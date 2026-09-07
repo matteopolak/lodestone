@@ -510,16 +510,15 @@ fn stage0_per_stage_shaped_vs_full_cost() {
 /// Primes the `pre_ore` memo slot for every chunk a subsequent `column(cx, cz)`
 /// call will need — simulating "this column, and its neighbourhood, were
 /// already requested at Shaped" — through the one already-public entry point
-/// that touches `pre_ore` without also touching `post_ore`:
+/// that touches the terrain prefix without also touching FEATURES:
 /// `ore_stage_for_profiling`, which calls `pre_ore_stage` for its own 3x3
-/// (`post_ore_world`'s own doc: "this stage's computation calls
-/// `Self::pre_ore_stage` ... for its own chunk and, via `Self::ore_stage`, for
-/// its 3x3") and then a private, unmemoised `ore_stage` directly, never
-/// `post_ore_world`.
+/// (`pre_ore_stage` is the only staged terrain product) and then a private,
+/// unmemoised ore profiling walk directly, never unified FEATURES.
 ///
 /// **One call at `(cx, cz)` alone is not enough**, and this was found by the
-/// counter control below, not assumed: `column`'s `vegetation_stage` reads a
-/// wider 5x5 rim (`COLUMN_CLOSURE_RADIUS` = 2) than `ore_stage`'s 3x3, so a
+/// counter control below, not assumed: `column`'s unified FEATURES dispatcher
+/// reads a wider 5x5 rim (`COLUMN_CLOSURE_RADIUS` = 2) than the isolated ore
+/// profiling walk's 3x3, so a
 /// single priming call left 16 of the 25 needed `pre_ore` entries cold and
 /// `stage0_upgrade_warm_hits_the_pre_ore_memo_by_counter` caught it directly
 /// (`pre_ore_computed` read 16, not 0, on first write of this file). Calling

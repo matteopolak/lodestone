@@ -54,7 +54,11 @@ surrounding quart cells, including the Y axis. This distinction is observable un
 and its containing cell selects `dripstone_caves`, while the external JVM's block lookup selects
 `badlands` from a neighbouring jittered corner. The feature predicate therefore must zoom first;
 reading `BiomeCells::at_quart` directly can admit a feature and consume its RNG when the reference
-rejects it, shifting every later feature in the stream.
+rejects it, shifting every later feature in the stream. When the selected horizontal source exists,
+its vertical quart index follows the existing edge-layer clamp used by `BiomeCells::at_block`;
+only a missing horizontal source remains unavailable. This matters for height ranges that
+legitimately sample below or above a generated column: rejecting those candidates would skip their
+feature-body RNG and shift later placements.
 
 ### Surface rules
 

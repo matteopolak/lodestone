@@ -701,7 +701,7 @@ pub fn parse_placements(placed: &Value) -> Vec<Placement> {
 pub type RegionGrid = crate::dense_grid::DenseBlockGrid;
 
 /// Centre-relative local coordinate lower/upper (exclusive) bound the 3×3
-/// driver ([`apply_ore_step_3x3`]) reads and writes over: one 16-wide band
+/// driver ([`apply_ore_step_3x3_per_source`]) reads and writes over: one 16-wide band
 /// per row/column of the 3×3 chunk grid (`-16..0` the west/north neighbour,
 /// `0..16` the centre, `16..32` the east/south neighbour).
 pub const REGION_MIN: i32 = -16;
@@ -830,7 +830,7 @@ impl RegionHeights {
     }
 
     /// Builds one from the `HashMap<(i32, i32), i32>` shape the JVM parity
-    /// fixtures assemble (see [`apply_ore_step_3x3`]). Production never goes
+    /// fixtures assemble (see [`apply_ore_step_3x3_per_source`]). Production never goes
     /// through a map at all — `overworld::decorate` fills this type directly.
     ///
     /// Entries outside the driven region are dropped, matching the map version:
@@ -851,7 +851,7 @@ impl RegionHeights {
 /// Inputs the ore driver needs beyond the RNG.
 pub struct OreInput<'a> {
     /// The chunk currently placing features — its own origin/seed
-    /// ([`OreInput::origin`]). The [`apply_ore_step_3x3`] driver varies this
+    /// ([`OreInput::origin`]). The [`apply_ore_step_3x3_per_source`] driver varies this
     /// across the 9 source chunks while holding `center_x`/`center_z` fixed.
     pub chunk_x: i32,
     pub chunk_z: i32,
@@ -971,32 +971,6 @@ fn apply_one_source<R: RandomSource>(
     decoration_seed
 }
 
-/// Run the whole `UNDERGROUND_ORES` decoration step for a single chunk (its
-/// own origin doubling as the centre — i.e. `input.chunk_x/chunk_z` must
-/// equal `input.center_x/center_z`) over an identical post-carve input,
-/// returning the region field after placement. `ores` must be in step order
-/// with each entry's `index` set to its position within the step's feature
-/// list (matching vanilla's `setFeatureSeed` index).
-///
-/// This is the single-source primitive; [`apply_ore_step_3x3`] is the real
-/// vanilla driver (9 of these, one per source chunk in the 3×3 neighbourhood,
-/// sharing one region grid) and is what a whole-chunk parity comparison
-/// should use — see this module's doc comment for why a single-source-only
-/// driver under-models vanilla's `blockStateWriteRadius(1)` spill.
-///
-/// Writes land in `view`'s own overlay, so the caller reads the placed ores back
-/// off the view (or folds them into the one grid it owns) rather than diffing two
-/// full copies of the region — see [`region_view`]'s module doc.
-pub fn apply_ore_step<R: RandomSource>(
-    random: &mut WorldgenRandom<R>,
-    seed: i64,
-    input: &OreInput<'_>,
-    view: &mut RegionView<'_>,
-    ores: &[PlacedOre],
-) -> i64 {
-    apply_one_source(random, seed, input, ores, STEP_UNDERGROUND_ORES, view)
-}
-
 /// Executes one ore entry after its caller has already derived this source's
 /// decoration seed. This is the seam for dimensions whose ore entries share a
 /// step with non-ore entries: it preserves the caller's raw `(step, index)`
@@ -1040,71 +1014,6 @@ pub(crate) fn apply_scattered_ore_entry_at_seed<R: RandomSource>(
     place_scattered_ore_placed_feature(random, input.origin(), ore, input, &ctx, view);
 }
 
-/// The complete 3×3 neighbourhood driver for one CENTRE chunk.
-///
-/// Vanilla's own one-chunk-into-neighbours write spill at the FEATURES generation stage
-/// means a NEIGHBOUR chunk's own ore decoration
-/// (its own origin, its own `decorationSeed` — vanilla's own
-/// biome-decoration application is called once per chunk, using that chunk's own
-/// seed) can legitimately spill blocks into the centre. This runs the full
-/// underground-ore decoration step for each of the 9 chunks in `center ± 1`, in turn
-/// (`dx` outer `-1..=1`, `dz` inner `-1..=1`, matching
-/// `crate::carver::apply_carvers`'s own source-chunk loop convention — a
-/// fixed, documented iteration order, not a claim this matches real-world
-/// chunk *load* order, which vanilla itself does not guarantee is
-/// deterministic at boundaries), writing every result into one shared region
-/// grid keyed by centre-relative local coordinates.
-///
-/// `ores` is the SAME list for all 9 passes — correct whenever biome does not
-/// vary across the neighbourhood (true for a fixed single-biome fixture).
-/// A thin wrapper over [`apply_ore_step_3x3_per_source`] for that fixed-list
-/// case; composing against real per-quart biome variety uses
-/// that function directly with a per-source ore-list closure instead.
-///
-/// Returns the CENTRE pass's own decoration seed. All 9 passes' writes are in
-/// `view`, which the caller reads at any region-local coordinate — the centre
-/// 16×16 slice (`in_center`) for the fixture-comparable `ore.*` output, or a
-/// neighbour's third to see spill into (or within) a neighbour.
-///
-/// Takes the heightmap as the sparse `HashMap` a JVM parity fixture naturally
-/// parses (`ofh.<x>,<z>` lines) and converts it to the dense
-/// [`RegionHeights`] production builds directly, so the fixtures keep their
-/// shape while the driver has exactly one heightmap representation to read.
-#[allow(clippy::too_many_arguments)]
-pub fn apply_ore_step_3x3<R: RandomSource>(
-    random: &mut WorldgenRandom<R>,
-    seed: i64,
-    center_x: i32,
-    center_z: i32,
-    min_y: i32,
-    height: i32,
-    min_gen_y: i32,
-    gen_depth: i32,
-    ocean_floor_wg: &HashMap<(i32, i32), i32>,
-    in_tag: &dyn Fn(&str, &str) -> bool,
-    view: &mut RegionView<'_>,
-    ores: &[PlacedOre],
-) -> i64 {
-    let dense = RegionHeights::from_map(ocean_floor_wg);
-    apply_ore_step_3x3_per_source(
-        random,
-        seed,
-        center_x,
-        center_z,
-        min_y,
-        height,
-        min_gen_y,
-        gen_depth,
-        REGION_MIN,
-        REGION_MAX,
-        &dense,
-        in_tag,
-        None,
-        view,
-        &|_source_x, _source_z| ores,
-    )
-}
-
 /// The complete 3×3 neighbourhood driver, generalised to a **per-source**
 /// ore list: `ores_for_source(x, z)`
 /// is called once per of the 9 source chunks (their own chunk coordinates,
@@ -1112,8 +1021,7 @@ pub fn apply_ore_step_3x3<R: RandomSource>(
 /// underground-ore list — vanilla's own biome-decoration application
 /// resolves the decorating biome per chunk, so a neighbour in a different
 /// biome to the centre places (and RNG-consumes) a different feature list,
-/// not the centre's own. [`apply_ore_step_3x3`] is the fixed-list special
-/// case of this for a single-biome fixture.
+/// not the centre's own.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_ore_step_3x3_per_source<'a, R: RandomSource>(
     random: &mut WorldgenRandom<R>,
@@ -1432,9 +1340,9 @@ thread_local! {
     /// is `size = 64` (`64 * 4 * 8`) and 1,056 bytes is `size = 33`.
     ///
     /// Thread-local rather than a field on a scratch struct threaded through the
-    /// call graph, because [`place_ore_feature`] and [`apply_ore_step`] are `pub`
-    /// and the parity fixtures call them directly — a signature change would
-    /// churn files this unit does not own for no measured gain.
+    /// call graph, because [`place_ore_feature`] is public and the parity
+    /// fixtures call it directly — a signature change would churn files this
+    /// unit does not own for no measured gain.
     ///
     /// **Taken and returned, not borrowed across the body**, matching U8's
     /// precedent in `feature/vegetation/`: a `Cell::take` leaves an empty `Vec`

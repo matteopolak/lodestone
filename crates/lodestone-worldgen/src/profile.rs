@@ -3,9 +3,11 @@
 //! # What it is
 //!
 //! [`overworld::OverworldGenerator::column_timed`] already splits one
-//! column's generation into the ten [`overworld::StageTimes`] buckets
-//! (aquifer/shape/biome/surface/materialize/carve/ore/vegetation/top_layer/
-//! intern) — but it returns one sample. This module runs it over many
+//! column's generation into the ten [`overworld::StageTimes`] compatibility buckets.
+//! The retained `ore` bucket is zero, while `vegetation` measures the complete
+//! unified FEATURES dispatcher, including ore and vegetal bodies. The buckets are
+//! aquifer/shape/biome/surface/materialize/carve/ore/vegetation/top_layer/intern;
+//! `column_timed` returns one sample. This module runs it over many
 //! columns and reports the **tail**, not the mean, matching this
 //! workspace's own rule that a mean can hide the one window that actually
 //! mattered (a keep-alive timeout was once diagnosed from an average that
@@ -44,7 +46,7 @@
 //! `StageGuard::enter` runs from exactly one call site
 //! (`OverworldGenerator::intern_from_dense`), reached exactly once per
 //! top-level `column`/`column_timed` call and never from the neighbour-chunk
-//! recursion inside `ore_stage`/`vegetation_stage` — so after `reset()`,
+//! recursion inside the ore and FEATURES stages — so after `reset()`,
 //! profiling `N` columns must leave `stage_entered[Stage::Intern]` at
 //! exactly `N`. Disagreement would mean the aggregation loop skipped,
 //! doubled, or deduplicated a coordinate, not that generation itself is
@@ -90,8 +92,10 @@
 
 use crate::overworld::{OverworldGenerator, StageTimes};
 
-/// [`StageTimes`]'s ten field names, in field declaration order — the same
-/// order and the same first ten entries as
+/// [`StageTimes`]'s ten compatibility-bucket names, in field declaration order. The
+/// `ore` bucket is retained as zero for callers that still expect the old shape;
+/// the complete unified FEATURES dispatcher is measured by `vegetation`.
+/// This remains the same order and the same first ten entries as
 /// `lodestone_worldgen_core::counters::STAGE_NAMES`, kept as a separate,
 /// shorter array here because `StageTimes` has no `Structure`/`Other`
 /// fields to name.

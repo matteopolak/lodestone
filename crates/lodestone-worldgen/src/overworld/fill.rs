@@ -80,7 +80,7 @@ impl OverworldGenerator {
         let ore_heights = self.ore_heights_from_world(&world);
 
         // `Arc` because `PreOreResult` hands this world out to
-        // `vegetation_stage`'s rim sources rather than only into a mutating
+        // the unified FEATURES stage's rim sources rather than only into a mutating
         // consumer — see that alias's own doc.
         (Arc::new(world), ore_heights, biome_quarts, Arc::new(biome_cells))
     }
@@ -476,7 +476,7 @@ impl OverworldGenerator {
         // so the dense-grid win can be measured end to end (144-chunk sweep)
         // rather than argued from Big-O alone. Not used by `column()`'s
         // normal path; safe to leave in as a one-line, well-documented
-        // escape hatch (mirrors `LODESTONE_ORE_SINGLE_SOURCE_DEBUG` above).
+        // escape hatch for focused allocation measurements.
         let mut grid = if std::env::var("LODESTONE_CARVE_HASHMAP_DEBUG").is_ok() {
             CarveGrid::new(world.into_hashmap())
         } else {

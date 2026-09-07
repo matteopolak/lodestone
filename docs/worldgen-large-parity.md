@@ -18,11 +18,52 @@ This split prevents two independent failure modes. A generated chunk can receive
 
 `--packet-out` remains a one-chunk raw packet diagnostic. It is never used for the baseline, but is useful when the Rust comparison identifies a semantic mismatch and needs its existing detailed packet diff.
 
+### Lifecycle replay for the accepted 16 by 16 manifests
+
+The accepted partial manifests at `/private/tmp/lodestone-worldgen-parity-overworld-16-outputs/overworld-partial.lwp` and `/private/tmp/lodestone-worldgen-parity-nether-16-outputs/nether-partial.lwp` have an independent full-run lifecycle capture beside them at `/private/tmp/lodestone-worldgen-lifecycle-capture-20260907-r1/out`. The Rust gate authenticates `provenance.txt`, the 324-row `replay.tsv`, and the 4,608-row `replay-completion-order.tsv` before generating a packet. The capture schema is `lodestone-worldgen-lifecycle-capture-v1`, with seed `42`, a one-chunk halo, and tile-z-major/tile-x-major admission order. The accepted manifest SHA-256 values are `54f3a7e62ed8dbd0d976a27eefef64f6d11152d3e26b94e162e2561192f81071` (Overworld) and `cb4d341f6826ebf7bce49ee195618d48e314729b6bd4251b3b97124e4f948789` (Nether). The canonical replay-sequence SHA-256 is `4e2eeb0217c06e7ed68e3976df04ebef5648ff1b14516141c49095d8ef15498f`; the source-capture SHA-256 is `b47516b6f47ec74aba6201cd8d54401deb12edf94cc4272c0dd9c2b52845f9a3`; and `replay.tsv` is `b8678c8a8b847a94d82bba31c9250aeace0d43e02fc309c923838e327c209986`. The Overworld completion file is `4af54ab035bc7febad74da7a6dffdd9c79a6b9e10c90a164523d98c5e995b1e0`; the Nether completion file is `7115c80a42320ed2ca7c3b8fe7160ea4516cdc6436a10633e212f405f2f0b52a`.
+
+The completion rows repeat observations for every target, so the parser first deduplicates one global event per `(source, stage, completion_seq)`. It requires exactly one successful `FEATURES` event for each of the 324 replay admissions, verifies that its source and admission index agree, and rejects any inversion between `FEATURES` completion-sequence rank and replay admission order. `LifecycleMaterializer` enforces the stricter one-application identity `(source, stage)`; a changed completion sequence remains diagnostic telemetry and is rejected before the source body can run again. Effects are then applied once per source in authenticated `replay.tsv` admission order. The complete 18 by 18 halo is shaped before any feature body runs, so an early source may write to a neighbour whose explicit ticket appears later; every write remains in the mutable resident state and read-after-write override map. For Overworld, each source's production top-layer spill pass then runs with those current overrides immediately after its `FEATURES` result and before the next admission; Nether has no corresponding stage. `FULL` and `before_fence` are parsed as telemetry diagnostics only: they do not establish causal ordering or freeze a target. After all 324 `FEATURES` bodies and any source-local top-layer passes finish, the gate snapshots and encodes the 256 targets and accepts only a digest match to the authenticated final manifest. The reusable `LifecycleMaterializer` and source adapters live in `lodestone-worldgen-parity::lifecycle`; the ignored comparator owns only capture authentication and manifest comparison. The adapters invoke the production shaped-prefix and source-filtered decoration dispatchers, including their read-after-write override inputs and generated block entities.
+
+The capture is deliberately external and is not checked into the repository. Its provenance fields and fixed digests prevent silently replaying a changed artifact; the accepted root freeze digests are `ade151a2bd6a5840c0548d70dd763a3f5060b301fbf2b2cf043af5de365ea4e8` (Overworld) and `c56e42d8ac751d348ff8461b4284c783f24702437039b682b37dca426b497048` (Nether), and the accepted manifest digest is checked against the manifest supplied to the test as well. To run the bounded lifecycle gate:
+
+```text
+LODESTONE_LARGE_PARITY_MANIFEST=/absolute/path/overworld-partial.lwp \
+LODESTONE_LARGE_PARITY_LIFECYCLE_CAPTURE_ROOT=/private/tmp/lodestone-worldgen-lifecycle-capture-20260907-r1/out \
+LODESTONE_LARGE_PARITY_MAX_CHUNKS=1 \
+  cargo test -p lodestone-v26-2 --test large_worldgen_parity \
+  parity_manifest_streams_before_rust_comparison -- --ignored --nocapture
+```
+
+The default is fail-fast at the first target digest mismatch. `LODESTONE_LARGE_PARITY_SCAN_ALL=1` consumes the bounded prefix and retains the existing packet component report, while `LODESTONE_LARGE_PARITY_DIAGNOSTIC_OUT` writes the bounded coordinate/state evidence. The Nether invocation uses its Nether partial manifest and the same capture root; set `LODESTONE_LARGE_PARITY_LIFECYCLE_CAPTURE` to one dimension-specific capture directory when a root contains more than the two named directories.
+
+The lifecycle capture's `targets.tsv` intentionally stores packet hashes and sizes, not packet bodies. The Rust gate does not use that file as acceptance input: the sealed manifest digest is the authority. To obtain a reference body for the first Nether target for component diagnosis, export that one chunk from the supplied accepted root into a mounted output directory, then pass the resulting packet to the Rust gate:
+
+```text
+mkdir -p /private/tmp/lodestone-worldgen-reference-packet
+LODESTONE_ORACLE_FROZEN_WORLD_ROOT=/private/tmp/lodestone-worldgen-parity-nether-16-v4 \
+LODESTONE_ORACLE_OUTPUT_ROOT=/private/tmp/lodestone-worldgen-reference-packet \
+LODESTONE_ORACLE_DIMENSION=nether \
+  bash scripts/worldgen-oracle/large-parity.sh --mode export \
+  --out /oracle-out/nether-one.lwp --cx -8 -8 --cz -8 -8 \
+  --packet-out /oracle-out/nether-reference.packet
+
+LODESTONE_LARGE_PARITY_MANIFEST=/private/tmp/lodestone-worldgen-parity-nether-16-outputs/nether-partial.lwp \
+LODESTONE_LARGE_PARITY_LIFECYCLE_CAPTURE_ROOT=/private/tmp/lodestone-worldgen-lifecycle-capture-20260907-r1/out \
+LODESTONE_LARGE_PARITY_REFERENCE_PACKET=/private/tmp/lodestone-worldgen-reference-packet/nether-reference.packet \
+LODESTONE_LARGE_PARITY_MAX_CHUNKS=1 \
+  cargo test -p lodestone-v26-2 --test large_worldgen_parity \
+  parity_manifest_streams_before_rust_comparison -- --ignored --nocapture
+```
+
+The accepted-root export is only diagnostic evidence; the manifest digest remains the acceptance authority. The lifecycle `targets.tsv` hash is not a final-state acceptance signal and its body is not retained, so it must not be confused with the accepted-root packet used for component diagnosis. A failing one-target run reports the first final-state digest mismatch and, when a reference packet is supplied, exact terrain, biome, heightmap, block-entity, sky-light, and block-light component differences.
+
 ## How to change it
 
 The Java exporter and Rust comparator must change together whenever a semantic field changes. Bump the schema/domain strings and manifest version rather than reinterpreting existing data. Keep decoded ids in their existing packet-cell order, sort only collections without semantic order (heightmaps, block entities, compound keys), and keep NBT lists in order. For v4/v5, pass the dimension identity through packet decoding and source selection; do not infer it from a column's height because Nether and End intentionally share a window. V5's light normalization is only for an initial chunk's trailing full-sky tail; never apply it to block light, a mixed sky array, or a later light-only update.
 
 The Rust gate in `crates/versions/26.2/tests/large_worldgen_parity.rs` generates a complete 3 by 3 local input, sends it through the neighbour-aware production initial-chunk encoder, then decodes the resulting packet and applies the schema-selected canonical record before comparing the full digest. Its north-neighbour glowstone control proves that the old one-column path has zero block light at the centre border while the neighbour-aware path carries the expected value. The test support reader authenticates the entire manifest before generation. Its v2 refusal is intentional: a short raw hash cannot be converted into a semantic hash.
+
+When extending lifecycle replay, preserve the separation between capture facts and generator behavior: add a provenance field and a fixed digest for each new external stream, validate the 324 admissions and the one-FEATURES-per-source admission mapping, reject completion-sequence inversions, and deduplicate global completion events before dispatch. Add the corresponding override argument to the production source dispatcher so a later feature reads the resident state produced by earlier events, and carry generated block entities through the production column boundary in event order. Keep the reusable source/materializer behavior in `lodestone-worldgen-parity::lifecycle`; the version-specific comparator should retain only capture parsing and acceptance reporting. Do not use target fences or `targets.tsv` as final-state acceptance. Keep the first final-manifest mismatch and its component report as the acceptance evidence.
 
 Run a small persisted control before any broad job. This proves both the frozen-world seal and duplicate read-only export:
 
@@ -82,6 +123,8 @@ LODESTONE_LARGE_PARITY_MANIFEST=/absolute/path/full-v3.lwp \
 ## Configuration
 
 `LODESTONE_ORACLE_BATCH` controls only the bounded read-only export batch; materialization is intentionally one centre at a time. `LODESTONE_ORACLE_EPOCH_TILES` controls the clean-JVM materialization epoch in 16 by 16 tiles and defaults to `32` (at most 8,192 nominal chunks before edge clipping). It is durable provenance: keep it unchanged while resuming a materialization. `LODESTONE_ORACLE_WORLD_ROOT` is a writable host directory mounted at `/world` only for materialization. `LODESTONE_ORACLE_FROZEN_WORLD_ROOT` is mounted read-only at `/frozen` for export. The source seal is checked before it is copied into the ephemeral server-access directory. `LargeParityOracle --provenance-selftest` proves that a legacy v3 seal cannot export and a legacy v4 progress file cannot resume; the format versions of their manifests remain unchanged, but their construction provenance is not accepted.
+
+The lifecycle gate uses `LODESTONE_LARGE_PARITY_LIFECYCLE_CAPTURE` for one explicit capture directory or `LODESTONE_LARGE_PARITY_LIFECYCLE_CAPTURE_ROOT` for the `overworld-full-accepted-sequence` and `nether-full-accepted-sequence` subdirectories. `LODESTONE_LARGE_PARITY_MAX_CHUNKS` bounds the final target prefix after the full 324-source replay, `LODESTONE_LARGE_PARITY_SCAN_ALL` changes fail-fast to bounded diagnostics, and `LODESTONE_LARGE_PARITY_DIAGNOSTIC_OUT` retains the report. These variables do not alter the authenticated admission-order replay.
 
 The manifest tools accept `validate`, `merge`, `reproducible`, `accept`, and `selftest`. `reproducible` is the independent-root gate: it requires both manifests to cover the complete grid and have equal schema, dimension, and payload while deliberately allowing different frozen-world identities. Use it on the two complete merged materializations before `accept`. `accept` is the final read-only export gate: it requires two complete byte-identical exports from one frozen-world identity. `selftest` covers full-grid merge ordering, independent-root payload equality plus bit-flip/incomplete/schema negatives, duplicate-read acceptance, payload tampering, different-world and different-dimension merge/accept refusal, schema rejection, and v2 rejection. Existing v3 overworld and v4 dimension exports continue to validate and merge byte-for-byte. End exports now select v5 automatically and must be kept separate from v4 shards; accepted v4 artifacts are not regenerated by this migration.
 

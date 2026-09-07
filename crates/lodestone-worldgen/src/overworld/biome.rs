@@ -175,8 +175,10 @@ where
     let local_qx = block_x.rem_euclid(16).div_euclid(4) as usize;
     let local_qz = block_z.rem_euclid(16).div_euclid(4) as usize;
     let local_qy = (qy * 4 - cells.min_y()).div_euclid(4);
-    (local_qy >= 0 && local_qy < cells.y_quarts() as i32)
-        .then(|| cells.at_quart(local_qx, local_qy as usize, local_qz))
+    // Height ranges may choose candidates outside the generated window. Keep
+    // the body in the stream and use the same edge-layer clamp as `at_block`;
+    // a missing horizontal source remains the `None` case above.
+    Some(cells.at_quart(local_qx, local_qy.max(0) as usize, local_qz))
 }
 
 fn zoom_seed(seed: i64) -> i64 {
@@ -424,5 +426,37 @@ mod tests {
         assert_eq!(cells.at_quart(3, 22, 1), "minecraft:dripstone_caves");
         let got = zoomed_biome(zoom_seed(42), -1907, 24, -1914, |_, _| Some(&cells));
         assert_eq!(got, Some("minecraft:badlands"));
+    }
+
+    #[test]
+    fn block_zoom_clamps_vertical_cells_but_not_missing_horizontal_sources() {
+        let cells = BiomeCells::from_fn(-64, 8, |_, qy, _| {
+            if qy == 0 {
+                "minecraft:plains".to_string()
+            } else {
+                "minecraft:badlands".to_string()
+            }
+        });
+        let bottom = cells.at_quart(0, 0, 0);
+        let top = cells.at_quart(0, cells.y_quarts() - 1, 0);
+
+        let below = zoomed_biome(zoom_seed(42), 0, cells.min_y() - 64, 0, |_, _| {
+            Some(&cells)
+        });
+        assert_eq!(below, Some(bottom));
+
+        let above = zoomed_biome(
+            zoom_seed(42),
+            0,
+            cells.min_y() + cells.y_quarts() as i32 * 4 + 64,
+            0,
+            |_, _| Some(&cells),
+        );
+        assert_eq!(above, Some(top));
+
+        assert_eq!(
+            zoomed_biome(zoom_seed(42), 0, cells.min_y(), 0, |_, _| None),
+            None
+        );
     }
 }

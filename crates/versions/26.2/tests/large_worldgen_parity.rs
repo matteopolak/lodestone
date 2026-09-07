@@ -2,62 +2,407 @@
 //! a full 501² run is an external oracle job, not a regular unit test.
 mod support { pub mod large_parity_manifest; }
 
-use std::{collections::BTreeMap, fs::File, io::{BufReader, Read, Seek, SeekFrom}, path::Path};
+use std::{collections::{BTreeMap, BTreeSet}, fs::File, io::{BufReader, Read, Seek, SeekFrom}, path::{Path, PathBuf}};
 use lodestone_core::{Reader, Writer};
-use lodestone_server::{ChunkColumn, ChunkSource, ServerDirective, ServerProtocol, end_chunk_source, nether_chunk_source, overworld_chunk_source, retained_chunk_source_for_view_radius};
+use lodestone_server::{
+    ChunkColumn, ChunkSource, ServerDirective, ServerProtocol,
+    end_chunk_source,
+    nether_chunk_source, overworld_chunk_source, retained_chunk_source_for_view_radius,
+};
 use lodestone_server::dimension::Dimension as ServerDimension;
 use lodestone_v26_2::V770ServerProtocol;
 use lodestone_v26_2::packets::chunk::{ChunkShape, LevelChunkWithLight};
+use lodestone_worldgen_parity::lifecycle::{
+    LifecycleCompletion, LifecycleMaterializer, LifecycleWorldgenSource,
+};
 use support::large_parity_manifest::{Dimension, HEADER_BYTES, canonical_nbt, read_header, payload_digest_from_header, semantic_digest, semantic_digest_for_dimension, semantic_digest_v5_for_dimension, semantic_record, semantic_record_for_dimension, semantic_record_v5_for_dimension, verify_payload};
 
 type ChunkPos = (i32, i32);
-type AbsoluteCell = (i32, i32, i32);
 
-/// Stateful boundary used by the parity materializer while a bounded tile is
-/// still settling. A completed source may modify a generated, not-yet-encoded
-/// column; it may not recreate an evicted column or revise an encoded one.
-#[derive(Default)]
-struct ParityLifecycle {
-    resident: std::collections::BTreeMap<ChunkPos, std::collections::BTreeMap<AbsoluteCell, String>>,
-    encoded: std::collections::BTreeSet<ChunkPos>,
+/// One coordinate admission from the independent lifecycle capture.
+#[derive(Debug, Clone, Copy)]
+struct LifecycleAdmission {
+    replay_index: usize,
+    chunk: ChunkPos,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SpillDisposition {
-    Stored,
-    TargetNotResident,
-    TargetAlreadyEncoded,
+/// One globally unique completion event, derived from the repeated per-target
+/// observations in `replay-completion-order.tsv`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LifecycleEvent {
+    source: ChunkPos,
+    stage: LifecycleCompletion,
+    completion_sequence: u64,
+    admission_index: usize,
 }
 
-impl ParityLifecycle {
-    fn seed_resident(&mut self, cell: AbsoluteCell, state: &str) {
-        self.resident
-            .entry((cell.0.div_euclid(16), cell.2.div_euclid(16)))
-            .or_default()
-            .insert(cell, state.to_owned());
+/// Authenticated, compact input to the partial-manifest materializer.
+#[derive(Debug)]
+struct LifecycleCapture {
+    admissions: Vec<LifecycleAdmission>,
+    target_order: Vec<ChunkPos>,
+    /// FEATURES events in replay admission order. Their captured completion
+    /// sequence is retained for diagnostics/authentication, but admission
+    /// order is the only order allowed to drive effects.
+    feature_events: Vec<LifecycleEvent>,
+    /// Number of unique FULL events in the telemetry. FULL is retained as a
+    /// diagnostic fact and deliberately has no effect on sealed replay state.
+    full_event_count: usize,
+}
+
+/// Checks that the independent capture's FEATURES completion sequence agrees
+/// with replay admission order. The served replay uses admission order because
+/// that is the deterministic source order; an externally reordered callback
+/// stream must fail authentication rather than change the materialized world.
+fn validate_feature_event_order(
+    feature_events_by_sequence: &[LifecycleEvent],
+    admissions: &[LifecycleAdmission],
+) -> Result<(), String> {
+    if feature_events_by_sequence.len() != admissions.len() {
+        return Err(format!(
+            "expected one FEATURES event per admission, got {} events for {} admissions",
+            feature_events_by_sequence.len(),
+            admissions.len(),
+        ));
     }
-
-    fn apply_spill(&mut self, cell: AbsoluteCell, state: &str) -> SpillDisposition {
-        let target = (cell.0.div_euclid(16), cell.2.div_euclid(16));
-        if self.encoded.contains(&target) {
-            return SpillDisposition::TargetAlreadyEncoded;
+    let mut seen_sources = BTreeSet::new();
+    for (rank, event) in feature_events_by_sequence.iter().enumerate() {
+        if event.stage != LifecycleCompletion::Features {
+            return Err(format!(
+                "global event at completion sequence {} is not FEATURES",
+                event.completion_sequence,
+            ));
         }
-        let Some(column) = self.resident.get_mut(&target) else {
-            return SpillDisposition::TargetNotResident;
-        };
-        column.insert(cell, state.to_owned());
-        SpillDisposition::Stored
+        if event.admission_index != rank {
+            return Err(format!(
+                "FEATURES completion sequence rank {rank} maps to admission {}, expected {rank}",
+                event.admission_index,
+            ));
+        }
+        let admission = admissions.get(event.admission_index).ok_or_else(|| {
+            format!(
+                "FEATURES event for {:?} points outside the {}-entry admission replay",
+                event.source,
+                admissions.len(),
+            )
+        })?;
+        if admission.chunk != event.source {
+            return Err(format!(
+                "FEATURES event source {:?} disagrees with replay admission {} {:?}",
+                event.source, event.admission_index, admission.chunk,
+            ));
+        }
+        if !seen_sources.insert(event.source) {
+            return Err(format!(
+                "FEATURES source {:?} appears more than once",
+                event.source,
+            ));
+        }
     }
+    if seen_sources.len() != admissions.len() {
+        return Err(format!(
+            "FEATURES source set has {} entries for {} admissions",
+            seen_sources.len(),
+            admissions.len(),
+        ));
+    }
+    Ok(())
+}
 
-    fn encode(&mut self, cell: AbsoluteCell) -> String {
-        let target = (cell.0.div_euclid(16), cell.2.div_euclid(16));
-        self.encoded.insert(target);
-        self.resident
-            .get(&target)
-            .and_then(|column| column.get(&cell))
-            .expect("the materializer only encodes resident generated cells")
-            .clone()
+const LIFECYCLE_CAPTURE_SCHEMA: &str = "lodestone-worldgen-lifecycle-capture-v1";
+const LIFECYCLE_REPLAY_SEQUENCE_SHA256: &str =
+    "4e2eeb0217c06e7ed68e3976df04ebef5648ff1b14516141c49095d8ef15498f";
+const LIFECYCLE_CAPTURE_SOURCE_SHA256: &str =
+    "b47516b6f47ec74aba6201cd8d54401deb12edf94cc4272c0dd9c2b52845f9a3";
+const LIFECYCLE_ACCEPTED_ROOT_SHA256_OVERWORLD: &str =
+    "ade151a2bd6a5840c0548d70dd763a3f5060b301fbf2b2cf043af5de365ea4e8";
+const LIFECYCLE_ACCEPTED_ROOT_SHA256_NETHER: &str =
+    "c56e42d8ac751d348ff8461b4284c783f24702437039b682b37dca426b497048";
+const LIFECYCLE_ACCEPTED_MANIFEST_SHA256_OVERWORLD: &str =
+    "54f3a7e62ed8dbd0d976a27eefef64f6d11152d3e26b94e162e2561192f81071";
+const LIFECYCLE_ACCEPTED_MANIFEST_SHA256_NETHER: &str =
+    "cb4d341f6826ebf7bce49ee195618d48e314729b6bd4251b3b97124e4f948789";
+const LIFECYCLE_REPLAY_FILE_SHA256: &str =
+    "b8678c8a8b847a94d82bba31c9250aeace0d43e02fc309c923838e327c209986";
+const LIFECYCLE_COMPLETION_FILE_SHA256: &str =
+    "4af54ab035bc7febad74da7a6dffdd9c79a6b9e10c90a164523d98c5e995b1e0";
+const LIFECYCLE_COMPLETION_FILE_SHA256_NETHER: &str =
+    "7115c80a42320ed2ca7c3b8fe7160ea4516cdc6436a10633e212f405f2f0b52a";
+
+impl LifecycleCapture {
+    /// Loads and authenticates one external full-run capture.  The capture is
+    /// intentionally not copied into the repository: its provenance and file
+    /// digests bind the replay to the independently generated artifact.
+    fn load(dimension: Dimension, header: &support::large_parity_manifest::Header, manifest: &Path) -> Self {
+        let directory = lifecycle_capture_directory(dimension);
+        let provenance_path = directory.join("provenance.txt");
+        let provenance = std::fs::read_to_string(&provenance_path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", provenance_path.display()));
+        let fields = provenance
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .collect::<std::collections::HashMap<_, _>>();
+        let field = |name: &str| {
+            fields
+                .get(name)
+                .copied()
+                .unwrap_or_else(|| panic!("{} has no {name}", provenance_path.display()))
+        };
+        assert_eq!(field("capture_schema"), LIFECYCLE_CAPTURE_SCHEMA);
+        assert_eq!(field("mode"), "full", "partial comparator requires the full 324-coordinate capture");
+        assert_eq!(field("seed"), "42");
+        assert_eq!(field("dimension"), dimension_capture_name(dimension));
+        assert_eq!(field("replay_entries"), "324");
+        assert_eq!(field("coordinate_order"), "tile_z-major,tile_x-major,z-major,x-major;tile_side=16");
+        assert_eq!(field("capture_source_sha256"), LIFECYCLE_CAPTURE_SOURCE_SHA256);
+        assert_eq!(field("replay_sequence_sha256"), LIFECYCLE_REPLAY_SEQUENCE_SHA256);
+        let accepted_root_sha256 = match dimension {
+            Dimension::Overworld => LIFECYCLE_ACCEPTED_ROOT_SHA256_OVERWORLD,
+            Dimension::Nether => LIFECYCLE_ACCEPTED_ROOT_SHA256_NETHER,
+            Dimension::End => unreachable!("the partial lifecycle gate rejects End below"),
+        };
+        assert_eq!(field("accepted_root_tree_sha256"), accepted_root_sha256);
+        assert_eq!(field("accepted_freeze_text"), accepted_root_sha256);
+        assert_eq!(field("accepted_roots_were_not_opened_for_generation"), "true");
+        let accepted_manifest_sha256 = match dimension {
+            Dimension::Overworld => LIFECYCLE_ACCEPTED_MANIFEST_SHA256_OVERWORLD,
+            Dimension::Nether => LIFECYCLE_ACCEPTED_MANIFEST_SHA256_NETHER,
+            Dimension::End => unreachable!("the partial lifecycle gate rejects End below"),
+        };
+        assert_eq!(field("accepted_manifest_sha256"), accepted_manifest_sha256);
+        assert_eq!(file_sha256(manifest), accepted_manifest_sha256);
+        assert_eq!(field("accepted_manifest_header"), format_manifest_header(header));
+        assert_eq!(field("target_grid_x"), format!("{}..{}", header.cx0, header.cx1));
+        assert_eq!(field("target_grid_z"), format!("{}..{}", header.cz0, header.cz1));
+        let provenance_canonical = format!(
+            "capture_schema={LIFECYCLE_CAPTURE_SCHEMA}\nmode=full\ndimension={}\nseed=42\naccepted_root_tree_sha256={accepted_root_sha256}\naccepted_manifest_sha256={}\naccepted_freeze_text={accepted_root_sha256}\ntarget_grid=-8..7\nmaterializer_halo=-9..8\ncoordinate_order=tile_z-major,tile_x-major,z-major,x-major;tile_side=16\nreplay_sequence_sha256={LIFECYCLE_REPLAY_SEQUENCE_SHA256}\n",
+            dimension_capture_name(dimension),
+            field("accepted_manifest_sha256"),
+        );
+        assert_eq!(
+            field("provenance_sha256"),
+            hex(&support::large_parity_manifest::sha256(provenance_canonical.as_bytes())),
+            "capture provenance hash does not authenticate its canonical fields",
+        );
+
+        let replay_path = directory.join("replay.tsv");
+        assert_eq!(file_sha256(&replay_path), LIFECYCLE_REPLAY_FILE_SHA256);
+        let completion_path = directory.join("replay-completion-order.tsv");
+        let completion_sha = if dimension == Dimension::Nether {
+            LIFECYCLE_COMPLETION_FILE_SHA256_NETHER
+        } else {
+            LIFECYCLE_COMPLETION_FILE_SHA256
+        };
+        assert_eq!(file_sha256(&completion_path), completion_sha);
+
+        let replay_text = std::fs::read_to_string(&replay_path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", replay_path.display()));
+        let replay_lines = replay_text.lines().collect::<Vec<_>>();
+        assert_eq!(
+            replay_lines.first().copied(),
+            Some("replay_index\ttile\ttile_x\ttile_z\tx\tz\ttarget"),
+            "{} has an unexpected header",
+            replay_path.display()
+        );
+        let width = i64::from(header.cx1 - header.cx0 + 1);
+        let height = i64::from(header.cz1 - header.cz0 + 1);
+        assert_eq!((width, height, header.count), (16, 16, 256));
+        assert_eq!(replay_lines.len(), 325);
+        let mut admissions = Vec::with_capacity(324);
+        let mut seen = BTreeSet::new();
+        let mut captured_targets = BTreeSet::new();
+        let mut canonical = String::new();
+        for (line_index, line) in replay_lines.iter().skip(1).enumerate() {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            assert_eq!(fields.len(), 7, "replay row {line_index} has {} fields", fields.len());
+            let replay_index = parse_usize(fields[0], "replay index");
+            assert_eq!(replay_index, line_index, "replay indices must be contiguous");
+            let tile = parse_usize(fields[1], "tile");
+            let tile_x = parse_usize(fields[2], "tile x");
+            let tile_z = parse_usize(fields[3], "tile z");
+            let x = parse_i32(fields[4], "replay x");
+            let z = parse_i32(fields[5], "replay z");
+            let target = parse_bool(fields[6], "replay target");
+            let expected_target = header.cx0 <= x && x <= header.cx1 && header.cz0 <= z && z <= header.cz1;
+            assert_eq!(target, expected_target, "replay target flag disagrees at ({x},{z})");
+            assert_eq!(tile_x, usize::from(x >= header.cx1));
+            assert_eq!(tile_z, usize::from(z >= header.cz1));
+            assert_eq!(tile, tile_x + tile_z * 2);
+            assert!(
+                (header.cx0 - 1..=header.cx1 + 1).contains(&x)
+                    && (header.cz0 - 1..=header.cz1 + 1).contains(&z),
+                "replay coordinate ({x},{z}) is outside the one-chunk halo"
+            );
+            assert!(seen.insert((x, z)), "replay admits ({x},{z}) more than once");
+            canonical.push_str(&format!("{replay_index}\t{x}\t{z}\n"));
+            admissions.push(LifecycleAdmission {
+                replay_index,
+                chunk: (x, z),
+            });
+            if target {
+                captured_targets.insert((x, z));
+            }
+        }
+        assert_eq!(seen.len(), 324);
+        let target_order = (header.cz0..=header.cz1)
+            .flat_map(|z| (header.cx0..=header.cx1).map(move |x| (x, z)))
+            .collect::<Vec<_>>();
+        assert_eq!(captured_targets.len(), header.count as usize);
+        assert!(target_order.iter().all(|target| captured_targets.contains(target)));
+        assert_eq!(hex(&support::large_parity_manifest::sha256(canonical.as_bytes())), LIFECYCLE_REPLAY_SEQUENCE_SHA256);
+
+        let completion_text = std::fs::read_to_string(&completion_path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", completion_path.display()));
+        let completion_lines = completion_text.lines().collect::<Vec<_>>();
+        assert_eq!(
+            completion_lines.first().copied(),
+            Some("target_index\ttarget_x\ttarget_z\tstatus\tsource_x\tsource_z\tcompletion_seq\tcompletion_state\tbefore_fence\tcenter_admission_index"),
+            "{} has an unexpected header",
+            completion_path.display()
+        );
+        assert_eq!(completion_lines.len(), 4609);
+        let admission_by_chunk = admissions
+            .iter()
+            .map(|entry| (entry.chunk, entry.replay_index))
+            .collect::<BTreeMap<_, _>>();
+        let replay_by_chunk = admission_by_chunk.clone();
+        let mut completions = BTreeMap::<ChunkPos, BTreeSet<(ChunkPos, LifecycleCompletion)>>::new();
+        let mut events_by_key = BTreeMap::<(u64, ChunkPos, LifecycleCompletion), LifecycleEvent>::new();
+        let mut event_by_sequence = BTreeMap::<u64, (ChunkPos, LifecycleCompletion, usize)>::new();
+        for (line_index, line) in completion_lines.iter().skip(1).enumerate() {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            assert_eq!(fields.len(), 10, "completion row {line_index} has {} fields", fields.len());
+            let target_index = parse_usize(fields[0], "completion target index");
+            let target = (parse_i32(fields[1], "completion target x"), parse_i32(fields[2], "completion target z"));
+            let expected_replay_index = replay_by_chunk
+                .get(&target)
+                .copied()
+                .unwrap_or_else(|| panic!("completion target {target:?} was not admitted"));
+            assert_eq!(target_index, expected_replay_index, "completion target index must identify its replay admission");
+            let stage = match fields[3] {
+                "FEATURES" => LifecycleCompletion::Features,
+                "FULL" => LifecycleCompletion::Full,
+                other => panic!("unknown lifecycle completion {other:?}"),
+            };
+            let source = (parse_i32(fields[4], "completion source x"), parse_i32(fields[5], "completion source z"));
+            assert!((target.0 - source.0).abs() <= 1 && (target.1 - source.1).abs() <= 1, "completion source {source:?} is outside target {target:?}'s 3x3");
+            let completion_sequence = parse_u64(fields[6], "completion sequence");
+            assert_eq!(fields[7], "success=true", "only successful captured completions may drive replay");
+            // This is an observation about one target's packet-time fence,
+            // not an instruction to replay a prefix. Final manifests are
+            // sealed after the complete halo settles, so the relation is
+            // intentionally parsed for schema validation and then ignored.
+            let _before_fence = parse_bool(fields[8], "completion fence flag");
+            let admission_index = parse_usize(fields[9], "completion admission index");
+            assert!(admissions.get(admission_index).is_some(), "completion admission index {admission_index} is outside the replay");
+            assert_eq!(admission_by_chunk[&source], admission_index, "completion source and admission index disagree");
+            assert!(
+                completions.entry(target).or_default().insert((source, stage)),
+                "target {target:?} repeats the {:?} completion for {source:?}",
+                stage,
+            );
+            let event = LifecycleEvent {
+                source,
+                stage,
+                completion_sequence,
+                admission_index,
+            };
+            match events_by_key.entry((completion_sequence, source, stage)) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(event);
+                }
+                std::collections::btree_map::Entry::Occupied(slot) => {
+                    assert_eq!(*slot.get(), event, "repeated completion rows must describe one global event");
+                }
+            }
+            if let Some(previous) = event_by_sequence.insert(completion_sequence, (source, stage, admission_index)) {
+                assert_eq!(previous, (source, stage, admission_index), "completion sequence {completion_sequence} identifies more than one global event");
+            }
+        }
+        assert_eq!(completions.len(), target_order.len());
+        for target in &target_order {
+            let rows = completions.get(target).expect("every target needs completion rows");
+            assert_eq!(rows.len(), 18, "target {target:?} must have 9 FEATURES/FULL source pairs");
+        }
+        let events = events_by_key.into_values().collect::<Vec<_>>();
+        assert_eq!(events.len(), event_by_sequence.len(), "global completion sequence must be one-to-one");
+        assert_eq!(events.len(), admissions.len() * 2, "every admitted source must contribute one global FEATURES and FULL event");
+        assert!(events.windows(2).all(|pair| pair[0].completion_sequence < pair[1].completion_sequence));
+        let feature_events = events
+            .iter()
+            .filter(|event| event.stage == LifecycleCompletion::Features)
+            .copied()
+            .collect::<Vec<_>>();
+        let full_event_count = events
+            .iter()
+            .filter(|event| event.stage == LifecycleCompletion::Full)
+            .count();
+        validate_feature_event_order(&feature_events, &admissions)
+            .unwrap_or_else(|error| panic!("invalid FEATURES completion order: {error}"));
+        let mut feature_events = feature_events;
+        feature_events.sort_by_key(|event| event.admission_index);
+
+        Self {
+            admissions,
+            target_order,
+            feature_events,
+            full_event_count,
+        }
     }
+}
+
+fn lifecycle_capture_directory(dimension: Dimension) -> PathBuf {
+    if let Some(path) = std::env::var_os("LODESTONE_LARGE_PARITY_LIFECYCLE_CAPTURE") {
+        return PathBuf::from(path);
+    }
+    let root = std::env::var_os("LODESTONE_LARGE_PARITY_LIFECYCLE_CAPTURE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            panic!("set LODESTONE_LARGE_PARITY_LIFECYCLE_CAPTURE to the external {} capture directory (or set LODESTONE_LARGE_PARITY_LIFECYCLE_CAPTURE_ROOT)", dimension_capture_name(dimension))
+        });
+    root.join(format!("{}-full-accepted-sequence", dimension_capture_name(dimension)))
+}
+
+fn dimension_capture_name(dimension: Dimension) -> &'static str {
+    match dimension {
+        Dimension::Overworld => "overworld",
+        Dimension::Nether => "nether",
+        Dimension::End => "end",
+    }
+}
+
+fn format_manifest_header(header: &support::large_parity_manifest::Header) -> String {
+    format!(
+        "magic=LWP26P04;version={};header_bytes=256;coordinate_order=2;schema={};protocol=776;seed=42;grid_x=-250..250;grid_z=-250..250;target_x={}..{};target_z={}..{};count={}",
+        header.semantic_version,
+        header.semantic_version,
+        header.cx0,
+        header.cx1,
+        header.cz0,
+        header.cz1,
+        header.count,
+    )
+}
+
+fn file_sha256(path: &Path) -> String {
+    let bytes = std::fs::read(path).unwrap_or_else(|error| panic!("read {} for SHA-256: {error}", path.display()));
+    hex(&support::large_parity_manifest::sha256(&bytes))
+}
+
+fn parse_usize(value: &str, what: &str) -> usize {
+    value.parse().unwrap_or_else(|error| panic!("invalid {what} {value:?}: {error}"))
+}
+
+fn parse_u64(value: &str, what: &str) -> u64 {
+    value.parse().unwrap_or_else(|error| panic!("invalid {what} {value:?}: {error}"))
+}
+
+fn parse_i32(value: &str, what: &str) -> i32 {
+    value.parse().unwrap_or_else(|error| panic!("invalid {what} {value:?}: {error}"))
+}
+
+fn parse_bool(value: &str, what: &str) -> bool {
+    value.parse().unwrap_or_else(|error| panic!("invalid {what} {value:?}: {error}"))
 }
 
 #[test]
@@ -81,86 +426,37 @@ fn sha256_control_and_bit_flip_are_detected() {
     assert!(verify_payload(&corrupt[..], 1, good).is_err(), "one changed fingerprint bit must be detected");
 }
 
-/// The external materializer's status order is observable at this tile: the
-/// western source completes before the centre is encoded, while the northern
-/// source completes after it. The first spill must be retained and the second
-/// must be rejected. These are captured Nether cells, not synthetic geometry.
 #[test]
-fn lifecycle_retains_earlier_spills_and_rejects_later_spills() {
-    let netherrack = "minecraft:netherrack";
-    let basalt = "minecraft:basalt[axis=y]";
-    let source = nether_chunk_source(42);
-
-    let mut earlier = ParityLifecycle::default();
-    let include = (-4000, 64, -4000); // centre (-250,-250), local (0,64,0)
-    let include_spill = source
-        .generator()
-        .parity_source_spills(-250, -250, -251, -250)
-        .into_iter()
-        .find(|spill| spill.position == include)
-        .expect("captured western source spill must be produced by the real dispatcher");
-    assert_eq!(include_spill.source, (-251, -250));
-    assert_eq!(include_spill.state, basalt);
-    earlier.seed_resident(include, netherrack);
-    assert_eq!(
-        earlier.apply_spill(include_spill.position, &include_spill.state),
-        SpillDisposition::Stored,
-        "earlier source (-251,-250), step 7/raw 0 writes basalt before the target reaches Full",
+fn lifecycle_rejects_adjacent_feature_sequence_inversion() {
+    let admissions = vec![
+        LifecycleAdmission { replay_index: 0, chunk: (0, 0) },
+        LifecycleAdmission { replay_index: 1, chunk: (1, 0) },
+    ];
+    let mut swapped = vec![
+        LifecycleEvent {
+            source: (0, 0),
+            stage: LifecycleCompletion::Features,
+            completion_sequence: 10,
+            admission_index: 0,
+        },
+        LifecycleEvent {
+            source: (1, 0),
+            stage: LifecycleCompletion::Features,
+            completion_sequence: 20,
+            admission_index: 1,
+        },
+    ];
+    assert!(validate_feature_event_order(&swapped, &admissions).is_ok());
+    // Simulate the smallest capture corruption: only adjacent callback
+    // sequence numbers are exchanged. Sorting by the captured sequence now
+    // exposes an admission inversion, which the loader must reject.
+    (swapped[0].completion_sequence, swapped[1].completion_sequence) =
+        (swapped[1].completion_sequence, swapped[0].completion_sequence);
+    swapped.sort_by_key(|event| event.completion_sequence);
+    assert!(
+        validate_feature_event_order(&swapped, &admissions).is_err(),
+        "an adjacent FEATURES sequence inversion must fail the structural gate",
     );
-    assert_eq!(earlier.encode(include), basalt, "the earlier neighbour's direct spill must reach the packet");
-
-    let mut later = ParityLifecycle::default();
-    let exclude = (-3991, 14, -4000); // centre (-250,-250), local (9,14,0)
-    let exclude_spill = source
-        .generator()
-        .parity_source_spills(-250, -250, -250, -251)
-        .into_iter()
-        .find(|spill| spill.position == exclude)
-        .expect("captured northern source spill must be produced by the real dispatcher");
-    assert_eq!(exclude_spill.source, (-250, -251));
-    assert_eq!(exclude_spill.state, basalt);
-    later.seed_resident(exclude, netherrack);
-    assert_eq!(later.encode(exclude), netherrack, "the frozen target reached Full as netherrack");
-    assert_eq!(
-        later.apply_spill(exclude_spill.position, &exclude_spill.state),
-        SpillDisposition::TargetAlreadyEncoded,
-        "later source (-250,-251) must not revise an encoded target",
-    );
-    assert_eq!(later.encode(exclude), netherrack, "the rejected later spill must not change the packet state");
-
-    let mut absent = ParityLifecycle::default();
-    assert_eq!(
-        absent.apply_spill(include, basalt),
-        SpillDisposition::TargetNotResident,
-        "a spill must never instantiate an ungenerated destination column",
-    );
-}
-
-#[test]
-fn overworld_lifecycle_geometry_keeps_the_settled_andesite_not_immediate_diorite() {
-    let target = (-250, -250);
-    let cell = (-3991, 10, -4000); // local (9,10,0), accepted/fresh 18x18 witness
-    let source = overworld_chunk_source(42);
-    let andesite = source.generator().parity_source_ore_spills(target.0, target.1, -250, -251)
-        .into_iter().find(|spill| spill.position == cell)
-        .expect("the earlier accepted-world source must reach the witness cell");
-    let diorite = source.generator().parity_source_ore_spills(target.0, target.1, -250, -250)
-        .into_iter().find(|spill| spill.position == cell)
-        .expect("the immediate 3x3 centre source must reach the witness cell");
-    assert_eq!(andesite.state, "minecraft:andesite");
-    assert_eq!(diorite.state, "minecraft:diorite");
-
-    let mut settled = ParityLifecycle::default();
-    settled.seed_resident(cell, "minecraft:stone");
-    assert_eq!(settled.apply_spill(andesite.position, &andesite.state), SpillDisposition::Stored);
-    assert_eq!(settled.encode(cell), "minecraft:andesite", "accepted/fresh 18x18 state");
-    assert_eq!(settled.apply_spill(diorite.position, &diorite.state), SpillDisposition::TargetAlreadyEncoded);
-
-    let mut immediate = ParityLifecycle::default();
-    immediate.seed_resident(cell, "minecraft:stone");
-    assert_eq!(immediate.apply_spill(andesite.position, &andesite.state), SpillDisposition::Stored);
-    assert_eq!(immediate.apply_spill(diorite.position, &diorite.state), SpillDisposition::Stored);
-    assert_eq!(immediate.encode(cell), "minecraft:diorite", "synthetic immediate 3x3 negative geometry");
 }
 
 #[test]
@@ -354,24 +650,14 @@ fn parity_manifest_streams_before_rust_comparison() {
     payload_file.seek(SeekFrom::Start(HEADER_BYTES as u64)).expect("seek payload");
     let mut expected = BufReader::new(payload_file);
     let dimension = h.dimension;
-    let source: Box<dyn ChunkSource> = match dimension {
-        // A frozen external world is a retained, settled lifecycle result.
-        // Keep the comparator on the server's retained-source path rather than
-        // regenerating an isolated column for every packet request.
-        Dimension::Overworld => Box::new(retained_chunk_source_for_view_radius(overworld_chunk_source(42), 8)),
-        Dimension::Nether => Box::new(retained_chunk_source_for_view_radius(nether_chunk_source(42), 8)),
-        Dimension::End => Box::new(retained_chunk_source_for_view_radius(end_chunk_source(42), 8)),
-    };
     let server_dimension = match dimension {
         Dimension::Overworld => ServerDimension::Overworld,
         Dimension::Nether => ServerDimension::Nether,
         Dimension::End => ServerDimension::End,
     };
-    let column_for = |cx, cz| -> ChunkColumn { source.column(cx, cz) };
     let max_chunks = std::env::var("LODESTONE_LARGE_PARITY_MAX_CHUNKS")
         .ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(h.count);
     let limit = max_chunks.min(h.count);
-    let width = (h.cx1 - h.cx0 + 1) as u64;
     let scan_all = std::env::var_os("LODESTONE_LARGE_PARITY_SCAN_ALL").is_some();
     let reference_packets = if scan_all {
         load_reference_packets(dimension, h.cx0, h.cx1, h.cz0, h.cz1, limit)
@@ -380,65 +666,111 @@ fn parity_manifest_streams_before_rust_comparison() {
     };
     let mut digest_mismatches = Vec::new();
     let mut component_reports = Vec::new();
-    let mut expected_digest = [0u8; 32];
-    for index in 0..limit {
-        expected.read_exact(&mut expected_digest).expect("manifest semantic digest");
-        let cx = h.cx0 + (index % width) as i32;
-        let cz = h.cz0 + (index / width) as i32;
-        let column = column_for(cx, cz);
-        let mut neighbours = Vec::with_capacity(8);
-        for dz in -1..=1 {
-            for dx in -1..=1 {
-                if (dx, dz) != (0, 0) {
-                    neighbours.push((dx, dz, column_for(cx + dx, cz + dz)));
+    let partial_lifecycle = h.count == 256
+        && h.cx1 - h.cx0 == 15
+        && h.cz1 - h.cz0 == 15;
+    if partial_lifecycle {
+        let capture = LifecycleCapture::load(dimension, &h, Path::new(&path));
+        match dimension {
+            Dimension::Overworld => compare_lifecycle_manifest(
+                LifecycleMaterializer::new(overworld_chunk_source(42)),
+                &capture,
+                &mut expected,
+                &h,
+                dimension,
+                server_dimension,
+                limit,
+                scan_all,
+                &reference_packets,
+                &mut digest_mismatches,
+                &mut component_reports,
+            ),
+            Dimension::Nether => compare_lifecycle_manifest(
+                LifecycleMaterializer::new(nether_chunk_source(42)),
+                &capture,
+                &mut expected,
+                &h,
+                dimension,
+                server_dimension,
+                limit,
+                scan_all,
+                &reference_packets,
+                &mut digest_mismatches,
+                &mut component_reports,
+            ),
+            Dimension::End => panic!("partial lifecycle capture is only available for Overworld and Nether"),
+        }
+    } else {
+        let source: Box<dyn ChunkSource> = match dimension {
+            // A frozen external world is a retained, settled lifecycle result.
+            // Keep the comparator on the server's retained-source path rather than
+            // regenerating an isolated column for every packet request.
+            Dimension::Overworld => Box::new(retained_chunk_source_for_view_radius(overworld_chunk_source(42), 8)),
+            Dimension::Nether => Box::new(retained_chunk_source_for_view_radius(nether_chunk_source(42), 8)),
+            Dimension::End => Box::new(retained_chunk_source_for_view_radius(end_chunk_source(42), 8)),
+        };
+        let column_for = |cx, cz| -> ChunkColumn { source.column(cx, cz) };
+        let width = (h.cx1 - h.cx0 + 1) as u64;
+        let mut expected_digest = [0u8; 32];
+        for index in 0..limit {
+            expected.read_exact(&mut expected_digest).expect("manifest semantic digest");
+            let cx = h.cx0 + (index % width) as i32;
+            let cz = h.cz0 + (index / width) as i32;
+            let column = column_for(cx, cz);
+            let mut neighbours = Vec::with_capacity(8);
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    if (dx, dz) != (0, 0) {
+                        neighbours.push((dx, dz, column_for(cx + dx, cz + dz)));
+                    }
                 }
             }
-        }
-        let directive = V770ServerProtocol
-            .try_encode_chunk_with_neighbours_in_dimension(
-                cx,
-                cz,
-                &column,
-                &neighbours,
-                server_dimension,
-            )
-            .expect("production neighbour-aware chunk encoder");
-        let payload = match directive {
-            ServerDirective::Send { packet_id, payload } => {
-                assert_eq!(packet_id, lodestone_v26_2::packet_ids::play::clientbound::LEVEL_CHUNK_WITH_LIGHT);
-                payload
+            let directive = V770ServerProtocol
+                .try_encode_chunk_with_neighbours_in_dimension(
+                    cx,
+                    cz,
+                    &column,
+                    &neighbours,
+                    server_dimension,
+                )
+                .expect("production neighbour-aware chunk encoder");
+            let payload = match directive {
+                ServerDirective::Send { packet_id, payload } => {
+                    assert_eq!(packet_id, lodestone_v26_2::packet_ids::play::clientbound::LEVEL_CHUNK_WITH_LIGHT);
+                    payload
+                }
+                other => panic!("production chunk encoder returned {other:?} at ({cx},{cz})"),
+            };
+            if index == 0 {
+                if let Some(path) = std::env::var_os("LODESTONE_LARGE_PARITY_PACKET_OUT") {
+                    std::fs::write(&path, &payload).expect("write requested Lodestone packet capture");
+                }
             }
-            other => panic!("production chunk encoder returned {other:?} at ({cx},{cz})"),
-        };
-        if index == 0 {
-            if let Some(path) = std::env::var_os("LODESTONE_LARGE_PARITY_PACKET_OUT") {
-                std::fs::write(&path, &payload).expect("write requested Lodestone packet capture");
+            let decoded = packet_decode_for_dimension(&payload, dimension);
+            let full = match h.semantic_version {
+                3 => semantic_digest(&decoded),
+                4 => semantic_digest_for_dimension(&decoded, dimension),
+                5 => semantic_digest_v5_for_dimension(&decoded, dimension),
+                version => panic!("unsupported parity semantic version {version}"),
+            };
+            if full != expected_digest {
+                if !scan_all {
+                    let packet_summary = std::env::var_os("LODESTONE_LARGE_PARITY_REFERENCE_PACKET")
+                        .map(|path| packet_difference_summary(&std::fs::read(path).expect("read authoritative packet capture"), &payload, dimension));
+                    panic!(
+                        "large semantic parity mismatch at ({cx},{cz}) after {index} matching chunks: reference SHA-256 {}, Lodestone SHA-256 {}{}",
+                        hex(&expected_digest), hex(&full), packet_summary.as_deref().unwrap_or(""),
+                    );
+                }
+                digest_mismatches.push((cx, cz, expected_digest, full));
             }
-        }
-        let decoded = packet_decode_for_dimension(&payload, dimension);
-        let full = match h.semantic_version {
-            3 => semantic_digest(&decoded),
-            4 => semantic_digest_for_dimension(&decoded, dimension),
-            5 => semantic_digest_v5_for_dimension(&decoded, dimension),
-            version => panic!("unsupported parity semantic version {version}"),
-        };
-        if full != expected_digest {
-            if !scan_all {
-                let packet_summary = std::env::var_os("LODESTONE_LARGE_PARITY_REFERENCE_PACKET")
-                    .map(|path| packet_difference_summary(&std::fs::read(path).expect("read authoritative packet capture"), &payload, dimension));
-                panic!(
-                    "large semantic parity mismatch at ({cx},{cz}) after {index} matching chunks: reference SHA-256 {}, Lodestone SHA-256 {}{}",
-                    hex(&expected_digest), hex(&full), packet_summary.as_deref().unwrap_or(""),
-                );
+            if let Some(reference_packet) = reference_packets.get(&(cx, cz)) {
+                let report = packet_component_difference(reference_packet, &payload, dimension);
+                component_reports.push(((cx, cz), report));
             }
-            digest_mismatches.push((cx, cz, expected_digest, full));
-        }
-        if let Some(reference_packet) = reference_packets.get(&(cx, cz)) {
-            let report = packet_component_difference(reference_packet, &payload, dimension);
-            component_reports.push(((cx, cz), report));
-        }
-        if (index + 1) % 256 == 0 || index + 1 == limit {
-            eprintln!("large semantic parity: compared {}/{} chunks (batch boundary at ({cx},{cz}))", index + 1, limit);
+            if (index + 1) % 256 == 0 || index + 1 == limit {
+                eprintln!("large semantic parity: compared {}/{} chunks (batch boundary at ({cx},{cz}))", index + 1, limit);
+            }
         }
     }
     if limit < h.count {
@@ -454,6 +786,105 @@ fn parity_manifest_streams_before_rust_comparison() {
     }
     if !digest_mismatches.is_empty() || has_failing_component_mismatches {
         panic!("{}", format_diagnostic_summary(limit, h.count, &digest_mismatches, &component_reports));
+    }
+}
+
+fn compare_lifecycle_manifest<S: LifecycleWorldgenSource>(
+    mut materializer: LifecycleMaterializer<S>,
+    capture: &LifecycleCapture,
+    expected: &mut BufReader<File>,
+    header: &support::large_parity_manifest::Header,
+    dimension: Dimension,
+    server_dimension: ServerDimension,
+    limit: u64,
+    scan_all: bool,
+    reference_packets: &BTreeMap<ChunkPos, Vec<u8>>,
+    digest_mismatches: &mut Vec<(i32, i32, [u8; 32], [u8; 32])>,
+    component_reports: &mut Vec<((i32, i32), PacketComponentReport)>,
+) {
+    // The external rows repeat the same source completion once per target that
+    // observes it. Admit the complete authenticated 18x18 halo first, then
+    // run each source's FEATURES body exactly once in replay.tsv admission
+    // order. FULL/fence telemetry is diagnostic only: the accepted manifest is
+    // a sealed final-world state, not a set of target-fence snapshots.
+    for admission in &capture.admissions {
+        materializer.admit(admission.chunk);
+    }
+    eprintln!(
+        "large lifecycle replay: admitted {} halo columns, applying {} FEATURES events; ignoring {} FULL telemetry events",
+        capture.admissions.len(),
+        capture.feature_events.len(),
+        capture.full_event_count,
+    );
+    for event in &capture.feature_events {
+        materializer.complete(event.source, event.stage, event.completion_sequence);
+    }
+
+    let mut expected_digest = [0u8; 32];
+    for index in 0..limit {
+        expected.read_exact(&mut expected_digest).expect("manifest semantic digest");
+        let target = capture
+            .target_order
+            .get(index as usize)
+            .copied()
+            .expect("capture target order must cover the manifest prefix");
+        let column = materializer.snapshot_for_packet(target);
+        let mut neighbours = Vec::with_capacity(8);
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                if (dx, dz) != (0, 0) {
+                    let neighbour = (target.0 + dx, target.1 + dz);
+                    if let Some(column) = materializer.resident_column(neighbour) {
+                        neighbours.push((dx, dz, column.clone()));
+                    }
+                }
+            }
+        }
+        let directive = V770ServerProtocol
+            .try_encode_chunk_with_neighbours_in_dimension(
+                target.0,
+                target.1,
+                &column,
+                &neighbours,
+                server_dimension,
+            )
+            .expect("production neighbour-aware chunk encoder");
+        let payload = match directive {
+            ServerDirective::Send { packet_id, payload } => {
+                assert_eq!(packet_id, lodestone_v26_2::packet_ids::play::clientbound::LEVEL_CHUNK_WITH_LIGHT);
+                payload
+            }
+            other => panic!("production chunk encoder returned {other:?} at {target:?}"),
+        };
+        if index == 0 {
+            if let Some(path) = std::env::var_os("LODESTONE_LARGE_PARITY_PACKET_OUT") {
+                std::fs::write(&path, &payload).expect("write requested Lodestone packet capture");
+            }
+        }
+        let decoded = packet_decode_for_dimension(&payload, dimension);
+        let full = match header.semantic_version {
+            3 => semantic_digest(&decoded),
+            4 => semantic_digest_for_dimension(&decoded, dimension),
+            5 => semantic_digest_v5_for_dimension(&decoded, dimension),
+            version => panic!("unsupported parity semantic version {version}"),
+        };
+        if full != expected_digest {
+            if !scan_all {
+                let packet_summary = std::env::var_os("LODESTONE_LARGE_PARITY_REFERENCE_PACKET")
+                    .map(|path| packet_difference_summary(&std::fs::read(path).expect("read authoritative packet capture"), &payload, dimension));
+                panic!(
+                    "large semantic parity mismatch at {:?} after {index} matching chunks: reference SHA-256 {}, Lodestone SHA-256 {}{}",
+                    target, hex(&expected_digest), hex(&full), packet_summary.as_deref().unwrap_or(""),
+                );
+            }
+            digest_mismatches.push((target.0, target.1, expected_digest, full));
+        }
+        if let Some(reference_packet) = reference_packets.get(&target) {
+            component_reports.push((target, packet_component_difference(reference_packet, &payload, dimension)));
+        }
+        if (index + 1) % 256 == 0 || index + 1 == limit {
+            eprintln!("large lifecycle parity: compared {}/{} targets (batch boundary at {:?})", index + 1, limit, target);
+        }
     }
 }
 
@@ -837,6 +1268,9 @@ fn canonical_entity_key(entity: &lodestone_world::BlockEntity) -> (u8, i16, u8, 
 
 fn format_diagnostic_report(limit: u64, total: u64, digest: &[(i32, i32, [u8; 32], [u8; 32])], components: &[((i32, i32), PacketComponentReport)]) -> String {
     let mut output = format!("large semantic parity diagnostic: compared {limit}/{total} chunks; digest mismatches={} coordinates={:?}\n", digest.len(), digest.iter().map(|(x, z, _, _)| (*x, *z)).collect::<Vec<_>>());
+    if !digest.is_empty() && components.is_empty() {
+        output.push_str("component reports unavailable: set LODESTONE_LARGE_PARITY_REFERENCE_PACKET to an authoritative raw packet (or LODESTONE_LARGE_PARITY_REFERENCE_PACKET_DIR to reference*.packet files)\n");
+    }
     for ((x, z), report) in components {
         output.push_str(&format!("packet ({x},{z}) component mismatches: terrain={} {:?}; biomes={} {:?}; heightmaps={} {:?}; block_entities={} {:?}; sky_light={} {:?}; block_light={} {:?}; masks={} {:?}\n", report.terrain.total, report.terrain.examples, report.biomes.total, report.biomes.examples, report.heightmaps.total, report.heightmaps.examples, report.block_entities.total, report.block_entities.examples, report.sky_light.total, report.sky_light.examples, report.block_light.total, report.block_light.examples, report.masks.total, report.masks.examples));
     }
@@ -845,6 +1279,9 @@ fn format_diagnostic_report(limit: u64, total: u64, digest: &[(i32, i32, [u8; 32
 
 fn format_diagnostic_summary(limit: u64, total: u64, digest: &[(i32, i32, [u8; 32], [u8; 32])], components: &[((i32, i32), PacketComponentReport)]) -> String {
     let mut output = format!("large semantic parity diagnostic: compared {limit}/{total} chunks; digest mismatches={} coordinates={:?}", digest.len(), digest.iter().map(|(x, z, _, _)| (*x, *z)).collect::<Vec<_>>());
+    if !digest.is_empty() && components.is_empty() {
+        output.push_str("; component reports unavailable: set LODESTONE_LARGE_PARITY_REFERENCE_PACKET to an authoritative raw packet (or LODESTONE_LARGE_PARITY_REFERENCE_PACKET_DIR to reference*.packet files)");
+    }
     for ((x, z), report) in components {
         output.push_str(&format!("\npacket ({x},{z}) counts: terrain={}, biomes={}, heightmaps={}, block_entities={}, sky_light={}, block_light={}, masks={}", report.terrain.total, report.biomes.total, report.heightmaps.total, report.block_entities.total, report.sky_light.total, report.block_light.total, report.masks.total));
     }

@@ -18,9 +18,9 @@
 //! The dependency model for a column `C` is:
 //!
 //! * fill / surface / carve depend on the seed alone — embarrassingly parallel;
-//! * `ore(C)` reads `pre_ore(3×3(C))`;
-//! * `veg(C)` reads `post_ore(3×3(C))`, which closes over `pre_ore(5×5(C))`;
-//! * `top_layer(C)` depends on `veg(C)` alone.
+//! * the unified FEATURES stage for `C` reads the centre plus its 5×5
+//!   terrain-prefix context;
+//! * `top_layer(C)` depends on the completed FEATURES result alone.
 //!
 //! So two columns at Chebyshev distance ≥ 5 share **no** store entry and are
 //! wholly independent; adjacent columns share 20 of their 25 pre-ore entries.

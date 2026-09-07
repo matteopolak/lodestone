@@ -81,14 +81,14 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use lodestone_worldgen::compose::build_biome_vegetation;
+use lodestone_worldgen::compose::build_decoration_catalog;
 use lodestone_worldgen::density::{NoiseParams, Resolver};
 use lodestone_worldgen::dense_grid::DenseBlockGrid;
 use lodestone_worldgen::feature::vegetation::{
     PlacedRef, VegGrid, VegTags, apply_vegetal_decoration_step_3x3_per_source, build_veg_tags,
 };
 use lodestone_worldgen::feature::region_view::WIDE_RADIUS;
-use lodestone_worldgen::feature::{REGION_MAX, REGION_MIN, VEG_PADDING};
+use lodestone_worldgen::feature::{REGION_MAX, REGION_MIN, STEP_VEGETAL_DECORATION, VEG_PADDING};
 use lodestone_worldgen::interner::StateInterner;
 use lodestone_worldgen::rng::{WorldgenRandom, XoroshiroRandomSource};
 use serde_json::Value;
@@ -201,6 +201,17 @@ const FIXED_TO_ZERO: &[&str] = &["minecraft:birch_forest"];
 
 fn prod_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../lodestone-server/assets/worldgen")
+}
+
+fn vegetal_features_for(resolver: &dyn Resolver, biome: &str) -> Vec<(usize, PlacedRef)> {
+    let catalog = build_decoration_catalog(resolver, &[biome.to_owned()]);
+    catalog
+        .select([biome])
+        .into_iter()
+        .filter_map(|(step, index, placed)| {
+            (step == STEP_VEGETAL_DECORATION).then_some((index, placed))
+        })
+        .collect()
 }
 
 struct FsResolver {
@@ -420,7 +431,7 @@ fn biomes_with_vegetation(resolver: &FsResolver) -> Vec<String> {
                 name.to_string_lossy().trim_end_matches(".json")
             )
         })
-        .filter(|b| !build_biome_vegetation(resolver, b).is_empty())
+        .filter(|b| !vegetal_features_for(resolver, b).is_empty())
         .collect();
     out.sort();
     out
@@ -443,7 +454,7 @@ fn sweep(rim: Rim) -> (Vec<(String, Seam)>, usize, usize) {
     let mut truncated = 0usize;
     let mut crossings = 0usize;
     for biome in biomes {
-        let features = build_biome_vegetation(&resolver, &biome);
+        let features = vegetal_features_for(&resolver, &biome);
         let w = drive(&world, &interner, WEST, &features, &tags, rim);
         let e = drive(&world, &interner, EAST, &features, &tags, rim);
         let seam = measure_seam(&w, &e);

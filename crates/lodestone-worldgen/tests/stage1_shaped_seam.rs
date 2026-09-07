@@ -4,7 +4,7 @@
 //!
 //! # What it is
 //!
-//! Two gates, each with its own executed control (this repo's evidence
+//! Three gates, each with its own executed control (this repo's evidence
 //! standard: "run the control and observe it fail; do not describe what it
 //! would do"):
 //!
@@ -16,15 +16,12 @@
 //!    block id in a clone of the matching side and asserts the comparison stops
 //!    agreeing, proving the equality check can actually detect a diff rather
 //!    than passing by construction.
-//! 2. **Stage-touch counters** (`stage1_shaped_sweep_touches_only_pre_ore_and_structure_stages`,
+//! 2. **Stage-touch counters** (`stage1_shaped_sweep_touches_only_prefix_stages`,
 //!    `--features gen-counters` only): a shaped sweep bumps `pre_ore_computed`
-//!    and `structure_starts_computed` and leaves `post_ore_computed` and the
-//!    vegetation stage-entry counter at zero. Its control
-//!    (`stage1_control_full_sweep_trips_the_post_ore_and_vegetation_counters`)
-//!    runs the identical sweep shape through plain `column()` and asserts those
-//!    same two counters are **not** zero — the counter gate's hypothesis,
-//!    observed failing against the thing it exists to distinguish `column_shaped`
-//!    from.
+//!    and `structure_starts_computed` and leaves the unified FEATURES stage-entry
+//!    counter at zero. Its control (`stage1_control_full_sweep_trips_the_features_counter`)
+//!    runs the identical sweep shape through plain `column()` and observes that
+//!    FEATURES is entered while the obsolete standalone ore bucket stays zero.
 //!
 //! A third, non-gate check (`stage1_shaped_column_contains_a_real_structure`)
 //! answers the report question the plan's Stage 1 write-up asks for directly:
@@ -225,15 +222,15 @@ fn stage1_counters_require_the_gen_counters_feature() {
 }
 
 /// A shaped sweep must compute `pre_ore`/structure-start work and must never
-/// touch `post_ore` or the vegetation stage. Small sweep (3×3) — this gate is
+/// touch unified FEATURES. Small sweep (3×3) — this gate is
 /// about *which* counters move, not about scale (that is Stage 0's job).
 #[cfg(feature = "gen-counters")]
 #[test]
 #[ignore = "measurement-shaped correctness gate, gen-counters build, real generation; run with \
             `cargo test --release -p lodestone-worldgen --features gen-counters \
             --test stage1_shaped_seam -- --ignored --test-threads=1 --nocapture \
-            stage1_shaped_sweep_touches_only_pre_ore_and_structure_stages`"]
-fn stage1_shaped_sweep_touches_only_pre_ore_and_structure_stages() {
+            stage1_shaped_sweep_touches_only_prefix_stages`"]
+fn stage1_shaped_sweep_touches_only_prefix_stages() {
     use lodestone_worldgen::counters::{self, Stage};
 
     assert!(counters::enabled(), "gen-counters feature is off for this build");
@@ -251,11 +248,10 @@ fn stage1_shaped_sweep_touches_only_pre_ore_and_structure_stages() {
 
     let snap = counters::snapshot();
     println!(
-        "STAGE1_COUNTER pre_ore_computed={} structure_starts_computed={} post_ore_computed={} \
-         vegetation_stage_entered={}",
+        "STAGE1_COUNTER pre_ore_computed={} structure_starts_computed={} \
+         features_stage_entered={}",
         snap.pre_ore_computed,
         snap.structure_starts_computed,
-        snap.post_ore_computed,
         snap.stage_entered[Stage::Vegetation as usize]
     );
 
@@ -265,19 +261,20 @@ fn stage1_shaped_sweep_touches_only_pre_ore_and_structure_stages() {
         "STAGE1: shaped sweep never computed structure starts — vacuous"
     );
     assert_eq!(
-        snap.post_ore_computed, 0,
-        "STAGE1: shaped sweep computed post_ore {} times — column_shaped is not a pure prefix",
-        snap.post_ore_computed
+        snap.stage_entered[Stage::Vegetation as usize], 0,
+        "STAGE1: shaped sweep entered FEATURES {} times",
+        snap.stage_entered[Stage::Vegetation as usize]
     );
     assert_eq!(
-        snap.stage_entered[Stage::Vegetation as usize], 0,
-        "STAGE1: shaped sweep entered the vegetation stage {} times",
-        snap.stage_entered[Stage::Vegetation as usize]
+        snap.stage_entered[Stage::Ore as usize],
+        0,
+        "STAGE1: shaped sweep entered the obsolete standalone ore bucket"
     );
 }
 
 /// The control for the gate above: the identical sweep shape through plain
-/// `column()` must trip the two counters the shaped gate asserts are zero —
+/// `column()` must enter unified FEATURES while leaving the standalone ore
+/// bucket at zero —
 /// observed failing, not described. A generator independent from the shaped
 /// gate's, so the two tests never share store state.
 #[cfg(feature = "gen-counters")]
@@ -285,8 +282,8 @@ fn stage1_shaped_sweep_touches_only_pre_ore_and_structure_stages() {
 #[ignore = "measurement-shaped correctness gate, gen-counters build, real generation; run with \
             `cargo test --release -p lodestone-worldgen --features gen-counters \
             --test stage1_shaped_seam -- --ignored --test-threads=1 --nocapture \
-            stage1_control_full_sweep_trips_the_post_ore_and_vegetation_counters`"]
-fn stage1_control_full_sweep_trips_the_post_ore_and_vegetation_counters() {
+            stage1_control_full_sweep_trips_the_features_counter`"]
+fn stage1_control_full_sweep_trips_the_features_counter() {
     use lodestone_worldgen::counters::{self, Stage};
 
     assert!(counters::enabled(), "gen-counters feature is off for this build");
@@ -304,18 +301,62 @@ fn stage1_control_full_sweep_trips_the_post_ore_and_vegetation_counters() {
 
     let snap = counters::snapshot();
     println!(
-        "STAGE1_CONTROL post_ore_computed={} vegetation_stage_entered={}",
-        snap.post_ore_computed, snap.stage_entered[Stage::Vegetation as usize]
+        "STAGE1_CONTROL features_stage_entered={} ore_stage_entered={}",
+        snap.stage_entered[Stage::Vegetation as usize],
+        snap.stage_entered[Stage::Ore as usize]
     );
 
     assert!(
-        snap.post_ore_computed > 0,
-        "STAGE1 control failed: a full sweep never computed post_ore — either the counter is not \
-         wired, or column() stopped calling post_ore_world"
+        snap.stage_entered[Stage::Vegetation as usize] > 0,
+        "STAGE1 control failed: a full sweep never entered unified FEATURES"
     );
     assert!(
-        snap.stage_entered[Stage::Vegetation as usize] > 0,
-        "STAGE1 control failed: a full sweep never entered the vegetation stage"
+        snap.stage_entered[Stage::Ore as usize] == 0,
+        "STAGE1 control entered the obsolete standalone ore bucket {} times",
+        snap.stage_entered[Stage::Ore as usize]
+    );
+}
+
+/// `column_timed` computes the centre's prefix locally so it can time the
+/// prefix stages.  The unified FEATURES dispatcher must consume that supplied
+/// biome state rather than asking the staged store to compute the centre again.
+/// The expected `5×5 - 1` count is derived from the dispatcher's 5×5 read rim:
+/// the 24 non-centre prefixes are cached, while the centre prefix is the timed
+/// local value.  The independent cold-column comparison proves this hoist did
+/// not change the generated bytes.
+#[cfg(feature = "gen-counters")]
+#[test]
+#[ignore = "measurement-shaped correctness gate, gen-counters build, real generation; run with \
+            `cargo test --release -p lodestone-worldgen --features gen-counters \
+            --test stage1_shaped_seam -- --ignored --test-threads=1 --nocapture \
+            column_timed_uses_supplied_center_prefix"]
+fn column_timed_uses_supplied_center_prefix() {
+    use lodestone_worldgen::counters;
+
+    const PRE_ORE_CLOSURE: u64 = 5 * 5;
+    let timed_generator = overworld_generator(SEED);
+    counters::reset();
+    let (timed, _) = timed_generator.column_timed(0, 0);
+    let snapshot = counters::snapshot();
+
+    assert_eq!(
+        snapshot.pre_ore_computed,
+        PRE_ORE_CLOSURE - 1,
+        "column_timed must compute only the 24 non-centre prefixes through the \
+         dispatcher; a 25th computation means it recomputed the supplied centre prefix"
+    );
+    assert_eq!(
+        snapshot.stage_entered[ lodestone_worldgen::counters::Stage::Ore as usize ],
+        0,
+        "column_timed must attribute unified FEATURES to Vegetation, not the \
+         obsolete standalone ore stage"
+    );
+
+    let cold = overworld_generator(SEED).column(0, 0);
+    assert_eq!(
+        timed.into_raw(),
+        cold.into_raw(),
+        "column_timed output must remain byte-identical to a cold column"
     );
 }
 

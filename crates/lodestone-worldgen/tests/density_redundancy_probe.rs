@@ -267,7 +267,7 @@ fn redundancy_per_interior_column() {
 ///
 /// # How it works
 ///
-/// [`OverworldGenerator::column_timed`] runs the identical ten stages `column`
+/// [`OverworldGenerator::column_timed`] runs the identical live stages `column`
 /// does — `benches/generation.rs`'s own block-for-block anti-drift control is what
 /// makes that claim checkable — and reports a `Duration` per stage. Density
 /// evaluation lives in `aquifer` (building the three samplers, plus
@@ -276,13 +276,13 @@ fn redundancy_per_interior_column() {
 /// `aquifer + shape` is an **upper bound** on the density engine's share.
 ///
 /// **The warm-up is load-bearing and the first version of this probe did not have
-/// it.** `column_timed`'s `vegetation` bucket times `vegetation_stage`, which reads
-/// the post-ore world of its 3×3 — and on a cold store that *computes* those
-/// neighbours, so their entire pre-ore and ore pipelines land in the `vegetation`
+/// it.** `column_timed`'s `vegetation` bucket times unified FEATURES, which reads
+/// the 5×5 terrain rim — and on a cold store that *computes* those
+/// neighbours, so their entire terrain-prefix pipelines land in the `vegetation`
 /// row. Measured both ways: cold store reports vegetation **51.6%** and
 /// `aquifer + shape` 14.7%, which invites exactly the wrong conclusion, because
 /// most of that 51.6% is other chunks' `shape`. Sweeping with `column()` first
-/// leaves every neighbour's post-ore in the store, so each row times only its own
+/// leaves every neighbour's terrain prefix in the store, so each row times only its own
 /// stage. **A stage-attribution bucket that can contain another chunk's whole
 /// pipeline is not an attribution.**
 ///
@@ -295,9 +295,8 @@ fn redundancy_per_interior_column() {
 /// **Do not turn this into a before/after comparator**; `I_ss` is that.
 ///
 /// The shares are **unweighted**, and that was checked rather than assumed.
-/// §12.130's counts over this sweep (`pre_ore_computed` 256, `post_ore_computed`
-/// 196, vegetation 144, over 144 columns) suggest weighting each pre-ore stage by
-/// 1.78 and ore by 1.36 — those are sweep *averages*, dominated by the leading
+/// The sweep's terrain-prefix and FEATURES entries suggest weighting the prefix
+/// by the wider dependency ratio — those are sweep *averages*, dominated by the leading
 /// edge filling its 5×5 closure, and the median interior column is not the average.
 /// The control decides it: the unweighted total lands within ~2% of `C_ss` while the
 /// weighted one overshoots by ~1.4×, so a median interior column pays about one

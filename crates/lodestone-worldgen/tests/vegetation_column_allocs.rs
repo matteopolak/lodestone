@@ -22,7 +22,7 @@
 //! It does **not** assert a total. A warm column legitimately allocates for its
 //! *output* — `docs/plans/worldgen-rewrite.md` allows O(1) buffers for the returned
 //! column, measured at 41 for the palette/blocks pair, plus the private copy of the
-//! centre's post-ore grid that `overworld/decorate.rs` names as the one copy the
+//! centre's terrain prefix that `overworld/decorate.rs` names as the one copy the
 //! vegetation stage still makes. Pinning a total here would make this gate fail on
 //! any unrelated unit's output-side change, which is how a gate becomes something
 //! people delete.

@@ -207,8 +207,7 @@ fn motion_blocking_from_palette(
     out
 }
 
-/// Per-stage wall-clock cost of one [`OverworldGenerator::column_timed`] call:
-/// **one field per stage the pipeline actually has**.
+/// Per-stage wall-clock cost of one [`OverworldGenerator::column_timed`] call.
 ///
 /// # What changed here, and why the old field names were misleading
 ///
@@ -233,13 +232,13 @@ fn motion_blocking_from_palette(
 ///
 /// # These are cache-cold stage costs, deliberately
 ///
-/// [`OverworldGenerator::column`] reaches its stages through two memo caches
-/// ([`OverworldGenerator::pre_ore_stage`] and `post_ore_world`).
-/// `column_timed` calls the same stage functions *without* those caches, on
-/// purpose: a cache hit costs almost nothing, so a per-stage split taken over
-/// memoised calls would attribute ~0% to whichever stage happened to be warm
-/// and is not a split of anything. The stage functions, their order and their
-/// inputs are identical to `column`'s, so the *output* is identical too —
+/// [`OverworldGenerator::column`] reaches its terrain prefix through a memoised
+/// store, while the FEATURES and later stages run for each served column.
+/// `column_timed` calls the same stage functions *without* the terrain-prefix
+/// cache, on purpose: a cache hit costs almost nothing, so a per-stage split
+/// taken over memoised calls would attribute ~0% to whichever stage happened to
+/// be warm and is not a split of anything. The stage functions, their order and
+/// their inputs are identical to `column`'s, so the *output* is identical too —
 /// `benches/generation.rs` asserts exactly that against a pair of freshly
 /// constructed generators, which is the anti-drift control the "do not create a
 /// second pipeline" half of the per-stage cost split asks for.
@@ -262,9 +261,13 @@ pub struct StageTimes {
     pub materialize: std::time::Duration,
     /// Carvers (`crate::carver::apply_carvers`).
     pub carve: std::time::Duration,
-    /// The `UNDERGROUND_ORES` 3×3 neighbourhood driver.
+    /// Reserved compatibility bucket for callers that recorded the former
+    /// ore-only pass. It is zero now that every FEATURES entry runs through
+    /// one globally ordered dispatcher; splitting that stream would change
+    /// the read-after-write behavior being measured.
     pub ore: std::time::Duration,
-    /// Vegetal decoration.
+    /// The complete globally ordered FEATURES dispatcher, including ores,
+    /// disks, underground decoration and vegetal bodies.
     pub vegetation: std::time::Duration,
     /// `TOP_LAYER_MODIFICATION` — `freeze_top_layer`'s snow and ice. The
     /// first stage to earn its own field rather than being

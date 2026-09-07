@@ -18,12 +18,12 @@
 //! | resolver | source | may be used by |
 //! |---|---|---|
 //! | [`make_shape_only_generator`] | in-crate fixture tree, 2 of 9 methods | raw noise-router throughput only |
-//! | [`make_full_generator`] | in-crate fixture tree, all 9 methods | single-biome composed benches; 2 of 10 stages inert |
+//! | [`make_full_generator`] | in-crate fixture tree, all 9 methods | single-biome composed benches; 2 of 9 live stages inert |
 //! | [`make_embedded_generator`] | **`lodestone-server`'s embedded production data** | [`C_ss`/`C_cold`](bench_steady_state_and_cold) and the [calibration](bench_counter_calibration) |
 //!
 //! The fixture tree is single-biome plains and carries no `block_freeze_facts`
 //! document, so against it the biome nearest-neighbour search never runs and
-//! `freeze_top_layer` early-returns — **two of the ten stages are structurally
+//! `freeze_top_layer` early-returns — **two of the nine live stages are structurally
 //! absent**, and the percentage table stays perfectly plausible while describing
 //! a pipeline with stages missing. That is `CLAUDE.md`'s "world" species of
 //! vacuous test, and it is this file's own documented history (see
@@ -563,7 +563,7 @@ fn make_shape_only_generator(seed: i64) -> OverworldGenerator {
 }
 
 /// The **composed** generator: every fixture the tree carries is resolved, so
-/// carvers, the 3×3 ore driver, vegetal decoration and the freeze stage all
+/// carvers, the unified FEATURES dispatcher and the freeze stage all
 /// really run. Much slower per column, which is why benches using it work over
 /// small patches.
 fn make_full_generator(seed: i64) -> OverworldGenerator {
@@ -586,7 +586,7 @@ fn make_full_generator(seed: i64) -> OverworldGenerator {
 ///   `top_layer` stage stops early-returning.
 ///
 /// Both are asserted by counter, not assumed — see
-/// [`assert_all_ten_stages_ran`].
+/// [`assert_all_live_stages_ran`].
 fn make_embedded_generator(seed: i64) -> OverworldGenerator {
     lodestone_server::overworld_generator(seed)
 }
@@ -648,9 +648,10 @@ fn bench_column_throughput(c: &mut Criterion) {
     });
 }
 
-/// **The per-stage cost split** — now with **one bucket per stage
-/// the pipeline actually has**: aquifer, noise router (shape), biome, surface,
-/// materialize, carve, ore, vegetation, top-layer, intern.
+/// **The per-stage cost split** — one bucket per live production stage:
+/// aquifer, noise router (shape), biome, surface, materialize, carve,
+/// vegetation, top-layer, intern. Ore remains a compatibility timing slot but
+/// is not a production dispatcher stage.
 ///
 /// # What this pass changed, and why the previous split was not the answer
 ///
@@ -699,6 +700,31 @@ fn bench_stage_split(c: &mut Criterion) {
             "column_timed's column shape differs from column()'s — the timed path has drifted \
              from the verified one, which is the risk the per-stage split's method note is about"
         );
+        assert_eq!(
+            plain.clone().into_raw(),
+            timed.clone().into_raw(),
+            "column_timed metadata/block raw output differs from column()"
+        );
+        assert_eq!(
+            plain.biome_cells(),
+            timed.biome_cells(),
+            "column_timed's full biome-cell metadata differs from column()"
+        );
+        assert_eq!(
+            plain.block_entities(),
+            timed.block_entities(),
+            "column_timed's generated block entities differ from column()"
+        );
+        assert_eq!(
+            plain.motion_blocking_heightmap(),
+            timed.motion_blocking_heightmap(),
+            "column_timed's motion-blocking metadata differs from column()"
+        );
+        assert_eq!(
+            plain.spawn_candidates(),
+            timed.spawn_candidates(),
+            "column_timed's spawn metadata differs from column()"
+        );
         let mut first_mismatch = None;
         let mut mismatches = 0usize;
         for lz in 0..16 {
@@ -742,15 +768,16 @@ fn bench_stage_split(c: &mut Criterion) {
         black_box(generator.column_timed(cx, cz));
     }
 
-    // One accumulator per stage, in pipeline order.
-    let mut stages: [(&str, Vec<f64>); 10] = [
+    // One accumulator per live stage, in pipeline order. Standalone ore is a
+    // profiling-only compatibility path and deliberately has no production
+    // bucket here.
+    let mut stages: [(&str, Vec<f64>); 9] = [
         ("aquifer", Vec::new()),
         ("shape", Vec::new()),
         ("biome", Vec::new()),
         ("surface", Vec::new()),
         ("materialize", Vec::new()),
         ("carve", Vec::new()),
-        ("ore", Vec::new()),
         ("vegetation", Vec::new()),
         ("top_layer", Vec::new()),
         ("intern", Vec::new()),
@@ -766,7 +793,6 @@ fn bench_stage_split(c: &mut Criterion) {
             us(t.surface),
             us(t.materialize),
             us(t.carve),
-            us(t.ore),
             us(t.vegetation),
             us(t.top_layer),
             us(t.intern),
@@ -794,7 +820,7 @@ fn bench_stage_split(c: &mut Criterion) {
     let stage_total = |name: &str| -> f64 {
         stages.iter().find(|(n, _)| *n == name).map_or(0.0, |(_, v)| sum(v))
     };
-    for name in ["aquifer", "shape", "surface", "materialize", "carve", "ore", "vegetation"] {
+    for name in ["aquifer", "shape", "surface", "materialize", "carve", "vegetation"] {
         let got = stage_total(name);
         assert!(
             got > 1_000.0,
@@ -829,7 +855,7 @@ fn bench_stage_split(c: &mut Criterion) {
          EMBEDDED data, which does carry those facts."
     );
 
-    // Scene string names the ten-bucket split explicitly, so a reader (and
+    // Scene string names the nine live-stage split explicitly, so a reader (and
     // `bench-compare`) can never pair these with the old four-bucket numbers.
     //
     // **The patch size is derived from `coords`, not restated.** It used to be
@@ -843,7 +869,7 @@ fn bench_stage_split(c: &mut Criterion) {
     // constant next to a loop is a second source of truth.
     let side = (coords.len() as f64).sqrt().round() as usize;
     let scene = format!(
-        "seed={SEED} patch={side}x{side}({} chunks) split=10stage resolver=fixture_tree",
+        "seed={SEED} patch={side}x{side}({} chunks) split=9stage resolver=fixture_tree",
         coords.len()
     );
     for (name, v) in &stages {
@@ -1150,13 +1176,9 @@ fn rss_bytes() -> u64 {
 /// prediction instead of breaking it.
 const BLOCKS_PER_CHUNK_LAYER: u64 = 16 * 16;
 
-/// Chunks whose stages 1–4 one cold `column()` must compute: the 5×5 pre-ore
-/// closure.
-///
-/// `vegetation_stage` reads `post_ore_world` over the 3×3 around the centre;
-/// each `ore_stage` reads `pre_ore_stage` over *its own* 3×3. Composing the two
-/// gives 5×5 = 25 — the number D4 states, here as an assertion rather than a
-/// claim.
+/// Chunks whose stages 1–4 one cold `column()` must compute: the 5×5 terrain
+/// prefix closure. The unified FEATURES dispatcher reads the 5×5 rim directly,
+/// so its 3×3 source loop does not add another cached stage.
 const COLD_PRE_ORE_CHUNKS: u64 = 25;
 
 /// Chebyshev radius of the pre-ore closure above, in chunks: 5×5 is radius 2.
@@ -1188,15 +1210,11 @@ const COLD_STRUCTURE_START_CHUNKS: u64 = {
     (side * side) as u64
 };
 
-/// Ore RNG walks one cold `column()` must run: the 3×3 post-ore closure. D4's
-/// "9 ore RNG walks".
-const COLD_POST_ORE_CHUNKS: u64 = 9;
+/// Source chunks the unified FEATURES dispatcher visits (the 3×3 driver, all
+/// nine sources including the centre).
+const FEATURES_SOURCES: u64 = 9;
 
-/// Source chunks each of `ore_stage` and `vegetation_stage` stitches into its
-/// region view (the 3×3 driver, all 9 sources including the centre).
-const STITCH_SOURCES_PER_STAGE: u64 = 9;
-
-/// Fails unless all ten stages really ran, by counter.
+/// Fails unless all nine live stages really ran, by counter.
 ///
 /// # Why this exists
 ///
@@ -1211,10 +1229,10 @@ const STITCH_SOURCES_PER_STAGE: u64 = 9;
 /// probabilistically and only for stages expensive enough to notice. A
 /// `stage_entered` counter catches it exactly, which is why the stage guards sit
 /// *below* each stage's no-data early return rather than above it.
-fn assert_all_ten_stages_ran(s: &Snapshot, chunks: u64, what: &str) {
+fn assert_all_live_stages_ran(s: &Snapshot, chunks: u64, what: &str) {
     assert!(
         counters::enabled(),
-        "assert_all_ten_stages_ran called in a build without `gen-counters`; \
+        "assert_all_live_stages_ran called in a build without `gen-counters`; \
          every counter reads 0 and the assertions below would be vacuous"
     );
     for stage in [
@@ -1224,7 +1242,6 @@ fn assert_all_ten_stages_ran(s: &Snapshot, chunks: u64, what: &str) {
         Stage::Surface,
         Stage::Materialize,
         Stage::Carve,
-        Stage::Ore,
         Stage::Vegetation,
         Stage::TopLayer,
         Stage::Intern,
@@ -1236,7 +1253,7 @@ fn assert_all_ten_stages_ran(s: &Snapshot, chunks: u64, what: &str) {
              the 'world' vacuity signature, not a slow stage: the resolver supplied no \
              data for it and the stage early-returned. `top_layer` reading 0 means the \
              generator is the fixture tree (no `block_freeze_facts`) rather than the \
-             embedded server data; `ore`/`vegetation` reading 0 means no ore/feature \
+             embedded server data; `vegetation` reading 0 means no FEATURES \
              documents resolved.",
             stage
         );
@@ -1397,11 +1414,6 @@ fn bench_counter_calibration(_c: &mut Criterion) {
          region; got {}",
         s.pre_ore_computed
     );
-    assert_eq!(
-        s.post_ore_computed, COLD_POST_ORE_CHUNKS,
-        "D4 predicts {COLD_POST_ORE_CHUNKS} ore RNG walks on a cold column; got {}",
-        s.post_ore_computed
-    );
     // `Stage::Aquifer` is the one stage with the same two-consumer problem as
     // `block_at`: `StartSampler` builds a real aquifer per probed chunk, and those
     // chunks are not in the pre-ore closure. Decomposed, for the same reason.
@@ -1410,7 +1422,6 @@ fn bench_counter_calibration(_c: &mut Criterion) {
         (Stage::Surface, COLD_PRE_ORE_CHUNKS),
         (Stage::Materialize, COLD_PRE_ORE_CHUNKS),
         (Stage::Carve, COLD_PRE_ORE_CHUNKS),
-        (Stage::Ore, COLD_POST_ORE_CHUNKS),
         (Stage::Vegetation, 1),
         (Stage::TopLayer, 1),
         (Stage::Intern, 1),
@@ -1433,9 +1444,10 @@ fn bench_counter_calibration(_c: &mut Criterion) {
     // `CLAUDE.md`'s "predict the value, do not merely assert the sign of the
     // change". Both hypotheses come from constants outside the code under test:
     //
-    // * **Pre-U7** — `ore_stage` stitched 9 sources once per ore walk and
-    //   `vegetation_stage` stitched 9 once, each copying `256 * height` cells:
-    //   `(9 walks × 9 + 9) × 98,304`.
+    // * **Pre-U7** — the former split feature passes each stitched the 3×3
+    //   source window, each copying `256 * height` cells. The old arithmetic is
+    //   retained only as an independent magnitude discriminator:
+    //   `(9 source passes × 9 + 9) × 98,304`.
     // * **Post-U7** — nothing is copied to make the neighbourhood addressable, so
     //   exactly 0. Not "small": there is no residual term, because the counter is
     //   bumped from the stitch loops and both are deleted.
@@ -1444,11 +1456,11 @@ fn bench_counter_calibration(_c: &mut Criterion) {
     // them, and a *partial* revert (one stitch back, one gone) lands on neither
     // and fails.
     let pre_u7_stitch =
-        (COLD_POST_ORE_CHUNKS * STITCH_SOURCES_PER_STAGE + STITCH_SOURCES_PER_STAGE) * per_fill;
+        (FEATURES_SOURCES * FEATURES_SOURCES + FEATURES_SOURCES) * per_fill;
     assert_eq!(
         pre_u7_stitch, 8_847_360,
         "arithmetic check on the pre-U7 hypothesis itself: \
-         ({COLD_POST_ORE_CHUNKS} × {STITCH_SOURCES_PER_STAGE} + {STITCH_SOURCES_PER_STAGE}) \
+         ({FEATURES_SOURCES} × {FEATURES_SOURCES} + {FEATURES_SOURCES}) \
          × {per_fill} should be 8,847,360"
     );
     assert_eq!(
@@ -1493,11 +1505,11 @@ fn bench_counter_calibration(_c: &mut Criterion) {
     // pre-U3 hypothesis that no confusion between the two is possible, and low
     // enough that a regression to per-cell or per-block interning (the real
     // failure mode, which would put it in the tens of thousands) still trips it.
-    let veg_stitch_cells = STITCH_SOURCES_PER_STAGE * per_fill;
+    let veg_stitch_cells = FEATURES_SOURCES * per_fill;
     assert_eq!(
         veg_stitch_cells, 884_736,
         "the ~885k figure D2 calls the single most damning number in the diagnosis: \
-         {STITCH_SOURCES_PER_STAGE} × {per_fill}"
+         {FEATURES_SOURCES} × {per_fill}"
     );
     /// Ceiling on interner warmup allocations for one cold column. See above for
     /// why this is a ceiling and not an equality.
@@ -1554,17 +1566,17 @@ fn bench_counter_calibration(_c: &mut Criterion) {
     );
 
     // --- 5. Every stage real -------------------------------------------
-    assert_all_ten_stages_ran(&s, 1, "calibration (cold column, embedded data)");
+    assert_all_live_stages_ran(&s, 1, "calibration (cold column, embedded data)");
 
     println!("\n=== worldgen counter calibration: 1 cold column, seed {SEED}, EMBEDDED data ===");
     print_counters(&s, 1);
     println!("  heap allocations in the column path: {allocs}");
     println!(
         "  DERIVED: block_at/fill = {} (plan states 98,304); pre_ore closure = {} (plan: 25); \
-         ore walks = {} (plan: 9)",
+         FEATURES sources = {} (3×3 source window)",
         (s.block_at - s.structure_probe_block_at) / s.stage_entered[Stage::Shape as usize].max(1),
         s.pre_ore_computed,
-        s.post_ore_computed
+        FEATURES_SOURCES
     );
     println!(
         "  DERIVED: structure starts closure = {} (21x21 = {COLD_STRUCTURE_START_CHUNKS}); \
@@ -1605,8 +1617,6 @@ fn print_counters(s: &Snapshot, chunks: u64) {
     row("palette_intern_hit", s.palette_intern_hit);
     row("pre_ore_computed", s.pre_ore_computed);
     row("pre_ore_cache_hits", s.pre_ore_hits);
-    row("post_ore_computed", s.post_ore_computed);
-    row("post_ore_cache_hits", s.post_ore_hits);
     row("biome_nn_searches", s.biome_searches);
     row("biome_rows_compared", s.biome_rows_compared);
     row("stitch_cells_copied", s.stitch_cells);
@@ -1688,8 +1698,7 @@ fn print_counters(s: &Snapshot, chunks: u64) {
 ///
 /// | stage | chunks | why |
 /// |---|---|---|
-/// | aquifer…carve | 16×16 = 256 | 5×5 pre-ore closure of the sweep |
-/// | ore | 14×14 = 196 | 3×3 post-ore closure of the sweep |
+/// | aquifer…carve | 16×16 = 256 | 5×5 terrain-prefix closure of the sweep |
 /// | vegetation, top_layer, intern | 12×12 = 144 | the sweep itself |
 ///
 /// This is a much stronger statement than "144 of each": it fails if a single
@@ -1813,7 +1822,6 @@ fn bench_steady_state_and_cold(_c: &mut Criterion) {
             (Stage::Surface, closure(2), "5×5 pre-ore closure"),
             (Stage::Materialize, closure(2), "5×5 pre-ore closure"),
             (Stage::Carve, closure(2), "5×5 pre-ore closure"),
-            (Stage::Ore, closure(1), "3×3 post-ore closure"),
             (Stage::Vegetation, sweep, "the sweep itself"),
             (Stage::TopLayer, sweep, "the sweep itself"),
             (Stage::Intern, sweep, "the sweep itself"),
@@ -1835,9 +1843,9 @@ fn bench_steady_state_and_cold(_c: &mut Criterion) {
             "pre-ore computations over the sweep should equal the 5×5 closure exactly"
         );
         assert_eq!(
-            s.post_ore_computed,
-            closure(1),
-            "post-ore computations over the sweep should equal the 3×3 closure exactly"
+            s.stage_entered[Stage::Ore as usize],
+            0,
+            "the standalone ore stage must not be entered by unified FEATURES"
         );
         // Structure starts are the **widest** closure in the pipeline, and the
         // reason `STORE_RETENTION` is what it is. Predicted from `REFS_RADIUS`.
@@ -1852,8 +1860,8 @@ fn bench_steady_state_and_cold(_c: &mut Criterion) {
             SIDE + 2 * SWEEP_STRUCTURE_RADIUS,
             s.structure_starts_computed
         );
-        assert_all_ten_stages_ran(&s, sweep, "C_ss sweep (embedded data)");
-        assert_all_ten_stages_ran(&cold_snapshot, 1, "C_cold (embedded data)");
+        assert_all_live_stages_ran(&s, sweep, "C_ss sweep (embedded data)");
+        assert_all_live_stages_ran(&cold_snapshot, 1, "C_cold (embedded data)");
     } else {
         println!(
             "worldgen C_ss/C_cold: counters NOT compiled in, so the exactly-once \
@@ -1882,8 +1890,8 @@ fn bench_steady_state_and_cold(_c: &mut Criterion) {
     // distribution above.
     //
     // The repeated work is `column(5, 5)` on the already-swept generator: not the
-    // C_ss path (the store answers pre_ore/post_ore, so only
-    // vegetation/top_layer/intern re-run), and it does not need to be. It only has
+    // C_ss path (the store answers the terrain prefix, so only
+    // FEATURES/top_layer/intern re-run), and it does not need to be. It only has
     // to be *the same work each time*.
     //
     // Deliberately outside `measure_allocs`: the counting allocator adds
@@ -2025,27 +2033,28 @@ fn bench_vegetation_walk_cost(_c: &mut Criterion) {
         f64::NAN
     };
 
-    // The per-stage µs table on EMBEDDED data — the U2 deliverable.
+    // The per-stage µs table on EMBEDDED data — the U2 deliverable. The `ore`
+    // compatibility bucket is intentionally omitted: unified FEATURES is one
+    // stream and its elapsed time belongs to `vegetation`.
     // `bench_stage_split` produces the same shape against the fixture tree,
     // where `biome` and `top_layer` are structurally inert; this is the version
-    // with all ten stages live, and the two are deliberately recorded under
+    // with all nine live stages present, and the two are deliberately recorded under
     // different scene strings so `bench-compare` can never pair them.
-    let stage_us: [(&str, f64); 10] = [
+    let stage_us: [(&str, f64); 9] = [
         ("aquifer", times.aquifer.as_secs_f64() * 1e6),
         ("shape", times.shape.as_secs_f64() * 1e6),
         ("biome", times.biome.as_secs_f64() * 1e6),
         ("surface", times.surface.as_secs_f64() * 1e6),
         ("materialize", times.materialize.as_secs_f64() * 1e6),
         ("carve", times.carve.as_secs_f64() * 1e6),
-        ("ore", times.ore.as_secs_f64() * 1e6),
         ("vegetation", veg_us),
         ("top_layer", times.top_layer.as_secs_f64() * 1e6),
         ("intern", times.intern.as_secs_f64() * 1e6),
     ];
     let total_us: f64 = stage_us.iter().map(|&(_, v)| v).sum();
-    println!("\n=== per-stage split, release, EMBEDDED server data (all ten stages live) ===");
-    println!("  (centre chunk's stages 1-4 are cache-cold by `column_timed`'s design; ore and");
-    println!("   vegetation read the warm 5x5 neighbourhood, matching C_ss's condition)");
+    println!("\n=== per-stage split, release, EMBEDDED server data (nine live stages) ===");
+    println!("  (centre chunk's stages 1-4 are cache-cold by `column_timed`'s design; FEATURES");
+    println!("   reads the warm 5x5 neighbourhood, matching C_ss's condition)");
     for &(name, us) in &stage_us {
         println!("  {name:<12} {us:>12.1} us  {:>6.2}%", 100.0 * us / total_us);
     }
@@ -2055,13 +2064,13 @@ fn bench_vegetation_walk_cost(_c: &mut Criterion) {
         // here must be genuinely cheap, not absent. `top_layer` is the one this
         // catches — against the fixture tree it reads 0.000% because it never
         // ran at all, and no timing threshold can tell those apart.
-        assert_all_ten_stages_ran(&s, 1, "per-stage split (embedded data)");
+        assert_all_live_stages_ran(&s, 1, "per-stage split (embedded data)");
     }
     for &(name, us) in &stage_us {
         support::record(support::Record {
             bench: "generation",
             metric: &format!("embedded_stage_{name}_us"),
-            scene: "seed=42 chunk=(0,0) warm=5x5 resolver=embedded split=10stage",
+            scene: "seed=42 chunk=(0,0) warm=5x5 resolver=embedded split=9stage",
             value: us,
             unit: "us",
         });
@@ -2086,7 +2095,7 @@ fn bench_vegetation_walk_cost(_c: &mut Criterion) {
 
     let scene = format!("seed={SEED} chunk=(0,0) warm=5x5 resolver=embedded");
     for (metric, value, unit) in [
-        ("vegetation_stage_us", veg_us, "us"),
+        ("features_stage_us", veg_us, "us"),
         ("vegetation_rng_draws", veg_draws as f64, "draws"),
         ("vegetation_ns_per_rng_draw", ns_per_draw, "ns"),
     ] {

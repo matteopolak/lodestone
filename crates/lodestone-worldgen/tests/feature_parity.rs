@@ -30,7 +30,7 @@
 //! the ore feature order (`oredef.*`), and the centre's own decoration seed. This
 //! Rust side reads the same disk JSON the version crate ships
 //! (`configured_feature`/`placed_feature`/`biome`), runs the matching
-//! [`apply_ore_step_3x3`] driver, and asserts the centre 16×16 column matches
+//! [`apply_ore_step_3x3_per_source`] driver, and asserts the centre 16×16 column matches
 //! **element-wise, naming the divergent coordinate** — never a hash or a sample.
 //!
 //! Three fixtures, all `minecraft:plains`:
@@ -47,7 +47,8 @@ use std::path::{Path, PathBuf};
 use lodestone_worldgen::dense_grid::DenseBlockGrid;
 use lodestone_worldgen::feature::region_view::RegionView;
 use lodestone_worldgen::feature::{
-    PlacedOre, REGION_MAX, REGION_MIN, apply_ore_step_3x3, parse_ore_config, parse_placements,
+    PlacedOre, REGION_MAX, REGION_MIN, RegionHeights, apply_ore_step_3x3_per_source,
+    parse_ore_config, parse_placements,
 };
 use lodestone_worldgen::rng::{WorldgenRandom, XoroshiroRandomSource};
 use serde_json::Value;
@@ -271,7 +272,7 @@ fn run_fixture(
 
     // The real vanilla 3x3 driver: each of the 9 chunks in `chunk ± 1` runs
     // its OWN ore step (own origin, own decorationSeed) against the SAME
-    // shared region grid — see `apply_ore_step_3x3`'s doc comment. Returns
+    // shared region grid — see `apply_ore_step_3x3_per_source`'s doc comment. Returns
     // the centre pass's own decoration seed as a side channel, so it can
     // still be cross-checked against the oracle's `meta.decorationSeed`
     // without a second, separate derivation.
@@ -293,7 +294,8 @@ fn run_fixture(
     // would be a transport complete enough to pass while resolving to a different
     // implementation than the one being shipped.
     let mut working = RegionView::over_region_grid(&grid, MIN_Y, HEIGHT);
-    let center_decoration_seed = apply_ore_step_3x3(
+    let ocean_floor_wg = RegionHeights::from_map(&f.ocean_floor_wg);
+    let center_decoration_seed = apply_ore_step_3x3_per_source(
         &mut random,
         f.seed,
         f.chunk_x,
@@ -302,10 +304,13 @@ fn run_fixture(
         HEIGHT,
         MIN_GEN_Y,
         GEN_DEPTH,
-        &f.ocean_floor_wg,
+        REGION_MIN,
+        REGION_MAX,
+        &ocean_floor_wg,
         &in_tag,
+        None,
         &mut working,
-        ores,
+        &|_source_x, _source_z| ores,
     );
 
     // Diff against the input, restricted to the CENTRE 16x16 — the fixture's

@@ -257,9 +257,9 @@ fn ore_composition_gap_is_measured_and_reported() {
         // Floor: `postfeatures` records only the centre chunk's decoration
         // pass, while `apply_ore_step_3x3_per_source` includes neighbour spill.
         // A faithful 3×3 composition therefore differs wherever an ore vein
-        // from a neighbouring source lands in the centre. The debug-only
-        // single-source toggle (`LODESTONE_ORE_SINGLE_SOURCE_DEBUG=1`) matches
-        // the fixture's narrower scope and measures 563/98304 at (0,0),
+        // from a neighbouring source lands in the centre. A diagnostic
+        // single-source probe matched the fixture's narrower scope and
+        // measured 563/98304 at (0,0),
         // confirming that most of the full-3×3 residual is a scope difference.
         //
         // The (-120,-120) fixture samples badlands. Its biome-specific ore

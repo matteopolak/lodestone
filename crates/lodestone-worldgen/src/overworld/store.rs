@@ -5,10 +5,9 @@
 //!
 //! A concurrent map from chunk position to a caller-defined *entry* holding one
 //! [`StageSlot`] per intermediate product of that chunk (today: the pre-ore
-//! world and the post-ore world; [`crate::overworld`] defines the shape).
-//! Replaces the two `Mutex<HashMap + VecDeque>` FIFO caches
-//! (`PreOreCache`/`PostOreCache`) that `overworld/mod.rs` carried until Unit 6
-//! of `docs/plans/worldgen-rewrite.md`.
+//! terrain prefix; [`crate::overworld`] defines the shape). Replaces the
+//! `Mutex<HashMap + VecDeque>` FIFO cache that `overworld/mod.rs` carried until
+//! Unit 6 of `docs/plans/worldgen-rewrite.md`.
 //!
 //! # Why the old shape had to go, in one measurement
 //!
@@ -48,9 +47,9 @@
 //!   edge in the generation graph, not incidental sharing.
 //!
 //! That is what turns the plan's acceptance criterion into an invariant: the
-//! `pre_ore_computed`/`post_ore_computed` counters are bumped **inside** the
-//! `get_or_init` closure, so over any sweep they equal the number of distinct
-//! chunks reached at that stage, exactly — never more.
+//! `pre_ore_computed` counter is bumped **inside** the `get_or_init` closure,
+//! so over any sweep it equals the number of distinct terrain prefixes reached,
+//! exactly — never more.
 //!
 //! # Eviction is view-scoped, and that is load-bearing
 //!
@@ -90,11 +89,9 @@
 //!   over the entry payload precisely so the store does not depend back on the
 //!   generator.
 //! * **Reentrancy is the one real trap.** `OnceLock::get_or_init` deadlocks if
-//!   its own closure re-enters the *same slot*. The generator's call graph is
-//!   strictly layered and must stay that way: `post_ore` may call `pre_ore`
-//!   (any chunk), `pre_ore` calls nothing in the store, and no stage ever
-//!   re-enters its own slot for its own chunk. If you add a stage, add it
-//!   *above* the ones it consumes and never make a stage depend on itself.
+//!   its own closure re-enters the *same slot*. The terrain-prefix computation
+//!   calls no other store stage. If you add a stage, add it *above* the ones it
+//!   consumes and never make a stage depend on itself.
 //! * **Do not add a shared scratch pool here.** Any buffer reuse belongs in a
 //!   `thread_local` free-list; a pool behind a lock would re-create precisely
 //!   the contention this module exists to delete.
@@ -817,11 +814,10 @@ mod tests {
     /// One `OverworldGenerator::column` call's store traffic, in its real shape.
     ///
     /// Faithful to `column()` rather than convenient: the 5×5 pin, then the
-    /// pre-ore stage over that whole 5×5 (`ore_stage`'s 3×3-of-3×3 closure), then
-    /// the post-ore stage over the 3×3 (`vegetation_stage`'s driver). Both stage
-    /// loops go through [`StagedStore::entry`], exactly as production does —
-    /// which is why the entries are all created by `open_view` first and why
-    /// `entry`'s own ceiling check never sees `inserted == true` here either.
+    /// terrain-prefix stage over that whole 5×5. The loop goes through
+    /// [`StagedStore::entry`], exactly as production does — which is why the
+    /// entries are all created by `open_view` first and why `entry`'s own
+    /// ceiling check never sees `inserted == true` here either.
     fn visit_column(store: &StagedStore<Stages>, pos: ChunkPos) {
         let _view = store.open_view(pos, WALK_CLOSURE_RADIUS);
         for p in box_around(pos, WALK_CLOSURE_RADIUS) {

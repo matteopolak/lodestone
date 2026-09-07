@@ -633,8 +633,8 @@ impl FreezeCounts {
 ///
 /// **This step never writes outside its own chunk.** `SnowAndFreezeFeature`'s
 /// loops are `dx`/`dz` in `0..16` from the chunk origin and every write is at
-/// `(x, y, z)` or `(x, y - 1, z)` of that same column, so unlike ores
-/// ([`super::apply_ore_step_3x3`]) and vegetation there is no
+/// `(x, y, z)` or `(x, y - 1, z)` of that same column, so unlike the unified
+/// FEATURES dispatcher and vegetation there is no
 /// `blockStateWriteRadius(1)` spill to model and no 3×3 driver: a centre-only
 /// pass **is** vanilla's full behaviour here. That is why this function takes one
 /// chunk's grid rather than a stitched region.

@@ -6,8 +6,8 @@
 //! `scripts/worldgen-oracle/VegetationOracle.java` boots the real server
 //! headlessly, replays the real `UNDERGROUND_ORES` step over a 3x3
 //! neighbourhood (so the vegetal-decoration pass below starts from the same
-//! post-ore terrain `OverworldGenerator::vegetation_stage` does on the Rust
-//! side, not a pre-ore approximation), then runs `VEGETAL_DECORATION` TWICE
+//! terrain prefix the unified FEATURES dispatcher supplies on the Rust side,
+//! not a pre-prefix approximation), then runs `VEGETAL_DECORATION` TWICE
 //! from that identical baseline:
 //!
 //!   * `single.*` — only the centre chunk's own decoration pass. This is
@@ -81,12 +81,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use lodestone_worldgen::compose::build_biome_vegetation;
+use lodestone_worldgen::compose::build_decoration_catalog;
 use lodestone_worldgen::density::{NoiseParams, Resolver};
 use lodestone_worldgen::feature::vegetation::{
     apply_vegetal_decoration_step, apply_vegetal_decoration_step_3x3_per_source, build_veg_tags, PlacedRef, VegGrid,
 };
-use lodestone_worldgen::feature::{REGION_MAX, REGION_MIN};
+use lodestone_worldgen::feature::{REGION_MAX, REGION_MIN, STEP_VEGETAL_DECORATION};
 use lodestone_worldgen::rng::{WorldgenRandom, XoroshiroRandomSource};
 use serde_json::Value;
 
@@ -95,6 +95,17 @@ const HEIGHT: i32 = 384;
 
 fn data_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/worldgen_data")
+}
+
+fn vegetal_features_for(resolver: &dyn Resolver, biome: &str) -> Vec<(usize, PlacedRef)> {
+    let catalog = build_decoration_catalog(resolver, &[biome.to_owned()]);
+    catalog
+        .select([biome])
+        .into_iter()
+        .filter_map(|(step, index, placed)| {
+            (step == STEP_VEGETAL_DECORATION).then_some((index, placed))
+        })
+        .collect()
 }
 
 fn support_dir() -> PathBuf {
@@ -150,7 +161,7 @@ impl Resolver for FsResolver {
 // ---------------------------------------------------------------------------
 
 struct Fixture {
-    /// The WHOLE driven `-16..32` region's post-ore terrain (`base.*`,
+    /// The WHOLE driven `-16..32` region's terrain prefix (`base.*`,
     /// centre-relative local coordinates) — what `VegGrid`/
     /// `VegGrid::with_footprint` is seeded from. Widened from centre-only:
     /// the real 3×3 driver needs every one of the 9 sources' own terrain,
@@ -242,7 +253,7 @@ fn parse_fixture(text: &str) -> Fixture {
                 "meta.proxyFallback" => f.proxy_fallbacks.push(rest.to_string()),
                 "meta.postOreReplayMismatches" => {
                     let n: usize = rest.parse().unwrap();
-                    assert_eq!(n, 0, "the oracle's own post-ore baseline must replay identically between its two passes");
+                    assert_eq!(n, 0, "the oracle's own terrain-prefix baseline must replay identically between its two passes");
                 }
                 _ => {}
             }
@@ -301,8 +312,8 @@ const COMPOSED_PARITY_EVIDENCE: &[&str] = &[
 // ---------------------------------------------------------------------------
 
 /// Runs `crate::feature::vegetation`'s real, production
-/// `apply_vegetal_decoration_step` — the exact function
-/// `OverworldGenerator::vegetation_stage` calls — seeded from `f.base`, and
+/// `apply_vegetal_decoration_step` — the vegetal adapter used by unified
+/// FEATURES — seeded from `f.base`, and
 /// returns every cell it wrote, local coordinates, matching `f.single_diff`'s
 /// key space.
 fn run_our_engine(f: &Fixture, resolver: &FsResolver) -> HashMap<(i32, i32, i32), String> {
@@ -313,7 +324,7 @@ fn run_our_engine(f: &Fixture, resolver: &FsResolver) -> HashMap<(i32, i32, i32)
         grid.seed(base_x + lx, y, base_z + lz, state.clone());
     }
     let tags = build_veg_tags(resolver);
-    let features = build_biome_vegetation(resolver, &f.biome);
+    let features = vegetal_features_for(resolver, &f.biome);
     assert!(!features.is_empty(), "{}: must resolve a non-empty VEGETAL_DECORATION list", f.biome);
 
     let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
@@ -325,17 +336,16 @@ fn run_our_engine(f: &Fixture, resolver: &FsResolver) -> HashMap<(i32, i32, i32)
 }
 
 /// Runs `crate::feature::vegetation`'s real, production
-/// `apply_vegetal_decoration_step_3x3_per_source` (the real vanilla
-/// 3×3 driver — the exact function
-/// `OverworldGenerator::vegetation_stage` calls in production once its
-/// centre and 8 neighbours' post-ore terrain is stitched), seeded from
+/// `apply_vegetal_decoration_step_3x3_per_source` (the 3×3 vegetal adapter
+/// driven by unified FEATURES once its centre and 8 neighbours' terrain prefix
+/// are available), seeded from
 /// `f.base` over the WHOLE driven `REGION_MIN..REGION_MAX` region, and
 /// returns every cell it wrote, centre-relative local coordinates, matching
 /// `f.full_diff`'s key space. Every one of the 9 sources uses the SAME
 /// `minecraft:plains` feature list — matching `VegetationOracle.java`'s own
 /// `FixedBiomeSource` scope (no biome variety anywhere in this oracle), the
-/// single-list convenience `apply_ore_step_3x3` already established for the
-/// ore engine's fixed-biome case.
+/// per-source ore driver already established for the ore engine's fixed-biome
+/// case.
 fn run_our_engine_full3x3(f: &Fixture, resolver: &FsResolver) -> HashMap<(i32, i32, i32), String> {
     let base_x = f.chunk_x * 16;
     let base_z = f.chunk_z * 16;
@@ -344,7 +354,7 @@ fn run_our_engine_full3x3(f: &Fixture, resolver: &FsResolver) -> HashMap<(i32, i
         grid.seed(base_x + lx, y, base_z + lz, state.clone());
     }
     let tags = build_veg_tags(resolver);
-    let features = build_biome_vegetation(resolver, &f.biome);
+    let features = vegetal_features_for(resolver, &f.biome);
     assert!(!features.is_empty(), "{}: must resolve a non-empty VEGETAL_DECORATION list", f.biome);
 
     let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
@@ -728,7 +738,7 @@ fn full3x3_driver_is_deterministic_across_two_independent_generators() {
     let resolver = FsResolver { root: data_dir() };
     let f = load("vegetation_plains_land_jvm.txt");
     let tags = build_veg_tags(&resolver);
-    let features = build_biome_vegetation(&resolver, "minecraft:plains");
+    let features = vegetal_features_for(&resolver, "minecraft:plains");
     let features_for_source = |_x: i32, _z: i32| -> &[(usize, PlacedRef)] { &features };
     let base_x = f.chunk_x * 16;
     let base_z = f.chunk_z * 16;

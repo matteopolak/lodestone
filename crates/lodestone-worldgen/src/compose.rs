@@ -83,47 +83,12 @@ pub fn build_biome_carvers(resolver: &dyn Resolver, biome: &str) -> Vec<CarverCo
     }
 }
 
-/// Resolves one biome's `UNDERGROUND_ORES` decoration step
-/// (`features[`[`STEP_UNDERGROUND_ORES`]`]`) into ordered [`PlacedOre`]s,
-/// skipping non-ore entries in that step but **preserving their positions** —
-/// the `index` `WorldgenRandom::set_feature_seed` uses is the entry's
-/// position in the *raw* step array, not a count of ore-only entries, exactly
-/// as `feature/mod.rs`'s own `build_plains_ores` test helper does for one
-/// hardcoded biome file; this is the same logic against any biome a
-/// [`Resolver`] supplies.
-///
-/// Empty if the resolver has no data for `biome`.
-#[must_use]
-pub fn build_biome_ores(resolver: &dyn Resolver, biome: &str) -> Vec<PlacedOre> {
-    let doc = resolver.biome_document(biome);
-    let Some(step) = doc
-        .get("features")
-        .and_then(Value::as_array)
-        .and_then(|steps| steps.get(STEP_UNDERGROUND_ORES as usize))
-        .and_then(Value::as_array)
-    else {
-        return Vec::new();
-    };
-    let mut ores = Vec::new();
-    for (i, entry) in step.iter().enumerate() {
-        let Some(placed_id) = entry.as_str() else {
-            continue;
-        };
-        if let Some(mut ore) = parse_placed_ore(resolver, placed_id) {
-            ore.index = i;
-            ores.push(ore);
-        }
-    }
-    ores
-}
-
 /// Resolves one placed-feature id when its configured feature is an ore.
 ///
 /// The returned [`PlacedOre`] carries a placeholder index because a placed
 /// feature's actual decoration index belongs to the global per-step ordering,
 /// not to the feature document. [`DecorationCatalog::select_ores`] assigns that
-/// index at selection time. `build_biome_ores` remains the single-biome helper
-/// and overwrites it with the local raw position for its isolated fixtures.
+/// index at selection time.
 fn parse_placed_ore(resolver: &dyn Resolver, placed_id: &str) -> Option<PlacedOre> {
     let placed = resolver.placed_feature(placed_id);
     if placed.is_null() {
@@ -137,104 +102,6 @@ fn parse_placed_ore(resolver: &dyn Resolver, placed_id: &str) -> Option<PlacedOr
         placements: parse_placements(&placed),
         config: parse_ore_config(&configured["config"]),
     })
-}
-
-/// Resolves one biome's `VEGETAL_DECORATION` decoration step
-/// (`features[`[`crate::feature::STEP_VEGETAL_DECORATION`]`]`)
-/// into `(raw step index, resolved PlacedRef)` pairs — the same "preserve
-/// the raw position" convention [`build_biome_ores`] establishes, so
-/// [`crate::feature::vegetation::apply_vegetal_decoration_step`]'s
-/// `setFeatureSeed` index matches vanilla's even if some entries here
-/// resolve to [`crate::feature::vegetation::ConfiguredFeature::Unsupported`]
-/// (which still consumes an index, just places nothing — see that module's
-/// doc for why an unsupported entry must never be dropped from the list,
-/// only made inert).
-///
-/// Empty if the resolver has no data for `biome`.
-#[must_use]
-pub fn build_biome_vegetation(
-    resolver: &dyn Resolver,
-    biome: &str,
-) -> Vec<(usize, crate::feature::vegetation::PlacedRef)> {
-    let doc = resolver.biome_document(biome);
-    let Some(step) = doc
-        .get("features")
-        .and_then(Value::as_array)
-        .and_then(|steps| steps.get(crate::feature::STEP_VEGETAL_DECORATION as usize))
-        .and_then(Value::as_array)
-    else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for (i, entry) in step.iter().enumerate() {
-        let Some(id) = entry.as_str() else {
-            continue;
-        };
-        if resolver.placed_feature(id).is_null() {
-            continue;
-        }
-        let placed_ref =
-            crate::feature::vegetation::resolve_placed_feature_ref(resolver, entry);
-        out.push((i, placed_ref));
-    }
-    out
-}
-
-/// Every decoration step the [`crate::feature::vegetation`] engine
-/// drives, not just `VEGETAL_DECORATION`.
-///
-/// Returns `(step, raw index within that step, resolved feature)` in **step
-/// order**, which is the order `Biome.generate` runs them. The index is the
-/// entry's position in its own step array, because that is what
-/// `WorldgenRandom::set_feature_seed(seed, index, step)` takes — the *pair*
-/// identifies a feature's RNG stream, so a step must never be flattened into a
-/// single running index.
-///
-/// # Which steps, and the one deliberate deviation
-///
-/// [`DRIVEN_STEPS`] is the list. It omits:
-///
-/// * step 6 `UNDERGROUND_ORES` — a separate engine
-///   ([`crate::feature::apply_ore_step_3x3_per_source`]) with its own region
-///   view, already correct, and merging the two is not this issue's scope.
-/// * step 10 `TOP_LAYER_MODIFICATION` — [`crate::feature::top_layer`].
-/// * step 5 `STRONGHOLDS` — zero entries across all 66 bundled biomes.
-///
-/// **The deviation:** because ore runs as its own earlier stage, steps 0-4 run
-/// *after* ores here and *before* them in vanilla. Nothing in steps 0-4 reads a
-/// block that ore placement writes (ore replaces stone with ore in place, so
-/// every solidity/air question those steps ask answers the same either way), so
-/// this is a real ordering difference with no known observable consequence —
-/// stated rather than hidden, because "no known consequence" is not "none".
-#[must_use]
-pub fn build_biome_decoration(
-    resolver: &dyn Resolver,
-    biome: &str,
-) -> Vec<(i32, usize, crate::feature::vegetation::PlacedRef)> {
-    let doc = resolver.biome_document(biome);
-    let Some(steps) = doc.get("features").and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for &step in DRIVEN_STEPS {
-        let Some(entries) = steps.get(step as usize).and_then(Value::as_array) else {
-            continue;
-        };
-        for (i, entry) in entries.iter().enumerate() {
-            let Some(id) = entry.as_str() else {
-                continue;
-            };
-            if resolver.placed_feature(id).is_null() {
-                continue;
-            }
-            out.push((
-                step,
-                i,
-                crate::feature::vegetation::resolve_placed_feature_ref(resolver, entry),
-            ));
-        }
-    }
-    out
 }
 
 /// Globally sorted decoration features plus each biome's membership in that
@@ -495,8 +362,8 @@ pub fn build_decoration_catalog(
     }
 }
 
-/// The `GenerationStep.Decoration` indices [`build_biome_decoration`] drives, in
-/// vanilla's own order. See that function's doc for what is missing and why.
+/// The decoration-step indices the [`DecorationCatalog`] drives, in source
+/// order. The catalog retains unsupported entries for index accounting.
 pub const DRIVEN_STEPS: &[i32] = &[
     0, // RAW_GENERATION
     1, // LAKES
@@ -520,7 +387,7 @@ pub const DRIVEN_STEPS: &[i32] = &[
 /// trimmed or modified datapack that omits the entry must produce a snow-free
 /// world rather than snow the engine assumed.
 ///
-/// Unlike [`build_biome_vegetation`] this does not consult
+/// Unlike the placed-feature selection in [`DecorationCatalog`], this does not consult
 /// [`Resolver::placed_feature`]: `placed_feature/freeze_top_layer.json` carries
 /// nothing the engine reads (its whole placement is `[{"type":
 /// "minecraft:biome"}]`, and `configured_feature/freeze_top_layer.json`'s config
@@ -903,46 +770,6 @@ mod tests {
     }
 
     #[test]
-    fn build_biome_ores_skips_non_ore_but_keeps_index() {
-        let mut steps = vec![Value::Array(Vec::new()); 7];
-        steps[STEP_UNDERGROUND_ORES as usize] = serde_json::json!([
-            "minecraft:not_ore", // index 0, skipped (missing placed data)
-            "minecraft:iron"     // index 1, must keep index 1, not 0
-        ]);
-        let mut biomes = HashMap::new();
-        biomes.insert("minecraft:test", serde_json::json!({"features": steps}));
-
-        let mut placed = HashMap::new();
-        placed.insert(
-            "minecraft:iron",
-            serde_json::json!({"feature": "minecraft:iron_cf", "placement": []}),
-        );
-        let mut features = HashMap::new();
-        features.insert(
-            "minecraft:iron_cf",
-            serde_json::json!({
-                "type": "minecraft:ore",
-                "config": {
-                    "size": 9,
-                    "discard_chance_on_air_exposure": 0.0,
-                    "targets": []
-                }
-            }),
-        );
-
-        let resolver = FakeResolver {
-            tags: HashMap::new(),
-            biomes,
-            carvers: HashMap::new(),
-            features,
-            placed,
-        };
-        let ores = build_biome_ores(&resolver, "minecraft:test");
-        assert_eq!(ores.len(), 1, "the non-ore entry must not produce a PlacedOre");
-        assert_eq!(ores[0].index, 1, "index must be the raw step position, not a count");
-    }
-
-    #[test]
     fn global_ore_selection_keeps_the_global_step_index() {
         let mut first_steps = vec![Value::Array(Vec::new()); 7];
         first_steps[STEP_UNDERGROUND_ORES as usize] = serde_json::json!([
@@ -1063,60 +890,4 @@ mod tests {
             .all(|(step, _, _)| *step != STEP_UNDERGROUND_ORES));
     }
 
-    #[test]
-    fn build_biome_vegetation_skips_missing_but_keeps_index() {
-        let mut steps = vec![Value::Array(Vec::new()); 10];
-        steps[crate::feature::STEP_VEGETAL_DECORATION as usize] = serde_json::json!([
-            "minecraft:missing", // index 0, skipped (no placed_feature data)
-            "minecraft:grass_patch" // index 1, must keep index 1, not 0
-        ]);
-        let mut biomes = HashMap::new();
-        biomes.insert("minecraft:test", serde_json::json!({"features": steps}));
-
-        let mut placed = HashMap::new();
-        placed.insert(
-            "minecraft:grass_patch",
-            serde_json::json!({"feature": "minecraft:grass_cf", "placement": []}),
-        );
-        let mut features = HashMap::new();
-        features.insert(
-            "minecraft:grass_cf",
-            serde_json::json!({
-                "type": "minecraft:simple_block",
-                "config": {
-                    "to_place": {
-                        "type": "minecraft:simple_state_provider",
-                        "state": {"Name": "minecraft:short_grass"}
-                    }
-                }
-            }),
-        );
-
-        let resolver = FakeResolver {
-            tags: HashMap::new(),
-            biomes,
-            carvers: HashMap::new(),
-            features,
-            placed,
-        };
-        let veg = build_biome_vegetation(&resolver, "minecraft:test");
-        assert_eq!(veg.len(), 1, "the missing entry must not produce a PlacedRef");
-        assert_eq!(veg[0].0, 1, "index must be the raw step position, not a count");
-        assert!(matches!(
-            *veg[0].1.feature,
-            crate::feature::vegetation::ConfiguredFeature::SimpleBlock(_)
-        ));
-    }
-
-    #[test]
-    fn build_biome_vegetation_unknown_biome_is_empty() {
-        let resolver = FakeResolver {
-            tags: HashMap::new(),
-            biomes: HashMap::new(),
-            carvers: HashMap::new(),
-            features: HashMap::new(),
-            placed: HashMap::new(),
-        };
-        assert!(build_biome_vegetation(&resolver, "minecraft:nowhere").is_empty());
-    }
 }

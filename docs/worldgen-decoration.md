@@ -25,15 +25,16 @@ unconstrained form.
 
 ### Decoration steps and feature types
 
-`compose::build_biome_decoration` resolves a biome's `features` array over the driven steps —
+`compose::DecorationCatalog` resolves biome `features` arrays over the driven steps —
 `RAW_GENERATION`, `LAKES`, `LOCAL_MODIFICATIONS`, `UNDERGROUND_STRUCTURES`, `SURFACE_STRUCTURES`,
 `UNDERGROUND_DECORATION`, `FLUID_SPRINGS`, `VEGETAL_DECORATION` — into `(step, index, PlacedRef)`
-triples in step order. `UNDERGROUND_ORES` and `TOP_LAYER_MODIFICATION` are separate engines with
-their own docs (ore allocation below; freeze/snow in `worldgen-biomes.md`); `STRONGHOLDS` has zero
-entries across every bundled biome and is not driven.
+triples in step order. `TOP_LAYER_MODIFICATION` is a separate engine with its own docs
+(freeze/snow in `worldgen-biomes.md`); underground ores are selected by the unified FEATURES
+dispatcher described below. `STRONGHOLDS` has zero entries across every bundled biome and is not
+driven.
 
 `compose::build_decoration_catalog` builds the globally ordered feature graph once from the biome
-source's first-occurrence order. For each decorating source, `vegetation_stage` unions section
+source's first-occurrence order. For each decorating source, the unified FEATURES dispatcher unions section
 biomes from the source's 3×3 chunk neighbourhood, selects those graph entries, and retains their
 global indices even when earlier entries are not selected. This matters for underground biomes:
 their features can run in a chunk whose surface biome is different. The compiled-server
@@ -120,7 +121,7 @@ the returned dense columns prove the same mixed dispatcher carries a non-ore wri
 `feature/vegetation/` places grass, flowers and trees over a real 3×3 neighbourhood (a tree or patch
 straddling a chunk edge genuinely spills into whichever chunk generates it, matching vanilla's own
 cross-chunk decoration spill) via `VegGrid`, a mutable chunk-local block field seeded from the
-composed post-ore grid and folded back afterward. Trunk placers cover straight, forking, dark-oak
+composed terrain-prefix grid and folded back afterward. Trunk placers cover straight, forking, dark-oak
 2×2, giant/mega-jungle, fancy, cherry and mangrove's upwards-branching shape; foliage placers cover
 the vanilla equivalents plus cherry's hanging-leaves pass and mangrove's dart-throw scatter; a
 mangrove root placer and a fallen-tree feature (stump + horizontal log, sharing decorator machinery
@@ -176,6 +177,12 @@ explicit production gap: `warm_ocean` currently diverges on seagrass and multifa
 `KNOWN_VEGETATION_GAPS` until the ignored composed-fixture gate in
 `vegetation_parity.rs` passes; a successful feature-local map is not permission to remove that
 end-to-end ledger entry.
+
+Vegetation-patch configurations may name block tags in `replaceable`, including
+`#minecraft:moss_replaceable`. The parser expands those tags recursively through
+`resolve_block_set`; the waterlogged variant uses the same path. Treating the field as literal block
+IDs silently makes patches skip terrain such as deepslate, so preserve tag expansion when extending
+the configuration parser.
 
 Placement is off block-state strings only at the edges: tag-membership questions (17 of them — 11
 registry tags plus 6 base-name equalities) are answered by fixed bitsets indexed by `StateId`,
@@ -256,10 +263,9 @@ group's wander clamps to its own chunk rather than reading a neighbour.
 
 ## Configuration
 
-None beyond debug/test escape hatches: `LODESTONE_VEG_STRICT=1` (panic on unmodelled dispatch),
-`LODESTONE_VEG_SINGLE_SOURCE_DEBUG=1` / `LODESTONE_ORE_SINGLE_SOURCE_DEBUG=1` (run the centre chunk
-only, bypassing the 3×3 driver — debug-only, never on a production path). Everything else is read
-from bundled `configured_feature`/`placed_feature`/`biome` JSON through `Resolver`.
+None beyond the debug/test escape hatch `LODESTONE_VEG_STRICT=1` (panic on unmodelled dispatch).
+Everything else is read from bundled `configured_feature`/`placed_feature`/`biome` JSON through
+`Resolver`.
 
 ## Dependencies
 

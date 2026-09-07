@@ -10,7 +10,7 @@
 //! ## How it works
 //!
 //! [`crate::feature::vegetation::VegGrid`] collects them during decoration, exactly
-//! as it collects block writes; `OverworldGenerator::vegetation_stage` drains the
+//! as it collects block writes; the unified FEATURES dispatcher drains the
 //! list and keeps only what landed inside the served 16×16, which is the same
 //! discard rule the grid's own `dirty_cells` fold-back already applies to spilled
 //! blocks. A nest that spilled into a neighbour belongs to *that* chunk's own

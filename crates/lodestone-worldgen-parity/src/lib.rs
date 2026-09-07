@@ -37,6 +37,8 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
+pub mod lifecycle;
+
 /// One pipeline stage's full `16 x height x 16` block field for one chunk,
 /// indexed by local `(lx, y, lz)` with `lx, lz` in `0..16` and `y` in
 /// `min_y..min_y + height`. Missing positions read as `"minecraft:air"`

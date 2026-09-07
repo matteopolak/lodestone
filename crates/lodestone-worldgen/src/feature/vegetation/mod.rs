@@ -31,9 +31,7 @@
 //!
 //! [`apply_vegetal_decoration_step`] (the single-source primitive this
 //! module shipped with originally) still exists and is still
-//! correct on its own terms — it is simply no longer what
-//! `crate::overworld::OverworldGenerator::vegetation_stage` calls in
-//! production. A write whose final position lands outside whatever
+//! correct on its own terms. A write whose final position lands outside whatever
 //! footprint the caller's [`VegGrid`] covers is silently dropped (never
 //! written anywhere else), and a read (heightmap probe, air/tag check)
 //! clamps into the nearest in-bounds column — for the single-source
@@ -82,8 +80,8 @@
 //! silent no-op, never a panic** — [`ConfiguredFeature::Unsupported`],
 //! [`TreeConfig::try_parse`] returning `None`, [`BlockStateProvider::try_parse`]
 //! returning `None`. This matters beyond the three named species:
-//! [`super::compose::build_biome_vegetation`] (this module is reached from)
-//! resolves **every** biome's `VEGETAL_DECORATION` step at generator
+//! [`super::compose::DecorationCatalog`] resolves **every** biome's driven
+//! decoration entries at generator
 //! construction time, including biomes this issue never asked for (mangrove's
 //! `UpwardsBranchingTrunkPlacer`, fancy oak's `FancyTrunkPlacer`,
 //! cherry's `CherryTrunkPlacer`, azalea's `EnvironmentScanPlacement`,
@@ -315,7 +313,7 @@ pub fn apply_vegetal_decoration_step<R: RandomSource>(
 /// [`apply_vegetal_decoration_step`] over **every** driven decoration
 /// step, not only `VEGETAL_DECORATION`.
 ///
-/// `features` is [`crate::compose::build_biome_decoration`]'s output —
+/// `features` is [`crate::compose::DecorationCatalog::select`]'s output —
 /// `(step, index within that step, feature)`, already in step order. The
 /// `set_feature_seed(decoration_seed, index, step)` pair is what isolates each
 /// feature's stream, so nothing here depends on the list being contiguous or on

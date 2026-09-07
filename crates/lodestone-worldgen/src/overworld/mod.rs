@@ -39,16 +39,13 @@
 //!    surface height; carver selection is a different question from surface
 //!    material). See [`crate::carver::apply_carvers`]'s doc comment.
 //!
-//! 5. **Ore features** — [`Self::ore_stage`] runs
-//!    [`crate::feature::apply_ore_step_3x3_per_source`], vanilla's real 3×3
-//!    neighbourhood underground-ore decoration driver: each of the 9 chunks in
-//!    `center ± 1` gets its own full pre-ore pipeline (stages 1-4 above,
-//!    via [`Self::pre_ore_stage`]) and its own biome-resolved ore list (the
-//!    same per-source-chunk convention [`Self::biome_for_carver_source`]
-//!    already uses for carvers), and every one of the 9 passes writes into
-//!    one shared region grid before the centre 16×16 is folded back in —
-//!    matching vanilla's real spill of block writes one chunk into each
-//!    neighbour, not an approximation of it.
+//! 5. **FEATURES** — [`Self::features_stage`] runs the unified, globally
+//!    ordered decoration stream over the real 3×3 source neighbourhood. Each
+//!    source uses its own pre-ore terrain prefix and biome container, while
+//!    all ore, disk and vegetal bodies share one read/write region and observe
+//!    preceding entries' writes. The surrounding 5×5 terrain-prefix context
+//!    supplies the padded probes required by those source passes; the centre
+//!    16×16 result and entities are then returned to the caller.
 //!
 //! This landed after an architecture review found that `FeatureOracle.java`
 //! — the oracle `feature_parity` validates the ore *engine* against —
@@ -64,9 +61,8 @@
 //! stage is *single-source only* (it never extends to a real 3×3 with real
 //! per-quart biome variety — that would need 8 more fully-generated real
 //! chunks per fixture dump, not attempted; see that file's own doc comment).
-//! A debug-only toggle (`LODESTONE_ORE_SINGLE_SOURCE_DEBUG=1`, in
-//! [`Self::ore_stage`]) reproduces that oracle's own narrower scope and
-//! measured a much smaller residual against it (563/98304 at chunk (0,0),
+//! A diagnostic single-source probe reproduced that oracle's narrower scope
+//! and measured a much smaller residual against it (563/98304 at chunk (0,0),
 //! down from the pre-composition 4113) — evidence the *engine* is correct
 //! and that most of the *full* 3×3 gap against `postfeatures` (2237/98304 at
 //! the same chunk) is real vanilla ore spill this oracle stage cannot model,
@@ -193,10 +189,9 @@
 //! the stage seams `column`/`column_timed` already called. Nothing moved but text:
 //!
 //! * this file — the generator struct, `new`, the `column`/`column_timed`
-//!   orchestration and the two memoised stage entry points
-//!   (`pre_ore_stage`/`post_ore_world`);
-//! * [`store`] — the staged sharded per-chunk store those two memoise into,
-//!   Unit 6's replacement for the two `Mutex`-guarded FIFO caches this file
+//!   orchestration and the memoised `pre_ore_stage` entry point;
+//! * [`store`] — the staged sharded per-chunk store that memoises the terrain
+//!   prefix, Unit 6's replacement for the `Mutex`-guarded FIFO cache this file
 //!   used to hold;
 //! * [`fill`] — stages 1-4 (aquifer, shape, surface, materialise, carve);
 //! * [`biome`] — the climate/biome resolution stages;
@@ -237,25 +232,20 @@ pub use self::output::StageTimes;
 pub use self::structures::{BEARD_REACH, REFS_RADIUS, StructureRefs};
 
 /// The return shape of [`OverworldGenerator::pre_ore_stage`] — one chunk's
-/// own post-carve world, heightmap and biome quarts (stages 1-4). Named so
-/// [`OverworldGenerator::pre_ore_cache`]'s value type reads as "one chunk's
-/// pre-ore result", not an anonymous 3-tuple.
+/// own post-carve world, heightmap and biome quarts (stages 1-4). Named so the
+/// store's value type reads as "one chunk's pre-ore result", not an anonymous
+/// 3-tuple.
 ///
-/// The world is an `Arc` so it can be *handed out* rather than copied. Two callers
-/// want it that way: [`OverworldGenerator::vegetation_stage`] supplies the 16 rim
-/// chunks of its 5×5 read neighbourhood straight from here (see
-/// [`crate::feature::region_view::WIDE_RADIUS`]), and it must not pay 16 dense-grid
-/// memcpys per column to do so. Every pre-existing consumer that needs to *mutate*
-/// it still clones out of the `Arc` — the same clone it already made, moved one
-/// deref inward.
+/// The world is an `Arc` so read-only neighbourhood consumers can be handed the
+/// terrain prefix rather than copying it. Every consumer that needs to mutate it
+/// still clones out of the `Arc`.
 type PreOreResult = (
     Arc<crate::dense_grid::DenseBlockGrid>,
     [i32; 256],
     [(String, bool); 16],
-    // The full 4x4x4 biome grid for this chunk. Behind an `Arc` for
-    // the same reason the world is -- `vegetation_stage` pulls eight neighbours'
-    // `PreOreResult`s out of the store and must not copy 1,536 cells per
-    // neighbour to do it. The 16-entry surface array above is *derived from* this
+    // The full 4x4x4 biome grid for this chunk. Behind an `Arc` for the same
+    // reason the world is: neighbourhood consumers must not copy 1,536 cells
+    // per neighbour. The 16-entry surface array above is *derived from* this
     // one (`surface_quarts_from_cells`), kept alongside rather than recomputed
     // because every existing consumer -- surface, carve, decorate -- asks the
     // surface question specifically.
@@ -287,27 +277,15 @@ struct ChunkStages {
     structure_refs: store::StageSlot<structures::StructureRefs>,
     /// Stages 1–4 — see [`OverworldGenerator::pre_ore_stage`].
     pre_ore: store::StageSlot<PreOreResult>,
-    /// Stages 1–5 — see [`OverworldGenerator::post_ore_world`].
-    post_ore: store::StageSlot<crate::dense_grid::DenseBlockGrid>,
 }
 
 /// Chebyshev chunk radius one [`OverworldGenerator::column`] call closes over.
 ///
-/// **Derived from the drivers, not chosen.** [`OverworldGenerator::vegetation_stage`]
-/// reads the post-ore world of the 3×3 around its centre (radius 1), and each of
-/// those post-ore worlds runs [`OverworldGenerator::ore_stage`], which reads the
-/// pre-ore world of *its own* 3×3 — so one column's pre-ore closure is 5×5,
-/// radius **2**. If a driver's neighbourhood ever widens, this widens with it or
-/// the pin below stops covering the request that needs it.
-///
-/// **`vegetation_stage` now also reads that 5×5 rim directly**, rather than only
-/// reaching it transitively through the eight neighbours' own `ore_stage` calls:
-/// its read neighbourhood is [`crate::feature::region_view::WIDE_RADIUS`] = 2, and
-/// the 16 rim chunks are supplied from `pre_ore_stage` (see that stage for why
-/// pre-ore and not post-ore). That does **not** move this constant — the closure
-/// was already exactly this set, which is precisely what makes the wider read free
-/// — but it does mean two independent drivers now depend on this radius being 2.
-/// Narrowing it would break vegetation's seam consistency as well as the pin.
+/// **Derived from the drivers, not chosen.** The unified FEATURES dispatcher reads
+/// the pre-ore world of the 5×5 neighbourhood: each source's 3×3 feature pass can
+/// inspect the centre-relative region and its padded decoration context. If a
+/// driver's neighbourhood ever widens, this widens with it or the pin below
+/// stops covering the request that needs it.
 const COLUMN_CLOSURE_RADIUS: i32 = 2;
 
 /// Chebyshev chunk radius one [`OverworldGenerator::column`] call closes over
@@ -330,7 +308,6 @@ const COLUMN_CLOSURE_RADIUS: i32 = 2;
 /// | counter | predicted | measured | factor |
 /// |---|---|---|---|
 /// | `pre_ore_computed` | 256 | **740** | 2.9× |
-/// | `post_ore_computed` | 196 | **416** | 2.1× |
 /// | `structure_starts_computed` | 1,024 | **7,569** | 7.4× |
 ///
 /// Every one of those recomputations is a full terrain stage re-run, and the
@@ -366,11 +343,11 @@ const STRUCTURE_CLOSURE_RADIUS: i32 = COLUMN_CLOSURE_RADIUS + structures::REFS_R
 /// oldest unpinned ones were the neighbours it was about to read back.
 ///
 /// **Entry count is not proportional to memory here, which is why raising it is
-/// affordable.** Only entries whose `pre_ore`/`post_ore` slots were actually
-/// computed hold a dense grid (~192 KiB each); the extra entries this ceiling
-/// admits are structure-starts-only, which hold a `Vec` of starts and nothing
-/// else. Per column of travel a session adds ~21 structure-only entries against
-/// ~5 terrain-bearing ones, so the resident terrain set at 2,048 entries is on the
+/// affordable.** Only entries whose `pre_ore` slot was actually computed hold a
+/// dense grid (~192 KiB each); the extra entries this ceiling admits are
+/// structure-starts-only, which hold a `Vec` of starts and nothing else. Per
+/// column of travel a session adds ~21 structure-only entries against ~5
+/// terrain-bearing ones, so the resident terrain set at 2,048 entries is on the
 /// order of the 512-entry ceiling's — see `docs/worldgen-store-distance-leak.md`.
 ///
 /// Two things keep this from being the capacity-FIFO guess it replaced. First,
@@ -380,10 +357,9 @@ const STRUCTURE_CLOSURE_RADIUS: i32 = COLUMN_CLOSURE_RADIUS + structures::REFS_R
 /// happened" is a checkable control rather than an assumption — which is what
 /// licenses reading the stage-computation counters as `chunks × stages`.
 ///
-/// Memory is unchanged by the swap, deliberately: 512 entries × (one pre-ore
-/// grid + one post-ore grid, ~192 KiB each) is the same worst case as the two
-/// 512-entry caches it replaces, and the reason a ceiling exists at all is
-/// still `lodestone_server`'s `OverworldChunkSource`, which holds one generator
+/// Memory is bounded by the terrain prefix held per entry, and the reason a
+/// ceiling exists at all is still `lodestone_server`'s `OverworldChunkSource`,
+/// which holds one generator
 /// for a whole world's lifetime — a session gradually exploring a large area
 /// would otherwise grow this without bound, a real if slow leak on a machine
 /// CLAUDE.md already flags memory as the binding limit on.
@@ -474,18 +450,14 @@ pub struct OverworldGenerator {
     /// Block-tag closures for every tag referenced by any biome's ore
     /// targets, resolved once — see `crate::compose::build_ore_tag_map`.
     ore_tag_map: HashMap<String, HashSet<String>>,
-    /// The staged per-chunk store: this generator's memoisation of
-    /// [`Self::pre_ore_stage`] and [`Self::post_ore_world`], and Unit 6's
-    /// replacement for the two `Mutex`-guarded FIFO caches that preceded it.
+    /// The staged per-chunk store: this generator's memoisation of the terrain
+    /// prefix produced by [`Self::pre_ore_stage`], and Unit 6's replacement for
+    /// the `Mutex`-guarded FIFO cache that preceded it.
     ///
     /// The memoisation itself is not new and its motivation is unchanged:
-    /// [`Self::ore_stage`]'s real 3×3 driver needs the centre plus all 8
-    /// neighbours' pre-ore pipelines on *every* [`column`](Self::column) call,
-    /// and [`Self::vegetation_stage`]'s 3×3 driver needs 8 neighbours' full
-    /// post-ore worlds (the expensive ore *RNG walk*, not just terrain), so
-    /// without memoisation a sweep redoes each of those up to 9× — measured, a
-    /// 144-chunk sweep went from ~68s to 700.57s in debug when ore composition
-    /// landed, matching the predicted ~9×.
+    /// The unified FEATURES dispatcher needs the centre plus the surrounding
+    /// pre-ore pipelines on every [`column`](Self::column) call, so without
+    /// memoisation a sweep would redo each terrain prefix up to 9×.
     ///
     /// What **is** new is that computing once is now structural rather than
     /// best-effort. The old caches took one global `Mutex` each and released it
@@ -499,16 +471,16 @@ pub struct OverworldGenerator {
     /// computing a second copy. See [`store`]'s module doc for the full
     /// argument, the exact-key rule, and why eviction is view-scoped.
     store: store::StagedStore<ChunkStages>,
-    /// Per-biome decoration list, resolved the same way and at the same time as
-    /// `ores_by_biome` — see `crate::compose::build_biome_decoration`. Empty
+    /// Per-biome decoration list, resolved alongside the generator's ore
+    /// definitions and global [`crate::compose::DecorationCatalog`]. Empty
     /// (whole map) when the resolver supplies no biome documents with any driven
-    /// step, in which case [`Self::vegetation_stage`] is a no-op, matching every
+    /// step, in which case the FEATURES dispatcher is a no-op, matching every
     /// other resolver's "no data supplied" convention.
     ///
     /// **This later widened from `VEGETAL_DECORATION` alone to every step in
     /// `crate::compose::DRIVEN_STEPS`**, so entries now carry their own step index
-    /// and the map is no longer one-step-per-biome. The name is unchanged because
-    /// [`Self::vegetation_stage`] is still the one stage that consumes it.
+    /// and the map is no longer one-step-per-biome. The catalog is consumed by
+    /// the unified FEATURES dispatcher.
     decoration_catalog: crate::compose::DecorationCatalog,
     /// Block-tag closures [`crate::feature::vegetation`]'s own predicates/
     /// checks need (`supports_vegetation`, `replaceable_by_trees`, `logs`,
@@ -980,24 +952,13 @@ impl OverworldGenerator {
         // itself*. See that constant for the measured cost.
         let _view = self.store.open_view((cx, cz), STRUCTURE_CLOSURE_RADIUS);
         let cached = self.pre_ore_stage(cx, cz);
-        // Routed through `post_ore_world` (which wraps
-        // `ore_stage` in `Self::post_ore_cache`) rather than calling
-        // `ore_stage` directly, so this chunk's post-ore result is
-        // available with no recomputation to any OTHER chunk's
-        // `vegetation_stage` that later needs it as one of its 8
-        // neighbours — see `PostOreCache`'s own doc comment for why that
-        // sharing matters (without it, every chunk that appears as both a
-        // sweep's own centre and some other chunk's neighbour would pay the
-        // real ore-placement RNG walk twice). This costs one
-        // `DenseBlockGrid` clone (unwrapping the cached `Arc`) in place of
-        // the clone `ore_stage` already required directly — same order of
-        // cost as before, not a new one.
-        //
-        // Unit 7 moved that clone *inside* `vegetation_stage`: the `Arc` is
-        // handed over intact so the pre-vegetation content can double as the
-        // centre source of the in-place region view, and the private mutable copy
-        // is taken once at the end. Same one clone, one stage later.
-        let (world, block_entities) = self.vegetation_stage(cx, cz, self.post_ore_world(cx, cz));
+        // FEATURES is one globally indexed stream. Ores, disks and vegetal
+        // bodies must share both their source order and their intermediate
+        // writes, so production enters the same dispatcher used by lifecycle
+        // replay rather than composing an ore result with a later vegetation
+        // pass.
+        let (world, block_entities) =
+            self.features_stage(cx, cz, (*cached.0).clone(), &cached.1, &cached.3);
         // `TOP_LAYER_MODIFICATION` is vanilla's LAST decoration
         // step (index 10) and must run after vegetation, because the
         // `MOTION_BLOCKING` height it reads includes leaves and logs — snow sits
@@ -1109,40 +1070,6 @@ impl OverworldGenerator {
         )
     }
 
-    /// One chunk's own post-carve-and-ore world (stages 1-5), for an
-    /// arbitrary `(cx, cz)` — not necessarily the chunk [`Self::column`] was
-    /// asked to generate. Used by [`Self::vegetation_stage`]'s 3×3 driver to
-    /// obtain each of the 8 neighbours' own post-ore terrain, exactly the
-    /// input vegetal decoration reads/writes against for that neighbour in
-    /// real vanilla. Recurses into that neighbour's own 3×3 ore composition
-    /// via [`Self::ore_stage`]/[`Self::pre_ore_stage`] (the latter memoised,
-    /// per [`Self::pre_ore_cache`]'s doc comment) — real parity, not an
-    /// approximation.
-    ///
-    /// Memoised in [`Self::store`]'s `post_ore` slot — a *separate* stage from
-    /// `pre_ore` on the same entry, because this one memoises the expensive ore
-    /// placement **RNG walk**, not just the cheap-to-share pre-ore terrain
-    /// feeding it: without it, a sweep over adjacent chunks would rerun the full
-    /// [`Self::ore_stage`] once per `(neighbour, requester)` pair instead of once
-    /// per neighbour, a second 9× on top of the one ore composition already
-    /// costs.
-    ///
-    /// **The layering here is what keeps the store deadlock-free**, and it is a
-    /// rule rather than an accident. This stage's computation calls
-    /// [`Self::pre_ore_stage`] — a strictly *lower* stage — for its own chunk and,
-    /// via [`Self::ore_stage`], for its 3×3; `pre_ore` calls nothing in the
-    /// store. So the wait-for graph only ever points downward and its lowest
-    /// layer never waits. A stage that re-entered its own slot, or that reached
-    /// back up a layer, would deadlock on the once-guard: see [`store`]'s module
-    /// doc before adding one.
-    fn post_ore_world(&self, cx: i32, cz: i32) -> Arc<crate::dense_grid::DenseBlockGrid> {
-        let entry = self.store.entry((cx, cz));
-        entry.post_ore.get_or_compute(crate::counters::bump_post_ore, || {
-            let pre = self.pre_ore_stage(cx, cz);
-            self.ore_stage(cx, cz, (*pre.0).clone(), &pre.1)
-        })
-    }
-
     /// Runs **only** [`Self::ore_stage`] for `(cx, cz)` against a private copy of
     /// that chunk's already-memoised pre-ore world, and returns how many cells ore
     /// placement wrote into the centre.
@@ -1157,10 +1084,9 @@ impl OverworldGenerator {
     /// load-bearing part — on a cold store the `pre_ore_stage` call below runs a
     /// whole terrain pipeline and the profile stops being about ore.
     ///
-    /// Deliberately **not** routed through [`Self::post_ore_world`]: that memoises,
-    /// so a second call over the same chunk would measure a store hit. The one
-    /// dense-grid clone it costs (98,304 `u16`s) is the same clone
-    /// `post_ore_world`'s consumer pays and is ~0.2% of the stage.
+    /// Deliberately runs against a private dense-grid clone so a second call
+    /// over the same chunk still measures the ore walk rather than a cached
+    /// result. The clone is ~0.2% of the stage.
     ///
     /// The return value is how many of the centre's own cells the stage changed,
     /// purely so a caller can assert the workload was not vacuous — a resolver with
@@ -1197,8 +1123,8 @@ impl OverworldGenerator {
     #[must_use]
     pub fn column_timed(&self, cx: i32, cz: i32) -> (GeneratedColumn, StageTimes) {
         // Same pin as [`Self::column`] — this path drives the same 3×3/5×5
-        // neighbourhood through `ore_stage`/`vegetation_stage`, so it needs the
-        // same protection or a bench near the retention ceiling could measure an
+        // neighbourhood through the FEATURES dispatcher, so it needs the same
+        // protection or a bench near the retention ceiling could measure an
         // eviction rather than the pipeline.
         let _view = self.store.open_view((cx, cz), STRUCTURE_CLOSURE_RADIUS);
         let base_x = cx * 16;
@@ -1231,16 +1157,10 @@ impl OverworldGenerator {
         // bucket rather than given one of its own, because for a chunk with no
         // structure in reach it is a single early return.
         let world = self.structure_place_stage(cx, cz, world);
-        let ore_heights = self.ore_heights_from_world(&world);
-        let t_ore_start = lodestone_time::Instant::now();
-        let world = self.ore_stage(cx, cz, world, &ore_heights);
-        let t_vegetation_start = lodestone_time::Instant::now();
-        // `Arc::new` rather than a store lookup: this path builds its own world
-        // locally (it is the per-stage timing split, not the memoised serve path),
-        // so wrapping it is a pointer move, not a copy. `vegetation_stage` takes
-        // the shared form because in `column` the centre's post-ore grid really is
-        // shared — see there.
-        let (world, block_entities) = self.vegetation_stage(cx, cz, Arc::new(world));
+        let feature_heights = self.ore_heights_from_world(&world);
+        let t_features_start = lodestone_time::Instant::now();
+        let (world, block_entities) =
+            self.features_stage(cx, cz, world, &feature_heights, &biome_cells);
         let t_top_layer_start = lodestone_time::Instant::now();
         // This call is why `StageTimes` grew a field rather
         // than folding another stage into `intern`: `top_layer_stage` is the
@@ -1267,9 +1187,9 @@ impl OverworldGenerator {
                 biome: t_surface_start - t_biome_start,
                 surface: t_materialize_start - t_surface_start,
                 materialize: t_carve_start - t_materialize_start,
-                carve: t_ore_start - t_carve_start,
-                ore: t_vegetation_start - t_ore_start,
-                vegetation: t_top_layer_start - t_vegetation_start,
+                carve: t_features_start - t_carve_start,
+                ore: std::time::Duration::ZERO,
+                vegetation: t_top_layer_start - t_features_start,
                 top_layer: t_intern_start - t_top_layer_start,
                 intern: t_end - t_intern_start,
             },

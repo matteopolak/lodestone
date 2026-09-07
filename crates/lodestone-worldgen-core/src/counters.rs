@@ -105,7 +105,8 @@ pub enum Stage {
     Intern = 9,
     /// Structure-generation stages (`structure_starts`, `structure_place`).
     ///
-    /// **Not one of "the ten stages"** and deliberately has no `StageTimes`
+    /// **Not one of `StageTimes`' ten compatibility slots** and deliberately has no
+    /// `StageTimes`
     /// field: it runs *above* `pre_ore` (starts/refs) and *inside* it (placement),
     /// so it does not fit the flat per-column timing table. It exists because the
     /// allocation binning in `benches/generation.rs` reads [`current_stage`], and
@@ -228,10 +229,6 @@ pub struct Snapshot {
     pub pre_ore_computed: u64,
     /// `pre_ore_stage` hits: served from the memo cache.
     pub pre_ore_hits: u64,
-    /// `post_ore_world` misses: the ore RNG walk actually run for some chunk.
-    pub post_ore_computed: u64,
-    /// `post_ore_world` hits: served from the memo cache.
-    pub post_ore_hits: u64,
     /// `biome::nearest_biome` calls — climate nearest-neighbour searches.
     ///
     /// **Not brute-force any more.** U9 (`7ff942dd`) put a ported
@@ -335,8 +332,6 @@ impl Default for Snapshot {
             palette_intern_hit: 0,
             pre_ore_computed: 0,
             pre_ore_hits: 0,
-            post_ore_computed: 0,
-            post_ore_hits: 0,
             biome_searches: 0,
             biome_rows_compared: 0,
             rng_draws: [0; STAGE_COUNT],
@@ -411,8 +406,6 @@ mod imp {
         palette_intern_hit: AtomicU64,
         pre_ore_computed: AtomicU64,
         pre_ore_hits: AtomicU64,
-        post_ore_computed: AtomicU64,
-        post_ore_hits: AtomicU64,
         biome_searches: AtomicU64,
         biome_rows_compared: AtomicU64,
         rng_draws: [AtomicU64; STAGE_COUNT],
@@ -442,8 +435,6 @@ mod imp {
         palette_intern_hit: AtomicU64::new(0),
         pre_ore_computed: AtomicU64::new(0),
         pre_ore_hits: AtomicU64::new(0),
-        post_ore_computed: AtomicU64::new(0),
-        post_ore_hits: AtomicU64::new(0),
         biome_searches: AtomicU64::new(0),
         biome_rows_compared: AtomicU64::new(0),
         rng_draws: [const { AtomicU64::new(0) }; STAGE_COUNT],
@@ -556,11 +547,6 @@ mod imp {
     }
 
     #[inline]
-    pub fn bump_post_ore(computed: bool) {
-        bump(if computed { &C.post_ore_computed } else { &C.post_ore_hits });
-    }
-
-    #[inline]
     pub fn bump_biome_search(rows: u64) {
         bump(&C.biome_searches);
         bump_by(&C.biome_rows_compared, rows);
@@ -657,8 +643,6 @@ mod imp {
         C.palette_intern_hit.store(0, Relaxed);
         C.pre_ore_computed.store(0, Relaxed);
         C.pre_ore_hits.store(0, Relaxed);
-        C.post_ore_computed.store(0, Relaxed);
-        C.post_ore_hits.store(0, Relaxed);
         C.biome_searches.store(0, Relaxed);
         C.biome_rows_compared.store(0, Relaxed);
         for a in &C.rng_draws {
@@ -695,8 +679,6 @@ mod imp {
             palette_intern_hit: C.palette_intern_hit.load(Relaxed),
             pre_ore_computed: C.pre_ore_computed.load(Relaxed),
             pre_ore_hits: C.pre_ore_hits.load(Relaxed),
-            post_ore_computed: C.post_ore_computed.load(Relaxed),
-            post_ore_hits: C.post_ore_hits.load(Relaxed),
             biome_searches: C.biome_searches.load(Relaxed),
             biome_rows_compared: C.biome_rows_compared.load(Relaxed),
             rng_draws: std::array::from_fn(|i| C.rng_draws[i].load(Relaxed)),
@@ -749,8 +731,6 @@ mod imp {
     #[inline(always)]
     pub fn bump_pre_ore(_computed: bool) {}
     #[inline(always)]
-    pub fn bump_post_ore(_computed: bool) {}
-    #[inline(always)]
     pub fn bump_biome_search(_rows: u64) {}
     #[inline(always)]
     pub fn bump_rng_draw() {}
@@ -793,7 +773,7 @@ pub use imp::{
     StageGuard, bump_biome_search, bump_block_at, bump_cell_fill, bump_corner_eval,
     bump_corner_lookup, bump_density_eval,
     bump_density_point_compute, bump_noise_corner_batch, bump_palette_intern_hit,
-    bump_palette_intern_new, bump_post_ore,
+    bump_palette_intern_new,
     bump_pre_ore, bump_rng_draw, bump_slot_hit, bump_slot_miss, bump_state_intern_new,
     bump_state_name_lookup, bump_stitch_cells, bump_string_allocs, bump_structure_aquifer,
     bump_structure_height_probe, bump_structure_start, current_stage, reset, snapshot,
