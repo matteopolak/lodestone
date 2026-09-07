@@ -26,23 +26,27 @@ default (maximum, for the overworld) rather than treated as zero — which is ex
 computed light at all (the state before this subsystem existed) produced a uniformly *bright* world:
 lit caves, lit sealed rooms, no real night, rather than the reverse.
 
-The served sky payload keeps the first uniformly full-sky section above the highest non-air terrain
+The ordinary sky payload keeps the first uniformly full-sky section above the highest non-air terrain
 section, then leaves higher sections absent. This is a wire-shape rule, not a lighting-value change:
 the omitted sections still resolve to full daylight, while retaining them would allocate redundant
 full arrays and fail byte parity. The engine leaves the result alone when that premise is not true,
-so a non-full section is never silently converted into an omission. Initial chunk packets also omit
-uniformly zero block-light sections; non-zero values, including a border contribution from a loaded
-neighbour, remain present. Light-update packets retain explicit zero sections because those clear
-the client's existing value rather than describing a new chunk.
+so a non-full section is never silently converted into an omission. A protocol-specific initial
+chunk form can retain a longer bounded run without changing the flood result; later light updates
+keep the ordinary compact form. Explicit zero block-light sections in an update clear a client's
+existing value, so update packets always retain them.
 
 ### Dimension sky rules
 
 Sky seeding is a dimension property, not a consequence of a column's vertical shape. The Nether and
-the End both use a 0..256 served window, but only the Nether lacks skylight; every one of its 18
-light sections therefore carries an explicit zero sky value in both an initial chunk and a later
-light update. The End and Overworld retain the ordinary sky flood. `ChunkSource::dimension` carries
-that choice to the protocol's dimension-aware initial-encoding and light-computation hooks. An unlabelled source
-uses the Overworld as the compatibility default; a dimension wrapper must always forward its label.
+the End both use a 0..256 served window, but only the Nether lacks skylight. Its initial chunk form
+therefore omits every sky section and keeps zero block-light data only through one section above the
+highest terrain section; its later light updates retain explicit zero sky and block values for the
+normal clear operation. The End has sky light, but its initial form retains four uniformly full sky
+sections above terrain and preserves zero block-light sections through that same terminal section.
+The Overworld keeps the one-section sky form and elides uniform zero block light in an initial
+chunk. `ChunkSource::dimension` carries that choice to the protocol's dimension-aware
+initial-encoding and light-computation hooks. An unlabelled source uses the Overworld as the
+compatibility default; a dimension wrapper must always forward its label.
 
 ### Keeping light current after an edit
 
