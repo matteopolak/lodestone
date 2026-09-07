@@ -25,11 +25,12 @@
 //! atlas we minted.
 //!
 //! Run with:
-//! `cargo test -p lodestone-render --test block_texture_gate -- --ignored --nocapture`
+//! `cargo test -p lodestone-render --test terrain block_texture_gate -- --ignored --nocapture`
 
 use std::path::PathBuf;
 
 use lodestone_assets::{Image, ResourceLocation, ResourceManager, ZipSource};
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockStateRegistry, Identifier};
 use lodestone_render::{
     BlockAtlas, BlockClassifier, BlocksJsonRegistry, Face, blocks_json_registry,
@@ -220,23 +221,28 @@ fn real_vanilla_block_models_map_to_correct_sprites() {
     // generator calls to turn real vanilla state strings into classifier ids.
     assert_eq!(
         atlas.state_id_of("minecraft:stone"),
-        Some(stone),
+        Some(StateId::new(stone).expect("stone must be a canonical state id")),
         "state_id_of(bare name) must match the registry's stone id"
     );
     assert_eq!(
         atlas.state_id_of("minecraft:grass_block[snowy=false]"),
-        Some(grass),
+        Some(StateId::new(grass).expect("grass must be a canonical state id")),
         "state_id_of(full property string) must match the registry id"
     );
     assert_eq!(
         atlas.state_id_of("minecraft:oak_log[axis=y]"),
-        Some(log),
+        Some(StateId::new(log).expect("oak log must be a canonical state id")),
         "state_id_of must round-trip a complete property set to the right id"
     );
     assert_eq!(
         atlas.state_id_of("minecraft:most_certainly_not_a_block"),
         None,
         "an unknown block must resolve to None, not a plausible-but-wrong id"
+    );
+    assert_eq!(
+        atlas.state_id_of("minecraft:stone[not_a_real_property=true]"),
+        None,
+        "an unknown state must resolve to None, not a plausible-but-wrong id"
     );
 
     // --- PROVENANCE: atlas pixels at stone's sprite == the real stone.png. ---

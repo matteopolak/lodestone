@@ -49,6 +49,7 @@ use lodestone_assets::{
     ModelError, ModelResolver, ResolvedModel, ResourceLocation, ResourceManager,
     tint::{self, Colormap, TintKind, vanilla_tint_kind},
 };
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockStateRegistry, Identifier};
 
 use crate::block_models::BlockModels;
@@ -115,12 +116,12 @@ pub struct BlockAtlas {
     atlas: Atlas,
     uv_table: Vec<[f32; 4]>,
     classes: Vec<StateClass>,
-    /// Forward index: a canonical `(block, sorted properties)` key → global state
-    /// id, inverted from the reverse-only [`BlockStateRegistry`] so callers who
+    /// Forward index: a canonical `(block, sorted properties)` key → [`StateId`],
+    /// inverted from the reverse-only [`BlockStateRegistry`] so callers who
     /// hold a block-state *string* (e.g. a world generator emitting
     /// `"minecraft:grass_block[snowy=false]"`) can resolve it to the id the
     /// classifier keys on. See [`state_id_of`](BlockAtlas::state_id_of).
-    name_to_id: HashMap<(Identifier, BTreeMap<String, String>), u32>,
+    name_to_id: HashMap<(Identifier, BTreeMap<String, String>), StateId>,
     /// The baked per-state *model* geometry for the same registry, attached
     /// after [`build`](BlockAtlas::build) via [`with_models`](BlockAtlas::with_models).
     ///
@@ -194,7 +195,7 @@ impl BlockAtlas {
         // over every resolvable id independent of whether its model projects, so a
         // block whose geometry fails to resolve still maps its string to the right
         // id (the classifier renders it lit-empty, but the id stays correct).
-        let mut name_to_id: HashMap<(Identifier, BTreeMap<String, String>), u32> =
+        let mut name_to_id: HashMap<(Identifier, BTreeMap<String, String>), StateId> =
             HashMap::with_capacity(count as usize);
 
         // Texture sets to stitch: raw block textures plus tinted duplicates keyed
@@ -207,7 +208,9 @@ impl BlockAtlas {
                 projected.push(None);
                 continue;
             };
-            name_to_id.insert((state.block.clone(), state.properties.clone()), id);
+            if let Some(state_id) = StateId::new(id) {
+                name_to_id.insert((state.block.clone(), state.properties.clone()), state_id);
+            }
             let block_key = state.block.to_string();
 
             let blockstates = bs_cache
@@ -383,13 +386,13 @@ impl BlockAtlas {
     }
 
 
-    /// The vanilla global block-state id for a generator block-state string, or
+    /// The canonical block-state id for a generator block-state string, or
     /// `None` if it names no known state.
     ///
     /// This is the forward companion to the reverse-only [`BlockStateRegistry`]:
     /// a world generator that emits real vanilla state *strings*
     /// (`"minecraft:grass_block[snowy=false]"`, or a bare `"minecraft:stone"`)
-    /// resolves them here to the id the [`BlockClassifier`] keys on, so blocks and
+    /// resolves them here to the typed id the [`BlockClassifier`] keys on, so blocks and
     /// atlas share one id space with no lossy demo palette in between.
     ///
     /// Matching is **exact and structural**: the string is parsed into a
@@ -403,7 +406,7 @@ impl BlockAtlas {
     /// block-state string form always lists every property, so a faithful
     /// generator string round-trips exactly.
     #[must_use]
-    pub fn state_id_of(&self, block_state: &str) -> Option<u32> {
+    pub fn state_id_of(&self, block_state: &str) -> Option<StateId> {
         let key = parse_state_key(block_state)?;
         self.name_to_id.get(&key).copied()
     }

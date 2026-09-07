@@ -1036,9 +1036,9 @@ impl LiveCollision {
         let mut air_states = vec![0u32];
         for name in AIR_BLOCKS {
             if let Some(id) = atlas.state_id_of(name)
-                && !air_states.contains(&id)
+                && !air_states.contains(&id.raw())
             {
-                air_states.push(id);
+                air_states.push(id.raw());
             }
         }
         Self {
@@ -1762,6 +1762,7 @@ mod tests {
     fn state_id(atlas: &BlockAtlas, name: &str) -> u32 {
         atlas
             .state_id_of(name)
+            .map(StateId::raw)
             .unwrap_or_else(|| panic!("no such block state: {name}"))
     }
 
