@@ -391,9 +391,9 @@ impl SnowSupport {
 }
 
 /// Resolves a [`SnowSupport`] from a [`crate::density::Resolver`]: the five
-/// per-state columns from
+/// top-layer per-state columns from
 /// [`Resolver::block_freeze_facts`](crate::density::Resolver::block_freeze_facts)
-/// and the two tags from
+/// (the same document also carries dungeon solidity) and the two tags from
 /// [`Resolver::block_tag`](crate::density::Resolver::block_tag).
 ///
 /// Empty sets (never a panic) when the resolver has no data — matching

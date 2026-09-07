@@ -109,6 +109,7 @@ use std::collections::HashMap;
 use lodestone_core::{Nbt, NbtTag};
 use lodestone_data::potion::potion_name;
 use lodestone_model::{BlockPos, ItemStack};
+use lodestone_world::{ColumnLight, LightData, NibbleArray};
 use lodestone_worldgen::overworld::block_entities::GeneratedBlockEntity;
 
 use crate::block_entities::BlockEntity;
@@ -172,6 +173,14 @@ pub enum Error {
         need: usize,
         /// Bits per entry in force.
         bits: u32,
+    },
+    /// A persisted light array did not contain exactly one 16³ nibble section.
+    #[error("light array {field:?} has {actual} bytes, need 2048")]
+    InvalidLight {
+        /// NBT path of the invalid array.
+        field: String,
+        /// Number of bytes found.
+        actual: usize,
     },
 }
 
@@ -426,6 +435,15 @@ pub fn column_to_nbt_with(cx: i32, cz: i32, column: &ChunkColumn, extras: &Chunk
         ]));
     }
 
+    // A retained snapshot is part of the persisted column, including its two
+    // boundary sections. Keep the section list in ascending Y order so a
+    // reload sees the same shape regardless of whether a boundary section was
+    // present in the terrain payload.
+    let has_retained_light = column.retained_light().is_some();
+    if let Some(light) = column.retained_light() {
+        append_retained_light(&mut sections, min_section, section_count, light);
+    }
+
     Nbt::Compound(vec![
         ("DataVersion".to_owned(), Nbt::Int(DATA_VERSION)),
         ("xPos".to_owned(), Nbt::Int(cx)),
@@ -437,10 +455,13 @@ pub fn column_to_nbt_with(cx: i32, cz: i32, column: &ChunkColumn, extras: &Chunk
         ),
         ("LastUpdate".to_owned(), Nbt::Long(0)),
         ("InhabitedTime".to_owned(), Nbt::Long(0)),
-        // Zero, not one: our sections carry no `SkyLight`/`BlockLight`, and
-        // claiming the light is correct would have a real client render our
-        // terrain pitch black rather than relight it.
-        ("isLightOn".to_owned(), Nbt::Byte(0)),
+        // A retained all-Missing snapshot is still meaningful: it records that
+        // the settlement fence completed and must survive a reload as an
+        // exact snapshot rather than being recomputed from terrain.
+        (
+            "isLightOn".to_owned(),
+            Nbt::Byte(if has_retained_light { 1 } else { 0 }),
+        ),
         (
             "sections".to_owned(),
             Nbt::List {
@@ -468,6 +489,85 @@ pub fn column_to_nbt_with(cx: i32, cz: i32, column: &ChunkColumn, extras: &Chunk
         ),
         ("structures".to_owned(), structures_to_nbt(column)),
     ])
+}
+
+/// Appends the exact retained sky/block light state to a chunk's section list.
+///
+/// The light index is offset by one from the block-section index: index zero is
+/// the section immediately below the build range and the final index is the
+/// section immediately above it. Those boundary sections may contain only
+/// light tags, so they must be emitted even though the terrain loop has no
+/// corresponding block section.
+fn append_retained_light(
+    sections: &mut Vec<Nbt>,
+    min_section: i32,
+    block_section_count: usize,
+    light: &ColumnLight,
+) {
+    debug_assert_eq!(
+        light.light_section_count(),
+        block_section_count + 2,
+        "retained light must span both column boundaries"
+    );
+    for index in 0..light.light_section_count() {
+        let sky = light_data_bytes(light.sky(index));
+        let block = light_data_bytes(light.block(index));
+        if sky.is_none() && block.is_none() {
+            continue;
+        }
+        let section_y = min_section - 1 + index as i32;
+        let section_index = sections
+            .iter()
+            .position(|section| {
+                field(section, "Y")
+                    .and_then(|value| match value {
+                        Nbt::Byte(y) => Some(i32::from(*y)),
+                        _ => None,
+                    })
+                    == Some(section_y)
+            })
+            .unwrap_or_else(|| {
+                let insert_at = sections
+                    .iter()
+                    .position(|section| {
+                        field(section, "Y")
+                            .and_then(|value| match value {
+                                Nbt::Byte(y) => Some(i32::from(*y)),
+                                _ => None,
+                            })
+                            .is_some_and(|y| y > section_y)
+                    })
+                    .unwrap_or(sections.len());
+                sections.insert(
+                    insert_at,
+                    Nbt::Compound(vec![("Y".to_owned(), Nbt::Byte(section_y as i8))]),
+                );
+                insert_at
+            });
+        let Nbt::Compound(fields) = &mut sections[section_index] else {
+            unreachable!("chunk sections are compounds")
+        };
+        if let Some(bytes) = sky {
+            fields.push(("SkyLight".to_owned(), Nbt::ByteArray(bytes)));
+        }
+        if let Some(bytes) = block {
+            fields.push(("BlockLight".to_owned(), Nbt::ByteArray(bytes)));
+        }
+    }
+}
+
+/// Converts the compact light representation to the signed-byte array used by
+/// the chunk NBT schema. Uniform values are expanded only at this persistence
+/// boundary; loading collapses them back to `LightData::Uniform`.
+fn light_data_bytes(data: &LightData) -> Option<Vec<i8>> {
+    match data {
+        LightData::Missing => None,
+        LightData::Uniform(value) => {
+            let value = value & 0x0f;
+            Some(vec![(value | (value << 4)) as i8; 2048])
+        }
+        LightData::Values(values) => Some(values.as_bytes().iter().map(|byte| *byte as i8).collect()),
+    }
 }
 
 /// The chunk's `structures` compound: `starts` for the
@@ -565,14 +665,47 @@ pub fn column_from_nbt(nbt: &Nbt, min_y: i32, height: i32) -> Result<ChunkColumn
     let mut column = ChunkColumn::new(min_y, height);
     let min_section = min_y.div_euclid(16);
     let section_count = (height as usize).div_ceil(SECTION_EDGE);
+    let mut retained_light = matches!(field(nbt, "isLightOn"), Some(Nbt::Byte(1)))
+        .then(|| ColumnLight::new(section_count));
 
     for (i, section) in sections.iter().enumerate() {
         let Some(&Nbt::Byte(y)) = field(section, "Y") else {
             return Err(bad(&format!("sections[{i}].Y")));
         };
         let section_index = i32::from(y) - min_section;
-        if section_index < 0 || section_index as usize >= section_count {
-            // Vanilla's own out-of-range skip, not an error.
+        if (-1..=section_count as i32).contains(&section_index) {
+            let light_index = (section_index + 1) as usize;
+            for (name, sky) in [("SkyLight", true), ("BlockLight", false)] {
+                let Some(value) = field(section, name) else {
+                    continue;
+                };
+                let path = format!("sections[{i}].{name}");
+                let Nbt::ByteArray(bytes) = value else {
+                    return Err(bad(&path));
+                };
+                if bytes.len() != 2048 {
+                    return Err(Error::InvalidLight {
+                        field: path,
+                        actual: bytes.len(),
+                    });
+                }
+                let bytes: Vec<u8> = bytes.iter().map(|value| *value as u8).collect();
+                let array = NibbleArray::from_bytes(&bytes).expect("validated light length");
+                let data = match array.uniform_value() {
+                    Some(value) => LightData::Uniform(value),
+                    None => LightData::Values(array),
+                };
+                let light = retained_light.get_or_insert_with(|| ColumnLight::new(section_count));
+                if sky {
+                    *light.sky_mut(light_index) = data;
+                } else {
+                    *light.block_mut(light_index) = data;
+                }
+            }
+        }
+        if !(0..section_count as i32).contains(&section_index) {
+            // The persisted format permits sections outside this column's
+            // world window; skip them rather than widening the restored column.
             continue;
         }
         let Some(block_states) = field(section, "block_states") else {
@@ -683,6 +816,10 @@ pub fn column_from_nbt(nbt: &Nbt, min_y: i32, height: i32) -> Result<ChunkColumn
                 column.set_biome_quarts(&quarts);
             }
         }
+    }
+
+    if let Some(light) = retained_light {
+        column.set_retained_light(light);
     }
 
     Ok(column)
@@ -1080,6 +1217,28 @@ pub fn generated_block_entity(entity: &GeneratedBlockEntity) -> (BlockPos, Block
                         .collect(),
                 ),
             ));
+        }
+        GeneratedBlockEntity::DungeonChest {
+            loot_table,
+            loot_table_seed,
+            ..
+        } => {
+            fields.push((
+                "LootTable".to_owned(),
+                Nbt::String(loot_table.clone()),
+            ));
+            if *loot_table_seed != 0 {
+                fields.push(("LootTableSeed".to_owned(), Nbt::Long(*loot_table_seed)));
+            }
+        }
+        GeneratedBlockEntity::DungeonSpawner { entity_type, .. } => {
+            let key = entity_type
+                .parse()
+                .expect("generated dungeon spawner entity type is a valid resource key");
+            return (
+                BlockPos::new(x, y, z),
+                BlockEntity::Spawner(SpawnerState::generated(key)),
+            );
         }
     }
     (
@@ -2001,6 +2160,74 @@ mod brewing_nbt_tests {
         let bottle = decoded.bottle(0).expect("first bottle survives persistence");
         assert_eq!(bottle.kind, BottleKind::Splash);
         assert_eq!(potion_name(bottle.potion), "minecraft:swiftness");
+    }
+}
+
+#[cfg(test)]
+mod retained_light_tests {
+    use lodestone_core::{Nbt, NbtTag};
+    use lodestone_world::{ColumnLight, LightData, NibbleArray};
+
+    use super::{Error, column_from_nbt, column_to_nbt, field};
+    use crate::chunk::ChunkColumn;
+
+    #[test]
+    fn retained_light_round_trips_boundaries_and_varied_sections() {
+        let mut column = ChunkColumn::new(-32, 32);
+        let mut light = ColumnLight::new(column.section_count());
+        *light.sky_mut(0) = LightData::Uniform(7);
+        let mut varied = NibbleArray::filled(15);
+        varied.set(NibbleArray::index(2, 3, 4), 4);
+        *light.sky_mut(1) = LightData::Values(varied);
+        *light.block_mut(2) = LightData::Uniform(3);
+        *light.block_mut(3) = LightData::Uniform(0);
+        *light.sky_mut(3) = LightData::Uniform(13);
+        *light.block_mut(3) = LightData::Uniform(2);
+        column.set_retained_light(light.clone());
+
+        let nbt = column_to_nbt(12, -9, &column);
+        assert_eq!(
+            field(&nbt, "isLightOn"),
+            Some(&lodestone_core::Nbt::Byte(1)),
+        );
+
+        let restored = column_from_nbt(&nbt, column.min_y, column.height)
+            .expect("retained light must decode with the terrain");
+        assert_eq!(restored.retained_light(), Some(&light));
+    }
+
+    #[test]
+    fn malformed_retained_light_array_is_rejected() {
+        let nbt = Nbt::Compound(vec![
+            ("isLightOn".to_owned(), Nbt::Byte(1)),
+            (
+                "sections".to_owned(),
+                Nbt::List {
+                    element_type: NbtTag::Compound,
+                    elements: vec![Nbt::Compound(vec![
+                        ("Y".to_owned(), Nbt::Byte(-1)),
+                        ("SkyLight".to_owned(), Nbt::ByteArray(vec![0; 1])),
+                    ])],
+                },
+            ),
+        ]);
+
+        let error = column_from_nbt(&nbt, 0, 16).expect_err("short light arrays must fail closed");
+        assert!(
+            matches!(error, Error::InvalidLight { actual: 1, .. }),
+            "unexpected malformed-light error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn block_mutation_invalidates_the_retained_snapshot() {
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_retained_light(ColumnLight::new(column.section_count()));
+        assert!(column.retained_light().is_some());
+
+        column.set_block(1, 1, 1, "minecraft:stone");
+
+        assert!(column.retained_light().is_none());
     }
 }
 

@@ -1678,9 +1678,14 @@ fn decode_native_chunk(
     height: i32,
     record: StorageRecord,
 ) -> Result<NativeChunkRecord, ChunkRecordError> {
-    let (column, (block_scheduled_ticks, fluid_scheduled_ticks), light) =
+    let (mut column, (block_scheduled_ticks, fluid_scheduled_ticks), light) =
         decode_chunk(column_x, column_z, min_y, height, record)?;
     let light = light.ok_or(ChunkRecordError::MissingStoredLight)?;
+    // Native reload returns a column that can flow directly back into the
+    // serving source. Keep the decoded light beside the terrain as well as in
+    // the typed record, so an initial packet consumes the persisted snapshot
+    // instead of recomputing it after restart.
+    column.set_retained_light(light.clone());
     Ok(NativeChunkRecord {
         column,
         light,
@@ -3716,6 +3721,11 @@ mod tests {
             snapshot[0].record.light.sky(1),
             &lodestone_world::LightData::Uniform(13),
             "a snapshot returns the complete canonical-light record, not terrain alone"
+        );
+        assert_eq!(
+            snapshot[0].record.column.retained_light(),
+            Some(&snapshot[0].record.light),
+            "a native reload must attach persisted light to the serving column"
         );
         assert_eq!(
             snapshot[1].record.column.block_state(3, 4, 5),

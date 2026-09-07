@@ -2311,6 +2311,23 @@ pub trait ServerProtocol: Send + Sync {
         self.try_encode_chunk_with_neighbours(cx, cz, column, neighbours)
     }
 
+    /// Computes the exact light snapshot to retain for a fresh initial chunk.
+    ///
+    /// A source calls this only after the centre and every contributing
+    /// neighbour have been admitted and the source's light fence has completed.
+    /// The default keeps existing protocol families on their ordinary light
+    /// computation; a family with a distinct initial wire representation may
+    /// override it. The resulting snapshot is stored on the resident column
+    /// and is later consumed verbatim by the initial chunk encoder.
+    fn compute_initial_column_light_with_neighbours_in_dimension(
+        &self,
+        column: &ChunkColumn,
+        neighbours: &[(i32, i32, ChunkColumn)],
+        dimension: Dimension,
+    ) -> Option<lodestone_world::ColumnLight> {
+        self.compute_column_light_with_neighbours_in_dimension(column, neighbours, dimension)
+    }
+
     /// The same encoder as [`encode_chunk`](Self::encode_chunk), detached from
     /// `&self` so it can be **moved into the blocking worker that generated the
     /// column** — see [`ChunkEncoder`] for the measurement that made this
@@ -2407,6 +2424,15 @@ pub trait ServerProtocol: Send + Sync {
     /// computes light. The default preserves the isolated light compute for
     /// families that have not adopted cross-column propagation.
     fn uses_cross_column_light(&self) -> bool {
+        false
+    }
+
+    /// Whether the server should settle and retain the exact light snapshot
+    /// consumed by this family's initial chunk packet. Legacy families leave
+    /// this disabled because they do not consume the retained representation;
+    /// an opting-in family must make its initial encoder prefer the column's
+    /// retained snapshot over a fresh reconstruction.
+    fn retains_initial_column_light(&self) -> bool {
         false
     }
 
@@ -3777,6 +3803,19 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         )
     }
 
+    fn compute_initial_column_light_with_neighbours_in_dimension(
+        &self,
+        column: &ChunkColumn,
+        neighbours: &[(i32, i32, ChunkColumn)],
+        dimension: Dimension,
+    ) -> Option<lodestone_world::ColumnLight> {
+        (**self).compute_initial_column_light_with_neighbours_in_dimension(
+            column,
+            neighbours,
+            dimension,
+        )
+    }
+
     fn chunk_encoder(&self) -> Option<std::sync::Arc<dyn ChunkEncoder>> {
         (**self).chunk_encoder()
     }
@@ -3808,6 +3847,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn uses_cross_column_light(&self) -> bool {
         (**self).uses_cross_column_light()
+    }
+
+    fn retains_initial_column_light(&self) -> bool {
+        (**self).retains_initial_column_light()
     }
 
     fn compute_column_light_with_neighbours(

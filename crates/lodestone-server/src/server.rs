@@ -89,8 +89,8 @@ use crate::brewing::{Bottle, BottleKind, is_ingredient};
 use crate::composter::{InsertOutcome, compostable_chance};
 use crate::command::{CommandCaller, CommandDispatch, CommandSession};
 use crate::chunk::{
-    AIR, ChunkColumn, ChunkSource, generate_columns_offloaded, generate_columns_parallel,
-    is_air_or_fluid, is_water,
+    AIR, ChunkColumn, ColumnLightSettlementError, ChunkSource, generate_columns_offloaded,
+    generate_columns_parallel, is_air_or_fluid, is_water,
 };
 use crate::fall::{FallSample, FallTracker};
 use crate::container_click::{
@@ -1601,10 +1601,9 @@ where
     }
     let mut batch = vec![proto.begin_chunk_batch()];
     let count = update.added.len() as i32;
-    // Only the `Shared` arm can offload (a borrowed source is not `'static`), which
-    // is the same fork `SourceRef` already encodes; both arms emit the same bytes in
-    // the same order.
-    let offloaded = if proto.uses_cross_column_light() {
+    // Only a one-column protocol can offload (a borrowed source is not `'static'`):
+    // cross-column and retained-initial protocols must settle their source state inline.
+    let offloaded = if proto.uses_cross_column_light() || proto.retains_initial_column_light() {
         None
     } else {
         match source {
@@ -2436,19 +2435,91 @@ fn encode_chunk_with_source<P: ServerProtocol>(
     let dimension = source
         .dimension()
         .unwrap_or(crate::dimension::Dimension::Overworld);
-    if !proto.uses_cross_column_light() {
+    if !proto.retains_initial_column_light() {
         return proto.try_encode_chunk_in_dimension(cx, cz, column, dimension);
     }
-    let neighbours = (-1..=1)
+    // The initial packet must be based on a complete, settled 3×3 footprint.
+    // Prefer the source's current centre copy because another admission may
+    // already have installed a newer retained snapshot than the argument held
+    // by the streaming queue. The source's settlement transaction validates
+    // that this copy remains current after the potentially expensive light
+    // computation.
+    let neighbour_offsets = light_neighbour_offsets(proto.uses_cross_column_light());
+    let mut fallback = source
+        .resident_column(cx, cz)
+        .unwrap_or_else(|| column.clone());
+    for attempt in 0..=LIGHT_SETTLEMENT_OPTIMISTIC_RETRIES {
+        let mut captured_neighbours = Vec::new();
+        let exclusive = attempt == LIGHT_SETTLEMENT_OPTIMISTIC_RETRIES;
+        let mut compute = |centre: &ChunkColumn, neighbours: &[(i32, i32, ChunkColumn)]| {
+            captured_neighbours = neighbours.to_vec();
+            proto.compute_initial_column_light_with_neighbours_in_dimension(
+                centre,
+                neighbours,
+                dimension,
+            )
+        };
+        match source.settle_resident_column_light_with_neighbours(
+            cx,
+            cz,
+            &fallback,
+            &neighbour_offsets,
+            false,
+            false,
+            exclusive,
+            &mut compute,
+        ) {
+            Ok(centre) => {
+                return proto.try_encode_chunk_with_neighbours_in_dimension(
+                    cx,
+                    cz,
+                    &centre,
+                    &captured_neighbours,
+                    dimension,
+                );
+            }
+            Err(ColumnLightSettlementError::NoLight) => {
+                return proto.try_encode_chunk_with_neighbours_in_dimension(
+                    cx,
+                    cz,
+                    &fallback,
+                    &captured_neighbours,
+                    dimension,
+                );
+            }
+            Err(ColumnLightSettlementError::MissingFootprint) => {
+                return Err(ChunkEncodeError::new(
+                    "initial retained-light settlement lost its source footprint",
+                ));
+            }
+            Err(ColumnLightSettlementError::Conflict) if !exclusive => {
+                // A dependency write completed after capture. Retry from the
+                // current source view so the next light snapshot describes the
+                // newer blocks rather than the rejected one.
+                fallback = source
+                    .resident_column(cx, cz)
+                    .unwrap_or_else(|| source.column(cx, cz));
+            }
+            Err(ColumnLightSettlementError::Conflict) => {
+                return Err(ChunkEncodeError::new(
+                    "initial retained-light settlement remained unstable after the exclusive retry",
+                ));
+            }
+        }
+    }
+    unreachable!("the bounded initial-light settlement loop always returns")
+}
+
+const LIGHT_SETTLEMENT_OPTIMISTIC_RETRIES: usize = 3;
+
+fn light_neighbour_offsets(cross_column: bool) -> Vec<(i32, i32)> {
+    if !cross_column {
+        return Vec::new();
+    }
+    (-1..=1)
         .flat_map(|dz| (-1..=1).map(move |dx| (dx, dz)))
         .filter(|&(dx, dz)| (dx, dz) != (0, 0))
-        .filter_map(|(dx, dz)| {
-            source
-                .resident_column(cx + dx, cz + dz)
-                .map(|column| (dx, dz, column))
-        })
-        .collect::<Vec<_>>();
-    proto.try_encode_chunk_with_neighbours_in_dimension(cx, cz, column, &neighbours, dimension)
+        .collect()
 }
 
 fn encode_column<P: ServerProtocol, S: ChunkSource + 'static>(
@@ -5734,22 +5805,67 @@ where
     P: ServerProtocol,
     S: ChunkSource + ?Sized,
 {
-    let column = source.column(cx, cz);
     let dimension = source
         .dimension()
         .unwrap_or(crate::dimension::Dimension::Overworld);
-    // Both halves have to be present for the cheap path: a family that can
-    // compute light but not encode the packet (or the reverse) would otherwise
-    // silently send nothing, which is the exact island this replaces.
-    let light = if proto.uses_cross_column_light() {
-        let neighbours = (-1..=1)
-            .flat_map(|dz| (-1..=1).map(move |dx| (dx, dz)))
-            .filter(|&(dx, dz)| (dx, dz) != (0, 0))
-            .map(|(dx, dz)| (dx, dz, source.column(cx + dx, cz + dz)))
-            .collect::<Vec<_>>();
-        proto.compute_column_light_with_neighbours_in_dimension(&column, &neighbours, dimension)
+    let (column, light) = if proto.retains_initial_column_light() {
+        let neighbour_offsets = light_neighbour_offsets(proto.uses_cross_column_light());
+        let mut fallback = source.column(cx, cz);
+        'settle: {
+            for attempt in 0..=LIGHT_SETTLEMENT_OPTIMISTIC_RETRIES {
+            let exclusive = attempt == LIGHT_SETTLEMENT_OPTIMISTIC_RETRIES;
+            let mut compute = |candidate: &ChunkColumn,
+                               neighbours: &[(i32, i32, ChunkColumn)]| {
+                if proto.uses_cross_column_light() {
+                    proto.compute_column_light_with_neighbours_in_dimension(
+                        candidate,
+                        neighbours,
+                        dimension,
+                    )
+                } else {
+                    proto.compute_column_light_in_dimension(candidate, dimension)
+                }
+            };
+            match source.settle_resident_column_light_with_neighbours(
+                cx,
+                cz,
+                &fallback,
+                &neighbour_offsets,
+                false,
+                true,
+                exclusive,
+                &mut compute,
+            ) {
+                Ok(column) => break 'settle (column.clone(), column.retained_light().cloned()),
+                Err(ColumnLightSettlementError::NoLight)
+                | Err(ColumnLightSettlementError::MissingFootprint) => {
+                    break 'settle (fallback, None)
+                }
+                Err(ColumnLightSettlementError::Conflict) if !exclusive => {
+                    fallback = source.column(cx, cz);
+                }
+                Err(ColumnLightSettlementError::Conflict) => return Ok(()),
+            }
+            }
+            unreachable!("the bounded dynamic-light settlement loop always returns")
+        }
     } else {
-        proto.compute_column_light_in_dimension(&column, dimension)
+        let column = source.column(cx, cz);
+        // Both halves have to be present for the cheap path: a family that can
+        // compute light but not encode the packet (or the reverse) would
+        // otherwise silently send nothing, which is the exact island this
+        // replaces.
+        let light = if proto.uses_cross_column_light() {
+            let neighbours = (-1..=1)
+                .flat_map(|dz| (-1..=1).map(move |dx| (dx, dz)))
+                .filter(|&(dx, dz)| (dx, dz) != (0, 0))
+                .map(|(dx, dz)| (dx, dz, source.column(cx + dx, cz + dz)))
+                .collect::<Vec<_>>();
+            proto.compute_column_light_with_neighbours_in_dimension(&column, &neighbours, dimension)
+        } else {
+            proto.compute_column_light_in_dimension(&column, dimension)
+        };
+        (column, light)
     };
     if let Some(light) = light {
         let directive = proto.encode_light_update(cx, cz, &light);
@@ -5760,7 +5876,7 @@ where
     }
     // Fallback: the whole-column resend, inside the same
     // `begin_chunk_batch`/`end_chunk_batch` pair every other chunk send in this
-    // module uses — vanilla's flow control counts batches, so a bare
+    // module uses — the batch accounting counts these directives, so a bare
     // `encode_chunk` outside one leaves the client's accounting short.
     apply(conn, state, proto.begin_chunk_batch()).await?;
     let directive = match proto.try_encode_chunk_in_dimension(cx, cz, &column, dimension) {
@@ -5816,16 +5932,63 @@ where
     S: ChunkSource + ?Sized,
 {
     let radius = i32::from(proto.uses_cross_column_light());
-    let Some((column, neighbours)) = resident_light_neighbourhood(source, cx, cz, radius) else {
-        return Ok(());
-    };
     let dimension = source
         .dimension()
         .unwrap_or(crate::dimension::Dimension::Overworld);
-    let light = if radius != 0 {
-        proto.compute_column_light_with_neighbours_in_dimension(&column, &neighbours, dimension)
+    let (column, light) = if proto.retains_initial_column_light() {
+        let neighbour_offsets = light_neighbour_offsets(proto.uses_cross_column_light());
+        let Some(mut fallback) = source.resident_column(cx, cz) else {
+            return Ok(());
+        };
+        'settle: {
+            for attempt in 0..=LIGHT_SETTLEMENT_OPTIMISTIC_RETRIES {
+            let exclusive = attempt == LIGHT_SETTLEMENT_OPTIMISTIC_RETRIES;
+            let mut compute = |candidate: &ChunkColumn,
+                               neighbours: &[(i32, i32, ChunkColumn)]| {
+                if radius != 0 {
+                    proto.compute_column_light_with_neighbours_in_dimension(
+                        candidate,
+                        neighbours,
+                        dimension,
+                    )
+                } else {
+                    proto.compute_column_light_in_dimension(candidate, dimension)
+                }
+            };
+            match source.settle_resident_column_light_with_neighbours(
+                cx,
+                cz,
+                &fallback,
+                &neighbour_offsets,
+                true,
+                true,
+                exclusive,
+                &mut compute,
+            ) {
+                Ok(column) => break 'settle (column.clone(), column.retained_light().cloned()),
+                Err(ColumnLightSettlementError::MissingFootprint) => return Ok(()),
+                Err(ColumnLightSettlementError::NoLight) => break 'settle (fallback, None),
+                Err(ColumnLightSettlementError::Conflict) if !exclusive => {
+                    let Some(current) = source.resident_column(cx, cz) else {
+                        return Ok(());
+                    };
+                    fallback = current;
+                }
+                Err(ColumnLightSettlementError::Conflict) => return Ok(()),
+            }
+            }
+            unreachable!("the bounded resident-light settlement loop always returns")
+        }
     } else {
-        proto.compute_column_light_in_dimension(&column, dimension)
+        let Some((column, neighbours)) = resident_light_neighbourhood(source, cx, cz, radius) else {
+            return Ok(());
+        };
+        let light = if radius != 0 {
+            proto.compute_column_light_with_neighbours_in_dimension(&column, &neighbours, dimension)
+        } else {
+            proto.compute_column_light_in_dimension(&column, dimension)
+        };
+        (column, light)
     };
     if let Some(light) = light {
         let directive = proto.encode_light_update(cx, cz, &light);
@@ -16545,7 +16708,9 @@ mod tests {
 
     struct ColdColumnSource {
         column_reads: AtomicUsize,
+        store_calls: AtomicUsize,
         resident: bool,
+        center_only: bool,
     }
 
     impl ChunkSource for ColdColumnSource {
@@ -16554,8 +16719,9 @@ mod tests {
             ChunkColumn::new(0, 256)
         }
 
-        fn resident_column(&self, _cx: i32, _cz: i32) -> Option<ChunkColumn> {
-            self.resident.then(|| ChunkColumn::new(0, 256))
+        fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
+            (self.resident && (!self.center_only || (cx, cz) == (0, 0)))
+                .then(|| ChunkColumn::new(0, 256))
         }
 
         fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
@@ -16567,6 +16733,332 @@ mod tests {
         }
 
         fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+
+        fn store_resident_column(
+            &self,
+            _cx: i32,
+            _cz: i32,
+            _column: &ChunkColumn,
+        ) -> bool {
+            self.store_calls.fetch_add(1, Ordering::Relaxed);
+            true
+        }
+    }
+
+    /// Exercises the actual initial-settlement consumer across the persistent
+    /// source and cache layers. The light is deliberately supplied by the
+    /// protocol's compute hook and then recovered only from the saved column;
+    /// the test never installs a snapshot directly on a fixture column.
+    #[derive(Debug)]
+    struct RetainedLifecycleProtocol {
+        computes: Arc<AtomicUsize>,
+        retain_initial_light: bool,
+        fallback_encodes: Arc<AtomicUsize>,
+    }
+
+    impl ServerProtocol for RetainedLifecycleProtocol {
+        fn decode(&self, _state: State, _packet_id: i32, _payload: &[u8]) -> ServerBound {
+            ServerBound::Ignored
+        }
+
+        fn login_success(&self, _username: &str, _uuid: Uuid) -> Vec<ServerDirective> {
+            Vec::new()
+        }
+
+        fn begin_configuration(&self) -> Vec<ServerDirective> {
+            Vec::new()
+        }
+
+        fn begin_play(&self, _view_radius: i32) -> Vec<ServerDirective> {
+            Vec::new()
+        }
+
+        fn begin_chunk_batch(&self) -> ServerDirective {
+            ServerDirective::None
+        }
+
+        fn encode_chunk(&self, _cx: i32, _cz: i32, _column: &ChunkColumn) -> ServerDirective {
+            ServerDirective::None
+        }
+
+        fn try_encode_chunk_in_dimension(
+            &self,
+            _cx: i32,
+            _cz: i32,
+            _column: &ChunkColumn,
+            _dimension: crate::dimension::Dimension,
+        ) -> Result<ServerDirective, ChunkEncodeError> {
+            if self.retain_initial_light {
+                self.fallback_encodes.fetch_add(1, Ordering::AcqRel);
+                return Ok(ServerDirective::Send {
+                    packet_id: 2,
+                    payload: Vec::new(),
+                });
+            }
+            Ok(ServerDirective::None)
+        }
+
+        fn try_encode_chunk_with_neighbours_in_dimension(
+            &self,
+            _cx: i32,
+            _cz: i32,
+            column: &ChunkColumn,
+            _neighbours: &[(i32, i32, ChunkColumn)],
+            _dimension: crate::dimension::Dimension,
+        ) -> Result<ServerDirective, ChunkEncodeError> {
+            let light = column
+                .retained_light()
+                .expect("the production initial consumer must attach retained light first");
+            let mut writer = lodestone_core::Writer::default();
+            light.encode(&mut writer);
+            Ok(ServerDirective::Send {
+                packet_id: 1,
+                payload: writer.as_slice().to_vec(),
+            })
+        }
+
+        fn compute_initial_column_light_with_neighbours_in_dimension(
+            &self,
+            column: &ChunkColumn,
+            neighbours: &[(i32, i32, ChunkColumn)],
+            _dimension: crate::dimension::Dimension,
+        ) -> Option<lodestone_world::ColumnLight> {
+            assert_eq!(neighbours.len(), 8, "initial settlement must admit the full footprint");
+            self.computes.fetch_add(1, Ordering::AcqRel);
+            let mut light = lodestone_world::ColumnLight::new(column.section_count());
+            *light.sky_mut(0) = lodestone_world::LightData::Uniform(4);
+            *light.sky_mut(1) = lodestone_world::LightData::Uniform(12);
+            *light.block_mut(2) = lodestone_world::LightData::Uniform(6);
+            Some(light)
+        }
+
+        fn uses_cross_column_light(&self) -> bool {
+            true
+        }
+
+        fn retains_initial_column_light(&self) -> bool {
+            self.retain_initial_light
+        }
+
+        fn end_chunk_batch(&self, _batch_size: i32) -> ServerDirective {
+            ServerDirective::None
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn retained_light_survives_source_cache_save_reload_and_initial_encode() {
+        let world_dir = tempfile::tempdir().expect("create retained-light lifecycle world");
+        let region = crate::region_source::RegionChunkSource::new(
+            OneColumnSource,
+            world_dir.path(),
+            crate::dimension::Dimension::End,
+            0,
+            256,
+        )
+        .expect("open retained-light lifecycle source");
+        let save = region.save_handle();
+        let store = crate::chunk_store::ChunkStore::with_capacity(region.clone(), 64);
+        let source = crate::dimension::DimensionalSource::alone(
+            store,
+            crate::dimension::Dimension::End,
+            crate::portal::PortalIndex::default(),
+        );
+        let protocol = RetainedLifecycleProtocol {
+            computes: Arc::new(AtomicUsize::new(0)),
+            retain_initial_light: true,
+            fallback_encodes: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let first_column = source.column(0, 0);
+        let first = encode_chunk_with_source(&protocol, &source, 0, 0, &first_column)
+            .expect("settle and encode the first End column");
+        let first_light = source
+            .resident_column(0, 0)
+            .expect("settled center remains resident")
+            .retained_light()
+            .cloned()
+            .expect("settlement must retain its exact light");
+        assert_eq!(protocol.computes.load(Ordering::Acquire), 1);
+        let first_payload = match first {
+            ServerDirective::Send { payload, .. } => payload,
+            other => panic!("initial lifecycle encode emitted {other:?}"),
+        };
+        assert_eq!(first_light.sky(0), &lodestone_world::LightData::Uniform(4));
+        assert_eq!(first_light.sky(1), &lodestone_world::LightData::Uniform(12));
+        assert_eq!(first_light.block(2), &lodestone_world::LightData::Uniform(6));
+
+        assert_eq!(save.save().expect("persist the settled light snapshot"), 1);
+        drop(source);
+        drop(region);
+        drop(save);
+
+        let reloaded_region = crate::region_source::RegionChunkSource::new(
+            OneColumnSource,
+            world_dir.path(),
+            crate::dimension::Dimension::End,
+            0,
+            256,
+        )
+        .expect("reopen retained-light lifecycle source");
+        let reloaded_store = crate::chunk_store::ChunkStore::with_capacity(
+            reloaded_region,
+            64,
+        );
+        let reloaded_source = crate::dimension::DimensionalSource::alone(
+            reloaded_store,
+            crate::dimension::Dimension::End,
+            crate::portal::PortalIndex::default(),
+        );
+        let reloaded_column = reloaded_source.column(0, 0);
+        assert_eq!(
+            reloaded_column.retained_light(),
+            Some(&first_light),
+            "reload must restore the persisted snapshot on the serving column"
+        );
+        let replay = encode_chunk_with_source(
+            &protocol,
+            &reloaded_source,
+            0,
+            0,
+            &reloaded_column,
+        )
+        .expect("encode the reloaded End column");
+        let replay_payload = match replay {
+            ServerDirective::Send { payload, .. } => payload,
+            other => panic!("reloaded lifecycle encode emitted {other:?}"),
+        };
+        assert_eq!(
+            replay_payload, first_payload,
+            "initial encode must consume the persisted light verbatim"
+        );
+        assert_eq!(
+            protocol.computes.load(Ordering::Acquire),
+            1,
+            "reload serving must not recompute a retained snapshot"
+        );
+    }
+
+    /// A legacy family that does not consume retained snapshots must keep the
+    /// one-column path: no neighbour generation, light settlement, or source
+    /// persistence is admitted merely because it can compute cross-column
+    /// light in another context.
+    #[test]
+    fn legacy_initial_encode_does_not_admit_retained_light_settlement() {
+        let source = ColdColumnSource {
+            column_reads: AtomicUsize::new(0),
+            store_calls: AtomicUsize::new(0),
+            resident: true,
+            center_only: false,
+        };
+        let computes = Arc::new(AtomicUsize::new(0));
+        let protocol = RetainedLifecycleProtocol {
+            computes: Arc::clone(&computes),
+            retain_initial_light: false,
+            fallback_encodes: Arc::new(AtomicUsize::new(0)),
+        };
+        let column = ChunkColumn::new(0, 256);
+        assert!(matches!(
+            encode_chunk_with_source(&protocol, &source, 0, 0, &column),
+            Ok(ServerDirective::None)
+        ));
+        assert_eq!(source.column_reads.load(Ordering::Relaxed), 0);
+        assert_eq!(source.store_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(computes.load(Ordering::Relaxed), 0);
+    }
+
+    /// The production stack may serve many light-only columns before an
+    /// autosave. Region persistence owns those dirty snapshots until the save
+    /// acknowledges each cache eviction, then releases the evicted records;
+    /// the next session still restores an evicted column's exact light.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn light_only_settlement_is_bounded_after_save_and_survives_reload() {
+        let world_dir = tempfile::tempdir().expect("create bounded retained-light world");
+        let region = crate::region_source::RegionChunkSource::new(
+            OneColumnSource,
+            world_dir.path(),
+            crate::dimension::Dimension::End,
+            0,
+            256,
+        )
+        .expect("open bounded retained-light source");
+        let save = region.save_handle();
+        let store = crate::chunk_store::ChunkStore::with_capacity(region.clone(), 2);
+        let source = crate::dimension::DimensionalSource::alone(
+            store,
+            crate::dimension::Dimension::End,
+            crate::portal::PortalIndex::default(),
+        );
+        let protocol = RetainedLifecycleProtocol {
+            computes: Arc::new(AtomicUsize::new(0)),
+            retain_initial_light: true,
+            fallback_encodes: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let mut expected = None;
+        for cx in 0..6 {
+            let column = source.column(cx, 0);
+            encode_chunk_with_source(&protocol, &source, cx, 0, &column)
+                .expect("settle and encode a production light snapshot");
+            if cx == 0 {
+                expected = Some(
+                    source
+                        .column(cx, 0)
+                        .retained_light()
+                        .cloned()
+                        .expect("the first settlement must carry light"),
+                );
+            }
+        }
+        assert_eq!(protocol.computes.load(Ordering::Acquire), 6);
+        assert_eq!(
+            region.retained_columns(),
+            6,
+            "the pending save must see every dirty light snapshot"
+        );
+
+        assert_eq!(save.save().expect("save all settled snapshots"), 6);
+        assert!(
+            region.retained_columns() <= 2,
+            "after acknowledgement only the bounded resident tail may remain"
+        );
+        let expected = expected.expect("capture the first settled snapshot");
+
+        drop(source);
+        drop(region);
+        drop(save);
+
+        let reloaded_region = crate::region_source::RegionChunkSource::new(
+            OneColumnSource,
+            world_dir.path(),
+            crate::dimension::Dimension::End,
+            0,
+            256,
+        )
+        .expect("reopen bounded retained-light source");
+        let reloaded_store = crate::chunk_store::ChunkStore::with_capacity(
+            reloaded_region,
+            2,
+        );
+        let reloaded_source = crate::dimension::DimensionalSource::alone(
+            reloaded_store,
+            crate::dimension::Dimension::End,
+            crate::portal::PortalIndex::default(),
+        );
+        let reloaded_column = reloaded_source.column(0, 0);
+        assert_eq!(
+            reloaded_column.retained_light(),
+            Some(&expected),
+            "an evicted light-only column must restore its saved snapshot"
+        );
+        encode_chunk_with_source(&protocol, &reloaded_source, 0, 0, &reloaded_column)
+            .expect("encode the reloaded retained snapshot");
+        assert_eq!(
+            protocol.computes.load(Ordering::Acquire),
+            6,
+            "serving a persisted snapshot must not recompute it"
+        );
     }
 
     struct EndGatewaySource {
@@ -16600,7 +17092,9 @@ mod tests {
     fn tick_relight_requires_a_resident_light_footprint_without_generating() {
         let cold = ColdColumnSource {
             column_reads: AtomicUsize::new(0),
+            store_calls: AtomicUsize::new(0),
             resident: false,
+            center_only: false,
         };
         assert!(resident_light_neighbourhood(&cold, 0, 0, 1).is_none());
         assert_eq!(
@@ -16611,7 +17105,9 @@ mod tests {
 
         let warm = ColdColumnSource {
             column_reads: AtomicUsize::new(0),
+            store_calls: AtomicUsize::new(0),
             resident: true,
+            center_only: false,
         };
         let (_, neighbours) = resident_light_neighbourhood(&warm, 0, 0, 1)
             .expect("a resident 3x3 footprint must be available for a live relight");
@@ -16620,6 +17116,70 @@ mod tests {
             warm.column_reads.load(Ordering::Relaxed),
             0,
             "a complete resident footprint must also avoid the generating accessor"
+        );
+    }
+
+    #[tokio::test]
+    async fn retained_tick_relight_defers_missing_footprint_but_keeps_no_light_fallback() {
+        let source = ColdColumnSource {
+            column_reads: AtomicUsize::new(0),
+            store_calls: AtomicUsize::new(0),
+            resident: true,
+            center_only: true,
+        };
+        let protocol = RetainedLifecycleProtocol {
+            computes: Arc::new(AtomicUsize::new(0)),
+            retain_initial_light: true,
+            fallback_encodes: Arc::new(AtomicUsize::new(0)),
+        };
+        let (client_end, server_end) = lodestone_net::memory_pair();
+        let mut conn = Connection::new(server_end);
+        let mut state = State::Play;
+
+        send_resident_column_light(&mut conn, &protocol, &source, &mut state, 0, 0)
+            .await
+            .expect("a missing resident footprint defers the tick relight");
+        assert_eq!(
+            protocol.fallback_encodes.load(Ordering::Acquire),
+            0,
+            "missing resident neighbours must not fall back to an isolated full-column packet"
+        );
+        assert_eq!(
+            source.column_reads.load(Ordering::Acquire),
+            0,
+            "the resident-only path must not generate a missing neighbour"
+        );
+        assert_eq!(
+            source.store_calls.load(Ordering::Acquire),
+            0,
+            "a deferred relight must not persist a partial footprint"
+        );
+        drop(conn);
+        drop(client_end);
+
+        // A complete footprint with a protocol that genuinely has no light
+        // result remains on the existing compatible full-column fallback.
+        let source = ColdColumnSource {
+            column_reads: AtomicUsize::new(0),
+            store_calls: AtomicUsize::new(0),
+            resident: true,
+            center_only: false,
+        };
+        let protocol = RetainedLifecycleProtocol {
+            computes: Arc::new(AtomicUsize::new(0)),
+            retain_initial_light: true,
+            fallback_encodes: Arc::new(AtomicUsize::new(0)),
+        };
+        let (_client_end, server_end) = lodestone_net::memory_pair();
+        let mut conn = Connection::new(server_end);
+        let mut state = State::Play;
+        send_resident_column_light(&mut conn, &protocol, &source, &mut state, 0, 0)
+            .await
+            .expect("a genuine protocol no-light result keeps the fallback");
+        assert_eq!(
+            protocol.fallback_encodes.load(Ordering::Acquire),
+            1,
+            "a genuine no-light result must remain distinguishable from a missing footprint"
         );
     }
 

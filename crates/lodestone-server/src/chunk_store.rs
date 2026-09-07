@@ -218,9 +218,10 @@
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry as MapEntry;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 
-use crate::chunk::{ChunkColumn, ChunkSource};
+use crate::chunk::{ChunkColumn, ColumnLightSettlementError, ChunkSource};
 use crate::chunk_lifecycle::{ChunkLifecycleHandoff, ChunkLifecyclePlan};
 use crate::ticket::{TicketDelta, TicketKind, TicketOwner, TicketStoreHandle};
 
@@ -591,6 +592,228 @@ impl Cache {
     }
 }
 
+/// Per-coordinate serialization for writes that update both retention layers.
+///
+/// The cache mutex cannot cover the wrapped source callback: a persistent
+/// source may perform filesystem work, and holding the global cache lock across
+/// that callback would stall unrelated columns. A plain unlock between the two
+/// layers is also incorrect, though: an older light snapshot can reach the
+/// source after a newer block mutation and overwrite it. Weak entries keep this
+/// coordination table bounded by coordinates with an active snapshot or writer.
+#[derive(Debug)]
+struct ChunkWriteState {
+    held: AtomicBool,
+    revision: AtomicU64,
+}
+
+struct ChunkWriteObservation {
+    chunk: (i32, i32),
+    state: Arc<ChunkWriteState>,
+    revision: u64,
+    column: ChunkColumn,
+}
+
+struct ChunkWriteSnapshot {
+    observations: Vec<ChunkWriteObservation>,
+}
+
+/// A canonical, multi-coordinate write lease. The table mutex is held only
+/// while the lease claims or releases its coordinate records; the lease itself
+/// does not hold the global cache mutex, so an expensive light computation can
+/// run with the cache available to unrelated coordinates.
+struct ChunkWriteLease<'a> {
+    gates: &'a ChunkWriteGates,
+    coordinates: Vec<(i32, i32)>,
+    states: Vec<Arc<ChunkWriteState>>,
+    bump_revision: bool,
+}
+
+impl Drop for ChunkWriteLease<'_> {
+    fn drop(&mut self) {
+        let _state = self
+            .gates
+            .state
+            .lock()
+            .expect("chunk write-gate table poisoned");
+        for state in &self.states {
+            if self.bump_revision {
+                state.revision.fetch_add(1, Ordering::AcqRel);
+            }
+            state.held.store(false, Ordering::Release);
+        }
+        self.gates.wake.notify_all();
+    }
+}
+
+#[derive(Debug, Default)]
+struct ChunkWriteGates {
+    state: Mutex<HashMap<(i32, i32), Weak<ChunkWriteState>>>,
+    wake: Condvar,
+}
+
+impl ChunkWriteGates {
+    fn state_for_locked(
+        state: &mut HashMap<(i32, i32), Weak<ChunkWriteState>>,
+        chunk: (i32, i32),
+    ) -> Arc<ChunkWriteState> {
+        if let Some(gate) = state.get(&chunk).and_then(Weak::upgrade) {
+            return gate;
+        }
+        let gate = Arc::new(ChunkWriteState {
+            held: AtomicBool::new(false),
+            revision: AtomicU64::new(0),
+        });
+        state.insert(chunk, Arc::downgrade(&gate));
+        gate
+    }
+
+    /// Acquires one or more coordinate gates in canonical `(cx, cz)` order.
+    /// Claiming the sorted set under the table mutex avoids lock inversion when
+    /// adjacent columns settle concurrently, while the condition variable
+    /// keeps a contended admission finite rather than spinning.
+    fn acquire_many<'a>(
+        &'a self,
+        chunks: &[(i32, i32)],
+        bump_revision: bool,
+    ) -> ChunkWriteLease<'a> {
+        let mut canonical = chunks.to_vec();
+        canonical.sort_unstable();
+        canonical.dedup();
+        loop {
+            let mut state = self
+                .state
+                .lock()
+                .expect("chunk write-gate table poisoned");
+            state.retain(|_, gate| gate.strong_count() != 0);
+            let records = canonical
+                .iter()
+                .map(|&chunk| (chunk, Self::state_for_locked(&mut state, chunk)))
+                .collect::<Vec<_>>();
+            if records
+                .iter()
+                .any(|(_, record)| record.held.load(Ordering::Acquire))
+            {
+                state = self
+                    .wake
+                    .wait(state)
+                    .expect("chunk write-gate table poisoned");
+                drop(state);
+                continue;
+            }
+            let states = records
+                .into_iter()
+                .map(|(_, record)| record)
+                .collect::<Vec<_>>();
+            for record in &states {
+                record.held.store(true, Ordering::Release);
+            }
+            drop(state);
+            return ChunkWriteLease {
+                gates: self,
+                coordinates: canonical,
+                states,
+                bump_revision,
+            };
+        }
+    }
+
+    /// Runs one same-coordinate cache/source write while holding its gate.
+    /// Callbacks must not re-enter a write for the same coordinate; source
+    /// implementations only receive the complete operation and do not call
+    /// back into the outer store.
+    fn with<R>(&self, chunk: (i32, i32), operation: impl FnOnce() -> R) -> R {
+        let lease = self.acquire_many(&[chunk], true);
+        let result = operation();
+        drop(lease);
+        result
+    }
+
+    /// Captures all requested columns while their coordinate gates are held.
+    /// The cache lock is held only by the caller's short `capture` operation;
+    /// no gate remains held while light computation runs.
+    fn snapshot_many(
+        &self,
+        chunks: &[(i32, i32)],
+        mut capture: impl FnMut((i32, i32)) -> Option<ChunkColumn>,
+    ) -> Result<ChunkWriteSnapshot, ()> {
+        let lease = self.acquire_many(chunks, false);
+        let observations = lease
+            .states
+            .iter()
+            .zip(lease.coordinates.iter().copied())
+            .map(|(state, chunk)| {
+                let column = capture(chunk)?;
+                let revision = state.revision.load(Ordering::Acquire);
+                Some(ChunkWriteObservation {
+                    chunk,
+                    state: Arc::clone(state),
+                    revision,
+                    column,
+                })
+            })
+            .collect::<Option<Vec<_>>>();
+        drop(lease);
+        observations
+            .map(|observations| ChunkWriteSnapshot { observations })
+            .ok_or(())
+    }
+
+    /// Captures all requested columns under an already-held lease. This is
+    /// used only by the bounded final settlement attempt, which keeps the
+    /// coordinate gates through compute and commit for guaranteed progress.
+    fn snapshot_while_held(
+        &self,
+        lease: &ChunkWriteLease<'_>,
+        mut capture: impl FnMut((i32, i32)) -> Option<ChunkColumn>,
+    ) -> Result<ChunkWriteSnapshot, ()> {
+        let observations = lease
+            .states
+            .iter()
+            .zip(lease.coordinates.iter().copied())
+            .map(|(state, chunk)| {
+                let column = capture(chunk)?;
+                let revision = state.revision.load(Ordering::Acquire);
+                Some(ChunkWriteObservation {
+                    chunk,
+                    state: Arc::clone(state),
+                    revision,
+                    column,
+                })
+            })
+            .collect::<Option<Vec<_>>>();
+        observations
+            .map(|observations| ChunkWriteSnapshot { observations })
+            .ok_or(())
+    }
+
+    /// Commits a computed snapshot only if no dependency write completed after
+    /// capture. All nine coordinate gates are claimed in canonical order before
+    /// validation, so the check and source/cache commit are one transaction.
+    fn try_commit<R>(
+        &self,
+        snapshot: ChunkWriteSnapshot,
+        commit: impl FnOnce() -> R,
+    ) -> Result<R, ()> {
+        let chunks = snapshot
+            .observations
+            .iter()
+            .map(|observation| observation.chunk)
+            .collect::<Vec<_>>();
+        let mut lease = self.acquire_many(&chunks, false);
+        if snapshot.observations.iter().any(|observation| {
+            observation.state.revision.load(Ordering::Acquire) != observation.revision
+        }) {
+            drop(lease);
+            return Err(());
+        }
+        let result = commit();
+        lease.bump_revision = true;
+        drop(lease);
+        Ok(result)
+    }
+
+}
+
 /// A [`ChunkSource`] that retains what it generates. See the module docs.
 pub(crate) struct ChunkStore<S> {
     source: S,
@@ -600,6 +823,9 @@ pub(crate) struct ChunkStore<S> {
     /// does not change when the slider moves.
     policy: CapacityPolicy,
     cache: Mutex<Cache>,
+    /// Same-coordinate write gate held from cache update through the wrapped
+    /// source callback. The cache lock itself remains short-lived.
+    write_gates: ChunkWriteGates,
     /// The only source-facing lifecycle owner. Cache mutation selects bounded
     /// load/release work first; this hand-off serializes source transitions for
     /// one coordinate through their acknowledgement without serializing
@@ -682,6 +908,7 @@ impl<S> ChunkStore<S> {
                 evicted: 0,
                 next_ticket_check: 0,
             }),
+            write_gates: ChunkWriteGates::default(),
             lifecycle: ChunkLifecycleHandoff::default(),
             tickets: TicketStoreHandle::new(),
         }
@@ -772,6 +999,12 @@ impl<S: ChunkSource> ChunkStore<S> {
         // doc for why this piggybacks on read traffic instead of a new
         // `run_tick_loop` parameter.
         self.maybe_tick_tickets();
+        // A cold generation is a same-coordinate write: it installs the
+        // generated value in the cache, and an uncached `set_block` writes the
+        // wrapped source. Keeping this gate from the miss check through the
+        // insertion makes those operations one ordering, so a stale in-flight
+        // generation cannot land after the edit that should supersede it.
+        let gate = self.write_gates.acquire_many(&[(cx, cz)], true);
         {
             let mut guard = self.lock();
             let cache = &mut *guard;
@@ -779,6 +1012,8 @@ impl<S: ChunkSource> ChunkStore<S> {
             if let Some(entry) = cache.columns.get_mut(&(cx, cz)) {
                 entry.last_used = stamp;
                 if entry.column.generation_stage() >= stage {
+                    drop(guard);
+                    drop(gate);
                     return None;
                 }
             }
@@ -805,6 +1040,8 @@ impl<S: ChunkSource> ChunkStore<S> {
         cache.generated += 1;
         let stamp = cache.next_stamp();
         if cache.capacity == 0 {
+            drop(guard);
+            drop(gate);
             return Some(fresh);
         }
         match cache.columns.entry((cx, cz)) {
@@ -827,6 +1064,7 @@ impl<S: ChunkSource> ChunkStore<S> {
         }
         let evicted = cache.evict_down_to_capacity();
         drop(guard);
+        drop(gate);
         // Outside the lock, deliberately: see `evict_down_to`. This is what
         // lets the layer beneath release a column it has already written, so
         // the edit map is not the process's real memory bound for a
@@ -998,6 +1236,108 @@ impl<S: ChunkSource> ChunkStore<S> {
             self.source.unload(assignment.chunk.0, assignment.chunk.1);
         });
     }
+
+    /// Replaces the cache entry and forwards the same complete value to the
+    /// wrapped source. The caller owns the coordinate write gate.
+    fn store_resident_column_inner(&self, cx: i32, cz: i32, column: &ChunkColumn) -> bool {
+        let cached = {
+            let mut guard = self.lock();
+            let cache = &mut *guard;
+            let stamp = cache.next_stamp();
+            if let Some(entry) = cache.columns.get_mut(&(cx, cz)) {
+                entry.column = column.clone();
+                entry.last_used = stamp;
+                true
+            } else {
+                false
+            }
+        };
+        // The cache and wrapped source are two distinct retention layers. Do
+        // not short-circuit on a cache hit: a persistent source still needs the
+        // exact snapshot for a future reload.
+        let stored = self.source.store_resident_column(cx, cz, column);
+        cached || stored
+    }
+
+    fn light_coordinates(
+        cx: i32,
+        cz: i32,
+        neighbour_offsets: &[(i32, i32)],
+    ) -> Vec<(i32, i32)> {
+        let mut coordinates = Vec::with_capacity(neighbour_offsets.len() + 1);
+        coordinates.push((cx, cz));
+        coordinates.extend(
+            neighbour_offsets
+                .iter()
+                .map(|&(dx, dz)| (cx + dx, cz + dz)),
+        );
+        coordinates.sort_unstable();
+        coordinates.dedup();
+        coordinates
+    }
+
+    fn capture_light_snapshot(
+        &self,
+        coordinates: &[(i32, i32)],
+        centre: (i32, i32),
+        fallback: &ChunkColumn,
+        resident_only: bool,
+    ) -> Result<ChunkWriteSnapshot, ColumnLightSettlementError> {
+        self.write_gates
+            .snapshot_many(coordinates, |(cx, cz)| {
+                self.read(cx, cz, ChunkColumn::clone)
+                    .or_else(|| self.source.resident_column(cx, cz))
+                    .or_else(|| {
+                        (!resident_only).then(|| self.source.column(cx, cz))
+                    })
+                    .or_else(|| (cx, cz).eq(&centre).then(|| fallback.clone()))
+            })
+            .map_err(|()| ColumnLightSettlementError::MissingFootprint)
+    }
+
+    fn capture_light_snapshot_while_held(
+        &self,
+        lease: &ChunkWriteLease<'_>,
+        centre: (i32, i32),
+        fallback: &ChunkColumn,
+        resident_only: bool,
+    ) -> Result<ChunkWriteSnapshot, ColumnLightSettlementError> {
+        self.write_gates
+            .snapshot_while_held(lease, |(cx, cz)| {
+                self.read(cx, cz, ChunkColumn::clone)
+                    .or_else(|| self.source.resident_column(cx, cz))
+                    .or_else(|| {
+                        (!resident_only).then(|| self.source.column(cx, cz))
+                    })
+                    .or_else(|| (cx, cz).eq(&centre).then(|| fallback.clone()))
+            })
+            .map_err(|()| ColumnLightSettlementError::MissingFootprint)
+    }
+
+    fn light_columns(
+        snapshot: &ChunkWriteSnapshot,
+        centre: (i32, i32),
+        neighbour_offsets: &[(i32, i32)],
+    ) -> Result<(ChunkColumn, Vec<(i32, i32, ChunkColumn)>), ColumnLightSettlementError> {
+        let centre_column = snapshot
+            .observations
+            .iter()
+            .find(|observation| observation.chunk == centre)
+            .map(|observation| observation.column.clone())
+            .ok_or(ColumnLightSettlementError::MissingFootprint)?;
+        let neighbours = neighbour_offsets
+            .iter()
+            .map(|&(dx, dz)| {
+                snapshot
+                    .observations
+                    .iter()
+                    .find(|observation| observation.chunk == (centre.0 + dx, centre.1 + dz))
+                    .map(|observation| (dx, dz, observation.column.clone()))
+                    .ok_or(ColumnLightSettlementError::MissingFootprint)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((centre_column, neighbours))
+    }
 }
 
 impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
@@ -1016,6 +1356,114 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
     fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
         self.read(cx, cz, ChunkColumn::clone)
             .or_else(|| self.source.resident_column(cx, cz))
+    }
+
+    /// Replaces the cached column with the caller's complete snapshot and
+    /// forwards that same value to the wrapped source.
+    fn store_resident_column(&self, cx: i32, cz: i32, column: &ChunkColumn) -> bool {
+        self.write_gates
+            .with((cx, cz), || self.store_resident_column_inner(cx, cz, column))
+    }
+
+    /// Captures the complete light footprint, computes outside the cache lock,
+    /// then commits only when every captured coordinate revision is still
+    /// current. The exclusive path is the bounded final attempt: all
+    /// dependency gates remain held through compute and commit, so it cannot
+    /// lose a race to a neighbour mutation.
+    fn settle_resident_column_light_with_neighbours(
+        &self,
+        cx: i32,
+        cz: i32,
+        fallback: &ChunkColumn,
+        neighbour_offsets: &[(i32, i32)],
+        resident_only: bool,
+        replace_existing: bool,
+        exclusive: bool,
+        compute: &mut dyn FnMut(
+            &ChunkColumn,
+            &[(i32, i32, ChunkColumn)],
+        ) -> Option<lodestone_world::ColumnLight>,
+    ) -> Result<ChunkColumn, ColumnLightSettlementError> {
+        let centre = (cx, cz);
+        if !replace_existing {
+            let snapshot = self.capture_light_snapshot(
+                &[centre],
+                centre,
+                fallback,
+                resident_only,
+            )?;
+            let current = snapshot
+                .observations
+                .first()
+                .expect("the centre snapshot is always requested")
+                .column
+                .clone();
+            if current.retained_light().is_some() {
+                return Ok(current);
+            }
+        }
+        let coordinates = Self::light_coordinates(cx, cz, neighbour_offsets);
+        // Ensure all generated dependencies are ordered before the optimistic
+        // capture. The subsequent multi-coordinate snapshot still validates
+        // every dependency, so a mutation between these calls is detected.
+        if !resident_only {
+            for &(column_cx, column_cz) in &coordinates {
+                let _ = self.column(column_cx, column_cz);
+            }
+        }
+
+        if exclusive {
+            let mut lease = self.write_gates.acquire_many(&coordinates, false);
+            let snapshot = self.capture_light_snapshot_while_held(
+                &lease,
+                centre,
+                fallback,
+                resident_only,
+            )?;
+            let (centre_column, neighbours) = Self::light_columns(
+                &snapshot,
+                centre,
+                neighbour_offsets,
+            )?;
+            if !replace_existing && centre_column.retained_light().is_some() {
+                drop(lease);
+                return Ok(centre_column);
+            }
+            let Some(light) = compute(&centre_column, &neighbours) else {
+                drop(lease);
+                return Err(ColumnLightSettlementError::NoLight);
+            };
+            let mut settled = centre_column;
+            settled.set_retained_light(light);
+            let _ = self.store_resident_column_inner(cx, cz, &settled);
+            lease.bump_revision = true;
+            drop(lease);
+            return Ok(settled);
+        }
+
+        let snapshot = self.capture_light_snapshot(
+            &coordinates,
+            centre,
+            fallback,
+            resident_only,
+        )?;
+        let (centre_column, neighbours) = Self::light_columns(
+            &snapshot,
+            centre,
+            neighbour_offsets,
+        )?;
+        if !replace_existing && centre_column.retained_light().is_some() {
+            return Ok(centre_column);
+        }
+        let Some(light) = compute(&centre_column, &neighbours) else {
+            return Err(ColumnLightSettlementError::NoLight);
+        };
+        let mut settled = centre_column;
+        settled.set_retained_light(light);
+        self.write_gates
+            .try_commit(snapshot, || self.store_resident_column_inner(cx, cz, &settled))
+            .map(|_| settled)
+            .map_err(|()| ColumnLightSettlementError::Conflict)
     }
 
     /// Forwarded, not answered: a cache owns no registries of its own, and a
@@ -1230,36 +1678,38 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
-        let retained = {
-            let mut guard = self.lock();
-            let cache = &mut *guard;
-            let stamp = cache.next_stamp();
-            if let Some(entry) = cache.columns.get_mut(&(cx, cz)) {
-                // A `y` outside the column's vertical extent is a no-op rather
-                // than an index panic. `ChunkColumn::set_block` indexes
-                // unguarded, and the inner source's own `set_block` may have
-                // accepted the edit (or rejected it its own way) without this
-                // retained column being able to hold it — so the store guards its
-                // own update rather than relying on the source to reject
-                // out-of-range `y`.
-                if y >= entry.column.min_y && y < entry.column.min_y + entry.column.height {
-                    entry.column.set_block(lx, y, lz, name);
-                    entry.last_used = stamp;
-                    Some(entry.column.clone())
+        self.write_gates.with((cx, cz), || {
+            let retained = {
+                let mut guard = self.lock();
+                let cache = &mut *guard;
+                let stamp = cache.next_stamp();
+                if let Some(entry) = cache.columns.get_mut(&(cx, cz)) {
+                    // A `y` outside the column's vertical extent is a no-op rather
+                    // than an index panic. `ChunkColumn::set_block` indexes
+                    // unguarded, and the inner source's own `set_block` may have
+                    // accepted the edit (or rejected it its own way) without this
+                    // retained column being able to hold it — so the store guards its
+                    // own update rather than relying on the source to reject
+                    // out-of-range `y`.
+                    if y >= entry.column.min_y && y < entry.column.min_y + entry.column.height {
+                        entry.column.set_block(lx, y, lz, name);
+                        entry.last_used = stamp;
+                        Some(entry.column.clone())
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
-            } else {
-                None
+            };
+            if retained
+                .as_ref()
+                .is_some_and(|column| self.source.store_resident_column(cx, cz, column))
+            {
+                return;
             }
-        };
-        if retained
-            .as_ref()
-            .is_some_and(|column| self.source.store_resident_column(cx, cz, column))
-        {
-            return;
-        }
-        self.source.set_block(x, y, z, name);
+            self.source.set_block(x, y, z, name);
+        });
     }
 
     /// Forwarded for the same reason `world_registries`/`dimension` above are:
@@ -1274,8 +1724,8 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
 #[cfg(test)]
 mod tests {
     use std::ops::RangeInclusive;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
     use lodestone_model::BlockPos;
 
@@ -2356,6 +2806,814 @@ mod tests {
             per_column * 8
         );
         assert_eq!(store.generated(), 8, "each distinct column generated once");
+    }
+
+    /// A retained light refresh and a block mutation for one coordinate must
+    /// share one ordering across the cache and its wrapped source. The source
+    /// deliberately stalls the old refresh after it has entered the source
+    /// callback; the newer `set_block` attempts to pass while that callback is
+    /// stalled, and therefore proves the per-coordinate gate rather than
+    /// relying on scheduler luck.
+    #[test]
+    fn same_coordinate_light_refresh_cannot_overwrite_a_newer_block_mutation() {
+        struct RaceSource {
+            persisted: Arc<Mutex<ChunkColumn>>,
+            old_started: Arc<AtomicBool>,
+            release_old: Arc<(Mutex<bool>, Condvar)>,
+            store_calls: Arc<AtomicUsize>,
+        }
+
+        impl RaceSource {
+            fn new() -> Self {
+                Self {
+                    persisted: Arc::new(Mutex::new(ChunkColumn::new(0, 16))),
+                    old_started: Arc::new(AtomicBool::new(false)),
+                    release_old: Arc::new((Mutex::new(false), Condvar::new())),
+                    store_calls: Arc::new(AtomicUsize::new(0)),
+                }
+            }
+        }
+
+        impl ChunkSource for RaceSource {
+            fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+                self.persisted
+                    .lock()
+                    .expect("race source column lock poisoned")
+                    .clone()
+            }
+
+            fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+                self.column(x.div_euclid(16), z.div_euclid(16))
+                    .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
+                    .to_owned()
+            }
+
+            fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+                self.column(x.div_euclid(16), z.div_euclid(16))
+                    .biome_state_at(x.rem_euclid(16), y, z.rem_euclid(16))
+                    .to_owned()
+            }
+
+            fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+
+            fn store_resident_column(
+                &self,
+                _cx: i32,
+                _cz: i32,
+                column: &ChunkColumn,
+            ) -> bool {
+                let is_old_refresh = column.retained_light().is_some_and(|light| {
+                    *light.sky(0) == lodestone_world::LightData::Uniform(1)
+                });
+                if is_old_refresh {
+                    self.old_started.store(true, Ordering::Release);
+                    let (released, wake) = &*self.release_old;
+                    let mut released = released
+                        .lock()
+                        .expect("race source release lock poisoned");
+                    while !*released {
+                        released = wake
+                            .wait(released)
+                            .expect("race source release lock poisoned");
+                    }
+                }
+                self.store_calls.fetch_add(1, Ordering::AcqRel);
+                *self
+                    .persisted
+                    .lock()
+                    .expect("race source persistence lock poisoned") = column.clone();
+                true
+            }
+        }
+
+        let source = RaceSource::new();
+        let persisted = Arc::clone(&source.persisted);
+        let old_started = Arc::clone(&source.old_started);
+        let release_old = Arc::clone(&source.release_old);
+        let store_calls = Arc::clone(&source.store_calls);
+        let store = Arc::new(ChunkStore::new(source));
+        let _ = store.column(0, 0);
+
+        let mut old = store
+            .resident_column(0, 0)
+            .expect("the old refresh starts from a resident column");
+        let mut old_light = lodestone_world::ColumnLight::new(old.section_count());
+        *old_light.sky_mut(0) = lodestone_world::LightData::Uniform(1);
+        old.set_retained_light(old_light.clone());
+
+        let mutation_attempted = Arc::new(AtomicBool::new(false));
+        let mutation_finished = Arc::new(AtomicBool::new(false));
+        std::thread::scope(|scope| {
+            let old_store = Arc::clone(&store);
+            scope.spawn(move || {
+                assert!(old_store.store_resident_column(0, 0, &old));
+            });
+
+            while !old_started.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+
+            let mutation_store = Arc::clone(&store);
+            let mutation_attempted_for_thread = Arc::clone(&mutation_attempted);
+            let mutation_finished_for_thread = Arc::clone(&mutation_finished);
+            scope.spawn(move || {
+                mutation_attempted_for_thread.store(true, Ordering::Release);
+                mutation_store.set_block(1, 0, 1, "minecraft:gold_block");
+                mutation_finished_for_thread.store(true, Ordering::Release);
+            });
+
+            while !mutation_attempted.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            assert_eq!(
+                store_calls.load(Ordering::Acquire),
+                0,
+                "the newer mutation must not reach the source while the old refresh owns the gate"
+            );
+            assert!(
+                !mutation_finished.load(Ordering::Acquire),
+                "the newer mutation passed the old refresh's coordinate gate"
+            );
+            assert_eq!(
+                store
+                    .resident_column(0, 0)
+                    .expect("the old snapshot remains in cache while its source write stalls")
+                    .retained_light(),
+                Some(&old_light)
+            );
+
+            let (released, wake) = &*release_old;
+            *released.lock().expect("race source release lock poisoned") = true;
+            wake.notify_one();
+        });
+
+        assert!(mutation_finished.load(Ordering::Acquire));
+        let after_mutation = persisted
+            .lock()
+            .expect("race source persistence lock poisoned")
+            .clone();
+        assert_eq!(
+            after_mutation.block_state(1, 0, 1),
+            "minecraft:gold_block",
+            "the delayed old refresh must not replace the newer persisted block"
+        );
+        assert_eq!(
+            after_mutation.retained_light(),
+            None,
+            "the block mutation must invalidate the old retained light"
+        );
+
+        // Finish the sequence with the newer light refresh that belongs to the
+        // already-mutated column. It must survive in both retention layers.
+        let mut newest = store
+            .resident_column(0, 0)
+            .expect("the mutated column remains resident");
+        let mut newest_light = lodestone_world::ColumnLight::new(newest.section_count());
+        *newest_light.sky_mut(0) = lodestone_world::LightData::Uniform(9);
+        newest.set_retained_light(newest_light.clone());
+        assert!(store.store_resident_column(0, 0, &newest));
+        let persisted_newest = persisted
+            .lock()
+            .expect("race source persistence lock poisoned")
+            .clone();
+        assert_eq!(
+            persisted_newest.block_state(1, 0, 1),
+            "minecraft:gold_block"
+        );
+        assert_eq!(persisted_newest.retained_light(), Some(&newest_light));
+        assert_eq!(
+            store
+                .resident_column(0, 0)
+                .expect("newest column remains resident")
+                .retained_light(),
+            Some(&newest_light)
+        );
+        assert_eq!(store_calls.load(Ordering::Acquire), 3);
+    }
+
+    /// A light computation may outlive the cache/source read that fed it. The
+    /// mutation deliberately completes while that computation is paused; the
+    /// stale snapshot must then be rejected at commit, and a later computation
+    /// over the new column must still be able to commit.
+    #[test]
+    fn a_light_snapshot_commit_rejects_a_block_write_after_capture() {
+        struct RevisionSource {
+            persisted: Arc<Mutex<ChunkColumn>>,
+            store_calls: Arc<AtomicUsize>,
+        }
+
+        impl ChunkSource for RevisionSource {
+            fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+                self.persisted
+                    .lock()
+                    .expect("revision source column lock poisoned")
+                    .clone()
+            }
+
+            fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+                self.column(x.div_euclid(16), z.div_euclid(16))
+                    .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
+                    .to_owned()
+            }
+
+            fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+                self.column(x.div_euclid(16), z.div_euclid(16))
+                    .biome_state_at(x.rem_euclid(16), y, z.rem_euclid(16))
+                    .to_owned()
+            }
+
+            fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+
+            fn store_resident_column(
+                &self,
+                _cx: i32,
+                _cz: i32,
+                column: &ChunkColumn,
+            ) -> bool {
+                self.store_calls.fetch_add(1, Ordering::AcqRel);
+                *self
+                    .persisted
+                    .lock()
+                    .expect("revision source persistence lock poisoned") = column.clone();
+                true
+            }
+        }
+
+        let source = RevisionSource {
+            persisted: Arc::new(Mutex::new(ChunkColumn::new(0, 16))),
+            store_calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let persisted = Arc::clone(&source.persisted);
+        let store_calls = Arc::clone(&source.store_calls);
+        let store = Arc::new(ChunkStore::with_capacity(source, 1));
+        let _ = store.column(0, 0);
+
+        let captured = Arc::new(AtomicBool::new(false));
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let fallback = store
+            .resident_column(0, 0)
+            .expect("the transaction starts from a resident column");
+        std::thread::scope(|scope| {
+            let refresh_store = Arc::clone(&store);
+            let refresh_captured = Arc::clone(&captured);
+            let refresh_release = Arc::clone(&release);
+            let refresh_fallback = fallback.clone();
+            let delayed = scope.spawn(move || {
+                let mut compute = |_: &ChunkColumn| {
+                    refresh_captured.store(true, Ordering::Release);
+                    let (released, wake) = &*refresh_release;
+                    let mut released = released
+                        .lock()
+                        .expect("revision source release lock poisoned");
+                    while !*released {
+                        released = wake
+                            .wait(released)
+                            .expect("revision source release lock poisoned");
+                    }
+                    let mut light = lodestone_world::ColumnLight::new(1);
+                    *light.sky_mut(0) = lodestone_world::LightData::Uniform(1);
+                    Some(light)
+                };
+                refresh_store.settle_resident_column_light(
+                    0,
+                    0,
+                    &refresh_fallback,
+                    true,
+                    &mut compute,
+                )
+            });
+
+            while !captured.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+
+            // The mutation is not allowed to wait for the light computation;
+            // only the short snapshot/commit sections own the coordinate gate.
+            store.set_block(1, 0, 1, "minecraft:gold_block");
+            let after_mutation = store
+                .resident_column(0, 0)
+                .expect("the mutation leaves the column resident");
+            assert_eq!(
+                after_mutation.block_state(1, 0, 1),
+                "minecraft:gold_block"
+            );
+            assert_eq!(after_mutation.retained_light(), None);
+            assert_eq!(
+                persisted
+                    .lock()
+                    .expect("revision source persistence lock poisoned")
+                    .block_state(1, 0, 1),
+                "minecraft:gold_block"
+            );
+
+            let (released, wake) = &*release;
+            *released
+                .lock()
+                .expect("revision source release lock poisoned") = true;
+            wake.notify_one();
+            assert!(matches!(
+                delayed.join().expect("delayed settlement must not panic"),
+                Err(ColumnLightSettlementError::Conflict)
+            ));
+        });
+
+        let current = store
+            .resident_column(0, 0)
+            .expect("the current column remains resident");
+        let mut compute = |column: &ChunkColumn| {
+            let mut light = lodestone_world::ColumnLight::new(column.section_count());
+            *light.sky_mut(0) = lodestone_world::LightData::Uniform(9);
+            Some(light)
+        };
+        let settled = store
+            .settle_resident_column_light(0, 0, &current, true, &mut compute)
+            .expect("the refresh over the newer block must commit");
+        assert_eq!(settled.block_state(1, 0, 1), "minecraft:gold_block");
+        assert!(matches!(
+            settled.retained_light().map(|light| light.sky(0)),
+            Some(lodestone_world::LightData::Uniform(9))
+        ));
+        let persisted = persisted
+            .lock()
+            .expect("revision source persistence lock poisoned")
+            .clone();
+        assert_eq!(persisted.block_state(1, 0, 1), "minecraft:gold_block");
+        assert_eq!(persisted.retained_light(), settled.retained_light());
+        assert_eq!(store_calls.load(Ordering::Acquire), 2);
+    }
+
+    /// A light snapshot depends on every column in its footprint, not only the
+    /// centre. A neighbour mutation deliberately completes while compute is
+    /// paused; the multi-coordinate commit must reject the stale centre light,
+    /// after which a fresh computation over the new neighbour can commit.
+    #[test]
+    fn a_neighbour_snapshot_commit_rejects_a_neighbour_write_after_capture() {
+        let offsets = vec![
+            (-1, -1),
+            (0, -1),
+            (1, -1),
+            (-1, 0),
+            (1, 0),
+            (-1, 1),
+            (0, 1),
+            (1, 1),
+        ];
+        let store = Arc::new(ChunkStore::with_capacity(CountingSource::new(), 32));
+        let mut coordinates = vec![(0, 0)];
+        coordinates.extend(offsets.iter().map(|&(dx, dz)| (dx, dz)));
+        for (cx, cz) in coordinates {
+            let _ = store.column(cx, cz);
+        }
+
+        let captured = Arc::new(AtomicBool::new(false));
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let fallback = store
+            .resident_column(0, 0)
+            .expect("the centre starts resident");
+        let result = std::thread::scope(|scope| {
+            let refresh_store = Arc::clone(&store);
+            let refresh_offsets = offsets.clone();
+            let refresh_captured = Arc::clone(&captured);
+            let refresh_release = Arc::clone(&release);
+            let refresh_fallback = fallback.clone();
+            let delayed = scope.spawn(move || {
+                let mut compute = |centre: &ChunkColumn,
+                                   neighbours: &[(i32, i32, ChunkColumn)]| {
+                    assert_eq!(neighbours.len(), 8);
+                    assert_eq!(
+                        neighbours
+                            .iter()
+                            .find(|(dx, dz, _)| (*dx, *dz) == (1, 0))
+                            .expect("the east dependency is captured")
+                            .2
+                            .block_state(1, 0, 1),
+                        "minecraft:air"
+                    );
+                    refresh_captured.store(true, Ordering::Release);
+                    let (released, wake) = &*refresh_release;
+                    let mut released = released
+                        .lock()
+                        .expect("neighbour snapshot release lock poisoned");
+                    while !*released {
+                        released = wake
+                            .wait(released)
+                            .expect("neighbour snapshot release lock poisoned");
+                    }
+                    let mut light = lodestone_world::ColumnLight::new(centre.section_count());
+                    *light.sky_mut(0) = lodestone_world::LightData::Uniform(1);
+                    Some(light)
+                };
+                refresh_store.settle_resident_column_light_with_neighbours(
+                    0,
+                    0,
+                    &refresh_fallback,
+                    &refresh_offsets,
+                    true,
+                    true,
+                    false,
+                    &mut compute,
+                )
+            });
+
+            while !captured.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            store.set_block(17, 0, 1, "minecraft:gold_block");
+            assert_eq!(
+                store
+                    .resident_column(1, 0)
+                    .expect("the east neighbour remains resident")
+                    .block_state(1, 0, 1),
+                "minecraft:gold_block"
+            );
+            let (released, wake) = &*release;
+            *released
+                .lock()
+                .expect("neighbour snapshot release lock poisoned") = true;
+            wake.notify_one();
+            delayed.join().expect("neighbour refresh must not panic")
+        });
+        assert!(matches!(
+            result,
+            Err(ColumnLightSettlementError::Conflict)
+        ));
+        assert_eq!(
+            store
+                .resident_column(0, 0)
+                .expect("the centre remains resident")
+                .retained_light(),
+            None,
+            "a neighbour mutation must reject the stale centre snapshot"
+        );
+
+        let current = store
+            .resident_column(0, 0)
+            .expect("the current centre remains resident");
+        let mut compute = |centre: &ChunkColumn,
+                           neighbours: &[(i32, i32, ChunkColumn)]| {
+            assert_eq!(neighbours.len(), 8);
+            let mut light = lodestone_world::ColumnLight::new(centre.section_count());
+            *light.sky_mut(0) = lodestone_world::LightData::Uniform(9);
+            Some(light)
+        };
+        let settled = store
+            .settle_resident_column_light_with_neighbours(
+                0,
+                0,
+                &current,
+                &offsets,
+                true,
+                true,
+                false,
+                &mut compute,
+            )
+            .expect("the fresh footprint must commit");
+        assert_eq!(
+            settled.retained_light().map(|light| light.sky(0)),
+            Some(&lodestone_world::LightData::Uniform(9))
+        );
+        assert_eq!(
+            store
+                .resident_column(1, 0)
+                .expect("the east neighbour remains resident")
+                .block_state(1, 0, 1),
+            "minecraft:gold_block"
+        );
+    }
+
+    /// The exclusive settlement path is the bounded contention fallback. It
+    /// holds the sorted footprint gates while computing, so a waiting
+    /// neighbour write cannot race the final commit and both operations finish
+    /// in a deterministic order.
+    #[test]
+    fn exclusive_light_settlement_makes_progress_before_a_waiting_neighbour_write() {
+        let offsets = vec![
+            (-1, -1),
+            (0, -1),
+            (1, -1),
+            (-1, 0),
+            (1, 0),
+            (-1, 1),
+            (0, 1),
+            (1, 1),
+        ];
+        let store = Arc::new(ChunkStore::with_capacity(CountingSource::new(), 32));
+        for &(dx, dz) in &offsets {
+            let _ = store.column(dx, dz);
+        }
+        let _ = store.column(0, 0);
+        let captured = Arc::new(AtomicBool::new(false));
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let fallback = store
+            .resident_column(0, 0)
+            .expect("the centre starts resident");
+        std::thread::scope(|scope| {
+            let refresh_store = Arc::clone(&store);
+            let refresh_offsets = offsets.clone();
+            let refresh_captured = Arc::clone(&captured);
+            let refresh_release = Arc::clone(&release);
+            let refresh_fallback = fallback.clone();
+            let delayed = scope.spawn(move || {
+                let mut compute = |centre: &ChunkColumn,
+                                   neighbours: &[(i32, i32, ChunkColumn)]| {
+                    assert_eq!(neighbours.len(), 8);
+                    refresh_captured.store(true, Ordering::Release);
+                    let (released, wake) = &*refresh_release;
+                    let mut released = released
+                        .lock()
+                        .expect("exclusive release lock poisoned");
+                    while !*released {
+                        released = wake
+                            .wait(released)
+                            .expect("exclusive release lock poisoned");
+                    }
+                    let mut light = lodestone_world::ColumnLight::new(centre.section_count());
+                    *light.sky_mut(0) = lodestone_world::LightData::Uniform(3);
+                    Some(light)
+                };
+                refresh_store.settle_resident_column_light_with_neighbours(
+                    0,
+                    0,
+                    &refresh_fallback,
+                    &refresh_offsets,
+                    true,
+                    true,
+                    true,
+                    &mut compute,
+                )
+            });
+            while !captured.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            let mutation_started = Arc::new(AtomicBool::new(false));
+            let mutation_finished = Arc::new(AtomicBool::new(false));
+            let mutation_started_for_thread = Arc::clone(&mutation_started);
+            let mutation_finished_for_thread = Arc::clone(&mutation_finished);
+            let mutation_store = Arc::clone(&store);
+            let mutation = scope.spawn(move || {
+                mutation_started_for_thread.store(true, Ordering::Release);
+                mutation_store.set_block(17, 0, 1, "minecraft:gold_block");
+                mutation_finished_for_thread.store(true, Ordering::Release);
+            });
+            while !mutation_started.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            assert!(
+                !mutation_finished.load(Ordering::Acquire),
+                "the neighbour write must wait for the exclusive final compute"
+            );
+            let (released, wake) = &*release;
+            *released
+                .lock()
+                .expect("exclusive release lock poisoned") = true;
+            wake.notify_one();
+            assert!(
+                delayed
+                    .join()
+                    .expect("exclusive settlement must not panic")
+                    .is_ok()
+            );
+            mutation.join().expect("waiting neighbour write must not panic");
+        });
+        assert_eq!(
+            store
+                .resident_column(1, 0)
+                .expect("the east neighbour remains resident")
+                .block_state(1, 0, 1),
+            "minecraft:gold_block"
+        );
+        let current = store
+            .resident_column(0, 0)
+            .expect("the current centre remains resident");
+        let mut compute = |centre: &ChunkColumn,
+                           neighbours: &[(i32, i32, ChunkColumn)]| {
+            assert_eq!(neighbours.len(), 8);
+            let mut light = lodestone_world::ColumnLight::new(centre.section_count());
+            *light.sky_mut(0) = lodestone_world::LightData::Uniform(9);
+            Some(light)
+        };
+        let settled = store
+            .settle_resident_column_light_with_neighbours(
+                0,
+                0,
+                &current,
+                &offsets,
+                true,
+                true,
+                false,
+                &mut compute,
+            )
+            .expect("the post-contention refresh must commit");
+        assert_eq!(
+            settled.retained_light().map(|light| light.sky(0)),
+            Some(&lodestone_world::LightData::Uniform(9))
+        );
+        assert_eq!(
+            settled.block_state(1, 0, 1),
+            "minecraft:air",
+            "the centre has no terrain mutation from the east neighbour write"
+        );
+    }
+
+    /// A cold generation and an uncached block write share the same
+    /// coordinate ordering. The generation pauses before returning its base
+    /// column; the write attempts during that pause and must complete only
+    /// after insertion, so the cache cannot resurrect stale terrain.
+    #[test]
+    fn cold_generation_cannot_insert_after_an_uncached_block_write() {
+        struct EnsureRaceSource {
+            persisted: Arc<Mutex<ChunkColumn>>,
+            generated: Arc<Mutex<Option<ChunkColumn>>>,
+            generation_started: Arc<AtomicBool>,
+            release_generation: Arc<(Mutex<bool>, Condvar)>,
+        }
+
+        impl ChunkSource for EnsureRaceSource {
+            fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+                self.generation_started.store(true, Ordering::Release);
+                let (released, wake) = &*self.release_generation;
+                let mut released = released
+                    .lock()
+                    .expect("ensure race release lock poisoned");
+                while !*released {
+                    released = wake
+                        .wait(released)
+                        .expect("ensure race release lock poisoned");
+                }
+                let generated = self
+                    .persisted
+                    .lock()
+                    .expect("ensure race persistence lock poisoned")
+                    .clone();
+                *self
+                    .generated
+                    .lock()
+                    .expect("ensure race generated-column lock poisoned") = Some(generated.clone());
+                generated
+            }
+
+            fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+                self.persisted
+                    .lock()
+                    .expect("ensure race persistence lock poisoned")
+                    .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
+                    .to_owned()
+            }
+
+            fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+                crate::chunk::DEFAULT_BIOME.to_owned()
+            }
+
+            fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+                self.persisted
+                    .lock()
+                    .expect("ensure race persistence lock poisoned")
+                    .set_block(x.rem_euclid(16), y, z.rem_euclid(16), name);
+            }
+        }
+
+        let source = EnsureRaceSource {
+            persisted: Arc::new(Mutex::new(ChunkColumn::new(0, 16))),
+            generated: Arc::new(Mutex::new(None)),
+            generation_started: Arc::new(AtomicBool::new(false)),
+            release_generation: Arc::new((Mutex::new(false), Condvar::new())),
+        };
+        let persisted = Arc::clone(&source.persisted);
+        let generated_source = Arc::clone(&source.generated);
+        let generation_started = Arc::clone(&source.generation_started);
+        let release_generation = Arc::clone(&source.release_generation);
+        let store = Arc::new(ChunkStore::with_capacity(source, 1));
+        let mutation_started = Arc::new(AtomicBool::new(false));
+        let mutation_finished = Arc::new(AtomicBool::new(false));
+        std::thread::scope(|scope| {
+            let loading_store = Arc::clone(&store);
+            let loading = scope.spawn(move || loading_store.column(0, 0));
+            while !generation_started.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+
+            let mutation_store = Arc::clone(&store);
+            let mutation_started_for_thread = Arc::clone(&mutation_started);
+            let mutation_finished_for_thread = Arc::clone(&mutation_finished);
+            let mutation = scope.spawn(move || {
+                mutation_started_for_thread.store(true, Ordering::Release);
+                mutation_store.set_block(1, 0, 1, "minecraft:gold_block");
+                mutation_finished_for_thread.store(true, Ordering::Release);
+            });
+            while !mutation_started.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            assert!(
+                !mutation_finished.load(Ordering::Acquire),
+                "an uncached block write must wait for the cold generation gate"
+            );
+            let (released, wake) = &*release_generation;
+            *released
+                .lock()
+                .expect("ensure race release lock poisoned") = true;
+            wake.notify_one();
+            let _generated = loading.join().expect("cold generation must not panic");
+            assert_eq!(
+                generated_source
+                    .lock()
+                    .expect("ensure race generated-column lock poisoned")
+                    .as_ref()
+                    .expect("the cold source must return a generated column")
+                    .block_state(1, 0, 1),
+                "minecraft:air",
+                "the in-flight generation observed the pre-write terrain"
+            );
+            mutation.join().expect("ordered block write must not panic");
+        });
+        assert!(mutation_finished.load(Ordering::Acquire));
+        assert_eq!(
+            store.column(0, 0).block_state(1, 0, 1),
+            "minecraft:gold_block",
+            "the cache must retain the edit that followed generation"
+        );
+        assert_eq!(
+            persisted
+                .lock()
+                .expect("ensure race persistence lock poisoned")
+                .block_state(1, 0, 1),
+            "minecraft:gold_block"
+        );
+        assert_eq!(store.generated(), 1);
+    }
+
+    /// A generator-backed source's terrain edit ledger must grow only for
+    /// actual block mutations. Serving and evicting many exact light snapshots
+    /// exercises the cache lifecycle without turning those snapshots into
+    /// permanent terrain edits.
+    #[test]
+    fn light_only_resident_snapshots_do_not_become_inner_terrain_edits() {
+        struct EditLedgerSource {
+            edits: Arc<Mutex<HashMap<(i32, i32), ChunkColumn>>>,
+        }
+
+        impl ChunkSource for EditLedgerSource {
+            fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+                self.edits
+                    .lock()
+                    .expect("edit ledger lock poisoned")
+                    .get(&(cx, cz))
+                    .cloned()
+                    .unwrap_or_else(|| ChunkColumn::new(0, 16))
+            }
+
+            fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+                self.column(x.div_euclid(16), z.div_euclid(16))
+                    .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
+                    .to_owned()
+            }
+
+            fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+                self.column(x.div_euclid(16), z.div_euclid(16))
+                    .biome_state_at(x.rem_euclid(16), y, z.rem_euclid(16))
+                    .to_owned()
+            }
+
+            fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+                let cx = x.div_euclid(16);
+                let cz = z.div_euclid(16);
+                let mut edits = self.edits.lock().expect("edit ledger lock poisoned");
+                edits
+                    .entry((cx, cz))
+                    .or_insert_with(|| ChunkColumn::new(0, 16))
+                    .set_block(x.rem_euclid(16), y, z.rem_euclid(16), name);
+            }
+        }
+
+        let edits = Arc::new(Mutex::new(HashMap::new()));
+        let source = EditLedgerSource {
+            edits: Arc::clone(&edits),
+        };
+        let store = ChunkStore::with_capacity(source, 2);
+        for cx in 0..16 {
+            let mut column = store.column(cx, 0);
+            let mut light = lodestone_world::ColumnLight::new(column.section_count());
+            *light.sky_mut(0) = lodestone_world::LightData::Uniform((cx % 16) as u8);
+            column.set_retained_light(light);
+            assert!(store.store_resident_column(cx, 0, &column));
+        }
+
+        assert_eq!(store.len(), 2, "the outer cache remains bounded after evictions");
+        assert_eq!(
+            edits.lock().expect("edit ledger lock poisoned").len(),
+            0,
+            "light-only snapshots must not become permanent terrain edits"
+        );
+
+        store.set_block(15 * 16 + 1, 0, 1, "minecraft:gold_block");
+        let edits = edits.lock().expect("edit ledger lock poisoned");
+        assert_eq!(edits.len(), 1, "a real block write still enters the edit ledger");
+        assert_eq!(
+            edits
+                .get(&(15, 0))
+                .expect("the edited coordinate is retained")
+                .block_state(1, 0, 1),
+            "minecraft:gold_block"
+        );
     }
 
     // ---------------------------------------------------------------------

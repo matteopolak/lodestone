@@ -41,17 +41,45 @@ Sky seeding is a dimension property, not a consequence of a column's vertical sh
 the End both use a 0..256 served window, but only the Nether lacks skylight. Its initial chunk form
 therefore omits every sky section and keeps zero block-light data only through one section above the
 highest terrain section; its later light updates retain explicit zero sky and block values for the
-normal clear operation. The End has sky light, and its initial stored range is reconstructed from the
-settled 3×3 block neighborhood: every non-empty block
-section activates its own light section and the vertically adjacent pair in all neighboring columns.
-The below-world apron is therefore absent for an elevated island neighborhood but present when a
-bottom block section activates it; it is not a fixed per-dimension omission. In the external elevated-island
-control this retains exactly two uniformly full sections above terrain, while empty columns inherit the
-different stored ranges activated by their neighbors.
-The Overworld keeps the one-section sky form and elides uniform zero block light in an initial
-chunk. `ChunkSource::dimension` carries that choice to the protocol's dimension-aware
-initial-encoding and light-computation hooks. An unlabelled source uses the Overworld as the
-compatibility default; a dimension wrapper must always forward its label.
+normal clear operation. The End has sky light, but its initial packet does not reconstruct a storage
+mask from terrain or from the order in which neighbouring columns arrived. It consumes the exact
+`ColumnLight` snapshot captured by the source's settlement transaction. The Overworld keeps the one-section sky form
+and elides uniform zero block light in an initial chunk. `ChunkSource::dimension` carries that choice
+to the protocol's dimension-aware initial-encoding and light-computation hooks. An unlabelled source
+uses the Overworld as the compatibility default; a dimension wrapper must always forward its label.
+
+### Retained snapshots and reloads
+
+For a protocol that opts into retained initial light, the server stores the exact `ColumnLight` result
+on the centre column when its settlement transaction completes. The initial
+`LEVEL_CHUNK_WITH_LIGHT` encoder consumes that snapshot verbatim, including `Missing`, explicit empty,
+full, and varied sections. An independent sealed-world capture showed that a persisted End section
+mask can differ from the first in-memory settlement, so a reload must serve what storage restored
+rather than recomputing from the current terrain or a neighbour subset. That capture is external
+evidence for the storage contract; it does not claim that this repository drives the capture's
+scheduler or loading-ticket sequence in a production test.
+
+`column_to_nbt` writes the retained snapshot's sky and block arrays, including the light-only sections
+immediately below and above the block range, and marks the column as light-complete. `column_from_nbt`
+restores those arrays into `ChunkColumn` before a source can serve the column again. Only protocols
+that return `true` from `ServerProtocol::retains_initial_column_light` enter this settlement path;
+the default is `false`, so legacy one-column protocols do not admit neighbours or persist a snapshot
+they do not consume. `RegionChunkSource` keeps an opted-in snapshot in its edit/persistence path,
+while `ChunkStore::store_resident_column` updates the cache and forwards the value instead of
+allowing an in-memory cache hit to hide a future reload.
+The typed native record path stores the same `ColumnLight` beside terrain and reattaches it to the
+decoded `ChunkColumn` on reopen, so a caller can feed that record directly back to the serving source.
+Persisted columns remain authoritative after eviction and restart; admission and ticket policy remain
+the responsibility of the source/cache lifecycle that owns the column.
+
+`ChunkStore` uses a per-coordinate revision/CAS check from snapshot through commit, while keeping both the
+global cache mutex and the coordinate gates out of the expensive optimistic light computation. A block
+mutation in the centre or any dependency that completes after capture invalidates the older result; a
+bounded retry sequence ends in an exclusive footprint transaction. The sequence is covered by
+`a_light_snapshot_commit_rejects_a_block_write_after_capture`,
+`a_neighbour_snapshot_commit_rejects_a_neighbour_write_after_capture`, and
+`exclusive_light_settlement_makes_progress_before_a_waiting_neighbour_write`; source/cache ordering
+is covered by `same_coordinate_light_refresh_cannot_overwrite_a_newer_block_mutation`.
 
 ### Keeping light current after an edit
 
@@ -77,21 +105,27 @@ contribution to the centre column. Families that do not opt in retain the isolat
 
 When an edit changes emission or dampening, the server recomputes and sends all nine columns, not
 only the edited one. That fanout matters at both edges and corners: changing one seam cell can alter
-the light a client renders in either column. The calculation is intentionally not cached on a
-`ChunkColumn`, avoiding a stale-derived-data path after a retained column is edited.
+the light a client renders in either column. The computed value is replaced on the affected
+`ChunkColumn` only after the complete 3×3 result is available, so the retained snapshot cannot be
+partially updated.
 
-Initial chunk batches obtain the already-resident members of the same 3×3 view before the protocol
-encoder writes the inline-light payload, so a boundary emitter or occluder is correct from the first
-client-visible chunk when its neighbour is loaded. A missing neighbour stays an opaque seam, exactly
-like the isolated result; this read must never generate eight extra columns. Protocols that do not
-opt into cross-column light keep their one-column encoder and do not pay for adjacent reads. The
-detached worker encoder is likewise bypassed for an opted-in family until it can carry the same
-neighbourhood explicitly.
+For an opted-in protocol, the recalculated result replaces the affected column's retained snapshot
+before the update is sent. `ChunkColumn::set_block` also invalidates any old snapshot immediately, so
+a later initial send cannot mistake derived light for current state.
+
+For an opted-in protocol, initial chunk encoding assembles the centre and its eight neighbours in a
+fixed relative-coordinate order, then settles the centre's retained snapshot through the validated
+read/compute/commit fence. The order is only a deterministic admission/assembly rule; the light
+result is not allowed to depend on direction, coordinate, or holder ordinal. A missing neighbour is
+resolved through the source's normal column path so the fence has a complete 3×3 input; the snapshot
+is stored before the initial packet is written. Protocols that do not opt into retained initial light
+keep their one-column encoder and do not pay for adjacent reads. The detached worker encoder remains
+on the one-column contract until it can carry the same neighbourhood explicitly.
 
 A retaining source must preserve an explicitly resident backing column when it has not retained its
 own copy yet. Otherwise the initial centre column can be wrapped and served before its already-loaded
 neighbours enter the cache, turning a fully resident 3×3 into eight opaque seams. The fallback is a
-resident lookup, never a generated-column read.
+resident lookup before the source's normal generation path is used to complete the fence.
 
 The update still travels on the acting connection. Broadcasting the result to other players sharing
 the world remains separate multiplayer work.
@@ -110,19 +144,20 @@ cannot repair a column the client already received while later columns are still
 is still deduplicated by affected column and uses only resident data, so this correctness path never
 turns a cache miss into join-time terrain generation.
 
-### Validated against a real, already-lit vanilla world
+### Validated against an independent, already-lit reference world
 
-The engine's correctness is checked against a real vanilla server's own generated-and-lit world data
-— the world's stored sky and block light arrays, computed entirely independently of this project's
-own terrain reader, so neither the input blocks nor the expected light output came from this code.
-Sky light agrees with vanilla's own values completely on real, laterally-varied terrain (chunks whose
-light is not merely straight-down attenuation through open sky or water, which would trivially agree
-under almost any implementation); the small residual disagreement in block light is a documented gap
-in the per-block-state emission census for a couple of specific block types, not a defect in the
-propagation algorithm itself — and the same governing invariant applies here as at the chunk border:
-this project's light is never *brighter* than a real vanilla server's own answer, only occasionally
-too dark where a census entry is still missing, which is the safe direction for a gap of this kind to
-fail in.
+The engine's correctness is checked against an independent reference server's generated-and-lit world
+data — stored sky and block light arrays computed independently of this project's terrain reader, so
+neither the input blocks nor the expected light output came from this code. Sky light agrees completely
+on laterally-varied terrain; the small residual block-light disagreement is a documented gap in the
+per-block-state emission census for a couple of specific block types, not a propagation defect.
+
+An external End lifecycle trace also showed that packet/storage snapshots can agree at settlement while
+the resident column is still present, then differ after reload: one target's sky mask grew from
+sections `0..=5` to `0..=6`, and empty sections became explicit stored light. The sealed reload export
+is therefore the external parity oracle. It is not a production scheduler/ticket test or a runtime
+comparator; the production contract is the exact `ColumnLight` persistence and restore path described
+above.
 
 ## How to change it
 
@@ -138,6 +173,11 @@ fail in.
   open east column, east-only and full-3×3 results are both sky light 14 at the east border, while
   the seven-neighbour control without east is 7 through the longer north/south paths. This catches a
   supplied-neighbour assembly that works only when its list happens to contain one entry.
+- **Opting a family into retained initial light**: implement
+  `ServerProtocol::retains_initial_column_light` only when the initial chunk encoder consumes the
+  column's exact snapshot. Exercise the source/cache/save/reload path and conflicts where a block write
+  completes between snapshot capture and light commit, including a dependency column; leave the
+  capability disabled for a family whose wire form does not consume it.
 - **Adding a dimension or changing its sky rule**: route the dimension through the protocol's
   `*_in_dimension` chunk and light hooks, then decode-test both its initial chunk and a light update.
   Do not infer skylight from `min_y`, height, or section count: the Nether and End share the same
@@ -159,9 +199,10 @@ fail in.
 
 ## Configuration
 
-None. Light is computed unconditionally for every served column and on every light-relevant edit;
-there is no feature flag or setting that disables it. The per-block-state census is fixed data for a
-given game version, regenerated from its real source only when that version changes.
+There is no runtime setting. `ServerProtocol::retains_initial_column_light` is the capability
+boundary for exact initial-light settlement; its default is `false`. Light-relevant edits still use
+the protocol's ordinary light-computation hooks. The per-block-state census is fixed data for a given
+game version, regenerated from its real source only when that version changes.
 
 ## Dependencies
 
@@ -170,5 +211,5 @@ given game version, regenerated from its real source only when that version chan
   name/property census it is keyed through.
 - The chunk source/column types the light is computed over — see `docs/chunk-storage.md` and
   `docs/chunk-lifecycle.md`.
-- A real vanilla server (for the oracle comparison only) and the pinned game-version data sources
-  behind the census; neither is required for the engine to run in production.
+- An independent reference server (for oracle comparison only) and the pinned game-version data
+  sources behind the census; neither is required for the engine to run in production.

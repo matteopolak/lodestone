@@ -982,25 +982,32 @@ fn save_native_dirty_chunks(context: &NativeSaveContext) -> Result<usize, crate:
                 crate::world_storage::ChunkRecordError::MissingMotionBlockingHeightmap,
             ));
         }
-        let light = if protocol.uses_cross_column_light() {
-            let mut neighbours = Vec::with_capacity(9);
-            for dz in -1..=1 {
-                for dx in -1..=1 {
-                    neighbours.push((
-                        dx,
-                        dz,
-                        source.column(snapshot.column_x + dx, snapshot.column_z + dz),
-                    ));
+        let light = snapshot
+            .column
+            .retained_light()
+            .filter(|light| light.light_section_count() == snapshot.column.section_count() + 2)
+            .cloned()
+            .or_else(|| {
+                if protocol.uses_cross_column_light() {
+                    let mut neighbours = Vec::with_capacity(9);
+                    for dz in -1..=1 {
+                        for dx in -1..=1 {
+                            neighbours.push((
+                                dx,
+                                dz,
+                                source.column(snapshot.column_x + dx, snapshot.column_z + dz),
+                            ));
+                        }
+                    }
+                    protocol.compute_column_light_with_neighbours_in_dimension(
+                        &snapshot.column,
+                        &neighbours,
+                        dimension,
+                    )
+                } else {
+                    protocol.compute_column_light_in_dimension(&snapshot.column, dimension)
                 }
-            }
-            protocol.compute_column_light_with_neighbours_in_dimension(
-                &snapshot.column,
-                &neighbours,
-                dimension,
-            )
-        } else {
-            protocol.compute_column_light_in_dimension(&snapshot.column, dimension)
-        };
+            });
         let Some(light) = light else {
             return Err(crate::world_storage::Error::Chunk(
                 crate::world_storage::ChunkRecordError::MissingComputedLight,
@@ -6678,6 +6685,11 @@ mod tests {
         assert_eq!(loaded.column.block_entities().len(), 1);
         assert_eq!(loaded.light.sky(0), &lodestone_world::LightData::Uniform(7));
         assert_eq!(loaded.light.block(1), &lodestone_world::LightData::Uniform(3));
+        assert_eq!(
+            loaded.column.retained_light(),
+            Some(&loaded.light),
+            "the native reload must restore light on the serving column"
+        );
         assert_eq!(loaded.block_scheduled_ticks.len(), 1);
         assert_eq!(loaded.fluid_scheduled_ticks.len(), 1);
         assert!(reopened

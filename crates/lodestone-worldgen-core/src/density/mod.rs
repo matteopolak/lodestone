@@ -203,13 +203,14 @@ pub trait Resolver {
         Value::Null
     }
 
-    /// The five per-block-state predicates vanilla's `freeze_top_layer`
-    /// (`TOP_LAYER_MODIFICATION`) needs, as the JSON document
+    /// The six per-block-state predicates used by the top-layer and dungeon
+    /// stages, exposed in the JSON document that
     /// [`crate::feature::top_layer::SnowSupport::parse`] expects:
     ///
     /// ```json
     /// {
-    ///   "blocks_motion":   { "default": ["minecraft:stone", ...], "states": {"...": false} },
+    ///   "solid":            { "default": ["minecraft:stone", ...], "states": {"...": false} },
+    ///   "blocks_motion":    { "default": [...], "states": {...} },
     ///   "has_fluid_state": { "default": [...], "states": {...} },
     ///   "water_source":    { "default": [...], "states": {...} },
     ///   "face_full_up":    { "default": [...], "states": {...} },
@@ -227,9 +228,10 @@ pub trait Resolver {
     /// whole step a no-op — the same "no data supplied" convention
     /// [`biome_parameters`](Self::biome_parameters) established. This is *not*
     /// datapack data: it is a census of the game's own compiled behaviour
-    /// (collision geometry, fluid states), so a resolver that wants snow supplies
-    /// it from `lodestone_data::snow_support` rather than from a JSON asset. See
-    /// `lodestone_server::worldgen_data`'s implementation.
+    /// (block capabilities, collision geometry, fluid states), so a resolver that
+    /// wants these facts supplies them from its canonical block-state census
+    /// rather than from a JSON asset. See `lodestone_server::worldgen_data`'s
+    /// implementation.
     fn block_freeze_facts(&self) -> Value {
         Value::Null
     }

@@ -810,6 +810,10 @@ fn noise_state_index(value: f64, state_count: usize) -> usize {
 /// module's own predicates/checks reference.
 #[derive(Debug, Default, Clone)]
 pub struct VegTags {
+    /// `#minecraft:features_cannot_replace` — blocks protected from feature
+    /// writes. The dungeon feature uses this same closure for its shell,
+    /// floor, air and block-entity placements.
+    pub features_cannot_replace: HashSet<String>,
     pub cannot_replace_below_tree_trunk: HashSet<String>,
     pub supports_vegetation: HashSet<String>,
     pub replaceable_by_trees: HashSet<String>,
@@ -857,6 +861,10 @@ pub struct VegTags {
     pub overrides_mushroom_light_requirement: HashSet<String>,
     /// Non-fluid floors that can support lily pads.
     pub supports_lily_pad: HashSet<String>,
+    /// Exact per-state solidity used by dungeon geometry and chest support
+    /// checks. Unlike the older base-name vegetation helper, this preserves
+    /// state properties whose shapes do not block the room.
+    pub solid: StatePredicate,
     /// Exact canonical-state capability facts supplied by the version boundary.
     pub simple_block_support: SimpleBlockSupport,
     /// Ground accepted by the cave-root system's nested tree candidate.
@@ -902,6 +910,7 @@ impl SimpleBlockSupport {
 /// resolver method's "no data supplied" convention.
 #[must_use]
 pub fn build_veg_tags(resolver: &dyn Resolver) -> VegTags {
+    let freeze_facts = resolver.block_freeze_facts();
     let resolve = |id: &str| {
         let mut out = HashSet::new();
         let mut seen = HashSet::new();
@@ -909,6 +918,7 @@ pub fn build_veg_tags(resolver: &dyn Resolver) -> VegTags {
         out
     };
     VegTags {
+        features_cannot_replace: resolve("minecraft:features_cannot_replace"),
         cannot_replace_below_tree_trunk: resolve("minecraft:cannot_replace_below_tree_trunk"),
         supports_vegetation: resolve("minecraft:supports_vegetation"),
         replaceable_by_trees: resolve("minecraft:replaceable_by_trees"),
@@ -928,6 +938,7 @@ pub fn build_veg_tags(resolver: &dyn Resolver) -> VegTags {
         soul_fire_base_blocks: resolve("minecraft:soul_fire_base_blocks"),
         overrides_mushroom_light_requirement: resolve("minecraft:overrides_mushroom_light_requirement"),
         supports_lily_pad: resolve("minecraft:supports_lily_pad"),
+        solid: StatePredicate::parse(&freeze_facts["solid"]),
         simple_block_support: SimpleBlockSupport::parse(&resolver.block_survival_facts()),
         azalea_grows_on: resolve("minecraft:azalea_grows_on"),
         beneath_bamboo_podzol_replaceable: resolve("minecraft:beneath_bamboo_podzol_replaceable"),
@@ -1753,6 +1764,10 @@ pub enum ConfiguredFeature {
     Speleothem(Box<super::features::SpeleothemCfg>),
     SpeleothemCluster(Box<super::features::SpeleothemClusterCfg>),
     Lake(Box<super::features::LakeCfg>),
+    /// The underground dungeon feature. Its configuration is empty; the
+    /// protected-block closure comes from [`VegTags`], which is resolved once
+    /// per generator rather than once per placement.
+    MonsterRoom,
     HugeMushroom(Box<super::features::HugeMushroomCfg>),
     HugeFungus(Box<super::features::HugeFungusCfg>),
     Bamboo(f64),
@@ -2221,6 +2236,7 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
                 _ => ConfiguredFeature::Unsupported("lake: unsupported fluid/barrier".into()),
             }
         }
+        "monster_room" => ConfiguredFeature::MonsterRoom,
         "huge_brown_mushroom" | "huge_red_mushroom" => {
             let c = &doc["config"];
             match (
@@ -2442,6 +2458,7 @@ pub fn collect_unsupported(placed: &PlacedRef) -> Vec<String> {
             | ConfiguredFeature::Speleothem(_)
             | ConfiguredFeature::SpeleothemCluster(_)
             | ConfiguredFeature::Lake(_)
+            | ConfiguredFeature::MonsterRoom
             | ConfiguredFeature::HugeMushroom(_)
             | ConfiguredFeature::HugeFungus(_)
             | ConfiguredFeature::Bamboo(_)

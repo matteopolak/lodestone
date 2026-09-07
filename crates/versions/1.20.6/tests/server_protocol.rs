@@ -10,6 +10,11 @@ use lodestone_v1_20_6::packets::position::Position;
 const CTX: Ctx = Ctx { version: 766 };
 
 #[test]
+fn protocol_766_does_not_opt_into_retained_initial_light() {
+    assert!(!V766ServerProtocol.retains_initial_column_light());
+}
+
+#[test]
 fn surface_heightmap_uses_first_free_y_and_non_straddling_nine_bit_longs() {
     let mut column = ChunkColumn::new(-64, 384);
     column.set_block(3, 101, 5, "minecraft:stone");
