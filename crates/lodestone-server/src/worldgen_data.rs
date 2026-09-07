@@ -2181,6 +2181,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn bundled_source_carries_a_neighbouring_mineshaft_into_its_served_column() {
+        use lodestone_worldgen::structure::StructureRegistry;
+
+        const SEED: i64 = 42;
+        const START: (i32, i32) = (-245, 250);
+        const TARGET: (i32, i32) = (-249, 250);
+
+        // The negative control distinguishes "the placement predicate did not
+        // happen to choose this chunk" from "the resolver supplied no
+        // structure data at all". A bare registry is intentionally empty.
+        let no_data = lodestone_worldgen::table_resolver::TableResolver::new(&[]);
+        assert!(
+            StructureRegistry::new(SEED, &no_data).is_empty(),
+            "a resolver with no structure-set documents must not invent starts"
+        );
+
+        let source = overworld_chunk_source(SEED);
+        let origin = source.column(START.0, START.1);
+        assert!(
+            origin
+                .structure_starts()
+                .iter()
+                .any(|start| start.structure == "minecraft:mineshaft"),
+            "the bundled source must persist the captured mineshaft start at {START:?}"
+        );
+
+        let target = source.column(TARGET.0, TARGET.1);
+        assert!(
+            target
+                .structure_references()
+                .contains_key("minecraft:mineshaft"),
+            "the target must retain a reference to the neighbouring mineshaft start"
+        );
+        assert_eq!(
+            target.block_state(10, 12, 0),
+            "minecraft:rail[shape=north_south,waterlogged=false]",
+            "the source column's captured rail cell is the state the chunk encoder receives"
+        );
+    }
+
     /// The integrated server's chunk source must serve the **real** generator
     /// block-for-block — no simplified terrain one layer in. This diffs the
     /// [`crate::ChunkSource`] output against the generator over a whole column
