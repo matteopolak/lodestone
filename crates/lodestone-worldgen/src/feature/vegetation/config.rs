@@ -77,7 +77,13 @@ pub enum BlockPredicate {
     /// convention can produce.
     AllOf(Vec<BlockPredicate>),
     AnyOf(Vec<BlockPredicate>),
-    MatchingBlockTag(String),
+    /// A block tag match at the predicate's position plus an optional offset.
+    /// Root-system candidate predicates use the offset form to inspect the
+    /// supporting block below the candidate.
+    MatchingBlockTag {
+        tag: String,
+        offset: (i32, i32, i32),
+    },
     /// The matching-blocks predicate. `blocks` is the JSON's `blocks`
     /// field, which is either one id or a list; `offset` is added to the tested
     /// position. Matched by **base** id, so `minecraft:water[level=0]` counts as
@@ -202,7 +208,10 @@ impl BlockPredicate {
             "all_of" => BlockPredicate::AllOf(parse_predicate_list(v)),
             "any_of" => BlockPredicate::AnyOf(parse_predicate_list(v)),
             "matching_block_tag" => {
-                BlockPredicate::MatchingBlockTag(v["tag"].as_str().unwrap_or_default().to_string())
+                BlockPredicate::MatchingBlockTag {
+                    tag: v["tag"].as_str().unwrap_or_default().to_string(),
+                    offset: parse_offset(&v["offset"]),
+                }
             }
             "matching_blocks" => BlockPredicate::MatchingBlocks {
                 blocks: parse_id_list(&v["blocks"]),
@@ -232,13 +241,24 @@ pub(super)     fn test(&self, grid: &VegGrid, tags: &VegTags, pos: BlockPos) -> 
         match self {
             BlockPredicate::True => true,
             BlockPredicate::Solid => {
-                let base = super::base_id(grid.get(pos.x, pos.y, pos.z));
-                !is_air(base) && !is_fluid(base) && blocks_motion(base)
+                let state = grid.get(pos.x, pos.y, pos.z);
+                if !tags.solid.is_empty() {
+                    tags.solid.test(state)
+                } else {
+                    let base = super::base_id(state);
+                    !is_air(base) && !is_fluid(base) && blocks_motion(base)
+                }
             }
             BlockPredicate::Not(inner) => !inner.test(grid, tags, pos),
             BlockPredicate::AllOf(list) => list.iter().all(|p| p.test(grid, tags, pos)),
             BlockPredicate::AnyOf(list) => list.iter().any(|p| p.test(grid, tags, pos)),
-            BlockPredicate::MatchingBlockTag(tag) => {
+            BlockPredicate::MatchingBlockTag { tag, offset } => {
+                let (dx, dy, dz) = *offset;
+                let pos = BlockPos {
+                    x: pos.x + dx,
+                    y: pos.y + dy,
+                    z: pos.z + dz,
+                };
                 // The JSON tag name is a per-feature constant, so matching it as
                 // a string costs nothing per attempt; what used to cost is the
                 // *state* side, now a bit test. Unit 8.
@@ -1875,6 +1895,90 @@ pub fn resolve_configured_feature_ref(resolver: &dyn Resolver, value: &Value) ->
     }
 }
 
+fn parse_root_system_int(config: &Value, name: &str, min: i32, max: i32) -> Option<i32> {
+    let value = config.get(name)?.as_i64()?;
+    (i64::from(min)..=i64::from(max))
+        .contains(&value)
+        .then_some(value as i32)
+}
+
+fn parse_root_replaceable(resolver: &dyn Resolver, value: &Value) -> Option<HashSet<String>> {
+    let mut replaceable = HashSet::new();
+    let mut seen = HashSet::new();
+    let mut add = |entry: &str| {
+        if let Some(tag) = entry.strip_prefix('#') {
+            crate::compose::resolve_block_tag(resolver, tag, &mut replaceable, &mut seen);
+        } else {
+            replaceable.insert(entry.to_owned());
+        }
+    };
+
+    match value {
+        Value::String(entry) => add(entry),
+        Value::Array(entries) => {
+            for entry in entries {
+                add(entry.as_str()?);
+            }
+        }
+        _ => return None,
+    }
+    Some(replaceable)
+}
+
+fn parse_root_system_config(resolver: &dyn Resolver, config: &Value) -> Option<super::root_system::RootSystemCfg> {
+    let root_state_provider = BlockStateProvider::try_parse(config.get("root_state_provider")?)?;
+    let hanging_root_state_provider =
+        BlockStateProvider::try_parse(config.get("hanging_root_state_provider")?)?;
+    let root_replaceable = parse_root_replaceable(resolver, config.get("root_replaceable")?)?;
+    let allowed_tree_position = config.get("allowed_tree_position")?;
+    if !allowed_tree_position.is_object() {
+        return None;
+    }
+
+    Some(super::root_system::RootSystemCfg {
+        feature: resolve_placed_feature_ref(resolver, config.get("feature")?),
+        required_vertical_space_for_tree: parse_root_system_int(
+            config,
+            "required_vertical_space_for_tree",
+            1,
+            64,
+        )?,
+        level_test_distance: parse_root_system_int(config, "level_test_distance", 0, 16)?,
+        max_level_deviation: parse_root_system_int(config, "max_level_deviation", 0, 64)?,
+        root_radius: parse_root_system_int(config, "root_radius", 1, 64)?,
+        root_replaceable,
+        root_state_provider,
+        root_placement_attempts: parse_root_system_int(config, "root_placement_attempts", 1, 256)?,
+        root_column_max_height: parse_root_system_int(
+            config,
+            "root_column_max_height",
+            1,
+            4096,
+        )?,
+        hanging_root_radius: parse_root_system_int(config, "hanging_root_radius", 1, 64)?,
+        hanging_roots_vertical_span: parse_root_system_int(
+            config,
+            "hanging_roots_vertical_span",
+            1,
+            16,
+        )?,
+        hanging_root_state_provider,
+        hanging_root_placement_attempts: parse_root_system_int(
+            config,
+            "hanging_root_placement_attempts",
+            1,
+            256,
+        )?,
+        allowed_vertical_water_for_tree: parse_root_system_int(
+            config,
+            "allowed_vertical_water_for_tree",
+            1,
+            64,
+        )?,
+        allowed_tree_position: BlockPredicate::parse(allowed_tree_position),
+    })
+}
+
 pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value) -> ConfiguredFeature {
     let ty = doc["type"].as_str().unwrap_or("");
     let short = ty.strip_prefix("minecraft:").unwrap_or(ty);
@@ -1925,39 +2029,10 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
             }
         }
         "root_system" => {
-            let c = &doc["config"];
-            match (
-                BlockStateProvider::try_parse(&c["root_state_provider"]),
-                BlockStateProvider::try_parse(&c["hanging_root_state_provider"]),
-            ) {
-                (Some(root_state_provider), Some(hanging_root_state_provider)) => {
-                    let mut root_replaceable = std::collections::HashSet::new();
-                    let mut seen = std::collections::HashSet::new();
-                    if let Some(tag) = c["root_replaceable"].as_str().and_then(|s| s.strip_prefix('#')) {
-                        crate::compose::resolve_block_tag(resolver, tag, &mut root_replaceable, &mut seen);
-                    } else {
-                        root_replaceable.extend(parse_id_list(&c["root_replaceable"]));
-                    }
-                    ConfiguredFeature::RootSystem(Box::new(super::root_system::RootSystemCfg {
-                        feature: resolve_placed_feature_ref(resolver, &c["feature"]),
-                        required_vertical_space_for_tree: c["required_vertical_space_for_tree"].as_i64().unwrap_or(1) as i32,
-                        level_test_distance: c["level_test_distance"].as_i64().unwrap_or(0) as i32,
-                        max_level_deviation: c["max_level_deviation"].as_i64().unwrap_or(0) as i32,
-                        root_radius: c["root_radius"].as_i64().unwrap_or(1) as i32,
-                        root_replaceable,
-                        root_state_provider,
-                        root_placement_attempts: c["root_placement_attempts"].as_i64().unwrap_or(1) as i32,
-                        root_column_max_height: c["root_column_max_height"].as_i64().unwrap_or(1) as i32,
-                        hanging_root_radius: c["hanging_root_radius"].as_i64().unwrap_or(1) as i32,
-                        hanging_roots_vertical_span: c["hanging_roots_vertical_span"].as_i64().unwrap_or(1) as i32,
-                        hanging_root_state_provider,
-                        hanging_root_placement_attempts: c["hanging_root_placement_attempts"].as_i64().unwrap_or(1) as i32,
-                        allowed_vertical_water_for_tree: c["allowed_vertical_water_for_tree"].as_i64().unwrap_or(1) as i32,
-                        allowed_tree_position: BlockPredicate::parse(&c["allowed_tree_position"]),
-                    }))
-                }
-                _ => ConfiguredFeature::Unsupported("root_system: unsupported state provider".into()),
-            }
+            parse_root_system_config(resolver, &doc["config"]).map_or_else(
+                || ConfiguredFeature::Unsupported("root_system: malformed configuration".into()),
+                |cfg| ConfiguredFeature::RootSystem(Box::new(cfg)),
+            )
         }
         "coral_tree" => ConfiguredFeature::Coral(super::coral::CoralKind::Tree),
         "coral_claw" => ConfiguredFeature::Coral(super::coral::CoralKind::Claw),
@@ -2599,6 +2674,78 @@ mod tests {
         assert!(cfg.cannot_replace.contains("minecraft:bedrock"));
         assert!(cfg.invalid_blocks.contains("minecraft:water"));
         assert_eq!(cfg.outer_wall_distance_max, 5);
+    }
+
+    fn root_system_doc() -> Value {
+        serde_json::json!({
+            "type": "minecraft:root_system",
+            "config": {
+                "feature": {"feature": {"type": "minecraft:no_op"}, "placement": []},
+                "required_vertical_space_for_tree": 3,
+                "level_test_distance": 0,
+                "max_level_deviation": 0,
+                "root_radius": 3,
+                "root_replaceable": "#minecraft:azalea_root_replaceable",
+                "root_state_provider": {
+                    "type": "minecraft:simple_state_provider",
+                    "state": {"Name": "minecraft:rooted_dirt"}
+                },
+                "root_placement_attempts": 20,
+                "root_column_max_height": 100,
+                "hanging_root_radius": 3,
+                "hanging_roots_vertical_span": 2,
+                "hanging_root_state_provider": {
+                    "type": "minecraft:simple_state_provider",
+                    "state": {"Name": "minecraft:hanging_roots", "Properties": {"waterlogged": "false"}}
+                },
+                "hanging_root_placement_attempts": 20,
+                "allowed_vertical_water_for_tree": 2,
+                "allowed_tree_position": {
+                    "type": "minecraft:matching_block_tag",
+                    "tag": "minecraft:air"
+                }
+            }
+        })
+    }
+
+    struct RootResolver;
+
+    impl Resolver for RootResolver {
+        fn density_function(&self, _id: &str) -> Value {
+            Value::Null
+        }
+
+        fn noise(&self, _id: &str) -> NoiseParams {
+            unreachable!("the root-system parser fixture has no noise references")
+        }
+
+        fn block_tag(&self, id: &str) -> Value {
+            assert_eq!(id, "minecraft:azalea_root_replaceable");
+            serde_json::json!({"values": ["minecraft:stone"]})
+        }
+    }
+
+    #[test]
+    fn root_system_parser_requires_the_configured_codec_fields() {
+        let resolver = RootResolver;
+        let feature = super::parse_configured_feature_doc(&resolver, &root_system_doc());
+        let ConfiguredFeature::RootSystem(cfg) = feature else {
+            panic!("the complete root-system document must parse");
+        };
+        assert_eq!(cfg.root_column_max_height, 100);
+        assert_eq!(cfg.root_placement_attempts, 20);
+        assert!(cfg.root_replaceable.contains("minecraft:stone"));
+
+        let mut malformed = root_system_doc();
+        malformed["config"]
+            .as_object_mut()
+            .expect("root-system config object")
+            .remove("root_radius");
+        assert!(matches!(
+            super::parse_configured_feature_doc(&resolver, &malformed),
+            ConfiguredFeature::Unsupported(reason)
+                if reason == "root_system: malformed configuration"
+        ));
     }
 
 }

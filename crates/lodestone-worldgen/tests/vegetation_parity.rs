@@ -84,9 +84,10 @@ use std::path::{Path, PathBuf};
 use lodestone_worldgen::compose::build_decoration_catalog;
 use lodestone_worldgen::density::{NoiseParams, Resolver};
 use lodestone_worldgen::feature::vegetation::{
-    apply_vegetal_decoration_step, apply_vegetal_decoration_step_3x3_per_source, build_veg_tags, PlacedRef, VegGrid,
+    apply_vegetal_decoration_step, apply_vegetal_decoration_step_3x3_per_source, build_veg_tags,
+    ConfiguredFeature, PlacedRef, VegGrid, VegPlacement,
 };
-use lodestone_worldgen::feature::{REGION_MAX, REGION_MIN, STEP_VEGETAL_DECORATION};
+use lodestone_worldgen::feature::{BlockPos, REGION_MAX, REGION_MIN, STEP_VEGETAL_DECORATION};
 use lodestone_worldgen::rng::{WorldgenRandom, XoroshiroRandomSource};
 use serde_json::Value;
 
@@ -306,6 +307,81 @@ const SPILL_FIXTURES: &[&str] = &[
 const COMPOSED_PARITY_EVIDENCE: &[&str] = &[
     "vegetation_warm_ocean_0_0_jvm.txt",
 ];
+
+#[test]
+fn bundled_lush_root_system_reaches_the_nested_tree_dispatch() {
+    let resolver = FsResolver { root: data_dir() };
+    let placed = lodestone_worldgen::feature::vegetation::resolve_placed_feature_ref(
+        &resolver,
+        &Value::String("minecraft:rooted_azalea_tree".to_owned()),
+    );
+    let ConfiguredFeature::RootSystem(cfg) = *placed.feature else {
+        panic!("the bundled lush-cave feature must resolve to a root system");
+    };
+    assert_eq!(cfg.root_column_max_height, 100);
+    assert!(matches!(*cfg.feature.feature, ConfiguredFeature::Tree(_)));
+    assert!(cfg.root_replaceable.contains("minecraft:dirt"));
+}
+
+fn run_bundled_root_system(resolver: &FsResolver, nested_noop: bool) -> Vec<String> {
+    let parsed = lodestone_worldgen::feature::vegetation::resolve_placed_feature_ref(
+        resolver,
+        &Value::String("minecraft:rooted_azalea_tree".to_owned()),
+    );
+    let mut root = PlacedRef {
+        registry_id: None,
+        placements: vec![VegPlacement::FixedPlacement(vec![BlockPos { x: 8, y: 63, z: 8 }])],
+        feature: parsed.feature,
+    };
+    if nested_noop {
+        let ConfiguredFeature::RootSystem(cfg) = root.feature.as_mut() else {
+            panic!("the bundled lush-cave feature must resolve to a root system");
+        };
+        cfg.feature.feature = Box::new(ConfiguredFeature::NoOp);
+    }
+
+    let tags = build_veg_tags(resolver);
+    let mut grid = VegGrid::new(MIN_Y, HEIGHT, 0, 0);
+    for x in 5..=11 {
+        for z in 5..=11 {
+            for y in MIN_Y..=64 {
+                grid.seed(x, y, z, "minecraft:stone".to_owned());
+            }
+            grid.seed(x, 64, z, "minecraft:dirt".to_owned());
+        }
+    }
+    grid.seed(8, 63, 8, "minecraft:air".to_owned());
+    for y in 65..100 {
+        grid.seed(8, y, 8, "minecraft:air".to_owned());
+    }
+    grid.seed(8, 100, 8, "minecraft:stone".to_owned());
+
+    let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+    apply_vegetal_decoration_step(&mut random, 42, 0, 0, &mut grid, &tags, &[(0, root)]);
+    grid.dirty_cells()
+        .map(|(_, _, _, state)| state.to_owned())
+        .collect()
+}
+
+#[test]
+fn bundled_lush_root_system_writes_only_after_nested_tree_success() {
+    let resolver = FsResolver { root: data_dir() };
+    let writes = run_bundled_root_system(&resolver, false);
+    assert!(
+        writes.iter().any(|state| state.starts_with("minecraft:oak_log")),
+        "the resolved root-system consumer must reach a nested tree log; writes={writes:?}"
+    );
+    assert!(
+        writes.iter().any(|state| state == "minecraft:rooted_dirt"),
+        "the successful nested tree must enable the intervening rooted-dirt pass"
+    );
+
+    let rejected = run_bundled_root_system(&resolver, true);
+    assert!(
+        rejected.is_empty(),
+        "a nested no-op control must not leave root writes behind; got {rejected:?}"
+    );
+}
 
 // ---------------------------------------------------------------------------
 // Run our own engine from the fixture's baseline and diff against `single.*`

@@ -1738,7 +1738,10 @@ mod tests {
                 BlockStateProvider::Simple("minecraft:cactus[age=0]".to_string()),
             )],
             direction: (0, 1, 0),
-            allowed_placement: BlockPredicate::MatchingBlockTag("minecraft:air".to_string()),
+            allowed_placement: BlockPredicate::MatchingBlockTag {
+                tag: "minecraft:air".to_string(),
+                offset: (0, 0, 0),
+            },
             prioritize_tip: false,
         };
         let mut grid = grid_with_flat_ground(-64, 384, 69);
@@ -1770,7 +1773,10 @@ mod tests {
                 BlockStateProvider::Simple("minecraft:cactus[age=0]".to_string()),
             )],
             direction: (0, 1, 0),
-            allowed_placement: BlockPredicate::MatchingBlockTag("minecraft:air".to_string()),
+            allowed_placement: BlockPredicate::MatchingBlockTag {
+                tag: "minecraft:air".to_string(),
+                offset: (0, 0, 0),
+            },
             prioritize_tip: false,
         };
         let mut grid = grid_with_flat_ground(-64, 384, 69);
