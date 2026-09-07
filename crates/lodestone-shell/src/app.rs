@@ -40,9 +40,10 @@ use std::time::Duration;
 // and panics when it runs — see `crate::platform`.
 use crate::platform::Instant;
 
-// `HeadlessTarget`/`TargetError` moved to `crate::diagnostics` along with
-// `Mode::Headless`'s own offscreen render — not needed here any more.
-use lodestone_render::{GpuContext, RenderTarget, fog::FogSettings};
+// The normal window and terminal presentation targets share the render-target
+// interface; the terminal uses `HeadlessTarget` while the window uses the
+// swapchain-backed target.
+use lodestone_render::{GpuContext, HeadlessTarget, RenderTarget, fog::FogSettings};
 // Native-only: it blocks on adapter/device selection. The browser arm awaits
 // `attach_window_async` from `spawn_local` instead — see `app::lifecycle::resumed`,
 // which is split at exactly that seam.
@@ -668,7 +669,80 @@ fn capture_key_for(physical_key: PhysicalKey) -> Option<CaptureKey> {
 /// this timing before it arms the gather.
 const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(400);
 
-struct WindowApp {
+/// The presentation target used by the shared frame pipeline. A terminal
+/// session owns the same target interface as a window; only acquisition and
+/// final readback differ.
+pub(crate) enum PresentationTarget {
+    Surface(lodestone_render::SurfaceTarget<'static>),
+    Headless(HeadlessTarget),
+}
+
+impl RenderTarget for PresentationTarget {
+    fn format(&self) -> wgpu::TextureFormat {
+        match self {
+            Self::Surface(target) => target.format(),
+            Self::Headless(target) => target.format(),
+        }
+    }
+
+    fn raw_view_format(&self) -> wgpu::TextureFormat {
+        match self {
+            Self::Surface(target) => target.raw_view_format(),
+            Self::Headless(target) => target.raw_view_format(),
+        }
+    }
+
+    fn size(&self) -> (u32, u32) {
+        match self {
+            Self::Surface(target) => target.size(),
+            Self::Headless(target) => target.size(),
+        }
+    }
+
+    fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        match self {
+            Self::Surface(target) => target.resize(device, width, height),
+            Self::Headless(target) => target.resize(device, width, height),
+        }
+    }
+
+    fn reconfigure(&mut self, device: &wgpu::Device) {
+        if let Self::Surface(target) = self {
+            target.reconfigure(device);
+        }
+    }
+
+    fn acquire(&mut self) -> Result<lodestone_render::AcquiredFrame, lodestone_render::TargetError> {
+        match self {
+            Self::Surface(target) => target.acquire(),
+            Self::Headless(target) => target.acquire(),
+        }
+    }
+}
+
+impl PresentationTarget {
+    pub(crate) fn readback(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Option<Vec<u8>> {
+        match self {
+            Self::Surface(_) => None,
+            Self::Headless(target) => Some(target.read_texels(device, queue)),
+        }
+    }
+
+    fn default_present_mode(&self) -> Option<wgpu::PresentMode> {
+        match self {
+            Self::Surface(target) => Some(target.default_present_mode()),
+            Self::Headless(_) => None,
+        }
+    }
+
+    fn set_present_mode(&mut self, device: &wgpu::Device, mode: wgpu::PresentMode) {
+        if let Self::Surface(target) = self {
+            target.set_present_mode(device, mode);
+        }
+    }
+}
+
+pub(crate) struct WindowApp {
     config: Config,
     /// Opt-in deterministic benchmark choreography. `None` is the ordinary
     /// player-controlled path and pays no per-frame state-machine work.
@@ -679,7 +753,7 @@ struct WindowApp {
     sim: Sim,
     window: Option<Arc<Window>>,
     gpu: Option<GpuContext>,
-    target: Option<lodestone_render::SurfaceTarget<'static>>,
+    target: Option<PresentationTarget>,
     render: Option<RenderState>,
     hud: Option<HudRenderer>,
     container: Option<ContainerRenderer>,
@@ -804,6 +878,9 @@ struct WindowApp {
     last_icon_pack_generation: u64,
     /// Editable buffer for the chat prompt; only consumed while chat is open.
     chat_input: ChatInput,
+    /// Terminal presentation draws chat as native terminal text over the
+    /// framebuffer, so the shared HUD chat pixels must be omitted there.
+    terminal_chat_native: bool,
     /// Wrapped chat rows, persisted across frames — see
     /// [`crate::hud::ChatWrapCache`]. Lives here rather than in `hud` because
     /// the HUD `Frame` is rebuilt from scratch every frame and so can hold no

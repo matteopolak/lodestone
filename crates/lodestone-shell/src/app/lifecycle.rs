@@ -973,7 +973,7 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
                 // was created from, and a second `resumed` will retry cleanly.
                 if let Some(window) = self.window.clone() {
                     tracing::info!(target: "gpu", "GPU attached; finishing bring-up");
-                    self.finish_bring_up(window, gpu, target);
+                    self.finish_bring_up(Some(window), gpu, super::PresentationTarget::Surface(target));
                 } else {
                     tracing::warn!(
                         target: "gpu",
@@ -1618,9 +1618,9 @@ impl WindowApp {
     // this file.
     pub(super) fn finish_bring_up(
         &mut self,
-        window: Arc<Window>,
+        window: Option<Arc<Window>>,
         gpu: GpuContext,
-        #[cfg_attr(not(target_arch = "wasm32"), allow(unused_mut))] mut target: lodestone_render::SurfaceTarget<'static>,
+        #[cfg_attr(not(target_arch = "wasm32"), allow(unused_mut))] mut target: super::PresentationTarget,
     ) {
         // Browser only: `attach_window_async` sized `target` from `window.inner_size()`,
         // read from inside an async task racing winit's own canvas `ResizeObserver` — see
@@ -1635,9 +1635,11 @@ impl WindowApp {
         // first frame are ever sized from `target` — fixes the initial frame outright
         // instead of relying on a `Resized` event to correct it a moment later.
         #[cfg(target_arch = "wasm32")]
-        if let Some((mw, mh)) = measured_canvas_physical_size()
+        if let Some(window) = window.as_ref()
+            && let Some((mw, mh)) = measured_canvas_physical_size()
             && (mw, mh) != target.size()
         {
+            let _ = window;
             target.resize(gpu.device(), mw, mh);
         }
 
@@ -1647,9 +1649,9 @@ impl WindowApp {
                 target: "frame_benchmark",
                 framebuffer_width = w,
                 framebuffer_height = h,
-                fullscreen = window.fullscreen().is_some(),
-                monitor = ?window.current_monitor().and_then(|monitor| monitor.name()),
-                outer_position = ?window.outer_position().ok(),
+                fullscreen = window.as_ref().is_some_and(|w| w.fullscreen().is_some()),
+                monitor = ?window.as_ref().and_then(|w| w.current_monitor()).and_then(|monitor| monitor.name()),
+                outer_position = ?window.as_ref().and_then(|w| w.outer_position().ok()),
                 render_distance = self.config.render_distance,
                 present_mode = ?wgpu::PresentMode::AutoNoVsync,
                 "benchmark window ready"
@@ -1932,7 +1934,7 @@ impl WindowApp {
         // No target requested: stay on `Screen::MainMenu`, which `UiState::new`
         // already put us on. Nothing else to do.
 
-        self.window = Some(window);
+        self.window = window;
         self.gpu = Some(gpu);
         self.target = Some(target);
         self.render = Some(render);

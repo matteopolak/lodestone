@@ -1,10 +1,12 @@
 //! Native terminal presentation surfaces.
 //!
 //! `stdio` is deliberately GPU-free and emits only player-visible text. The
-//! `terminal` surface drives the normal [`crate::sim::Sim`], renders its camera
-//! through the existing offscreen wgpu target, and hands the RGBA readback to
-//! `ratatui-image`'s true-colour Unicode half-block protocol. Ratatui owns the
-//! surrounding chat, status, and input panes. Neither path creates a window.
+//! `terminal` surface drives the normal [`crate::sim::Sim`], renders its full
+//! camera/UI frame through the existing offscreen wgpu target, and hands the
+//! RGBA readback to `ratatui-image`'s true-colour Unicode half-block protocol.
+//! The only presentation exception is chat: the shared styled spans and editor
+//! are composed as readable terminal text over the rasterized game pane, with
+//! the prompt in the final terminal row. Neither path creates a window.
 
 use std::collections::HashMap;
 use std::io::{self, IsTerminal};
@@ -12,11 +14,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
 use image::{DynamicImage, RgbaImage};
-use lodestone_assets::ResourceLocation;
 use lodestone_controller::Action;
-use lodestone_game::click::{Click, PlayerCtx};
-use lodestone_game::menu::Menu;
-use lodestone_render::{GpuContext, HeadlessTarget, RenderTarget, TargetError};
 use ratatui::crossterm::{
     event::{
         self, DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture,
@@ -25,18 +23,26 @@ use ratatui::crossterm::{
     },
     execute,
 };
-use ratatui::layout::{Constraint, Layout, Rect, Size};
-use ratatui::style::{Color, Style};
-use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
+use ratatui::layout::{Rect, Size};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
 use ratatui_image::Image;
 use ratatui_image::protocol::{Protocol, halfblocks::Halfblocks};
 
+#[cfg(feature = "multiplayer")]
 use crate::chat::compose_chat_action;
 use crate::config::Config;
-use crate::gpu::RenderState;
+#[cfg(feature = "window")]
+use crate::app::WindowApp;
+#[cfg(feature = "multiplayer")]
 use crate::net::{NetClient, NetUpdate};
 use crate::platform::Instant;
-use crate::sim::Sim;
+#[cfg(feature = "window")]
+use crate::container::MenuButton;
+#[cfg(feature = "window")]
+use crate::menu::nav::MenuKey;
+use lodestone_model::text::{TextColor, TextSpan};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeyCommand {
@@ -160,44 +166,145 @@ enum Focus {
     Inventory,
 }
 
-#[derive(Default)]
-struct InventoryUi {
-    hovered_slot: Option<usize>,
-}
-
-const INVENTORY_SLOT_WIDTH: u16 = 7;
-
-#[derive(Clone, Copy)]
-struct SurfaceAreas {
-    chat: Rect,
-    game: Rect,
-    input: Rect,
-}
-
-fn surface_areas(area: Rect) -> SurfaceAreas {
-    let [body, input] = Layout::vertical([Constraint::Min(5), Constraint::Length(3)]).areas(area);
-    let [chat, game] =
-        Layout::horizontal([Constraint::Percentage(32), Constraint::Percentage(68)]).areas(body);
-    SurfaceAreas { chat, game, input }
-}
-
-fn inner(area: Rect) -> Rect {
-    Rect::new(
-        area.x.saturating_add(1),
-        area.y.saturating_add(1),
-        area.width.saturating_sub(2),
-        area.height.saturating_sub(2),
-    )
-}
-
 fn current_area() -> io::Result<Rect> {
     let (width, height) = ratatui::crossterm::terminal::size()?;
     Ok(Rect::new(0, 0, width, height))
 }
 
-fn render_cells(area: Rect) -> Size {
-    let area = inner(surface_areas(area).game);
-    Size::new(area.width.max(1), area.height.max(1))
+fn terminal_game_area(area: Rect) -> Rect {
+    Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1).max(1))
+}
+
+fn terminal_render_cells(area: Rect) -> Size {
+    let game = terminal_game_area(area);
+    Size::new(game.width.max(1), game.height.max(1))
+}
+
+fn terminal_render_dimensions(
+    area: Rect,
+    terminal_pixels: Option<(u32, u32, u32, u32)>,
+) -> (u32, u32) {
+    let cells = terminal_render_cells(area);
+    let Some((columns, rows, width, height)) = terminal_pixels else {
+        return (u32::from(cells.width), u32::from(cells.height) * 2);
+    };
+    let target_width = (u64::from(cells.width) * u64::from(width) + u64::from(columns / 2))
+        / u64::from(columns);
+    let target_height = (u64::from(cells.height) * u64::from(height) + u64::from(rows / 2))
+        / u64::from(rows);
+    (
+        u32::try_from(target_width.max(1)).unwrap_or(u32::MAX),
+        u32::try_from(target_height.max(1)).unwrap_or(u32::MAX),
+    )
+}
+
+/// Convert a terminal cell into the framebuffer coordinate consumed by the
+/// shared window/menu hit-testing path. The game pane is the only interactive
+/// portion of the image; the prompt row intentionally has no pointer target.
+#[cfg(feature = "window")]
+fn terminal_pointer_position(
+    mouse: MouseEvent,
+    game: Rect,
+    width: u32,
+    height: u32,
+) -> Option<(f32, f32)> {
+    if !game.contains((mouse.column, mouse.row).into()) {
+        return None;
+    }
+    let local_x = f32::from(mouse.column.saturating_sub(game.x)) + 0.5;
+    let local_y = f32::from(mouse.row.saturating_sub(game.y)) + 0.5;
+    Some((
+        local_x * width as f32 / f32::from(game.width.max(1)),
+        local_y * height as f32 / f32::from(game.height.max(1)),
+    ))
+}
+
+#[cfg(feature = "window")]
+fn terminal_menu_button(mouse: MouseEvent) -> Option<MenuButton> {
+    match mouse.kind {
+        MouseEventKind::Down(button) | MouseEventKind::Up(button) => match button {
+            ratatui::crossterm::event::MouseButton::Left => Some(MenuButton::Left),
+            ratatui::crossterm::event::MouseButton::Right => Some(MenuButton::Right),
+            ratatui::crossterm::event::MouseButton::Middle => Some(MenuButton::Pick),
+        },
+        _ => None,
+    }
+}
+
+fn terminal_chat_display(
+    entries: &[(Vec<TextSpan>, f32)],
+    max_lines: usize,
+    chat_open: bool,
+) -> Vec<Line<'static>> {
+    let mut lines = entries
+        .iter()
+        .flat_map(|(spans, age)| {
+            let alpha = if chat_open { 1.0 } else { terminal_chat_alpha(*age) };
+            (alpha > 0.0)
+                .then(|| {
+                    crate::overlay::spans_lines(spans)
+                        .into_iter()
+                        .map(move |line| terminal_chat_line(&line, alpha))
+                })
+                .into_iter()
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    if lines.len() > max_lines {
+        lines.drain(..lines.len() - max_lines);
+    }
+    lines
+}
+
+fn terminal_chat_line(spans: &[TextSpan], alpha: f32) -> Line<'static> {
+    Line::from(
+        spans
+            .iter()
+            .map(|span| {
+                let mut modifier = Modifier::empty();
+                if span.style.bold == Some(true) {
+                    modifier.insert(Modifier::BOLD);
+                }
+                if span.style.italic == Some(true) {
+                    modifier.insert(Modifier::ITALIC);
+                }
+                if span.style.underlined == Some(true) {
+                    modifier.insert(Modifier::UNDERLINED);
+                }
+                if span.style.strikethrough == Some(true) {
+                    modifier.insert(Modifier::CROSSED_OUT);
+                }
+                let rgb = span.style.color.unwrap_or(TextColor::White).rgb();
+                Span::styled(
+                    span.text.clone(),
+                    Style::default()
+                        .fg(faded_terminal_color(rgb, alpha))
+                        .add_modifier(modifier),
+                )
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn terminal_chat_alpha(age: f32) -> f32 {
+    const CHAT_VISIBLE_SECS: f32 = 10.0;
+    const CHAT_FADE_SECS: f32 = 2.0;
+    if age <= CHAT_VISIBLE_SECS - CHAT_FADE_SECS {
+        1.0
+    } else if age >= CHAT_VISIBLE_SECS {
+        0.0
+    } else {
+        (CHAT_VISIBLE_SECS - age) / CHAT_FADE_SECS
+    }
+}
+
+fn faded_terminal_color(rgb: u32, alpha: f32) -> Color {
+    let fade = alpha.clamp(0.0, 1.0);
+    Color::Rgb(
+        (f32::from(((rgb >> 16) & 0xff) as u8) * fade).round() as u8,
+        (f32::from(((rgb >> 8) & 0xff) as u8) * fade).round() as u8,
+        (f32::from((rgb & 0xff) as u8) * fade).round() as u8,
+    )
 }
 
 /// Return the terminal window's physical dimensions when the tty reports them.
@@ -216,29 +323,12 @@ fn terminal_pixel_size() -> Option<(u32, u32, u32, u32)> {
     ))
 }
 
-fn render_dimensions(area: Rect, terminal_pixels: Option<(u32, u32, u32, u32)>) -> (u32, u32) {
-    let cells = render_cells(area);
-    let Some((columns, rows, width, height)) = terminal_pixels else {
-        // Halfblocks consumes two source pixels vertically per terminal cell.
-        return (u32::from(cells.width), u32::from(cells.height) * 2);
-    };
-
-    // Keep one source pixel per physical terminal pixel where the platform
-    // reports cell geometry. The halfblock encoder downsamples this frame to
-    // `cells.width x cells.height` cells, preserving the camera's physical
-    // aspect even when cells are not exactly 1:2.
-    let target_width = (u64::from(cells.width) * u64::from(width) + u64::from(columns / 2))
-        / u64::from(columns);
-    let target_height =
-        (u64::from(cells.height) * u64::from(height) + u64::from(rows / 2)) / u64::from(rows);
-    (
-        u32::try_from(target_width.max(1)).unwrap_or(u32::MAX),
-        u32::try_from(target_height.max(1)).unwrap_or(u32::MAX),
-    )
-}
-
 /// Run the live game in a Ratatui layout with a coloured Unicode image pane.
-#[cfg(feature = "multiplayer")]
+///
+/// The frame is produced by `WindowApp::redraw`, the same entry point used by
+/// the winit window. Ratatui is only the final presentation adapter: it reads
+/// the completed offscreen framebuffer and converts it to half-block cells.
+#[cfg(feature = "window")]
 pub(crate) fn run_terminal(
     _owned: lodestone_auth::Entitlement,
     config: Config,
@@ -251,27 +341,8 @@ pub(crate) fn run_terminal(
 
     let initial_area = current_area()?;
     let (mut pixel_width, mut pixel_height) =
-        render_dimensions(initial_area, terminal_pixel_size());
-    let ctx = GpuContext::new_headless_blocking()
-        .map_err(|error| anyhow::anyhow!("terminal GPU bring-up failed: {error}"))?;
-    let device = ctx.device();
-    let queue = ctx.queue();
-    let format = wgpu::TextureFormat::Rgba8Unorm;
-    let mut target = HeadlessTarget::new(device, pixel_width, pixel_height, format);
-    let mut sim = Sim::new(config.clone());
-    sim.connect(config.host.clone(), config.explicit_port(), config.protocol);
-    let mut render = RenderState::new(
-        device,
-        queue,
-        format,
-        pixel_width,
-        pixel_height,
-        sim.vanilla_atlas(),
-    );
-    render.set_fog(
-        crate::sim::fog_for_render_distance(config.render_distance),
-        config.render_distance,
-    );
+        terminal_render_dimensions(initial_area, terminal_pixel_size());
+    let mut app = WindowApp::new_terminal(config, pixel_width, pixel_height)?;
 
     let mut terminal = ratatui::try_init()?;
     let _session = TerminalSession;
@@ -289,8 +360,6 @@ pub(crate) fn run_terminal(
     }
 
     let mut focus = Focus::Game;
-    let mut inventory_ui = InventoryUi::default();
-    let mut chat_input = String::new();
     let mut last_mouse = None;
     let mut held = HashMap::new();
     let mut last_frame = Instant::now();
@@ -298,30 +367,67 @@ pub(crate) fn run_terminal(
 
     while running {
         let area = current_area()?;
-        let areas = surface_areas(area);
+        let game_area = terminal_game_area(area);
         while event::poll(Duration::ZERO)? {
             match event::read()? {
                 Event::Key(key) => {
-                    if !handle_key(
-                        key,
-                        &mut focus,
-                        &mut chat_input,
-                        &mut inventory_ui,
-                        &mut held,
-                        &mut sim,
-                    ) {
+                    app.terminal_set_modifiers(
+                        key.modifiers.contains(KeyModifiers::SHIFT),
+                        key.modifiers.contains(KeyModifiers::CONTROL),
+                    );
+                    let before = focus;
+                    if !handle_key(key, &mut focus, &mut held, &mut app) {
                         running = false;
                         break;
                     }
+                    if before == Focus::Game && focus == Focus::Inventory {
+                        app.terminal_toggle_inventory();
+                    }
                 }
-                Event::Mouse(mouse) if focus == Focus::Game => {
-                    handle_mouse(mouse, inner(areas.game), &mut last_mouse, &mut sim);
-                }
-                Event::Mouse(mouse) if focus == Focus::Inventory => {
-                    handle_inventory_mouse(mouse, inner(areas.game), &mut inventory_ui, &mut sim);
+                Event::Mouse(mouse) => {
+                    app.terminal_set_modifiers(
+                        mouse.modifiers.contains(KeyModifiers::SHIFT),
+                        mouse.modifiers.contains(KeyModifiers::CONTROL),
+                    );
+                    // Crossterm reports terminal cells, while the shared
+                    // window path consumes framebuffer pixels. Convert once
+                    // and feed the same cursor/menu adapter used by winit;
+                    // gameplay relative-look remains based on the raw cells
+                    // below so its sensitivity is unchanged.
+                    let pointer = terminal_pointer_position(
+                        mouse,
+                        game_area,
+                        pixel_width,
+                        pixel_height,
+                    );
+                    app.terminal_pointer_moved(pointer);
+                    if app.terminal_routes_menu_input() {
+                        if let Some(button) = terminal_menu_button(mouse) {
+                            match mouse.kind {
+                                MouseEventKind::Down(_) => app.terminal_pointer_button(button, true),
+                                MouseEventKind::Up(_) => app.terminal_pointer_button(button, false),
+                                _ => {}
+                            }
+                        }
+                        last_mouse = None;
+                    } else if focus == Focus::Game {
+                        handle_mouse(mouse, game_area, &mut last_mouse, &mut app);
+                    } else if focus == Focus::Inventory {
+                        if let MouseEventKind::ScrollUp | MouseEventKind::ScrollDown = mouse.kind {
+                            let delta = if matches!(mouse.kind, MouseEventKind::ScrollUp) { -1 } else { 1 };
+                            app.terminal_cycle_slot(delta);
+                        } else if let Some(button) = terminal_menu_button(mouse) {
+                            match mouse.kind {
+                                MouseEventKind::Down(_) => app.terminal_pointer_button(button, true),
+                                MouseEventKind::Up(_) => app.terminal_pointer_button(button, false),
+                                _ => {}
+                            }
+                        }
+                        last_mouse = None;
+                    }
                 }
                 Event::FocusLost => {
-                    reset_terminal_input(&mut held, &mut sim);
+                    reset_terminal_input(&mut held, &mut app);
                     last_mouse = None;
                 }
                 Event::FocusGained => last_mouse = None,
@@ -335,167 +441,70 @@ pub(crate) fn run_terminal(
         if !running {
             break;
         }
-        expire_unreleased_keys(&mut held, &mut sim);
+        expire_unreleased_keys(&mut held, &mut app);
 
-        let dimensions = render_dimensions(area, terminal_pixel_size());
+        let dimensions = terminal_render_dimensions(area, terminal_pixel_size());
         if dimensions != (pixel_width, pixel_height) {
             (pixel_width, pixel_height) = dimensions;
-            target = HeadlessTarget::new(device, pixel_width, pixel_height, format);
-            render.resize(device, pixel_width, pixel_height);
+            app.resize_terminal(pixel_width, pixel_height);
         }
-
         let now = Instant::now();
-        let dt = now.duration_since(last_frame).as_secs_f64().min(0.25);
+        let _dt = now.duration_since(last_frame).as_secs_f64().min(0.25);
         last_frame = now;
-        sim.step(dt);
-        if sim.open_menu().is_some() && focus == Focus::Game {
-            reset_terminal_input(&mut held, &mut sim);
-            inventory_ui.hovered_slot = None;
-            focus = Focus::Inventory;
-        }
-
-        for key in sim.drain_removals() {
-            render.remove_section(&key);
-        }
-        for meshed in sim.drain_meshes() {
-            render.upload_section(device, queue, meshed.key, &meshed.mesh);
-        }
-
-        let aspect = pixel_width as f32 / pixel_height as f32;
-        sim.update_target(aspect);
-        let camera = sim.render_camera(aspect);
-        let frame = target
-            .acquire()
-            .map_err(|error: TargetError| {
-                anyhow::anyhow!("terminal frame acquire failed: {error}")
-        })?;
-        let entity_draws = sim.entity_draws();
-        crate::remote_skins::request_all(
-            entity_draws
-                .iter()
-                .filter_map(|draw| draw.player_skin.as_ref().map(|skin| skin.url.as_str()))
-                .chain(
-                    entity_draws
-                        .iter()
-                        .filter_map(|draw| draw.player_skin.as_ref()?.cape.as_deref()),
-                ),
-        );
-        // This resolves the local sheet even in first person, where it feeds the
-        // arm; the same source makes the avatar appear when F5 selects a detached
-        // camera.
-        let body = sim.third_person_body_state();
-        render.set_third_person_body_source(move || body.clone());
-        render.install_pending_player_skins(device, queue);
-        let hand_swing = sim.hand_swing_progress();
-        render.set_hand_swing_source(move || hand_swing);
-        let item_use = sim.item_use_render_state();
-        render.set_item_use_source(move || item_use);
-        let hand_bob = sim.bob_frame();
-        render.set_hand_bob_source(move || hand_bob);
-        let held_item = terminal_main_hand(&sim);
-        render.set_main_hand_source(move || held_item.clone());
-        let _ = sim.extract_particles(&camera);
-        render.prepare_particles(device, queue, &sim.particle_instances(), &camera);
-        render.update_animation(queue, sim.tick_count());
-        let _ = render.render(
-            device,
-            queue,
-            frame.view(),
-            &camera,
-            None,
-            &entity_draws,
-        );
+        let pixels = app.redraw_terminal()?;
         let protocol = halfblock_protocol(
-            target.read_texels(device, queue),
+            pixels,
             pixel_width,
             pixel_height,
-            render_cells(area),
+            terminal_render_cells(area),
         )?;
-
-        let chat = sim
-            .recent_chat_spans(usize::from(areas.chat.height.saturating_sub(2)))
-            .into_iter()
-            .map(|(spans, _)| {
-                spans
-                    .iter()
-                    .map(|span| span.text.as_str())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let position = sim.player().position;
-        let game_title = format!(
-            " Game · {:?} · {:.1} {:.1} {:.1} ",
-            sim.session_phase(), position.x, position.y, position.z
+        let chat_lines = app.terminal_chat_lines(
+            usize::from(terminal_game_area(area).height.saturating_sub(1)),
+        );
+        let native_chat = terminal_chat_display(
+            &chat_lines,
+            usize::from(terminal_game_area(area).height.saturating_sub(1)),
+            app.terminal_chat_is_open(),
         );
         terminal.draw(|frame| {
-            let areas = surface_areas(frame.area());
-            frame.render_widget(Block::bordered().title(" Chat "), areas.chat);
+            let area = frame.area();
+            let game = terminal_game_area(area);
+            frame.render_widget(Image::new(&protocol), game);
+            let chat_height = u16::try_from(native_chat.len()).unwrap_or(game.height);
+            let chat_y = game.y.saturating_add(game.height.saturating_sub(chat_height));
             frame.render_widget(
-                Paragraph::new(chat.as_str()).wrap(Wrap { trim: false }),
-                inner(areas.chat),
+                Paragraph::new(native_chat),
+                Rect::new(game.x.saturating_add(1), chat_y, game.width.saturating_sub(2), chat_height),
             );
-            frame.render_widget(Block::bordered().title(game_title.as_str()), areas.game);
-            frame.render_widget(Image::new(&protocol), inner(areas.game));
-            let game_inner = inner(areas.game);
-            let hotbar_area = Rect::new(
-                game_inner.x,
-                game_inner.y.saturating_add(game_inner.height.saturating_sub(1)),
-                game_inner.width,
-                1,
-            );
-            frame.render_widget(Paragraph::new(terminal_hotbar(&sim)), hotbar_area);
-            if focus == Focus::Inventory {
-                let menu = terminal_menu(&sim);
-                let panel = inventory_panel(game_inner, menu.slot_count());
-                frame.render_widget(Clear, panel);
-                frame.render_widget(Block::bordered().title(" Inventory · E or Esc closes "), panel);
-                frame.render_widget(
-                    Paragraph::new(terminal_inventory_text(&menu, inventory_ui.hovered_slot)),
-                    inner(panel),
-                );
-            }
-            let input_title = match focus {
-                Focus::Game => " Input · Enter or / to chat · Ctrl-C to quit ",
-                Focus::Chat => " Chat · Enter to send · Esc to cancel ",
-                Focus::Inventory => " Inventory · click slots · 1–9 swaps hovered slot ",
-            };
-            let style = if focus == Focus::Chat {
-                Style::default().fg(Color::Yellow)
-            } else {
-                Style::default()
-            };
             frame.render_widget(
-                Paragraph::new(format!("> {chat_input}"))
-                    .block(Block::bordered().title(input_title))
-                    .style(style),
-                areas.input,
+                Paragraph::new(format!("> {}", app.terminal_chat_text()))
+                    .style(Style::default().fg(Color::Yellow)),
+                Rect::new(area.x, game.y.saturating_add(game.height), area.width, 1),
             );
         })?;
 
         std::thread::sleep(Duration::from_millis(80));
     }
-    reset_terminal_input(&mut held, &mut sim);
+    reset_terminal_input(&mut held, &mut app);
     Ok(())
 }
 
-#[cfg(not(feature = "multiplayer"))]
+#[cfg(not(feature = "window"))]
 pub(crate) fn run_terminal(
     _owned: lodestone_auth::Entitlement,
     _config: Config,
 ) -> anyhow::Result<()> {
     Err(anyhow::anyhow!(
-        "multiplayer is disabled in this build of the game; the terminal surface only joins remote servers"
+        "the terminal surface requires the window rendering feature in this build"
     ))
 }
 
+#[cfg(feature = "window")]
 fn handle_key(
     key: KeyEvent,
     focus: &mut Focus,
-    chat_input: &mut String,
-    inventory_ui: &mut InventoryUi,
     held: &mut HashMap<Action, Instant>,
-    sim: &mut Sim,
+    app: &mut WindowApp,
 ) -> bool {
     if key.kind == KeyEventKind::Press
         && key.modifiers.contains(KeyModifiers::CONTROL)
@@ -504,29 +513,48 @@ fn handle_key(
         return false;
     }
 
+    // Menu navigation is a UI concern, not gameplay input. In particular,
+    // this lets a terminal launched without `--host` use the real title-screen
+    // rows and actions rather than displaying a non-interactive screenshot.
+    if *focus == Focus::Game
+        && app.terminal_routes_menu_input()
+        && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+        && let Some(menu_key) = terminal_menu_key(key)
+    {
+        app.terminal_menu_key(menu_key);
+        return true;
+    }
+
     match *focus {
         Focus::Chat if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
             match key.code {
                 KeyCode::Esc => {
-                    chat_input.clear();
+                    app.terminal_chat_cancel();
                     *focus = Focus::Game;
                 }
                 KeyCode::Enter => {
-                    let line = std::mem::take(chat_input);
-                    if line.trim() == "#quit" {
+                    if app.terminal_chat_text().trim() == "#quit" {
                         return false;
                     }
-                    if !line.is_empty() {
-                        let _ = sim.send_chat(&line);
-                    }
+                    app.terminal_chat_submit();
                     *focus = Focus::Game;
                 }
                 KeyCode::Backspace => {
-                    chat_input.pop();
+                    app.terminal_chat_backspace();
                 }
                 KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    chat_input.push(ch);
+                    app.terminal_chat_push_char(ch);
                 }
+                KeyCode::Up => {
+                    app.terminal_chat_history_up();
+                }
+                KeyCode::Down => {
+                    app.terminal_chat_history_down();
+                }
+                KeyCode::Left => app.terminal_chat_move_left(),
+                KeyCode::Right => app.terminal_chat_move_right(),
+                KeyCode::Home => app.terminal_chat_move_start(),
+                KeyCode::End => app.terminal_chat_move_end(),
                 _ => {}
             }
         }
@@ -534,25 +562,22 @@ fn handle_key(
             if let Some(command) = key_command(key) {
                 match command {
                     KeyCommand::Movement(action, pressed) => {
-                        sim.input_mut(|input| input.set(action, pressed));
+                        app.terminal_set_action(action, pressed);
                         if pressed {
                             held.insert(action, Instant::now());
                         } else {
                             held.remove(&action);
                         }
                     }
-                    KeyCommand::SelectSlot(slot) => sim.select_slot(slot),
-                    KeyCommand::TogglePerspective => sim.cycle_camera_type(),
+                    KeyCommand::SelectSlot(slot) => app.terminal_select_slot(slot),
+                    KeyCommand::TogglePerspective => app.terminal_cycle_camera(),
                     KeyCommand::ToggleInventory => {
-                        reset_terminal_input(held, sim);
-                        inventory_ui.hovered_slot = None;
+                        reset_terminal_input(held, app);
                         *focus = Focus::Inventory;
                     }
                     KeyCommand::OpenChat { command } => {
-                        reset_terminal_input(held, sim);
-                        if command {
-                            chat_input.push('/');
-                        }
+                        reset_terminal_input(held, app);
+                        app.terminal_chat_open(command);
                         *focus = Focus::Chat;
                     }
                 }
@@ -561,16 +586,12 @@ fn handle_key(
         Focus::Inventory if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('e' | 'E') => {
-                    if sim.open_menu().is_some() {
-                        sim.close_open_menu();
-                    }
-                    inventory_ui.hovered_slot = None;
+                    app.terminal_close_container();
                     *focus = Focus::Game;
                 }
-                KeyCode::Char('1'..='9') if inventory_ui.hovered_slot.is_some() => {
+                KeyCode::Char('1'..='9') => {
                     let KeyCode::Char(key) = key.code else { unreachable!() };
-                    let slot = inventory_ui.hovered_slot.expect("guarded above");
-                    terminal_menu_click(sim, Click::hotbar_swap(slot, key as u8 - b'1'));
+                    app.terminal_container_hotbar(key as u8 - b'1');
                 }
                 _ => {}
             }
@@ -578,6 +599,22 @@ fn handle_key(
         _ => {}
     }
     true
+}
+
+#[cfg(feature = "window")]
+fn terminal_menu_key(key: KeyEvent) -> Option<MenuKey> {
+    Some(match key.code {
+        KeyCode::Up => MenuKey::Up,
+        KeyCode::Down => MenuKey::Down,
+        KeyCode::Enter => MenuKey::Enter,
+        KeyCode::Esc => MenuKey::Escape,
+        KeyCode::Tab => MenuKey::Tab,
+        KeyCode::Backspace => MenuKey::Backspace,
+        KeyCode::Delete => MenuKey::Delete,
+        KeyCode::F(5) => MenuKey::Refresh,
+        KeyCode::Char(ch) => MenuKey::Char(ch),
+        _ => return None,
+    })
 }
 
 fn key_command(key: KeyEvent) -> Option<KeyCommand> {
@@ -619,126 +656,6 @@ fn key_command(key: KeyEvent) -> Option<KeyCommand> {
         }
         KeyCode::Char('/') => Some(KeyCommand::OpenChat { command: true }),
         _ => None,
-    }
-}
-
-fn terminal_main_hand(sim: &Sim) -> Option<crate::gpu::MainHandItem> {
-    let menu = sim.player_menu();
-    let stack = menu.player_native(sim.selected_slot())?;
-    let visual = stack.item_model().unwrap_or_else(|| stack.item().clone());
-    let item = ResourceLocation::parse(&visual.to_string()).ok()?;
-    Some(crate::gpu::MainHandItem {
-        item,
-        foil: crate::hud::item_icon::stack_has_foil(stack),
-        custom_model_data: stack.custom_model_data(),
-        dyed_color: stack.dyed_color(),
-        potion_color: stack.potion_color(),
-        banner_patterns: stack.banner_patterns().to_vec(),
-        base_color: stack.base_color().map(str::to_owned),
-        skin: crate::hud::item_icon::stack_skin_url(stack),
-    })
-}
-
-fn terminal_menu(sim: &Sim) -> Menu {
-    sim.open_menu()
-        .map(|open| open.menu)
-        .unwrap_or_else(|| sim.player_menu())
-}
-
-fn terminal_hotbar(sim: &Sim) -> String {
-    let menu = sim.player_menu();
-    (0..9)
-        .map(|slot| {
-            let label = menu
-                .player_native(slot)
-                .map_or_else(|| "---".to_owned(), terminal_stack_label);
-            let marker = if slot == sim.selected_slot() { '>' } else { ' ' };
-            format!("{marker}{}:{label:<3}", slot + 1)
-        })
-        .collect::<String>()
-}
-
-fn terminal_stack_label(stack: &lodestone_game::item::ItemStack) -> String {
-    let identifier = stack.item().to_string();
-    let name = identifier.rsplit(':').next().unwrap_or("?");
-    let mut label = name.chars().take(3).collect::<String>();
-    if stack.count() > 1 {
-        label = stack.count().min(99).to_string();
-    }
-    label
-}
-
-fn inventory_columns(slot_count: usize) -> usize {
-    slot_count.clamp(1, 9)
-}
-
-fn inventory_panel(game: Rect, slot_count: usize) -> Rect {
-    let columns = inventory_columns(slot_count);
-    let rows = slot_count.div_ceil(columns).max(1);
-    let width = (u16::try_from(columns).unwrap_or(u16::MAX) * INVENTORY_SLOT_WIDTH)
-        .saturating_add(2)
-        .min(game.width);
-    let height = (u16::try_from(rows).unwrap_or(u16::MAX) + 2).min(game.height);
-    Rect::new(
-        game.x.saturating_add(game.width.saturating_sub(width) / 2),
-        game.y.saturating_add(game.height.saturating_sub(height) / 2),
-        width,
-        height,
-    )
-}
-
-fn inventory_slot_at(menu: &Menu, panel: Rect, column: u16, row: u16) -> Option<usize> {
-    let content = inner(panel);
-    if !content.contains((column, row).into()) {
-        return None;
-    }
-    let columns = inventory_columns(menu.slot_count());
-    let local_x = column.saturating_sub(content.x);
-    let local_y = row.saturating_sub(content.y);
-    let cell_width = (content.width / u16::try_from(columns).ok()?).max(1);
-    let slot = usize::from(local_y) * columns + usize::from(local_x / cell_width);
-    (slot < menu.slot_count()).then_some(slot)
-}
-
-fn terminal_inventory_text(menu: &Menu, hovered: Option<usize>) -> String {
-    let columns = inventory_columns(menu.slot_count());
-    (0..menu.slot_count())
-        .map(|slot| {
-            let prefix = if hovered == Some(slot) { '>' } else { ' ' };
-            let label = menu
-                .slot_item(slot)
-                .map_or_else(|| "---".to_owned(), terminal_stack_label);
-            format!("{prefix}{slot:02}:{label:<3}")
-        })
-        .collect::<Vec<_>>()
-        .chunks(columns)
-        .map(|row| row.concat())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn terminal_menu_click(sim: &Sim, click: Click) {
-    let Some(net) = sim.net() else { return };
-    let shared = net.shared_handle();
-    let Some(handle) = shared.get() else { return };
-    let _ = handle.menu_click(click, PlayerCtx::survival());
-}
-
-fn handle_inventory_mouse(mouse: MouseEvent, game: Rect, ui: &mut InventoryUi, sim: &Sim) {
-    let menu = terminal_menu(sim);
-    let panel = inventory_panel(game, menu.slot_count());
-    let slot = inventory_slot_at(&menu, panel, mouse.column, mouse.row);
-    ui.hovered_slot = slot;
-    let Some(slot) = slot else { return };
-    let click = match mouse.kind {
-        MouseEventKind::Down(ratatui::crossterm::event::MouseButton::Left)
-            if mouse.modifiers.contains(KeyModifiers::SHIFT) => Some(Click::shift(slot)),
-        MouseEventKind::Down(ratatui::crossterm::event::MouseButton::Left) => Some(Click::left(slot)),
-        MouseEventKind::Down(ratatui::crossterm::event::MouseButton::Right) => Some(Click::right(slot)),
-        _ => None,
-    };
-    if let Some(click) = click {
-        terminal_menu_click(sim, click);
     }
 }
 
@@ -784,42 +701,32 @@ fn handle_mouse(
     mouse: MouseEvent,
     game: Rect,
     last_mouse: &mut Option<(u16, u16)>,
-    sim: &mut Sim,
+    app: &mut WindowApp,
 ) {
     let (command, next) = mouse_event_command(mouse, game, *last_mouse);
     *last_mouse = next;
     match command {
         Some(MouseCommand::Motion { dx, dy }) => {
-            sim.input_mut(|input| input.add_mouse(dx as f32, dy as f32));
+            app.terminal_mouse_motion(dx as f32, dy as f32);
         }
         Some(MouseCommand::Attack(pressed)) => {
-            if pressed {
-                sim.begin_attack();
-            } else {
-                sim.end_attack();
-            }
+            app.terminal_mouse_attack(pressed);
         }
         Some(MouseCommand::Use(pressed)) => {
-            if pressed {
-                sim.use_item();
-            } else {
-                sim.end_use();
-            }
+            app.terminal_mouse_use(pressed);
         }
-        Some(MouseCommand::PickItem { include_data }) => sim.pick_block_or_entity(include_data),
-        Some(MouseCommand::CycleSlot(delta)) => sim.cycle_slot(delta),
+        Some(MouseCommand::PickItem { include_data }) => app.terminal_mouse_pick_item(include_data),
+        Some(MouseCommand::CycleSlot(delta)) => app.terminal_cycle_slot(delta),
         None => {}
     }
 }
 
-fn reset_terminal_input(held: &mut HashMap<Action, Instant>, sim: &mut Sim) {
+fn reset_terminal_input(held: &mut HashMap<Action, Instant>, app: &mut WindowApp) {
     held.clear();
-    sim.input_mut(|input| input.release_all());
-    sim.end_attack();
-    sim.end_use();
+    app.terminal_reset_input();
 }
 
-fn expire_unreleased_keys(held: &mut HashMap<Action, Instant>, sim: &mut Sim) {
+fn expire_unreleased_keys(held: &mut HashMap<Action, Instant>, app: &mut WindowApp) {
     const RELEASE_TIMEOUT: Duration = Duration::from_millis(350);
     let expired = held
         .iter()
@@ -827,7 +734,7 @@ fn expire_unreleased_keys(held: &mut HashMap<Action, Instant>, sim: &mut Sim) {
         .collect::<Vec<_>>();
     for action in expired {
         held.remove(&action);
-        sim.input_mut(|input| input.set(action, false));
+        app.terminal_expire_action(action);
     }
 }
 
@@ -879,29 +786,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn layout_reserves_chat_game_and_input_panes() {
-        let areas = surface_areas(Rect::new(0, 0, 100, 30));
-        assert_eq!(areas.input.height, 3);
-        assert_eq!(areas.chat.width, 32);
-        assert_eq!(areas.game.width, 68);
-        assert_eq!(render_cells(Rect::new(0, 0, 100, 30)), Size::new(66, 25));
-        assert_eq!(
-            render_dimensions(Rect::new(0, 0, 100, 30), None),
-            (66, 50)
-        );
+    fn terminal_frame_uses_the_full_game_area_and_reserves_only_prompt_row() {
+        let area = Rect::new(0, 0, 120, 40);
+        assert_eq!(terminal_game_area(area), Rect::new(0, 0, 120, 39));
+        assert_eq!(terminal_render_cells(area), Size::new(120, 39));
+        assert_eq!(terminal_render_dimensions(area, None), (120, 78));
     }
 
     #[test]
-    fn terminal_pixels_correct_the_camera_target_aspect_for_non_halfblock_cells() {
-        let area = Rect::new(0, 0, 100, 30);
-        // A 10x15 physical cell is taller than the halfblock protocol's
-        // default 1:2 assumption. The GPU target follows the physical game
-        // pane (66*10 by 25*15), while its protocol output remains 66x25
-        // cells.
-        assert_eq!(
-            render_dimensions(area, Some((100, 30, 1_000, 450))),
-            (660, 375)
-        );
+    fn native_chat_overlay_preserves_shared_log_fade_ages() {
+        assert_eq!(terminal_chat_alpha(0.0), 1.0);
+        assert_eq!(terminal_chat_alpha(8.0), 1.0);
+        assert_eq!(terminal_chat_alpha(9.0), 0.5);
+        assert_eq!(terminal_chat_alpha(10.0), 0.0);
+    }
+
+    #[test]
+    fn native_chat_overlay_preserves_span_colour_and_formatting() {
+        use lodestone_model::text::{TextColor, TextStyle};
+
+        let spans = vec![
+            TextSpan {
+                text: "red".to_owned(),
+                style: TextStyle {
+                    color: Some(TextColor::Red),
+                    bold: Some(true),
+                    italic: Some(false),
+                    underlined: Some(true),
+                    strikethrough: Some(true),
+                    ..TextStyle::default()
+                },
+            },
+            TextSpan {
+                text: " hex".to_owned(),
+                style: TextStyle {
+                    color: Some(TextColor::Rgb(0x12_34_56)),
+                    italic: Some(true),
+                    ..TextStyle::default()
+                },
+            },
+        ];
+        let line = terminal_chat_line(&spans, 1.0);
+        assert_eq!(line.spans[0].style.fg, Some(Color::Rgb(255, 85, 85)));
+        assert!(line.spans[0].style.add_modifier.contains(Modifier::BOLD));
+        assert!(line.spans[0].style.add_modifier.contains(Modifier::UNDERLINED));
+        assert!(line.spans[0].style.add_modifier.contains(Modifier::CROSSED_OUT));
+        assert_eq!(line.spans[1].style.fg, Some(Color::Rgb(0x12, 0x34, 0x56)));
+        assert!(line.spans[1].style.add_modifier.contains(Modifier::ITALIC));
     }
 
     #[test]
@@ -976,38 +907,52 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "window")]
     #[test]
-    fn inventory_grid_maps_cells_to_menu_slots_without_an_out_of_bounds_tail() {
-        let menu = Menu::player();
-        let panel = inventory_panel(Rect::new(0, 0, 80, 30), menu.slot_count());
-        let content = inner(panel);
-        assert_eq!(inventory_slot_at(&menu, panel, content.x, content.y), Some(0));
+    fn terminal_menu_keys_use_the_shared_navigation_protocol() {
         assert_eq!(
-            inventory_slot_at(
-                &menu,
-                panel,
-                content.x.saturating_add(content.width.saturating_sub(1)),
-                content.y,
-            ),
-            Some(8)
+            terminal_menu_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Some(MenuKey::Down)
         );
         assert_eq!(
-            inventory_slot_at(
-                &menu,
-                panel,
-                content.x,
-                content.y.saturating_add(6),
-            ),
+            terminal_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(MenuKey::Enter)
+        );
+        assert_eq!(
+            terminal_menu_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+            Some(MenuKey::Char('x'))
+        );
+        assert_eq!(
+            terminal_menu_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
             None,
-            "the final partial row must not manufacture a slot"
+            "unhandled menu keys must remain available to gameplay/chat"
         );
     }
 
+    #[cfg(feature = "window")]
     #[test]
-    fn inventory_text_marks_only_the_hovered_slot() {
-        let text = terminal_inventory_text(&Menu::player(), Some(3));
-        assert!(text.contains(">03:"));
-        assert!(text.contains(" 02:"));
+    fn terminal_pointer_maps_cells_to_the_shared_framebuffer_space() {
+        let game = Rect::new(4, 2, 10, 5);
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 5,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(
+            terminal_pointer_position(mouse, game, 200, 100),
+            Some((30.0, 30.0)),
+            "one cell is mapped to the centre of its corresponding framebuffer cell"
+        );
+        assert_eq!(
+            terminal_pointer_position(
+                MouseEvent { column: 3, ..mouse },
+                game,
+                200,
+                100
+            ),
+            None
+        );
     }
 
     #[test]

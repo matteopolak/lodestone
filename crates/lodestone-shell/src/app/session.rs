@@ -6,6 +6,354 @@ use super::*;
 use lodestone_data::item::Item;
 
 impl WindowApp {
+    /// Build the normal shell pipeline against an offscreen target. This is
+    /// used by the terminal surface so it rasterizes the exact same world,
+    /// HUD, inventory, and menu passes as a window instead of maintaining a
+    /// second renderer.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn new_terminal(config: Config, width: u32, height: u32) -> anyhow::Result<Self> {
+        let gpu = GpuContext::new_headless_blocking()
+            .map_err(|error| anyhow::anyhow!("terminal GPU bring-up failed: {error}"))?;
+        let target = super::PresentationTarget::Headless(HeadlessTarget::new(
+            gpu.device(),
+            width.max(1),
+            height.max(1),
+            wgpu::TextureFormat::Rgba8Unorm,
+        ));
+        let mut app = Self::new(config);
+        app.terminal_chat_native = true;
+        app.finish_bring_up(None, gpu, target);
+        Ok(app)
+    }
+
+    /// Render one terminal frame through [`WindowApp::redraw`] and return its
+    /// completed offscreen pixels. `None` is reserved for an accidental use
+    /// with a window target.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn redraw_terminal(&mut self) -> anyhow::Result<Vec<u8>> {
+        self.redraw();
+        let (Some(gpu), Some(target)) = (self.gpu.as_ref(), self.target.as_ref()) else {
+            anyhow::bail!("terminal renderer was not initialized");
+        };
+        target
+            .readback(gpu.device(), gpu.queue())
+            .ok_or_else(|| anyhow::anyhow!("terminal renderer has no offscreen readback"))
+    }
+
+    pub(crate) fn terminal_set_action(&mut self, action: Action, pressed: bool) {
+        self.sim.input_mut(|input| input.set(action, pressed));
+    }
+
+    pub(crate) fn terminal_select_slot(&mut self, slot: usize) {
+        self.sim.select_slot(slot);
+    }
+
+    pub(crate) fn terminal_cycle_camera(&mut self) {
+        self.sim.cycle_camera_type();
+    }
+
+    pub(crate) fn terminal_mouse_motion(&mut self, dx: f32, dy: f32) {
+        self.sim.input_mut(|input| input.add_mouse(dx, dy));
+    }
+
+    pub(crate) fn terminal_mouse_attack(&mut self, pressed: bool) {
+        if pressed {
+            self.sim.begin_attack();
+        } else {
+            self.sim.end_attack();
+        }
+    }
+
+    pub(crate) fn terminal_mouse_use(&mut self, pressed: bool) {
+        if pressed {
+            self.sim.use_item();
+        } else {
+            self.sim.end_use();
+        }
+    }
+
+    pub(crate) fn terminal_mouse_pick_item(&mut self, include_data: bool) {
+        self.sim.pick_block_or_entity(include_data);
+    }
+
+    pub(crate) fn terminal_cycle_slot(&mut self, delta: i32) {
+        self.sim.cycle_slot(delta);
+    }
+
+    pub(crate) fn terminal_reset_input(&mut self) {
+        self.sim.input_mut(InputState::release_all);
+        self.sim.end_attack();
+        self.sim.end_use();
+    }
+
+    pub(crate) fn terminal_expire_action(&mut self, action: Action) {
+        self.sim.input_mut(|input| input.set(action, false));
+    }
+
+    pub(crate) fn terminal_chat_lines(
+        &self,
+        max_lines: usize,
+    ) -> Vec<(Vec<lodestone_model::text::TextSpan>, f32)> {
+        self.sim
+            .recent_chat_spans(max_lines)
+    }
+
+    pub(crate) fn terminal_chat_is_open(&self) -> bool {
+        self.ui.is_chat_open()
+    }
+
+    /// Terminal input delegates to the same edit box and chat history as the
+    /// windowed input path. The terminal only supplies a platform-neutral
+    /// key adapter; it does not maintain a second chat buffer.
+    pub(crate) fn terminal_chat_text(&self) -> &str {
+        self.chat_input.as_str()
+    }
+
+    pub(crate) fn terminal_chat_open(&mut self, command: bool) {
+        self.sim.input_mut(InputState::release_all);
+        let _ = self.chat_input.take();
+        if command {
+            self.chat_input.push_char('/');
+        }
+        self.ui.open_chat();
+        self.tab_held = false;
+        self.set_grab(false);
+    }
+
+    pub(crate) fn terminal_chat_cancel(&mut self) {
+        let _ = self.chat_input.take();
+        self.ui.close_chat();
+        self.set_grab(self.ui.wants_cursor_grab());
+    }
+
+    pub(crate) fn terminal_chat_submit(&mut self) {
+        let line = self.chat_input.as_str().to_owned();
+        self.chat_input.record_sent(&line);
+        let _ = self.chat_input.take();
+        self.sim.send_chat(&line);
+        self.ui.close_chat();
+        self.set_grab(self.ui.wants_cursor_grab());
+    }
+
+    pub(crate) fn terminal_chat_push_char(&mut self, ch: char) {
+        self.chat_input.push_char(ch);
+    }
+
+    pub(crate) fn terminal_chat_backspace(&mut self) {
+        self.chat_input.backspace();
+    }
+
+    pub(crate) fn terminal_chat_move_left(&mut self) {
+        self.chat_input.move_left();
+    }
+
+    pub(crate) fn terminal_chat_move_right(&mut self) {
+        self.chat_input.move_right();
+    }
+
+    pub(crate) fn terminal_chat_move_start(&mut self) {
+        self.chat_input.move_start();
+    }
+
+    pub(crate) fn terminal_chat_move_end(&mut self) {
+        self.chat_input.move_end();
+    }
+
+    pub(crate) fn terminal_chat_history_up(&mut self) {
+        self.chat_input.history_up();
+    }
+
+    pub(crate) fn terminal_chat_history_down(&mut self) {
+        self.chat_input.history_down();
+    }
+
+    pub(crate) fn resize_terminal(&mut self, width: u32, height: u32) {
+        if let (Some(gpu), Some(target), Some(render)) = (
+            self.gpu.as_ref(),
+            self.target.as_mut(),
+            self.render.as_mut(),
+        ) {
+            target.resize(gpu.device(), width, height);
+            render.resize(gpu.device(), width, height);
+        }
+    }
+
+    pub(crate) fn terminal_toggle_inventory(&mut self) {
+        if self.ui.is_container_open() {
+            self.ui.close_container();
+        } else {
+            self.ui.open_container();
+        }
+        self.set_grab(self.ui.wants_cursor_grab());
+    }
+
+    pub(crate) fn terminal_close_container(&mut self) {
+        if self.sim.open_menu().is_some() {
+            self.sim.close_open_menu();
+        }
+        self.ui.close_container();
+        self.set_grab(self.ui.wants_cursor_grab());
+    }
+
+    pub(crate) fn terminal_container_hotbar(&mut self, slot: u8) {
+        self.send_container_swap(i32::from(slot));
+    }
+
+    pub(crate) fn terminal_routes_menu_input(&self) -> bool {
+        crate::menu::nav::routes_menu_input(&self.ui)
+    }
+
+    /// Feed a terminal keyboard navigation key through the same menu navigator
+    /// used by window input. The caller translates Crossterm's key code into
+    /// the platform-neutral [`MenuKey`] enum.
+    pub(crate) fn terminal_menu_key(&mut self, key: MenuKey) {
+        self.handle_menu_key(key);
+        self.set_grab(self.ui.wants_cursor_grab());
+    }
+
+    /// Update the shared menu/container pointer from terminal-cell coordinates
+    /// already converted to framebuffer pixels by the terminal adapter.
+    pub(crate) fn terminal_pointer_moved(&mut self, position: Option<(f32, f32)>) {
+        let Some((x, y)) = position else {
+            self.cursor = (-1.0, -1.0);
+            return;
+        };
+        self.cursor = (x, y);
+        if self.terminal_routes_menu_input() {
+            if let Some(row) = self.menu_slider_drag {
+                if let Some(fraction) = self.menu_slider_fraction(row, x, y) {
+                    self.nav.drag_slider(&self.ui, row, fraction);
+                }
+            } else {
+                if let Some(row) = self.menu_row_at(x, y) {
+                    self.nav.hover(&self.ui, row);
+                }
+                self.track_book_page_cursor();
+            }
+        } else if self.ui.is_container_open()
+            && self.menu_input.is_dragging()
+            && let Some(menu) = self.active_container_menu()
+            && let Some((w, h)) = self.target.as_ref().map(RenderTarget::size)
+        {
+            let hit = crate::container::hit_test_with_book(
+                &menu,
+                self.nav.gui_scale(),
+                w,
+                h,
+                x,
+                y,
+                self.recipe_panel.open,
+            );
+            self.menu_input.dragged(hit, &menu);
+        }
+    }
+
+    /// Route a terminal pointer press/release through the same menu or
+    /// container hit-testing and click prediction used by the window path.
+    pub(crate) fn terminal_pointer_button(&mut self, button: MenuButton, pressed: bool) {
+        if self.terminal_routes_menu_input() {
+            if button == MenuButton::Left
+                && let Some((w, h)) = self.target.as_ref().map(RenderTarget::size)
+            {
+                self.terminal_pointer_button_at(
+                    button,
+                    pressed,
+                    self.cursor.0,
+                    self.cursor.1,
+                    w,
+                    h,
+                );
+            }
+            self.set_grab(self.ui.wants_cursor_grab());
+            return;
+        }
+        if !self.ui.is_container_open() {
+            return;
+        }
+        let Some(menu) = self.active_container_menu() else {
+            return;
+        };
+        let Some((w, h)) = self.target.as_ref().map(RenderTarget::size) else {
+            return;
+        };
+        let hit = crate::container::hit_test_with_book(
+            &menu,
+            self.nav.gui_scale(),
+            w,
+            h,
+            self.cursor.0,
+            self.cursor.1,
+            self.recipe_panel.open,
+        );
+        let ctx = MenuContext {
+            cursor_loaded: menu.carried().is_some(),
+            creative: false,
+        };
+        let clicks = if pressed {
+            let now = Instant::now();
+            let repeat = button == MenuButton::Left
+                && self
+                    .last_menu_click
+                    .is_some_and(|previous| now.duration_since(previous) < DOUBLE_CLICK_WINDOW);
+            self.last_menu_click = Some(now);
+            self.menu_input
+                .press(hit, button, self.shift_held, ctx, repeat, &menu)
+        } else {
+            self.menu_input.release(hit, button, self.shift_held, ctx, &menu)
+        };
+        for click in clicks {
+            self.send_menu_click(click);
+        }
+    }
+
+    /// Activate a menu row at an explicit framebuffer size. The terminal uses
+    /// [`Self::terminal_pointer_button`] in production, while the explicit
+    /// dimensions make the adapter's click-to-state seam testable without a
+    /// GPU surface.
+    pub(crate) fn terminal_pointer_button_at(
+        &mut self,
+        button: MenuButton,
+        pressed: bool,
+        x: f32,
+        y: f32,
+        width: u32,
+        height: u32,
+    ) {
+        if !self.terminal_routes_menu_input() || button != MenuButton::Left {
+            return;
+        }
+        self.cursor = (x, y);
+        if pressed {
+            if self.nav.awaiting_key_capture() {
+                return;
+            }
+            if self.dispatch_book_page_click() || self.dispatch_death_click_under_cursor() {
+                return;
+            }
+            if let Some(row) = self.menu_row_at_in(x, y, width, height) {
+                let dragged = self.nav.slider_row(&self.ui, row)
+                    && self
+                        .menu_slider_fraction(row, x, y)
+                        .is_some_and(|fraction| self.nav.drag_slider(&self.ui, row, fraction));
+                if dragged {
+                    self.menu_slider_drag = Some(row);
+                } else {
+                    self.sim.play_ui_click_sound();
+                    let action = self.nav.click(&mut self.ui, row);
+                    self.apply_menu_action(action);
+                }
+            }
+        } else if self.menu_slider_drag.take().is_some() {
+            self.sim.play_ui_click_sound();
+        }
+        self.set_grab(self.ui.wants_cursor_grab());
+    }
+
+    pub(crate) fn terminal_set_modifiers(&mut self, shift: bool, ctrl: bool) {
+        self.shift_held = shift;
+        self.ctrl_held = ctrl;
+    }
+
     pub(super) fn new(config: Config) -> Self {
         Self::new_with_app(Sim::client_app(), config)
     }
@@ -76,6 +424,7 @@ impl WindowApp {
             // with it would skip exactly that case.
             last_icon_pack_generation: 0,
             chat_input: ChatInput::new(),
+            terminal_chat_native: false,
             chat_wrap: crate::hud::ChatWrapCache::default(),
             menu_input: MenuInput::new(),
             shift_held: false,
@@ -267,7 +616,11 @@ impl WindowApp {
         };
         match attach_window(window.clone()) {
             Ok((gpu, target)) => {
-                self.finish_bring_up(window, gpu, target);
+                self.finish_bring_up(
+                    Some(window),
+                    gpu,
+                    super::PresentationTarget::Surface(target),
+                );
                 true
             }
             Err(e) => {

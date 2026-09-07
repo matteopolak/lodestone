@@ -212,3 +212,24 @@ pub(super) fn java_string_hash_code(s: &str) -> i32 {
 pub(super) fn requested_a_connection(config: &Config) -> bool {
     cfg!(feature = "multiplayer") && (config.connect_in_window || config.address_given)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::menu::Screen;
+
+    #[test]
+    fn terminal_without_address_keeps_the_main_menu_start_screen() {
+        let config = Config::default();
+        assert!(!requested_a_connection(&config));
+        assert!(!config.address_given);
+        assert_eq!(UiState::new().screen(), Screen::MainMenu);
+    }
+
+    #[test]
+    fn an_explicit_terminal_address_bypasses_the_main_menu() {
+        let mut config = Config::default();
+        config.address_given = true;
+        assert!(requested_a_connection(&config));
+    }
+}
