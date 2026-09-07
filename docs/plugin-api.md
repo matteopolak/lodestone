@@ -394,9 +394,11 @@ The no-argument `disconnect` action is separately guarded by `act:disconnect`; i
 or session handle, and the live client owns orderly shutdown through its normal action queue.
 Placement returns a finite, generation-bounded result only to a guest granted `observe:place`; a
 multi-tick break claim remains
-outside the ABI because it needs a separate cancellation and ownership contract. Command
-registration/invocation, async equivalents, `Monitor`-tier enforcement for a guest, and declared
-load-order dependencies are all named gaps. The native windowed client installs the WASM conductor
+outside the ABI because it needs a separate cancellation and ownership contract. Portable command
+registration/invocation and declared manifest dependencies are implemented; a required dependency
+must itself load successfully before its dependent is admitted, while startup still reports broken
+siblings independently. Async equivalents and `Monitor`-tier enforcement for a guest remain gaps.
+The native windowed client installs the WASM conductor
 before `WindowApp` adopts its `App` and scans the cwd-relative `plugins/` directory through
 `PluginHost::load_directory`. Browser plugin support is out of scope: `wasmtime` cannot itself run
 inside a wasm32 guest.

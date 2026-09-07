@@ -197,6 +197,10 @@ pub enum LoadError {
     Manifest(#[from] crate::manifest::ManifestError),
     #[error(transparent)]
     Host(#[from] HostError),
+    #[error(
+        "plugin `{plugin}` requires dependency `{dependency}`, which failed to load"
+    )]
+    RequiredDependencyFailed { plugin: String, dependency: String },
 }
 
 /// A directory reload that was rejected before it could replace active guests.
@@ -1302,21 +1306,42 @@ impl PluginHost {
     /// guest. An embedding that rebuilds its host for a plugin reload therefore
     /// gets the same grants again, while one that changes the policy must reload
     /// rather than silently changing a running guest's authority.
+    /// Required dependencies are checked against these actual load results, not
+    /// just the manifest graph: a dependent is refused when its dependency's
+    /// module is missing, denied, malformed, or fails during initialization.
     pub fn load_directory_with_grants(
         &mut self,
         dir: &Path,
         grants: &PluginGrantPolicy,
     ) -> Vec<Result<usize, LoadError>> {
         let baseline = self.policy.clone();
+        let mut failed = std::collections::BTreeSet::new();
         crate::manifest::scan_directory(dir)
             .into_iter()
             .map(|found| {
                 let (path, manifest) = found?;
+                if let Some(dependency) = manifest
+                    .dependencies
+                    .required
+                    .iter()
+                    .find(|dependency| failed.contains(*dependency))
+                {
+                    failed.insert(manifest.name.clone());
+                    return Err(LoadError::RequiredDependencyFailed {
+                        plugin: manifest.name,
+                        dependency: dependency.clone(),
+                    });
+                }
                 let mut effective = baseline.clone();
                 if let Some(additions) = grants.additions_for(dir, &path, &manifest) {
                     effective.extend_from(additions);
                 }
-                self.load_manifest_with_policy(&path, manifest, &effective)
+                let name = manifest.name.clone();
+                let result = self.load_manifest_with_policy(&path, manifest, &effective);
+                if result.is_err() {
+                    failed.insert(name);
+                }
+                result
             })
             .collect()
     }

@@ -37,12 +37,25 @@ fn shipped_manifest_path() -> PathBuf {
 
 /// Build a `plugins/`-shaped directory: `<root>/<dir>/{plugin.toml, <module>}`.
 fn install(root: &Path, dir: &str, manifest_text: &str, module_name: &str, wasm: &Path) -> PathBuf {
+    let manifest_path = write_manifest(root, dir, manifest_text);
+    let d = root.join(dir);
+    std::fs::copy(wasm, d.join(module_name)).expect("copy module");
+    manifest_path
+}
+
+fn write_manifest(root: &Path, dir: &str, manifest_text: &str) -> PathBuf {
     let d = root.join(dir);
     std::fs::create_dir_all(&d).expect("mkdir");
     let manifest_path = d.join("plugin.toml");
     std::fs::write(&manifest_path, manifest_text).expect("write manifest");
-    std::fs::copy(wasm, d.join(module_name)).expect("copy module");
     manifest_path
+}
+
+fn named_manifest(base: &str, name: &str) -> String {
+    base.replace(
+        r#"name = "chat-responder""#,
+        &format!(r#"name = "{name}""#),
+    )
 }
 
 fn fresh_root(label: &str) -> PathBuf {
@@ -282,6 +295,118 @@ fn a_directory_with_one_broken_plugin_still_loads_the_good_one() {
     // The good one still works, which is the assertion that makes "does not abort"
     // mean something.
     assert_eq!(host.tick_all(&[chat("ping")]).len(), 1);
+}
+
+/// A required dependency is not merely a manifest name in the graph: it must
+/// finish loading before its dependent is admitted. This positive control also
+/// proves that the dependency edge remains observable in the host's load order.
+#[test]
+fn a_loadable_required_dependency_precedes_its_dependent() {
+    let wasm = support::build_example_plugin(&[]);
+    let base = std::fs::read_to_string(shipped_manifest_path()).expect("read");
+    let root = fresh_root("required-dependency-loadable");
+
+    let dependency = named_manifest(&base, "dependency");
+    let dependent = format!(
+        "{}\n[dependencies]\nrequired = [\"dependency\"]\n",
+        named_manifest(&base, "dependent")
+    );
+    // Install in reverse path order so a path-only loader would disagree with
+    // the dependency graph.
+    install(&root, "dependent", &dependent, "chat_responder.wasm", &wasm);
+    install(&root, "dependency", &dependency, "chat_responder.wasm", &wasm);
+
+    let mut host = PluginHost::new(CapabilitySet::default_policy()).expect("engine");
+    let results = host.load_directory(&root);
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().all(Result::is_ok), "both must load: {results:?}");
+    assert_eq!(
+        host.plugins().iter().map(|plugin| plugin.name()).collect::<Vec<_>>(),
+        vec!["dependency", "dependent"],
+        "a required dependency must load before its dependent"
+    );
+}
+
+/// A dependency whose module is missing must poison its dependent while an
+/// unrelated good sibling still loads. The latter is the startup partial-
+/// discovery control; the former is the required-edge gate.
+#[test]
+fn a_missing_required_dependency_module_blocks_its_dependent() {
+    let wasm = support::build_example_plugin(&[]);
+    let base = std::fs::read_to_string(shipped_manifest_path()).expect("read");
+    let root = fresh_root("required-dependency-missing-module");
+
+    let dependency = named_manifest(&base, "dependency");
+    write_manifest(&root, "dependency", &dependency);
+    let dependent = format!(
+        "{}\n[dependencies]\nrequired = [\"dependency\"]\n",
+        named_manifest(&base, "dependent")
+    );
+    install(&root, "dependent", &dependent, "chat_responder.wasm", &wasm);
+    install(&root, "good", &named_manifest(&base, "good"), "chat_responder.wasm", &wasm);
+
+    let mut host = PluginHost::new(CapabilitySet::default_policy()).expect("engine");
+    let results = host.load_directory(&root);
+    assert_eq!(results.len(), 3);
+    assert!(
+        results.iter().any(|result| matches!(
+            result,
+            Err(LoadError::Manifest(ManifestError::MissingModule { plugin, .. }))
+                if plugin == "dependency"
+        )),
+        "the missing dependency module must be reported: {results:?}"
+    );
+    assert!(
+        results.iter().any(|result| matches!(
+            result,
+            Err(LoadError::RequiredDependencyFailed { plugin, dependency })
+                if plugin == "dependent" && dependency == "dependency"
+        )),
+        "the dependent must not load after its required dependency fails: {results:?}"
+    );
+    assert_eq!(
+        host.plugins().iter().map(|plugin| plugin.name()).collect::<Vec<_>>(),
+        vec!["good"],
+        "an unrelated startup sibling must remain loadable"
+    );
+}
+
+/// A required dependency denied by host policy has the same fail-closed effect
+/// as a missing module. The module itself is valid; only its requested authority
+/// differs, so this is an independent policy negative control.
+#[test]
+fn a_denied_required_dependency_blocks_its_dependent() {
+    let wasm = support::build_example_plugin(&[]);
+    let base = std::fs::read_to_string(shipped_manifest_path()).expect("read");
+    let root = fresh_root("required-dependency-denied");
+
+    let dependency = named_manifest(&base, "dependency").replace(
+        r#"capabilities = ["log", "observe:chat", "act:chat"]"#,
+        r#"capabilities = ["log", "observe:chat", "act:chat", "fs:read"]"#,
+    );
+    install(&root, "dependency", &dependency, "chat_responder.wasm", &wasm);
+    let dependent = format!(
+        "{}\n[dependencies]\nrequired = [\"dependency\"]\n",
+        named_manifest(&base, "dependent")
+    );
+    install(&root, "dependent", &dependent, "chat_responder.wasm", &wasm);
+
+    let mut host = PluginHost::new(CapabilitySet::default_policy()).expect("engine");
+    let results = host.load_directory(&root);
+    assert_eq!(results.len(), 2);
+    assert!(
+        results.iter().any(|result| matches!(result, Err(LoadError::Host(_)))),
+        "the denied dependency must be reported: {results:?}"
+    );
+    assert!(
+        results.iter().any(|result| matches!(
+            result,
+            Err(LoadError::RequiredDependencyFailed { plugin, dependency })
+                if plugin == "dependent" && dependency == "dependency"
+        )),
+        "the dependent must not load after policy denies its required dependency: {results:?}"
+    );
+    assert!(host.is_empty(), "neither required-edge participant may load");
 }
 
 /// Startup discovery can retain a good sibling while reporting a bad one. A
