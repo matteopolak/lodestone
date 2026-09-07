@@ -17,7 +17,7 @@
 //! finish signal), the
 //! play join sequence (join game, default spawn, initial teleport,
 //! chunk-cache center), `level_chunk_with_light`
-//! for every column in the initial view, a post-join welcome chat, entity
+//! for every column in the initial view, entity
 //! spawn/update/remove for the mob simulation, server-initiated keep-alive
 //! with a disconnect-on-timeout, time-of-day, and view streaming
 //! (chunk-cache-center / forget / send) as the player moves between chunk
@@ -5223,13 +5223,6 @@ impl ServerProtocol for V770ServerProtocol {
         dimension: Dimension,
     ) -> Option<ColumnLight> {
         Some(compute_served_light_with_neighbours(column, neighbours, dimension))
-    }
-
-    fn welcome_message(&self) -> Vec<ServerDirective> {
-        vec![ServerDirective::Send {
-            packet_id: play::clientbound::SYSTEM_CHAT,
-            payload: encode_system_chat("Welcome to Lodestone", false),
-        }]
     }
 
     /// `overlay: false` — command feedback belongs in the chat history, not

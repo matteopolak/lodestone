@@ -86,8 +86,8 @@ bot built this way gets ProtocolLib-class visibility with no server-side change 
 - **Version-locked, and that is the real cost.** A decorator forwards `ServerProtocol`/
   `VersionAdapter` — traits every protocol family implements — but a hook written against one
   family's concrete behaviour does not transfer to another. `V26.2`'s `V770ServerProtocol` sends
-  chat through `encode_system_chat` and a join-time welcome line through `welcome_message`; an older
-  family may format chat differently, leave `welcome_message` at its empty default, or shape
+  chat through `encode_system_chat` and leaves the optional `welcome_message` hook empty; an older
+  family may format chat differently, use that hook for join-time content, or shape
   `ServerBound::Chat`'s fields differently (no `salt`/`signature` at all pre-1.19). A decorator
   written for one family compiles against any family (the trait is version-free) but its hooks may
   silently match nothing, or match the wrong thing, against a different one — there is no compiler

@@ -461,11 +461,7 @@ where
         match tokio::time::timeout_at(deadline, events.recv()).await {
             Ok(Some(ClientEvent::Chat { text, .. })) => {
                 let line = plain(&text);
-                // The join sequence sends its own welcome line first; it is not
-                // what this gate is about.
-                if line != "Welcome to Lodestone" {
-                    chat.push(line);
-                }
+                chat.push(line);
             }
             Ok(Some(_)) => {}
             Ok(None) | Err(_) => break,
@@ -553,9 +549,7 @@ async fn run_integrated_connection(
         match tokio::time::timeout_at(deadline, events.recv()).await {
             Ok(Some(ClientEvent::Chat { text, .. })) => {
                 let line = plain(&text);
-                if line != "Welcome to Lodestone" {
-                    chat.push(line);
-                }
+                chat.push(line);
             }
             Ok(Some(_)) => {}
             Ok(None) | Err(_) => break,
@@ -850,9 +844,7 @@ async fn a_server_with_no_sink_installed_answers_a_command_with_a_refusal() {
         match tokio::time::timeout_at(deadline, events.recv()).await {
             Ok(Some(ClientEvent::Chat { text, .. })) => {
                 let line = plain(&text);
-                if line != "Welcome to Lodestone" {
-                    refusal = Some(line);
-                }
+                refusal = Some(line);
             }
             Ok(Some(_)) => {}
             Ok(None) | Err(_) => break,

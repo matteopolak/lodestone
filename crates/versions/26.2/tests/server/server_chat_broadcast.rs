@@ -257,14 +257,14 @@ async fn a_message_typed_by_one_player_reaches_another_players_wire() {
     let b_join = join(&mut client_b, &name_b, uuid_b).await;
     assert_eq!(registry.len(), 2, "both players must be registered");
 
-    // **Precondition, asserted rather than assumed.** B's join burst carries a
-    // welcome `system_chat` of its own, so "B received a system_chat" is
-    // already true before anyone says anything. Without this the assertions
-    // below could be satisfied by the join banner.
+    // **Precondition, asserted rather than assumed.** B's join burst must not
+    // carry any chat of its own. Without this control, the assertions below
+    // could accidentally observe unrelated server chat instead of A's
+    // message.
     let joined_lines = system_chat_lines(&b_join);
     assert!(
-        !joined_lines.iter().any(|line| line.contains("hello from A")),
-        "B must not have seen the message before it was sent: {joined_lines:?}"
+        joined_lines.is_empty(),
+        "B must not receive join-time chat before anyone sends a message: {joined_lines:?}"
     );
 
     // A types a message.
