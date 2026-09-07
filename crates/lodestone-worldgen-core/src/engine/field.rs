@@ -37,8 +37,8 @@ use super::graph::{Graph, NodeId, OpKind};
 use super::scratch::Scratch;
 use crate::density::Context;
 
-/// Cell geometry: vanilla's own noise-settings cell-width/cell-height accessors — 4 and 8 for
-/// the overworld.
+/// Cell geometry selected from the owning settings document. The usual values
+/// are 4 and 8; the End uses 8 and 4.
 #[derive(Clone, Copy, Debug)]
 pub struct Geom {
     /// Vanilla's own cell-width field, the X/Z cell edge.

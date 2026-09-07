@@ -423,7 +423,7 @@ pub enum Density {
     },
     /// `interpolated` — for point evaluation this is transparent (see the
     /// module's `## Caching` section for why), but for the block field it
-    /// samples the wrapped fn at 4×8×4 cell corners and trilinearly
+    /// samples the wrapped fn at settings-selected cell corners and trilinearly
     /// interpolates (see [`chunk`]). `slot` indexes the sampler's per-node
     /// corner cache.
     Interpolated {

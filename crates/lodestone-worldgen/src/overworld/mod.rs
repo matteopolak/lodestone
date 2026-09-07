@@ -610,6 +610,7 @@ impl OverworldGenerator {
         let min_y = settings["noise"]["min_y"].as_i64().unwrap_or(-64) as i32;
         let height = settings["noise"]["height"].as_i64().unwrap_or(384) as i32;
         let sea_level = settings["sea_level"].as_i64().unwrap_or(63) as i32;
+        let (cell_width, cell_height) = crate::aquifer::cell_geometry(settings);
         let default_block = settings["default_block"]["Name"]
             .as_str()
             .unwrap_or("minecraft:stone")
@@ -679,6 +680,8 @@ impl OverworldGenerator {
                     .from_hash_of("minecraft:aquifer");
                 src.fork_positional()
             },
+            cell_width,
+            cell_height,
         };
 
         // Carver-replaceable tag closure: without this

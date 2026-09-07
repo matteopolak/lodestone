@@ -53,7 +53,10 @@ A density function graph (`Density`, compiled by `engine::graph::Program`) is va
 - **Point interpreter** (`Density::compute`) — evaluates one `(x, y, z)` at a time; used by leaves
   (`spline`, `old_blended_noise`, `find_top_surface`, `end_islands`) and by aquifer/surface.
 - **Block field** (`engine::field`, driven through `NoiseChunkSampler`) — fills a whole chunk,
-  pre-computing a 4×8×4 cell's eight corners once and trilinearly interpolating the rest.
+  pre-computing each cell's eight corners once and trilinearly interpolating the rest. The cell
+  width and height come from the settings document (`size_horizontal` and `size_vertical`, each
+  multiplied by four): the usual pair is 4×8, while the End uses 8×4. Aquifer and optional vein
+  samplers carry that same pair instead of assuming one world-wide lattice.
 
 **The interpolation order is bit-significant.** Vanilla's own noise-chunk sampler pre-fills its cell array with
 its own plain-trilinear lerp (X-inner nesting) via an in-code `cache_all_in_cell` marker that never appears in any
