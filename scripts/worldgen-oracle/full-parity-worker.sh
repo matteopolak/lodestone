@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Generate one disjoint share of the full parity grid as compact vertical shards.
+# Generate one disjoint share of the full parity grid as compact shards.
 # Compact 16-wide shards keep each 256-record scheduler batch spatially local.
+# End exports may opt into two-row horizontal shards so each JVM handles at most
+# 1002 centres before its dirty-chunk state is discarded.
 set -euo pipefail
 
 worker="${1:?usage: full-parity-worker.sh WORKER_INDEX WORKER_COUNT}"
@@ -31,6 +33,25 @@ fi
 here="$(cd "$(dirname "$0")" && pwd)"
 grid_min=-250
 grid_max=250
+
+if [[ "$dimension" == end && "${LODESTONE_ORACLE_END_BOUNDED:-0}" == 1 ]]; then
+  slot=0
+  for (( z_lo = grid_min; z_lo <= grid_max; z_lo += 2, slot += 1 )); do
+    if (( slot % workers != worker )); then
+      continue
+    fi
+    z_hi=$((z_lo + 1))
+    if (( z_hi > grid_max )); then
+      z_hi="$grid_max"
+    fi
+    output_rel="${shard_dir}/end/shard-z${z_lo}-${z_hi}.lwp"
+    "$here/large-parity.sh" --mode export --dimension end \
+      --out "${output_prefix}/${output_rel}" \
+      --cx "$grid_min" "$grid_max" --cz "$z_lo" "$z_hi" --resume
+  done
+  exit 0
+fi
+
 slot=0
 for (( x_lo = grid_min; x_lo <= grid_max; x_lo += 16, slot += 1 )); do
   if (( slot % workers != worker )); then
