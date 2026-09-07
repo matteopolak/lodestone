@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Materialize in ordered, cleanly restarted epochs or run one read-only export
-# shard. The full target is --cx -250 250 --cz -250 250.
+# shard. The full raw-packet target is --cx -500 500 --cz -500 500.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 MODE=""
@@ -29,7 +29,19 @@ case "$EPOCH_TILES" in
 esac
 dimension="${LODESTONE_ORACLE_DIMENSION:-overworld}"
 dimension_arg_explicit=0
+raw_packet=0
 for (( i = 0; i < ${#ARGS[@]}; i++ )); do
+  case "${ARGS[$i]}" in
+    --raw-packet|--format-v6) raw_packet=1 ;;
+    --format)
+      if [ $((i + 1)) -ge ${#ARGS[@]} ] || [ "${ARGS[$((i + 1))]}" != v6 ]; then
+        echo "--format accepts only v6 for raw packet materialization" >&2
+        exit 2
+      fi
+      raw_packet=1
+      i=$((i + 1))
+      ;;
+  esac
   if [ "${ARGS[$i]}" = "--dimension" ]; then
     if [ $((i + 1)) -ge ${#ARGS[@]} ]; then echo "--dimension requires a value" >&2; exit 2; fi
     dimension="${ARGS[$((i + 1))]}"
@@ -46,7 +58,11 @@ esac
 if [ "$dimension_arg_explicit" -eq 0 ] && [ "$dimension" != overworld ]; then
   ARGS+=( --dimension "$dimension" )
 fi
-freeze_stamp="lodestone-large-parity-materialization-v2-${dimension}.freeze.sha256"
+if [ "$raw_packet" -eq 1 ]; then
+  freeze_stamp="lodestone-large-parity-materialization-v6-${dimension}.freeze.sha256"
+else
+  freeze_stamp="lodestone-large-parity-materialization-v2-${dimension}.freeze.sha256"
+fi
 
 while :; do
   LODESTONE_ORACLE_EPOCH_TILES="$EPOCH_TILES" "$HERE/run.sh" LargeParityOracle "${ARGS[@]}"
