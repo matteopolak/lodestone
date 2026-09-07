@@ -11,9 +11,7 @@ use super::account_screen::{
     accounts_failed_frame, accounts_flow_frame, accounts_idle_frame, accounts_name_edit_frame,
 };
 use super::measure::{MANAGE_SERVER_TITLE_Y, manage_server_slot};
-use super::screens::{
-    COPYRIGHT, credits_frame, error_frame, loading_frame, ownership_frame, version_line,
-};
+use super::screens::{credits_frame, error_frame, loading_frame, ownership_frame, version_line};
 use super::server_list::SERVER_LIST_FOOTER_H;
 
 /// Builds vanilla's `JoinMultiplayerScreen`: one row per saved server at
@@ -229,26 +227,15 @@ pub fn frame_for<'a>(
             selected: nav.main_index(),
             vanilla: true,
             logo: true,
-            labels: vec![
-                MenuLabel {
-                    text: version_line(),
-                    origin: Origin::BottomLeft,
-                    dx: 2.0,
-                    dy: CORNER_TEXT_Y,
-                    align: Align::Left,
-                    colour: LABEL,
-                    scale: 1.0,
-                },
-                MenuLabel {
-                    text: COPYRIGHT.to_string(),
-                    origin: Origin::BottomRight,
-                    dx: -2.0,
-                    dy: CORNER_TEXT_Y,
-                    align: Align::Right,
-                    colour: LABEL,
-                    scale: 1.0,
-                },
-            ],
+            labels: vec![MenuLabel {
+                text: version_line(),
+                origin: Origin::BottomLeft,
+                dx: 2.0,
+                dy: CORNER_TEXT_Y,
+                align: Align::Left,
+                colour: LABEL,
+                scale: 1.0,
+            }],
             ..Default::default()
         }),
         // Vanilla's `JoinMultiplayerScreen`: a `HeaderAndFooterLayout`

@@ -55,9 +55,8 @@ owner's decision on each: the `"Minecraft Realms"` button label and the
 advancement titles (`"Minecraft: Trial(s) Edition"`, `"Minecraft"`) stay — the button names a
 real feature by its real name, and the advancement titles are the game's own data, so changing
 them would be a fidelity bug rather than an attribution fix. Everything else in that finding
-was reworded to Lodestone's own copy: the title screen's `"Copyright Mojang AB. Do not
-distribute!"` (an instruction not to distribute that made no sense for our own build) and its
-`"Minecraft {version} (Lodestone {version})"` version line, the "Add Server" hint text, the
+was reworded to Lodestone's own copy: the title screen omits the bottom-right copyright/tagline
+slot and uses `"Lodestone (Minecraft 26.2)"` at bottom left, while the "Add Server" hint text, the
 built-in resource-pack description, the telemetry-consent body text (which now also drops the
 `go.microsoft.com` Privacy Statement link and button — it existed only to disclose a data
 pipeline this client does not have), the sign-in failure message for an account with no
