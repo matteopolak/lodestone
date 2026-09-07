@@ -79,6 +79,11 @@ octave accumulation chain, and no folding a `0.0 *` multiply that could carry a 
 nightly `#![feature(portable_simd)]`) lanes only independent lattice positions, never across an
 accumulation chain, for the same reason — it is the one place lanes are safe.
 
+The geode distance field follows the same rule: each point's inverse-square-root term is added to
+the sampled noise offset first, then that rounded contribution is added to the running shell or
+crack sum. Keep those two additions explicit when changing the geode loop; combining them changes
+the threshold comparison for some IEEE-754 inputs.
+
 ### RNG
 
 `lodestone-javarandom` (see its own doc) is the workspace's one `java.util.Random` port; worldgen
