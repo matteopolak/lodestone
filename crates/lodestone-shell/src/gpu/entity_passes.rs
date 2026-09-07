@@ -3504,6 +3504,7 @@ mod tests {
         EntityDraw {
             id: 1,
             type_path: Arc::from(type_path),
+            tnt_fuse: None,
             item: None,
             item_model: None,
             item_skin: None,

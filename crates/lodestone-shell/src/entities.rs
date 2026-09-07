@@ -141,7 +141,7 @@ use lodestone_assets::ResourceLocation;
 use lodestone_ecs::app::{App, Plugin};
 use lodestone_ecs::entity::{
     AttackSwing, DeathTime, EntityFlags, EntityIndex, ExperienceOrbValue, FallingBlockState,
-    HurtTime, ItemFrameRotation, ItemUse, MinecraftEntityId, MobState, OnGround, Pose,
+    HurtTime, ItemFrameRotation, ItemUse, MinecraftEntityId, MobState, OnGround, Pose, TntFuse,
 };
 use lodestone_ecs::player::{
     CollisionSource, LocalPlayer, PhysicsState, PlayerCollision, Profile,
@@ -1143,6 +1143,10 @@ pub struct EntityDraw {
     /// synced) and `count` (how many absorptions the entity holds after merging,
     /// server-only) as two different numbers, and only the first is on the wire.
     pub experience_orb_value: Option<i32>,
+    /// A primed TNT entity's synchronized fuse time, in ticks remaining. It is
+    /// `None` for every other entity; the moving-block pass uses it for the
+    /// final-ten-tick swell and five-tick white flash.
+    pub tnt_fuse: Option<f32>,
     /// This frame's interpolated `(capeLean, capeLean2, capeFlap)`, all
     /// degrees — see [`cape_sway`] for the derivation and [`CapeLag`] for the
     /// per-tick state it comes from. Computed for every tracked entity (the
@@ -2052,6 +2056,7 @@ pub fn extract_pickup_draws(
             block_state: None,
             item_frame_rotation: 0,
             experience_orb_value: None,
+            tnt_fuse: None,
             cape_sway: (0.0, 0.0, 0.0),
             painting: None,
             firework: None,
@@ -2701,22 +2706,6 @@ pub fn extract_entity_draws(
     // one VarInt into a drawn block — see `EntityDraw::block_state`, and note it is
     // the *only* thing a client is ever told about which block is falling.
     falling_blocks: Query<&FallingBlockState>,
-    // `ExperienceOrbValue` lives on the ingest entity too
-    // (`lodestone_ecs::ingest::apply_entity_metadata` inserts it from index 8's
-    // `INT`, gated on the adapter having established the entity is an orb),
-    // bridged the same way `FallingBlockState` and `EntityFlags` above are — and
-    // for the same structural reason: the component is on the *ingest* entity, not
-    // on the render track this query's tuple is drawn from.
-    //
-    // Bridged rather than folded through `EntityFacts` into a fourteenth render
-    // component, which is the route `RenderWool` takes. Both work; this one adds
-    // nothing to `spawn_track`/`update_track` and nothing to the tuple above,
-    // which is already at fourteen.
-    orb_values: Query<&ExperienceOrbValue>,
-    // The wire variant, on the ingest entity, bridged like `orb_values` above —
-    // resolved to a texture sheet by `lodestone_render::entity_variant_sheet_for`.
-    // See `EntityDraw::variant_sheet`.
-    variants: Query<&lodestone_ecs::entity::Variant>,
     // `Tamed` lives on the ingest entity too and is bridged through the same
     // `EntityIndex` as `variants`. It supplies the tame bit that
     // `variant_sheet` uses to select the tamed texture.
@@ -2756,7 +2745,10 @@ pub fn extract_entity_draws(
     // stand overwrites the humanoid walk cycle in vanilla, posed or not, so a
     // missing component resolves to `ArmorStandPose::VANILLA_DEFAULT` rather
     // than to "no pose". See `ARMOR_STAND_TYPE_PATH`.
-    (tameds, vehicles, armor_stands, item_frame_rotations, armor_stand_poses, painting_variants, firework_flags, projectile_owners, vehicle_hurts): (
+    (orb_values, tnt_fuses, variants, tameds, vehicles, armor_stands, item_frame_rotations, armor_stand_poses, painting_variants, firework_flags, projectile_owners, vehicle_hurts): (
+        Query<&ExperienceOrbValue>,
+        Query<&TntFuse>,
+        Query<&lodestone_ecs::entity::Variant>,
         Query<&lodestone_ecs::entity::Tamed>,
         Query<&lodestone_ecs::entity::Vehicle>,
         Query<&lodestone_ecs::entity::ArmorStandFlags>,
@@ -3068,6 +3060,12 @@ pub fn extract_entity_draws(
         } else {
             None
         };
+        let tnt_fuse = (kind.0.as_ref() == "tnt").then(|| {
+            index
+                .get(id.0)
+                .and_then(|entity| tnt_fuses.get(entity).ok())
+                .map_or(80.0, |fuse| fuse.0 as f32 - partial_tick + 1.0)
+        });
         // An item frame's in-plane rotation, bridged off the ingest entity like
         // `block_state` and `experience_orb_value` above. `0` — vanilla's own
         // accessor default — for every entity that is not a frame and for a frame
@@ -3224,6 +3222,7 @@ pub fn extract_entity_draws(
             armor_stand,
             player_skin: player_skin.0.clone(),
             experience_orb_value,
+            tnt_fuse,
             cape_sway: cape_sway_value,
         });
     }
@@ -4922,6 +4921,7 @@ mod tests {
         variant: Option<EntityVariant>,
         creeper_swell_dir: Option<i32>,
         experience_orb_value: Option<i32>,
+        tnt_fuse: Option<i32>,
     }
 
     impl IngestSnap {
@@ -4980,6 +4980,9 @@ mod tests {
             }
             if let Some(value) = self.experience_orb_value {
                 e.insert(ExperienceOrbValue(value));
+            }
+            if let Some(fuse) = self.tnt_fuse {
+                e.insert(TntFuse(fuse));
             }
         }
     }
@@ -5857,6 +5860,7 @@ mod tests {
             EntityDraw {
                 id: 1,
                 type_path: std::sync::Arc::from("player"),
+                tnt_fuse: None,
                 variant_sheet: None,
                 item: None,
                 item_model: None,
@@ -6612,6 +6616,7 @@ mod tests {
             variant: None,
             creeper_swell_dir: None,
             experience_orb_value: None,
+            tnt_fuse: None,
         }
     }
 
@@ -6629,6 +6634,41 @@ mod tests {
             experience_orb_value: value,
             ..snap(id, Vec3::ZERO, 0.0)
         }
+    }
+
+    fn primed_tnt_snap(id: i32, fuse: Option<i32>) -> IngestSnap {
+        IngestSnap {
+            type_path: "tnt".into(),
+            tnt_fuse: fuse,
+            ..snap(id, Vec3::ZERO, 0.0)
+        }
+    }
+
+    /// The synchronized TNT fuse must cross the ingest-to-render boundary with
+    /// the render-time tick adjustment intact. These three values land exactly
+    /// on the scale/flash witnesses: 10 has no swell, 5 is the dark cadence
+    /// boundary, and 0 is the fully swollen lit frame.
+    #[test]
+    fn primed_tnt_fuse_reaches_draw_with_the_render_tick_adjustment() {
+        let mut interp = EntityInterpolator::new();
+        (primed_tnt_snap(1, Some(9))).apply(interp.world_mut());
+        (primed_tnt_snap(2, Some(4))).apply(interp.world_mut());
+        (primed_tnt_snap(3, Some(-1))).apply(interp.world_mut());
+        (snap(4, Vec3::ZERO, 0.0)).apply(interp.world_mut());
+        interp.update(0.0);
+
+        let fuse_of = |id: i32| -> Option<f32> {
+            interp
+                .draws()
+                .iter()
+                .find(|draw| draw.id == id)
+                .unwrap_or_else(|| panic!("no draw for entity {id}"))
+                .tnt_fuse
+        };
+        assert_eq!(fuse_of(1), Some(10.0));
+        assert_eq!(fuse_of(2), Some(5.0));
+        assert_eq!(fuse_of(3), Some(0.0));
+        assert_eq!(fuse_of(4), None, "only primed TNT carries a fuse");
     }
 
     /// [`extract_entity_draws`] must carry an orb's `ExperienceOrbValue` through to
@@ -7858,6 +7898,7 @@ mod tests {
             variant: None,
             creeper_swell_dir: None,
             experience_orb_value: None,
+            tnt_fuse: None,
         }
     }
 
@@ -7901,6 +7942,7 @@ mod tests {
             variant: None,
             creeper_swell_dir: None,
             experience_orb_value: None,
+            tnt_fuse: None,
         }
     }
 

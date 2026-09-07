@@ -73,7 +73,10 @@
 
 use lodestone_data::block_states::StateId;
 use lodestone_model::BlockStateRef;
-use lodestone_render::{Camera, Frustum, GpuModelMesh, ModelMesh, mesh_moving_block_quads};
+use lodestone_render::{
+    Camera, Frustum, GpuModelMesh, ModelMesh, mesh_moving_block_quads,
+    mesh_moving_block_quads_with_white_flash,
+};
 
 use crate::display_entities::{BLOCK_DISPLAY_TYPE_PATH, placement_bounds};
 use crate::entities::EntityDraw;
@@ -141,14 +144,13 @@ fn falling_block_pose(feet: glam::Vec3) -> glam::Mat4 {
     glam::Mat4::from_translation(feet - glam::Vec3::new(0.5, 0.0, 0.5))
 }
 
-/// Vanilla's own TNT renderer submit routine's pose, minus the fuse-driven scale swell (see this
-/// module's own doc for why that piece is not ported).
+/// Primed TNT's block-model pose, including its final-ten-tick scale swell.
 ///
 /// Vanilla, in `poseStack` call order:
 ///
 /// ```text
 /// translate(0, 0.5, 0)
-/// [scale(s, s, s) — swell in the last 10 ticks, not ported]
+/// scale(s, s, s) — swell in the last 10 ticks
 /// mulPose(YP.rotationDegrees(-90))
 /// translate(-0.5, -0.5, 0.5)
 /// mulPose(YP.rotationDegrees(90))
@@ -161,12 +163,32 @@ fn falling_block_pose(feet: glam::Vec3) -> glam::Mat4 {
 /// TNT renderer
 /// line for line instead of trusting an algebraic shortcut.
 #[must_use]
-fn primed_tnt_pose(feet: glam::Vec3) -> glam::Mat4 {
+fn primed_tnt_pose(feet: glam::Vec3, fuse: f32) -> glam::Mat4 {
+    let scale = 1.0 + primed_tnt_swell_amount(fuse);
     glam::Mat4::from_translation(feet)
         * glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.5, 0.0))
+        * glam::Mat4::from_scale(glam::Vec3::splat(scale))
         * glam::Mat4::from_rotation_y((-90.0f32).to_radians())
         * glam::Mat4::from_translation(glam::Vec3::new(-0.5, -0.5, 0.5))
         * glam::Mat4::from_rotation_y(90.0f32.to_radians())
+}
+
+/// The final-ten-tick TNT swell: clamp `1 - fuse / 10`, raise it to the
+/// fourth power, then multiply by `0.3`.
+#[must_use]
+fn primed_tnt_swell_amount(fuse: f32) -> f32 {
+    let mut amount = (1.0 - fuse / 10.0).clamp(0.0, 1.0);
+    amount *= amount;
+    amount *= amount;
+    amount * 0.3
+}
+
+/// Whether this fuse window submits the full-white TNT overlay. Negative fuse
+/// values are the unlit sentinel; non-negative values alternate every five
+/// ticks, with the `0..5` window lit.
+#[must_use]
+fn primed_tnt_is_lit(fuse: f32) -> bool {
+    fuse >= 0.0 && (fuse / 5.0) as i32 % 2 == 0
 }
 
 /// Vanilla's own piston-moving-block-entity get-extended-progress routine —
@@ -464,8 +486,7 @@ impl RenderState {
         }
     }
 
-    /// Merge every primed TNT entity on screen — vanilla's `TntRenderer`, minus
-    /// two pieces named below.
+    /// Merge every primed TNT entity on screen.
     ///
     /// # Why this is the entity render path's missing hop
     ///
@@ -488,29 +509,9 @@ impl RenderState {
     /// rather than routing through [`EntityDraw::block_state`], which exists
     /// for the *variable* case and would be one more hop for a constant.
     ///
-    /// # Two named deviations from `TntRenderer`, both because the fuse count
-    /// has no client-side home yet
-    ///
-    /// * **No swell scale.** Vanilla scales the block up during the last 10
-    ///   ticks of the fuse (vanilla's own TNT renderer's get-swell-amount routine). `EntityDraw` carries
-    ///   no fuse value — vanilla's own primed-TNT fuse data accessor is decoded server-side
-    ///   (`lodestone_server::mobs::tnt`) and put on the wire as metadata index
-    ///   8, but nothing on this side of the wire folds it into an ingest
-    ///   component yet (`metadata_class` has no `Tnt` arm), so there is nothing
-    ///   to read here. A static, un-swelling block is the identity case of the
-    ///   swell formula (`getSwellAmount` at a fuse this function cannot see is
-    ///   indistinguishable from "not yet swelling"), not a fabricated value.
-    /// * **No white "isLit" flash.** Same root cause: vanilla blinks
-    ///   `submitWhiteSolidBlock`'s overlay on/off every 5 ticks of the fuse,
-    ///   and [`MovingBlock`] carries no tint/overlay channel at all today — see
-    ///   its own doc for why (this seam's producers so far have been fully
-    ///   opaque, un-tinted geometry). Adding one is a `lodestone-render`
-    ///   change, out of scope here.
-    ///
-    /// Both are cosmetic: the block that draws is the *correct* one, at the
-    /// *correct* pose, for the whole 80-tick fuse — the swell and the flash
-    /// are polish on top of a real TNT block rather than the difference
-    /// between a TNT block and nothing.
+    /// `EntityDraw::tnt_fuse` is the authoritative countdown, adjusted for
+    /// this frame's partial tick during extraction. It controls both the
+    /// final-ten-tick scale and the alternating five-tick full-white overlay.
     fn merge_primed_tnt(
         &self,
         model: &ModelRenderer,
@@ -540,13 +541,15 @@ impl RenderState {
             let light = self
                 .entity_light
                 .sample(draw.feet + glam::Vec3::new(0.0, 0.5, 0.0));
-            if self.merge_moving_block(
+            let fuse = draw.tnt_fuse.unwrap_or(80.0);
+            if self.merge_moving_block_with_white_flash(
                 model,
                 MovingBlock {
                     state_id,
-                    transform: primed_tnt_pose(draw.feet),
+                    transform: primed_tnt_pose(draw.feet, fuse),
                     light,
                 },
+                primed_tnt_is_lit(fuse),
                 combined,
             ) {
                 stats.moving_blocks_drawn += 1;
@@ -965,14 +968,25 @@ impl RenderState {
         request: MovingBlock,
         combined: &mut ModelMesh,
     ) -> bool {
+        self.merge_moving_block_with_white_flash(model, request, false, combined)
+    }
+
+    fn merge_moving_block_with_white_flash(
+        &self,
+        model: &ModelRenderer,
+        request: MovingBlock,
+        white_flash: bool,
+        combined: &mut ModelMesh,
+    ) -> bool {
         let quads = model.crack_resolver.state_quads(request.state_id);
         if quads.is_empty() {
             return false;
         }
-        combined.merge(&mesh_moving_block_quads(
+        combined.merge(&mesh_moving_block_quads_with_white_flash(
             quads,
             request.transform,
             request.light,
+            white_flash,
         ));
         true
     }
@@ -1282,7 +1296,7 @@ mod tests {
     #[test]
     fn the_primed_tnt_pose_rotates_about_its_own_centre_half_a_block_above_the_feet() {
         let feet = glam::Vec3::new(4.0, 70.0, 9.0);
-        let pose = primed_tnt_pose(feet);
+        let pose = primed_tnt_pose(feet, 10.0);
 
         let centre = pose.transform_point3(glam::Vec3::splat(0.5));
         let expected_centre = feet + glam::Vec3::new(0.0, 0.5, 0.0);
@@ -1300,6 +1314,21 @@ mod tests {
              (got the no-rotation hypothesis {unrotated_wrong} instead: the two \
              `Ry` calls did not fire)"
         );
+    }
+
+    /// Exact fuse witnesses for the two render-only TNT states. `10` is the
+    /// no-swell boundary, `5` exercises the fourth-power middle, and `0` is
+    /// the maximum 30% growth; the flash witnesses straddle both five-tick
+    /// boundaries and the negative unlit sentinel.
+    #[test]
+    fn primed_tnt_fuse_drives_exact_swell_and_flash_windows() {
+        assert_eq!(primed_tnt_swell_amount(10.0), 0.0);
+        assert!((primed_tnt_swell_amount(5.0) - 0.01875).abs() < f32::EPSILON);
+        assert!((primed_tnt_swell_amount(0.0) - 0.3).abs() < f32::EPSILON);
+        assert!(!primed_tnt_is_lit(-1.0));
+        assert!(primed_tnt_is_lit(4.0));
+        assert!(!primed_tnt_is_lit(5.0));
+        assert!(primed_tnt_is_lit(10.0));
     }
 
     /// A zero direction step — which no real `facing` byte produces, but a decode

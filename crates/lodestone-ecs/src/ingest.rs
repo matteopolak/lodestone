@@ -53,7 +53,7 @@ use crate::entity::{
     DisplayBrightness, DisplayItem, DisplayItemContext, DisplayLeftRotation, DisplayLineWidth,
     DisplayRightRotation, DisplayScale, DisplayStyleFlags, DisplayText, DisplayTextOpacity,
     DisplayTranslation,
-    EntityFlags, EntityIndex, EntityKind, EntityUuid, Equipment, ExperienceOrbValue,
+    EntityFlags, EntityIndex, EntityKind, EntityUuid, Equipment, ExperienceOrbValue, TntFuse,
     FallingBlockState, HeadYaw, Health, HurtTime, ItemFrameRotation, Leashed, MinecraftEntityId,
     FireworkFlags, PaintingVariant, PlayerProfileName,
     MobState, OnGround,
@@ -1026,6 +1026,12 @@ pub fn apply_entity_metadata(
         // metadata. Putting this one in `session` would compile and never run.
         if let Some(value) = metadata.experience_orb_value {
             entity.insert(ExperienceOrbValue(value));
+        }
+        // Unlike a creeper's direction-only fuse, primed TNT synchronizes its
+        // remaining ticks. Keep that per-entity value on the ingest entity so
+        // the moving-block renderer can render its exact final-ten-tick state.
+        if let Some(fuse) = metadata.tnt_fuse {
+            entity.insert(TntFuse(fuse));
         }
         // The eight-step rotation of the stack in an item frame
         // (vanilla's own item-frame rotation metadata index). Per-*entity* state, so this system and
@@ -2542,6 +2548,30 @@ mod tests {
             "a health-only update cleared the swell direction — a creeper mid-fuse would \
              freeze on screen every time it took damage"
         );
+    }
+
+    /// A primed TNT's type-gated index-8 metadata reaches the extractable ECS
+    /// component and later reports replace the countdown rather than creating
+    /// stale visual state.
+    #[test]
+    fn primed_tnt_fuse_folds_into_tnt_fuse_component() {
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(57, "minecraft:tnt"));
+        assert!(entity_for(&world, 57).get::<TntFuse>().is_none());
+
+        for fuse in [80, 9] {
+            feed(
+                &mut world,
+                metadata(
+                    EntityMetadataUpdate {
+                        tnt_fuse: Some(fuse),
+                        ..EntityMetadataUpdate::default()
+                    },
+                    57,
+                ),
+            );
+            assert_eq!(entity_for(&world, 57).get::<TntFuse>(), Some(&TntFuse(fuse)));
+        }
     }
 
     /// End-to-end through the **real schedule**: a spawn, then a metadata packet

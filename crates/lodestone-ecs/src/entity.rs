@@ -606,6 +606,12 @@ pub struct CreeperSwellDir(pub i32);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExperienceOrbValue(pub i32);
 
+/// A primed TNT entity's authoritative fuse countdown in ticks. The server
+/// updates this metadata every tick; the render extract uses it directly for
+/// the final-ten-tick scale swell and the five-tick white-flash cadence.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TntFuse(pub i32);
+
 /// Which of the eight 45° steps the stack in an item frame is turned to —
 /// vanilla's own item-frame rotation metadata index
 /// ([`lodestone_model::event::EntityMetadataUpdate::item_frame_rotation`]),

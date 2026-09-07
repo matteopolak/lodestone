@@ -366,6 +366,7 @@ impl ThirdPersonBodyState {
             // The local player is not an experience orb either — `None` is what
             // stops `prepare_orbs` claiming our own body as one.
             experience_orb_value: None,
+            tnt_fuse: None,
             count: 1,
             foil: false,
             // The local third-person body does not draw its own nametag

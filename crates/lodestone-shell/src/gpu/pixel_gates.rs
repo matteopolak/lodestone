@@ -12,7 +12,9 @@
 //! [`super::sky_clear_bytes`] is the shared sky reference every silhouette
 //! test classifies against; its doc records why it is derived rather than
 //! hardcoded.
-use lodestone_render::{Camera, HeadlessTarget, HorizonCell, RenderTarget};
+use lodestone_render::{
+    Camera, HeadlessTarget, HorizonCell, RenderTarget, WHITE_FLASH_MATERIAL_WEIGHT,
+};
 
 use crate::entities::EntityDraw;
 
@@ -700,6 +702,7 @@ fn entity_hitbox_and_chunk_border_vertices_draw_visible_pixels() {
     let zombie = EntityDraw {
         id: 1,
         type_path: std::sync::Arc::from("zombie"),
+        tnt_fuse: None,
         variant_sheet: None,
         item: None,
         item_model: None,
@@ -1180,6 +1183,7 @@ fn entity_renders_to_pixels_through_shell_path() {
             hurt: false,
             id: 1,
             type_path: std::sync::Arc::from("pig"),
+            tnt_fuse: None,
             item: None,
             item_model: None,
             item_skin: None,
@@ -1232,6 +1236,7 @@ fn entity_renders_to_pixels_through_shell_path() {
             hurt: false,
             id: 2,
             type_path: std::sync::Arc::from("pig"),
+            tnt_fuse: None,
             item: None,
             item_model: None,
             item_skin: None,
@@ -1436,6 +1441,7 @@ fn zombie_wears_its_real_skin_not_the_flat_placeholder() {
         hurt: false,
         id: 1,
         type_path: std::sync::Arc::from("zombie"),
+        tnt_fuse: None,
         item: None,
         item_model: None,
         item_skin: None,
@@ -2021,6 +2027,7 @@ fn orb_draw(value: i32) -> EntityDraw {
     EntityDraw {
         id: 1,
         type_path: std::sync::Arc::from(crate::entities::EXPERIENCE_ORB_TYPE_PATH),
+        tnt_fuse: None,
         item: None,
         item_model: None,
         item_skin: None,
@@ -2746,6 +2753,33 @@ fn hud_flat_colour_blend_matches_vanilla_gamma_on_a_raw_target() {
         "corrected-target vs. linear-hypothesis: max |actual - predicted_linear| = \
          {max_linear_gap:.2}/255 across the sweep (diagnostic only, see row table above)"
     );
+}
+
+/// Pixel witness for the primed explosive's lit fuse overlay. A dark material
+/// is deliberately used: opaque white would store 255, whereas the reference
+/// overlay's 63/255 material weight stores about 205.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn primed_tnt_white_flash_blends_instead_of_replacing_the_material() {
+    let ctx = lodestone_render::GpuContext::new_headless_blocking().expect(
+        "headless GPU test opted in via --ignored but no wgpu adapter is available",
+    );
+    let got = render_flat_blend_over_grey(
+        ctx.device(),
+        ctx.queue(),
+        wgpu::TextureFormat::Rgba8Unorm,
+        51,
+        [1.0, 1.0, 1.0, 1.0 - WHITE_FLASH_MATERIAL_WEIGHT],
+    );
+    let expected = 255.0 * (1.0 - WHITE_FLASH_MATERIAL_WEIGHT)
+        + 51.0 * WHITE_FLASH_MATERIAL_WEIGHT;
+    for channel in &got[..3] {
+        assert!(
+            (f32::from(*channel) - expected).abs() <= 2.0,
+            "white-overlay blend expected about {expected:.2}, got {got:?}"
+        );
+        assert!(*channel < 230, "opaque-white replacement would be 255, got {got:?}");
+    }
 }
 
 /// Dropping the presentation-side GPU state must **measurably**

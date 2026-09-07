@@ -143,6 +143,9 @@ const IDX_LIVING_FLAGS: u8 = 8;
 /// so both are `false` for it, and every other claimant is non-living too. The
 /// class is the only thing that separates them.
 const IDX_EXPERIENCE_ORB_VALUE: u8 = 8;
+/// Primed TNT's fuse countdown. This is the same wire index and serializer as
+/// [`IDX_EXPERIENCE_ORB_VALUE`], so only the concrete TNT class disambiguates it.
+const IDX_TNT_FUSE: u8 = 8;
 const IDX_HEALTH: u8 = 9;
 /// the mob class's own mob-flags accessor, the mob class's **only**
 /// accessor-registration call and
@@ -502,6 +505,9 @@ pub enum MetadataClass {
     /// index 8, an index five unrelated `INT` fields also claim. See
     /// [`IDX_EXPERIENCE_ORB_VALUE`].
     ExperienceOrb,
+    /// Primed TNT — gates its index-8 `INT` fuse countdown against the four
+    /// unrelated `INT` claimants at that same index.
+    Tnt,
     /// A tameable-animal subclass — wolf, cat, parrot (via a shared
     /// shoulder-riding base class), nautilus/zombie-nautilus (via a shared
     /// abstract-nautilus base class) — the other `BYTE` claimant of index 18
@@ -598,6 +604,7 @@ pub fn metadata_class(entity_type: &str) -> Option<MetadataClass> {
         | "minecraft:camel" => Some(MetadataClass::Horse),
         "minecraft:creeper" => Some(MetadataClass::Creeper),
         "minecraft:experience_orb" => Some(MetadataClass::ExperienceOrb),
+        "minecraft:tnt" => Some(MetadataClass::Tnt),
         "minecraft:wolf" | "minecraft:cat" | "minecraft:parrot" | "minecraft:nautilus"
         | "minecraft:zombie_nautilus" => Some(MetadataClass::Tamable),
         "minecraft:ender_dragon" => Some(MetadataClass::Dragon),
@@ -1171,6 +1178,9 @@ pub fn read_entity_metadata(
             {
                 md.experience_orb_value = Some(v);
             }
+            (IDX_TNT_FUSE, Value::Int(v)) if class == Some(MetadataClass::Tnt) => {
+                md.tnt_fuse = Some(v);
+            }
             (IDX_AIR_SUPPLY, Value::Int(v)) => md.air_supply = Some(v),
             (IDX_CUSTOM_NAME, Value::OptText(t)) => md.custom_name = Reported::Reported(t),
             (IDX_CUSTOM_NAME_VISIBLE, Value::Bool(b)) => md.custom_name_visible = Some(b),
@@ -1569,6 +1579,14 @@ mod tests {
         }
     }
 
+    fn primed_tnt() -> TrackedEntity {
+        TrackedEntity {
+            class: Some(MetadataClass::Tnt),
+            living: false,
+            mob: false,
+        }
+    }
+
     /// Index 8's `INT` is an orb's XP value **only** when the caller says the
     /// entity is an orb; for anything else it is consumed for alignment and
     /// deliberately not surfaced.
@@ -1623,6 +1641,36 @@ mod tests {
             control.is_empty(),
             "the control surfaced something: {control:?}"
         );
+    }
+
+    /// Index 8's `INT` is a primed-TNT fuse only for a primed TNT entity. The
+    /// orb control proves the shared index does not cross the class guard in
+    /// either direction.
+    #[test]
+    fn index_8_int_is_a_tnt_fuse_only_for_primed_tnt() {
+        let payload = |value: i32| {
+            let mut bytes = vec![IDX_TNT_FUSE];
+            bytes.extend(varint(SER_INT));
+            bytes.extend(varint(value));
+            bytes.push(EOF_MARKER);
+            bytes
+        };
+        let bytes = payload(9);
+        let mut reader = Reader::new(&bytes);
+        let tnt = read_entity_metadata(&mut reader, primed_tnt())
+            .expect("decode TNT fuse")
+            .metadata;
+        reader.ensure_empty().expect("whole TNT payload consumed");
+        assert_eq!(tnt.tnt_fuse, Some(9));
+        assert_eq!(tnt.experience_orb_value, None);
+
+        let mut reader = Reader::new(&bytes);
+        let orb = read_entity_metadata(&mut reader, an_orb())
+            .expect("decode orb control")
+            .metadata;
+        reader.ensure_empty().expect("whole orb payload consumed");
+        assert_eq!(orb.tnt_fuse, None);
+        assert_eq!(orb.experience_orb_value, Some(9));
     }
 
     /// Appends a network-NBT string component (`TAG_String` + modified-utf8) so
