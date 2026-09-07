@@ -2519,7 +2519,56 @@ impl NetherChunkSource {
     }
 
     fn generate(&self, cx: i32, cz: i32) -> ChunkColumn {
-        ChunkColumn::from_nether(self.generator.column(cx, cz), Self::WINDOW_HEIGHT)
+        let mut column = ChunkColumn::from_nether(self.generator.column(cx, cz), Self::WINDOW_HEIGHT);
+        self.attach_structures(&mut column, cx, cz);
+        column
+    }
+
+    /// Copies the Nether generator's complete starts/references and attaches
+    /// the coded payloads from every referenced start.  A fortress spawner or
+    /// chest can sit outside its origin chunk, so this must resolve references
+    /// rather than only inspect `structure_starts(cx, cz)`.
+    fn attach_structures(&self, column: &mut ChunkColumn, cx: i32, cz: i32) {
+        let starts = self.generator.structure_starts(cx, cz);
+        let references = self.generator.structure_references(cx, cz);
+        if !references.is_empty() {
+            let mut origins: Vec<(i32, i32)> = references
+                .values()
+                .flatten()
+                .map(|packed| (*packed as u32 as i32, (*packed >> 32) as u32 as i32))
+                .collect();
+            origins.sort_unstable();
+            origins.dedup();
+
+            let mut referenced_starts = Vec::new();
+            for (ox, oz) in origins {
+                referenced_starts.extend(self.generator.structure_starts(ox, oz));
+            }
+            let chests = crate::structure_loot::chests_for_chunk(
+                &referenced_starts,
+                cx,
+                cz,
+                crate::block_drops::bundled_tables(),
+            );
+            let spawners = crate::structure_loot::spawners_for_chunk(&referenced_starts, cx, cz);
+            if !chests.is_empty() || !spawners.is_empty() {
+                let mut entities = column.block_entities().to_vec();
+                for chest in chests {
+                    if let Some(block) = chest.block {
+                        column.set_block(
+                            chest.pos.x.rem_euclid(16),
+                            chest.pos.y,
+                            chest.pos.z.rem_euclid(16),
+                            block,
+                        );
+                    }
+                    entities.push((chest.pos, chest.entity));
+                }
+                entities.extend(spawners);
+                column.set_block_entities(entities);
+            }
+        }
+        column.set_structures(starts, references);
     }
 }
 

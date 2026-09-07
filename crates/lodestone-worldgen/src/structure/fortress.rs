@@ -33,9 +33,10 @@
 
 use std::sync::Arc;
 
-use lodestone_worldgen_core::rng::RandomSource;
+use lodestone_worldgen_core::rng::{LegacyRandomSource, RandomSource};
 
 use super::coded::Facing;
+use super::template::{BlockState, Mirror, Rotation};
 use super::{BoundingBox, CodedBlock, CodedLoot, StructurePiece};
 use crate::dense_grid::DenseBlockGrid;
 
@@ -66,21 +67,22 @@ enum Kind {
 impl Kind {
     fn id(self) -> &'static str {
         match self {
-            Self::Start => "minecraft:NeStart",
-            Self::LongBridge => "minecraft:NeBS",
-            Self::WideJunction => "minecraft:NeBCr",
-            Self::SmallJunction => "minecraft:NeRC",
-            Self::RisingJunction => "minecraft:NeSR",
-            Self::SpawnerHall => "minecraft:NeMT",
-            Self::CastleGate => "minecraft:NeCE",
-            Self::CastleHall => "minecraft:NeSC",
-            Self::CastleJunction => "minecraft:NeSCSC",
-            Self::RightElbow => "minecraft:NeSCRT",
-            Self::LeftElbow => "minecraft:NeSCLT",
-            Self::Ascender => "minecraft:NeCCS",
-            Self::Balcony => "minecraft:NeCTB",
-            Self::Garden => "minecraft:NeCSR",
-            Self::EndCap => "minecraft:NeBEF",
+            // The start is persisted with the crossing's piece type, not a
+            // synthetic start-only id.
+            Self::Start | Self::WideJunction => "minecraft:nebcr",
+            Self::LongBridge => "minecraft:nebs",
+            Self::SmallJunction => "minecraft:nerc",
+            Self::RisingJunction => "minecraft:nesr",
+            Self::SpawnerHall => "minecraft:nemt",
+            Self::CastleGate => "minecraft:nece",
+            Self::CastleHall => "minecraft:nesc",
+            Self::CastleJunction => "minecraft:nescsc",
+            Self::RightElbow => "minecraft:nescrt",
+            Self::LeftElbow => "minecraft:nesclt",
+            Self::Ascender => "minecraft:neccs",
+            Self::Balcony => "minecraft:nectb",
+            Self::Garden => "minecraft:necsr",
+            Self::EndCap => "minecraft:nebef",
         }
     }
 }
@@ -345,7 +347,20 @@ fn local_pos(piece: &Node, x: i32, y: i32, z: i32) -> [i32; 3] {
 }
 
 fn write(blocks: &mut Vec<CodedBlock>, piece: &Node, state: &str, x: i32, y: i32, z: i32) {
-    blocks.push(CodedBlock { pos: local_pos(piece, x, y, z), state: state.to_string() });
+    let (mirror, rotation) = match piece.facing {
+        Facing::North => (Mirror::None, Rotation::None),
+        Facing::South => (Mirror::LeftRight, Rotation::None),
+        Facing::West => (Mirror::LeftRight, Rotation::Cw90),
+        Facing::East => (Mirror::None, Rotation::Cw90),
+    };
+    let state = BlockState::parse(state).mirror(mirror).rotate(rotation).canonical();
+    blocks.push(CodedBlock { pos: local_pos(piece, x, y, z), state });
+}
+
+fn fence(north: bool, east: bool, south: bool, west: bool) -> String {
+    format!(
+        "minecraft:nether_brick_fence[east={east},north={north},south={south},waterlogged=false,west={west}]"
+    )
 }
 
 fn box_fill(blocks: &mut Vec<CodedBlock>, piece: &Node, state: &str, x0: i32, y0: i32, z0: i32, x1: i32, y1: i32, z1: i32) {
@@ -384,9 +399,8 @@ fn emit_cross(blocks: &mut Vec<CodedBlock>, piece: &Node) {
 fn emit_room(blocks: &mut Vec<CodedBlock>, piece: &Node) {
     const BRICK: &str = "minecraft:nether_bricks";
     const AIR: &str = "minecraft:air";
-    const WE: &str = "minecraft:nether_brick_fence[east=true,north=false,south=false,waterlogged=false,west=true]";
-    const NS: &str = "minecraft:nether_brick_fence[east=false,north=true,south=true,waterlogged=false,west=false]";
-    let (we, ns) = if piece.facing.is_z_axis() { (WE, NS) } else { (NS, WE) };
+    let we = fence(false, true, false, true);
+    let ns = fence(true, false, true, false);
     box_fill(blocks, piece, BRICK, 0, 0, 0, 6, 1, 6);
     box_fill(blocks, piece, AIR, 0, 2, 0, 6, 7, 6);
     for (x0, x1, z) in [(0, 1, 0), (0, 1, 6), (5, 6, 0), (5, 6, 6)] {
@@ -397,20 +411,19 @@ fn emit_room(blocks: &mut Vec<CodedBlock>, piece: &Node) {
     }
     for (x0, x1, z) in [(2, 4, 0), (2, 4, 6)] {
         box_fill(blocks, piece, BRICK, x0, 6, z, x1, 6, z);
-        box_fill(blocks, piece, we, x0, 5, z, x1, 5, z);
+        box_fill(blocks, piece, &we, x0, 5, z, x1, 5, z);
     }
     for (x, z0, z1) in [(0, 2, 4), (6, 2, 4)] {
         box_fill(blocks, piece, BRICK, x, 6, z0, x, 6, z1);
-        box_fill(blocks, piece, ns, x, 5, z0, x, 5, z1);
+        box_fill(blocks, piece, &ns, x, 5, z0, x, 5, z1);
     }
 }
 
 fn emit_rising_room(blocks: &mut Vec<CodedBlock>, piece: &Node) {
     const BRICK: &str = "minecraft:nether_bricks";
     const AIR: &str = "minecraft:air";
-    const WE: &str = "minecraft:nether_brick_fence[east=true,north=false,south=false,waterlogged=false,west=true]";
-    const NS: &str = "minecraft:nether_brick_fence[east=false,north=true,south=true,waterlogged=false,west=false]";
-    let (we, ns) = if piece.facing.is_z_axis() { (WE, NS) } else { (NS, WE) };
+    let we = fence(false, true, false, true);
+    let ns = fence(true, false, true, false);
     box_fill(blocks, piece, BRICK, 0, 0, 0, 6, 1, 6);
     box_fill(blocks, piece, AIR, 0, 2, 0, 6, 10, 6);
     box_fill(blocks, piece, BRICK, 0, 2, 0, 1, 8, 0);
@@ -418,9 +431,9 @@ fn emit_rising_room(blocks: &mut Vec<CodedBlock>, piece: &Node) {
     box_fill(blocks, piece, BRICK, 0, 2, 1, 0, 8, 6);
     box_fill(blocks, piece, BRICK, 6, 2, 1, 6, 8, 6);
     box_fill(blocks, piece, BRICK, 1, 2, 6, 5, 8, 6);
-    box_fill(blocks, piece, ns, 0, 3, 2, 0, 5, 4);
-    box_fill(blocks, piece, ns, 6, 3, 2, 6, 5, 2);
-    box_fill(blocks, piece, ns, 6, 3, 4, 6, 5, 4);
+    box_fill(blocks, piece, &ns, 0, 3, 2, 0, 5, 4);
+    box_fill(blocks, piece, &ns, 6, 3, 2, 6, 5, 2);
+    box_fill(blocks, piece, &ns, 6, 3, 4, 6, 5, 4);
     write(blocks, piece, BRICK, 5, 2, 5);
     box_fill(blocks, piece, BRICK, 4, 2, 5, 4, 3, 5);
     box_fill(blocks, piece, BRICK, 3, 2, 5, 3, 4, 5);
@@ -429,7 +442,7 @@ fn emit_rising_room(blocks: &mut Vec<CodedBlock>, piece: &Node) {
     box_fill(blocks, piece, BRICK, 1, 7, 1, 5, 7, 4);
     box_fill(blocks, piece, AIR, 6, 8, 2, 6, 8, 4);
     box_fill(blocks, piece, BRICK, 2, 6, 0, 4, 8, 0);
-    box_fill(blocks, piece, we, 2, 5, 0, 4, 5, 0);
+    box_fill(blocks, piece, &we, 2, 5, 0, 4, 5, 0);
 }
 
 fn is_structure_replaceable(state: &str) -> bool {
@@ -492,88 +505,368 @@ fn place_supports_in_chunk(
                 }
             }
         }
-        _ => {}
-    }
-}
-
-/// Resolves the common masonry shell, its front/back passages, and the
-/// piece-specific interior landmarks. Downward supports deliberately stop at the
-/// piece floor here: the start-time API has no stable post-carve terrain read, so
-/// an unbounded column would be a different class of eager-world-read error.
-fn emit_blocks<R: RandomSource>(piece: &Node, random: &mut R) -> (Vec<CodedBlock>, Vec<CodedLoot>) {
-    const BRICK: &str = "minecraft:nether_bricks";
-    const AIR: &str = "minecraft:air";
-    const FENCE: &str = "minecraft:nether_brick_fence[east=false,north=false,south=false,waterlogged=false,west=false]";
-    const STAIRS: &str = "minecraft:nether_brick_stairs[facing=south,half=bottom,shape=straight,waterlogged=false]";
-    let (size_off, size) = shape(piece.kind);
-    let _ = size_off;
-    let [width, height, depth] = size;
-    let mut blocks = Vec::new();
-    // Most variants are closed shells. The three bridge-family rooms below
-    // have their own sparse operation sequences instead.
-    if !matches!(piece.kind, Kind::Start | Kind::WideJunction | Kind::SmallJunction | Kind::RisingJunction) {
-        box_fill(&mut blocks, piece, BRICK, 0, 0, 0, width - 1, 1.min(height - 1), depth - 1);
-        box_fill(&mut blocks, piece, AIR, 1, 2, 1, width - 2, height - 2, depth - 2);
-        box_fill(&mut blocks, piece, BRICK, 0, 2, 0, width - 1, height - 1, 0);
-        box_fill(&mut blocks, piece, BRICK, 0, 2, depth - 1, width - 1, height - 1, depth - 1);
-        box_fill(&mut blocks, piece, BRICK, 0, 2, 0, 0, height - 1, depth - 1);
-        box_fill(&mut blocks, piece, BRICK, width - 1, 2, 0, width - 1, height - 1, depth - 1);
-        box_fill(&mut blocks, piece, BRICK, 0, height - 1, 0, width - 1, height - 1, depth - 1);
-        // A three-wide, three-tall portal at both longitudinal faces links
-        // every generated child to its parent rather than producing sealed boxes.
-        let middle = width / 2;
-        box_fill(&mut blocks, piece, AIR, middle - 1, 2, 0, middle + 1, 4.min(height - 2), 0);
-        box_fill(&mut blocks, piece, AIR, middle - 1, 2, depth - 1, middle + 1, 4.min(height - 2), depth - 1);
-    }
-    match piece.kind {
         Kind::LongBridge => {
-            box_fill(&mut blocks, piece, BRICK, 0, 3, 0, width - 1, 4, depth - 1);
-            box_fill(&mut blocks, piece, AIR, 1, 5, 0, width - 2, 7, depth - 1);
-            box_fill(&mut blocks, piece, FENCE, 0, 1, 1, 0, 4, depth - 2);
-            box_fill(&mut blocks, piece, FENCE, width - 1, 1, 1, width - 1, 4, depth - 2);
+            for x in 0..=4 {
+                for z in 0..=2 {
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, 18 - z);
+                }
+            }
         }
-        Kind::WideJunction | Kind::Start => emit_cross(&mut blocks, piece),
-        Kind::SmallJunction => emit_room(&mut blocks, piece),
-        Kind::RisingJunction => emit_rising_room(&mut blocks, piece),
+        Kind::CastleGate | Kind::Garden => {
+            for x in 4..=8 {
+                for z in 0..=2 {
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, 12 - z);
+                }
+            }
+            for x in 0..=2 {
+                for z in 4..=8 {
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, 12 - x, z);
+                }
+            }
+        }
+        Kind::CastleHall | Kind::CastleJunction | Kind::RightElbow | Kind::LeftElbow => {
+            for x in 0..=4 {
+                for z in 0..=4 {
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
+                }
+            }
+        }
         Kind::Ascender => {
-            for step in 0..depth.min(10) {
-                let floor = (height - 3 - step).max(1);
-                box_fill(&mut blocks, piece, BRICK, 0, 0, step, width - 1, floor, step);
-                if step < 7 && width > 2 && floor + 1 < height {
-                    box_fill(&mut blocks, piece, STAIRS, 1, floor + 1, step, width - 2, floor + 1, step);
+            for x in 0..=4 {
+                for z in 0..=9 {
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
+                }
+            }
+        }
+        Kind::Balcony => {
+            for x in 0..=8 {
+                for z in 0..=5 {
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
                 }
             }
         }
         Kind::SpawnerHall => {
-            write(&mut blocks, piece, "minecraft:spawner", width / 2, 5.min(height - 1), 5.min(depth - 1));
-            box_fill(&mut blocks, piece, FENCE, 0, 6.min(height - 1), 3, width - 1, 6.min(height - 1), depth - 1);
-        }
-        Kind::Garden => {
-            let y = 5.min(height - 2);
-            box_fill(&mut blocks, piece, "minecraft:soul_sand", 3, y, 3, width - 4, y, depth - 4);
-            box_fill(&mut blocks, piece, "minecraft:nether_wart[age=0]", 3, y + 1, 3, width - 4, y + 1, depth - 4);
-        }
-        Kind::Balcony => box_fill(&mut blocks, piece, FENCE, 1, 3, depth - 1, width - 2, 3, depth - 1),
-        Kind::EndCap => {
-            // Its construction seed has already been consumed during tree growth;
-            // use it only to make the terminal masonry jagged without touching
-            // the shared structure stream again.
-            let mut state = piece.end_seed.unwrap_or_default() as u32;
-            for x in 0..width {
-                for y in 0..height.min(6) {
-                    state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
-                    let z = (state % depth as u32) as i32;
-                    box_fill(&mut blocks, piece, BRICK, x, y, 0, x, y, z);
+            for x in 0..=6 {
+                for z in 0..=6 {
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
                 }
             }
         }
         _ => {}
     }
+}
+
+fn emit_long_bridge(blocks: &mut Vec<CodedBlock>, piece: &Node) {
+    const BRICK: &str = "minecraft:nether_bricks";
+    const AIR: &str = "minecraft:air";
+    let nse = fence(true, true, true, false);
+    let nsw = fence(true, false, true, true);
+    box_fill(blocks, piece, BRICK, 0, 3, 0, 4, 4, 18);
+    box_fill(blocks, piece, AIR, 1, 5, 0, 3, 7, 18);
+    box_fill(blocks, piece, BRICK, 0, 5, 0, 0, 5, 18);
+    box_fill(blocks, piece, BRICK, 4, 5, 0, 4, 5, 18);
+    box_fill(blocks, piece, BRICK, 0, 2, 0, 4, 2, 5);
+    box_fill(blocks, piece, BRICK, 0, 2, 13, 4, 2, 18);
+    box_fill(blocks, piece, BRICK, 0, 0, 0, 4, 1, 3);
+    box_fill(blocks, piece, BRICK, 0, 0, 15, 4, 1, 18);
+    for (x, fence) in [(0, &nse), (4, &nsw)] {
+        box_fill(blocks, piece, fence, x, 1, 1, x, 4, 1);
+        box_fill(blocks, piece, fence, x, 3, 4, x, 4, 4);
+        box_fill(blocks, piece, fence, x, 3, 14, x, 4, 14);
+        box_fill(blocks, piece, fence, x, 1, 17, x, 4, 17);
+    }
+}
+
+fn emit_small_castle(blocks: &mut Vec<CodedBlock>, piece: &Node) {
+    const BRICK: &str = "minecraft:nether_bricks";
+    const AIR: &str = "minecraft:air";
+    let ns = fence(true, false, true, false);
+    let we = fence(false, true, false, true);
+    box_fill(blocks, piece, BRICK, 0, 0, 0, 4, 1, 4);
+    box_fill(blocks, piece, AIR, 0, 2, 0, 4, 5, 4);
+    match piece.kind {
+        Kind::CastleHall => {
+            box_fill(blocks, piece, BRICK, 0, 2, 0, 0, 5, 4);
+            box_fill(blocks, piece, BRICK, 4, 2, 0, 4, 5, 4);
+            for x in [0, 4] {
+                box_fill(blocks, piece, &ns, x, 3, 1, x, 4, 1);
+                box_fill(blocks, piece, &ns, x, 3, 3, x, 4, 3);
+            }
+        }
+        Kind::CastleJunction => {
+            for (x, z) in [(0, 0), (4, 0), (0, 4), (4, 4)] {
+                box_fill(blocks, piece, BRICK, x, 2, z, x, 5, z);
+            }
+        }
+        Kind::LeftElbow => {
+            box_fill(blocks, piece, BRICK, 4, 2, 0, 4, 5, 4);
+            for z in [1, 3] { box_fill(blocks, piece, &ns, 4, 3, z, 4, 4, z); }
+            box_fill(blocks, piece, BRICK, 0, 2, 0, 0, 5, 0);
+            box_fill(blocks, piece, BRICK, 0, 2, 4, 3, 5, 4);
+            for x in [1, 3] { box_fill(blocks, piece, &we, x, 3, 4, x, 4, 4); }
+        }
+        Kind::RightElbow => {
+            box_fill(blocks, piece, BRICK, 0, 2, 0, 0, 5, 4);
+            for z in [1, 3] { box_fill(blocks, piece, &ns, 0, 3, z, 0, 4, z); }
+            box_fill(blocks, piece, BRICK, 4, 2, 0, 4, 5, 0);
+            box_fill(blocks, piece, BRICK, 1, 2, 4, 4, 5, 4);
+            for x in [1, 3] { box_fill(blocks, piece, &we, x, 3, 4, x, 4, 4); }
+        }
+        _ => unreachable!("not a small castle piece"),
+    }
+    box_fill(blocks, piece, BRICK, 0, 6, 0, 4, 6, 4);
+}
+
+fn emit_ascender(blocks: &mut Vec<CodedBlock>, piece: &Node) {
+    const BRICK: &str = "minecraft:nether_bricks";
+    const AIR: &str = "minecraft:air";
+    const STAIRS: &str = "minecraft:nether_brick_stairs[facing=south,half=bottom,shape=straight,waterlogged=false]";
+    let ns = fence(true, false, true, false);
+    for step in 0..=9 {
+        let floor = (7 - step).max(1);
+        let roof = (floor + 5).max(14 - step).min(13);
+        box_fill(blocks, piece, BRICK, 0, 0, step, 4, floor, step);
+        box_fill(blocks, piece, AIR, 1, floor + 1, step, 3, roof - 1, step);
+        if step <= 6 { box_fill(blocks, piece, STAIRS, 1, floor + 1, step, 3, floor + 1, step); }
+        box_fill(blocks, piece, BRICK, 0, roof, step, 4, roof, step);
+        box_fill(blocks, piece, BRICK, 0, floor + 1, step, 0, roof - 1, step);
+        box_fill(blocks, piece, BRICK, 4, floor + 1, step, 4, roof - 1, step);
+        if step % 2 == 0 {
+            box_fill(blocks, piece, &ns, 0, floor + 2, step, 0, floor + 3, step);
+            box_fill(blocks, piece, &ns, 4, floor + 2, step, 4, floor + 3, step);
+        }
+    }
+}
+
+fn emit_balcony(blocks: &mut Vec<CodedBlock>, piece: &Node) {
+    const BRICK: &str = "minecraft:nether_bricks";
+    const AIR: &str = "minecraft:air";
+    let ns = fence(true, false, true, false);
+    let we = fence(false, true, false, true);
+    box_fill(blocks, piece, BRICK, 0, 0, 0, 8, 1, 8);
+    box_fill(blocks, piece, AIR, 0, 2, 0, 8, 5, 8);
+    box_fill(blocks, piece, BRICK, 0, 6, 0, 8, 6, 5);
+    box_fill(blocks, piece, BRICK, 0, 2, 0, 2, 5, 0);
+    box_fill(blocks, piece, BRICK, 6, 2, 0, 8, 5, 0);
+    box_fill(blocks, piece, &we, 1, 3, 0, 1, 4, 0);
+    box_fill(blocks, piece, &we, 7, 3, 0, 7, 4, 0);
+    box_fill(blocks, piece, BRICK, 0, 2, 4, 8, 2, 8);
+    box_fill(blocks, piece, AIR, 1, 1, 4, 2, 2, 4);
+    box_fill(blocks, piece, AIR, 6, 1, 4, 7, 2, 4);
+    box_fill(blocks, piece, &we, 1, 3, 8, 7, 3, 8);
+    write(blocks, piece, &fence(false, true, true, false), 0, 3, 8);
+    write(blocks, piece, &fence(false, false, true, true), 8, 3, 8);
+    box_fill(blocks, piece, &ns, 0, 3, 6, 0, 3, 7);
+    box_fill(blocks, piece, &ns, 8, 3, 6, 8, 3, 7);
+    box_fill(blocks, piece, BRICK, 0, 3, 4, 0, 5, 5);
+    box_fill(blocks, piece, BRICK, 8, 3, 4, 8, 5, 5);
+    box_fill(blocks, piece, BRICK, 1, 3, 5, 2, 5, 5);
+    box_fill(blocks, piece, BRICK, 6, 3, 5, 7, 5, 5);
+    box_fill(blocks, piece, &we, 1, 4, 5, 1, 5, 5);
+    box_fill(blocks, piece, &we, 7, 4, 5, 7, 5, 5);
+}
+
+fn emit_large_frame(blocks: &mut Vec<CodedBlock>, piece: &Node) {
+    const BRICK: &str = "minecraft:nether_bricks";
+    const AIR: &str = "minecraft:air";
+    box_fill(blocks, piece, BRICK, 0, 3, 0, 12, 4, 12);
+    box_fill(blocks, piece, AIR, 0, 5, 0, 12, 13, 12);
+    box_fill(blocks, piece, BRICK, 0, 5, 0, 1, 12, 12);
+    box_fill(blocks, piece, BRICK, 11, 5, 0, 12, 12, 12);
+    box_fill(blocks, piece, BRICK, 2, 5, 11, 4, 12, 12);
+    box_fill(blocks, piece, BRICK, 8, 5, 11, 10, 12, 12);
+    box_fill(blocks, piece, BRICK, 5, 9, 11, 7, 12, 12);
+    box_fill(blocks, piece, BRICK, 2, 5, 0, 4, 12, 1);
+    box_fill(blocks, piece, BRICK, 8, 5, 0, 10, 12, 1);
+    box_fill(blocks, piece, BRICK, 5, 9, 0, 7, 12, 1);
+    box_fill(blocks, piece, BRICK, 2, 11, 2, 10, 12, 10);
+}
+
+fn emit_large_rails(blocks: &mut Vec<CodedBlock>, piece: &Node, joined: bool) {
+    const BRICK: &str = "minecraft:nether_bricks";
+    let we = fence(false, true, false, true);
+    let ns = fence(true, false, true, false);
+    for i in (1..=11).step_by(2) {
+        box_fill(blocks, piece, &we, i, 10, 0, i, 11, 0);
+        box_fill(blocks, piece, &we, i, 10, 12, i, 11, 12);
+        box_fill(blocks, piece, &ns, 0, 10, i, 0, 11, i);
+        box_fill(blocks, piece, &ns, 12, 10, i, 12, 11, i);
+        write(blocks, piece, BRICK, i, 13, 0);
+        write(blocks, piece, BRICK, i, 13, 12);
+        write(blocks, piece, BRICK, 0, 13, i);
+        write(blocks, piece, BRICK, 12, 13, i);
+        if i != 11 {
+            write(blocks, piece, &we, i + 1, 13, 0);
+            write(blocks, piece, &we, i + 1, 13, 12);
+            write(blocks, piece, &ns, 0, 13, i + 1);
+            write(blocks, piece, &ns, 12, 13, i + 1);
+        }
+    }
+    write(blocks, piece, &fence(true, true, false, false), 0, 13, 0);
+    write(blocks, piece, &fence(false, true, true, false), 0, 13, 12);
+    write(blocks, piece, &fence(false, false, true, true), 12, 13, 12);
+    write(blocks, piece, &fence(true, false, false, true), 12, 13, 0);
+    for z in (3..=9).step_by(2) {
+        let left = if joined { fence(true, false, true, true) } else { fence(true, false, true, false) };
+        let right = if joined { fence(true, true, true, false) } else { fence(true, false, true, false) };
+        box_fill(blocks, piece, &left, 1, 7, z, 1, 8, z);
+        box_fill(blocks, piece, &right, 11, 7, z, 11, 8, z);
+    }
+}
+
+fn emit_large_foundation(blocks: &mut Vec<CodedBlock>, piece: &Node) {
+    const BRICK: &str = "minecraft:nether_bricks";
+    box_fill(blocks, piece, BRICK, 4, 2, 0, 8, 2, 12);
+    box_fill(blocks, piece, BRICK, 0, 2, 4, 12, 2, 8);
+    box_fill(blocks, piece, BRICK, 4, 0, 0, 8, 1, 3);
+    box_fill(blocks, piece, BRICK, 4, 0, 9, 8, 1, 12);
+    box_fill(blocks, piece, BRICK, 0, 0, 4, 3, 1, 8);
+    box_fill(blocks, piece, BRICK, 9, 0, 4, 12, 1, 8);
+}
+
+fn emit_castle_gate(blocks: &mut Vec<CodedBlock>, piece: &Node) {
+    const BRICK: &str = "minecraft:nether_bricks";
+    const AIR: &str = "minecraft:air";
+    emit_large_frame(blocks, piece);
+    box_fill(blocks, piece, &fence(false, false, false, false), 5, 8, 0, 7, 8, 0);
+    emit_large_rails(blocks, piece, true);
+    emit_large_foundation(blocks, piece);
+    box_fill(blocks, piece, BRICK, 5, 5, 5, 7, 5, 7);
+    box_fill(blocks, piece, AIR, 6, 1, 6, 6, 4, 6);
+    write(blocks, piece, BRICK, 6, 0, 6);
+    write(blocks, piece, "minecraft:lava", 6, 5, 6);
+}
+
+fn emit_garden(blocks: &mut Vec<CodedBlock>, piece: &Node) {
+    const BRICK: &str = "minecraft:nether_bricks";
+    const AIR: &str = "minecraft:air";
+    const NORTH_STAIRS: &str = "minecraft:nether_brick_stairs[facing=north,half=bottom,shape=straight,waterlogged=false]";
+    const EAST_STAIRS: &str = "minecraft:nether_brick_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]";
+    const WEST_STAIRS: &str = "minecraft:nether_brick_stairs[facing=west,half=bottom,shape=straight,waterlogged=false]";
+    emit_large_frame(blocks, piece);
+    emit_large_rails(blocks, piece, true);
+    for i in 0..=6 {
+        let z = i + 4;
+        box_fill(blocks, piece, NORTH_STAIRS, 5, 5 + i, z, 7, 5 + i, z);
+        if (5..=8).contains(&z) {
+            box_fill(blocks, piece, BRICK, 5, 5, z, 7, i + 4, z);
+        } else if (9..=10).contains(&z) {
+            box_fill(blocks, piece, BRICK, 5, 8, z, 7, i + 4, z);
+        }
+        if i >= 1 { box_fill(blocks, piece, AIR, 5, 6 + i, z, 7, 9 + i, z); }
+    }
+    box_fill(blocks, piece, NORTH_STAIRS, 5, 12, 11, 7, 12, 11);
+    box_fill(blocks, piece, &fence(true, true, true, false), 5, 6, 7, 5, 7, 7);
+    box_fill(blocks, piece, &fence(true, false, true, true), 7, 6, 7, 7, 7, 7);
+    box_fill(blocks, piece, AIR, 5, 13, 12, 7, 13, 12);
+    box_fill(blocks, piece, BRICK, 2, 5, 2, 3, 5, 3);
+    box_fill(blocks, piece, BRICK, 2, 5, 9, 3, 5, 10);
+    box_fill(blocks, piece, BRICK, 2, 5, 4, 2, 5, 8);
+    box_fill(blocks, piece, BRICK, 9, 5, 2, 10, 5, 3);
+    box_fill(blocks, piece, BRICK, 9, 5, 9, 10, 5, 10);
+    box_fill(blocks, piece, BRICK, 10, 5, 4, 10, 5, 8);
+    box_fill(blocks, piece, WEST_STAIRS, 4, 5, 2, 4, 5, 3);
+    box_fill(blocks, piece, WEST_STAIRS, 4, 5, 9, 4, 5, 10);
+    box_fill(blocks, piece, EAST_STAIRS, 8, 5, 2, 8, 5, 3);
+    box_fill(blocks, piece, EAST_STAIRS, 8, 5, 9, 8, 5, 10);
+    box_fill(blocks, piece, "minecraft:soul_sand", 3, 4, 4, 4, 4, 8);
+    box_fill(blocks, piece, "minecraft:soul_sand", 8, 4, 4, 9, 4, 8);
+    box_fill(blocks, piece, "minecraft:nether_wart[age=0]", 3, 5, 4, 4, 5, 8);
+    box_fill(blocks, piece, "minecraft:nether_wart[age=0]", 8, 5, 4, 9, 5, 8);
+    emit_large_foundation(blocks, piece);
+}
+
+fn emit_spawner_hall(blocks: &mut Vec<CodedBlock>, piece: &Node) {
+    const BRICK: &str = "minecraft:nether_bricks";
+    const AIR: &str = "minecraft:air";
+    let we = fence(false, true, false, true);
+    let ns = fence(true, false, true, false);
+    box_fill(blocks, piece, AIR, 0, 2, 0, 6, 7, 7);
+    box_fill(blocks, piece, BRICK, 1, 0, 0, 5, 1, 7);
+    box_fill(blocks, piece, BRICK, 1, 2, 1, 5, 2, 7);
+    box_fill(blocks, piece, BRICK, 1, 3, 2, 5, 3, 7);
+    box_fill(blocks, piece, BRICK, 1, 4, 3, 5, 4, 7);
+    box_fill(blocks, piece, BRICK, 1, 2, 0, 1, 4, 2);
+    box_fill(blocks, piece, BRICK, 5, 2, 0, 5, 4, 2);
+    box_fill(blocks, piece, BRICK, 1, 5, 2, 1, 5, 3);
+    box_fill(blocks, piece, BRICK, 5, 5, 2, 5, 5, 3);
+    box_fill(blocks, piece, BRICK, 0, 5, 3, 0, 5, 8);
+    box_fill(blocks, piece, BRICK, 6, 5, 3, 6, 5, 8);
+    box_fill(blocks, piece, BRICK, 1, 5, 8, 5, 5, 8);
+    write(blocks, piece, &fence(false, false, false, true), 1, 6, 3);
+    write(blocks, piece, &fence(false, true, false, false), 5, 6, 3);
+    write(blocks, piece, &fence(true, true, false, false), 0, 6, 3);
+    write(blocks, piece, &fence(true, false, false, true), 6, 6, 3);
+    box_fill(blocks, piece, &ns, 0, 6, 4, 0, 6, 7);
+    box_fill(blocks, piece, &ns, 6, 6, 4, 6, 6, 7);
+    write(blocks, piece, &fence(false, true, true, false), 0, 6, 8);
+    write(blocks, piece, &fence(false, false, true, true), 6, 6, 8);
+    box_fill(blocks, piece, &we, 1, 6, 8, 5, 6, 8);
+    write(blocks, piece, &fence(false, true, false, false), 1, 7, 8);
+    box_fill(blocks, piece, &we, 2, 7, 8, 4, 7, 8);
+    write(blocks, piece, &fence(false, false, false, true), 5, 7, 8);
+    write(blocks, piece, &fence(false, true, false, false), 2, 8, 8);
+    write(blocks, piece, &we, 3, 8, 8);
+    write(blocks, piece, &fence(false, false, false, true), 4, 8, 8);
+    write(blocks, piece, "minecraft:spawner", 3, 5, 5);
+}
+
+fn emit_end_cap(blocks: &mut Vec<CodedBlock>, piece: &Node) {
+    const BRICK: &str = "minecraft:nether_bricks";
+    let mut random = LegacyRandomSource::new(i64::from(piece.end_seed.unwrap_or_default()));
+    for x in 0..=4 {
+        for y in 3..=4 {
+            let z = random.next_int_bounded(8);
+            box_fill(blocks, piece, BRICK, x, y, 0, x, y, z);
+        }
+    }
+    let z = random.next_int_bounded(8);
+    box_fill(blocks, piece, BRICK, 0, 5, 0, 0, 5, z);
+    let z = random.next_int_bounded(8);
+    box_fill(blocks, piece, BRICK, 4, 5, 0, 4, 5, z);
+    for x in 0..=4 {
+        let z = random.next_int_bounded(5);
+        box_fill(blocks, piece, BRICK, x, 2, 0, x, 2, z);
+    }
+    for x in 0..=4 {
+        for y in 0..=1 {
+            let z = random.next_int_bounded(3);
+            box_fill(blocks, piece, BRICK, x, y, 0, x, y, z);
+        }
+    }
+}
+
+/// Replays each piece's local block-writing sequence. Supports remain in the
+/// placement pass because only that pass can see the receiving chunk's terrain.
+fn emit_blocks<R: RandomSource>(piece: &Node, random: &mut R) -> (Vec<CodedBlock>, Vec<CodedLoot>) {
+    let mut blocks = Vec::new();
+    match piece.kind {
+        Kind::LongBridge => emit_long_bridge(&mut blocks, piece),
+        Kind::WideJunction | Kind::Start => emit_cross(&mut blocks, piece),
+        Kind::SmallJunction => emit_room(&mut blocks, piece),
+        Kind::RisingJunction => emit_rising_room(&mut blocks, piece),
+        Kind::SpawnerHall => emit_spawner_hall(&mut blocks, piece),
+        Kind::CastleGate => emit_castle_gate(&mut blocks, piece),
+        Kind::CastleHall | Kind::CastleJunction | Kind::RightElbow | Kind::LeftElbow => emit_small_castle(&mut blocks, piece),
+        Kind::Ascender => emit_ascender(&mut blocks, piece),
+        Kind::Balcony => emit_balcony(&mut blocks, piece),
+        Kind::Garden => emit_garden(&mut blocks, piece),
+        Kind::EndCap => emit_end_cap(&mut blocks, piece),
+    }
     let mut loot = Vec::new();
     if piece.chest {
-        let x = if matches!(piece.kind, Kind::RightElbow) { 1 } else { width - 2 };
-        let pos = local_pos(piece, x, 2, 3.min(depth - 2));
-        write(&mut blocks, piece, "minecraft:chest[facing=north,type=single,waterlogged=false]", x, 2, 3.min(depth - 2));
+        let x = if matches!(piece.kind, Kind::RightElbow) { 1 } else { 3 };
+        let pos = local_pos(piece, x, 2, 3);
+        // This eager block list has no receiving chunk grid. The external
+        // state is wall-dependent, so keep the default state until container
+        // placement is moved to that grid-aware stage.
+        blocks.push(CodedBlock {
+            pos,
+            state: "minecraft:chest[facing=north,type=single,waterlogged=false]".to_string(),
+        });
         loot.push(CodedLoot { pos, table: "minecraft:chests/nether_bridge".to_string(), seed: random.next_long() });
     }
     (blocks, loot)

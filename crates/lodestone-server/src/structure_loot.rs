@@ -105,6 +105,7 @@ use lodestone_worldgen::structure::template::transform;
 
 use crate::block_entities::{BlockEntity, CONTAINER_9X3_SIZE};
 use crate::loot::{LootContext, LootTableSet};
+use crate::mob_spawner::SpawnerState;
 use crate::mob_spawn::SpawnRng;
 
 /// One data marker read out of a template: its template-relative position and
@@ -289,6 +290,45 @@ pub fn chests_for_chunk(
                     entity: fill_container(items, &mut rng),
                     block,
                 });
+            }
+        }
+    }
+    out
+}
+
+/// Generated spawner payloads for structure pieces that reach `(cx, cz)`.
+///
+/// Block lists deliberately keep block state separate from their runtime
+/// payloads.  A spawner block therefore needs this server-side bridge just as
+/// a coded chest needs [`chests_for_chunk`]: clients receive the entity state
+/// in the chunk packet, and the server tick owns the live state thereafter.
+#[must_use]
+pub fn spawners_for_chunk(
+    starts: &[std::sync::Arc<StructureStart>],
+    cx: i32,
+    cz: i32,
+) -> Vec<(BlockPos, BlockEntity)> {
+    let blaze = "minecraft:blaze"
+        .parse::<ResourceKey>()
+        .expect("bundled blaze entity key is valid");
+    let mut out = Vec::new();
+    for start in starts {
+        for piece in &start.pieces {
+            // The spawner hall owns this payload.  Checking its emitted block
+            // too makes the sidecar fail closed if the piece writer changes:
+            // a packet can never carry a blaze spawner where generation did
+            // not put a spawner block.
+            if piece.id != "minecraft:nemt" {
+                continue;
+            }
+            let Some(blocks) = piece.blocks.as_ref() else {
+                continue;
+            };
+            for block in blocks.iter().filter(|block| block.state == "minecraft:spawner") {
+                let pos = BlockPos::new(block.pos[0], block.pos[1], block.pos[2]);
+                if pos.x.div_euclid(16) == cx && pos.z.div_euclid(16) == cz {
+                    out.push((pos, BlockEntity::Spawner(SpawnerState::generated(blaze.clone()))));
+                }
             }
         }
     }
@@ -824,5 +864,35 @@ mod tests {
             .collect();
         assert_eq!(occupied.len(), 3);
         assert_ne!(occupied, vec![0, 1, 2], "stacks must be scattered, not packed");
+    }
+
+    /// The external seed-42 fortress has a spawner hall crossing chunk
+    /// `(-2, 0)`.  This is deliberately through `NetherChunkSource`, not the
+    /// sidecar helper: it proves the generated block entity reaches the same
+    /// production `ChunkColumn` packet source as ordinary generated chests.
+    #[test]
+    fn fortress_spawner_arrives_with_blaze_payload() {
+        use crate::chunk::ChunkSource as _;
+
+        let source = crate::nether_chunk_source(42);
+        let column = source.column(-2, 0);
+        assert_eq!(column.block_state(7, 77, 11), "minecraft:spawner");
+        let (pos, entity) = column
+            .block_entities()
+            .iter()
+            .find(|(_, entity)| matches!(entity, BlockEntity::Spawner(_)))
+            .expect("external seed-42 spawner hall must reach its receiving chunk");
+        assert_eq!(*pos, BlockPos::new(-25, 77, 11));
+        let BlockEntity::Spawner(spawner) = entity else {
+            unreachable!("the finder only accepts spawner block entities");
+        };
+        let (delay, min_delay, max_delay, count, nearby, player_range, range, potentials, next) = spawner.saved_fields();
+        assert_eq!((delay, min_delay, max_delay, count, nearby, player_range, range), (20, 200, 800, 4, 6, 16, 4));
+        assert!(potentials.is_empty(), "generated fortress spawner has no weighted overrides");
+        assert_eq!(
+            next.and_then(|data| data.entity_type.as_ref()).map(ToString::to_string).as_deref(),
+            Some("minecraft:blaze"),
+            "the packet sidecar must carry the spawner hall's entity id"
+        );
     }
 }

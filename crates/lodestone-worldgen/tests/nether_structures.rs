@@ -708,7 +708,11 @@ fn the_nether_ledger_names_the_remaining_gaps_and_not_the_closed_one() {
         "bastion_remnant assembles and now places: {:?}",
         ledger.get("minecraft:bastion_remnant")
     );
-    assert!(ledger.contains_key("minecraft:fortress"), "fortress has no piece generator and must be ledgered");
+    assert!(
+        !ledger.contains_key("minecraft:fortress"),
+        "fortress now builds its complete coded tree and reaches the Nether placement pass: {:?}",
+        ledger.get("minecraft:fortress")
+    );
     assert!(
         !ledger.contains_key("minecraft:ruined_portal_nether"),
         "the Nether portal now has pieces and a post-template placement consumer: {:?}",
