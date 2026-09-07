@@ -7817,6 +7817,67 @@ mod block_edit_tests {
         assert_eq!(packet.light.block(7), &LightData::Missing);
     }
 
+    /// End's initial path must actually consume the supplied east column. The
+    /// lower apron is the discriminating cell: with the east input present,
+    /// sky can cross the seam below a centre island; without it the barrier
+    /// leaves that cell dark. The all-neighbour packet path is otherwise easy
+    /// to mistake for an isolated computation because upper open air is full
+    /// sky in either case.
+    #[test]
+    fn end_initial_fallback_uses_east_neighbour_for_lower_apron_sky() {
+        use crate::packets::chunk::LevelChunkWithLight;
+
+        let shape = ChunkShape::nether_or_end_1_21();
+        let mut center = ServerChunkColumn::new(0, 256);
+        for z in 0..16 {
+            for x in 0..16 {
+                center.set_block(x, 0, z, "minecraft:end_stone");
+            }
+        }
+        let east = ServerChunkColumn::new(0, 256);
+        let all_neighbours = (-1..=1)
+            .flat_map(|dz| (-1..=1).map(move |dx| (dx, dz)))
+            .filter(|&(dx, dz)| (dx, dz) != (0, 0))
+            .map(|(dx, dz)| (dx, dz, ServerChunkColumn::new(0, 256)))
+            .collect::<Vec<_>>();
+        let proto = V770ServerProtocol;
+        let decode = |neighbours: &[(i32, i32, ServerChunkColumn)]| {
+            let ServerDirective::Send { payload, .. } = proto
+                .try_encode_chunk_with_neighbours_in_dimension(
+                    0,
+                    0,
+                    &center,
+                    neighbours,
+                    Dimension::End,
+                )
+                .expect("End initial chunk")
+            else {
+                panic!("End initial chunk must send a packet");
+            };
+            let mut reader = Reader::new(&payload);
+            let packet = LevelChunkWithLight::decode(&mut reader, &shape)
+                .expect("decode End initial chunk");
+            reader.ensure_empty().expect("no End packet trailing bytes");
+            packet.light
+        };
+
+        let isolated = decode(&[]);
+        let with_east = decode(&[(1, 0, east)]);
+        let without_east = decode(
+            &all_neighbours
+                .iter()
+                .filter(|&&(dx, dz, _)| (dx, dz) != (1, 0))
+                .map(|(dx, dz, column)| (*dx, *dz, column.clone()))
+                .collect::<Vec<_>>(),
+        );
+        let with_all = decode(&all_neighbours);
+        assert!(matches!(with_east.sky(0), LightData::Values(_)));
+        assert_eq!(isolated.section_light(0).sky_at(15, 15, 8), 0);
+        assert_eq!(with_east.section_light(0).sky_at(15, 15, 8), 14);
+        assert_eq!(with_all.section_light(0).sky_at(15, 15, 8), 14);
+        assert_eq!(without_east.section_light(0).sky_at(15, 15, 8), 7);
+    }
+
     /// Initial End packets consume the exact light snapshot retained at the
     /// settlement fence. Reload captures contain both stored empty sections
     /// and stored full sections, and one capture has a varied lower section;
