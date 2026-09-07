@@ -114,7 +114,7 @@ where
             z: candidate.z,
         };
         let below_base = base_at(grid, below);
-        if below_base == "minecraft:lava" || !solid_at(grid, below) {
+        if below_base == "minecraft:lava" || !solid_at(grid, tags, below) {
             return None;
         }
 
@@ -127,7 +127,12 @@ where
         if grid.dirty_cells().count() != writes_before {
             return Some(origin.y + y);
         }
-        return None;
+        // A nested placed feature can reject this candidate after consuming
+        // part of the shared stream. The reference loop keeps scanning, so a
+        // later supported candidate gets the stream exactly where the failed
+        // attempt left it instead of turning the first rejection into a hard
+        // stop.
+        continue;
     }
     None
 }
@@ -192,7 +197,7 @@ fn place_hanging_roots<R: RandomSource>(
         else {
             continue;
         };
-        if hanging_state_can_survive(grid, state, pos) {
+        if hanging_state_can_survive(grid, tags, state, pos) {
             grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state);
         }
     }
@@ -205,12 +210,14 @@ fn place_hanging_roots<R: RandomSource>(
 /// newly added provider silently place through an invalid ceiling.
 fn hanging_state_can_survive(
     grid: &VegGrid,
+    tags: &VegTags,
     state: crate::interner::StateId,
     pos: BlockPos,
 ) -> bool {
     match super::base_id(grid.interner().name_of(state)) {
         "minecraft:hanging_roots" => solid_at(
             grid,
+            tags,
             BlockPos {
                 x: pos.x,
                 y: pos.y + 1,
@@ -275,11 +282,16 @@ fn air_at(grid: &VegGrid, pos: BlockPos) -> bool {
 }
 
 /// The root column's support and hanging-root ceiling both need a full solid
-/// surface. The grid only carries base ids, so its existing motion capability
-/// is the narrowest reusable approximation of that state query.
-fn solid_at(grid: &VegGrid, pos: BlockPos) -> bool {
-    let base = base_at(grid, pos);
-    !is_air(base) && !is_fluid(base) && blocks_motion(base)
+/// surface. Production tags carry the exact per-state solidity predicate;
+/// compact fixtures without that census use the base-id motion approximation.
+fn solid_at(grid: &VegGrid, tags: &VegTags, pos: BlockPos) -> bool {
+    let state = grid.get(pos.x, pos.y, pos.z);
+    if !tags.solid.is_empty() {
+        tags.solid.test(state)
+    } else {
+        let base = super::base_id(state);
+        !is_air(base) && !is_fluid(base) && blocks_motion(base)
+    }
 }
 
 #[cfg(test)]
@@ -434,5 +446,60 @@ mod tests {
             grid.dirty_cells().any(|(x, _, _, _)| x >= 16),
             "the region overlay must retain roots that cross the source chunk edge"
         );
+    }
+
+    #[test]
+    fn failed_nested_candidate_retries_on_the_same_random_stream() {
+        let mut grid = fixture_grid("minecraft:air");
+        // Candidate y=64 is intentionally rejected by the configured
+        // predicate. Candidate y=65 is viable but its nested feature returns
+        // no writes. Candidate y=66 is viable and succeeds, proving that a
+        // failed nested attempt does not terminate the vertical scan.
+        grid.seed(0, 64, 0, "minecraft:dirt".to_string());
+        grid.seed(0, 65, 0, "minecraft:stone".to_string());
+        grid.seed(0, 66, 0, "minecraft:air".to_string());
+        grid.seed(0, 67, 0, "minecraft:air".to_string());
+        grid.seed(0, 68, 0, "minecraft:stone".to_string());
+
+        let mut cfg = fixture_cfg();
+        cfg.root_column_max_height = 8;
+        cfg.allowed_tree_position = BlockPredicate::AnyOf(vec![
+            BlockPredicate::MatchingBlocks {
+                blocks: vec!["minecraft:stone".to_string()],
+                offset: (0, 0, 0),
+            },
+            BlockPredicate::MatchingBlocks {
+                blocks: vec!["minecraft:air".to_string()],
+                offset: (0, 0, 0),
+            },
+        ]);
+        cfg.required_vertical_space_for_tree = 1;
+        cfg.root_placement_attempts = 0;
+        cfg.hanging_root_placement_attempts = 0;
+
+        let tags = fixture_tags(&grid);
+        let mut random = LegacyRandomSource::new(7);
+        let mut expected_random = LegacyRandomSource::new(7);
+        let expected_draws = [expected_random.next_int(), expected_random.next_int()];
+        let mut callback_positions = Vec::new();
+        let mut callback_draws = Vec::new();
+        assert!(place_root_system(
+            &mut random,
+            BlockPos { x: 0, y: 63, z: 0 },
+            &cfg,
+            &mut grid,
+            &tags,
+            |random, pos, _, grid, _| {
+                callback_positions.push(pos.y);
+                callback_draws.push(random.next_int());
+                if pos.y == 66 {
+                    grid.set_if_in_bounds(pos.x, pos.y, pos.z, "minecraft:oak_log".to_string());
+                }
+            },
+        ));
+        assert_eq!(callback_positions, [65, 66]);
+        assert_eq!(callback_draws, expected_draws);
+        assert_eq!(random.next_int(), expected_random.next_int());
+        assert_eq!(grid.get(0, 66, 0), "minecraft:oak_log");
     }
 }
