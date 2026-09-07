@@ -56,7 +56,6 @@
 //! seventeenth [`TextColor`](lodestone_model::text::TextColor) variant for
 //! it).
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use lodestone_model::text::TextColor;

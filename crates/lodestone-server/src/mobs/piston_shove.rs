@@ -86,7 +86,9 @@
 
 use lodestone_model::{BlockPos, Vec3};
 
-use super::{ChunkWorld, MobSim, SimMob};
+use super::{MobSim, SimMob};
+#[cfg(test)]
+use super::ChunkWorld;
 use crate::piston::Direction;
 
 /// `Direction`'s unit step vector as a float triple. `crate::piston::push_delta`

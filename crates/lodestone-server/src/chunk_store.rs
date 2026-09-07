@@ -223,7 +223,9 @@ use std::sync::{Arc, Condvar, Mutex, Weak};
 
 use crate::chunk::{ChunkColumn, ColumnLightSettlementError, ChunkSource};
 use crate::chunk_lifecycle::{ChunkLifecycleHandoff, ChunkLifecyclePlan};
-use crate::ticket::{TicketDelta, TicketKind, TicketOwner, TicketStoreHandle};
+use crate::ticket::{TicketDelta, TicketStoreHandle};
+#[cfg(test)]
+use crate::ticket::{TicketKind, TicketOwner};
 
 /// The floor under [`capacity_for_view_radius`], and the capacity a radius-less
 /// `ChunkStore::new` store retains before evicting the least-recently-used one.
@@ -1115,6 +1117,7 @@ impl<S: ChunkSource> ChunkStore<S> {
     /// vanilla's `TicketType.PLAYER_SPAWN`: loading-only, expires after 20
     /// ticks without a refresh (`docs/plans/chunk-lifecycle.md` U7,
     /// `crate::ticket::ticket_type::PLAYER_SPAWN`).
+    #[cfg(test)]
     pub(crate) fn set_spawn_ticket(&self, pos: (i32, i32), radius: i32) {
         self.tickets.set_ticket_with_radius(
             TicketOwner::Spawn,
@@ -1128,6 +1131,7 @@ impl<S: ChunkSource> ChunkStore<S> {
     /// `31`, the level used for entity-ticking residency.
     /// `id` distinguishes more than one forced region; the caller owns
     /// uniqueness (a serial counter is enough).
+    #[cfg(test)]
     pub(crate) fn set_forced_ticket(&self, id: u64, pos: (i32, i32)) {
         self.tickets.set_ticket_at_level(
             TicketOwner::Forced(id),
@@ -1140,6 +1144,7 @@ impl<S: ChunkSource> ChunkStore<S> {
     /// Withdraws a forced ticket. Its chunk is not dropped synchronously —
     /// see [`maybe_tick_tickets`](Self::maybe_tick_tickets) — but it becomes
     /// an eviction candidate on the next check-in.
+    #[cfg(test)]
     pub(crate) fn remove_forced_ticket(&self, id: u64) -> bool {
         self.tickets
             .remove_ticket(TicketOwner::Forced(id), TicketKind::Forced)
@@ -1152,6 +1157,7 @@ impl<S: ChunkSource> ChunkStore<S> {
     /// cold (nothing has read it since the ticket was granted) or cached and
     /// ticket-`Empty` (read once, ticket since removed, not yet swept).
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn ticket_status(&self, cx: i32, cz: i32) -> crate::ticket::ChunkStatus {
         self.tickets.status((cx, cz))
     }

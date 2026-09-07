@@ -911,7 +911,7 @@ struct SourceColumnMetrics {
 /// a real [`ChunkSource`]: the integrated server owns chunk retention and the
 /// version protocol owns encoding, while this source only supplies deterministic
 /// terrain and records the work that crossed that boundary.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct HeavyChunkSource {
     columns: Arc<Mutex<HashMap<(i32, i32), ChunkColumn>>>,
     stats: Arc<HeavySourceStats>,
@@ -1097,6 +1097,7 @@ fn is_translucent_heavy_state(name: &str) -> bool {
 
 /// Drives one finite join against the production integrated server and records
 /// the wire-level work needed by the heavyweight profiler.
+#[derive(Debug)]
 pub struct HeavyServerHarness;
 
 impl HeavyServerHarness {

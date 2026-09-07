@@ -139,6 +139,7 @@ impl GossipContainer {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -147,6 +148,7 @@ impl GossipContainer {
     /// a test) that wants the un-weighted ledger rather than
     /// [`reputation`](Self::reputation)'s single summed number.
     #[must_use]
+    #[cfg(test)]
     pub fn entries_for(&self, target: Uuid) -> Option<&HashMap<GossipType, i32>> {
         self.entries.get(&target)
     }
@@ -180,6 +182,7 @@ impl GossipContainer {
 
     /// `GossipContainer.remove(target, type)` — an outright drop, not a
     /// decayed subtraction.
+    #[cfg(test)]
     pub fn remove_type(&mut self, target: Uuid, gtype: GossipType) {
         if let Some(bucket) = self.entries.get_mut(&target) {
             bucket.remove(&gtype);
@@ -308,6 +311,7 @@ impl GossipContainer {
     /// `entries.putAll`, a plain map overwrite, not `add`'s clamp-and-merge).
     /// Used to seed a freshly cured villager's ledger from a zombie
     /// villager's saved gossip.
+    #[cfg(test)]
     pub fn put_all(&mut self, other: &GossipContainer) {
         for (&target, bucket) in &other.entries {
             let dest = self.entries.entry(target).or_default();

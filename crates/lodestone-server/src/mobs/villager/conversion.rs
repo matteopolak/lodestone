@@ -110,7 +110,7 @@ pub struct ConversionState {
 /// conversion RNG stream supplied by the caller.
 #[must_use]
 pub fn roll_conversion_ticks(next_int: impl FnOnce(i32) -> i32) -> i32 {
-    next_int(2401) + CONVERSION_WAIT_MIN
+    next_int(CONVERSION_WAIT_MAX - CONVERSION_WAIT_MIN + 1) + CONVERSION_WAIT_MIN
 }
 
 /// Starts a conversion: `ZombieVillager.startConverting`'s timer half (the

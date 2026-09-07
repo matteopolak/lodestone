@@ -332,6 +332,17 @@ pub struct SpawnCtx<'a> {
     pub nearby_count: &'a dyn Fn(&ResourceKey, i32) -> i32,
 }
 
+impl std::fmt::Debug for SpawnCtx<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpawnCtx")
+            .field("near_player", &self.near_player)
+            .field("spawner_blocks_work", &self.spawner_blocks_work)
+            .field("difficulty", &self.difficulty)
+            .field("pos", &self.pos)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A monster-spawner block entity's live state — its persisted timing fields,
 /// NBT-shaped so [`crate::chunk_nbt`] can load/save them verbatim.
 #[derive(Debug, Clone, PartialEq)]
