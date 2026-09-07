@@ -195,6 +195,12 @@ Intentional categories retain primitives because the representation is the inter
 
 When a migration family lands, update all rows in that family together and rerun the two census expressions. Remove rows that no longer match; add newly exposed candidates and classify them in the same commit. A primitive may move to an intentional category only when its boundary role is documented and tested. Canonical block states now cross production APIs as `lodestone_data::block_states::StateId`: raw values are allowed only at decode, chunk-store, or version-adapter boundaries, and are validated before state-specific work.
 
+The render atlas follows the same boundary: `BlockAtlas::state_id_of` parses a
+textual state key and returns `Option<StateId>`. The shell's collision adapter
+calls `StateId::raw()` only when filling its packed raw-state list; unknown or
+partial state strings remain unresolved rather than being assigned a plausible
+canonical id.
+
 Container synchronization state now uses `lodestone_model::ContainerStateId`; keep packet decoding and encoding at its `from_wire`/`as_wire` boundary rather than restoring integer casts in menu consumers.
 
 ## Configuration
