@@ -22,7 +22,9 @@ The committed real-section fixture in `crates/versions/1.8/tests/support/` ancho
 An unrepresentable state or a source that does not cover the full window is an encoding error;
 neither can become air silently.
 
-Block updates use the same exact state conversion. The serverbound break decoder accepts the three
+Block updates use the same exact state conversion. Multi-section bulk updates group dirty records by
+ascending section coordinate while retaining wire order inside each section; literal controls assert
+both orders and query the production world sink. The serverbound break decoder accepts the three
 break phases and six faces so an observed chunk block can produce an observed update. The in-memory
 integration test connects the family adapter to a registry-selected server transport, verifies a
 known dandelion appears, breaks it, and observes the replacement air state.

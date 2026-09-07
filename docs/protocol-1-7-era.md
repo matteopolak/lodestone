@@ -61,8 +61,12 @@ order. A canonical column must cover y=0 through y=255, and every emitted
 state must have an exact legacy inverse within protocol 5's defined numeric
 block ranges `0..=164` or `170..=175`; unsupported states fail encoding rather
 than becoming air. Block updates use their protocol-5 position shape and the
-same conversion. The in-memory integration test reaches Play, observes a known
-chunk block, breaks it, and observes its replacement update. The same hosted
+same conversion. Literal `block_change` and `multi_block_change` controls also
+write canonical states into the loaded world and assert the resulting dirty
+section event; the multi-section fixture preserves wire order within each
+section. A literal block event is checked at the shared visible-event route.
+The in-memory integration test reaches Play, observes a known chunk block,
+breaks it, and observes its replacement update. The same hosted
 path carries the connection watchdog: `V5ServerProtocol` emits a clientbound
 keep-alive challenge and lifts the exact serverbound echo to
 `ServerBound::KeepAlive`, so `lodestone-server` can clear its pending challenge.

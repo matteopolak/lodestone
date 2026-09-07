@@ -43,7 +43,9 @@ The play baseline emits a join and absolute position packet, then encodes y=0 th
 `map_chunk` packets. Each canonical block-state id goes through `lodestone_canonical::inverse`,
 which returns an exact `(old_id << 4) | meta` representative or an error. The checked chunk path
 propagates that error to the server rather than silently using air. The direct block-update helper
-uses the same conversion before constructing its packed position and legacy state payload.
+uses the same conversion before constructing its packed position and legacy state payload. Bulk block
+updates group dirty records by ascending section coordinate, while each section retains the packet's
+wire order; literal controls distinguish those two guarantees and query the production world sink.
 
 The encoder accepts any canonical column spanning y=0 through y=255 and projects precisely that
 window; rows below or above it are not sent. It rejects only a source that does not cover the
