@@ -560,7 +560,7 @@ fn ticked_vehicle(
     vehicle
 }
 
-/// A [`CollisionView`] for the vehicle tick: [`ItemCollision`]'s shapes plus the
+/// A [`CollisionView`] for the vehicle tick: [`LiveBlockCollision`]'s shapes plus the
 /// three hooks a boat's buoyancy needs and a dropped item's settle does not.
 ///
 /// `fluid_at` is the load-bearing addition. `AbstractBoat.getStatus` classifies

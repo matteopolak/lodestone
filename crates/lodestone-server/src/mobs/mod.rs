@@ -52,7 +52,7 @@ use lodestone_data::{
     potion::PotionId,
 };
 // `collide` and `CollisionView` are the item pass's swept resolve against the real
-// per-state shape census (see `ItemCollision`); `Vec3d` is the physics crate's own
+// per-state shape census (see `LiveBlockCollision`); `Vec3d` is the physics crate's own
 // vector, which `Vec3` (this crate's) is converted to at that seam rather than
 // through the whole module.
 use lodestone_physics::{CollisionView, EntityDimensions, Vec3d, collision::collide};
@@ -3521,7 +3521,7 @@ pub struct MobSim<'w> {
     /// Keeping this separate from [`leash_owner_plan`](Self::leash_owner_plan)
     /// rejects replayed completions even when they contain only `Keep` effects.
     applied_leash_owner_plan: u64,
-    /// Cells the last tick's item-settling pass asked [`ItemCollision`] for —
+    /// Cells the last tick's item-settling pass asked [`LiveBlockCollision`] for —
     /// see [`items_settled_probe_count`](Self::items_settled_probe_count).
     item_probe_count: u64,
     /// Every detonation [`tick`](Self::tick) has triggered since the last
@@ -5658,7 +5658,7 @@ impl<'w> MobSim<'w> {
         let min_y = f64::from(self.world.min_y);
         let plan = self.item_owner_plan;
         let completed = crate::tick_region::run_bounded_owner_jobs(jobs, worker_count, &|(owner, inputs)| {
-            let view = ItemCollision {
+            let view = LiveBlockCollision {
                 block_state,
                 probe_count: std::cell::Cell::new(0),
             };
@@ -5765,11 +5765,15 @@ impl<'w> MobSim<'w> {
     ///
     /// **The oracle is a block-state *name*, not a solid/air boolean.** A name
     /// distinguishes shapes such as a bottom slab, soul sand, and a grass patch
-    /// when [`ItemCollision`] computes the resting surface.
+    /// when [`LiveBlockCollision`] computes the resting surface.
     pub fn tick_with_terrain(
         &mut self,
         block_state: &(dyn Fn(i32, i32, i32) -> String + Sync),
     ) {
+        let live_collision = LiveBlockCollision {
+            block_state,
+            probe_count: std::cell::Cell::new(0),
+        };
         // Feed every mob's perception inputs before its goals run. The pass
         // supplies `nearest_player`, `temptation`, `avoid_threat`,
         // `no_action_time`, `partner_candidate`, and `parent_candidate`; the
@@ -5898,6 +5902,7 @@ impl<'w> MobSim<'w> {
             }
         }
         for m in &mut self.mobs {
+            let before_live_collision = m.mob.live_collision_origin();
             // Vanilla ages `invulnerableTime`/`hurtTime` every tick regardless
             // of whether the mob was hit this tick.
             m.hurt_cooldown.tick();
@@ -5909,6 +5914,12 @@ impl<'w> MobSim<'w> {
             if m.rider.is_none() {
                 m.mob.tick(&mut m.goals);
             }
+            // The navigation world is intentionally a stable, bounded snapshot;
+            // collision cannot be. A command-spawned mob may be far outside the
+            // initial snapshot, and a player can edit its support after it was
+            // made, so resolve every SimMob through the live shape oracle before
+            // any subsequent per-tick consumer reads its position.
+            settle_mob(&live_collision, &mut m.mob, before_live_collision, true);
             // Vanilla's own generic per-tick base update's ambient-sound roll runs every tick a
             // mob is alive, independent of any goal — see
             // `roll_ambient_sound`'s own doc.
@@ -6340,6 +6351,18 @@ impl<'w> MobSim<'w> {
         // placed last alongside the warden consumer as the other
         // per-species host-side driver this tick runs.
         self.tick_sniffers();
+
+        // Combat, leashes, crowd push, and warden effects can apply an impulse
+        // after the AI loop's first sweep. Resolve that final movement before
+        // snapshots are published so no producer gets a one-tick collision
+        // bypass merely because it ran later in the tick order.
+        for mob in &mut self.mobs {
+            let before_live_collision = mob.mob.live_collision_origin();
+            // This pass only resolves motion added after the main AI sweep. Do
+            // not integrate gravity twice when a mined floor left a mob
+            // unsupported: the first pass already did that for this tick.
+            settle_mob(&live_collision, &mut mob.mob, before_live_collision, false);
+        }
 
         self.tick_count += 1;
     }
@@ -10337,15 +10360,24 @@ const ITEM_DIMENSIONS: EntityDimensions = EntityDimensions::new(0.25, 0.25, 0.0)
 /// item's expanded box spans rather than probing one column. `probe_count` is
 /// incremented per cell so the cost is a **counter** a gate can assert on rather
 /// than a duration, and `items_settled_probe_count` exposes it.
-struct ItemCollision<'a> {
+struct LiveBlockCollision<'a> {
     block_state: &'a dyn Fn(i32, i32, i32) -> String,
     probe_count: std::cell::Cell<u64>,
 }
 
-impl CollisionView for ItemCollision<'_> {
+impl CollisionView for LiveBlockCollision<'_> {
     fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<lodestone_physics::Aabb>) {
         self.probe_count.set(self.probe_count.get() + 1);
         let name = (self.block_state)(x, y, z);
+        // The moving-piston state has no static census box because its carried
+        // shape is dynamic. During the server's discrete two-cell shove it is
+        // nevertheless solid for entity support and collision, matching the
+        // pathfinding adapter's deliberately equivalent full-cube fallback.
+        if crate::piston::is_moving_piston(&name) {
+            let (bx, by, bz) = (f64::from(x), f64::from(y), f64::from(z));
+            out.push(lodestone_physics::Aabb::new(bx, by, bz, bx + 1.0, by + 1.0, bz + 1.0));
+            return;
+        }
         // The shared resolver preserves every named property and supplies only a
         // block's registered default for properties the input omits. Replacing it
         // with a lowest-id fallback makes a bare oak slab a full cube rather than
@@ -10470,6 +10502,387 @@ fn settle_entity(
     // boundary-straddling floor() to defend against, and an item resting on a slab
     // has no block boundary under its feet to probe in the first place.
     motion.on_ground = attempted.y < 0.0 && (resolved.y - attempted.y).abs() > f64::EPSILON;
+}
+
+/// Applies the live world's swept block collision to one navigation-driven mob.
+///
+/// Navigation keeps a bounded terrain snapshot so a path search has stable
+/// inputs, but its result is not permission to move through blocks changed or
+/// loaded after that snapshot. This is the live authority: it resolves the
+/// entity's real species-sized body against the current per-state shape table
+/// after every navigation step, then commits the resolved delta back into the
+/// navigator so the emitted entity snapshot and next physics step agree.
+fn settle_mob(
+    view: &dyn CollisionView,
+    mob: &mut NavigatingMob<'_>,
+    before: Vec3,
+    allow_live_fall: bool,
+) {
+    let shape = mob.shape();
+    let dimensions = EntityDimensions::new(shape.width, shape.height, shape.max_up_step);
+    // Commands and plugin hooks can create a body at an arbitrary exact
+    // coordinate, including inside a placed block. A zero-length swept move
+    // deliberately does not depenetrate, so escape upward through the real
+    // live shape before treating this tick's navigation result as movement.
+    // Teleports do not take this route: `NavigatingMob::teleport_to` declares
+    // an intentional authority boundary by replacing `before`.
+    if mob.needs_live_unembed() {
+        if let Some(unembedded) = unembed_mob(view, dimensions, before) {
+            let supported = mob_supported(view, dimensions, unembedded);
+            mob.apply_live_collision(before, unembedded, supported, true);
+            return;
+        }
+    }
+    let mut attempted_position = mob.position();
+    let mut attempted = Vec3d::new(
+        attempted_position.x - before.x,
+        attempted_position.y - before.y,
+        attempted_position.z - before.z,
+    );
+    let mut resolved = collide(
+        view,
+        attempted,
+        dimensions.bounding_box(Vec3d::new(before.x, before.y, before.z)),
+        mob.is_on_ground(),
+        dimensions.step_height,
+    );
+    let mut resolved_position = Vec3::new(
+        before.x + resolved.x,
+        before.y + resolved.y,
+        before.z + resolved.z,
+    );
+
+    // A static navigation snapshot can still contain a block a player has
+    // mined. If that held an idle mob level, navigation produced no downward
+    // delta at all; begin the same gravity integration here and sweep the full
+    // updated movement from the last accepted live position.
+    if allow_live_fall && attempted.y >= 0.0 && !mob_supported(view, dimensions, resolved_position) {
+        mob.begin_live_fall_from_unsupported_surface();
+        attempted_position = mob.position();
+        attempted = Vec3d::new(
+            attempted_position.x - before.x,
+            attempted_position.y - before.y,
+            attempted_position.z - before.z,
+        );
+        resolved = collide(
+            view,
+            attempted,
+            dimensions.bounding_box(Vec3d::new(before.x, before.y, before.z)),
+            false,
+            dimensions.step_height,
+        );
+        resolved_position = Vec3::new(
+            before.x + resolved.x,
+            before.y + resolved.y,
+            before.z + resolved.z,
+        );
+    }
+    let vertical_collision = (resolved.y - attempted.y).abs() > f64::EPSILON;
+    let landed = attempted.y < 0.0 && vertical_collision;
+    let supported = mob_supported(view, dimensions, resolved_position);
+    mob.apply_live_collision(before, resolved_position, landed || supported, vertical_collision);
+}
+
+/// Moves an initially intersecting body to the highest live shape it overlaps.
+///
+/// Swept collision correctly clips motion that starts outside a collider, but
+/// intentionally leaves a zero-delta overlap alone. The command and plugin
+/// spawn seam permits such a starting point, so repeat the same collision-box
+/// query used by a sweep until the body is flush above every overlapping shape.
+/// The loaded world's vertical span is smaller than this bound; retaining a
+/// bound avoids a malformed collision oracle turning a server tick into an
+/// unbounded loop.
+fn unembed_mob(view: &dyn CollisionView, dimensions: EntityDimensions, feet: Vec3) -> Option<Vec3> {
+    const MAX_UNEMBED_STEPS: usize = 512;
+    let mut candidate = feet;
+    for _ in 0..MAX_UNEMBED_STEPS {
+        let body = dimensions.bounding_box(Vec3d::new(candidate.x, candidate.y, candidate.z));
+        let mut colliders = Vec::new();
+        for x in body.min_x.floor() as i32 - 1..=body.max_x.floor() as i32 + 1 {
+            for y in body.min_y.floor() as i32 - 1..=body.max_y.floor() as i32 + 1 {
+                for z in body.min_z.floor() as i32 - 1..=body.max_z.floor() as i32 + 1 {
+                    view.collision_boxes(x, y, z, &mut colliders);
+                }
+            }
+        }
+        let Some(top) = colliders
+            .iter()
+            .filter(|shape| body.intersects(shape))
+            .map(|shape| shape.max_y)
+            .max_by(f64::total_cmp)
+        else {
+            return (candidate != feet).then_some(candidate);
+        };
+        candidate.y = top;
+    }
+    // A malformed oracle cannot make normal movement unsafe: the next tick
+    // retries the bounded escape instead of publishing an unchecked movement.
+    Some(candidate)
+}
+
+/// Whether a body at `feet` is supported by any live collision shape directly
+/// beneath it. The probe has no visible displacement; it solely keeps the
+/// collision step's ground/auto-step state honest after block edits.
+fn mob_supported(view: &dyn CollisionView, dimensions: EntityDimensions, feet: Vec3) -> bool {
+    const SUPPORT_PROBE: f64 = 1.0e-4;
+    let support = collide(
+        view,
+        Vec3d::new(0.0, -SUPPORT_PROBE, 0.0),
+        dimensions.bounding_box(Vec3d::new(feet.x, feet.y, feet.z)),
+        false,
+        0.0,
+    );
+    support.y > -SUPPORT_PROBE + f64::EPSILON
+}
+
+#[cfg(test)]
+mod live_mob_collision_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn state_with_floor(x: i32, y: i32, z: i32) -> String {
+        let _ = (x, z);
+        if y == 0 {
+            "minecraft:stone".to_string()
+        } else {
+            AIR.to_string()
+        }
+    }
+
+    fn settle(sim: &mut MobSim<'_>, state: &(dyn Fn(i32, i32, i32) -> String + Sync)) {
+        for _ in 0..160 {
+            sim.tick_with_terrain(state);
+        }
+    }
+
+    /// A command-created mob can be outside the immutable pathfinding snapshot.
+    /// These three bodies differ in both species and dimensions, but all must
+    /// use the live floor and stop at its known top rather than falling toward
+    /// the snapshot's minimum Y.
+    #[test]
+    fn live_sweep_lands_cow_zombie_and_warden_outside_the_navigation_snapshot() {
+        let snapshot = ChunkWorld::new(-64, 384);
+        let mut sim = MobSim::new(&snapshot);
+        let ids: Vec<_> = ["cow", "zombie", "warden"]
+            .into_iter()
+            .map(|species| {
+                sim.spawn_species(
+                    format!("minecraft:{species}").parse().expect("valid key"),
+                    Vec3::new(160.5, 5.0, 160.5),
+                )
+                .id()
+            })
+            .collect();
+
+        settle(&mut sim, &state_with_floor);
+
+        for id in ids {
+            let mob = sim.get(id).expect("spawned mob remains live");
+            assert!(
+                (mob.position().y - 1.0).abs() < 1.0e-9,
+                "{} must rest on the live full-block top, got {:?}",
+                mob.entity_type(),
+                mob.position()
+            );
+            assert!(mob.mob.is_on_ground(), "{} must report live support", mob.entity_type());
+        }
+    }
+
+    /// Real collision shapes, rather than a solid/air guess: a bottom slab is
+    /// 0.5 high, a fence is 1.5 high, and short grass has no collision at all.
+    #[test]
+    fn live_sweep_uses_slab_fence_and_non_colliding_plant_shapes() {
+        for (state, expected_y) in [
+            ("minecraft:oak_slab[type=bottom]", 0.5),
+            ("minecraft:oak_fence[north=false,east=false,south=false,west=false,waterlogged=false]", 1.5),
+            ("minecraft:short_grass", 0.0),
+        ] {
+            let snapshot = ChunkWorld::new(-64, 384);
+            let mut sim = MobSim::new(&snapshot);
+            let id = sim
+                .spawn_species(
+                    "minecraft:cow".parse().expect("valid key"),
+                    Vec3::new(0.5, 4.0, 0.5),
+                )
+                .id();
+            let live = |x: i32, y: i32, z: i32| {
+                if x == 0 && y == 0 && z == 0 {
+                    state.to_string()
+                } else if y == -1 {
+                    "minecraft:stone".to_string()
+                } else {
+                    AIR.to_string()
+                }
+            };
+            settle(&mut sim, &live);
+            let y = sim.get(id).expect("cow remains live").position().y;
+            assert!(
+                (y - expected_y).abs() < 1.0e-9,
+                "{state} must resolve to its real collision top {expected_y}, got {y}"
+            );
+        }
+    }
+
+    /// Mining the live floor must make an idle mob fall even if that block is
+    /// still present in the immutable navigation snapshot.
+    #[test]
+    fn removing_live_support_starts_gravity_without_waiting_for_a_path_refresh() {
+        let mut snapshot = ChunkWorld::new(-64, 384);
+        snapshot.set_block(0, 0, 0, "minecraft:stone");
+        let mut sim = MobSim::new(&snapshot);
+        let id = sim
+            .spawn_species("minecraft:cow".parse().expect("valid key"), Vec3::new(0.5, 1.0, 0.5))
+            .id();
+        let floor_exists = AtomicBool::new(true);
+        let live = |x: i32, y: i32, z: i32| {
+            if floor_exists.load(Ordering::SeqCst) && x == 0 && y == 0 && z == 0 {
+                "minecraft:stone".to_string()
+            } else {
+                AIR.to_string()
+            }
+        };
+        sim.tick_with_terrain(&live);
+        assert_eq!(sim.get(id).expect("cow").position().y, 1.0, "precondition: floor supports cow");
+
+        floor_exists.store(false, Ordering::SeqCst);
+        sim.tick_with_terrain(&live);
+        assert!(
+            sim.get(id).expect("cow").position().y < 1.0,
+            "the live floor was removed, so the cow must begin falling despite the stale path snapshot"
+        );
+    }
+
+    /// Support is an AABB overlap, not a single column chosen from the feet
+    /// coordinate. These positions straddle the same live floor edge by less
+    /// than one body-width, so a point/column approximation would give them
+    /// the same answer even though only the first cow still overlaps the slab
+    /// of floor.
+    #[test]
+    fn live_sweep_distinguishes_the_horizontal_edge_of_a_supporting_block() {
+        for (x, should_stand) in [(1.44, true), (1.46, false)] {
+            let snapshot = ChunkWorld::new(-64, 384);
+            let mut sim = MobSim::new(&snapshot);
+            let cow = sim
+                .spawn_species("minecraft:cow".parse().expect("valid key"), Vec3::new(x, 1.0, 0.5))
+                .id();
+            let floor = |bx: i32, by: i32, bz: i32| {
+                if (bx, by, bz) == (0, 0, 0) {
+                    "minecraft:stone".to_string()
+                } else {
+                    AIR.to_string()
+                }
+            };
+            sim.tick_with_terrain(&floor);
+            let mob = sim.get(cow).expect("cow remains live");
+            if should_stand {
+                assert_eq!(mob.position().y, 1.0, "overlapping body must remain supported");
+                assert!(mob.mob.is_on_ground());
+            } else {
+                assert!(mob.position().y < 1.0, "body beyond floor edge must start falling");
+                assert!(!mob.mob.is_on_ground());
+            }
+        }
+    }
+
+    /// The command seam accepts an exact coordinate, not only a prevalidated
+    /// empty cell. Starting with a living body embedded in a full block must
+    /// escape through that full block's actual top; a zero-length sweep alone
+    /// would otherwise leave it intersecting forever.
+    #[test]
+    fn live_sweep_unembeds_an_initially_embedded_living_mob() {
+        let snapshot = ChunkWorld::new(-64, 384);
+        let mut sim = MobSim::new(&snapshot);
+        let cow = sim
+            .spawn_species("minecraft:cow".parse().expect("valid key"), Vec3::new(0.5, 0.0, 0.5))
+            .id();
+        sim.tick_with_terrain(&state_with_floor);
+        let mob = sim.get(cow).expect("cow remains live");
+        assert_eq!(mob.position().y, 1.0, "embedded cow must escape to the floor top");
+        assert!(mob.mob.is_on_ground(), "escaped cow must report its live support");
+    }
+
+    /// A physical impulse is swept from the last accepted position. This covers
+    /// the shared impulse route used by crowd push, leashes, combat, warden
+    /// effects, and piston shoves; it is deliberately unlike a teleport, which
+    /// resets the collision origin as an intentional instant relocation.
+    #[test]
+    fn an_impulse_and_a_piston_shove_cannot_cross_a_live_wall() {
+        let snapshot = ChunkWorld::new(-64, 384);
+        let mut sim = MobSim::new(&snapshot);
+        let cow = sim
+            .spawn_species("minecraft:cow".parse().expect("valid key"), Vec3::new(0.5, 1.0, 0.5))
+            .id();
+        let live = |x: i32, y: i32, z: i32| {
+            if y == 0 {
+                "minecraft:stone".to_string()
+            } else if x == 2 && y == 1 && z == 0 {
+                "minecraft:stone".to_string()
+            } else {
+                AIR.to_string()
+            }
+        };
+        sim.tick_with_terrain(&live);
+        sim.get_mut(cow)
+            .expect("cow")
+            .apply_knockback(Vec3::new(3.0, 0.0, 0.0));
+        sim.tick_with_terrain(&live);
+        let after_impulse = sim.get(cow).expect("cow").position();
+        let maximum_center_x = 2.0 - f64::from(sim.get(cow).expect("cow").shape().width) / 2.0;
+        assert!(
+            after_impulse.x <= maximum_center_x + 1.0e-9,
+            "impulse crossed live wall: {after_impulse:?}"
+        );
+
+        let shoved = sim.shove_from_piston(
+            BlockPos::new(1, 1, 0),
+            BlockPos::new(2, 1, 0),
+            crate::neighbor_update::Direction::East,
+        );
+        assert_eq!(shoved, vec![cow], "precondition: piston selected the cow");
+        sim.tick_with_terrain(&live);
+        let after_piston = sim.get(cow).expect("cow").position();
+        assert!(
+            after_piston.x <= maximum_center_x + 1.0e-9,
+            "piston shove crossed live wall: {after_piston:?}"
+        );
+    }
+
+    /// `push_entities` runs after every mob's first live sweep. Place a pig
+    /// flush with the wall and a player inside its push range: the player
+    /// impulse is created in that late phase, so only the final sweep can
+    /// keep the snapshot from reporting an in-wall position this same tick.
+    #[test]
+    fn a_post_ai_push_is_clipped_before_the_entity_snapshot_is_published() {
+        let mut snapshot = ChunkWorld::new(-64, 384);
+        for x in 0..=2 {
+            snapshot.set_block(x, 0, 0, "minecraft:stone");
+        }
+        snapshot.set_block(2, 1, 0, "minecraft:stone");
+        let mut sim = MobSim::new(&snapshot);
+        let pig = sim
+            .spawn_species("minecraft:pig".parse().expect("valid key"), Vec3::new(1.55, 1.0, 0.5))
+            .id();
+        sim.set_players(vec![PlayerPerception {
+            position: Vec3::new(1.0, 1.0, 0.5),
+            held_item: None,
+            view_direction: Vec3::new(0.0, 0.0, 1.0),
+        }]);
+        let live = |x: i32, y: i32, z: i32| snapshot.block_state(x, y, z).to_owned();
+
+        sim.tick_with_terrain(&live);
+
+        let maximum_center_x = 2.0 - f64::from(sim.get(pig).expect("pig").shape().width) / 2.0;
+        let snapshot = sim
+            .snapshots()
+            .into_iter()
+            .find(|entity| entity.id == pig)
+            .expect("pig must be published to the entity snapshot consumer");
+        assert!(
+            snapshot.position.x <= maximum_center_x + 1.0e-9,
+            "post-AI player push crossed the live wall before streaming: {snapshot:?}"
+        );
+        assert_eq!(snapshot.position.y, 1.0, "wall clipping must retain live floor support");
+    }
 }
 
 /// The entity-type key every dropped item streams as.

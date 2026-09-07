@@ -318,6 +318,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   the sky pass (disc, sun, moon, stars, clouds) and per-dimension/per-biome tint, and
   the client's own light-relight engine that fixes a broken block's lighting without
   waiting for the server.
+- [Live mob simulation](./live-mob-sim.md) — The server's living-mob tick combines a
+  stable terrain snapshot for navigation with a live per-block-state collision pass
+  before entity snapshots are streamed to clients. This keeps a mob's AI search
+  deterministic while ensuring command, plugin, combat, leash, crowd, and piston
+  motion cannot cross a block that changed after that search snapshot was made.
 - [Menu screens](./menu-screens.md) — A catalogue of every individual non-container
   menu screen in the shell: what each one is, where its code lives, and what makes it
   distinctive. See [`ui-framework.md`](./ui-framework.md) for the shared

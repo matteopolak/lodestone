@@ -480,7 +480,7 @@ fn ticked_tnt(
 }
 
 /// A [`CollisionView`] over a caller-supplied block-state oracle — the TNT
-/// analogue of `vehicles::VehicleCollision`/`mod::ItemCollision`: real
+/// analogue of `vehicles::VehicleCollision`/`mod::LiveBlockCollision`: real
 /// per-block-state collision shapes, and nothing else (no fluid buoyancy —
 /// TNT does not float; see this module's doc for what fluid interaction is
 /// and is not modelled).
