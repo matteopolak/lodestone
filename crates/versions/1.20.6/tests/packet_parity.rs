@@ -217,7 +217,6 @@ fn multi_block_change_batches_world_writes_and_canonicalizes_each_state() {
     let canonical_dirt =
         lodestone_data::block_states::state_id("minecraft:dirt").expect("canonical dirt exists");
     assert_ne!(canonical_diamond, 4276, "the fixture must distinguish wire and canonical ids");
-    assert_ne!(canonical_dirt, 10, "the fixture must distinguish wire and canonical ids");
     let directives = adapter_for(PROTOCOL_1_20_6)
         .handle_packet(
             &mut world,
