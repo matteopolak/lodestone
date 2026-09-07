@@ -600,6 +600,25 @@ pub fn overworld_chunk_source(seed: i64) -> crate::chunk::OverworldChunkSource {
     overworld_chunk_source_of_type(seed, WorldType::Overworld)
 }
 
+/// Wraps any generated [`crate::ChunkSource`] in the server's normal bounded
+/// resident-column cache for `view_radius`.
+///
+/// This is the public construction seam for tools that generate a finite
+/// world area and then encode it through the same retained-source layer as a
+/// hosted connection. The opaque return keeps [`crate::chunk_store::ChunkStore`]
+/// private: callers need the [`crate::ChunkSource`] behaviour, not cache
+/// internals or a second retention implementation.
+///
+/// `view_radius` uses the hosted capacity policy. Integrated singleplayer uses
+/// its own uncapped constructor because it spends the local player's memory.
+#[must_use]
+pub fn retained_chunk_source_for_view_radius<S: crate::ChunkSource>(
+    source: S,
+    view_radius: i32,
+) -> impl crate::ChunkSource {
+    crate::chunk_store::ChunkStore::for_view_radius(source, view_radius)
+}
+
 /// Builds the bundled overworld [`ChunkSource`](crate::ChunkSource) for `seed`
 /// using `world_type` — the server/worldgen boundary where a
 /// world-creation UI needs: it persists a [`WorldType`] alongside the seed and
@@ -1169,7 +1188,34 @@ pub fn end_chunk_source(seed: i64) -> crate::chunk::EndChunkSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chunk::ChunkSource;
+    use crate::chunk::{ChunkColumn, ChunkSource};
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+
+    #[test]
+    fn retained_chunk_source_factory_exposes_residency_without_exposing_the_store() {
+        struct Source(Arc<AtomicUsize>);
+        impl ChunkSource for Source {
+            fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                ChunkColumn::new(-64, 384)
+            }
+            fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+                "minecraft:air".to_owned()
+            }
+            fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+                "minecraft:plains".to_owned()
+            }
+            fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let source = retained_chunk_source_for_view_radius(Source(Arc::clone(&calls)), 1);
+        assert!(!source.is_column_resident(3, -2), "the wrapped store begins empty");
+        let _ = source.column(3, -2);
+        assert!(source.is_column_resident(3, -2), "a generated column remains resident");
+        let _ = source.column(3, -2);
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "the opaque factory must retain rather than regenerate");
+    }
 
     #[test]
     fn bundled_survival_facts_are_complete_and_preserve_state_overrides() {

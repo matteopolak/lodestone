@@ -674,7 +674,8 @@ pub use worldgen_data::{
     bundled_biome_spawners, bundled_worldgen_serves, end_chunk_source, end_generator,
     nether_chunk_source, nether_generator,
     overworld_chunk_source, overworld_chunk_source_checked, overworld_chunk_source_of_type,
-    overworld_generator, overworld_generator_of_type, BUNDLED_WORLDGEN_SCOPE, WorldType,
+    overworld_generator, overworld_generator_of_type, retained_chunk_source_for_view_radius,
+    BUNDLED_WORLDGEN_SCOPE, WorldType,
     WorldgenScopeMismatch,
 };
 // The remaining three presets (`single_biome_surface`, `flat`/

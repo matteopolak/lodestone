@@ -72,6 +72,7 @@ import net.minecraft.network.RegistryFriendlyByteBuf;
 public final class LargeParityOracle {
     static final byte[] MAGIC = "LWP26P03".getBytes(StandardCharsets.US_ASCII);
     static final byte[] MAGIC_V4 = "LWP26P04".getBytes(StandardCharsets.US_ASCII);
+    static final byte[] MAGIC_V5 = "LWP26P05".getBytes(StandardCharsets.US_ASCII);
     static final int HEADER_BYTES = 256, FORMAT_VERSION = 3, SCHEMA_VERSION = 3, DIGEST_BYTES = 32;
     static final int GRID_MIN = -250, GRID_MAX = 250;
     static final int GRID_SIDE = GRID_MAX - GRID_MIN + 1;
@@ -80,8 +81,10 @@ public final class LargeParityOracle {
     static final long SEED = 42L;
     static final byte[] MANIFEST_DOMAIN = "lodestone.worldgen.large-parity.manifest/v3/semantic".getBytes(StandardCharsets.US_ASCII);
     static final byte[] MANIFEST_DOMAIN_V4 = "lodestone.worldgen.large-parity.manifest/v4/semantic".getBytes(StandardCharsets.US_ASCII);
+    static final byte[] MANIFEST_DOMAIN_V5 = "lodestone.worldgen.large-parity.manifest/v5/semantic".getBytes(StandardCharsets.US_ASCII);
     static final byte[] RECORD_DOMAIN = "lodestone.worldgen.large-parity.chunk/v3/semantic".getBytes(StandardCharsets.US_ASCII);
     static final byte[] RECORD_DOMAIN_V4 = "lodestone.worldgen.large-parity.chunk/v4/semantic".getBytes(StandardCharsets.US_ASCII);
+    static final byte[] RECORD_DOMAIN_V5 = "lodestone.worldgen.large-parity.chunk/v5/semantic".getBytes(StandardCharsets.US_ASCII);
     static final String FREEZE_STAMP = "lodestone-large-parity-v3.freeze.sha256";
     static final String MATERIALIZE_PROGRESS = "lodestone-large-parity-v3.materialize";
     static final int MATERIALIZE_TILE = 16;
@@ -97,7 +100,9 @@ public final class LargeParityOracle {
         boolean resume, help;
         String dimension = OVERWORLD;
         boolean explicitDimension;
-        boolean v4() { return explicitDimension || !OVERWORLD.equals(dimension); }
+        boolean dimensionFormat() { return explicitDimension || !OVERWORLD.equals(dimension); }
+        boolean v5() { return END.equals(dimension); }
+        int semanticVersion() { return v5() ? 5 : dimensionFormat() ? 4 : FORMAT_VERSION; }
         String dimensionKey() { return switch (dimension) { case NETHER -> "minecraft:the_nether"; case END -> "minecraft:the_end"; default -> "minecraft:overworld"; }; }
     }
 
@@ -141,10 +146,12 @@ public final class LargeParityOracle {
 
     static byte[] header(Args a, long count, byte[] frozenDigest, byte[] payloadDigest) {
         ByteBuffer b = ByteBuffer.allocate(HEADER_BYTES).order(ByteOrder.BIG_ENDIAN);
-        b.put(a.v4() ? MAGIC_V4 : MAGIC).putShort((short)(a.v4() ? 4 : FORMAT_VERSION)).putShort((short)HEADER_BYTES).putShort((short)2).putShort((short)(a.v4() ? 4 : SCHEMA_VERSION)).putInt(776).putLong(SEED);
+        byte[] magic = a.v5() ? MAGIC_V5 : a.dimensionFormat() ? MAGIC_V4 : MAGIC;
+        byte[] domain = a.v5() ? MANIFEST_DOMAIN_V5 : a.dimensionFormat() ? MANIFEST_DOMAIN_V4 : MANIFEST_DOMAIN;
+        b.put(magic).putShort((short)a.semanticVersion()).putShort((short)HEADER_BYTES).putShort((short)2).putShort((short)a.semanticVersion()).putInt(776).putLong(SEED);
         b.putInt(GRID_MIN).putInt(GRID_MAX).putInt(GRID_MIN).putInt(GRID_MAX).putInt(a.loX).putInt(a.hiX).putInt(a.loZ).putInt(a.hiZ).putLong(count);
-        b.putShort((short)DIGEST_BYTES).putShort((short)0).put(digest(a.v4() ? MANIFEST_DOMAIN_V4 : MANIFEST_DOMAIN)).put(frozenDigest).put(payloadDigest);
-        if (a.v4()) b.put(digest(a.dimensionKey().getBytes(StandardCharsets.UTF_8)));
+        b.putShort((short)DIGEST_BYTES).putShort((short)0).put(digest(domain)).put(frozenDigest).put(payloadDigest);
+        if (a.dimensionFormat()) b.put(digest(a.dimensionKey().getBytes(StandardCharsets.UTF_8)));
         return b.array();
     }
 
@@ -153,13 +160,14 @@ public final class LargeParityOracle {
         if (!f.isFile() || f.length() < HEADER_BYTES || f.length() > HEADER_BYTES + count * DIGEST_BYTES || ((f.length() - HEADER_BYTES) % DIGEST_BYTES) != 0) throw new IllegalStateException("resume refuses malformed v3 shard: " + f);
         try (RandomAccessFile in = new RandomAccessFile(f, "r")) {
             byte[] h = new byte[HEADER_BYTES]; in.readFully(h); ByteBuffer b = ByteBuffer.wrap(h).order(ByteOrder.BIG_ENDIAN); byte[] magic = new byte[8]; b.get(magic);
-            byte[] expectedMagic = a.v4() ? MAGIC_V4 : MAGIC; int expectedVersion = a.v4() ? 4 : FORMAT_VERSION, expectedSchema = a.v4() ? 4 : SCHEMA_VERSION;
+            byte[] expectedMagic = a.v5() ? MAGIC_V5 : a.dimensionFormat() ? MAGIC_V4 : MAGIC; int expectedVersion = a.semanticVersion(), expectedSchema = a.semanticVersion();
             if (!Arrays.equals(magic, expectedMagic) || b.getShort() != expectedVersion || b.getShort() != HEADER_BYTES || b.getShort() != 2 || b.getShort() != expectedSchema || b.getInt() != 776 || b.getLong() != SEED) throw new IllegalStateException("manifest format differs; resume requires the selected parity format: " + f);
             b.position(28);
             if (b.getInt()!=GRID_MIN || b.getInt()!=GRID_MAX || b.getInt()!=GRID_MIN || b.getInt()!=GRID_MAX || b.getInt()!=a.loX || b.getInt()!=a.hiX || b.getInt()!=a.loZ || b.getInt()!=a.hiZ || b.getLong()!=count || b.getShort()!=DIGEST_BYTES) throw new IllegalStateException("resume shard geometry differs: " + f);
             b.getShort(); byte[] domain = new byte[32]; b.get(domain); byte[] recordedFrozen = new byte[32]; b.get(recordedFrozen); byte[] expected = new byte[32]; b.get(expected);
-            if (!Arrays.equals(domain, digest(a.v4() ? MANIFEST_DOMAIN_V4 : MANIFEST_DOMAIN)) || !Arrays.equals(recordedFrozen, frozenDigest)) throw new IllegalStateException("resume schema or frozen-world identity differs: " + f);
-            if (a.v4()) { byte[] recordedDimension = new byte[32]; b.get(recordedDimension); if (!Arrays.equals(recordedDimension, digest(a.dimensionKey().getBytes(StandardCharsets.UTF_8)))) throw new IllegalStateException("resume dimension identity differs: " + f); }
+            byte[] expectedDomain = a.v5() ? MANIFEST_DOMAIN_V5 : a.dimensionFormat() ? MANIFEST_DOMAIN_V4 : MANIFEST_DOMAIN;
+            if (!Arrays.equals(domain, digest(expectedDomain)) || !Arrays.equals(recordedFrozen, frozenDigest)) throw new IllegalStateException("resume schema or frozen-world identity differs: " + f);
+            if (a.dimensionFormat()) { byte[] recordedDimension = new byte[32]; b.get(recordedDimension); if (!Arrays.equals(recordedDimension, digest(a.dimensionKey().getBytes(StandardCharsets.UTF_8)))) throw new IllegalStateException("resume dimension identity differs: " + f); }
             long records = (f.length() - HEADER_BYTES) / DIGEST_BYTES;
             if (records == count) { MessageDigest actual = sha256(); byte[] buf = new byte[8192]; int n; while ((n = in.read(buf)) != -1) actual.update(buf, 0, n); if (!Arrays.equals(expected, actual.digest())) throw new IllegalStateException("resume payload checksum differs: " + f); }
             else if (!Arrays.equals(expected, new byte[32])) throw new IllegalStateException("partial shard has a non-zero final checksum: " + f);
@@ -183,9 +191,9 @@ public final class LargeParityOracle {
         try (var paths = Files.walk(source)) { for (Path from : paths.sorted().toList()) { Path to = copy.resolve(source.relativize(from).toString()); if (Files.isDirectory(from)) Files.createDirectories(to); else Files.copy(from, to, StandardCopyOption.COPY_ATTRIBUTES); } }
         return copy;
     }
-    static String freezeStamp(Args a) { return a.v4() ? "lodestone-large-parity-v4-" + a.dimension + ".freeze.sha256" : FREEZE_STAMP; }
-    static String progressFile(Args a) { return a.v4() ? "lodestone-large-parity-v4-" + a.dimension + ".materialize" : MATERIALIZE_PROGRESS; }
-    static String formatLabel(Args a) { return a.v4() ? "v4-" + a.dimension : "v3"; }
+    static String freezeStamp(Args a) { return a.dimensionFormat() ? "lodestone-large-parity-v4-" + a.dimension + ".freeze.sha256" : FREEZE_STAMP; }
+    static String progressFile(Args a) { return a.dimensionFormat() ? "lodestone-large-parity-v4-" + a.dimension + ".materialize" : MATERIALIZE_PROGRESS; }
+    static String formatLabel(Args a) { return "v" + a.semanticVersion() + "-" + a.dimension; }
     static byte[] worldTreeDigest(Path root, Args a) throws Exception {
         MessageDigest sha = sha256();
         try (var paths = Files.walk(root)) { for (Path path : paths.filter(Files::isRegularFile).filter(p -> !p.getFileName().toString().equals(freezeStamp(a))).sorted().toList()) {
@@ -220,14 +228,45 @@ public final class LargeParityOracle {
             default -> throw new IllegalStateException("unknown NBT tag " + tag.getId());
         }
     }
-    static void canonicalLight(DataOutputStream out, java.util.BitSet present, java.util.BitSet empty, List<byte[]> arrays, int sections) throws Exception {
+    static boolean fullSky(byte[] bytes) {
+        for (byte value : bytes) if (value != (byte)0xff) return false;
+        return true;
+    }
+    static void canonicalLight(DataOutputStream out, java.util.BitSet present, java.util.BitSet empty, List<byte[]> arrays, int sections, boolean sky, boolean normalizeFullSkyTail) throws Exception {
+        byte[][] data = new byte[sections][];
         int cursor = 0;
         for (int section = 0; section < sections; section++) {
             if (present.get(section) && empty.get(section)) throw new IllegalStateException("light section has both present and empty bits");
-            if (present.get(section)) { byte[] bytes = arrays.get(cursor++); if (bytes.length != 2048) throw new IllegalStateException("light array length"); out.writeByte(2); out.write(bytes); }
-            else if (empty.get(section)) out.writeByte(1); else out.writeByte(0);
+            if (present.get(section)) { data[section] = arrays.get(cursor++); if (data[section].length != 2048) throw new IllegalStateException("light array length"); }
         }
         if (cursor != arrays.size()) throw new IllegalStateException("light mask/array count differs");
+        // Initial chunks are enabled after their supplied layers are queued. A
+        // trailing all-15 sky layer is therefore equivalent to omitted data;
+        // retain every lower or mixed layer, where omission can change lookup.
+        int lastRequired = sections - 1;
+        if (sky && normalizeFullSkyTail) while (lastRequired >= 0 && (!present.get(lastRequired) || fullSky(data[lastRequired]))) lastRequired--;
+        for (int section = 0; section < sections; section++) {
+            if (sky && normalizeFullSkyTail && section > lastRequired && present.get(section) && fullSky(data[section])) out.writeByte(0);
+            else if (present.get(section)) { out.writeByte(2); out.write(data[section]); }
+            else if (empty.get(section)) out.writeByte(1); else out.writeByte(0);
+        }
+    }
+    static byte[] canonicalLightBytes(java.util.BitSet present, java.util.BitSet empty, List<byte[]> arrays, int sections, boolean sky) throws Exception {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream(); DataOutputStream out = new DataOutputStream(bytes); canonicalLight(out, present, empty, arrays, sections, sky, true); out.flush(); return bytes.toByteArray();
+    }
+    static void verifyCanonicalLightContract() throws Exception {
+        byte[] full = new byte[2048]; Arrays.fill(full, (byte)0xff); byte[] nearFull = full.clone(); nearFull[1487] = (byte)0xef;
+        java.util.BitSet present = new java.util.BitSet(); present.set(0);
+        byte[] omitted = canonicalLightBytes(new java.util.BitSet(), new java.util.BitSet(), List.of(), 1, true);
+        byte[] explicitFull = canonicalLightBytes(present, new java.util.BitSet(), List.of(full), 1, true);
+        if (!Arrays.equals(omitted, explicitFull) || explicitFull.length != 1) throw new IllegalStateException("full sky canonicalization lost compact default");
+        byte[] nonDefault = canonicalLightBytes(present, new java.util.BitSet(), List.of(nearFull), 1, true);
+        if (Arrays.equals(nonDefault, explicitFull)) throw new IllegalStateException("mixed sky layer was normalized away");
+        java.util.BitSet empty = new java.util.BitSet(); empty.set(0);
+        byte[] blockOmitted = canonicalLightBytes(new java.util.BitSet(), new java.util.BitSet(), List.of(), 1, false);
+        byte[] blockEmpty = canonicalLightBytes(new java.util.BitSet(), empty, List.of(), 1, false);
+        byte[] blockFull = canonicalLightBytes(present, new java.util.BitSet(), List.of(full), 1, false);
+        if (Arrays.equals(blockOmitted, blockEmpty) || Arrays.equals(blockOmitted, blockFull)) throw new IllegalStateException("block-light representation was normalized");
     }
     static byte[] packetBody(MinecraftServer server, LevelChunk chunk, ServerLevel level) {
         ClientboundLevelChunkWithLightPacket packet = new ClientboundLevelChunkWithLightPacket(chunk, level.getLightEngine(), null, null);
@@ -237,8 +276,8 @@ public final class LargeParityOracle {
     }
     static byte[] semanticRecord(ServerLevel level, LevelChunk chunk, Args a) throws Exception {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream(120_000); DataOutputStream out = new DataOutputStream(bytes);
-        out.write(a.v4() ? RECORD_DOMAIN_V4 : RECORD_DOMAIN); out.writeInt(chunk.getPos().x()); out.writeInt(chunk.getPos().z());
-        if (a.v4()) out.write(a.dimensionKey().getBytes(StandardCharsets.UTF_8));
+        out.write(a.v5() ? RECORD_DOMAIN_V5 : a.dimensionFormat() ? RECORD_DOMAIN_V4 : RECORD_DOMAIN); out.writeInt(chunk.getPos().x()); out.writeInt(chunk.getPos().z());
+        if (a.dimensionFormat()) out.write(a.dimensionKey().getBytes(StandardCharsets.UTF_8));
         ClientboundLevelChunkWithLightPacket packet = new ClientboundLevelChunkWithLightPacket(chunk, level.getLightEngine(), null, null);
         List<Map.Entry<Heightmap.Types, long[]>> maps = new ArrayList<>(packet.getChunkData().getHeightmaps().entrySet()); maps.sort(Comparator.comparingInt(entry -> entry.getKey().ordinal()));
         out.writeInt(maps.size()); for (Map.Entry<Heightmap.Types, long[]> entry : maps) { out.writeInt(entry.getKey().ordinal()); Heightmap map = null; for (Map.Entry<Heightmap.Types, Heightmap> candidate : chunk.getHeightmaps()) if (candidate.getKey() == entry.getKey()) { map = candidate.getValue(); break; } if (map == null) throw new IllegalStateException("packet heightmap missing from chunk"); for (int z = 0; z < 16; z++) for (int x = 0; x < 16; x++) out.writeInt(map.getFirstAvailable(x, z)); }
@@ -250,14 +289,80 @@ public final class LargeParityOracle {
         Registry<net.minecraft.world.level.block.entity.BlockEntityType<?>> types = level.registryAccess().lookupOrThrow(Registries.BLOCK_ENTITY_TYPE);
         List<BlockEntity> entities = new ArrayList<>(chunk.getBlockEntities().values()); entities.sort(Comparator.comparingInt((BlockEntity e) -> e.getBlockPos().getX() & 15).thenComparingInt(e -> e.getBlockPos().getY()).thenComparingInt(e -> e.getBlockPos().getZ() & 15).thenComparingInt(e -> types.getId(e.getType())));
         out.writeInt(entities.size()); for (BlockEntity entity : entities) { out.writeByte(entity.getBlockPos().getX() & 15); out.writeShort(entity.getBlockPos().getY()); out.writeByte(entity.getBlockPos().getZ() & 15); out.writeInt(types.getId(entity.getType())); CompoundTag tag = entity.getUpdateTag(level.registryAccess()); if (tag.isEmpty()) out.writeByte(Tag.TAG_END); else canonicalTag(out, tag); }
-        var light = packet.getLightData(); int lightSections = chunk.getSections().length + 2; canonicalLight(out, light.getSkyYMask(), light.getEmptySkyYMask(), light.getSkyUpdates(), lightSections); canonicalLight(out, light.getBlockYMask(), light.getEmptyBlockYMask(), light.getBlockUpdates(), lightSections); out.flush(); return bytes.toByteArray();
+        var light = packet.getLightData(); int lightSections = chunk.getSections().length + 2; canonicalLight(out, light.getSkyYMask(), light.getEmptySkyYMask(), light.getSkyUpdates(), lightSections, true, a.v5()); canonicalLight(out, light.getBlockYMask(), light.getEmptyBlockYMask(), light.getBlockUpdates(), lightSections, false, false); out.flush(); return bytes.toByteArray();
+    }
+
+    static void settleMaterializedBatch(MinecraftServer server, ServerLevel level, List<ChunkPos> positions) {
+        // A completed FULL future does not order deferred sky propagation before
+        // its loading ticket is removed. Run only scheduler work (no resident
+        // chunk ticks), then queue a post-update fence for every exact batch
+        // column while all of its tickets still exist.
+        server.submit(() -> level.getChunkSource().tick(() -> true, false)).join();
+        List<CompletableFuture<?>> fences = server.submit(() -> {
+            List<CompletableFuture<?>> result = new ArrayList<>(positions.size());
+            for (ChunkPos pos : positions) result.add(level.getChunkSource().getLightEngine().waitForPendingTasks(pos.x(), pos.z()));
+            return result;
+        }).join();
+        for (CompletableFuture<?> fence : fences) fence.join();
+        server.submit(() -> {
+            for (ChunkPos pos : positions) {
+                LevelChunk chunk = level.getChunkSource().getChunkNow(pos.x(), pos.z());
+                if (chunk == null || !chunk.isLightCorrect()) {
+                    throw new IllegalStateException("materialized chunk did not reach settled FULL light: " + pos);
+                }
+            }
+        }).join();
+    }
+
+    static List<ChunkPos> lightNeighbourhood(List<ChunkPos> positions) {
+        java.util.LinkedHashSet<ChunkPos> result = new java.util.LinkedHashSet<>();
+        for (ChunkPos center : positions) for (int z = -1; z <= 1; z++) for (int x = -1; x <= 1; x++) result.add(new ChunkPos(center.x() + x, center.z() + z));
+        return new ArrayList<>(result);
+    }
+
+    static void awaitLight(MinecraftServer server, ServerLevel level, List<ChunkPos> positions) {
+        List<CompletableFuture<?>> fences = server.submit(() -> {
+            List<CompletableFuture<?>> result = new ArrayList<>(positions.size());
+            for (ChunkPos pos : positions) result.add(level.getChunkSource().getLightEngine().waitForPendingTasks(pos.x(), pos.z()));
+            return result;
+        }).join();
+        for (CompletableFuture<?> fence : fences) fence.join();
+    }
+
+    static void relightFromBlocks(MinecraftServer server, ServerLevel level, List<ChunkPos> positions) {
+        server.submit(() -> {
+            try {
+                var engine = level.getChunkSource().getLightEngine();
+                Method clear = net.minecraft.server.level.ThreadedLevelLightEngine.class.getDeclaredMethod("updateChunkStatus", ChunkPos.class);
+                clear.setAccessible(true);
+                for (ChunkPos pos : positions) clear.invoke(engine, pos);
+                engine.tryScheduleUpdate();
+            } catch (ReflectiveOperationException e) { throw new IllegalStateException("relight reset bridge failed", e); }
+        }).join();
+        awaitLight(server, level, positions);
+        List<CompletableFuture<?>> initialized = server.submit(() -> {
+            var engine = level.getChunkSource().getLightEngine(); List<CompletableFuture<?>> result = new ArrayList<>(positions.size());
+            for (ChunkPos pos : positions) { LevelChunk chunk = level.getChunkSource().getChunkNow(pos.x(), pos.z()); if (chunk == null) throw new IllegalStateException("relight lost chunk: " + pos); result.add(engine.initializeLight(chunk, false)); }
+            engine.tryScheduleUpdate(); return result;
+        }).join();
+        for (CompletableFuture<?> future : initialized) future.join();
+        List<CompletableFuture<?>> lit = server.submit(() -> {
+            var engine = level.getChunkSource().getLightEngine(); List<CompletableFuture<?>> result = new ArrayList<>(positions.size());
+            for (ChunkPos pos : positions) { LevelChunk chunk = level.getChunkSource().getChunkNow(pos.x(), pos.z()); if (chunk == null) throw new IllegalStateException("relight lost chunk: " + pos); result.add(engine.lightChunk(chunk, false)); }
+            engine.tryScheduleUpdate(); return result;
+        }).join();
+        for (CompletableFuture<?> future : lit) future.join();
+        awaitLight(server, level, positions);
     }
 
     static void loadBatch(MinecraftServer server, ServerLevel level, Args a, List<ChunkPos> positions, boolean capture, List<byte[]> out) {
-        List<CompletableFuture<?>> futures = server.submit(() -> { List<CompletableFuture<?>> result = new ArrayList<>(positions.size()); for (ChunkPos pos : positions) result.add(level.getChunkSource().addTicketAndLoadWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, 0)); return result; }).join();
-        for (int i = 0; i < positions.size(); i++) { net.minecraft.server.level.ChunkResult<?> result = (net.minecraft.server.level.ChunkResult<?>)futures.get(i).join(); if (!result.isSuccess()) throw new IllegalStateException("chunk generation failed at " + positions.get(i) + ": " + result.getError()); }
+        List<ChunkPos> loaded = capture && a.v5() ? lightNeighbourhood(positions) : positions;
+        List<CompletableFuture<?>> futures = server.submit(() -> { List<CompletableFuture<?>> result = new ArrayList<>(loaded.size()); for (ChunkPos pos : loaded) result.add(level.getChunkSource().addTicketAndLoadWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, 0)); return result; }).join();
+        for (int i = 0; i < loaded.size(); i++) { net.minecraft.server.level.ChunkResult<?> result = (net.minecraft.server.level.ChunkResult<?>)futures.get(i).join(); if (!result.isSuccess()) throw new IllegalStateException("chunk generation failed at " + loaded.get(i) + ": " + result.getError()); }
+        if (!capture) settleMaterializedBatch(server, level, positions);
+        if (capture && a.v5()) relightFromBlocks(server, level, loaded);
         if (capture) out.addAll(server.submit(() -> { try { List<byte[]> result = new ArrayList<>(positions.size()); for (ChunkPos pos : positions) { LevelChunk chunk = level.getChunkSource().getChunkNow(pos.x(), pos.z()); if (chunk == null) throw new IllegalStateException("loaded chunk was evicted: " + pos); if (diagnosticPacketOut != null) Files.write(Path.of(diagnosticPacketOut), packetBody(server, chunk, level)); byte[] record = semanticRecord(level, chunk, a); if (diagnosticRecordOut != null) Files.write(Path.of(diagnosticRecordOut), record); result.add(digest(record)); } return result; } catch (Exception e) { throw new IllegalStateException("canonical chunk export failed", e); } }).join());
-        server.submit(() -> { for (ChunkPos pos : positions) level.getChunkSource().removeTicketWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, 0); }).join();
+        server.submit(() -> { for (ChunkPos pos : loaded) level.getChunkSource().removeTicketWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, 0); }).join();
     }
 
     record MaterializeProgress(int minX, int maxX, int minZ, int maxZ, int tilesX, int tilesZ, int epochTiles, int nextTile, int inflightEnd) {
@@ -274,7 +379,7 @@ public final class LargeParityOracle {
     }
 
     static String progressText(Args a, MaterializeProgress progress) {
-        String marker = a.v4() ? "lodestone-large-parity-v4-" + a.dimension + "-materialize" : "lodestone-large-parity-v3-materialize";
+        String marker = a.dimensionFormat() ? "lodestone-large-parity-v4-" + a.dimension + "-materialize" : "lodestone-large-parity-v3-materialize";
         return marker + "=1\n"
             + "seed=" + SEED + "\n"
             + "tile-size=" + MATERIALIZE_TILE + "\n"
@@ -292,7 +397,7 @@ public final class LargeParityOracle {
             int split = line.indexOf('=');
             if (split <= 0 || values.put(line.substring(0, split), line.substring(split + 1)) != null) throw new IllegalStateException("malformed materialization progress: " + progress);
         }
-        String marker = a.v4() ? "lodestone-large-parity-v4-" + a.dimension + "-materialize" : "lodestone-large-parity-v3-materialize";
+        String marker = a.dimensionFormat() ? "lodestone-large-parity-v4-" + a.dimension + "-materialize" : "lodestone-large-parity-v3-materialize";
         if (values.size() != 12 || !"1".equals(values.get(marker)) || !Long.toString(SEED).equals(values.get("seed")) || !Integer.toString(MATERIALIZE_TILE).equals(values.get("tile-size"))) throw new IllegalStateException("materialization progress provenance differs: " + progress);
         try {
             MaterializeProgress result = new MaterializeProgress(Integer.parseInt(values.get("min-x")), Integer.parseInt(values.get("max-x")), Integer.parseInt(values.get("min-z")), Integer.parseInt(values.get("max-z")), Integer.parseInt(values.get("tiles-x")), Integer.parseInt(values.get("tiles-z")), Integer.parseInt(values.get("epoch-tiles")), Integer.parseInt(values.get("next-tile")), Integer.parseInt(values.get("inflight-end")));
@@ -392,7 +497,7 @@ public final class LargeParityOracle {
         } });
     }
     public static void main(String[] ignored) throws Exception {
-        Args a = args(); if (a.help) { usage(); return; }
+        verifyCanonicalLightContract(); Args a = args(); if (a.help) { usage(); return; }
         if ("materialize".equals(a.mode)) { String root = System.getenv("ORACLE_WORLD_ROOT"); if (root == null || root.isBlank()) throw new IllegalStateException("materialize requires LODESTONE_ORACLE_WORLD_ROOT"); materialize(a, Path.of(root)); }
         else { String root = System.getenv("ORACLE_FROZEN_WORLD_ROOT"); if (root == null || root.isBlank()) throw new IllegalStateException("export requires LODESTONE_ORACLE_FROZEN_WORLD_ROOT"); export(a, Path.of(root)); }
     }

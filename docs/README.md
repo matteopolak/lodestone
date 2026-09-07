@@ -780,10 +780,9 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   fight rather than missing terrain or a disconnected dimension source.
 - [Large worldgen parity harness](./worldgen-large-parity.md) —
   `scripts/worldgen-oracle/LargeParityOracle.java` is the resumable, 251,001-chunk
-  parity oracle for the 501 by 501 overworld grid centred at `(0, 0)`. Version 3
-  freezes one generated reference world first, then records a full SHA-256 digest of
-  each chunk's canonical semantic record; the old v2 raw 16-bit packet fingerprints
-  are explicitly rejected.
+  parity oracle for the 501 by 501 grid centred at `(0, 0)`. It freezes one generated
+  reference world first, then records a full SHA-256 digest of each chunk's canonical
+  semantic record; the old v2 raw 16-bit packet fingerprints are explicitly rejected.
 - [Woodland mansion assembly](./worldgen-mansion.md) — `structure::mansion` builds
   the template-piece list for the currently supported exterior of a woodland mansion.
   It is intentionally partial: the seeded plan, entrance, exterior walls, corridor

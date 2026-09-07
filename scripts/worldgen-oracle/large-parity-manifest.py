@@ -4,10 +4,12 @@ import argparse, hashlib, pathlib, struct, sys, tempfile
 
 MAGIC = b"LWP26P03"
 MAGIC_V4 = b"LWP26P04"
+MAGIC_V5 = b"LWP26P05"
 HEADER = 256
 WIDTH = 32
 DOMAIN = b"lodestone.worldgen.large-parity.manifest/v3/semantic"
 DOMAIN_V4 = b"lodestone.worldgen.large-parity.manifest/v4/semantic"
+DOMAIN_V5 = b"lodestone.worldgen.large-parity.manifest/v5/semantic"
 GRID_MIN = -250
 GRID_MAX = 250
 GRID_SIDE = GRID_MAX - GRID_MIN + 1
@@ -15,7 +17,7 @@ GRID_COUNT = GRID_SIDE * GRID_SIDE
 DIMENSIONS = {"overworld": b"minecraft:overworld", "nether": b"minecraft:the_nether", "end": b"minecraft:the_end"}
 # magic, version, header, digest algorithm, schema, protocol, seed, global/shard
 # bounds, record count, per-record digest width, reserved, schema/world/payload SHA-256;
-# v4 stores sha256(dimension resource location) in otherwise-unused bytes 168..200.
+# v4 and v5 store sha256(dimension resource location) in otherwise-unused bytes 168..200.
 FMT = ">8sHHHHIqiiiiiiiiQHH32s32s32s88x"
 
 
@@ -39,13 +41,19 @@ def make_header(version, dim, sx0, sx1, sz0, sz1, count, frozen, payload_digest)
             dim_digest = hashlib.sha256(DIMENSIONS[dim]).digest()
         except KeyError as error:
             raise ValueError(f"unsupported dimension {dim!r}") from error
+    elif version == 5:
+        magic, schema, domain = MAGIC_V5, 5, DOMAIN_V5
+        try:
+            dim_digest = hashlib.sha256(DIMENSIONS[dim]).digest()
+        except KeyError as error:
+            raise ValueError(f"unsupported dimension {dim!r}") from error
     else:
         raise ValueError(f"unsupported manifest version {version}")
     header = struct.pack(FMT, magic, version, HEADER, 2, schema, 776, 42,
                          GRID_MIN, GRID_MAX, GRID_MIN, GRID_MAX, sx0, sx1, sz0, sz1,
                          count, WIDTH, 0, hashlib.sha256(domain).digest(), frozen,
                          payload_digest)
-    return header[:168] + dim_digest + header[200:] if version == 4 else header
+    return header[:168] + dim_digest + header[200:] if version in (4, 5) else header
 
 
 def read(path):
@@ -56,20 +64,21 @@ def read(path):
     (magic, version, size, algorithm, schema, protocol, seed, gx0, gx1, gz0,
      gz1, sx0, sx1, sz0, sz1, count, width, reserved, domain, frozen,
      payload_digest) = h
-    if magic not in (MAGIC, MAGIC_V4):
+    if magic not in (MAGIC, MAGIC_V4, MAGIC_V5):
         if magic == b"LWP26P02":
             raise ValueError(f"{path}: v2 stores raw 16-bit packet fingerprints and is rejected; regenerate from a frozen world as v3")
         raise ValueError(f"{path}: unsupported manifest magic {magic!r}")
     valid_v3 = (magic == MAGIC and version == 3 and schema == 3)
     valid_v4 = (magic == MAGIC_V4 and version == 4 and schema == 4)
-    if not (valid_v3 or valid_v4) or (size, algorithm, protocol, seed, width, reserved) != (HEADER, 2, 776, 42, WIDTH, 0):
+    valid_v5 = (magic == MAGIC_V5 and version == 5 and schema == 5)
+    if not (valid_v3 or valid_v4 or valid_v5) or (size, algorithm, protocol, seed, width, reserved) != (HEADER, 2, 776, 42, WIDTH, 0):
         raise ValueError(f"{path}: unsupported parity manifest header")
     if (gx0, gx1, gz0, gz1) != (GRID_MIN, GRID_MAX, GRID_MIN, GRID_MAX):
         raise ValueError(f"{path}: not the required {GRID_SIDE}x{GRID_SIDE} grid")
     expected = (sx1-sx0+1)*(sz1-sz0+1)
     if sx0 < gx0 or sx1 > gx1 or sz0 < gz0 or sz1 > gz1 or count != expected:
         raise ValueError(f"{path}: invalid shard bounds/count")
-    expected_domain = DOMAIN if version == 3 else DOMAIN_V4
+    expected_domain = DOMAIN if version == 3 else DOMAIN_V4 if version == 4 else DOMAIN_V5
     if domain != hashlib.sha256(expected_domain).digest():
         raise ValueError(f"{path}: semantic-record schema digest differs")
     dim = dimension(raw, h)
@@ -204,7 +213,15 @@ def selftest():
         try: accept(accepted, overworld, nether)
         except ValueError as error: assert "dimension" in str(error)
         else: raise AssertionError("different dimensions were accepted")
-    print("selftest ok: authenticated v3/v4 merge, duplicate-read acceptance, tamper/world/dimension controls, v2 refusal")
+        v5 = directory / "end-v5.lwp"; v5_payload = bytes([0x53]) * WIDTH * GRID_COUNT
+        v5.write_bytes(make_header(5, "end", GRID_MIN, GRID_MAX, GRID_MIN, GRID_MAX,
+                                   GRID_COUNT, frozen, hashlib.sha256(v5_payload).digest()) + v5_payload)
+        assert read(v5)[1] == v5_payload and read(v5)[2] == "end"
+        raw = bytearray(v5.read_bytes()); raw[72] ^= 1; v5.write_bytes(raw)
+        try: read(v5)
+        except ValueError as error: assert "schema" in str(error)
+        else: raise AssertionError("v5 schema/domain mismatch was accepted")
+    print("selftest ok: authenticated v3/v4/v5 merge, duplicate-read acceptance, tamper/world/dimension/schema controls, v2 refusal")
 
 
 def main():
