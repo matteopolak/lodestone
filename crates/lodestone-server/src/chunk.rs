@@ -2519,7 +2519,17 @@ impl NetherChunkSource {
     }
 
     fn generate(&self, cx: i32, cz: i32) -> ChunkColumn {
-        let mut column = ChunkColumn::from_nether(self.generator.column(cx, cz), Self::WINDOW_HEIGHT);
+        let generated = self.generator.column(cx, cz);
+        let placement_chests = crate::structure_loot::chests_from_coded(
+            generated.placement_loot(),
+            crate::block_drops::bundled_tables(),
+        );
+        let mut column = ChunkColumn::from_nether(generated, Self::WINDOW_HEIGHT);
+        if !placement_chests.is_empty() {
+            let mut entities = column.block_entities().to_vec();
+            entities.extend(placement_chests.into_iter().map(|chest| (chest.pos, chest.entity)));
+            column.set_block_entities(entities);
+        }
         self.attach_structures(&mut column, cx, cz);
         column
     }

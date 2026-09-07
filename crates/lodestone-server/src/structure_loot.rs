@@ -129,6 +129,29 @@ pub struct StructureChest {
     pub block: Option<&'static str>,
 }
 
+/// Resolves coded container sidecars whose position and seed were already
+/// decided by the structure-placement pass.
+#[must_use]
+pub fn chests_from_coded(
+    coded: &[lodestone_worldgen::structure::CodedLoot],
+    tables: &LootTableSet,
+) -> Vec<StructureChest> {
+    let mut out = Vec::with_capacity(coded.len());
+    for coded in coded {
+        let Ok(table) = coded.table.parse::<ResourceKey>() else {
+            continue;
+        };
+        let mut rng = SpawnRng::new(coded.seed as u64);
+        let items = tables.roll(&table, &LootContext::default(), &mut rng);
+        out.push(StructureChest {
+            pos: BlockPos::new(coded.pos[0], coded.pos[1], coded.pos[2]),
+            entity: fill_container(items, &mut rng),
+            block: None,
+        });
+    }
+    out
+}
+
 /// The loot table a `(structure, marker metadata)` pair names, from that
 /// structure's own `handleDataMarker`.
 ///
@@ -198,23 +221,7 @@ pub fn chests_for_chunk(
                 if pos.x.div_euclid(16) != cx || pos.z.div_euclid(16) != cz {
                     continue;
                 }
-                let Ok(table) = coded.table.parse::<ResourceKey>() else {
-                    continue;
-                };
-                // Vanilla's seed, not the position hash: a coded piece drew it from
-                // the structure's own stream, so using it keeps the roll on the
-                // generator's specification rather than substituting ours. Still
-                // deterministic per column, which is the property the module doc
-                // requires.
-                let mut rng = SpawnRng::new(coded.seed as u64);
-                let items = tables.roll(&table, &LootContext::default(), &mut rng);
-                out.push(StructureChest {
-                    pos,
-                    entity: fill_container(items, &mut rng),
-                    // The coded piece already wrote the container block itself,
-                    // through the same `CodedBlock` list that builds the rest of it.
-                    block: None,
-                });
+                out.extend(chests_from_coded(std::slice::from_ref(coded), tables));
             }
             let Some(placement) = piece.placement.as_ref() else {
                 continue;
@@ -894,5 +901,35 @@ mod tests {
             Some("minecraft:blaze"),
             "the packet sidecar must carry the spawner hall's entity id"
         );
+    }
+
+    /// The grid-resolved fortress chest sidecar reaches the same production
+    /// columns as its block states; eager piece metadata is not a substitute.
+    #[test]
+    fn fortress_placement_chests_reach_the_chunk_source() {
+        use crate::chunk::ChunkSource as _;
+
+        let source = crate::nether_chunk_source(42);
+        let expected = [
+            (BlockPos::new(-35, 53, 68), "minecraft:chest[facing=south,type=single,waterlogged=false]"),
+            (BlockPos::new(-37, 61, 78), "minecraft:chest[facing=south,type=single,waterlogged=false]"),
+            (BlockPos::new(-20, 53, 65), "minecraft:chest[facing=south,type=single,waterlogged=false]"),
+            (BlockPos::new(-6, 61, 95), "minecraft:chest[facing=west,type=single,waterlogged=false]"),
+        ];
+        for (pos, expected_state) in expected {
+            let column = source.column(pos.x.div_euclid(16), pos.z.div_euclid(16));
+            let state = column.block_state(pos.x.rem_euclid(16), pos.y, pos.z.rem_euclid(16));
+            assert_eq!(state, expected_state, "placement wrote the wrong external state at {pos:?}");
+            let entity = column
+                .block_entities()
+                .iter()
+                .find_map(|(found, entity)| (*found == pos).then_some(entity))
+                .unwrap_or_else(|| panic!("placement loot did not reach the column at {pos:?}"));
+            assert_eq!(entity.type_id(), "minecraft:chest");
+            assert!(
+                entity.container_slots().iter().any(Option::is_some),
+                "the exact placement seed must roll a nonempty external chest at {pos:?}",
+            );
+        }
     }
 }

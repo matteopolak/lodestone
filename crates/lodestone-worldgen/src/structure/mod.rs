@@ -250,6 +250,14 @@ const UNDERGROUND_STRUCTURES_RUNTIME_ORDER: &[&str] = &[
     "minecraft:trial_chambers",
 ];
 
+/// Captured runtime registration order for the three structures in the
+/// `underground_decoration` step.
+const UNDERGROUND_DECORATION_RUNTIME_ORDER: &[&str] = &[
+    "minecraft:ancient_city",
+    "minecraft:fortress",
+    "minecraft:nether_fossil",
+];
+
 fn structure_step_index(step: &str) -> Option<i32> {
     Some(match step {
         "raw_generation" => 0,
@@ -527,10 +535,10 @@ pub struct CodedBlock {
 /// `structure_block` DATA markers and has no equivalent source for a coded piece,
 /// since a coded piece has no template to re-read. This list is that source.
 ///
-/// The `seed` is one 64-bit draw from the same stream the
-/// piece's other draws come from, in the order the container is created, so it
-/// is part of the stream-position specification whether or not anything rolls
-/// with it yet.
+/// The `seed` is one 64-bit draw from the stream that owns container placement.
+/// Most coded rooms use their piece stream; fortress chests instead use the
+/// receiving chunk's decoration stream, in placement order. The distinction is
+/// part of the stream-position specification whether or not anything rolls yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodedLoot {
     /// Absolute world position of the container block.
@@ -3118,6 +3126,36 @@ impl StructureRegistry {
     /// grid. The persisted start retains the eager piece tree; the direct replay
     /// lets conditional supports observe ordinary piece writes and current
     /// terrain in their real order.
+    pub(crate) fn place_fortress_for_chunk_with(
+        &self,
+        start: &StructureStart,
+        chunk_x: i32,
+        chunk_z: i32,
+        world: &mut crate::dense_grid::DenseBlockGrid,
+        placement_random: &mut WorldgenRandom<XoroshiroRandomSource>,
+        solid_render: &dyn Fn(&str) -> bool,
+    ) -> Option<Vec<CodedLoot>> {
+        let Some(definition) = self.structures.get(&start.structure) else {
+            return None;
+        };
+        let StructureKind::Fortress = &definition.kind else {
+            return None;
+        };
+        let mut random = structure_random(self.seed, start.chunk_x, start.chunk_z);
+        Some(fortress::place_for_chunk(
+            start.chunk_x,
+            start.chunk_z,
+            chunk_x,
+            chunk_z,
+            world,
+            &mut random,
+            placement_random,
+            solid_render,
+        ))
+    }
+
+    /// Compatibility entry point for a fortress routed through a dimension
+    /// without canonical state-capability data at the placement call site.
     pub(crate) fn place_fortress_for_chunk(
         &self,
         start: &StructureStart,
@@ -3125,22 +3163,26 @@ impl StructureRegistry {
         chunk_z: i32,
         world: &mut crate::dense_grid::DenseBlockGrid,
     ) -> bool {
-        let Some(definition) = self.structures.get(&start.structure) else {
+        let Some((step, index)) = self.runtime_decoration_key(&start.structure) else {
             return false;
         };
-        let StructureKind::Fortress = &definition.kind else {
-            return false;
-        };
-        let mut random = structure_random(self.seed, start.chunk_x, start.chunk_z);
-        fortress::place_for_chunk(
-            start.chunk_x,
-            start.chunk_z,
+        let mut placement = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        let decoration_seed = placement.set_decoration_seed(self.seed, chunk_x * 16, chunk_z * 16);
+        placement.set_feature_seed(decoration_seed, index as i32, step);
+        self.place_fortress_for_chunk_with(
+            start,
             chunk_x,
             chunk_z,
             world,
-            &mut random,
-        );
-        true
+            &mut placement,
+            &|state| {
+                !matches!(
+                    state.split_once('[').map_or(state, |(base, _)| base),
+                    "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air" | "minecraft:water" | "minecraft:lava"
+                )
+            },
+        )
+        .is_some()
     }
 
     /// The loaded jigsaw template pools.
@@ -3197,6 +3239,7 @@ impl StructureRegistry {
         let step = structure_step_index(&self.structures.get(id)?.step)?;
         let index = match step {
             3 => UNDERGROUND_STRUCTURES_RUNTIME_ORDER.iter().position(|entry| *entry == id)?,
+            7 => UNDERGROUND_DECORATION_RUNTIME_ORDER.iter().position(|entry| *entry == id)?,
             _ => return None,
         };
         Some((step, index))
