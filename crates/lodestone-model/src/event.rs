@@ -697,6 +697,14 @@ pub struct EntityMetadataUpdate {
     /// reads as the real accessor's own default of `0` — the icon for value `0`
     /// is cell 0 — never as a cleared value.
     pub experience_orb_value: Option<i32>,
+    /// A primed TNT entity's fuse time in ticks, when present and the entity is
+    /// known to be primed TNT. The client renders its final-ten-tick swell and
+    /// alternating white flash from this countdown.
+    ///
+    /// This shares an `INT` at index 8 with an orb value, a fishing-hook target,
+    /// a vehicle hurt clock and a display interpolation delay. A version adapter
+    /// therefore raises it only after it has established the concrete TNT type.
+    pub tnt_fuse: Option<i32>,
     /// Whether a tamed-animal-family entity is tamed, when present and the
     /// entity is known to belong to that family.
     ///

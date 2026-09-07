@@ -549,7 +549,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // reserved slot's own plains default) also lands here, at its reserved
     // palette slot — the two paths agree by construction.
     var tint_col = vec3<f32>(1.0, 1.0, 1.0);
-    if (in.tint_rgb_override.a != 0u) {
+    // Alpha 1 is the moving-block white-overlay marker. Alpha 255 is the
+    // established explicit RGB override; no existing mesh uses an intermediate
+    // alpha, so the two encodings cannot collide.
+    let white_flash = in.tint_rgb_override.a == 1u;
+    if (in.tint_rgb_override.a == 255u) {
         tint_col = vec3<f32>(in.tint_rgb_override.rgb) / 255.0;
     } else if (in.tint_idx != 255u) {
         tint_col = palette.colors[in.tint_idx].rgb;
@@ -562,7 +566,17 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // linear texel to sRGB, multiply tint and shade there, convert back. A
     // single round-trip (rather than one per multiply) means fewer transfer
     // applications and less rounding.
-    let lit_srgb = linear_to_srgb(tex.rgb) * tint_col * in.shade;
+    let material_srgb = linear_to_srgb(tex.rgb) * tint_col;
+    // The fixed white-overlay endpoint leaves alpha byte 63 on the material.
+    // Apply that blend before light, so a flash remains subject to the same
+    // world shading as its ordinary block model.
+    const WHITE_FLASH_MATERIAL_WEIGHT: f32 = 63.0 / 255.0;
+    let flashed_srgb = select(
+        material_srgb,
+        mix(vec3<f32>(1.0, 1.0, 1.0), material_srgb, WHITE_FLASH_MATERIAL_WEIGHT),
+        white_flash,
+    );
+    let lit_srgb = flashed_srgb * in.shade;
     // The section fade-in: mix the lit fragment toward the fog colour by
     // `in.visibility`, so a freshly built section materialises out of the fog
     // instead of popping in solid. Byte-for-byte `terrain.fsh`'s own

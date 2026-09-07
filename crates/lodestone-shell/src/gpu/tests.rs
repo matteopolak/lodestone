@@ -405,6 +405,7 @@ fn a_fully_armoured_zombie_resolves_layers_on_real_wearer_parts() {
         hurt: false,
         id: 7,
         type_path: std::sync::Arc::from("zombie"),
+        tnt_fuse: None,
         item: None,
         item_model: None,
         item_skin: None,

@@ -12,9 +12,13 @@ Falling-block and block-display states originate as `BlockStateRef` values. Thei
 
 Moving-piston records are a different ingress: their gather resolves state strings and currently stores the resulting raw values in `MovingPistonSpawn`. `merge_piston_heads` validates those values with `StateId::new` immediately before constructing `MovingBlock`; no raw piston value reaches the baked-quad snapshot, and an unresolved or future source can still be declined at that boundary.
 
+Primed TNT keeps its block state fixed to the default TNT model, but its fuse is not fixed. The protocol adapter type-gates the ambiguous index-8 integer as `tnt_fuse`, ECS folds it into `TntFuse`, and `extract_entity_draws` adjusts it by the frame partial tick. `primed_tnt_pose` applies the final-ten-tick fourth-power swell (`0` at fuse `10`, `0.3` at `0`), while the model vertex's dedicated white-flash marker applies the fixed white-overlay blend in alternating five-tick windows. The blend retains `63/255` of the textured material before world shading; it is not opaque white. This path intentionally shares the ordinary model pipeline, so a flash does not allocate a second mesh or draw call.
+
 ## How to change it
 
 Add a producer by constructing `MovingBlock` only after obtaining a `StateId`, or add a source-specific resolver that can turn a protocol-local reference into a canonical state with demonstrated equivalence. Do not unwrap or range-check `BlockStateRef::ProtocolLocal` as a built-in id. For a raw canonical-side source, validate with `StateId::new` at the producer boundary; the `MovingBlock` field and `CrackResolver::state_quads` do not accept raw integers. Keep the transform-specific tests next to the producer and extend the source-tag control if adding another network path.
+
+When changing TNT rendering, preserve the type gate at metadata decode: index 8 is also used by several unrelated entity families. Keep the swell witnesses at fuse `10`, `5`, and `0`, and the flash witnesses around each five-tick boundary; a generic integer test cannot detect a class mix-up or a cadence reversal.
 
 ## Configuration
 

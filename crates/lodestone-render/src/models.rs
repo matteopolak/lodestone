@@ -137,6 +137,13 @@ use crate::fluid_grid::{FluidGrid, FluidNeighborCell};
 use crate::section::{Face, SECTION_SIZE};
 use crate::translucency::RenderLayer;
 
+/// The textured-material weight in the primed explosive's white fuse overlay.
+///
+/// The reference overlay texel at the lit endpoint stores alpha byte `63`.
+/// The shader therefore mixes `white` with `material` at `63 / 255`, rather
+/// than replacing the material with opaque white.
+pub const WHITE_FLASH_MATERIAL_WEIGHT: f32 = 63.0 / 255.0;
+
 /// A vertex for arbitrary baked-model geometry. Wider than the packed cube
 /// vertex because model positions need sub-block precision and atlas-relative
 /// UVs rather than per-face tile ids.
@@ -1246,6 +1253,23 @@ pub fn mesh_item_quads(quads: &[BakedQuad], pose: Mat4, gui_light: GuiLight) -> 
 /// path does not have.
 #[must_use]
 pub fn mesh_moving_block_quads(quads: &[BakedQuad], pose: Mat4, light: u8) -> ModelMesh {
+    mesh_moving_block_quads_with_white_flash(quads, pose, light, false)
+}
+
+/// [`mesh_moving_block_quads`] with the white flash overlay used by a primed
+/// explosive during alternating five-tick fuse windows.
+///
+/// The marker reuses the alpha byte of `tint_rgb_override`: `255` remains the
+/// existing explicit RGB override, while `1` is an otherwise-unreachable white
+/// overlay marker. This keeps moving block geometry in the existing
+/// model vertex format and leaves all ordinary callers byte-identical.
+#[must_use]
+pub fn mesh_moving_block_quads_with_white_flash(
+    quads: &[BakedQuad],
+    pose: Mat4,
+    light: u8,
+    white_flash: bool,
+) -> ModelMesh {
     let mut mesh = ModelMesh::default();
     for quad in quads {
         let base = mesh.vertices.len() as u32;
@@ -1269,7 +1293,11 @@ pub fn mesh_moving_block_quads(quads: &[BakedQuad], pose: Mat4, light: u8) -> Mo
                 // red sand, gravel are untinted) resolves to anyway, so the
                 // deviation is currently invisible. A moving *grass block* would
                 // show it as the default green rather than the local biome's.
-                tint_rgb_override: [0, 0, 0, 0],
+                tint_rgb_override: if white_flash {
+                    [255, 255, 255, 1]
+                } else {
+                    [0, 0, 0, 0]
+                },
             });
         }
         mesh.indices
@@ -3206,5 +3234,37 @@ mod tests {
         let mesh = mesh_moving_block_quads(&[], Mat4::IDENTITY, 0xF0);
         assert_eq!(mesh.quad_count(), 0);
         assert!(mesh.vertices.is_empty() && mesh.indices.is_empty());
+    }
+
+    #[test]
+    fn moving_block_white_flash_uses_the_dedicated_vertex_marker() {
+        let flashed = mesh_moving_block_quads_with_white_flash(
+            &[down_quad()],
+            Mat4::IDENTITY,
+            0xF0,
+            true,
+        );
+        assert!(flashed
+            .vertices
+            .iter()
+            .all(|vertex| vertex.tint_rgb_override == [255, 255, 255, 1]));
+
+        let plain = mesh_moving_block_quads(&[down_quad()], Mat4::IDENTITY, 0xF0);
+        assert!(plain
+            .vertices
+            .iter()
+            .all(|vertex| vertex.tint_rgb_override == [0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn white_flash_is_a_blend_not_an_opaque_replacement() {
+        // A dark material makes the two hypotheses visibly different:
+        // 0.2 would become 1.0 under replacement, but the reference overlay
+        // keeps exactly 63/255 of that material.
+        let material = 0.2_f32;
+        let blended = 1.0 - WHITE_FLASH_MATERIAL_WEIGHT
+            + material * WHITE_FLASH_MATERIAL_WEIGHT;
+        assert!((blended - 0.802_352_96).abs() < f32::EPSILON);
+        assert!(blended < 0.9, "the white overlay must not erase the material");
     }
 }
