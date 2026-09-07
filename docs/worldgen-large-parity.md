@@ -26,7 +26,7 @@ The completion rows repeat observations for every target, so the parser first de
 
 The capture is deliberately external and is not checked into the repository. Its provenance fields and fixed digests prevent silently replaying a changed artifact; the accepted root freeze digests are `ade151a2bd6a5840c0548d70dd763a3f5060b301fbf2b2cf043af5de365ea4e8` (Overworld) and `c56e42d8ac751d348ff8461b4284c783f24702437039b682b37dca426b497048` (Nether), and the accepted manifest digest is checked against the manifest supplied to the test as well.
 
-`LifecycleReplayPlan` is a static per-target optimisation over that authenticated full replay. It walks events backwards from the packet's 3 by 3 light domain, selecting direct writers within Chebyshev distance two and recursively including earlier mutable dependencies within the audited distance-four bound. Destination admission is a separate clipped closure: for `(-8,-8)` in the accepted 18 by 18 tiled capture the plan retains 59 FEATURES events and admits 105 resident destinations. Events remain in authenticated order, source-local top-layer work remains immediately after FEATURES, and spills are applied only to admitted destinations. The Nether adapter consequently computes 159 unique pre-decoration columns for this irregular clipped closure, compared with 484 for the full replay. The ignored `full_and_pruned_lifecycle_replay_have_identical_target_packet_bytes` control compares raw packet bytes for that target using exactly its 3 by 3 packet-light neighbourhood. The streaming comparator selects this pruned plan automatically only when `LODESTONE_LARGE_PARITY_MAX_CHUNKS=1` and `LODESTONE_LARGE_PARITY_SCAN_ALL` is unset; multi-target and scan-all runs retain full replay as acceptance authority. End manifests never enter this lifecycle-only branch and use the retained-source comparator. The lifecycle unit negative control mutates event order and observes plan construction reject it; geometry, event count, and order mismatches fail closed.
+`LifecycleReplayPlan` is a static per-target optimisation over that authenticated full replay. It walks events backwards from the packet's 3 by 3 light domain, selecting direct writers within Chebyshev distance two and recursively including earlier mutable dependencies within the audited distance-four bound. Destination admission is a separate clipped closure. Events remain in authenticated order, source-local top-layer work remains immediately after FEATURES, and spills are applied only to admitted destinations. The Nether adapter computes only the unique pre-decoration columns in the selected closure rather than the full replay's closure. The ignored `full_and_pruned_lifecycle_replay_have_identical_target_packet_bytes` control compares raw packet bytes for the audited corner using exactly its 3 by 3 packet-light neighbourhood; its audited closure counts remain a control on the plan itself, not an assumption in the production comparator. The streaming comparator selects this pruned plan automatically for a one-chunk fail-fast prefix (`LODESTONE_LARGE_PARITY_MAX_CHUNKS=1` with `LODESTONE_LARGE_PARITY_SCAN_ALL` unset). `LODESTONE_LARGE_PARITY_TARGET_INDEX` is the explicit arbitrary-target form: it selects one zero-based row from the authenticated 16 by 16 manifest, seeks directly to that 32-byte digest, and builds the plan for `capture.target_order[index]`. It requires the 16 by 16 Overworld or Nether lifecycle manifest, cannot be combined with scan-all, and accepts only an unset limit or `LODESTONE_LARGE_PARITY_MAX_CHUNKS=1`; invalid, out-of-range, or ambiguous combinations fail closed. Multi-target and scan-all runs retain full replay as acceptance authority. End manifests never enter this lifecycle-only branch and use the retained-source comparator. The lifecycle unit negative control mutates event order and observes plan construction reject it; geometry, event count, and order mismatches fail closed.
 
 To run the bounded lifecycle gate:
 
@@ -35,8 +35,31 @@ LODESTONE_LARGE_PARITY_MANIFEST=/absolute/path/overworld-partial.lwp \
 LODESTONE_LARGE_PARITY_LIFECYCLE_CAPTURE_ROOT=/private/tmp/lodestone-worldgen-lifecycle-capture-20260907-r1/out \
 LODESTONE_LARGE_PARITY_MAX_CHUNKS=1 \
   cargo test -p lodestone-v26-2 --test large_worldgen_parity \
+parity_manifest_streams_before_rust_comparison -- --ignored --nocapture
+```
+
+To inspect an arbitrary target without replaying the other 323 lifecycle
+admissions, set its zero-based manifest index. For example, Nether index `7`
+is `(-1,-8)` in the accepted target order:
+
+```text
+LODESTONE_LARGE_PARITY_MANIFEST=/absolute/path/nether-partial.lwp \
+LODESTONE_LARGE_PARITY_LIFECYCLE_CAPTURE_ROOT=/private/tmp/lodestone-worldgen-lifecycle-capture-20260907-r1/out \
+LODESTONE_LARGE_PARITY_TARGET_INDEX=7 \
+LODESTONE_LARGE_PARITY_MAX_CHUNKS=1 \
+  cargo test -p lodestone-v26-2 --test large_worldgen_parity \
   parity_manifest_streams_before_rust_comparison -- --ignored --nocapture
 ```
+
+The target index is a selector, not a request to consume a prefix: the reader
+authenticates the complete payload first, then seeks to and reads exactly the
+selected digest. This keeps the manifest acceptance check intact while making
+the replay cost depend on the selected target's closure.
+
+`nether_target_index_7_full_and_pruned_packet_bytes_match` is the corresponding
+raw-byte identity control for index `7`. It is ignored because its full side
+replays all 324 admissions; run it only when the long-running control has been
+reviewed.
 
 The default is fail-fast at the first target digest mismatch. `LODESTONE_LARGE_PARITY_SCAN_ALL=1` consumes the bounded prefix and retains the existing packet component report, while `LODESTONE_LARGE_PARITY_DIAGNOSTIC_OUT` writes the bounded coordinate/state evidence. The Nether invocation uses its Nether partial manifest and the same capture root; set `LODESTONE_LARGE_PARITY_LIFECYCLE_CAPTURE` to one dimension-specific capture directory when a root contains more than the two named directories.
 
