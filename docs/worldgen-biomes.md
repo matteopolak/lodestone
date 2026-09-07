@@ -70,13 +70,20 @@ column whose surface biome is unrelated. The Badlands surface rule (its terracot
 lookup) is ported — `Rule::Bandlands`/`BandBlocks`, a 192-entry table built once per
 world seed and now interned to `StateId`s rather than re-derived per probe, with `math::round`
 providing Java's half-up rounding semantics `f64::round`'s half-away-from-zero does not match.
+The ceiling-depth scan starts from the fixed below-generation-window sentinel `-2032 << 4`,
+independent of the dimension's configured minimum Y, until it finds a lower non-stone block.
+The pre-surface classifier treats `air`, `cave_air` and `void_air` as the same empty class, while
+water and lava (including states with a level property) remain fluids.
 
 Performance-wise, the surface stage historically dominated worldgen's heap allocation (every probe
 built and cloned `String`s for `pre`/`biome_at`/matched-rule results); it is now interned end to end
 — `PreState` carries a `StateId` plus a cheap `PreClass` (air/fluid/stone) rather than deriving
 classification from a string per probe, and the diff handed to materialisation is a `FastMap` keyed
 by position, read only by point lookup (never iterated) so hasher choice cannot leak into palette
-order.
+order. Parsed condition sources also receive compact cache slots: X/Z predicates and 2-D noise live
+for one column, while biome, depth, water, vertical-gradient and 3-D noise predicates are refreshed
+for each scanned Y position. This preserves the context's lazy invalidation domains without mutable
+state in the shared rule tree.
 
 ### Freeze-top-layer (snow and ice)
 

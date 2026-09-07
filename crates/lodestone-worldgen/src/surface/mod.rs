@@ -60,6 +60,7 @@
 //! `x,y,z`. No Mojang source is transliterated — this is written from the
 //! documented algorithm and checked against the running server (plan §11).
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -74,6 +75,12 @@ use crate::rng::{PositionalRandomFactory, RandomSource, AnyPositionalFactory};
 
 /// The vanilla `Integer.MIN_VALUE` sentinel meaning "no water above".
 const NO_WATER: i32 = i32::MIN;
+
+/// Fixed below-generation-window sentinel for the ceiling-depth scan.
+///
+/// This value is deliberately independent of the dimension's configured
+/// minimum Y. The scan keeps it until it finds a lower non-stone block.
+const WAY_BELOW_MIN_Y: i32 = -2032 << 4;
 
 /// The **sparse** surface diff [`SurfaceSystem::build_surface`] returns: local
 /// `(x, y, z)` -> the interned state a surface rule rewrote that position to.
@@ -186,41 +193,55 @@ pub type BlockCanon = HashMap<String, String>;
 /// a context).
 enum Cond {
     AbovePreliminarySurface,
-    /// `biome` — a per-column runtime check
+    /// `biome` — a per-position runtime check
     /// (`ctx.biome` membership) rather than a build-time constant, since a
     /// generator run no longer has one fixed biome for its whole life. The
     /// list is the rule's raw `biome_is` set, exactly as written in JSON.
-    BiomeIs(Vec<String>),
+    BiomeIs {
+        list: Vec<String>,
+        cache: usize,
+    },
     NoiseThreshold {
         noise: NormalNoise,
         min: f64,
         max: f64,
         is_3d: bool,
+        cache: usize,
     },
     Not(Box<Cond>),
-    Steep,
+    Steep {
+        cache: usize,
+    },
     StoneDepth {
         offset: i32,
         add_surface_depth: bool,
         secondary_depth_range: i32,
         ceiling: bool,
+        cache: usize,
     },
-    Temperature,
-    Hole,
+    Temperature {
+        cache: usize,
+    },
+    Hole {
+        cache: usize,
+    },
     VerticalGradient {
         factory: AnyPositionalFactory,
         true_at_and_below: i32,
         false_at_and_above: i32,
+        cache: usize,
     },
     Water {
         offset: i32,
         surface_depth_multiplier: i32,
         add_stone_depth: bool,
+        cache: usize,
     },
     YAbove {
         anchor_y: i32,
         surface_depth_multiplier: i32,
         add_stone_depth: bool,
+        cache: usize,
     },
 }
 
@@ -395,8 +416,89 @@ fn make_bands<R: RandomSource>(random: &mut R, clay_bands: &mut [String], base_w
     }
 }
 
+/// A lazily-filled condition result. The epoch is advanced when the scan
+/// changes its X/Z column or its Y position, matching the two invalidation
+/// domains of the surface-rule context.
+#[derive(Debug, Clone, Copy)]
+struct CachedBool {
+    epoch: u64,
+    value: bool,
+}
+
+/// Scratch storage for the surface-rule context's lazy predicates.
+///
+/// The rule tree is shared by every generated chunk and therefore cannot hold
+/// mutable per-scan values itself. Conversely, putting a new map behind every
+/// condition would add hashing and allocation to the hottest stage. The parser
+/// assigns each condition a compact slot, and one small epoch-tagged array is
+/// reused for a complete `build_surface`/`top_material` call. X/Z conditions
+/// survive Y updates; Y conditions are invalidated for every scanned block.
+#[derive(Debug)]
+struct EvalCache {
+    xz_epoch: u64,
+    y_epoch: u64,
+    xz: Vec<CachedBool>,
+    y: Vec<CachedBool>,
+}
+
+impl EvalCache {
+    fn new(xz_slots: usize, y_slots: usize) -> Self {
+        Self {
+            // Zero is reserved as the never-valid epoch. The first update
+            // advances both domains before any slot can be read.
+            xz_epoch: 0,
+            y_epoch: 0,
+            xz: vec![CachedBool { epoch: 0, value: false }; xz_slots],
+            y: vec![CachedBool { epoch: 0, value: false }; y_slots],
+        }
+    }
+
+    fn begin_column(&mut self) {
+        self.xz_epoch = self.xz_epoch.wrapping_add(1).max(1);
+        self.y_epoch = self.y_epoch.wrapping_add(1).max(1);
+    }
+
+    fn begin_y(&mut self) {
+        self.y_epoch = self.y_epoch.wrapping_add(1).max(1);
+    }
+
+    fn get_xz(&self, slot: usize) -> Option<bool> {
+        let entry = self
+            .xz
+            .get(slot)
+            .unwrap_or_else(|| panic!("surface X/Z cache slot {slot} is out of range"));
+        (self.xz_epoch != 0 && entry.epoch == self.xz_epoch).then_some(entry.value)
+    }
+
+    fn set_xz(&mut self, slot: usize, value: bool) {
+        let epoch = self.xz_epoch;
+        let entry = self
+            .xz
+            .get_mut(slot)
+            .unwrap_or_else(|| panic!("surface X/Z cache slot {slot} is out of range"));
+        *entry = CachedBool { epoch, value };
+    }
+
+    fn get_y(&self, slot: usize) -> Option<bool> {
+        let entry = self
+            .y
+            .get(slot)
+            .unwrap_or_else(|| panic!("surface Y cache slot {slot} is out of range"));
+        (self.y_epoch != 0 && entry.epoch == self.y_epoch).then_some(entry.value)
+    }
+
+    fn set_y(&mut self, slot: usize, value: bool) {
+        let epoch = self.y_epoch;
+        let entry = self
+            .y
+            .get_mut(slot)
+            .unwrap_or_else(|| panic!("surface Y cache slot {slot} is out of range"));
+        *entry = CachedBool { epoch, value };
+    }
+}
+
 /// Per-column / per-Y scan state mirroring vanilla's own surface-rule scan context.
-struct Ctx<'a> {
+struct Ctx<'a, 'b> {
     block_x: i32,
     block_z: i32,
     surface_depth: i32,
@@ -406,18 +508,22 @@ struct Ctx<'a> {
     water_height: i32,
     stone_depth_above: i32,
     stone_depth_below: i32,
-    /// This column's biome id — consulted by [`Cond::BiomeIs`],
+    /// This position's biome id — consulted by [`Cond::BiomeIs`],
     /// which only ever *compares* it.
     ///
     /// **Borrowed, not owned** (U21). It was a `String`, and both producers had
-    /// to clone into it: `build_surface`'s `biome_at` callback once per column
-    /// (0.35% of the surface stage's allocations) and `top_material` once per
-    /// call on the carver path. Neither clone bought anything — the biome table
-    /// this borrows from outlives the scan in both cases.
+    /// to clone into it: `build_surface`'s `biome_at` callback for each
+    /// rule-evaluated position and `top_material` once per call on the carver
+    /// path. Neither clone bought anything — the biome table this borrows from
+    /// outlives the scan in both cases.
     biome: &'a str,
     /// This column's biome's "cold enough to snow" answer — consulted by
     /// [`Cond::Temperature`]. See [`crate::biome::cold_enough_to_snow`].
     cold_enough_to_snow: bool,
+    /// Per-call lazy condition storage. This is borrowed so concurrent
+    /// generators never share cache state, while one scan can reuse X/Z
+    /// values across all Y positions in its column.
+    cache: &'b mut EvalCache,
 }
 
 /// The interpreter: instantiated noises + parsed rule tree, ready to build any
@@ -440,6 +546,12 @@ pub struct SurfaceSystem {
     master: AnyPositionalFactory,
     prelim: Density,
     rule: Rule,
+    /// Number of condition slots used by the scan's X/Z-local and Y-local
+    /// lazy predicates. Slots are assigned while parsing so one context can
+    /// cache repeated condition sources without giving the rule tree interior
+    /// mutability or sharing mutable state between generator calls.
+    xz_cache_slots: usize,
+    y_cache_slots: usize,
 }
 
 impl SurfaceSystem {
@@ -487,8 +599,12 @@ impl SurfaceSystem {
             interner,
             min_y,
             gen_depth,
+            xz_cache_slots: Cell::new(0),
+            y_cache_slots: Cell::new(0),
         };
         let rule = parser.rule(&settings["surface_rule"]);
+        let xz_cache_slots = parser.xz_cache_slots.get();
+        let y_cache_slots = parser.y_cache_slots.get();
 
         Self {
             min_y,
@@ -500,6 +616,8 @@ impl SurfaceSystem {
             master,
             prelim,
             rule,
+            xz_cache_slots,
+            y_cache_slots,
         }
     }
 
@@ -587,11 +705,11 @@ impl SurfaceSystem {
     ///   interned id plus [`PreClass`]. Out-of-range Y is treated as air, and
     ///   this method applies that clamp itself, so `pre` is never asked.
     /// * `heightmap` yields `WORLD_SURFACE_WG` at local `(x, z)`.
-    /// * `biome_at` yields `(biome id, cold_enough_to_snow)` at local `(x, z)`
-    ///   — called once per column, not per block, so a caller
-    ///   whose biome varies at quart (not block) resolution can cheaply
-    ///   return the same pair for every `(x, z)` in one 4×4 cell. The id is
-    ///   **borrowed** from the caller's own biome table (U21).
+    /// * `biome_at` yields `(biome id, cold_enough_to_snow)` at local `(x, y, z)`
+    ///   — called for each stone position that reaches rule evaluation. A
+    ///   caller whose biome varies at quart (not block) resolution can cheaply
+    ///   answer from its precomputed cell context. The id is **borrowed** from
+    ///   the caller's own biome table (U21).
     /// * `min_block_x`/`min_block_z` are the chunk's world-space origin.
     ///
     /// Returns a **sparse** [`SurfaceDiff`]: local `(x, y, z)` -> interned
@@ -623,7 +741,7 @@ impl SurfaceSystem {
     ) -> SurfaceDiff {
         let y_lo = self.min_y;
         let y_hi = self.min_y + self.gen_depth; // exclusive
-        let way_below_min_y = self.min_y << 4;
+        let way_below_min_y = WAY_BELOW_MIN_Y;
 
         // The four `preliminary_surface_level` corner values for this chunk's
         // corner cell. Every one of the 256 columns below shares the same
@@ -645,6 +763,7 @@ impl SurfaceSystem {
             self.preliminary_surface_level((corner_cell_x + 1) << 4, (corner_cell_z + 1) << 4);
 
         let mut out: SurfaceDiff = SurfaceDiff::default();
+        let mut cache = EvalCache::new(self.xz_cache_slots, self.y_cache_slots);
 
         // Immutable classification source: vanilla only ever reads the original
         // column while scanning (`old` is at the current, not-yet-written Y and
@@ -662,6 +781,7 @@ impl SurfaceSystem {
                 let block_x = min_block_x + x;
                 let block_z = min_block_z + z;
                 let surface_depth = self.surface_depth(block_x, block_z);
+                cache.begin_column();
                 let mut ctx = Ctx {
                     block_x,
                     block_z,
@@ -682,6 +802,7 @@ impl SurfaceSystem {
                     stone_depth_below: 0,
                     biome: "",
                     cold_enough_to_snow: false,
+                    cache: &mut cache,
                 };
 
                 let height = heightmap(x, z) + 1;
@@ -725,12 +846,13 @@ impl SurfaceSystem {
                         ctx.water_height = water_height;
                         ctx.stone_depth_above = stone_above_depth;
                         ctx.stone_depth_below = stone_below_depth;
+                        ctx.cache.begin_y();
                         let (biome, cold_enough_to_snow) = biome_at(x, y, z);
                         ctx.biome = biome;
                         ctx.cold_enough_to_snow = cold_enough_to_snow;
 
                         if old.state == self.default_block {
-                            if let Some(state) = self.try_apply(&self.rule, heightmap, &ctx) {
+                            if let Some(state) = self.try_apply(&self.rule, heightmap, &mut ctx) {
                                 out.insert((x, y, z), state);
                             }
                         }
@@ -774,7 +896,10 @@ impl SurfaceSystem {
         cold_enough_to_snow: bool,
     ) -> Option<String> {
         let surface_depth = self.surface_depth(block_x, block_z);
-        let ctx = Ctx {
+        let mut cache = EvalCache::new(self.xz_cache_slots, self.y_cache_slots);
+        cache.begin_column();
+        cache.begin_y();
+        let mut ctx = Ctx {
             block_x,
             block_z,
             surface_depth,
@@ -786,8 +911,9 @@ impl SurfaceSystem {
             stone_depth_below: 1,
             biome,
             cold_enough_to_snow,
+            cache: &mut cache,
         };
-        self.try_apply(&self.rule, heightmap, &ctx)
+        self.try_apply(&self.rule, heightmap, &mut ctx)
             .map(|id| self.interner.name_of(id).to_string())
     }
 
@@ -795,7 +921,7 @@ impl SurfaceSystem {
         &self,
         rule: &Rule,
         heightmap: &dyn Fn(i32, i32) -> i32,
-        ctx: &Ctx<'_>,
+        ctx: &mut Ctx<'_, '_>,
     ) -> Option<StateId> {
         match rule {
             Rule::Block(state) => Some(*state),
@@ -818,50 +944,81 @@ impl SurfaceSystem {
         }
     }
 
-    fn test(&self, cond: &Cond, heightmap: &dyn Fn(i32, i32) -> i32, ctx: &Ctx<'_>) -> bool {
+    fn test(&self, cond: &Cond, heightmap: &dyn Fn(i32, i32) -> i32, ctx: &mut Ctx<'_, '_>) -> bool {
         match cond {
-            Cond::BiomeIs(list) => list.iter().any(|b| b.as_str() == ctx.biome),
+            Cond::BiomeIs { list, cache } => {
+                if let Some(value) = ctx.cache.get_y(*cache) {
+                    return value;
+                }
+                let value = list.iter().any(|b| b.as_str() == ctx.biome);
+                ctx.cache.set_y(*cache, value);
+                value
+            }
             Cond::AbovePreliminarySurface => ctx.block_y >= ctx.min_surface_level,
             Cond::NoiseThreshold {
                 noise,
                 min,
                 max,
                 is_3d,
+                cache,
             } => {
-                let v = if *is_3d {
-                    noise.get_value(
-                        f64::from(ctx.block_x),
-                        f64::from(ctx.block_y),
-                        f64::from(ctx.block_z),
-                    )
+                let cached = if *is_3d {
+                    ctx.cache.get_y(*cache)
                 } else {
-                    noise.get_value(f64::from(ctx.block_x), 0.0, f64::from(ctx.block_z))
+                    ctx.cache.get_xz(*cache)
                 };
-                v >= *min && v <= *max
+                if let Some(value) = cached {
+                    return value;
+                }
+                let x = f64::from(ctx.block_x);
+                let y = f64::from(ctx.block_y);
+                let z = f64::from(ctx.block_z);
+                let v = if *is_3d {
+                    noise.get_value(x, y, z)
+                } else {
+                    noise.get_value(x, 0.0, z)
+                };
+                let value = v >= *min && v <= *max;
+                if *is_3d {
+                    ctx.cache.set_y(*cache, value);
+                } else {
+                    ctx.cache.set_xz(*cache, value);
+                }
+                value
             }
             Cond::Not(inner) => !self.test(inner, heightmap, ctx),
-            Cond::Steep => {
+            Cond::Steep { cache } => {
+                if let Some(value) = ctx.cache.get_xz(*cache) {
+                    return value;
+                }
                 let cbx = ctx.block_x & 15;
                 let cbz = ctx.block_z & 15;
                 let z_north = (cbz - 1).max(0);
                 let z_south = (cbz + 1).min(15);
                 let h_north = heightmap(cbx, z_north);
                 let h_south = heightmap(cbx, z_south);
-                if h_south >= h_north + 4 {
-                    return true;
-                }
-                let x_west = (cbx - 1).max(0);
-                let x_east = (cbx + 1).min(15);
-                let h_west = heightmap(x_west, cbz);
-                let h_east = heightmap(x_east, cbz);
-                h_west >= h_east + 4
+                let value = if h_south >= h_north + 4 {
+                    true
+                } else {
+                    let x_west = (cbx - 1).max(0);
+                    let x_east = (cbx + 1).min(15);
+                    let h_west = heightmap(x_west, cbz);
+                    let h_east = heightmap(x_east, cbz);
+                    h_west >= h_east + 4
+                };
+                ctx.cache.set_xz(*cache, value);
+                value
             }
             Cond::StoneDepth {
                 offset,
                 add_surface_depth,
                 secondary_depth_range,
                 ceiling,
+                cache,
             } => {
+                if let Some(value) = ctx.cache.get_y(*cache) {
+                    return value;
+                }
                 let stone_depth = if *ceiling {
                     ctx.stone_depth_below
                 } else {
@@ -883,58 +1040,92 @@ impl SurfaceSystem {
                         f64::from(*secondary_depth_range),
                     ) as i32
                 };
-                stone_depth <= 1 + offset + surface_depth + secondary
+                let value = stone_depth <= 1 + offset + surface_depth + secondary;
+                ctx.cache.set_y(*cache, value);
+                value
             }
-            Cond::Temperature => ctx.cold_enough_to_snow,
-            Cond::Hole => ctx.surface_depth <= 0,
+            Cond::Temperature { cache } => {
+                if let Some(value) = ctx.cache.get_y(*cache) {
+                    return value;
+                }
+                let value = ctx.cold_enough_to_snow;
+                ctx.cache.set_y(*cache, value);
+                value
+            }
+            Cond::Hole { cache } => {
+                if let Some(value) = ctx.cache.get_xz(*cache) {
+                    return value;
+                }
+                let value = ctx.surface_depth <= 0;
+                ctx.cache.set_xz(*cache, value);
+                value
+            }
             Cond::VerticalGradient {
                 factory,
                 true_at_and_below,
                 false_at_and_above,
+                cache,
             } => {
+                if let Some(value) = ctx.cache.get_y(*cache) {
+                    return value;
+                }
                 let block_y = ctx.block_y;
-                if block_y <= *true_at_and_below {
-                    return true;
-                }
-                if block_y >= *false_at_and_above {
-                    return false;
-                }
-                let probability = map(
-                    f64::from(block_y),
-                    f64::from(*true_at_and_below),
-                    f64::from(*false_at_and_above),
-                    1.0,
-                    0.0,
-                );
-                let mut random = factory.at(ctx.block_x, block_y, ctx.block_z);
-                f64::from(random.next_float()) < probability
+                let value = if block_y <= *true_at_and_below {
+                    true
+                } else if block_y >= *false_at_and_above {
+                    false
+                } else {
+                    let probability = map(
+                        f64::from(block_y),
+                        f64::from(*true_at_and_below),
+                        f64::from(*false_at_and_above),
+                        1.0,
+                        0.0,
+                    );
+                    let mut random = factory.at(ctx.block_x, block_y, ctx.block_z);
+                    f64::from(random.next_float()) < probability
+                };
+                ctx.cache.set_y(*cache, value);
+                value
             }
             Cond::Water {
                 offset,
                 surface_depth_multiplier,
                 add_stone_depth,
+                cache,
             } => {
-                ctx.water_height == NO_WATER
+                if let Some(value) = ctx.cache.get_y(*cache) {
+                    return value;
+                }
+                let value = ctx.water_height == NO_WATER
                     || ctx.block_y
                         + if *add_stone_depth {
                             ctx.stone_depth_above
                         } else {
                             0
                         }
-                        >= ctx.water_height + offset + ctx.surface_depth * surface_depth_multiplier
+                        >= ctx.water_height + offset + ctx.surface_depth * surface_depth_multiplier;
+                ctx.cache.set_y(*cache, value);
+                value
             }
             Cond::YAbove {
                 anchor_y,
                 surface_depth_multiplier,
                 add_stone_depth,
+                cache,
             } => {
-                ctx.block_y
+                if let Some(value) = ctx.cache.get_y(*cache) {
+                    return value;
+                }
+                let value = ctx.block_y
                     + if *add_stone_depth {
                         ctx.stone_depth_above
                     } else {
                         0
                     }
-                    >= anchor_y + ctx.surface_depth * surface_depth_multiplier
+                    >= anchor_y + ctx.surface_depth * surface_depth_multiplier;
+                ctx.cache.set_y(*cache, value);
+                value
             }
         }
     }
@@ -951,9 +1142,26 @@ struct RuleParser<'a, 'b> {
     interner: &'a StateInterner,
     min_y: i32,
     gen_depth: i32,
+    /// Compact cache-slot counters. Each parsed condition gets its own slot,
+    /// preserving the source-level lazy-condition identity even when two
+    /// conditions happen to have equal JSON values.
+    xz_cache_slots: Cell<usize>,
+    y_cache_slots: Cell<usize>,
 }
 
 impl RuleParser<'_, '_> {
+    fn next_xz_cache_slot(&self) -> usize {
+        let slot = self.xz_cache_slots.get();
+        self.xz_cache_slots.set(slot + 1);
+        slot
+    }
+
+    fn next_y_cache_slot(&self) -> usize {
+        let slot = self.y_cache_slots.get();
+        self.y_cache_slots.set(slot + 1);
+        slot
+    }
+
     fn rule(&self, node: &Value) -> Rule {
         let ty = strip(node["type"].as_str().expect("rule type"));
         match ty {
@@ -1043,21 +1251,35 @@ impl RuleParser<'_, '_> {
                             node["biome_is"]
                                 .as_str()
                                 .expect("biome_is must be a string or array of strings")
-                                .to_string(),
+                            .to_string(),
                         ]
                     });
-                Cond::BiomeIs(list)
+                Cond::BiomeIs {
+                    list,
+                    cache: self.next_y_cache_slot(),
+                }
             }
-            "noise_threshold" => Cond::NoiseThreshold {
-                noise: self
-                    .builder
-                    .noise(node["noise"].as_str().expect("noise id")),
-                min: node["min_threshold"].as_f64().expect("min_threshold"),
-                max: node["max_threshold"].as_f64().expect("max_threshold"),
-                is_3d: node["is_3d"].as_bool().unwrap_or(false),
-            },
+            "noise_threshold" => {
+                let is_3d = node["is_3d"].as_bool().unwrap_or(false);
+                let cache = if is_3d {
+                    self.next_y_cache_slot()
+                } else {
+                    self.next_xz_cache_slot()
+                };
+                Cond::NoiseThreshold {
+                    noise: self
+                        .builder
+                        .noise(node["noise"].as_str().expect("noise id")),
+                    min: node["min_threshold"].as_f64().expect("min_threshold"),
+                    max: node["max_threshold"].as_f64().expect("max_threshold"),
+                    is_3d,
+                    cache,
+                }
+            }
             "not" => Cond::Not(Box::new(self.cond(&node["invert"]))),
-            "steep" => Cond::Steep,
+            "steep" => Cond::Steep {
+                cache: self.next_xz_cache_slot(),
+            },
             "stone_depth" => Cond::StoneDepth {
                 offset: node["offset"].as_i64().expect("offset") as i32,
                 add_surface_depth: node["add_surface_depth"]
@@ -1067,9 +1289,14 @@ impl RuleParser<'_, '_> {
                     .as_i64()
                     .expect("secondary_depth_range") as i32,
                 ceiling: node["surface_type"].as_str() == Some("ceiling"),
+                cache: self.next_y_cache_slot(),
             },
-            "temperature" => Cond::Temperature,
-            "hole" => Cond::Hole,
+            "temperature" => Cond::Temperature {
+                cache: self.next_y_cache_slot(),
+            },
+            "hole" => Cond::Hole {
+                cache: self.next_xz_cache_slot(),
+            },
             "vertical_gradient" => Cond::VerticalGradient {
                 factory: self
                     .builder
@@ -1078,6 +1305,7 @@ impl RuleParser<'_, '_> {
                     .fork_positional(),
                 true_at_and_below: self.resolve_anchor(&node["true_at_and_below"]),
                 false_at_and_above: self.resolve_anchor(&node["false_at_and_above"]),
+                cache: self.next_y_cache_slot(),
             },
             "water" => Cond::Water {
                 offset: node["offset"].as_i64().expect("offset") as i32,
@@ -1086,6 +1314,7 @@ impl RuleParser<'_, '_> {
                     .expect("surface_depth_multiplier")
                     as i32,
                 add_stone_depth: node["add_stone_depth"].as_bool().expect("add_stone_depth"),
+                cache: self.next_y_cache_slot(),
             },
             "y_above" => Cond::YAbove {
                 anchor_y: self.resolve_anchor(&node["anchor"]),
@@ -1094,6 +1323,7 @@ impl RuleParser<'_, '_> {
                     .expect("surface_depth_multiplier")
                     as i32,
                 add_stone_depth: node["add_stone_depth"].as_bool().expect("add_stone_depth"),
+                cache: self.next_y_cache_slot(),
             },
             other => panic!("unhandled surface condition type: minecraft:{other}"),
         }
@@ -1118,7 +1348,11 @@ fn strip(id: &str) -> &str {
 }
 
 fn is_air(s: &str) -> bool {
-    s == "minecraft:air"
+    let name = s.split('[').next().unwrap_or(s);
+    matches!(
+        name,
+        "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
+    )
 }
 
 fn is_fluid(s: &str) -> bool {
@@ -1205,4 +1439,52 @@ pub fn identity_canon(settings: &Value) -> BlockCanon {
     walk(&settings["surface_rule"], &mut canon);
     walk(&settings["default_block"], &mut canon);
     canon
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{class_of_name, EvalCache, PreClass, WAY_BELOW_MIN_Y};
+
+    #[test]
+    fn block_classification_treats_all_air_states_as_air() {
+        for name in [
+            "minecraft:air",
+            "minecraft:cave_air",
+            "minecraft:void_air",
+        ] {
+            assert_eq!(class_of_name(name), PreClass::Air, "{name}");
+        }
+        assert_eq!(
+            class_of_name("minecraft:water[level=0]"),
+            PreClass::Fluid,
+            "water remains fluid even with a level property"
+        );
+        assert_eq!(class_of_name("minecraft:stone"), PreClass::Stone);
+    }
+
+    #[test]
+    fn condition_cache_respects_xz_and_y_epochs() {
+        let mut cache = EvalCache::new(1, 1);
+        assert_eq!(cache.get_xz(0), None, "unstarted X/Z epoch must not hit");
+        assert_eq!(cache.get_y(0), None, "unstarted Y epoch must not hit");
+
+        cache.begin_column();
+        cache.set_xz(0, true);
+        cache.set_y(0, false);
+        assert_eq!(cache.get_xz(0), Some(true));
+        assert_eq!(cache.get_y(0), Some(false));
+
+        cache.begin_y();
+        assert_eq!(cache.get_xz(0), Some(true), "Y updates preserve X/Z values");
+        assert_eq!(cache.get_y(0), None, "Y updates invalidate Y values");
+
+        cache.begin_column();
+        assert_eq!(cache.get_xz(0), None, "a new column invalidates X/Z values");
+    }
+
+    #[test]
+    fn ceiling_scan_sentinel_is_dimension_independent() {
+        assert_eq!(WAY_BELOW_MIN_Y, -2032 << 4);
+        assert_ne!(WAY_BELOW_MIN_Y, -64 << 4);
+    }
 }
