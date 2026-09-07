@@ -95,14 +95,17 @@ Every biome document for both dimensions already carries its full decoration ste
 every referenced configured/placed feature is bundled. `EndGenerator` reads the fixed platform entry
 from `the_end` and applies its 5×5, four-row block shape after materialization. The independent
 `EndPlatformOracle.java` fixture covers those 100 writes. The generator constructs a three-by-three
-decoration region before serving its centre, so outer-island and chorus writers from neighbouring
-source chunks compose into the served column. Return gateways carry their block position, exit, and
+decoration region before serving its centre, so outer-island, chorus, and spike writers from
+neighbouring source chunks compose into the served column. A spike is selected only by the chunk
+holding its centre; its circular block footprint is then clipped by each served column, while its
+crystal remains a gameplay entity. Return gateways carry their block position, exit, and
 exact-teleport flag through `EndColumn::gateways`; `ChunkColumn::from_end` turns that sidecar into a
 persisted block entity. The End-filtered structure registry samples city starts from the End's own
-pre-surface density field and applies intersecting template pieces before palette extraction. The
-positive `end_city_jvm.txt` capture gates one start, its nine-piece sequence, and two placed block
-states. The terrain fixture deliberately stops before later writers, so it is not evidence that they
-were placed.
+pre-surface density field and applies intersecting template pieces before palette extraction. Its
+recursive assembler keeps its ship choice at city scope, including collision-rejected branches, so
+the template list cannot acquire a second ship later in the same city. The positive
+`end_city_jvm.txt` capture gates one start, its nine-piece sequence, and two placed block states. The
+terrain fixture deliberately stops before later writers, so it is not evidence that they were placed.
 The integrated server's `DimensionalSource` builds the Nether and End sources lazily behind the
 same chunk lifecycle used by the primary dimension. A generated Nether column therefore passes
 through the shared cache, the dimension-specific Anvil region path when persistence is enabled,

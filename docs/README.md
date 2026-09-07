@@ -756,6 +756,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   (`biome/`), a full 3-D biome grid plus ore veins (`overworld/biome_cells.rs`,
   `overworld/veins.rs`), surface rule application (`surface/`), and the final
   `TOP_LAYER_MODIFICATION` decoration step (`feature/top_layer.rs`).
+- [Worldgen coral features](./worldgen-coral-features.md) — The coral feature module
+  places the three configured warm-ocean geometries: a branching tree, a claw-shaped
+  set of branches, and a hollow shell-like mushroom. They share the registry-selected
+  coral-block state and water survival rules.
 - [Decoration: features, vegetation, ores and generation-time mob spawns](./worldgen-decoration.md) —
   Everything that runs after terrain shape and biome assignment to make a chunk look
   inhabited: the `GenerationStep.Decoration` driver and its placement-modifier
@@ -780,10 +784,25 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   freezes one generated reference world first, then records a full SHA-256 digest of
   each chunk's canonical semantic record; the old v2 raw 16-bit packet fingerprints
   are explicitly rejected.
+- [Woodland mansion assembly](./worldgen-mansion.md) — `structure::mansion` builds
+  the template-piece list for the currently supported exterior of a woodland mansion.
+  It is intentionally partial: the seeded plan, entrance, exterior walls, corridor
+  floors, and roof layers place blocks; room dividers, doors, carpets, stairs, secret
+  rooms, furnishings, and entity markers do not yet place.
+- [Nether fortress generation](./worldgen-nether-fortress.md) — The Nether fortress
+  generator constructs the entire recursive bridge-and-castle piece tree for a placed
+  start. Its output is a set of oriented, collision-free bounding boxes plus eager
+  masonry, air, fence, stair, chest, garden, and spawner block lists translated
+  together into the Nether's permitted structure height interval.
 - [Nether world generation](./worldgen-nether.md) —
   `lodestone_worldgen::nether::NetherGenerator` produces a complete Nether column from
   the bundled noise, biome, feature, tag and structure documents. It uses the legacy
   world-generation random family required by the Nether settings.
+- [Root-system world generation](./worldgen-root-system.md) — The root-system
+  configured feature grows an elevated nested feature through a cave ceiling, replaces
+  eligible material in the column below it, and scatters hanging roots around the
+  original candidate. It is the root-column path used by the lush-cave decoration
+  data.
 - [Structure generation](./worldgen-structures.md) — The structure engine: deciding
   which chunk gets which structure for a seed, and turning that decision into real
   blocks — jittered-grid and concentric-ring placement, `.nbt` structure templates

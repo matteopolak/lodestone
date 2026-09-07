@@ -69,7 +69,7 @@
 //! | reference behaviour | here | ledger row |
 //! |---|---|---|
 //! | the block-writing walk's random is the decorating chunk's | the structure's own stream, continuing after piece layout | `coded:region_random` |
-//! | the sturdy-neighbours check / block placement skip positions outside the decorating chunk's box | no chunk gate; `structure_place_stage` clips instead | `mineshaft:post_process_scope` |
+//! | interior, support, and sturdy-neighbour reads ignore positions outside the decorating chunk's box | output writes are clipped, but those reads still inspect the neighbouring terrain | `mineshaft:post_process_scope` |
 //!
 //! # Dependencies
 //!

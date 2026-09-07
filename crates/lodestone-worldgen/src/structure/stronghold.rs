@@ -12,11 +12,12 @@
 //! resolved second) rather than anything in [`super::jigsaw`].
 //!
 //! Unlike a mineshaft, a stronghold's pieces need **no shared block canvas**:
-//! no stronghold piece ever reads another piece's
-//! territory (the replaceability override is never applied, so it defaults to
-//! `true`), so every piece's block list is a pure function of its own box,
-//! orientation and random draws. That is what keeps this module free of
-//! [`super::mineshaft::View`]'s shared-overlay machinery.
+//! they retain one ordered list of selected writes, then replay it against the
+//! final chunk grid. Only the ten enclosing selector boxes use that grid read:
+//! each skips its candidate when the existing state is air. Every later
+//! decoration remains unconditional, so preserving write order is enough and
+//! this module stays free of [`super::mineshaft::View`]'s shared-overlay
+//! machinery.
 //!
 //! # How it works
 //!
@@ -77,17 +78,8 @@
 //!   never duplicated in the table, so equality on the enum is equality on
 //!   the reference's own object identity.
 //!
-//! # Deviations
+//! # Remaining deviation
 //!
-//! * **The "only overwrite non-air" flag on every box-generation call is not
-//!   honoured.** A faithful implementation's flag means "only overwrite a block that is not
-//!   already air", read from the real generated terrain a stronghold is
-//!   dug into — meaningful *because* the block-writing pass runs after noise and surface generation
-//!   in a full pipeline. Every coded piece in this crate resolves its
-//!   blocks eagerly at start time (`StartContext`'s pre-surface shape, see
-//!   [`super::coded`]'s module doc), before there is any terrain to read, so
-//!   the predicate has nothing to consult and every write here is
-//!   unconditional. Ledgered as `stronghold:skip_air_shell`.
 //! * **The portal room's spawner carries no spawn-entry payload.** `minecraft:spawner`
 //!   is placed as a bare block; assigning its entity type needs an
 //!   entity-spawning layer this crate does not have yet, the same gap
@@ -98,15 +90,16 @@
 //!
 //! [`StartContext`] only for [`StartContext::sea_level`] and
 //! [`StartContext::min_y`] — a stronghold reads no column heights and no
-//! biome, unlike every other coded structure in this crate. [`super::coded`]
-//! for [`Facing`] and the mirror/rotate transform
-//! [`super::template::BlockState`] applies.
+//! biome, unlike every other coded structure in this crate. The placement
+//! stage supplies the post-surface [`crate::dense_grid::DenseBlockGrid`] that
+//! [`place_post_surface_blocks`] reads. [`super::coded`] supplies [`Facing`],
+//! and [`super::template::BlockState`] supplies the mirror/rotate transform.
 
 use lodestone_worldgen_core::rng::RandomSource;
 
 use super::coded::Facing;
 use super::template::{BlockState, Mirror, Rotation};
-use super::{BoundingBox, CodedBlock, CodedLoot, StartContext, StructurePiece};
+use super::{BoundingBox, CodedBlock, CodedLoot, PieceRefinement, StartContext, StructurePiece};
 
 /// The deepest a child piece may recurse.
 const MAX_DEPTH: i32 = 50;
@@ -118,6 +111,46 @@ const MAGIC_START_Y: i32 = 64;
 /// The absolute-distance spread
 /// bound, measured against the start piece's own box.
 const MAX_SPREAD: i32 = 112;
+
+/// One stronghold write, retained in post-process order until the real chunk
+/// grid is available.
+///
+/// The source implementation's selector-box overload has one special flag:
+/// when it is set, a candidate write lands only if the pre-existing grid state
+/// is not air. `only_if_non_air` records that flag alongside the selected state
+/// instead of applying it to every stronghold write. In particular, later
+/// unguarded decorations must still be able to overwrite a position whose
+/// earlier guarded shell write was skipped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostSurfaceWrite {
+    /// The selected and transformed state at its world position.
+    pub block: CodedBlock,
+    /// Whether this one write requires a non-air state already in the grid.
+    pub only_if_non_air: bool,
+}
+
+/// Applies a stronghold's ordered post-surface writes to one decorating grid.
+///
+/// A block state with properties is still air when its base name is one of the
+/// three air states. In particular, `minecraft:cave_air` is air for this
+/// guard, not a replaceable solid.
+pub fn place_post_surface_blocks(
+    world: &mut crate::dense_grid::DenseBlockGrid,
+    writes: &[PostSurfaceWrite],
+) {
+    for write in writes {
+        let [x, y, z] = write.block.pos;
+        let existing = world.get(x, y, z);
+        let existing_is_air = matches!(
+            existing.split('[').next(),
+            Some("minecraft:air" | "minecraft:cave_air" | "minecraft:void_air")
+        );
+        if write.only_if_non_air && existing_is_air {
+            continue;
+        }
+        world.set(x, y, z, &write.block.state);
+    }
+}
 
 /// A small-door piece's door type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -861,7 +894,7 @@ fn into_pieces<R: RandomSource>(tree: Tree, random: &mut R) -> Vec<StructurePiec
             node,
             mirror,
             rotation,
-            blocks: Vec::new(),
+            writes: Vec::new(),
             loot: Vec::new(),
         };
         post_process(&mut place, random);
@@ -873,14 +906,20 @@ fn into_pieces<R: RandomSource>(tree: Tree, random: &mut R) -> Vec<StructurePiec
             template: None,
             placement: None,
             extra_placements: Vec::new(),
-            blocks: Some(std::sync::Arc::new(place.blocks)),
+            // Stronghold's selector boxes inspect the already-surfaced grid,
+            // and all of a piece's writes must retain their relative order.
+            // `structure_place_stage` consumes this refinement instead of the
+            // normal eager-block list.
+            blocks: None,
             loot: place.loot,
             // `terrain_adaptation` is `bury` for `minecraft:stronghold`
             // (`assets/worldgen/structure/stronghold.json`), which the
             // beardifier's rigid-box path already handles with `beard: None`
             // — see [`super::beardifier`].
             beard: None,
-            refine: None,
+            refine: Some(PieceRefinement::StrongholdBlocks {
+                writes: std::sync::Arc::new(place.writes),
+            }),
         });
     }
     out
@@ -891,20 +930,31 @@ struct Place<'a> {
     node: &'a Node,
     mirror: Mirror,
     rotation: Rotation,
-    blocks: Vec<CodedBlock>,
+    writes: Vec<PostSurfaceWrite>,
     loot: Vec<CodedLoot>,
 }
 
 impl Place<'_> {
-    /// Places one block — mirror, then rotate, then record. The replaceability check is
-    /// never overridden for a stronghold piece, so it defaults to
-    /// `true` and every write is unconditional.
+    /// Places one unguarded block — mirror, then rotate, then retain its order.
     fn place(&mut self, state: &BlockState, x: i32, y: i32, z: i32) {
+        self.place_with_air_guard(state, x, y, z, false);
+    }
+
+    /// Places one selector-box candidate whose source flag is preserved for the
+    /// later post-surface grid check.
+    fn place_only_if_non_air(&mut self, state: &BlockState, x: i32, y: i32, z: i32) {
+        self.place_with_air_guard(state, x, y, z, true);
+    }
+
+    fn place_with_air_guard(&mut self, state: &BlockState, x: i32, y: i32, z: i32, only_if_non_air: bool) {
         let pos = self.node.world_pos(x, y, z);
         let transformed = state.mirror(self.mirror).rotate(self.rotation);
-        self.blocks.push(CodedBlock {
-            pos,
-            state: transformed.canonical(),
+        self.writes.push(PostSurfaceWrite {
+            block: CodedBlock {
+                pos,
+                state: transformed.canonical(),
+            },
+            only_if_non_air,
         });
     }
 
@@ -922,11 +972,44 @@ impl Place<'_> {
         }
     }
 
-    /// A selector-driven box using the smooth-stone selector — the
-    /// shell every room-shaped piece opens with: `cave_air` inside, a
-    /// randomised stone-brick variant on every face.
+    /// A solid-box overload whose writes carry the source's non-air guard.
     #[allow(clippy::too_many_arguments)]
-    fn generate_shell<R: RandomSource>(&mut self, x0: i32, y0: i32, z0: i32, x1: i32, y1: i32, z1: i32, random: &mut R) {
+    fn generate_box_only_if_non_air(
+        &mut self,
+        x0: i32,
+        y0: i32,
+        z0: i32,
+        x1: i32,
+        y1: i32,
+        z1: i32,
+        edge: &BlockState,
+        fill: &BlockState,
+    ) {
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                for z in z0..=z1 {
+                    let interior = y != y0 && y != y1 && x != x0 && x != x1 && z != z0 && z != z1;
+                    self.place_only_if_non_air(if interior { fill } else { edge }, x, y, z);
+                }
+            }
+        }
+    }
+
+    /// A selector-driven box using the smooth-stone selector. Its air guard is
+    /// recorded per call: the major enclosing shells use it, while their later
+    /// interior details do not.
+    #[allow(clippy::too_many_arguments)]
+    fn generate_shell<R: RandomSource>(
+        &mut self,
+        x0: i32,
+        y0: i32,
+        z0: i32,
+        x1: i32,
+        y1: i32,
+        z1: i32,
+        only_if_non_air: bool,
+        random: &mut R,
+    ) {
         let cave_air = BlockState::of("minecraft:cave_air");
         for y in y0..=y1 {
             for x in x0..=x1 {
@@ -944,9 +1027,17 @@ impl Place<'_> {
                         } else {
                             BlockState::of("minecraft:stone_bricks")
                         };
-                        self.place(&state, x, y, z);
+                        if only_if_non_air {
+                            self.place_only_if_non_air(&state, x, y, z);
+                        } else {
+                            self.place(&state, x, y, z);
+                        }
                     } else {
-                        self.place(&cave_air, x, y, z);
+                        if only_if_non_air {
+                            self.place_only_if_non_air(&cave_air, x, y, z);
+                        } else {
+                            self.place(&cave_air, x, y, z);
+                        }
                     }
                 }
             }
@@ -1087,9 +1178,12 @@ impl Place<'_> {
     /// plus a 64-bit loot-seed draw.
     fn create_chest<R: RandomSource>(&mut self, random: &mut R, x: i32, y: i32, z: i32, table: &str) {
         let pos = self.node.world_pos(x, y, z);
-        self.blocks.push(CodedBlock {
-            pos,
-            state: "minecraft:chest[facing=north,type=single,waterlogged=false]".to_string(),
+        self.writes.push(PostSurfaceWrite {
+            block: CodedBlock {
+                pos,
+                state: "minecraft:chest[facing=north,type=single,waterlogged=false]".to_string(),
+            },
+            only_if_non_air: false,
         });
         self.loot.push(CodedLoot {
             pos,
@@ -1110,7 +1204,7 @@ fn post_process<R: RandomSource>(p: &mut Place<'_>, random: &mut R) {
             left_child,
             right_child,
         } => {
-            p.generate_shell(0, 0, 0, 4, 4, 6, random);
+            p.generate_shell(0, 0, 0, 4, 4, 6, true, random);
             p.generate_small_door(random, door, 1, 1, 0);
             p.generate_small_door(random, SmallDoorType::Opening, 1, 1, 6);
             let east_torch = BlockState::parse("minecraft:wall_torch[facing=east]");
@@ -1127,13 +1221,13 @@ fn post_process<R: RandomSource>(p: &mut Place<'_>, random: &mut R) {
             }
         }
         Kind::PrisonHall { door } => {
-            p.generate_shell(0, 0, 0, 8, 4, 10, random);
+            p.generate_shell(0, 0, 0, 8, 4, 10, true, random);
             p.generate_small_door(random, door, 1, 1, 0);
             p.generate_box(1, 1, 10, 3, 3, 10, &cave_air, &cave_air);
-            p.generate_shell(4, 1, 1, 4, 3, 1, random);
-            p.generate_shell(4, 1, 3, 4, 3, 3, random);
-            p.generate_shell(4, 1, 7, 4, 3, 7, random);
-            p.generate_shell(4, 1, 9, 4, 3, 9, random);
+            p.generate_shell(4, 1, 1, 4, 3, 1, false, random);
+            p.generate_shell(4, 1, 3, 4, 3, 3, false, random);
+            p.generate_shell(4, 1, 7, 4, 3, 7, false, random);
+            p.generate_shell(4, 1, 9, 4, 3, 9, false, random);
             let ns = BlockState::parse("minecraft:iron_bars[east=false,north=true,south=true,waterlogged=false,west=false]");
             let nse = BlockState::parse("minecraft:iron_bars[east=true,north=true,south=true,waterlogged=false,west=false]");
             let we = BlockState::parse("minecraft:iron_bars[east=true,north=false,south=false,waterlogged=false,west=true]");
@@ -1155,7 +1249,7 @@ fn post_process<R: RandomSource>(p: &mut Place<'_>, random: &mut R) {
             p.place(&door_top, 4, 2, 8);
         }
         Kind::LeftTurn { door } => {
-            p.generate_shell(0, 0, 0, 4, 4, 4, random);
+            p.generate_shell(0, 0, 0, 4, 4, 4, true, random);
             p.generate_small_door(random, door, 1, 1, 0);
             if matches!(p.node.orientation, Facing::North | Facing::East) {
                 p.generate_box(0, 1, 1, 0, 3, 3, &cave_air, &cave_air);
@@ -1164,7 +1258,7 @@ fn post_process<R: RandomSource>(p: &mut Place<'_>, random: &mut R) {
             }
         }
         Kind::RightTurn { door } => {
-            p.generate_shell(0, 0, 0, 4, 4, 4, random);
+            p.generate_shell(0, 0, 0, 4, 4, 4, true, random);
             p.generate_small_door(random, door, 1, 1, 0);
             if matches!(p.node.orientation, Facing::North | Facing::East) {
                 p.generate_box(4, 1, 1, 4, 3, 3, &cave_air, &cave_air);
@@ -1173,7 +1267,7 @@ fn post_process<R: RandomSource>(p: &mut Place<'_>, random: &mut R) {
             }
         }
         Kind::RoomCrossing { door, room_type } => {
-            p.generate_shell(0, 0, 0, 10, 6, 10, random);
+            p.generate_shell(0, 0, 0, 10, 6, 10, true, random);
             p.generate_small_door(random, door, 4, 1, 0);
             p.generate_box(4, 1, 10, 6, 3, 10, &cave_air, &cave_air);
             p.generate_box(0, 1, 4, 0, 3, 6, &cave_air, &cave_air);
@@ -1250,7 +1344,7 @@ fn post_process<R: RandomSource>(p: &mut Place<'_>, random: &mut R) {
             }
         }
         Kind::StraightStairsDown { door } => {
-            p.generate_shell(0, 0, 0, 4, 10, 7, random);
+            p.generate_shell(0, 0, 0, 4, 10, 7, true, random);
             p.generate_small_door(random, door, 1, 7, 0);
             p.generate_small_door(random, SmallDoorType::Opening, 1, 1, 7);
             let stairs = BlockState::parse("minecraft:cobblestone_stairs[facing=south,half=bottom,shape=straight,waterlogged=false]");
@@ -1266,7 +1360,7 @@ fn post_process<R: RandomSource>(p: &mut Place<'_>, random: &mut R) {
             }
         }
         Kind::StairsDown { door, .. } => {
-            p.generate_shell(0, 0, 0, 4, 10, 4, random);
+            p.generate_shell(0, 0, 0, 4, 10, 4, true, random);
             p.generate_small_door(random, door, 1, 7, 0);
             p.generate_small_door(random, SmallDoorType::Opening, 1, 1, 4);
             p.place(&stone_bricks, 2, 6, 1);
@@ -1294,7 +1388,7 @@ fn post_process<R: RandomSource>(p: &mut Place<'_>, random: &mut R) {
             right_low,
             right_high,
         } => {
-            p.generate_shell(0, 0, 0, 9, 8, 10, random);
+            p.generate_shell(0, 0, 0, 9, 8, 10, true, random);
             p.generate_small_door(random, door, 4, 3, 0);
             if left_low {
                 p.generate_box(0, 3, 1, 0, 5, 3, &cave_air, &cave_air);
@@ -1309,14 +1403,14 @@ fn post_process<R: RandomSource>(p: &mut Place<'_>, random: &mut R) {
                 p.generate_box(9, 5, 7, 9, 7, 9, &cave_air, &cave_air);
             }
             p.generate_box(5, 1, 10, 7, 3, 10, &cave_air, &cave_air);
-            p.generate_shell(1, 2, 1, 8, 2, 6, random);
-            p.generate_shell(4, 1, 5, 4, 4, 9, random);
-            p.generate_shell(8, 1, 5, 8, 4, 9, random);
-            p.generate_shell(1, 4, 7, 3, 4, 9, random);
-            p.generate_shell(1, 3, 5, 3, 3, 6, random);
+            p.generate_shell(1, 2, 1, 8, 2, 6, false, random);
+            p.generate_shell(4, 1, 5, 4, 4, 9, false, random);
+            p.generate_shell(8, 1, 5, 8, 4, 9, false, random);
+            p.generate_shell(1, 4, 7, 3, 4, 9, false, random);
+            p.generate_shell(1, 3, 5, 3, 3, 6, false, random);
             p.generate_box(1, 3, 4, 3, 3, 4, &smooth_slab, &smooth_slab);
             p.generate_box(1, 4, 6, 3, 4, 6, &smooth_slab, &smooth_slab);
-            p.generate_shell(5, 1, 7, 7, 1, 8, random);
+            p.generate_shell(5, 1, 7, 7, 1, 8, false, random);
             p.generate_box(5, 1, 9, 7, 1, 9, &smooth_slab, &smooth_slab);
             p.generate_box(5, 2, 7, 7, 2, 7, &smooth_slab, &smooth_slab);
             p.generate_box(4, 5, 7, 4, 5, 9, &smooth_slab, &smooth_slab);
@@ -1326,7 +1420,7 @@ fn post_process<R: RandomSource>(p: &mut Place<'_>, random: &mut R) {
             p.place(&BlockState::parse("minecraft:wall_torch[facing=south]"), 6, 5, 6);
         }
         Kind::ChestCorridor { door } => {
-            p.generate_box(0, 0, 0, 4, 4, 6, &stone_bricks, &stone_bricks);
+            p.generate_box_only_if_non_air(0, 0, 0, 4, 4, 6, &stone_bricks, &stone_bricks);
             p.generate_small_door(random, door, 1, 1, 0);
             p.generate_small_door(random, SmallDoorType::Opening, 1, 1, 6);
             p.generate_box(3, 1, 2, 3, 1, 4, &stone_bricks, &stone_bricks);
@@ -1341,7 +1435,7 @@ fn post_process<R: RandomSource>(p: &mut Place<'_>, random: &mut R) {
         }
         Kind::Library { door, is_tall } => {
             let current_height = if is_tall { 11 } else { 6 };
-            p.generate_shell(0, 0, 0, 13, current_height - 1, 14, random);
+            p.generate_shell(0, 0, 0, 13, current_height - 1, 14, true, random);
             p.generate_small_door(random, door, 4, 1, 0);
             let cobweb = BlockState::of("minecraft:cobweb");
             p.generate_maybe_box(random, 0.07, 2, 1, 1, 11, 4, 13, &cobweb, &cobweb);
@@ -1442,18 +1536,18 @@ fn post_process<R: RandomSource>(p: &mut Place<'_>, random: &mut R) {
             }
         }
         Kind::PortalRoom => {
-            p.generate_shell(0, 0, 0, 10, 7, 15, random);
+            p.generate_shell(0, 0, 0, 10, 7, 15, false, random);
             p.generate_small_door(random, SmallDoorType::Grates, 4, 1, 0);
-            p.generate_shell(1, 6, 1, 1, 6, 14, random);
-            p.generate_shell(9, 6, 1, 9, 6, 14, random);
-            p.generate_shell(2, 6, 1, 8, 6, 2, random);
-            p.generate_shell(2, 6, 14, 8, 6, 14, random);
-            p.generate_shell(1, 1, 1, 2, 1, 4, random);
-            p.generate_shell(8, 1, 1, 9, 1, 4, random);
+            p.generate_shell(1, 6, 1, 1, 6, 14, false, random);
+            p.generate_shell(9, 6, 1, 9, 6, 14, false, random);
+            p.generate_shell(2, 6, 1, 8, 6, 2, false, random);
+            p.generate_shell(2, 6, 14, 8, 6, 14, false, random);
+            p.generate_shell(1, 1, 1, 2, 1, 4, false, random);
+            p.generate_shell(8, 1, 1, 9, 1, 4, false, random);
             let lava = BlockState::of("minecraft:lava");
             p.generate_box(1, 1, 1, 1, 1, 3, &lava, &lava);
             p.generate_box(9, 1, 1, 9, 1, 3, &lava, &lava);
-            p.generate_shell(3, 1, 8, 7, 1, 12, random);
+            p.generate_shell(3, 1, 8, 7, 1, 12, false, random);
             p.generate_box(4, 1, 9, 6, 1, 11, &lava, &lava);
             let ns_bars = BlockState::parse("minecraft:iron_bars[east=false,north=true,south=true,waterlogged=false,west=false]");
             let we_bars = BlockState::parse("minecraft:iron_bars[east=true,north=false,south=false,waterlogged=false,west=true]");
@@ -1468,9 +1562,9 @@ fn post_process<R: RandomSource>(p: &mut Place<'_>, random: &mut R) {
                 p.generate_box(x, 3, 15, x, 4, 15, &we_bars, &we_bars);
                 x += 2;
             }
-            p.generate_shell(4, 1, 5, 6, 1, 7, random);
-            p.generate_shell(4, 2, 6, 6, 2, 7, random);
-            p.generate_shell(4, 3, 7, 6, 3, 7, random);
+            p.generate_shell(4, 1, 5, 6, 1, 7, false, random);
+            p.generate_shell(4, 2, 6, 6, 2, 7, false, random);
+            p.generate_shell(4, 3, 7, 6, 3, 7, false, random);
             let stair = BlockState::parse("minecraft:stone_brick_stairs[facing=north,half=bottom,shape=straight,waterlogged=false]");
             for x in 4..=6 {
                 p.place(&stair, x, 1, 4);
@@ -1579,22 +1673,22 @@ mod tests {
             assert!(!pieces.is_empty(), "seed {seed}: empty piece list");
             let portal_rooms: Vec<_> = pieces.iter().filter(|p| p.id == "minecraft:shpr").collect();
             assert_eq!(portal_rooms.len(), 1, "seed {seed}: expected exactly one portal room");
-            let frames: Vec<_> = portal_rooms[0]
-                .blocks
-                .as_ref()
-                .unwrap()
+            let Some(PieceRefinement::StrongholdBlocks { writes }) = portal_rooms[0].refine.as_ref() else {
+                panic!("seed {seed}: portal room has no post-surface writes");
+            };
+            let frames: Vec<_> = writes
                 .iter()
-                .filter(|b| b.state.starts_with("minecraft:end_portal_frame"))
+                .filter(|write| write.block.state.starts_with("minecraft:end_portal_frame"))
                 .collect();
             assert_eq!(frames.len(), 12, "seed {seed}: expected 12 end portal frames");
             for f in &frames {
                 assert!(
-                    f.state.contains("facing=north")
-                        || f.state.contains("facing=south")
-                        || f.state.contains("facing=east")
-                        || f.state.contains("facing=west"),
+                    f.block.state.contains("facing=north")
+                        || f.block.state.contains("facing=south")
+                        || f.block.state.contains("facing=east")
+                        || f.block.state.contains("facing=west"),
                     "seed {seed}: frame with no recognised facing: {}",
-                    f.state
+                    f.block.state
                 );
             }
         }
@@ -1661,5 +1755,96 @@ mod tests {
         for p in &pieces {
             assert!(p.gen_depth <= MAX_DEPTH + 1, "gen_depth {} exceeds cap", p.gen_depth);
         }
+    }
+
+    /// The external predicate is `!existing_state.isAir()`: a guarded shell
+    /// candidate skips all three air states, but lands on a real solid. The
+    /// final write proves that later unguarded decoration is not accidentally
+    /// suppressed along with the guarded shell.
+    #[test]
+    fn guarded_shell_writes_use_the_external_non_air_predicate_in_order() {
+        let writes = [
+            PostSurfaceWrite {
+                block: CodedBlock {
+                    pos: [0, 0, 0],
+                    state: "minecraft:stone_bricks".to_string(),
+                },
+                only_if_non_air: true,
+            },
+            PostSurfaceWrite {
+                block: CodedBlock {
+                    pos: [1, 0, 0],
+                    state: "minecraft:mossy_stone_bricks".to_string(),
+                },
+                only_if_non_air: true,
+            },
+            PostSurfaceWrite {
+                block: CodedBlock {
+                    pos: [2, 0, 0],
+                    state: "minecraft:cracked_stone_bricks".to_string(),
+                },
+                only_if_non_air: true,
+            },
+            PostSurfaceWrite {
+                block: CodedBlock {
+                    pos: [0, 0, 0],
+                    state: "minecraft:smooth_stone_slab".to_string(),
+                },
+                only_if_non_air: false,
+            },
+        ];
+        let mut world = crate::dense_grid::DenseBlockGrid::new(0, 0, 0, 3, 1, 1, "minecraft:air");
+        world.set(1, 0, 0, "minecraft:stone");
+        world.set(2, 0, 0, "minecraft:cave_air");
+
+        place_post_surface_blocks(&mut world, &writes);
+
+        assert_eq!(world.get(0, 0, 0), "minecraft:smooth_stone_slab");
+        assert_eq!(world.get(1, 0, 0), "minecraft:mossy_stone_bricks");
+        assert_eq!(world.get(2, 0, 0), "minecraft:cave_air");
+    }
+
+    /// Control for the detector above: reversing the external predicate lets a
+    /// guarded write replace air and prevents it replacing stone. The two grids
+    /// must therefore disagree at both discriminator cells.
+    #[test]
+    fn inverted_non_air_guard_is_a_negative_control() {
+        let writes = [
+            PostSurfaceWrite {
+                block: CodedBlock {
+                    pos: [0, 0, 0],
+                    state: "minecraft:stone_bricks".to_string(),
+                },
+                only_if_non_air: true,
+            },
+            PostSurfaceWrite {
+                block: CodedBlock {
+                    pos: [1, 0, 0],
+                    state: "minecraft:mossy_stone_bricks".to_string(),
+                },
+                only_if_non_air: true,
+            },
+        ];
+        let mut expected = crate::dense_grid::DenseBlockGrid::new(0, 0, 0, 2, 1, 1, "minecraft:air");
+        expected.set(1, 0, 0, "minecraft:stone");
+        let mut inverted = expected.clone();
+
+        place_post_surface_blocks(&mut expected, &writes);
+        for write in &writes {
+            let [x, y, z] = write.block.pos;
+            let existing_is_air = matches!(
+                inverted.get(x, y, z).split('[').next(),
+                Some("minecraft:air" | "minecraft:cave_air" | "minecraft:void_air")
+            );
+            if write.only_if_non_air && !existing_is_air {
+                continue;
+            }
+            inverted.set(x, y, z, &write.block.state);
+        }
+
+        assert_eq!(expected.get(0, 0, 0), "minecraft:air");
+        assert_eq!(expected.get(1, 0, 0), "minecraft:mossy_stone_bricks");
+        assert_eq!(inverted.get(0, 0, 0), "minecraft:stone_bricks");
+        assert_eq!(inverted.get(1, 0, 0), "minecraft:stone");
     }
 }

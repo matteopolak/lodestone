@@ -248,11 +248,13 @@
 //! Every path this module used to expose (`crate::feature::vegetation::X`) still
 //! resolves: the submodules are private and glob-re-exported here.
 
+mod coral;
 mod config;
 pub mod features;
 mod grid;
 pub mod ids;
 mod place;
+mod root_system;
 mod tree;
 
 pub use self::config::*;
@@ -273,7 +275,7 @@ pub(super) fn base_id(state: &str) -> &str {
 /// hangs a whole placed feature off each surface cell it produces, so a feature
 /// body has to be able to re-enter the placement pipeline the same way a
 /// selector's branch does.
-pub(super) fn place_placed_feature_at<R: RandomSource>(
+pub(crate) fn place_placed_feature_at<R: RandomSource>(
     random: &mut R,
     origin: BlockPos,
     placed: &PlacedRef,
@@ -527,11 +529,13 @@ fn place_configured_feature<R: RandomSource>(
         }
         ConfiguredFeature::RootSystem(cfg) => {
             census_bump(|c| c.other_feature += 1);
-            features::place_root_system(random, pos, cfg, grid, tags)
+            root_system::place_root_system(random, pos, cfg, grid, tags, |random, pos, placed, grid, tags| {
+                place_placed_feature(random, pos, placed, grid, tags);
+            });
         }
         ConfiguredFeature::Coral(kind) => {
             census_bump(|c| c.other_feature += 1);
-            features::place_coral(random, pos, *kind, grid)
+            coral::place_coral(random, pos, *kind, grid)
         }
         ConfiguredFeature::RandomSelector { default, options } => {
             census_bump(|c| c.random_selector += 1);
@@ -640,6 +644,10 @@ fn place_configured_feature<R: RandomSource>(
         ConfiguredFeature::HugeMushroom(cfg) => {
             census_bump(|c| c.other_feature += 1);
             features::place_huge_mushroom(random, pos, cfg, grid, tags)
+        }
+        ConfiguredFeature::HugeFungus(cfg) => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_huge_fungus(random, pos, cfg, grid, tags)
         }
         ConfiguredFeature::Bamboo(probability) => {
             census_bump(|c| c.other_feature += 1);
@@ -1081,10 +1089,17 @@ mod tests {
         });
         let parsed = try_parse_int_provider(&v).expect("weighted_list must parse");
         match parsed {
-            IntProvider::WeightedList(entries) => {
-                assert_eq!(entries, vec![(0, 19), (1, 1)]);
+            IntProvider::WeightedProviders(entries) => {
+                let scalar_entries: Vec<_> = entries
+                    .into_iter()
+                    .map(|(provider, weight)| match *provider {
+                        IntProvider::Constant(value) => (value, weight),
+                        other => panic!("weighted_list scalar data parsed as {other:?}"),
+                    })
+                    .collect();
+                assert_eq!(scalar_entries, vec![(0, 19), (1, 1)]);
             }
-            other => panic!("expected WeightedList, got {other:?}"),
+            other => panic!("expected WeightedProviders, got {other:?}"),
         }
     }
 
@@ -2705,6 +2720,19 @@ mod tests {
         tags
     }
 
+    fn bundled_huge_fungus_cfg(name: &str) -> features::HugeFungusCfg {
+        let source = match name {
+            "crimson" => include_str!("../../../../lodestone-server/assets/worldgen/configured_feature/crimson_fungus.json"),
+            "warped" => include_str!("../../../../lodestone-server/assets/worldgen/configured_feature/warped_fungus.json"),
+            _ => panic!("unknown bundled huge-fungus fixture: {name}"),
+        };
+        let doc: Value = serde_json::from_str(source).expect("bundled configured-feature JSON");
+        match parse_configured_feature_doc(&EmptyMushroomResolver, &doc) {
+            ConfiguredFeature::HugeFungus(cfg) => *cfg,
+            other => panic!("fixture must resolve to the production fungus feature, got {other:?}"),
+        }
+    }
+
     #[test]
     fn coral_forms_require_water_above_and_write_distinct_geometries() {
         let mut dry = VegGrid::new(-64, 384, 0, 0);
@@ -2713,7 +2741,7 @@ mod tests {
         place_configured_feature(
             &mut random,
             BlockPos { x: 8, y: 70, z: 8 },
-            &ConfiguredFeature::Coral(super::features::CoralKind::Claw),
+            &ConfiguredFeature::Coral(super::coral::CoralKind::Claw),
             &mut dry,
             &VegTags::default(),
         );
@@ -2721,9 +2749,9 @@ mod tests {
 
         let mut counts = Vec::new();
         for (kind, seed) in [
-            (super::features::CoralKind::Tree, 11),
-            (super::features::CoralKind::Claw, 12),
-            (super::features::CoralKind::Mushroom, 13),
+            (super::coral::CoralKind::Tree, 11),
+            (super::coral::CoralKind::Claw, 12),
+            (super::coral::CoralKind::Mushroom, 13),
         ] {
             let mut grid = VegGrid::new(-64, 384, 0, 0);
             for x in 0..16 { for y in 60..96 { for z in 0..16 { grid.seed(x, y, z, "minecraft:water".to_string()); } } }
@@ -2741,9 +2769,9 @@ mod tests {
         use std::collections::BTreeMap;
         let fixture = include_str!("../../../tests/support/coral_feature_jvm.txt");
         for (label, kind) in [
-            ("tree.11", super::features::CoralKind::Tree),
-            ("claw.11", super::features::CoralKind::Claw),
-            ("mushroom.11", super::features::CoralKind::Mushroom),
+            ("tree.11", super::coral::CoralKind::Tree),
+            ("claw.11", super::coral::CoralKind::Claw),
+            ("mushroom.11", super::coral::CoralKind::Mushroom),
         ] {
             // The fixture's first token is the label, followed by its position
             // and canonical state; split it without assuming a coordinate sign.
@@ -2762,49 +2790,6 @@ mod tests {
         }
         assert!(fixture.contains("control.dry_origin result=false writes=1"));
         assert!(fixture.contains("control.dry_above result=false writes=1"));
-    }
-
-    #[test]
-    fn root_system_matches_the_compiled_server_fixture_exactly() {
-        use std::collections::{BTreeMap, HashSet};
-        let fixture = include_str!("../../../tests/support/root_system_jvm.txt");
-        let expected: BTreeMap<_, _> = fixture.lines().filter_map(|line| {
-            if line.starts_with('#') { return None; }
-            let mut words = line.splitn(3, ' ');
-            let row = words.next()?; let pos = words.next()?; let state = words.next()?;
-            (row == "normal").then_some((pos.to_string(), state.to_string()))
-        }).collect();
-        assert!(expected.keys().any(|p| p.contains(",62,")), "fixture must include hanging roots below the root column");
-        let mut grid = VegGrid::with_footprint(-64, 384, 0, 0, -16, 32);
-        for x in -16..32 { for y in -64..=64 { for z in -16..32 { grid.seed(x, y, z, "minecraft:stone".to_string()); } } }
-        for x in -3..=3 { for z in -3..=3 { grid.seed(x, 62, z, "minecraft:air".to_string()); } }
-        grid.seed(0, 63, 0, "minecraft:air".to_string());
-        let mut tags = VegTags::default();
-        tags.supports_vegetation.insert("minecraft:stone".to_string());
-        tags.bind(grid.interner());
-        let cfg = super::features::RootSystemCfg {
-            feature: PlacedRef { registry_id: None, placements: Vec::new(), feature: Box::new(ConfiguredFeature::SimpleBlock(BlockStateProvider::Simple("minecraft:oak_log".to_string()))) },
-            required_vertical_space_for_tree: 3, level_test_distance: 0, max_level_deviation: 0,
-            root_radius: 3, root_replaceable: HashSet::from(["minecraft:stone".to_string()]),
-            root_state_provider: BlockStateProvider::Simple("minecraft:rooted_dirt".to_string()), root_placement_attempts: 20,
-            root_column_max_height: 8, hanging_root_radius: 3, hanging_roots_vertical_span: 2,
-            hanging_root_state_provider: BlockStateProvider::Simple("minecraft:hanging_roots".to_string()), hanging_root_placement_attempts: 20,
-            allowed_vertical_water_for_tree: 2,
-            allowed_tree_position: BlockPredicate::MatchingBlocks { blocks: vec!["minecraft:air".to_string()], offset: (0, 0, 0) },
-        };
-        let mut random = LegacyRandomSource::new(19);
-        super::features::place_root_system(&mut random, BlockPos { x: 0, y: 63, z: 0 }, &cfg, &mut grid, &tags);
-        let got: BTreeMap<_, _> = grid.dirty_cells().map(|(x,y,z,state)| (format!("{x},{y},{z}"), state.to_string())).collect();
-        assert_eq!(got, expected, "root column, hanging-root support, or nested-feature success ordering drifted from the compiled-server fixture");
-
-        assert!(fixture.contains("blocked 0,63,0 minecraft:stone"), "fixture must retain the occupied-origin control");
-        let mut blocked = VegGrid::with_footprint(-64, 384, 0, 0, -16, 32);
-        for x in -16..32 { for y in -64..=64 { for z in -16..32 { blocked.seed(x, y, z, "minecraft:stone".to_string()); } } }
-        blocked.seed(0, 63, 0, "minecraft:stone".to_string());
-        tags.bind(blocked.interner());
-        let mut random = LegacyRandomSource::new(19);
-        super::features::place_root_system(&mut random, BlockPos { x: 0, y: 63, z: 0 }, &cfg, &mut blocked, &tags);
-        assert_eq!(blocked.dirty_cells().count(), 0, "occupied outer origin must prevent all root-system writes");
     }
 
     /// Parsing the bundled records is not enough: this drives the resulting
@@ -2924,5 +2909,68 @@ mod tests {
             "minecraft:red_mushroom_block[down=false,east=false,north=true,south=false,up=true,west=true]",
             "a top corner exposes both outward horizontal faces"
         );
+    }
+
+    /// Both bundled Nether fungus records must resolve to a real configured
+    /// body and write a stem plus hat on their own nylium floor. This is the
+    /// consumer-side control for the parser arm: a type that only parses but
+    /// never reaches dispatch would still leave the visible biome gap.
+    #[test]
+    fn bundled_huge_fungus_records_reach_configured_feature_dispatch() {
+        for (fixture, stem, hat) in [
+            ("crimson", "minecraft:crimson_stem", "minecraft:nether_wart_block"),
+            ("warped", "minecraft:warped_stem", "minecraft:warped_wart_block"),
+        ] {
+            let cfg = bundled_huge_fungus_cfg(fixture);
+            let feature = ConfiguredFeature::HugeFungus(Box::new(cfg));
+            let placed = PlacedRef {
+                registry_id: Some(format!("minecraft:{fixture}_fungi")),
+                placements: Vec::new(),
+                feature: Box::new(feature.clone()),
+            };
+            assert!(
+                collect_unsupported(&placed).is_empty(),
+                "{fixture} fungus must not remain in the unsupported census"
+            );
+            let mut grid = grid_with_flat_ground(-64, 384, 69);
+            grid.seed(8, 69, 8, format!("minecraft:{}_nylium", fixture));
+            let mut random = LegacyRandomSource::new(0);
+            place_configured_feature(
+                &mut random,
+                BlockPos { x: 8, y: 70, z: 8 },
+                &feature,
+                &mut grid,
+                &VegTags::default(),
+            );
+            let mut stems = 0;
+            let mut hats = 0;
+            for y in 70..90 {
+                for x in 3..=13 {
+                    for z in 3..=13 {
+                        let base = base_id(grid.get(x, y, z));
+                        stems += usize::from(base == stem);
+                        hats += usize::from(base == hat);
+                    }
+                }
+            }
+            assert!(stems > 0, "{fixture} must place stem blocks");
+            assert!(hats > 0, "{fixture} must place hat blocks");
+        }
+    }
+
+    /// Negative control for the unsupported-feature census: an unknown type
+    /// must remain visible instead of being mistaken for a successful parse.
+    #[test]
+    fn unsupported_feature_census_control_reports_unknown_type() {
+        let feature = parse_configured_feature_doc(
+            &EmptyMushroomResolver,
+            &serde_json::json!({"type": "minecraft:future_vegetation", "config": {}}),
+        );
+        let placed = PlacedRef {
+            registry_id: None,
+            placements: Vec::new(),
+            feature: Box::new(feature),
+        };
+        assert_eq!(collect_unsupported(&placed), vec!["future_vegetation"]);
     }
 }

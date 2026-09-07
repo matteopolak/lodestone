@@ -178,6 +178,28 @@ fn fixed_end_platform_is_composed_from_the_biome_feature() {
     assert_eq!(writes, 100, "fixture must contain the complete 5x5x4 platform");
 }
 
+/// The spike source is the chunk containing its centre, while its footprint can
+/// reach an adjacent served column. These predicted cells come from a direct
+/// bundled-server feature control for this seed: centre `(42, 0)`, radius `4`,
+/// height `100`; the control observed obsidian at `(42, 99, 0)` and air at the
+/// one-cell-outside position `(47, 99, 0)`.
+#[test]
+fn end_spikes_are_feature_writes_with_cross_chunk_clipping() {
+    let generator = generator(SEED);
+
+    let producer = generator.column(2, 0);
+    assert_eq!(producer.block_state(10, 99, 0), "minecraft:obsidian", "spike centre belongs to its producer chunk");
+
+    let neighbour = generator.column(2, -1);
+    assert_eq!(neighbour.block_state(10, 99, 15), "minecraft:obsidian", "the source at z=0 writes across the southern chunk edge");
+
+    // Negative control: x=48 is just beyond this radius-four spike's last
+    // write at x=46. This distinguishes a circular feature footprint from an
+    // accidental chunk-wide or square fill.
+    let outside = generator.column(3, -1);
+    assert_eq!(outside.block_state(0, 99, 15), "minecraft:air", "one cell outside the independently predicted spike footprint");
+}
+
 /// The city fixture is a positive capture from an independently generated End
 /// region. It gates the start location, all emitted piece templates, and two
 /// post-placement controls through the production [`EndGenerator::column`] path.

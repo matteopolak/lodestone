@@ -35,7 +35,7 @@ const FAT_TOWER_BRIDGES: [Bridge; 4] = [
 enum Branch {
     HouseTower,
     Tower,
-    TowerBridge { ship_created: bool },
+    TowerBridge,
     FatTower,
 }
 
@@ -48,6 +48,11 @@ pub(super) fn generate<R: RandomSource>(
     random: &mut R,
 ) -> Vec<StructurePiece> {
     let mut pieces = Vec::new();
+    // The ship choice belongs to this complete city, not one recursive bridge
+    // invocation. Keep it outside `Branch` so every descendant observes a ship
+    // selected by an earlier sibling, including a sibling later rejected for a
+    // collision.
+    let mut ship_created = false;
     let Some(mut last) = add_root(&mut pieces, templates, "base_floor", origin, rotation, true) else {
         return pieces;
     };
@@ -61,7 +66,7 @@ pub(super) fn generate<R: RandomSource>(
         };
         last = piece;
     }
-    let _ = recursive(templates, Branch::Tower, 1, &last, [0, 0, 0], &mut pieces, random);
+    let _ = recursive(templates, Branch::Tower, 1, &last, [0, 0, 0], &mut pieces, random, &mut ship_created);
     pieces
 }
 
@@ -104,18 +109,44 @@ fn add(
 
 fn recursive<R: RandomSource>(
     templates: &TemplateStore, branch: Branch, depth: i32, parent: &StructurePiece, offset: [i32; 3], existing: &mut Vec<StructurePiece>, random: &mut R,
+    ship_created: &mut bool,
 ) -> bool {
     if depth > MAX_DEPTH { return false; }
     let mut children = Vec::new();
-    let generated = generate_branch(templates, branch, depth, parent, offset, &mut children, random);
+    let generated = generate_branch(templates, branch, depth, parent, offset, &mut children, random, ship_created);
     if !generated { return false; }
     let tag = random.next_int();
     for child in &mut children { child.gen_depth = tag; }
-    if children.iter().any(|child| existing.iter().any(|old| child.bounding_box.intersects(old.bounding_box) && old.gen_depth != parent.gen_depth)) {
+    if has_rejected_collision(&children, existing, parent.gen_depth) {
         return false;
     }
     existing.extend(children);
     true
+}
+
+/// The first already-placed piece intersecting a candidate controls whether a
+/// recursive branch is kept. Later intersections do not replace that first
+/// result, so retain the insertion-order lookup instead of folding all boxes
+/// into one boolean.
+fn has_rejected_collision(children: &[StructurePiece], existing: &[StructurePiece], parent_gen_depth: i32) -> bool {
+    children.iter().any(|child| {
+        existing
+            .iter()
+            .find(|old| child.bounding_box.intersects(old.bounding_box))
+            .is_some_and(|old| old.gen_depth != parent_gen_depth)
+    })
+}
+
+/// Claims the one city-wide ship slot when this bridge's already-drawn choice
+/// selects it. A later bridge does not draw a replacement choice after the
+/// slot is occupied.
+fn claim_ship(ship_created: &mut bool, selected: bool) -> bool {
+    if !*ship_created && selected {
+        *ship_created = true;
+        true
+    } else {
+        false
+    }
 }
 
 fn add_child(
@@ -124,6 +155,7 @@ fn add_child(
 
 fn generate_branch<R: RandomSource>(
     templates: &TemplateStore, branch: Branch, depth: i32, parent: &StructurePiece, offset: [i32; 3], out: &mut Vec<StructurePiece>, random: &mut R,
+    ship_created: &mut bool,
 ) -> bool {
     let rotation = parent.placement.as_ref().map(|p| p.settings.rotation).unwrap_or(Rotation::None);
     match branch {
@@ -134,13 +166,13 @@ fn generate_branch<R: RandomSource>(
                 1 => {
                     let Some(piece) = add_child(out, templates, &last, [-1, 0, -1], "second_floor_2", rotation, false) else { return false; }; last = piece;
                     let Some(piece) = add_child(out, templates, &last, [-1, 8, -1], "second_roof", rotation, false) else { return false; }; last = piece;
-                    let _ = recursive(templates, Branch::Tower, depth + 1, &last, [0, 0, 0], out, random);
+                    let _ = recursive(templates, Branch::Tower, depth + 1, &last, [0, 0, 0], out, random, ship_created);
                 }
                 _ => {
                     let Some(piece) = add_child(out, templates, &last, [-1, 0, -1], "second_floor_2", rotation, false) else { return false; }; last = piece;
                     let Some(piece) = add_child(out, templates, &last, [-1, 4, -1], "third_floor_2", rotation, false) else { return false; }; last = piece;
                     let Some(piece) = add_child(out, templates, &last, [-1, 8, -1], "third_roof", rotation, true) else { return false; }; last = piece;
-                    let _ = recursive(templates, Branch::Tower, depth + 1, &last, [0, 0, 0], out, random);
+                    let _ = recursive(templates, Branch::Tower, depth + 1, &last, [0, 0, 0], out, random, ship_created);
                 }
             }
             true
@@ -158,17 +190,17 @@ fn generate_branch<R: RandomSource>(
                 for entry in TOWER_BRIDGES {
                     if random.next_bool() {
                         let Some(start) = add_child(out, templates, &bridge, entry.offset, "bridge_end", rotation_add(rotation, entry.rotation), true) else { return false; };
-                        let _ = recursive(templates, Branch::TowerBridge { ship_created: false }, depth + 1, &start, [0, 0, 0], out, random);
+                        let _ = recursive(templates, Branch::TowerBridge, depth + 1, &start, [0, 0, 0], out, random, ship_created);
                     }
                 }
                 add_child(out, templates, &last, [-1, 4, -1], "tower_top", rotation, true).is_some()
             } else if depth != 7 {
-                recursive(templates, Branch::FatTower, depth + 1, &last, [0, 0, 0], out, random)
+                recursive(templates, Branch::FatTower, depth + 1, &last, [0, 0, 0], out, random, ship_created)
             } else {
                 add_child(out, templates, &last, [-1, 4, -1], "tower_top", rotation, true).is_some()
             }
         }
-        Branch::TowerBridge { mut ship_created } => {
+        Branch::TowerBridge => {
             let length = random.next_int_bounded(4) + 1;
             let Some(mut last) = add_child(out, templates, parent, [0, 0, -4], "bridge_piece", rotation, true) else { return false; };
             last.gen_depth = -1;
@@ -178,13 +210,12 @@ fn generate_branch<R: RandomSource>(
                 let Some(piece) = add_child(out, templates, &last, offset, name, rotation, true) else { return false; }; last = piece;
                 next_y = if name == "bridge_piece" { 0 } else { 4 };
             }
-            if !ship_created && random.next_int_bounded(10 - depth) == 0 {
+            let selected_ship = !*ship_created && random.next_int_bounded(10 - depth) == 0;
+            if claim_ship(ship_created, selected_ship) {
                 let Some(_) = add_child(out, templates, &last, [-8 + random.next_int_bounded(8), next_y, -70 + random.next_int_bounded(10)], "ship", rotation, true) else { return false; };
-                ship_created = true;
-            } else if !recursive(templates, Branch::HouseTower, depth + 1, &last, [-3, next_y + 1, -11], out, random) { return false; }
+            } else if !recursive(templates, Branch::HouseTower, depth + 1, &last, [-3, next_y + 1, -11], out, random, ship_created) { return false; }
             let Some(mut end) = add_child(out, templates, &last, [4, next_y, 0], "bridge_end", rotation_add(rotation, Rotation::Cw180), true) else { return false; };
             end.gen_depth = -1;
-            let _ = ship_created;
             true
         }
         Branch::FatTower => {
@@ -196,11 +227,58 @@ fn generate_branch<R: RandomSource>(
                 for entry in FAT_TOWER_BRIDGES {
                     if random.next_bool() {
                         let Some(start) = add_child(out, templates, &last, entry.offset, "bridge_end", rotation_add(rotation, entry.rotation), true) else { return false; };
-                        let _ = recursive(templates, Branch::TowerBridge { ship_created: false }, depth + 1, &start, [0, 0, 0], out, random);
+                        let _ = recursive(templates, Branch::TowerBridge, depth + 1, &start, [0, 0, 0], out, random, ship_created);
                     }
                 }
             }
             add_child(out, templates, &last, [-2, 8, -2], "fat_tower_top", rotation, true).is_some()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::structure::BoundingBox;
+
+    fn piece(box_min: [i32; 3], box_max: [i32; 3], gen_depth: i32) -> StructurePiece {
+        StructurePiece {
+            id: "test".to_owned(),
+            bounding_box: BoundingBox { min: box_min, max: box_max },
+            orientation: None,
+            gen_depth,
+            template: None,
+            placement: None,
+            extra_placements: Vec::new(),
+            blocks: None,
+            loot: Vec::new(),
+            beard: None,
+            refine: None,
+        }
+    }
+
+    #[test]
+    fn first_intersecting_piece_controls_the_collision_decision() {
+        let child = piece([0, 0, 0], [1, 1, 1], 0);
+        let existing = vec![
+            piece([0, 0, 0], [1, 1, 1], 17),
+            piece([0, 0, 0], [1, 1, 1], 29),
+        ];
+        assert!(
+            !has_rejected_collision(&[child.clone()], &existing, 17),
+            "the first intersecting piece shares the parent generation depth"
+        );
+        assert!(
+            has_rejected_collision(&[child], &existing, 3),
+            "control: changing the first collision depth must reject the branch"
+        );
+    }
+
+    #[test]
+    fn a_city_claims_at_most_one_ship_across_its_bridges() {
+        let mut ship_created = false;
+        assert!(!claim_ship(&mut ship_created, false), "a non-selected bridge must not claim the slot");
+        assert!(claim_ship(&mut ship_created, true), "the first selected bridge claims the slot");
+        assert!(!claim_ship(&mut ship_created, true), "control: a later selected bridge must not create a second ship");
     }
 }

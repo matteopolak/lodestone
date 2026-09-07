@@ -1145,8 +1145,17 @@ impl NetherGenerator {
         };
         let seed = registry.seed();
         let (bx, bz) = (cx * 16, cz * 16);
+        let mut feature_randoms: HashMap<
+            String,
+            crate::rng::WorldgenRandom<crate::rng::LegacyRandomSource>,
+        > = HashMap::new();
         for (_, _, start) in &refs.entries {
             if !start.pieces_complete {
+                continue;
+            }
+            if start.bounding_box.intersects_xz(bx, bz, bx + 15, bz + 15)
+                && registry.place_fortress_for_chunk(start, cx, cz, &mut world)
+            {
                 continue;
             }
             // One `referencePos` per start, from its **first** piece's box, before
@@ -1170,36 +1179,51 @@ impl NetherGenerator {
                         world.set(block.pos[0], block.pos[1], block.pos[2], &block.state);
                     }
                 }
-                let Some(placement) = &piece.placement else {
-                    continue;
-                };
-                let origin = crate::structure::template::PlaceOrigin {
-                    position: placement.position,
-                    reference,
-                    seed,
-                };
-                placement
-                    .template
-                    .place(origin, &placement.settings, &mut world);
-                // A `list_pool_element` writes several templates at one position, in
-                // document order — vanilla's own list-pool-element place's own loop.
-                for extra in &piece.extra_placements {
+                if let Some(placement) = &piece.placement {
                     let origin = crate::structure::template::PlaceOrigin {
-                        position: extra.position,
+                        position: placement.position,
                         reference,
                         seed,
                     };
-                    extra.template.place(origin, &extra.settings, &mut world);
+                    placement
+                        .template
+                        .place(origin, &placement.settings, &mut world);
+                    for extra in &piece.extra_placements {
+                        let origin = crate::structure::template::PlaceOrigin {
+                            position: extra.position,
+                            reference,
+                            seed,
+                        };
+                        extra.template.place(origin, &extra.settings, &mut world);
+                    }
                 }
-                if let Some(PieceRefinement::RuinedPortalTerrain {
-                    placement,
-                    cold,
-                    overgrown,
-                    vines,
-                    features_cannot_replace,
-                }) = piece.refine.as_ref()
-                {
-                    crate::overworld::structures::place_ruined_portal_terrain(
+                match piece.refine.as_ref() {
+                    Some(PieceRefinement::FeaturePlacements { placements }) => {
+                        let Some((step, index)) = registry.feature_placement_key(&start.structure) else {
+                            continue;
+                        };
+                        let random = feature_randoms.entry(start.structure.clone()).or_insert_with(|| {
+                            let mut random = crate::rng::WorldgenRandom::new(
+                                crate::rng::LegacyRandomSource::new(0),
+                            );
+                            let decoration_seed = random.set_decoration_seed(seed, bx, bz);
+                            random.set_feature_seed(decoration_seed, index as i32, step);
+                            random
+                        });
+                        crate::structure::feature_placement::place_feature_pool_elements(
+                            random,
+                            placements,
+                            &mut world,
+                            &self.veg_tags,
+                        );
+                    }
+                    Some(PieceRefinement::RuinedPortalTerrain {
+                        placement,
+                        cold,
+                        overgrown,
+                        vines,
+                        features_cannot_replace,
+                    }) => crate::overworld::structures::place_ruined_portal_terrain(
                         &mut world,
                         piece.bounding_box,
                         seed,
@@ -1208,7 +1232,11 @@ impl NetherGenerator {
                         *overgrown,
                         *vines,
                         features_cannot_replace,
-                    );
+                    ),
+                    Some(PieceRefinement::StrongholdBlocks { writes }) => {
+                        crate::structure::stronghold::place_post_surface_blocks(&mut world, writes);
+                    }
+                    Some(PieceRefinement::BuriedTreasureChest) | None => {}
                 }
             }
         }

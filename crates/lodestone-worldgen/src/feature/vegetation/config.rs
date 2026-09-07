@@ -1721,8 +1721,8 @@ pub enum ConfiguredFeature {
     /// biomes' `fallen_*_tree` `RandomSelector` branches at a small
     /// (~1-1.25%) chance each. See [`super::features::place_fallen_tree`].
     FallenTree(Box<super::features::FallenTreeCfg>),
-    RootSystem(Box<super::features::RootSystemCfg>),
-    Coral(super::features::CoralKind),
+    RootSystem(Box<super::root_system::RootSystemCfg>),
+    Coral(super::coral::CoralKind),
     RandomSelector {
         default: Box<PlacedRef>,
         options: Vec<(f32, PlacedRef)>,
@@ -1752,6 +1752,7 @@ pub enum ConfiguredFeature {
     SpeleothemCluster(Box<super::features::SpeleothemClusterCfg>),
     Lake(Box<super::features::LakeCfg>),
     HugeMushroom(Box<super::features::HugeMushroomCfg>),
+    HugeFungus(Box<super::features::HugeFungusCfg>),
     Bamboo(f64),
     VegetationPatch(Box<super::features::VegetationPatchCfg>),
     SculkPatch(Box<super::features::SculkPatchCfg>),
@@ -1918,7 +1919,7 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
                     } else {
                         root_replaceable.extend(parse_id_list(&c["root_replaceable"]));
                     }
-                    ConfiguredFeature::RootSystem(Box::new(super::features::RootSystemCfg {
+                    ConfiguredFeature::RootSystem(Box::new(super::root_system::RootSystemCfg {
                         feature: resolve_placed_feature_ref(resolver, &c["feature"]),
                         required_vertical_space_for_tree: c["required_vertical_space_for_tree"].as_i64().unwrap_or(1) as i32,
                         level_test_distance: c["level_test_distance"].as_i64().unwrap_or(0) as i32,
@@ -1939,9 +1940,9 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
                 _ => ConfiguredFeature::Unsupported("root_system: unsupported state provider".into()),
             }
         }
-        "coral_tree" => ConfiguredFeature::Coral(super::features::CoralKind::Tree),
-        "coral_claw" => ConfiguredFeature::Coral(super::features::CoralKind::Claw),
-        "coral_mushroom" => ConfiguredFeature::Coral(super::features::CoralKind::Mushroom),
+        "coral_tree" => ConfiguredFeature::Coral(super::coral::CoralKind::Tree),
+        "coral_claw" => ConfiguredFeature::Coral(super::coral::CoralKind::Claw),
+        "coral_mushroom" => ConfiguredFeature::Coral(super::coral::CoralKind::Mushroom),
         "random_selector" => {
             let cfg = &doc["config"];
             let default = resolve_placed_feature_ref(resolver, &cfg["default"]);
@@ -2220,6 +2221,27 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
                 ),
             }
         }
+        "huge_fungus" => {
+            let c = &doc["config"];
+            match (
+                c["valid_base_block"]["Name"].as_str(),
+                c["stem_state"]["Name"].as_str(),
+                c["hat_state"]["Name"].as_str(),
+                c["decor_state"]["Name"].as_str(),
+            ) {
+                (Some(valid_base_block), Some(_stem_state), Some(_hat_state), Some(_decor_state)) => {
+                    ConfiguredFeature::HugeFungus(Box::new(super::features::HugeFungusCfg {
+                        valid_base_block: valid_base_block.to_string(),
+                        stem_state: canon_state(&c["stem_state"]),
+                        hat_state: canon_state(&c["hat_state"]),
+                        decor_state: canon_state(&c["decor_state"]),
+                        replaceable_blocks: BlockPredicate::parse(&c["replaceable_blocks"]),
+                        planted: c["planted"].as_bool().unwrap_or(false),
+                    }))
+                }
+                _ => ConfiguredFeature::Unsupported("huge_fungus: unsupported states".into()),
+            }
+        }
         "vegetation_patch" | "waterlogged_vegetation_patch" => {
             let c = &doc["config"];
             let surface = match c["surface"].as_str().unwrap_or("floor") {
@@ -2361,9 +2383,9 @@ pub fn collect_unsupported(placed: &PlacedRef) -> Vec<String> {
                 walk(&cfg.feature.feature, out);
             }
             ConfiguredFeature::Coral(kind) => out.push(match kind {
-                super::features::CoralKind::Tree => "coral_tree",
-                super::features::CoralKind::Claw => "coral_claw",
-                super::features::CoralKind::Mushroom => "coral_mushroom",
+                super::coral::CoralKind::Tree => "coral_tree",
+                super::coral::CoralKind::Claw => "coral_claw",
+                super::coral::CoralKind::Mushroom => "coral_mushroom",
             }.to_string()),
             // Every terminal (modelled) feature type. Listed rather than `_ => {}`
             // so a newly added variant is a compile error here — this walk is the
@@ -2394,6 +2416,7 @@ pub fn collect_unsupported(placed: &PlacedRef) -> Vec<String> {
             | ConfiguredFeature::SpeleothemCluster(_)
             | ConfiguredFeature::Lake(_)
             | ConfiguredFeature::HugeMushroom(_)
+            | ConfiguredFeature::HugeFungus(_)
             | ConfiguredFeature::Bamboo(_)
             | ConfiguredFeature::SculkPatch(_)
             | ConfiguredFeature::NoOp => {}

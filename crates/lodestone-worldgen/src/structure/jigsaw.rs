@@ -73,13 +73,14 @@ use lodestone_worldgen_core::rng::{
 use serde_json::Value;
 
 use super::beardifier::{Junction, PieceBeard};
+use super::feature_placement::FeaturePlacement;
 use super::pool::{PoolElement, PoolStore, Projection, place_settings, shuffle};
 use super::processor::ColumnHeights;
 use super::template::{
     BlockNbt, Rotation, TemplateBlockInfo, direction_step, nbt_int, nbt_string, opposite_direction,
 };
 use super::{
-    BoundingBox, HeightmapKind, PiecePlacement, StartContext, StructurePiece, free_height,
+    BoundingBox, HeightmapKind, PiecePlacement, PieceRefinement, StartContext, StructurePiece, free_height,
 };
 
 /// Vanilla's own jigsaw-block-entity joint-type enum.
@@ -1209,6 +1210,7 @@ impl Placer<'_> {
             } else {
                 placements.drain(1..).collect()
             };
+            let feature_placements = element_feature_placements(&piece.element, piece.position);
             out.push(StructurePiece {
                 id: "minecraft:jigsaw".to_string(),
                 bounding_box: piece.box_,
@@ -1222,7 +1224,9 @@ impl Placer<'_> {
                 blocks: None,
                 loot: Vec::new(),
                 beard,
-                refine: None,
+                refine: (!feature_placements.is_empty()).then(|| PieceRefinement::FeaturePlacements {
+                    placements: Arc::new(feature_placements),
+                }),
             });
         }
         out
@@ -1257,6 +1261,51 @@ fn element_placements(
     }
 }
 
+/// Every resolved feature placement an element contributes at `position`.
+///
+/// A list places each child at its own parent's assembled position, in document
+/// order, and forces its projection on every descendant. Keeping this separate
+/// from [`element_placements`] is intentional: template elements and feature
+/// elements share traversal order, but they have different placement engines.
+fn element_feature_placements(
+    element: &PoolElement,
+    position: [i32; 3],
+) -> Vec<FeaturePlacement> {
+    element_feature_placements_with_projection(element, position, None)
+}
+
+/// Recursive worker for [`element_feature_placements`]. A list's projection
+/// reaches all descendants, including a nested list whose parsed child records
+/// otherwise retain their original projection.
+fn element_feature_placements_with_projection(
+    element: &PoolElement,
+    position: [i32; 3],
+    inherited_projection: Option<Projection>,
+) -> Vec<FeaturePlacement> {
+    match element {
+        PoolElement::Feature { .. } => {
+            element
+                .feature_placement(position)
+                .map_or_else(Vec::new, |mut placement| {
+                    if let Some(projection) = inherited_projection {
+                        placement.projection = projection;
+                    }
+                    vec![placement]
+                })
+        }
+        PoolElement::List { elements, projection } => {
+            let projection = inherited_projection.unwrap_or(*projection);
+            elements
+                .iter()
+                .flat_map(|child| {
+                    element_feature_placements_with_projection(child, position, Some(projection))
+                })
+                .collect()
+        }
+        PoolElement::Single { .. } | PoolElement::Empty => Vec::new(),
+    }
+}
+
 /// Vanilla's own bounding-box "is inside" at `(pos)`.
 fn is_inside(box_: BoundingBox, pos: [i32; 3]) -> bool {
     (0..3).all(|i| pos[i] >= box_.min[i] && pos[i] <= box_.max[i])
@@ -1265,6 +1314,90 @@ fn is_inside(box_: BoundingBox, pos: [i32; 3]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn feature_elements_survive_nested_list_conversion_in_document_order() {
+        struct Context;
+
+        impl StartContext for Context {
+            fn first_occupied_height(
+                &self,
+                _x: i32,
+                _z: i32,
+                _heightmap: HeightmapKind,
+            ) -> i32 {
+                0
+            }
+
+            fn biome_at_quart(&self, _qx: i32, _qy: i32, _qz: i32) -> String {
+                "test:biome".to_string()
+            }
+
+            fn sea_level(&self) -> i32 {
+                0
+            }
+        }
+
+        let placed = Arc::new(crate::feature::vegetation::PlacedRef {
+            registry_id: None,
+            placements: Vec::new(),
+            feature: Box::new(crate::feature::vegetation::ConfiguredFeature::NoOp),
+        });
+        let feature = |feature: &str, projection| PoolElement::Feature {
+            feature: feature.to_string(),
+            placed: Some(Arc::clone(&placed)),
+            projection,
+        };
+        let element = PoolElement::List {
+            elements: vec![
+                feature("test:first", Projection::Rigid),
+                PoolElement::List {
+                    elements: vec![feature("test:second", Projection::TerrainMatching)],
+                    projection: Projection::TerrainMatching,
+                },
+            ],
+            projection: Projection::Rigid,
+        };
+        let pools = PoolStore::default();
+        let pieces = Placer {
+            pools: &pools,
+            max_depth: 0,
+            expansion_hack: false,
+            pieces: vec![PlacedPiece {
+                element: Arc::new(element),
+                position: [17, 42, -9],
+                rotation: Rotation::None,
+                box_: BoundingBox::of_block(17, 42, -9),
+                ground_level_delta: 1,
+                junctions: Vec::new(),
+            }],
+            frees: Vec::new(),
+            placing: PriorityQueue::default(),
+            aliases: PoolAliasLookup::default(),
+        }
+        .into_pieces(false, &Context);
+        assert_eq!(pieces.len(), 1);
+        assert!(pieces[0].placement.is_none());
+        let Some(PieceRefinement::FeaturePlacements { placements }) = &pieces[0].refine else {
+            panic!("feature-only jigsaw piece must retain its feature payload");
+        };
+        assert_eq!(
+            placements.iter().map(|placement| placement.feature.as_str()).collect::<Vec<_>>(),
+            ["test:first", "test:second"],
+        );
+        assert!(placements.iter().all(|placement| placement.origin
+            == crate::feature::BlockPos {
+                x: 17,
+                y: 42,
+                z: -9,
+            }));
+        assert!(
+            placements
+                .iter()
+                .all(|placement| placement.projection == Projection::Rigid),
+            "the outer list projection must reach nested descendants",
+        );
+    }
 
     fn jigsaw(front: &str, top: &str, name: &str, target: &str, joint: JointType) -> JigsawBlockInfo {
         JigsawBlockInfo {
