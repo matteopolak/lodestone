@@ -405,9 +405,11 @@ fn order_entries(
 
     // A dependency is available to the graph only when its own manifest is
     // uniquely named and locally valid. A required edge to anything else is a
-    // missing usable dependency, which is the fail-closed result we want. The
+    // missing usable manifest, which is the fail-closed result we want. The
     // fixed point matters for A -> B -> missing: both A and B must be refused,
-    // rather than allowing A after only B is marked invalid.
+    // rather than allowing A after only B is marked invalid. The host performs
+    // the second half of this gate after ordering: the dependency's module must
+    // also compile, instantiate, and initialize successfully.
     loop {
         let available: std::collections::BTreeSet<String> = nodes
             .iter()
