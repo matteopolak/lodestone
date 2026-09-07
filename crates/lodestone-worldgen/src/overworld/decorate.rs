@@ -885,8 +885,8 @@ impl OverworldGenerator {
             self.height,
             cx * 16,
             cz * 16,
-            crate::feature::REGION_MIN - crate::feature::VEG_PADDING,
-            crate::feature::REGION_MAX + crate::feature::VEG_PADDING,
+            crate::feature::REGION_MIN - crate::feature::vegetation::GEODE_PADDING,
+            crate::feature::REGION_MAX + crate::feature::vegetation::GEODE_PADDING,
             |dx, dz| {
                 if dx == 0 && dz == 0 {
                     Some(Arc::clone(&centre_grid))
@@ -911,8 +911,8 @@ impl OverworldGenerator {
 
         let mut seeded = BTreeMap::new();
         let mut ore_transferred = HashMap::new();
-        let local_lo = crate::feature::REGION_MIN - crate::feature::VEG_PADDING;
-        let local_hi = crate::feature::REGION_MAX + crate::feature::VEG_PADDING;
+        let local_lo = crate::feature::REGION_MIN - crate::feature::vegetation::GEODE_PADDING;
+        let local_hi = crate::feature::REGION_MAX + crate::feature::vegetation::GEODE_PADDING;
         for &(x, y, z, ref state) in overrides {
             let id = self.interner.id_of(state);
             let lx = x - cx * 16;
@@ -978,8 +978,9 @@ impl OverworldGenerator {
                         if let Some((entry_at, (_, found, placed))) = next_decoration
                             .filter(|(_, (_, found, _))| *found == index)
                         {
-                            crate::feature::vegetation::apply_decoration_entry_at_seed(
+                            crate::feature::vegetation::apply_decoration_entry_at_world_seed(
                                 &mut random,
+                                self.seed,
                                 decoration_seed,
                                 origin,
                                 step,

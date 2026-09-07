@@ -66,7 +66,7 @@ surface_water_depth_filter, noise_threshold_count, random_offset, block_predicat
 height_range, and the list fan-out `Positions::List`/`count_on_every_layer`/`fixed_placement` need)
 compose as a depth-first flat-map, exactly reproducing vanilla's `Stream` pipeline's draw order.
 Configured-feature bodies (`simple_block`, `tree`, `random_selector`/`simple_random_selector`,
-`speleothem`, `speleothem_cluster`, and the vegetation-specific ones below) each reproduce their vanilla `place()` body's exact draw
+`speleothem`, `speleothem_cluster`, `geode`, and the vegetation-specific ones below) each reproduce their placement body's exact draw
 sequence. An unmodelled feature type or placement modifier degrades to a silent, RNG-free no-op
 (`ConfiguredFeature::Unsupported`) rather than a panic — the census resolves every bundled biome's
 step list at generator construction time, including biomes nobody has tested yet, so a hard failure
@@ -79,6 +79,16 @@ writers, so it is not evidence for decoration scheduling or cross-source order. 
 single-use types remain unmodelled and are tracked by name in
 `lodestone_server::worldgen_data::KNOWN_VEGETATION_GAPS`; update that set whenever a type lands so a
 regression (or a fixed gap that should be pruned) is loud rather than silent.
+
+The geode body receives the raw world seed separately from its feature stream. It builds its
+normal-noise field from that seed without consuming the placement RNG, then visits its closed
+generation box with X as the innermost coordinate. Layer providers, cracks, invalid-block aborts,
+crystal direction order and waterlogged crystal states all retain their conditional draws. Geodes
+can write sixteen blocks away from an origin, so the Overworld decoration grid keeps a `[-32, 48)`
+local footprint; the ordinary Nether vegetation footprint remains eight blocks wide. Nested placed
+features and structure-pool feature elements must forward the same world seed rather than silently
+substituting zero. The accepted lifecycle manifest is the composed output gate; feature-local tests
+cover parsing, protected blocks and boundary spill but are not substitutes for that packet digest.
 
 Simple-block state providers include fixed, weighted, threshold-noise, noise and dual-noise forms.
 The two noise forms construct their deterministic fields from the bundled seed and octave data at

@@ -178,6 +178,7 @@ impl PoolFeaturePlacement {
     pub fn place<R: RandomSource>(
         &self,
         random: &mut R,
+        world_seed: i64,
         grid: &mut VegGrid,
         tags: &VegTags,
     ) {
@@ -186,8 +187,9 @@ impl PoolFeaturePlacement {
         // bind idempotently here instead of making every placement-stage caller
         // remember a vegetation-internal cache invariant.
         tags.bind(grid.interner());
-        crate::feature::vegetation::place_placed_feature_at(
+        crate::feature::vegetation::place_placed_feature_at_seed(
             random,
+            world_seed,
             self.origin,
             &self.placed,
             grid,
@@ -1122,7 +1124,7 @@ mod tests {
         let mut tags = VegTags::default();
         tags.supports_vegetation.insert("minecraft:dirt".to_string());
         let mut random = LegacyRandomSource::new(0);
-        placement.place(&mut random, &mut grid, &tags);
+        placement.place(&mut random, 0, &mut grid, &tags);
         let writes: Vec<_> = grid.dirty_cells().collect();
         assert!(!writes.is_empty(), "feature placement must write real blocks");
         assert!(

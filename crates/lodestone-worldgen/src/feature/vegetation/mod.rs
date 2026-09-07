@@ -249,6 +249,7 @@
 mod coral;
 mod config;
 mod dungeon;
+mod geode;
 pub mod features;
 mod grid;
 pub mod ids;
@@ -270,18 +271,20 @@ pub(super) fn base_id(state: &str) -> &str {
     state.split('[').next().unwrap_or(state)
 }
 
-/// [`place_placed_feature`], reachable from [`features`] — `vegetation_patch`
-/// hangs a whole placed feature off each surface cell it produces, so a feature
-/// body has to be able to re-enter the placement pipeline the same way a
-/// selector's branch does.
-pub(crate) fn place_placed_feature_at<R: RandomSource>(
+/// Extra horizontal context required by the geode body. Its bounded scan is
+/// sixteen blocks around an origin, while the ordinary vegetation spill only
+/// needs [`crate::feature::VEG_PADDING`] blocks.
+pub const GEODE_PADDING: i32 = 16;
+
+pub(crate) fn place_placed_feature_at_seed<R: RandomSource>(
     random: &mut R,
+    world_seed: i64,
     origin: BlockPos,
     placed: &PlacedRef,
     grid: &mut VegGrid,
     tags: &VegTags,
 ) {
-    place_placed_feature(random, origin, placed, grid, tags);
+    place_placed_feature_with_seed(random, world_seed, origin, placed, grid, tags);
 }
 
 pub fn apply_vegetal_decoration_step<R: RandomSource>(
@@ -306,7 +309,7 @@ pub fn apply_vegetal_decoration_step<R: RandomSource>(
     let decoration_seed = random.set_decoration_seed(seed, origin.x, origin.z);
     for (index, placed) in features {
         random.set_feature_seed(decoration_seed, *index as i32, STEP_VEGETAL_DECORATION);
-        place_placed_feature(random, origin, placed, grid, tags);
+        place_placed_feature_with_seed(random, seed, origin, placed, grid, tags);
     }
 }
 
@@ -342,12 +345,13 @@ pub fn apply_decoration_steps<R: RandomSource>(
     let decoration_seed = random.set_decoration_seed(seed, origin.x, origin.z);
     for (step, index, placed) in features {
         random.set_feature_seed(decoration_seed, *index as i32, *step);
-        place_placed_feature(random, origin, placed, grid, tags);
+        place_placed_feature_with_seed(random, seed, origin, placed, grid, tags);
     }
 }
 
 /// Executes one decoration entry with a source seed the caller already derived.
 /// Mixed decoration steps use this to retain raw index order around ore entries.
+#[cfg(test)]
 pub(crate) fn apply_decoration_entry_at_seed<R: RandomSource>(
     random: &mut WorldgenRandom<R>,
     decoration_seed: i64,
@@ -358,8 +362,26 @@ pub(crate) fn apply_decoration_entry_at_seed<R: RandomSource>(
     grid: &mut VegGrid,
     tags: &VegTags,
 ) {
+    apply_decoration_entry_at_world_seed(
+        random, 0, decoration_seed, origin, step, index, placed, grid, tags,
+    );
+}
+
+/// Executes one mixed-step decoration entry while retaining the raw world
+/// seed for nested world-seed-dependent configured features.
+pub(crate) fn apply_decoration_entry_at_world_seed<R: RandomSource>(
+    random: &mut WorldgenRandom<R>,
+    world_seed: i64,
+    decoration_seed: i64,
+    origin: BlockPos,
+    step: i32,
+    index: usize,
+    placed: &PlacedRef,
+    grid: &mut VegGrid,
+    tags: &VegTags,
+) {
     random.set_feature_seed(decoration_seed, index as i32, step);
-    place_placed_feature(random, origin, placed, grid, tags);
+    place_placed_feature_with_seed(random, world_seed, origin, placed, grid, tags);
 }
 
 /// The 3×3 per-source driver for [`apply_decoration_steps`] — the same shape as
@@ -462,8 +484,9 @@ pub fn apply_vegetal_decoration_step_3x3_per_source<'a, R: RandomSource>(
     }
 }
 
-fn place_placed_feature<R: RandomSource>(
+fn place_placed_feature_with_seed<R: RandomSource>(
     random: &mut R,
+    world_seed: i64,
     origin: BlockPos,
     placed: &PlacedRef,
     grid: &mut VegGrid,
@@ -478,9 +501,10 @@ fn place_placed_feature<R: RandomSource>(
         tags: &VegTags,
         feature: &ConfiguredFeature,
         placed_feature_id: Option<&str>,
+        world_seed: i64,
     ) {
         if i == mods.len() {
-            place_configured_feature(random, pos, feature, grid, tags);
+            place_configured_feature_with_seed(random, world_seed, pos, feature, grid, tags);
             return;
         }
         // U8: `get_positions` returns [`Positions`] instead of a freshly
@@ -490,10 +514,30 @@ fn place_placed_feature<R: RandomSource>(
         // [`Positions`]'s own doc for why three shapes are exhaustive here.
         match mods[i].get_positions(random, pos, grid, tags, placed_feature_id) {
             Positions::None => {}
-            Positions::One(next) => recurse(random, mods, i + 1, next, grid, tags, feature, placed_feature_id),
+            Positions::One(next) => recurse(
+                random,
+                mods,
+                i + 1,
+                next,
+                grid,
+                tags,
+                feature,
+                placed_feature_id,
+                world_seed,
+            ),
             Positions::Repeat(next, n) => {
                 for _ in 0..n {
-                    recurse(random, mods, i + 1, next, grid, tags, feature, placed_feature_id);
+                    recurse(
+                        random,
+                        mods,
+                        i + 1,
+                        next,
+                        grid,
+                        tags,
+                        feature,
+                        placed_feature_id,
+                        world_seed,
+                    );
                 }
             }
             // This modifier's fan-out shape — a *different* position per recursion,
@@ -501,7 +545,17 @@ fn place_placed_feature<R: RandomSource>(
             // order the modifier produced.
             Positions::List(list) => {
                 for next in list {
-                    recurse(random, mods, i + 1, next, grid, tags, feature, placed_feature_id);
+                    recurse(
+                        random,
+                        mods,
+                        i + 1,
+                        next,
+                        grid,
+                        tags,
+                        feature,
+                        placed_feature_id,
+                        world_seed,
+                    );
                 }
             }
         }
@@ -515,11 +569,24 @@ fn place_placed_feature<R: RandomSource>(
         tags,
         &placed.feature,
         placed.registry_id.as_deref(),
+        world_seed,
     );
 }
 
+#[cfg(test)]
 fn place_configured_feature<R: RandomSource>(
     random: &mut R,
+    pos: BlockPos,
+    feature: &ConfiguredFeature,
+    grid: &mut VegGrid,
+    tags: &VegTags,
+) {
+    place_configured_feature_with_seed(random, 0, pos, feature, grid, tags);
+}
+
+fn place_configured_feature_with_seed<R: RandomSource>(
+    random: &mut R,
+    world_seed: i64,
     pos: BlockPos,
     feature: &ConfiguredFeature,
     grid: &mut VegGrid,
@@ -545,7 +612,7 @@ fn place_configured_feature<R: RandomSource>(
         ConfiguredFeature::RootSystem(cfg) => {
             census_bump(|c| c.other_feature += 1);
             root_system::place_root_system(random, pos, cfg, grid, tags, |random, pos, placed, grid, tags| {
-                place_placed_feature(random, pos, placed, grid, tags);
+                place_placed_feature_at_seed(random, world_seed, pos, placed, grid, tags);
             });
         }
         ConfiguredFeature::Coral(kind) => {
@@ -556,11 +623,11 @@ fn place_configured_feature<R: RandomSource>(
             census_bump(|c| c.random_selector += 1);
             for (chance, option) in options {
                 if random.next_float() < *chance {
-                    place_placed_feature(random, pos, option, grid, tags);
+                    place_placed_feature_with_seed(random, world_seed, pos, option, grid, tags);
                     return;
                 }
             }
-            place_placed_feature(random, pos, default, grid, tags);
+            place_placed_feature_with_seed(random, world_seed, pos, default, grid, tags);
         }
         ConfiguredFeature::SimpleRandomSelector(list) => {
             census_bump(|c| c.simple_random_selector += 1);
@@ -568,7 +635,7 @@ fn place_configured_feature<R: RandomSource>(
                 return;
             }
             let idx = random.next_int_bounded(list.len() as i32) as usize;
-            place_placed_feature(random, pos, &list[idx], grid, tags);
+            place_placed_feature_with_seed(random, world_seed, pos, &list[idx], grid, tags);
         }
         // ------------------------------------------------------------------
         // Bodies in [`features`]; census counters are deliberately
@@ -682,7 +749,7 @@ fn place_configured_feature<R: RandomSource>(
         }
         ConfiguredFeature::VegetationPatch(cfg) => {
             census_bump(|c| c.other_feature += 1);
-            features::place_vegetation_patch(random, pos, cfg, grid, tags)
+            features::place_vegetation_patch_with_seed(random, world_seed, pos, cfg, grid, tags)
         }
         ConfiguredFeature::SculkPatch(cfg) => {
             census_bump(|c| c.other_feature += 1);
@@ -691,7 +758,7 @@ fn place_configured_feature<R: RandomSource>(
         ConfiguredFeature::RandomBooleanSelector { yes, no } => {
             census_bump(|c| c.other_feature += 1);
             let branch = if random.next_bool() { yes } else { no };
-            place_placed_feature(random, pos, branch, grid, tags);
+            place_placed_feature_with_seed(random, world_seed, pos, branch, grid, tags);
         }
         ConfiguredFeature::WeightedRandomSelector(list) => {
             census_bump(|c| c.other_feature += 1);
@@ -706,7 +773,7 @@ fn place_configured_feature<R: RandomSource>(
             for (weight, option) in list {
                 roll -= *weight;
                 if roll < 0 {
-                    place_placed_feature(random, pos, option, grid, tags);
+                    place_placed_feature_with_seed(random, world_seed, pos, option, grid, tags);
                     return;
                 }
             }
@@ -714,8 +781,12 @@ fn place_configured_feature<R: RandomSource>(
         ConfiguredFeature::Sequence(list) => {
             census_bump(|c| c.other_feature += 1);
             for option in list {
-                place_placed_feature(random, pos, option, grid, tags);
+                place_placed_feature_with_seed(random, world_seed, pos, option, grid, tags);
             }
+        }
+        ConfiguredFeature::Geode(cfg) => {
+            census_bump(|c| c.other_feature += 1);
+            geode::place_geode(random, world_seed, pos, cfg, grid, tags);
         }
         ConfiguredFeature::NoOp => {}
         // Still a no-op — the module's degrade-don't-crash rule —

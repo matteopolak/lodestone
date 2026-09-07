@@ -890,4 +890,79 @@ mod tests {
             .all(|(step, _, _)| *step != STEP_UNDERGROUND_ORES));
     }
 
+    #[test]
+    fn local_modification_geode_keeps_its_raw_step_index() {
+        let mut steps = vec![Value::Array(Vec::new()); 3];
+        steps[2] = serde_json::json!([
+            "minecraft:preceding_a",
+            "minecraft:preceding_b",
+            "minecraft:amethyst_geode"
+        ]);
+        let mut biomes = HashMap::new();
+        biomes.insert("minecraft:test", serde_json::json!({"features": steps}));
+
+        let mut placed = HashMap::new();
+        placed.insert(
+            "minecraft:preceding_a",
+            serde_json::json!({"feature": "minecraft:no_op", "placement": []}),
+        );
+        placed.insert(
+            "minecraft:preceding_b",
+            serde_json::json!({"feature": "minecraft:no_op", "placement": []}),
+        );
+        placed.insert(
+            "minecraft:amethyst_geode",
+            serde_json::json!({"feature": "minecraft:geode", "placement": []}),
+        );
+
+        let mut features = HashMap::new();
+        features.insert("minecraft:no_op", serde_json::json!({"type": "minecraft:no_op"}));
+        features.insert(
+            "minecraft:geode",
+            serde_json::json!({
+                "type": "minecraft:geode",
+                "config": {
+                    "blocks": {
+                        "filling_provider": {"type": "minecraft:simple_state_provider", "state": {"Name": "minecraft:air"}},
+                        "inner_layer_provider": {"type": "minecraft:simple_state_provider", "state": {"Name": "minecraft:amethyst_block"}},
+                        "alternate_inner_layer_provider": {"type": "minecraft:simple_state_provider", "state": {"Name": "minecraft:budding_amethyst"}},
+                        "middle_layer_provider": {"type": "minecraft:simple_state_provider", "state": {"Name": "minecraft:calcite"}},
+                        "outer_layer_provider": {"type": "minecraft:simple_state_provider", "state": {"Name": "minecraft:smooth_basalt"}},
+                        "inner_placements": [{"Name": "minecraft:amethyst_cluster", "Properties": {"facing": "up", "waterlogged": "false"}}],
+                        "cannot_replace": "#minecraft:features_cannot_replace",
+                        "invalid_blocks": "#minecraft:geode_invalid_blocks"
+                    },
+                    "crack": {},
+                    "layers": {},
+                    "invalid_blocks_threshold": 1
+                }
+            }),
+        );
+        let mut tags = HashMap::new();
+        tags.insert("minecraft:features_cannot_replace", serde_json::json!({"values": []}));
+        tags.insert("minecraft:geode_invalid_blocks", serde_json::json!({"values": []}));
+        let resolver = FakeResolver {
+            tags,
+            biomes,
+            carvers: HashMap::new(),
+            features,
+            placed,
+        };
+
+        let catalog = build_decoration_catalog(&resolver, &["minecraft:test".to_string()]);
+        let selected = catalog.select(["minecraft:test"]);
+        let (_, index, placed) = selected
+            .into_iter()
+            .find(|(step, _, placed)| {
+                *step == 2
+                    && placed.registry_id.as_deref() == Some("minecraft:amethyst_geode")
+            })
+            .expect("local-modification geode must remain selected");
+        assert_eq!(index, 2);
+        assert!(matches!(
+            placed.feature.as_ref(),
+            crate::feature::vegetation::ConfiguredFeature::Geode(_)
+        ));
+    }
+
 }
