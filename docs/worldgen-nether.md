@@ -44,9 +44,11 @@ removing one shifts the seed of every entry after it. Extend the shared feature
 parser/body, then let `build_nether_feature_lists` route the new type rather
 than adding a Nether-specific algorithm.
 
-Do not use the Overworld's step-6 ore resolver for Nether step 7, and do not
-replace `LegacyRandomSource` with xoroshiro in either Nether feature pass. Both
-errors create plausible terrain with a different world layout.
+The shared `feature::apply_ore_step_3x3_per_source` wrapper is intentionally
+fixed to step 6 for the Overworld. Nether code must call its explicit-step
+variant with 7, because the step participates in each feature's seed. Do not
+replace `LegacyRandomSource` with xoroshiro in either Nether feature pass;
+either error creates plausible terrain with a different world layout.
 
 When changing the biome-document parser, preserve a direct carver id as a
 single-element list and preserve array order exactly. The source chunk and list
