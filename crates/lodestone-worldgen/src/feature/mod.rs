@@ -600,6 +600,19 @@ pub struct PlacedOre {
     pub config: OreConfig,
 }
 
+/// A resolved scattered ore feature. It shares the configured target and
+/// placed-feature modifiers with [`PlacedOre`], but its feature body samples
+/// independent block candidates rather than building one connected blob.
+#[derive(Clone, Debug)]
+pub(crate) struct PlacedScatteredOre {
+    /// Registry id of the placed feature owning this ore configuration.
+    pub registry_id: Option<String>,
+    /// Raw index within the generation step, used by `set_feature_seed`.
+    pub index: usize,
+    pub placements: Vec<Placement>,
+    pub config: OreConfig,
+}
+
 struct Ctx<'a> {
     min_gen_y: i32,
     gen_depth: i32,
@@ -1006,6 +1019,27 @@ pub(crate) fn apply_ore_entry_at_seed<R: RandomSource>(
     place_placed_feature(random, input.origin(), ore, input, &ctx, view);
 }
 
+/// Executes one scattered-ore entry after its caller has already derived this
+/// source's decoration seed. The placed-feature modifiers and the feature seed
+/// are shared with standard ore; only the configured feature body differs.
+pub(crate) fn apply_scattered_ore_entry_at_seed<R: RandomSource>(
+    random: &mut WorldgenRandom<R>,
+    decoration_seed: i64,
+    input: &OreInput<'_>,
+    feature_step: i32,
+    ore: &PlacedScatteredOre,
+    view: &mut RegionView<'_>,
+) {
+    let ctx = Ctx {
+        min_gen_y: input.min_gen_y,
+        gen_depth: input.gen_depth,
+        biome_allows: input.biome_allows,
+        feature_id: ore.registry_id.as_deref(),
+    };
+    random.set_feature_seed(decoration_seed, ore.index as i32, feature_step);
+    place_scattered_ore_placed_feature(random, input.origin(), ore, input, &ctx, view);
+}
+
 /// The complete 3×3 neighbourhood driver for one CENTRE chunk.
 ///
 /// Vanilla's own one-chunk-into-neighbours write spill at the FEATURES generation stage
@@ -1197,8 +1231,16 @@ pub fn decoration_seed<R: RandomSource>(
     random.set_decoration_seed(seed, origin_x, origin_z)
 }
 
-/// Reproduce vanilla's own placed-feature place-with-context's depth-first modifier pipeline for
-/// one ore feature, calling [`place_ore_feature`] at each surviving position.
+/// The feature body selected by a placed ore entry. The placement-modifier
+/// walk is shared so both bodies consume the same modifier RNG stream.
+#[derive(Clone, Copy)]
+enum OreBody {
+    Standard,
+    Scattered,
+}
+
+/// Reproduce the placed-feature depth-first modifier pipeline for one standard
+/// ore feature, calling [`place_ore_feature`] at each surviving position.
 fn place_placed_feature<R: RandomSource>(
     random: &mut R,
     origin: BlockPos,
@@ -1206,6 +1248,51 @@ fn place_placed_feature<R: RandomSource>(
     input: &OreInput<'_>,
     ctx: &Ctx,
     working: &mut RegionView<'_>,
+) {
+    place_placed_feature_with_body(
+        random,
+        origin,
+        &ore.placements,
+        &ore.config,
+        input,
+        ctx,
+        working,
+        OreBody::Standard,
+    );
+}
+
+/// Reproduce the placed-feature depth-first modifier pipeline for one
+/// scattered ore feature, calling [`place_scattered_ore_feature`] at each
+/// surviving position.
+fn place_scattered_ore_placed_feature<R: RandomSource>(
+    random: &mut R,
+    origin: BlockPos,
+    ore: &PlacedScatteredOre,
+    input: &OreInput<'_>,
+    ctx: &Ctx,
+    working: &mut RegionView<'_>,
+) {
+    place_placed_feature_with_body(
+        random,
+        origin,
+        &ore.placements,
+        &ore.config,
+        input,
+        ctx,
+        working,
+        OreBody::Scattered,
+    );
+}
+
+fn place_placed_feature_with_body<R: RandomSource>(
+    random: &mut R,
+    origin: BlockPos,
+    modifiers: &[Placement],
+    config: &OreConfig,
+    input: &OreInput<'_>,
+    ctx: &Ctx,
+    working: &mut RegionView<'_>,
+    body: OreBody,
 ) {
     fn recurse<R: RandomSource>(
         random: &mut R,
@@ -1216,9 +1303,15 @@ fn place_placed_feature<R: RandomSource>(
         config: &OreConfig,
         input: &OreInput<'_>,
         working: &mut RegionView<'_>,
+        body: OreBody,
     ) {
         if i == modifiers.len() {
-            place_ore_feature(random, pos, config, input, working);
+            match body {
+                OreBody::Standard => place_ore_feature(random, pos, config, input, working),
+                OreBody::Scattered => {
+                    place_scattered_ore_feature(random, pos, config, input, working)
+                }
+            }
             return;
         }
         // Depth-first, exactly as `for next in vec` was: `One` recurses once,
@@ -1228,25 +1321,16 @@ fn place_placed_feature<R: RandomSource>(
         match modifiers[i].get_positions(random, pos, ctx) {
             OrePositions::None => {}
             OrePositions::One(next) => {
-                recurse(random, modifiers, i + 1, next, ctx, config, input, working);
+                recurse(random, modifiers, i + 1, next, ctx, config, input, working, body);
             }
             OrePositions::Repeat(next, n) => {
                 for _ in 0..n {
-                    recurse(random, modifiers, i + 1, next, ctx, config, input, working);
+                    recurse(random, modifiers, i + 1, next, ctx, config, input, working, body);
                 }
             }
         }
     }
-    recurse(
-        random,
-        &ore.placements,
-        0,
-        origin,
-        ctx,
-        &ore.config,
-        input,
-        working,
-    );
+    recurse(random, modifiers, 0, origin, ctx, config, input, working, body);
 }
 
 /// Vanilla's own ore-feature place plus its inner place step, for a single
@@ -1300,6 +1384,38 @@ pub fn place_ore_feature<R: RandomSource>(
     do_place(
         random, config, input, working, x0, x1, z0, z1, y0, y1, x_start, y_start, z_start,
     );
+}
+
+/// Place the independent candidates of a scattered ore feature for one
+/// already-resolved origin. The feature consumes one bounded attempt count,
+/// then two `next_float` draws per axis for each attempt. Candidate distance
+/// grows with the attempt index and is capped at seven blocks, while target
+/// matching and exposure checks remain shared with standard ore placement.
+pub fn place_scattered_ore_feature<R: RandomSource>(
+    random: &mut R,
+    origin: BlockPos,
+    config: &OreConfig,
+    input: &OreInput<'_>,
+    working: &mut RegionView<'_>,
+) {
+    ore_probe::bump_feature(1);
+    let number_of_tries = random.next_int_bounded(config.size + 1);
+    let mut cache = TargetCache::empty();
+    for attempt in 0..number_of_tries {
+        let max_distance = attempt.min(7);
+        let x = origin.x + scattered_offset(random, max_distance);
+        let y = origin.y + scattered_offset(random, max_distance);
+        let z = origin.z + scattered_offset(random, max_distance);
+        try_place_ore(random, config, input, working, x, y, z, &mut cache);
+    }
+}
+
+/// Java-compatible half-up rounding for the scattered body's `f32` offsets.
+/// Rust's `round` is half-away-from-zero, which differs for negative ties.
+#[inline]
+fn scattered_offset<R: RandomSource>(random: &mut R, max_distance: i32) -> i32 {
+    let delta = (random.next_float() - random.next_float()) * max_distance as f32;
+    (delta + 0.5).floor() as i32
 }
 
 thread_local! {

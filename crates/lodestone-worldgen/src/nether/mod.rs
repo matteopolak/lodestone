@@ -125,7 +125,7 @@ use crate::biome::{BiomeTable, ClimateSampler};
 use crate::carver::{CarveGrid, CarverConfig, NoObserver};
 use crate::density::{Builder, Resolver};
 use crate::engine::Program;
-use crate::feature::PlacedOre;
+use crate::feature::{PlacedOre, PlacedScatteredOre, RuleTest};
 use crate::interner::{StateId, StateInterner};
 use crate::overworld::structures::{BEARD_REACH, REFS_RADIUS, StructureRefs};
 use crate::structure::beardifier::Beardifier;
@@ -162,6 +162,31 @@ type PreDecorationResult = (
 );
 
 type DecorationFeatures = Vec<(i32, usize, crate::feature::vegetation::PlacedRef)>;
+
+/// A step-7 ore entry retains the body selected by its configured feature.
+/// Standard and scattered entries share the raw index and target parser, but
+/// intentionally dispatch to different placement bodies.
+#[derive(Clone, Debug)]
+enum NetherOre {
+    Standard(PlacedOre),
+    Scattered(PlacedScatteredOre),
+}
+
+impl NetherOre {
+    fn index(&self) -> usize {
+        match self {
+            Self::Standard(ore) => ore.index,
+            Self::Scattered(ore) => ore.index,
+        }
+    }
+
+    fn config(&self) -> &crate::feature::OreConfig {
+        match self {
+            Self::Standard(ore) => &ore.config,
+            Self::Scattered(ore) => &ore.config,
+        }
+    }
+}
 
 /// The final block state one completed decoration source wrote in a target's
 /// decoration region. The bounded parity materializer consumes these
@@ -285,7 +310,7 @@ pub struct NetherGenerator {
     carver_replaceable: HashSet<String>,
     carvers_by_biome: HashMap<String, Vec<CarverConfig>>,
     /// Step-7 ore entries, retaining each entry's raw index for its seed.
-    ores_by_biome: HashMap<String, Vec<PlacedOre>>,
+    ores_by_biome: HashMap<String, Vec<NetherOre>>,
     ore_tag_map: HashMap<String, HashSet<String>>,
     /// The non-ore step-7 entries plus step-9 vegetal entries. Every tuple
     /// keeps its original `(step, index)` seed identity.
@@ -434,7 +459,7 @@ fn synchronize_mixed_entry(
 fn build_nether_feature_lists(
     resolver: &dyn Resolver,
     biome: &str,
-) -> (Vec<PlacedOre>, DecorationFeatures) {
+) -> (Vec<NetherOre>, DecorationFeatures) {
     let document = resolver.biome_document(biome);
     let Some(steps) = document.get("features").and_then(Value::as_array) else {
         return (Vec::new(), Vec::new());
@@ -457,19 +482,31 @@ fn build_nether_feature_lists(
                 .get("feature")
                 .and_then(Value::as_str)
                 .map(|id| resolver.configured_feature(id));
+            let configured_type = configured
+                .as_ref()
+                .and_then(|feature| feature.get("type"))
+                .and_then(Value::as_str);
             if step == 7
-                && configured
-                    .as_ref()
-                    .and_then(|feature| feature.get("type"))
-                    .and_then(Value::as_str)
-                    == Some("minecraft:ore")
+                && matches!(configured_type, Some("minecraft:ore" | "minecraft:scattered_ore"))
             {
-                ores.push(PlacedOre {
-                    registry_id: None,
-                    index,
-                    placements: crate::feature::parse_placements(&placed),
-                    config: crate::feature::parse_ore_config(&configured.expect("checked above")["config"]),
-                });
+                let configured = configured.as_ref().expect("checked above");
+                let config = crate::feature::parse_ore_config(&configured["config"]);
+                let placements = crate::feature::parse_placements(&placed);
+                if configured_type == Some("minecraft:scattered_ore") {
+                    ores.push(NetherOre::Scattered(PlacedScatteredOre {
+                        registry_id: None,
+                        index,
+                        placements,
+                        config,
+                    }));
+                } else {
+                    ores.push(NetherOre::Standard(PlacedOre {
+                        registry_id: None,
+                        index,
+                        placements,
+                        config,
+                    }));
+                }
             } else {
                 decoration.push((
                     step,
@@ -480,6 +517,29 @@ fn build_nether_feature_lists(
         }
     }
     (ores, decoration)
+}
+
+/// Resolves every target tag used by either step-7 ore body. The shared
+/// Overworld helper accepts only standard entries, while Nether scattered ore
+/// has its own target tag and must be included in the same membership closure.
+fn build_nether_ore_tag_map(
+    resolver: &dyn Resolver,
+    ores: &[NetherOre],
+) -> HashMap<String, HashSet<String>> {
+    let mut map = HashMap::new();
+    for ore in ores {
+        for target in &ore.config().targets {
+            if let RuleTest::TagMatch(tag) = &target.target {
+                map.entry(tag.clone()).or_insert_with(|| {
+                    let mut members = HashSet::new();
+                    let mut seen = HashSet::new();
+                    crate::compose::resolve_block_tag(resolver, tag, &mut members, &mut seen);
+                    members
+                });
+            }
+        }
+    }
+    map
 }
 
 impl NetherGenerator {
@@ -569,8 +629,8 @@ impl NetherGenerator {
                 .entry(point.biome.clone())
                 .or_insert(decoration);
         }
-        let all_ores: Vec<PlacedOre> = ores_by_biome.values().flatten().cloned().collect();
-        let ore_tag_map = crate::compose::build_ore_tag_map(resolver, &all_ores);
+        let all_ores: Vec<NetherOre> = ores_by_biome.values().flatten().cloned().collect();
+        let ore_tag_map = build_nether_ore_tag_map(resolver, &all_ores);
         let veg_tags = crate::feature::vegetation::build_veg_tags(resolver);
 
         // Structure placement's dimension half. Filtered by `possible_biomes`
@@ -749,9 +809,9 @@ impl NetherGenerator {
                         .find(|(_, (s, _, _))| *s == step);
                     let next_ore = if step == 7 { ores.get(ore_at) } else { None };
                     let next_index = match (next_decoration, next_ore) {
-                        (Some((_, (_, index, _))), Some(ore)) => Some((*index).min(ore.index)),
+                        (Some((_, (_, index, _))), Some(ore)) => Some((*index).min(ore.index())),
                         (Some((_, (_, index, _))), None) => Some(*index),
-                        (None, Some(ore)) => Some(ore.index),
+                        (None, Some(ore)) => Some(ore.index()),
                         (None, None) => None,
                     };
                     let Some(index) = next_index else { break };
@@ -769,9 +829,28 @@ impl NetherGenerator {
                             &mut ore_transferred,
                         );
                         decoration_at = entry_at + 1;
-                    } else if let Some(ore) = next_ore.filter(|ore| ore.index == index) {
+                    } else if let Some(ore) = next_ore.filter(|ore| ore.index() == index) {
                         let input = crate::feature::OreInput { chunk_x: source_x, chunk_z: source_z, center_x: cx, center_z: cz, min_y: self.min_y, height: self.height, min_gen_y: self.min_y, gen_depth: self.height, read_min: crate::feature::REGION_MIN, read_max: crate::feature::REGION_MAX, ocean_floor_wg: &heights, in_tag: &in_tag, biome_allows: None };
-                        crate::feature::apply_ore_entry_at_seed(&mut ore_random, ore_seed, &input, 7, ore, &mut ore_view);
+                        match ore {
+                            NetherOre::Standard(ore) => crate::feature::apply_ore_entry_at_seed(
+                                &mut ore_random,
+                                ore_seed,
+                                &input,
+                                7,
+                                ore,
+                                &mut ore_view,
+                            ),
+                            NetherOre::Scattered(ore) => {
+                                crate::feature::apply_scattered_ore_entry_at_seed(
+                                    &mut ore_random,
+                                    ore_seed,
+                                    &input,
+                                    7,
+                                    ore,
+                                    &mut ore_view,
+                                );
+                            }
+                        }
                         synchronize_mixed_entry(
                             MixedEntryWriter::Ore,
                             &mut grid,
