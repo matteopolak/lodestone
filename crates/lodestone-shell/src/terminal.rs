@@ -9,8 +9,9 @@
 //! the prompt in the final terminal row. Neither path creates a window.
 
 use std::collections::HashMap;
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Write};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use image::{DynamicImage, RgbaImage};
@@ -22,7 +23,10 @@ use ratatui::crossterm::{
         MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
+    terminal::{EnterAlternateScreen, enable_raw_mode},
 };
+#[cfg(feature = "window")]
+use ratatui::{Terminal, backend::CrosstermBackend};
 use ratatui::layout::{Rect, Size};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -323,6 +327,59 @@ fn terminal_pixel_size() -> Option<(u32, u32, u32, u32)> {
     ))
 }
 
+/// Collect all terminal escape sequences for one Ratatui frame before
+/// handing them to stdout. Crossterm queues individual cell commands, and an
+/// unwrapped `Stdout` can flush when its small line buffer fills; that exposes
+/// a frame row by row. This writer makes backend flush the presentation
+/// boundary: one logical frame is written and flushed together.
+struct TerminalFrameWriter<W> {
+    inner: W,
+    frame: Vec<u8>,
+}
+
+impl<W> TerminalFrameWriter<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            frame: Vec::new(),
+        }
+    }
+}
+
+impl<W: Write> Write for TerminalFrameWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.frame.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.write_all(&self.frame)?;
+        // The bytes have been handed to the underlying writer before its
+        // flush can fail; clear them even on that error so a caller retrying
+        // the flush cannot duplicate a complete frame.
+        let result = self.inner.flush();
+        self.frame.clear();
+        result
+    }
+}
+
+#[cfg(feature = "window")]
+fn init_terminal() -> io::Result<Terminal<CrosstermBackend<TerminalFrameWriter<io::Stdout>>>> {
+    // `ratatui::try_init` cannot be used here because its fixed backend owns
+    // an unwrapped Stdout. Keep its panic-safety contract while supplying the
+    // frame writer explicitly.
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        ratatui::restore();
+        previous_hook(info);
+    }));
+    enable_raw_mode()?;
+    execute!(io::stdout(), EnterAlternateScreen)?;
+    Terminal::new(CrosstermBackend::new(TerminalFrameWriter::new(
+        io::stdout(),
+    )))
+}
+
 /// Run the live game in a Ratatui layout with a coloured Unicode image pane.
 ///
 /// The frame is produced by `WindowApp::redraw`, the same entry point used by
@@ -344,7 +401,7 @@ pub(crate) fn run_terminal(
         terminal_render_dimensions(initial_area, terminal_pixel_size());
     let mut app = WindowApp::new_terminal(config, pixel_width, pixel_height)?;
 
-    let mut terminal = ratatui::try_init()?;
+    let mut terminal = init_terminal()?;
     let _session = TerminalSession;
     if let Err(error) = execute!(
         io::stdout(),
@@ -758,6 +815,22 @@ fn halfblock_protocol(
 }
 
 fn linear_to_srgb_byte(value: u8) -> u8 {
+    static SRGB_LUT: OnceLock<[u8; 256]> = OnceLock::new();
+    SRGB_LUT.get_or_init(|| {
+        std::array::from_fn(|value| {
+            let linear = value as f32 / 255.0;
+            let srgb = if linear <= 0.003_130_8 {
+                linear * 12.92
+            } else {
+                1.055 * linear.powf(1.0 / 2.4) - 0.055
+            };
+            (srgb * 255.0).round().clamp(0.0, 255.0) as u8
+        })
+    })[usize::from(value)]
+}
+
+#[cfg(test)]
+fn linear_to_srgb_byte_reference(value: u8) -> u8 {
     let linear = f32::from(value) / 255.0;
     let srgb = if linear <= 0.003_130_8 {
         linear * 12.92
@@ -840,6 +913,13 @@ mod tests {
         assert_eq!(linear_to_srgb_byte(0), 0);
         assert_eq!(linear_to_srgb_byte(128), 188);
         assert_eq!(linear_to_srgb_byte(255), 255);
+        for value in 0..=u8::MAX {
+            assert_eq!(
+                linear_to_srgb_byte(value),
+                linear_to_srgb_byte_reference(value),
+                "lookup table changed transfer function at {value}"
+            );
+        }
     }
 
     #[test]
@@ -1041,6 +1121,7 @@ mod tests {
 
     #[test]
     fn rgba_frame_uses_the_library_halfblock_protocol() {
+        let started = std::time::Instant::now();
         let protocol = halfblock_protocol(
             vec![0; 4 * 3 * 4],
             4,
@@ -1049,5 +1130,107 @@ mod tests {
         )
         .expect("valid RGBA frame");
         assert_eq!(protocol.size(), Size::new(1, 1));
+        eprintln!(
+            "terminal pixel-to-cell conversion: 4x3 pixels -> 1x1 cells in {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn terminal_pixel_to_cell_conversion_profile() {
+        let width = 320;
+        let height = 180;
+        let started = std::time::Instant::now();
+        let protocol = halfblock_protocol(
+            vec![128; width as usize * height as usize * 4],
+            width,
+            height,
+            Size::new(80, 45),
+        )
+        .expect("valid RGBA frame");
+        eprintln!(
+            "terminal pixel-to-cell conversion: {}x{} pixels -> {}x{} cells in {:?}",
+            width,
+            height,
+            protocol.size().width,
+            protocol.size().height,
+            started.elapsed()
+        );
+        assert_eq!(protocol.size(), Size::new(80, 45));
+    }
+
+    #[cfg(feature = "window")]
+    #[test]
+    fn frame_writer_coalesces_backend_serialization_into_one_write() {
+        use ratatui::backend::Backend;
+        use ratatui::buffer::Cell;
+
+        #[derive(Default)]
+        struct RecordingWriter {
+            writes: Vec<Vec<u8>>,
+            flushes: usize,
+        }
+
+        impl Write for RecordingWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.writes.push(bytes.to_vec());
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                self.flushes += 1;
+                Ok(())
+            }
+        }
+
+        let cells = (0..12u16)
+            .flat_map(|y| {
+                (0..32u16).map(move |x| {
+                    let mut cell = Cell::new(if (x + y) % 2 == 0 { "▀" } else { "▄" });
+                    cell.set_fg(Color::Rgb(0x12, 0x34, 0x56));
+                    cell.set_bg(Color::Rgb(0x65, 0x43, 0x21));
+                    (x, y, cell)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let mut direct_sink = RecordingWriter::default();
+        let mut direct = CrosstermBackend::new(&mut direct_sink);
+        let direct_started = std::time::Instant::now();
+        direct
+            .draw(cells.iter().map(|(x, y, cell)| (*x, *y, cell)))
+            .expect("direct backend serialization");
+        Backend::flush(&mut direct).expect("direct backend flush");
+        let direct_elapsed = direct_started.elapsed();
+
+        let mut atomic_sink = RecordingWriter::default();
+        let mut atomic = CrosstermBackend::new(TerminalFrameWriter::new(&mut atomic_sink));
+        let atomic_started = std::time::Instant::now();
+        atomic
+            .draw(cells.iter().map(|(x, y, cell)| (*x, *y, cell)))
+            .expect("frame-buffered backend serialization");
+        let atomic_serialization_elapsed = atomic_started.elapsed();
+        let atomic_flush_started = std::time::Instant::now();
+        Backend::flush(&mut atomic).expect("frame-buffered backend flush");
+        let atomic_flush_elapsed = atomic_flush_started.elapsed();
+
+        let direct_bytes = direct_sink.writes.iter().map(Vec::len).sum::<usize>();
+        let atomic_bytes = atomic_sink.writes.iter().map(Vec::len).sum::<usize>();
+        eprintln!(
+            "terminal presentation serialization: direct writes={} bytes={} flushes={} elapsed={:?}; frame-buffered writes={} bytes={} flushes={} serialization={:?} flush={:?}",
+            direct_sink.writes.len(),
+            direct_bytes,
+            direct_sink.flushes,
+            direct_elapsed,
+            atomic_sink.writes.len(),
+            atomic_bytes,
+            atomic_sink.flushes,
+            atomic_serialization_elapsed,
+            atomic_flush_elapsed,
+        );
+        assert!(direct_sink.writes.len() > 1, "negative control must expose multiple writes");
+        assert_eq!(direct_bytes, atomic_bytes);
+        assert_eq!(atomic_sink.writes.len(), 1);
+        assert_eq!(atomic_sink.flushes, 1);
     }
 }
