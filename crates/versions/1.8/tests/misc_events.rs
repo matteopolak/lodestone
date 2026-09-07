@@ -393,6 +393,22 @@ fn block_break_animation_dispatches_block_destruction() {
 }
 
 #[test]
+fn block_break_animation_preserves_wire_clear_sentinel() {
+    // Literal protocol bytes keep this regression independent of the packet
+    // encoder: the final 0xff is signed -1, the clear token for this packet.
+    // The preceding bytes encode entity 6 and Position(9, 8, 7).
+    let payload = [6, 0, 0, 0x02, 0x40, 0x20, 0, 0, 7, 0xff];
+    match only_event(dispatch(play::clientbound::BLOCK_BREAK_ANIMATION, &payload)) {
+        ClientEvent::BlockDestruction { entity_id, pos, progress } => {
+            assert_eq!(entity_id, 6);
+            assert_eq!((pos.x, pos.y, pos.z), (9, 8, 7));
+            assert_eq!(progress, u8::MAX, "wire -1 must remain the clear token");
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+#[test]
 fn world_event_dispatches_level_event_with_distinct_fields() {
     let payload = encode(&WorldEvent {
         effect_id: 1003,

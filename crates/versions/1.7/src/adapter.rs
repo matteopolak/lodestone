@@ -1033,7 +1033,11 @@ impl V5Adapter {
         Ok(vec![Directive::Emit(ClientEvent::BlockDestruction {
             entity_id: body.entity_id,
             pos: body.location.to_model(),
-            progress: u8::try_from(body.destroy_stage).unwrap_or(0),
+            // The wire field is signed only because this era's packet model
+            // describes it as `i8`; its bits are a raw stage byte. In
+            // particular, the clear sentinel -1 must remain 255 instead of
+            // becoming visible stage 0.
+            progress: body.destroy_stage.to_be_bytes()[0],
         })])
     }
 

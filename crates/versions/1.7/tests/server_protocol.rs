@@ -158,6 +158,53 @@ fn hosted_health_update_reaches_the_client_hud_with_protocol_5_fixed_width_food(
 }
 
 #[test]
+fn block_break_animation_preserves_the_signed_clear_stage_as_raw_byte() {
+    // Entity 42, position (3, 64, -4), then the signed -1 clear sentinel.
+    // This is a literal body so the assertion exercises the production packet
+    // decoder and adapter boundary rather than a symmetric encode/decode pair.
+    let clear = [
+        0x2a, // entity id 42
+        0, 0, 0, 3, // x
+        0, 0, 0, 64, // y
+        0xff, 0xff, 0xff, 0xfc, // z = -4
+        0xff, // destroy stage = -1 on the signed wire field
+    ];
+    let directives = V5Adapter::new()
+        .handle_packet(
+            &mut World::new(),
+            ConnectionState::Play,
+            play::clientbound::BLOCK_BREAK_ANIMATION,
+            &clear,
+        )
+        .expect("the clear-stage frame must decode");
+    assert!(matches!(
+        directives.as_slice(),
+        [Directive::Emit(ClientEvent::BlockDestruction {
+            entity_id: 42,
+            pos,
+            progress: 255,
+        })] if *pos == BlockPos::new(3, 64, -4)
+    ));
+
+    // Control: a visible stage remains its numeric stage, so the conversion
+    // preserves all raw bytes rather than mapping every value to the clear.
+    let mut visible = clear;
+    visible[visible.len() - 1] = 9;
+    let directives = V5Adapter::new()
+        .handle_packet(
+            &mut World::new(),
+            ConnectionState::Play,
+            play::clientbound::BLOCK_BREAK_ANIMATION,
+            &visible,
+        )
+        .expect("the visible-stage frame must decode");
+    assert!(matches!(
+        directives.as_slice(),
+        [Directive::Emit(ClientEvent::BlockDestruction { progress: 9, .. })]
+    ));
+}
+
+#[test]
 fn projects_the_legacy_window_and_decodes_break_actions() {
     let protocol = V5ServerProtocol;
     let mut covering = ChunkColumn::new(-64, 384);
