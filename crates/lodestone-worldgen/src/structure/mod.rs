@@ -258,6 +258,21 @@ const UNDERGROUND_DECORATION_RUNTIME_ORDER: &[&str] = &[
     "minecraft:nether_fossil",
 ];
 
+/// Returns the captured registry position for a structure in the decoration
+/// loop. The runtime registry includes all bundled structures, even when a
+/// dimension's filtered structure registry does not retain every one of them.
+fn captured_runtime_structure_index(step: i32, id: &str) -> Option<usize> {
+    match step {
+        3 => UNDERGROUND_STRUCTURES_RUNTIME_ORDER
+            .iter()
+            .position(|entry| *entry == id),
+        7 => UNDERGROUND_DECORATION_RUNTIME_ORDER
+            .iter()
+            .position(|entry| *entry == id),
+        _ => None,
+    }
+}
+
 fn structure_step_index(step: &str) -> Option<i32> {
     Some(match step {
         "raw_generation" => 0,
@@ -3215,20 +3230,26 @@ impl StructureRegistry {
         self.structures.get(id)
     }
 
-    /// `(generation step, bootstrap index within that step)` used to
-    /// seed a structure's feature-pool elements for one decorating chunk.
+    /// `(generation step, runtime index within that step)` used to seed a
+    /// structure's feature-pool elements for one decorating chunk.
+    ///
+    /// The two steps with captured runtime order use that order even when the
+    /// dimension-filtered registry omitted another structure ahead of `id`.
+    /// Datapack-only structures and steps without a capture retain the bundled
+    /// registration-order fallback.
     pub(crate) fn feature_placement_key(&self, id: &str) -> Option<(i32, usize)> {
         let step = structure_step_index(&self.structures.get(id)?.step)?;
-        let index = self
-            .structure_order
-            .iter()
-            .filter(|other| {
-                self.structures
-                    .get(*other)
-                    .and_then(|def| structure_step_index(&def.step))
-                    == Some(step)
-            })
-            .position(|other| other == id)?;
+        let index = captured_runtime_structure_index(step, id).or_else(|| {
+            self.structure_order
+                .iter()
+                .filter(|other| {
+                    self.structures
+                        .get(*other)
+                        .and_then(|def| structure_step_index(&def.step))
+                        == Some(step)
+                })
+                .position(|other| other == id)
+        })?;
         Some((step, index))
     }
 
@@ -3237,11 +3258,7 @@ impl StructureRegistry {
     /// ordering above: the runtime registry does not use that bootstrap order.
     pub(crate) fn runtime_decoration_key(&self, id: &str) -> Option<(i32, usize)> {
         let step = structure_step_index(&self.structures.get(id)?.step)?;
-        let index = match step {
-            3 => UNDERGROUND_STRUCTURES_RUNTIME_ORDER.iter().position(|entry| *entry == id)?,
-            7 => UNDERGROUND_DECORATION_RUNTIME_ORDER.iter().position(|entry| *entry == id)?,
-            _ => return None,
-        };
+        let index = captured_runtime_structure_index(step, id)?;
         Some((step, index))
     }
 
@@ -3516,6 +3533,30 @@ mod tests {
                 .position(|id| *id == "minecraft:mineshaft"),
             Some(1)
         );
+    }
+
+    /// Feature-pool streams use the complete runtime registry index, not the
+    /// subset retained after a dimension filter. These positions are the
+    /// inputs that distinguish the captured orders from the bootstrap list.
+    #[test]
+    fn captured_runtime_orders_seed_feature_placements() {
+        assert_eq!(
+            captured_runtime_structure_index(3, "minecraft:mineshaft"),
+            Some(1)
+        );
+        assert_eq!(
+            captured_runtime_structure_index(3, "minecraft:buried_treasure"),
+            Some(0)
+        );
+        assert_eq!(
+            captured_runtime_structure_index(7, "minecraft:ancient_city"),
+            Some(0)
+        );
+        assert_eq!(
+            captured_runtime_structure_index(7, "minecraft:fortress"),
+            Some(1)
+        );
+        assert_eq!(captured_runtime_structure_index(4, "minecraft:mansion"), None);
     }
 
     /// A resolver with no structure data places nothing and names nothing —
