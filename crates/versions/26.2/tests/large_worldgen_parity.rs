@@ -461,6 +461,54 @@ fn optional_usize_env(name: &str) -> Result<Option<usize>, String> {
         .transpose()
 }
 
+fn optional_u64_env(name: &str) -> Result<Option<u64>, String> {
+    std::env::var_os(name)
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| format!("{name} must be valid UTF-8"))?
+                .parse::<u64>()
+                .map_err(|error| format!("{name} must be a non-negative integer: {error}"))
+        })
+        .transpose()
+}
+
+/// Selects a bounded comparison run.  A batch is explicitly scan-all: a
+/// multi-thousand-chunk run that stops at its first defect cannot provide the
+/// independent issue inventory that makes the expensive export useful.
+fn parity_batch_limit(
+    count: u64,
+    max_chunks: Option<u64>,
+    batch_size: Option<u64>,
+    target_index: Option<usize>,
+    scan_all: bool,
+) -> Result<u64, String> {
+    if let Some(size) = batch_size {
+        if target_index.is_some() {
+            return Err("LODESTONE_LARGE_PARITY_BATCH_SIZE cannot be combined with LODESTONE_LARGE_PARITY_TARGET_INDEX".to_owned());
+        }
+        if !scan_all {
+            return Err("LODESTONE_LARGE_PARITY_BATCH_SIZE requires LODESTONE_LARGE_PARITY_SCAN_ALL=1".to_owned());
+        }
+        if size < 2_000 {
+            return Err(format!("LODESTONE_LARGE_PARITY_BATCH_SIZE must be at least 2000, got {size}"));
+        }
+        if count < size {
+            return Err(format!("LODESTONE_LARGE_PARITY_BATCH_SIZE={size} exceeds the authenticated manifest count {count}"));
+        }
+        if max_chunks.is_some_and(|limit| limit != size) {
+            return Err("LODESTONE_LARGE_PARITY_BATCH_SIZE and LODESTONE_LARGE_PARITY_MAX_CHUNKS must agree when both are set".to_owned());
+        }
+        return Ok(size);
+    }
+
+    let selection = lifecycle_target_selection(count, max_chunks, target_index, scan_all)?;
+    Ok(match selection {
+        LifecycleTargetSelection::Prefix { limit } => limit,
+        LifecycleTargetSelection::Single { .. } => 1,
+    })
+}
+
 #[test]
 fn lifecycle_target_selection_rejects_ambiguous_single_target_requests() {
     assert_eq!(
@@ -477,6 +525,23 @@ fn lifecycle_target_selection_rejects_ambiguous_single_target_requests() {
     assert_eq!(
         lifecycle_target_selection(256, Some(2), None, false),
         Ok(LifecycleTargetSelection::Prefix { limit: 2 }),
+    );
+}
+
+#[test]
+fn parity_batch_selection_requires_scan_all_and_two_thousand_targets() {
+    assert_eq!(
+        parity_batch_limit(4_000, Some(2_000), Some(2_000), None, true),
+        Ok(2_000),
+    );
+    assert!(parity_batch_limit(4_000, None, Some(1_999), None, true).is_err());
+    assert!(parity_batch_limit(4_000, None, Some(2_000), None, false).is_err());
+    assert!(parity_batch_limit(1_999, None, Some(2_000), None, true).is_err());
+    assert!(parity_batch_limit(4_000, None, Some(2_000), Some(3), true).is_err());
+    assert!(parity_batch_limit(4_000, Some(256), Some(2_000), None, true).is_err());
+    assert_eq!(
+        parity_batch_limit(4_000, Some(2), None, None, false),
+        Ok(2),
     );
 }
 
@@ -750,12 +815,15 @@ fn parity_manifest_streams_before_rust_comparison() {
     let scan_all = std::env::var_os("LODESTONE_LARGE_PARITY_SCAN_ALL").is_some();
     let target_index = optional_usize_env("LODESTONE_LARGE_PARITY_TARGET_INDEX")
         .unwrap_or_else(|error| panic!("invalid lifecycle target selection: {error}"));
-    let selection = lifecycle_target_selection(h.count, max_chunks, target_index, scan_all)
-        .unwrap_or_else(|error| panic!("invalid lifecycle target selection: {error}"));
-    let limit = match selection {
-        LifecycleTargetSelection::Prefix { limit } => limit,
-        LifecycleTargetSelection::Single { .. } => 1,
-    };
+    let batch_size = optional_u64_env("LODESTONE_LARGE_PARITY_BATCH_SIZE")
+        .unwrap_or_else(|error| panic!("invalid parity batch selection: {error}"));
+    let limit = parity_batch_limit(h.count, max_chunks, batch_size, target_index, scan_all)
+        .unwrap_or_else(|error| panic!("invalid parity batch selection: {error}"));
+    if batch_size.is_some() {
+        eprintln!(
+            "large semantic parity: authenticated scan-all batch selected ({limit} targets)"
+        );
+    }
     let reference_packets = if scan_all {
         load_reference_packets(dimension, h.cx0, h.cx1, h.cz0, h.cz1, limit)
     } else {
@@ -870,8 +938,10 @@ fn parity_manifest_streams_before_rust_comparison() {
                 }
                 digest_mismatches.push((cx, cz, expected_digest, full));
             }
-            if let Some(reference_packet) = reference_packets.get(&(cx, cz)) {
-                let report = packet_component_difference(reference_packet, &payload, dimension);
+            if let Some(reference_path) = reference_packets.get(&(cx, cz)) {
+                let reference_packet = std::fs::read(reference_path)
+                    .unwrap_or_else(|error| panic!("read {}: {error}", reference_path.display()));
+                let report = packet_component_difference(&reference_packet, &payload, dimension);
                 component_reports.push(((cx, cz), report));
             }
             if (index + 1) % 256 == 0 || index + 1 == limit {
@@ -1046,7 +1116,7 @@ fn compare_lifecycle_manifest<S: LifecycleWorldgenSource>(
     limit: u64,
     scan_all: bool,
     target_index: Option<usize>,
-    reference_packets: &BTreeMap<ChunkPos, Vec<u8>>,
+    reference_packets: &BTreeMap<ChunkPos, PathBuf>,
     digest_mismatches: &mut Vec<(i32, i32, [u8; 32], [u8; 32])>,
     component_reports: &mut Vec<((i32, i32), PacketComponentReport)>,
 ) {
@@ -1166,8 +1236,13 @@ fn compare_lifecycle_manifest<S: LifecycleWorldgenSource>(
             }
             digest_mismatches.push((target.0, target.1, expected_digest, full));
         }
-        if let Some(reference_packet) = reference_packets.get(&target) {
-            component_reports.push((target, packet_component_difference(reference_packet, &payload, dimension)));
+        if let Some(reference_path) = reference_packets.get(&target) {
+            let reference_packet = std::fs::read(reference_path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", reference_path.display()));
+            component_reports.push((
+                target,
+                packet_component_difference(&reference_packet, &payload, dimension),
+            ));
         }
         if (index + 1) % 256 == 0 || index + 1 == limit {
             eprintln!("large lifecycle parity: compared {}/{} targets (batch boundary at {:?})", index + 1, limit, target);
@@ -1364,17 +1439,31 @@ fn packet_difference_summary(reference: &[u8], actual: &[u8], dimension: Dimensi
 }
 
 const MAX_COMPONENT_EXAMPLES: usize = 32;
+/// Keep component-state inventory bounded even when a batch contains many
+/// unrelated bad cells.  The digest mismatch list remains exact for every
+/// target; this cap applies only to the optional per-cell signature census.
+const MAX_COMPONENT_SIGNATURES: usize = 32;
 const MAX_REFERENCE_PACKET_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_REFERENCE_PACKET_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Default)]
 struct ComponentDiff {
     total: usize,
     examples: Vec<String>,
+    signatures: BTreeMap<String, usize>,
+    signature_overflow: usize,
 }
 
 impl ComponentDiff {
-    fn push(&mut self, value: String) {
+    fn push(&mut self, signature: String, value: String) {
         self.total += 1;
+        if let Some(count) = self.signatures.get_mut(&signature) {
+            *count += 1;
+        } else if self.signatures.len() < MAX_COMPONENT_SIGNATURES {
+            self.signatures.insert(signature, 1);
+        } else {
+            self.signature_overflow += 1;
+        }
         if self.examples.len() < MAX_COMPONENT_EXAMPLES {
             self.examples.push(value);
         }
@@ -1390,6 +1479,33 @@ struct PacketComponentReport {
     sky_light: ComponentDiff,
     block_light: ComponentDiff,
     masks: ComponentDiff,
+}
+
+#[test]
+fn component_inventory_groups_signatures_without_unbounded_examples() {
+    let mut first = PacketComponentReport::default();
+    first
+        .terrain
+        .push("minecraft:air -> minecraft:stone".to_owned(), "cell a".to_owned());
+    first
+        .terrain
+        .push("minecraft:air -> minecraft:stone".to_owned(), "cell b".to_owned());
+    for index in 0..(MAX_COMPONENT_SIGNATURES + 1) {
+        first
+            .biomes
+            .push(format!("{index} -> {}", index + 1), format!("cell {index}"));
+    }
+    let second = PacketComponentReport::default();
+    let reports = vec![((3, 4), first), ((5, 6), second)];
+    let groups = component_signature_groups(&reports);
+    let terrain = groups
+        .get(&("terrain", "minecraft:air -> minecraft:stone".to_owned()))
+        .expect("repeated terrain signature is retained");
+    assert_eq!(terrain.0, 2);
+    assert_eq!(terrain.1, BTreeSet::from([(3, 4)]));
+    assert_eq!(reports[0].1.biomes.total, MAX_COMPONENT_SIGNATURES + 1);
+    assert_eq!(reports[0].1.biomes.signature_overflow, 1);
+    assert_eq!(reports[0].1.biomes.examples.len(), MAX_COMPONENT_EXAMPLES);
 }
 
 impl PacketComponentReport {
@@ -1420,7 +1536,7 @@ fn load_reference_packets(
     cz0: i32,
     cz1: i32,
     limit: u64,
-) -> BTreeMap<ChunkPos, Vec<u8>> {
+) -> BTreeMap<ChunkPos, PathBuf> {
     let mut paths = Vec::new();
     if let Some(path) = std::env::var_os("LODESTONE_LARGE_PARITY_REFERENCE_PACKET") {
         paths.push(path.into());
@@ -1440,6 +1556,7 @@ fn load_reference_packets(
     let packet_limit = usize::try_from(limit).unwrap_or(usize::MAX);
     assert!(paths.len() <= packet_limit, "reference packet inputs ({}) exceed the selected manifest prefix ({limit} chunks)", paths.len());
     let mut packets = BTreeMap::new();
+    let mut total_bytes = 0u64;
     for path in paths {
         let path = Path::new(&path);
         let size = std::fs::metadata(path).unwrap_or_else(|error| panic!("stat {}: {error}", path.display())).len();
@@ -1450,7 +1567,14 @@ fn load_reference_packets(
         let width = i64::from(cx1 - cx0 + 1);
         let index = i64::from(coordinate.1 - cz0) * width + i64::from(coordinate.0 - cx0);
         assert!(coordinate.0 >= cx0 && coordinate.0 <= cx1 && coordinate.1 >= cz0 && coordinate.1 <= cz1 && index >= 0 && u64::try_from(index).is_ok_and(|index| index < limit), "reference packet {} decodes to {coordinate:?}, outside the selected manifest prefix", path.display());
-        if packets.insert(coordinate, bytes).is_some() {
+        total_bytes = total_bytes
+            .checked_add(size)
+            .expect("reference packet diagnostic byte count overflow");
+        assert!(
+            total_bytes <= MAX_REFERENCE_PACKET_TOTAL_BYTES,
+            "reference packet inputs total {total_bytes} bytes, over the {MAX_REFERENCE_PACKET_TOTAL_BYTES}-byte diagnostic bound",
+        );
+        if packets.insert(coordinate, path.to_path_buf()).is_some() {
             panic!("duplicate reference packet for {coordinate:?}");
         }
     }
@@ -1473,7 +1597,12 @@ fn packet_component_difference(reference_bytes: &[u8], actual_bytes: &[u8], dime
                 let x = cell % 16;
                 let z = (cell / 16) % 16;
                 let y = reference.column.min_y() + section as i32 * 16 + (cell / 256) as i32;
-                report.terrain.push(format!("({x},{y},{z}) {} -> {}", state_label(left), state_label(right)));
+                let from = state_label(left);
+                let to = state_label(right);
+                report.terrain.push(
+                    format!("{from} -> {to}"),
+                    format!("({x},{y},{z}) {from} -> {to}"),
+                );
             }
         }
         for cell in 0..64 {
@@ -1483,7 +1612,10 @@ fn packet_component_difference(reference_bytes: &[u8], actual_bytes: &[u8], dime
                 let x = cell % 4;
                 let z = (cell / 4) % 4;
                 let y = cell / 16;
-                report.biomes.push(format!("section {section} ({x},{y},{z}) {left} -> {right}"));
+                report.biomes.push(
+                    format!("{left} -> {right}"),
+                    format!("section {section} ({x},{y},{z}) {left} -> {right}"),
+                );
             }
         }
     }
@@ -1498,7 +1630,12 @@ fn packet_component_difference(reference_bytes: &[u8], actual_bytes: &[u8], dime
             for x in 0..16 {
                 let a = left.map(|value| value.get(x, z));
                 let b = right.map(|value| value.get(x, z));
-                if a != b { report.heightmaps.push(format!("id {id} ({x},{z}) {a:?} -> {b:?}")); }
+                if a != b {
+                    report.heightmaps.push(
+                        format!("id {id}: {a:?} -> {b:?}"),
+                        format!("id {id} ({x},{z}) {a:?} -> {b:?}"),
+                    );
+                }
             }
         }
     }
@@ -1513,7 +1650,8 @@ fn packet_component_difference(reference_bytes: &[u8], actual_bytes: &[u8], dime
         let b = right.get(index);
         if a.map(canonical_entity_key) != b.map(canonical_entity_key) {
             let position = a.or(b).map(|entity| (entity.rel_x, entity.y, entity.rel_z, entity.type_id));
-            report.block_entities.push(format!("index {index} at {position:?}"));
+            let signature = format!("type {:?} -> {:?}", a.map(|entity| entity.type_id), b.map(|entity| entity.type_id));
+            report.block_entities.push(signature, format!("index {index} at {position:?}"));
         }
     }
 
@@ -1526,10 +1664,20 @@ fn packet_component_difference(reference_bytes: &[u8], actual_bytes: &[u8], dime
             let y = cell / 256;
             let a = left.sky_at(x, y, z);
             let b = right.sky_at(x, y, z);
-            if a != b { report.sky_light.push(format!("section {section} ({x},{y},{z}) {a} -> {b}")); }
+            if a != b {
+                report.sky_light.push(
+                    format!("{a} -> {b}"),
+                    format!("section {section} ({x},{y},{z}) {a} -> {b}"),
+                );
+            }
             let a = left.block_at(x, y, z);
             let b = right.block_at(x, y, z);
-            if a != b { report.block_light.push(format!("section {section} ({x},{y},{z}) {a} -> {b}")); }
+            if a != b {
+                report.block_light.push(
+                    format!("{a} -> {b}"),
+                    format!("section {section} ({x},{y},{z}) {a} -> {b}"),
+                );
+            }
         }
         let masks = [
             ("sky", reference.light.sky(section), actual.light.sky(section)),
@@ -1541,7 +1689,12 @@ fn packet_component_difference(reference_bytes: &[u8], actual_bytes: &[u8], dime
                 lodestone_world::LightData::Uniform(0) => "empty",
                 lodestone_world::LightData::Uniform(_) | lodestone_world::LightData::Values(_) => "present",
             };
-            if tag(a) != tag(b) { report.masks.push(format!("{layer} section {section}: {} -> {}", tag(a), tag(b))); }
+            if tag(a) != tag(b) {
+                report.masks.push(
+                    format!("{layer}: {} -> {}", tag(a), tag(b)),
+                    format!("{layer} section {section}: {} -> {}", tag(a), tag(b)),
+                );
+            }
         }
     }
     report
@@ -1553,13 +1706,64 @@ fn canonical_entity_key(entity: &lodestone_world::BlockEntity) -> (u8, i16, u8, 
     (entity.rel_x, entity.y, entity.rel_z, entity.type_id, writer.into_vec())
 }
 
+fn add_component_signature_groups(
+    groups: &mut BTreeMap<(&'static str, String), (usize, BTreeSet<ChunkPos>)>,
+    component: &'static str,
+    target: ChunkPos,
+    diff: &ComponentDiff,
+) {
+    for (signature, count) in &diff.signatures {
+        let entry = groups
+            .entry((component, signature.clone()))
+            .or_insert_with(|| (0, BTreeSet::new()));
+        entry.0 += *count;
+        entry.1.insert(target);
+    }
+}
+
+fn component_signature_groups(
+    components: &[((i32, i32), PacketComponentReport)],
+) -> BTreeMap<(&'static str, String), (usize, BTreeSet<ChunkPos>)> {
+    let mut groups = BTreeMap::new();
+    for &(target, ref report) in components {
+        add_component_signature_groups(&mut groups, "terrain", target, &report.terrain);
+        add_component_signature_groups(&mut groups, "biomes", target, &report.biomes);
+        add_component_signature_groups(&mut groups, "heightmaps", target, &report.heightmaps);
+        add_component_signature_groups(&mut groups, "block_entities", target, &report.block_entities);
+        add_component_signature_groups(&mut groups, "sky_light", target, &report.sky_light);
+        add_component_signature_groups(&mut groups, "block_light", target, &report.block_light);
+        add_component_signature_groups(&mut groups, "masks", target, &report.masks);
+    }
+    groups
+}
+
 fn format_diagnostic_report(limit: u64, total: u64, digest: &[(i32, i32, [u8; 32], [u8; 32])], components: &[((i32, i32), PacketComponentReport)]) -> String {
     let mut output = format!("large semantic parity diagnostic: compared {limit}/{total} chunks; digest mismatches={} coordinates={:?}\n", digest.len(), digest.iter().map(|(x, z, _, _)| (*x, *z)).collect::<Vec<_>>());
+    let mut digest_groups = BTreeMap::<(String, String), BTreeSet<ChunkPos>>::new();
+    for &(x, z, expected, actual) in digest {
+        digest_groups
+            .entry((hex(&expected), hex(&actual)))
+            .or_default()
+            .insert((x, z));
+    }
+    for ((expected, actual), coordinates) in digest_groups {
+        output.push_str(&format!(
+            "digest group expected={expected} actual={actual} chunks={coordinates:?}\n"
+        ));
+    }
     if !digest.is_empty() && components.is_empty() {
         output.push_str("component reports unavailable: set LODESTONE_LARGE_PARITY_REFERENCE_PACKET to an authoritative raw packet (or LODESTONE_LARGE_PARITY_REFERENCE_PACKET_DIR to reference*.packet files)\n");
     }
     for ((x, z), report) in components {
-        output.push_str(&format!("packet ({x},{z}) component mismatches: terrain={} {:?}; biomes={} {:?}; heightmaps={} {:?}; block_entities={} {:?}; sky_light={} {:?}; block_light={} {:?}; masks={} {:?}\n", report.terrain.total, report.terrain.examples, report.biomes.total, report.biomes.examples, report.heightmaps.total, report.heightmaps.examples, report.block_entities.total, report.block_entities.examples, report.sky_light.total, report.sky_light.examples, report.block_light.total, report.block_light.examples, report.masks.total, report.masks.examples));
+        output.push_str(&format!("packet ({x},{z}) component mismatches: terrain={} {:?} (signature_overflow={}); biomes={} {:?} (signature_overflow={}); heightmaps={} {:?} (signature_overflow={}); block_entities={} {:?} (signature_overflow={}); sky_light={} {:?} (signature_overflow={}); block_light={} {:?} (signature_overflow={}); masks={} {:?} (signature_overflow={})\n", report.terrain.total, report.terrain.examples, report.terrain.signature_overflow, report.biomes.total, report.biomes.examples, report.biomes.signature_overflow, report.heightmaps.total, report.heightmaps.examples, report.heightmaps.signature_overflow, report.block_entities.total, report.block_entities.examples, report.block_entities.signature_overflow, report.sky_light.total, report.sky_light.examples, report.sky_light.signature_overflow, report.block_light.total, report.block_light.examples, report.block_light.signature_overflow, report.masks.total, report.masks.examples, report.masks.signature_overflow));
+    }
+    if !components.is_empty() {
+        output.push_str("grouped component signatures (chunk coordinates are exact for retained signatures):\n");
+        for ((component, signature), (cells, coordinates)) in component_signature_groups(components) {
+            output.push_str(&format!(
+                "component={component} signature={signature:?} differing_cells={cells} chunks={coordinates:?}\n"
+            ));
+        }
     }
     output
 }
