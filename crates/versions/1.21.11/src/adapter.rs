@@ -1928,31 +1928,35 @@ impl V774Adapter {
         let body: SectionBlocksUpdate = adapter.decode_body_exact(payload)?;
         let shape = adapter.current_shape();
         let mut tally = FallbackTally::default();
-        let mut changed = Vec::with_capacity(body.blocks.len());
+        let mut blocks = Vec::with_capacity(body.blocks.len());
         for (local, raw) in &body.blocks {
             let raw = u32::try_from(*raw).map_err(|_| {
                 AdapterError::Decode(format!("section_blocks_update state id {raw} is negative"))
             })?;
             let state = shape.canonical.resolve_or_air(raw, &mut tally);
-            let x = body.section_x * 16 + i32::from(local[0]);
-            let y = body.section_y * 16 + i32::from(local[1]);
-            let z = body.section_z * 16 + i32::from(local[2]);
-            world.set_block(x, y, z, state.raw());
+            blocks.push((local[0], local[1], local[2], state.raw()));
+        }
+        // Keep the packet's one-section batch intact at the world seam. Apart
+        // from avoiding one section lookup per record, this lets a real world
+        // fork its palette once and queue one coherent relight set.
+        world.set_blocks(body.section_x, body.section_y, body.section_z, &blocks);
+        for &(local_x, local_y, local_z, state) in &blocks {
+            let x = body.section_x * 16 + i32::from(local_x);
+            let y = body.section_y * 16 + i32::from(local_y);
+            let z = body.section_z * 16 + i32::from(local_z);
             world.sync_block_entity(
-                x,
-                y,
-                z,
-                block_entity_type(state)
+                x, y, z,
+                lodestone_data::block_states::StateId::new(state)
+                    .and_then(block_entity_type)
                     .map(|kind| kind.raw()),
             );
-            changed.push(*local);
         }
-        if changed.is_empty() {
+        if blocks.is_empty() {
             return Ok(Vec::new());
         }
         Ok(vec![Directive::Emit(ClientEvent::SectionBlocksChanged {
             section: SectionPos::new(body.section_x, body.section_y, body.section_z),
-            blocks: changed,
+            blocks: blocks.iter().map(|&(x, y, z, _)| [x, y, z]).collect(),
         })])
     }
 

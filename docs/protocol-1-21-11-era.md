@@ -105,6 +105,14 @@ lists and string UUIDs before emitting canonical snapshots. `block_event`
 translates the 1,166-entry block registry through `src/block_registry.rs` and
 preserves both opaque event bytes for rendering and audio consumers.
 
+`block_update` resolves its protocol-local flat state id before writing through
+the canonical world sink. `section_blocks_update` performs the same resolution
+for every record, then submits the complete one-section batch through
+`WorldSink::set_blocks`; this preserves the world implementation's single
+section fork and per-cell block-entity synchronization. Both packet paths emit
+the section-relative dirty cells consumed by the renderer, while an empty bulk
+change emits no invalidation.
+
 The two registry bridges are generated from the independent 1.21.11
 `minecraft-data` tables and map by canonical name into the 26.2 model enums;
 the canonical ids must not be indexed directly because later releases insert
