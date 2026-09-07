@@ -2931,14 +2931,16 @@ fn compute_served_light(column: &WorldChunkColumn, dimension: Dimension) -> Colu
 
 /// The initial chunk light packet is deliberately framed separately from a
 /// later light update. The Overworld's compact form retains one full-sky
-/// section above terrain. End uses the same one-section computation for a
-/// freshly generated fallback; the production server normally supplies the
-/// exact snapshot captured at its light fence instead of reconstructing a
-/// storage mask from terrain. The Nether has no sky, so its value is
-/// immaterial there.
+/// section above terrain. A freshly generated End fallback has no settled
+/// storage snapshot yet, so it keeps the complete computed sky result and
+/// applies the same sparse section-allocation rule as the light engine. The
+/// production server normally supplies the exact snapshot captured at its
+/// light fence, which remains authoritative. The Nether has no sky, so its
+/// value is immaterial there.
 const fn initial_full_sky_sections(dimension: Dimension) -> usize {
     match dimension {
-        Dimension::End | Dimension::Overworld | Dimension::Nether => 1,
+        Dimension::End => usize::MAX,
+        Dimension::Overworld | Dimension::Nether => 1,
     }
 }
 
@@ -3015,11 +3017,22 @@ fn normalize_initial_chunk_light(
                 .expect("Nether initial light normalization needs storage allocation");
             retain_zero_block_light_for_storage(light, storage);
         }
-        // A fresh End snapshot is retained by the server before the column's
-        // loading ticket is released. If this fallback is reached, preserve
-        // the computed values rather than inventing a section mask from the
-        // column's coordinates, terrain, or admission order.
-        Dimension::End => {}
+        // A retained End snapshot bypasses this fallback and is consumed
+        // verbatim by the encoder. For a generated column, mirror the sparse
+        // storage mask so an unallocated lower apron is not mistaken for a
+        // computed light value. This is only a representation rule: retained
+        // snapshots remain authoritative and are never normalized here.
+        Dimension::End => {
+            let storage = block_light_storage
+                .expect("End initial light normalization needs storage allocation");
+            debug_assert_eq!(storage.len(), light.light_section_count());
+            for (section, &is_stored) in storage.iter().enumerate() {
+                if !is_stored {
+                    *light.sky_mut(section) = LightData::Missing;
+                    *light.block_mut(section) = LightData::Missing;
+                }
+            }
+        }
     }
 }
 
@@ -3031,7 +3044,7 @@ fn compute_served_initial_light(column: &WorldChunkColumn, dimension: Dimension)
         },
         initial_full_sky_sections(dimension),
     );
-    let block_light_storage = (dimension == Dimension::Nether)
+    let block_light_storage = (dimension == Dimension::Nether || dimension == Dimension::End)
         .then(|| initial_block_light_storage_sections(column, &[]));
     normalize_initial_chunk_light(&mut light, dimension, block_light_storage.as_deref());
     light
@@ -3106,7 +3119,7 @@ fn compute_served_initial_light_with_neighbours(
         },
         initial_full_sky_sections(dimension),
     );
-    let block_light_storage = (dimension == Dimension::Nether)
+    let block_light_storage = (dimension == Dimension::Nether || dimension == Dimension::End)
         .then(|| initial_block_light_storage_sections(center, &neighbour_columns));
     normalize_initial_chunk_light(&mut light, dimension, block_light_storage.as_deref());
     light
@@ -7746,6 +7759,62 @@ mod block_edit_tests {
             15,
             "overworld light updates retain sky light"
         );
+    }
+
+    /// A generated End column has no persisted settlement snapshot in this
+    /// direct source control. Its initial fallback must nevertheless use the
+    /// sparse storage shape: the lower apron stays absent, the two full sky
+    /// sections above the island remain present, and the next section is
+    /// omitted. This is the negative control for accidentally applying the
+    /// Overworld one-section trim to End columns.
+    #[test]
+    fn end_generated_initial_fallback_keeps_storage_shape_without_snapshot() {
+        use crate::packets::chunk::LevelChunkWithLight;
+
+        let source = lodestone_server::end_chunk_source(42);
+        let center = lodestone_server::ChunkSource::column(&source, -250, -250);
+        assert!(
+            center.retained_light().is_none(),
+            "the generated-source control must exercise the fallback, not persisted light"
+        );
+        let mut neighbours = Vec::with_capacity(8);
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                if (dx, dz) != (0, 0) {
+                    neighbours.push((
+                        dx,
+                        dz,
+                        lodestone_server::ChunkSource::column(&source, -250 + dx, -250 + dz),
+                    ));
+                }
+            }
+        }
+
+        let ServerDirective::Send { payload, .. } = V770ServerProtocol
+            .try_encode_chunk_with_neighbours_in_dimension(
+                -250,
+                -250,
+                &center,
+                &neighbours,
+                Dimension::End,
+            )
+            .expect("generated End initial chunk")
+        else {
+            panic!("generated End initial chunk must send a packet");
+        };
+        let shape = ChunkShape::nether_or_end_1_21();
+        let mut reader = Reader::new(&payload);
+        let packet = LevelChunkWithLight::decode(&mut reader, &shape)
+            .expect("decode generated End initial chunk");
+        reader.ensure_empty().expect("no End packet trailing bytes");
+
+        assert_eq!(packet.light.sky(0), &LightData::Missing);
+        assert_eq!(packet.light.sky(5), &LightData::Uniform(15));
+        assert_eq!(packet.light.sky(6), &LightData::Uniform(15));
+        assert_eq!(packet.light.sky(7), &LightData::Missing);
+        assert_eq!(packet.light.block(0), &LightData::Missing);
+        assert_eq!(packet.light.block(6), &LightData::Uniform(0));
+        assert_eq!(packet.light.block(7), &LightData::Missing);
     }
 
     /// Initial End packets consume the exact light snapshot retained at the
