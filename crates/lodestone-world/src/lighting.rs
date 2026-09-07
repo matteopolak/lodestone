@@ -183,6 +183,31 @@ pub fn compute_column_light(
     blocks: &impl BlockVolume,
     props: &impl LightProperties,
 ) -> ColumnLight {
+    compute_column_light_for_initial_chunk(blocks, props, 1)
+}
+
+/// Computes light for an initial chunk packet while retaining a bounded run of
+/// full-sky sections above the highest terrain section.
+///
+/// A light update keeps the long-standing one-section framing exposed by
+/// [`compute_column_light`]. Initial chunk packets are dimension-specific,
+/// however: a protocol can retain more than that one redundant full-sky section
+/// without changing any per-cell light value. `full_sky_sections` includes the
+/// first uniformly full section immediately above terrain and must be nonzero.
+///
+/// The caller remains responsible for the protocol's block-light and
+/// no-skylight masks. This function only selects how much computed *sky* data
+/// survives the otherwise-lossless wire-size normalization.
+#[must_use]
+pub fn compute_column_light_for_initial_chunk(
+    blocks: &impl BlockVolume,
+    props: &impl LightProperties,
+    full_sky_sections: usize,
+) -> ColumnLight {
+    assert!(
+        full_sky_sections > 0,
+        "initial chunk light must keep at least one full-sky section"
+    );
     let section_count = blocks.section_count();
     let min_y = blocks.min_y();
     let field = Field {
@@ -200,6 +225,7 @@ pub fn compute_column_light(
         0,
         blocks.air_state(),
         props,
+        full_sky_sections,
         |x, world_y, z| Some(blocks.block(x, world_y, z)),
     )
 }
@@ -291,6 +317,26 @@ pub fn compute_column_light_with_neighbours(
     neighbourhood: &Neighbourhood<'_, impl BlockVolume>,
     props: &impl LightProperties,
 ) -> ColumnLight {
+    compute_column_light_with_neighbours_for_initial_chunk(neighbourhood, props, 1)
+}
+
+/// Computes initial-chunk light with loaded neighbours and a protocol-selected
+/// full-sky section budget.
+///
+/// This is the neighbour-aware counterpart of
+/// [`compute_column_light_for_initial_chunk`]. Its block sampling and flood are
+/// identical to [`compute_column_light_with_neighbours`]; only the number of
+/// uniformly full sky sections retained above terrain differs.
+#[must_use]
+pub fn compute_column_light_with_neighbours_for_initial_chunk(
+    neighbourhood: &Neighbourhood<'_, impl BlockVolume>,
+    props: &impl LightProperties,
+    full_sky_sections: usize,
+) -> ColumnLight {
+    assert!(
+        full_sky_sections > 0,
+        "initial chunk light must keep at least one full-sky section"
+    );
     let center = neighbourhood.center;
     let section_count = center.section_count();
     let min_y = center.min_y();
@@ -309,6 +355,7 @@ pub fn compute_column_light_with_neighbours(
         EDGE,
         center.air_state(),
         props,
+        full_sky_sections,
         |fx, world_y, fz| {
             let dx = (fx / EDGE) as i32 - 1;
             let dz = (fz / EDGE) as i32 - 1;
@@ -330,6 +377,7 @@ fn compute_lit(
     oz: usize,
     air_state: u32,
     props: &impl LightProperties,
+    full_sky_sections: usize,
     sample: impl Fn(usize, i32, usize) -> Option<u32>,
 ) -> ColumnLight {
     let light_sections = section_count + 2;
@@ -381,7 +429,11 @@ fn compute_lit(
     propagate(&field, &mut block, &opacity, &mut block_buckets);
 
     let mut packed = pack(section_count, light_sections, &field, ox, oz, &sky, &block);
-    trim_sky_after_first_full_section(&mut packed, highest_non_air_light_section);
+    trim_sky_after_full_sections(
+        &mut packed,
+        highest_non_air_light_section,
+        full_sky_sections,
+    );
     packed
 }
 
@@ -535,10 +587,12 @@ fn pack_section(field: &Field, ox: usize, oz: usize, data: &[u8], s: usize) -> L
 /// full update array. If the premise is false — the section immediately above
 /// the highest non-air terrain is not uniformly full sky — the function leaves
 /// the result untouched rather than inventing a cutoff.
-fn trim_sky_after_first_full_section(
+fn trim_sky_after_full_sections(
     light: &mut ColumnLight,
     highest_non_air_light_section: Option<usize>,
+    full_sky_sections: usize,
 ) {
+    debug_assert!(full_sky_sections > 0);
     let Some(highest) = highest_non_air_light_section else {
         return;
     };
@@ -548,7 +602,8 @@ fn trim_sky_after_first_full_section(
     {
         return;
     }
-    for section in (first_full + 1)..light.light_section_count() {
+    let first_elided = first_full.saturating_add(full_sky_sections);
+    for section in first_elided..light.light_section_count() {
         *light.sky_mut(section) = LightData::Missing;
     }
 }
@@ -1227,10 +1282,33 @@ mod tests {
         // Section 1 is the proposed first full section above terrain, but it is
         // not full sky. The helper must leave later sections untouched rather
         // than guessing that section 2 is the cutoff.
-        trim_sky_after_first_full_section(&mut light, Some(0));
+        trim_sky_after_full_sections(&mut light, Some(0), 1);
         assert_eq!(light.sky(1), &LightData::Uniform(7));
         assert_eq!(light.sky(2), &LightData::Uniform(15));
         assert_eq!(light.sky(3), &LightData::Uniform(15));
+    }
+
+    #[test]
+    fn initial_chunk_can_keep_four_full_sky_sections() {
+        let mut light = ColumnLight::new(8);
+        for section in 0..light.light_section_count() {
+            *light.sky_mut(section) = LightData::Uniform(15);
+        }
+
+        trim_sky_after_full_sections(&mut light, Some(4), 4);
+
+        for section in 5..=8 {
+            assert_eq!(
+                light.sky(section),
+                &LightData::Uniform(15),
+                "the four full sections from the first section above terrain remain"
+            );
+        }
+        assert_eq!(
+            light.sky(9),
+            &LightData::Missing,
+            "the next full-sky section is elided"
+        );
     }
 
     #[test]

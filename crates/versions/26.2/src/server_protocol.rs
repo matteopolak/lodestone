@@ -89,7 +89,8 @@ use lodestone_server::crafting::{
 use lodestone_world::{
     ChunkColumn as WorldChunkColumn, ChunkSection, ColumnLight, Heightmap, Heightmaps,
     LightData, LightProperties, Neighbourhood, compute_column_light,
-    compute_column_light_with_neighbours,
+    compute_column_light_for_initial_chunk, compute_column_light_with_neighbours,
+    compute_column_light_with_neighbours_for_initial_chunk,
 };
 use lodestone_data::block::Block;
 use lodestone_data::item::Item;
@@ -2928,6 +2929,106 @@ fn compute_served_light(column: &WorldChunkColumn, dimension: Dimension) -> Colu
     )
 }
 
+/// The initial chunk light packet is deliberately framed separately from a
+/// later light update. The external packet captures retain four full-sky
+/// sections above End terrain, whereas the overworld's compact form retains
+/// only the first one. The Nether has no sky, so its value is immaterial there.
+const fn initial_full_sky_sections(dimension: Dimension) -> usize {
+    match dimension {
+        Dimension::End => 4,
+        Dimension::Overworld | Dimension::Nether => 1,
+    }
+}
+
+/// Highest non-air block section in the light-section coordinate system.
+///
+/// Light section zero is the apron below the world, so a block section's index
+/// has an offset of one. A protocol's initial packet masks stop just above this
+/// populated range; deriving the boundary from the column avoids treating an
+/// empty upper build window as meaningful light data.
+fn highest_non_air_light_section(column: &WorldChunkColumn) -> Option<usize> {
+    for section in (0..column.section_count()).rev() {
+        if column.section(section).is_none() {
+            continue;
+        }
+        let base_y = column.min_y() + (section * ChunkSection::EDGE) as i32;
+        for y in (base_y..base_y + ChunkSection::EDGE as i32).rev() {
+            for z in 0..ChunkSection::EDGE {
+                for x in 0..ChunkSection::EDGE {
+                    if column.get_block(x, y, z) != column.air_id() {
+                        return Some(section + 1);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Retains explicit zero block-light sections through `last`, eliding only the
+/// redundant tail. Values are never touched: a non-uniform section carries a
+/// real source or propagation result even if its first byte happens to be zero.
+fn retain_zero_block_light_through(light: &mut ColumnLight, last: Option<usize>) {
+    for section in 0..light.light_section_count() {
+        if matches!(light.block(section), LightData::Uniform(0))
+            && last.is_none_or(|last| section > last)
+        {
+            *light.block_mut(section) = LightData::Missing;
+        }
+    }
+}
+
+/// Applies only the dimension-specific representation rules for an initial
+/// chunk packet. A later `light_update` has prior client state to clear and is
+/// intentionally left in the fully explicit representation returned by the
+/// light engine.
+fn normalize_initial_chunk_light(
+    light: &mut ColumnLight,
+    dimension: Dimension,
+    highest_non_air: Option<usize>,
+) {
+    match dimension {
+        Dimension::Overworld => elide_zero_block_light_for_chunk(light),
+        Dimension::Nether => {
+            // A no-skylight initial chunk has no sky mask at all. This differs
+            // from a later update, where explicit zero values clear old light.
+            for section in 0..light.light_section_count() {
+                *light.sky_mut(section) = LightData::Missing;
+            }
+            let last_nonzero = (0..light.light_section_count())
+                .rev()
+                .find(|&section| !matches!(light.block(section), LightData::Uniform(0) | LightData::Missing));
+            let last = highest_non_air
+                .and_then(|section| section.checked_add(1))
+                .into_iter()
+                .chain(last_nonzero)
+                .max();
+            retain_zero_block_light_through(light, last);
+        }
+        Dimension::End => {
+            let last_sky = (0..light.light_section_count())
+                .rev()
+                .find(|&section| !matches!(light.sky(section), LightData::Missing));
+            let last_nonzero = (0..light.light_section_count())
+                .rev()
+                .find(|&section| !matches!(light.block(section), LightData::Uniform(0) | LightData::Missing));
+            retain_zero_block_light_through(light, last_sky.into_iter().chain(last_nonzero).max());
+        }
+    }
+}
+
+fn compute_served_initial_light(column: &WorldChunkColumn, dimension: Dimension) -> ColumnLight {
+    let mut light = compute_column_light_for_initial_chunk(
+        column,
+        &V770LightProps {
+            has_skylight: dimension.has_skylight(),
+        },
+        initial_full_sky_sections(dimension),
+    );
+    normalize_initial_chunk_light(&mut light, dimension, highest_non_air_light_section(column));
+    light
+}
+
 /// Initial chunk packets omit block-light sections whose computed values are
 /// uniformly zero. A present zero section is meaningful for a light update,
 /// where it clears a previously known value, but the initial chunk packet has
@@ -2972,6 +3073,33 @@ fn compute_served_light_with_neighbours(
             has_skylight: dimension.has_skylight(),
         },
     )
+}
+
+fn compute_served_initial_light_with_neighbours(
+    center: &WorldChunkColumn,
+    shape: &ChunkShape,
+    neighbours: &[(i32, i32, ServerChunkColumn)],
+    dimension: Dimension,
+) -> ColumnLight {
+    let neighbour_columns = neighbours
+        .iter()
+        .map(|(_, _, neighbour)| build_world_column(shape, neighbour))
+        .collect::<Vec<_>>();
+    let mut neighbourhood = Neighbourhood::new(center);
+    for ((dx, dz, _), neighbour) in neighbours.iter().zip(&neighbour_columns) {
+        if (*dx, *dz) != (0, 0) {
+            neighbourhood = neighbourhood.with(*dx, *dz, neighbour);
+        }
+    }
+    let mut light = compute_column_light_with_neighbours_for_initial_chunk(
+        &neighbourhood,
+        &V770LightProps {
+            has_skylight: dimension.has_skylight(),
+        },
+        initial_full_sky_sections(dimension),
+    );
+    normalize_initial_chunk_light(&mut light, dimension, highest_non_air_light_section(center));
+    light
 }
 
 /// Server-side implementation of the protocol-776 (Minecraft 26.2) wire
@@ -3365,8 +3493,7 @@ fn encode_chunk_in_dimension(
 ) -> ServerDirective {
     let shape = shape_for_column(column);
     let world_column = build_world_column(&shape, column);
-    let mut light = compute_served_light(&world_column, dimension);
-    elide_zero_block_light_for_chunk(&mut light);
+    let light = compute_served_initial_light(&world_column, dimension);
     let payload = encode_column_body(cx, cz, &shape, &world_column, &light, column);
     ServerDirective::Send {
         packet_id: play::clientbound::LEVEL_CHUNK_WITH_LIGHT,
@@ -5011,8 +5138,12 @@ impl ServerProtocol for V770ServerProtocol {
     ) -> Result<ServerDirective, lodestone_server::ChunkEncodeError> {
         let shape = shape_for_column(column);
         let world_column = build_world_column(&shape, column);
-        let mut light = compute_served_light_with_neighbours(column, neighbours, dimension);
-        elide_zero_block_light_for_chunk(&mut light);
+        let light = compute_served_initial_light_with_neighbours(
+            &world_column,
+            &shape,
+            neighbours,
+            dimension,
+        );
         let payload = encode_column_body(cx, cz, &shape, &world_column, &light, column);
         Ok(ServerDirective::Send {
             packet_id: play::clientbound::LEVEL_CHUNK_WITH_LIGHT,
@@ -7410,8 +7541,8 @@ mod block_edit_tests {
             for section in 0..18 {
                 assert_eq!(
                     *initial.light.sky(section),
-                    LightData::Uniform(0),
-                    "nether initial chunk sky section {section}"
+                    LightData::Missing,
+                    "external initial Nether chunks omit sky section {section}"
                 );
             }
 
@@ -7502,6 +7633,79 @@ mod block_edit_tests {
             15,
             "overworld light updates retain sky light"
         );
+    }
+
+    /// The external packet captures use different initial masks despite the
+    /// Nether and End sharing a 16-section geometry. This test gives each
+    /// dimension a deliberately high last block so the terminal section is
+    /// observable instead of passing on an all-air control.
+    #[test]
+    fn initial_chunk_light_framing_matches_external_dimension_values() {
+        use crate::packets::chunk::LevelChunkWithLight;
+
+        let proto = V770ServerProtocol;
+        let shape = ChunkShape::nether_or_end_1_21();
+        let decode = |column: &ServerChunkColumn, dimension: Dimension| {
+            let ServerDirective::Send { payload, .. } = proto
+                .try_encode_chunk_with_neighbours_in_dimension(0, 0, column, &[], dimension)
+                .expect("initial chunk")
+            else {
+                panic!("chunk encoder must send a packet");
+            };
+            let mut reader = Reader::new(&payload);
+            let packet = LevelChunkWithLight::decode(&mut reader, &shape).expect("decode chunk");
+            reader.ensure_empty().expect("no trailing bytes");
+            packet
+        };
+
+        let mut nether = ServerChunkColumn::new(0, 256);
+        nether.set_block(8, 127, 8, "minecraft:netherrack");
+        let nether = decode(&nether, Dimension::Nether);
+        for section in 0..18 {
+            assert_eq!(
+                nether.light.sky(section),
+                &LightData::Missing,
+                "the external Nether initial form has no sky section {section}"
+            );
+            assert_eq!(
+                nether.light.block(section),
+                if section <= 9 {
+                    &LightData::Uniform(0)
+                } else {
+                    &LightData::Missing
+                },
+                "a highest block in light section eight frames Nether block section {section}"
+            );
+        }
+
+        let mut end = ServerChunkColumn::new(0, 256);
+        end.set_block(8, 63, 8, "minecraft:end_stone");
+        let end = decode(&end, Dimension::End);
+        for section in 5..=8 {
+            assert_eq!(
+                end.light.sky(section),
+                &LightData::Uniform(15),
+                "the external End initial form retains full sky section {section}"
+            );
+        }
+        for section in 9..18 {
+            assert_eq!(
+                end.light.sky(section),
+                &LightData::Missing,
+                "the End sky mask stops after section eight"
+            );
+        }
+        for section in 0..18 {
+            assert_eq!(
+                end.light.block(section),
+                if section <= 8 {
+                    &LightData::Uniform(0)
+                } else {
+                    &LightData::Missing
+                },
+                "the End block mask follows its retained sky range at section {section}"
+            );
+        }
     }
 
     /// Initial chunk packets omit uniformly dark block-light sections, while a
