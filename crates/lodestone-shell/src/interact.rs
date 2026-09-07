@@ -66,6 +66,8 @@
 //! [`lodestone_ecs::ChunkWorldWrite`] for the write and the re-mesh it makes
 //! visible.
 
+use std::collections::VecDeque;
+
 use lodestone_ecs::app::{App, Plugin};
 use lodestone_ecs::ecs::prelude::{Commands, Entity, Query, Res, ResMut, With};
 use lodestone_ecs::ecs::resource::Resource;
@@ -281,6 +283,18 @@ pub fn entity_type_can_be_picked(kind: &lodestone_model::ResourceKey) -> bool {
 /// cheap no-op there.
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct Attacking(pub bool);
+
+/// Attack press edges that arrived between simulation ticks.
+///
+/// `Attacking` is the held state used by the normal per-tick mining loop, but
+/// a press followed by a release can happen entirely between two ticks. A
+/// boolean alone loses that click, which makes discrete creative breaking
+/// slower than holding the button. The input path records each block ray hit
+/// here; [`drive_mining`] consumes one edge per delivered tick, preserving the
+/// target selected at press time and allowing a release to remain a real
+/// instant-break attempt.
+#[derive(Resource, Debug, Default)]
+pub struct AttackPresses(pub VecDeque<RayHit>);
 
 /// Whether the use (right) button has been pressed and not yet released.
 ///
@@ -684,6 +698,7 @@ fn resolve_place_intent(
 pub fn drive_mining(
     egress: Res<Egress>,
     attacking: Res<Attacking>,
+    mut attack_presses: Option<ResMut<AttackPresses>>,
     target: Res<RayTarget>,
     net: Res<NetHandle>,
     version: Res<VersionData>,
@@ -731,12 +746,22 @@ pub fn drive_mining(
     // connection at all.
     let creative = abilities.is_some_and(|a| a.instabuild);
 
+    // Consume one discrete press edge per simulation tick. Keeping the ray
+    // hit, rather than re-reading the current target, means a click followed
+    // by camera movement still acts on the block it selected. Additional
+    // clicks stay queued and are delivered on later ticks instead of being
+    // collapsed into the held boolean.
+    let pressed_hit = attack_presses
+        .as_mut()
+        .and_then(|presses| presses.0.pop_front());
     let human_attacking = attacking.0 && dead.is_none();
     // `via_intent` distinguishes "no hit, human idle" from "no hit, a plugin's
     // intent was rejected" — only the latter owes `outcome` a write below, and
     // only the latter is allowed to overwrite an `Idle` a previous branch
     // already set.
-    let (hit, via_intent) = if human_attacking {
+    let (hit, via_intent) = if let Some(pressed_hit) = pressed_hit {
+        (Some(pressed_hit), false)
+    } else if human_attacking {
         (target.0, false)
     } else if let Some(intent) = intent {
         if dead.is_some() {
@@ -867,7 +892,7 @@ pub fn drive_mining(
     let was_mining = mining.0.target().is_some();
     // `continue_` delegates to `start` when no dig is live yet, so this one entry
     // point covers first-press, hold, and retarget uniformly.
-    let actions = mining.0.continue_(pos, face, &inputs, None);
+    let mut actions = mining.0.continue_(pos, face, &inputs, None);
     let is_mining_now = mining.0.target().is_some();
     if (was_mining || is_mining_now)
         && actions
@@ -1023,6 +1048,12 @@ pub fn drive_mining(
                 block_sound_seed(hit.block, clock.ticks),
             );
         }
+    }
+    // A click edge is allowed to complete its instant creative break even if
+    // the physical button was released before this tick. For survival, this
+    // immediately follows START with ABORT, preserving tap semantics.
+    if pressed_hit.is_some() && !human_attacking {
+        actions.extend(mining.0.stop());
     }
     queue.0.extend(actions);
 }
@@ -1318,6 +1349,7 @@ impl Plugin for InteractPlugin {
         app.init_resource::<RayTarget>();
         app.init_resource::<EntityRayTarget>();
         app.init_resource::<Attacking>();
+        app.init_resource::<AttackPresses>();
         app.init_resource::<UsingItem>();
         app.init_resource::<MiningPredictor>();
         app.init_resource::<PlacementPredictor>();

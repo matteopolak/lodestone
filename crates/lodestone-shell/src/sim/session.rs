@@ -307,6 +307,7 @@ impl Sim {
             w.insert_resource(MiningPredictor(Mining::new()));
             w.insert_resource(PlacementPredictor(Placement::new()));
             w.insert_resource(Attacking(false));
+            w.insert_resource(AttackPresses::default());
             w.insert_resource(UsingItem(false));
             w.insert_resource(NetHandle(None));
         });

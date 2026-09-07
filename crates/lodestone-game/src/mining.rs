@@ -234,9 +234,10 @@ struct Active {
 #[derive(Debug, Default)]
 pub struct Mining {
     state: Option<Active>,
-    /// Post-break cooldown (`destroyDelay`): after a block breaks, vanilla
+    /// Post-break cooldown (`destroyDelay`): after a survival block breaks,
     /// ignores dig input for 5 ticks so a held button does not instantly chew
-    /// through the block behind it.
+    /// through the block behind it. Creative input never arms this delay: each
+    /// delivered press (or held-input tick) is an independent instant break.
     delay: i32,
     /// Monotonic block-change prediction sequence. `START`/`STOP` carry a fresh
     /// value the server echoes when it acks or rolls back; `ABORT` carries `0`,
@@ -382,19 +383,13 @@ impl Mining {
                 // destruction rather than on the `StopDestroy` packet a
                 // one-shot never sends.
                 //
-                // **Also arms the same 5-tick cooldown `continue_`'s progressive
-                // finish sets.** Without it, holding the button in creative
-                // breaks a block, clears `state`, and reaches `start` again on
-                // the very next tick with nothing to stop it doing the same
-                // thing again — a block broken every tick instead of once per
-                // click. Because `state` stays `None` for a creative dig, the
-                // *next* `continue_` call (once the cooldown expires) falls
-                // straight back into this branch via its `same_target`-on-`None`
-                // check — the same reason `continue_` itself needs no separate
-                // creative arm.
+                // Survival's five-tick destroy delay is deliberately not
+                // applied to creative input. Creative has no click cooldown:
+                // the next delivered press or held-input tick must be able to
+                // enter this branch immediately.
                 self.state = None;
                 self.destroyed = Some(pos);
-                self.delay = 5;
+                self.delay = if inputs.creative { 0 } else { 5 };
                 out.push(block_action(BlockActionKind::StartDestroy, pos, face, seq));
             } else {
                 self.state = Some(Active {
@@ -970,19 +965,49 @@ mod tests {
         );
     }
 
-    /// Holding the button through an instant break (creative, or any
-    /// `progress_per_tick() >= 1.0` input) must not break a second block on the
-    /// very next tick. Before `Mining::start`'s instant-break branch armed the
-    /// same 5-tick cooldown `continue_`'s progressive finish does, `state` was
-    /// left `None` with no delay, so the next `continue_` call (still `!same_target`
-    /// since there is no active dig) fell straight through to `start` again —
-    /// a block destroyed every single tick the button stayed down.
+    /// Creative instant breaks have no post-break click delay. Both a second
+    /// press and the next held-input tick must reach the same one-shot branch;
+    /// the input cadence, rather than a mining cooldown, is the only limit.
+    #[test]
+    fn creative_press_and_hold_can_break_again_immediately() {
+        let mut m = Mining::new();
+        let p = pos(0, 70, 0);
+        let inputs = BreakInputs {
+            hardness: -1.0,
+            creative: true,
+            ..BreakInputs::default()
+        };
+
+        let first = m.start(p, BlockFace::Up, &inputs, None);
+        assert_eq!(m.take_destroyed(), Some(p));
+        assert!(is_start(&first[0], p));
+
+        let held = m.continue_(p, BlockFace::Up, &inputs, None);
+        assert_eq!(m.take_destroyed(), Some(p), "held creative input has no delay");
+        assert!(is_start(&held[0], p));
+
+        let pressed_again = m.start(p, BlockFace::Up, &inputs, None);
+        assert_eq!(
+            m.take_destroyed(),
+            Some(p),
+            "a second creative press must not inherit a post-break cooldown"
+        );
+        assert!(is_start(&pressed_again[0], p));
+    }
+
+    /// Holding the button through a survival instant break must not break a
+    /// second block on the very next tick. Before `Mining::start`'s
+    /// instant-break branch armed the same 5-tick survival cooldown
+    /// `continue_`'s progressive finish does, `state` was left `None` with no
+    /// delay, so the next `continue_` call (still `!same_target` since there is
+    /// no active dig) fell straight through to `start` again — a block
+    /// destroyed every single tick the button stayed down.
     ///
     /// Predicts the exact tick count rather than merely "eventually stops":
     /// one destroy, then exactly five cooldown ticks reporting nothing, matching
     /// the same `self.delay = 5` the progressive-finish path already used.
     #[test]
-    fn holding_through_an_instant_break_does_not_break_a_block_every_tick() {
+    fn holding_through_a_survival_instant_break_does_not_break_a_block_every_tick() {
         let mut m = Mining::new();
         let p = pos(0, 70, 0);
         let inputs = BreakInputs {
