@@ -412,6 +412,29 @@ impl ChatInput {
         self.buf.handle_char(ch);
     }
 
+    /// Platform-neutral editing primitives for presentation adapters that do
+    /// not have a winit key event. They operate on the same edit box as the
+    /// window path, including its caret, selection, and Unicode boundaries.
+    pub fn backspace(&mut self) {
+        self.buf.delete_text(-1, false);
+    }
+
+    pub fn move_left(&mut self) {
+        self.buf.move_cursor(-1, false);
+    }
+
+    pub fn move_right(&mut self) {
+        self.buf.move_cursor(1, false);
+    }
+
+    pub fn move_start(&mut self) {
+        self.buf.move_cursor_to_start(false);
+    }
+
+    pub fn move_end(&mut self) {
+        self.buf.move_cursor_to_end(false);
+    }
+
     /// The current text.
     #[must_use]
     pub fn as_str(&self) -> &str {

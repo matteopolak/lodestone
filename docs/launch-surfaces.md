@@ -20,36 +20,38 @@ by the GUI chat box: a leading `/` sends a command without the slash, and any ot
 Only the window surface leaves stdout available to process tracing. All non-window modes write tracing
 selected by `RUST_LOG` to stderr, while `LODESTONE_TRACE` continues to write its separate trace file.
 
-The `terminal` path owns a normal `Sim`, connects it to the requested server, and advances it with the
-same fixed-timestep logic as the windowed client. Completed terrain meshes are uploaded to
-`RenderState`, whose ordinary world pass draws into `HeadlessTarget`. The resulting RGBA frame is not a
-separate map renderer: it is the actual game camera output. The linear offscreen values are
-sRGB-encoded, wrapped in an in-memory `image::RgbaImage`, and passed to `ratatui-image`'s primitive
-half-block protocol. That protocol packs two vertical pixels into each `▀` cell with independent
-true-colour foreground and background. It is forced instead of terminal-specific Kitty, Sixel, or
-iTerm2 image protocols so `--surface terminal` has stable Unicode output everywhere.
+The `terminal` path constructs the same `WindowApp` and calls the same `redraw` pipeline as the window
+surface, but gives it a `HeadlessTarget` instead of a swapchain. This means a launch without `--host`
+stays on the real main menu (including its buttons and panorama), and an in-game frame includes the
+same HUD, hotbar, inventory/container screens, entities, player skin, effects, and overlays. The only
+terminal-specific step happens after the frame is complete: its RGBA readback is sRGB-encoded, wrapped
+in an in-memory `image::RgbaImage`, and passed to `ratatui-image`'s primitive half-block protocol.
+That protocol packs two vertical pixels into each `▀` cell with independent true-colour foreground and
+background. It is forced instead of terminal-specific Kitty, Sixel, or iTerm2 image protocols so
+`--surface terminal` has stable Unicode output everywhere.
 
-Ratatui splits the current terminal dimensions into a chat pane on the left, game pane on the right,
-and input pane along the bottom. The game pane uses the real render camera and the same local-body,
-first-person-hand, and skin sources as the window surface, so `F5` draws the signed-in body and the
-first-person arm uses its skin sheet. When the tty reports physical window pixels, the headless target is
-sized to the game pane's measured cell width and height; this makes the camera projection correct for
-terminals whose cells are not exactly 1:2. The half-block protocol still emits two vertical source
-pixels per cell and downsamples the physical frame to the pane's cell size. Terminals that report zero
-pixel dimensions use the protocol's 1:2 fallback. A resize rebuilds the headless target to the game
-pane's new geometry. In game focus, `W`, `A`, `S`, `D`, space, and the modifier keys feed the shared
+Ratatui reserves the final row for a small input prompt and rasterizes the complete game frame into the
+remaining terminal area. When the tty reports physical window pixels, the headless target is sized to
+the measured cell geometry; this makes the camera projection correct for terminals whose cells are not
+exactly 1:2. The half-block protocol still emits two vertical source pixels per cell and downsamples the
+physical frame to the terminal's cell size. Terminals that report zero pixel dimensions use the
+protocol's 1:2 fallback. A resize rebuilds the shared headless target to the new geometry. In game focus,
+`W`, `A`, `S`, `D`, space, and the modifier keys feed the shared
 `InputState`; number keys select hotbar slots, `F5` changes the camera, and `T`, Enter, or `/` focuses
-chat. Enter sends, Escape cancels, and a leading `/` uses `Sim::send_chat`'s normal command path.
+chat. Enter sends, Escape cancels, and a leading `/` uses `Sim::send_chat`'s normal command path. The
+chat log is the one stored by `Sim` and its ages drive the terminal overlay's fade. Chat is the one
+intentional presentation exception: its shared GPU pixels are suppressed, then the same text and age
+window are composited as readable Ratatui lines at the lower-left of the game frame, so chat is not
+duplicated or made unreadable by rasterization. The input line and history use the shared `ChatInput`
+edit box and history store as well.
 Mouse left/right/middle buttons invoke attack, use/place, and pick-item, while the wheel cycles the
 hotbar. `Ctrl-C` exits. A short release timeout prevents movement sticking on terminal emulators that
 do not report key-release events, and focus loss releases movement and active mouse actions.
 
-The terminal draws its hotbar natively as a compact nine-slot row over the camera pane: terminal cells
-cannot preserve the window GUI's pixel-sized item art at a normal TTY resolution. `E` opens a native
-inventory grid from the active server menu or the local player menu; a server-opened menu also raises
-that grid automatically. Left and right click send ordinary pickup clicks, Shift-left-click sends a
-quick move, and `1` through `9` swap the hovered grid slot with that hotbar slot. `E` or Escape closes
-the terminal view and, for a server menu, sends the regular close request.
+The terminal does not draw a substitute hotbar or inventory: those are part of the shared GPU frame and
+therefore remain pixel-identical before rasterization. `E` and Escape still use the terminal input
+adapter to open and close the same inventory/container state; clicks are delivered to the shared game
+state.
 
 ## How to change it
 
@@ -57,20 +59,18 @@ the terminal view and, for a server menu, sends the regular close request.
   both `crate::run` and `crate::app::run`.
 - Change stream filtering or local commands in `crate::terminal::run_stdio`. Keep `/` server-bound;
   local controls use the reserved `#` namespace so chat cannot be mistaken for a client command.
-- Change terminal layout in `crate::terminal::surface_areas`, keyboard mapping in
-  `crate::terminal::key_command`, mouse mapping in `crate::terminal::mouse_event_command`, event
-  effects in `crate::terminal::handle_key`/`crate::terminal::handle_mouse`, target geometry in
-  `crate::terminal::terminal_pixel_size`/`crate::terminal::render_dimensions`, and image conversion
+- Change terminal layout in `crate::terminal::terminal_game_area`, keyboard mapping in
+  `crate::terminal::key_command`, mouse mapping in `crate::terminal::mouse_event_command`, and
+  route UI events through `WindowApp`'s terminal adapter (`terminal_menu_key`,
+  `terminal_pointer_moved`, and `terminal_pointer_button`) rather than mutating `Sim` directly.
+  Gameplay effects in `crate::terminal::handle_key`/`crate::terminal::handle_mouse`, target geometry in
+  `crate::terminal::terminal_pixel_size`/`crate::terminal::terminal_render_dimensions`, and image conversion
   in `crate::terminal::halfblock_protocol`. Keep the pure mappers and geometry helpers covered with
   synthetic Crossterm events or measured dimensions so behavior stays deterministic without a TTY.
 - Keep the `ratatui-image` primitive half-block backend free of Chafa and image decoder features. The
   surface starts from raw RGBA bytes, so those dependencies add no capability here.
-- Change the rendered scene through `Sim` or `RenderState`, not by teaching the terminal encoder about
-  blocks. A second scene implementation would drift from the window.
-- Change the native terminal inventory in `crate::terminal::terminal_menu`,
-  `terminal_inventory_text`, `inventory_slot_at`, and `handle_inventory_mouse`. Keep its click route
-  on `ClientHandle::menu_click`; the client-owned menu predictor must produce the changed-slot list and
-  state id, never a hand-built container packet.
+- Change the rendered scene through `WindowApp::redraw`, `Sim`, or `RenderState`, not by teaching the
+  terminal encoder about blocks or UI. The terminal encoder must remain a final framebuffer adapter.
 
 ### Gotchas
 
@@ -86,10 +86,15 @@ The physical cell fields come from the terminal's window-size query and are not 
 interface. They are therefore a best-effort aspect correction, not a pixel-perfect display contract;
 the fallback remains deterministic and portable.
 
-The terminal hotbar and inventory are textual overlays rather than a downsampled copy of the window GUI.
-They deliberately expose item ids/counts and menu-slot indices compactly so their click targets remain
-usable on a small terminal. The player skin is visible as a full body only in detached (`F5`) camera
-modes; first person correctly exposes only the skinned arm.
+The terminal image is necessarily difficult to read at normal cell sizes, but it is the same framebuffer
+as the window surface. The player skin is visible as a full body in detached (`F5`) camera modes; first
+person correctly exposes only the skinned arm.
+
+When no `--host` is supplied, the terminal starts on the same main-menu screen as a window. Crossterm
+cells are converted to framebuffer coordinates and menu/container clicks are handled by `WindowApp`'s
+shared hit-testing and navigation. Only chat is an intentional presentation exception: its shared log,
+fade timing, history, editor state, span colours, and basic formatting flags are rendered as readable
+native terminal text over the game pane.
 
 Ratatui restores raw mode and the alternate screen through its panic hook. The terminal surface also
 disables mouse capture, focus reporting, and keyboard enhancement flags on every normal or unwinding
@@ -106,8 +111,13 @@ lodestone --surface stdio --host example.org --port 25565
 lodestone --surface terminal --host example.org --port 25565
 ```
 
+`terminal` is enabled by the `window` rendering feature and does not require the `multiplayer` feature.
+Without a host it can therefore show and navigate the main menu in a singleplayer-only build; the
+multiplayer row remains disabled by that build's normal feature flag.
+
 - `--surface <window|stdio|terminal>` selects the presentation path. The default remains `window`.
-- `--host`, `--port`, and `--protocol` select the server for both terminal surfaces.
+- `--host`, `--port`, and `--protocol` select the server when a terminal session is requested. Omitting
+  `--host` on `terminal` starts the shared main-menu scene; `stdio` remains connection-only.
 - `RUST_LOG` tracing goes to stderr for every non-window mode, so it cannot corrupt a surface's stdout
   protocol or alternate-screen output; `LODESTONE_TRACE=<path>` remains a file sink.
 - The live terminal size controls the pane and GPU target sizes; when available, the terminal's

@@ -233,7 +233,7 @@ impl WindowApp {
             // `if let`, and that is the whole point of the split below it:
             // it re-binds objects `reload_block_atlas` has just replaced, so
             // it is meaningless on a frame where that did not run.
-            let format = self.target.as_ref().map(lodestone_render::SurfaceTarget::format);
+            let format = self.target.as_ref().map(RenderTarget::format);
             if let Some(format) = format
                 && let Some(gpu) = self.gpu.as_ref()
                 && let Some(render) = self.render.as_ref()
@@ -289,7 +289,7 @@ impl WindowApp {
                 // than leaving the owner on the pack state from startup.
                 render.reload_block_entity_textures(gpu.device(), gpu.queue());
             }
-            let format = self.target.as_ref().map(lodestone_render::SurfaceTarget::format);
+            let format = self.target.as_ref().map(RenderTarget::format);
             if let Some(format) = format {
                 if let Some(gpu) = self.gpu.as_ref()
                     && let Some(hud) = self.hud.as_mut()
@@ -1909,6 +1909,22 @@ impl WindowApp {
         // settings.
         hud_frame.chat_options = chat_display_opts;
         hud_frame.chat_scrollbar = chat_scrollbar_view;
+        // The terminal surface keeps the shared chat model and input state,
+        // but composites its readable text after framebuffer rasterization.
+        // Clear every HUD chat payload here so the same messages cannot appear
+        // twice (once as tiny pixels and once as terminal text).
+        if self.terminal_chat_native {
+            hud_frame.chat_spans = &[];
+            hud_frame.chat_trust = &[];
+            hud_frame.chat_wrap = None;
+            hud_frame.chat_input = None;
+            hud_frame.chat_selection = None;
+            hud_frame.chat_cursor = None;
+            hud_frame.chat_suggestion_ghost = None;
+            hud_frame.chat_suggestions = None;
+            hud_frame.chat_hover_tooltip = None;
+            hud_frame.chat_scrollbar = None;
+        }
         hud_frame.players = tab_view.as_ref();
         hud_frame.sidebar = sidebar.as_ref();
         hud_frame.boss_bars = &boss_bars;
@@ -2889,8 +2905,11 @@ impl WindowApp {
         let (Some(gpu), Some(target)) = (self.gpu.as_ref(), self.target.as_mut()) else {
             return;
         };
+        let Some(default) = target.default_present_mode() else {
+            return;
+        };
         let ordinary = if self.nav.options().enable_vsync {
-            target.default_present_mode()
+            default
         } else {
             wgpu::PresentMode::AutoNoVsync
         };

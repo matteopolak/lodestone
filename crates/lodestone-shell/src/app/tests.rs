@@ -974,6 +974,67 @@ fn the_crosshair_and_the_hotbar_disagree_behind_a_screen() {
     );
 }
 
+/// The terminal pointer adapter must activate the same row/action boundary as
+/// the window path. Clicking the first title row is expected to open the shared
+/// world-selection screen; a direct terminal-only menu implementation would
+/// leave the title screen unchanged.
+#[cfg(feature = "window")]
+#[test]
+fn terminal_pointer_click_reaches_shared_menu_state_transition() {
+    use crate::menu::Screen;
+
+    let mut app = WindowApp::new(Config::default());
+    const WIDTH: u32 = 800;
+    const HEIGHT: u32 = 600;
+    let (x, y) = {
+        let frame = crate::menu::nav::on_screen_frame(
+            &app.ui,
+            &app.nav,
+            app.sim.death_message(),
+            &app.statuses,
+            &mut app.favicons,
+        )
+        .expect("the title screen must expose a render frame");
+        let (logical_width, logical_height) =
+            crate::menu::render::logical_canvas(frame.gui_scale, WIDTH, HEIGHT);
+        let scale = crate::config::calculate_gui_scale(frame.gui_scale, WIDTH, HEIGHT).max(1)
+            as f32;
+        let (row_x, row_y, row_width, row_height) =
+            crate::menu::render::row_rect(&frame.rows, 0, logical_width, logical_height)
+                .expect("the first title row must have a hit area");
+        ((row_x + row_width * 0.5) * scale, (row_y + row_height * 0.5) * scale)
+    };
+    assert_eq!(app.ui.screen(), Screen::MainMenu);
+    app.terminal_pointer_button_at(
+        crate::container::MenuButton::Left,
+        true,
+        x,
+        y,
+        WIDTH,
+        HEIGHT,
+    );
+    assert_eq!(
+        app.ui.screen(),
+        Screen::WorldSelect,
+        "terminal click must pass through MenuNav's ownership reconciliation"
+    );
+}
+
+#[cfg(feature = "window")]
+#[test]
+fn terminal_enter_uses_the_same_menu_action_as_the_pointer() {
+    use crate::menu::Screen;
+
+    let mut app = WindowApp::new(Config::default());
+    assert_eq!(app.ui.screen(), Screen::MainMenu);
+    app.terminal_menu_key(crate::menu::nav::MenuKey::Enter);
+    assert_eq!(
+        app.ui.screen(),
+        Screen::WorldSelect,
+        "terminal Enter must dispatch through MenuNav and the shared action handler"
+    );
+}
+
 #[test]
 fn a_long_stall_is_clamped_not_replayed() {
     // The reported bug: tab out for a minute, tab back in, and the client
