@@ -40,15 +40,15 @@ for (( x_lo = grid_min; x_lo <= grid_max; x_lo += 16, slot += 1 )); do
   if (( x_hi > grid_max )); then
     x_hi=grid_max
   fi
-  dimension_arg=()
-  if [ "$dimension" != overworld ]; then dimension_arg=( --dimension "$dimension" ); fi
+  export_command=( "$here/large-parity.sh" --mode export )
+  if [ "$dimension" != overworld ]; then
+    export_command+=( --dimension "$dimension" )
+  fi
   output_rel="${shard_dir}/shard-x${x_lo}-${x_hi}.lwp"
   if [ "$dimension" != overworld ]; then
     output_rel="${shard_dir}/${dimension}/shard-x${x_lo}-${x_hi}.lwp"
   fi
-  "$here/large-parity.sh" \
-    --mode export \
-    "${dimension_arg[@]}" \
+  "${export_command[@]}" \
     --out "${output_prefix}/${output_rel}" \
     --cx "$x_lo" "$x_hi" --cz "$grid_min" "$grid_max" --resume
 done
