@@ -1292,6 +1292,21 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
         drop(edits);
     }
 
+    /// Retains a complete column snapshot for the next save and for a later
+    /// reload. Light is part of the column's exact serving state, so this path
+    /// is used after both initial settlement and a resident light recompute,
+    /// not only after a block edit.
+    fn store_resident_column(&self, cx: i32, cz: i32, column: &ChunkColumn) -> bool {
+        let mut edits = self.state.edits.lock().expect("world edit lock poisoned");
+        edits.insert((cx, cz), column.clone());
+        self.state
+            .dirty
+            .lock()
+            .expect("world dirty lock poisoned")
+            .insert((cx, cz));
+        true
+    }
+
     /// The cache above has evicted this column, so the save path may release
     /// it once it is on disk.
     ///

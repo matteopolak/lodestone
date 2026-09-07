@@ -354,6 +354,16 @@ pub struct ChunkColumn {
     /// even a cached `ChunkColumn` revisited later cannot hand out the same
     /// candidates twice. See `docs/worldgen-mob-generation-spawn.md`.
     generation_spawns: Vec<lodestone_worldgen::spawn_stage::GenerationSpawn>,
+    /// The exact sky/block light state captured by the source's settlement
+    /// transaction, when this column has one.
+    ///
+    /// A freshly generated column receives this snapshot through the source
+    /// lifecycle; a persisted column restores it from its chunk record. Block
+    /// edits clear it, and the server installs a replacement after recomputing
+    /// the affected 3×3 footprint. Keeping the value beside the blocks makes
+    /// an initial packet consume the same state that storage and later
+    /// resident reads see.
+    retained_light: Option<lodestone_world::ColumnLight>,
 }
 
 impl ChunkColumn {
@@ -397,6 +407,7 @@ impl ChunkColumn {
             structure_references: std::collections::BTreeMap::new(),
             motion_blocking: None,
             generation_spawns: Vec::new(),
+            retained_light: None,
         }
     }
 
@@ -480,6 +491,7 @@ impl ChunkColumn {
             structure_references: std::collections::BTreeMap::new(),
             motion_blocking,
             generation_spawns,
+            retained_light: None,
         };
         column.recalc_ticking_counts();
         debug_assert_eq!(
@@ -737,6 +749,31 @@ impl ChunkColumn {
         self.block_entities = entities;
     }
 
+    /// Returns the exact light snapshot retained for this column, if one has
+    /// been captured by a settlement transaction or restored from storage.
+    #[must_use]
+    pub fn retained_light(&self) -> Option<&lodestone_world::ColumnLight> {
+        self.retained_light.as_ref()
+    }
+
+    /// Installs a complete light snapshot for this column.
+    ///
+    /// The snapshot spans the column's block sections plus the one-section
+    /// boundary on either side. Callers that obtain light from a protocol
+    /// encoder should validate that shape before storing it; the encoder also
+    /// validates it before consuming a retained value.
+    pub fn set_retained_light(&mut self, light: lodestone_world::ColumnLight) {
+        self.retained_light = Some(light);
+    }
+
+    /// Drops the retained light snapshot after a block mutation.
+    ///
+    /// The next initial send or light update must install a newly fenced
+    /// snapshot instead of serving a value computed for the old block grid.
+    pub fn clear_retained_light(&mut self) {
+        self.retained_light = None;
+    }
+
     /// Takes this column's pending `SPAWN`-stage creature candidates, leaving
     /// it empty after the one generation-time consumer reads it.
     ///
@@ -937,6 +974,7 @@ impl ChunkColumn {
 
     /// Sets the block state at a local `(x, z)` in `0..16` and world `y`.
     pub fn set_block(&mut self, x: i32, y: i32, z: i32, name: &str) {
+        self.clear_retained_light();
         let id = self.intern(name);
         self.write_block_id(x, y, z, id);
     }
@@ -1352,6 +1390,17 @@ impl ChunkColumn {
     }
 }
 
+/// The result of trying to install a retained light snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnLightSettlementError {
+    /// The protocol could not produce a light snapshot for the column.
+    NoLight,
+    /// A resident-only settlement could not assemble every contributing column.
+    MissingFootprint,
+    /// A write changed the column after the snapshot was captured.
+    Conflict,
+}
+
 /// Supplies terrain columns to the integrated server.
 pub trait ChunkSource: Send + Sync {
     /// Generates the column at chunk coordinates `(cx, cz)`.
@@ -1409,6 +1458,83 @@ pub trait ChunkSource: Send + Sync {
     /// coordinate-level mutation instead.
     fn store_resident_column(&self, _cx: i32, _cz: i32, _column: &ChunkColumn) -> bool {
         false
+    }
+
+    /// Computes and installs a retained light snapshot from one stable column
+    /// view. The callback runs without a source or cache lock held. A source
+    /// with a versioned cache may reject the result when a concurrent block
+    /// write changed the column between capture and commit; callers should
+    /// refresh their input and retry that case.
+    fn settle_resident_column_light(
+        &self,
+        cx: i32,
+        cz: i32,
+        fallback: &ChunkColumn,
+        replace_existing: bool,
+        compute: &mut dyn FnMut(&ChunkColumn) -> Option<lodestone_world::ColumnLight>,
+    ) -> Result<ChunkColumn, ColumnLightSettlementError> {
+        let mut compute_centre = |current: &ChunkColumn, _neighbours: &[(i32, i32, ChunkColumn)]| {
+            compute(current)
+        };
+        self.settle_resident_column_light_with_neighbours(
+            cx,
+            cz,
+            fallback,
+            &[],
+            false,
+            replace_existing,
+            false,
+            &mut compute_centre,
+        )
+    }
+
+    /// Captures the centre and every requested neighbour, computes light from
+    /// that one footprint, and installs the resulting snapshot. The offsets
+    /// are chunk-relative `(dx, dz)` pairs and omit `(0, 0)`; callers normally
+    /// pass the eight entries in a 3×3 square.
+    ///
+    /// `resident_only` makes an absent centre or neighbour return
+    /// [`ColumnLightSettlementError::MissingFootprint`] without generation or
+    /// persistence. The callback runs after all columns have been captured and
+    /// without a source/cache lock held. `exclusive` requests the source's
+    /// guaranteed-progress path: a source with coordinate gates holds every
+    /// requested gate through the callback and commit, while the ordinary path
+    /// validates the captured revisions optimistically.
+    fn settle_resident_column_light_with_neighbours(
+        &self,
+        cx: i32,
+        cz: i32,
+        fallback: &ChunkColumn,
+        neighbour_offsets: &[(i32, i32)],
+        resident_only: bool,
+        replace_existing: bool,
+        _exclusive: bool,
+        compute: &mut dyn FnMut(&ChunkColumn, &[(i32, i32, ChunkColumn)]) -> Option<lodestone_world::ColumnLight>,
+    ) -> Result<ChunkColumn, ColumnLightSettlementError> {
+        let current = self
+            .resident_column(cx, cz)
+            .or_else(|| (!resident_only).then(|| fallback.clone()))
+            .ok_or(ColumnLightSettlementError::MissingFootprint)?;
+        if !replace_existing && current.retained_light().is_some() {
+            return Ok(current);
+        }
+        let mut neighbours = Vec::with_capacity(neighbour_offsets.len());
+        for &(dx, dz) in neighbour_offsets {
+            let column = if resident_only {
+                self.resident_column(cx + dx, cz + dz)
+            } else {
+                Some(self.column(cx + dx, cz + dz))
+            }
+            .ok_or(ColumnLightSettlementError::MissingFootprint)?;
+            neighbours.push((dx, dz, column));
+        }
+        let Some(light) = compute(&current, &neighbours) else {
+            return Err(ColumnLightSettlementError::NoLight);
+        };
+        let mut settled = current;
+        settled.set_retained_light(light);
+        let _ = self.store_resident_column(cx, cz, &settled);
+        Ok(settled)
     }
 
     /// Reads the biome id at world coordinates `(x, y, z)` — `/execute if
@@ -1674,6 +1800,43 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
         (**self).store_resident_column(cx, cz, column)
     }
 
+    fn settle_resident_column_light(
+        &self,
+        cx: i32,
+        cz: i32,
+        fallback: &ChunkColumn,
+        replace_existing: bool,
+        compute: &mut dyn FnMut(&ChunkColumn) -> Option<lodestone_world::ColumnLight>,
+    ) -> Result<ChunkColumn, ColumnLightSettlementError> {
+        (**self).settle_resident_column_light(cx, cz, fallback, replace_existing, compute)
+    }
+
+    fn settle_resident_column_light_with_neighbours(
+        &self,
+        cx: i32,
+        cz: i32,
+        fallback: &ChunkColumn,
+        neighbour_offsets: &[(i32, i32)],
+        resident_only: bool,
+        replace_existing: bool,
+        exclusive: bool,
+        compute: &mut dyn FnMut(
+            &ChunkColumn,
+            &[(i32, i32, ChunkColumn)],
+        ) -> Option<lodestone_world::ColumnLight>,
+    ) -> Result<ChunkColumn, ColumnLightSettlementError> {
+        (**self).settle_resident_column_light_with_neighbours(
+            cx,
+            cz,
+            fallback,
+            neighbour_offsets,
+            resident_only,
+            replace_existing,
+            exclusive,
+            compute,
+        )
+    }
+
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
         (**self).column(cx, cz)
     }
@@ -1762,6 +1925,43 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
 
     fn store_resident_column(&self, cx: i32, cz: i32, column: &ChunkColumn) -> bool {
         (**self).store_resident_column(cx, cz, column)
+    }
+
+    fn settle_resident_column_light(
+        &self,
+        cx: i32,
+        cz: i32,
+        fallback: &ChunkColumn,
+        replace_existing: bool,
+        compute: &mut dyn FnMut(&ChunkColumn) -> Option<lodestone_world::ColumnLight>,
+    ) -> Result<ChunkColumn, ColumnLightSettlementError> {
+        (**self).settle_resident_column_light(cx, cz, fallback, replace_existing, compute)
+    }
+
+    fn settle_resident_column_light_with_neighbours(
+        &self,
+        cx: i32,
+        cz: i32,
+        fallback: &ChunkColumn,
+        neighbour_offsets: &[(i32, i32)],
+        resident_only: bool,
+        replace_existing: bool,
+        exclusive: bool,
+        compute: &mut dyn FnMut(
+            &ChunkColumn,
+            &[(i32, i32, ChunkColumn)],
+        ) -> Option<lodestone_world::ColumnLight>,
+    ) -> Result<ChunkColumn, ColumnLightSettlementError> {
+        (**self).settle_resident_column_light_with_neighbours(
+            cx,
+            cz,
+            fallback,
+            neighbour_offsets,
+            resident_only,
+            replace_existing,
+            exclusive,
+            compute,
+        )
     }
 
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
@@ -2445,26 +2645,17 @@ impl ChunkSource for OverworldChunkSource {
         });
         column.set_block(lx, y, lz, name);
     }
-
-    fn store_resident_column(&self, cx: i32, cz: i32, column: &ChunkColumn) -> bool {
-        self.edits
-            .lock()
-            .expect("chunk edit cache lock poisoned")
-            .insert((cx, cz), column.clone());
-        true
-    }
 }
 
 /// The Nether's terrain source — [`OverworldChunkSource`]'s counterpart for the
 /// second dimension this server hosts.
 ///
-/// Same retention rule as its sibling and for the same reason: `edits` is
-/// populated **only** by [`set_block`](Self::set_block), so an untouched column is
-/// regenerated on demand and only a column a player (or a portal) has actually
-/// changed costs memory. That matters more here than in the overworld, because
-/// *every* Nether portal trip writes blocks — the destination portal the travel
-/// path builds when it finds none is a `set_block` fan-out, and it has to still be
-/// there when the player walks back into it.
+/// The edit ledger retains block mutations. Light snapshots are owned by the
+/// persistent region wrapper while a save is pending; a generator-backed source
+/// must not turn every served column into a permanent terrain edit. That matters
+/// here because *every* Nether portal trip writes blocks — the destination portal
+/// the travel path builds when it finds none is a `set_block` fan-out, and it has
+/// to still be there when the player walks back into it.
 ///
 /// # The window height is 256, not the generator's 128
 ///
@@ -2630,9 +2821,9 @@ impl ChunkSource for NetherChunkSource {
 /// The End's terrain source — [`NetherChunkSource`]'s counterpart for the third
 /// dimension this engine generates real terrain for.
 ///
-/// Same retention rule as its siblings, for the same reason: `edits` is
-/// populated only by [`set_block`](Self::set_block), so an untouched column is
-/// regenerated on demand.
+/// The edit ledger retains block mutations. A persistent region wrapper owns
+/// exact light snapshots until a successful save, while this deterministic
+/// generator remains free to regenerate untouched terrain after eviction.
 ///
 /// **Constructed, but not reachable by a player.** `crate::integrated`'s
 /// `with_nether` sibling factory has an `End` arm that builds one of these

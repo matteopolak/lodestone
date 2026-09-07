@@ -228,7 +228,8 @@ fn freeze_facts() -> &'static Value {
         use lodestone_data::{block_solidity, block_states, snow_support};
 
         type Reader = fn(lodestone_data::block_states::StateId) -> bool;
-        const COLUMNS: [(&str, Reader); 5] = [
+        const COLUMNS: [(&str, Reader); 6] = [
+            ("solid", block_solidity::legacy_solid),
             ("blocks_motion", block_solidity::blocks_motion),
             ("has_fluid_state", snow_support::has_fluid_state),
             ("water_source", snow_support::is_water_source_liquid_block),
@@ -1190,6 +1191,55 @@ mod tests {
     use super::*;
     use crate::chunk::{ChunkColumn, ChunkSource};
     use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+
+    /// Production-data anchor for the underground dungeon path. The reference
+    /// column at seed 42/chunk (-8,-8) contains this chest, including its
+    /// deferred loot-table metadata; checking the generated block entity keeps
+    /// the assertion on the actual source boundary rather than a fixture map.
+    #[test]
+    fn production_dungeon_reaches_the_external_chest_anchor() {
+        let source = overworld_chunk_source(42);
+        let column = source.column(-8, -8);
+        let chest_pos = lodestone_model::BlockPos::new(-113, -33, -125);
+        let local_x = chest_pos.x.rem_euclid(16);
+        let local_z = chest_pos.z.rem_euclid(16);
+        assert_eq!(
+            column
+                .block_state(local_x, chest_pos.y, local_z)
+                .split('[')
+                .next(),
+            Some("minecraft:chest"),
+            "the externally anchored position must be a dungeon chest"
+        );
+        let (_, entity) = column
+            .block_entities()
+            .iter()
+            .find(|(pos, _)| *pos == chest_pos)
+            .expect("the anchored dungeon chest must carry a generated block entity");
+        let nbt = crate::chunk_nbt::block_entity_to_nbt(chest_pos, entity);
+        let lodestone_core::Nbt::Compound(fields) = nbt else {
+            panic!("generated dungeon chest must encode as a compound");
+        };
+        assert!(fields.iter().any(|(name, value)| {
+            name == "LootTable"
+                && matches!(value, lodestone_core::Nbt::String(table) if table == "minecraft:chests/simple_dungeon")
+        }));
+        assert!(
+            source
+                .column(-7, -8)
+                .block_entities()
+                .iter()
+                .any(|(_, entity)| matches!(entity, crate::block_entities::BlockEntity::Spawner(_))),
+            "the accepted room's source column must carry its spawner block entity"
+        );
+        assert!(
+            column
+                .block_entities()
+                .iter()
+                .all(|(pos, _)| *pos != lodestone_model::BlockPos::new(-112, -33, -125)),
+            "the nearby non-anchor must not be treated as a coordinate fixture"
+        );
+    }
 
     #[test]
     fn retained_chunk_source_factory_exposes_residency_without_exposing_the_store() {

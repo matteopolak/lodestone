@@ -783,6 +783,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   the End's non-multi-noise biome source. All bundled 26.2 data for both dimensions is
   complete; the remaining gaps are structure families and gameplay such as the dragon
   fight rather than missing terrain or a disconnected dimension source.
+- [World-generation dungeons](./worldgen-dungeons.md) — The `monster_room`
+  configured feature places an underground cobblestone room, up to two deferred-loot
+  chests, and one monster spawner during Overworld decoration. Generated block
+  entities travel with the column, so the room's metadata is present when the server
+  encodes or saves the receiving chunk.
 - [Large worldgen parity harness](./worldgen-large-parity.md) —
   `scripts/worldgen-oracle/LargeParityOracle.java` is the resumable, 251,001-chunk
   parity oracle for the 501 by 501 grid centred at `(0, 0)`. It freezes one generated
@@ -807,6 +812,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   eligible material in the column below it, and scatters hanging roots around the
   original candidate. It is the root-column path used by the lush-cave decoration
   data.
+- [Nether scattered ore](./worldgen-scattered-ore.md) — The Nether scattered-ore
+  feature places independent ore candidates around each resolved origin instead of
+  growing one connected blob. It is the feature body used by the Nether's step-7
+  ancient-debris entry and shares the configured targets, placement modifiers, and
+  exposure rule with standard ore.
 - [Structure generation](./worldgen-structures.md) — The structure engine: deciding
   which chunk gets which structure for a seed, and turning that decision into real
   blocks — jittered-grid and concentric-ring placement, `.nbt` structure templates

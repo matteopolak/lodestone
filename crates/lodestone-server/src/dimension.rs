@@ -71,7 +71,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::block_entities::BlockEntityHandle;
-use crate::chunk::{ChunkColumn, ChunkSource};
+use crate::chunk::{ChunkColumn, ColumnLightSettlementError, ChunkSource};
 
 /// A level this server can host.
 ///
@@ -482,6 +482,48 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
 
     fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
         self.primary.resident_column(cx, cz)
+    }
+
+    fn store_resident_column(&self, cx: i32, cz: i32, column: &ChunkColumn) -> bool {
+        self.primary.store_resident_column(cx, cz, column)
+    }
+
+    fn settle_resident_column_light(
+        &self,
+        cx: i32,
+        cz: i32,
+        fallback: &ChunkColumn,
+        replace_existing: bool,
+        compute: &mut dyn FnMut(&ChunkColumn) -> Option<lodestone_world::ColumnLight>,
+    ) -> Result<ChunkColumn, ColumnLightSettlementError> {
+        self.primary
+            .settle_resident_column_light(cx, cz, fallback, replace_existing, compute)
+    }
+
+    fn settle_resident_column_light_with_neighbours(
+        &self,
+        cx: i32,
+        cz: i32,
+        fallback: &ChunkColumn,
+        neighbour_offsets: &[(i32, i32)],
+        resident_only: bool,
+        replace_existing: bool,
+        exclusive: bool,
+        compute: &mut dyn FnMut(
+            &ChunkColumn,
+            &[(i32, i32, ChunkColumn)],
+        ) -> Option<lodestone_world::ColumnLight>,
+    ) -> Result<ChunkColumn, ColumnLightSettlementError> {
+        self.primary.settle_resident_column_light_with_neighbours(
+            cx,
+            cz,
+            fallback,
+            neighbour_offsets,
+            resident_only,
+            replace_existing,
+            exclusive,
+            compute,
+        )
     }
 
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {

@@ -250,6 +250,7 @@
 
 mod coral;
 mod config;
+mod dungeon;
 pub mod features;
 mod grid;
 pub mod ids;
@@ -664,6 +665,10 @@ fn place_configured_feature<R: RandomSource>(
         ConfiguredFeature::Lake(cfg) => {
             census_bump(|c| c.other_feature += 1);
             features::place_lake(random, pos, cfg, grid, tags)
+        }
+        ConfiguredFeature::MonsterRoom => {
+            census_bump(|c| c.other_feature += 1);
+            dungeon::place_monster_room(random, pos, feature, grid, tags)
         }
         ConfiguredFeature::HugeMushroom(cfg) => {
             census_bump(|c| c.other_feature += 1);

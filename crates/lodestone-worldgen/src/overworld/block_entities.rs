@@ -4,10 +4,8 @@
 //!
 //! A list of block entities a generated column carries alongside its block field,
 //! so a decoration feature can produce a block *plus* the state that block needs to
-//! be more than scenery. Today there is exactly one producer — the beehive
-//! decorator, whose nests reached the client empty because the draw for
-//! "2 or 3 bees" was consumed and thrown away
-//! ([`crate::feature::vegetation::place`]).
+//! be more than scenery. The beehive decorator and underground dungeon feature
+//! are the current producers.
 //!
 //! ## How it works
 //!
@@ -24,16 +22,16 @@
 //! crate either taking an NBT dependency or inventing its own tag type, and it
 //! would move the "did I spell the field names right" question from compile time to
 //! a wire gate. One variant per block-entity kind the generator can actually
-//! produce keeps that question in the type system, and the list is short: adding
-//! chests, spawners and decorated pots for the structure engine means adding
-//! variants here, and the consumer's `match` then fails to compile until it handles
-//! them — which is the property a blob would throw away.
+//! produce keeps that question in the type system. Each variant carries the data
+//! needed to build the save and packet forms at the
+//! server boundary. Adding another generated block entity means adding a variant
+//! here, and the consumer's `match` then fails to compile until it handles it —
+//! which is the property a blob would throw away.
 //!
 //! ## Dependencies
 //!
-//! None. The **consumer** side is not in this crate: `ChunkColumn` has no
-//! block-entity field and the chunk-data packet writes a hardcoded `var_i32(0)`,
-//! both outside `lodestone-worldgen`. See that patch's own comment for the reason.
+//! None. The server boundary consumes this typed list when it adopts a generated
+//! column and turns each entry into the appropriate block-entity record.
 
 /// One block entity a generated column carries, with its **absolute** world
 /// position.
@@ -55,6 +53,31 @@ pub enum GeneratedBlockEntity {
         /// One entry per bee, in the order the decorator drew them.
         bees: Vec<BeeOccupant>,
     },
+    /// A dungeon chest with deferred loot generation.
+    ///
+    /// `loot_table_seed` is the feature's own random draw, retained so the
+    /// server can reproduce the deferred table selection after the chunk is
+    /// sent or saved. The block state's facing is carried separately because
+    /// the chest's block entity does not own block-state properties.
+    DungeonChest {
+        x: i32,
+        y: i32,
+        z: i32,
+        /// The canonical horizontal facing (`north`, `south`, `east`, or `west`).
+        facing: String,
+        /// The resource id of the deferred loot table.
+        loot_table: String,
+        /// The random seed attached to that deferred table.
+        loot_table_seed: i64,
+    },
+    /// A dungeon monster spawner with the selected initial entity type.
+    DungeonSpawner {
+        x: i32,
+        y: i32,
+        z: i32,
+        /// The resource id selected by the feature's final bounded draw.
+        entity_type: String,
+    },
 }
 
 impl GeneratedBlockEntity {
@@ -63,6 +86,8 @@ impl GeneratedBlockEntity {
     pub fn position(&self) -> (i32, i32, i32) {
         match self {
             GeneratedBlockEntity::Beehive { x, y, z, .. } => (*x, *y, *z),
+            GeneratedBlockEntity::DungeonChest { x, y, z, .. }
+            | GeneratedBlockEntity::DungeonSpawner { x, y, z, .. } => (*x, *y, *z),
         }
     }
 
@@ -71,6 +96,8 @@ impl GeneratedBlockEntity {
     pub fn type_id(&self) -> &'static str {
         match self {
             GeneratedBlockEntity::Beehive { .. } => "minecraft:beehive",
+            GeneratedBlockEntity::DungeonChest { .. } => "minecraft:chest",
+            GeneratedBlockEntity::DungeonSpawner { .. } => "minecraft:spawner",
         }
     }
 }

@@ -329,8 +329,8 @@ pub struct GeneratedColumn {
     /// and what a per-section biome container on the wire or in a region file
     /// must be built from. See [`super::biome_cells`].
     biome_cells: super::BiomeCells,
-    /// Block entities decoration produced inside this chunk, in write
-    /// order. Empty for every chunk with no bee nest, which is nearly all of them.
+    /// Block entities decoration produced inside this chunk, in write order.
+    /// Most chunks have none; underground rooms and beehives populate this list.
     block_entities: Vec<super::block_entities::GeneratedBlockEntity>,
     /// The `MOTION_BLOCKING` heightmap in vanilla's stored form —
     /// see [`motion_blocking_from_palette`] and
@@ -456,10 +456,10 @@ impl GeneratedColumn {
     /// The block entities this chunk's decoration produced, with
     /// absolute world positions.
     ///
-    /// **Nothing downstream consumes this yet.** `ChunkColumn` has no block-entity
-    /// field and the chunk-data packet writes a hardcoded `var_i32(0)`, both outside
-    /// this crate — so a generated bee nest still reaches the client empty until
-    /// that lands.
+    /// The server's receiving `ChunkColumn` copies these records into its served
+    /// block-entity list, filtering the records to the chunk being encoded. A
+    /// generated room or beehive therefore retains its metadata through chunk
+    /// encoding and save/load.
     #[must_use]
     pub fn block_entities(&self) -> &[super::block_entities::GeneratedBlockEntity] {
         &self.block_entities
