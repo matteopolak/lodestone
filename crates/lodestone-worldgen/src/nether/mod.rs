@@ -116,7 +116,10 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
@@ -365,6 +368,13 @@ pub struct NetherGenerator {
     /// Overworld needed a view-pinned one.
     starts: Mutex<HashMap<(i32, i32), Arc<Vec<Arc<StructureStart>>>>>,
     pre_decoration: Mutex<HashMap<(i32, i32), Arc<PreDecorationResult>>>,
+    /// Capacity of the pure pre-decoration memo. Production keeps the small
+    /// demand-ordered bound; the lifecycle comparator raises it only for the
+    /// admitted replay closure, so a partial packet limit cannot trigger the
+    /// same prefix repeatedly while the authenticated source order is replayed.
+    pre_decoration_capacity: AtomicUsize,
+    /// Number of cache-miss computations, exposed for parity diagnostics.
+    pre_decoration_computations: AtomicUsize,
 }
 
 /// Entries [`NetherGenerator::starts`] holds before it is cleared wholesale.
@@ -386,12 +396,36 @@ const STARTS_MEMO_CEILING: usize = 8192;
 const PORTAL_TERRAIN_REACH: i32 = 14;
 /// Thirty-two full pre/post fields are enough for one 5×5 decoration read
 /// closure plus a small sequential sweep, without retaining hundreds of MiB of
-/// 16×128×16 grids in a long-lived generator.
+/// 16×128×16 grids in a long-lived production generator. Lifecycle replay uses
+/// a separate, replay-scoped capacity derived from its admitted closure.
 const DECORATION_MEMO_CEILING: usize = 32;
 /// The Nether dimension exposes two 128-row halves. Noise fills the lower
 /// half; vegetation placement still runs against the full 256-row dimension
 /// window, where `MOTION_BLOCKING` can return the first air row above the roof.
 const DECORATION_WINDOW_HEIGHT: i32 = 256;
+
+fn lifecycle_pre_decoration_capacity(admissions: &[(i32, i32)]) -> usize {
+    let Some(&(first_x, first_z)) = admissions.first() else {
+        return DECORATION_MEMO_CEILING;
+    };
+    let (min_x, max_x, min_z, max_z) = admissions.iter().skip(1).fold(
+        (first_x, first_x, first_z, first_z),
+        |(min_x, max_x, min_z, max_z), &(x, z)| {
+            (min_x.min(x), max_x.max(x), min_z.min(z), max_z.max(z))
+        },
+    );
+    let radius = crate::feature::region_view::WIDE_RADIUS;
+    let width: usize = (i64::from(max_x) - i64::from(min_x) + 1 + i64::from(radius) * 2)
+        .try_into()
+        .expect("lifecycle replay x closure must fit usize");
+    let height: usize = (i64::from(max_z) - i64::from(min_z) + 1 + i64::from(radius) * 2)
+        .try_into()
+        .expect("lifecycle replay z closure must fit usize");
+    width
+        .checked_mul(height)
+        .expect("lifecycle replay closure must fit usize")
+        .max(DECORATION_MEMO_CEILING)
+}
 
 /// Re-express a generated-column height anchor for the wider resident window.
 /// The placement context has two independent vertical extents: the noise
@@ -899,7 +933,29 @@ impl NetherGenerator {
             structures,
             starts: Mutex::new(HashMap::new()),
             pre_decoration: Mutex::new(HashMap::new()),
+            pre_decoration_capacity: AtomicUsize::new(DECORATION_MEMO_CEILING),
+            pre_decoration_computations: AtomicUsize::new(0),
         }
+    }
+
+    /// Raise the pre-decoration memo for one lifecycle replay without changing
+    /// the production demand-ordered default. Every source completion reads a
+    /// 5×5 context, so the exact replay closure is the admitted rectangle
+    /// expanded by [`crate::feature::region_view::WIDE_RADIUS`] in both axes.
+    /// The returned capacity is useful to diagnostics and tests; an empty
+    /// admission list leaves the production bound unchanged.
+    pub fn prepare_lifecycle_replay(&self, admissions: &[(i32, i32)]) -> usize {
+        let capacity = lifecycle_pre_decoration_capacity(admissions);
+        self.pre_decoration_capacity.store(capacity, Ordering::Relaxed);
+        self.pre_decoration_computations.store(0, Ordering::Relaxed);
+        capacity
+    }
+
+    /// Number of pre-decoration fields actually computed by this generator.
+    /// Diagnostics only; generation never branches on this count.
+    #[must_use]
+    pub fn pre_decoration_computations(&self) -> usize {
+        self.pre_decoration_computations.load(Ordering::Relaxed)
     }
 
     /// The generated column for chunk `(cx, cz)`.
@@ -1303,6 +1359,10 @@ impl NetherGenerator {
         {
             return existing;
         }
+        if self.pre_decoration_capacity.load(Ordering::Relaxed) > DECORATION_MEMO_CEILING {
+            self.pre_decoration_computations
+                .fetch_add(1, Ordering::Relaxed);
+        }
         let base_x = cx * 16;
         let base_z = cz * 16;
         let refs = self.structure_refs(cx, cz);
@@ -1325,7 +1385,7 @@ impl NetherGenerator {
             .pre_decoration
             .lock()
             .expect("nether pre-decoration memo poisoned");
-        if memo.len() >= DECORATION_MEMO_CEILING {
+        if memo.len() >= self.pre_decoration_capacity.load(Ordering::Relaxed) {
             memo.clear();
         }
         Arc::clone(memo.entry((cx, cz)).or_insert_with(|| Arc::clone(&computed)))
@@ -2059,7 +2119,7 @@ fn canonical_state_from_settings(value: &Value, fallback: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
@@ -2067,7 +2127,7 @@ mod tests {
 
     use super::{
         MixedEntryWriter, NetherGenerator, build_nether_feature_lists, decoration_random,
-        synchronize_mixed_entry,
+        lifecycle_pre_decoration_capacity, synchronize_mixed_entry,
     };
     use crate::dense_grid::DenseBlockGrid;
     use crate::density::{NoiseParams, Resolver};
@@ -2076,6 +2136,56 @@ mod tests {
     use crate::interner::StateInterner;
     use crate::rng::{LegacyRandomSource, RandomSource, WorldgenRandom};
     use serde_json::Value;
+
+    #[test]
+    fn lifecycle_cache_capacity_covers_the_admitted_18_by_18_closure() {
+        let admissions = (-9..=8)
+            .flat_map(|z| (-9..=8).map(move |x| (x, z)))
+            .collect::<Vec<_>>();
+        assert_eq!(lifecycle_pre_decoration_capacity(&admissions), 484);
+        assert_eq!(lifecycle_pre_decoration_capacity(&[(0, 0)]), 32);
+        assert_eq!(lifecycle_pre_decoration_capacity(&[]), 32);
+
+        let computes = |capacity: usize| {
+            let mut memo = HashSet::new();
+            let mut computes = 0;
+            let mut read = |chunk| {
+                if memo.insert(chunk) {
+                    if memo.len() > capacity {
+                        memo.clear();
+                        memo.insert(chunk);
+                    }
+                    computes += 1;
+                }
+            };
+            for &chunk in &admissions {
+                read(chunk);
+            }
+            for &(cx, cz) in &admissions {
+                read((cx, cz));
+                for dx in -2..=2 {
+                    for dz in -2..=2 {
+                        if dx != 0 || dz != 0 {
+                            read((cx + dx, cz + dz));
+                        }
+                    }
+                }
+                read((cx, cz));
+                for source_x in cx - 1..=cx + 1 {
+                    for source_z in cz - 1..=cz + 1 {
+                        for dx in -1..=1 {
+                            for dz in -1..=1 {
+                                read((source_x + dx, source_z + dz));
+                            }
+                        }
+                    }
+                }
+            }
+            computes
+        };
+        assert_eq!(computes(32), 5_534);
+        assert_eq!(computes(484), 484);
+    }
 
     struct NetherAssets {
         root: PathBuf,

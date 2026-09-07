@@ -686,7 +686,16 @@ fn parity_manifest_streams_before_rust_comparison() {
                 &mut component_reports,
             ),
             Dimension::Nether => compare_lifecycle_manifest(
-                LifecycleMaterializer::new(nether_chunk_source(42)),
+                {
+                    let mut materializer = LifecycleMaterializer::new(nether_chunk_source(42));
+                    let admissions = capture
+                        .admissions
+                        .iter()
+                        .map(|admission| admission.chunk)
+                        .collect::<Vec<_>>();
+                    materializer.prepare_lifecycle_replay(&admissions);
+                    materializer
+                },
                 &capture,
                 &mut expected,
                 &h,
@@ -818,6 +827,17 @@ fn compare_lifecycle_manifest<S: LifecycleWorldgenSource>(
     );
     for event in &capture.feature_events {
         materializer.complete(event.source, event.stage, event.completion_sequence);
+    }
+    if let Some(computations) = materializer.lifecycle_pre_decoration_computations() {
+        // The accepted 18x18 capture's 5x5 source context is a 22x22 closure.
+        // This is a performance control only; it must never influence replay.
+        assert_eq!(
+            computations, 484,
+            "Nether lifecycle replay recomputed outside its admitted 22x22 closure",
+        );
+        eprintln!(
+            "large lifecycle replay: Nether pre-decoration computations={computations} (expected unique closure)"
+        );
     }
 
     let mut expected_digest = [0u8; 32];
