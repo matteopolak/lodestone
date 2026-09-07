@@ -26,7 +26,7 @@
 //! rather than presented as jar-verified.
 
 use lodestone_core::Nbt;
-use lodestone_model::{ConnectionState, SectionPos, VersionAdapter};
+use lodestone_model::{ClientEvent, ConnectionState, Directive, SectionPos, VersionAdapter};
 use lodestone_v1_9::V340Adapter;
 use lodestone_v1_9::canonical::{self, FallbackTally};
 use lodestone_v1_9::packet_ids::play;
@@ -231,26 +231,53 @@ fn multi_block_change_splits_records_spanning_multiple_sections() {
     let adapter = V340Adapter::new();
     let mut sink = RecordingSink::default();
 
-    // chunk (0, 0); one record at y=10 (section 0), one at y=80 (section 5).
+    // chunk (0, 0); the wire visits section 5 first and section 0 second.
+    // Each section has two records so the assertions distinguish both the
+    // deterministic section order and the original order within each section.
     let mut payload = 0i32.to_be_bytes().to_vec();
     payload.extend_from_slice(&0i32.to_be_bytes());
-    payload.extend_from_slice(&var_i32(2));
-    payload.push(0x00); // rel (0, 0)
+    payload.extend_from_slice(&var_i32(4));
+    payload.push(0x59); // rel (5, 9)
+    payload.push(80);
+    payload.extend_from_slice(&var_i32(16)); // stone
+    payload.push(0x12); // rel (1, 2)
+    payload.push(80);
+    payload.extend_from_slice(&var_i32(16)); // stone
+    payload.push(0x34); // rel (3, 4)
     payload.push(10);
     payload.extend_from_slice(&var_i32(16)); // stone
-    payload.push(0x00); // rel (0, 0)
-    payload.push(80);
+    payload.push(0x78); // rel (7, 8)
+    payload.push(10);
     payload.extend_from_slice(&var_i32(16)); // stone
 
     let directives = dispatch(&mut sink, &adapter, play::clientbound::MULTI_BLOCK_CHANGE, &payload);
+    let mut tally = FallbackTally::default();
+    let expected_state = canonical::resolve_or_air(1, 0, &mut tally);
+    assert!(tally.is_empty(), "stone must resolve cleanly: {tally:?}");
 
-    assert_eq!(sink.set_block.len(), 2);
-    assert_remesh(
-        &directives,
-        &[
-            (SectionPos::new(0, 0, 0), &[[0, 10, 0]]),
-            (SectionPos::new(0, 5, 0), &[[0, 0, 0]]),
+    assert_eq!(
+        sink.set_block,
+        vec![
+            (5, 80, 9, expected_state),
+            (1, 80, 2, expected_state),
+            (3, 10, 4, expected_state),
+            (7, 10, 8, expected_state),
         ],
+        "world writes retain packet record order"
+    );
+    assert_eq!(
+        directives,
+        vec![
+            Directive::Emit(ClientEvent::SectionBlocksChanged {
+                section: SectionPos::new(0, 0, 0),
+                blocks: vec![[3, 10, 4], [7, 10, 8]],
+            }),
+            Directive::Emit(ClientEvent::SectionBlocksChanged {
+                section: SectionPos::new(0, 5, 0),
+                blocks: vec![[5, 0, 9], [1, 0, 2]],
+            }),
+        ],
+        "dirty sections use deterministic order while records within each section keep wire order"
     );
 }
 

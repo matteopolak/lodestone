@@ -1,6 +1,6 @@
 //! [`VersionAdapter`] implementation driving the protocol 340 join flow.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::{Arc, LockResult, Mutex, MutexGuard, PoisonError};
 
 use lodestone_core::{Ctx, Decode, Encode, ProtocolRange, Reader, Writer};
@@ -1762,8 +1762,7 @@ impl V340Adapter {
         // cells; cap the pre-allocation so a hostile count cannot force a
         // large speculative allocation before the truncated body is
         // rejected by the per-record reads below.
-        let mut by_section: HashMap<i32, Vec<[u8; 3]>> =
-            HashMap::with_capacity(count.min(16));
+        let mut by_section: BTreeMap<i32, Vec<[u8; 3]>> = BTreeMap::new();
         let mut tally = FallbackTally::default();
         for _ in 0..count {
             let horizontal = reader.u8().map_err(dec_err)?;
