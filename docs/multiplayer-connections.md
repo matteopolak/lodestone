@@ -75,6 +75,15 @@ queued. Keep-alives and other non-movement actions remain live across the
 boundary. This keeps a delayed pre-correction claim off the wire without
 rewriting a valid post-correction position.
 
+The client driver polls inbound packets and outbound actions fairly. The action
+queue is intentionally unbounded so user input never blocks the render thread,
+but it must not be given a biased select priority: a held attack action can keep
+that queue permanently ready, which would otherwise stop the reader from
+receiving and automatically answering a keep-alive. The focused
+`lodestone_keepalive` debug target records the challenge id at client receive,
+before/after its automatic write, and at the server send/acknowledgement sites.
+Use `RUST_LOG=warn,lodestone_keepalive=debug` for this narrow trace.
+
 An absolute correction snaps both the current and previous camera positions to
 its target. Relative axes apply their delta independently to the previous
 position. Interpolation belongs to predicted movement; treating absolute server
@@ -120,6 +129,9 @@ RUST_LOG=warn,net=info,net_join=info just run
 
 Add `sim_input=debug,net_input=debug` to trace changed local input intents and
 their encoded packets without enabling per-tick input logs.
+Add `lodestone_keepalive=debug` to trace one keep-alive's client receive and
+automatic-response write; pair it with the server target of the same name to
+locate a stalled hop without renderer logs.
 
 An explicitly entered port suppresses SRV lookup. A bare hostname enables it.
 

@@ -531,9 +531,12 @@ impl<T: Transport> Driver<T> {
                 continue;
             }
             tokio::select! {
-                biased;
-
-                // Local shutdown request wins over other work.
+                // Do not bias this toward the action queue. It is unbounded and
+                // a held input can keep it ready forever; preferring it would
+                // prevent the reader from seeing a keep-alive and make a healthy
+                // singleplayer client look silent to its server. Tokio's fair
+                // branch ordering gives both packet directions a polling chance.
+                // Local shutdown remains an independently ready branch.
                 _ = &mut shutdown => {
                     tracing::debug!("local shutdown requested");
                     self.graceful_local_close().await;
@@ -1186,6 +1189,11 @@ impl<T: Transport> Driver<T> {
 
         match &event {
             ClientEvent::KeepAlive { id } => {
+                tracing::debug!(
+                    target: "lodestone_keepalive",
+                    id,
+                    "client received keep-alive challenge"
+                );
                 if self.keep_alive.is_automatic() {
                     auto_actions.push(ClientAction::KeepAliveResponse { id: *id });
                 }
@@ -1566,10 +1574,26 @@ impl<T: Transport> Driver<T> {
         for action in auto_actions {
             match self.adapter.encode_action(self.state, &action) {
                 Ok(Some((packet_id, payload))) => {
+                    if let ClientAction::KeepAliveResponse { id } = &action {
+                        tracing::debug!(
+                            target: "lodestone_keepalive",
+                            id = *id,
+                            packet_id,
+                            "client writing keep-alive response"
+                        );
+                    }
                     if let Err(error) = self.conn.write_packet(packet_id, &payload).await {
                         return Step::Stop(Box::new(SessionOutcome::Failed(
                             ClientError::Transport(error),
                         )));
+                    }
+                    if let ClientAction::KeepAliveResponse { id } = &action {
+                        tracing::debug!(
+                            target: "lodestone_keepalive",
+                            id = *id,
+                            packet_id,
+                            "client wrote keep-alive response"
+                        );
                     }
                 }
                 Ok(None) => {}
