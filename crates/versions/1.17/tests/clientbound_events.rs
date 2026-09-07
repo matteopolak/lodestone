@@ -185,6 +185,33 @@ fn unknown_attribute_key_is_skipped_after_wire_decode() {
 }
 
 #[test]
+fn entity_metadata_surfaces_shared_flags_from_literal_756_and_758_bodies() {
+    for &(protocol, id) in &[
+        (PROTOCOL_1_17_1, packet_ids::play::clientbound::ENTITY_METADATA),
+        (PROTOCOL_1_18_2, packet_ids_758::play::clientbound::ENTITY_METADATA),
+    ] {
+        // Independent wire layout: entity id VarInt, index 0, serializer type
+        // 0 (signed byte), the non-round flags value, and the 0xff terminator.
+        let mut body = var_i32(73);
+        body.extend_from_slice(&[0, 0, 0xa1, 0xff]);
+        let events = dispatch(protocol, id, &body);
+        let [Directive::Emit(ClientEvent::EntityMetadataUpdated {
+            entity_id,
+            metadata,
+        })] = events.as_slice()
+        else {
+            panic!("wrong event");
+        };
+        assert_eq!((*entity_id, metadata.flags), (73, Some(0xa1)));
+        let event = ClientEvent::EntityMetadataUpdated {
+            entity_id: *entity_id,
+            metadata: metadata.clone(),
+        };
+        assert!(lodestone_model::route(&event).ingest);
+    }
+}
+
+#[test]
 fn block_destruction_preserves_clear_stage_byte() {
     let mut body = var_i32(42);
     body.extend_from_slice(&pack_position(lodestone_model::BlockPos::new(1, 2, 3)).to_be_bytes());

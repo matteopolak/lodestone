@@ -10,8 +10,9 @@ use lodestone_model::{
     AdapterError, AnimationAction, BlockActionKind, BlockFace, BlockStateRef, BossAction, BossColor, BossOverlay,
     ChatKind, ChatMode, ChunkPos, ClientAction, ClientEvent, ClientSettings, CollisionRule,
     ConnectionState, Difficulty, Directive, DisplaySlot, DisplayedSkinParts, EntityInteraction,
-    EntityAttributeModifier, EntityAttributeSnapshot, EntityEquipment, EntityMovement, EquipmentSlot,
-    GameMode, Hand, ItemComponents, ItemStack, LevelEventData, LoginProfile, MainHand, ObjectiveMode, ObjectiveRenderType,
+    EntityAttributeModifier, EntityAttributeSnapshot, EntityEquipment, EntityMetadataUpdate,
+    EntityMovement, EquipmentSlot, GameMode, Hand, ItemComponents, ItemStack, LevelEventData,
+    LoginProfile, MainHand, ObjectiveMode, ObjectiveRenderType,
     PlayerCommand, PlayerListEntry, ProfileProperty, RecipeBookType, ResourceKey,
     ResourcePackResponseKind, Rotation, SectionPos, ServerAddress, TeamAction, TeamColor,
     TeamParameters, TeleportFlags, Text, Vec3, VersionAdapter, Visibility, WorldSink,
@@ -24,8 +25,9 @@ use crate::registry;
 use crate::packets::chunk::{ChunkShape, MapChunk, UnloadChunk, UpdateLight};
 use crate::packets::common::{KeepAliveRequest, KeepAliveResponse};
 use crate::packets::entity::{
-    EntityDestroy, EntityLook, EntityMoveLook, EntityTeleport, EntityVelocityPacket,
-    NamedEntitySpawn, RelEntityMove, SpawnEntityExperienceOrb, SpawnEntityLiving, SpawnObject,
+    EntityDestroy, EntityLook, EntityMetadataPacket, EntityMoveLook, EntityTeleport,
+    EntityVelocityPacket, NamedEntitySpawn, RelEntityMove, SpawnEntityExperienceOrb,
+    SpawnEntityLiving, SpawnObject,
 };
 use crate::packets::game::{
     AttachEntity, BlockDig, BlockPlace, ClientCommand, ClientboundChat, ClientboundPositionLook,
@@ -41,6 +43,7 @@ use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{
     EncryptionRequest, LoginDisconnect, LoginSuccess, SetCompression,
 };
+use crate::packets::metadata::MetadataValue;
 use crate::packets::player_info::{PlayerInfo, PlayerInfoAction};
 use crate::packets::position::Position;
 use crate::packets::settings::{BrandPayload, PlayerAbilities, ResourcePackReceive, Settings};
@@ -248,6 +251,9 @@ const REL_Y: i8 = 0x02;
 const REL_Z: i8 = 0x04;
 const REL_YAW: i8 = 0x08;
 const REL_PITCH: i8 = 0x10;
+
+/// Shared entity-flags metadata index in protocols 756 and 758.
+const METADATA_INDEX_SHARED_FLAGS: u8 = 0;
 
 /// Per-connection state used by this era's client-side player-position-send tick.
 #[derive(Debug, Clone, Copy)]
@@ -1613,6 +1619,32 @@ impl V756Adapter {
         Ok(vec![Directive::Emit(ClientEvent::EntityEquipmentUpdated { entity_id, equipment })])
     }
 
+    /// `minecraft:entity_metadata`. The shared flags at index zero are the
+    /// only entity-independent entry: every later index is category-specific,
+    /// so reporting it without a tracked entity category would be misleading.
+    /// The complete list is still decoded first, so unsupported serializer
+    /// types fail closed instead of leaving the next packet misaligned.
+    fn handle_play_entity_metadata(
+        adapter: &V756Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: EntityMetadataPacket = adapter.decode_body_exact(payload)?;
+        let flags = body.metadata.0.iter().find_map(|entry| match (entry.key, &entry.value) {
+            (METADATA_INDEX_SHARED_FLAGS, MetadataValue::Byte(bits)) => Some(*bits as u8),
+            _ => None,
+        });
+        Ok(flags.map_or_else(Vec::new, |flags| {
+            vec![Directive::Emit(ClientEvent::EntityMetadataUpdated {
+                entity_id: body.entity_id,
+                metadata: EntityMetadataUpdate {
+                    flags: Some(flags),
+                    ..EntityMetadataUpdate::default()
+                },
+            })]
+        }))
+    }
+
     /// `minecraft:block_break_animation`.
     fn handle_play_block_break_animation(
         _adapter: &V756Adapter,
@@ -2665,6 +2697,13 @@ static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = 
         ),
     ),
     (
+        "minecraft:entity_metadata",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V756Adapter::handle_play_entity_metadata,
+        ),
+    ),
+    (
         "minecraft:entity_equipment",
         lodestone_core::dispatch::Handler::new(
             lodestone_core::ProtocolRange::ALL,
@@ -3189,10 +3228,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:resource_pack_send",
         "v26-2 has this; backport (RESOURCE_PACK_PUSH)",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:entity_metadata",
-        "v26-2 has this; backport (SET_ENTITY_DATA)",
     ),
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:entity_sound_effect",
