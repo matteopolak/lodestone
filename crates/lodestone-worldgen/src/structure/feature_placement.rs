@@ -31,6 +31,7 @@ pub type FeaturePlacement = PoolFeaturePlacement;
 /// conversion.
 pub fn place_feature_pool_elements<R: RandomSource>(
     random: &mut R,
+    world_seed: i64,
     placements: &[FeaturePlacement],
     world: &mut DenseBlockGrid,
     tags: &VegTags,
@@ -53,7 +54,7 @@ pub fn place_feature_pool_elements<R: RandomSource>(
         |dx, dz| (dx == 0 && dz == 0).then(|| Arc::clone(&source)),
     );
     for placement in placements {
-        placement.place(random, &mut grid, tags);
+        placement.place(random, world_seed, &mut grid, tags);
     }
 
     debug_assert_eq!(
@@ -97,7 +98,7 @@ mod tests {
         let mut tags = VegTags::default();
         tags.supports_vegetation.insert("minecraft:dirt".to_string());
         let mut random = LegacyRandomSource::new(0);
-        place_feature_pool_elements(&mut random, &[placement], &mut world, &tags);
+        place_feature_pool_elements(&mut random, 0, &[placement], &mut world, &tags);
         assert_eq!(world.get(3, 1, 5), "minecraft:gold_block");
     }
 }

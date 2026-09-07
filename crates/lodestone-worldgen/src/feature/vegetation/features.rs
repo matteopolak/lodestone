@@ -2482,9 +2482,11 @@ fn north_or_south(value: i32, radius: i32) -> bool {
 
 /// Places a vegetation patch (and its waterlogged variant): a replaceable
 /// floor/ceiling patch followed by the configured feature on the resulting
-/// surface.
-pub(super) fn place_vegetation_patch<R: RandomSource>(
+/// surface. The world seed is forwarded to that nested feature so a nested
+/// geode uses the same seed as its enclosing decoration pass.
+pub(super) fn place_vegetation_patch_with_seed<R: RandomSource>(
     random: &mut R,
+    world_seed: i64,
     pos: BlockPos,
     cfg: &VegetationPatchCfg,
     grid: &mut VegGrid,
@@ -2565,7 +2567,14 @@ pub(super) fn place_vegetation_patch<R: RandomSource>(
                 y: p.y + outwards,
                 z: p.z,
             };
-            super::place_placed_feature_at(random, target, &cfg.vegetation_feature, grid, tags);
+            super::place_placed_feature_at_seed(
+                random,
+                world_seed,
+                target,
+                &cfg.vegetation_feature,
+                grid,
+                tags,
+            );
         }
     }
 }

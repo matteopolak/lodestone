@@ -1270,7 +1270,7 @@ impl NetherGenerator {
                     if let Some((entry_at, (_, found, placed))) = next_decoration
                         .filter(|(_, (_, found, _))| *found == index)
                     {
-                        crate::feature::vegetation::apply_decoration_entry_at_seed(&mut decoration_rng, decoration_seed, origin, step, *found, placed, &mut grid, &self.veg_tags);
+                        crate::feature::vegetation::apply_decoration_entry_at_world_seed(&mut decoration_rng, self.seed, decoration_seed, origin, step, *found, placed, &mut grid, &self.veg_tags);
                         synchronize_mixed_entry(
                             MixedEntryWriter::Decoration,
                             &mut grid,
@@ -1989,6 +1989,7 @@ impl NetherGenerator {
                         });
                         crate::structure::feature_placement::place_feature_pool_elements(
                             random,
+                            seed,
                             placements,
                             &mut world,
                             &self.veg_tags,

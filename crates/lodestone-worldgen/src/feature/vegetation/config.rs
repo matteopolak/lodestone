@@ -154,7 +154,7 @@ pub(super) fn parse_id_list(v: &Value) -> Vec<String> {
 /// literal-only helper above, speleothem anchors use a tag in every bundled
 /// record, so leaving `#…` unresolved would make every valid support look
 /// absent and silently suppress the feature.
-fn resolve_block_set(resolver: &dyn Resolver, v: &Value) -> Option<HashSet<String>> {
+pub(super) fn resolve_block_set(resolver: &dyn Resolver, v: &Value) -> Option<HashSet<String>> {
     match v {
         Value::String(tag) if tag.starts_with('#') => {
             let mut out = HashSet::new();
@@ -1784,6 +1784,8 @@ pub enum ConfiguredFeature {
     /// reports failure. This engine's placement bodies do not report success, so
     /// every entry runs; that matches a faithful implementation for the one bundled instance.
     Sequence(Vec<PlacedRef>),
+    /// A bounded noise-shaped shell with optional cracks and crystal growth.
+    Geode(Box<super::geode::GeodeCfg>),
     /// The no-op feature — genuinely nothing, and distinct from
     /// [`ConfiguredFeature::Unsupported`] so it is not counted as a gap.
     NoOp,
@@ -1960,6 +1962,10 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
         "coral_tree" => ConfiguredFeature::Coral(super::coral::CoralKind::Tree),
         "coral_claw" => ConfiguredFeature::Coral(super::coral::CoralKind::Claw),
         "coral_mushroom" => ConfiguredFeature::Coral(super::coral::CoralKind::Mushroom),
+        "geode" => match super::geode::GeodeCfg::try_parse(resolver, &doc["config"]) {
+            Some(cfg) => ConfiguredFeature::Geode(Box::new(cfg)),
+            None => ConfiguredFeature::Unsupported("geode: unsupported providers or bounds".into()),
+        },
         "random_selector" => {
             let cfg = &doc["config"];
             let default = resolve_placed_feature_ref(resolver, &cfg["default"]);
@@ -2464,6 +2470,7 @@ pub fn collect_unsupported(placed: &PlacedRef) -> Vec<String> {
             | ConfiguredFeature::HugeFungus(_)
             | ConfiguredFeature::Bamboo(_)
             | ConfiguredFeature::SculkPatch(_)
+            | ConfiguredFeature::Geode(_)
             | ConfiguredFeature::NoOp => {}
         }
     }
@@ -2538,6 +2545,60 @@ mod tests {
         };
         assert_eq!(cfg.replaceable.len(), 1);
         assert!(cfg.replaceable.contains("minecraft:deepslate"));
+    }
+
+    #[test]
+    fn geode_parser_resolves_both_block_sets() {
+        struct TagResolver;
+        impl Resolver for TagResolver {
+            fn density_function(&self, _id: &str) -> Value {
+                Value::Null
+            }
+
+            fn noise(&self, _id: &str) -> NoiseParams {
+                unreachable!("the geode parser fixture has no noise references")
+            }
+
+            fn block_tag(&self, id: &str) -> Value {
+                match id {
+                    "minecraft:features_cannot_replace" => {
+                        serde_json::json!({"values": ["minecraft:bedrock"]})
+                    }
+                    "minecraft:geode_invalid_blocks" => {
+                        serde_json::json!({"values": ["minecraft:water"]})
+                    }
+                    _ => Value::Null,
+                }
+            }
+        }
+
+        let feature = super::parse_configured_feature_doc(
+            &TagResolver,
+            &serde_json::json!({
+                "type": "minecraft:geode",
+                "config": {
+                    "blocks": {
+                        "filling_provider": {"type": "minecraft:simple_state_provider", "state": {"Name": "minecraft:air"}},
+                        "inner_layer_provider": {"type": "minecraft:simple_state_provider", "state": {"Name": "minecraft:amethyst_block"}},
+                        "alternate_inner_layer_provider": {"type": "minecraft:simple_state_provider", "state": {"Name": "minecraft:budding_amethyst"}},
+                        "middle_layer_provider": {"type": "minecraft:simple_state_provider", "state": {"Name": "minecraft:calcite"}},
+                        "outer_layer_provider": {"type": "minecraft:simple_state_provider", "state": {"Name": "minecraft:smooth_basalt"}},
+                        "inner_placements": [{"Name": "minecraft:amethyst_cluster", "Properties": {"facing": "up", "waterlogged": "false"}}],
+                        "cannot_replace": "#minecraft:features_cannot_replace",
+                        "invalid_blocks": "#minecraft:geode_invalid_blocks"
+                    },
+                    "crack": {},
+                    "layers": {},
+                    "invalid_blocks_threshold": 1
+                }
+            }),
+        );
+        let ConfiguredFeature::Geode(cfg) = feature else {
+            panic!("geode document must parse");
+        };
+        assert!(cfg.cannot_replace.contains("minecraft:bedrock"));
+        assert!(cfg.invalid_blocks.contains("minecraft:water"));
+        assert_eq!(cfg.outer_wall_distance_max, 5);
     }
 
 }

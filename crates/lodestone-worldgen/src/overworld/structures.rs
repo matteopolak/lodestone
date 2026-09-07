@@ -835,6 +835,7 @@ impl OverworldGenerator {
                         });
                         crate::structure::feature_placement::place_feature_pool_elements(
                             random,
+                            seed,
                             placements,
                             &mut world,
                             &self.veg_tags,
