@@ -362,6 +362,7 @@ public final class LargeParityOracle {
         if (!capture) settleMaterializedBatch(server, level, positions);
         if (capture && a.v5()) relightFromBlocks(server, level, loaded);
         if (capture) out.addAll(server.submit(() -> { try { List<byte[]> result = new ArrayList<>(positions.size()); for (ChunkPos pos : positions) { LevelChunk chunk = level.getChunkSource().getChunkNow(pos.x(), pos.z()); if (chunk == null) throw new IllegalStateException("loaded chunk was evicted: " + pos); if (diagnosticPacketOut != null) Files.write(Path.of(diagnosticPacketOut), packetBody(server, chunk, level)); byte[] record = semanticRecord(level, chunk, a); if (diagnosticRecordOut != null) Files.write(Path.of(diagnosticRecordOut), record); result.add(digest(record)); } return result; } catch (Exception e) { throw new IllegalStateException("canonical chunk export failed", e); } }).join());
+        if (capture && a.v5()) level.getChunkSource().save(false);
         server.submit(() -> { for (ChunkPos pos : loaded) level.getChunkSource().removeTicketWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, 0); }).join();
     }
 
