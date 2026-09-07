@@ -1,0 +1,9 @@
+# Independently captured direct step-7 trace for seed 42, source chunk (-8,-8).
+# The trace starts from the post-ore terrain and records the raw step-7 result
+# before the sealed initial-chunk source-spill lifecycle is applied.
+# Coordinates are local to the traced source chunk.
+seed 42
+chunk -8 -8
+step 7
+count 1
+cell 3 12 9
