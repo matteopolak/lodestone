@@ -90,9 +90,11 @@
 //! of room-interior decorations are deliberately left out — see `monument`'s
 //! own deviations list for exactly which and why.
 //!
-//! **What genuinely remains**: `fortress` and `mansion` have no piece generators.
+//! **What genuinely remains**: `mansion` places its seeded exterior shell,
+//! corridors and roofs, while its room interiors remain ledgered.
 //! `end_city` has a template-piece generator consumed by the End dimension's
-//! placement stage. Both portal variants have a complete setup parser,
+//! placement stage, and `fortress` has a coded recursive piece tree consumed
+//! by the Nether stage. Both portal variants have a complete setup parser,
 //! suitable-Y rule and post-template terrain refinement. `ruined_portal`'s own frame,
 //! terrain skirt, drip columns and optional overgrowth are real. The latter's
 //! chunk-independent random forks are named by `coded:ruined_portal_terrain_skirt`
@@ -149,6 +151,9 @@
 pub mod beardifier;
 pub mod coded;
 pub mod end_city;
+pub mod feature_placement;
+pub mod fortress;
+pub mod mansion;
 pub mod jigsaw;
 pub mod mineshaft;
 pub mod monument;
@@ -217,6 +222,42 @@ const BOOTSTRAP_ORDER: &[&str] = &[
     "minecraft:trail_ruins",
     "minecraft:trial_chambers",
 ];
+
+/// Bundled structure registry order. Feature-pool elements use their
+/// structure's zero-based index within one generation step as part of the
+/// decoration seed, so map iteration or alphabetical order is not equivalent.
+const STRUCTURE_BOOTSTRAP_ORDER: &[&str] = &[
+    "minecraft:pillager_outpost", "minecraft:mineshaft", "minecraft:mineshaft_mesa",
+    "minecraft:mansion", "minecraft:jungle_pyramid", "minecraft:desert_pyramid",
+    "minecraft:igloo", "minecraft:shipwreck", "minecraft:shipwreck_beached",
+    "minecraft:swamp_hut", "minecraft:stronghold", "minecraft:monument",
+    "minecraft:ocean_ruin_cold", "minecraft:ocean_ruin_warm", "minecraft:fortress",
+    "minecraft:nether_fossil", "minecraft:end_city", "minecraft:buried_treasure",
+    "minecraft:bastion_remnant", "minecraft:village_plains", "minecraft:village_desert",
+    "minecraft:village_savanna", "minecraft:village_snowy", "minecraft:village_taiga",
+    "minecraft:ruined_portal", "minecraft:ruined_portal_desert",
+    "minecraft:ruined_portal_jungle", "minecraft:ruined_portal_swamp",
+    "minecraft:ruined_portal_mountain", "minecraft:ruined_portal_ocean",
+    "minecraft:ruined_portal_nether", "minecraft:ancient_city", "minecraft:trail_ruins",
+    "minecraft:trial_chambers",
+];
+
+fn structure_step_index(step: &str) -> Option<i32> {
+    Some(match step {
+        "raw_generation" => 0,
+        "lakes" => 1,
+        "local_modifications" => 2,
+        "underground_structures" => 3,
+        "surface_structures" => 4,
+        "strongholds" => 5,
+        "underground_ores" => 6,
+        "underground_decoration" => 7,
+        "fluid_springs" => 8,
+        "vegetal_decoration" => 9,
+        "top_layer_modification" => 10,
+        _ => return None,
+    })
+}
 
 /// An inclusive block-space AABB.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -455,7 +496,7 @@ pub struct PiecePlacement {
 /// `structure_place_stage` clips it. The cost is the list's memory (a desert
 /// pyramid is ~7k entries) and the gain is that two chunks placing two halves of
 /// one pyramid cannot disagree.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodedBlock {
     /// Absolute world position.
     pub pos: [i32; 3],
@@ -547,8 +588,19 @@ pub struct StructurePiece {
 /// resolved when [`crate::overworld::OverworldGenerator::structure_place_stage`]
 /// places the piece — the one point in this engine's pipeline where a
 /// structure's own chunk has already been through surface rules and carvers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum PieceRefinement {
+    /// Placed-feature elements retained from a jigsaw pool in document order.
+    FeaturePlacements {
+        /// Fully resolved placements at this assembled piece's world origin.
+        placements: Arc<Vec<feature_placement::FeaturePlacement>>,
+    },
+    /// Stronghold writes whose air-sensitive selector boxes must inspect the
+    /// surfaced, carved terrain while preserving the piece writer's order.
+    StrongholdBlocks {
+        /// Selected writes in the exact order produced by the piece walk.
+        writes: Arc<Vec<stronghold::PostSurfaceWrite>>,
+    },
     /// Buried treasure's walk-down-to-stone-then-place-chest.
     ///
     /// Every other coded piece in this crate resolves its blocks eagerly, from
@@ -988,11 +1040,16 @@ pub enum StructureKind {
     },
     /// `minecraft:end_city` — a recursively assembled set of template pieces.
     EndCity,
+    /// `minecraft:mansion` — a seeded exterior, corridor and roof assembly.
+    /// Room interiors remain explicitly ledgered by [`mansion::MansionCoverage`].
+    Mansion,
     /// `minecraft:stronghold` — the recursive piece tree. No
     /// fields: unlike every other kind here its start predicate reads no
     /// biome and no column height, so the document holds nothing this
     /// variant needs to carry. See [`stronghold`].
     Stronghold,
+    /// `minecraft:fortress` — the recursive Nether bridge and castle tree.
+    Fortress,
     /// A structure `type` whose generator has not landed. Carries the type id so
     /// the ledger can name it.
     Unsupported(String),
@@ -1106,6 +1163,8 @@ enum Stub {
     RuinedPortal(Box<RuinedPortalStub>),
     /// The End city's pre-biome rotation, ground sample and continuing stream.
     EndCity([i32; 3], Rotation, Box<StructureRandom>),
+    /// The mansion's pre-biome rotation, ground sample and continuing stream.
+    Mansion([i32; 3], Rotation, Box<StructureRandom>),
 }
 
 impl Stub {
@@ -1117,7 +1176,7 @@ impl Stub {
             | Self::Continued(position, _) => *position,
             Self::Jigsaw(stub) => stub.position,
             Self::RuinedPortal(stub) => stub.position,
-            Self::EndCity(position, _, _) => *position,
+            Self::EndCity(position, _, _) | Self::Mansion(position, _, _) => *position,
         }
     }
 }
@@ -1159,7 +1218,9 @@ impl StructureKind {
                 ),
             },
             "minecraft:stronghold" => Self::Stronghold,
+            "minecraft:fortress" => Self::Fortress,
             "minecraft:end_city" => Self::EndCity,
+            "minecraft:mansion" => Self::Mansion,
             "minecraft:buried_treasure" => Self::BuriedTreasure,
             "minecraft:ocean_monument" => Self::OceanMonument {
                 surrounding: resolve_biome_set(
@@ -1234,6 +1295,7 @@ impl StructureKind {
                 .copied()
                 .collect(),
             Self::EndCity => END_CITY_TEMPLATES.to_vec(),
+            Self::Mansion => mansion::template_ids(),
             // A jigsaw structure's templates are named by its *pools*, and there
             // are hundreds of them — `PoolStore::load` pulls each one in as it
             // parses the element that names it, so there is no static list here.
@@ -1245,6 +1307,7 @@ impl StructureKind {
             | Self::JunglePyramid
             | Self::Mineshaft { .. }
             | Self::Stronghold
+            | Self::Fortress
             | Self::Unsupported(_) => Vec::new(),
         }
     }
@@ -1393,7 +1456,7 @@ impl StructureKind {
                 mineshaft::generate(cx, cz, ctx, *wood, blocking, &mut random);
             return Some(Stub::Eager(position, pieces));
         }
-        if matches!(self, Self::EndCity) {
+        if matches!(self, Self::EndCity | Self::Mansion) {
             let mut random = structure_random(seed, cx, cz);
             let rotation = Rotation::random(&mut random);
             let (mut offset_x, mut offset_z) = (5, 5);
@@ -1409,7 +1472,11 @@ impl StructureKind {
                 .map(|(x, z)| ctx.first_occupied_height(x, z, HeightmapKind::WorldSurfaceWg))
                 .min()
                 .unwrap_or(i32::MIN);
-            return (y >= 60).then(|| Stub::EndCity([x, y, z], rotation, Box::new(random)));
+            return (y >= 60).then(|| match self {
+                Self::EndCity => Stub::EndCity([x, y, z], rotation, Box::new(random)),
+                Self::Mansion => Stub::Mansion([x, y, z], rotation, Box::new(random)),
+                _ => unreachable!("the height-sampled template branch names only two kinds"),
+            });
         }
         self.find_generation_point(cx, cz, ctx).map(Stub::Plain)
     }
@@ -1491,13 +1558,14 @@ impl StructureKind {
             // work is entirely inside the lazy piece generator,
             // which is why [`Self::Stronghold`] needs no [`Stub`] arm of its
             // own — `generate_pieces` below does the whole job.
-            Self::Stronghold => Some([cx * 16, 0, cz * 16]),
+            Self::Stronghold | Self::Fortress => Some([cx * 16, 0, cz * 16]),
             // Handled by `find_stub` before this function is reached.
             Self::Jigsaw(_)
             | Self::Mineshaft { .. }
             | Self::NetherFossil { .. }
             | Self::RuinedPortal { .. }
-            | Self::EndCity => None,
+            | Self::EndCity
+            | Self::Mansion => None,
             Self::Unsupported(_) => {
                 // No generator, so no honest generation point — and therefore no
                 // honest biome-check Y either. Sea level is used deliberately
@@ -1588,6 +1656,12 @@ impl StructureKind {
             let Stub::EndCity(position, rotation, mut random) = stub else { return None; };
             return Some(end_city::generate(position, rotation, templates, &mut *random));
         }
+        if matches!(self, Self::Mansion) {
+            let Stub::Mansion(position, rotation, mut random) = stub else { return None; };
+            return mansion::generate(position, rotation, templates, &mut *random)
+                .ok()
+                .map(mansion::MansionAssembly::into_pieces);
+        }
         match self {
             Self::Shipwreck { beached } => {
                 let mut random = structure_random(seed, cx, cz);
@@ -1657,6 +1731,10 @@ impl StructureKind {
                 }])
             }
             Self::Stronghold => Some(stronghold::generate(cx, cz, seed, ctx)),
+            Self::Fortress => {
+                let mut random = structure_random(seed, cx, cz);
+                Some(fortress::generate(cx, cz, &mut random).0)
+            }
             Self::OceanMonument { .. } => Some(monument::generate(cx, cz, seed, ctx)),
             Self::Unsupported(_) => None,
             // Handled above, before the match, because they consume `stub`.
@@ -1664,7 +1742,8 @@ impl StructureKind {
             | Self::Mineshaft { .. }
             | Self::NetherFossil { .. }
             | Self::RuinedPortal { .. }
-            | Self::EndCity => None,
+            | Self::EndCity
+            | Self::Mansion => None,
         }
     }
 
@@ -1688,7 +1767,8 @@ impl StructureKind {
             | Self::Igloo
             | Self::NetherFossil { .. }
             | Self::RuinedPortal { .. }
-            | Self::EndCity => match pieces {
+            | Self::EndCity
+            | Self::Mansion => match pieces {
                 Some(p) if !p.is_empty() => Validity::Valid,
                 _ => Validity::Unknown,
             },
@@ -1736,7 +1816,7 @@ impl StructureKind {
             // no invalid stronghold. `Unknown` rather than `Invalid` for the
             // same reason: an empty list here would mean the generator
             // itself never ran, which the ledger should name.
-            Self::Stronghold => match pieces {
+            Self::Stronghold | Self::Fortress => match pieces {
                 Some(p) if !p.is_empty() => Validity::Valid,
                 _ => Validity::Unknown,
             },
@@ -2532,8 +2612,8 @@ pub struct StructureDef {
     pub biomes: HashSet<String>,
     /// `terrain_adaptation`.
     pub terrain_adaptation: TerrainAdjustment,
-    /// `step` (`surface_structures`, `underground_structures`, …). Carried for
-    /// the eventual placement pass; nothing here reads it.
+    /// `step` (`surface_structures`, `underground_structures`, …), used with
+    /// registry order to seed feature-pool elements during placement.
     pub step: String,
 }
 
@@ -2556,6 +2636,7 @@ pub struct StructureRegistry {
     sets: Vec<StructureSetDef>,
     set_index: HashMap<String, usize>,
     structures: HashMap<String, StructureDef>,
+    structure_order: Vec<String>,
     templates: TemplateStore,
     pools: PoolStore,
     unsupported: BTreeMap<String, String>,
@@ -2770,6 +2851,11 @@ impl StructureRegistry {
         // structure id (the placement oracle asserts implemented structures are
         // *absent* from this map).
         if !templates.is_empty() {
+            unsupported.insert(
+                "mansion:room_templates".into(),
+                "the mansion assembler places its seeded exterior shell, corridor floors and roof templates, but does not yet place room divider, door, carpet, stairs, secret-room or furnishing templates; MansionAssembly::coverage reports ExteriorAndCorridors so this partial result is inspectable rather than full support"
+                    .into(),
+            );
             // Archaeology's state change is real, but using it still needs gameplay
             // support. The container-loot paths below are deliberately absent from
             // this ledger: their server-side consumers now attach filled containers.
@@ -2843,17 +2929,6 @@ impl StructureRegistry {
                     .into(),
             );
             unsupported.insert(
-                "stronghold:skip_air_shell".into(),
-                "every stronghold shell-carving call skips overwriting a block \
-                 that is not already air — read from \
-                 the real terrain a stronghold is dug into, since that pass runs \
-                 after noise and surface generation in a full pipeline. `stronghold::generate` \
-                 resolves every piece's blocks eagerly at start time, before any \
-                 terrain exists to read, so the predicate has nothing to consult and \
-                 every write is unconditional — the same shape as `coded:region_random`"
-                    .into(),
-            );
-            unsupported.insert(
                 "mineshaft:post_process_scope".into(),
                 "a mineshaft piece's block-writing walk normally runs once **per decorating \
                  chunk** and clips every read and write to that chunk. The liquid-shell \
@@ -2913,13 +2988,10 @@ impl StructureRegistry {
         // Reachability, not mechanism — and the one class of row that looks like no
         // row is needed, because every *other* instrument says these are fine.
         //
-        // **The composition half of this row is closed.** `NetherGenerator` now runs
+        // **The composition and structure halves of this row are closed.** `NetherGenerator` runs
         // starts / refs / beardifier / place, so `bastion_remnant` writes real blocks
-        // into a real Nether column. What is left is one dimension-shaped gap and
-        // three per-structure ones, and the row is kept (rather than deleted) because
-        // the per-structure rows cannot say the dimension-level thing: a reader asking
-        // "can I walk into a bastion" needs to know that no chunk source serves this
-        // dimension yet.
+        // into a real Nether column. The row remains because a reader asking "can I
+        // walk into a bastion" needs to know that no chunk source serves this dimension.
         if !structures.is_empty() {
             unsupported.insert(
                 "dimension:nether_structures".into(),
@@ -2927,12 +2999,8 @@ impl StructureRegistry {
                  `bastion_remnant` assembles **and places blocks** in a generated \
                  Nether column, and so does `nether_fossil` — the only structure \
                  whose `beard_thin` terrain flattening is now observable outside a \
-                 jigsaw. Two gaps remain. (1) `fortress` has no piece generator \
-                 and keeps its own row here, so at its placement cells the Nether \
-                 gets an advisory start with \
-                 `pieces_complete: false` and zero blocks, which is also what \
-                 stops the weighted `nether_complexes` walk from handing every \
-                 fortress cell to a bastion. (2) Nothing *serves* the dimension: \
+                 jigsaw, and `fortress` builds and places its recursive piece tree. \
+                 The remaining gap is serving the dimension: \
                  `lodestone-server`'s `EmbeddedResolver` hardcodes the Overworld \
                  documents and `OverworldChunkSource` is the only chunk source, so a \
                  portal trip still does not land in this terrain"
@@ -2942,14 +3010,6 @@ impl StructureRegistry {
         // S4's own gaps, recorded once. Keyed so they cannot be mistaken for a
         // structure id, exactly as the S2 rows above are.
         if !pools.is_empty() {
-            unsupported.insert(
-                "pool:feature_pool_element".into(),
-                "a `feature_pool_element` participates in the joint graph and the \
-                 free-space accumulator (so the village around it is vanilla's) but \
-                 places no blocks: its `placed_feature` needs the feature driver to \
-                 accept a structure-supplied origin"
-                    .into(),
-            );
             unsupported.insert(
                 "nbt:jigsaw_pool_element".into(),
                 "a persisted jigsaw child carries `Template` instead of vanilla's \
@@ -2976,11 +3036,24 @@ impl StructureRegistry {
             );
         }
 
+        let mut structure_order: Vec<String> = structures.keys().cloned().collect();
+        structure_order.sort_by(|a, b| {
+            let a_index = STRUCTURE_BOOTSTRAP_ORDER.iter().position(|id| *id == a);
+            let b_index = STRUCTURE_BOOTSTRAP_ORDER.iter().position(|id| *id == b);
+            match (a_index, b_index) {
+                (Some(a), Some(b)) => a.cmp(&b),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => a.cmp(b),
+            }
+        });
+
         Self {
             seed,
             sets,
             set_index,
             structures,
+            structure_order,
             templates,
             pools,
             unsupported,
@@ -3031,6 +3104,35 @@ impl StructureRegistry {
         Some(blocks)
     }
 
+    /// Regenerates and places a fortress start against this chunk's post-carve
+    /// grid. The persisted start retains the eager piece tree; the direct replay
+    /// lets conditional supports observe ordinary piece writes and current
+    /// terrain in their real order.
+    pub(crate) fn place_fortress_for_chunk(
+        &self,
+        start: &StructureStart,
+        chunk_x: i32,
+        chunk_z: i32,
+        world: &mut crate::dense_grid::DenseBlockGrid,
+    ) -> bool {
+        let Some(definition) = self.structures.get(&start.structure) else {
+            return false;
+        };
+        let StructureKind::Fortress = &definition.kind else {
+            return false;
+        };
+        let mut random = structure_random(self.seed, start.chunk_x, start.chunk_z);
+        fortress::place_for_chunk(
+            start.chunk_x,
+            start.chunk_z,
+            chunk_x,
+            chunk_z,
+            world,
+            &mut random,
+        );
+        true
+    }
+
     /// The loaded jigsaw template pools.
     #[must_use]
     pub fn pools(&self) -> &PoolStore {
@@ -3059,6 +3161,23 @@ impl StructureRegistry {
     #[must_use]
     pub fn structure(&self, id: &str) -> Option<&StructureDef> {
         self.structures.get(id)
+    }
+
+    /// `(generation step, index within that step)` used to seed a structure's
+    /// feature-pool elements for one decorating chunk.
+    pub(crate) fn feature_placement_key(&self, id: &str) -> Option<(i32, usize)> {
+        let step = structure_step_index(&self.structures.get(id)?.step)?;
+        let index = self
+            .structure_order
+            .iter()
+            .filter(|other| {
+                self.structures
+                    .get(*other)
+                    .and_then(|def| structure_step_index(&def.step))
+                    == Some(step)
+            })
+            .position(|other| other == id)?;
+        Some((step, index))
     }
 
     /// **The ledger**: every set, structure or placement type this registry

@@ -70,7 +70,7 @@ sequence. An unmodelled feature type or placement modifier degrades to a silent,
 (`ConfiguredFeature::Unsupported`) rather than a panic — the census resolves every bundled biome's
 step list at generator construction time, including biomes nobody has tested yet, so a hard failure
 on one unmodelled type would break every biome's world generation, not just the untested one.
-Currently unmodelled: `huge_fungus`, the End feature set, and several
+Currently unmodelled: the End feature set and several
 rarer single-use types — each
 tracked by name in `lodestone_server::worldgen_data::KNOWN_VEGETATION_GAPS`, which must be updated
 whenever a type lands so a regression (or a fixed gap that should be pruned) is loud rather than
@@ -128,6 +128,9 @@ layout exactly. The fixed-seed `vegetation_mushroom_fields_neg1_0_jvm.txt` and
 `vegetation_mushroom_fields_5_5_jvm.txt` external captures exercise the production mushroom-fields
 selector; their composed 3×3 replays contain both cap variants and their stems, so the selector path
 cannot regress while feature-local geometry tests remain green. The
+Nether's `huge_fungus` body is also modelled: crimson and warped fungi retain their variable
+height, rare broad stem, probabilistic hat/decor blocks, and wart-hat hanging vines, while the
+two source biomes' feature-list indices remain unchanged. The
 remaining named gaps degrade individually rather than disabling the whole tree.
 Root systems scan upward for a valid nested feature site, scatter the root-column replacement only
 after that nested placement succeeds, then independently scatter hanging roots from supported ceilings.

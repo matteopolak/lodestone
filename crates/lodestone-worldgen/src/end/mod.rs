@@ -332,6 +332,7 @@ pub struct EndGenerator {
     default_fluid: BlockKind,
     default_fluid_pre: PreState,
     decoration: decorate::EndDecoration,
+    veg_tags: crate::feature::vegetation::VegTags,
     structures: Option<crate::structure::StructureRegistry>,
 }
 
@@ -415,6 +416,7 @@ impl EndGenerator {
             default_fluid,
             default_fluid_pre,
             decoration: decorate::EndDecoration::from_resolver(resolver),
+            veg_tags: crate::feature::vegetation::build_veg_tags(resolver),
             structures,
         }
     }
@@ -522,6 +524,10 @@ impl EndGenerator {
         };
         let sampler = EndStartSampler::new(self);
         let (min_x, min_z) = (cx * 16, cz * 16);
+        let mut feature_randoms: HashMap<
+            String,
+            crate::rng::WorldgenRandom<crate::rng::LegacyRandomSource>,
+        > = HashMap::new();
         for start_x in cx - START_SCAN_RADIUS..=cx + START_SCAN_RADIUS {
             for start_z in cz - START_SCAN_RADIUS..=cz + START_SCAN_RADIUS {
                 for start in registry.starts_at(start_x, start_z, &sampler) {
@@ -553,6 +559,37 @@ impl EndGenerator {
                                 };
                                 extra.template.place(origin, &extra.settings, &mut world);
                             }
+                        }
+                        match piece.refine.as_ref() {
+                            Some(crate::structure::PieceRefinement::FeaturePlacements { placements }) => {
+                                let Some((step, index)) = registry.feature_placement_key(&start.structure) else {
+                                    continue;
+                                };
+                                let random = feature_randoms.entry(start.structure.clone()).or_insert_with(|| {
+                                    let mut random = crate::rng::WorldgenRandom::new(
+                                        crate::rng::LegacyRandomSource::new(0),
+                                    );
+                                    let decoration_seed = random.set_decoration_seed(
+                                        registry.seed(),
+                                        min_x,
+                                        min_z,
+                                    );
+                                    random.set_feature_seed(decoration_seed, index as i32, step);
+                                    random
+                                });
+                                crate::structure::feature_placement::place_feature_pool_elements(
+                                    random,
+                                    placements,
+                                    &mut world,
+                                    &self.veg_tags,
+                                );
+                            }
+                            Some(crate::structure::PieceRefinement::StrongholdBlocks { writes }) => {
+                                crate::structure::stronghold::place_post_surface_blocks(&mut world, writes);
+                            }
+                            Some(crate::structure::PieceRefinement::BuriedTreasureChest)
+                            | Some(crate::structure::PieceRefinement::RuinedPortalTerrain { .. })
+                            | None => {}
                         }
                     }
                 }

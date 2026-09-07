@@ -63,6 +63,8 @@ use super::processor::{ColumnHeights, ProcessorRule, RuleTest};
 use super::template::{BlockState, Rotation, StructureTemplate};
 use super::{BoundingBox, TemplateStore};
 use crate::density::Resolver;
+use crate::feature::BlockPos;
+use crate::feature::vegetation::{PlacedRef, VegGrid, VegTags};
 use lodestone_worldgen_core::rng::RandomSource;
 
 /// `StructureTemplatePool.Projection`.
@@ -129,10 +131,17 @@ pub enum PoolElement {
     /// exactly one synthetic jigsaw block** facing down, so it participates in the
     /// free-space accumulator and in the joint graph. Dropping it would change
     /// which elements the pool's shuffle offers and therefore the whole village.
-    /// It places no blocks — the gap is on the ledger.
+    /// Its resolved placed-feature body is retained so the placement stage can
+    /// run the same feature driver as ordinary vegetal decoration, at the
+    /// structure-supplied origin. The placement stage owns clipping and the
+    /// random stream; this element owns only the data and origin hand-off.
     Feature {
         /// The `placed_feature` id, for the ledger.
         feature: String,
+        /// The resolved placed-feature document. `None` is retained for
+        /// programmatically-built elements; parsed data always supplies it,
+        /// including an `Unsupported` body for an unmodelled feature type.
+        placed: Option<Arc<PlacedRef>>,
         /// `projection`.
         projection: Projection,
     },
@@ -140,6 +149,51 @@ pub enum PoolElement {
     /// **breaks** on it rather than skipping it, so its position in a pool
     /// matters.
     Empty,
+}
+
+/// A resolved `feature_pool_element` ready for placement.
+///
+/// Unlike biome decoration, a pool feature is not anchored to a chunk origin:
+/// its origin is the assembled piece's world position. The caller must invoke
+/// [`Self::place`] with the structure placement stream and the real placement
+/// grid, preserving modifier draws and clipping alongside the other piece
+/// placements.
+#[derive(Debug, Clone)]
+pub struct PoolFeaturePlacement {
+    /// Registry id used by the feature's biome modifier, when the source was a
+    /// registry holder rather than an inline value.
+    pub feature: String,
+    /// The parsed placed-feature pipeline and configured body.
+    pub placed: Arc<PlacedRef>,
+    /// The assembled world-space origin of the feature.
+    pub origin: BlockPos,
+    /// The pool element projection, retained for placement-stage diagnostics.
+    pub projection: Projection,
+}
+
+impl PoolFeaturePlacement {
+    /// Place the feature at its structure-supplied origin using the caller's
+    /// stream. This is deliberately not reseeded: structure placement has one
+    /// stream, and the feature's modifiers consume it in declaration order.
+    pub fn place<R: RandomSource>(
+        &self,
+        random: &mut R,
+        grid: &mut VegGrid,
+        tags: &VegTags,
+    ) {
+        // The ordinary decoration driver binds once per pass. A structure can
+        // contain several feature elements and calls this bridge directly, so
+        // bind idempotently here instead of making every placement-stage caller
+        // remember a vegetation-internal cache invariant.
+        tags.bind(grid.interner());
+        crate::feature::vegetation::place_placed_feature_at(
+            random,
+            self.origin,
+            &self.placed,
+            grid,
+            tags,
+        );
+    }
 }
 
 impl PoolElement {
@@ -164,6 +218,34 @@ impl PoolElement {
     #[must_use]
     pub fn ground_level_delta(&self) -> i32 {
         1
+    }
+
+    /// Returns the resolved feature placement for this element at `origin`.
+    ///
+    /// `None` means this is not a feature element, or it was constructed by a
+    /// caller without a resolved feature body. Parsed pool data never takes
+    /// the latter path: an unsupported body is represented by the feature
+    /// driver's `ConfiguredFeature::Unsupported` variant and remains an
+    /// observable, intentional no-op rather than disappearing from the pool.
+    #[must_use]
+    pub fn feature_placement(&self, origin: [i32; 3]) -> Option<PoolFeaturePlacement> {
+        match self {
+            Self::Feature {
+                feature,
+                placed: Some(placed),
+                projection,
+            } => Some(PoolFeaturePlacement {
+                feature: feature.clone(),
+                placed: Arc::clone(placed),
+                origin: BlockPos {
+                    x: origin[0],
+                    y: origin[1],
+                    z: origin[2],
+                },
+                projection: *projection,
+            }),
+            _ => None,
+        }
     }
 
     /// `getBoundingBox(manager, position, rotation)`.
@@ -452,8 +534,17 @@ impl PoolStore {
             "minecraft:feature_pool_element" => {
                 let projection = Projection::parse(&value["projection"])
                     .ok_or_else(|| format!("element projection '{}'", value["projection"]))?;
+                let placed = value
+                    .get("feature")
+                    .filter(|feature| !feature.is_null())
+                    .map(|feature| {
+                        Arc::new(crate::feature::vegetation::resolve_placed_feature_ref(
+                            resolver, feature,
+                        ))
+                    });
                 Ok(PoolElement::Feature {
                     feature: value["feature"].as_str().unwrap_or("<inline>").to_string(),
+                    placed,
                     projection,
                 })
             }
@@ -901,6 +992,7 @@ mod tests {
         let heights = Arc::new(ColumnHeights::build(0, 0, 0, 0, |_, _| 64));
         let feature_rigid = PoolElement::Feature {
             feature: "minecraft:x".into(),
+            placed: None,
             projection: Projection::Rigid,
         };
         let settings = place_settings(
@@ -918,6 +1010,7 @@ mod tests {
         );
         let feature_matching = PoolElement::Feature {
             feature: "minecraft:x".into(),
+            placed: None,
             projection: Projection::TerrainMatching,
         };
         let settings = place_settings(&feature_matching, Rotation::None, true, Some(heights));
@@ -932,5 +1025,128 @@ mod tests {
                 .iter()
                 .any(|p| matches!(p, Processor::JigsawReplacement))
         );
+    }
+
+    /// The bundled plains tree pool is the external control for this path: it
+    /// names the real `oak` placed feature, rather than a hand-written test
+    /// feature. The descriptor must retain the feature body and the exact
+    /// structure origin, while a programmatic feature with no body remains a
+    /// detectable no-op.
+    #[test]
+    fn bundled_feature_pool_element_resolves_and_places_at_its_origin() {
+        struct Resolver;
+
+        impl crate::density::Resolver for Resolver {
+            fn density_function(&self, _id: &str) -> Value {
+                Value::Null
+            }
+
+            fn noise(&self, _id: &str) -> crate::density::NoiseParams {
+                crate::density::NoiseParams {
+                    first_octave: 0,
+                    amplitudes: Vec::new(),
+                }
+            }
+
+            fn template_pool(&self, id: &str) -> Value {
+                match id {
+                    "minecraft:test" => serde_json::from_str(include_str!(
+                        "../../../lodestone-server/assets/worldgen/template_pool/village/plains/trees.json"
+                    ))
+                    .expect("bundled pool JSON"),
+                    "minecraft:empty" => serde_json::json!({
+                        "elements": [],
+                        "fallback": "minecraft:empty"
+                    }),
+                    _ => Value::Null,
+                }
+            }
+
+            fn placed_feature(&self, id: &str) -> Value {
+                if id == "minecraft:oak" {
+                    serde_json::from_str(include_str!(
+                        "../../../lodestone-server/assets/worldgen/placed_feature/oak.json"
+                    ))
+                    .expect("bundled placed-feature JSON")
+                } else {
+                    Value::Null
+                }
+            }
+
+            fn configured_feature(&self, id: &str) -> Value {
+                if id == "minecraft:oak" {
+                    serde_json::from_str(include_str!(
+                        "../../../lodestone-server/assets/worldgen/configured_feature/oak.json"
+                    ))
+                    .expect("bundled configured-feature JSON")
+                } else {
+                    Value::Null
+                }
+            }
+        }
+
+        let resolver = Resolver;
+        let mut pools = PoolStore::default();
+        pools
+            .load(
+                &resolver,
+                &mut TemplateStore::default(),
+                "minecraft:test",
+                &AliasedPools::default(),
+            )
+            .expect("bundled pool must load");
+        let element = pools
+            .get("minecraft:test")
+            .expect("test pool")
+            .expanded
+            .first()
+            .expect("weighted feature element")
+            .clone();
+        let placement = element
+            .feature_placement([3, 1, 5])
+            .expect("parsed feature body");
+        assert_eq!(placement.feature, "minecraft:oak");
+        assert_eq!(placement.origin, BlockPos { x: 3, y: 1, z: 5 });
+        assert_eq!(placement.projection, Projection::Rigid);
+        assert!(matches!(
+            placement.placed.feature.as_ref(),
+            crate::feature::vegetation::ConfiguredFeature::Tree(_)
+        ));
+
+        let mut grid = VegGrid::with_footprint(0, 32, 0, 0, -8, 24);
+        for x in -8..24 {
+            for z in -8..24 {
+                grid.seed(x, 0, z, "minecraft:dirt".to_string());
+            }
+        }
+        let mut tags = VegTags::default();
+        tags.supports_vegetation.insert("minecraft:dirt".to_string());
+        let mut random = LegacyRandomSource::new(0);
+        placement.place(&mut random, &mut grid, &tags);
+        let writes: Vec<_> = grid.dirty_cells().collect();
+        assert!(!writes.is_empty(), "feature placement must write real blocks");
+        assert!(
+            writes
+                .iter()
+                .any(|(_, _, _, state)| (*state).starts_with("minecraft:oak_log")),
+            "bundled oak feature must place at least one trunk block: {writes:?}"
+        );
+
+        let mut no_op_grid = VegGrid::with_footprint(0, 32, 0, 0, -8, 24);
+        for x in -8..24 {
+            for z in -8..24 {
+                no_op_grid.seed(x, 0, z, "minecraft:dirt".to_string());
+            }
+        }
+        let no_op = PoolElement::Feature {
+            feature: "minecraft:oak".to_string(),
+            placed: None,
+            projection: Projection::Rigid,
+        };
+        assert!(
+            no_op.feature_placement([3, 1, 5]).is_none(),
+            "the negative control must exercise the no-op detector"
+        );
+        assert!(no_op_grid.dirty_cells().next().is_none());
     }
 }

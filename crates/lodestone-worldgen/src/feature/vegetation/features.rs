@@ -712,6 +712,20 @@ pub enum HugeMushroomKind {
     Red,
 }
 
+/// The Nether fungus configuration. Unlike the overworld's cap-only mushroom,
+/// this feature grows a variable stem, a probabilistic hat and (for wart hats)
+/// hanging vines. `replaceable_blocks` is consulted only for plant states while
+/// the ordinary replaceability check handles air and other non-solid cells.
+#[derive(Clone, Debug)]
+pub struct HugeFungusCfg {
+    pub valid_base_block: String,
+    pub stem_state: String,
+    pub hat_state: String,
+    pub decor_state: String,
+    pub replaceable_blocks: BlockPredicate,
+    pub planted: bool,
+}
+
 /// `CaveSurface` — which way `vegetation_patch` grows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CaveSurface {
@@ -774,220 +788,9 @@ pub struct FallenTreeCfg {
     pub log_decorators: Vec<Decorator>,
 }
 
-/// The cave-root column feature.  The nested placed feature is intentionally
-/// retained here: a successful column consumes the nested feature's complete
-/// placement body on the same random stream before either kind of root is
-/// scattered around it.
-#[derive(Clone, Debug)]
-pub struct RootSystemCfg {
-    pub feature: PlacedRef,
-    pub required_vertical_space_for_tree: i32,
-    pub level_test_distance: i32,
-    pub max_level_deviation: i32,
-    pub root_radius: i32,
-    pub root_replaceable: HashSet<String>,
-    pub root_state_provider: BlockStateProvider,
-    pub root_placement_attempts: i32,
-    pub root_column_max_height: i32,
-    pub hanging_root_radius: i32,
-    pub hanging_roots_vertical_span: i32,
-    pub hanging_root_state_provider: BlockStateProvider,
-    pub hanging_root_placement_attempts: i32,
-    pub allowed_vertical_water_for_tree: i32,
-    pub allowed_tree_position: BlockPredicate,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CoralKind { Tree, Claw, Mushroom }
-
 // ---------------------------------------------------------------------------
 // Bodies
 // ---------------------------------------------------------------------------
-
-/// Places the cave-root column, then its two deliberately separate scatter
-/// passes.  A failed nested feature does not leave either kind of root behind.
-pub(super) fn place_root_system<R: RandomSource>(
-    random: &mut R,
-    origin: BlockPos,
-    cfg: &RootSystemCfg,
-    grid: &mut VegGrid,
-    tags: &VegTags,
-) {
-    if !air_at(grid, origin.x, origin.y, origin.z) {
-        return;
-    }
-    let mut target = None;
-    for dy in 1..=cfg.root_column_max_height {
-        let at = BlockPos { x: origin.x, y: origin.y + dy, z: origin.z };
-        if grid.height_world_surface(at.x, at.z) < at.y {
-            return;
-        }
-        if !cfg.allowed_tree_position.test(grid, tags, at) || !root_tree_space(at, cfg, grid) {
-            continue;
-        }
-        let below = base_at(grid, at.x, at.y - 1, at.z);
-        if below == "minecraft:lava" || !sturdy_at(grid, at.x, at.y - 1, at.z) {
-            return;
-        }
-        // The nested feature owns its own placement pipeline.  It is the
-        // success signal for the entire column: roots are only scattered once
-        // a tree/spring actually landed at the selected height.
-        let before = grid.dirty_cells().count();
-        super::place_placed_feature(random, at, &cfg.feature, grid, tags);
-        if grid.dirty_cells().count() > before {
-            // The scan index names the cell ABOVE the final root-column row:
-            // the replacement pass ends one row below the nested feature's
-            // candidate, not on the candidate's supporting block.
-            target = Some(at.y - 1);
-        }
-        break;
-    }
-    let Some(target_y) = target else { return; };
-    for y in origin.y..target_y {
-        for _ in 0..cfg.root_placement_attempts {
-            let x = origin.x + random.next_int_bounded(cfg.root_radius) - random.next_int_bounded(cfg.root_radius);
-            let z = origin.z + random.next_int_bounded(cfg.root_radius) - random.next_int_bounded(cfg.root_radius);
-            if cfg.root_replaceable.contains(base_at(grid, x, y, z)) {
-                if let Some(state) = cfg.root_state_provider.get_state(grid, tags, random, BlockPos { x, y, z }) {
-                    grid.set_if_in_bounds(x, y, z, state.to_string());
-                }
-            }
-        }
-    }
-    for _ in 0..cfg.hanging_root_placement_attempts {
-        let x = origin.x + random.next_int_bounded(cfg.hanging_root_radius) - random.next_int_bounded(cfg.hanging_root_radius);
-        let y = origin.y + random.next_int_bounded(cfg.hanging_roots_vertical_span) - random.next_int_bounded(cfg.hanging_roots_vertical_span);
-        let z = origin.z + random.next_int_bounded(cfg.hanging_root_radius) - random.next_int_bounded(cfg.hanging_root_radius);
-        if !air_at(grid, x, y, z) || !sturdy_at(grid, x, y + 1, z) {
-            continue;
-        }
-        if let Some(state) = cfg.hanging_root_state_provider.get_state(grid, tags, random, BlockPos { x, y, z }) {
-            grid.set_if_in_bounds(x, y, z, state.to_string());
-        }
-    }
-}
-
-fn root_tree_space(at: BlockPos, cfg: &RootSystemCfg, grid: &VegGrid) -> bool {
-    for i in 1..=cfg.required_vertical_space_for_tree {
-        let state = base_at(grid, at.x, at.y + i, at.z);
-        if !is_air(state) && !(i + 1 <= cfg.allowed_vertical_water_for_tree && state == "minecraft:water") {
-            return false;
-        }
-    }
-    if cfg.level_test_distance == 0 { return true; }
-    for (dx, dz) in HORIZONTAL {
-        let x = at.x + dx * cfg.level_test_distance;
-        let z = at.z + dz * cfg.level_test_distance;
-        if air_at(grid, x, at.y - cfg.max_level_deviation, z)
-            || !air_at(grid, x, at.y + cfg.max_level_deviation, z) {
-            return false;
-        }
-    }
-    true
-}
-
-const CORAL_BLOCKS: [&str; 5] = [
-    "minecraft:tube_coral_block", "minecraft:brain_coral_block", "minecraft:bubble_coral_block",
-    "minecraft:fire_coral_block", "minecraft:horn_coral_block",
-];
-const CORALS: [&str; 10] = [
-    "minecraft:tube_coral", "minecraft:brain_coral", "minecraft:bubble_coral", "minecraft:fire_coral", "minecraft:horn_coral",
-    "minecraft:tube_coral_fan[waterlogged=true]", "minecraft:brain_coral_fan[waterlogged=true]", "minecraft:bubble_coral_fan[waterlogged=true]", "minecraft:fire_coral_fan[waterlogged=true]", "minecraft:horn_coral_fan[waterlogged=true]",
-];
-const WALL_CORALS: [&str; 5] = [
-    "minecraft:tube_coral_wall_fan", "minecraft:brain_coral_wall_fan", "minecraft:bubble_coral_wall_fan",
-    "minecraft:fire_coral_wall_fan", "minecraft:horn_coral_wall_fan",
-];
-
-/// The three underwater geometries share the tagged coral-block choice and
-/// survival/decorating write, but intentionally not their shape loops.
-pub(super) fn place_coral<R: RandomSource>(random: &mut R, origin: BlockPos, kind: CoralKind, grid: &mut VegGrid) {
-    let state = CORAL_BLOCKS[random.next_int_bounded(CORAL_BLOCKS.len() as i32) as usize];
-    match kind {
-        CoralKind::Tree => place_coral_tree(random, origin, state, grid),
-        CoralKind::Claw => place_coral_claw(random, origin, state, grid),
-        CoralKind::Mushroom => place_coral_mushroom(random, origin, state, grid),
-    }
-}
-
-fn place_coral_block<R: RandomSource>(random: &mut R, at: BlockPos, state: &str, grid: &mut VegGrid) -> bool {
-    let here = base_at(grid, at.x, at.y, at.z);
-    if !(here == "minecraft:water" || CORALS.iter().any(|state| super::base_id(state) == here)) || !water_at(grid, at.x, at.y + 1, at.z) { return false; }
-    grid.set_if_in_bounds(at.x, at.y, at.z, state.to_string());
-    if random.next_float() < 0.25 {
-        let above = coral_default_state(CORALS[random.next_int_bounded(CORALS.len() as i32) as usize]);
-        grid.set_if_in_bounds(at.x, at.y + 1, at.z, above.to_string());
-    } else if random.next_float() < 0.05 {
-        let pickles = random.next_int_bounded(4) + 1;
-        grid.set_if_in_bounds(at.x, at.y + 1, at.z, format!("minecraft:sea_pickle[pickles={pickles},waterlogged=true]"));
-    }
-    for (i, (dx, dz)) in HORIZONTAL.iter().enumerate() {
-        if random.next_float() < 0.2 && water_at(grid, at.x + dx, at.y, at.z + dz) {
-            let fan = WALL_CORALS[random.next_int_bounded(WALL_CORALS.len() as i32) as usize];
-            let facing = ["north", "east", "south", "west"][i];
-            grid.set_if_in_bounds(at.x + dx, at.y, at.z + dz, format!("{fan}[facing={facing},waterlogged=true]"));
-        }
-    }
-    true
-}
-
-fn coral_default_state(state: &str) -> String {
-    if state.ends_with("_coral") { format!("{state}[waterlogged=true]") } else { state.to_string() }
-}
-
-fn shuffled<R: RandomSource>(random: &mut R, dirs: &mut [(i32, i32)]) {
-    for i in (1..dirs.len()).rev() { dirs.swap(i, random.next_int_bounded((i + 1) as i32) as usize); }
-}
-
-fn place_coral_tree<R: RandomSource>(random: &mut R, origin: BlockPos, state: &str, grid: &mut VegGrid) {
-    let height = random.next_int_bounded(3) + 1;
-    for y in 0..height { if !place_coral_block(random, BlockPos { x: origin.x, y: origin.y + y, z: origin.z }, state, grid) { return; } }
-    let top = origin.y + height;
-    let count = random.next_int_bounded(3) + 2;
-    let mut dirs = HORIZONTAL;
-    shuffled(random, &mut dirs);
-    for (dx, dz) in dirs.into_iter().take(count as usize) {
-        let mut x = origin.x + dx; let mut y = top; let mut z = origin.z + dz;
-        let branch_height = random.next_int_bounded(5) + 2; let mut segment = 0;
-        for j in 0..branch_height {
-            if !place_coral_block(random, BlockPos { x, y, z }, state, grid) { break; }
-            segment += 1; y += 1;
-            if j == 0 || (segment >= 2 && random.next_float() < 0.25) { x += dx; z += dz; segment = 0; }
-        }
-    }
-}
-
-fn place_coral_claw<R: RandomSource>(random: &mut R, origin: BlockPos, state: &str, grid: &mut VegGrid) {
-    if !place_coral_block(random, origin, state, grid) { return; }
-    let claw_i = random.next_int_bounded(4) as usize;
-    let claw = HORIZONTAL[claw_i];
-    let count = random.next_int_bounded(2) + 2;
-    let mut dirs = [claw, HORIZONTAL[(claw_i + 1) % 4], HORIZONTAL[(claw_i + 3) % 4]];
-    shuffled(random, &mut dirs);
-    for (dx, dz) in dirs.into_iter().take(count as usize) {
-        let side = random.next_int_bounded(2) + 1;
-        let (seg_dx, seg_dz, mut x, mut y, mut z, inward) = if (dx, dz) == claw {
-            (dx, dz, origin.x + dx, origin.y, origin.z + dz, random.next_int_bounded(3) + 2)
-        } else {
-            let vertical = random.next_int_bounded(2) == 1;
-            (if vertical { 0 } else { dx }, if vertical { 0 } else { dz }, origin.x + dx, origin.y + 1, origin.z + dz, random.next_int_bounded(3) + 3)
-        };
-        for _ in 0..side { if !place_coral_block(random, BlockPos { x, y, z }, state, grid) { break; } x += seg_dx; y += if seg_dx == 0 && seg_dz == 0 { 1 } else { 0 }; z += seg_dz; }
-        x -= seg_dx; y -= if seg_dx == 0 && seg_dz == 0 { 1 } else { 0 }; z -= seg_dz; y += 1;
-        for _ in 0..inward { x += claw.0; z += claw.1; if !place_coral_block(random, BlockPos { x, y, z }, state, grid) { break; } if random.next_float() < 0.25 { y += 1; } }
-    }
-}
-
-fn place_coral_mushroom<R: RandomSource>(random: &mut R, origin: BlockPos, state: &str, grid: &mut VegGrid) {
-    let h = random.next_int_bounded(3) + 3; let w = random.next_int_bounded(3) + 3; let l = random.next_int_bounded(3) + 3; let sink = random.next_int_bounded(3) + 1;
-    for x in 0..=w { for y in 0..=h { for z in 0..=l {
-        let inner_x = x != 0 && x != w; let inner_y = y != 0 && y != h; let inner_z = z != 0 && z != l;
-        let shell = x == 0 || x == w || y == 0 || y == h || z == 0 || z == l;
-        if shell && (inner_x || inner_y) && (inner_z || inner_y) && (inner_x || inner_z) && !(random.next_float() < 0.1) {
-            let _ = place_coral_block(random, BlockPos { x: origin.x + x, y: origin.y + y - sink, z: origin.z + z }, state, grid);
-        }
-    }}}
-}
 
 /// Vanilla's own spring feature's place — the single most common absentee in the bundle (6
 /// configured features, 112 step-8 entries across the 66 biomes).
@@ -1640,6 +1443,18 @@ fn place_growing_column<R: RandomSource>(
     grid: &mut VegGrid,
     upwards: bool,
 ) {
+    place_growing_column_with_age(random, start, total, grid, upwards, 17, 25);
+}
+
+fn place_growing_column_with_age<R: RandomSource>(
+    random: &mut R,
+    start: BlockPos,
+    total: i32,
+    grid: &mut VegGrid,
+    upwards: bool,
+    min_age: i32,
+    max_age: i32,
+) {
     let (head, plant, step, first) = if upwards {
         ("minecraft:twisting_vines", "minecraft:twisting_vines_plant", 1, 1)
     } else {
@@ -1651,7 +1466,7 @@ fn place_growing_column<R: RandomSource>(
         if air_at(grid, pos.x, pos.y, pos.z) {
             let blocked = !air_at(grid, pos.x, pos.y + step, pos.z);
             if h == total || blocked {
-                let age = next_int_between(random, 17, 25);
+                let age = next_int_between(random, min_age, max_age);
                 grid.set_if_in_bounds(pos.x, pos.y, pos.z, format!("{head}[age={age}]"));
                 return;
             }
@@ -2194,7 +2009,7 @@ pub(super) fn place_huge_mushroom_at_height<R: RandomSource>(
 ) {
     let max_y = grid.min_y + grid.height;
     if pos.y < grid.min_y + 1
-        || pos.y + height + 1 >= max_y
+        || pos.y + height + 1 > max_y
         || !cfg.can_place_on.test(
             grid,
             tags,
@@ -2219,20 +2034,11 @@ pub(super) fn place_huge_mushroom_at_height<R: RandomSource>(
         }
     }
 
-    for y in 0..height {
-        let at = BlockPos { x: pos.x, y: pos.y + y, z: pos.z };
-        if !sturdy_at(grid, at.x, at.y, at.z) {
-            if let Some(state) = cfg.stem_provider.get_state(grid, tags, random, at) {
-                grid.set_if_in_bounds(at.x, at.y, at.z, state.to_string());
-            }
-        }
-    }
-
     let mut place_cap = |at: BlockPos, west: bool, east: bool, north: bool, south: bool, up: bool| {
         if sturdy_at(grid, at.x, at.y, at.z) {
             return;
         }
-        if let Some(state) = cfg.cap_provider.get_state(grid, tags, random, at) {
+        if let Some(state) = cfg.cap_provider.get_state(grid, tags, random, pos) {
             grid.set_if_in_bounds(
                 at.x,
                 at.y,
@@ -2295,6 +2101,159 @@ pub(super) fn place_huge_mushroom_at_height<R: RandomSource>(
             }
         }
     }
+
+    // The cap is generated before the trunk. That ordering is observable for
+    // weighted or noise-selected providers even though the bundled providers
+    // are simple states.
+    for y in 0..height {
+        let at = BlockPos { x: pos.x, y: pos.y + y, z: pos.z };
+        if !sturdy_at(grid, at.x, at.y, at.z) {
+            if let Some(state) = cfg.stem_provider.get_state(grid, tags, random, pos) {
+                grid.set_if_in_bounds(at.x, at.y, at.z, state.to_string());
+            }
+        }
+    }
+}
+
+/// Places one Nether fungus. The height, rare doubled height, broad-stem roll,
+/// per-row hat radius and per-block material rolls intentionally stay in the
+/// reference order: later decoration entries share this random stream.
+pub(super) fn place_huge_fungus<R: RandomSource>(
+    random: &mut R,
+    origin: BlockPos,
+    cfg: &HugeFungusCfg,
+    grid: &mut VegGrid,
+    tags: &VegTags,
+) {
+    if base_at(grid, origin.x, origin.y - 1, origin.z) != cfg.valid_base_block {
+        return;
+    }
+
+    let mut total_height = random.next_int_bounded(10) + 4;
+    if random.next_int_bounded(12) == 0 {
+        total_height *= 2;
+    }
+    let max_y = grid.min_y + grid.height;
+    if !cfg.planted && origin.y + total_height + 1 >= max_y {
+        return;
+    }
+
+    let huge = random.next_float() < 0.06;
+    grid.set_if_in_bounds(origin.x, origin.y, origin.z, "minecraft:air".to_string());
+
+    let stem_radius: i32 = if huge { 1 } else { 0 };
+    for dx in -stem_radius..=stem_radius {
+        for dz in -stem_radius..=stem_radius {
+            let corner = huge && dx.abs() == stem_radius && dz.abs() == stem_radius;
+            for dy in 0..total_height {
+                let at = BlockPos { x: origin.x + dx, y: origin.y + dy, z: origin.z + dz };
+                if !huge_fungus_replaceable(grid, cfg, tags, at, true) {
+                    continue;
+                }
+                if !cfg.planted && corner && random.next_float() >= 0.1 {
+                    continue;
+                }
+                grid.set_if_in_bounds(at.x, at.y, at.z, cfg.stem_state.clone());
+            }
+        }
+    }
+
+    let hat_height = (random.next_int_bounded(1 + total_height / 3) + 5).min(total_height);
+    let hat_start_y = total_height - hat_height;
+    let place_vines = super::base_id(&cfg.hat_state) == "minecraft:nether_wart_block";
+    for dy in hat_start_y..=total_height {
+        let mut radius = if dy < total_height - random.next_int_bounded(3) { 2 } else { 1 };
+        if hat_height > 8 && dy < hat_start_y + 4 {
+            radius = 3;
+        }
+        if huge {
+            radius += 1;
+        }
+        let is_hat_bottom = dy < hat_start_y + 3;
+        for dx in -radius..=radius {
+            for dz in -radius..=radius {
+                let edge_x = dx == -radius || dx == radius;
+                let edge_z = dz == -radius || dz == radius;
+                let inside = !edge_x && !edge_z && dy != total_height;
+                let corner = edge_x && edge_z;
+                let at = BlockPos { x: origin.x + dx, y: origin.y + dy, z: origin.z + dz };
+                if !huge_fungus_replaceable(grid, cfg, tags, at, false) {
+                    continue;
+                }
+                if is_hat_bottom {
+                    if !inside {
+                        place_huge_fungus_drop(random, at, cfg, place_vines, grid);
+                    }
+                } else if inside {
+                    place_huge_fungus_hat_block(random, at, cfg, 0.1, 0.2, if place_vines { 0.1 } else { 0.0 }, grid);
+                } else if corner {
+                    place_huge_fungus_hat_block(random, at, cfg, 0.01, 0.7, if place_vines { 0.083 } else { 0.0 }, grid);
+                } else {
+                    place_huge_fungus_hat_block(random, at, cfg, 0.0005, 0.98, if place_vines { 0.07 } else { 0.0 }, grid);
+                }
+            }
+        }
+    }
+}
+
+fn huge_fungus_replaceable(
+    grid: &VegGrid,
+    cfg: &HugeFungusCfg,
+    tags: &VegTags,
+    pos: BlockPos,
+    check_plants: bool,
+) -> bool {
+    let base = base_at(grid, pos.x, pos.y, pos.z);
+    (is_air(base) || (!is_fluid(base) && !blocks_motion(base)))
+        || (check_plants && cfg.replaceable_blocks.test(grid, tags, pos))
+}
+
+fn place_huge_fungus_hat_block<R: RandomSource>(
+    random: &mut R,
+    pos: BlockPos,
+    cfg: &HugeFungusCfg,
+    decor_probability: f32,
+    hat_probability: f32,
+    vines_probability: f32,
+    grid: &mut VegGrid,
+) {
+    if random.next_float() < decor_probability {
+        grid.set_if_in_bounds(pos.x, pos.y, pos.z, cfg.decor_state.clone());
+    } else if random.next_float() < hat_probability {
+        grid.set_if_in_bounds(pos.x, pos.y, pos.z, cfg.hat_state.clone());
+        if random.next_float() < vines_probability {
+            try_place_huge_fungus_vines(random, pos, grid);
+        }
+    }
+}
+
+fn place_huge_fungus_drop<R: RandomSource>(
+    random: &mut R,
+    pos: BlockPos,
+    cfg: &HugeFungusCfg,
+    place_vines: bool,
+    grid: &mut VegGrid,
+) {
+    if base_at(grid, pos.x, pos.y - 1, pos.z) == super::base_id(&cfg.hat_state) {
+        grid.set_if_in_bounds(pos.x, pos.y, pos.z, cfg.hat_state.clone());
+    } else if random.next_float() < 0.15 {
+        grid.set_if_in_bounds(pos.x, pos.y, pos.z, cfg.hat_state.clone());
+        if place_vines && random.next_int_bounded(11) == 0 {
+            try_place_huge_fungus_vines(random, pos, grid);
+        }
+    }
+}
+
+fn try_place_huge_fungus_vines<R: RandomSource>(random: &mut R, hat_pos: BlockPos, grid: &mut VegGrid) {
+    let below = BlockPos { x: hat_pos.x, y: hat_pos.y - 1, z: hat_pos.z };
+    if !air_at(grid, below.x, below.y, below.z) {
+        return;
+    }
+    let mut goal = random.next_int_bounded(5) + 1;
+    if random.next_int_bounded(7) == 0 {
+        goal *= 2;
+    }
+    place_growing_column_with_age(random, below, goal, grid, false, 23, 25);
 }
 
 fn west_or_east(value: i32, radius: i32) -> bool {

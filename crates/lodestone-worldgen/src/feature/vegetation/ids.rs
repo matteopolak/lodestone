@@ -611,7 +611,7 @@ mod tests {
     /// order and complete.
     #[test]
     fn tag_all_is_complete_and_in_discriminant_order() {
-        assert_eq!(TAG_COUNT, 15, "TAG_COUNT is derived from Tag::ALL");
+        assert_eq!(TAG_COUNT, 25, "TAG_COUNT is derived from Tag::ALL");
         for (i, tag) in Tag::ALL.iter().enumerate() {
             assert_eq!(
                 tag.slot(),

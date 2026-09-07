@@ -23,12 +23,24 @@ fill_stage                shape, with the beard term added at the final_density 
 structure_place_stage     write every referenced start's pieces into this chunk (structures.rs)
 ```
 
-A structure's pieces reach the grid one of three ways: **eager blocks** built once at start time
-against a `StartContext` (every coded piece except mineshafts), a **template** placed by
+A structure's pieces reach the grid one of five ways: **eager blocks** built once at start time
+against a `StartContext` (the ordinary coded pieces), a **template** placed by
 `structure_place_stage` (shipwreck, ocean ruin, igloo, ruined portal, every jigsaw structure), or a
 **refinement** the placement stage runs against the chunk's real, already-surfaced-and-carved grid
 (`buried_treasure`'s chest, whose termination condition needs a material distinction that does not
-exist yet at start time).
+exist yet at start time). Stronghold writes are a fourth, ordered post-surface list: its enclosing
+selector boxes skip a candidate only when the current state is air, while later decorations remain
+unconditional. Keeping the guarded and unguarded writes in one list preserves their source order.
+
+Jigsaw pools also contain **feature elements**. `PoolStore::load` resolves their placed-feature
+document into a `PoolFeaturePlacement`, retaining the assembled world-space origin instead of
+reducing the element to its graph-only synthetic jigsaw block. `PoolFeaturePlacement::place` hands
+that origin and the caller's structure random stream to the existing vegetal feature driver; its
+placement modifiers therefore draw in document order and write into the same clipped grid as a
+template. The placement-stage anchor must enumerate each feature element alongside template
+placements: after adding the feature descriptor to `StructurePiece`, call it with the structure
+stream and placement grid before later decoration stages. Do not reseed it from the decorating chunk
+or substitute the chunk origin — either changes both its candidate positions and random sequence.
 
 Mineshaft starts eagerly retain their complete tree and bounding boxes, because the vertical shift
 depends on the finished tree. Their block-writing walk is replayed for the decorating chunk instead:
@@ -74,13 +86,15 @@ filter can even run, carrying the half-consumed RNG stream across it in a `Stub`
 `StructureRegistry::unsupported()` names every structure, structure-set entry or placement type the
 registry parsed but cannot fully generate, with a reason — read it rather than assuming coverage.
 A structure on the ledger still gets a start when placement and biome say so, but with no children
-and is filtered out of what actually reaches a chunk (a start with no children is invalid). The remaining
-family gaps are the Nether `fortress` and the Overworld `mansion`, which lack a piece generator. `end_city` has its
+and is filtered out of what actually reaches a chunk (a start with no children is invalid). Nether `fortress`
+now builds its recursive coded piece tree, and Overworld `mansion` places a seeded exterior, corridors and roofs;
+the mansion's unimplemented room interiors remain named by `mansion:room_templates`. `end_city` has its
 piece generator and is consumed by the End dimension's structure stage. Both ruined-portal variants build a template
 piece and run their post-template terrain refinement in their dimension's placement stage. Narrow per-structure deviations have their own ledger keys (for example,
 a coded chest's facing always reading `north`, or a decoration step whose RNG is position- rather than
-chunk-order-seeded). Template containers whose loot table lives in their own NBT, coded containers, and
-buried-treasure chests are server- and placement-stage connected; they must stay off the ledger. A stale
+chunk-order-seeded). Template containers whose loot table lives in their own NBT, coded containers,
+buried-treasure chests, and resolved pool feature elements are server- and placement-stage connected;
+they must stay off the ledger. A stale
 ledger row is worse than none, because it hides the real gap from the reader who came looking; keep ledger
 text current when you close or narrow a gap.
 
@@ -101,7 +115,9 @@ text current when you close or narrow a gap.
 - **A piece that needs a *material* distinction not available at start time** (buried treasure's
   chest walk) is the case for `PieceRefinement`, run at placement time against the real grid — reach
   for the eager-blocks path first and only use this when the piece's own logic genuinely needs
-  post-surface/post-carve material.
+  post-surface/post-carve material. A single ordered write list is also appropriate when only some
+  writes need the real grid: store the predicate alongside each write, rather than separating
+  guarded output from later unguarded decoration and changing overwrite order.
 - **Never widen a structure's read/write neighbourhood without re-deriving the store's retention and
   pin radius** — see `docs/worldgen.md`'s staged-store guidance; a structure phase was the one that
   broke this rule once, by adding a stage above an existing pinned closure rather than by touching a
@@ -130,7 +146,8 @@ byte-identical while production places structures).
 ## Dependencies
 
 `lodestone-worldgen-core`'s `rng` (seed derivations) and `density::Resolver`; `lodestone-worldgen`'s
-`aquifer` (start-time column sampling) and `biome` (the climate/biome filter); the bundled corpus —
+`aquifer` (start-time column sampling), `biome` (the climate/biome filter), and
+`feature::vegetation` (resolved pool-feature placement); the bundled corpus —
 1,606 files byte-verified against the 26.2 server jar under `crates/lodestone-server/assets/`, with a
 SHA-256 manifest as the drift gate rather than a duplicated copy — never hand-edit a bundled asset,
 re-extract with `just regen-worldgen-structures`. `lodestone-core`'s NBT codec and `flate2` for

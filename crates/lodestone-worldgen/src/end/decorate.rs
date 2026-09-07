@@ -13,7 +13,7 @@ use crate::dense_grid::DenseBlockGrid;
 use crate::density::Resolver;
 use crate::rng::{RandomSource, WorldgenRandom, XoroshiroRandomSource};
 
-use super::{END_HIGHLANDS, SMALL_END_ISLANDS, THE_END};
+use super::{END_HIGHLANDS, SMALL_END_ISLANDS, THE_END, end_spike_blocks, end_spikes_for_seed};
 
 /// The exit metadata attached to a generated return gateway.  The block itself
 /// belongs in the palette; this record is the data the gateway block entity
@@ -40,13 +40,15 @@ struct PlatformOrigin {
 ///
 /// The fixed platform, outer islands, chorus plants, and return-gateway blocks
 /// all write into the three-by-three region. A return gateway also creates an
-/// [`EndGateway`] sidecar; spikes create crystals and remain gameplay-driven.
+/// [`EndGateway`] sidecar. Spikes write their feature-owned blocks here; their
+/// crystals remain gameplay entities.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct EndDecoration {
     platforms: Vec<PlatformOrigin>,
     outer_islands: bool,
     chorus: bool,
     gateway_return: bool,
+    spikes: bool,
 }
 
 impl EndDecoration {
@@ -110,6 +112,7 @@ impl EndDecoration {
             outer_islands: feature_in_step(resolver, SMALL_END_ISLANDS, 0, "minecraft:end_island"),
             chorus: feature_in_step(resolver, END_HIGHLANDS, 9, "minecraft:chorus_plant"),
             gateway_return: feature_in_step(resolver, END_HIGHLANDS, 4, "minecraft:end_gateway"),
+            spikes: feature_in_step(resolver, THE_END, 4, "minecraft:end_spike"),
         }
     }
 
@@ -150,6 +153,21 @@ impl EndDecoration {
                 let biome = biome_at_chunk(source_x, source_z);
                 let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
                 let decoration_seed = random.set_decoration_seed(seed, source_x * 16, source_z * 16);
+                if biome == THE_END && self.spikes {
+                    // This feature has no placement modifiers before its biome
+                    // filter. Its producer is therefore the chunk containing a
+                    // spike centre, rather than the chunk receiving an edge write.
+                    for spike in end_spikes_for_seed(seed) {
+                        if spike.center_x.div_euclid(16) != source_x || spike.center_z.div_euclid(16) != source_z {
+                            continue;
+                        }
+                        // The bundled End noise settings have `min_y: 0`; this
+                        // feature's clear/write box starts at the dimension floor.
+                        for block in end_spike_blocks(&spike, 0) {
+                            world.set(block.x, block.y, block.z, &block.state);
+                        }
+                    }
+                }
                 if biome == SMALL_END_ISLANDS && self.outer_islands {
                     random.set_feature_seed(decoration_seed, 0, 0);
                     if random.next_float() < 1.0 / 14.0 {

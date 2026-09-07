@@ -721,6 +721,10 @@ impl OverworldGenerator {
         let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Structure);
         let seed = registry.seed();
         let (bx, bz) = (cx * 16, cz * 16);
+        let mut feature_randoms: HashMap<
+            String,
+            crate::rng::WorldgenRandom<crate::rng::XoroshiroRandomSource>,
+        > = HashMap::new();
         let mineshaft_sampler = StartSampler {
             generator: self,
             aquifers: RefCell::new(HashMap::new()),
@@ -740,6 +744,11 @@ impl OverworldGenerator {
                 for block in blocks {
                     world.set(block.pos[0], block.pos[1], block.pos[2], &block.state);
                 }
+                continue;
+            }
+            if start.bounding_box.intersects_xz(bx, bz, bx + 15, bz + 15)
+                && registry.place_fortress_for_chunk(start, cx, cz, &mut world)
+            {
                 continue;
             }
             // `StructureStart.placeInChunk` derives one `referencePos` for the whole
@@ -788,6 +797,28 @@ impl OverworldGenerator {
                 // Portal terrain runs after the frame, while buried treasure has no
                 // template and simply takes this same post-placement hook.
                 match piece.refine.as_ref() {
+                    Some(PieceRefinement::FeaturePlacements { placements }) => {
+                        let Some((step, index)) = registry.feature_placement_key(&start.structure) else {
+                            continue;
+                        };
+                        let random = feature_randoms.entry(start.structure.clone()).or_insert_with(|| {
+                            let mut random = crate::rng::WorldgenRandom::new(
+                                crate::rng::XoroshiroRandomSource::new(0),
+                            );
+                            let decoration_seed = random.set_decoration_seed(seed, bx, bz);
+                            random.set_feature_seed(decoration_seed, index as i32, step);
+                            random
+                        });
+                        crate::structure::feature_placement::place_feature_pool_elements(
+                            random,
+                            placements,
+                            &mut world,
+                            &self.veg_tags,
+                        );
+                    }
+                    Some(PieceRefinement::StrongholdBlocks { writes }) => {
+                        crate::structure::stronghold::place_post_surface_blocks(&mut world, writes);
+                    }
                     Some(PieceRefinement::BuriedTreasureChest) => {
                         place_buried_treasure_chest(&mut world, piece.bounding_box.min);
                     }
