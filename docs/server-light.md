@@ -26,8 +26,8 @@ default (maximum, for the overworld) rather than treated as zero — which is ex
 computed light at all (the state before this subsystem existed) produced a uniformly *bright* world:
 lit caves, lit sealed rooms, no real night, rather than the reverse.
 
-The ordinary sky payload keeps the first uniformly full-sky section above the highest non-air terrain
-section, then leaves higher sections absent. This is a wire-shape rule, not a lighting-value change:
+The ordinary sky payload keeps a bounded run of uniformly full-sky sections above the highest non-air
+terrain section, then leaves higher sections absent. This is a wire-shape rule, not a lighting-value change:
 the omitted sections still resolve to full daylight, while retaining them would allocate redundant
 full arrays and fail byte parity. The engine leaves the result alone when that premise is not true,
 so a non-full section is never silently converted into an omission. A protocol-specific initial
@@ -41,8 +41,13 @@ Sky seeding is a dimension property, not a consequence of a column's vertical sh
 the End both use a 0..256 served window, but only the Nether lacks skylight. Its initial chunk form
 therefore omits every sky section and keeps zero block-light data only through one section above the
 highest terrain section; its later light updates retain explicit zero sky and block values for the
-normal clear operation. The End has sky light, but its initial form retains four uniformly full sky
-sections above terrain and preserves zero block-light sections through that same terminal section.
+normal clear operation. The End has sky light, and its initial stored range is reconstructed from the
+settled 3×3 block neighborhood: every non-empty block
+section activates its own light section and the vertically adjacent pair in all neighboring columns.
+The below-world apron is therefore absent for an elevated island neighborhood but present when a
+bottom block section activates it; it is not a fixed per-dimension omission. In the external elevated-island
+control this retains exactly two uniformly full sections above terrain, while empty columns inherit the
+different stored ranges activated by their neighbors.
 The Overworld keeps the one-section sky form and elides uniform zero block light in an initial
 chunk. `ChunkSource::dimension` carries that choice to the protocol's dimension-aware
 initial-encoding and light-computation hooks. An unlabelled source uses the Overworld as the

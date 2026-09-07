@@ -2930,12 +2930,13 @@ fn compute_served_light(column: &WorldChunkColumn, dimension: Dimension) -> Colu
 }
 
 /// The initial chunk light packet is deliberately framed separately from a
-/// later light update. The external packet captures retain four full-sky
-/// sections above End terrain, whereas the overworld's compact form retains
-/// only the first one. The Nether has no sky, so its value is immaterial there.
+/// later light update. The Overworld's compact form retains one full-sky
+/// section above terrain. End framing comes from active light-storage sections
+/// instead, so its generic height cutoff is disabled here. The Nether has no
+/// sky, so its value is immaterial there.
 const fn initial_full_sky_sections(dimension: Dimension) -> usize {
     match dimension {
-        Dimension::End => 4,
+        Dimension::End => usize::MAX,
         Dimension::Overworld | Dimension::Nether => 1,
     }
 }
@@ -2986,6 +2987,7 @@ fn normalize_initial_chunk_light(
     light: &mut ColumnLight,
     dimension: Dimension,
     highest_non_air: Option<usize>,
+    end_storage_sections: Option<&[bool]>,
 ) {
     match dimension {
         Dimension::Overworld => elide_zero_block_light_for_chunk(light),
@@ -3006,15 +3008,45 @@ fn normalize_initial_chunk_light(
             retain_zero_block_light_through(light, last);
         }
         Dimension::End => {
-            let last_sky = (0..light.light_section_count())
-                .rev()
-                .find(|&section| !matches!(light.sky(section), LightData::Missing));
-            let last_nonzero = (0..light.light_section_count())
-                .rev()
-                .find(|&section| !matches!(light.block(section), LightData::Uniform(0) | LightData::Missing));
-            retain_zero_block_light_through(light, last_sky.into_iter().chain(last_nonzero).max());
+            let stored = end_storage_sections
+                .expect("End initial light normalization requires its settled storage mask");
+            debug_assert_eq!(stored.len(), light.light_section_count());
+            for (section, &is_stored) in stored.iter().enumerate() {
+                if !is_stored {
+                    *light.sky_mut(section) = LightData::Missing;
+                    *light.block_mut(section) = LightData::Missing;
+                }
+            }
         }
     }
+}
+
+/// Reconstructs which End light sections exist after the supplied 3x3 block
+/// neighborhood settles. A non-empty block section owns a light layer for
+/// itself and each vertically adjacent section in all neighboring columns.
+/// This includes packet light index zero, the below-world apron, when a
+/// bottom block section in the neighborhood activates it.
+fn end_initial_storage_sections(
+    center: &WorldChunkColumn,
+    neighbours: &[WorldChunkColumn],
+) -> Vec<bool> {
+    let mut stored = vec![false; center.section_count() + 2];
+    for column in std::iter::once(center).chain(neighbours) {
+        for block_section in 0..column.section_count() {
+            let non_empty = column.section(block_section).is_some_and(|section| {
+                (0..section.block_states().entry_count())
+                    .any(|cell| section.block_states().get(cell) != column.air_id())
+            });
+            if non_empty {
+                for light_section in block_section..=block_section + 2 {
+                    if light_section < stored.len() {
+                        stored[light_section] = true;
+                    }
+                }
+            }
+        }
+    }
+    stored
 }
 
 fn compute_served_initial_light(column: &WorldChunkColumn, dimension: Dimension) -> ColumnLight {
@@ -3025,7 +3057,14 @@ fn compute_served_initial_light(column: &WorldChunkColumn, dimension: Dimension)
         },
         initial_full_sky_sections(dimension),
     );
-    normalize_initial_chunk_light(&mut light, dimension, highest_non_air_light_section(column));
+    let end_storage = (dimension == Dimension::End)
+        .then(|| end_initial_storage_sections(column, &[]));
+    normalize_initial_chunk_light(
+        &mut light,
+        dimension,
+        highest_non_air_light_section(column),
+        end_storage.as_deref(),
+    );
     light
 }
 
@@ -3098,7 +3137,14 @@ fn compute_served_initial_light_with_neighbours(
         },
         initial_full_sky_sections(dimension),
     );
-    normalize_initial_chunk_light(&mut light, dimension, highest_non_air_light_section(center));
+    let end_storage = (dimension == Dimension::End)
+        .then(|| end_initial_storage_sections(center, &neighbour_columns));
+    normalize_initial_chunk_light(
+        &mut light,
+        dimension,
+        highest_non_air_light_section(center),
+        end_storage.as_deref(),
+    );
     light
 }
 
@@ -7636,9 +7682,10 @@ mod block_edit_tests {
     }
 
     /// The external packet captures use different initial masks despite the
-    /// Nether and End sharing a 16-section geometry. This test gives each
-    /// dimension a deliberately high last block so the terminal section is
-    /// observable instead of passing on an all-air control.
+    /// Nether and End sharing a 16-section geometry. The Nether input gives
+    /// the terminal section a high block; the End inputs use the exact
+    /// non-empty and empty seed-42 columns that distinguish neighbour-derived
+    /// light storage from a fixed vertical range.
     #[test]
     fn initial_chunk_light_framing_matches_external_dimension_values() {
         use crate::packets::chunk::LevelChunkWithLight;
@@ -7678,34 +7725,106 @@ mod block_edit_tests {
             );
         }
 
-        let mut end = ServerChunkColumn::new(0, 256);
-        end.set_block(8, 63, 8, "minecraft:end_stone");
-        let end = decode(&end, Dimension::End);
-        for section in 5..=8 {
+        let source = lodestone_server::retained_chunk_source_for_view_radius(
+            lodestone_server::end_chunk_source(42),
+            8,
+        );
+        let end_at = |cx: i32, cz: i32| {
+            let center = lodestone_server::ChunkSource::column(&source, cx, cz);
+            let mut neighbours = Vec::with_capacity(8);
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    if (dx, dz) != (0, 0) {
+                        neighbours.push((
+                            dx,
+                            dz,
+                            lodestone_server::ChunkSource::column(&source, cx + dx, cz + dz),
+                        ));
+                    }
+                }
+            }
+            let ServerDirective::Send { payload, .. } = proto
+                .try_encode_chunk_with_neighbours_in_dimension(
+                    cx,
+                    cz,
+                    &center,
+                    &neighbours,
+                    Dimension::End,
+                )
+                .expect("End initial chunk")
+            else {
+                panic!("End initial chunk must send a packet");
+            };
+            let mut reader = Reader::new(&payload);
+            let packet = LevelChunkWithLight::decode(&mut reader, &shape).expect("decode End chunk");
+            reader.ensure_empty().expect("no End trailing bytes");
+            packet
+        };
+        let stored_block_sections = |packet: &LevelChunkWithLight| {
+            (0..18)
+                .filter(|&section| !matches!(packet.light.block(section), LightData::Missing))
+                .collect::<Vec<_>>()
+        };
+        let stored_sky_sections = |packet: &LevelChunkWithLight| {
+            (0..18)
+                .filter(|&section| !matches!(packet.light.sky(section), LightData::Missing))
+                .collect::<Vec<_>>()
+        };
+
+        let end = end_at(-250, -250);
+        assert_eq!(end.light.sky(0), &LightData::Missing, "the external End packet omits the lower sky apron");
+        assert_eq!(end.light.block(0), &LightData::Missing, "the external End packet omits the lower block apron");
+        let retained_full_sky = (0..18)
+            .filter(|&section| end.light.sky(section) == &LightData::Uniform(15))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            retained_full_sky,
+            vec![5, 6],
+            "the external packet retains exactly two full-sky sections; the former four-section framing is the negative control",
+        );
+        for section in 5..=6 {
             assert_eq!(
                 end.light.sky(section),
                 &LightData::Uniform(15),
                 "the external End initial form retains full sky section {section}"
             );
         }
-        for section in 9..18 {
+        for section in 7..18 {
             assert_eq!(
                 end.light.sky(section),
                 &LightData::Missing,
-                "the End sky mask stops after section eight"
+                "the End sky mask stops after section six"
             );
         }
         for section in 0..18 {
             assert_eq!(
                 end.light.block(section),
-                if section <= 8 {
+                if (1..=6).contains(&section) {
                     &LightData::Uniform(0)
                 } else {
                     &LightData::Missing
                 },
-                "the End block mask follows its retained sky range at section {section}"
+                "the End block mask follows its retained sky range without the lower apron at section {section}"
             );
         }
+
+        let first_empty = end_at(-249, -250);
+        assert_eq!(stored_sky_sections(&first_empty), (2..=5).collect::<Vec<_>>());
+        assert_eq!(stored_block_sections(&first_empty), (2..=5).collect::<Vec<_>>());
+        let second_empty = end_at(-248, -250);
+        assert_eq!(stored_sky_sections(&second_empty), (2..=4).collect::<Vec<_>>());
+        assert_eq!(stored_block_sections(&second_empty), (2..=4).collect::<Vec<_>>());
+
+        let bottom_neighbour = end_at(-245, -250);
+        assert!(
+            !matches!(bottom_neighbour.light.sky(0), LightData::Missing),
+            "a bottom block section in the external 3x3 capture activates the lower sky apron",
+        );
+        assert_eq!(
+            bottom_neighbour.light.block(0),
+            &LightData::Uniform(0),
+            "the same neighborhood activates the lower block-light apron",
+        );
     }
 
     /// Initial chunk packets omit uniformly dark block-light sections, while a
