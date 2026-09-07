@@ -242,10 +242,9 @@ fn attribution_requires_counters() {
 ///
 /// # The scene
 ///
-/// A `SIDE × SIDE` sweep on the embedded production generator. `Stage::Ore` runs
-/// once per chunk of the `(SIDE + 2)²` post-ore closure — the bench asserts that
-/// exact identity — so the per-ore-pass figure below is a division by a count
-/// this pipeline gates elsewhere, not an estimate.
+/// A `SIDE × SIDE` sweep using the isolated ore profiling helper. `Stage::Ore`
+/// is reserved for that direct profiling walk; production `column()` attributes
+/// the unified FEATURES stream to `Stage::Vegetation`.
 #[test]
 #[ignore = "diagnostic: ~20 µs of backtrace per allocation; run explicitly"]
 fn where_the_ore_stages_allocations_come_from() {

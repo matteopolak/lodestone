@@ -98,6 +98,9 @@ lodestone-registry = { workspace = true, features = ["v26-2"] }
 # test needs to build a `WorldgenChunkSource`, mirroring the same fixture-driven
 # setup `lodestone-server`'s own tests use. Test-only.
 lodestone-worldgen = { path = "../../lodestone-worldgen" }
+# Test-only lifecycle replay uses the shared production parity materializer and
+# source adapters rather than owning a second copy in this comparator.
+lodestone-worldgen-parity = { path = "../../lodestone-worldgen-parity" }
 # Direct path dep (not a workspace alias) so the addition stays inside this
 # crate's manifest — the live physics gate drives the version-free
 # `lodestone-physics` engine to walk a player and asserts the real server never

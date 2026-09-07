@@ -265,9 +265,9 @@ Fixture regeneration commands live in this plan and each oracle's own header.
 
 ## Configuration
 
-`LODESTONE_REGEN=1` regenerates committed oracle fixtures; `LODESTONE_ORE_SINGLE_SOURCE_DEBUG=1` /
-`LODESTONE_VEG_SINGLE_SOURCE_DEBUG=1` / `LODESTONE_CARVE_HASHMAP_DEBUG=1` narrow composed stages
-for isolation (debug-only, never production paths). Oracles run through Apple `container` via
+`LODESTONE_REGEN=1` regenerates committed oracle fixtures. The remaining
+`LODESTONE_VEG_SINGLE_SOURCE_DEBUG=1` and `LODESTONE_CARVE_HASHMAP_DEBUG=1` controls narrow composed
+stages for isolation (debug-only, never production paths). Oracles run through Apple `container` via
 `scripts/worldgen-oracle/run.sh`.
 
 ## Dependencies

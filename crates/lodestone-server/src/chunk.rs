@@ -445,11 +445,7 @@ impl ChunkColumn {
                 }
             }
         }
-        let block_entities = column
-            .block_entities()
-            .iter()
-            .map(crate::chunk_nbt::generated_block_entity)
-            .collect();
+        let generated_block_entities = column.block_entities().to_vec();
         // Motion-blocking data is copied before `into_raw` consumes the column, for the same
         // reason the two above are.
         let motion_blocking = column.motion_blocking_heightmap().map(|map| Box::new(*map));
@@ -486,13 +482,14 @@ impl ChunkColumn {
             biome_quarts,
             biome_palette,
             biome_cells,
-            block_entities,
+            block_entities: Vec::new(),
             structure_starts: Vec::new(),
             structure_references: std::collections::BTreeMap::new(),
             motion_blocking,
             generation_spawns,
             retained_light: None,
         };
+        column.add_generated_block_entities(&generated_block_entities);
         column.recalc_ticking_counts();
         debug_assert_eq!(
             column.biome_cells.len(),
@@ -747,6 +744,21 @@ impl ChunkColumn {
     /// cannot desync the block grid.
     pub fn set_block_entities(&mut self, entities: Vec<(BlockPos, BlockEntity)>) {
         self.block_entities = entities;
+    }
+
+    /// Adds typed world-generation block entities through the same boundary
+    /// conversion used by [`Self::from_generated`]. Lifecycle replay calls
+    /// this after one source completion so its packet sees the same entity
+    /// records as an ordinarily generated column.
+    pub fn add_generated_block_entities(
+        &mut self,
+        entities: &[lodestone_worldgen::overworld::GeneratedBlockEntity],
+    ) {
+        self.block_entities.extend(
+            entities
+                .iter()
+                .map(crate::chunk_nbt::generated_block_entity),
+        );
     }
 
     /// Returns the exact light snapshot retained for this column, if one has
@@ -3617,5 +3629,67 @@ mod tests {
              gate is not distinguishing yielded generation from the pre-fix shape; got \
              {control_observed:?}"
         );
+    }
+
+    #[test]
+    fn generated_block_entities_all_variants_cross_the_server_boundary() {
+        let generated = crate::overworld_generator(42).column_shaped(0, 0);
+        let mut column = ChunkColumn::from_generated(generated);
+        let entities = [
+            lodestone_worldgen::overworld::GeneratedBlockEntity::Beehive {
+                x: 1,
+                y: 65,
+                z: 2,
+                bees: vec![lodestone_worldgen::overworld::block_entities::BeeOccupant {
+                    ticks_in_hive: 7,
+                    min_ticks_in_hive: 600,
+                }],
+            },
+            lodestone_worldgen::overworld::GeneratedBlockEntity::DungeonChest {
+                x: 3,
+                y: 20,
+                z: 4,
+                facing: "north".to_owned(),
+                loot_table: "minecraft:chests/simple_dungeon".to_owned(),
+                loot_table_seed: 99,
+            },
+            lodestone_worldgen::overworld::GeneratedBlockEntity::DungeonSpawner {
+                x: 5,
+                y: 30,
+                z: 6,
+                entity_type: "minecraft:zombie".to_owned(),
+            },
+        ];
+        column.add_generated_block_entities(&entities);
+
+        let converted = column.block_entities();
+        assert_eq!(converted.len(), entities.len());
+        assert!(matches!(
+            &converted[0],
+            (BlockPos { x: 1, y: 65, z: 2 }, BlockEntity::Opaque { id, nbt })
+                if id == "minecraft:beehive"
+                    && matches!(nbt, lodestone_core::Nbt::Compound(fields)
+                        if fields.iter().any(|(key, value)| key == "bees"
+                            && matches!(value, lodestone_core::Nbt::List { elements, .. }
+                                if elements.len() == 1)))
+        ));
+        assert!(matches!(
+            &converted[1],
+            (BlockPos { x: 3, y: 20, z: 4 }, BlockEntity::Opaque { id, nbt })
+                if id == "minecraft:chest"
+                    && matches!(nbt, lodestone_core::Nbt::Compound(fields)
+                        if fields.iter().any(|(key, value)| key == "LootTable"
+                            && matches!(value, lodestone_core::Nbt::String(table)
+                                if table == "minecraft:chests/simple_dungeon"))
+                        && fields.iter().any(|(key, value)| key == "LootTableSeed"
+                            && matches!(value, lodestone_core::Nbt::Long(seed) if *seed == 99)))
+        ));
+        assert!(matches!(
+            &converted[2],
+            (BlockPos { x: 5, y: 30, z: 6 }, BlockEntity::Spawner(state))
+                if state == &crate::mob_spawner::SpawnerState::generated(
+                    "minecraft:zombie".parse().expect("valid entity id")
+                )
+        ));
     }
 }

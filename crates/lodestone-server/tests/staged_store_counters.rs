@@ -40,7 +40,7 @@
 //!
 //! `lodestone-worldgen`'s own fixture resolvers supply density functions and noise
 //! but **no biome documents**, so `ores_by_biome`/`vegetation_by_biome` come out
-//! empty, both 3×3 drivers early-return, and a stage-computation gate written
+//! empty, the unified FEATURES dispatcher early-returns, and a stage-computation gate written
 //! against them would sweep 144 chunks, touch zero neighbours, and pass. That is
 //! the *world* species of vacuous test — the flaw is in the input, invisible in the
 //! test source — so [`the_sweep_actually_drives_both_neighbourhoods`] asserts the
@@ -50,10 +50,9 @@
 //!
 //! For a 12×12 sweep of centres `(0..12, 0..12)`:
 //!
-//! * `vegetation_stage(C)` needs `post_ore_world` over `C ± 1`, so post-ore is
-//!   reached across `-1..=12` — **14×14 = 196** chunks.
-//! * `post_ore_world(X)` runs `ore_stage(X)`, which needs `pre_ore_stage` over
-//!   `X ± 1`, so pre-ore is reached across `-2..=13` — **16×16 = 256** chunks.
+//! * The unified FEATURES dispatcher reads the centre plus the 5×5 cached
+//!   terrain-prefix context, so pre-ore is reached across `-2..=13` —
+//!   **16×16 = 256** chunks.
 //!
 //! **144 × 2 = 288 is the wrong reading** of the plan's "chunks × stages": each
 //! stage has its own closure radius, so the chunk count differs per stage. The
@@ -68,8 +67,6 @@ const SWEEP: i32 = 12;
 
 /// Distinct chunks the sweep reaches at the pre-ore stage: `-2..=13` squared.
 const PRE_ORE_CLOSURE: usize = 16 * 16;
-/// Distinct chunks the sweep reaches at the post-ore stage: `-1..=12` squared.
-const POST_ORE_CLOSURE: usize = 14 * 14;
 /// Distinct chunks the sweep reaches at the **structure-starts** stage, and
 /// therefore the store's real entry count: `-10..=21` squared.
 ///
@@ -108,12 +105,11 @@ fn sweep() -> &'static SweepResult {
             evictions: generator.store_evictions(),
         };
         eprintln!(
-            "[U6] {SWEEP}x{SWEEP} sweep: pre_ore computed={} hits={} | post_ore computed={} hits={} \
+            "[U6] {SWEEP}x{SWEEP} sweep: pre_ore computed={} hits={} | FEATURES entered={} \
              | store_len={} evictions={} | counters_live={}",
             result.counters.pre_ore_computed,
             result.counters.pre_ore_hits,
-            result.counters.post_ore_computed,
-            result.counters.post_ore_hits,
+            result.counters.stage_entered[lodestone_worldgen::counters::Stage::Vegetation as usize],
             result.store_len,
             result.evictions,
             result.counters_live,
@@ -158,28 +154,29 @@ fn each_neighbour_stage_is_computed_exactly_once_over_a_12x12_sweep() {
             "stages 1-4 must run once per chunk in the 16x16 pre-ore closure, not once per requester"
         );
         assert_eq!(
-            s.counters.post_ore_computed as usize, POST_ORE_CLOSURE,
-            "the ore RNG walk must run once per chunk in the 14x14 post-ore closure"
+            s.counters.stage_entered[lodestone_worldgen::counters::Stage::Vegetation as usize],
+            (SWEEP * SWEEP) as u64,
+            "the unified FEATURES dispatcher must enter once per served centre"
         );
-        // Non-vacuity floor for the two equalities, derived from the drivers and
+        assert_eq!(
+            s.counters.stage_entered[lodestone_worldgen::counters::Stage::Ore as usize],
+            0,
+            "the standalone ore stage must not be entered by unified FEATURES"
+        );
+        // Non-vacuity floor for the equality, derived from the dispatcher and
         // not from this run: each of the 144 centres calls `pre_ore_stage` at
-        // least once for itself plus once per source in `features_for_source`'s
-        // 3x3 — 10 minimum — so the sweep performs >= 1440 pre-ore lookups
+        // once for itself plus the 24 non-centre cells in its 5x5 read context —
+        // 25 minimum — so the sweep performs >= 3600 pre-ore lookups
         // against 256 computations. Without this floor, "computed == 256" would
         // also hold for a sweep in which no chunk was ever *shared*, which is the
         // only case the store exists for.
-        let floor = (SWEEP * SWEEP * 10) as u64 - PRE_ORE_CLOSURE as u64;
+        let floor = (SWEEP * SWEEP * 25) as u64 - PRE_ORE_CLOSURE as u64;
         assert!(
             s.counters.pre_ore_hits >= floor,
             "only {} pre-ore hits against {} computations (floor {floor}) — the drivers \
              cannot have asked for shared neighbours, so the equality above proves nothing",
             s.counters.pre_ore_hits,
             s.counters.pre_ore_computed
-        );
-        assert!(
-            s.counters.post_ore_hits >= (SWEEP * SWEEP) as u64,
-            "only {} post-ore hits; the 3x3 vegetation driver must reuse neighbours",
-            s.counters.post_ore_hits
         );
     } else {
         assert_eq!(
@@ -192,17 +189,16 @@ fn each_neighbour_stage_is_computed_exactly_once_over_a_12x12_sweep() {
     }
 }
 
-/// The *world* control: the embedded resolver really drives both 3×3
-/// neighbourhoods.
+/// The *world* control: the embedded resolver really drives unified FEATURES.
 ///
 /// Without it, a resolver change that emptied `ores_by_biome` or
-/// `vegetation_by_biome` would make both decoration stages early-return, collapse
+/// `vegetation_by_biome` would make the dispatcher early-return, collapse
 /// the closure to the 144 centres, and leave the once-only assertions holding —
 /// passing while measuring a pipeline with its neighbour stages missing. The
 /// closure size is the observable that separates the two.
 #[test]
 #[ignore = "reads the same multi-minute sweep"]
-fn the_sweep_actually_drives_both_neighbourhoods() {
+fn the_sweep_actually_drives_features() {
     let s = sweep();
     assert!(
         s.store_len > (SWEEP * SWEEP) as usize,
@@ -212,9 +208,14 @@ fn the_sweep_actually_drives_both_neighbourhoods() {
     );
     if s.counters_live {
         assert!(
-            s.counters.post_ore_computed as usize > (SWEEP * SWEEP) as usize,
-            "post-ore ran for only {} chunks; the 3x3 vegetation driver did not run",
-            s.counters.post_ore_computed
+            s.counters.stage_entered[lodestone_worldgen::counters::Stage::Vegetation as usize]
+                > 0,
+            "FEATURES entered zero times; the unified dispatcher did not run"
+        );
+        assert_eq!(
+            s.counters.stage_entered[lodestone_worldgen::counters::Stage::Ore as usize],
+            0,
+            "standalone ore must remain unused by unified FEATURES"
         );
     }
 }

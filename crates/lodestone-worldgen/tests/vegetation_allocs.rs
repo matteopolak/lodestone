@@ -89,13 +89,13 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
 
-use lodestone_worldgen::compose::build_biome_vegetation;
+use lodestone_worldgen::compose::build_decoration_catalog;
 use lodestone_worldgen::density::{NoiseParams, Resolver};
 use lodestone_worldgen::feature::vegetation::{
     PlacedRef, VegGrid, VegTags, apply_vegetal_decoration_step_3x3_per_source, build_veg_tags,
     census, ids, is_air,
 };
-use lodestone_worldgen::feature::{REGION_MAX, REGION_MIN};
+use lodestone_worldgen::feature::{REGION_MAX, REGION_MIN, STEP_VEGETAL_DECORATION};
 use lodestone_worldgen::rng::{WorldgenRandom, XoroshiroRandomSource};
 use serde_json::Value;
 
@@ -144,6 +144,17 @@ fn allocs_of<T>(f: impl FnOnce() -> T) -> (T, u64) {
 
 fn data_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/worldgen_data")
+}
+
+fn vegetal_features_for(resolver: &dyn Resolver, biome: &str) -> Vec<(usize, PlacedRef)> {
+    let catalog = build_decoration_catalog(resolver, &[biome.to_owned()]);
+    catalog
+        .select([biome])
+        .into_iter()
+        .filter_map(|(step, index, placed)| {
+            (step == STEP_VEGETAL_DECORATION).then_some((index, placed))
+        })
+        .collect()
 }
 
 /// The same fixture resolver `vegetation_parity.rs` uses, and deliberately the
@@ -278,7 +289,7 @@ fn run_pass(
 fn a_warm_vegetal_decoration_pass_allocates_only_its_grids_own_container_growth() {
     let resolver = FsResolver { root: data_dir() };
     let tags = build_veg_tags(&resolver);
-    let features = build_biome_vegetation(&resolver, BIOME);
+    let features = vegetal_features_for(&resolver, BIOME);
     assert!(
         !features.is_empty(),
         "{BIOME} must resolve a non-empty VEGETAL_DECORATION list, or this gate \
@@ -487,7 +498,7 @@ fn a_warm_vegetal_decoration_pass_allocates_only_its_grids_own_container_growth(
 fn a_warm_pass_allocates_zero_at_every_scene_size() {
     let resolver = FsResolver { root: data_dir() };
     let tags = build_veg_tags(&resolver);
-    let features = build_biome_vegetation(&resolver, BIOME);
+    let features = vegetal_features_for(&resolver, BIOME);
     let interner = std::sync::Arc::new(lodestone_worldgen::interner::StateInterner::new());
 
     const SCENES: [(i32, i32); 4] = [(0, 0), (7, 11), (-3, 5), (20, -5)];
@@ -563,7 +574,7 @@ fn recycling_is_what_removes_the_containers_and_draining_the_free_list_puts_them
 
     let resolver = FsResolver { root: data_dir() };
     let tags = build_veg_tags(&resolver);
-    let features = build_biome_vegetation(&resolver, BIOME);
+    let features = vegetal_features_for(&resolver, BIOME);
     let interner = std::sync::Arc::new(lodestone_worldgen::interner::StateInterner::new());
 
     // Converge the thread, exactly as the test above does.
@@ -633,7 +644,7 @@ fn recycling_is_what_removes_the_containers_and_draining_the_free_list_puts_them
 fn the_id_based_air_test_answers_what_the_string_scan_answered() {
     let resolver = FsResolver { root: data_dir() };
     let tags = build_veg_tags(&resolver);
-    let features = build_biome_vegetation(&resolver, BIOME);
+    let features = vegetal_features_for(&resolver, BIOME);
     let interner = std::sync::Arc::new(lodestone_worldgen::interner::StateInterner::new());
 
     let (base_x, base_z) = (0, 0);

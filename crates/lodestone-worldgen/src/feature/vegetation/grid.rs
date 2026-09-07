@@ -626,9 +626,8 @@ impl VegGrid {
 /// Runs the whole `VEGETAL_DECORATION` step for one chunk against its own
 /// grid — single-source only, see module doc's "Scope" section.
 /// `features` is `(raw step index, resolved PlacedRef)`, matching
-/// [`super::compose::build_biome_ores`]'s "preserve raw position" convention
-/// so `setFeatureSeed`'s index is the JSON array position, not a filtered
-/// count.
+/// the decoration catalog's global raw-position convention so `setFeatureSeed`'s
+/// index is the source's position in the global step order, not a filtered count.
 /// Per-thread census of what the vegetal-decoration placer actually *did* —
 /// the "make absence loud" half of that convention.
 ///

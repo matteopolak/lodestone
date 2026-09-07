@@ -10,10 +10,10 @@
 //! has a racing miss. Both read identical stage counts. The defect only appeared
 //! under a 289-column burst:
 //!
-//! | arm | pre-ore (true 441) | post-ore (true 361) |
-//! |---|---|---|
-//! | old cache (`4be59556`) | 452, 452, 448 *(varying)* | 380, 383, 372 |
-//! | new store (`34202a21`) | **441, 441, 441** | **361, 361, 361** |
+//! | arm | pre-ore (true 441) |
+//! |---|---|
+//! | old cache | over-computed and varying |
+//! | staged store | **441, 441, 441** |
 //!
 //! That is exactly the reasoning trap that produced `4307b59`: measure barrier
 //! removal serially and it looks free. So this gate's subject arm is the concurrent
@@ -60,25 +60,25 @@ use lodestone_worldgen::counters::{self, Snapshot};
 const BURST_RADIUS: i32 = 8;
 const BURST_COLUMNS: usize = 289;
 
-/// Derived from the drivers, not from a measurement. `post_ore_world(X)` is needed
-/// over `C ± 1` for each of the 289 centres, so post-ore is reached across a 19×19;
-/// `pre_ore_stage` is needed over `X ± 1` of each of those, so pre-ore is reached
-/// across a 21×21. `STORE_RETENTION = 512` is derived from this 441.
+/// Derived from the drivers, not from a measurement. FEATURES reads the 5×5
+/// terrain-prefix context for each centre, so pre-ore is reached across a
+/// 21×21. The store itself also retains structure starts over the current
+/// radius-10 request view, which is 37×37 for this 17×17 burst.
 const BURST_PRE_ORE_CLOSURE: usize = 21 * 21;
-const BURST_POST_ORE_CLOSURE: usize = 19 * 19;
+const BURST_STORE_CLOSURE: usize = 37 * 37;
 
 /// The control's view: 3×3, so the two arms differ by a factor rather than by a
 /// handful and the comparison cannot be mistaken for noise.
 const CONTROL_RADIUS: i32 = 1;
 const CONTROL_COLUMNS: usize = 9;
-/// Same derivation as above, one radius in: 7×7 and 5×5.
+/// Same derivation as above, one radius in: 7×7 prefix closure.
 const CONTROL_PRE_ORE_CLOSURE: usize = 7 * 7;
-const CONTROL_POST_ORE_CLOSURE: usize = 5 * 5;
-/// **The control's expectation.** With a fresh generator per column no store entry
-/// is ever shared, so every column pays its own full 5×5 pre-ore closure and 3×3
-/// post-ore closure. `9 × 25` and `9 × 9`.
+/// The shared control's current radius-10 store closure is 23×23.
+const CONTROL_STORE_CLOSURE: usize = 23 * 23;
+/// With a fresh generator per column no store entry is shared, so every column
+/// pays its own full 5×5 pre-ore closure. Its radius-10 store has 21×21 entries.
 const UNSHARED_PRE_ORE: usize = CONTROL_COLUMNS * 25;
-const UNSHARED_POST_ORE: usize = CONTROL_COLUMNS * 9;
+const UNSHARED_STORE_CLOSURE: usize = 21 * 21;
 
 /// The wire order for a view of `radius` centred on `(ox, oz)` — rings outward,
 /// `dz`-outer/`dx`-inner within a ring, mirroring `server.rs`'s private
@@ -206,25 +206,24 @@ fn measure() -> &'static Measurement {
         };
         eprintln!(
             "[U10] window={} counters_live={}\n\
-             [U10] burst   {} cols: pre_ore computed={} hits={} | post_ore computed={} hits={} \
+             [U10] burst   {} cols: pre_ore computed={} hits={} | FEATURES entered={} \
              | store_len={} evictions={}\n\
-             [U10] shared  {} cols: pre_ore computed={} | post_ore computed={}\n\
-             [U10] unshared(control) {} cols: pre_ore computed={} | post_ore computed={}",
+             [U10] shared  {} cols: pre_ore computed={} | FEATURES entered={}\n\
+             [U10] unshared(control) {} cols: pre_ore computed={} | FEATURES entered={}",
             m.window,
             m.counters_live,
             m.burst.columns,
             m.burst.counters.pre_ore_computed,
             m.burst.counters.pre_ore_hits,
-            m.burst.counters.post_ore_computed,
-            m.burst.counters.post_ore_hits,
+            m.burst.counters.stage_entered[lodestone_worldgen::counters::Stage::Vegetation as usize],
             m.burst.store_len,
             m.burst.evictions,
             m.shared_small.columns,
             m.shared_small.counters.pre_ore_computed,
-            m.shared_small.counters.post_ore_computed,
+            m.shared_small.counters.stage_entered[lodestone_worldgen::counters::Stage::Vegetation as usize],
             m.unshared_small.columns,
             m.unshared_small.counters.pre_ore_computed,
-            m.unshared_small.counters.post_ore_computed,
+            m.unshared_small.counters.stage_entered[lodestone_worldgen::counters::Stage::Vegetation as usize],
         );
         m
     })
@@ -253,13 +252,13 @@ fn the_barrier_free_289_column_burst_computes_each_stage_exactly_once() {
     // closure. More means a key aliased or a closure radius is wrong; fewer means
     // something was evicted and every count below is inflated.
     assert_eq!(
-        m.burst.store_len, BURST_PRE_ORE_CLOSURE,
-        "the store should hold exactly the burst's 21x21 pre-ore closure \
-         ({BURST_PRE_ORE_CLOSURE})"
+        m.burst.store_len, BURST_STORE_CLOSURE,
+        "the store should hold exactly the burst's 37x37 radius-10 structure closure \
+         ({BURST_STORE_CLOSURE})"
     );
     assert_eq!(
         m.burst.evictions, 0,
-        "STORE_RETENTION (512) is derived from this burst's 441-chunk closure precisely so \
+        "STORE_RETENTION is derived above this burst's radius-10 structure closure precisely so \
          nothing can be evicted mid-burst; an eviction would inflate every count below"
     );
 
@@ -271,18 +270,24 @@ fn the_barrier_free_289_column_burst_computes_each_stage_exactly_once() {
              racing miss back, and blocks the landing"
         );
         assert_eq!(
-            m.burst.counters.post_ore_computed as usize, BURST_POST_ORE_CLOSURE,
-            "the ore RNG walk must run once per chunk in the 19x19 closure (Unit 6: 361 exactly, \
-             3 of 3; old cache 380/383/372)"
+            m.burst.counters.stage_entered[lodestone_worldgen::counters::Stage::Vegetation as usize],
+            BURST_COLUMNS as u64,
+            "unified FEATURES must enter once per served centre"
+        );
+        assert_eq!(
+            m.burst.counters.stage_entered[lodestone_worldgen::counters::Stage::Ore as usize],
+            0,
+            "standalone Ore must remain unused by unified FEATURES"
         );
 
         // Non-vacuity floor, derived from the drivers rather than from this run:
-        // each of the 289 centres asks `pre_ore_stage` for itself plus each source
-        // in its 3x3 — 10 minimum — so the burst performs >= 2,890 lookups against
+        // each of the 289 centres asks `pre_ore_stage` for itself plus the 24
+        // non-centre cells in the 5x5 read context — 25 minimum — so the burst performs
+        // >= 7,225 lookups against
         // 441 computations. Without this, "computed == 441" would also hold for a
         // burst in which no chunk was ever shared, which is the only case the
         // store, and this scheduler, exist for.
-        let floor = (BURST_COLUMNS * 10) as u64 - BURST_PRE_ORE_CLOSURE as u64;
+        let floor = (BURST_COLUMNS * 25) as u64 - BURST_PRE_ORE_CLOSURE as u64;
         assert!(
             m.burst.counters.pre_ore_hits >= floor,
             "only {} pre-ore hits against {} computations (floor {floor}) — no neighbour was \
@@ -325,15 +330,15 @@ fn control_severing_the_store_dependency_edge_over_computes_every_stage() {
     assert_eq!(m.shared_small.columns, CONTROL_COLUMNS);
     assert_eq!(m.unshared_small.columns, CONTROL_COLUMNS);
 
-    // Instrument-independent half: the shared arm's store holds the whole closure,
-    // the severed arm's last generator holds only one column's own 5x5.
+    // Instrument-independent half: the shared arm's store holds the whole radius-10
+    // structure closure; the severed arm's last generator holds one such closure.
     assert_eq!(
-        m.shared_small.store_len, CONTROL_PRE_ORE_CLOSURE,
-        "the shared 3x3 must reach a 7x7 pre-ore closure"
+        m.shared_small.store_len, CONTROL_STORE_CLOSURE,
+        "the shared 3x3 must retain its 23x23 radius-10 structure closure"
     );
     assert_eq!(
-        m.unshared_small.store_len, 25,
-        "a per-column generator can only ever hold that column's own 5x5 pre-ore closure; \
+        m.unshared_small.store_len, UNSHARED_STORE_CLOSURE,
+        "a per-column generator can only ever hold that column's own 21x21 radius-10 store closure; \
          reading anything else means the arms are not actually differing in store sharing"
     );
 
@@ -343,7 +348,14 @@ fn control_severing_the_store_dependency_edge_over_computes_every_stage() {
             "the shared arm is the same once-only property as the burst, one radius in"
         );
         assert_eq!(
-            m.shared_small.counters.post_ore_computed as usize, CONTROL_POST_ORE_CLOSURE
+            m.shared_small.counters.stage_entered[lodestone_worldgen::counters::Stage::Vegetation as usize],
+            CONTROL_COLUMNS as u64,
+            "the shared control must enter unified FEATURES once per centre"
+        );
+        assert_eq!(
+            m.shared_small.counters.stage_entered[lodestone_worldgen::counters::Stage::Ore as usize],
+            0,
+            "the shared control must not enter standalone Ore"
         );
         assert_eq!(
             m.unshared_small.counters.pre_ore_computed as usize, UNSHARED_PRE_ORE,
@@ -353,7 +365,14 @@ fn control_severing_the_store_dependency_edge_over_computes_every_stage() {
              the acceptance gate cannot see the regression it exists to catch"
         );
         assert_eq!(
-            m.unshared_small.counters.post_ore_computed as usize, UNSHARED_POST_ORE
+            m.unshared_small.counters.stage_entered[lodestone_worldgen::counters::Stage::Vegetation as usize],
+            CONTROL_COLUMNS as u64,
+            "the unshared control must enter unified FEATURES once per centre"
+        );
+        assert_eq!(
+            m.unshared_small.counters.stage_entered[lodestone_worldgen::counters::Stage::Ore as usize],
+            0,
+            "the unshared control must not enter standalone Ore"
         );
         assert!(
             m.unshared_small.counters.pre_ore_computed
@@ -365,19 +384,19 @@ fn control_severing_the_store_dependency_edge_over_computes_every_stage() {
     }
 }
 
-/// The *world* control: the embedded resolver really drives both 3×3
-/// neighbourhoods, so the numbers above are measuring the pipeline this unit
-/// scheduled rather than a pipeline whose neighbour stages early-returned.
+/// The *world* control: the embedded resolver really drives unified FEATURES,
+/// so the numbers above measure the pipeline this unit scheduled rather than a
+/// dispatcher that early-returned.
 ///
 /// `lodestone-worldgen`'s own fixture resolvers supply no biome documents, so
-/// `ores_by_biome`/`vegetation_by_biome` come out empty, both 3×3 drivers
-/// early-return, and a gate written against them would generate 289 columns, touch
+/// `ores_by_biome`/`vegetation_by_biome` come out empty, the dispatcher
+/// early-returns, and a gate written against it would generate 289 columns, touch
 /// zero neighbours, and pass every equality above with the closure collapsed to
 /// 289. The closure size is the observable that separates the two — which is why
 /// the data has to come from `lodestone-server`'s embedded set.
 #[test]
 #[ignore = "reads the same multi-minute measurement"]
-fn the_burst_actually_drives_both_neighbourhoods() {
+fn the_burst_actually_drives_features() {
     let m = measure();
     assert!(
         m.burst.store_len > BURST_COLUMNS,
@@ -387,9 +406,14 @@ fn the_burst_actually_drives_both_neighbourhoods() {
     );
     if m.counters_live {
         assert!(
-            m.burst.counters.post_ore_computed as usize > BURST_COLUMNS,
-            "post-ore ran for only {} chunks; the 3x3 vegetation driver did not run",
-            m.burst.counters.post_ore_computed
+            m.burst.counters.stage_entered[lodestone_worldgen::counters::Stage::Vegetation as usize]
+                > 0,
+            "FEATURES entered zero times; the unified dispatcher did not run"
+        );
+        assert_eq!(
+            m.burst.counters.stage_entered[lodestone_worldgen::counters::Stage::Ore as usize],
+            0,
+            "standalone Ore must remain unused by unified FEATURES"
         );
     }
 }

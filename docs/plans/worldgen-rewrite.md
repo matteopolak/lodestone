@@ -265,8 +265,8 @@ refused with a measurement) inside U8 unless noted.
 1. **Precompiled placement programs — parity-safe.** Compile each biome's placement-modifier
    pipelines once per seed into flat typed programs (fixed-arg ops in a `Vec`, resolved ids, no
    `serde_json::Value` reads, no enum-tree dispatch per attempt). Same draws, same order — only
-   the interpreter around the draws changes. The feature *lists* are already resolved per seed
-   (`build_biome_vegetation`); this extends that to the modifier chains and feature configs.
+   the interpreter around the draws changes. The feature catalog is already resolved per seed
+   (`DecorationCatalog`); this extends that to the modifier chains and feature configs.
 2. **Tag membership as bitsets over U3's numeric ids — parity-safe.** `supports_vegetation`,
    `replaceable_by_trees`, `logs`, `cannot_replace_below_tree_trunk` become fixed bitsets indexed
    by state id (≤8 KiB per tag): O(1) bit test, zero allocation, no RNG involvement. These
@@ -661,7 +661,7 @@ reproduce this otherwise.
 - **U11**: this is the one engine unit that **intentionally changes output toward the reference**.
   It needs new `ComposedChunkOracle` fixtures with 3-D biome resolution before the diff, or every
   gate melts at once with no way to tell progress from regression.
-- **U12**: step-index preservation — `build_biome_ores` already skips-but-keeps-index; per-feature
+- **U12**: step-index preservation — `DecorationCatalog::select_ores` already skips-but-keeps-index; per-feature
   reseeding (`set_feature_seed`) means adding a feature cannot desync its neighbours' streams.
   The trap is assuming that and not proving it: each new feature type lands with its own
   `FeatureOracle`-shaped fixture, and the composed postfeatures gap must shrink monotonically.

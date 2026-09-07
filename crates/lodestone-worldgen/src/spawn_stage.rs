@@ -40,7 +40,7 @@
 //!   ship-fast scope cut, not a parity claim.
 //! * **The RNG stream is real per-chunk determinism, not vanilla's exact draw
 //!   order.** Seeded via [`WorldgenRandom::set_decoration_seed`] — the same
-//!   per-chunk derivation [`crate::feature::apply_ore_step`] uses for
+//!   per-chunk derivation used by feature decoration for
 //!   `UNDERGROUND_ORES` — so the same `(seed, cx, cz)` always proposes the
 //!   same candidate, which is what makes a fresh world's animal placement
 //!   reproducible across restarts. It is not vanilla's own
@@ -91,10 +91,10 @@ pub struct GenerationSpawn {
 /// control the issue's evidence standard asks for: a biome that cannot spawn a
 /// creature must not.
 ///
-/// `seed`/`cx`/`cz` seed a [`WorldgenRandom`] the same way
-/// [`crate::feature::apply_ore_step`] seeds one for `UNDERGROUND_ORES` — see
-/// the module doc's "Deliberately not vanilla-exact" for why this is real
-/// per-chunk determinism and not vanilla's own draw order.
+/// `seed`/`cx`/`cz` seed a [`WorldgenRandom`] with the same per-chunk decoration
+/// seed used for `UNDERGROUND_ORES` — see the module doc's "Deliberately not
+/// vanilla-exact" for why this is real per-chunk determinism and not vanilla's
+/// own draw order.
 #[must_use]
 pub fn spawn_candidates_for_chunk(
     biome_at: impl Fn(usize, usize) -> String,

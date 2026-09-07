@@ -43,7 +43,7 @@
 //!
 //! `lodestone-worldgen`'s own fixture resolvers supply density functions and noise
 //! but **no biome documents**, so `ores_by_biome`/`vegetation_by_biome` come out
-//! empty, both 3×3 drivers early-return before they would have stitched anything,
+//! empty, the unified FEATURES dispatcher early-returns before it would have stitched anything,
 //! and a `stitch_cells == 0` gate written against them would pass by generating a
 //! world with no decoration in it at all. That is the *world* species of vacuous
 //! test — the flaw is in the input and invisible in the test source — which is why
@@ -53,13 +53,13 @@ use lodestone_worldgen::counters::{self, Stage};
 
 const SEED: i64 = 42;
 
-/// One cold column's pre-ore closure: `vegetation_stage` reads post-ore over the
-/// 3×3, each of those runs `ore_stage` over *its* 3×3, so pre-ore spans 5×5.
+/// One cold column's terrain-prefix closure: the unified FEATURES dispatcher
+/// reads the centre plus its 3×3 source neighbourhood, so the cached prefix
+/// spans 5×5.
 const COLD_PRE_ORE_CHUNKS: usize = 25;
-/// Ore RNG walks on a cold column: the 3×3 `post_ore_world` closure.
-const COLD_ORE_WALKS: u64 = 9;
-/// Sources each stitch used to copy, and cells per source (`256 * height`).
-const STITCH_SOURCES: u64 = 9;
+/// Sources in the unified FEATURES dispatch (the 3×3 source neighbourhood).
+const FEATURES_SOURCES: u64 = 9;
+/// Sources each old region stitch copied, and cells per source (`256 * height`).
 const CELLS_PER_SOURCE: u64 = 256 * 384;
 
 #[test]
@@ -107,24 +107,23 @@ fn the_only_generation_in_this_binary() {
 
     // --- The world-vacuity guard: both drivers actually ran ----------------
     assert_eq!(
-        snapshot.stage_entered[Stage::Ore as usize], COLD_ORE_WALKS,
-        "the ore driver must have run {COLD_ORE_WALKS} times (the 3×3 post-ore closure) \
-         before a zero stitch count means anything; got {}",
-        snapshot.stage_entered[Stage::Ore as usize],
+        snapshot.stage_entered[Stage::Vegetation as usize], 1,
+        "the unified FEATURES dispatcher must have run once; got {}",
+        snapshot.stage_entered[Stage::Vegetation as usize],
     );
     assert_eq!(
-        snapshot.stage_entered[Stage::Vegetation as usize], 1,
-        "the vegetation driver must have run once; got {}",
-        snapshot.stage_entered[Stage::Vegetation as usize],
+        snapshot.stage_entered[Stage::Ore as usize], 0,
+        "the standalone ore stage must not be entered by unified FEATURES; got {}",
+        snapshot.stage_entered[Stage::Ore as usize],
     );
 
     // --- The criterion, as two hypotheses far apart ------------------------
     //
-    // Pre-U7: `ore_stage` stitched 9 sources per ore walk and `vegetation_stage`
-    // stitched 9 once, each copying `256 * height` cells. Post-U7: exactly 0 —
+    // Pre-U7: the old split drivers stitched 9 sources per ore walk and 9 once
+    // for vegetation, each copying `256 * height` cells. Post-U7: exactly 0 —
     // not "small", because the counter is bumped from the stitch loops themselves
     // and both are deleted. A *partial* revert lands on neither and fails.
-    let pre_u7 = (COLD_ORE_WALKS * STITCH_SOURCES + STITCH_SOURCES) * CELLS_PER_SOURCE;
+    let pre_u7 = (FEATURES_SOURCES * FEATURES_SOURCES + FEATURES_SOURCES) * CELLS_PER_SOURCE;
     assert_eq!(
         pre_u7, 8_847_360,
         "arithmetic check on the pre-U7 hypothesis itself: (9 × 9 + 9) × 98,304"
@@ -153,7 +152,7 @@ fn the_only_generation_in_this_binary() {
 
     println!(
         "in-place decoration: stitch_cells = 0 (pre-U7 hypothesis {pre_u7}), \
-         ore walks {}, vegetation 1, detector control passed",
-        snapshot.stage_entered[Stage::Ore as usize],
+         FEATURES sources {}, standalone ore 0, detector control passed",
+        FEATURES_SOURCES,
     );
 }

@@ -14,7 +14,7 @@
 //! The column-level figure lives in `benches/generation.rs` (embedded production
 //! data, 12×12 warm sweep) and in `tests/ore_alloc_attribution.rs`, which needs
 //! `--features gen-counters` to bin by stage. **This gate needs neither**: it
-//! drives `apply_ore_step_3x3` directly against a checked-in JVM fixture and
+//! drives `apply_ore_step_3x3_per_source` directly against a checked-in JVM fixture and
 //! counts every allocation the call makes, so it runs under a plain
 //! `cargo test --workspace` where the acceptance criterion actually needs to be
 //! enforced.
@@ -52,8 +52,8 @@ use std::path::{Path, PathBuf};
 use lodestone_worldgen::dense_grid::DenseBlockGrid;
 use lodestone_worldgen::feature::region_view::RegionView;
 use lodestone_worldgen::feature::{
-    PlacedOre, REGION_MAX, REGION_MIN, RuleTest, apply_ore_step_3x3, parse_ore_config,
-    parse_placements,
+    PlacedOre, REGION_MAX, REGION_MIN, RegionHeights, RuleTest, apply_ore_step_3x3_per_source,
+    parse_ore_config, parse_placements,
 };
 use lodestone_worldgen::rng::{WorldgenRandom, XoroshiroRandomSource};
 use serde_json::Value;
@@ -261,7 +261,8 @@ fn one_pass(
         |base: &str, tag: &str| -> bool { tag_map.get(tag).is_some_and(|set| set.contains(base)) };
     let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
     let mut working = RegionView::over_region_grid(grid, MIN_Y, HEIGHT);
-    apply_ore_step_3x3(
+    let ocean_floor_wg = RegionHeights::from_map(&f.ocean_floor_wg);
+    apply_ore_step_3x3_per_source(
         &mut random,
         f.seed,
         f.chunk_x,
@@ -270,10 +271,13 @@ fn one_pass(
         HEIGHT,
         MIN_GEN_Y,
         GEN_DEPTH,
-        &f.ocean_floor_wg,
+        REGION_MIN,
+        REGION_MAX,
+        &ocean_floor_wg,
         &in_tag,
+        None,
         &mut working,
-        ores,
+        &|_source_x, _source_z| ores,
     );
     working.writes()
 }

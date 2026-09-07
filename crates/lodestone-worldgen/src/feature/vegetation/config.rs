@@ -2297,7 +2297,8 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
                 (Some(ground_state), Some(depth), Some(xz_radius)) => {
                     ConfiguredFeature::VegetationPatch(Box::new(
                         super::features::VegetationPatchCfg {
-                            replaceable: parse_id_list(&c["replaceable"]).into_iter().collect(),
+                            replaceable: resolve_block_set(resolver, &c["replaceable"])
+                                .unwrap_or_default(),
                             ground_state,
                             vegetation_feature: resolve_placed_feature_ref(
                                 resolver,
@@ -2473,7 +2474,9 @@ pub fn collect_unsupported(placed: &PlacedRef) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::BlockPredicate;
+    use super::{BlockPredicate, ConfiguredFeature};
+    use crate::density::{NoiseParams, Resolver};
+    use serde_json::Value;
 
     #[test]
     fn matching_fluids_accepts_the_registry_string_shape() {
@@ -2486,6 +2489,55 @@ mod tests {
             BlockPredicate::MatchingFluid { fluids, offset: (0, 0, 0) }
                 if fluids == vec!["minecraft:water"]
         ));
+    }
+
+    #[test]
+    fn vegetation_patch_expands_replaceable_tag() {
+        struct TagResolver;
+        impl Resolver for TagResolver {
+            fn density_function(&self, _id: &str) -> Value {
+                Value::Null
+            }
+
+            fn noise(&self, _id: &str) -> NoiseParams {
+                unreachable!("the vegetation-patch parser fixture has no noise references")
+            }
+
+            fn block_tag(&self, id: &str) -> Value {
+                assert_eq!(id, "minecraft:moss_replaceable");
+                serde_json::json!({"values": ["minecraft:deepslate"]})
+            }
+        }
+
+        let feature = super::parse_configured_feature_doc(
+            &TagResolver,
+            &serde_json::json!({
+                "type": "minecraft:vegetation_patch",
+                "config": {
+                    "replaceable": "#minecraft:moss_replaceable",
+                    "ground_state": {
+                        "type": "minecraft:simple_state_provider",
+                        "state": {"Name": "minecraft:moss_block"}
+                    },
+                    "vegetation_feature": {
+                        "feature": {"type": "minecraft:no_op"},
+                        "placement": []
+                    },
+                    "surface": "floor",
+                    "depth": 1,
+                    "extra_bottom_block_chance": 0.0,
+                    "extra_edge_column_chance": 0.0,
+                    "vegetation_chance": 0.0,
+                    "vertical_range": 5,
+                    "xz_radius": 1
+                }
+            }),
+        );
+        let ConfiguredFeature::VegetationPatch(cfg) = feature else {
+            panic!("vegetation patch document must parse");
+        };
+        assert_eq!(cfg.replaceable.len(), 1);
+        assert!(cfg.replaceable.contains("minecraft:deepslate"));
     }
 
 }

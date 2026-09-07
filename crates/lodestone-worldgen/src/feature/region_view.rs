@@ -288,7 +288,7 @@ mod scratch {
     /// A write-order log of local keys whose backing `Vec` is recycled through
     /// this thread's free-list. `VegGrid::dirty`'s medium.
     ///
-    /// Write **order** is world-visible here (`vegetation_stage` folds back in
+    /// Write **order** is world-visible here (the unified FEATURES dispatcher folds back in
     /// insertion order and a `DenseBlockGrid` appends to its palette in
     /// first-write order), so this stays a `Vec` and nothing about recycling
     /// touches that: a returned log is empty and a taken one is appended to from
@@ -737,6 +737,25 @@ impl<'a> RegionView<'a> {
         true
     }
 
+    /// Seeds a state into this pass's read overlay without making it a new
+    /// decoration write.  Replay materializers use this for writes completed
+    /// by an earlier source: an ore source may probe the wider read context
+    /// even when that cell lies outside the current 3x3 writer region.
+    ///
+    /// This is deliberately separate from [`Self::set_id`].  Production
+    /// feature placement must retain the 3x3 write bound, while a stateful
+    /// caller may need to provide an already-resident value in the read-only
+    /// rim.  The seeded value participates in normal overlay-first reads and
+    /// is present in the raw [`Self::writes_in_scan_order`] view; callers that
+    /// report newly produced writes must track and exclude unchanged seeds.
+    pub fn seed_read_id(&mut self, lx: i32, y: i32, lz: i32, state: StateId) -> bool {
+        if !self.in_read_region(lx, y, lz) {
+            return false;
+        }
+        self.overlay.insert((lx, y, lz), state);
+        true
+    }
+
     /// [`Self::set_id`] taking a state string, interning it first.
     pub fn set(&mut self, lx: i32, y: i32, lz: i32, state: &str) -> bool {
         let id = self.interner.id_of(state);
@@ -1004,7 +1023,7 @@ mod tests {
 
     /// The same contract for the write log, and additionally that write **order**
     /// starts at index 0 — the log's order reaches the served palette through
-    /// `vegetation_stage`'s fold-back, so a recycled log that retained entries
+    /// the unified FEATURES fold-back, so a recycled log that retained entries
     /// would be a world-visible defect, not a leak.
     #[test]
     fn a_recycled_write_log_is_empty_and_restarts_at_index_zero() {
@@ -1365,6 +1384,27 @@ mod tests {
         assert_eq!(view.get(0, 8, 0), "minecraft:air");
         assert!(!view.set(0, 8, 0, "minecraft:stone"));
         assert_eq!(view.writes(), 0, "no out-of-region write may have landed");
+    }
+
+    /// A lifecycle replay may supply a previously completed state in the
+    /// wider ore read context without turning that state into a new 3x3 write.
+    #[test]
+    fn a_seeded_read_state_shadows_the_wide_source_rim() {
+        let interner = Arc::new(StateInterner::new());
+        let grids: Vec<DenseBlockGrid> = (-2..=2)
+            .flat_map(|dx| (-2..=2).map(move |dz| (dx, dz)))
+            .map(|(dx, dz)| chunk_grid(&interner, dx, dz, "minecraft:stone"))
+            .collect();
+        let mut view = RegionView::over_wide_sources(Arc::clone(&interner), 0, 0, 0, 8, |dx, dz| {
+            grids.get(((dx + 2) * 5 + (dz + 2)) as usize)
+        });
+        // x=-17 is in the source chunk at -2, but outside the current 3x3
+        // writer box [-16, 32). It is still in the ore read box [-32, 48).
+        assert_eq!(view.get(-17, 4, 0), "minecraft:stone");
+        let gold = interner.id_of("minecraft:gold_ore");
+        assert!(view.seed_read_id(-17, 4, 0, gold));
+        assert_eq!(view.get(-17, 4, 0), "minecraft:gold_ore");
+        assert!(!view.seed_read_id(crate::feature::ORE_READ_MIN - 1, 4, 0, gold));
     }
 
     /// An overlay write shadows the source underneath it, and a later read in the

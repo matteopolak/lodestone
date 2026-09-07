@@ -39,6 +39,15 @@ restore a split ore-then-decoration pass merely because a packet fixture initial
 the captured first Nether chunk, correcting this order exposed 231 additional differing cells, which
 identifies previously masked feature-body or input defects rather than a valid ordering exception.
 
+Nether noise and the packet-ready terrain carrier remain 128 rows high, while the resident decoration
+working window spans the dimension's full 256 rows. Top-relative placement anchors still resolve
+against the 128-row generated depth; the dispatcher adjusts only those anchors when copying parsed
+placement trees into the wider grid. Writes in the upper half bypass the 128-row ore view and remain
+lifecycle spill, so later feature reads can observe them without turning them into packet terrain.
+The same 5×5 source context carries replicated 3-D Nether biome cells into the vegetation grid, so
+candidate-biome modifiers reject features whose candidate is in a different biome; ore replacement
+keeps its separate block-level zoom lookup because its biome test is evaluated at the candidate block.
+
 Both generators run vanilla's own stage order: structure starts → refs → beardifier → fill (shape,
 with the disabled-aquifer fluid picker) → biome → surface → carve → structure placement. Neither
 stage reads a neighbour's *terrain* product (only the starts map, a pure function of `(seed, chunk)`,

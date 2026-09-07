@@ -111,6 +111,10 @@ memory-stats = "1"
 # both. It adds nothing to this crate's lib, so the wasm build and
 # `cargo check -p lodestone-shell --no-default-features` are untouched.
 lodestone-server = { path = "../lodestone-server" }
+# The top-layer replay control exercises the same shared lifecycle tooling as
+# the large comparator; production worldgen remains independent of this parity
+# harness dependency.
+lodestone-worldgen-parity = { path = "../lodestone-worldgen-parity" }
 
 [[bench]]
 name = "generation"

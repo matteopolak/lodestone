@@ -1,17 +1,17 @@
-//! Stages 5-7 of [`OverworldGenerator::column`]: the `UNDERGROUND_ORES` and
-//! `VEGETAL_DECORATION` 3×3 neighbourhood drivers and `TOP_LAYER_MODIFICATION`.
+//! Stages 5-7 of [`OverworldGenerator::column`]: the unified FEATURES
+//! neighbourhood dispatcher and `TOP_LAYER_MODIFICATION`.
 //!
 //! Moved here verbatim from `overworld.rs` by U16 Phase A; see [`super`]'s own module
 //! doc for the parity history of the 3×3 drivers.
 //!
 //! # Unit 7: the two region stitches that used to feed these drivers are gone
 //!
-//! Both drivers need to read *and write* across a 3×3 chunk neighbourhood, and
+//! The FEATURES dispatcher needs to read *and write* across a 3×3 chunk neighbourhood, and
 //! until Unit 7 of `docs/plans/worldgen-rewrite.md` the way that neighbourhood was
 //! made addressable was to copy it: `stitch_region` materialised a
 //! `48 × height × 48` `DenseBlockGrid` from the nine sources (884,736 cells),
 //! `apply_ore_step_3x3_per_source` cloned it (884,736 more),
-//! `stitch_veg_region` copied the nine post-ore fields into a `VegGrid`'s
+//! `stitch_veg_region` copied the nine terrain fields into a `VegGrid`'s
 //! `HashMap` (884,736 again), and each driver's output was folded back over the
 //! centre's full 98,304 cells. ~2.85M cell copies per served column, **every one of
 //! them warm** — the neighbours were already computed and memoised in
@@ -22,18 +22,16 @@
 //! source chunk owns the column instead, holding writes in a sparse overlay, so
 //! `crate::counters::Counters::stitch_cells` reads **zero** for a served column —
 //! this unit's acceptance criterion. What is left is one `Vec<u16>` clone of the
-//! centre's own post-ore grid (the store's copy is shared and must not be mutated)
-//! and two sparse fold-backs of what decoration actually wrote.
+//! centre's own terrain grid (the store's copy is shared and must not be mutated)
+//! and sparse transfers of what each decoration adapter actually wrote.
 //!
 //! **The trap, if you edit this file:** the fold-back order decides the served
 //! palette, because a `DenseBlockGrid` appends to its local palette in first-write
-//! order. `ore_stage` folds in `(y, lz, lx)` scan order because the full-box walk
-//! it replaced did; `vegetation_stage` folds in *write* order because the `dirty`
-//! `Vec` it replays always did. Neither is interchangeable with the other, and
-//! `column_is_byte_identical_across_two_independently_constructed_generators` is
-//! what notices.
+//! order. The unified dispatcher preserves each adapter's established ordering
+//! while transferring writes between them, and the byte-identity controls are
+//! what notice any drift.
 
-use std::{collections::{BTreeMap, BTreeSet}, sync::Arc};
+use std::{collections::{BTreeMap, BTreeSet, HashMap}, sync::Arc};
 
 use crate::feature::{PlacedOre, apply_ore_step_3x3_per_source, apply_ore_step_3x3_per_source_at_step};
 use crate::rng::{WorldgenRandom, XoroshiroRandomSource};
@@ -47,6 +45,120 @@ pub struct ParityOreSpill {
     pub source: (i32, i32),
     pub position: (i32, i32, i32),
     pub state: String,
+}
+
+/// Final source-tagged FEATURES transition used by the lifecycle parity
+/// materializer.  Unlike [`ParityOreSpill`], this includes every driven
+/// decoration step, including lakes, structures, springs, disks and vegetal
+/// features.  State text is intentional at this public boundary: interner ids
+/// belong to one generator and cannot safely cross into a resident column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParityDecorationSpill {
+    /// Chunk whose raw FEATURES entries produced this write.
+    pub source: (i32, i32),
+    /// Absolute block coordinate and final state after this source completed.
+    pub position: (i32, i32, i32),
+    pub state: String,
+}
+
+/// Complete result of one source's FEATURES pass.  The spill list is the
+/// lifecycle materializer's block transition stream; block entities are kept
+/// alongside it so a caller that persists entities does not need to replay the
+/// feature body a second time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParityDecorationResult {
+    pub spills: Vec<ParityDecorationSpill>,
+    pub block_entities: Vec<super::block_entities::GeneratedBlockEntity>,
+}
+
+/// Final source-local `TOP_LAYER_MODIFICATION` transition used by the
+/// lifecycle parity materializer.  State text is intentional at this public
+/// boundary: interner ids belong to one generator and cannot safely cross into
+/// a resident column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParityTopLayerSpill {
+    /// Chunk whose source-local top-layer pass produced this write.
+    pub source: (i32, i32),
+    /// Absolute block coordinate and final state after the pass completed.
+    pub position: (i32, i32, i32),
+    pub state: String,
+}
+
+#[derive(Clone, Copy)]
+enum MixedEntryWriter {
+    Decoration,
+    Ore,
+}
+
+#[derive(Default)]
+struct MixedSync {
+    projected: usize,
+    retained_outside: usize,
+}
+
+/// Makes one completed entry visible through both FEATURES adapters.  Ore
+/// placement writes into a centre-relative `RegionView`, while all other
+/// configured feature bodies write through the absolute-coordinate `VegGrid`.
+/// Keeping this boundary explicit is what lets the next raw entry observe the
+/// resident state regardless of which adapter placed the previous entry.
+fn synchronize_mixed_entry(
+    writer: MixedEntryWriter,
+    grid: &mut crate::feature::vegetation::VegGrid,
+    ore_view: &mut crate::feature::region_view::RegionView<'_>,
+    centre_x: i32,
+    centre_z: i32,
+    grid_cursor: &mut usize,
+    ore_transferred: &mut HashMap<(i32, i32, i32), crate::interner::StateId>,
+) -> MixedSync {
+    match writer {
+        MixedEntryWriter::Decoration => {
+            let end = grid.dirty_len();
+            let mut final_cells = BTreeMap::new();
+            for (x, y, z, state) in grid.dirty_cell_ids().skip(*grid_cursor) {
+                final_cells.insert((x, y, z), state);
+            }
+            *grid_cursor = end;
+            let mut sync = MixedSync::default();
+            for ((x, y, z), state) in &final_cells {
+                let lx = x - centre_x * 16;
+                let lz = z - centre_z * 16;
+                if !(crate::feature::REGION_MIN..crate::feature::REGION_MAX).contains(&lx)
+                    || !(crate::feature::REGION_MIN..crate::feature::REGION_MAX).contains(&lz)
+                {
+                    sync.retained_outside += 1;
+                    continue;
+                }
+                assert!(
+                    ore_view.set_id(lx, *y, lz, *state),
+                    "mixed decoration entry dropped an in-region write at ({x},{y},{z})",
+                );
+                ore_transferred.insert((*x, *y, *z), *state);
+                sync.projected += 1;
+            }
+            sync
+        }
+        MixedEntryWriter::Ore => {
+            let mut changed = Vec::new();
+            for (lx, y, lz, state) in ore_view.writes_in_scan_order() {
+                let x = centre_x * 16 + lx;
+                let z = centre_z * 16 + lz;
+                if ore_transferred.insert((x, y, z), state) != Some(state) {
+                    changed.push((x, y, z, state));
+                }
+            }
+            for (x, y, z, state) in &changed {
+                assert!(
+                    grid.set_id_if_in_bounds(*x, *y, *z, *state),
+                    "mixed ore entry wrote outside the decoration footprint at ({x},{y},{z})",
+                );
+            }
+            *grid_cursor = grid.dirty_len();
+            MixedSync {
+                projected: changed.len(),
+                retained_outside: 0,
+            }
+        }
+    }
 }
 
 impl OverworldGenerator {
@@ -73,20 +185,115 @@ impl OverworldGenerator {
         center_world: crate::dense_grid::DenseBlockGrid,
         center_heights: &[i32; 256],
     ) -> crate::dense_grid::DenseBlockGrid {
-        self.ore_stage_with_source(cx, cz, center_world, center_heights, None).0
+        self.ore_stage_with_source(cx, cz, center_world, center_heights, None, &[]).0
     }
 
-    /// Runs exactly one source through the normal ore dispatcher and exposes
-    /// its final overlay for parity materialization. Normal generation passes
-    /// `None` above and retains the unfiltered 3x3 path.
+    /// Runs one source chunk's complete FEATURES-stage dispatcher against the
+    /// target's shaped prefix with the final states already applied by
+    /// earlier source completions.  The ore and decoration adapters are both
+    /// seeded from that resident view before any feature body runs, so
+    /// replacement, height and neighbour probes observe the live field rather
+    /// than a fresh shaped snapshot.
     #[must_use]
-    pub fn parity_source_ore_spills(
-        &self, target_x: i32, target_z: i32, source_x: i32, source_z: i32,
-    ) -> Vec<ParityOreSpill> {
-        assert!((target_x - source_x).abs() <= 1 && (target_z - source_z).abs() <= 1,
-            "a source must lie in the target ore dispatch window");
+    pub fn parity_source_spills_with_overrides(
+        &self,
+        target_x: i32,
+        target_z: i32,
+        source_x: i32,
+        source_z: i32,
+        overrides: &[(i32, i32, i32, String)],
+    ) -> Vec<ParityDecorationSpill> {
+        self.parity_source_decoration_with_overrides(
+            target_x,
+            target_z,
+            source_x,
+            source_z,
+            overrides,
+        )
+        .spills
+    }
+
+    /// Complete source-filtered FEATURES result, including generated block
+    /// entities. Callers that persist generated entities should use this result
+    /// directly so they do not run the same source body twice.
+    #[must_use]
+    pub fn parity_source_decoration_with_overrides(
+        &self,
+        target_x: i32,
+        target_z: i32,
+        source_x: i32,
+        source_z: i32,
+        overrides: &[(i32, i32, i32, String)],
+    ) -> ParityDecorationResult {
+        assert!(
+            (target_x - source_x).abs() <= 1 && (target_z - source_z).abs() <= 1,
+            "a decoration source must be inside the target's 3x3 dispatch window",
+        );
         let pre = self.pre_ore_stage(target_x, target_z);
-        self.ore_stage_with_source(target_x, target_z, (*pre.0).clone(), &pre.1, Some((source_x, source_z))).1
+        self.mixed_features_stage_selected(
+            target_x,
+            target_z,
+            (*pre.0).clone(),
+            &pre.1,
+            &pre.3,
+            Some((source_x, source_z)),
+            overrides,
+        )
+        .1
+    }
+
+    /// Runs the source-local `TOP_LAYER_MODIFICATION` body over the source's
+    /// shaped column and returns the exact net block writes.  `overrides` is
+    /// the resident state already produced by earlier FEATURES/top-layer
+    /// completions; those states are seeded before the shared production stage
+    /// runs, so its height, replacement and read-after-write decisions use the
+    /// live column rather than a fresh shaped snapshot.
+    ///
+    /// This stage has no neighbourhood spill: every returned position belongs
+    /// to `(source_x, source_z)`.  Writes that leave a seeded state unchanged
+    /// are omitted, matching the other replay seams' net-transition contract.
+    #[must_use]
+    pub fn parity_source_top_layer_spills_with_overrides(
+        &self,
+        source_x: i32,
+        source_z: i32,
+        overrides: &[(i32, i32, i32, String)],
+    ) -> Vec<ParityTopLayerSpill> {
+        let pre = self.pre_ore_stage(source_x, source_z);
+        let mut world = (*pre.0).clone();
+        let (min_x, min_y, min_z, size_x, size_y, size_z) = world.bounds();
+        for &(x, y, z, ref state) in overrides {
+            if !(min_x..min_x + size_x).contains(&x)
+                || !(min_y..min_y + size_y).contains(&y)
+                || !(min_z..min_z + size_z).contains(&z)
+            {
+                continue;
+            }
+            world.set(x, y, z, state);
+        }
+        let seeded = world.clone();
+        let (world, _) = self.top_layer_stage(source_x, source_z, world, &pre.2);
+
+        let (min_x, min_y, min_z, size_x, size_y, size_z) = world.bounds();
+        let mut changed = BTreeMap::new();
+        for y in min_y..min_y + size_y {
+            for z in min_z..min_z + size_z {
+                for x in min_x..min_x + size_x {
+                    let state = world.get_id(x, y, z);
+                    if state != seeded.get_id(x, y, z) {
+                        changed.insert((x, y, z), state);
+                    }
+                }
+            }
+        }
+        changed
+            .into_iter()
+            .map(|(position, state)| ParityTopLayerSpill {
+                source: (source_x, source_z),
+                position,
+                state: self.interner.name_of(state).to_owned(),
+            })
+            .collect()
     }
 
     fn ore_stage_with_source(
@@ -96,6 +303,7 @@ impl OverworldGenerator {
         center_world: crate::dense_grid::DenseBlockGrid,
         center_heights: &[i32; 256],
         selected_source: Option<(i32, i32)>,
+        overrides: &[(i32, i32, i32, String)],
     ) -> (crate::dense_grid::DenseBlockGrid, Vec<ParityOreSpill>) {
         if self.ore_definitions.is_empty() {
             return (center_world, Vec::new());
@@ -245,15 +453,23 @@ impl OverworldGenerator {
             },
         );
 
+        // Earlier source completions belong to the same resident world, not
+        // to a fresh pre-ore snapshot.  Seed their final states into the
+        // dispatcher's own overlay so replacement predicates and blob probes
+        // read after those writes.  Keep the seeded ids separately: a cell
+        // that remains unchanged is context, not a new spill from this
+        // source.
+        let mut seeded = BTreeMap::new();
+        for &(x, y, z, ref state) in overrides {
+            let lx = x - cx * 16;
+            let lz = z - cz * 16;
+            let id = self.interner.id_of(state);
+            if view.seed_read_id(lx, y, lz, id) {
+                seeded.insert((lx, y, lz), id);
+            }
+        }
+
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
-        // Debug-only escape hatch (LODESTONE_ORE_SINGLE_SOURCE_DEBUG): run only
-        // the centre's own decoration pass (matching `ComposedChunkOracle
-        // .java`'s single-source-only `postfeatures` stage) while still exposing
-        // the full 3x3 terrain/heightmap through the view, so `get_height`'s
-        // probes never panic. Used once to isolate "is the centre pass itself
-        // correct" from "does real 3x3 spill widen the gap against a
-        // single-source oracle" — see docs/worldgen-parity.md. Not used by
-        // `column()`'s normal path.
         if let Some((source_x, source_z)) = selected_source {
             apply_ore_step_3x3_per_source_at_step(
                 &mut random,
@@ -274,10 +490,6 @@ impl OverworldGenerator {
                 &mut view,
                 &ores_for_source,
             );
-        } else if std::env::var("LODESTONE_ORE_SINGLE_SOURCE_DEBUG").is_ok() {
-            let ores = ores_for_source(cx, cz);
-            let input = crate::feature::OreInput { chunk_x: cx, chunk_z: cz, center_x: cx, center_z: cz, min_y: self.min_y, height: self.height, min_gen_y: self.min_y, gen_depth: self.height, read_min: crate::feature::ORE_READ_MIN, read_max: crate::feature::ORE_READ_MAX, ocean_floor_wg: &ocean_floor_wg, in_tag: &in_tag, biome_allows: Some(&biome_allows) };
-            crate::feature::apply_ore_step(&mut random, self.seed, &input, &mut view, ores);
         } else {
             apply_ore_step_3x3_per_source(
                 &mut random,
@@ -311,11 +523,15 @@ impl OverworldGenerator {
         // sequence is unchanged as long as the written cells are visited in the
         // same order. See `RegionView::centre_writes_in_scan_order`.
         let parity_spills = selected_source.map_or_else(Vec::new, |source| {
-            view.writes_in_scan_order().into_iter().map(|(lx, y, lz, state)| ParityOreSpill {
-                source,
-                position: (cx * 16 + lx, y, cz * 16 + lz),
-                state: self.interner.name_of(state).to_owned(),
-            }).collect()
+            view.writes_in_scan_order()
+                .into_iter()
+                .filter(|&(lx, y, lz, state)| seeded.get(&(lx, y, lz)).copied() != Some(state))
+                .map(|(lx, y, lz, state)| ParityOreSpill {
+                    source,
+                    position: (cx * 16 + lx, y, cz * 16 + lz),
+                    state: self.interner.name_of(state).to_owned(),
+                })
+                .collect()
         });
         let writes = view.centre_writes_in_scan_order();
         // Releases the view's borrow of `center_world` and of `wide_pre`.
@@ -376,235 +592,102 @@ impl OverworldGenerator {
         }
     }
 
-    /// Stage 6:
-    /// `VEGETAL_DECORATION`, over the real 3×3 `center ± 1` neighbourhood —
-    /// [`crate::feature::vegetation::apply_vegetal_decoration_step_3x3_per_source`],
-    /// the same [`Self::ore_stage`] shape applied to vegetal decoration
-    /// instead of ores (see that module's own doc "Scope" section for why
-    /// this is the same mechanism, not a second one).
-    ///
-    /// Builds one shared [`crate::feature::vegetation::VegGrid`] spanning
-    /// [`crate::feature::REGION_MIN`]/[`crate::feature::REGION_MAX`],
-    /// stitched from all 9 chunks' own **post-ore** terrain (the centre's
-    /// via the already-computed `world` parameter; each of the 8 neighbours'
-    /// via [`Self::post_ore_world`], which recurses into that neighbour's
-    /// *own* 3×3 ore composition — real vanilla parity, not an
-    /// approximation, at the cost this module's own doc "Performance"
-    /// section already names for `ore_stage` itself: no cache exists across
-    /// this recursion, so a full sweep pays it 9× again on top of ore's own
-    /// 9×). Each source's feature list comes from the deduplicated union of
-    /// every section biome in its own 3×3 neighbourhood, preserving the global
-    /// feature indices established at generator construction. That is a distinct
-    /// question from the y=0 biome carvers and ores use: underground features
-    /// must remain eligible when a source's surface biome differs.
-    ///
-    /// No-op (returns `world` unchanged) when the resolver supplied no biome
-    /// with a vegetation step, matching every other resolver's "no data
-    /// supplied" convention.
-    /// The return was later widened: the second element is the block entities
-    /// decoration produced **inside the served 16x16**, in write order. Spill into a
-    /// neighbour is dropped here for the same reason a spilled *block* is — the
-    /// neighbour's own pass produces its own copy, and keeping both would double it.
-    pub(super) fn vegetation_stage(
+    /// Selects the same source feature list used by the production vegetal
+    /// driver.  Feature membership is the union of every section biome in the
+    /// source's own 3x3 neighbourhood, while the catalog supplies the stable
+    /// raw `(step, index)` seed identity.  Step-6 disks are added explicitly;
+    /// step-6 ore entries are selected by [`DecorationCatalog::select_ores`]
+    /// because they use the ore placement adapter.
+    fn source_features_for(
+        &self,
+        source_x: i32,
+        source_z: i32,
+        centre_x: i32,
+        centre_z: i32,
+        centre_biomes: &super::biome_cells::BiomeCells,
+        wide_pre: &[Option<Arc<super::PreOreResult>>],
+    ) -> Vec<(i32, usize, crate::feature::vegetation::PlacedRef)> {
+        let biomes = Self::source_biomes(
+            source_x,
+            source_z,
+            centre_x,
+            centre_z,
+            centre_biomes,
+            wide_pre,
+        );
+        let mut features = self
+            .decoration_catalog
+            .select(biomes.iter().map(String::as_str));
+        features.extend(
+            self.decoration_catalog
+                .select_step6_disks(biomes.iter().map(String::as_str)),
+        );
+        features.sort_by_key(|(step, index, _)| (*step, *index));
+        features
+    }
+
+    /// Returns the biomes visible to one source's own 3x3 feature neighbourhood
+    /// without consulting the staged store.  The centre is supplied by the
+    /// caller because `column_timed` computes it locally; every other member of
+    /// this neighbourhood is already present in the 5x5 `wide_pre` read rim.
+    fn source_biomes(
+        source_x: i32,
+        source_z: i32,
+        centre_x: i32,
+        centre_z: i32,
+        centre_biomes: &super::biome_cells::BiomeCells,
+        wide_pre: &[Option<Arc<super::PreOreResult>>],
+    ) -> BTreeSet<String> {
+        let mut biomes = BTreeSet::new();
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                let x = source_x + dx;
+                let z = source_z + dz;
+                let offset_x = x - centre_x;
+                let offset_z = z - centre_z;
+                if offset_x == 0 && offset_z == 0 {
+                    biomes.extend(centre_biomes.palette().iter().cloned());
+                } else {
+                    let pre = wide_pre[crate::feature::region_view::wide_slot_of_offset(
+                        offset_x,
+                        offset_z,
+                    )]
+                    .as_ref()
+                    .expect("every source biome lies inside the 5x5 read rim");
+                    biomes.extend(pre.3.palette().iter().cloned());
+                }
+            }
+        }
+        biomes
+    }
+
+    /// Runs the complete Overworld FEATURES stage for normal generation.  The
+    /// parent orchestration module can hand this the shaped prefix directly;
+    /// the returned dense grid is the centre result and the entity list is in
+    /// feature write order.  Keeping this wrapper beside the source-filtered
+    /// seam makes the lifecycle and production paths share one dispatcher.
+    pub(super) fn features_stage(
         &self,
         cx: i32,
         cz: i32,
-        world: Arc<crate::dense_grid::DenseBlockGrid>,
+        center_world: crate::dense_grid::DenseBlockGrid,
+        center_heights: &[i32; 256],
+        center_biomes: &super::biome_cells::BiomeCells,
     ) -> (
         crate::dense_grid::DenseBlockGrid,
         Vec<super::block_entities::GeneratedBlockEntity>,
     ) {
-        if self.decoration_catalog.is_empty() {
-            return (
-                Arc::try_unwrap(world).unwrap_or_else(|shared| (*shared).clone()),
-                Vec::new(),
-            );
-        }
-        // After the early return — see `ore_stage`'s note on why.
-        let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Vegetation);
-
-        let base_x = cx * 16;
-        let base_z = cz * 16;
-        // Debug-only escape hatch (LODESTONE_VEG_SINGLE_SOURCE_DEBUG),
-        // mirroring `LODESTONE_ORE_SINGLE_SOURCE_DEBUG` above: give the grid no
-        // neighbour sources and decorate the centre only, matching
-        // `VegetationOracle.java`'s SINGLE mode's own narrower scope for
-        // direct comparison. Not used by `column()`'s normal path.
-        let single_source_debug = std::env::var("LODESTONE_VEG_SINGLE_SOURCE_DEBUG").is_ok();
-        // `VegGrid` takes the CENTRE chunk's own absolute block origin so
-        // every one of the 9 sources' absolute-coordinate writes translates
-        // correctly relative to it — see `VegGrid`'s own doc comment (the
-        // island a chunk-local-only grid used to cause) and
-        // `crate::feature::vegetation`'s module doc "Scope" section for why
-        // the footprint is widened beyond `REGION_MIN..REGION_MAX` here: trees
-        // (especially 2×2 trunks and their canopies) can spill past the tight
-        // 48-block 3×3 neighbourhood, and `VegGrid::set_if_in_bounds` drops any
-        // cell outside it — the chunk-border cut-off trees the player sees.
-        //
-        // Unit 7: `with_sources`, not `with_footprint_interned` + a seeding loop.
-        // `stitch_veg_region` used to copy all nine post-ore chunks into this
-        // grid's `HashMap` — 884,736 inserts per column, leaving 884,736 live
-        // entries — purely to make the neighbourhood addressable. The grids are
-        // now borrowed as read-only `Arc` snapshots straight out of the staged
-        // store and the map holds only what decoration writes. Nothing about the
-        // placement engine's view of the world changed: a read still answers the
-        // source terrain, a write still shadows it for later reads in the same
-        // step, and the padding ring still answers air because no source covers
-        // it.
-        let mut grid = crate::feature::vegetation::VegGrid::with_sources_and_biomes(
-            Arc::clone(&self.interner),
-            self.min_y,
-            self.height,
-            base_x,
-            base_z,
-            crate::feature::REGION_MIN - crate::feature::VEG_PADDING,
-            crate::feature::REGION_MAX + crate::feature::VEG_PADDING,
-            |dx, dz| {
-                if dx == 0 && dz == 0 {
-                    Some(Arc::clone(&world))
-                } else if single_source_debug {
-                    None
-                } else if dx.abs() <= 1 && dz.abs() <= 1 {
-                    // The eight chunks the driver actually decorates. Post-ore,
-                    // because decoration reads *and writes* against that terrain.
-                    // Recurses into that neighbour's own 3×3 ore composition,
-                    // memoised in the store — the same call the seeding loop made,
-                    // in the same `dx` outer / `dz` inner order, just without the
-                    // copy that followed it.
-                    Some(self.post_ore_world(cx + dx, cz + dz))
-                } else {
-                    // The 16 rim chunks of the 5×5 **read** neighbourhood — new,
-                    // and the fix for the cut-off-at-the-border trees the owner
-                    // reported. Nothing decorates here; these exist so that a
-                    // source at offset (±1, ±1) reading `VEG_PADDING` blocks past
-                    // its own edge sees real terrain instead of air. Where that
-                    // air boundary fell used to depend on which column was the
-                    // centre, so a source's own pass — and therefore a tree
-                    // straddling a seam — differed between the two chunks that
-                    // recompute it. See `region_view::WIDE_RADIUS`.
-                    //
-                    // **Pre-ore, deliberately, and it costs nothing.** A column's
-                    // pre-ore closure is already exactly this 5×5
-                    // (`COLUMN_CLOSURE_RADIUS`, and `open_view` already pins it),
-                    // so all 25 of these are already memoised for every served
-                    // column and this is a store hit plus an `Arc` clone. Asking
-                    // for `post_ore_world` here instead would widen the closure to
-                    // 7×7 — 49 pre-ore chunks per column instead of 25 — for a
-                    // difference that cannot move either heightmap (ore *replaces*
-                    // blocks, so the topmost non-air `y` is identical) and can only
-                    // affect a state-identity read landing on an ore cell at least
-                    // 16 blocks from the chunk being served. See
-                    // `VegGrid::with_sources`.
-                    Some(Arc::clone(&self.pre_ore_stage(cx + dx, cz + dz).0))
-                }
-            },
-            |dx, dz| Some(Arc::clone(&self.pre_ore_stage(cx + dx, cz + dz).3)),
-            self.decoration_catalog.feature_biomes(),
+        let (world, result) = self.mixed_features_stage_selected(
+            cx,
+            cz,
+            center_world,
+            center_heights,
+            center_biomes,
+            None,
+            &[],
         );
-
-        // A source's decorated feature set is the union of section biomes in
-        // its own 3x3 chunk neighbourhood. The global catalog preserves the
-        // seed index of a feature even when earlier entries are absent from this
-        // particular union, so collecting a fresh local index here is wrong.
-        let mut source_features = BTreeMap::new();
-        for source_x in cx - 1..=cx + 1 {
-            for source_z in cz - 1..=cz + 1 {
-                let mut biomes = BTreeSet::new();
-                for dx in -1..=1 {
-                    for dz in -1..=1 {
-                        let pre = self.pre_ore_stage(source_x + dx, source_z + dz);
-                        biomes.extend(pre.3.palette().iter().cloned());
-                    }
-                }
-                let mut features = self.decoration_catalog.select(biomes.iter().map(String::as_str));
-                features.extend(
-                    self.decoration_catalog
-                        .select_step6_disks(biomes.iter().map(String::as_str)),
-                );
-                // `select` omits step 6 because the ore and disk dispatchers
-                // share its raw global index but have different placement
-                // engines. Reinsert disks into the generation-step order after
-                // both selections have walked the same catalog.
-                features.sort_by_key(|(step, index, _)| (*step, *index));
-                source_features.insert((source_x, source_z), features);
-            }
-        }
-        let features_for_source = |source_x: i32, source_z: i32| {
-            source_features
-                .get(&(source_x, source_z))
-                .map(Vec::as_slice)
-                .unwrap_or(&[])
-        };
-
-        // Vegetal decoration draws from the SAME per-chunk `WorldgenRandom`
-        // shape every decoration stage uses (`set_decoration_seed`
-        // then per-feature `set_feature_seed`) — the fresh `XoroshiroRandomSource::new(0)`
-        // seed here is a throwaway carrier state; only `set_decoration_seed`'s
-        // own derivation (which mixes in `self.seed` and each source's own
-        // origin) determines the actual RNG stream, matching `Self::ore_stage`'s
-        // identical pattern.
-        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
-        if single_source_debug {
-            let features = features_for_source(cx, cz);
-            crate::feature::vegetation::apply_decoration_steps(
-                &mut random,
-                self.seed,
-                cx,
-                cz,
-                &mut grid,
-                &self.veg_tags,
-                features,
-            );
-        } else {
-            crate::feature::vegetation::apply_decoration_steps_3x3_per_source(
-                &mut random,
-                self.seed,
-                cx,
-                cz,
-                &mut grid,
-                &self.veg_tags,
-                &features_for_source,
-            );
-        }
-
-        // The one grid this call is allowed to mutate, and the one copy this stage
-        // still makes: the store owns the canonical post-ore product and shares it
-        // with every other column that has this chunk as a neighbour, so the
-        // served chunk has to be a private copy of it. That is one 98,304-cell
-        // `Vec<u16>` memcpy — the same clone `column()` used to make before
-        // handing the grid in, moved here so the pre-vegetation content can also
-        // serve as the view's centre source. It is not a stitch: nothing is
-        // re-palettised and no cell is read individually.
-        let mut world = (*world).clone();
-        // `grid.dirty_cells()` yields absolute coordinates over the whole
-        // driven `REGION_MIN..REGION_MAX` footprint (any of the 9 sources
-        // may have written there), but `world` is sized to exactly the
-        // centre chunk's own 16×16 box — `DenseBlockGrid::set` is a no-op
-        // outside its own box, so this loop naturally keeps only the writes
-        // that land in the chunk actually being served, discarding spill
-        // into a neighbour with no extra filtering needed.
-        // Ids, not strings: `dirty_cells` would resolve each write through the
-        // interner (a read guard per cell) only for `world.set` to hash the
-        // string and look the same id back up. Both grids share this
-        // generator's interner, so the id moves straight across. Allocation-free
-        // either way — this is lock and hash traffic, not heap traffic.
-        //
-        // Write order, not scan order, and unchanged by Unit 7: `dirty` is a `Vec`
-        // in insertion order, so the states vegetation introduces are appended to
-        // `world`'s palette in exactly the sequence they were placed, as before.
-        debug_assert_eq!(
-            grid.interner().instance_id(),
-            world.interner().instance_id(),
-            "folding vegetation writes back requires both grids on one interner",
-        );
-        for (x, y, z, state) in grid.dirty_cell_ids() {
-            world.set_id(x, y, z, state);
-        }
-        // Filtered to the served chunk exactly as the fold-back above
-        // is: `DenseBlockGrid::set` silently drops an out-of-box write, so the block
-        // half needs no explicit test; this half does.
-        let block_entities = grid
-            .take_block_entities()
+        let block_entities = result
+            .block_entities
             .into_iter()
             .filter(|be| {
                 let (x, _, z) = be.position();
@@ -612,6 +695,378 @@ impl OverworldGenerator {
             })
             .collect();
         (world, block_entities)
+    }
+
+    /// Runs the complete Overworld FEATURES stream over one shared read/write
+    /// neighbourhood.  `selected_source` is only a parity filter: with
+    /// `None`, all nine source chunks run for the production path; with
+    /// `Some`, the exact same loop runs only that source for the lifecycle
+    /// materializer.  The adapters are synchronized after every raw entry so
+    /// later entries see the current resident state regardless of whether the
+    /// previous body used ore or vegetation placement.
+    #[allow(clippy::too_many_arguments)]
+    fn mixed_features_stage_selected(
+        &self,
+        cx: i32,
+        cz: i32,
+        center_world: crate::dense_grid::DenseBlockGrid,
+        center_heights: &[i32; 256],
+        center_biomes: &super::biome_cells::BiomeCells,
+        selected_source: Option<(i32, i32)>,
+        overrides: &[(i32, i32, i32, String)],
+    ) -> (
+        crate::dense_grid::DenseBlockGrid,
+        ParityDecorationResult,
+    ) {
+        if self.decoration_catalog.is_empty() {
+            return (
+                center_world,
+                ParityDecorationResult {
+                    spills: Vec::new(),
+                    block_entities: Vec::new(),
+                },
+            );
+        }
+        let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Vegetation);
+
+        let mut wide_pre:
+            [Option<Arc<super::PreOreResult>>; crate::feature::region_view::WIDE_SLOTS] =
+            std::array::from_fn(|_| None);
+        for dx in -crate::feature::region_view::WIDE_RADIUS
+            ..=crate::feature::region_view::WIDE_RADIUS
+        {
+            for dz in -crate::feature::region_view::WIDE_RADIUS
+                ..=crate::feature::region_view::WIDE_RADIUS
+            {
+                if dx == 0 && dz == 0 {
+                    continue;
+                }
+                wide_pre[crate::feature::region_view::wide_slot_of_offset(dx, dz)] =
+                    Some(self.pre_ore_stage(cx + dx, cz + dz));
+            }
+        }
+        let centre_biomes = Arc::new(center_biomes.clone());
+
+        let mut ocean_floor_wg = crate::feature::RegionHeights::unset();
+        Self::stitch_heights(&mut ocean_floor_wg, 0, 0, center_heights);
+        for dx in -crate::feature::region_view::WIDE_RADIUS
+            ..=crate::feature::region_view::WIDE_RADIUS
+        {
+            for dz in -crate::feature::region_view::WIDE_RADIUS
+                ..=crate::feature::region_view::WIDE_RADIUS
+            {
+                if dx == 0 && dz == 0 {
+                    continue;
+                }
+                let neighbour = wide_pre[crate::feature::region_view::wide_slot_of_offset(dx, dz)]
+                    .as_ref()
+                    .expect("every non-centre wide source was filled above");
+                Self::stitch_heights(
+                    &mut ocean_floor_wg,
+                    dx * 16,
+                    dz * 16,
+                    &neighbour.1,
+                );
+            }
+        }
+
+        let mut source_ores = BTreeMap::new();
+        let mut source_features = BTreeMap::new();
+        for source_x in cx - 1..=cx + 1 {
+            for source_z in cz - 1..=cz + 1 {
+                // Ore membership belongs to the source chunk's complete
+                // section-biome container.  The surrounding 3x3 supplies
+                // terrain/read context (and may receive cross-border writes),
+                // but its biome containers must not make their ore entries
+                // eligible for this source's RNG stream.  The vegetation
+                // stream below intentionally uses `source_biomes`' 3x3 union.
+                let source_ore_biomes: &[String] = if source_x == cx && source_z == cz {
+                    centre_biomes.palette()
+                } else {
+                    let dx = source_x - cx;
+                    let dz = source_z - cz;
+                    wide_pre[crate::feature::region_view::wide_slot_of_offset(dx, dz)]
+                        .as_ref()
+                        .expect("every non-centre source biome was filled above")
+                        .3
+                        .palette()
+                };
+                source_ores.insert(
+                    (source_x, source_z),
+                    self.decoration_catalog
+                        .select_ores(
+                            source_ore_biomes.iter().map(String::as_str),
+                            &self.ore_definitions,
+                        ),
+                );
+                source_features.insert(
+                    (source_x, source_z),
+                    self.source_features_for(
+                        source_x,
+                        source_z,
+                        cx,
+                        cz,
+                        &centre_biomes,
+                        &wide_pre,
+                    ),
+                );
+            }
+        }
+
+        let in_tag = |block: &str, tag: &str| -> bool {
+            self.ore_tag_map
+                .get(tag)
+                .is_some_and(|members| members.contains(block))
+        };
+        let feature_biomes = self.decoration_catalog.feature_biomes();
+        let biome_zoom_seed = super::biome::biome_zoom_seed(self.seed);
+        let biome_sources = |source_x: i32, source_z: i32| {
+            let dx = source_x - cx;
+            let dz = source_z - cz;
+            if dx == 0 && dz == 0 {
+                Some(&*centre_biomes)
+            } else if (-crate::feature::region_view::WIDE_RADIUS
+                ..=crate::feature::region_view::WIDE_RADIUS)
+                .contains(&dx)
+                && (-crate::feature::region_view::WIDE_RADIUS
+                    ..=crate::feature::region_view::WIDE_RADIUS)
+                    .contains(&dz)
+            {
+                wide_pre[crate::feature::region_view::wide_slot_of_offset(dx, dz)]
+                    .as_ref()
+                    .map(|pre| &*pre.3)
+            } else {
+                None
+            }
+        };
+        let biome_allows = |pos: crate::feature::BlockPos, feature_id: &str| {
+            let Some(biome) = super::biome::zoomed_biome(
+                biome_zoom_seed,
+                pos.x,
+                pos.y,
+                pos.z,
+                biome_sources,
+            ) else {
+                return false;
+            };
+            feature_biomes
+                .get(feature_id)
+                .is_some_and(|eligible| eligible.contains(biome))
+        };
+
+        let centre_source = &center_world;
+        let wide_sources = &wide_pre;
+        let mut ore_view = crate::feature::region_view::RegionView::over_wide_sources(
+            Arc::clone(&self.interner),
+            cx,
+            cz,
+            self.min_y,
+            self.height,
+            |dx, dz| {
+                if dx == 0 && dz == 0 {
+                    Some(centre_source)
+                } else {
+                    wide_sources[crate::feature::region_view::wide_slot_of_offset(dx, dz)]
+                        .as_ref()
+                        .map(|pre| &*pre.0)
+                }
+            },
+        );
+
+        // The decoration adapter and ore adapter share the same generator
+        // interner.  The centre clone is the immutable source snapshot while
+        // `center_world` remains the one dense grid this function may return.
+        let centre_grid = Arc::new(center_world.clone());
+        let grid_sources = &wide_pre;
+        let grid_biomes = &wide_pre;
+        let mut grid = crate::feature::vegetation::VegGrid::with_sources_and_biomes(
+            Arc::clone(&self.interner),
+            self.min_y,
+            self.height,
+            cx * 16,
+            cz * 16,
+            crate::feature::REGION_MIN - crate::feature::VEG_PADDING,
+            crate::feature::REGION_MAX + crate::feature::VEG_PADDING,
+            |dx, dz| {
+                if dx == 0 && dz == 0 {
+                    Some(Arc::clone(&centre_grid))
+                } else {
+                    grid_sources[crate::feature::region_view::wide_slot_of_offset(dx, dz)]
+                        .as_ref()
+                        .map(|pre| Arc::clone(&pre.0))
+                }
+            },
+            |dx, dz| {
+                if dx == 0 && dz == 0 {
+                    Some(Arc::clone(&centre_biomes))
+                } else {
+                    grid_biomes[crate::feature::region_view::wide_slot_of_offset(dx, dz)]
+                        .as_ref()
+                        .map(|pre| Arc::clone(&pre.3))
+                }
+            },
+            self.decoration_catalog.feature_biomes(),
+        );
+        self.veg_tags.bind(grid.interner());
+
+        let mut seeded = BTreeMap::new();
+        let mut ore_transferred = HashMap::new();
+        let local_lo = crate::feature::REGION_MIN - crate::feature::VEG_PADDING;
+        let local_hi = crate::feature::REGION_MAX + crate::feature::VEG_PADDING;
+        for &(x, y, z, ref state) in overrides {
+            let id = self.interner.id_of(state);
+            let lx = x - cx * 16;
+            let lz = z - cz * 16;
+            if ore_view.seed_read_id(lx, y, lz, id) {
+                ore_transferred.insert((x, y, z), id);
+            }
+            if (local_lo..local_hi).contains(&lx)
+                && (local_lo..local_hi).contains(&lz)
+                && (self.min_y..self.min_y + self.height).contains(&y)
+            {
+                grid.seed_id(x, y, z, id);
+            }
+            seeded.insert((x, y, z), id);
+        }
+
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        let mut grid_cursor = 0usize;
+        for dx in -1..=1_i32 {
+            for dz in -1..=1_i32 {
+                let source_x = cx + dx;
+                let source_z = cz + dz;
+                if selected_source.is_some_and(|source| source != (source_x, source_z)) {
+                    continue;
+                }
+                let features = source_features
+                    .get(&(source_x, source_z))
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                let ores = source_ores
+                    .get(&(source_x, source_z))
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                let origin = crate::feature::BlockPos {
+                    x: source_x * 16,
+                    y: self.min_y,
+                    z: source_z * 16,
+                };
+                random.begin_decoration_source();
+                let decoration_seed = random.set_decoration_seed(self.seed, origin.x, origin.z);
+
+                for step in [0_i32, 1, 2, 3, 4, 6, 7, 8, crate::feature::STEP_VEGETAL_DECORATION] {
+                    let mut decoration_at = 0usize;
+                    let mut ore_at = 0usize;
+                    loop {
+                        let next_decoration = features
+                            .iter()
+                            .enumerate()
+                            .skip(decoration_at)
+                            .find(|(_, (entry_step, _, _))| *entry_step == step);
+                        let next_ore = (step == crate::feature::STEP_UNDERGROUND_ORES)
+                            .then(|| ores.get(ore_at))
+                            .flatten();
+                        let next_index = match (next_decoration, next_ore) {
+                            (Some((_, (_, index, _))), Some(ore)) => Some((*index).min(ore.index)),
+                            (Some((_, (_, index, _))), None) => Some(*index),
+                            (None, Some(ore)) => Some(ore.index),
+                            (None, None) => None,
+                        };
+                        let Some(index) = next_index else {
+                            break;
+                        };
+                        if let Some((entry_at, (_, found, placed))) = next_decoration
+                            .filter(|(_, (_, found, _))| *found == index)
+                        {
+                            crate::feature::vegetation::apply_decoration_entry_at_seed(
+                                &mut random,
+                                decoration_seed,
+                                origin,
+                                step,
+                                *found,
+                                placed,
+                                &mut grid,
+                                &self.veg_tags,
+                            );
+                            synchronize_mixed_entry(
+                                MixedEntryWriter::Decoration,
+                                &mut grid,
+                                &mut ore_view,
+                                cx,
+                                cz,
+                                &mut grid_cursor,
+                                &mut ore_transferred,
+                            );
+                            decoration_at = entry_at + 1;
+                        } else if let Some(ore) = next_ore.filter(|ore| ore.index == index) {
+                            let input = crate::feature::OreInput {
+                                chunk_x: source_x,
+                                chunk_z: source_z,
+                                center_x: cx,
+                                center_z: cz,
+                                min_y: self.min_y,
+                                height: self.height,
+                                min_gen_y: self.min_y,
+                                gen_depth: self.height,
+                                read_min: crate::feature::ORE_READ_MIN,
+                                read_max: crate::feature::ORE_READ_MAX,
+                                ocean_floor_wg: &ocean_floor_wg,
+                                in_tag: &in_tag,
+                                biome_allows: Some(&biome_allows),
+                            };
+                            crate::feature::apply_ore_entry_at_seed(
+                                &mut random,
+                                decoration_seed,
+                                &input,
+                                step,
+                                ore,
+                                &mut ore_view,
+                            );
+                            synchronize_mixed_entry(
+                                MixedEntryWriter::Ore,
+                                &mut grid,
+                                &mut ore_view,
+                                cx,
+                                cz,
+                                &mut grid_cursor,
+                                &mut ore_transferred,
+                            );
+                            ore_at += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut spills = Vec::new();
+        if let Some(source) = selected_source {
+            let mut final_cells = BTreeMap::new();
+            for (x, y, z, state) in grid.dirty_cell_ids() {
+                final_cells.insert((x, y, z), state);
+            }
+            spills = final_cells
+                .into_iter()
+                .filter(|(position, state)| seeded.get(position).copied() != Some(*state))
+                .map(|(position, state)| ParityDecorationSpill {
+                    source,
+                    position,
+                    state: self.interner.name_of(state).to_owned(),
+                })
+                .collect();
+        }
+        let block_entities = grid.take_block_entities();
+        drop(ore_view);
+        let mut world = center_world;
+        for (x, y, z, state) in grid.dirty_cell_ids() {
+            world.set_id(x, y, z, state);
+        }
+        (
+            world,
+            ParityDecorationResult {
+                spills,
+                block_entities,
+            },
+        )
     }
 
     /// Stage 7: the `TOP_LAYER_MODIFICATION` step —
@@ -622,8 +1077,7 @@ impl OverworldGenerator {
     /// Vanilla's own snow-and-freeze feature's placement loops `dx`/`dz` over `0..16` from the chunk
     /// origin and writes only at `(x, y, z)` / `(x, y - 1, z)` of that same
     /// column, so it has no
-    /// neighbour-write spill for [`Self::ore_stage`]'s and
-    /// [`Self::vegetation_stage`]'s neighbour drivers to model. A neighbour's own
+    /// neighbour-write spill for the FEATURES dispatcher to model. A neighbour's own
     /// freeze pass cannot reach into this chunk, and this one cannot reach out.
     /// That also means this stage costs no neighbour recomputation at all — it is
     /// one 256-column scan over a grid that is already in hand.
@@ -659,14 +1113,13 @@ impl OverworldGenerator {
         // discovers it is running against the fixture tree rather than the
         // embedded server data.
         let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::TopLayer);
-        // Debug-only escape hatch, mirroring `LODESTONE_ORE_SINGLE_SOURCE_DEBUG`
-        // and `LODESTONE_VEG_SINGLE_SOURCE_DEBUG` above: skip the step entirely
-        // so the A arm of a timing comparison can be measured in the same
-        // process as the B arm. Never used by `column()`'s normal path. Note a
-        // timing comparison must still build a FRESH generator per arm —
-        // `pre_ore_cache`/`post_ore_cache` are per-generator and would otherwise
-        // make the second arm measure nothing (the trap `049c603` already had to
-        // fix in two determinism gates).
+        // Debug-only escape hatch: skip the step entirely so the A arm of a
+        // timing comparison can be measured in the same process as the B arm.
+        // Never used by `column()`'s normal path. Note a timing comparison must
+        // still build a FRESH generator per arm — the staged store is
+        // per-generator and would otherwise make the second arm measure
+        // nothing (the trap `049c603` already had to fix in two determinism
+        // gates).
         if std::env::var("LODESTONE_FREEZE_DISABLE_DEBUG").is_ok() {
             return (world, crate::feature::top_layer::FreezeCounts::default());
         }
@@ -705,7 +1158,7 @@ impl OverworldGenerator {
 }
 
 // `stitch_veg_region` used to live here, and Unit 7 deleted it rather than
-// narrowing it. It copied one source chunk's whole post-ore field into the
+// narrowing it. It copied one source chunk's whole terrain field into the
 // vegetation grid, absolute cell by absolute cell, and it was the single most
 // damning number in `docs/plans/worldgen-rewrite.md`'s diagnosis: at one
 // `String` allocation per cell it accounted for 884,736 of the 905,459 heap
@@ -718,3 +1171,96 @@ impl OverworldGenerator {
 // `VegGrid::with_sources` deletes it outright: the nine grids are borrowed, and
 // `crate::counters::Counters::stitch_cells` — the counter that measured exactly
 // this loop and `stitch_region`'s twin — now reads zero for a served column.
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::{MixedEntryWriter, synchronize_mixed_entry};
+    use crate::dense_grid::DenseBlockGrid;
+    use crate::feature::region_view::RegionView;
+    use crate::feature::vegetation::VegGrid;
+    use crate::interner::StateInterner;
+
+    #[test]
+    fn mixed_entry_sync_bridges_each_adapter_once() {
+        let interner = Arc::new(StateInterner::new());
+        let air = interner.id_of("minecraft:air");
+        let backing = DenseBlockGrid::with_interner(
+            Arc::clone(&interner),
+            -16,
+            0,
+            -16,
+            48,
+            8,
+            48,
+            air,
+        );
+        let mut ore_view = RegionView::over_region_grid(&backing, 0, 8);
+        let mut grid = VegGrid::with_footprint_interned(
+            Arc::clone(&interner),
+            0,
+            8,
+            0,
+            0,
+            -24,
+            40,
+        );
+        let basalt = interner.id_of("minecraft:basalt");
+        let blackstone = interner.id_of("minecraft:blackstone");
+        assert!(grid.set_id_if_in_bounds(1, 1, 1, basalt));
+
+        let mut grid_cursor = 0usize;
+        let mut transferred = std::collections::HashMap::new();
+        let sync = synchronize_mixed_entry(
+            MixedEntryWriter::Decoration,
+            &mut grid,
+            &mut ore_view,
+            0,
+            0,
+            &mut grid_cursor,
+            &mut transferred,
+        );
+        assert_eq!(sync.projected, 1);
+        assert_eq!(ore_view.get_id(1, 1, 1), basalt);
+        assert_eq!(
+            synchronize_mixed_entry(
+                MixedEntryWriter::Decoration,
+                &mut grid,
+                &mut ore_view,
+                0,
+                0,
+                &mut grid_cursor,
+                &mut transferred,
+            )
+            .projected,
+            0,
+        );
+
+        assert!(ore_view.set_id(2, 1, 2, blackstone));
+        let sync = synchronize_mixed_entry(
+            MixedEntryWriter::Ore,
+            &mut grid,
+            &mut ore_view,
+            0,
+            0,
+            &mut grid_cursor,
+            &mut transferred,
+        );
+        assert_eq!(sync.projected, 1);
+        assert_eq!(grid.get_id(2, 1, 2), blackstone);
+        assert_eq!(
+            synchronize_mixed_entry(
+                MixedEntryWriter::Ore,
+                &mut grid,
+                &mut ore_view,
+                0,
+                0,
+                &mut grid_cursor,
+                &mut transferred,
+            )
+            .projected,
+            0,
+        );
+    }
+}

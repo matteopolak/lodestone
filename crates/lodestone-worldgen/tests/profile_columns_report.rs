@@ -147,7 +147,7 @@ fn prints_a_real_stage_percentile_report_over_a_small_patch() {
 /// `StageGuard::enter` has exactly one call site
 /// (`OverworldGenerator::intern_from_dense`), reached exactly once per
 /// top-level `column`/`column_timed` call and never from the
-/// neighbour-chunk recursion inside `ore_stage`/`vegetation_stage` — so
+/// neighbour-chunk reads inside the unified FEATURES dispatcher — so
 /// after `reset()`, profiling `N` columns must leave
 /// `stage_entered[Stage::Intern]` at exactly `N`. Disagreement would mean
 /// the aggregation loop skipped, doubled, or deduplicated a coordinate, not
