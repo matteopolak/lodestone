@@ -248,7 +248,7 @@ fn canonical_light_v5(w: &mut Writer, light: &lodestone_world::ColumnLight, sky:
     }
 }
 
-fn canonical_nbt(w: &mut Writer, value: &Nbt) {
+pub(crate) fn canonical_nbt(w: &mut Writer, value: &Nbt) {
     match value {
         Nbt::End => w.u8(0),
         Nbt::Byte(value) => { w.u8(1); w.i8(*value); }

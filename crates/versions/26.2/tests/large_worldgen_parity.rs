@@ -2,13 +2,13 @@
 //! a full 501² run is an external oracle job, not a regular unit test.
 mod support { pub mod large_parity_manifest; }
 
-use std::{fs::File, io::{BufReader, Read, Seek, SeekFrom}};
-use lodestone_core::Reader;
+use std::{collections::BTreeMap, fs::File, io::{BufReader, Read, Seek, SeekFrom}, path::Path};
+use lodestone_core::{Reader, Writer};
 use lodestone_server::{ChunkColumn, ChunkSource, ServerDirective, ServerProtocol, end_chunk_source, nether_chunk_source, overworld_chunk_source, retained_chunk_source_for_view_radius};
 use lodestone_server::dimension::Dimension as ServerDimension;
 use lodestone_v26_2::V770ServerProtocol;
 use lodestone_v26_2::packets::chunk::{ChunkShape, LevelChunkWithLight};
-use support::large_parity_manifest::{Dimension, HEADER_BYTES, read_header, payload_digest_from_header, semantic_digest, semantic_digest_for_dimension, semantic_digest_v5_for_dimension, semantic_record, semantic_record_for_dimension, semantic_record_v5_for_dimension, verify_payload};
+use support::large_parity_manifest::{Dimension, HEADER_BYTES, canonical_nbt, read_header, payload_digest_from_header, semantic_digest, semantic_digest_for_dimension, semantic_digest_v5_for_dimension, semantic_record, semantic_record_for_dimension, semantic_record_v5_for_dimension, verify_payload};
 
 type ChunkPos = (i32, i32);
 type AbsoluteCell = (i32, i32, i32);
@@ -372,6 +372,14 @@ fn parity_manifest_streams_before_rust_comparison() {
         .ok().and_then(|value| value.parse::<u64>().ok()).unwrap_or(h.count);
     let limit = max_chunks.min(h.count);
     let width = (h.cx1 - h.cx0 + 1) as u64;
+    let scan_all = std::env::var_os("LODESTONE_LARGE_PARITY_SCAN_ALL").is_some();
+    let reference_packets = if scan_all {
+        load_reference_packets(dimension, h.cx0, h.cx1, h.cz0, h.cz1, limit)
+    } else {
+        BTreeMap::new()
+    };
+    let mut digest_mismatches = Vec::new();
+    let mut component_reports = Vec::new();
     let mut expected_digest = [0u8; 32];
     for index in 0..limit {
         expected.read_exact(&mut expected_digest).expect("manifest semantic digest");
@@ -415,12 +423,19 @@ fn parity_manifest_streams_before_rust_comparison() {
             version => panic!("unsupported parity semantic version {version}"),
         };
         if full != expected_digest {
-            let packet_summary = std::env::var_os("LODESTONE_LARGE_PARITY_REFERENCE_PACKET")
-                .map(|path| packet_difference_summary(&std::fs::read(path).expect("read authoritative packet capture"), &payload, dimension));
-            panic!(
-                "large semantic parity mismatch at ({cx},{cz}) after {index} matching chunks: reference SHA-256 {}, Lodestone SHA-256 {}{}",
-                hex(&expected_digest), hex(&full), packet_summary.as_deref().unwrap_or(""),
-            );
+            if !scan_all {
+                let packet_summary = std::env::var_os("LODESTONE_LARGE_PARITY_REFERENCE_PACKET")
+                    .map(|path| packet_difference_summary(&std::fs::read(path).expect("read authoritative packet capture"), &payload, dimension));
+                panic!(
+                    "large semantic parity mismatch at ({cx},{cz}) after {index} matching chunks: reference SHA-256 {}, Lodestone SHA-256 {}{}",
+                    hex(&expected_digest), hex(&full), packet_summary.as_deref().unwrap_or(""),
+                );
+            }
+            digest_mismatches.push((cx, cz, expected_digest, full));
+        }
+        if let Some(reference_packet) = reference_packets.get(&(cx, cz)) {
+            let report = packet_component_difference(reference_packet, &payload, dimension);
+            component_reports.push(((cx, cz), report));
         }
         if (index + 1) % 256 == 0 || index + 1 == limit {
             eprintln!("large semantic parity: compared {}/{} chunks (batch boundary at ({cx},{cz}))", index + 1, limit);
@@ -428,6 +443,17 @@ fn parity_manifest_streams_before_rust_comparison() {
     }
     if limit < h.count {
         eprintln!("large semantic parity: bounded pilot completed successfully at {} chunks; full grid remains pending", limit);
+    }
+    let diagnostic = format_diagnostic_report(limit, h.count, &digest_mismatches, &component_reports);
+    let has_component_mismatches = component_reports.iter().any(|(_, report)| report.has_mismatch());
+    let has_failing_component_mismatches = component_reports.iter().any(|(_, report)| report.has_failing_mismatch());
+    if !digest_mismatches.is_empty() || has_component_mismatches {
+        if let Some(path) = std::env::var_os("LODESTONE_LARGE_PARITY_DIAGNOSTIC_OUT") {
+            std::fs::write(path, &diagnostic).expect("write parity diagnostic report");
+        }
+    }
+    if !digest_mismatches.is_empty() || has_failing_component_mismatches {
+        panic!("{}", format_diagnostic_summary(limit, h.count, &digest_mismatches, &component_reports));
     }
 }
 
@@ -617,6 +643,212 @@ fn packet_difference_summary(reference: &[u8], actual: &[u8], dimension: Dimensi
         "; captured-packet diagnosis: reference={} bytes, Lodestone={} bytes, block cells differ={differing_blocks}, biome cells differ={differing_biomes}, heightmaps equal={heightmaps_equal} ({heightmap_differences:?}), block entities equal={block_entities_equal}, reference stored sky={reference_stored_sky:?}, block={reference_stored_block:?}, sky light cells differ={differing_sky_light_cells} in sections {differing_sky_light_sections:?}, first sky differences={first_sky_light_differences:?}, sky difference extents={sky_light_difference_extents:?}, block light cells differ={differing_block_light_cells} in sections {differing_block_light_sections:?}, representations={light_representations:?}, non-air reference={non_air_reference}, Lodestone={non_air_actual}, first block difference={first_block_difference}, common state pairs={common_state_pairs}, differing blocks={block_difference_positions}",
         reference_len, actual_len,
     )
+}
+
+const MAX_COMPONENT_EXAMPLES: usize = 32;
+const MAX_REFERENCE_PACKET_BYTES: u64 = 8 * 1024 * 1024;
+
+#[derive(Default)]
+struct ComponentDiff {
+    total: usize,
+    examples: Vec<String>,
+}
+
+impl ComponentDiff {
+    fn push(&mut self, value: String) {
+        self.total += 1;
+        if self.examples.len() < MAX_COMPONENT_EXAMPLES {
+            self.examples.push(value);
+        }
+    }
+}
+
+#[derive(Default)]
+struct PacketComponentReport {
+    terrain: ComponentDiff,
+    biomes: ComponentDiff,
+    heightmaps: ComponentDiff,
+    block_entities: ComponentDiff,
+    sky_light: ComponentDiff,
+    block_light: ComponentDiff,
+    masks: ComponentDiff,
+}
+
+impl PacketComponentReport {
+    fn has_mismatch(&self) -> bool {
+        self.terrain.total != 0
+            || self.biomes.total != 0
+            || self.heightmaps.total != 0
+            || self.block_entities.total != 0
+            || self.sky_light.total != 0
+            || self.block_light.total != 0
+            || self.masks.total != 0
+    }
+
+    fn has_failing_mismatch(&self) -> bool {
+        self.terrain.total != 0
+            || self.biomes.total != 0
+            || self.heightmaps.total != 0
+            || self.block_entities.total != 0
+            || self.sky_light.total != 0
+            || self.block_light.total != 0
+    }
+}
+
+fn load_reference_packets(
+    dimension: Dimension,
+    cx0: i32,
+    cx1: i32,
+    cz0: i32,
+    cz1: i32,
+    limit: u64,
+) -> BTreeMap<ChunkPos, Vec<u8>> {
+    let mut paths = Vec::new();
+    if let Some(path) = std::env::var_os("LODESTONE_LARGE_PARITY_REFERENCE_PACKET") {
+        paths.push(path.into());
+    }
+    if let Some(directory) = std::env::var_os("LODESTONE_LARGE_PARITY_REFERENCE_PACKET_DIR") {
+        for entry in std::fs::read_dir(directory).expect("read reference packet directory") {
+            let path = entry.expect("read reference packet directory entry").path();
+            let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+            if name.starts_with("reference")
+                && path.extension().is_some_and(|ext| ext == "packet")
+                && path.is_file()
+            {
+                paths.push(path.into_os_string());
+            }
+        }
+    }
+    let packet_limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    assert!(paths.len() <= packet_limit, "reference packet inputs ({}) exceed the selected manifest prefix ({limit} chunks)", paths.len());
+    let mut packets = BTreeMap::new();
+    for path in paths {
+        let path = Path::new(&path);
+        let size = std::fs::metadata(path).unwrap_or_else(|error| panic!("stat {}: {error}", path.display())).len();
+        assert!(size <= MAX_REFERENCE_PACKET_BYTES, "reference packet {} is {size} bytes, over the {MAX_REFERENCE_PACKET_BYTES}-byte diagnostic bound", path.display());
+        let bytes = std::fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        let packet = packet_decode_for_dimension(&bytes, dimension);
+        let coordinate = (packet.x, packet.z);
+        let width = i64::from(cx1 - cx0 + 1);
+        let index = i64::from(coordinate.1 - cz0) * width + i64::from(coordinate.0 - cx0);
+        assert!(coordinate.0 >= cx0 && coordinate.0 <= cx1 && coordinate.1 >= cz0 && coordinate.1 <= cz1 && index >= 0 && u64::try_from(index).is_ok_and(|index| index < limit), "reference packet {} decodes to {coordinate:?}, outside the selected manifest prefix", path.display());
+        if packets.insert(coordinate, bytes).is_some() {
+            panic!("duplicate reference packet for {coordinate:?}");
+        }
+    }
+    packets
+}
+
+fn packet_component_difference(reference_bytes: &[u8], actual_bytes: &[u8], dimension: Dimension) -> PacketComponentReport {
+    let reference = packet_decode_for_dimension(reference_bytes, dimension);
+    let actual = packet_decode_for_dimension(actual_bytes, dimension);
+    assert_eq!((reference.x, reference.z), (actual.x, actual.z), "reference/current packet coordinates differ");
+    let mut report = PacketComponentReport::default();
+
+    for section in 0..reference.column.section_count() {
+        let reference_section = reference.column.section(section);
+        let actual_section = actual.column.section(section);
+        for cell in 0..4096 {
+            let left = reference_section.map_or(0, |value| value.block_states().get(cell));
+            let right = actual_section.map_or(0, |value| value.block_states().get(cell));
+            if left != right {
+                let x = cell % 16;
+                let z = (cell / 16) % 16;
+                let y = reference.column.min_y() + section as i32 * 16 + (cell / 256) as i32;
+                report.terrain.push(format!("({x},{y},{z}) {} -> {}", state_label(left), state_label(right)));
+            }
+        }
+        for cell in 0..64 {
+            let left = reference_section.map_or(0, |value| value.biomes().get(cell));
+            let right = actual_section.map_or(0, |value| value.biomes().get(cell));
+            if left != right {
+                let x = cell % 4;
+                let z = (cell / 4) % 4;
+                let y = cell / 16;
+                report.biomes.push(format!("section {section} ({x},{y},{z}) {left} -> {right}"));
+            }
+        }
+    }
+
+    let mut ids = reference.heightmaps.iter().map(|(id, _)| id).chain(actual.heightmaps.iter().map(|(id, _)| id)).collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids.dedup();
+    for id in ids {
+        let left = reference.heightmaps.get(id);
+        let right = actual.heightmaps.get(id);
+        for z in 0..16 {
+            for x in 0..16 {
+                let a = left.map(|value| value.get(x, z));
+                let b = right.map(|value| value.get(x, z));
+                if a != b { report.heightmaps.push(format!("id {id} ({x},{z}) {a:?} -> {b:?}")); }
+            }
+        }
+    }
+
+    let mut left = reference.block_entities.clone();
+    let mut right = actual.block_entities.clone();
+    left.sort_unstable_by_key(canonical_entity_key);
+    right.sort_unstable_by_key(canonical_entity_key);
+    let max = left.len().max(right.len());
+    for index in 0..max {
+        let a = left.get(index);
+        let b = right.get(index);
+        if a.map(canonical_entity_key) != b.map(canonical_entity_key) {
+            let position = a.or(b).map(|entity| (entity.rel_x, entity.y, entity.rel_z, entity.type_id));
+            report.block_entities.push(format!("index {index} at {position:?}"));
+        }
+    }
+
+    for section in 0..reference.light.light_section_count() {
+        let left = reference.light.section_light(section);
+        let right = actual.light.section_light(section);
+        for cell in 0..4096 {
+            let x = cell % 16;
+            let z = (cell / 16) % 16;
+            let y = cell / 256;
+            let a = left.sky_at(x, y, z);
+            let b = right.sky_at(x, y, z);
+            if a != b { report.sky_light.push(format!("section {section} ({x},{y},{z}) {a} -> {b}")); }
+            let a = left.block_at(x, y, z);
+            let b = right.block_at(x, y, z);
+            if a != b { report.block_light.push(format!("section {section} ({x},{y},{z}) {a} -> {b}")); }
+        }
+        let masks = [
+            ("sky", reference.light.sky(section), actual.light.sky(section)),
+            ("block", reference.light.block(section), actual.light.block(section)),
+        ];
+        for (layer, a, b) in masks {
+            let tag = |value: &lodestone_world::LightData| match value {
+                lodestone_world::LightData::Missing => "missing",
+                lodestone_world::LightData::Uniform(0) => "empty",
+                lodestone_world::LightData::Uniform(_) | lodestone_world::LightData::Values(_) => "present",
+            };
+            if tag(a) != tag(b) { report.masks.push(format!("{layer} section {section}: {} -> {}", tag(a), tag(b))); }
+        }
+    }
+    report
+}
+
+fn canonical_entity_key(entity: &lodestone_world::BlockEntity) -> (u8, i16, u8, u32, Vec<u8>) {
+    let mut writer = Writer::default();
+    canonical_nbt(&mut writer, &entity.nbt);
+    (entity.rel_x, entity.y, entity.rel_z, entity.type_id, writer.into_vec())
+}
+
+fn format_diagnostic_report(limit: u64, total: u64, digest: &[(i32, i32, [u8; 32], [u8; 32])], components: &[((i32, i32), PacketComponentReport)]) -> String {
+    let mut output = format!("large semantic parity diagnostic: compared {limit}/{total} chunks; digest mismatches={} coordinates={:?}\n", digest.len(), digest.iter().map(|(x, z, _, _)| (*x, *z)).collect::<Vec<_>>());
+    for ((x, z), report) in components {
+        output.push_str(&format!("packet ({x},{z}) component mismatches: terrain={} {:?}; biomes={} {:?}; heightmaps={} {:?}; block_entities={} {:?}; sky_light={} {:?}; block_light={} {:?}; masks={} {:?}\n", report.terrain.total, report.terrain.examples, report.biomes.total, report.biomes.examples, report.heightmaps.total, report.heightmaps.examples, report.block_entities.total, report.block_entities.examples, report.sky_light.total, report.sky_light.examples, report.block_light.total, report.block_light.examples, report.masks.total, report.masks.examples));
+    }
+    output
+}
+
+fn format_diagnostic_summary(limit: u64, total: u64, digest: &[(i32, i32, [u8; 32], [u8; 32])], components: &[((i32, i32), PacketComponentReport)]) -> String {
+    let mut output = format!("large semantic parity diagnostic: compared {limit}/{total} chunks; digest mismatches={} coordinates={:?}", digest.len(), digest.iter().map(|(x, z, _, _)| (*x, *z)).collect::<Vec<_>>());
+    for ((x, z), report) in components {
+        output.push_str(&format!("\npacket ({x},{z}) counts: terrain={}, biomes={}, heightmaps={}, block_entities={}, sky_light={}, block_light={}, masks={}", report.terrain.total, report.biomes.total, report.heightmaps.total, report.block_entities.total, report.sky_light.total, report.block_light.total, report.masks.total));
+    }
+    output
 }
 
 fn state_label(id: u32) -> String {
