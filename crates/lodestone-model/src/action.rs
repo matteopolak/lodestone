@@ -6,6 +6,7 @@ use crate::{
     ids::ResourceKey,
     item::ItemStack,
     math::{BlockPos, Rotation, Vec3, Vec3f},
+    prediction::PredictionSequence,
 };
 
 /// Things the client wants to do before a version adapter lowers them into a
@@ -153,7 +154,7 @@ pub enum ClientAction {
         /// Whether the hit starts inside a block.
         inside_block: bool,
         /// Client prediction sequence number.
-        sequence: i32,
+        sequence: PredictionSequence,
     },
     /// Use the held item in air.
     UseItem {

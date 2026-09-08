@@ -431,7 +431,10 @@ impl Sim {
     /// contract. It clears processed predictions whose state already agrees in
     /// the client-owned world and releases every older snapshot in the same
     /// acknowledgement window.
-    pub(crate) fn settle_placement_predictions(&mut self, sequence: i32) {
+    pub(crate) fn settle_placement_predictions(
+        &mut self,
+        sequence: lodestone_model::PredictionSequence,
+    ) {
         let settled = self.write(|world| {
             world
                 .resource_mut::<PlacementPredictor>()
@@ -441,7 +444,7 @@ impl Sim {
         if !settled.is_empty() {
             tracing::debug!(
                 target: "placement",
-                sequence,
+                sequence = sequence.raw(),
                 settled = settled.len(),
                 "server processed optimistic block placements"
             );

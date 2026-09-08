@@ -127,7 +127,7 @@ fn block_use(
         pos,
         face,
         cursor: Vec3f::new(cursor_x, cursor_y, cursor_z),
-        sequence: 0,
+        sequence: lodestone_model::PredictionSequence::INITIAL,
         hand,
     }
 }

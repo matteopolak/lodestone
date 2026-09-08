@@ -173,7 +173,7 @@ fn block_use_decodes_the_774_border_flag_before_its_prediction_sequence() {
                 y: 1.0,
                 z: 0.75,
             },
-            sequence: 17,
+            sequence: lodestone_model::PredictionSequence::new(17),
             hand: 0,
         }
     );

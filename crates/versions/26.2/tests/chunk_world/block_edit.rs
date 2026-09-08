@@ -292,7 +292,7 @@ async fn dig_and_place_persist_through_forget_and_reload() {
             face: BlockFace::Up,
             cursor: Vec3f::new(0.5, 1.0, 0.5),
             inside_block: false,
-            sequence: 3,
+            sequence: lodestone_model::PredictionSequence::new(3),
         })
         .expect("send use item on");
 

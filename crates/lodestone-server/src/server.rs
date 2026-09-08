@@ -11662,7 +11662,7 @@ where
             pos,
             face,
             cursor,
-            sequence: _,
+            sequence,
             hand,
         } => {
             // Draw one roll per right-click, regardless of the clicked block;
@@ -11710,6 +11710,10 @@ where
                 world.crafting_hooks(),
             )
             .await?;
+            // The edit handler has finished all authoritative writes and
+            // correction packets before this acknowledgement retires the
+            // client's optimistic placement ledger.
+            apply(conn, state, proto.encode_block_changed_ack(sequence)).await?;
         }
         ServerBound::DifficultyChanged { difficulty } => {
             // A difficulty change requires permission level `2`. A locked world

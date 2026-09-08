@@ -417,7 +417,7 @@ impl ServerProtocol for V756ServerProtocol {
                     },
                     // This era predates the block-prediction sequence, so the
                     // consumer receives the only unambiguous sentinel.
-                    sequence: 0,
+                    sequence: lodestone_model::PredictionSequence::INITIAL,
                     hand,
                 }
             }
@@ -917,7 +917,7 @@ impl ServerProtocol for V758ServerProtocol {
                         y: cursor_y,
                         z: cursor_z,
                     },
-                    sequence: 0,
+                    sequence: lodestone_model::PredictionSequence::INITIAL,
                     hand,
                 }
             }

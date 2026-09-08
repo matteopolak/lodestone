@@ -104,7 +104,7 @@ fn use_item_on_block_sends_hand_and_float_cursor_no_item() {
             z: 0.25,
         },
         inside_block: false,
-        sequence: 7,
+        sequence: lodestone_model::PredictionSequence::new(7),
     });
     assert_eq!(id, play::serverbound::BLOCK_PLACE);
     let place: BlockPlace = decode(&body);
@@ -124,7 +124,7 @@ fn use_item_in_air_uses_sentinel_placement() {
             yaw: 0.0,
             pitch: 0.0,
         },
-        sequence: 0,
+            sequence: lodestone_model::PredictionSequence::INITIAL,
     });
     assert_eq!(id, play::serverbound::BLOCK_PLACE);
     let place: BlockPlace = decode(&body);

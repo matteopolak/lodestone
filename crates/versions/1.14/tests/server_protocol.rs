@@ -145,7 +145,7 @@ fn assert_block_use_lift<P: ServerProtocol>(protocol: &P, packet_id: i32) {
             pos: BlockPos::new(5, -10, -7),
             face: BlockFace::South,
             cursor: Vec3f::new(0.25, 1.0, 0.75),
-            sequence: 0,
+            sequence: lodestone_model::PredictionSequence::INITIAL,
             hand: 1,
         }
     );

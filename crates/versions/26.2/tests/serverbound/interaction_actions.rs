@@ -10,7 +10,7 @@
 
 use lodestone_model::{
     AdapterError, BlockActionKind, BlockFace, ClientAction, ConnectionState, EntityInteraction,
-    Hand, PlayerCommand, PlayerInput, Rotation, Vec3, Vec3f, VersionAdapter,
+    Hand, PlayerCommand, PlayerInput, PredictionSequence, Rotation, Vec3, Vec3f, VersionAdapter,
 };
 use lodestone_v26_2::V770Adapter;
 use lodestone_v26_2::packet_ids::play;
@@ -195,7 +195,7 @@ fn use_item_on_is_byte_exact() {
             z: 0.75,
         },
         inside_block: true,
-        sequence: 42,
+        sequence: PredictionSequence::new(42),
     });
     assert_eq!(id, play::serverbound::USE_ITEM_ON);
     let mut want = Vec::new();

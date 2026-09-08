@@ -154,7 +154,7 @@ fn block_use(
             y: cursor_y,
             z: cursor_z,
         },
-        sequence: 0,
+        sequence: lodestone_model::PredictionSequence::INITIAL,
         hand,
     }
 }

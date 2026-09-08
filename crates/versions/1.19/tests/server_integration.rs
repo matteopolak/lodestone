@@ -23,7 +23,7 @@ fn adapter_block_use_reaches_protocol_762_host_consumer() {
             z: 0.75,
         },
         inside_block: true,
-        sequence: 17,
+        sequence: lodestone_model::PredictionSequence::new(17),
     };
     let Some((packet_id, payload)) = adapter_for(762)
         .encode_action(ConnectionState::Play, &action)
@@ -43,7 +43,7 @@ fn adapter_block_use_reaches_protocol_762_host_consumer() {
                 y: 1.0,
                 z: 0.75,
             },
-            sequence: 17,
+            sequence: lodestone_model::PredictionSequence::new(17),
             hand: 1,
         },
         "the adapter and registry-selected host must agree on the placement consumer input"

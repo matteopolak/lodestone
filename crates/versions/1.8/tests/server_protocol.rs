@@ -362,7 +362,7 @@ fn block_place_lifts_the_protocol_47_body_to_the_shared_placement_consumer() {
             face: BlockFace::East,
             cursor: Vec3f::new(0.25, 0.5, 0.75),
             hand: 0,
-            sequence: 0,
+            sequence: lodestone_model::PredictionSequence::INITIAL,
         }
     );
     assert_eq!(
@@ -402,7 +402,7 @@ fn adapter_emitted_block_place_reaches_the_hosted_placement_boundary() {
         face: BlockFace::North,
         cursor: Vec3f::new(0.5, 0.25, 0.75),
         inside_block: false,
-        sequence: 123,
+        sequence: lodestone_model::PredictionSequence::new(123),
     };
     let (packet_id, body) = V47Adapter::new()
         .encode_action(ConnectionState::Play, &action)
@@ -417,7 +417,7 @@ fn adapter_emitted_block_place_reaches_the_hosted_placement_boundary() {
             // The era's cursor is rounded to sixteenths by the adapter.
             cursor: Vec3f::new(0.5, 0.25, 0.6875),
             hand: 0,
-            sequence: 0,
+            sequence: lodestone_model::PredictionSequence::INITIAL,
         },
         "the real adapter frame must reach the shared server variant consumed by placement"
     );

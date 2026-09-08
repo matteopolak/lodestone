@@ -7,6 +7,7 @@ use crate::{
     ids::{DimensionId, Identifier, ResourceKey},
     item::ItemStack,
     math::{BlockPos, ChunkPos, Quat, Rotation, SectionPos, Vec3, Vec3f},
+    prediction::PredictionSequence,
     text::{Text, TextColor},
 };
 
@@ -2611,7 +2612,7 @@ pub enum ClientEvent {
     /// `sequence`; predictions at or before it can be reconciled/discarded.
     BlockChangedAck {
         /// Acknowledged sequence number.
-        sequence: i32,
+        sequence: PredictionSequence,
     },
     /// The chunk-loading center moved (usually following the player).
     ChunkCacheCenterChanged {
@@ -4917,7 +4918,9 @@ mod route_tests {
     /// lifecycle consumer visible to the exhaustive table.
     #[test]
     fn block_changed_ack_reaches_the_placement_prediction_consumer() {
-        let r = route(&ClientEvent::BlockChangedAck { sequence: 7 });
+        let r = route(&ClientEvent::BlockChangedAck {
+            sequence: PredictionSequence::new(7),
+        });
         assert!(r.shell, "the shell owns the placement prediction ledger");
         assert!(r.must_forward(), "the acknowledgement needs a NetUpdate arm");
         assert!(!r.is_island());

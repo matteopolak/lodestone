@@ -67,7 +67,7 @@ use lodestone_model::command_tree::{
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, Difficulty, EntityAttributeSnapshot, GameMode,
     ItemComponents, ItemStack, RecipeBookType, ResourceKey, ResourcePackResponseKind, Rotation,
-    SoundCategory, Text, TextContent, Vec3, Vec3f, WrittenBookContent,
+    SoundCategory, Text, TextContent, Vec3, Vec3f, WrittenBookContent, PredictionSequence,
 };
 use lodestone_server::{
     Abilities, ChunkColumn as ServerChunkColumn, ChunkEncoder, EntitySnapshot, HOTBAR_SIZE,
@@ -1361,6 +1361,13 @@ fn encode_block_update_body(x: i32, y: i32, z: i32, state_id: u32) -> Vec<u8> {
     let mut w = Writer::default();
     w.i64(pack_block_pos(x, y, z));
     w.var_i32(state_id as i32);
+    w.into_vec()
+}
+
+/// Encodes the one-field prediction acknowledgement body.
+fn encode_block_changed_ack_body(sequence: PredictionSequence) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.var_i32(sequence.as_wire());
     w.into_vec()
 }
 
@@ -3761,7 +3768,7 @@ impl ServerProtocol for V770ServerProtocol {
                             y: use_item.cursor_y,
                             z: use_item.cursor_z,
                         },
-                        sequence: use_item.sequence,
+                        sequence: PredictionSequence::from_wire(use_item.sequence),
                         // Same malformed-input convention as `USE_ITEM`'s hand just
                         // above: anything outside `0..=1` degrades to main hand
                         // rather than dropping the packet.
@@ -5494,6 +5501,13 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
+    fn encode_block_changed_ack(&self, sequence: PredictionSequence) -> ServerDirective {
+        ServerDirective::Send {
+            packet_id: play::clientbound::BLOCK_CHANGED_ACK,
+            payload: encode_block_changed_ack_body(sequence),
+        }
+    }
+
     /// `ClientboundBlockEntityDataPacket`: a packed `BlockPos` i64, the
     /// `BLOCK_ENTITY_TYPE` registry id as a VarInt, then the nameless network-NBT
     /// update tag — the identical shape this crate's own `BLOCK_ENTITY_DATA`
@@ -7092,7 +7106,7 @@ mod block_edit_tests {
                     y: 1.0,
                     z: 0.5,
                 },
-                sequence: 7,
+                sequence: PredictionSequence::from_wire(7),
                 hand: 0,
             }
         );
@@ -7121,6 +7135,25 @@ mod block_edit_tests {
             panic!("expected UseItemOn, got {decoded:?}");
         };
         assert_eq!(hand, 1);
+    }
+
+    #[test]
+    fn encode_prediction_ack_preserves_wrap_and_invalid_payload_is_dropped() {
+        let proto = V770ServerProtocol;
+        let ServerDirective::Send { packet_id, payload } =
+            proto.encode_block_changed_ack(PredictionSequence::from_wire(i32::MIN))
+        else {
+            panic!("prediction acknowledgement must be encoded");
+        };
+        assert_eq!(packet_id, play::clientbound::BLOCK_CHANGED_ACK);
+        assert_eq!(payload, vec![0x80, 0x80, 0x80, 0x80, 0x08]);
+
+        // A truncated VarInt is invalid packet input, not sequence zero. The
+        // decoder must reject it before it reaches the server consumer.
+        assert_eq!(
+            proto.decode(State::Play, play::serverbound::USE_ITEM_ON, &[0x00]),
+            ServerBound::Ignored
+        );
     }
 
     /// Same malformed-input convention as `USE_ITEM`'s own hand field: `hand`

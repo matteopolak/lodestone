@@ -82,7 +82,7 @@ async fn block_place_reaches_the_integrated_protocol_47_consumer_before_later_mo
             face: BlockFace::Up,
             cursor: Vec3f::new(0.5, 0.5, 0.5),
             inside_block: false,
-            sequence: 0,
+            sequence: lodestone_model::PredictionSequence::INITIAL,
         })
         .expect("joined legacy client accepts a block use");
     handle

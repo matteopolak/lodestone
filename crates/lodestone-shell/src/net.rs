@@ -894,7 +894,7 @@ pub enum NetUpdate {
     /// snapshots without carrying block payloads through the network queue.
     BlockChangedAck {
         /// Highest processed prediction sequence.
-        sequence: i32,
+        sequence: lodestone_model::PredictionSequence,
     },
     /// An authoritative correction to the local player's yaw and pitch.
     PlayerRotationSet {

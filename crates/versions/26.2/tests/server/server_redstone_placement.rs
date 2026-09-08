@@ -302,7 +302,7 @@ async fn place_one_dust_into_the_gap() -> (Vec<(i32, Option<u8>)>, Vec<(i32, Opt
             face: BlockFace::Up,
             cursor: Vec3f::new(0.5, 1.0, 0.5),
             inside_block: false,
-            sequence: 1,
+            sequence: lodestone_model::PredictionSequence::new(1),
         })
         .expect("send use item on");
 
