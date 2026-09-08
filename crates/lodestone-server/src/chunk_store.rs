@@ -1425,14 +1425,19 @@ impl<S: ChunkSource> ChunkStore<S> {
                 .find(|observation| observation.chunk == coordinate)
                 .ok_or(ColumnLightSettlementError::MissingFootprint)?;
             let mut column = observation.column.clone();
-            let status = if offset == (0, 0)
-                || observation.column.retained_light_status()
+            if offset != (0, 0)
+                && column.retained_light_status()
                     == Some(crate::chunk::RetainedLightStatus::CentreSettled)
             {
-                // A centre-settled column can also be returned as an unchanged
-                // dependency snapshot by a neighbouring admission. Preserve
-                // that stronger lifecycle state instead of downgrading it and
-                // forcing a later centre request to recompute needlessly.
+                // A later footprint may read this column as a dependency, but
+                // must not downgrade its already admitted centre snapshot.
+                // Block mutations clear the status across the dependency
+                // neighbourhood before a refresh, so retaining it here cannot
+                // hide a changed terrain state.
+                updates.push((coordinate.0, coordinate.1, column));
+                continue;
+            }
+            let status = if offset == (0, 0) {
                 crate::chunk::RetainedLightStatus::CentreSettled
             } else {
                 crate::chunk::RetainedLightStatus::DependencyInitialized
@@ -3137,6 +3142,63 @@ mod tests {
         assert!(settled
             .retained_light()
             .is_some_and(lodestone_world::ColumnLight::has_nonzero_values));
+    }
+
+    /// A later footprint can observe a centre as a dependency, but that read
+    /// must not replace the centre's settled snapshot with its own dependency
+    /// representation. Mutations clear the settled status before recompute;
+    /// this control isolates the admission-order case from invalidation.
+    #[test]
+    fn later_dependency_admission_preserves_settled_centre_snapshot() {
+        let store = ChunkStore::with_capacity(CountingSource::new(), 16);
+        let target = store.column(0, 0);
+        let mut expected = lodestone_world::ColumnLight::new(target.section_count());
+        for section in 1..=4 {
+            *expected.sky_mut(section) = lodestone_world::LightData::Uniform(15);
+            *expected.block_mut(section) = lodestone_world::LightData::Uniform(0);
+        }
+        let mut first_compute = |_: &ChunkColumn, _: &[(i32, i32, ChunkColumn)]| {
+            Some(ColumnLightSettlement::centre(expected.clone()))
+        };
+        store
+            .settle_resident_column_lights_with_neighbours(
+                0,
+                0,
+                &target,
+                &[(1, 0)],
+                false,
+                false,
+                true,
+                &mut first_compute,
+            )
+            .expect("centre admission");
+
+        let east = store.column(1, 0);
+        let empty = lodestone_world::ColumnLight::new(east.section_count());
+        let mut second_compute = |_: &ChunkColumn, _: &[(i32, i32, ChunkColumn)]| {
+            ColumnLightSettlement::with_neighbours(empty.clone(), [(-1, 0, empty.clone())])
+        };
+        store
+            .settle_resident_column_lights_with_neighbours(
+                1,
+                0,
+                &east,
+                &[(-1, 0)],
+                false,
+                false,
+                true,
+                &mut second_compute,
+            )
+            .expect("dependency admission");
+
+        let retained = store
+            .resident_column(0, 0)
+            .expect("settled centre remains resident");
+        assert_eq!(retained.retained_light(), Some(&expected));
+        assert_eq!(
+            retained.retained_light_status(),
+            Some(crate::chunk::RetainedLightStatus::CentreSettled)
+        );
     }
 
     /// A dependency can already contain populated light and still be only an
