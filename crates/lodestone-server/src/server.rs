@@ -191,7 +191,7 @@ use crate::ticket::{PLAYER_SPAWN_RADIUS, PlayerTicketGuard, TicketKind, TicketOw
 use crate::tick::{BlockTickFeed, ExplosionFeed};
 use crate::weather::WeatherFeed;
 use crate::vitals::{EYE_HEIGHT, PlayerVitals};
-use crate::world_spawn::{RespawnPoint, find_initial_spawn, is_bed_block, is_legal_bed_respawn};
+use crate::world_spawn::{RespawnPoint, is_bed_block, is_legal_bed_respawn};
 
 /// Server-initiated keep-alive interval, and the width of the window in
 /// which an echo must arrive before the connection is treated as dead.
@@ -840,6 +840,39 @@ impl<'a, S: ChunkSource + 'static> SourceRef<'a, S> {
             #[cfg(target_arch = "wasm32")]
             Self::Borrowed(source) => generate_columns_borrowed(source, &coords).await,
             Self::Dimension(source) => generate_columns_offloaded(Arc::clone(source), coords).await,
+        }
+    }
+
+    /// Resolves a fresh world's initial spawn without blocking the connection
+    /// runtime when its terrain is shared with an integrated server.
+    ///
+    /// `find_initial_spawn` probes a spiral of columns and its `ChunkSource`
+    /// interface is intentionally synchronous. That is safe for borrowed
+    /// fixture sources, but a shared integrated source is normally served by
+    /// the shell's current-thread runtime. Calling it directly there prevents
+    /// the same runtime from progressing the first chunk stream until the
+    /// entire spawn search completes. Keep the borrowed arm as the synchronous
+    /// control path while sending production shared sources through the same
+    /// blocking pool as [`Self::generate`].
+    async fn find_initial_spawn(self) -> crate::world_spawn::WorldSpawn {
+        match self {
+            Self::Borrowed(source) => crate::world_spawn::find_initial_spawn(source),
+            Self::Shared(source) => {
+                let source = Arc::clone(source);
+                tokio::task::spawn_blocking(move || {
+                    crate::world_spawn::find_initial_spawn(&*source)
+                })
+                .await
+                .expect("initial spawn blocking task panicked")
+            }
+            Self::Dimension(source) => {
+                let source = Arc::clone(source);
+                tokio::task::spawn_blocking(move || {
+                    crate::world_spawn::find_initial_spawn(&*source)
+                })
+                .await
+                .expect("initial spawn blocking task panicked")
+            }
         }
     }
 }
@@ -3966,12 +3999,12 @@ where
                             position = ?stored.pos,
                             "stored world spawn is obstructed; searching for a clear replacement"
                         );
-                        let found = find_initial_spawn(source.get());
+                        let found = source.find_initial_spawn().await;
                         world.set_world_spawn(found);
                         found
                     }
                     None => {
-                        let found = find_initial_spawn(source.get());
+                        let found = source.find_initial_spawn().await;
                         world.set_world_spawn(found);
                         found
                     }
