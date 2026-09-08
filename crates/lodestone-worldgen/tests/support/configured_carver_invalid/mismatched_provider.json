@@ -2,7 +2,7 @@
   "type": "minecraft:cave",
   "config": {
     "floor_level": {
-      "type": "minecraft:uniform",
+      "type": "minecraft:constant",
       "min_inclusive": 0.0,
       "max_exclusive": 1.0
     },
