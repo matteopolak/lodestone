@@ -22,13 +22,21 @@ keeps those upper-window writes separate from the compact terrain carrier, and
 heightmap would report air one block below the external result.
 
 The prefix values are immutable for a fixed seed and coordinate. Normal
-generation keeps a 32-entry demand-ordered memo to bound resident memory, while
-large packet replay calls `NetherGenerator::prepare_packet_replay` with its
-target coordinates. That helper derives the full target-plus-neighbour closure
-from the 5×5 prefix read radius, so a bounded scan does not evict a prefix that
-the next packet needs. The `pre_decoration_computations` and
-`pre_decoration_evictions` counters make the closure and any thrashing visible
-without changing generation decisions.
+generation keeps a 1,024-entry sharded memo: each coordinate maps to a small
+mutex-protected shard, while the value itself is published through `OnceLock`.
+That keeps adjacent workers off one global cache lock and makes a racing miss
+wait for the one computation instead of repeating terrain, structure and biome
+work. Large packet replay calls `NetherGenerator::prepare_packet_replay` with
+their target coordinates; that helper derives the full target-plus-neighbour
+closure from the 5×5 prefix read radius and raises retention when needed. The
+`pre_decoration_computations` and `pre_decoration_evictions` counters make
+closure work and any thrashing visible without changing generation decisions.
+
+Set `LODESTONE_NETHER_PROFILE=1` for the optional `NetherGenerator::cache_stats`
+timings. The report separates shard-lock wait/hold time from `OnceLock` waits
+and actual computations, so a cache convoy can be attributed to lock
+contention, repeated work or a real dependency wait rather than inferred from
+wall time alone.
 
 Biome carvers are normalized by `compose::build_biome_carvers` before that
 prefix runs. A biome document may declare one carver id directly or an ordered

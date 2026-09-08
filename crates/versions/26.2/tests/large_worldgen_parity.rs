@@ -1930,8 +1930,8 @@ fn nether_packet_replay_cache_preserves_raw_packet_bytes() {
     let target = (0, 0);
     let baseline_source = nether_chunk_source(42);
     let baseline = nether_packet_payload(&baseline_source, target);
-    assert_eq!(baseline_source.generator().pre_decoration_computations(), 217);
-    assert_eq!(baseline_source.generator().pre_decoration_evictions(), 6);
+    assert_eq!(baseline_source.generator().pre_decoration_computations(), 49);
+    assert_eq!(baseline_source.generator().pre_decoration_evictions(), 0);
 
     let prepared_source = nether_chunk_source(42);
     let capacity = prepared_source.generator().prepare_packet_replay(&[target]);
@@ -1941,8 +1941,8 @@ fn nether_packet_replay_cache_preserves_raw_packet_bytes() {
     assert_eq!(baseline, prepared, "immutable-stage retention must not alter packet bytes");
     assert_eq!(prepared_source.generator().pre_decoration_computations(), 49);
     assert_eq!(prepared_source.generator().pre_decoration_evictions(), 0);
-    assert!(baseline_source.generator().pre_decoration_computations() > capacity);
-    assert!(baseline_source.generator().pre_decoration_evictions() > 0);
+    assert_eq!(baseline_source.generator().pre_decoration_computations(), capacity);
+    assert_eq!(baseline_source.generator().pre_decoration_evictions(), 0);
 }
 
 /// Independent seam control for the row-window implementation: packet bytes
