@@ -2,7 +2,7 @@
 //! a full 501² run is an external oracle job, not a regular unit test.
 mod support { pub mod large_parity_manifest; }
 
-use std::{collections::{BTreeMap, BTreeSet}, fs::File, io::{BufReader, Read, Seek, SeekFrom}, path::{Path, PathBuf}};
+use std::{collections::{BTreeMap, BTreeSet}, fs::File, io::{BufReader, Read, Seek, SeekFrom}, path::{Path, PathBuf}, time::Instant};
 use lodestone_core::{Reader, Writer};
 use lodestone_server::{
     ChunkColumn, ChunkSource, ServerDirective, ServerProtocol,
@@ -1328,6 +1328,19 @@ fn replay_full_capture<S: LifecycleWorldgenSource>(
     materializer
 }
 
+fn replay_plan_without_preparation<S: LifecycleWorldgenSource>(
+    mut materializer: LifecycleMaterializer<S>,
+    plan: &LifecycleReplayPlan,
+) -> LifecycleMaterializer<S> {
+    for &admission in plan.admissions() {
+        materializer.admit(admission);
+    }
+    for event in plan.feature_events() {
+        materializer.complete(event.source, event.stage, event.sequence);
+    }
+    materializer
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LifecycleReplayMode {
     Full,
@@ -1415,6 +1428,71 @@ fn full_and_pruned_lifecycle_replay_have_identical_target_packet_bytes() {
     let path = std::env::var("LODESTONE_LARGE_PARITY_MANIFEST")
         .expect("set LODESTONE_LARGE_PARITY_MANIFEST to an accepted 16x16 manifest");
     assert_full_and_pruned_lifecycle_packet_bytes(Path::new(&path), (-8, -8), true);
+}
+
+/// The immutable FEATURES context is an execution optimisation only. This
+/// control replays the same authenticated target closure with and without the
+/// prepared slots and compares the exact production packet bytes. The timings
+/// are diagnostic: context preparation must not alter source order, RNG state,
+/// resident writes, or the encoded target.
+#[test]
+#[ignore = "requires an authenticated lifecycle capture and accepted manifest; see docs/worldgen-large-parity.md"]
+fn prepared_overworld_replay_preserves_authenticated_target_packet_bytes() {
+    let path = std::env::var("LODESTONE_LARGE_PARITY_MANIFEST")
+        .expect("set LODESTONE_LARGE_PARITY_MANIFEST to an accepted 16x16 Overworld manifest");
+    let mut raw_header = [0; HEADER_BYTES];
+    let mut manifest = File::open(&path).expect("open accepted manifest");
+    manifest.read_exact(&mut raw_header).expect("read manifest header");
+    let header = read_header(&raw_header[..]).expect("validate accepted manifest header");
+    assert_eq!(header.dimension, Dimension::Overworld, "the context control is Overworld-specific");
+    let capture = LifecycleCapture::load(header.dimension, &header, Path::new(&path));
+    let target = (-8, -8);
+    let admissions = capture
+        .admissions
+        .iter()
+        .map(|admission| admission.chunk)
+        .collect::<Vec<_>>();
+    let events = lifecycle_replay_events(&capture);
+    let plan = LifecycleReplayPlan::for_target(target, &admissions, &events)
+        .unwrap_or_else(|error| panic!("static target replay plan rejected authenticated capture: {error}"));
+    assert_eq!(plan.target(), target);
+    assert_eq!(plan.admissions().len(), 105, "audited target closure changed");
+    assert_eq!(plan.feature_events().len(), 59, "audited target event closure changed");
+
+    let unprepared_start = Instant::now();
+    let unprepared = replay_plan_without_preparation(
+        LifecycleMaterializer::new(overworld_chunk_source(42)),
+        &plan,
+    );
+    let unprepared_us = unprepared_start.elapsed().as_micros();
+
+    let prepared_start = Instant::now();
+    let mut prepared = LifecycleMaterializer::new(overworld_chunk_source(42));
+    prepared.prepare_lifecycle_replay(plan.admissions());
+    let prepared = replay_plan_without_preparation(prepared, &plan);
+    let prepared_us = prepared_start.elapsed().as_micros();
+
+    let unprepared_packet = lifecycle_packet_payload(
+        &unprepared,
+        target,
+        ServerDimension::Overworld,
+    );
+    let prepared_packet = lifecycle_packet_payload(
+        &prepared,
+        target,
+        ServerDimension::Overworld,
+    );
+    assert_eq!(
+        unprepared_packet, prepared_packet,
+        "prepared immutable replay context changed authenticated target packet bytes"
+    );
+    println!(
+        "AUTH_REPLAY_CONTEXT_BENCH target={target:?} admissions={} events={} unprepared_us={} prepared_us={}",
+        plan.admissions().len(),
+        plan.feature_events().len(),
+        unprepared_us,
+        prepared_us,
+    );
 }
 
 /// Raw-byte identity control for the Nether target-index pilot. This is kept

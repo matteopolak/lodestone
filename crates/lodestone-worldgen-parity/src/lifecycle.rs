@@ -230,6 +230,10 @@ fn override_vec(overrides: &BTreeMap<AbsoluteCell, String>) -> Vec<(i32, i32, i3
 }
 
 impl LifecycleWorldgenSource for OverworldChunkSource {
+    fn prepare_lifecycle_replay(&mut self, admissions: &[ChunkPos]) {
+        self.generator().prepare_lifecycle_replay(admissions);
+    }
+
     fn shaped_column(&self, cx: i32, cz: i32) -> ChunkColumn {
         self.column_at(cx, cz, ChunkGenerationStage::Shaped)
     }

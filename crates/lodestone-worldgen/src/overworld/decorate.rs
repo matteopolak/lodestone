@@ -31,7 +31,7 @@
 //! while transferring writes between them, and the byte-identity controls are
 //! what notice any drift.
 
-use std::{collections::{BTreeMap, BTreeSet, HashMap}, sync::Arc};
+use std::{collections::{BTreeMap, BTreeSet, HashMap, HashSet}, sync::Arc};
 
 use crate::feature::{PlacedOre, apply_ore_step_3x3_per_source, apply_ore_step_3x3_per_source_at_step};
 use crate::rng::{WorldgenRandom, XoroshiroRandomSource};
@@ -94,6 +94,25 @@ enum MixedEntryWriter {
 struct MixedSync {
     projected: usize,
     retained_outside: usize,
+}
+
+/// Immutable read context for one centre chunk's unified FEATURES dispatch.
+///
+/// The terrain prefixes are already memoised by [`super::OverworldGenerator`]'s
+/// staged store. This second layer keeps the derived 5×5 handles, stitched ore
+/// height table, and source-local feature selections alive across the source
+/// completions that share one centre. It contains no mutable world state and no
+/// placement result: resident overrides and every source's RNG stream remain
+/// owned by the caller and are evaluated in authenticated order.
+#[derive(Debug)]
+pub(super) struct MixedReplayContext {
+    wide_pre: [Option<Arc<super::PreOreResult>>; crate::feature::region_view::WIDE_SLOTS],
+    centre_biomes: Arc<super::biome_cells::BiomeCells>,
+    ocean_floor_wg: crate::feature::RegionHeights,
+    feature_biomes: HashMap<String, HashSet<String>>,
+    source_ores: BTreeMap<(i32, i32), Vec<PlacedOre>>,
+    source_features:
+        BTreeMap<(i32, i32), Vec<(i32, usize, crate::feature::vegetation::PlacedRef)>>,
 }
 
 /// Makes one completed entry visible through both FEATURES adapters.  Ore
@@ -230,12 +249,18 @@ impl OverworldGenerator {
             "a decoration source must be inside the target's 3x3 dispatch window",
         );
         let pre = self.pre_ore_stage(target_x, target_z);
+        if self.decoration_catalog.is_empty() {
+            return ParityDecorationResult {
+                spills: Vec::new(),
+                block_entities: Vec::new(),
+            };
+        }
+        let context = self.replay_context_for(target_x, target_z);
         self.mixed_features_stage_selected(
             target_x,
             target_z,
             (*pre.0).clone(),
-            &pre.1,
-            &pre.3,
+            &context,
             Some((source_x, source_z)),
             overrides,
         )
@@ -661,74 +686,105 @@ impl OverworldGenerator {
         biomes
     }
 
-    /// Runs the complete Overworld FEATURES stage for normal generation.  The
-    /// parent orchestration module can hand this the shaped prefix directly;
-    /// the returned dense grid is the centre result and the entity list is in
-    /// feature write order.  Keeping this wrapper beside the source-filtered
-    /// seam makes the lifecycle and production paths share one dispatcher.
-    pub(super) fn features_stage(
-        &self,
-        cx: i32,
-        cz: i32,
-        center_world: crate::dense_grid::DenseBlockGrid,
-        center_heights: &[i32; 256],
-        center_biomes: &super::biome_cells::BiomeCells,
-    ) -> (
-        crate::dense_grid::DenseBlockGrid,
-        Vec<super::block_entities::GeneratedBlockEntity>,
-    ) {
-        let (world, result) = self.mixed_features_stage_selected(
-            cx,
-            cz,
-            center_world,
-            center_heights,
-            center_biomes,
-            None,
-            &[],
-        );
-        let block_entities = result
-            .block_entities
-            .into_iter()
-            .filter(|be| {
-                let (x, _, z) = be.position();
-                (x >> 4) == cx && (z >> 4) == cz
-            })
-            .collect();
-        (world, block_entities)
+    /// Prepare bounded slots for an authenticated lifecycle replay. The slots
+    /// contain no generated data yet; each source completion fills its own
+    /// immutable context lazily, after admissions have populated the staged
+    /// pre-ore entries it reads.
+    pub fn prepare_lifecycle_replay(&self, admissions: &[(i32, i32)]) {
+        let mut slots = HashMap::with_capacity(admissions.len());
+        let mut pre_ore = HashMap::with_capacity(admissions.len().saturating_mul(
+            crate::feature::region_view::WIDE_SLOTS,
+        ));
+        for &chunk in admissions {
+            assert!(
+                slots
+                    .insert(chunk, Arc::new(super::store::StageSlot::default()))
+                    .is_none(),
+                "duplicate lifecycle replay admission for {chunk:?}"
+            );
+            for dx in -crate::feature::region_view::WIDE_RADIUS
+                ..=crate::feature::region_view::WIDE_RADIUS
+            {
+                for dz in -crate::feature::region_view::WIDE_RADIUS
+                    ..=crate::feature::region_view::WIDE_RADIUS
+                {
+                    pre_ore
+                        .entry((chunk.0 + dx, chunk.1 + dz))
+                        .or_insert_with(|| Arc::new(std::sync::OnceLock::new()));
+                }
+            }
+        }
+        *self
+            .replay_context_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(super::ReplayContextCache {
+                slots,
+                pre_ore: Arc::new(pre_ore),
+            });
     }
 
-    /// Runs the complete Overworld FEATURES stream over one shared read/write
-    /// neighbourhood.  `selected_source` is only a parity filter: with
-    /// `None`, all nine source chunks run for the production path; with
-    /// `Some`, the exact same loop runs only that source for the lifecycle
-    /// materializer.  The adapters are synchronized after every raw entry so
-    /// later entries see the current resident state regardless of whether the
-    /// previous body used ore or vegetation placement.
-    #[allow(clippy::too_many_arguments)]
-    fn mixed_features_stage_selected(
+    /// Number of prepared replay contexts that have been materialized so far.
+    /// Diagnostics only; generation never branches on this value. A lifecycle
+    /// control can use it to distinguish one lazy context build from a repeated
+    /// rebuild without observing or mutating the generated output.
+    #[must_use]
+    pub fn lifecycle_replay_contexts_ready(&self) -> usize {
+        self.replay_context_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|cache| cache.slots.values().filter(|slot| slot.peek().is_some()).count())
+            .unwrap_or(0)
+    }
+
+    /// Returns the immutable dispatch context for one centre chunk. During a
+    /// prepared lifecycle replay the exact admission set supplies a bounded,
+    /// once-only slot; ordinary production generation builds the context
+    /// directly and does not retain it for every explored chunk. The centre
+    /// pre-ore result supplies the key's own heights and biomes; surrounding
+    /// prefixes are borrowed as `Arc`s from exact-coordinate entries.
+    fn replay_context_for(&self, cx: i32, cz: i32) -> Arc<MixedReplayContext> {
+        let centre = self.pre_ore_stage(cx, cz);
+        let slot = self
+            .replay_context_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(|cache| cache.slots.get(&(cx, cz)).cloned());
+        match slot {
+            Some(slot) => slot.get_or_compute(
+                |_| {},
+                || self.build_mixed_replay_context(
+                    cx,
+                    cz,
+                    &centre.1,
+                    Arc::clone(&centre.3),
+                ),
+            ),
+            None => Arc::new(self.build_mixed_replay_context(
+                cx,
+                cz,
+                &centre.1,
+                Arc::clone(&centre.3),
+            )),
+        }
+    }
+
+    /// Builds the immutable portion of one unified FEATURES dispatch.
+    ///
+    /// `center_heights` and `center_biomes` are supplied explicitly so the
+    /// timing path can still measure a locally computed centre prefix without
+    /// accidentally replacing it with the staged-store value. The normal
+    /// production and lifecycle paths pass the staged centre values and use
+    /// [`Self::replay_context_for`] to retain the result.
+    fn build_mixed_replay_context(
         &self,
         cx: i32,
         cz: i32,
-        center_world: crate::dense_grid::DenseBlockGrid,
         center_heights: &[i32; 256],
-        center_biomes: &super::biome_cells::BiomeCells,
-        selected_source: Option<(i32, i32)>,
-        overrides: &[(i32, i32, i32, String)],
-    ) -> (
-        crate::dense_grid::DenseBlockGrid,
-        ParityDecorationResult,
-    ) {
-        if self.decoration_catalog.is_empty() {
-            return (
-                center_world,
-                ParityDecorationResult {
-                    spills: Vec::new(),
-                    block_entities: Vec::new(),
-                },
-            );
-        }
-        let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Vegetation);
-
+        center_biomes: Arc<super::biome_cells::BiomeCells>,
+    ) -> MixedReplayContext {
         let mut wide_pre:
             [Option<Arc<super::PreOreResult>>; crate::feature::region_view::WIDE_SLOTS] =
             std::array::from_fn(|_| None);
@@ -745,7 +801,7 @@ impl OverworldGenerator {
                     Some(self.pre_ore_stage(cx + dx, cz + dz));
             }
         }
-        let centre_biomes = Arc::new(center_biomes.clone());
+        let centre_biomes = center_biomes;
 
         let mut ocean_floor_wg = crate::feature::RegionHeights::unset();
         Self::stitch_heights(&mut ocean_floor_wg, 0, 0, center_heights);
@@ -775,10 +831,10 @@ impl OverworldGenerator {
         for source_x in cx - 1..=cx + 1 {
             for source_z in cz - 1..=cz + 1 {
                 // Ore membership belongs to the source chunk's complete
-                // section-biome container.  The surrounding 3x3 supplies
+                // section-biome container. The surrounding 3x3 supplies
                 // terrain/read context (and may receive cross-border writes),
                 // but its biome containers must not make their ore entries
-                // eligible for this source's RNG stream.  The vegetation
+                // eligible for this source's RNG stream. The vegetation
                 // stream below intentionally uses `source_biomes`' 3x3 union.
                 let source_ore_biomes: &[String] = if source_x == cx && source_z == cz {
                     centre_biomes.palette()
@@ -793,11 +849,10 @@ impl OverworldGenerator {
                 };
                 source_ores.insert(
                     (source_x, source_z),
-                    self.decoration_catalog
-                        .select_ores(
-                            source_ore_biomes.iter().map(String::as_str),
-                            &self.ore_definitions,
-                        ),
+                    self.decoration_catalog.select_ores(
+                        source_ore_biomes.iter().map(String::as_str),
+                        &self.ore_definitions,
+                    ),
                 );
                 source_features.insert(
                     (source_x, source_z),
@@ -813,18 +868,144 @@ impl OverworldGenerator {
             }
         }
 
+        MixedReplayContext {
+            wide_pre,
+            centre_biomes,
+            ocean_floor_wg,
+            feature_biomes: self.decoration_catalog.feature_biomes(),
+            source_ores,
+            source_features,
+        }
+    }
+
+    /// Runs the complete Overworld FEATURES stage for normal generation.  The
+    /// parent orchestration module can hand this the shaped prefix directly;
+    /// the returned dense grid is the centre result and the entity list is in
+    /// feature write order.  Keeping this wrapper beside the source-filtered
+    /// seam makes the lifecycle and production paths share one dispatcher.
+    pub(super) fn features_stage(
+        &self,
+        cx: i32,
+        cz: i32,
+        center_world: crate::dense_grid::DenseBlockGrid,
+    ) -> (
+        crate::dense_grid::DenseBlockGrid,
+        Vec<super::block_entities::GeneratedBlockEntity>,
+    ) {
+        if self.decoration_catalog.is_empty() {
+            return (center_world, Vec::new());
+        }
+        let context = self.replay_context_for(cx, cz);
+        self.features_stage_with_context(cx, cz, center_world, &context, None, &[])
+    }
+
+    /// Timing-only twin of [`Self::features_stage`]. It builds the immutable
+    /// context from the caller's locally computed centre prefix, preserving
+    /// `column_timed`'s cache-cold centre while sharing the exact dispatcher
+    /// body and output filtering with production.
+    pub(super) fn features_stage_uncached(
+        &self,
+        cx: i32,
+        cz: i32,
+        center_world: crate::dense_grid::DenseBlockGrid,
+        center_heights: &[i32; 256],
+        center_biomes: &super::biome_cells::BiomeCells,
+    ) -> (
+        crate::dense_grid::DenseBlockGrid,
+        Vec<super::block_entities::GeneratedBlockEntity>,
+    ) {
+        if self.decoration_catalog.is_empty() {
+            return (center_world, Vec::new());
+        }
+        let context = self.build_mixed_replay_context(
+            cx,
+            cz,
+            center_heights,
+            Arc::new(center_biomes.clone()),
+        );
+        self.features_stage_with_context(cx, cz, center_world, &context, None, &[])
+    }
+
+    fn features_stage_with_context(
+        &self,
+        cx: i32,
+        cz: i32,
+        center_world: crate::dense_grid::DenseBlockGrid,
+        context: &MixedReplayContext,
+        selected_source: Option<(i32, i32)>,
+        overrides: &[(i32, i32, i32, String)],
+    ) -> (
+        crate::dense_grid::DenseBlockGrid,
+        Vec<super::block_entities::GeneratedBlockEntity>,
+    ) {
+        let (world, result) = self.mixed_features_stage_selected(
+            cx,
+            cz,
+            center_world,
+            context,
+            selected_source,
+            overrides,
+        );
+        let block_entities = result
+            .block_entities
+            .into_iter()
+            .filter(|be| {
+                let (x, _, z) = be.position();
+                (x >> 4) == cx && (z >> 4) == cz
+            })
+            .collect();
+        (world, block_entities)
+    }
+
+    /// Runs the complete Overworld FEATURES stream over one shared read/write
+    /// neighbourhood.  `selected_source` is only a parity filter: with
+    /// `None`, all nine source chunks run for the production path; with
+    /// `Some`, the exact same loop runs only that source for the lifecycle
+    /// materializer.  The adapters are synchronized after every raw entry so
+    /// later entries see the current resident state regardless of whether the
+    /// previous body used ore or vegetation placement.
+    #[allow(clippy::too_many_arguments)]
+    fn mixed_features_stage_selected(
+        &self,
+        cx: i32,
+        cz: i32,
+        center_world: crate::dense_grid::DenseBlockGrid,
+        context: &MixedReplayContext,
+        selected_source: Option<(i32, i32)>,
+        overrides: &[(i32, i32, i32, String)],
+    ) -> (
+        crate::dense_grid::DenseBlockGrid,
+        ParityDecorationResult,
+    ) {
+        if self.decoration_catalog.is_empty() {
+            return (
+                center_world,
+                ParityDecorationResult {
+                    spills: Vec::new(),
+                    block_entities: Vec::new(),
+                },
+            );
+        }
+        let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Vegetation);
+
+        let wide_pre = &context.wide_pre;
+        let centre_biomes = &context.centre_biomes;
+        let ocean_floor_wg = &context.ocean_floor_wg;
+        let source_ores = &context.source_ores;
+        let source_features = &context.source_features;
+
         let in_tag = |block: &str, tag: &str| -> bool {
             self.ore_tag_map
                 .get(tag)
                 .is_some_and(|members| members.contains(block))
         };
-        let feature_biomes = self.decoration_catalog.feature_biomes();
+        let feature_biomes = &context.feature_biomes;
         let biome_zoom_seed = super::biome::biome_zoom_seed(self.seed);
         let biome_sources = |source_x: i32, source_z: i32| {
             let dx = source_x - cx;
             let dz = source_z - cz;
             if dx == 0 && dz == 0 {
-                Some(&*centre_biomes)
+                Some(centre_biomes.as_ref())
             } else if (-crate::feature::region_view::WIDE_RADIUS
                 ..=crate::feature::region_view::WIDE_RADIUS)
                 .contains(&dx)
