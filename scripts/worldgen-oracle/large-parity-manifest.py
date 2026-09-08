@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Validate and deterministically merge frozen-world parity manifests."""
-import argparse, hashlib, pathlib, struct, sys, tempfile
+import argparse, hashlib, mmap, pathlib, struct, sys, tempfile
 
 MAGIC = b"LWP26P03"
 MAGIC_V4 = b"LWP26P04"
@@ -88,11 +88,11 @@ def make_header(version, dim, sx0, sx1, sz0, sz1, count, frozen, payload_digest)
     return header[:168] + dim_digest + header[200:] if version != 3 else header
 
 
-def read(path):
-    raw = pathlib.Path(path).read_bytes()
-    if len(raw) < HEADER:
+def _parse_header(path, raw_header, payload_size):
+    """Validate a header and return it with its dimension and record width."""
+    if len(raw_header) < HEADER:
         raise ValueError(f"{path}: shorter than {HEADER}-byte v3 header")
-    h = struct.unpack(FMT, raw[:HEADER])
+    h = struct.unpack(FMT, raw_header)
     (magic, version, size, algorithm, schema, protocol, seed, gx0, gx1, gz0,
      gz1, sx0, sx1, sz0, sz1, count, width, reserved, domain, frozen,
      payload_digest) = h
@@ -119,15 +119,81 @@ def read(path):
     if domain != hashlib.sha256(expected_domain).digest():
         kind = "raw-packet" if version == 6 else "semantic-record"
         raise ValueError(f"{path}: {kind} schema digest differs")
-    dim = dimension(raw, h)
+    dim = dimension(raw_header, h)
     if frozen == bytes(32):
         raise ValueError(f"{path}: missing frozen-world identity")
+    expected_payload_size = count * expected_width
+    if payload_size != expected_payload_size:
+        raise ValueError(f"{path}: payload size is {payload_size}, expected {expected_payload_size}")
+    return h, dim, expected_width
+
+
+def read(path):
+    raw = pathlib.Path(path).read_bytes()
+    h, dim, expected_width = _parse_header(path, raw[:HEADER], len(raw) - HEADER)
     payload = raw[HEADER:]
-    if len(payload) != count*expected_width:
-        raise ValueError(f"{path}: payload size is {len(payload)}, expected {count*expected_width}")
-    if payload_digest != hashlib.sha256(payload).digest():
+    if len(payload) != h[15] * expected_width:
+        raise ValueError(f"{path}: payload size is {len(payload)}, expected {h[15] * expected_width}")
+    if h[20] != hashlib.sha256(payload).digest():
         raise ValueError(f"{path}: payload checksum differs")
     return h, payload, dim
+
+
+class _ManifestStream:
+    """Stream one authenticated shard without retaining its payload."""
+
+    def __init__(self, path):
+        self.path = pathlib.Path(path)
+        self.source = None
+        self.header = None
+        self.dimension = None
+        self.record_width = None
+        self.payload_digest = None
+
+    def __enter__(self):
+        self.source = self.path.open("rb")
+        try:
+            raw_header = self.source.read(HEADER)
+            self.source.seek(0, 2)
+            payload_size = self.source.tell() - HEADER
+            self.source.seek(HEADER)
+            self.header, self.dimension, self.record_width = _parse_header(
+                self.path, raw_header, payload_size
+            )
+        except BaseException:
+            self.source.close()
+            raise
+        self.payload_digest = hashlib.sha256()
+        return self
+
+    def records(self):
+        for _ in range(self.header[15]):
+            record = self.source.read(self.record_width)
+            if len(record) != self.record_width:
+                expected = self.header[15] * self.record_width
+                actual = self.source.tell() - HEADER
+                raise ValueError(f"{self.path}: payload size is {actual}, expected {expected}")
+            self.payload_digest.update(record)
+            yield record
+        if self.source.read(1):
+            expected = self.header[15] * self.record_width
+            actual = self.source.tell() - HEADER
+            raise ValueError(f"{self.path}: payload size is {actual}, expected {expected}")
+        if self.header[20] != self.payload_digest.digest():
+            raise ValueError(f"{self.path}: payload checksum differs")
+
+    def __exit__(self, _type, _value, _traceback):
+        self.source.close()
+
+
+def _slot_seen(slots, index):
+    """Return whether a dense occupancy bit is set, and set it otherwise."""
+    byte = index >> 3
+    mask = 1 << (index & 7)
+    if slots[byte] & mask:
+        return True
+    slots[byte] |= mask
+    return False
 
 
 def validate(paths):
@@ -138,38 +204,92 @@ def validate(paths):
 
 
 def merge(out, paths):
-    slots, frozen, dim, version = {}, None, None, None
+    """Merge shards through bounded external storage in canonical grid order."""
+    frozen, dim, version = None, None, None
     record_width = None
-    for path in paths:
-        h, payload, shard_dim = read(path)
+    required = None
+    grid_min = grid_max = None
+    seen_count = 0
+    overlap = None
+    with tempfile.TemporaryDirectory(prefix="large-parity-merge-") as directory:
+        slot_path = pathlib.Path(directory) / "records"
+        slot_file = None
+        slot_map = None
+        seen = None
+        try:
+            for path in paths:
+                with _ManifestStream(path) as shard:
+                    h, shard_dim = shard.header, shard.dimension
+                    compatibility_error = None
+                    if version is None:
+                        version, dim, record_width = h[1], shard_dim, shard.record_width
+                        required = RAW_GRID_COUNT if version == 6 else GRID_COUNT
+                        grid_min, grid_max = (RAW_GRID_MIN, RAW_GRID_MAX) if version == 6 else (GRID_MIN, GRID_MAX)
+                        slot_file = slot_path.open("w+b")
+                        slot_file.truncate(required * record_width)
+                        slot_map = mmap.mmap(slot_file.fileno(), 0, access=mmap.ACCESS_WRITE)
+                        seen = bytearray((required + 7) // 8)
+                    elif (h[1], shard_dim) != (version, dim):
+                        compatibility_error = ValueError(
+                            f"{path}: manifest format or dimension differs; do not merge dimensions or schema versions"
+                        )
+                    if frozen is None:
+                        frozen = h[19]
+                    elif frozen != h[19]:
+                        compatibility_error = compatibility_error or ValueError(
+                            f"{path}: frozen-world identity differs; never merge independently generated worlds"
+                        )
+                    sx0, sx1, sz0, sz1 = h[11:15]
+                    records = shard.records()
+                    for cz in range(sz0, sz1 + 1):
+                        for cx in range(sx0, sx1 + 1):
+                            index = (cz - grid_min) * (grid_max - grid_min + 1) + (cx - grid_min)
+                            value = next(records)
+                            if compatibility_error is not None:
+                                continue
+                            if _slot_seen(seen, index):
+                                if overlap is None:
+                                    overlap = f"overlap at ({cx}, {cz}): {path}"
+                            else:
+                                offset = index * record_width
+                                slot_map[offset:offset + record_width] = value
+                                seen_count += 1
+                    # Exhaust the iterator here so the whole shard is
+                    # authenticated before overlap reporting.
+                    try:
+                        next(records)
+                    except StopIteration:
+                        pass
+                    if compatibility_error is not None:
+                        raise compatibility_error
+        finally:
+            if slot_map is not None:
+                slot_map.flush()
+                slot_map.close()
+            if slot_file is not None:
+                slot_file.close()
         if version is None:
-            version, dim, record_width = h[1], shard_dim, h[16]
-        elif (h[1], shard_dim) != (version, dim):
-            raise ValueError(f"{path}: manifest format or dimension differs; do not merge dimensions or schema versions")
-        if frozen is None:
-            frozen = h[19]
-        elif frozen != h[19]:
-            raise ValueError(f"{path}: frozen-world identity differs; never merge independently generated worlds")
-        sx0, sx1, sz0, sz1 = h[11:15]
-        record = 0
-        for cz in range(sz0, sz1+1):
-            for cx in range(sx0, sx1+1):
-                key = (cx, cz)
-                if key in slots:
-                    raise ValueError(f"overlap at {key}: {path}")
-                slots[key] = payload[record*record_width:(record+1)*record_width]
-                record += 1
-    required = RAW_GRID_COUNT if version == 6 else GRID_COUNT
-    grid_min, grid_max = (RAW_GRID_MIN, RAW_GRID_MAX) if version == 6 else (GRID_MIN, GRID_MAX)
-    if len(slots) != required:
-        raise ValueError(f"incomplete merge: {len(slots)}/{required}; missing shards are not silently zero-filled")
-    payload = bytearray()
-    for cz in range(grid_min, grid_max + 1):
-        for cx in range(grid_min, grid_max + 1):
-            payload.extend(slots[(cx, cz)])
-    header = make_header(version, dim, grid_min, grid_max, grid_min, grid_max,
-                         required, frozen, hashlib.sha256(payload).digest())
-    pathlib.Path(out).write_bytes(header + payload)
+            raise ValueError(f"incomplete merge: 0/{GRID_COUNT}; missing shards are not silently zero-filled")
+        if overlap is not None:
+            raise ValueError(overlap)
+        if seen_count != required:
+            raise ValueError(f"incomplete merge: {seen_count}/{required}; missing shards are not silently zero-filled")
+        with slot_path.open("rb") as source:
+            payload_digest = hashlib.sha256()
+            while True:
+                block = source.read(1024 * 1024)
+                if not block:
+                    break
+                payload_digest.update(block)
+        header = make_header(version, dim, grid_min, grid_max, grid_min, grid_max,
+                             required, frozen, payload_digest.digest())
+        with pathlib.Path(out).open("wb") as target, slot_path.open("rb") as source:
+            target.write(header)
+            while True:
+                block = source.read(1024 * 1024)
+                if not block:
+                    break
+                target.write(block)
     kind = "raw packet hashes" if version == 6 else "semantic SHA-256 digests"
     print(f"merged {required} {kind} into {out}")
 
