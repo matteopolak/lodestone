@@ -37,7 +37,7 @@
 //! [`memory_pair`]: lodestone_net::memory_pair
 
 #[cfg(not(target_arch = "wasm32"))]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -950,6 +950,32 @@ fn set_resident_block_state(
     Ok(canonical)
 }
 
+/// Validate every replacement in an ordered resident batch before mutating
+/// the authoritative source. The returned canonical states are the exact
+/// values published after the whole preflight succeeds.
+#[cfg(not(target_arch = "wasm32"))]
+fn set_resident_block_states(
+    source: &dyn ChunkSource,
+    writes: &[(lodestone_model::BlockPos, lodestone_data::block_states::StateId)],
+) -> Result<Vec<String>, BlockMutationRefusal> {
+    let canonical = writes
+        .iter()
+        .map(|(pos, state)| {
+            let column = source
+                .resident_column(pos.x.div_euclid(16), pos.z.div_euclid(16))
+                .ok_or(BlockMutationRefusal::ColumnNotResident)?;
+            if !column.contains_y(pos.y) {
+                return Err(BlockMutationRefusal::OutOfBounds);
+            }
+            Ok(canonical_block_state(*state))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for ((pos, _), state) in writes.iter().zip(&canonical) {
+        source.set_block(pos.x, pos.y, pos.z, state);
+    }
+    Ok(canonical)
+}
+
 /// The complete production native-save inputs, all shared with the running
 /// integrated world. Keeping this context separate from the Anvil save handle
 /// makes the ordering explicit: native records are built while the dirty set is
@@ -1166,6 +1192,12 @@ pub struct IntegratedServer {
     /// last autosave.
     #[cfg(not(target_arch = "wasm32"))]
     entity_storage: Option<crate::entity_storage::EntityStorage>,
+    /// UUIDs restored into, or most recently saved from, the Anvil fallback
+    /// population.  This is the ownership set passed to
+    /// [`crate::entity_storage::EntityStorage::save_owned`] so a despawned
+    /// modeled entity becomes a tombstone without deleting opaque records.
+    #[cfg(not(target_arch = "wasm32"))]
+    entity_owned_uuids: Option<Arc<std::sync::Mutex<HashSet<uuid::Uuid>>>>,
     /// The live mob simulation, `Some` for every constructor that starts a tick
     /// loop.
     ///
@@ -1691,6 +1723,8 @@ impl IntegratedServer {
                 level_dat: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 entity_storage: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                entity_owned_uuids: None,
                 // Nothing persists here, so the save path has no population to read.
                 #[cfg(not(target_arch = "wasm32"))]
                 mobs: None,
@@ -1896,6 +1930,8 @@ impl IntegratedServer {
                 level_dat: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 entity_storage: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                entity_owned_uuids: None,
                 // Nothing persists here, so the save path has no population to read.
                 #[cfg(not(target_arch = "wasm32"))]
                 mobs: None,
@@ -2441,6 +2477,10 @@ impl IntegratedServer {
         // `open_persistent_with_mobs`'s autosave and `shutdown`'s flush can read
         // the population. `mob_handle` itself is moved into the tick task below.
         let handle_mobs = mob_handle.clone();
+        #[cfg(not(target_arch = "wasm32"))]
+        let owned_entity_uuids = Arc::new(std::sync::Mutex::new(HashSet::new()));
+        #[cfg(not(target_arch = "wasm32"))]
+        let seed_owned_entity_uuids = Arc::clone(&owned_entity_uuids);
         // the entity area to restore, and where from. Cloned here
         // because the ranges are consumed by `seed_coords` above.
         let restore_area = (cx_range.clone(), cz_range.clone());
@@ -2500,6 +2540,9 @@ impl IntegratedServer {
                 let (cx_range, cz_range) = restore_area;
                 match storage.load_area(cx_range, cz_range) {
                     Ok(saved) if !saved.is_empty() => {
+                        if let Ok(mut owned) = seed_owned_entity_uuids.lock() {
+                            owned.extend(saved.iter().map(|entity| entity.uuid));
+                        }
                         let restored = seed_mobs.with(|sim| sim.restore_saved(&saved));
                         tracing::info!(
                             "entity load: restored {restored} of {} saved entities",
@@ -2790,6 +2833,8 @@ impl IntegratedServer {
                 #[cfg(not(target_arch = "wasm32"))]
                 entity_storage: None,
                 #[cfg(not(target_arch = "wasm32"))]
+                entity_owned_uuids: Some(Arc::clone(&owned_entity_uuids)),
+                #[cfg(not(target_arch = "wasm32"))]
                 mobs: Some(handle_mobs),
                 // Always `Some` here — every dimension's `ChunkSource` shares
                 // this exact handle (see `handle_portals`'s own comment
@@ -3078,6 +3123,7 @@ impl IntegratedServer {
         // unconditionally); `poi_storage` (the local `HashMap` built above,
         // not yet moved anywhere) is what the write side reads per dimension.
         let autosave_portals = server.portals.clone();
+        let autosave_entity_owners = server.entity_owned_uuids.clone();
         let autosave_poi_storage = poi_storage.clone();
         let autosave_task = spawn_tick_task(&server.shutdown, async move {
             let mut ticker = tokio::time::interval(autosave);
@@ -3146,10 +3192,31 @@ impl IntegratedServer {
                 // compression.
                 if let Some(mobs) = &autosave_mobs {
                     let saved = mobs.with(|sim| sim.saved_entities());
+                    let live_uuids: HashSet<uuid::Uuid> =
+                        saved.iter().map(|entity| entity.uuid).collect();
+                    let owned = autosave_entity_owners
+                        .as_ref()
+                        .and_then(|owners| owners.lock().ok().map(|set| set.clone()))
+                        .unwrap_or_default();
                     let storage = autosave_entities.clone();
-                    let result = tokio::task::spawn_blocking(move || storage.save(&saved)).await;
-                    if let Ok(Err(err)) = result {
-                        tracing::warn!("autosave could not write entities: {err}");
+                    let result = tokio::task::spawn_blocking(move || {
+                        storage.save_owned(&saved, &owned)
+                    })
+                    .await;
+                    match result {
+                        Ok(Ok(_)) => {
+                            if let Some(owners) = &autosave_entity_owners {
+                                if let Ok(mut owners) = owners.lock() {
+                                    *owners = live_uuids;
+                                }
+                            }
+                        }
+                        Ok(Err(err)) => {
+                            tracing::warn!("autosave could not write entities: {err}");
+                        }
+                        Err(err) => {
+                            tracing::warn!("autosave entity task failed: {err}");
+                        }
                     }
                 }
                 // Persist the portal index on the same
@@ -3733,6 +3800,45 @@ impl IntegratedServer {
         }
     }
 
+    /// Submit one ordered resident-block batch through native-plugin
+    /// adjudication, preserving all-or-nothing source mutation.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub async fn set_resident_block_states_proposed(
+        &self,
+        writes: Vec<(
+            lodestone_model::BlockPos,
+            lodestone_data::block_states::StateId,
+        )>,
+        notify_listeners: bool,
+    ) -> Result<(Vec<(lodestone_model::BlockPos, lodestone_data::block_states::StateId)>, bool), BlockMutationRefusal> {
+        let proposals = self
+            .spawn_proposals
+            .as_ref()
+            .ok_or(BlockMutationRefusal::Unavailable)?;
+        let crate::ecs::ServerProposalAction::SetResidentBlockBatch {
+            writes,
+            notify_listeners,
+        } = proposals
+            .set_resident_block_batch(writes, notify_listeners)
+            .await
+            .map_err(BlockMutationRefusal::from)?
+        else {
+            return Err(BlockMutationRefusal::MismatchedAction);
+        };
+        let source = self
+            .world_source
+            .as_ref()
+            .ok_or(BlockMutationRefusal::PrimaryWorldUnavailable)?;
+        let canonical = set_resident_block_states(&**source, &writes)?;
+        for ((pos, _), state) in writes.iter().zip(&canonical) {
+            if let Some(block_ticks) = &self.block_ticks {
+                block_ticks.publish(pos.x, pos.y, pos.z, state.clone());
+            }
+        }
+        Ok((writes, notify_listeners))
+    }
+
     /// This world's shared player registry, for a host that wants RCON or an
     /// admin console to see and target real connections rather than nobody.
     ///
@@ -3772,6 +3878,19 @@ impl IntegratedServer {
     #[must_use]
     pub fn mobs(&self) -> Option<&MobHandle> {
         self.mobs.as_ref()
+    }
+
+    /// Returns a typed entity capability over this world's live mob and player
+    /// stores. The returned handle is a clone of the same state used by the
+    /// connection streamer; mutations therefore become ordinary entity
+    /// updates, directed player packets, or removals on the next stream pass.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn entity_api(&self) -> Option<crate::ServerEntityApi> {
+        Some(crate::ServerEntityApi::new(
+            self.mobs()?.clone(),
+            self.players()?.clone(),
+        ))
     }
 
     /// Spawns a mob of `entity_type` at `pos` on the live simulation, through
@@ -4530,6 +4649,8 @@ impl IntegratedServer {
             level_dat: None,
             #[cfg(not(target_arch = "wasm32"))]
             entity_storage: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            entity_owned_uuids: None,
             // `entity_storage`/`save` above are about *persistence*, which LAN
             // worlds do not have yet — but `mobs` itself (the local, `MobHandle
             // ::default()`, real and ticked by the loop just spawned) is a
@@ -5140,11 +5261,23 @@ impl IntegratedServer {
         // last tick of it on a clean quit, which is the common case rather than
         // the rare one.
         #[cfg(not(target_arch = "wasm32"))]
+        let entity_owners = self.entity_owned_uuids.take();
         if let (Some(storage), Some(mobs)) = (self.entity_storage.take(), self.mobs.take()) {
             let saved = mobs.with(|sim| sim.saved_entities());
             let count = saved.len();
-            match tokio::task::spawn_blocking(move || storage.save(&saved)).await {
+            let live_uuids: HashSet<uuid::Uuid> =
+                saved.iter().map(|entity| entity.uuid).collect();
+            let owned = entity_owners
+                .as_ref()
+                .and_then(|owners| owners.lock().ok().map(|set| set.clone()))
+                .unwrap_or_default();
+            match tokio::task::spawn_blocking(move || storage.save_owned(&saved, &owned)).await {
                 Ok(Ok(written)) => {
+                    if let Some(owners) = entity_owners {
+                        if let Ok(mut owners) = owners.lock() {
+                            *owners = live_uuids;
+                        }
+                    }
                     tracing::debug!("entities saved on shutdown: {written} of {count}");
                 }
                 Ok(Err(err)) => tracing::warn!("entity save on shutdown failed: {err}"),
@@ -5688,7 +5821,7 @@ mod tests {
         server
             .block_ticks()
             .expect("a ticking integrated server exposes its inbound tick feed")
-            .request_scheduled_ticks(pending.drain_due(u64::MAX, usize::MAX));
+            .request_fluid_scheduled_ticks(pending.drain_due(u64::MAX, usize::MAX));
 
         let deadline = lodestone_time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
@@ -5764,10 +5897,11 @@ mod tests {
             0,
             2,
         );
-        let mut pending = crate::scheduled_tick::ScheduledTickQueue::new();
+        let mut pending: crate::scheduled_tick::ScheduledTickQueue<crate::scheduled_tick::ScheduledTickKind> =
+            crate::scheduled_tick::ScheduledTickQueue::new();
         assert!(pending.schedule(
             (16, 1, 0),
-            crate::redstone::TICK_TORCH.to_owned(),
+            crate::scheduled_tick::ScheduledTickKind::Torch,
             1,
             crate::scheduled_tick::TickPriority::Normal,
         ));
@@ -5841,7 +5975,7 @@ mod tests {
         server
             .block_ticks()
             .expect("a ticking integrated server exposes its inbound tick feed")
-            .request_scheduled_ticks(pending.drain_due(u64::MAX, usize::MAX));
+            .request_fluid_scheduled_ticks(pending.drain_due(u64::MAX, usize::MAX));
 
         let deadline = lodestone_time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
@@ -5977,9 +6111,14 @@ mod tests {
              through a second call to the same accessor on the same sibling"
         );
 
-        let mut queue: crate::scheduled_tick::ScheduledTickQueue<String> =
+        let mut queue: crate::scheduled_tick::ScheduledTickQueue<crate::scheduled_tick::ScheduledTickKind> =
             crate::scheduled_tick::ScheduledTickQueue::new();
-        queue.schedule((3, 40, -9), "minecraft:redstone_wire".to_string(), 2, crate::scheduled_tick::TickPriority::Normal);
+        queue.schedule(
+            (3, 40, -9),
+            crate::scheduled_tick::ScheduledTickKind::Extension("minecraft:redstone_wire".to_string()),
+            2,
+            crate::scheduled_tick::TickPriority::Normal,
+        );
         feed.request_scheduled_ticks(queue.drain_due(u64::MAX, usize::MAX));
         assert_eq!(
             nether
@@ -6765,7 +6904,7 @@ mod tests {
         scheduled.with(|queues| {
             assert!(queues.block.schedule(
                 (2, 3, 4),
-                "redstone:torch".to_owned(),
+                crate::scheduled_tick::ScheduledTickKind::Torch,
                 1_000_000,
                 crate::scheduled_tick::TickPriority::Normal,
             ));
@@ -6827,7 +6966,7 @@ mod tests {
             .with(|queues| {
                 queues.block.has_scheduled(
                     (2, 3, 4),
-                    &"redstone:torch".to_owned(),
+                    &crate::scheduled_tick::ScheduledTickKind::Torch,
                 ) && queues.fluid.has_scheduled(
                     (2, 3, 4),
                     &"lodestone:fluid".to_owned(),
@@ -6878,7 +7017,7 @@ mod tests {
             for (cx, cz, _) in &columns {
                 assert!(queues.block.schedule(
                     (cx * 16 + 8, 65, cz * 16 + 8),
-                    "redstone:torch".to_owned(),
+                    crate::scheduled_tick::ScheduledTickKind::Torch,
                     1_000_000,
                     crate::scheduled_tick::TickPriority::Normal,
                 ));
@@ -7273,7 +7412,7 @@ mod tests {
         scheduled.with(|queues| {
             assert!(queues.block.schedule(
                 (50, 6, -76),
-                "redstone:torch".to_owned(),
+                crate::scheduled_tick::ScheduledTickKind::Torch,
                 20,
                 crate::scheduled_tick::TickPriority::Normal,
             ));

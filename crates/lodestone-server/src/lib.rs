@@ -153,6 +153,7 @@ mod chunk_blocks;
 pub mod chunk_nbt;
 mod chunk_store;
 mod command;
+pub mod plugin_commands;
 mod command_block;
 /// The built-in server command tree (`/gamerule`, …); see
 /// `docs/game-rules.md`.
@@ -188,6 +189,9 @@ pub mod dimension;
 /// function that actually spawns a loop is native-only, same as
 /// [`crate::tick::run_tick_loop`] itself.
 mod dimension_tick;
+/// The typed plugin-facing entity observation and mutation capability over the
+/// authoritative mob and player stores.
+pub mod entity_api;
 /// Nether portal frame detection, ignition, destination search and the per-player
 /// transition counter (`docs/nether-portals.md`). Public for the same reason
 /// [`fire`] is: anything that writes a `nether_portal` block owes
@@ -219,10 +223,6 @@ pub mod stonecutting;
 /// Sounds, particles and level events the server owns. Public
 /// because `ServerProtocol`'s three new encoders name [`effects::WorldEffect`].
 pub mod effects;
-/// Typed source-stop/destination-start barriers for moving entities that cross
-/// tick-region boundaries. The first production consumer is dropped-item
-/// motion; see `docs/entity-ownership-transfer.md`.
-pub mod entity_handoff;
 mod fall;
 /// Fire spread and burnout on the block-tick queue (`docs/fire-spread.md`).
 /// Public for the same reason [`fluid`] is: any code that writes a fire block
@@ -514,6 +514,7 @@ pub mod ticket;
 pub mod villager_trade;
 mod vitals;
 mod weather;
+mod worldgen_dispatch;
 /// Lightning: per-chunk strike-target selection during a thunderstorm, the
 /// `LightningBolt` life-cycle and its entity-facing effects (`docs/lightning.md`).
 /// Public because spawning the bolt as a real entity and applying an effect
@@ -540,7 +541,11 @@ pub use advancements::{
     AdvancementUpdate, GrantOutcome, PlayerAdvancementState, PlayerProgress, PlayerStatistics, StatKey,
     StatType,
 };
-pub use block_entities::{BlockEntity, BlockEntityHandle, BlockEntityRegistry, block_entity_for_item};
+pub use block_entities::{
+    merge_tick_effect_batches, BlockEntity, BlockEntityHandle, BlockEntityKind, BlockEntityRegistry,
+    BlockEntityTickAssignment, BlockEntityTickEffect, BlockEntityTickEffectBatch,
+    BlockEntityTickOwner, BlockEntityTickOwnerBatch, BlockEntityTickPlan, block_entity_for_item,
+};
 // `command_block` itself stays private (its module doc is an internal design
 // record, not a public surface); this one type is re-exported because
 // `BlockEntity::CommandBlock`'s payload is otherwise unreachable from outside
@@ -597,6 +602,7 @@ pub use hopper::{
 pub use integrated::{BlockMutationRefusal, IntegratedServer};
 #[cfg(not(target_arch = "wasm32"))]
 pub use integrated::PlayerGameModeRefusal;
+pub use entity_api::{EntityMutation, EntityMutationResult, EntityObservation, ServerEntityApi};
 #[cfg(not(target_arch = "wasm32"))]
 pub use integrated::{LanConfig, LanDiscovery, PublishConfig};
 #[cfg(not(target_arch = "wasm32"))]
@@ -648,8 +654,10 @@ pub use random_tick::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use rcon::{DEFAULT_RCON_PORT, RconConfig};
 pub use scheduled_tick::{
-    ChunkScheduledTickQueue, PersistedScheduledTick, ScheduledTick, ScheduledTickHandle,
-    ScheduledTickQueue, ScheduledTickQueueAccess, ScheduledTickSink, StagedTick, TickPriority,
+    merge_due_owner_batches, ChunkScheduledTickQueue, PersistedScheduledTick, ScheduledTick,
+    ScheduledTickHandle, ScheduledTickKind, ScheduledTickOwner, ScheduledTickOwnerAssignment,
+    ScheduledTickOwnerBatch, ScheduledTickQueue, ScheduledTickQueueAccess, ScheduledTickSink,
+    StagedTick, TickPriority,
 };
 pub use server::{
     // The gate in `tests/view_radius_store_capacity.rs` asserts at compile

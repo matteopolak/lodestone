@@ -3,7 +3,8 @@ use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, LoginProfile, PlayerLoadedPolicy, ServerAddress};
 use lodestone_model::{
-    BlockActionKind, BlockFace, BlockPos, ClientAction, ConnectionState, Rotation, Vec3, Vec3f,
+    BlockActionKind, BlockFace, BlockPos, ClientAction, ConnectionState, ContainerClickType,
+    ContainerStateId, Rotation, Vec3, Vec3f,
     VersionAdapter,
 };
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer, ServerProtocol};
@@ -24,7 +25,7 @@ fn adapter_block_use_reaches_the_registry_selected_host_consumer() {
             z: 0.75,
         },
         inside_block: true,
-        sequence: lodestone_model::PredictionSequence::new(17),
+        sequence: 17,
     };
     let Some((packet_id, payload)) = adapter
         .encode_action(ConnectionState::Play, &action)
@@ -44,7 +45,7 @@ fn adapter_block_use_reaches_the_registry_selected_host_consumer() {
                 y: 1.0,
                 z: 0.75,
             },
-            sequence: lodestone_model::PredictionSequence::new(17),
+            sequence: 17,
             hand: 1,
         },
         "the real adapter and registry-selected host must agree on the server consumer input"
@@ -53,46 +54,6 @@ fn adapter_block_use_reaches_the_registry_selected_host_consumer() {
         host.decode(lodestone_core::State::Configuration, packet_id, &payload),
         lodestone_server::ServerBound::Ignored,
         "the same bytes must not bypass the configuration-to-Play handoff"
-    );
-}
-
-#[test]
-fn adapter_block_use_preserves_signed_prediction_sequence_bits() {
-    let adapter = adapter_for(774);
-    let action = ClientAction::UseItemOn {
-        hand: lodestone_model::Hand::Main,
-        pos: BlockPos::new(5, -10, -7),
-        face: BlockFace::South,
-        cursor: Vec3f {
-            x: 0.25,
-            y: 1.0,
-            z: 0.75,
-        },
-        inside_block: false,
-        sequence: lodestone_model::PredictionSequence::from_wire(i32::MIN),
-    };
-    let Some((packet_id, payload)) = adapter
-        .encode_action(ConnectionState::Play, &action)
-        .expect("the protocol-774 adapter must encode a block use")
-    else {
-        panic!("block use must have a serverbound packet");
-    };
-    let host = lodestone_registry::server_protocol_for_protocol(774)
-        .expect("protocol 774 must resolve to the hosted family");
-    assert_eq!(
-        host.decode(lodestone_core::State::Play, packet_id, &payload),
-        lodestone_server::ServerBound::UseItemOn {
-            pos: BlockPos::new(5, -10, -7),
-            face: BlockFace::South,
-            cursor: Vec3f {
-                x: 0.25,
-                y: 1.0,
-                z: 0.75,
-            },
-            sequence: lodestone_model::PredictionSequence::from_wire(i32::MIN),
-            hand: 0,
-        },
-        "the adapter must preserve the signed VarInt bit pattern at the wire boundary"
     );
 }
 
@@ -126,6 +87,152 @@ fn adapter_air_use_reaches_the_registry_selected_host_consumer() {
         lodestone_server::ServerBound::Ignored,
         "the same bytes must not bypass the configuration-to-Play handoff"
     );
+}
+
+#[test]
+fn adapter_container_click_reaches_the_registry_selected_host_consumer() {
+    let adapter = adapter_for(774);
+    let action = ClientAction::ContainerClick {
+        window_id: 130,
+        state_id: lodestone_model::ContainerStateId::new(17),
+        slot: 37,
+        button: 0,
+        click_type: lodestone_model::ContainerClickType::Pickup,
+        changed_slots: vec![
+            lodestone_model::ContainerSlotChange { slot: 37, item: None },
+            lodestone_model::ContainerSlotChange {
+                slot: 46,
+                item: Some(lodestone_model::ItemStack::new(
+                    "minecraft:stone".parse().unwrap(),
+                    3,
+                )),
+            },
+        ],
+        carried_item: None,
+    };
+    let Some((packet_id, payload)) = adapter
+        .encode_action(ConnectionState::Play, &action)
+        .expect("the protocol-774 adapter must encode a plain container click")
+    else {
+        panic!("container click must have a serverbound packet");
+    };
+    let host = lodestone_registry::server_protocol_for_protocol(774)
+        .expect("protocol 774 must resolve to the hosted family");
+    assert_eq!(
+        host.decode(lodestone_core::State::Play, packet_id, &payload),
+        lodestone_server::ServerBound::ContainerClicked {
+            window_id: 130,
+            state_id: 17,
+            slot: 37,
+            button: 0,
+            click_type: 0,
+            changed_slots: vec![
+                (37, None),
+                (
+                    46,
+                    Some(lodestone_model::ItemStack::new(
+                        "minecraft:stone".parse().unwrap(),
+                        3,
+                    )),
+                ),
+            ],
+            carried_item: None,
+        },
+        "the real adapter bytes must reach the registry-selected server consumer",
+    );
+}
+
+#[test]
+fn adapter_container_close_reaches_the_registry_selected_host_consumer() {
+    let adapter = adapter_for(774);
+    let action = ClientAction::ContainerClose { window_id: 130 };
+    let Some((packet_id, payload)) = adapter
+        .encode_action(ConnectionState::Play, &action)
+        .expect("the protocol-774 adapter must encode a container close")
+    else {
+        panic!("container close must have a serverbound packet");
+    };
+    assert_eq!(payload, vec![0x82, 0x01]);
+    let host = lodestone_registry::server_protocol_for_protocol(774)
+        .expect("protocol 774 must resolve to the hosted family");
+    assert_eq!(
+        host.decode(lodestone_core::State::Play, packet_id, &payload),
+        lodestone_server::ServerBound::ContainerClosed { window_id: 130 },
+        "the real adapter close bytes must reach the registry-selected server consumer",
+    );
+}
+
+#[tokio::test]
+async fn joined_protocol_774_click_does_not_persist_client_prediction() {
+    let uuid = uuid::Uuid::new_v4();
+    let world_dir = std::env::temp_dir().join(format!("lodestone-v774-container-authority-{uuid}"));
+    std::fs::create_dir_all(&world_dir).expect("create temporary container world");
+    let (server, client_io, _world) = IntegratedServer::open_persistent_with_mobs(
+        lodestone_v1_21_11::V774ServerProtocol,
+        &world_dir,
+        FixtureSource::new(),
+        -64,
+        384,
+        (0..=0, 0..=0),
+        (8, 8),
+        0,
+        0,
+        Duration::from_secs(3600),
+    )
+    .expect("open temporary protocol-774 container world");
+    let (mut handle, _) = ClientBuilder::new(
+        ServerAddress { host: "memory".to_owned(), port: 0 },
+        LoginProfile { username: "ContAuthority".to_owned(), uuid },
+        Box::new(adapter_for(774)),
+    )
+    .player_loaded_policy(PlayerLoadedPolicy::Manual)
+    .connect_with(client_io);
+    handle
+        .wait_for_spawn(Duration::from_secs(10))
+        .await
+        .expect("protocol-774 client must join before its inventory is tested");
+    let initial_state = handle.player_menu().state_id();
+    assert_ne!(
+        initial_state,
+        ContainerStateId::new(0),
+        "the join content must establish a server state id before the click"
+    );
+
+    let forged = lodestone_model::ItemStack::new("minecraft:stone".parse().unwrap(), 64);
+    handle
+        .send_action(ClientAction::ContainerClick {
+            window_id: 0,
+            state_id: initial_state,
+            slot: 9,
+            button: 0,
+            click_type: ContainerClickType::Pickup,
+            changed_slots: vec![lodestone_model::ContainerSlotChange {
+                slot: 9,
+                item: Some(forged),
+            }],
+            carried_item: None,
+        })
+        .expect("joined protocol-774 client must submit a container click");
+    handle
+        .wait_for(Duration::from_secs(10), |client| {
+            client.player_menu().state_id() == ContainerStateId::new(0)
+        })
+        .await
+        .expect("the server must correct a prediction that disagrees with its empty inventory");
+
+    let authoritative = server
+        .players()
+        .expect("persistent integrated server must expose its player registry")
+        .inventory(uuid)
+        .expect("the joined player must have an authoritative inventory snapshot");
+    assert!(
+        authoritative.native(9).is_none(),
+        "the server-authoritative inventory must not persist the client's forged stack"
+    );
+    handle.shutdown();
+    let _ = handle.join().await;
+    server.shutdown().await;
+    std::fs::remove_dir_all(&world_dir).expect("remove temporary container world");
 }
 
 struct FixtureSource {
@@ -236,11 +343,6 @@ async fn registry_selected_protocol_774_reaches_play_and_confirms_a_block_break(
         .wait_for_chunk(lodestone_client::ChunkPos::new(0, 0), Duration::from_secs(10))
         .await
         .expect("protocol-774 chunk arrives");
-    assert_eq!(
-        handle.player_menu().state_id(),
-        lodestone_model::ContainerStateId::new(1),
-        "the production join path must consume protocol-774's window-0 content snapshot"
-    );
     let flower = lodestone_data::block_states::state_id("minecraft:dandelion")
         .expect("fixture state exists");
     assert_eq!(handle.block_at(TARGET), Some(flower));

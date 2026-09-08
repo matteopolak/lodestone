@@ -1144,8 +1144,10 @@ pub struct EntityDraw {
     /// server-only) as two different numbers, and only the first is on the wire.
     pub experience_orb_value: Option<i32>,
     /// A primed TNT entity's synchronized fuse time, in ticks remaining. It is
-    /// `None` for every other entity; the moving-block pass uses it for the
-    /// final-ten-tick swell and five-tick white flash.
+    /// `None` for every other entity and for the short window before a TNT
+    /// spawn's first metadata packet arrives; the moving-block pass renders
+    /// that missing-data state at its unlit, unswelled default. Once present,
+    /// the value drives the final-ten-tick swell and five-tick white flash.
     pub tnt_fuse: Option<f32>,
     /// This frame's interpolated `(capeLean, capeLean2, capeFlap)`, all
     /// degrees — see [`cape_sway`] for the derivation and [`CapeLag`] for the
@@ -3060,12 +3062,14 @@ pub fn extract_entity_draws(
         } else {
             None
         };
-        let tnt_fuse = (kind.0.as_ref() == "tnt").then(|| {
+        let tnt_fuse = if kind.0.as_ref() == "tnt" {
             index
                 .get(id.0)
                 .and_then(|entity| tnt_fuses.get(entity).ok())
-                .map_or(80.0, |fuse| fuse.0 as f32 - partial_tick + 1.0)
-        });
+                .map(|fuse| fuse.0 as f32 - partial_tick + 1.0)
+        } else {
+            None
+        };
         // An item frame's in-plane rotation, bridged off the ingest entity like
         // `block_state` and `experience_orb_value` above. `0` — vanilla's own
         // accessor default — for every entity that is not a frame and for a frame
@@ -4065,6 +4069,13 @@ pub(crate) fn fold_entities_for_local(
         .unwrap_or_default();
 
     let tracked: Vec<(i32, Entity)> = world.resource::<EntityIndex>().iter().collect();
+    let local_network_id = tracked.iter().find_map(|(id, entity)| {
+        world
+            .get_entity(*entity)
+            .ok()
+            .filter(|entity_ref| entity_ref.contains::<LocalPlayer>())
+            .map(|_| *id)
+    });
     let mut seen: HashSet<i32> = HashSet::with_capacity(tracked.len());
 
     for (id, ingest_entity) in tracked {
@@ -4172,6 +4183,9 @@ pub(crate) fn fold_entities_for_local(
         .resource_mut::<EntityMapIds>()
         .0
         .retain(|id, _| seen.contains(id));
+    if let Some(mut effects) = world.get_resource_mut::<lodestone_ecs::EntityStatusEffects>() {
+        effects.retain_entity_ids(|id| seen.contains(&id) || local_network_id == Some(id));
+    }
 }
 
 /// A newly seen entity is drawn at rest at its reported pose: both ends of the
@@ -4590,6 +4604,9 @@ pub fn reset_entity_tracks(world: &mut World) {
     world.resource_mut::<TrackIndex>().0.clear();
     world.resource_mut::<ItemStacks>().0.clear();
     world.resource_mut::<EntityMapIds>().0.clear();
+    if let Some(mut effects) = world.get_resource_mut::<lodestone_ecs::EntityStatusEffects>() {
+        effects.clear();
+    }
     world.resource_mut::<ExtractedDraws>().0.clear();
     // A pickup in flight when the session ends has no collector to fly to any
     // more, and its start point is in a world we are leaving.
@@ -6645,16 +6662,19 @@ mod tests {
     }
 
     /// The synchronized TNT fuse must cross the ingest-to-render boundary with
-    /// the render-time tick adjustment intact. These three values land exactly
-    /// on the scale/flash witnesses: 10 has no swell, 5 is the dark cadence
-    /// boundary, and 0 is the fully swollen lit frame.
+    /// the render-time tick adjustment intact. These values land exactly on
+    /// the production scale/flash witnesses: 10 has no swell, 5 is the dark
+    /// cadence boundary, and 0 is the fully swollen lit frame. A TNT that has
+    /// not reported metadata yet stays `None`, so the renderer can choose its
+    /// unlit default instead of mistaking the accessor default for a flash.
     #[test]
     fn primed_tnt_fuse_reaches_draw_with_the_render_tick_adjustment() {
         let mut interp = EntityInterpolator::new();
         (primed_tnt_snap(1, Some(9))).apply(interp.world_mut());
         (primed_tnt_snap(2, Some(4))).apply(interp.world_mut());
         (primed_tnt_snap(3, Some(-1))).apply(interp.world_mut());
-        (snap(4, Vec3::ZERO, 0.0)).apply(interp.world_mut());
+        (primed_tnt_snap(4, None)).apply(interp.world_mut());
+        (snap(5, Vec3::ZERO, 0.0)).apply(interp.world_mut());
         interp.update(0.0);
 
         let fuse_of = |id: i32| -> Option<f32> {
@@ -6668,7 +6688,8 @@ mod tests {
         assert_eq!(fuse_of(1), Some(10.0));
         assert_eq!(fuse_of(2), Some(5.0));
         assert_eq!(fuse_of(3), Some(0.0));
-        assert_eq!(fuse_of(4), None, "only primed TNT carries a fuse");
+        assert_eq!(fuse_of(4), None, "unreported TNT keeps the missing-data state");
+        assert_eq!(fuse_of(5), None, "only primed TNT can carry a fuse");
     }
 
     /// [`extract_entity_draws`] must carry an orb's `ExperienceOrbValue` through to

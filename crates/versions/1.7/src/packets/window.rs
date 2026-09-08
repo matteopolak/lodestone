@@ -102,6 +102,65 @@ pub struct ServerboundCloseWindow {
     pub window_id: u8,
 }
 
+/// Serverbound `window_click`.
+///
+/// Protocol 5 carries the pre-click contents of the selected slot and an
+/// action counter. It has no state id or post-click prediction list; the
+/// server derives the authoritative result from the click itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowClick {
+    /// Window handle.
+    pub window_id: u8,
+    /// Clicked slot index, with the outside sentinel represented as `-999`.
+    pub slot: i16,
+    /// Mouse button used.
+    pub button: i8,
+    /// Legacy transaction/action counter.
+    pub action: i16,
+    /// Click mode (pickup, quick-move, swap, and so on).
+    pub mode: i8,
+    /// Contents the client observed before the click.
+    pub item: Slot,
+}
+
+impl lodestone_core::Decode for WindowClick {
+    fn decode(
+        reader: &mut lodestone_core::Reader<'_>,
+        ctx: lodestone_core::Ctx,
+    ) -> lodestone_core::Result<Self> {
+        Ok(Self {
+            window_id: reader.u8()?,
+            slot: reader.i16()?,
+            button: reader.i8()?,
+            action: reader.i16()?,
+            mode: reader.i8()?,
+            item: Slot::decode(reader, ctx)?,
+        })
+    }
+}
+
+impl lodestone_core::Encode for WindowClick {
+    fn encode(
+        &self,
+        writer: &mut lodestone_core::Writer,
+        ctx: lodestone_core::Ctx,
+    ) -> lodestone_core::Result<()> {
+        writer.u8(self.window_id);
+        writer.i16(self.slot);
+        writer.i8(self.button);
+        writer.i16(self.action);
+        writer.i8(self.mode);
+        self.item.encode(writer, ctx)
+    }
+}
+
+impl lodestone_core::Packet for WindowClick {
+    const NAME: &'static str = "minecraft:window_click";
+    const STATE: lodestone_core::State = lodestone_core::State::Play;
+    const BOUND: lodestone_core::Bound = lodestone_core::Bound::Server;
+    const PROTOCOLS: lodestone_core::ProtocolRange = lodestone_core::ProtocolRange::new(5, 5);
+}
+
 /// Clientbound `set_slot`.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:set_slot", state = Play, bound = Client)]

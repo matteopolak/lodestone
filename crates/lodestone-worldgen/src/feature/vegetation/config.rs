@@ -8,7 +8,6 @@
 
 use std::collections::HashSet;
 
-use serde::Deserialize;
 use serde_json::Value;
 
 use crate::density::Resolver;
@@ -20,95 +19,6 @@ use super::grid::census::bump as census_bump;
 use super::ids::{IdTags, Tag, tag_at};
 use super::super::top_layer::StatePredicate;
 use super::tree::{FoliagePlacerCfg, RootPlacerCfg, TrunkPlacerCfg};
-
-/// Strict envelope for a placed feature. The feature holder is intentionally
-/// left dynamic because it may be a registry id or an inline holder; placement
-/// modifiers themselves still have a closed set of field names.
-#[allow(dead_code)]
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PlacedFeatureJson {
-    feature: Value,
-    placement: Vec<PlacementJson>,
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PlacementJson {
-    #[serde(rename = "type")]
-    type_name: String,
-    count: Option<Value>,
-    heightmap: Option<String>,
-    chance: Option<i32>,
-    max_water_depth: Option<i32>,
-    noise_level: Option<f64>,
-    below_noise: Option<i32>,
-    above_noise: Option<i32>,
-    xz_spread: Option<Value>,
-    y_spread: Option<Value>,
-    predicate: Option<Value>,
-    height: Option<Value>,
-    target_condition: Option<Value>,
-    allowed_search_condition: Option<Value>,
-    direction_of_search: Option<String>,
-    max_steps: Option<i32>,
-    noise_to_count_ratio: Option<i32>,
-    noise_factor: Option<f64>,
-    noise_offset: Option<f64>,
-    min_inclusive: Option<i32>,
-    max_inclusive: Option<i32>,
-    positions: Option<Value>,
-}
-
-/// Strict top-level tree configuration. Provider and predicate payloads remain
-/// dynamic registry data; the tree codec owns the surrounding field set.
-#[allow(dead_code)]
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TreeConfigJson {
-    trunk_provider: Value,
-    foliage_provider: Value,
-    trunk_placer: Value,
-    foliage_placer: Value,
-    minimum_size: Value,
-    #[serde(default)]
-    below_trunk_provider: Option<Value>,
-    #[serde(default)]
-    decorators: Vec<Value>,
-    #[serde(default)]
-    root_placer: Option<Value>,
-    #[serde(default)]
-    ignore_vines: Option<bool>,
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ConfiguredFeatureJson {
-    #[serde(rename = "type")]
-    type_name: String,
-    config: Value,
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EmptyConfigJson {}
-
-/// Closed field set shared by glow-lichen and sculk-vein multiface growth.
-#[allow(dead_code)]
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MultifaceGrowthJson {
-    block: Option<String>,
-    search_range: Option<i32>,
-    can_place_on_floor: Option<bool>,
-    can_place_on_ceiling: Option<bool>,
-    can_place_on_wall: Option<bool>,
-    chance_of_spreading: Option<f64>,
-    can_be_placed_on: Option<Value>,
-}
 
 /// The reference heightmap-type enum (the subset vegetal decoration references). See this
 /// module's doc "Approximations, named" for why only two scans back all
@@ -137,9 +47,8 @@ impl HeightmapKind {
     fn scan(self, grid: &VegGrid, x: i32, z: i32) -> i32 {
         match self {
             Self::OceanFloor | Self::OceanFloorWg => grid.height_ocean_floor(x, z),
-            Self::WorldSurface | Self::WorldSurfaceWg | Self::MotionBlocking => {
-                grid.height_world_surface(x, z)
-            }
+            Self::WorldSurface | Self::WorldSurfaceWg => grid.height_world_surface(x, z),
+            Self::MotionBlocking => grid.height_motion_blocking(x, z),
         }
     }
 }
@@ -148,11 +57,18 @@ impl HeightmapKind {
 /// subset grass/flower/tree placement and the rule-based state provider use).
 /// Unknown predicate types degrade to [`BlockPredicate::True`] (this
 /// module's blanket "unsupported degrades, never panics" rule) — see this
-/// module's doc comment for why that must never be a panic.
+/// module's doc comment for why that must never be a panic. Predicates whose
+/// placement semantics are needed by the bundled data are represented
+/// explicitly below, including the downward sturdy-face check used by
+/// hanging cave vegetation.
 #[derive(Clone, Debug)]
 pub enum BlockPredicate {
     True,
     Solid,
+    /// Tests the state at `position + offset` for center support on its
+    /// downward face. This is the target condition for the bundled upward
+    /// environment scan that anchors hanging vegetation to a ceiling.
+    HasSturdyFaceDown { offset: (i32, i32, i32) },
     Not(Box<BlockPredicate>),
     /// The all-of/any-of predicate combinators — added for `patch_sugar_cane*`'s
     /// `block_predicate_filter`, which nests a `matching_block_tag` +
@@ -201,14 +117,6 @@ pub enum BlockPredicate {
         fluids: Vec<String>,
         offset: (i32, i32, i32),
     },
-    /// Tests the requested face of the block at `offset`. The bundled
-    /// placement data currently uses the downward face to find a ceiling for
-    /// hanging vegetation; the resolver supplies exact center-support facts
-    /// for that face and full upward-face facts for the opposite direction.
-    HasSturdyFace {
-        direction: SturdyFaceDirection,
-        offset: (i32, i32, i32),
-    },
     /// Approximates every `would_survive` check this module reaches as
     /// the vegetation block's own may-place-on rule — see module doc. The default for any
     /// `would_survive` whose tested state isn't one of the two special-cased
@@ -228,12 +136,6 @@ pub enum BlockPredicate {
     /// same `all_of`, so modelling it twice would be redundant, not more
     /// correct.
     WouldSurviveSugarCane,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum SturdyFaceDirection {
-    Up,
-    Down,
 }
 
 pub(super) fn parse_predicate_list(v: &Value) -> Vec<BlockPredicate> {
@@ -308,6 +210,11 @@ impl BlockPredicate {
         let ty = v["type"].as_str().unwrap_or("minecraft:true");
         match ty.strip_prefix("minecraft:").unwrap_or(ty) {
             "solid" => BlockPredicate::Solid,
+            "has_sturdy_face" if v["direction"].as_str() == Some("down") => {
+                BlockPredicate::HasSturdyFaceDown {
+                    offset: parse_offset(&v["offset"]),
+                }
+            }
             "not" => BlockPredicate::Not(Box::new(BlockPredicate::parse(&v["predicate"]))),
             "all_of" => BlockPredicate::AllOf(parse_predicate_list(v)),
             "any_of" => BlockPredicate::AnyOf(parse_predicate_list(v)),
@@ -332,17 +239,6 @@ impl BlockPredicate {
                 },
                 offset: parse_offset(&v["offset"]),
             },
-            "has_sturdy_face" => match v["direction"].as_str() {
-                Some("up") => BlockPredicate::HasSturdyFace {
-                    direction: SturdyFaceDirection::Up,
-                    offset: parse_offset(&v["offset"]),
-                },
-                Some("down") => BlockPredicate::HasSturdyFace {
-                    direction: SturdyFaceDirection::Down,
-                    offset: parse_offset(&v["offset"]),
-                },
-                _ => BlockPredicate::True,
-            },
             "would_survive" => match v["state"]["Name"].as_str().unwrap_or("") {
                 "minecraft:cactus" => BlockPredicate::WouldSurviveCactus,
                 "minecraft:sugar_cane" => BlockPredicate::WouldSurviveSugarCane,
@@ -363,6 +259,18 @@ pub(super)     fn test(&self, grid: &VegGrid, tags: &VegTags, pos: BlockPos) -> 
                     let base = super::base_id(state);
                     !is_air(base) && !is_fluid(base) && blocks_motion(base)
                 }
+            }
+            BlockPredicate::HasSturdyFaceDown { offset } => {
+                let (dx, dy, dz) = *offset;
+                let state = grid.get_id(pos.x + dx, pos.y + dy, pos.z + dz);
+                grid.interner().canonical_id(state).map_or_else(
+                    || {
+                        tags.simple_block_support
+                            .center_support_down
+                            .test(grid.interner().name_of(state))
+                    },
+                    lodestone_data::block_survival::center_support_down,
+                )
             }
             BlockPredicate::Not(inner) => !inner.test(grid, tags, pos),
             BlockPredicate::AllOf(list) => list.iter().all(|p| p.test(grid, tags, pos)),
@@ -406,21 +314,6 @@ pub(super)     fn test(&self, grid: &VegGrid, tags: &VegTags, pos: BlockPos) -> 
                 fluids.iter().any(|f| {
                     fluid_tag_of(f).is_some_and(|tag| tags.has(grid.interner(), tag, id))
                 })
-            }
-            BlockPredicate::HasSturdyFace { direction, offset } => {
-                let (dx, dy, dz) = *offset;
-                let state = grid.get_id(pos.x + dx, pos.y + dy, pos.z + dz);
-                let name = grid.interner().name_of(state);
-                let facts = match direction {
-                    SturdyFaceDirection::Up => &tags.simple_block_support.sturdy_up,
-                    SturdyFaceDirection::Down => &tags.simple_block_support.center_support_down,
-                };
-                if !facts.is_empty() {
-                    facts.test(name)
-                } else {
-                    let base = super::base_id(name);
-                    !is_air(base) && !is_fluid(base) && blocks_motion(base)
-                }
             }
             BlockPredicate::WouldSurviveOnSupportsVegetation => {
                 tag_at(grid, tags, Tag::SupportsVegetation, pos.x, pos.y - 1, pos.z)
@@ -1180,6 +1073,11 @@ pub(super) fn try_parse_int_provider(v: &Value) -> Option<IntProvider> {
                     min: v["min_inclusive"].as_i64()? as i32,
                     max: v["max_inclusive"].as_i64()? as i32,
                 }),
+                "clamped" => Some(IntProvider::Clamped {
+                    source: Box::new(try_parse_int_provider(v.get("source")?)?),
+                    min: v["min_inclusive"].as_i64()? as i32,
+                    max: v["max_inclusive"].as_i64()? as i32,
+                }),
                 // The REAL trapezoid-int sample (two draws, triangular),
                 // not a `Uniform` stand-in — see `IntProvider::Trapezoid`'s
                 // own doc comment on why the approximation this replaced
@@ -1401,7 +1299,7 @@ impl VegPlacement {
                     for _ in 0..n.max(0) {
                         let x = random.next_int_bounded(16) + pos.x;
                         let z = random.next_int_bounded(16) + pos.z;
-                        let start_y = grid.height_world_surface(x, z);
+                        let start_y = grid.height_motion_blocking(x, z);
                         if let Some(y) = find_on_ground_y(grid, tags, x, start_y, z, layer) {
                             out.push(BlockPos { x, y, z });
                             found_any = true;
@@ -1899,6 +1797,7 @@ pub enum ConfiguredFeature {
     // [`super::features`]; each arm's parse is immediately below in
     // `parse_configured_feature_doc`.
     Spring(Box<super::features::SpringCfg>),
+    UnderwaterMagma(Box<super::features::UnderwaterMagmaCfg>),
     Disk(Box<super::features::DiskCfg>),
     BlockPile(BlockStateProvider),
     NetherForestVegetation(Box<super::features::NetherForestVegetationCfg>),
@@ -1942,6 +1841,12 @@ pub enum ConfiguredFeature {
     Sequence(Vec<PlacedRef>),
     /// A bounded noise-shaped shell with optional cracks and crystal growth.
     Geode(Box<super::geode::GeodeCfg>),
+    /// A paired structure-template fossil and ore-overlay placement.
+    Fossil(Box<super::fossil::FossilCfg>),
+    /// A tapered packed-ice spike rooted on a snow block.
+    IceSpike(Box<super::ice_spike::IceSpikeCfg>),
+    /// A paired tapered dripstone cone grown across a cave column.
+    LargeDripstone(Box<super::large_dripstone::LargeDripstoneCfg>),
     /// The no-op feature — genuinely nothing, and distinct from
     /// [`ConfiguredFeature::Unsupported`] so it is not counted as a gap.
     NoOp,
@@ -1998,9 +1903,6 @@ pub fn resolve_placed_feature_ref(resolver: &dyn Resolver, value: &Value) -> Pla
 }
 
 pub(super) fn parse_placed_feature_doc(resolver: &dyn Resolver, doc: &Value) -> PlacedRef {
-    if let Err(error) = serde_json::from_value::<PlacedFeatureJson>(doc.clone()) {
-        return unsupported_placed_ref(&format!("placed-feature schema: {error}"));
-    }
     let placements = doc
         .get("placement")
         .and_then(Value::as_array)
@@ -2118,29 +2020,40 @@ fn parse_root_system_config(resolver: &dyn Resolver, config: &Value) -> Option<s
     })
 }
 
+fn parse_underwater_magma_config(config: &Value) -> Option<super::features::UnderwaterMagmaCfg> {
+    let floor_search_range = config
+        .get("floor_search_range")
+        .and_then(Value::as_i64)
+        .filter(|value| (0..=512).contains(value))? as i32;
+    let placement_probability_per_valid_position = config
+        .get("placement_probability_per_valid_position")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))? as f32;
+    let placement_radius_around_floor = config
+        .get("placement_radius_around_floor")
+        .and_then(Value::as_i64)
+        .filter(|value| (0..=64).contains(value))? as i32;
+    Some(super::features::UnderwaterMagmaCfg {
+        floor_search_range,
+        placement_probability_per_valid_position,
+        placement_radius_around_floor,
+    })
+}
+
 pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value) -> ConfiguredFeature {
-    let typed = match serde_json::from_value::<ConfiguredFeatureJson>(doc.clone()) {
-        Ok(value) => value,
-        Err(error) => return ConfiguredFeature::Unsupported(format!("configured-feature schema: {error}")),
-    };
-    let ty = typed.type_name;
-    let short = ty.strip_prefix("minecraft:").unwrap_or(&ty);
+    let ty = doc["type"].as_str().unwrap_or("");
+    let short = ty.strip_prefix("minecraft:").unwrap_or(ty);
     match short {
         "simple_block" => match BlockStateProvider::try_parse(&doc["config"]["to_place"]) {
             Some(p) => ConfiguredFeature::SimpleBlock(p),
             None => ConfiguredFeature::Unsupported("simple_block: unsupported to_place".into()),
         },
-        "tree" => {
-            if serde_json::from_value::<TreeConfigJson>(doc["config"].clone()).is_err() {
-                return ConfiguredFeature::Unsupported("tree: schema validation failed".into());
-            }
-            match TreeConfig::try_parse(&doc["config"]) {
+        "tree" => match TreeConfig::try_parse(&doc["config"]) {
             Some(cfg) => ConfiguredFeature::Tree(Box::new(cfg)),
             None => ConfiguredFeature::Unsupported(
                 "tree: unsupported trunk/foliage/size/provider".into(),
             ),
-            }
-        }
+        },
         "block_column" => match BlockColumnConfig::try_parse(&doc["config"]) {
             Some(cfg) => ConfiguredFeature::BlockColumn(Box::new(cfg)),
             None => ConfiguredFeature::Unsupported(
@@ -2189,6 +2102,21 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
             Some(cfg) => ConfiguredFeature::Geode(Box::new(cfg)),
             None => ConfiguredFeature::Unsupported("geode: unsupported providers or bounds".into()),
         },
+        "fossil" => match super::fossil::FossilCfg::try_parse(resolver, &doc["config"]) {
+            Some(cfg) => ConfiguredFeature::Fossil(Box::new(cfg)),
+            None => ConfiguredFeature::Unsupported("fossil: unsupported templates/processors".into()),
+        },
+        "spike" => match super::ice_spike::IceSpikeCfg::try_parse(resolver, &doc["config"]) {
+            Some(cfg) => ConfiguredFeature::IceSpike(Box::new(cfg)),
+            None => ConfiguredFeature::Unsupported("spike: malformed support/replacement/state".into()),
+        },
+        "large_dripstone" => match super::large_dripstone::LargeDripstoneCfg::try_parse(
+            resolver,
+            &doc["config"],
+        ) {
+            Some(cfg) => ConfiguredFeature::LargeDripstone(Box::new(cfg)),
+            None => ConfiguredFeature::Unsupported("large_dripstone: malformed providers or bounds".into()),
+        },
         "random_selector" => {
             let cfg = &doc["config"];
             let default = resolve_placed_feature_ref(resolver, &cfg["default"]);
@@ -2234,6 +2162,12 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
                 hole_count: c["hole_count"].as_i64().unwrap_or(1) as i32,
                 valid_blocks: parse_id_list(&c["valid_blocks"]).into_iter().collect(),
             }))
+        }
+        "underwater_magma" => {
+            parse_underwater_magma_config(&doc["config"]).map_or_else(
+                || ConfiguredFeature::Unsupported("underwater_magma: malformed configuration".into()),
+                |cfg| ConfiguredFeature::UnderwaterMagma(Box::new(cfg)),
+            )
         }
         "disk" => {
             let c = &doc["config"];
@@ -2341,11 +2275,6 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
         "bamboo" => ConfiguredFeature::Bamboo(doc["config"]["probability"].as_f64().unwrap_or(0.0)),
         "multiface_growth" => {
             let c = &doc["config"];
-            if serde_json::from_value::<MultifaceGrowthJson>(c.clone()).is_err() {
-                return ConfiguredFeature::Unsupported(
-                    "multiface_growth: schema validation failed".into(),
-                );
-            }
             ConfiguredFeature::MultifaceGrowth(Box::new(super::features::MultifaceGrowthCfg {
                 block: c["block"].as_str().unwrap_or("minecraft:glow_lichen").to_string(),
                 search_range: c["search_range"].as_i64().unwrap_or(10) as i32,
@@ -2470,13 +2399,7 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
                 _ => ConfiguredFeature::Unsupported("lake: unsupported fluid/barrier".into()),
             }
         }
-        "monster_room" => {
-            if serde_json::from_value::<EmptyConfigJson>(doc["config"].clone()).is_ok() {
-                ConfiguredFeature::MonsterRoom
-            } else {
-                ConfiguredFeature::Unsupported("monster_room: schema validation failed".into())
-            }
-        }
+        "monster_room" => ConfiguredFeature::MonsterRoom,
         "huge_brown_mushroom" | "huge_red_mushroom" => {
             let c = &doc["config"];
             match (
@@ -2678,6 +2601,7 @@ pub fn collect_unsupported(placed: &PlacedRef) -> Vec<String> {
             | ConfiguredFeature::BlockColumn(_)
             | ConfiguredFeature::FallenTree(_)
             | ConfiguredFeature::Spring(_)
+            | ConfiguredFeature::UnderwaterMagma(_)
             | ConfiguredFeature::Disk(_)
             | ConfiguredFeature::BlockPile(_)
             | ConfiguredFeature::NetherForestVegetation(_)
@@ -2705,6 +2629,9 @@ pub fn collect_unsupported(placed: &PlacedRef) -> Vec<String> {
             | ConfiguredFeature::Bamboo(_)
             | ConfiguredFeature::SculkPatch(_)
             | ConfiguredFeature::Geode(_)
+            | ConfiguredFeature::Fossil(_)
+            | ConfiguredFeature::IceSpike(_)
+            | ConfiguredFeature::LargeDripstone(_)
             | ConfiguredFeature::NoOp => {}
         }
     }
@@ -2715,20 +2642,13 @@ pub fn collect_unsupported(placed: &PlacedRef) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::{HashMap, HashSet},
-        sync::Arc,
-    };
+    use std::collections::{HashMap, HashSet};
 
-    use super::{
-        BlockPredicate, ConfiguredFeature, Positions, SimpleBlockSupport, SturdyFaceDirection,
-        VegPlacement, VegTags,
-    };
-    use super::super::grid::VegGrid;
+    use super::{BlockPredicate, ConfiguredFeature};
     use crate::density::{NoiseParams, Resolver};
     use crate::feature::BlockPos;
     use crate::feature::top_layer::StatePredicate;
-    use crate::rng::XoroshiroRandomSource;
+    use crate::feature::vegetation::grid::VegGrid;
     use serde_json::Value;
 
     #[test]
@@ -2745,84 +2665,39 @@ mod tests {
     }
 
     #[test]
-    fn sturdy_face_predicate_reads_the_requested_support_fact() {
+    fn has_sturdy_face_down_parser_keeps_the_ceiling_target() {
         let predicate = BlockPredicate::parse(&serde_json::json!({
             "type": "minecraft:has_sturdy_face",
             "direction": "down"
         }));
         assert!(matches!(
             predicate,
-            BlockPredicate::HasSturdyFace {
-                direction: SturdyFaceDirection::Down,
-                offset: (0, 0, 0)
-            }
+            BlockPredicate::HasSturdyFaceDown { offset: (0, 0, 0) }
         ));
 
-        let mut tags = VegTags::default();
-        tags.simple_block_support = SimpleBlockSupport {
-            center_support_down: StatePredicate::new(
-                HashSet::from(["minecraft:stone".to_owned()]),
-                HashMap::new(),
-            ),
-            ..SimpleBlockSupport::default()
-        };
-        let mut grid = VegGrid::with_footprint_interned(
-            Arc::new(crate::interner::StateInterner::new()),
-            0,
-            16,
-            0,
-            0,
-            0,
-            16,
-        );
-        grid.seed(0, 0, 0, "minecraft:stone".to_owned());
-        assert!(predicate.test(&grid, &tags, BlockPos { x: 0, y: 0, z: 0 }));
-        assert!(!predicate.test(&grid, &tags, BlockPos { x: 0, y: 1, z: 0 }));
+        let unsupported_direction = BlockPredicate::parse(&serde_json::json!({
+            "type": "minecraft:has_sturdy_face",
+            "direction": "north"
+        }));
+        assert!(matches!(unsupported_direction, BlockPredicate::True));
     }
 
     #[test]
-    fn environment_scan_stops_at_the_first_supported_ceiling() {
-        let placement = VegPlacement::try_parse(&serde_json::json!({
-            "type": "minecraft:environment_scan",
-            "direction_of_search": "up",
-            "target_condition": {
-                "type": "minecraft:has_sturdy_face",
-                "direction": "down"
-            },
-            "allowed_search_condition": {
-                "type": "minecraft:matching_block_tag",
-                "tag": "minecraft:air"
-            },
-            "max_steps": 12
-        }))
-        .expect("the bundled ceiling scan must parse");
-        let mut tags = VegTags::default();
-        tags.simple_block_support = SimpleBlockSupport {
-            center_support_down: StatePredicate::new(
-                HashSet::from(["minecraft:stone".to_owned()]),
-                HashMap::new(),
-            ),
-            ..SimpleBlockSupport::default()
-        };
-        let mut grid = VegGrid::with_footprint_interned(
-            Arc::new(crate::interner::StateInterner::new()),
-            0,
-            16,
-            0,
-            0,
-            0,
-            16,
+    fn has_sturdy_face_down_tests_the_state_at_the_scan_target() {
+        let predicate = BlockPredicate::HasSturdyFaceDown { offset: (0, 0, 0) };
+        let mut grid = VegGrid::new(0, 4, 0, 0);
+        grid.seed(8, 3, 8, "minecraft:stone".to_string());
+        let mut tags = super::VegTags::default();
+        tags.simple_block_support.center_support_down = StatePredicate::new(
+            HashSet::from(["minecraft:test_support".to_string()]),
+            HashMap::new(),
         );
-        grid.seed(0, 2, 0, "minecraft:stone".to_owned());
-        let mut random = XoroshiroRandomSource::new(0);
-        let positions = placement.get_positions(
-            &mut random,
-            BlockPos { x: 0, y: 0, z: 0 },
-            &grid,
-            &tags,
-            Some("minecraft:cave_vines"),
-        );
-        assert_eq!(positions, Positions::One(BlockPos { x: 0, y: 2, z: 0 }));
+
+        assert!(predicate.test(&grid, &tags, BlockPos { x: 8, y: 3, z: 8 }));
+        assert!(!predicate.test(&grid, &tags, BlockPos { x: 8, y: 2, z: 8 }));
+
+        grid.seed(9, 3, 9, "minecraft:test_support".to_string());
+        assert!(predicate.test(&grid, &tags, BlockPos { x: 9, y: 3, z: 9 }));
     }
 
     #[test]
@@ -2926,6 +2801,63 @@ mod tests {
         assert!(cfg.cannot_replace.contains("minecraft:bedrock"));
         assert!(cfg.invalid_blocks.contains("minecraft:water"));
         assert_eq!(cfg.outer_wall_distance_max, 5);
+    }
+
+    fn underwater_magma_doc() -> Value {
+        serde_json::json!({
+            "type": "minecraft:underwater_magma",
+            "config": {
+                "floor_search_range": 5,
+                "placement_probability_per_valid_position": 0.5,
+                "placement_radius_around_floor": 1
+            }
+        })
+    }
+
+    #[test]
+    fn underwater_magma_parser_requires_bounded_codec_fields() {
+        let resolver = RootResolver;
+        let feature = super::parse_configured_feature_doc(&resolver, &underwater_magma_doc());
+        let ConfiguredFeature::UnderwaterMagma(cfg) = feature else {
+            panic!("the complete underwater-magma document must parse");
+        };
+        assert_eq!(cfg.floor_search_range, 5);
+        assert_eq!(cfg.placement_radius_around_floor, 1);
+        assert_eq!(cfg.placement_probability_per_valid_position, 0.5);
+
+        for field in [
+            "floor_search_range",
+            "placement_probability_per_valid_position",
+            "placement_radius_around_floor",
+        ] {
+            let mut malformed = underwater_magma_doc();
+            malformed["config"]
+                .as_object_mut()
+                .expect("underwater-magma config object")
+                .remove(field);
+            assert!(matches!(
+                super::parse_configured_feature_doc(&resolver, &malformed),
+                ConfiguredFeature::Unsupported(reason)
+                    if reason == "underwater_magma: malformed configuration"
+            ));
+        }
+
+        for (field, value) in [
+            ("floor_search_range", serde_json::json!(-1)),
+            ("floor_search_range", serde_json::json!(513)),
+            ("placement_probability_per_valid_position", serde_json::json!(-0.01)),
+            ("placement_probability_per_valid_position", serde_json::json!(1.01)),
+            ("placement_radius_around_floor", serde_json::json!(-1)),
+            ("placement_radius_around_floor", serde_json::json!(65)),
+        ] {
+            let mut malformed = underwater_magma_doc();
+            malformed["config"][field] = value;
+            assert!(matches!(
+                super::parse_configured_feature_doc(&resolver, &malformed),
+                ConfiguredFeature::Unsupported(reason)
+                    if reason == "underwater_magma: malformed configuration"
+            ));
+        }
     }
 
     fn root_system_doc() -> Value {

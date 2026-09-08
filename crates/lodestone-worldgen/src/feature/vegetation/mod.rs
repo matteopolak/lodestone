@@ -249,7 +249,10 @@
 mod coral;
 mod config;
 mod dungeon;
+mod fossil;
 mod geode;
+mod ice_spike;
+mod large_dripstone;
 pub mod features;
 mod grid;
 pub mod ids;
@@ -512,7 +515,17 @@ fn place_placed_feature_with_seed<R: RandomSource>(
         // recursion in the same order — `Repeat(p, n)` recurses `n` times on the
         // same position, exactly as `for next in vec![p; n]` did. See
         // [`Positions`]'s own doc for why three shapes are exhaustive here.
-        match mods[i].get_positions(random, pos, grid, tags, placed_feature_id) {
+        let next_positions = mods[i].get_positions(random, pos, grid, tags, placed_feature_id);
+        if std::env::var_os("LODESTONE_VEG_TRACE_CAVE_POSITIONS").is_some()
+            && placed_feature_id == Some("minecraft:cave_vines")
+            && i >= 2
+            && (-128..-112).contains(&pos.x)
+            && (-128..-112).contains(&pos.z)
+        {
+            eprintln!("VEGPOS id={} modifier={} from={},{},{} positions={next_positions:?}",
+                placed_feature_id.unwrap_or("<inline>"), i, pos.x, pos.y, pos.z);
+        }
+        match next_positions {
             Positions::None => {}
             Positions::One(next) => recurse(
                 random,
@@ -621,11 +634,36 @@ fn place_configured_feature_with_seed<R: RandomSource>(
         }
         ConfiguredFeature::RandomSelector { default, options } => {
             census_bump(|c| c.random_selector += 1);
+            let trace_selector = std::env::var_os("LODESTONE_VEG_TRACE_SELECTORS").is_some()
+                && (-144..-112).contains(&pos.x)
+                && (-144..-112).contains(&pos.z);
             for (chance, option) in options {
-                if random.next_float() < *chance {
+                let draw = random.next_float();
+                if trace_selector {
+                    eprintln!(
+                        "VEGSELECT pos={},{},{} chance={} draw={} option={} default={}",
+                        pos.x,
+                        pos.y,
+                        pos.z,
+                        chance,
+                        draw,
+                        option.registry_id.as_deref().unwrap_or("<inline>"),
+                        default.registry_id.as_deref().unwrap_or("<inline>"),
+                    );
+                }
+                if draw < *chance {
                     place_placed_feature_with_seed(random, world_seed, pos, option, grid, tags);
                     return;
                 }
+            }
+            if trace_selector {
+                eprintln!(
+                    "VEGSELECT pos={},{},{} selected-default={} ",
+                    pos.x,
+                    pos.y,
+                    pos.z,
+                    default.registry_id.as_deref().unwrap_or("<inline>"),
+                );
             }
             place_placed_feature_with_seed(random, world_seed, pos, default, grid, tags);
         }
@@ -646,6 +684,10 @@ fn place_configured_feature_with_seed<R: RandomSource>(
         ConfiguredFeature::Spring(cfg) => {
             census_bump(|c| c.other_feature += 1);
             features::place_spring(pos, cfg, grid)
+        }
+        ConfiguredFeature::UnderwaterMagma(cfg) => {
+            census_bump(|c| c.other_feature += 1);
+            features::place_underwater_magma(random, pos, cfg, grid)
         }
         ConfiguredFeature::Disk(cfg) => {
             census_bump(|c| c.other_feature += 1);
@@ -787,6 +829,18 @@ fn place_configured_feature_with_seed<R: RandomSource>(
         ConfiguredFeature::Geode(cfg) => {
             census_bump(|c| c.other_feature += 1);
             geode::place_geode(random, world_seed, pos, cfg, grid, tags);
+        }
+        ConfiguredFeature::Fossil(cfg) => {
+            census_bump(|c| c.other_feature += 1);
+            fossil::place_fossil(random, pos, cfg, grid);
+        }
+        ConfiguredFeature::IceSpike(cfg) => {
+            census_bump(|c| c.other_feature += 1);
+            ice_spike::place_ice_spike(random, pos, cfg, grid);
+        }
+        ConfiguredFeature::LargeDripstone(cfg) => {
+            census_bump(|c| c.other_feature += 1);
+            large_dripstone::place_large_dripstone(random, pos, cfg, grid);
         }
         ConfiguredFeature::NoOp => {}
         // Still a no-op — the module's degrade-don't-crash rule —

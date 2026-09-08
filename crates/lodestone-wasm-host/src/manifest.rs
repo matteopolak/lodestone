@@ -135,24 +135,24 @@ pub struct Dependencies {
     pub optional: Vec<String>,
 }
 
-/// Exact identity required by a plugin that requests `version:broker`.
+/// The exact version-specific data identity a privileged broker consumer needs.
 ///
-/// The loader checks this declaration against the configured source before it
-/// reads or compiles the module. A plugin that does not request the broker does
-/// not need this table.
+/// This is intentionally a manifest-owned declaration. It is checked against
+/// the host's selected [`VersionBrokerDescriptor`] before the module is read or
+/// compiled, so a plugin cannot accidentally run against a neighbouring family.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VersionLock {
-    /// Version-family label, for example `v26-2`.
+    /// The protocol family selected by the host, such as `v26-2`.
     pub family: String,
-    /// Negotiated protocol number within that family.
+    /// The negotiated protocol number within that family.
     pub protocol: i32,
-    /// Broker ABI identifier, for example `lodestone:version-broker@0.1`.
+    /// The broker contract ABI, independent of the main plugin world ABI.
     pub abi: String,
 }
 
 impl VersionLock {
-    /// Convert this manifest declaration to the host comparison type.
+    /// Convert the manifest declaration into the host-side comparison value.
     #[must_use]
     pub fn descriptor(&self) -> VersionBrokerDescriptor {
         VersionBrokerDescriptor::new(&self.family, self.protocol, &self.abi)
@@ -238,7 +238,7 @@ pub struct Manifest {
     /// gets a default grant.
     #[serde(default)]
     pub capabilities: Vec<String>,
-    /// Required when `capabilities` contains `version:broker`.
+    /// Required only by plugins requesting the privileged version broker.
     #[serde(rename = "version-lock", default)]
     pub version_lock: Option<VersionLock>,
     /// Required and optional plugin edges used by directory discovery.
@@ -611,7 +611,7 @@ capabilities = ["log", "observe:chat", "act:chat"]
     }
 
     #[test]
-    fn a_version_lock_parses_as_an_exact_broker_identity() {
+    fn version_lock_parses_as_an_exact_broker_identity() {
         let text = format!(
             "{}\n\n[version-lock]\nfamily = \"v26-2\"\nprotocol = 776\nabi = \"lodestone:version-broker@0.1\"\n",
             GOOD.replace(
@@ -620,7 +620,7 @@ capabilities = ["log", "observe:chat", "act:chat"]
             )
         );
         let manifest = parse(&text).expect("version lock must parse");
-        let lock = manifest.version_lock.expect("version lock declaration");
+        let lock = manifest.version_lock.expect("lock declaration");
         assert_eq!(lock.family, "v26-2");
         assert_eq!(lock.protocol, 776);
         assert_eq!(lock.descriptor().family(), "v26-2");

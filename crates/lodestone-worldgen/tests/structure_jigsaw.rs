@@ -180,6 +180,14 @@ fn the_jigsaw_structures_s4_models_are_not_on_the_ledger() {
             ledger.get(supported)
         );
     }
+    assert!(
+        !ledger.contains_key("mansion:room_templates"),
+        "the complete mansion template assembly must not remain on the unsupported ledger"
+    );
+    assert!(
+        !ledger.contains_key("minecraft:mansion"),
+        "the bundled woodland mansion type must resolve to its existing generator"
+    );
     for (unsupported, expected) in [
         // The block-entity half of a `capped` archaeology rule: the suspicious
         // block is placed, its loot table is not.

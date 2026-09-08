@@ -208,21 +208,6 @@ pub fn adapter_for_protocol(protocol: i32) -> Option<Box<dyn VersionAdapter>> {
     resolve_adapter(FAMILIES, protocol)
 }
 
-/// Returns the stable label of the compiled-in family that handles `protocol`.
-///
-/// This is the identity half of [`adapter_for_protocol`]. It deliberately does
-/// not construct an adapter: a caller that needs the adapter can resolve both
-/// values from the same registry table, while diagnostics and capability
-/// descriptors can name the selected family without receiving any version
-/// crate internals.
-#[must_use]
-pub fn family_for_protocol(protocol: i32) -> Option<&'static str> {
-    FAMILIES
-        .iter()
-        .find(|family| family.protocols.contains(&protocol))
-        .map(|family| family.label)
-}
-
 /// One compiled-in family's entry in the protocol → [`lodestone_physics::PhysicsProfile`]
 /// mapping. See [`physics_profile_for_protocol`] for the family → profile
 /// table and the fidelity limits of the available profiles.
@@ -833,14 +818,6 @@ mod tests {
     #[test]
     fn unknown_protocol_resolves_to_none() {
         assert!(adapter_for_protocol(-1).is_none());
-        assert!(family_for_protocol(-1).is_none());
-    }
-
-    #[cfg(feature = "v26-2")]
-    #[test]
-    fn family_identity_matches_the_adapter_registry_row() {
-        assert_eq!(family_for_protocol(776), Some("v26-2"));
-        assert_eq!(family_for_protocol(777), None);
     }
 
     /// An unrecognised protocol number must still return a usable profile —

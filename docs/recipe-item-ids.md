@@ -11,8 +11,8 @@ by a protocol/session registry.
 
 The 26.2 adapter reads each synchronized recipe item number as an unsigned
 domain value. A number present in the generated item census becomes
-`ItemId::Canonical`; any other non-negative number becomes
-`ItemId::ProtocolLocal` and remains available to a dynamic-registry consumer. Negative wire values are
+`ItemId::Canonical`; any other non-negative number becomes `ItemId::ProtocolLocal`
+and remains available to a dynamic-registry consumer. Negative wire values are
 rejected as malformed registry ids. Recipe synchronization compares the typed
 values, so equal numbers from different registries cannot accidentally match.
 

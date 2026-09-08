@@ -95,34 +95,12 @@ pub struct FriendsView {
     pub preferences: Option<FriendsPreferences>,
     pub snapshot: Option<FriendsSnapshot>,
     pub presence: Option<PresenceSnapshot>,
+    /// The most recent successful relationship mutation for this account.
+    /// Menus consume it as a visible confirmation; it is cleared when a new
+    /// mutation is queued so the same action can be confirmed again.
+    pub mutation_success: Option<FriendMutation>,
     pub stale: bool,
     pub error: Option<FriendsError>,
-    /// The most recent relationship mutation accepted by the service. This is
-    /// typed so the menu can acknowledge a request without interpreting a
-    /// generic successful snapshot as an action result.
-    pub mutation_success: Option<FriendsMutationSuccess>,
-}
-
-/// A relationship mutation that the service accepted.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FriendsMutationSuccess {
-    RequestSent(String),
-    Accepted(Uuid),
-    Declined(Uuid),
-    Cancelled(Uuid),
-    Removed(Uuid),
-}
-
-impl FriendsMutationSuccess {
-    fn from_mutation(mutation: &FriendMutation) -> Self {
-        match mutation {
-            FriendMutation::SendByName(name) => Self::RequestSent(name.clone()),
-            FriendMutation::Accept(profile_id) => Self::Accepted(*profile_id),
-            FriendMutation::Decline(profile_id) => Self::Declined(*profile_id),
-            FriendMutation::Cancel(profile_id) => Self::Cancelled(*profile_id),
-            FriendMutation::Remove(profile_id) => Self::Removed(*profile_id),
-        }
-    }
 }
 
 /// A relationship change that frame code may present without a session or any
@@ -301,7 +279,7 @@ pub struct FriendsCoordinator {
     desired_presence: Option<PresenceStatus>,
     queued_mutations: VecDeque<FriendMutation>,
     queued_preferences: Option<FriendsPreferences>,
-    mutation_success: Option<FriendsMutationSuccess>,
+    mutation_success: Option<FriendMutation>,
     retry_after_resolution: Option<FriendsOperation>,
     in_flight: Option<InFlight>,
     error: Option<FriendsError>,
@@ -372,7 +350,6 @@ impl FriendsCoordinator {
 
     pub fn queue_mutation(&mut self, mutation: FriendMutation) {
         self.mutation_success = None;
-        self.error = None;
         self.queued_mutations.push_back(mutation);
     }
 
@@ -547,10 +524,8 @@ impl FriendsCoordinator {
                 self.presence_not_before = now.saturating_add(hint_duration(hint));
                 self.presence_due = Some(now.saturating_add(PRESENCE_CADENCE.max(hint_duration(hint))));
             }
-            (FriendsOperation::Mutate { .. }, FriendsResponse::Mutation(snapshot)) => {
-                if let FriendsOperation::Mutate { mutation } = operation {
-                    self.mutation_success = Some(FriendsMutationSuccess::from_mutation(mutation));
-                }
+            (FriendsOperation::Mutate { mutation }, FriendsResponse::Mutation(snapshot)) => {
+                self.mutation_success = Some(mutation.clone());
                 self.snapshot = Some(snapshot);
                 self.friends_tag = None;
                 self.friends_due = Some(now.saturating_add(self.friends_cadence()));
@@ -664,9 +639,9 @@ impl FriendsCoordinator {
             preferences: self.preferences,
             snapshot: self.snapshot.clone(),
             presence: self.presence.clone(),
+            mutation_success: self.mutation_success.clone(),
             stale: self.error.is_some() && self.snapshot.is_some(),
             error: self.error,
-            mutation_success: self.mutation_success.clone(),
         }
     }
 }
@@ -861,26 +836,21 @@ mod tests {
     }
 
     #[test]
-    fn successful_mutation_publishes_typed_action_feedback() {
+    fn successful_mutation_is_exposed_as_a_repeatable_credential_free_confirmation() {
         let mut coordinator = FriendsCoordinator::default();
         resolve_and_enable(&mut coordinator);
-        coordinator.queue_mutation(FriendMutation::SendByName("Alex".to_owned()));
+        let mutation = FriendMutation::Accept(Uuid::from_u128(2));
+        coordinator.queue_mutation(mutation.clone());
         let operation = coordinator.poll(Duration::from_secs(10), false).expect("mutation");
         coordinator.complete(
             Duration::from_secs(10),
             &operation,
-            Ok(FriendsResponse::Mutation(FriendsSnapshot {
-                outgoing: vec![FriendProfile {
-                    profile_id: Uuid::from_u128(2),
-                    name: "Alex".to_owned(),
-                }],
-                ..FriendsSnapshot::default()
-            })),
+            Ok(FriendsResponse::Mutation(FriendsSnapshot::default())),
         );
-        assert_eq!(
-            coordinator.view(Duration::from_secs(10)).mutation_success,
-            Some(FriendsMutationSuccess::RequestSent("Alex".to_owned()))
-        );
+        assert_eq!(coordinator.view(Duration::from_secs(10)).mutation_success, Some(mutation.clone()));
+
+        coordinator.queue_mutation(mutation);
+        assert!(coordinator.view(Duration::from_secs(10)).mutation_success.is_none());
     }
 
     #[test]

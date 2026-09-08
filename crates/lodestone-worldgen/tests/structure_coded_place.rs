@@ -319,11 +319,7 @@ fn the_coded_structures_s5_models_are_not_on_the_ledger() {
         "coded:average_ground_height",
         "coded:region_random",
         "coded:worldgen_entities",
-        "coded:chest_reorient",
         "coded:decoration_random",
-        "coded:ruined_portal_terrain_skirt",
-        "dimension:nether_structures",
-        "mineshaft:post_process_scope",
         "mineshaft:pre_surface_world_reads",
     ] {
         assert!(ledger.contains_key(key), "{key} is not on the ledger");
@@ -336,28 +332,27 @@ fn the_coded_structures_s5_models_are_not_on_the_ledger() {
         !ledger.contains_key("template:mirrored_shape"),
         "rail shape is remapped now; the row must be gone"
     );
+    assert!(
+        !ledger.contains_key("mineshaft:post_process_scope"),
+        "mineshaft block replay is already chunk-scoped; the stale scope row must be gone"
+    );
+    assert!(
+        !ledger.contains_key("coded:ruined_portal_terrain_skirt"),
+        "ruined-portal terrain uses the target chunk's decoration stream"
+    );
     // `bastion_remnant` is **supported** (its pools load, it assembles) and, since
     // `NetherGenerator` gained a structure stage, it also *places blocks* — 15,405
     // bastion-only blocks at chunk (8, 7) against 0 in the structure-free control,
     // measured by `tests/nether_structures.rs`, which is where that half is gated.
-    // What survives here is the dimension row, and what it must now say is the
-    // *remaining* gap: nothing serves the Nether, so the terrain and its bastion are
-    // still unreachable from the game. A row that still claimed "no structure stage"
-    // would be the stale-record failure this file's own history is full of.
+    // The dimension-serving consumer is a server concern and is covered by the
+    // server integration gate; it must not remain misreported as a worldgen gap.
     assert!(
         !ledger.contains_key("minecraft:bastion_remnant"),
         "bastion_remnant assembles and places; it is not a support gap"
     );
-    let nether_row = ledger
-        .get("dimension:nether_structures")
-        .expect("the remaining Nether reachability gap must be named");
     assert!(
-        nether_row.contains("places blocks"),
-        "the row must record that the composition gap closed: {nether_row}"
-    );
-    assert!(
-        nether_row.contains("ChunkSource") || nether_row.contains("chunk source"),
-        "the row must name what is still missing — a chunk source: {nether_row}"
+        !ledger.contains_key("dimension:nether_structures"),
+        "Nether generation is served by the integrated server; this stale worldgen gap must be gone"
     );
     // Every structure-container path has a consumer. Marker containers had one
     // already; self-named template containers and coded-piece containers now do
@@ -374,6 +369,14 @@ fn the_coded_structures_s5_models_are_not_on_the_ledger() {
     assert!(
         !ledger.contains_key("coded:chests"),
         "coded containers have a loot consumer"
+    );
+    assert!(
+        !ledger.contains_key("coded:chest_reorient"),
+        "coded chest facing is resolved from the receiving grid"
+    );
+    assert!(
+        !ledger.contains_key("coded:pyramid_roof_seed"),
+        "desert-pyramid roof picks use the world seed's positional forks"
     );
     assert!(
         !ledger.contains_key("coded:buried_treasure_chest"),
@@ -696,5 +699,49 @@ fn mineshaft_target_chunk_rng_matches_external_cobweb() {
         column.block_state(WORLD.0.rem_euclid(16) as usize, WORLD.1, WORLD.2.rem_euclid(16) as usize),
         "minecraft:cobweb",
         "captured section-Y0 palette entry at the corridor's probabilistic gate"
+    );
+}
+
+/// The embedded generator's jungle temple has one chest with no horizontal
+/// support and one with several supports. This drives the same receiving-column
+/// path used by the served world, while comparing the retained loot sidecar
+/// before and after placement to guard the placement stream's draw boundary.
+#[test]
+fn coded_chest_reorientation_reaches_production_column_without_changing_loot() {
+    let with = lodestone_server::overworld_generator(SEED);
+    let start = start_at(&with, JUNGLE_CHUNK, "minecraft:jungle_pyramid");
+    let expected_loot = start.pieces[0].loot.clone();
+    let chest_positions: Vec<[i32; 3]> = expected_loot
+        .iter()
+        .filter(|loot| loot.table == "minecraft:chests/jungle_temple")
+        .map(|loot| loot.pos)
+        .collect();
+    assert_eq!(chest_positions.len(), 2, "jungle temple chest sidecar");
+
+    let column = with.column(JUNGLE_CHUNK.0, JUNGLE_CHUNK.1);
+    let states: Vec<String> = chest_positions
+        .iter()
+        .map(|pos| {
+            column
+                .block_state(
+                    pos[0].rem_euclid(16) as usize,
+                    pos[1],
+                    pos[2].rem_euclid(16) as usize,
+                )
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(
+        states,
+        vec![
+            "minecraft:chest[facing=north,type=single,waterlogged=false]".to_string(),
+            "minecraft:chest[facing=south,type=single,waterlogged=false]".to_string(),
+        ],
+        "the receiving grid must control each coded chest's facing"
+    );
+    assert_eq!(
+        start_at(&with, JUNGLE_CHUNK, "minecraft:jungle_pyramid").pieces[0].loot,
+        expected_loot,
+        "reorientation must not mutate or redraw the coded loot sidecar"
     );
 }

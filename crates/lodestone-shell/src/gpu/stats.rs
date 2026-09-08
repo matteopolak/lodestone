@@ -431,6 +431,8 @@ pub struct RenderStats {
     /// Whether the portal overlay drew this frame — not
     /// first-person-gated, keyed on `ScreenEffects::portal_intensity > 0.0`.
     pub portal_overlay_drawn: bool,
+    /// Whether the bounded Blindness/Darkness screen layer drew this frame.
+    pub vision_obscuration_drawn: bool,
     /// Whether the world-border warning vignette drew this frame, keyed on
     /// `ScreenEffects::border_warning_strength > 0.0`. This screen-level
     /// effect is not suppressed by camera or spectator mode.

@@ -148,8 +148,7 @@ fn open_test_stonecutter(
 
     const WINDOW_ID: i32 = 17;
     let stone_id = lodestone_model::ItemId::canonical(u32::from(Item::Stone.registry_id()));
-    let slab_id =
-        lodestone_model::ItemId::canonical(u32::from(Item::StoneSlab.registry_id()));
+    let slab_id = lodestone_model::ItemId::canonical(u32::from(Item::StoneSlab.registry_id()));
     let ingest = |event| {
         app.sim
             .net()
@@ -1117,6 +1116,132 @@ fn terminal_enter_uses_the_same_menu_action_as_the_pointer() {
         Screen::WorldSelect,
         "terminal Enter must dispatch through MenuNav and the shared action handler"
     );
+}
+
+#[test]
+fn terminal_escape_and_wheel_reach_the_shared_playing_actions() {
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+    app.ui.begin(SessionKind::Singleplayer);
+    app.ui.session_ready();
+    assert!(app.ui.is_playing());
+
+    app.terminal_scroll(1.0);
+    assert_eq!(
+        app.sim.selected_slot(),
+        8,
+        "terminal wheel-up must select the previous shared hotbar slot"
+    );
+
+    app.terminal_escape();
+    assert!(app.ui.is_paused(), "terminal Escape must use the shared pause action");
+
+    app.ui.open_container();
+    assert!(app.terminal_has_container());
+    app.terminal_escape();
+    assert!(!app.terminal_has_container());
+    assert!(app.ui.is_playing());
+}
+
+#[test]
+fn terminal_middle_click_reaches_the_shared_pick_action() {
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+    let (net, actions, _feed) = NetClient::loopback_with_feed();
+    app.sim.attach_net(net);
+    app.sim.set_ray_target_for_test(Some(crate::raycast::RayHit::face_center(
+        [3, 70, -2],
+        [0, 1, 0],
+    )));
+
+    app.terminal_mouse_pick_item(true);
+
+    assert_eq!(
+        actions.try_recv(),
+        Ok(lodestone_model::ClientAction::PickItemFromBlock {
+            pos: lodestone_model::BlockPos::new(3, 70, -2),
+            include_data: true,
+        }),
+        "terminal middle-click must feed the same targeted pick action as the window path"
+    );
+}
+
+#[test]
+fn deferred_middle_pick_drops_failed_capture_and_replays_once_after_success() {
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+    app.ui.enter_dev_world();
+    let (net, actions, _feed) = NetClient::loopback_with_feed();
+    app.sim.attach_net(net);
+    app.sim.set_ray_target_for_test(Some(crate::raycast::RayHit::face_center(
+        [3, 70, -2],
+        [0, 1, 0],
+    )));
+
+    app.pending_pick = Some(PendingPick {
+        include_data: true,
+        requested_at: Instant::now(),
+    });
+    app.grabbed = false;
+    app.replay_pending_pick();
+    assert!(actions.try_recv().is_err(), "a failed grab must not emit a pick");
+    assert!(app.pending_pick.is_none(), "failed grabs clear the one-shot request");
+
+    app.pending_pick = Some(PendingPick {
+        include_data: true,
+        requested_at: Instant::now(),
+    });
+    app.grabbed = true;
+    app.replay_pending_pick();
+    assert_eq!(
+        actions.try_recv(),
+        Ok(lodestone_model::ClientAction::PickItemFromBlock {
+            pos: lodestone_model::BlockPos::new(3, 70, -2),
+            include_data: true,
+        })
+    );
+    assert!(app.pending_pick.is_none(), "successful dispatch consumes the request");
+    app.replay_pending_pick();
+    assert!(actions.try_recv().is_err(), "one middle-click emits exactly once");
+}
+
+#[test]
+fn deferred_middle_pick_expires_and_drops_when_play_ends() {
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+    app.ui.enter_dev_world();
+    let (net, actions, _feed) = NetClient::loopback_with_feed();
+    app.sim.attach_net(net);
+    app.sim.set_ray_target_for_test(Some(crate::raycast::RayHit::face_center(
+        [3, 70, -2],
+        [0, 1, 0],
+    )));
+
+    app.pending_pick = Some(PendingPick {
+        include_data: false,
+        requested_at: Instant::now() - PENDING_PICK_TIMEOUT - Duration::from_millis(1),
+    });
+    app.grabbed = true;
+    app.replay_pending_pick();
+    assert!(app.pending_pick.is_none(), "expired requests must be discarded");
+    assert!(actions.try_recv().is_err());
+
+    app.ui.on_escape();
+    app.pending_pick = Some(PendingPick {
+        include_data: false,
+        requested_at: Instant::now(),
+    });
+    app.replay_pending_pick();
+    assert!(app.pending_pick.is_none(), "menu transitions must clear pending picks");
+    assert!(actions.try_recv().is_err());
 }
 
 #[test]

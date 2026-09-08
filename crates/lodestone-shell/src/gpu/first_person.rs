@@ -1448,7 +1448,7 @@ impl RenderState {
         // and the arm.
         let mut hand_fog = FogUniform::disabled();
         hand_fog.end_enabled[2] = self.sky_darken.value();
-        let ambient = self.ambient_light.value();
+        let ambient = self.effective_ambient_light();
         hand_fog.ambient_light = [ambient[0], ambient[1], ambient[2], 0.0];
         queue.write_buffer(
             &self.entities.hand_cam_buffer,

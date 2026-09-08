@@ -19,6 +19,44 @@ use super::{ChunkWorld, MobSim, ProjectileMeta, ProjectileBlockHit};
 /// figure.
 const GHAST_FIREBALL_EXPLOSION_POWER: f32 = 1.0;
 
+/// The tick-start chunk owner of one ballistic projectile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ProjectileTickOwner {
+    Chunk { cx: i32, cz: i32 },
+}
+
+impl ProjectileTickOwner {
+    fn for_position(position: Vec3) -> Self {
+        Self::Chunk {
+            cx: (position.x.floor() as i32).div_euclid(16),
+            cz: (position.z.floor() as i32).div_euclid(16),
+        }
+    }
+}
+
+/// One completed projectile-motion owner batch.
+#[derive(Debug, Clone)]
+pub(crate) struct ProjectileTickOwnerBatch {
+    owner: ProjectileTickOwner,
+    plan: u64,
+    expected_batch_count: usize,
+    effects: Vec<ProjectileTickEffect>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProjectileTickEffect {
+    owner: ProjectileTickOwner,
+    serial: usize,
+    projectile: TrackedProjectile,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProjectileTickInput {
+    owner: ProjectileTickOwner,
+    serial: usize,
+    projectile: TrackedProjectile,
+}
+
 /// One projectile impact [`MobSim::resolve_projectile_impacts`] found, staged
 /// before resolution because the search borrows the mob list immutably and
 /// applying the damage needs it mutably.
@@ -258,6 +296,109 @@ impl<'w> MobSim<'w> {
             meta.potion = potion;
         }
         id
+    }
+
+    /// Advances projectile motion as independent chunk-owner completions.
+    /// Impact search remains before this hand-off, so a block or entity hit
+    /// still observes the exact segment that was about to be travelled.
+    pub(crate) fn tick_projectile_owner_batches(&mut self) -> Vec<ProjectileTickOwnerBatch> {
+        self.projectile_owner_plan = self
+            .projectile_owner_plan
+            .checked_add(1)
+            .expect("projectile owner plan generation must not wrap");
+        // Projectile integration is deliberately kept on the serial arm until
+        // the focused ignored measurement demonstrates that worker overhead
+        // beats the central registry publication cost for a real scene.
+        let workers = 1;
+        self.tick_projectile_owner_batches_with_workers(workers)
+    }
+
+    fn tick_projectile_owner_batches_with_workers(
+        &self,
+        worker_count: usize,
+    ) -> Vec<ProjectileTickOwnerBatch> {
+        let mut jobs = Vec::<(ProjectileTickOwner, Vec<ProjectileTickInput>)>::new();
+        for (serial, projectile) in self.projectiles.iter().copied().enumerate() {
+            let owner = ProjectileTickOwner::for_position(projectile.projectile.position);
+            let input = ProjectileTickInput {
+                owner,
+                serial,
+                projectile,
+            };
+            if let Some((_, inputs)) = jobs
+                .iter_mut()
+                .find(|(candidate, _)| *candidate == owner)
+            {
+                inputs.push(input);
+            } else {
+                jobs.push((owner, vec![input]));
+            }
+        }
+        let plan = self.projectile_owner_plan;
+        let mut batches = crate::tick_region::run_bounded_owner_jobs(
+            jobs,
+            worker_count,
+            &|(owner, inputs)| {
+                let effects = inputs
+                    .into_iter()
+                    .map(|input| {
+                        let mut projectile = input.projectile;
+                        projectile.projectile.tick();
+                        projectile.ticks_alive += 1;
+                        ProjectileTickEffect {
+                            owner: input.owner,
+                            serial: input.serial,
+                            projectile,
+                        }
+                    })
+                    .collect();
+                ProjectileTickOwnerBatch {
+                    owner,
+                    plan,
+                    expected_batch_count: 0,
+                    effects,
+                }
+            },
+        );
+        let batch_count = batches.len();
+        for batch in &mut batches {
+            batch.expected_batch_count = batch_count;
+        }
+        batches
+    }
+
+    /// Centrally publishes projectile motion after validating the complete
+    /// tick-start plan. This is the only owner-batch path that replaces live
+    /// registry entries; metadata and impact resolution remain serial.
+    pub(crate) fn apply_projectile_tick_owner_batches(
+        &mut self,
+        batches: Vec<ProjectileTickOwnerBatch>,
+    ) {
+        if batches.is_empty() {
+            return;
+        }
+        let plan = batches[0].plan;
+        assert_eq!(
+            plan, self.projectile_owner_plan,
+            "projectile owner completion must name the latest tick-start plan"
+        );
+        assert!(
+            plan > self.applied_projectile_owner_plan,
+            "projectile owner completion may not replay an applied plan"
+        );
+        let effects = merge_projectile_tick_owner_batches(batches);
+        assert_eq!(
+            effects.len(),
+            self.projectiles.len(),
+            "projectile owner completion must retain every live tick-start entity"
+        );
+        for effect in effects {
+            assert!(
+                self.projectiles.replace(effect.projectile),
+                "projectile owner completion may update only a live tick-start projectile"
+            );
+        }
+        self.applied_projectile_owner_plan = plan;
     }
 
     /// Resolves one tick's worth of projectile impacts, **before**
@@ -773,6 +914,49 @@ impl<'w> MobSim<'w> {
         self.projectiles.get(id).map(|p| p.position)
     }
 
+}
+
+fn merge_projectile_tick_owner_batches(
+    mut batches: Vec<ProjectileTickOwnerBatch>,
+) -> Vec<ProjectileTickEffect> {
+    let first = batches
+        .first()
+        .expect("projectile owner completion must contain every tick-start owner batch");
+    let plan = first.plan;
+    let expected_batch_count = first.expected_batch_count;
+    let mut owners = std::collections::HashSet::new();
+    for batch in &batches {
+        assert_eq!(
+            (batch.plan, batch.expected_batch_count),
+            (plan, expected_batch_count),
+            "projectile owner completions must originate from one tick-start plan"
+        );
+        assert!(
+            owners.insert(batch.owner),
+            "projectile owner completion may not contain one owner twice"
+        );
+        assert!(
+            batch.effects.iter().all(|effect| effect.owner == batch.owner),
+            "a projectile owner batch may contain only its own effects"
+        );
+    }
+    assert_eq!(
+        batches.len(),
+        expected_batch_count,
+        "projectile owner completion must contain every tick-start owner batch exactly once"
+    );
+    let mut effects: Vec<_> = batches
+        .drain(..)
+        .flat_map(|batch| batch.effects)
+        .collect();
+    effects.sort_unstable_by_key(|effect| effect.serial);
+    for (serial, effect) in effects.iter().enumerate() {
+        assert_eq!(
+            effect.serial, serial,
+            "projectile owner completion must retain every tick-start serial slot exactly once"
+        );
+    }
+    effects
 }
 
 #[cfg(test)]
@@ -1458,5 +1642,124 @@ mod tests {
         // sources (the direct 6.0 plus the blast) combined would have been
         // lethal and the control above would be measuring nothing.
         assert!(sim.get(struck).is_some(), "fixture sanity: the directly-hit mob must survive both hits");
+    }
+
+    fn dense_projectile_motion_fixture(count: usize) -> MobSim<'static> {
+        let world = Box::leak(Box::new(ChunkWorld::new(-512, 256)));
+        let mut sim = MobSim::new(world);
+        for index in 0..count {
+            let x = f64::from((index % 64) as u32) * 16.5 + 0.5;
+            let z = f64::from((index / 64) as u32) * 16.5 + 0.5;
+            sim.spawn_projectile(
+                "minecraft:arrow".parse().expect("valid key"),
+                Projectile::arrow(
+                    Vec3::new(x, 100.0, z),
+                    Vec3::new(0.2 + f64::from((index % 7) as u32) * 0.01, 0.01, -0.03),
+                ),
+            );
+        }
+        sim
+    }
+
+    fn run_projectile_motion_with_workers(mut sim: MobSim<'static>, workers: usize) -> MobSim<'static> {
+        sim.projectile_owner_plan = sim
+            .projectile_owner_plan
+            .checked_add(1)
+            .expect("fixture generation must not wrap");
+        let batches = sim.tick_projectile_owner_batches_with_workers(workers);
+        sim.apply_projectile_tick_owner_batches(batches);
+        sim
+    }
+
+    fn projectile_motion_state(sim: &MobSim<'_>) -> Vec<(i32, Vec3, Vec3, u32)> {
+        sim.projectiles
+            .iter()
+            .map(|tracked| {
+                (
+                    tracked.id,
+                    tracked.projectile.position,
+                    tracked.projectile.velocity,
+                    tracked.ticks_alive,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn projectile_motion_serial_and_parallel_controls_have_exact_parity() {
+        let serial = run_projectile_motion_with_workers(dense_projectile_motion_fixture(256), 1);
+        let parallel = run_projectile_motion_with_workers(dense_projectile_motion_fixture(256), 4);
+        assert_eq!(
+            projectile_motion_state(&serial),
+            projectile_motion_state(&parallel),
+            "parallel owner completions must preserve registration order and exact motion"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "latest tick-start plan")]
+    fn stale_projectile_owner_completion_is_rejected() {
+        let mut sim = dense_projectile_motion_fixture(4);
+        sim.projectile_owner_plan = 1;
+        let batches = sim.tick_projectile_owner_batches_with_workers(1);
+        sim.projectile_owner_plan = 2;
+        sim.apply_projectile_tick_owner_batches(batches);
+    }
+
+    #[test]
+    #[should_panic(expected = "may not replay")]
+    fn replayed_projectile_owner_completion_is_rejected() {
+        let mut sim = dense_projectile_motion_fixture(4);
+        sim.projectile_owner_plan = 1;
+        let batches = sim.tick_projectile_owner_batches_with_workers(1);
+        sim.apply_projectile_tick_owner_batches(batches.clone());
+        sim.apply_projectile_tick_owner_batches(batches);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "focused native measurement for the production cutoff"]
+    fn measure_dense_projectile_owner_workers() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        // Instrument control: a zero-projectile scene must stay empty, while
+        // the populated control must advance every tick-start entry exactly
+        // once. This catches a benchmark that only times fixture creation or
+        // an executor call whose output is never consumed.
+        let empty = run_projectile_motion_with_workers(dense_projectile_motion_fixture(0), 1);
+        assert!(projectile_motion_state(&empty).is_empty());
+        let initial = dense_projectile_motion_fixture(8);
+        let initial_state = projectile_motion_state(&initial);
+        let advanced = run_projectile_motion_with_workers(initial, 1);
+        let advanced_state = projectile_motion_state(&advanced);
+        assert_ne!(initial_state, advanced_state, "the populated control must move");
+        assert!(advanced_state.iter().all(|(_, _, _, ticks)| *ticks == 1));
+
+        for count in [64, 128, 256, 512, 1024] {
+            let mut serial_nanos = 0_u128;
+            let mut parallel_nanos = 0_u128;
+            for _ in 0..5 {
+                let mut serial = dense_projectile_motion_fixture(count);
+                serial.projectile_owner_plan = 1;
+                let serial_start = Instant::now();
+                let serial_batches = serial.tick_projectile_owner_batches_with_workers(1);
+                serial.apply_projectile_tick_owner_batches(serial_batches);
+                black_box(projectile_motion_state(&serial));
+                serial_nanos += serial_start.elapsed().as_nanos();
+
+                let mut parallel = dense_projectile_motion_fixture(count);
+                parallel.projectile_owner_plan = 1;
+                let parallel_start = Instant::now();
+                let parallel_batches = parallel.tick_projectile_owner_batches_with_workers(4);
+                parallel.apply_projectile_tick_owner_batches(parallel_batches);
+                black_box(projectile_motion_state(&parallel));
+                parallel_nanos += parallel_start.elapsed().as_nanos();
+            }
+            let speedup = serial_nanos as f64 / parallel_nanos.max(1) as f64;
+            println!(
+                "projectile owner cutoff count={count}: serial={serial_nanos}ns parallel={parallel_nanos}ns speedup={speedup:.3}x"
+            );
+        }
     }
 }

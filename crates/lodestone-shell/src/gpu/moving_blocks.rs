@@ -164,7 +164,17 @@ fn falling_block_pose(feet: glam::Vec3) -> glam::Mat4 {
 /// line for line instead of trusting an algebraic shortcut.
 #[must_use]
 fn primed_tnt_pose(feet: glam::Vec3, fuse: f32) -> glam::Mat4 {
-    let scale = 1.0 + primed_tnt_swell_amount(fuse);
+    primed_tnt_pose_with_scale(feet, 1.0 + primed_tnt_swell_amount(fuse))
+}
+
+/// Compose the TNT pose after the fuse decision has been made.
+///
+/// Keeping the scale as an input lets the production merge use one
+/// fuse-derived decision for both the transform and the white-flash marker.
+/// Recomputing the swell at the mesh call site would make it too easy for a
+/// future timing change to update one visual without the other.
+#[must_use]
+fn primed_tnt_pose_with_scale(feet: glam::Vec3, scale: f32) -> glam::Mat4 {
     glam::Mat4::from_translation(feet)
         * glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.5, 0.0))
         * glam::Mat4::from_scale(glam::Vec3::splat(scale))
@@ -189,6 +199,26 @@ fn primed_tnt_swell_amount(fuse: f32) -> f32 {
 #[must_use]
 fn primed_tnt_is_lit(fuse: f32) -> bool {
     fuse >= 0.0 && (fuse / 5.0) as i32 % 2 == 0
+}
+
+/// The fuse-derived visual state consumed by [`merge_primed_tnt`].
+///
+/// `None` means the entity exists but its first fuse metadata packet has not
+/// reached the render ECS yet. It must remain an ordinary, unlit TNT at scale
+/// one; treating that absence as fuse `80` would accidentally enter the lit
+/// `(80 / 5) % 2 == 0` cadence and make the TNT white until the first update.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PrimedTntVisual {
+    scale: f32,
+    white_flash: bool,
+}
+
+#[must_use]
+fn primed_tnt_visual(fuse: Option<f32>) -> PrimedTntVisual {
+    PrimedTntVisual {
+        scale: fuse.map_or(1.0, |fuse| 1.0 + primed_tnt_swell_amount(fuse)),
+        white_flash: fuse.is_some_and(primed_tnt_is_lit),
+    }
 }
 
 /// Vanilla's own piston-moving-block-entity get-extended-progress routine —
@@ -541,15 +571,15 @@ impl RenderState {
             let light = self
                 .entity_light
                 .sample(draw.feet + glam::Vec3::new(0.0, 0.5, 0.0));
-            let fuse = draw.tnt_fuse.unwrap_or(80.0);
+            let visual = primed_tnt_visual(draw.tnt_fuse);
             if self.merge_moving_block_with_white_flash(
                 model,
                 MovingBlock {
                     state_id,
-                    transform: primed_tnt_pose(draw.feet, fuse),
+                    transform: primed_tnt_pose_with_scale(draw.feet, visual.scale),
                     light,
                 },
-                primed_tnt_is_lit(fuse),
+                visual.white_flash,
                 combined,
             ) {
                 stats.moving_blocks_drawn += 1;
@@ -1316,19 +1346,35 @@ mod tests {
         );
     }
 
-    /// Exact fuse witnesses for the two render-only TNT states. `10` is the
-    /// no-swell boundary, `5` exercises the fourth-power middle, and `0` is
-    /// the maximum 30% growth; the flash witnesses straddle both five-tick
-    /// boundaries and the negative unlit sentinel.
+    /// Production visual-state witnesses for early, middle, and final fuse
+    /// timing. The merge path consumes [`primed_tnt_visual`] for both the
+    /// transform scale and the shader marker, so this test keeps those two
+    /// outputs on one fuse clock rather than testing an unused helper.
     #[test]
-    fn primed_tnt_fuse_drives_exact_swell_and_flash_windows() {
-        assert_eq!(primed_tnt_swell_amount(10.0), 0.0);
-        assert!((primed_tnt_swell_amount(5.0) - 0.01875).abs() < f32::EPSILON);
-        assert!((primed_tnt_swell_amount(0.0) - 0.3).abs() < f32::EPSILON);
+    fn primed_tnt_production_visual_state_tracks_early_mid_and_final_fuse() {
+        let early = primed_tnt_visual(Some(80.0));
+        assert_eq!(early.scale, 1.0);
+        assert!(early.white_flash, "the first five-tick flash window is lit");
+
+        let early_dark = primed_tnt_visual(Some(75.0));
+        assert_eq!(early_dark.scale, 1.0);
+        assert!(!early_dark.white_flash, "the next five-tick window must go dark");
+
+        let mid = primed_tnt_visual(Some(5.0));
+        assert!((mid.scale - 1.01875).abs() < f32::EPSILON);
+        assert!(!mid.white_flash, "the middle swell window is the dark cadence");
+
+        let final_frame = primed_tnt_visual(Some(0.0));
+        assert!((final_frame.scale - 1.3).abs() < f32::EPSILON);
+        assert!(final_frame.white_flash, "the final five-tick window is lit");
+
+        let missing = primed_tnt_visual(None);
+        assert_eq!(missing.scale, 1.0);
+        assert!(!missing.white_flash, "missing metadata must never force a white frame");
+
+        // Keep the negative fuse sentinel's flash behavior explicit as well:
+        // a stale post-detonation record may not re-light the block.
         assert!(!primed_tnt_is_lit(-1.0));
-        assert!(primed_tnt_is_lit(4.0));
-        assert!(!primed_tnt_is_lit(5.0));
-        assert!(primed_tnt_is_lit(10.0));
     }
 
     /// A zero direction step — which no real `facing` byte produces, but a decode

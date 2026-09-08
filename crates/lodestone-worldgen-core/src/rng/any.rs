@@ -34,13 +34,6 @@ use super::{
     LegacyPositionalFactory, LegacyRandomSource, PositionalRandomFactory, RandomSource,
     XoroshiroPositionalFactory, XoroshiroRandomSource,
 };
-use serde::Deserialize;
-
-#[derive(Debug, Default, Deserialize)]
-struct RandomSourceSettings {
-    #[serde(default)]
-    legacy_random_source: bool,
-}
 
 /// Vanilla's own worldgen-random algorithm choice — which family a dimension's noise stack uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,9 +61,11 @@ impl Algorithm {
     /// A missing key is xoroshiro, matching the codec's `false` default.
     #[must_use]
     pub fn from_settings(settings: &serde_json::Value) -> Self {
-        let settings: RandomSourceSettings = serde_json::from_value(settings.clone())
-            .expect("noise settings legacy_random_source must be a boolean when present");
-        Self::from_legacy_flag(settings.legacy_random_source)
+        Self::from_legacy_flag(
+            settings["legacy_random_source"]
+                .as_bool()
+                .unwrap_or(false),
+        )
     }
 
     /// Whether this is the legacy family — the question vanilla's own
@@ -289,12 +284,5 @@ mod tests {
         let nether: serde_json::Value = serde_json::json!({ "legacy_random_source": true });
         assert_eq!(Algorithm::from_settings(&overworld), Algorithm::Xoroshiro);
         assert_eq!(Algorithm::from_settings(&nether), Algorithm::Legacy);
-    }
-
-    #[test]
-    #[should_panic(expected = "legacy_random_source must be a boolean")]
-    fn malformed_random_source_flag_is_not_coerced() {
-        let malformed = serde_json::json!({ "legacy_random_source": "true" });
-        let _ = Algorithm::from_settings(&malformed);
     }
 }

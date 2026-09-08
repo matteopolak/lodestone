@@ -564,14 +564,48 @@ interface types {
         set-resident-block(resident-block-mutation),
     }
 
-    /// A root command a guest wants the host to register. The host supplies one
-    /// greedy tail argument so a command handler receives the canonical command
-    /// line, including every argument after this root.
+    /// The string parsing mode for a guest command argument.
+    enum command-string-kind {
+        /// One unquoted token.
+        word,
+        /// One token, or a quoted string with spaces.
+        quotable,
+        /// Everything remaining on the command line.
+        greedy,
+    }
+
+    /// The primitive parser a guest may place in one command argument slot.
+    /// `choices` is a closed set: values outside the supplied list are rejected.
+    /// Other kinds accept their normal primitive syntax and may add static
+    /// completion candidates through `command-argument.suggestions`.
+    variant command-argument-kind {
+        text(command-string-kind),
+        integer,
+        long,
+        float,
+        double,
+        boolean,
+        choices(list<string>),
+    }
+
+    /// One named, typed command argument. Suggestions are copied into the host's
+    /// parser and filtered by the native command tree against the partial token.
+    record command-argument {
+        name: string,
+        kind: command-argument-kind,
+        suggestions: list<string>,
+    }
+
+    /// A root command a guest wants the host to register. An empty `arguments`
+    /// list retains the compatibility form: the root and one greedy tail both
+    /// invoke the guest. A non-empty list creates a typed sequential argument
+    /// path and the final slot invokes the guest.
     record command-spec {
         name: string,
         description: string,
         aliases: list<string>,
         permission: option<string>,
+        arguments: list<command-argument>,
     }
 
     /// The result of handling a plugin-owned command. A successful result is
@@ -708,12 +742,9 @@ interface world-snapshot {
     read-blocks: func(positions: list<block-pos>) -> result<list<option<u32>>, string>;
 }
 
-/// Capability `version:broker` — denied unless explicitly granted and an
-/// exact `[version-lock]` matches the selected host source.
-///
-/// The source returns only copied identity and provider-defined key/value
-/// records. Protocol-family types, registry handles, ECS/world guards,
-/// sockets, callbacks, and raw packet bytes never cross this interface.
+/// Capability `version:broker` — denied unless explicitly granted. The broker
+/// exposes only copied identity and key/value records; protocol-family types,
+/// ECS handles, world guards, sockets, and callbacks never cross this boundary.
 interface version-broker {
     record descriptor {
         family: string,
@@ -726,13 +757,11 @@ interface version-broker {
         value: string,
     }
 
-    /// Make the selected source identity observable to the guest after the
-    /// host has already validated the manifest's version lock.
+    /// The source identity is returned so the host can make the version lock
+    /// observable to the guest as well as validating it at load time.
     get-descriptor: func() -> descriptor;
 
-    /// Return one bounded copied record for a provider-defined key. Unknown
-    /// keys return `none`; providers must keep their vocabulary finite and
-    /// document it rather than exposing an arbitrary internal map.
+    /// Return one bounded copied record for a version-specific key.
     lookup: func(key: string) -> option<value>;
 }
 

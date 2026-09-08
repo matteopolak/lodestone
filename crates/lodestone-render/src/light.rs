@@ -151,6 +151,47 @@ pub const AMBIENT_LIGHT: f32 = 10.0 / 255.0;
 /// below for the measured gap.
 pub const OVERWORLD_AMBIENT_LIGHT: [f32; 3] = [AMBIENT_LIGHT, AMBIENT_LIGHT, AMBIENT_LIGHT];
 
+/// The default per-dimension colour the lightmap uses for Night Vision,
+/// unpacked from the shipped `0x999999` environment default.
+pub const NIGHT_VISION_COLOR: [f32; 3] = [0.6, 0.6, 0.6];
+
+/// Night Vision's lightmap intensity for a remaining duration and partial tick.
+///
+/// The effect stays fully bright until its final 200 ticks. During that last
+/// ten seconds it pulses between `0.4` and `1.0`, giving the player a visible
+/// expiry warning without making the effect disappear early. Infinite effects
+/// use the stable full-strength branch.
+#[must_use]
+pub fn night_vision_intensity(duration_ticks: i32, partial_tick: f32) -> f32 {
+    if duration_ticks < 0 || duration_ticks > 200 {
+        1.0
+    } else {
+        let phase = (duration_ticks as f32 - partial_tick.clamp(0.0, 1.0))
+            * std::f32::consts::PI
+            * 0.2;
+        0.7 + phase.sin() * 0.3
+    }
+}
+
+/// The effective lightmap ambient seed while an effect supplies a minimum
+/// light colour. This is a channelwise maximum, not an additive light source:
+/// it is evaluated before either block or sky light enters the lightmap.
+#[must_use]
+pub fn ambient_with_effect_floor(ambient: [f32; 3], effect_floor: [f32; 3]) -> [f32; 3] {
+    [
+        ambient[0].max(effect_floor[0]),
+        ambient[1].max(effect_floor[1]),
+        ambient[2].max(effect_floor[2]),
+    ]
+}
+
+/// The Night Vision contribution to the lightmap's ambient seed.
+#[must_use]
+pub fn night_vision_effect_floor(duration_ticks: i32, partial_tick: f32) -> [f32; 3] {
+    let intensity = night_vision_intensity(duration_ticks, partial_tick);
+    NIGHT_VISION_COLOR.map(|channel| channel * intensity)
+}
+
 /// Unpacks a `0xRRGGBB` colour — as decoded off the wire by
 /// `DimensionType::ambient_light_color` — into per-channel `0.0..=1.0` floats.
 /// Vanilla's packed-24-bit-to-vector unpack: a bare `byte / 255`, no linearisation
@@ -874,6 +915,38 @@ mod tests {
         assert_eq!(
             rgb24_to_channels(0x302821),
             [48.0 / 255.0, 40.0 / 255.0, 33.0 / 255.0]
+        );
+    }
+
+    #[test]
+    fn night_vision_replaces_only_a_darker_ambient_seed_and_flashes_on_expiry() {
+        let ambient = OVERWORLD_AMBIENT_LIGHT;
+        assert_eq!(
+            ambient_with_effect_floor(ambient, [0.0, 0.0, 0.0]),
+            ambient,
+            "control: no visual effect must leave the dimension ambient seed byte-for-byte unchanged"
+        );
+
+        let full = night_vision_effect_floor(3_600, 0.25);
+        assert_eq!(full, NIGHT_VISION_COLOR, "an ordinary fresh effect is full strength");
+        let infinite = night_vision_effect_floor(-1, 0.75);
+        assert_eq!(infinite, NIGHT_VISION_COLOR, "infinite effects do not enter the expiry flash");
+
+        let near_expiry = night_vision_effect_floor(200, 0.0);
+        let expected = 0.7 * 0.6;
+        for channel in near_expiry {
+            assert!(
+                (channel - expected).abs() < 1e-6,
+                "the expiry phase starts at the externally specified 0.7 intensity, got {channel}"
+            );
+        }
+
+        let effective = ambient_with_effect_floor(ambient, full);
+        assert_eq!(effective, full, "Night Vision must raise the dark ambient seed");
+        let additive_wrong = [ambient[0] + full[0], ambient[1] + full[1], ambient[2] + full[2]];
+        assert!(
+            additive_wrong[0] - effective[0] > 0.03,
+            "control: addition and the required channelwise maximum must remain distinguishable"
         );
     }
 

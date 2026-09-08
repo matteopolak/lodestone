@@ -434,6 +434,119 @@ const PAPER_WORLD_SURFACE_CENSUS: [PaperWorldMemberSpec; 14] = [
     PaperWorldMemberSpec { method: ISOLATED_SHIM_METHODS[40], capability: PaperWorldCapability::ResidentStateWrite },
 ];
 
+/// Capability metadata aligned one-for-one with [`ISOLATED_SHIM_METHODS`].
+///
+/// Keeping the alignment explicit makes adding a native declaration a
+/// compile-time-sized change: the census test below fails until the new
+/// declaration is classified and, when it belongs to this domain, included in
+/// [`PAPER_WORLD_SURFACE_CENSUS`]. `None` is intentional for lifecycle,
+/// player, and inventory members.
+const PAPER_WORLD_METHOD_CAPABILITIES: [Option<PaperWorldCapability>; 42] = [
+    Some(PaperWorldCapability::ResidentStateRead),
+    None,
+    Some(PaperWorldCapability::ResidentStateWrite),
+    None,
+    None,
+    None,
+    None,
+    None,
+    Some(PaperWorldCapability::ResidentChangeObservation),
+    Some(PaperWorldCapability::CallbackBlockHandle),
+    Some(PaperWorldCapability::CallbackBlockHandle),
+    Some(PaperWorldCapability::CallbackBlockHandle),
+    Some(PaperWorldCapability::CallbackBlockHandle),
+    Some(PaperWorldCapability::CallbackBlockHandle),
+    Some(PaperWorldCapability::ResidentStateRead),
+    Some(PaperWorldCapability::ResidentStateWrite),
+    Some(PaperWorldCapability::CallbackBlockHandleRetention),
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    Some(PaperWorldCapability::ResidentStateBatchRead),
+    Some(PaperWorldCapability::ResidentStateWrite),
+    Some(PaperWorldCapability::ResidentStateWrite),
+    None,
+];
+
+/// The Rust producer category for one implemented player shim member.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaperPlayerCapability {
+    /// A value-only player handle available to a resident block-change callback.
+    CallbackPlayerHandle,
+    /// A copied player profile value.
+    IdentityRead,
+    /// A bounded lookup through the worker-owned active player roster.
+    RosterLookup,
+    /// A bounded index/count view of the worker-owned active player roster.
+    RosterEnumeration,
+    /// A generation-checked active/retained lifetime query.
+    LifetimeRead,
+    /// A bounded host query for copied player position and rotation.
+    PositionRead,
+    /// A bounded host query for the copied player entity ID.
+    EntityIdRead,
+    /// A bounded host query for the copied player game mode.
+    GameModeRead,
+    /// A bounded host query for copied player experience.
+    ExperienceRead,
+}
+
+/// One generated player shim declaration and its Rust capability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PaperPlayerMemberSpec {
+    /// Exact declared static-native method.
+    pub method: NativeMethodSpec,
+    /// The finite Rust capability servicing that declaration.
+    pub capability: PaperPlayerCapability,
+}
+
+/// The complete current player/entity shim census.
+///
+/// This intentionally describes the small value-and-handle surface that is
+/// implemented today. A player member absent here is unsupported, even if a
+/// similarly named method exists in an upstream API.
+const PAPER_PLAYER_SURFACE_CENSUS: [PaperPlayerMemberSpec; 21] = [
+    PaperPlayerMemberSpec { method: ISOLATED_SHIM_METHODS[17], capability: PaperPlayerCapability::CallbackPlayerHandle },
+    PaperPlayerMemberSpec { method: ISOLATED_SHIM_METHODS[18], capability: PaperPlayerCapability::IdentityRead },
+    PaperPlayerMemberSpec { method: ISOLATED_SHIM_METHODS[19], capability: PaperPlayerCapability::IdentityRead },
+    PaperPlayerMemberSpec { method: ISOLATED_SHIM_METHODS[20], capability: PaperPlayerCapability::RosterLookup },
+    PaperPlayerMemberSpec { method: ISOLATED_SHIM_METHODS[21], capability: PaperPlayerCapability::RosterLookup },
+    PaperPlayerMemberSpec { method: ISOLATED_SHIM_METHODS[22], capability: PaperPlayerCapability::RosterLookup },
+    PaperPlayerMemberSpec { method: ISOLATED_SHIM_METHODS[23], capability: PaperPlayerCapability::RosterLookup },
+    PaperPlayerMemberSpec { method: ISOLATED_SHIM_METHODS[24], capability: PaperPlayerCapability::RosterLookup },
+    PaperPlayerMemberSpec { method: ISOLATED_SHIM_METHODS[25], capability: PaperPlayerCapability::RosterEnumeration },
+    PaperPlayerMemberSpec { method: ISOLATED_SHIM_METHODS[26], capability: PaperPlayerCapability::RosterEnumeration },
+    PaperPlayerMemberSpec { method: ISOLATED_SHIM_METHODS[27], capability: PaperPlayerCapability::LifetimeRead },
+    PaperPlayerMemberSpec { method: ISOLATED_SHIM_METHODS[28], capability: PaperPlayerCapability::LifetimeRead },
+    PaperPlayerMemberSpec { method: ISOLATED_SHIM_METHODS[29], capability: PaperPlayerCapability::PositionRead },
+    PaperPlayerMemberSpec { method: ISOLATED_SHIM_METHODS[30], capability: PaperPlayerCapability::PositionRead },
+    PaperPlayerMemberSpec { method: ISOLATED_SHIM_METHODS[31], capability: PaperPlayerCapability::PositionRead },
+    PaperPlayerMemberSpec { method: ISOLATED_SHIM_METHODS[32], capability: PaperPlayerCapability::PositionRead },
+    PaperPlayerMemberSpec { method: ISOLATED_SHIM_METHODS[33], capability: PaperPlayerCapability::PositionRead },
+    PaperPlayerMemberSpec { method: ISOLATED_SHIM_METHODS[34], capability: PaperPlayerCapability::EntityIdRead },
+    PaperPlayerMemberSpec { method: ISOLATED_SHIM_METHODS[35], capability: PaperPlayerCapability::GameModeRead },
+    PaperPlayerMemberSpec { method: ISOLATED_SHIM_METHODS[36], capability: PaperPlayerCapability::ExperienceRead },
+    PaperPlayerMemberSpec { method: ISOLATED_SHIM_METHODS[37], capability: PaperPlayerCapability::ExperienceRead },
+];
+
 /// The Rust producer category for one implemented inventory shim member.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaperInventoryCapability {
@@ -542,9 +655,20 @@ pub const fn paper_world_surface_census() -> &'static [PaperWorldMemberSpec] {
     &PAPER_WORLD_SURFACE_CENSUS
 }
 
+/// Capability classification aligned one-for-one with the isolated shim
+/// declarations. `None` marks a declaration outside the world/block domain.
+pub const fn paper_world_method_capabilities() -> &'static [Option<PaperWorldCapability>] {
+    &PAPER_WORLD_METHOD_CAPABILITIES
+}
+
 /// Generated census of every implemented inventory/item shim member.
 pub const fn paper_inventory_surface_census() -> &'static [PaperInventoryMemberSpec] {
     &PAPER_INVENTORY_SURFACE_CENSUS
+}
+
+/// Generated census of every implemented player/entity shim member.
+pub const fn paper_player_surface_census() -> &'static [PaperPlayerMemberSpec] {
+    &PAPER_PLAYER_SURFACE_CENSUS
 }
 
 /// Generated validation and registration sequence for the isolated shim.
@@ -1209,7 +1333,7 @@ fn method_id(
     }
 }
 
-fn register_method(
+pub(crate) fn register_method(
     env: &mut Env<'_>,
     class: &JClass<'_>,
     method: NativeMethodSpec,
@@ -1756,14 +1880,90 @@ mod tests {
     }
 
     #[test]
+    fn generated_player_surface_census_maps_each_member_and_names_unsupported_mutations() {
+        let census = paper_player_surface_census();
+        assert_eq!(census.len(), 21, "every supported player member is listed once");
+        let unique_methods = census
+            .iter()
+            .map(|entry| (entry.method.name, entry.method.descriptor))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique_methods.len(), census.len(), "player census must not duplicate a declaration");
+        assert!(census.iter().all(|entry| isolated_shim_methods().contains(&entry.method)));
+        assert!(census.iter().all(|entry| {
+            entry.method.name == "currentPlayerHandle"
+                || entry.method.name.starts_with("playerHandle")
+                || entry.method.name.starts_with("activePlayer")
+        }));
+
+        for unsupported in [
+            "playerHandleTeleport",
+            "playerHandleDamage",
+            "playerHandleSendMessage",
+            "playerHandleSetGameMode",
+            "playerHandleSetExperience",
+        ] {
+            assert!(
+                !census.iter().any(|entry| entry.method.name == unsupported),
+                "unsupported player member {unsupported} must not acquire an implicit capability",
+            );
+            assert!(
+                !isolated_shim_methods().iter().any(|method| method.name == unsupported),
+                "unsupported player member {unsupported} must remain unregistered",
+            );
+        }
+    }
+
+    #[test]
     fn generated_world_surface_census_maps_each_member_to_one_rust_capability() {
         let census = paper_world_surface_census();
         assert_eq!(census.len(), 14, "every supported world/block member is listed once");
+        assert_eq!(
+            paper_world_method_capabilities().len(),
+            isolated_shim_methods().len(),
+            "every isolated shim declaration must have world-domain classification metadata",
+        );
         let unique_methods = census.iter()
             .map(|entry| (entry.method.name, entry.method.descriptor))
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(unique_methods.len(), census.len(), "world census must not duplicate a declaration");
         assert!(census.iter().all(|entry| isolated_shim_methods().contains(&entry.method)));
+        let classified = isolated_shim_methods()
+            .iter()
+            .zip(paper_world_method_capabilities())
+            .filter_map(|(method, capability)| capability.map(|capability| (*method, capability)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            classified.len(),
+            census.len(),
+            "every classified world declaration must appear in the public census",
+        );
+        for (method, capability) in classified {
+            assert_eq!(
+                census.iter().filter(|entry| entry.method == method).count(),
+                1,
+                "classified world declaration {}/{} must appear exactly once",
+                method.name,
+                method.descriptor,
+            );
+            assert_eq!(
+                census.iter().find(|entry| entry.method == method).map(|entry| entry.capability),
+                Some(capability),
+                "world declaration {}/{} must retain its declared Rust capability",
+                method.name,
+                method.descriptor,
+            );
+        }
+        assert!(
+            census.iter().all(|entry| {
+                isolated_shim_methods()
+                    .iter()
+                    .zip(paper_world_method_capabilities())
+                    .find(|(method, _)| *method == &entry.method)
+                    .and_then(|(_, capability)| capability.as_ref().copied())
+                    == Some(entry.capability)
+            }),
+            "a census member must not claim an unclassified or mismatched shim declaration",
+        );
         assert!(census.iter().any(|entry| entry.method == NativeMethodSpec {
             name: "blockStateIds",
             descriptor: "([I)[I",

@@ -3370,6 +3370,7 @@ pub fn tick_among_entities(
     nearby: &[crate::push::NearbyEntity],
     self_flags: crate::push::PushSelf,
 ) {
+    crate::trace::player_tick_start(state, input);
     travel_and_check_inside_blocks(state, input, view, profile, nearby);
     crate::push::apply_entity_push(state, view, profile, nearby, self_flags);
     // The pose comes *after* the push, because the crowd-push pass is the
@@ -3378,6 +3379,7 @@ pub fn tick_among_entities(
     // update. `nearby` also supplies the entity term of the fit gate —
     // vacuous unless one of them is a boat, a shulker or a happy ghast.
     update_player_pose(state, input, view, nearby);
+    crate::trace::player_tick_end(state);
 }
 
 /// Vanilla's own swim-state update — the sprint-swimming pose state machine.

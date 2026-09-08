@@ -9,7 +9,10 @@
 //! `TcpStream` client (open-to-LAN).
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
 use lodestone_time::Instant;
@@ -43,6 +46,15 @@ pub(crate) struct JoinStopwatch {
     started: Instant,
 }
 
+impl std::fmt::Debug for JoinStopwatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The platform clock is intentionally opaque here: a stopwatch's
+        // starting instant is useful only through `elapsed`, and exposing it
+        // would make the debug representation platform-specific.
+        f.debug_struct("JoinStopwatch").finish_non_exhaustive()
+    }
+}
+
 impl JoinStopwatch {
     pub(crate) fn now() -> Self {
         Self {
@@ -60,6 +72,63 @@ impl JoinStopwatch {
         {
             Duration::ZERO
         }
+    }
+}
+
+/// Optional, low-overhead timing for one connection's initial chunk stream.
+///
+/// The trace is deliberately opt-in through `LODESTONE_JOIN_TRACE=1`; normal
+/// joins do not allocate this state, clone it into workers, or pay a clock read
+/// for every column. When enabled, one event is emitted for each stage and the
+/// first event in each stage carries `first=true`, making time-to-first
+/// generated/encoded/delivered columns visible without dumping payloads or
+/// shader/source text.
+#[derive(Debug)]
+pub(crate) struct JoinTrace {
+    started: JoinStopwatch,
+    generated_seen: AtomicBool,
+    encoded_seen: AtomicBool,
+    delivered_seen: AtomicBool,
+}
+
+impl JoinTrace {
+    /// Build a trace only when the operator explicitly requested it and the
+    /// subscriber accepts the dedicated target. `None` is the normal path.
+    pub(crate) fn new() -> Option<Arc<Self>> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let requested = std::env::var_os("LODESTONE_JOIN_TRACE")
+            .is_some_and(|value| !value.is_empty() && value != "0");
+        #[cfg(target_arch = "wasm32")]
+        let requested = false;
+        if !requested || !tracing::enabled!(target: "lodestone_join_trace", tracing::Level::INFO) {
+            return None;
+        }
+        Some(Arc::new(Self {
+            started: JoinStopwatch::now(),
+            generated_seen: AtomicBool::new(false),
+            encoded_seen: AtomicBool::new(false),
+            delivered_seen: AtomicBool::new(false),
+        }))
+    }
+
+    /// Record one stage transition for a chunk. The stage names are stable so
+    /// a capture can be grouped without parsing free-form log messages.
+    pub(crate) fn mark(&self, stage: &'static str, cx: i32, cz: i32) {
+        let first = match stage {
+            "generated" => self.generated_seen.swap(true, Ordering::Relaxed),
+            "encoded" => self.encoded_seen.swap(true, Ordering::Relaxed),
+            "delivered" => self.delivered_seen.swap(true, Ordering::Relaxed),
+            _ => false,
+        };
+        tracing::info!(
+            target: "lodestone_join_trace",
+            stage,
+            cx,
+            cz,
+            first = !first,
+            elapsed_millis = self.started.elapsed().as_millis() as u64,
+            "join chunk stage"
+        );
     }
 }
 
@@ -83,15 +152,21 @@ use lodestone_net::{ServerKeyPair, generate_verify_token};
 
 use crate::advancements::AdvancementManager;
 use crate::block_breaking::PendingBreak;
-use crate::block_entities::{BlockEntity, BlockEntityHandle, block_entity_for_item};
+use crate::block_entities::{
+    BlockEntity, BlockEntityHandle, BlockEntityKind, block_entity_for_item,
+};
 use crate::border::BorderFeed;
 use crate::brewing::{Bottle, BottleKind, is_ingredient};
 use crate::composter::{InsertOutcome, compostable_chance};
 use crate::command::{CommandCaller, CommandDispatch, CommandSession};
 use crate::chunk::{
     AIR, ChunkColumn, ColumnLightSettlementError, ChunkSource, generate_columns_offloaded,
-    generate_columns_parallel, is_air_or_fluid, is_water,
+    is_air_or_fluid, is_water,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use crate::chunk::generate_columns_parallel;
+#[cfg(target_arch = "wasm32")]
+use crate::chunk::generate_columns_borrowed;
 use crate::fall::{FallSample, FallTracker};
 use crate::container_click::{
     Click, MayPickup, MenuKind, MenuLayout, SelectedBundleIndex, SlotKind, Station, do_click_with,
@@ -110,7 +185,7 @@ use crate::protocol::{
 use crate::redstone::{WorldState, COMPARATOR, OBSERVER, REPEATER};
 use crate::redstone_diode::{set_comparator, set_repeater};
 use crate::redstone_observer::set_observer;
-use crate::scheduled_tick::{ScheduledTick, ScheduledTickQueue};
+use crate::scheduled_tick::{ScheduledTick, ScheduledTickKind, ScheduledTickQueue};
 use crate::sleep::{SleepEvent, SleepFeed, SleepVote};
 use crate::ticket::{PLAYER_SPAWN_RADIUS, PlayerTicketGuard, TicketKind, TicketOwner, TicketStoreHandle};
 use crate::tick::{BlockTickFeed, ExplosionFeed};
@@ -440,6 +515,49 @@ where
     directives
 }
 
+/// Mirrors effect-driven base-entity flags into the shared player registry
+/// before a stream pass. The registry keeps only remote-visible player state;
+/// the connection-local effect set remains the timer and gameplay authority.
+fn republish_effect_entity_flags(
+    players: Option<&PlayerRegistry>,
+    ticket: Option<&PlayerTicket>,
+    effects: &crate::mob_effects::ActiveEffects,
+) {
+    let Some((registry, ticket)) = players.zip(ticket) else {
+        return;
+    };
+    let invisible = effects.amplifier_of("minecraft:invisibility").is_some();
+    registry.set_shared_flags(ticket.entity_id(), if invisible { 0x20 } else { 0 });
+}
+
+/// Runs the player air rule with the same active-effect store that drives the
+/// connection's status-effect packets and gameplay consumers.
+///
+/// Keeping this at the server boundary means [`PlayerVitals`] stays a pure
+/// value type: terrain decides submersion and the effect store decides only
+/// the hold/refill mode. Both native and browser timer loops call this helper.
+fn tick_player_air_supply(
+    vitals: &mut PlayerVitals,
+    eye_in_water: bool,
+    invulnerable: bool,
+    effects: &crate::mob_effects::ActiveEffects,
+) -> crate::vitals::VitalsTick {
+    vitals.tick_with_underwater_breathing(
+        eye_in_water && !invulnerable,
+        effects.underwater_breathing(),
+    )
+}
+
+/// Applies the instant-Saturation part of an effect tick through the
+/// authoritative food state. Both timer loops use this seam before deciding
+/// whether a new `SetHealth` packet is needed.
+fn apply_effect_saturation(vitals: &mut PlayerVitals, food_points: u32) -> bool {
+    food_points > 0
+        && vitals.apply_saturation_effect(
+            i32::try_from(food_points).unwrap_or(i32::MAX),
+        )
+}
+
 /// An [`EntitySource`] carrying no entities — for callers that only stream
 /// terrain (the existing chunk-only behaviour).
 #[derive(Debug, Clone, Copy, Default)]
@@ -707,7 +825,9 @@ impl<'a, S: ChunkSource + 'static> SourceRef<'a, S> {
     /// [`generate_columns_parallel`] documents, and it is load-bearing for
     /// the wire: both arms hand back a `Vec` aligned index-for-index with
     /// `coords`, so which arm a caller is on cannot change the emitted byte
-    /// sequence.
+    /// sequence. On wasm32 the borrowed arm uses the same generator one
+    /// column at a time and yields to the browser between columns; it never
+    /// enters the native thread pool.
     /// `pub(crate)` rather than private since `crate::join_scheduler`'s
     /// `JoinChunkStream` finishes a join from `serve_play`, and its borrowed arm
     /// generates through exactly this method — the alternative was duplicating the
@@ -715,7 +835,10 @@ impl<'a, S: ChunkSource + 'static> SourceRef<'a, S> {
     pub(crate) async fn generate(self, coords: Vec<(i32, i32)>) -> Vec<ChunkColumn> {
         match self {
             Self::Shared(source) => generate_columns_offloaded(Arc::clone(source), coords).await,
+            #[cfg(not(target_arch = "wasm32"))]
             Self::Borrowed(source) => generate_columns_parallel(source, &coords),
+            #[cfg(target_arch = "wasm32")]
+            Self::Borrowed(source) => generate_columns_borrowed(source, &coords).await,
             Self::Dimension(source) => generate_columns_offloaded(Arc::clone(source), coords).await,
         }
     }
@@ -2527,12 +2650,19 @@ fn encode_column<P: ServerProtocol, S: ChunkSource + 'static>(
     source: SourceRef<'_, S>,
     cx: i32,
     cz: i32,
+    trace: Option<&JoinTrace>,
     payload: crate::join_scheduler::ColumnPayload,
 ) -> Result<ServerDirective, ChunkEncodeError> {
     match payload {
         crate::join_scheduler::ColumnPayload::Encoded(directive) => Ok(directive),
         crate::join_scheduler::ColumnPayload::Column(column) => {
-            encode_chunk_with_source(proto, source.get(), cx, cz, &column)
+            let directive = encode_chunk_with_source(proto, source.get(), cx, cz, &column);
+            if directive.is_ok() {
+                if let Some(trace) = trace {
+                    trace.mark("encoded", cx, cz);
+                }
+            }
+            directive
         }
     }
 }
@@ -4057,6 +4187,7 @@ where
                 let join_cx = (join_pos.x / 16.0).floor() as i32;
                 let join_cz = (join_pos.z / 16.0).floor() as i32;
                 let t_chunks = JoinStopwatch::now();
+                let join_trace = JoinTrace::new();
                 let mut batch_size = 0;
                 let window = crate::join_scheduler::generation_window();
                 let rings: Vec<Vec<(i32, i32)>> = join_view_rings(view_radius)
@@ -4110,6 +4241,7 @@ where
                             (join_cx, join_cz),
                             crate::join_scheduler::DEFAULT_FULL_GENERATION_RADIUS,
                         )
+                        .with_trace(join_trace.clone())
                         .encoding_with(if proto.uses_cross_column_light() {
                             None
                         } else {
@@ -4132,7 +4264,14 @@ where
                             let Some(((cx, cz), payload)) = next else {
                                 break;
                             };
-                            let directive = match encode_column(proto, source, cx, cz, payload) {
+                            let directive = match encode_column(
+                                proto,
+                                source,
+                                cx,
+                                cz,
+                                join_trace.as_deref(),
+                                payload,
+                            ) {
                                 Ok(directive) => directive,
                                 Err(error) => {
                                     return return_chunk_encode_error(
@@ -4146,6 +4285,9 @@ where
                                 }
                             };
                             apply(conn, &mut state, directive).await?;
+                            if let Some(trace) = join_trace.as_ref() {
+                                trace.mark("delivered", cx, cz);
+                            }
                             batch_size += 1;
                         }
                         join_stream = crate::join_scheduler::JoinChunkStream::windowed(pipeline);
@@ -4180,6 +4322,9 @@ where
                         for ring in &rings {
                             let columns = source.generate(ring.clone()).await;
                             for (&(cx, cz), column) in ring.iter().zip(columns.iter()) {
+                                if let Some(trace) = join_trace.as_ref() {
+                                    trace.mark("generated", cx, cz);
+                                }
                                 let directive = match encode_chunk_with_source(
                                     proto,
                                     source.get(),
@@ -4199,7 +4344,13 @@ where
                                         .await;
                                     }
                                 };
+                                if let Some(trace) = join_trace.as_ref() {
+                                    trace.mark("encoded", cx, cz);
+                                }
                                 apply(conn, &mut state, directive).await?;
+                                if let Some(trace) = join_trace.as_ref() {
+                                    trace.mark("delivered", cx, cz);
+                                }
                                 batch_size += 1;
                             }
                         }
@@ -4403,6 +4554,7 @@ where
                     spawn.pos,
                     chunks_sent,
                     join_stream,
+                    join_trace,
                     block_entities,
                     mobs,
                     block_ticks,
@@ -5518,7 +5670,7 @@ where
     // Deliberately **not** folded into `propagate_placement`, whose return value
     // several gates assert on exactly. This is its own request against the same
     // feed, and `run_tick_loop`'s rebase loop routes it to the fluid queue.
-    block_ticks.request_scheduled_ticks(crate::fluid::ticks_after_edit(
+    block_ticks.request_fluid_scheduled_ticks(crate::fluid::ticks_after_edit(
         source,
         fluid_env_at(source, pos),
         pos,
@@ -5619,7 +5771,7 @@ where
         let current = source.block_state(cell.x, cell.y, cell.z);
         let directive = proto.encode_block_update(cell.x, cell.y, cell.z, &current);
         apply(conn, state, directive).await?;
-        block_ticks.request_scheduled_ticks(crate::fluid::ticks_after_edit(
+        block_ticks.request_fluid_scheduled_ticks(crate::fluid::ticks_after_edit(
             source,
             fluid_env_at(source, cell),
             cell,
@@ -6593,6 +6745,7 @@ where
                 state,
                 proto,
                 vitals,
+                effects,
                 // No sound fires for this call (`hurt` below is
                 // `None`, and `publish_health` only plays one on a landed hit),
                 // but a position is still owed to the parameter.
@@ -6718,6 +6871,11 @@ where
             .await?;
         }
     }
+    // A command can add, replace, restore, or clear Health Boost. Publish the
+    // folded attribute in this same command turn, rather than waiting for the
+    // periodic status tick and briefly leaving the client's heart capacity
+    // stale.
+    sync_effect_max_health(conn, state, proto, vitals, effects).await?;
     Ok(())
 }
 
@@ -7661,10 +7819,10 @@ where
                     // because `ScheduledTick`'s `sub_tick_order` is private — the
                     // same idiom `propagate_placement` uses to produce its own
                     // relative-delay batch, and for the same reason.
-                    let mut pending: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+                    let mut pending: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
                     pending.schedule(
                         (pos.x, pos.y, pos.z),
-                        crate::hand_use::TICK_BUTTON.to_string(),
+                        ScheduledTickKind::ButtonRelease,
                         delay,
                         crate::scheduled_tick::TickPriority::Normal,
                     );
@@ -7725,7 +7883,7 @@ where
     if let Some(item) = held_item {
         let spawner_here = block_entities.with(|reg| {
             reg.get(pos)
-                .is_some_and(|entity| entity.type_id() == "minecraft:mob_spawner")
+                .is_some_and(|entity| entity.kind() == BlockEntityKind::MobSpawner)
         });
         if !spawner_here {
             match crate::spawn_egg::apply_spawn_egg(
@@ -8096,7 +8254,7 @@ where
             // And the same seeding hook `destroy_block` performs, for the same
             // reason: a block placed into a flow, or beside a source, has to
             // start it re-evaluating. See `crate::fluid::ticks_after_edit`.
-            block_ticks.request_scheduled_ticks(crate::fluid::ticks_after_edit(
+            block_ticks.request_fluid_scheduled_ticks(crate::fluid::ticks_after_edit(
                 source,
                 fluid_env_at(source, target),
                 target,
@@ -8183,7 +8341,9 @@ where
 /// A `moving_piston` block update marks an animated cell; the payload from the
 /// scheduled completion tick identifies the moving state. Send the payload
 /// after the cell's `block_update` so the client has the matching cell record.
-fn moving_piston_records(scheduled: &[ScheduledTick<String>]) -> Vec<(BlockPos, lodestone_core::Nbt)> {
+fn moving_piston_records(
+    scheduled: &[ScheduledTick<ScheduledTickKind>],
+) -> Vec<(BlockPos, lodestone_core::Nbt)> {
     scheduled
         .iter()
         .filter(|pending| crate::piston::is_finish_kind(&pending.kind))
@@ -8238,7 +8398,7 @@ fn moving_piston_records(scheduled: &[ScheduledTick<String>]) -> Vec<(BlockPos, 
 pub(crate) fn propagate_placement<S>(
     source: &S,
     target: BlockPos,
-) -> (Vec<(BlockPos, String)>, Vec<ScheduledTick<String>>)
+) -> (Vec<(BlockPos, String)>, Vec<ScheduledTick<ScheduledTickKind>>)
 where
     S: ChunkSource + ?Sized,
 {
@@ -8252,7 +8412,7 @@ pub(crate) fn propagate_placement_with_entities<S>(
     source: &S,
     target: BlockPos,
     block_entities: Option<&BlockEntityHandle>,
-) -> (Vec<(BlockPos, String)>, Vec<ScheduledTick<String>>)
+) -> (Vec<(BlockPos, String)>, Vec<ScheduledTick<ScheduledTickKind>>)
 where
     S: ChunkSource + ?Sized,
 {
@@ -8265,7 +8425,7 @@ where
     if target.y < column.min_y || target.y >= column.min_y + column.height {
         return (Vec::new(), Vec::new());
     }
-    let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+    let mut block_ticks: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
     // `react_at_placement`, not `propagate_and_react`: the placed block owes
     // itself a `setPlacedBy` reaction that the neighbour pass structurally
     // cannot deliver. See that function's own doc comment.
@@ -8294,7 +8454,8 @@ where
     // re-`schedule`s each entry and so assigns it a fresh `sub_tick_order`, which
     // makes *this* order the one that decides tie-breaks later — so it has to be
     // deterministic. `u64::MAX` drains everything regardless of delay.
-    let scheduled: Vec<ScheduledTick<String>> = block_ticks.drain_due(u64::MAX, usize::MAX);
+    let scheduled: Vec<ScheduledTick<ScheduledTickKind>> =
+        block_ticks.drain_due(u64::MAX, usize::MAX);
     let changed = events
         .into_iter()
         .map(|event| {
@@ -8317,7 +8478,7 @@ pub(crate) fn propagate_removal_with_entities<S>(
     source: &S,
     target: BlockPos,
     wire_state_before_removal: &str,
-) -> (Vec<(BlockPos, String)>, Vec<ScheduledTick<String>>)
+) -> (Vec<(BlockPos, String)>, Vec<ScheduledTick<ScheduledTickKind>>)
 where
     S: ChunkSource + ?Sized,
 {
@@ -8330,7 +8491,7 @@ where
     if target.y < column.min_y || target.y >= column.min_y + column.height {
         return (Vec::new(), Vec::new());
     }
-    let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+    let mut block_ticks: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
     let events = crate::random_tick::react_at_removal(
         &mut column,
         min_x,
@@ -8346,7 +8507,8 @@ where
         &mut block_ticks,
         0,
     );
-    let scheduled: Vec<ScheduledTick<String>> = block_ticks.drain_due(u64::MAX, usize::MAX);
+    let scheduled: Vec<ScheduledTick<ScheduledTickKind>> =
+        block_ticks.drain_due(u64::MAX, usize::MAX);
     let changed = events
         .into_iter()
         .map(|event| {
@@ -8482,7 +8644,7 @@ where
     match action {
         0 if vitals.health() <= 0.0 => {
             vitals.respawn();
-            *client_loaded = !proto.has_player_loaded_packet();
+            *client_loaded = false;
             // Prefer a usable bed position and fall back to the world spawn when
             // the bed is broken or obstructed.
             let target = respawn
@@ -8733,6 +8895,58 @@ fn player_attribute_snapshots(inventory: &PlayerInventory) -> Vec<EntityAttribut
             })
         })
         .collect()
+}
+
+/// One folded maximum-health snapshot for the local player's active effects.
+///
+/// This travels through the existing local-player attribute packet rather than
+/// inventing a status-effect-specific health wire path. The client already
+/// merges that packet into its attribute component, which is also where the
+/// HUD obtains the number of heart rows.
+fn max_health_snapshot(max_health: f32) -> EntityAttributeSnapshot {
+    EntityAttributeSnapshot {
+        attribute: "minecraft:max_health"
+            .parse()
+            .expect("built-in max-health attribute identifier"),
+        base: f64::from(max_health),
+        modifiers: Vec::new(),
+    }
+}
+
+/// Publishes the one effect-derived attribute that changes the authoritative
+/// health ceiling, plus the current-health packet that must be clamped when an
+/// expiring effect lowers that ceiling.
+///
+/// Calling this after effect application and after the timer's expiry pass
+/// makes add, amplifier replacement, hidden-chain restoration, and removal
+/// share one transition. A no-op effect tick produces no packets.
+async fn sync_effect_max_health<T, P>(
+    conn: &mut Connection<T>,
+    state: &mut State,
+    proto: &P,
+    vitals: &mut PlayerVitals,
+    effects: &crate::mob_effects::ActiveEffects,
+) -> Result<bool, ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+{
+    if !vitals.set_max_health(effects.max_health()) {
+        return Ok(false);
+    }
+    let snapshot = max_health_snapshot(vitals.max_health());
+    apply(conn, state, proto.encode_update_attributes(std::slice::from_ref(&snapshot))).await?;
+    apply(
+        conn,
+        state,
+        proto.encode_set_health(
+            vitals.health(),
+            vitals.food().food_level(),
+            vitals.food().saturation(),
+        ),
+    )
+    .await?;
+    Ok(true)
 }
 
 /// Sends [`player_attribute_snapshots`] as an `update_attributes` packet —
@@ -9990,6 +10204,7 @@ enum UseItemOutcome {
 #[allow(clippy::too_many_arguments)]
 fn apply_use_item(
     mobs: &MobHandle,
+    effects: &crate::mob_effects::ActiveEffects,
     inventory: &mut PlayerInventory,
     player_pos: Option<(f64, f64, f64)>,
     client_movement: ClientMovement,
@@ -10087,7 +10302,17 @@ fn apply_use_item(
             // own comment discloses the same gap), so the catch itself lands
             // for real — loot spawned, xp awarded — and only the durability
             // half is the disclosed no-op.
-            mobs.with(|sim| sim.retrieve_fishing_bobber(bobber_id, Vec3::new(x, y, z), 0));
+            // The bobber already carries its rod-derived luck. The player's
+            // current Luck/Unluck attribute is sampled when the catch is
+            // rolled, so expiry before retrieval is observable and no second
+            // effect timer is needed in the fishing simulation.
+            mobs.with(|sim| {
+                sim.retrieve_fishing_bobber(
+                    bobber_id,
+                    Vec3::new(x, y, z),
+                    effects.luck(),
+                )
+            });
         } else {
             // Vanilla's own fishing-rod-item use routine's cast arm. `luck`/`lure_speed` are `0, 0`
             // No enchantment model reaches this call site yet (see
@@ -10480,6 +10705,7 @@ fn apply_attack(
     player_pos: Option<(f64, f64, f64)>,
     sprinting: bool,
     inventory: &PlayerInventory,
+    effects: &crate::mob_effects::ActiveEffects,
     entity_id: i32,
     player_uuid: uuid::Uuid,
 ) {
@@ -10497,7 +10723,7 @@ fn apply_attack(
     // The weapon feed resolves the held item through the `ATTACK_DAMAGE`
     // attribute fold. An empty hand uses the player's attribute base with no
     // modifiers.
-    let raw_damage = inventory.combat_stats().attack_damage;
+    let raw_damage = effects.melee_damage(inventory.combat_stats().attack_damage);
     mobs.with(|sim| {
         sim.attack_from_player(
             entity_id,
@@ -10852,6 +11078,7 @@ async fn publish_health<T, P>(
     state: &mut State,
     proto: &P,
     vitals: &PlayerVitals,
+    effects: &crate::mob_effects::ActiveEffects,
     // The position the hurt/death sound is centred on (`WorldEffect::Sound`'s
     // wire form quantises it to eighths of a block, so a stale or zeroed
     // position only ever costs spatialisation accuracy, never a dropped
@@ -10926,6 +11153,14 @@ where
     )
     .await?;
     if vitals.health() <= 0.0 {
+        if matches!(effects.death_trigger(), Some(crate::mob_effects::DeathTrigger::WindCharged)) {
+            apply(
+                conn,
+                state,
+                proto.encode_world_effect(&crate::effects::wind_charged_death(pos)),
+            )
+            .await?;
+        }
         advancements.award_stat(
             player_uuid,
             crate::advancements::StatKey::new(
@@ -10984,6 +11219,7 @@ async fn fall_status_sample<T, P, S>(
     player_pos: &Option<(f64, f64, f64)>,
     fall: &mut FallTracker,
     vitals: &mut PlayerVitals,
+    effects: &crate::mob_effects::ActiveEffects,
     username: &str,
     on_ground: bool,
     client_loaded: bool,
@@ -11019,6 +11255,7 @@ where
             state,
             proto,
             vitals,
+            effects,
             Vec3::new(x, y, z),
             // Always `LOCAL_PLAYER_ENTITY_ID`, never the registry ticket's id:
             // this packet goes straight to `conn`, this player's own socket,
@@ -11530,6 +11767,7 @@ where
                     state,
                     proto,
                     vitals,
+                    effects,
                     Vec3::new(x, y, z),
                     // Self-facing, per `fall_status_sample`'s own call site comment.
                     LOCAL_PLAYER_ENTITY_ID,
@@ -11568,6 +11806,7 @@ where
                 player_pos,
                 fall,
                 vitals,
+                effects,
                 username,
                 on_ground,
                 *client_loaded,
@@ -11593,6 +11832,7 @@ where
                 player_pos,
                 fall,
                 vitals,
+                effects,
                 username,
                 on_ground,
                 *client_loaded,
@@ -11662,7 +11902,7 @@ where
             pos,
             face,
             cursor,
-            sequence,
+            sequence: _,
             hand,
         } => {
             // Draw one roll per right-click, regardless of the clicked block;
@@ -11710,10 +11950,6 @@ where
                 world.crafting_hooks(),
             )
             .await?;
-            // The edit handler has finished all authoritative writes and
-            // correction packets before this acknowledgement retires the
-            // client's optimistic placement ledger.
-            apply(conn, state, proto.encode_block_changed_ack(sequence)).await?;
         }
         ServerBound::DifficultyChanged { difficulty } => {
             // A difficulty change requires permission level `2`. A locked world
@@ -12222,7 +12458,15 @@ where
             }
         }
         ServerBound::Attack { entity_id } => {
-            apply_attack(mobs, *player_pos, *sprinting, inventory, entity_id, player_uuid);
+            apply_attack(
+                mobs,
+                *player_pos,
+                *sprinting,
+                inventory,
+                effects,
+                entity_id,
+                player_uuid,
+            );
             // Attack exhaustion is charged on every living-target swing, not
             // only when the damage attempt lands.
             if !Abilities::for_mode(*game_mode).invulnerable {
@@ -12498,6 +12742,7 @@ where
             }
             let outcome = apply_use_item(
                 mobs,
+                effects,
                 inventory,
                 *player_pos,
                 *client_movement,
@@ -13408,6 +13653,8 @@ async fn serve_play<T, P, S, E>(
     // The deferred portion of the join view (`JOIN_PRESTREAM_RADIUS`) belongs
     // to this connection and is drained alongside socket reads and timers.
     mut join_stream: crate::join_scheduler::JoinChunkStream<S>,
+    // Optional per-stage join timing shared with the generation workers.
+    join_trace: Option<Arc<JoinTrace>>,
     block_entities: &BlockEntityHandle,
     mobs: &MobHandle,
     block_ticks: &BlockTickFeed,
@@ -13493,7 +13740,7 @@ where
     let mut teleport_acknowledgements = initial_teleport_id.map(TeleportAcknowledgements::after_initial);
     let mut player_pos: Option<(f64, f64, f64)> = None;
     let mut client_movement = ClientMovement::default();
-    let mut client_loaded = !proto.has_player_loaded_packet();
+    let mut client_loaded = false;
     let mut abilities = Abilities::for_mode(game_mode);
     // The rotation is stored alongside `player_pos` — see `dispatch_play_packet`'s own
     // parameter comment. Restore the native locator's bounded rotation when
@@ -13767,11 +14014,24 @@ where
             //
             // Both `JoinChunkStream::next` arms are cancel-safe; a canceled
             // column must not silently leave a hole in the client's terrain.
-            chunk = join_stream.next(source), if !join_stream.is_done() => {
+            chunk = tokio::time::timeout(
+                crate::join_scheduler::JOIN_STREAM_SERVICE_BUDGET,
+                join_stream.next(source),
+            ), if !join_stream.is_done() => {
                 watch.enter();
                 let chunk = match chunk {
-                    Ok(chunk) => chunk,
-                    Err(error) => {
+                    // A worker can legitimately take hundreds of milliseconds
+                    // on a cold terrain column. Dropping only this borrowed
+                    // future is safe: `ColumnPipeline::next` leaves the head
+                    // handle in place until it has been emitted, so the next
+                    // pass observes the same ordered result. Most importantly,
+                    // the socket-read arm gets polled at least once per budget.
+                    Err(_) => {
+                        watch.pass("join_stream");
+                        continue;
+                    }
+                    Ok(Ok(chunk)) => chunk,
+                    Ok(Err(error)) => {
                         return return_chunk_encode_error(
                             conn,
                             proto,
@@ -13788,7 +14048,14 @@ where
                         join_batch_open = true;
                         join_batch_size = 0;
                     }
-                    let directive = match encode_column(proto, source, cx, cz, payload) {
+                    let directive = match encode_column(
+                        proto,
+                        source,
+                        cx,
+                        cz,
+                        join_trace.as_deref(),
+                        payload,
+                    ) {
                         Ok(directive) => directive,
                         Err(error) => {
                             return return_chunk_encode_error(
@@ -13802,6 +14069,9 @@ where
                         }
                     };
                     apply(conn, &mut state, directive).await?;
+                    if let Some(trace) = join_trace.as_ref() {
+                        trace.mark("delivered", cx, cz);
+                    }
                     chunks_sent += 1;
                     join_batch_size += 1;
                     // Close on a full batch or on the last column, whichever comes
@@ -14135,6 +14405,7 @@ where
                 {
                     registry.set_rotation(ticket.entity_id(), rotation);
                 }
+                republish_effect_entity_flags(entities.players(), player_ticket.as_ref(), &effects);
                 for directive in stream_pass(
                     proto,
                     entities,
@@ -14160,6 +14431,7 @@ where
             // connection says nothing. See [`ENTITY_STREAM_INTERVAL`].
             _ = entity_stream_tick.tick() => {
                 watch.enter();
+                republish_effect_entity_flags(entities.players(), player_ticket.as_ref(), &effects);
                 for directive in stream_pass(
                     proto,
                     entities,
@@ -14641,6 +14913,7 @@ where
                                 &mut state,
                                 proto,
                                 &vitals,
+                                &effects,
                                 Vec3::new(x, y, z),
                                 // Self-facing, per `publish_health`'s own call sites.
                                 LOCAL_PLAYER_ENTITY_ID,
@@ -14664,7 +14937,12 @@ where
                     // at the damage below because `PlayerVitals` is mode-free by
                     // design, and a depleting bar that can never hurt is worse
                     // than no bar at all.
-                    let outcome = vitals.tick(!invulnerable && is_water(&eye_state));
+                    let outcome = tick_player_air_supply(
+                        &mut vitals,
+                        is_water(&eye_state),
+                        invulnerable,
+                        &effects,
+                    );
                     if let Some(air) = outcome.air_changed {
                         apply(conn, &mut state, proto.encode_air_supply_update(air)).await?;
                     }
@@ -14674,6 +14952,7 @@ where
                             &mut state,
                             proto,
                             &vitals,
+                            &effects,
                             Vec3::new(x, y, z),
                             // Self-facing, per `publish_health`'s own call sites.
                             LOCAL_PLAYER_ENTITY_ID,
@@ -14729,6 +15008,7 @@ where
                                     &mut state,
                                     proto,
                                     &vitals,
+                                    &effects,
                                     Vec3::new(x, y, z),
                                     // Self-facing, per `publish_health`'s own call sites.
                                     LOCAL_PLAYER_ENTITY_ID,
@@ -14833,6 +15113,7 @@ where
                             &mut state,
                             proto,
                             &vitals,
+                            &effects,
                             Vec3::new(x, y, z),
                             // Self-facing, per `publish_health`'s own call sites.
                             LOCAL_PLAYER_ENTITY_ID,
@@ -15070,19 +15351,24 @@ where
                 // `game_tick` is the entity tick count needed **only** for an
                 // infinite effect; a finite one counts against its remaining
                 // duration.
+                // Apply a newly granted/replaced Health Boost before periodic
+                // effects read their regeneration ceiling. The second sync
+                // below catches expiry and hidden-effect restoration.
+                sync_effect_max_health(conn, &mut state, proto, &mut vitals, &effects).await?;
                 if !effects.is_empty() {
                     let out = effects.tick(
                         i32::try_from(world.time().game_time.max(0)).unwrap_or(i32::MAX),
                         vitals.health(),
-                        crate::vitals::MAX_HEALTH,
+                        vitals.max_health(),
                     );
                     if out.exhaustion > 0.0 {
                         vitals.add_exhaustion(out.exhaustion);
                     }
+                    let saturation_changed = apply_effect_saturation(&mut vitals, out.saturation);
                     // Poison's `health > 1.0` guard is already applied inside the
                     // registry, so this is an unconditional subtraction of an amount
                     // that was only produced when the guard allowed it.
-                    let mut moved = false;
+                    let mut moved = saturation_changed;
                     // Tracked separately from `moved`, because regeneration reaches
                     // this publish too and a heal must not flash the screen red or
                     // tilt the camera. This is the one arm where "health changed"
@@ -15108,6 +15394,7 @@ where
                             &mut state,
                             proto,
                             &vitals,
+                            &effects,
                             // No terrain read backs this arm (status effects tick
                             // regardless of a reported position), so this falls
                             // back to the origin on a connection that has never
@@ -15123,6 +15410,7 @@ where
                         )
                         .await?;
                     }
+                    sync_effect_max_health(conn, &mut state, proto, &mut vitals, &effects).await?;
                 }
 
                 // Hunger, after the air block — vanilla's own order
@@ -15149,6 +15437,7 @@ where
                             &mut state,
                             proto,
                             &vitals,
+                            &effects,
                             // Hunger needs no terrain and runs even before the
                             // first movement packet — see the wither arm just
                             // above for the same fallback.
@@ -15905,6 +16194,7 @@ where
                     state,
                     proto,
                     vitals,
+                    effects,
                     Vec3::new(x, y, z),
                     LOCAL_PLAYER_ENTITY_ID,
                     username,
@@ -15924,7 +16214,12 @@ where
         );
         // `!invulnerable &&` keeps creative players from depleting air or
         // drowning.
-        let outcome = vitals.tick(!invulnerable && is_water(&eye_state));
+        let outcome = tick_player_air_supply(
+            vitals,
+            is_water(&eye_state),
+            invulnerable,
+            effects,
+        );
         if let Some(air) = outcome.air_changed {
             apply(conn, state, proto.encode_air_supply_update(air)).await?;
         }
@@ -15934,6 +16229,7 @@ where
                 state,
                 proto,
                 vitals,
+                effects,
                 Vec3::new(x, y, z),
                 LOCAL_PLAYER_ENTITY_ID,
                 username,
@@ -15974,6 +16270,7 @@ where
                 state,
                 proto,
                 vitals,
+                effects,
                 Vec3::new(x, y, z),
                 LOCAL_PLAYER_ENTITY_ID,
                 username,
@@ -16047,16 +16344,20 @@ where
 
     // Tick status effects before hunger so their exhaustion is included when
     // hunger consumes exhaustion.
+    // Apply a newly granted/replaced Health Boost before periodic effects read
+    // their regeneration ceiling. The second sync below catches expiry and
+    // hidden-effect restoration.
+    sync_effect_max_health(conn, state, proto, vitals, effects).await?;
     if !effects.is_empty() {
         let out = effects.tick(
             i32::try_from(world.time().game_time.max(0)).unwrap_or(i32::MAX),
             vitals.health(),
-            crate::vitals::MAX_HEALTH,
+            vitals.max_health(),
         );
         if out.exhaustion > 0.0 {
             vitals.add_exhaustion(out.exhaustion);
         }
-        let mut moved = false;
+        let mut moved = apply_effect_saturation(vitals, out.saturation);
         let mut hurt_landed = false;
         if out.heal > 0.0 {
             vitals.heal(out.heal);
@@ -16078,6 +16379,7 @@ where
                 state,
                 proto,
                 vitals,
+                effects,
                 // Terrain data is not needed for this health publication.
                 player_pos.map(|(x, y, z)| Vec3::new(x, y, z)).unwrap_or_default(),
                 LOCAL_PLAYER_ENTITY_ID,
@@ -16089,6 +16391,7 @@ where
             )
             .await?;
         }
+        sync_effect_max_health(conn, state, proto, vitals, effects).await?;
     }
 
     // Hunger runs after air checks and does not require a reported position.
@@ -16101,6 +16404,7 @@ where
                 state,
                 proto,
                 vitals,
+                effects,
                 player_pos.map(|(x, y, z)| Vec3::new(x, y, z)).unwrap_or_default(),
                 LOCAL_PLAYER_ENTITY_ID,
                 username,
@@ -16139,8 +16443,9 @@ async fn serve_play<T, P, S, E>(
     initial_teleport_id: Option<i32>,
     mut streamer: EntityStreamer,
     mut player_list: PlayerListStreamer,
-    // Keep the ticket guard alive for the entire connection. Player streaming
-    // is packet-driven through `FallTracker` and needs no timer here.
+    // Keep the ticket guard alive for the entire connection. Movement remains
+    // packet-driven through `FallTracker`; the browser timer separately runs
+    // the shared entity diff for world changes that occur while idle.
     player_ticket: Option<PlayerTicket>,
     // The guard withdraws this connection's `PLAYER_LOADING` and
     // `PLAYER_SIMULATION` tickets when the task exits. Move it with each
@@ -16157,16 +16462,19 @@ async fn serve_play<T, P, S, E>(
     // dispatch. It has no second thread, so generation occupies this loop until
     // the initial burst completes.
     mut join_stream: crate::join_scheduler::JoinChunkStream<S>,
+    // Optional per-stage join timing. Browser builds normally leave this off.
+    join_trace: Option<Arc<JoinTrace>>,
     block_entities: &BlockEntityHandle,
     mobs: &MobHandle,
-    // Inbound placement packets publish neighbour-update requests here.
-    // Outbound random-tick changes require a container-sync timer, which this
-    // browser loop does not provide.
+    // Inbound placement packets publish neighbour-update requests here. The
+    // browser timer below also drains the world-tick block lane, so changes
+    // made while the client is idle reach the wire without waiting for input.
     block_ticks: &BlockTickFeed,
-    // No packet produces explosion-feed entries on the browser target.
-    _explosions: &ExplosionFeed,
-    // Weather changes are world-tick events; this browser loop has no timer
-    // producer that drains the weather feed.
+    // The browser timer drains explosions emitted by the shared world tick.
+    explosions: &ExplosionFeed,
+    // Weather changes are world-tick events. They remain a follow-up for this
+    // connection loop because the shared weather feed is currently drained by
+    // the native container-sync path.
     _weather: &WeatherFeed,
     // Bed clicks and wake-up packets are handled here. Voter counts and
     // skipped-night notifications require a container-sync timer, which is
@@ -16222,7 +16530,7 @@ where
     // remains driven by inbound `PlayerMoved` packets.
     let mut player_pos: Option<(f64, f64, f64)> = None;
     let mut client_movement = ClientMovement::default();
-    let mut client_loaded = !proto.has_player_loaded_packet();
+    let mut client_loaded = false;
     let mut abilities = Abilities::for_mode(game_mode);
     // The rotation is stored alongside `player_pos` — see `dispatch_play_packet`'s own
     // parameter comment.
@@ -16308,7 +16616,14 @@ where
             let Some(((cx, cz), payload)) = next else {
                 break;
             };
-            let directive = match encode_column(proto, source, cx, cz, payload) {
+            let directive = match encode_column(
+                proto,
+                source,
+                cx,
+                cz,
+                join_trace.as_deref(),
+                payload,
+            ) {
                 Ok(directive) => directive,
                 Err(error) => {
                     return return_chunk_encode_error(
@@ -16322,14 +16637,18 @@ where
                 }
             };
             apply(conn, &mut state, directive).await?;
+            if let Some(trace) = join_trace.as_ref() {
+                trace.mark("delivered", cx, cz);
+            }
             chunks_sent += 1;
             batch_size += 1;
         }
         apply(conn, &mut state, proto.end_chunk_batch(batch_size)).await?;
     }
 
-    // The browser timer uses a macrotask via `window.setTimeout`; it drives
-    // `wasm_vitals_tick` once per `WASM_VITALS_TICK_INTERVAL` period.
+    // The browser timer uses a macrotask via the active page/worker global's
+    // `setTimeout`; it drives both player vitals and publication of world
+    // changes once per `WASM_VITALS_TICK_INTERVAL` period.
     let mut vitals_interval =
         crate::browser_timer::BrowserInterval::new(WASM_VITALS_TICK_INTERVAL);
     loop {
@@ -16370,6 +16689,45 @@ where
                 )
                 .await?;
                 republish_inventory(entities.players(), player_uuid, &inventory);
+                // The world tick runs in a separate future and can mutate the
+                // shared source while this connection is completely idle.
+                // Drain the block lane here rather than waiting for the next
+                // inbound packet; otherwise scheduled fluids and random block
+                // updates remain authoritative in memory but invisible to the
+                // browser client.
+                send_tick_block_updates(
+                    conn,
+                    proto,
+                    source.get(),
+                    &mut state,
+                    block_ticks.drain_all(),
+                )
+                .await?;
+                // Explosions have the same producer/consumer shape as block
+                // changes: the shared world tick publishes them independently
+                // of client input, so the timer must forward them as well.
+                for detonation in explosions.drain_all() {
+                    apply(
+                        conn,
+                        &mut state,
+                        proto.encode_explode(detonation.centre, detonation.radius),
+                    )
+                    .await?;
+                }
+                // Entity snapshots are the browser's item/mob visibility
+                // path. Run the same diff used by the native connection timer
+                // so a dropped item appears and falls even when the player
+                // sends no movement packets.
+                republish_effect_entity_flags(entities.players(), player_ticket.as_ref(), &effects);
+                for directive in stream_pass(
+                    proto,
+                    entities,
+                    &mut streamer,
+                    &mut player_list,
+                    player_ticket.as_ref(),
+                ) {
+                    apply(conn, &mut state, directive).await?;
+                }
                 continue;
             }
         };
@@ -16532,6 +16890,7 @@ where
         {
             registry.set_rotation(ticket.entity_id(), rotation);
         }
+        republish_effect_entity_flags(entities.players(), player_ticket.as_ref(), &effects);
         for directive in stream_pass(
             proto,
             entities,
@@ -16551,6 +16910,7 @@ mod tests {
     use crate::composter::{Composter, MAX_FILL_LEVEL, READY_DELAY_TICKS};
     use crate::chunk::ChunkColumn;
     use crate::furnace::{Furnace, FurnaceKind};
+    use crate::mob_effects::ActiveEffects;
     use crate::protocol::MetadataField;
     use lodestone_model::{Rotation, Vec3};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -17751,6 +18111,9 @@ mod tests {
     const REMOVE: i32 = 3;
     const METADATA: i32 = 4;
     const LINK: i32 = 5;
+    const ATTRIBUTES: i32 = 6;
+    const HEALTH: i32 = 7;
+    const PARTICLES: i32 = 8;
 
     impl ServerProtocol for TagProto {
         fn decode(&self, _s: State, _id: i32, _p: &[u8]) -> ServerBound {
@@ -17814,6 +18177,39 @@ mod tests {
                 // stays visually distinct from `0`, which is also a plausible id.
                 payload: vec![source_id as u8, target_id.map_or(255, |id| id as u8)],
             }
+        }
+        fn encode_update_attributes(&self, attributes: &[EntityAttributeSnapshot]) -> ServerDirective {
+            let max_health = attributes
+                .iter()
+                .find(|snapshot| snapshot.attribute.to_string() == "minecraft:max_health")
+                .map(|snapshot| snapshot.base as u8)
+                .unwrap_or_default();
+            ServerDirective::Send {
+                packet_id: ATTRIBUTES,
+                payload: vec![max_health],
+            }
+        }
+        fn encode_set_health(&self, health: f32, _food: i32, _saturation: f32) -> ServerDirective {
+            ServerDirective::Send {
+                packet_id: HEALTH,
+                payload: vec![health as u8],
+            }
+        }
+        fn encode_level_particles(
+            &self,
+            particle: &str,
+            pos: Vec3,
+            _offset: lodestone_model::Vec3f,
+            _max_speed: f32,
+            _count: i32,
+            _long_distance: bool,
+        ) -> ServerDirective {
+            (particle == "minecraft:gust_emitter_small")
+                .then(|| ServerDirective::Send {
+                    packet_id: PARTICLES,
+                    payload: [pos.x.to_be_bytes(), pos.y.to_be_bytes(), pos.z.to_be_bytes()].concat(),
+                })
+                .unwrap_or(ServerDirective::None)
         }
     }
 
@@ -17911,6 +18307,143 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(sent(&out[0]), (ADD, [10u8].as_slice()));
         assert_eq!(sent(&out[1]).0, METADATA);
+    }
+
+    #[test]
+    fn effect_shared_flags_trigger_the_real_metadata_stream_path() {
+        let mut streamer = EntityStreamer::default();
+        let out = streamer.sync(
+            &TagProto,
+            &[snap_with_metadata(10, 0.0, vec![MetadataField::SharedFlags(0x20)])],
+        );
+        assert_eq!(sent(&out[0]), (ADD, [10u8].as_slice()));
+        assert_eq!(sent(&out[1]), (METADATA, [10u8, 1].as_slice()));
+
+        let cleared = streamer.sync(
+            &TagProto,
+            &[snap_with_metadata(10, 0.0, vec![MetadataField::SharedFlags(0)])],
+        );
+        assert_eq!(sent(&cleared[0]), (UPDATE, [10u8].as_slice()));
+        assert_eq!(sent(&cleared[1]), (METADATA, [10u8, 1].as_slice()));
+    }
+
+    #[test]
+    fn live_air_supply_helper_consumes_the_active_effect_store() {
+        let mut water_breathing = ActiveEffects::new();
+        water_breathing.apply("minecraft:water_breathing", 200, 0);
+        let mut refilling = PlayerVitals::restored(crate::vitals::MAX_HEALTH, 20);
+        assert_eq!(
+            tick_player_air_supply(&mut refilling, true, false, &water_breathing).air_changed,
+            Some(24),
+            "the production helper must carry Water Breathing through to the air ticker"
+        );
+
+        let mut ordinary = PlayerVitals::restored(crate::vitals::MAX_HEALTH, 20);
+        assert_eq!(
+            tick_player_air_supply(&mut ordinary, true, false, &ActiveEffects::new()).air_changed,
+            Some(19),
+            "the no-effect control must still deplete rather than universally refill"
+        );
+    }
+
+    #[test]
+    fn live_saturation_helper_updates_the_authoritative_food_snapshot() {
+        let mut vitals = PlayerVitals::restored(crate::vitals::MAX_HEALTH, 300);
+        vitals.set_food(crate::food::FoodData::restored(16, 0.0, 0.0, 0));
+        assert!(apply_effect_saturation(&mut vitals, 3));
+        assert_eq!(vitals.food().food_level(), 19);
+        assert_eq!(vitals.food().saturation(), 6.0);
+
+        let mut full = PlayerVitals::default();
+        full.set_food(crate::food::FoodData::restored(20, 20.0, 0.0, 0));
+        assert!(
+            !apply_effect_saturation(&mut full, 1),
+            "a full food/saturation snapshot must not request a redundant packet"
+        );
+    }
+
+    /// The production publication helper must emit both the folded attribute
+    /// and the current health frame when Health Boost is added and removed.
+    /// The removal arm is the important control: it catches an implementation
+    /// that grows the extra hearts correctly but leaves their client-side row
+    /// after expiry.
+    #[tokio::test]
+    async fn health_boost_attribute_and_health_reach_the_real_connection_path() {
+        let (client_end, server_end) = lodestone_net::memory_pair();
+        let mut conn = Connection::new(server_end);
+        let mut peer = Connection::new(client_end);
+        let mut state = State::Play;
+        let mut vitals = PlayerVitals::default();
+        let mut effects = ActiveEffects::new();
+
+        effects.apply("minecraft:health_boost", 1, 0);
+        assert!(
+            sync_effect_max_health(&mut conn, &mut state, &TagProto, &mut vitals, &effects)
+                .await
+                .expect("the active effect must publish")
+        );
+        assert_eq!(vitals.max_health(), 24.0);
+        assert_eq!(peer.read_packet().await.expect("attribute frame"), Some((ATTRIBUTES, vec![24])));
+        assert_eq!(peer.read_packet().await.expect("health frame"), Some((HEALTH, vec![20])));
+
+        // The one-tick duration expires through the same store/tick path the
+        // live timer uses; direct removal would not prove the expiry arm.
+        let _ = effects.tick(0, vitals.health(), vitals.max_health());
+        assert!(
+            sync_effect_max_health(&mut conn, &mut state, &TagProto, &mut vitals, &effects)
+                .await
+                .expect("expiry must publish the restored ceiling")
+        );
+        assert_eq!(vitals.max_health(), crate::vitals::MAX_HEALTH);
+        assert_eq!(peer.read_packet().await.expect("restored attribute frame"), Some((ATTRIBUTES, vec![20])));
+        assert_eq!(peer.read_packet().await.expect("restored health frame"), Some((HEALTH, vec![20])));
+    }
+
+    /// The death choke point must consume Wind Charged exactly where health
+    /// crosses zero and put the existing small-gust world effect on the real
+    /// outbound connection.  The empty-effect control distinguishes a death
+    /// packet from the effect-specific particle frame.
+    #[tokio::test]
+    async fn wind_charged_death_reaches_the_real_connection_path() {
+        let (client_end, server_end) = lodestone_net::memory_pair();
+        let mut conn = Connection::new(server_end);
+        let mut peer = Connection::new(client_end);
+        let mut state = State::Play;
+        let mut vitals = PlayerVitals::default();
+        vitals.kill();
+        let mut effects = ActiveEffects::new();
+        effects.apply("minecraft:wind_charged", 200, 0);
+        let mut advancements = AdvancementManager::new(Vec::new()).expect("empty advancement tree");
+
+        publish_health(
+            &mut conn,
+            &mut state,
+            &TagProto,
+            &vitals,
+            &effects,
+            Vec3::new(4.0, 70.0, 9.0),
+            LOCAL_PLAYER_ENTITY_ID,
+            "Player",
+            crate::vitals::DeathCause::GenericKill,
+            &mut advancements,
+            Uuid::nil(),
+            None,
+        )
+        .await
+        .expect("death publication");
+
+        assert_eq!(peer.read_packet().await.expect("health frame"), Some((HEALTH, vec![0])));
+        assert_eq!(
+            peer.read_packet().await.expect("small-gust frame"),
+            Some((
+                PARTICLES,
+                [4.0f64.to_be_bytes(), 70.9f64.to_be_bytes(), 9.0f64.to_be_bytes()].concat(),
+            )),
+            "the effect must use the existing level-particle consumer at the midpoint"
+        );
+
+        let no_effect = ActiveEffects::new();
+        assert_eq!(no_effect.death_trigger(), None, "control: no active trigger means no gust frame");
     }
 
     /// Control: a spawn with *empty* metadata (every existing test's `snap`)
@@ -20699,11 +21232,11 @@ mod tests {
         // `ScheduledTick` carries a private `sub_tick_order`, so it is built
         // through a real queue rather than a struct literal — same trick
         // `tick.rs`'s own `one_pending` test helper uses.
-        let mut queue: crate::scheduled_tick::ScheduledTickQueue<String> =
+        let mut queue: crate::scheduled_tick::ScheduledTickQueue<ScheduledTickKind> =
             crate::scheduled_tick::ScheduledTickQueue::new();
         queue.schedule(
             (11, 60, -4),
-            "minecraft:redstone_wire".to_string(),
+            ScheduledTickKind::Extension("minecraft:redstone_wire".to_string()),
             2,
             crate::scheduled_tick::TickPriority::Normal,
         );

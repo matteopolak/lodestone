@@ -1139,10 +1139,9 @@ pub fn create_portal<S: ChunkSource + ?Sized>(
     // already exists for exactly this reason (no generation on a hit), so a
     // *warm* dimension — every return trip, and every outbound trip after the
     // first — pays only that check and skips the parallel fan-out entirely.
-    // Native only: `generate_columns_parallel` fans out over
-    // `std::thread::scope`, which is `Builder::spawn`'s panic-on-`Err` call
-    // site on `wasm32-unknown-unknown` (no threads there at all) — see this
-    // crate's wasm hazard notes. Skipping it there costs nothing beyond the
+    // Native only: `generate_columns_parallel` fans out over the shared Rayon
+    // pool. The helper is not compiled for `wasm32-unknown-unknown` (no native
+    // worker pool there); skipping it costs nothing beyond the
     // serial cost the scan already pays; it buys nothing either, since a
     // browser singleplayer world has no second core to fan out to.
     #[cfg(not(target_arch = "wasm32"))]
@@ -2681,8 +2680,8 @@ mod tests {
             "the 33x33 footprint around a chunk-aligned-ish origin spans exactly 9 columns"
         );
         // The parallelism claim itself. `std::thread::available_parallelism`
-        // is the same query `generate_columns_parallel` sizes its own
-        // fan-out from, so a single-core sandbox is the only way this could
+        // is the same machine-scale budget used by the shared Rayon
+        // dispatcher, so a single-core sandbox is the only way this could
         // fail honestly — everywhere else, more than one thread touching 9
         // columns is exactly what "warmed in parallel" means.
         let cores = std::thread::available_parallelism().map(std::num::NonZero::get).unwrap_or(1);

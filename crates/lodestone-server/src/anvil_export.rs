@@ -258,7 +258,7 @@ fn export_ticks(
             })?;
             Ok(SavedTick {
                 pos: tick.pos,
-                kind: tick.kind.clone(),
+                kind: tick.kind.clone().into_name(),
                 delay,
                 priority: tick.priority,
             })

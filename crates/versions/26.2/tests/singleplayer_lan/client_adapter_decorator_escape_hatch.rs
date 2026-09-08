@@ -79,6 +79,9 @@ enum Hooks {
     /// Inbound: rewrite every `ClientEvent::Chat` directive's text before the
     /// application sees it.
     RewriteInboundChat,
+    /// Inbound: add a caller-supplied marker to each chat directive. This is
+    /// used by the stack-order conformance test below.
+    RewriteInboundChatWithPrefix(&'static str),
     /// Inbound: append one synthetic `ClientEvent::Chat` directive whenever
     /// the wrapped adapter's own decode produces one — a chat event the real
     /// server never sent.
@@ -88,6 +91,9 @@ enum Hooks {
     /// Outbound: rewrite `ClientAction::SendChat`'s text before the wrapped
     /// adapter encodes it.
     RewriteOutboundChat,
+    /// Outbound: add a caller-supplied marker before the wrapped adapter
+    /// encodes the action. This is used by the stack-order conformance test.
+    RewriteOutboundChatWithPrefix(&'static str),
 }
 
 /// The decorator itself. `VersionAdapter` declares seven methods with no
@@ -150,16 +156,17 @@ impl<A: VersionAdapter> VersionAdapter for Decorator<A> {
         let directives = self.inner.handle_packet(world, state, packet_id, payload)?;
         Ok(match self.hooks {
             Hooks::DropInboundChat => directives.into_iter().filter(|d| !is_chat(d)).collect(),
-            Hooks::RewriteInboundChat => directives
+            Hooks::RewriteInboundChat | Hooks::RewriteInboundChatWithPrefix(_) => directives
                 .into_iter()
                 .map(|d| {
                     if is_chat(&d) {
-                        let rewritten = if let Directive::Emit(ClientEvent::Chat { text, .. }) = &d
-                        {
-                            Text::literal(format!(
-                                "[rewritten by client decorator] {}",
-                                text.to_plain_string()
-                            ))
+                        let rewritten = if let Directive::Emit(ClientEvent::Chat { text, .. }) = &d {
+                            let prefix = match self.hooks {
+                                Hooks::RewriteInboundChat => "rewritten by client decorator",
+                                Hooks::RewriteInboundChatWithPrefix(prefix) => prefix,
+                                _ => unreachable!(),
+                            };
+                            Text::literal(format!("[{prefix}] {}", text.to_plain_string()))
                         } else {
                             unreachable!()
                         };
@@ -196,6 +203,12 @@ impl<A: VersionAdapter> VersionAdapter for Decorator<A> {
             (Hooks::RewriteOutboundChat, ClientAction::SendChat { text }) => {
                 let rewritten = ClientAction::SendChat {
                     text: format!("[rewritten by client decorator] {text}"),
+                };
+                self.inner.encode_action(state, &rewritten)
+            }
+            (Hooks::RewriteOutboundChatWithPrefix(prefix), ClientAction::SendChat { text }) => {
+                let rewritten = ClientAction::SendChat {
+                    text: format!("[{prefix}] {text}"),
                 };
                 self.inner.encode_action(state, &rewritten)
             }
@@ -248,6 +261,10 @@ async fn join(
         .wait_for_spawn(Duration::from_secs(30))
         .await
         .expect("client never spawned");
+    let position = handle.position().expect("spawn wait supplied a position");
+    handle
+        .acknowledge_teleport_correction(position, handle.rotation())
+        .expect("client still connected");
     (handle, events, server)
 }
 
@@ -489,6 +506,78 @@ async fn decorator_appends_an_inbound_chat_event() {
             "Appended by client decorator".to_string(),
         ],
         "the decorator must append its own event after the real server event"
+    );
+
+    handle.shutdown();
+    server.shutdown().await;
+}
+
+/// **Stack conformance, outbound.** Decorators are nested outermost-first:
+/// the outer wrapper receives the action, then the inner wrapper receives the
+/// outer wrapper's rewritten action. Distinct markers make that ordering
+/// observable and prove that each wrapper's mutation is preserved on the wire.
+#[tokio::test]
+async fn stacked_client_decorators_apply_outbound_mutations_inner_after_outer() {
+    let (mut handle, mut events, server) = join(
+        |inner| {
+            Box::new(Decorator {
+                inner: Decorator {
+                    inner,
+                    hooks: Hooks::RewriteOutboundChatWithPrefix("inner"),
+                },
+                hooks: Hooks::RewriteOutboundChatWithPrefix("outer"),
+            })
+        },
+        "StackOutClient",
+    )
+    .await;
+
+    handle
+        .chat("hello from the outbound stack")
+        .expect("client still connected");
+
+    let lines = collect_chat_lines(&mut events, Duration::from_secs(5)).await;
+    assert_eq!(
+        lines,
+        vec!["<StackOutClient> [inner] [outer] hello from the outbound stack".to_string()],
+        "the inner decorator must see and preserve the outer decorator's mutation"
+    );
+
+    handle.shutdown();
+    server.shutdown().await;
+}
+
+/// **Stack conformance, inbound.** The adapter's decoded directive flows back
+/// through the nested wrappers: the inner wrapper mutates first, then the
+/// outer wrapper mutates that result. This proves ordering without exposing a
+/// borrowed decoder buffer to either decorator.
+#[tokio::test]
+async fn stacked_client_decorators_apply_inbound_mutations_inner_before_outer() {
+    let (mut handle, mut events, server) = join(
+        |inner| {
+            Box::new(Decorator {
+                inner: Decorator {
+                    inner,
+                    hooks: Hooks::RewriteInboundChatWithPrefix("inner"),
+                },
+                hooks: Hooks::RewriteInboundChatWithPrefix("outer"),
+            })
+        },
+        "StackInClient",
+    )
+    .await;
+
+    handle
+        .chat("hello from the inbound stack")
+        .expect("client still connected");
+
+    let lines = collect_chat_lines(&mut events, Duration::from_secs(5)).await;
+    assert_eq!(
+        lines,
+        vec![
+            "[outer] [inner] <StackInClient> hello from the inbound stack".to_string()
+        ],
+        "the outer decorator must see and preserve the inner decorator's mutation"
     );
 
     handle.shutdown();

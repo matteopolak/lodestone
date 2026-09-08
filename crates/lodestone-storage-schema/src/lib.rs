@@ -174,8 +174,12 @@ fn validate_chunk(chunk: &ChunkRecord) -> Result<(), ValidationError> {
     {
         let kind = ScheduledTickKind::try_from(tick.kind)
             .map_err(|_| ValidationError::UnknownScheduledTickKind(tick.kind))?;
-        if kind == ScheduledTickKind::Unspecified {
-            return Err(ValidationError::UnknownScheduledTickKind(tick.kind));
+        if tick.extension_kind.is_empty() {
+            if kind == ScheduledTickKind::Unspecified {
+                return Err(ValidationError::UnknownScheduledTickKind(tick.kind));
+            }
+        } else if kind != ScheduledTickKind::Unspecified {
+            return Err(ValidationError::ScheduledTickKindConflict);
         }
         ScheduledTickPriority::try_from(tick.priority)
             .map_err(|_| ValidationError::UnknownScheduledTickPriority(tick.priority))?;
@@ -379,6 +383,7 @@ pub enum ValidationError {
     InvalidMotionBlockingHeightCount(usize),
     MotionBlockingHeightOutOfRange(u32),
     UnknownScheduledTickKind(i32),
+    ScheduledTickKindConflict,
     UnknownScheduledTickPriority(i32),
     InvalidPlayerUuidLength(usize),
     InvalidEntityUuidLength(usize),
@@ -457,6 +462,9 @@ impl std::fmt::Display for ValidationError {
             Self::UnknownScheduledTickKind(kind) => {
                 write!(formatter, "unknown scheduled-tick kind {kind}")
             }
+            Self::ScheduledTickKindConflict => formatter.write_str(
+                "scheduled-tick extension kind requires the unspecified built-in kind",
+            ),
             Self::UnknownScheduledTickPriority(priority) => {
                 write!(formatter, "unknown scheduled-tick priority {priority}")
             }

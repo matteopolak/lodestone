@@ -87,3 +87,12 @@ lodestone-app = { workspace = true }
 lodestone-shell = { path = "../lodestone-shell" }
 lodestone-physics = { workspace = true }
 lodestone-world = { workspace = true }
+# The cross-tier authority gate starts the real integrated server and feeds it
+# the copied request produced by the separately built guest. This is dev-only:
+# the host remains version-free and does not acquire a server dependency in its
+# production graph.
+lodestone-server = { path = "../lodestone-server" }
+lodestone-core = { workspace = true }
+lodestone-data = { workspace = true }
+uuid = { workspace = true }
+tokio = { workspace = true }

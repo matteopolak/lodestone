@@ -5,30 +5,40 @@ use std::sync::Arc;
 
 use bevy_ecs::prelude::Resource;
 use lodestone_data::block_states::StateId;
-use lodestone_model::{BlockPos, ResourceKey, Vec3};
+use lodestone_model::{BlockFace, BlockPos, Hand, ResourceKey, Vec3};
 
 use super::proposals::{ProposalVerdict, ServerProposalAction};
 
 /// Event kinds currently backed by the server proposal vocabulary.
 ///
-/// `PlayerInteract` is intentionally present as a known-but-unsupported kind:
+/// `InventoryClick` is intentionally present as a known-but-unsupported kind:
 /// attempting to register it fails explicitly until that packet path has a
 /// proposal owner. This keeps a successful registration meaningful.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PaperEventKind {
     /// A proposed mob spawn.
     EntitySpawn,
+    /// A proposed mob removal.
+    EntityDespawn,
     /// A proposed mutation of a block in a resident column.
     ResidentBlockChange,
-    /// A player interaction, which has no proposal owner yet.
+    /// A player interaction against a block face.
     PlayerInteract,
+    /// An inventory click, which has no proposal owner yet.
+    InventoryClick,
 }
 
 impl PaperEventKind {
     /// Whether this event kind has a proposal-backed dispatch path.
     #[must_use]
     pub const fn supported(self) -> bool {
-        matches!(self, Self::EntitySpawn | Self::ResidentBlockChange)
+        matches!(
+            self,
+            Self::EntitySpawn
+                | Self::EntityDespawn
+                | Self::ResidentBlockChange
+                | Self::PlayerInteract
+        )
     }
 }
 
@@ -56,12 +66,32 @@ pub enum PaperEvent {
         /// Whether the proposal has been cancelled.
         cancelled: bool,
     },
+    /// A mob removal proposal.
+    EntityDespawn {
+        /// The server entity id to remove.
+        id: i32,
+        /// Whether the proposal has been cancelled.
+        cancelled: bool,
+    },
     /// A resident block mutation proposal.
     ResidentBlockChange {
         /// The target block position.
         pos: BlockPos,
         /// The replacement state.
         state: StateId,
+        /// Whether the proposal has been cancelled.
+        cancelled: bool,
+    },
+    /// A player interaction against a block face.
+    PlayerInteract {
+        /// The clicked block position.
+        pos: BlockPos,
+        /// The clicked face.
+        face: BlockFace,
+        /// The hand used for the interaction.
+        hand: Hand,
+        /// Whether the player is using the secondary action modifier.
+        using_secondary_action: bool,
         /// Whether the proposal has been cancelled.
         cancelled: bool,
     },
@@ -73,7 +103,9 @@ impl PaperEvent {
     pub const fn kind(&self) -> PaperEventKind {
         match self {
             Self::EntitySpawn { .. } => PaperEventKind::EntitySpawn,
+            Self::EntityDespawn { .. } => PaperEventKind::EntityDespawn,
             Self::ResidentBlockChange { .. } => PaperEventKind::ResidentBlockChange,
+            Self::PlayerInteract { .. } => PaperEventKind::PlayerInteract,
         }
     }
 
@@ -81,7 +113,9 @@ impl PaperEvent {
     pub fn cancel(&mut self) {
         match self {
             Self::EntitySpawn { cancelled, .. }
-            | Self::ResidentBlockChange { cancelled, .. } => *cancelled = true,
+            | Self::EntityDespawn { cancelled, .. }
+            | Self::ResidentBlockChange { cancelled, .. }
+            | Self::PlayerInteract { cancelled, .. } => *cancelled = true,
         }
     }
 
@@ -90,7 +124,9 @@ impl PaperEvent {
     pub const fn is_cancelled(&self) -> bool {
         match self {
             Self::EntitySpawn { cancelled, .. }
-            | Self::ResidentBlockChange { cancelled, .. } => *cancelled,
+            | Self::EntityDespawn { cancelled, .. }
+            | Self::ResidentBlockChange { cancelled, .. }
+            | Self::PlayerInteract { cancelled, .. } => *cancelled,
         }
     }
 
@@ -101,6 +137,10 @@ impl PaperEvent {
                 pos: *pos,
                 cancelled: false,
             }),
+            ServerProposalAction::DespawnMob { id } => Some(Self::EntityDespawn {
+                id: *id,
+                cancelled: false,
+            }),
             ServerProposalAction::SetResidentBlock { pos, state } => {
                 Some(Self::ResidentBlockChange {
                     pos: *pos,
@@ -108,9 +148,21 @@ impl PaperEvent {
                     cancelled: false,
                 })
             }
+            ServerProposalAction::PlayerInteract {
+                pos,
+                face,
+                hand,
+                using_secondary_action,
+            } => Some(Self::PlayerInteract {
+                pos: *pos,
+                face: *face,
+                hand: *hand,
+                using_secondary_action: *using_secondary_action,
+                cancelled: false,
+            }),
             ServerProposalAction::NaturalSpawnMob { .. }
-            | ServerProposalAction::DespawnMob { .. }
-            | ServerProposalAction::SetPlayerGameMode { .. } => None,
+            | ServerProposalAction::SetPlayerGameMode { .. }
+            | ServerProposalAction::SetResidentBlockBatch { .. } => None,
         }
     }
 
@@ -119,9 +171,22 @@ impl PaperEvent {
             Self::EntitySpawn { entity_type, pos, .. } => {
                 ServerProposalAction::SpawnMob { entity_type, pos }
             }
+            Self::EntityDespawn { id, .. } => ServerProposalAction::DespawnMob { id },
             Self::ResidentBlockChange { pos, state, .. } => {
                 ServerProposalAction::SetResidentBlock { pos, state }
             }
+            Self::PlayerInteract {
+                pos,
+                face,
+                hand,
+                using_secondary_action,
+                ..
+            } => ServerProposalAction::PlayerInteract {
+                pos,
+                face,
+                hand,
+                using_secondary_action,
+            },
         }
     }
 }
@@ -131,6 +196,15 @@ impl PaperEvent {
 pub enum PaperEventRegistrationError {
     /// The proposal vocabulary does not yet own this event kind.
     Unsupported(PaperEventKind),
+}
+
+/// Why a listener failed while dispatching an event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaperEventFailureReason {
+    /// The listener panicked; dispatch continued with later listeners.
+    Panic,
+    /// A monitor listener attempted to mutate the event; its mutation was discarded.
+    MonitorMutation,
 }
 
 struct Registration {
@@ -159,13 +233,15 @@ impl std::fmt::Debug for PaperEventBus {
     }
 }
 
-/// A listener that panicked while handling an event.
+/// A listener failure recorded while handling an event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PaperEventFailure {
     /// The event kind being dispatched.
     pub kind: PaperEventKind,
     /// The listener's registration name.
     pub listener: &'static str,
+    /// The failure recorded by the dispatcher.
+    pub reason: PaperEventFailureReason,
 }
 
 impl PaperEventBus {
@@ -224,9 +300,24 @@ impl PaperEventBus {
         if listeners.is_empty() {
             return None;
         }
-        for (_, _, name, listener) in listeners {
+        for (priority, _, name, listener) in listeners {
+            let before = event.clone();
             if catch_unwind(AssertUnwindSafe(|| listener(&mut event))).is_err() {
-                self.failures.push(PaperEventFailure { kind, listener: name });
+                if priority == PaperEventPriority::Monitor {
+                    event = before;
+                }
+                self.failures.push(PaperEventFailure {
+                    kind,
+                    listener: name,
+                    reason: PaperEventFailureReason::Panic,
+                });
+            } else if priority == PaperEventPriority::Monitor && event != before {
+                event = before;
+                self.failures.push(PaperEventFailure {
+                    kind,
+                    listener: name,
+                    reason: PaperEventFailureReason::MonitorMutation,
+                });
             }
         }
         if event.is_cancelled() {

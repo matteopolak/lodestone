@@ -80,6 +80,70 @@ impl WindowApp {
         self.sim.cycle_slot(delta);
     }
 
+    /// Apply one terminal wheel notch through the same screen-owned actions as
+    /// the window path. Crossterm reports discrete up/down events, so the
+    /// terminal adapter supplies a signed notch rather than inventing a second
+    /// pixel-delta model.
+    pub(crate) fn terminal_scroll(&mut self, notches: f64) {
+        if notches == 0.0 {
+            return;
+        }
+
+        if self.terminal_routes_menu_input() {
+            let Some((width, height)) = self.target.as_ref().map(RenderTarget::size) else {
+                return;
+            };
+            let (_, canvas_height) = crate::menu::render::logical_canvas(
+                self.nav.gui_scale(),
+                width,
+                height,
+            );
+            let notches = scale_scroll(
+                notches,
+                self.nav.discrete_mouse_scroll(),
+                self.nav.mouse_wheel_sensitivity(),
+            );
+            if notches == 0.0 {
+                return;
+            }
+            self.nav
+                .scroll_active_list(&self.ui, notches as f32, canvas_height);
+            return;
+        }
+
+        if self.active_container_menu().is_some() {
+            if self.creative_screen_open() {
+                self.scroll_creative_screen(notches as f32);
+                return;
+            }
+            let consumed_by_bundle = self
+                .target
+                .as_ref()
+                .map(RenderTarget::size)
+                .is_some_and(|(width, height)| {
+                    self.handle_bundle_scroll(notches, width, height)
+                });
+            if !consumed_by_bundle {
+                let _ = self.scroll_stonecutter(notches) || self.scroll_loom(notches);
+            }
+            return;
+        }
+
+        if self.ui.accepts_gameplay_input() {
+            let scaled = scale_scroll(
+                notches,
+                self.nav.discrete_mouse_scroll(),
+                self.nav.mouse_wheel_sensitivity(),
+            );
+            let step = hotbar_scroll_step(accumulate_scroll(&mut self.scroll_accum, scaled));
+            if step != 0 {
+                // Positive wheel values mean up in both adapters; moving up
+                // the wheel selects the previous slot, as in the window path.
+                self.terminal_cycle_slot(-step);
+            }
+        }
+    }
+
     pub(crate) fn terminal_reset_input(&mut self) {
         self.sim.input_mut(InputState::release_all);
         self.sim.end_attack();
@@ -179,8 +243,10 @@ impl WindowApp {
     }
 
     pub(crate) fn terminal_toggle_inventory(&mut self) {
-        let was_open = self.ui.is_container_open();
-        if was_open {
+        if self.active_container_menu().is_some() {
+            if self.sim.open_menu().is_some() {
+                self.sim.close_open_menu();
+            }
             self.ui.close_container();
         } else {
             self.ui.open_container();
@@ -205,6 +271,23 @@ impl WindowApp {
 
     pub(crate) fn terminal_routes_menu_input(&self) -> bool {
         crate::menu::nav::routes_menu_input(&self.ui)
+    }
+
+    pub(crate) fn terminal_has_container(&self) -> bool {
+        self.active_container_menu().is_some()
+    }
+
+    /// Apply the same context-sensitive Escape action as the window keyboard
+    /// path: an open container closes first, otherwise the current UI screen
+    /// receives Escape (for example, Playing becomes Paused).
+    pub(crate) fn terminal_escape(&mut self) {
+        if self.active_container_menu().is_some() {
+            self.sim.close_open_menu();
+            self.ui.close_container();
+        } else {
+            self.ui.on_escape();
+        }
+        self.set_grab(self.ui.wants_cursor_grab());
     }
 
     /// Feed a terminal keyboard navigation key through the same menu navigator
@@ -234,7 +317,7 @@ impl WindowApp {
                 }
                 self.track_book_page_cursor();
             }
-        } else if self.ui.is_container_open()
+        } else if self.active_container_menu().is_some()
             && self.menu_input.is_dragging()
             && let Some(menu) = self.active_container_menu()
             && let Some((w, h)) = self.target.as_ref().map(RenderTarget::size)
@@ -271,13 +354,35 @@ impl WindowApp {
             self.set_grab(self.ui.wants_cursor_grab());
             return;
         }
-        if !self.ui.is_container_open() {
+        if self.active_container_menu().is_none() {
             return;
         }
-        let Some(menu) = self.active_container_menu() else {
+        let Some((w, h)) = self.target.as_ref().map(RenderTarget::size) else {
             return;
         };
-        let Some((w, h)) = self.target.as_ref().map(RenderTarget::size) else {
+
+        if self.creative_screen_open() {
+            let (button, input) = match button {
+                MenuButton::Pick => (0, lodestone_game::click::ContainerInput::Clone),
+                MenuButton::Left if self.shift_held => {
+                    (0, lodestone_game::click::ContainerInput::QuickMove)
+                }
+                MenuButton::Right if self.shift_held => {
+                    (1, lodestone_game::click::ContainerInput::QuickMove)
+                }
+                MenuButton::Left => (0, lodestone_game::click::ContainerInput::Pickup),
+                MenuButton::Right => (1, lodestone_game::click::ContainerInput::Pickup),
+            };
+            if pressed {
+                self.handle_creative_click(button, input, w, h);
+            } else {
+                self.creative.scrolling = false;
+            }
+            self.set_grab(self.ui.wants_cursor_grab());
+            return;
+        }
+
+        let Some(menu) = self.active_container_menu() else {
             return;
         };
         let hit = crate::container::hit_test_with_book(
@@ -401,6 +506,7 @@ impl WindowApp {
             hud: None,
             container: None,
             grabbed: false,
+            pending_pick: None,
             pacer: FramePacer::new(Instant::now()),
             ui: UiState::new(),
             nav: MenuNav::new(),
@@ -635,6 +741,9 @@ impl WindowApp {
     }
 
     pub(super) fn set_grab(&mut self, grabbed: bool) {
+        if !grabbed {
+            self.pending_pick = None;
+        }
         let Some(window) = &self.window else { return };
         if grabbed {
             let locked = window
@@ -657,16 +766,6 @@ impl WindowApp {
 
     /// Release gameplay pointer capture and place the visible pointer at the
     /// centre of the newly focused container screen.
-    ///
-    /// A locked pointer has no useful screen position: while gameplay owns it,
-    /// the platform reports motion deltas and hides the OS cursor. Releasing
-    /// that lock alone leaves the native pointer at the platform's restored
-    /// position, which can be outside the panel or stale from the last menu.
-    /// Container hit-testing and the terminal surface both read `self.cursor`,
-    /// so the logical and native positions must be updated together. This is
-    /// deliberately separate from [`Self::set_grab`]: that method is called
-    /// repeatedly while screens settle, whereas a screen-focus transition must
-    /// recenter only on entry and must not fight subsequent pointer movement.
     pub(super) fn focus_container_screen(&mut self) {
         self.set_grab(false);
         let Some((width, height)) = self.target.as_ref().map(RenderTarget::size) else {
@@ -1312,6 +1411,17 @@ impl WindowApp {
         });
     }
 
+    /// Install the per-frame entity-effect state source. Positions are not
+    /// captured here: `RenderState` joins the ids with the current entity draw
+    /// slice, preserving interpolation and making expiry/removal immediately
+    /// visible in the next frame.
+    pub(super) fn install_entity_glow_source(&mut self) {
+        let Some(render) = self.render.as_mut() else {
+            return;
+        };
+        render.set_entity_glow_source(self.sim.glowing_entity_ids_source());
+    }
+
     /// Install the plugin-billboard source: the render half of the
     /// `ExtractSet::Debug` billboard channel (`docs/plugin-api.md`), the
     /// channel a plugin (a waypoint, a hologram, a minimap overlay) uses to
@@ -1867,6 +1977,7 @@ impl WindowApp {
                     None => lodestone_render::light::OVERWORLD_AMBIENT_LIGHT,
                 })
             });
+            render.set_effect_light_source(self.sim.effect_light_source());
             render.set_entity_light_source(move |feet| {
                 crate::net::entity_light_at(
                     &handle,
@@ -1925,6 +2036,7 @@ impl WindowApp {
         self.install_outline_source();
         self.install_shadow_ground_source();
         self.install_debug_lines_source();
+        self.install_entity_glow_source();
         self.install_plugin_billboards_source();
     }
 }

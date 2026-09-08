@@ -297,7 +297,11 @@ fn collide_axis(axis: Axis, moving: &Aabb, shapes: &[Aabb], mut distance: f64) -
         if distance.abs() < EPSILON {
             return 0.0;
         }
+        let before = distance;
         distance = collide_one_box(axis, shape, moving, distance);
+        if before != distance {
+            crate::trace::collision_shape_clip(axis, *shape, before, distance);
+        }
     }
     distance
 }
@@ -377,15 +381,18 @@ fn collect_colliders(
 /// Vanilla's own "collide with shapes" step — resolves movement axis by
 /// axis, moving the box after each resolved axis.
 fn collide_with_shapes(movement: Vec3d, bounding_box: Aabb, shapes: &[Aabb]) -> Vec3d {
+    let order = axis_step_order(movement);
+    crate::trace::collision_sweep_start(movement, bounding_box, shapes.len(), order);
     if shapes.is_empty() {
         return movement;
     }
     let mut resolved = Vec3d::ZERO;
-    for axis in axis_step_order(movement) {
+    for axis in order {
         let axis_movement = movement.get(axis);
         if axis_movement != 0.0 {
             let moved = bounding_box.move_vec(resolved);
             let collision = collide_axis(axis, &moved, shapes, axis_movement);
+            crate::trace::collision_axis(axis, axis_movement, moved, collision);
             resolved = resolved.with(axis, collision);
         }
     }
@@ -527,6 +534,15 @@ pub fn collide_among_entities(
     let y_collision = movement.y != movement_step.y;
     let z_collision = movement.z != movement_step.z;
     let on_ground_after = y_collision && movement.y < 0.0;
+    crate::trace::collision_result(
+        movement,
+        movement_step,
+        x_collision,
+        y_collision,
+        z_collision,
+        on_ground_after,
+        max_up_step,
+    );
 
     if max_up_step > 0.0 && (on_ground_after || on_ground) && (x_collision || z_collision) {
         let grounded = if on_ground_after {
@@ -551,7 +567,9 @@ pub fn collide_among_entities(
                 grounded,
                 &colliders,
             );
-            if step.horizontal_distance_sqr() > movement_step.horizontal_distance_sqr() {
+            let accepted = step.horizontal_distance_sqr() > movement_step.horizontal_distance_sqr();
+            crate::trace::step_candidate(candidate, step, movement_step, accepted);
+            if accepted {
                 let distance_to_ground = bounding_box.min_y - grounded.min_y;
                 return step.subtract(Vec3d::new(0.0, distance_to_ground, 0.0));
             }

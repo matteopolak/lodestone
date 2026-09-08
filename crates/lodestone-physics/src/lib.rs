@@ -52,6 +52,7 @@ pub mod player;
 pub mod pose;
 pub mod profile;
 pub mod push;
+pub mod trace;
 pub mod vehicle;
 
 pub use collision::CollisionView;

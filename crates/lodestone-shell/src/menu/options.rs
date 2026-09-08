@@ -24,8 +24,8 @@
 //!
 //! There is no disabled widget type in vanilla and none here — see
 //! [`super::widget`]'s module docs. [`Cell::is_live`] is what decides it, and
-//! it answers `false` for **60 or 61 of the 143** controls this module
-//! renders. The 83-or-82 live ones break down as:
+//! it answers `false` for **99 or 100 of the 143** controls this module
+//! renders. The 44-or-43 live ones break down as:
 //!
 //! - **25 option rows**, driving **22** distinct [`LiveOption`]s — three of them
 //!   (`textBackgroundOpacity`, `chatOpacity`, `chatLineSpacing`) are placed on
@@ -37,10 +37,10 @@
 //!   `discreteMouseScroll` plus the four remaining Controls rows
 //!   (`toggleAttack`/`toggleUse`/`autoJump`/`sprintWindow`).
 //! - **9 `Done` buttons**, one per page, always live.
-//! - **17 or 16 working nav buttons** — four Online rows open Friends settings;
-//!   the swing is still the root's Online button:
+//! - **14 or 13 working navigation/action buttons** — the swing is the root's
+//!   Online button:
 //!   live outside a world, the inactive World Options placeholder inside one
-//!   (see [`online_cell`]), which is the whole of the 83-vs-82 difference.
+//!   (see [`online_cell`]), which is the whole of the 44-vs-43 difference.
 //!
 //! **These numbers are asserted, not maintained by hand** —
 //! `the_disabled_majority_is_the_point_and_it_is_measured` and
@@ -859,13 +859,14 @@ pub struct OptionSpec {
 pub enum Action {
     /// The footer's `Done`, and Escape's equivalent: leave this page.
     Done,
-    /// Open the credential-free Friends settings screen. The caller preserves
-    /// whether Options came from the title or an in-world pause menu.
-    OpenFriendsSettings,
     /// A control that is present because vanilla has it and inactive because
     /// this client cannot do it — the accessibility guide's external link
     /// and Credits & Attribution.
     Unsupported,
+    /// Open the credential-safe Friends settings surface. The account-scoped
+    /// service state and rollback behavior live there rather than in the
+    /// options tree, which does not retain a session.
+    OpenFriendsSettings,
 }
 
 /// One focusable widget on a settings page.
@@ -940,7 +941,8 @@ impl Cell {
     /// An option is live only if it drives something in
     /// [`crate::config::Options`]; a nav button is live only if its destination
     /// is a page we build; `Done` is always live and
-    /// [`Action::Unsupported`] never is.
+    /// [`Action::Unsupported`] never is; [`Action::OpenFriendsSettings`] is a
+    /// live route into the account-scoped Friends surface.
     #[must_use]
     pub fn is_live(self) -> bool {
         match self {
@@ -2620,9 +2622,11 @@ static SKIN: &[Entry] = &[
     pair(cycle("modelPart.hat", "Hat"), cycle("mainHand", "Main Hand")),
 ];
 
-/// Online Options' controls, in their own call order. Friends rows are live
-/// links into the account-scoped Friends Settings tab; the remaining rows are
-/// decorative and use [`cycle`] or [`unsupported`] as appropriate.
+/// `OnlineOptionsScreen.addOptions`, in its
+/// own call order. The Friends List and request-permission rows open the
+/// account-scoped Friends settings surface; the remaining online controls are
+/// decorative — see [`SettingsPage::Online`]'s doc for why — so their
+/// accessors use [`cycle`].
 ///
 /// `friendsList`/`allowFriendRequests` are not vanilla's own options class `OptionInstance`s
 /// at all — vanilla backs them with `PlayerSocialManager` state instead
@@ -2637,12 +2641,12 @@ static SKIN: &[Entry] = &[
 static ONLINE: &[Entry] = &[
     head("Friends List"), // options.online.friends.header
     pair(
-        friends_settings("Friends List..."), // options.friendsList
-        friends_settings("Allow Requests..."), // options.allowFriendRequests
+        friends_settings("Friends List..."), // opens account-scoped availability
+        friends_settings("Allow Requests..."), // opens the account-scoped preference surface
     ),
     pair(
-        friends_settings("In-Game Notification..."),
-        friends_settings("Visibility..."), // options.sharePresence
+        cycle("inGameNotification", "In-Game Notification"),
+        cycle("sharePresence", "Visibility"), // options.sharePresence
     ),
     big(unsupported("Xbox Settings...")), // options.online.xboxSettings
     head("Servers"),                      // options.online.servers.header
@@ -2687,7 +2691,7 @@ static ROOT_GRID: &[Cell] = &[
 /// |---|---|
 /// | `Language` | A searchable list backed by [`super::language`]. |
 /// | `KeyBinds` | A key-binding list backed by [`super::key_binds`]. |
-/// | `Online` | An options page whose Friends rows open account-scoped settings. |
+/// | `Online` | An inactive root header button; no page is opened. |
 /// | `Telemetry` | A static information page backed by [`super::telemetry`]. |
 /// | `ResourcePacks` | Two filesystem-backed lists with transfer, reorder, metadata and thumbnail support, backed by [`super::packs`]. |
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2711,11 +2715,15 @@ pub enum SettingsPage {
     Accessibility,
     /// `SkinCustomizationScreen`.
     Skin,
-    /// Online Options — the four Friends rows open the account-scoped Friends
-    /// Settings tab, where service-backed availability/request controls and
-    /// client-only notification/visibility controls are kept together. The
-    /// Xbox, server-listing and Realms rows remain decorative because this
-    /// client has no corresponding consumer. See the [`ONLINE`] table.
+    /// `OnlineOptionsScreen` — friends list,
+    /// requests, in-game notifications, presence visibility, an external Xbox
+    /// Settings link, server-listing opt-out and Realms news/invites. The
+    /// Friends List and request-permission rows are live as routes to the
+    /// account-scoped Friends settings surface, where service persistence and
+    /// failure rollback are implemented. The other five controls remain
+    /// decorative because this
+    /// client has no local notification/visibility store, Realms client, or
+    /// Xbox link to send them to; see [`ONLINE`].
     ///
     /// Reached from the root's second header button when
     /// [`super::UiState::settings_in_world`] is `false` — vanilla's own fork
@@ -3491,11 +3499,12 @@ pub enum SettingsOutcome {
     /// Leave the settings tree entirely — the root page's Done, or Escape from
     /// it. [`super::UiState::close_settings`] is what that means.
     Close,
-    /// Open Friends' account-scoped settings from one of the Online rows.
-    OpenFriendsSettings,
     /// Cycle this live option and persist it. [`super::nav::MenuNav`] owns the
     /// [`crate::config::Options`] and the file, so it does the mutation.
     Cycle(LiveOption),
+    /// Leave the options tree and open the account-scoped Friends settings
+    /// surface, whose worker owns service persistence and failure rollback.
+    OpenFriendsSettings,
 }
 
 /// The settings tree's own cursor: which page, where the cursor is on it, and
@@ -4441,14 +4450,13 @@ mod tests {
         // cutoutLeaves, plus mipmapLevels, entityShadows, weatherRadius,
         // attackIndicator, particles and biomeBlendRadius, are each placed
         // once)
-        // + 9 Done buttons (one per page, always live) + 17 working nav buttons
+        // + 9 Done buttons (one per page, always live) + 13 working nav buttons
         // (Skin/Sound/Video/Controls/Chat/Accessibility/**Language**/
         // **Telemetry**/**Resource Packs** from the root grid,
         // Accessibility -> Controls, Controls -> Mouse, Controls -> Key Binds,
-        // the root's own Online button, and four Online -> Friends Settings
-        // rows, live outside a world).
+        // and the root's own Online button, live outside a world).
         // A change that adds or removes a live row anywhere must say so here.
-        assert_eq!(live.len(), 83, "outside a world: {live:?}");
+        assert_eq!(live.len(), 81, "outside a world: {live:?}");
     }
 
     /// The companion to [`the_disabled_majority_is_the_point_and_it_is_measured`]:
@@ -4482,8 +4490,8 @@ mod tests {
         // and
         // `menuBackgroundBlurriness`, which is **two** rows (Video and
         // Accessibility) for one option.
-        assert_eq!(outside.len(), 83);
-        assert_eq!(inside.len(), 82, "one fewer: the root's Online button");
+        assert_eq!(outside.len(), 81);
+        assert_eq!(inside.len(), 80, "one fewer: the root's Online button");
         assert!(
             outside.contains(&nav("Online...", SettingsPage::Online)),
             "outside a world the root links to Online"
@@ -6290,28 +6298,31 @@ mod tests {
     }
 
     #[test]
-    fn friends_rows_open_the_account_settings_surface() {
+    fn online_friends_preference_rows_reach_account_scoped_settings() {
         let mut nav = SettingsNav::new();
-        nav.page = SettingsPage::Online;
-
-        let rows = all_controls(SettingsPage::Online, false);
-        let friends_rows: Vec<usize> = rows
+        nav.open_at(false, SettingsPage::Online);
+        let controls = all_controls(SettingsPage::Online, false);
+        let routes: Vec<_> = controls
             .iter()
-            .enumerate()
-            .filter_map(|(index, cell)| {
-                matches!(cell, Cell::Act { act: Action::OpenFriendsSettings, .. })
-                    .then_some(index)
+            .filter_map(|cell| match cell {
+                Cell::Act {
+                    label,
+                    act: Action::OpenFriendsSettings,
+                } => Some(*label),
+                _ => None,
             })
             .collect();
-        assert_eq!(friends_rows.len(), 4, "the four Friends rows are live");
-
-        for row in friends_rows {
+        assert_eq!(routes, ["Friends List...", "Allow Requests..."]);
+        for label in routes {
+            let row = controls
+                .iter()
+                .position(|cell| {
+                    matches!(cell, Cell::Act { label: candidate, act: Action::OpenFriendsSettings } if *candidate == label)
+                })
+                .expect("Online must expose each account-scoped Friends preference route");
             nav.cursor = row;
-            assert_eq!(
-                nav.enter(),
-                SettingsOutcome::OpenFriendsSettings,
-                "Friends row {row} opens its account-scoped settings"
-            );
+            assert!(nav.visible()[row].cell.is_live());
+            assert_eq!(nav.enter(), SettingsOutcome::OpenFriendsSettings);
         }
     }
 

@@ -251,7 +251,24 @@ impl ClientHandle {
     /// entity-shaped state the local player does fold.
     #[must_use]
     pub fn entity(&self, entity_id: i32) -> Option<EntityView> {
-        self.state.entity(entity_id)
+        let entity_id = lodestone_ecs::entity::EntityNetworkId::from_wire(entity_id)?;
+        self.entity_by_network_id(entity_id)
+    }
+
+    /// Returns a view of a server-owned entity by its classified network id.
+    ///
+    /// Plugin-local ids are deliberately not part of this client read-model
+    /// lookup: they never arrived through the server entity stream and must be
+    /// observed through the owning plugin's ECS boundary instead.
+    #[must_use]
+    pub fn entity_by_network_id(
+        &self,
+        entity_id: lodestone_ecs::entity::EntityNetworkId,
+    ) -> Option<EntityView> {
+        if entity_id.is_plugin() {
+            return None;
+        }
+        self.state.entity(entity_id.raw())
     }
 
     /// Returns views of all currently tracked entities, **excluding the local

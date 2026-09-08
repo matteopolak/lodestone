@@ -49,22 +49,34 @@ already applied to its world, so the existing loading grid and bar continue to
 paint while the Worker prepares and streams the initial view.
 
 `lodestone_net::MessagePortTransport` turns the two ports into an async byte
-stream. It intentionally transports raw framed bytes only: message boundaries
-can split or coalesce protocol packets, and `ByteInbox` reassembles them before
-the codec reads. Startup/error messages remain on the Worker control channel,
-so they can never be decoded as packets. The page retains the worker object for
-the session; a post-ready worker failure closes the port and reaches the normal
-client disconnect path. It must not fall back then, because that would create a
-second authoritative mutable world. A failure before `ready` is the one safe
-fallback point and uses the existing in-page duplex server.
+stream. Binary messages carry framed bytes; a private `{kind: "credit", bytes}`
+envelope carries flow-control grants and is never passed to the packet codec.
+The finite receive window is replenished only after `ByteInbox` has handed bytes
+to the reader, so `poll_write` either returns a partial write or waits for
+credit instead of growing the browser's `MessagePort` queue without bound.
+Message boundaries can split or coalesce protocol packets, and `ByteInbox`
+reassembles them before the codec reads. Startup/error messages remain on the
+Worker control channel, so they can never be decoded as packets. A malformed
+credit envelope or payload beyond the receive window is a terminal transport
+error; both parked reads and writes are woken so the client cannot hang behind a
+dead Worker. The page retains the worker object for the session; a post-ready
+worker failure closes the port and reaches the normal client disconnect path. It
+must not fall back then, because that would create a second authoritative
+mutable world. A failure before `ready` is the one safe fallback point and uses
+the existing in-page duplex server. Dropping or shutting down the page endpoint
+also terminates the dedicated Worker: a `MessagePort` has no peer-close event,
+so relying on port drop alone could leave the old authoritative loop alive
+behind a later session.
 
 `web/worker/worker_bootstrap.test.mjs` drives the control module with synthetic
 Worker events. It proves malformed launch envelopes do not import wasm, valid
 launches transfer exactly one port and report milestones in order, and a failing
-server bootstrap cannot claim readiness. `cargo xtask wasm-check` runs that
-Node test before building the browser bundle; it complements the real browser
-smoke test, rather than pretending a host-side control-plane test can prove
-painting or browser scheduling.
+server bootstrap cannot claim readiness. The shell tests separately prove that
+an error before `ready` remains fallback-eligible while an error after `ready`
+can only disconnect the existing session. `cargo xtask wasm-check` runs the
+worker control test before building the browser bundle; it complements the real
+browser smoke test, rather than pretending a host-side control-plane test can
+prove painting or browser scheduling.
 
 The page's synchronous ECS command dispatch cannot cross this boundary. The
 worker installs a command sink that visibly refuses page-plugin commands rather

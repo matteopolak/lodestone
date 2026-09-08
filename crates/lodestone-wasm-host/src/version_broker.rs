@@ -1,21 +1,16 @@
-//! The deliberately small, version-locked WASM broker surface.
+//! Version-locked data exposed by the privileged WASM broker by value.
 //!
-//! A native plugin can depend on a concrete protocol crate and wrap its
-//! adapter. A WASM guest cannot receive that adapter, a registry handle, or a
-//! world guard. This module is the host-side contract for the useful middle:
-//! an embedding supplies a version-specific source, and the guest receives
-//! only owned descriptor and key/value records.
+//! This module deliberately contains no protocol types, registry handles, ECS
+//! borrows, sockets, or callbacks. A version-specific embedding supplies a
+//! descriptor and small copied records; the WASM ABI can then expose those
+//! records without making the host depend on a concrete protocol family.
 
 use std::fmt;
 
-/// ABI identifier for the privileged version broker import.
+/// The unstable ABI identifier for the version broker import.
 pub const ABI: &str = "lodestone:version-broker@0.1";
 
-/// Exact identity of the version-specific source selected by an embedding.
-///
-/// Family, negotiated protocol, and broker ABI all participate in equality.
-/// Keeping the descriptor owned makes it suitable for manifest data while
-/// ensuring no string borrowed from an adapter crosses into a guest store.
+/// The exact family/protocol/ABI identity required by a WASM broker consumer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VersionBrokerDescriptor {
     family: String,
@@ -24,13 +19,9 @@ pub struct VersionBrokerDescriptor {
 }
 
 impl VersionBrokerDescriptor {
-    /// Construct a required or selected broker identity.
+    /// Creates a descriptor from owned manifest or host configuration values.
     #[must_use]
-    pub fn new(
-        family: impl Into<String>,
-        protocol: i32,
-        abi: impl Into<String>,
-    ) -> Self {
+    pub fn new(family: impl Into<String>, protocol: i32, abi: impl Into<String>) -> Self {
         Self {
             family: family.into(),
             protocol,
@@ -38,29 +29,26 @@ impl VersionBrokerDescriptor {
         }
     }
 
-    /// The version-family label.
+    /// The required version family.
     #[must_use]
     pub fn family(&self) -> &str {
         &self.family
     }
 
-    /// The negotiated wire protocol.
+    /// The required negotiated protocol.
     #[must_use]
     pub const fn protocol(&self) -> i32 {
         self.protocol
     }
 
-    /// The broker interface ABI.
+    /// The required version-broker ABI.
     #[must_use]
     pub fn abi(&self) -> &str {
         &self.abi
     }
 
-    /// Require an exact identity match, preserving both sides on failure.
-    pub fn validate_against(
-        &self,
-        actual: &Self,
-    ) -> Result<(), VersionBrokerCompatibilityError> {
+    /// Checks an exact host/plugin identity match.
+    pub fn validate_against(&self, actual: &Self) -> Result<(), VersionBrokerCompatibilityError> {
         if self == actual {
             Ok(())
         } else {
@@ -72,7 +60,7 @@ impl VersionBrokerDescriptor {
     }
 }
 
-/// One copied value returned by a broker lookup.
+/// One bounded, copied record returned by a version broker.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VersionBrokerRecord {
     key: String,
@@ -80,7 +68,7 @@ pub struct VersionBrokerRecord {
 }
 
 impl VersionBrokerRecord {
-    /// Construct an owned broker record.
+    /// Creates a copied key/value record for a broker response.
     #[must_use]
     pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
@@ -89,34 +77,29 @@ impl VersionBrokerRecord {
         }
     }
 
-    /// The canonical key returned by the source.
+    /// The copied registry/protocol key.
     #[must_use]
     pub fn key(&self) -> &str {
         &self.key
     }
 
-    /// The copied value.
+    /// The copied value, with no retained host reference.
     #[must_use]
     pub fn value(&self) -> &str {
         &self.value
     }
 }
 
-/// A version-specific source that is safe to expose through the WASM boundary.
-///
-/// Implementations must keep their key vocabulary finite and document it. The
-/// trait intentionally returns an owned record: a provider may use an adapter,
-/// registry, or other internal cache, but it cannot hand any of those objects
-/// or a borrowed reference to guest code.
+/// Host-provided source for the broker import.
 pub trait VersionBroker: Send + Sync {
-    /// Identity of the selected source.
+    /// The exact identity of the version-specific data source.
     fn descriptor(&self) -> VersionBrokerDescriptor;
 
-    /// Resolve one provider-defined, copied key.
+    /// Returns one copied record for `key`, if this source knows it.
     fn lookup(&self, key: &str) -> Option<VersionBrokerRecord>;
 }
 
-/// A manifest's required broker identity did not match the selected source.
+/// A requested broker identity did not match the selected host source.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VersionBrokerCompatibilityError {
     required: VersionBrokerDescriptor,
@@ -124,7 +107,7 @@ pub struct VersionBrokerCompatibilityError {
 }
 
 impl VersionBrokerCompatibilityError {
-    /// The identity required by the plugin.
+    /// The identity declared by the plugin.
     #[must_use]
     pub fn required(&self) -> &VersionBrokerDescriptor {
         &self.required
@@ -159,30 +142,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exact_identity_matches() {
+    fn matching_broker_descriptor_is_accepted() {
         let descriptor = VersionBrokerDescriptor::new("v26-2", 776, ABI);
-        assert!(descriptor.validate_against(&descriptor).is_ok());
+        assert_eq!(descriptor.validate_against(&descriptor), Ok(()));
     }
 
     #[test]
-    fn mismatch_preserves_required_and_actual_identity() {
+    fn mismatch_names_required_and_actual_family_protocol_and_abi() {
         let required = VersionBrokerDescriptor::new("v26-2", 776, ABI);
         let actual = VersionBrokerDescriptor::new("v1-21-11", 774, "lodestone:version-broker@0.2");
         let error = required
             .validate_against(&actual)
-            .expect_err("a different source must not be accepted");
+            .expect_err("a different broker identity must be refused");
 
-        assert_eq!(error.required(), &required);
-        assert_eq!(error.actual(), &actual);
-        let text = error.to_string();
-        assert!(text.contains("requires family=v26-2 protocol=776"));
-        assert!(text.contains("host provides family=v1-21-11 protocol=774"));
+        let message = error.to_string();
+        assert!(
+            message.contains("requires family=v26-2 protocol=776 ABI=lodestone:version-broker@0.1")
+        );
+        assert!(message.contains(
+            "host provides family=v1-21-11 protocol=774 ABI=lodestone:version-broker@0.2"
+        ));
     }
 
     #[test]
-    fn records_are_owned_values() {
-        let record = VersionBrokerRecord::new("block-name/1", "minecraft:stone");
-        assert_eq!(record.key(), "block-name/1");
+    fn broker_records_are_owned_copies() {
+        let record = VersionBrokerRecord::new("block-state", "minecraft:stone");
+        assert_eq!(record.key(), "block-state");
         assert_eq!(record.value(), "minecraft:stone");
     }
 }

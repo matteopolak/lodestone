@@ -390,6 +390,7 @@ impl Sim {
             ecs: std::sync::Arc::new(lodestone_ecs::parking_lot::RwLock::new(ecs)),
             local,
             net: None,
+            join_trace: crate::sim::join_trace::JoinTrace::new(),
             recipe_book_cache: lodestone_game::recipe_sync::RecipeBookSync::new(),
             recipe_book_cache_revision: None,
             adopted_live_world: false,

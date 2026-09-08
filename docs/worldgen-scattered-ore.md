@@ -21,15 +21,11 @@ The body first draws a bounded attempt count from `size + 1`. Each attempt
 draws two floats for each axis, rounds the difference with half-up semantics,
 and limits the attempt distance to seven blocks. A candidate is written only
 when the shared target rule and discard-on-air-exposure check accept it. The
-direct step-7 trace fixture records one ancient-debris cell at local
-`(3, 12, 9)` for seed `42` and source chunk `(-8, -8)`.
-
-The sealed initial-chunk packet for the same scenario contains three
-ancient-debris cells. That packet is intentionally still an end-to-end red
-control: the current production column models the direct feature result, but
-not yet the source-spill lifecycle that determines which completed-source
-writes are present when a sealed target chunk is encoded. Until that lifecycle
-exists, the sealed packet's cells must not be copied into a unit expectation.
+focused fixture captures the final ancient-debris cells at local `(2, 21, 13)`,
+`(2, 21, 14)`, and `(2, 86, 3)` for seed `42` and source chunk `(-8, -8)`.
+Its independent packet comes from the full Nether oracle export, so it
+includes the same structure-bearing pre-decoration prefix and mixed
+source-completion lifecycle as `NetherGenerator::column`.
 
 ## How to change it
 
@@ -40,22 +36,23 @@ coordinates without necessarily changing the total count. Extend the shared
 target/exposure path rather than duplicating its predicates in the Nether
 module.
 
-The direct trace test and its standard-ore negative control are the focused
-controls. When source-spill lifecycle state is implemented, promote the sealed
-packet manifest to the end-to-end assertion and retain the direct trace as the
-body-level regression control.
+The full-column test and its standard-ore negative control are the focused
+controls. Keep the `scope full-column` fixture marker synchronized with the
+production entry point: a post-ore feature trace is not comparable to a
+packet-ready column.
 
 ## Configuration
 
 There are no runtime flags. The configured and placed feature documents under
 `crates/lodestone-server/assets/worldgen/` select the body, target tag,
-attempt size, exposure chance, and placement modifiers. The focused trace uses
-seed `42`, Nether step `7`, and source chunk `(-8, -8)`.
+attempt size, exposure chance, and placement modifiers. The focused full-column
+capture uses seed `42`, Nether step `7`, and source chunk `(-8, -8)`.
 
 ## Dependencies
 
 The implementation depends on `lodestone_worldgen::feature` for ore parsing,
 placement walking, target rules, and region writes; `lodestone_worldgen::nether`
 for the mixed 3×3 source pass; and the bundled world-generation assets. The
-focused test also consumes an independently captured direct trace, while the
-sealed packet is owned by the external end-to-end parity gate.
+focused test consumes an independently captured sealed packet exported by
+`scripts/worldgen-oracle/large-parity.sh`; the same packet path is used by the
+external end-to-end parity gate.

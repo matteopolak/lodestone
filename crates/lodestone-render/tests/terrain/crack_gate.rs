@@ -472,3 +472,55 @@ fn crack_multiply_scales_proportionally_with_surface_brightness() {
          satisfies that bound (94 <= 188) as easily as multiply's correct 10 <= 188"
     );
 }
+
+/// A progress stage is a location-sensitive overlay: its crack texels must
+/// change the target block's pixel, leave an uncracked pixel alone, and vanish
+/// when the target is removed from the draw list. The atlas alpha `128` is an
+/// intentionally intermediate stage between the opaque gate above and the
+/// transparent control, so this checks the visible middle of the progression
+/// rather than only its endpoints.
+#[test]
+#[ignore = "requires a GPU adapter; run explicitly to inspect stage pixels"]
+fn crack_intermediate_stage_is_localized_and_clears_when_removed() {
+    let Some(gpu) = setup() else {
+        panic!(
+            "crack_gate: no GPU adapter. This test is #[ignore]d, so running it is an explicit \
+             request for a real GPU frame — a headless CI box has none and should not run it."
+        );
+    };
+
+    // These are location-based reads from the same target block face. The
+    // undrawn frame is the cleanup baseline; it is not a blank-atlas proxy.
+    let (baseline_center, baseline_g, baseline_b) =
+        render_pixel(&gpu, 128, true, false, SURFACE_A);
+    let (baseline_edge, _, _) = render_pixel(&gpu, 128, false, false, SURFACE_A);
+    let (visible_center, visible_g, visible_b) =
+        render_pixel(&gpu, 128, true, true, SURFACE_A);
+    let (visible_edge, _, _) = render_pixel(&gpu, 128, false, true, SURFACE_A);
+    let (cleared_center, cleared_g, cleared_b) =
+        render_pixel(&gpu, 128, true, false, SURFACE_A);
+
+    println!(
+        "intermediate crack target center: baseline=({baseline_center},{baseline_g},{baseline_b}) \
+         visible=({visible_center},{visible_g},{visible_b}) \
+         cleared=({cleared_center},{cleared_g},{cleared_b})"
+    );
+    println!(
+        "intermediate crack uncracked edge: baseline={baseline_edge} visible={visible_edge}"
+    );
+
+    assert!(
+        visible_center < baseline_center,
+        "the intermediate stage must darken its target location: visible r={visible_center}, \
+         baseline r={baseline_center}"
+    );
+    assert_eq!(
+        visible_edge, baseline_edge,
+        "an uncracked location must not be touched by the overlay"
+    );
+    assert_eq!(
+        (cleared_center, cleared_g, cleared_b),
+        (baseline_center, baseline_g, baseline_b),
+        "removing the target must restore the exact undrawn pixel"
+    );
+}

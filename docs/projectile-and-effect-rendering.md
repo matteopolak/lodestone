@@ -42,15 +42,18 @@ before any index match runs.
 
 ### Lightning bolts
 
-Entirely client-side: `LightningBolt` declares no synced data at all, so a bolt puts nothing on the wire
-beyond its spawn position, and its shape seed is rolled independently on each side — there is no
-captured-bytes oracle for this feature and never can be; gates have to check structural invariants
-instead. The geometry is four concentric hollow tubes traced along one seeded random walk and rebuilt
-every frame, blended **additively** (`(SRC_ALPHA, ONE)`) — ordinary alpha blending over the same geometry
-reads as a dull grey flash rather than white, because the bolt's own base colour is a dim blue-grey and
-the white comes from four passes stacking. No hitbox means no frustum culling; the cost ceiling is a
-fixed-capacity buffer. Not ported: the mid-strike reseed between flashes (needs per-bolt life/flash state
-that isn't on the wire) — a bolt here holds one shape for its whole life, seeded from its entity id.
+The server owns bolt lifetime and publishes the current entity set through `MobSim::snapshots` and
+`LiveMobSource`; an expired bolt is removed before the completed tick is published, so the connection's
+`EntityStreamer` can emit its removal on the next client pass. The entity declares no synced data at all,
+so its wire record carries only the spawn position and its shape seed is rolled independently on each
+side — there is no captured-bytes oracle for this feature and never can be; gates check structural
+invariants instead. The geometry is four concentric hollow tubes traced along one seeded random walk and
+rebuilt every frame, blended **additively** (`(SRC_ALPHA, ONE)`) — ordinary alpha blending over the same
+geometry reads as a dull grey flash rather than white, because the bolt's own base colour is a dim
+blue-grey and the white comes from four passes stacking. No hitbox means no frustum culling; the cost
+ceiling is a fixed-capacity buffer. Not ported: the mid-strike reseed between flashes (needs per-bolt
+life/flash state that isn't on the wire) — a bolt here holds one shape for its whole life, seeded from
+its entity id.
 
 ### Paintings
 
@@ -186,6 +189,8 @@ one axis at a time — see `gpu/maps.rs`'s own module doc for the full switch li
 * `lodestone-render` — placement matrices and geometry (`entity::projectile_model_matrix`,
   `painting::painting_mesh`/`painting_matrix`, `entity::item_frame_*`, `lightning_bolt`, `display`,
   `map_item`).
+* `lodestone-server` — live bolt lifecycle and completed-tick entity snapshots consumed by the
+  connection diff.
 * `lodestone-ecs` — the per-entity components these producers read (`FireworkFlags`, `PaintingVariant`,
   `ItemFrameRotation`, `Display*`), folded by `ingest::apply_entity_metadata`/`apply_display_metadata`.
 * `lodestone-game::maps` — the map colour store (`MapStore`/`MapState`), independent of any render code.

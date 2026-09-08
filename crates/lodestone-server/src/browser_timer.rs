@@ -17,7 +17,7 @@
 //!
 //! [`BrowserInterval`] is the replacement primitive: a `tokio::time::
 //! interval_at`-alike built entirely on a real browser **macrotask**
-//! (`window.setTimeout`), the same mechanism `crate::chunk::yield_to_browser`
+//! (the active global's `setTimeout`), the same mechanism `crate::chunk::yield_to_browser`
 //! already uses for the join/streaming yield points (`35f4800b`), generalised
 //! from a fixed one-macrotask yield to a caller-supplied period. It is
 //! deliberately *not* a microtask (`Promise::resolve().then(..)`) — a
@@ -95,15 +95,25 @@ pub(crate) type BrowserInstant = lodestone_time::Instant;
 async fn browser_sleep(duration: Duration) {
     let millis = i32::try_from(duration.as_millis()).unwrap_or(i32::MAX);
     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
-        let window = web_sys::window().expect(
-            "no global `window`: this crate's wasm32 build only runs inside a browser tab",
-        );
+        // The normal singleplayer path runs in a dedicated server worker.
+        // Workers have the same timer API but no `Window`, so use the active
+        // global directly and keep the page fallback on the same path.
+        use wasm_bindgen::{JsCast, JsValue};
+
+        let global = js_sys::global();
+        let set_timeout = js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout"))
+            .expect("browser global must expose setTimeout")
+            .unchecked_into::<js_sys::Function>();
         // A missed `set_timeout` call (the only failure mode here — an
         // exhausted timer-id space or similar) leaves `resolve` uncalled,
         // so this future simply never completes rather than completing
         // early or panicking. Matches `lodestone_shell::platform::relay::
         // sleep`'s own reasoning for the identical shape.
-        let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, millis);
+        let _ = set_timeout.call2(
+            &global,
+            resolve.as_ref(),
+            &JsValue::from(millis),
+        );
     });
     let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
 }
@@ -224,5 +234,23 @@ mod tests {
         let now = previous + period;
         let next = next_deadline(previous, period, now);
         assert_eq!(next, now + period);
+    }
+
+    #[test]
+    fn repeated_stalls_each_schedule_one_future_tick() {
+        // Model two separate returns from a stalled event loop. A burst
+        // implementation would leave the second deadline in the past after
+        // the first resume; rebasing must keep every resumed tick one period
+        // away from the observation time.
+        let period = Duration::from_millis(50);
+        let first_deadline = BrowserInstant::now();
+        let first_resume = first_deadline + Duration::from_millis(275);
+        let second_deadline = next_deadline(first_deadline, period, first_resume);
+        assert_eq!(second_deadline, first_resume + period);
+
+        let second_resume = second_deadline + Duration::from_millis(175);
+        let third_deadline = next_deadline(second_deadline, period, second_resume);
+        assert_eq!(third_deadline, second_resume + period);
+        assert!(third_deadline > second_resume);
     }
 }

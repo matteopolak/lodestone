@@ -142,12 +142,13 @@ pub(crate) const HOTBAR_SLOTS: usize = 9;
 /// `isUnderWater()`. The two agree in nearly every real pose but are not the
 /// same function, so the mining path reads the raw `eye_in_water` flag.
 ///
-/// # Mining efficiency, haste and fatigue are still unmodeled
+/// # Mining effects are separate from the tool census
 ///
-/// Everything but `hardness`/`correct_tool`/`tool_speed`/`is_air`/`on_ground`/
-/// `submerged`/`creative` is left at [`BreakInputs::default`] — no enchantment,
-/// potion or attribute inputs are modeled yet, only the tool census resolved by
-/// [`lodestone_model::VersionAdapter::tool_mining`].
+/// Haste (including Conduit Power) and Mining Fatigue arrive through the
+/// local [`HudEffects`] component, rather than the version-owned tool census.
+/// [`dig_break_inputs_with_effects`] joins those two sources at the one
+/// `BreakInputs` construction site used by live mining. This basic builder is
+/// retained for callers that have no local player state.
 ///
 /// # `creative` bypasses this formula, it is not an input to it
 ///
@@ -170,6 +171,21 @@ pub(crate) fn dig_break_inputs(
     submerged: bool,
     creative: bool,
 ) -> BreakInputs {
+    dig_break_inputs_with_effects(entry, tool, is_air, on_ground, submerged, creative, None, None)
+}
+
+/// Builds mining inputs with the live Haste/Conduit Power and Mining Fatigue
+/// amplifiers already resolved from the local effect set.
+pub(crate) fn dig_break_inputs_with_effects(
+    entry: lodestone_model::BlockHardness,
+    tool: lodestone_model::ToolMining,
+    is_air: bool,
+    on_ground: bool,
+    submerged: bool,
+    creative: bool,
+    haste_amplifier: Option<u32>,
+    mining_fatigue: Option<u32>,
+) -> BreakInputs {
     BreakInputs {
         hardness: entry.hardness,
         is_air,
@@ -180,8 +196,27 @@ pub(crate) fn dig_break_inputs(
         on_ground,
         submerged,
         creative,
+        haste_amplifier,
+        mining_fatigue,
         ..BreakInputs::default()
     }
+}
+
+/// The active mining-effect amplifiers from the HUD's authoritative local
+/// effect state. Conduit Power uses the Haste formula; when both are present,
+/// the stronger amplifier wins rather than applying the multiplier twice.
+#[must_use]
+pub(crate) fn mining_effect_amplifiers(
+    effects: Option<&HudEffects>,
+) -> (Option<u32>, Option<u32>) {
+    let amplifier = |bare: &str| {
+        let id = lodestone_model::Identifier::new("minecraft", bare).ok()?;
+        effects?.0.get(&id).map(|effect| u32::from(effect.amplifier))
+    };
+    (
+        amplifier("haste").max(amplifier("conduit_power")),
+        amplifier("mining_fatigue"),
+    )
 }
 
 /// The bare-hand [`lodestone_model::ToolMining`] fold, for when
@@ -456,6 +491,9 @@ pub struct Sim {
     /// give every `With<LocalPlayer>` system two players.
     local: Entity,
     net: Option<NetClient>,
+    /// Optional client-side join timeline; disabled unless
+    /// `LODESTONE_JOIN_TRACE` explicitly requests it.
+    join_trace: crate::sim::join_trace::JoinTrace,
     /// Stable read-side snapshot of the session's recipe sync store. The ECS
     /// component remains authoritative; this cache only avoids cloning its
     /// nested maps and registry sets on every redraw.
@@ -1682,6 +1720,7 @@ pub(crate) mod presentation;
 mod build;
 mod session;
 mod collide;
+mod join_trace;
 // `pub(crate)`, not the bare `mod` every other seam above uses: `entities.rs`
 // reuses `step::{body_yaw_target, tick_head_turn}` for the remote-player body
 // yaw simulation (`tick_remote_body_yaw`) rather than forking a second copy of

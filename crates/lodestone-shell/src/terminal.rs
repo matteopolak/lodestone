@@ -54,6 +54,7 @@ enum KeyCommand {
     SelectSlot(usize),
     TogglePerspective,
     ToggleInventory,
+    Escape,
     OpenChat { command: bool },
 }
 
@@ -235,6 +236,25 @@ fn terminal_menu_button(mouse: MouseEvent) -> Option<MenuButton> {
     }
 }
 
+#[cfg(feature = "window")]
+fn terminal_wheel_notches(kind: MouseEventKind) -> Option<f64> {
+    match kind {
+        // Crossterm's positive direction is the same direction consumed by
+        // MenuNav's list scroll and by the window path's winit adapter.
+        MouseEventKind::ScrollUp => Some(1.0),
+        MouseEventKind::ScrollDown => Some(-1.0),
+        MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => None,
+        _ => None,
+    }
+}
+
+fn terminal_escape_key(key: KeyEvent) -> bool {
+    // Esc is normally decoded as `KeyCode::Esc`. A few basic terminals expose
+    // the byte as a control character when keyboard-enhancement reporting is
+    // unavailable, so keep that fallback on the same path.
+    matches!(key.code, KeyCode::Esc | KeyCode::Char('\u{1b}'))
+}
+
 fn terminal_chat_display(
     entries: &[(Vec<TextSpan>, f32)],
     max_lines: usize,
@@ -401,20 +421,14 @@ pub(crate) fn run_terminal(
         terminal_render_dimensions(initial_area, terminal_pixel_size());
     let mut app = WindowApp::new_terminal(config, pixel_width, pixel_height)?;
 
+    // Keep the cleanup guard alive before terminal setup. If raw-mode or the
+    // alternate-screen transition fails, `ratatui::restore` still gets a
+    // chance to put the tty back in its previous state. Mouse/focus/keyboard
+    // reporting are optional terminal capabilities; unsupported commands must
+    // not turn a usable keyboard-only terminal into a failed launch.
+    let mut session = TerminalSession::default();
     let mut terminal = init_terminal()?;
-    let _session = TerminalSession;
-    if let Err(error) = execute!(
-        io::stdout(),
-        EnableMouseCapture,
-        EnableFocusChange,
-        PushKeyboardEnhancementFlags(
-            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
-        )
-    ) {
-        return Err(error.into());
-    }
+    session.enable_input_capabilities();
 
     let mut focus = Focus::Game;
     let mut last_mouse = None;
@@ -459,7 +473,21 @@ pub(crate) fn run_terminal(
                     );
                     app.terminal_pointer_moved(pointer);
                     if app.terminal_routes_menu_input() {
+                        if let Some(notches) = terminal_wheel_notches(mouse.kind) {
+                            app.terminal_scroll(notches);
+                        }
                         if let Some(button) = terminal_menu_button(mouse) {
+                            match mouse.kind {
+                                MouseEventKind::Down(_) => app.terminal_pointer_button(button, true),
+                                MouseEventKind::Up(_) => app.terminal_pointer_button(button, false),
+                                _ => {}
+                            }
+                        }
+                        last_mouse = None;
+                    } else if app.terminal_has_container() {
+                        if let Some(notches) = terminal_wheel_notches(mouse.kind) {
+                            app.terminal_scroll(notches);
+                        } else if let Some(button) = terminal_menu_button(mouse) {
                             match mouse.kind {
                                 MouseEventKind::Down(_) => app.terminal_pointer_button(button, true),
                                 MouseEventKind::Up(_) => app.terminal_pointer_button(button, false),
@@ -470,9 +498,8 @@ pub(crate) fn run_terminal(
                     } else if focus == Focus::Game {
                         handle_mouse(mouse, game_area, &mut last_mouse, &mut app);
                     } else if focus == Focus::Inventory {
-                        if let MouseEventKind::ScrollUp | MouseEventKind::ScrollDown = mouse.kind {
-                            let delta = if matches!(mouse.kind, MouseEventKind::ScrollUp) { -1 } else { 1 };
-                            app.terminal_cycle_slot(delta);
+                        if let Some(notches) = terminal_wheel_notches(mouse.kind) {
+                            app.terminal_scroll(notches);
                         } else if let Some(button) = terminal_menu_button(mouse) {
                             match mouse.kind {
                                 MouseEventKind::Down(_) => app.terminal_pointer_button(button, true),
@@ -485,12 +512,25 @@ pub(crate) fn run_terminal(
                 }
                 Event::FocusLost => {
                     reset_terminal_input(&mut held, &mut app);
+                    app.terminal_pointer_moved(None);
                     last_mouse = None;
                 }
-                Event::FocusGained => last_mouse = None,
-                Event::Resize(_, _) => last_mouse = None,
+                Event::FocusGained => {
+                    app.terminal_pointer_moved(None);
+                    last_mouse = None;
+                }
+                Event::Resize(_, _) => {
+                    app.terminal_pointer_moved(None);
+                    last_mouse = None;
+                }
                 _ => {}
             }
+        }
+        // A server can close a container without a local key event. Keep the
+        // terminal's small focus state from trapping the next gameplay event
+        // in an inventory that is no longer drawn.
+        if focus == Focus::Inventory && !app.terminal_has_container() {
+            focus = Focus::Game;
         }
         if matches!(focus, Focus::Chat | Focus::Inventory) {
             last_mouse = None;
@@ -584,35 +624,36 @@ fn handle_key(
 
     match *focus {
         Focus::Chat if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
-            match key.code {
-                KeyCode::Esc => {
-                    app.terminal_chat_cancel();
-                    *focus = Focus::Game;
-                }
-                KeyCode::Enter => {
-                    if app.terminal_chat_text().trim() == "#quit" {
-                        return false;
+            if terminal_escape_key(key) {
+                app.terminal_chat_cancel();
+                *focus = Focus::Game;
+            } else {
+                match key.code {
+                    KeyCode::Enter => {
+                        if app.terminal_chat_text().trim() == "#quit" {
+                            return false;
+                        }
+                        app.terminal_chat_submit();
+                        *focus = Focus::Game;
                     }
-                    app.terminal_chat_submit();
-                    *focus = Focus::Game;
+                    KeyCode::Backspace => {
+                        app.terminal_chat_backspace();
+                    }
+                    KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        app.terminal_chat_push_char(ch);
+                    }
+                    KeyCode::Up => {
+                        app.terminal_chat_history_up();
+                    }
+                    KeyCode::Down => {
+                        app.terminal_chat_history_down();
+                    }
+                    KeyCode::Left => app.terminal_chat_move_left(),
+                    KeyCode::Right => app.terminal_chat_move_right(),
+                    KeyCode::Home => app.terminal_chat_move_start(),
+                    KeyCode::End => app.terminal_chat_move_end(),
+                    _ => {}
                 }
-                KeyCode::Backspace => {
-                    app.terminal_chat_backspace();
-                }
-                KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    app.terminal_chat_push_char(ch);
-                }
-                KeyCode::Up => {
-                    app.terminal_chat_history_up();
-                }
-                KeyCode::Down => {
-                    app.terminal_chat_history_down();
-                }
-                KeyCode::Left => app.terminal_chat_move_left(),
-                KeyCode::Right => app.terminal_chat_move_right(),
-                KeyCode::Home => app.terminal_chat_move_start(),
-                KeyCode::End => app.terminal_chat_move_end(),
-                _ => {}
             }
         }
         Focus::Game => {
@@ -632,6 +673,11 @@ fn handle_key(
                         reset_terminal_input(held, app);
                         *focus = Focus::Inventory;
                     }
+                    KeyCommand::Escape => {
+                        reset_terminal_input(held, app);
+                        app.terminal_escape();
+                        *focus = Focus::Game;
+                    }
                     KeyCommand::OpenChat { command } => {
                         reset_terminal_input(held, app);
                         app.terminal_chat_open(command);
@@ -641,16 +687,21 @@ fn handle_key(
             }
         }
         Focus::Inventory if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('e' | 'E') => {
-                    app.terminal_close_container();
-                    *focus = Focus::Game;
+            if terminal_escape_key(key) {
+                app.terminal_close_container();
+                *focus = Focus::Game;
+            } else {
+                match key.code {
+                    KeyCode::Char('e' | 'E') => {
+                        app.terminal_close_container();
+                        *focus = Focus::Game;
+                    }
+                    KeyCode::Char('1'..='9') => {
+                        let KeyCode::Char(key) = key.code else { unreachable!() };
+                        app.terminal_container_hotbar(key as u8 - b'1');
+                    }
+                    _ => {}
                 }
-                KeyCode::Char('1'..='9') => {
-                    let KeyCode::Char(key) = key.code else { unreachable!() };
-                    app.terminal_container_hotbar(key as u8 - b'1');
-                }
-                _ => {}
             }
         }
         _ => {}
@@ -664,7 +715,7 @@ fn terminal_menu_key(key: KeyEvent) -> Option<MenuKey> {
         KeyCode::Up => MenuKey::Up,
         KeyCode::Down => MenuKey::Down,
         KeyCode::Enter => MenuKey::Enter,
-        KeyCode::Esc => MenuKey::Escape,
+        KeyCode::Esc | KeyCode::Char('\u{1b}') => MenuKey::Escape,
         KeyCode::Tab => MenuKey::Tab,
         KeyCode::Backspace => MenuKey::Backspace,
         KeyCode::Delete => MenuKey::Delete,
@@ -700,6 +751,9 @@ fn key_command(key: KeyEvent) -> Option<KeyCommand> {
     }
     if !pressed {
         return None;
+    }
+    if terminal_escape_key(key) {
+        return Some(KeyCommand::Escape);
     }
     match key.code {
         KeyCode::Char('1'..='9') => {
@@ -754,6 +808,7 @@ fn mouse_event_command(
     (command, next)
 }
 
+#[cfg(feature = "window")]
 fn handle_mouse(
     mouse: MouseEvent,
     game: Rect,
@@ -778,11 +833,13 @@ fn handle_mouse(
     }
 }
 
+#[cfg(feature = "window")]
 fn reset_terminal_input(held: &mut HashMap<Action, Instant>, app: &mut WindowApp) {
     held.clear();
     app.terminal_reset_input();
 }
 
+#[cfg(feature = "window")]
 fn expire_unreleased_keys(held: &mut HashMap<Action, Instant>, app: &mut WindowApp) {
     const RELEASE_TIMEOUT: Duration = Duration::from_millis(350);
     let expired = held
@@ -840,16 +897,61 @@ fn linear_to_srgb_byte_reference(value: u8) -> u8 {
     (srgb * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
-struct TerminalSession;
+#[cfg(feature = "window")]
+#[derive(Default)]
+struct TerminalSession {
+    mouse_capture: bool,
+    focus_change: bool,
+    keyboard_enhancements: bool,
+}
 
+#[cfg(feature = "window")]
+impl TerminalSession {
+    fn enable_input_capabilities(&mut self) {
+        if execute!(io::stdout(), EnableMouseCapture).is_ok() {
+            self.mouse_capture = true;
+        } else {
+            tracing::warn!(
+                target: "terminal",
+                "terminal does not support mouse capture; continuing with keyboard input"
+            );
+        }
+
+        if execute!(io::stdout(), EnableFocusChange).is_ok() {
+            self.focus_change = true;
+        } else {
+            tracing::debug!(
+                target: "terminal",
+                "terminal does not report focus changes; input reset relies on release timeout"
+            );
+        }
+
+        let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+            | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+            | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES;
+        if execute!(io::stdout(), PushKeyboardEnhancementFlags(flags)).is_ok() {
+            self.keyboard_enhancements = true;
+        } else {
+            tracing::debug!(
+                target: "terminal",
+                "terminal keyboard enhancement flags unavailable; using basic key decoding"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "window")]
 impl Drop for TerminalSession {
     fn drop(&mut self) {
-        let _ = execute!(
-            io::stdout(),
-            PopKeyboardEnhancementFlags,
-            DisableFocusChange,
-            DisableMouseCapture
-        );
+        if self.keyboard_enhancements {
+            let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+        }
+        if self.focus_change {
+            let _ = execute!(io::stdout(), DisableFocusChange);
+        }
+        if self.mouse_capture {
+            let _ = execute!(io::stdout(), DisableMouseCapture);
+        }
         ratatui::restore();
     }
 }
@@ -985,6 +1087,15 @@ mod tests {
             key_command(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)),
             Some(KeyCommand::ToggleInventory)
         );
+        assert_eq!(
+            key_command(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(KeyCommand::Escape)
+        );
+        assert_eq!(
+            key_command(KeyEvent::new(KeyCode::Char('\u{1b}'), KeyModifiers::NONE)),
+            Some(KeyCommand::Escape),
+            "basic terminals that expose the escape byte as a control character must still pause"
+        );
     }
 
     #[cfg(feature = "window")]
@@ -1007,6 +1118,15 @@ mod tests {
             None,
             "unhandled menu keys must remain available to gameplay/chat"
         );
+    }
+
+    #[cfg(feature = "window")]
+    #[test]
+    fn terminal_wheel_direction_matches_shared_scroll_actions() {
+        assert_eq!(terminal_wheel_notches(MouseEventKind::ScrollUp), Some(1.0));
+        assert_eq!(terminal_wheel_notches(MouseEventKind::ScrollDown), Some(-1.0));
+        assert_eq!(terminal_wheel_notches(MouseEventKind::ScrollLeft), None);
+        assert_eq!(terminal_wheel_notches(MouseEventKind::Moved), None);
     }
 
     #[cfg(feature = "window")]

@@ -176,6 +176,47 @@ sender id and jump boost, plus trailing-byte and wrong-state controls, pin the
 boundary; the adapter frame then passes through the registry-selected protocol
 5 host to the shared consumer.
 
+The protocol-5 `use_entity` frame now reaches both shared entity consumers.
+Its fixed-width target id is followed by a signed mouse ordinal: `0` means
+attack and `1` means ordinary interaction. This wire has neither hand nor
+sneak data, so the bridge supplies main hand and `false`; the connection
+identifies the player independently of this target-only frame. Other ordinals,
+truncated bodies, trailing bytes, and non-Play frames are rejected. The
+in-memory integration control sends a real adapter interaction to a
+pre-tamed wolf and observes the shared mob consumer toggle its sitting order.
+
+Protocol 5 now has the basic container session at the production bridge. A
+canonical `generic_9x3` menu opens as a literal `minecraft:chest` window with
+27 slots; the server sends `window_items` and `set_slot` using the era's
+numeric item ids, while the client consumes them as canonical inventory and
+container events. A `window_click` carries the window, slot, button, action
+counter, mode, and pre-click legacy slot; the host ignores the prediction and
+lets the shared server derive the authoritative result. Close actions use the
+one-byte window handle. `tests/inventory.rs` pins literal open/content/slot,
+click, and close bodies and routes them through both the real adapter and
+`V5ServerProtocol` consumers.
+
+The clientbound entity-state path also has an explicit protocol-5 census at
+the ECS ingest boundary. The standalone metadata list is decoded completely,
+but only these five protocol-wide fields are raised into
+`ClientEvent::EntityMetadataUpdated`: index `0` byte entity flags, index `1`
+short air supply, index `6` float health, index `10` string custom name, and
+index `11` byte custom-name visibility. Entity-specific indices and the
+observed potion-colour/ambient fields remain decoded-but-unreported because
+the packet carries no entity type or canonical colour carrier. Equipment is a
+single `(entity, slot, Slot)` record: ordinals `0..=4` map exactly to main
+hand, feet, legs, chest, and head; the empty-slot sentinel becomes `None`,
+while the legacy damage and compressed-tag contents have no canonical fields.
+The attribute packet supports exactly seven dotted keys —
+`generic.maxHealth`, `generic.followRange`, `generic.knockbackResistance`,
+`generic.movementSpeed`, `generic.attackDamage`, `horse.jumpStrength`, and
+`zombie.spawnReinforcements` — translated to their canonical snake-case
+identifiers. UUID-only modifiers retain stable generated identifiers and raw
+operation ids; unknown attribute keys are dropped without discarding known
+entries in the same update. Literal metadata, equipment, and attribute bodies
+in `tests/server_protocol.rs` feed these handlers and assert the resulting
+client events, rather than only testing a symmetric packet round trip.
+
 Hosted movement now lifts all four serverbound shapes into the shared server:
 `position` and `position_look` update the authoritative player sample,
 `look` updates rotation alone, and `flying` updates the grounded state alone.

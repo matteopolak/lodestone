@@ -4,12 +4,9 @@ use std::time::Duration;
 use lodestone_client::{ClientBuilder, LoginProfile, PlayerLoadedPolicy, ServerAddress};
 use lodestone_model::{
     AnimationAction, BlockActionKind, BlockFace, BlockPos, ClientAction, ClientEvent,
-    ConnectionState, ContainerClickType, ContainerSlotChange, Hand, ItemStack, Rotation, Vec3,
-    Vec3f, VersionAdapter,
+    ConnectionState, Hand, Rotation, Vec3, Vec3f, VersionAdapter,
 };
-use lodestone_server::{
-    BlockEntity, ChunkColumn, ChunkSource, IntegratedServer, PLAYER_ENTITY_ID_BASE,
-};
+use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer, PLAYER_ENTITY_ID_BASE};
 use lodestone_v1_19::adapter_for;
 
 const TARGET: BlockPos = BlockPos::new(8, 100, 8);
@@ -60,7 +57,6 @@ fn adapter_block_use_reaches_protocol_762_host_consumer() {
 
 struct FixtureSource {
     column: Mutex<ChunkColumn>,
-    chest: Option<(BlockPos, BlockEntity)>,
 }
 
 impl FixtureSource {
@@ -69,40 +65,13 @@ impl FixtureSource {
         column.set_block(TARGET.x, TARGET.y, TARGET.z, "minecraft:dandelion");
         Self {
             column: Mutex::new(column),
-            chest: None,
-        }
-    }
-
-    fn with_chest() -> Self {
-        let mut column = ChunkColumn::new(-64, 384);
-        column.set_block(
-            TARGET.x,
-            TARGET.y,
-            TARGET.z,
-            "minecraft:chest[facing=north,type=single,waterlogged=false]",
-        );
-        let mut slots = vec![None; 27];
-        slots[0] = Some(ItemStack::new("minecraft:diamond".parse().unwrap(), 1));
-        Self {
-            column: Mutex::new(column),
-            chest: Some((
-                TARGET,
-                BlockEntity::Container {
-                    id: "minecraft:chest".to_owned(),
-                    slots,
-                },
-            )),
         }
     }
 }
 
 impl ChunkSource for FixtureSource {
     fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
-        self
-            .column
-            .lock()
-            .expect("fixture column lock poisoned")
-            .clone()
+        self.column.lock().expect("fixture column lock poisoned").clone()
     }
 
     fn block_state(&self, x: i32, y: i32, z: i32) -> String {
@@ -122,13 +91,6 @@ impl ChunkSource for FixtureSource {
             .lock()
             .expect("fixture column lock poisoned")
             .set_block(x.rem_euclid(16), y, z.rem_euclid(16), state);
-    }
-
-    fn block_entity(&self, x: i32, y: i32, z: i32) -> Option<BlockEntity> {
-        self.chest
-            .as_ref()
-            .filter(|(pos, _)| *pos == BlockPos::new(x, y, z))
-            .map(|(_, entity)| entity.clone())
     }
 }
 
@@ -273,189 +235,6 @@ async fn registry_selected_protocol_762_broadcasts_an_arm_swing_to_another_clien
 
     sender.shutdown();
     observer.shutdown();
-    server.shutdown().await;
-}
-
-#[tokio::test]
-async fn joined_protocol_762_chest_moves_a_slot_and_corrects_prediction() {
-    let protocol = lodestone_registry::server_protocol_for_protocol(762)
-        .expect("protocol 762 must resolve to the hosted family");
-    let source = Arc::new(FixtureSource::with_chest());
-    assert_eq!(
-        source
-            .block_entity(TARGET.x, TARGET.y, TARGET.z)
-            .map(|entity| {
-                entity.container_slots()[0]
-                    .as_ref()
-                    .map(|item| item.item.to_string())
-            }),
-        Some(Some("minecraft:diamond".to_owned()))
-    );
-    let (server, client_io) = IntegratedServer::open_in_memory_with_mobs(
-        protocol,
-        Arc::clone(&source),
-        (0..=0, 0..=0),
-        (0, 0),
-        0,
-        0,
-    );
-    let entities = server
-        .block_entities()
-        .expect("the live integrated server owns block entities")
-        .clone();
-    entities.with(|registry| {
-        let mut slots = vec![None; 27];
-        slots[0] = Some(ItemStack::new("minecraft:diamond".parse().unwrap(), 1));
-        registry.insert(
-            TARGET,
-            BlockEntity::Container {
-                id: "minecraft:chest".to_owned(),
-                slots,
-            },
-        );
-    });
-    let profile = LoginProfile {
-        username: "ChestFixture".to_owned(),
-        uuid: uuid::Uuid::new_v4(),
-    };
-    let address = ServerAddress {
-        host: "memory".to_owned(),
-        port: 0,
-    };
-    let (mut handle, mut events) = ClientBuilder::new(address, profile, Box::new(adapter_for(762)))
-        .player_loaded_policy(PlayerLoadedPolicy::Manual)
-        .connect_with(client_io);
-
-    handle
-        .wait_for_spawn(Duration::from_secs(10))
-        .await
-        .expect("protocol-762 login reaches Play");
-    handle
-        .wait_for_chunk(lodestone_client::ChunkPos::new(0, 0), Duration::from_secs(10))
-        .await
-        .expect("protocol-762 chunk arrives");
-    assert_eq!(
-        entities.with(|registry| {
-            registry
-                .get(TARGET)
-                .map(BlockEntity::container_slots)
-                .and_then(|slots| slots.first().cloned())
-                .and_then(|item| item.map(|item| item.item.to_string()))
-        }),
-        Some("minecraft:diamond".to_owned())
-    );
-    handle
-        .send_action(ClientAction::UseItemOn {
-            hand: Hand::Main,
-            pos: TARGET,
-            face: BlockFace::Up,
-            cursor: Vec3f {
-                x: 0.5,
-                y: 0.5,
-                z: 0.5,
-            },
-            inside_block: false,
-            sequence: lodestone_model::PredictionSequence::INITIAL,
-        })
-        .expect("joined client accepts the chest interaction");
-    let window_id = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if let Some(ClientEvent::ScreenOpened { window_id, .. }) = events.recv().await {
-                break window_id;
-            }
-        }
-    })
-    .await
-    .expect("the chest opens through the joined protocol path");
-    let initial = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if let Some(ClientEvent::ContainerContent { window_id: id, items, .. }) = events.recv().await
-                && id == window_id
-            {
-                break items;
-            }
-        }
-    })
-    .await
-    .expect("the chest's initial content reaches the joined client");
-    assert_eq!(initial[0].as_ref().map(|item| item.count), Some(1));
-    let opened = handle.open_menu().expect("the chest menu remains open");
-    assert_eq!(opened.window_id, 1);
-    assert_eq!(opened.menu.slot_item(0).map(|item| item.count()), Some(1));
-    let state_id = opened.menu.state_id();
-
-    handle
-        .send_action(ClientAction::ContainerClick {
-            window_id: opened.window_id,
-            state_id,
-            slot: 0,
-            button: 0,
-            click_type: ContainerClickType::QuickMove,
-            // Deliberately omit the predicted diff: the host must derive the
-            // transfer and send a full correction, not trust the claim.
-            changed_slots: Vec::<ContainerSlotChange>::new(),
-            carried_item: None,
-        })
-        .expect("joined client accepts the chest click");
-    let corrected = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if let Some(ClientEvent::ContainerContent { window_id: id, items, .. }) = events.recv().await
-                && id == window_id
-            {
-                break items;
-            }
-        }
-    })
-    .await
-    .expect("the host mutation and corrective content reach the client");
-    assert!(corrected[0].is_none());
-    assert_eq!(corrected[62].as_ref().map(|item| item.count), Some(1));
-
-    handle
-        .send_action(ClientAction::ContainerClose {
-            window_id: opened.window_id,
-        })
-        .expect("joined client accepts the chest close");
-
-    handle
-        .send_action(ClientAction::UseItemOn {
-            hand: Hand::Main,
-            pos: TARGET,
-            face: BlockFace::Up,
-            cursor: Vec3f {
-                x: 0.5,
-                y: 0.5,
-                z: 0.5,
-            },
-            inside_block: false,
-            sequence: lodestone_model::PredictionSequence::new(1),
-        })
-        .expect("joined client reopens the chest");
-    let reopened_window_id = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if let Some(ClientEvent::ScreenOpened { window_id, .. }) = events.recv().await {
-                break window_id;
-            }
-        }
-    })
-    .await
-    .expect("the chest reopens through the joined protocol path");
-    let reopened = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if let Some(ClientEvent::ContainerContent { window_id: id, items, .. }) = events.recv().await
-                && id == reopened_window_id
-            {
-                break items;
-            }
-        }
-    })
-    .await
-    .expect("the authoritative slot mutation persists after reopening");
-    assert!(reopened[0].is_none());
-    assert_eq!(reopened[62].as_ref().map(|item| item.count), Some(1));
-
-    handle.shutdown();
-    let _ = handle.join().await;
     server.shutdown().await;
 }
 

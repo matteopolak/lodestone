@@ -297,7 +297,63 @@ impl ServerProtocol for V47ServerProtocol {
                     cursor: Vec3f::new(cursor_x, cursor_y, cursor_z),
                     // Protocol 47 predates off-hand and prediction sequences.
                     hand: 0,
-                    sequence: lodestone_model::PredictionSequence::INITIAL,
+                    sequence: 0,
+                }
+            }
+            // Protocol 47 keeps all entity interactions in one packet. Plain
+            // interaction (`mouse = 0`) and attack (`mouse = 1`) have no hand
+            // or sneak field; the bridge supplies main hand and false. The
+            // `mouse = 2` form carries a precise hit point, which this shared
+            // server model does not currently consume, but it still reaches
+            // the same generic interaction path after its full body is
+            // validated so adapter-produced interact-at clicks are not dead.
+            State::Play if packet_id == play::serverbound::USE_ENTITY => {
+                let mut reader = Reader::new(payload);
+                let target = match reader.var_i32() {
+                    Ok(target) => target,
+                    Err(_) => return ServerBound::Ignored,
+                };
+                let mouse = match reader.var_i32() {
+                    Ok(mouse) => mouse,
+                    Err(_) => return ServerBound::Ignored,
+                };
+                match mouse {
+                    0 => {
+                        if reader.ensure_empty().is_err() {
+                            ServerBound::Ignored
+                        } else {
+                            ServerBound::InteractEntity {
+                                entity_id: target,
+                                hand: 0,
+                                using_secondary_action: false,
+                            }
+                        }
+                    }
+                    1 => {
+                        if reader.ensure_empty().is_err() {
+                            ServerBound::Ignored
+                        } else {
+                            ServerBound::Attack { entity_id: target }
+                        }
+                    }
+                    2 => {
+                        // The point is intentionally read, not skipped: full
+                        // consumption is what protects the branch from a
+                        // malformed or transposed interact-at body.
+                        let decoded = (|| -> lodestone_core::Result<ServerBound> {
+                            let _x = reader.f32()?;
+                            let _y = reader.f32()?;
+                            let _z = reader.f32()?;
+                            reader.ensure_empty()?;
+                            Ok(ServerBound::InteractEntity {
+                                entity_id: target,
+                                hand: 0,
+                                using_secondary_action: false,
+                            })
+                        })();
+                        decoded.unwrap_or(ServerBound::Ignored)
+                    }
+                    _ => ServerBound::Ignored,
                 }
             }
             // Protocol 47's arm-animation request is an empty body. The

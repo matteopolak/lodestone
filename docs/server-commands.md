@@ -48,6 +48,16 @@ and the **host** — a crate legitimately linking both — implements it. No sin
 command is refused; the wire layer enforces the caller's identity and a fail-closed default, but
 never a specific permission, since it has no `Permissions` resource and structurally never will.
 
+The dedicated-server foundation is [`plugin_commands`](../crates/lodestone-server/src/plugin_commands.rs):
+it keeps a server-owned command tree and permission policy independent of the client ECS, and its
+bounded `ServerCommandQueue` lets a future network sink hand requests to the primary tick owner.
+Pure value-only handlers can be installed into `CommandDispatch` through
+`ServerCommandRegistry::into_dispatch`; world-mutating handlers remain behind the queue until the
+server-side world-effect API is settled. Registration, aliases, argument parsing,
+permission-filtered suggestions, and non-blocking queue hand-back are covered by focused tests.
+`ServerCommandQueue::drain_async` can run a value-only dispatch through the existing bounded server
+scheduler; its response still returns only from the scheduler's tick-owned hand-back.
+
 ### Permission levels and access control
 
 Vanilla's five permission levels (`All`/`Moderators`/`Gamemasters`/`Admins`/`Owners`, numbered 0–4)

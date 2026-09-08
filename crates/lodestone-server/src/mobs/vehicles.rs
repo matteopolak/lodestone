@@ -33,12 +33,14 @@ impl VehicleTickOwner {
 
 /// One completed vehicle-owner batch.
 ///
-/// `expected_batch_count` and the serial values are copied from the tick-start
-/// plan. The central consumer uses them to reject a missing, duplicated, or
-/// substituted completion before it changes any live vehicle state.
+/// The plan generation, `expected_batch_count`, and serial values are copied
+/// from tick start. The central consumer uses them to reject stale, replayed,
+/// missing, duplicated, or substituted completion before it changes any live
+/// vehicle state.
 #[derive(Debug, Clone)]
 pub(crate) struct VehicleTickOwnerBatch {
     owner: VehicleTickOwner,
+    plan: u64,
     expected_batch_count: usize,
     effects: Vec<VehicleTickEffect>,
 }
@@ -58,6 +60,14 @@ struct VehicleTickEffect {
     vehicle: TrackedVehicle,
 }
 
+#[derive(Debug, Clone)]
+struct VehicleTickInput {
+    owner: VehicleTickOwner,
+    serial: usize,
+    id: i32,
+    vehicle: TrackedVehicle,
+}
+
 /// `VehicleEntity.hurtServer`'s `setHurtTime(10)` — how long the hull rocks
 /// after a hit, in ticks. The client's roll formula reads the same counter
 /// *twice* (inside its sine and as a linear falloff), so this number sets both
@@ -68,6 +78,9 @@ const VEHICLE_HURT_TICKS: i32 = 10;
 /// Used here as a **clamp** rather than as a trigger — see
 /// [`MobSim::attack_vehicle`] for why this crate does not destroy the vehicle.
 const VEHICLE_DESTROY_DAMAGE: f32 = 40.0;
+
+/// Dense-scene cutoff measured by `measure_dense_vehicle_owner_workers`.
+const VEHICLE_OWNER_PARALLEL_THRESHOLD: usize = 128;
 
 impl<'w> MobSim<'w> {
     /// Creates one `AbstractBoat` at `position` facing `yaw` and returns its
@@ -366,13 +379,35 @@ impl<'w> MobSim<'w> {
     /// owns a cloned tick-start vehicle; no completion writes the live map.
     pub(crate) fn tick_vehicle_owner_batches(
         &mut self,
-        block_state: &dyn Fn(i32, i32, i32) -> String,
+        block_state: &(dyn Fn(i32, i32, i32) -> String + Sync),
     ) -> Vec<VehicleTickOwnerBatch> {
         self.clear_disconnected_vehicle_riders();
+        self.vehicle_owner_plan = self
+            .vehicle_owner_plan
+            .checked_add(1)
+            .expect("vehicle owner plan generation must not wrap");
+        #[cfg(not(target_arch = "wasm32"))]
+        let workers = if self.vehicles.len() >= VEHICLE_OWNER_PARALLEL_THRESHOLD {
+            std::thread::available_parallelism()
+                .map(std::num::NonZero::get)
+                .unwrap_or(1)
+                .min(4)
+        } else {
+            1
+        };
+        #[cfg(target_arch = "wasm32")]
+        let workers = 1;
+        self.tick_vehicle_owner_batches_with_workers(block_state, workers)
+    }
+
+    fn tick_vehicle_owner_batches_with_workers(
+        &self,
+        block_state: &(dyn Fn(i32, i32, i32) -> String + Sync),
+        worker_count: usize,
+    ) -> Vec<VehicleTickOwnerBatch> {
         let mut ids: Vec<i32> = self.vehicles.keys().copied().collect();
         ids.sort_unstable();
-        let mut batches = Vec::<VehicleTickOwnerBatch>::new();
-
+        let mut jobs = Vec::<(VehicleTickOwner, Vec<VehicleTickInput>)>::new();
         for (serial, id) in ids.into_iter().enumerate() {
             let vehicle = self
                 .vehicles
@@ -380,22 +415,43 @@ impl<'w> MobSim<'w> {
                 .cloned()
                 .expect("a tick-start vehicle id must remain live while planning");
             let owner = VehicleTickOwner::for_position(vehicle.motion.position);
-            let effect = VehicleTickEffect {
+            let input = VehicleTickInput {
                 owner,
                 serial,
                 id,
-                vehicle: ticked_vehicle(vehicle, block_state),
+                vehicle,
             };
-            if let Some(batch) = batches.iter_mut().find(|batch| batch.owner == owner) {
-                batch.effects.push(effect);
+            if let Some((_, inputs)) = jobs
+                .iter_mut()
+                .find(|(candidate, _)| *candidate == owner)
+            {
+                inputs.push(input);
             } else {
-                batches.push(VehicleTickOwnerBatch {
-                    owner,
-                    expected_batch_count: 0,
-                    effects: vec![effect],
-                });
+                jobs.push((owner, vec![input]));
             }
         }
+        let plan = self.vehicle_owner_plan;
+        let mut batches = crate::tick_region::run_bounded_owner_jobs(
+            jobs,
+            worker_count,
+            &|(owner, inputs)| {
+                let effects = inputs
+                    .into_iter()
+                    .map(|input| VehicleTickEffect {
+                        owner: input.owner,
+                        serial: input.serial,
+                        id: input.id,
+                        vehicle: ticked_vehicle(input.vehicle, block_state),
+                    })
+                    .collect();
+                VehicleTickOwnerBatch {
+                    owner,
+                    plan,
+                    expected_batch_count: 0,
+                    effects,
+                }
+            },
+        );
         let batch_count = batches.len();
         for batch in &mut batches {
             batch.expected_batch_count = batch_count;
@@ -415,6 +471,15 @@ impl<'w> MobSim<'w> {
         if batches.is_empty() {
             return;
         }
+        let plan = batches[0].plan;
+        assert_eq!(
+            plan, self.vehicle_owner_plan,
+            "vehicle owner completion must name the latest tick-start plan"
+        );
+        assert!(
+            plan > self.applied_vehicle_owner_plan,
+            "vehicle owner completion may not replay an applied plan"
+        );
         let effects = merge_vehicle_tick_owner_batches(batches);
         for effect in effects {
             assert!(
@@ -423,6 +488,7 @@ impl<'w> MobSim<'w> {
             );
             self.vehicles.insert(effect.id, effect.vehicle);
         }
+        self.applied_vehicle_owner_plan = plan;
     }
 
     fn clear_disconnected_vehicle_riders(&mut self) {
@@ -776,6 +842,20 @@ mod vehicle_tests {
         sim
     }
 
+    fn dense_vehicle_fixture<'w>(world: &'w ChunkWorld, count: usize) -> MobSim<'w> {
+        let mut sim = MobSim::new(world);
+        for serial in 0..count {
+            let x = [-7.5, 24.5, 40.5, 56.5][serial % 4];
+            let z = f64::from((serial / 4 % 8) as u8) + 0.5;
+            sim.spawn_vehicle(
+                "minecraft:oak_boat".parse().expect("a valid key"),
+                Vec3::new(x, 70.0, z),
+                0.0,
+            );
+        }
+        sim
+    }
+
     #[test]
     fn vehicle_owner_batches_restore_serial_state_after_reversed_completion() {
         let world = world();
@@ -820,6 +900,56 @@ mod vehicle_tests {
     }
 
     #[test]
+    fn vehicle_owner_batches_match_between_one_and_four_lanes() {
+        let serial_world = world();
+        let mut serial = owner_batch_fixture(&serial_world);
+        serial.vehicle_owner_plan = 1;
+        let serial_batches = serial.tick_vehicle_owner_batches_with_workers(&lake(), 1);
+        serial.apply_vehicle_tick_owner_batches(serial_batches);
+
+        let parallel_world = world();
+        let mut parallel = owner_batch_fixture(&parallel_world);
+        parallel.vehicle_owner_plan = 1;
+        let parallel_batches = parallel.tick_vehicle_owner_batches_with_workers(&lake(), 4);
+        parallel.apply_vehicle_tick_owner_batches(parallel_batches);
+
+        let public_state = |sim: &MobSim<'_>| {
+            sim.snapshots()
+                .into_iter()
+                .map(|snapshot| {
+                    (
+                        snapshot.id,
+                        snapshot.position,
+                        snapshot.velocity,
+                        snapshot.metadata,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(public_state(&parallel), public_state(&serial));
+    }
+
+    #[test]
+    #[should_panic(expected = "latest tick-start plan")]
+    fn vehicle_owner_batches_reject_a_stale_plan() {
+        let world = world();
+        let mut sim = owner_batch_fixture(&world);
+        let stale = sim.tick_vehicle_owner_batches(&lake());
+        let _current = sim.tick_vehicle_owner_batches(&lake());
+        sim.apply_vehicle_tick_owner_batches(stale);
+    }
+
+    #[test]
+    #[should_panic(expected = "may not replay an applied plan")]
+    fn vehicle_owner_batches_reject_a_replayed_plan() {
+        let world = world();
+        let mut sim = owner_batch_fixture(&world);
+        let batches = sim.tick_vehicle_owner_batches(&lake());
+        sim.apply_vehicle_tick_owner_batches(batches.clone());
+        sim.apply_vehicle_tick_owner_batches(batches);
+    }
+
+    #[test]
     #[should_panic(expected = "every tick-start owner batch exactly once")]
     fn vehicle_owner_batch_merge_rejects_a_missing_owner() {
         let world = world();
@@ -837,6 +967,33 @@ mod vehicle_tests {
         let mut batches = sim.tick_vehicle_owner_batches(&lake());
         batches.push(batches[0].clone());
         sim.apply_vehicle_tick_owner_batches(batches);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "focused vehicle worker measurement; run explicitly before choosing a production cutoff"]
+    fn measure_dense_vehicle_owner_workers() {
+        use std::time::Instant;
+
+        for count in [64, 128, 256, 512, 1_024] {
+            let serial_world = world();
+            let parallel_world = world();
+            let serial = dense_vehicle_fixture(&serial_world, count);
+            let parallel = dense_vehicle_fixture(&parallel_world, count);
+
+            let started = Instant::now();
+            let _ = serial.tick_vehicle_owner_batches_with_workers(&lake(), 1);
+            let serial_ms = started.elapsed().as_secs_f64() * 1_000.0;
+
+            let started = Instant::now();
+            let _ = parallel.tick_vehicle_owner_batches_with_workers(&lake(), 4);
+            let parallel_ms = started.elapsed().as_secs_f64() * 1_000.0;
+
+            println!(
+                "dense_vehicle owners=4 vehicles={count} serial_ms={serial_ms:.3} parallel_ms={parallel_ms:.3} speedup={:.3}",
+                serial_ms / parallel_ms
+            );
+        }
     }
 
     #[test]

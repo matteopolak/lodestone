@@ -45,7 +45,8 @@ use super::{
     BlockEntityRenderer, BlockEntitySource, BrushableSource, CampfireSource, ConduitSource,
     CopperGolemStatueSource, ShelfSource,
     DEFAULT_RENDER_DISTANCE_CHUNKS, DecoratedPotSource, EnchantingTableSource, ShulkerSource,
-    DebugLineRenderer, DebugLineVertex, DebugLinesSource, DisplayTextRenderer, EntityLightSource,
+    DebugLineRenderer, DebugLineVertex, DebugLinesSource, DisplayTextRenderer, EffectLightSource,
+    EntityGlowSource, EntityLightSource,
     EntityRenderer, HandSwingSource, ItemUseSource, ItemUseState, LecternSource, MainHandSource, MapSource,
     MovingPistonSource,
     NameTagRenderer, OutlineRenderer, OutlineShapeSource,
@@ -115,6 +116,10 @@ impl RenderState {
         let depth = DepthBuffer::new(device, width.max(1), height.max(1));
         let outline = OutlineRenderer::new(device, color_format);
         let debug_lines = DebugLineRenderer::new(device, color_format);
+        // Entity-effect outlines use the same ribbon expansion and depth-tested
+        // pipeline as debug lines, but retain a separate buffer and draw call so
+        // the gameplay effect is independent of F3 visibility.
+        let glow_outline = DebugLineRenderer::new(device, color_format);
         // A second instance of the same renderer for the fishing line — see
         // `RenderState::fishing_line`'s own doc for why it is not the same one.
         let fishing_line = DebugLineRenderer::new(device, color_format);
@@ -324,6 +329,8 @@ impl RenderState {
             outline,
             debug_lines,
             debug_lines_source: DebugLinesSource::default(),
+            glow_outline,
+            entity_glow_source: EntityGlowSource::default(),
             fishing_line,
             plugin_billboards,
             plugin_billboards_source: PluginBillboardsSource::default(),
@@ -350,6 +357,7 @@ impl RenderState {
             // The overworld's own ambient colour until the shell installs the
             // current dimension; see `set_ambient_light_source`.
             ambient_light: AmbientLightSource::default(),
+            effect_light: EffectLightSource::default(),
             // No third-person camera exists yet; see
             // `set_third_person_body_source`.
             third_person_body: ThirdPersonBodySource::default(),
@@ -849,7 +857,7 @@ impl RenderState {
             &self.fog,
             self.time_of_day.value(),
             self.sky_darken.value(),
-            self.ambient_light.value(),
+            self.effective_ambient_light(),
             [eye.x, eye.y, eye.z],
             // The section fade-in's clock (`lodestone_render::
             // section_visibility`), in the same seconds a section's
@@ -957,6 +965,24 @@ impl RenderState {
         f: impl Fn() -> Option<[f32; 3]> + Send + Sync + 'static,
     ) {
         self.ambient_light = AmbientLightSource(Some(Box::new(f)));
+    }
+
+    /// Install a local visual effect's lightmap floor. The value is kept
+    /// separate from the dimension source and combined only at the shared
+    /// lightmap input, so an effect cannot replace a dimension's ambient hue.
+    pub fn set_effect_light_source(
+        &mut self,
+        f: impl Fn() -> Option<[f32; 3]> + Send + Sync + 'static,
+    ) {
+        self.effect_light = EffectLightSource(Some(Box::new(f)));
+    }
+
+    #[must_use]
+    pub(super) fn effective_ambient_light(&self) -> [f32; 3] {
+        lodestone_render::ambient_with_effect_floor(
+            self.ambient_light.value(),
+            self.effect_light.value(),
+        )
     }
 
     /// Install the sky pass, built once by the caller (typically
@@ -2064,6 +2090,14 @@ impl RenderState {
         f: impl Fn(glam::Vec3) -> Vec<DebugLineVertex> + Send + Sync + 'static,
     ) {
         self.debug_lines_source = DebugLinesSource(Some(Box::new(f)));
+    }
+
+    /// Install the current entity ids carrying an outline-producing effect.
+    /// The render pass joins these ids with the current frame's interpolated
+    /// entity draws, so this source carries state only and cannot retain stale
+    /// positions after an entity moves, expires, or is removed.
+    pub fn set_entity_glow_source(&mut self, f: impl Fn() -> Vec<i32> + Send + Sync + 'static) {
+        self.entity_glow_source = EntityGlowSource(Some(Box::new(f)));
     }
 
     /// Install the source for this frame's plugin billboards (see

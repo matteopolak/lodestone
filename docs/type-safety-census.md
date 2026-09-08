@@ -13,7 +13,7 @@ numeric: public functions with state_id, block_state, effect_id, item_id, entity
 text: public String fields whose names end in url, dimension, potion, effect, state, kind, mode, key, or id
 ```
 
-The snapshot contains **86 numeric APIs** and **62 text fields**, **148 sites total**. Every row is assigned either a migration family or an intentional boundary category. The scanner is a discovery guard, not a claim that every integer or string in the repository needs a wrapper.
+The snapshot contains **84 numeric APIs** and **62 text fields**, **146 sites total**. Every row is assigned either a migration family or an intentional boundary category. The scanner is a discovery guard, not a claim that every integer or string in the repository needs a wrapper.
 
 | disposition | sites |
 |---|---:|
@@ -28,10 +28,9 @@ The snapshot contains **86 numeric APIs** and **62 text fields**, **148 sites to
 | `intentional-wire-boundary` | 36 |
 | `inventory-menu-slot` | 32 |
 | `potion-and-state-value` | 11 |
-| `prediction-sequence` | 2 |
 | `typed-discriminator` | 5 |
 
-Migration families are `prediction-sequence`, `entity-network-id`, `inventory-menu-slot`, `potion-and-state-value`, `typed-discriminator`, and `dimension-resource-url`.
+Migration families are `entity-network-id`, `inventory-menu-slot`, `potion-and-state-value`, `typed-discriminator`, and `dimension-resource-url`.
 
 Intentional categories retain primitives because the representation is the interface: bytes/integers at wire boundaries, strings in storage/import formats, external identity strings, cache or ring-buffer indices, observability labels, secrets, and user-authored or format-defined text.
 
@@ -61,7 +60,6 @@ Intentional categories retain primitives because the representation is the inter
 | `crates/lodestone-ecs/src/entity.rs:     pub fn get(&self, entity_id: i32) -> Option<Entity> {` | `entity-network-id` |
 | `crates/lodestone-ecs/src/entity.rs:     pub fn insert(&mut self, entity_id: i32, entity: Entity) {` | `entity-network-id` |
 | `crates/lodestone-ecs/src/entity.rs:     pub fn remove(&mut self, entity_id: i32) -> Option<Entity> {` | `entity-network-id` |
-| `crates/lodestone-shell/src/sim/meshing.rs:     pub(crate) fn settle_placement_predictions(&mut self, sequence: i32) {` | `prediction-sequence` |
 | `crates/lodestone-client/src/state.rs:     pub(crate) fn entity(&self, entity_id: i32) -> Option<EntityView> {` | `entity-network-id` |
 | `crates/lodestone-shell/src/sim/session.rs:     pub fn select_slot(&mut self, slot: usize) {` | `inventory-menu-slot` |
 | `crates/lodestone-shell/src/sim/session.rs:     pub fn send_container_button_click(&self, window_id: i32, button_id: i32) {` | `inventory-menu-slot` |
@@ -97,7 +95,6 @@ Intentional categories retain primitives because the representation is the inter
 | `crates/lodestone-game/src/click.rs:     pub fn drop_one(slot: usize) -> Self {` | `inventory-menu-slot` |
 | `crates/lodestone-game/src/click.rs:     pub fn drop_stack(slot: usize) -> Self {` | `inventory-menu-slot` |
 | `crates/lodestone-game/src/click.rs:     pub fn double(slot: usize) -> Self {` | `inventory-menu-slot` |
-| `crates/lodestone-game/src/placement.rs:     pub fn acknowledge(&mut self, sequence: i32) -> Vec<PlacePrediction> {` | `prediction-sequence` |
 | `crates/lodestone-game/src/reconcile.rs:     pub fn to_action(&self, window_id: i32) -> ClientAction {` | `inventory-menu-slot` |
 | `crates/versions/26.2/src/packets/metadata.rs: pub fn write_update_attributes(w: &mut Writer, entity_id: i32, attributes: &[EntityAttributeSnapshot]) {` | `intentional-wire-boundary` |
 | `crates/lodestone-shell/src/entities.rs: pub fn begin_item_pickup(world: &mut World, item_entity_id: i32, collector_id: i32) -> bool {` | `entity-network-id` |
@@ -197,8 +194,25 @@ textual state key and returns `Option<StateId>`. The shell's collision adapter
 calls `StateId::raw()` only when filling its packed raw-state list; unknown or
 partial state strings remain unresolved rather than being assigned a plausible
 canonical id.
+Other state-aware consumers should use `StateId::from_state_str` directly;
+they must not recover a raw id only to validate it again before lookup. An
+unknown block name remains unresolved and therefore cannot be treated as a
+solid built-in state.
+
+Potion names at built-in consumers follow the corresponding typed path:
+`PotionId::from_name` returns a validated `PotionId`, while the raw
+`potion_id` compatibility helper remains for model and wire-facing storage.
+Unknown names stay unresolved instead of being converted into a guessed registry
+number.
 
 Container synchronization state now uses `lodestone_model::ContainerStateId`; keep packet decoding and encoding at its `from_wire`/`as_wire` boundary rather than restoring integer casts in menu consumers.
+
+Recipe synchronization item ids now use `lodestone_model::ItemId`: the 26.2
+adapter classifies known ids only after generated-census validation and keeps
+unknown non-negative ids protocol-local through the recipe fields. Consumers
+must require `ItemId::canonical_raw()` before indexing a generated item table;
+the shared `RegistrySet` representation remains a separate session-scoped
+boundary for fields belonging to several registries.
 
 ## Configuration
 

@@ -4,8 +4,8 @@
 
 The tools that keep this workspace buildable and testable at scale: the `just` task runner
 that gives every health check a short canonical name, the GitHub Actions CI workflow that
-verifies pushes without contending for the shared dev machine, the `sccache`/private-target-dir
-build policy that lets many agents build concurrently in one checkout, and the
+verifies pushes without contending for the shared dev machine, the machine-level shared-target
+and `sccache` policy that queues local builds, and the
 `cargo xtask` static scanners (`islands`, `world-coverage`, and their siblings `connectedness`,
 `check-ptr-const`, `wasm-check`) that catch classes of defect no compiler check can see.
 
@@ -23,13 +23,12 @@ require, and `just health` runs all five in order; `just -n <recipe>` prints a r
 command with no side effects,
 which is how to verify a recipe stays byte-for-byte faithful to the raw command it names.
 
-Every cargo-invoking recipe passes `--target-dir {{tdir}}` and `-j {{jobs}}`, both sourced from
-`LODESTONE_TARGET_DIR`/`LODESTONE_JOBS` environment variables that `just` interpolates into the
-command line **before** cargo runs — so cargo only ever sees the flag form, never the
-environment variable. The flag form keeps Cargo's private-target choice visible in each expanded
-recipe without placing a `CARGO_*` variable in the process environment. `LODESTONE_JOBS` defaults
-to empty (cargo's own default), never a hardcoded number, so a recipe never silently throttles a
-CI runner or an otherwise-idle machine. `just run` (native) and `just run-wasm` (the browser
+Cargo policy is resolved normally. On this development machine, `~/.cargo/config.toml` selects
+`~/.cargo/shared-target`, `rustc-wrapper = "sccache"`, and eight cross-crate jobs. Agents do not pass
+`--target-dir`, export `CARGO_TARGET_DIR`, or set their own job caps: simultaneous commands queue on
+Cargo's target lock, and the admitted build uses the configured parallelism. The `Justfile` asks
+`cargo metadata` for the resolved target path only where a following profiler needs to locate a built
+binary. CI has no user config and retains Cargo's runner-local defaults. `just run` (native) and `just run-wasm` (the browser
 target, driven by `trunk` against `web/`'s own separate Cargo workspace) are deliberately
 separate recipes rather than one parameterized command, because they share no invocation to
 parameterize — `trunk` takes different flags entirely and `web/` never touches the shared
@@ -89,27 +88,24 @@ and any doc or comment claiming the two are "kept in sync" is describing somethi
 config-precedence rules make impossible to verify by inspection — read the actual `rustc
 --version` a job reports, never a `toolchain:` value in the YAML.
 
-### Private target directories, CI caching, and trimmed dev profiles
+### Shared local target, CI caching, and trimmed dev profiles
 
-Up to a dozen agents build concurrently in one shared checkout on one machine. Before this
-design, every agent shared one `target/`, and cargo serializes concurrent builds on an exclusive
-build-directory lock — a `cargo test` has been measured at 42+ minutes elapsed and 0% CPU, pure
-lock-wait. **Private per-agent target directories dodge that lock**, but they do not share local
-compiled dependencies: each has its own build outputs. The root Cargo configuration deliberately
-does not enable `sccache` for local builds. A controlled pair of fresh, non-incremental target
-directories must establish a useful local hit rate before that policy changes; otherwise the
-wrapper adds a dependency and startup work without demonstrated reuse. CI is separate: its
-workflow explicitly opts into an Actions-backed `sccache` service and keeps the wrapper scoped to
-jobs where it works.
+Local builds deliberately share one global target. Cargo's exclusive target lock is the queue: many
+agents may request work, but only one invocation mutates the target at a time, using eight cross-crate
+jobs and the repository's eight compiler front-end threads once admitted. `sccache` wraps every local
+rustc invocation from the global Cargo config. This trades simultaneous independent Cargo graphs for
+dependency reuse, bounded disk use, and useful CPU occupancy by the active build. CI is separate: its
+workflow explicitly opts into an Actions-backed cache and retains runner-local target directories.
 
 Trimmed dev profiles (`debug = "line-tables-only"` for the workspace, `opt-level = 1` for
 third-party dependencies) cut both wall time and per-agent `target/` size substantially, at the
 cost of a slower incremental edit loop for the one or two crates where `opt-level = 1` bites
 hardest — override it locally for just that package if it does (`--config
 'profile.dev.package.<crate>.opt-level=0'`). A heavy vendored-C `-sys` crate is rebuilt in every
-private target directory because a Rust compiler wrapper cannot cache its C toolchain work. Delete
-a task's private target directory as soon as it finishes, and prefer removing a heavy `-sys`
-dependency outright over trying to cache it. The binding constraint this design does not touch at
+target directory because a Rust compiler wrapper cannot cache its C toolchain work. Prefer removing a
+heavy `-sys` dependency outright over trying to cache it. A daily `cargo-sweep` LaunchAgent skips while
+Cargo or rustc is live, removes artifacts older than 21 days, and caps the global target at 40 GB. The
+binding constraint this design does not touch at
 all is test-runtime memory — a single test binary has been observed using several gigabytes of
 RSS, which is unrelated to target-directory policy or profile tuning.
 
@@ -197,22 +193,23 @@ cannot: `connectedness` only ever asks "does this clientbound packet reach anyth
 
 ## Configuration
 
-- `LODESTONE_TARGET_DIR` / `LODESTONE_JOBS` — per-agent private build directory and `-j` bound,
-  read by `just` and spliced in as flags; unset means today's shared-`target/`, no-`-j` behavior.
+- `~/.cargo/config.toml` — local-only shared target, compiler wrapper, and eight-job build queue.
+- `~/.local/bin/cargo-shared-target-prune` and its user LaunchAgent — age and size retention for the
+  shared target; cleanup skips whenever Cargo or rustc is running.
 - `LODESTONE_REGEN=1` — switches any generate-offline/drift-check-online test from assert to
   write, used throughout the regeneration recipes and the `docs-index` generator.
 - `cargo xtask islands [--crate <name>]`, `cargo xtask world-coverage` — no environment
   variables of their own; both scan the whole workspace from the current directory unless scoped.
-- `.cargo/config.toml` — local Cargo configuration deliberately has no `rustc-wrapper`. CI's
-  workflow supplies `RUSTC_WRAPPER=sccache` only on supported jobs; a job without that setting
-  invokes `rustc` directly.
+- `.cargo/config.toml` — repository-only compiler/profile settings; machine-specific caching and
+  target policy live in the user's global Cargo config.
 
 ## Dependencies
 
 - `casey/just` for the task runner; `cargo`, `xtask`, and `scripts/*` for everything it names.
 - `dtolnay/rust-toolchain`, `Swatinem/rust-cache`, `mozilla-actions/sccache-action`,
   `extractions/setup-just` in CI.
-- `sccache` in CI as the compiler-cache wrapper; `syn`/`proc-macro2` (with the `visit` feature)
+- `sccache` locally and in CI as the compiler-cache wrapper; `cargo-sweep` for local retention;
+  `syn`/`proc-macro2` (with the `visit` feature)
   for both AST-walking `xtask` scanners; `lodestone-data`/`lodestone-assets`
   as plain, version-free dependencies of `world-coverage` for the real registry populations and
   rig corpus, and the pinned 26.2 decompile under `.cache/` as `world-coverage`'s optional

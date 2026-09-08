@@ -290,10 +290,14 @@ if you serve `dist/` with something else entirely, replicate both headers.
 `web/worker/` is a separate wasm package staged by
 `web/scripts/stage_worker.sh` during Trunk's post-build hook. Its bootstrap
 receives launch settings and one endpoint of a `MessageChannel`, builds the
-world and server before reporting ready, then bridges only raw protocol bytes.
-The page keeps the other endpoint as `MessagePortTransport` for the normal
-client driver. Worker startup failures fall back to the legacy in-page server;
-after ready, a worker crash is a disconnect rather than a hidden second world.
+world and server before reporting ready, then bridges framed protocol bytes with
+a bounded private credit envelope. The page keeps the other endpoint as
+`MessagePortTransport` for the normal client driver; writes wait or complete
+partially when the peer's receive window is full. Worker startup failures fall
+back to the legacy in-page server; after ready, a worker crash is a disconnect
+rather than a hidden second world. Dropping or shutting down the page endpoint
+also terminates the dedicated Worker because a `MessagePort` has no peer-close
+event.
 
 Page-side plugin commands are explicitly refused in worker singleplayer until
 there is a request/reply command bridge with an authorization policy.

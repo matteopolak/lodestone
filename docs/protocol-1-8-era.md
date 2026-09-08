@@ -29,12 +29,6 @@ break phases and six faces so an observed chunk block can produce an observed up
 integration test connects the family adapter to a registry-selected server transport, verifies a
 known dandelion appears, breaks it, and observes the replacement air state.
 
-The clientbound `block_break_animation` packet is decoded from its literal entity id, packed
-position, and raw stage byte into `ClientEvent::BlockDestruction`. The shared session fold
-preserves visible stages and clears reset stages; it also drops overlays when an entity is
-replaced or removed, when a chunk unloads, or when the session ends. The crack renderer uses
-the loaded block state only to resolve geometry and keeps stage texels nearest-sampled.
-
 `V47ServerProtocol` also participates in the shared connection watchdog: it encodes a clientbound
 keep-alive and consumes its serverbound echo as `ServerBound::KeepAlive`. Protocol 47 carries the
 id as a signed VarInt, unlike protocol 5's fixed `i32` and later fixed `i64` forms. The hosted
@@ -98,6 +92,25 @@ literal three-VarInt control fixes the packet shape and rejects the adjacent
 sneak ordinal, trailing bytes, and all non-Play states. The client adapter's
 leave-bed action is then decoded through the registry-selected protocol, which
 proves this version-family frame reaches the common consumer boundary.
+
+The protocol-47 `use_entity` frame now reaches both shared entity consumers.
+Its target and mouse discriminator are VarInts: `0` is ordinary interaction,
+`1` is attack, and `2` is interaction at a precise entity-local point. The
+shared server currently has no point-bearing interaction carrier, so the
+mouse-2 coordinates are fully read and validated before the request is lifted
+to the same main-hand, non-sneaking interaction variant. Unknown ordinals,
+truncated points, trailing bytes, and non-Play frames are ignored. The
+in-memory integration control sends a real adapter interaction to a
+pre-tamed wolf and observes the shared mob consumer toggle its sitting order.
+
+The clientbound `block_break_animation` frame carries a VarInt breaker id, a
+packed block position, and a signed stage byte. The adapter preserves that
+stage as the raw byte in `ClientEvent::BlockDestruction`: stages `0..=9` remain
+visible crack stages, while the wire clear sentinel `-1` remains `255` for the
+session overlay consumer. Literal packet bytes in
+`crates/versions/1.8/tests/misc_events.rs` cover the clear-token path
+independently of the packet encoder, while the adjacent
+dispatch case confirms a visible stage.
 
 The joining adapter translates four additional clientbound state packets.
 `update_time` is two raw `i64` values and becomes `ClientEvent::TimeChanged`;

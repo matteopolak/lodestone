@@ -33,8 +33,6 @@ mod entity_hurt_overlay_pixels;
 mod entity_light_pixels;
 #[path = "entities/entity_night_pixels.rs"]
 mod entity_night_pixels;
-#[path = "entities/player_skin_artifact_controls.rs"]
-mod player_skin_artifact_controls;
 #[path = "entities/entity_variant_pixels.rs"]
 mod entity_variant_pixels;
 #[path = "entities/first_person_arm_swing_pixels.rs"]

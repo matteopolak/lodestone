@@ -625,23 +625,23 @@ fn raw_packet_targets(
         .collect()
 }
 
-/// The first packet is the bootstrap admission and has no previously adopted
-/// neighbour light. Later admissions adopt the cardinal source columns before
-/// their initial packet is encoded; the full 3x3 footprint is still supplied
-/// to the encoder for packet construction.
-const INITIAL_CARDINAL_NEIGHBOUR_OFFSETS: [(i32, i32); 4] =
-    [(-1, 0), (0, -1), (1, 0), (0, 1)];
+/// The sealed-world exporter reads the saved light snapshot produced when a
+/// column was first admitted. Materialization is z-major and x-major within
+/// each row, so only the north row and west cell can have been admitted when
+/// a target's initial snapshot is computed. Future east and south columns
+/// must not leak into that first fallback; a later live relight may use them.
+const INITIAL_ADMISSION_NEIGHBOUR_OFFSETS: [(i32, i32); 4] =
+    [(-1, -1), (0, -1), (1, -1), (-1, 0)];
 
-fn initial_light_admission_neighbour_offsets(record_index: u64) -> &'static [(i32, i32)] {
-    if record_index == 0 {
-        &[]
-    } else {
-        &INITIAL_CARDINAL_NEIGHBOUR_OFFSETS
-    }
+fn initial_admission_neighbour_offsets() -> &'static [(i32, i32)] {
+    &INITIAL_ADMISSION_NEIGHBOUR_OFFSETS
 }
 
-fn initial_light_snapshot_for_admission(
-    proto: &V770ServerProtocol,
+/// Replays one initial admission's saved-light boundary. The packet still
+/// carries all eight terrain neighbours, but the retained centre light is
+/// computed from the columns that existed at admission time.
+fn initial_light_snapshot_for_admission<P: ServerProtocol>(
+    proto: &P,
     centre: &ChunkColumn,
     admitted_neighbours: &[(i32, i32, ChunkColumn)],
     dimension: ServerDimension,
@@ -660,6 +660,82 @@ fn initial_light_snapshot_for_admission(
 }
 
 #[test]
+fn initial_light_admission_excludes_future_neighbours() {
+    assert_eq!(
+        initial_admission_neighbour_offsets(),
+        &INITIAL_ADMISSION_NEIGHBOUR_OFFSETS,
+    );
+
+    let mut centre = ChunkColumn::new(0, 256);
+    for z in 0..16 {
+        for x in 0..16 {
+            centre.set_block(x, 0, z, "minecraft:end_stone");
+        }
+    }
+    let empty = ChunkColumn::new(0, 256);
+    let mut east = ChunkColumn::new(0, 256);
+    for z in 0..16 {
+        for x in 0..16 {
+            east.set_block(x, 0, z, "minecraft:end_stone");
+        }
+    }
+    let all_neighbours = (-1..=1)
+        .flat_map(|dz| (-1..=1).map(move |dx| (dx, dz)))
+        .filter(|&(dx, dz)| (dx, dz) != (0, 0))
+        .map(|(dx, dz)| {
+            let column = if (dx, dz) == (1, 0) {
+                east.clone()
+            } else {
+                empty.clone()
+            };
+            (dx, dz, column)
+        })
+        .collect::<Vec<_>>();
+    let admitted_offsets = initial_admission_neighbour_offsets();
+    let admitted_neighbours = all_neighbours
+        .iter()
+        .filter(|(dx, dz, _)| admitted_offsets.contains(&(*dx, *dz)))
+        .map(|&(dx, dz, ref column)| (dx, dz, column.clone()))
+        .collect::<Vec<_>>();
+    let proto = V770ServerProtocol;
+    let settled = initial_light_snapshot_for_admission(
+        &proto,
+        &centre,
+        &admitted_neighbours,
+        ServerDimension::End,
+    );
+    let replayed = proto
+        .try_encode_chunk_with_neighbours_in_dimension(
+            0,
+            0,
+            &settled,
+            &all_neighbours,
+            ServerDimension::End,
+        )
+        .expect("the synthetic End packet must encode");
+    let admitted_fallback = proto
+        .try_encode_chunk_with_neighbours_in_dimension(
+            0,
+            0,
+            &centre,
+            &admitted_neighbours,
+            ServerDimension::End,
+        )
+        .expect("the admitted-footprint End packet must encode");
+    let full_fallback = proto
+        .try_encode_chunk_with_neighbours_in_dimension(
+            0,
+            0,
+            &centre,
+            &all_neighbours,
+            ServerDimension::End,
+        )
+        .expect("the full-footprint End packet must encode");
+    assert_eq!(replayed, admitted_fallback);
+    assert_ne!(replayed, full_fallback);
+}
+
+#[test]
 fn lifecycle_target_selection_rejects_ambiguous_single_target_requests() {
     assert_eq!(
         lifecycle_target_selection(256, None, Some(7), false),
@@ -675,19 +751,6 @@ fn lifecycle_target_selection_rejects_ambiguous_single_target_requests() {
     assert_eq!(
         lifecycle_target_selection(256, Some(2), None, false),
         Ok(LifecycleTargetSelection::Prefix { limit: 2 }),
-    );
-}
-
-#[test]
-fn initial_light_admission_has_bootstrap_then_cardinal_sources() {
-    assert!(initial_light_admission_neighbour_offsets(0).is_empty());
-    assert_eq!(
-        initial_light_admission_neighbour_offsets(1),
-        INITIAL_CARDINAL_NEIGHBOUR_OFFSETS.as_slice(),
-    );
-    assert_eq!(
-        initial_light_admission_neighbour_offsets(31),
-        INITIAL_CARDINAL_NEIGHBOUR_OFFSETS.as_slice(),
     );
 }
 
@@ -1223,22 +1286,17 @@ fn parity_manifest_streams_before_rust_comparison() {
             let cx = h.cx0 + (index % width) as i32;
             let cz = h.cz0 + (index / width) as i32;
             let column = column_for(cx, cz);
-            let settled_column = if raw_packet && dimension == Dimension::Nether {
-                let admitted_neighbour_offsets =
-                    initial_light_admission_neighbour_offsets(index);
-                let admitted_neighbours = admitted_neighbour_offsets
-                    .iter()
-                    .map(|&(dx, dz)| (dx, dz, column_for(cx + dx, cz + dz)))
-                    .collect::<Vec<_>>();
-                initial_light_snapshot_for_admission(
-                    &V770ServerProtocol,
-                    &column,
-                    &admitted_neighbours,
-                    server_dimension,
-                )
-            } else {
-                column.clone()
-            };
+            let admitted_offsets = initial_admission_neighbour_offsets();
+            let admitted_neighbours = admitted_offsets
+                .iter()
+                .map(|&(dx, dz)| (dx, dz, column_for(cx + dx, cz + dz)))
+                .collect::<Vec<_>>();
+            let settled_column = initial_light_snapshot_for_admission(
+                &V770ServerProtocol,
+                &column,
+                &admitted_neighbours,
+                server_dimension,
+            );
             let mut neighbours = Vec::with_capacity(8);
             for dz in -1..=1 {
                 for dx in -1..=1 {
@@ -1858,7 +1916,31 @@ fn packet_difference_summary(reference: &[u8], actual: &[u8], dimension: Dimensi
     let mut differing_block_light_sections = Vec::new();
     let mut first_sky_light_differences = Vec::new();
     let mut sky_light_difference_extents = Vec::new();
+    let mut first_block_light_differences = Vec::new();
+    let mut block_light_difference_extents = Vec::new();
     let mut light_representations = Vec::new();
+    let mut local_emissive_blocks = Vec::new();
+    for block_section in 0..reference.column.section_count() {
+        let Some(section_data) = reference.column.section(block_section) else {
+            continue;
+        };
+        for cell in 0..4096 {
+            let state = section_data.block_states().get(cell);
+            let Some(state_id) = lodestone_data::block_states::StateId::new(state) else {
+                continue;
+            };
+            let emission = lodestone_data::light_props::emission(state_id);
+            if emission != 0 {
+                local_emissive_blocks.push((
+                    cell % 16,
+                    reference.column.min_y() + block_section as i32 * 16 + (cell / 256) as i32,
+                    (cell / 16) % 16,
+                    state,
+                    emission,
+                ));
+            }
+        }
+    }
     for section in 0..reference.column.section_count() {
         let reference_section = reference.column.section(section);
         let actual_section = actual.column.section(section);
@@ -1925,6 +2007,53 @@ fn packet_difference_summary(reference: &[u8], actual: &[u8], dimension: Dimensi
         }
         if reference.light.block(section) != actual.light.block(section) {
             differing_block_light_sections.push(section);
+            let mut first = None;
+            let mut min = (usize::MAX, usize::MAX, usize::MAX);
+            let mut max = (0usize, 0usize, 0usize);
+            let mut reference_brighter = 0usize;
+            let mut actual_brighter = 0usize;
+            for cell in 0..4096 {
+                let x = cell % 16;
+                let z = (cell / 16) % 16;
+                let y = cell / 256;
+                let reference_value = reference.light.section_light(section).block_at(x, y, z);
+                let actual_value = actual.light.section_light(section).block_at(x, y, z);
+                if reference_value != actual_value {
+                    let world_y = reference.column.min_y()
+                        + section.saturating_sub(1) as i32 * 16
+                        + y as i32;
+                    first.get_or_insert((x, world_y, z, reference_value, actual_value));
+                    min.0 = min.0.min(x);
+                    min.1 = min.1.min(y);
+                    min.2 = min.2.min(z);
+                    max.0 = max.0.max(x);
+                    max.1 = max.1.max(y);
+                    max.2 = max.2.max(z);
+                    reference_brighter += usize::from(reference_value > actual_value);
+                    actual_brighter += usize::from(actual_value > reference_value);
+                }
+            }
+            let first_source = first.and_then(|(x, world_y, z, _, _)| {
+                local_emissive_blocks
+                    .iter()
+                    .min_by_key(|(source_x, source_y, source_z, _, _)| {
+                        source_x.abs_diff(x)
+                            + source_y.abs_diff(world_y) as usize
+                            + source_z.abs_diff(z)
+                    })
+                    .map(|&(source_x, source_y, source_z, state, emission)| {
+                        let distance = source_x.abs_diff(x)
+                            + source_y.abs_diff(world_y) as usize
+                            + source_z.abs_diff(z);
+                        format!(
+                            "local ({source_x},{source_y},{source_z}) {} emission {emission} distance {distance}",
+                            state_label(state),
+                        )
+                    })
+            });
+            first_block_light_differences.push((section, first, first_source));
+            let extent = first.is_some().then_some((min, max));
+            block_light_difference_extents.push((section, extent, reference_brighter, actual_brighter));
         }
         if reference.light.sky(section) != actual.light.sky(section)
             || reference.light.block(section) != actual.light.block(section)
@@ -1969,8 +2098,9 @@ fn packet_difference_summary(reference: &[u8], actual: &[u8], dimension: Dimensi
         .join("; ");
     let block_difference_positions = block_difference_positions.join("; ");
     format!(
-        "; captured-packet diagnosis: reference={} bytes, Lodestone={} bytes, block cells differ={differing_blocks}, biome cells differ={differing_biomes}, heightmaps equal={heightmaps_equal} ({heightmap_differences:?}), block entities equal={block_entities_equal}, reference stored sky={reference_stored_sky:?}, block={reference_stored_block:?}, sky light cells differ={differing_sky_light_cells} in sections {differing_sky_light_sections:?}, first sky differences={first_sky_light_differences:?}, sky difference extents={sky_light_difference_extents:?}, block light cells differ={differing_block_light_cells} in sections {differing_block_light_sections:?}, representations={light_representations:?}, non-air reference={non_air_reference}, Lodestone={non_air_actual}, first block difference={first_block_difference}, common state pairs={common_state_pairs}, differing blocks={block_difference_positions}",
+        "; captured-packet diagnosis: reference={} bytes, Lodestone={} bytes, block cells differ={differing_blocks}, biome cells differ={differing_biomes}, heightmaps equal={heightmaps_equal} ({heightmap_differences:?}), block entities equal={block_entities_equal}, reference stored sky={reference_stored_sky:?}, block={reference_stored_block:?}, sky light cells differ={differing_sky_light_cells} in sections {differing_sky_light_sections:?}, first sky differences={first_sky_light_differences:?}, sky difference extents={sky_light_difference_extents:?}, block light cells differ={differing_block_light_cells} in sections {differing_block_light_sections:?}, first block differences={first_block_light_differences:?}, block difference extents={block_light_difference_extents:?}, local emissive blocks={} (nearest centre-column source per first difference), representations={light_representations:?}, non-air reference={non_air_reference}, Lodestone={non_air_actual}, first block difference={first_block_difference}, common state pairs={common_state_pairs}, differing blocks={block_difference_positions}",
         reference_len, actual_len,
+        local_emissive_blocks.len(),
     )
 }
 

@@ -17,8 +17,10 @@ state of the project; work that out yourself from the tracker and the tree.
   a conclusion to implement. Mark which constants you verified against the jar or decompiled source and
   which you are passing on faith. Ask for "anything in this brief that turned out wrong" and read that
   part of the report first. When an agent contradicts you and is right, say so and move on.
-- **Parallel Cargo runs are supported through sccache.** Give each agent its own literal `--target-dir`
-  under `/tmp` and a bounded `-j` value, following [`docs/repo-tooling.md`](../repo-tooling.md).
+- **Cargo builds share one machine-level queue.** Run plain Cargo commands without `--target-dir`,
+  `CARGO_TARGET_DIR`, or per-agent job overrides. `~/.cargo/config.toml` selects the shared target,
+  `sccache`, and eight jobs; Cargo's target lock serialises simultaneous invocations while each admitted
+  build can use the machine efficiently. See [`docs/repo-tooling.md`](../repo-tooling.md).
   A count taken while agents are mid-edit is still a sample rather than a measurement — the invariant is
   zero failures, never a number. Run a final integrated verification when a group lands, using the health
   checks in `CLAUDE.md` — `just health` (see
@@ -109,8 +111,8 @@ your own log with a cheap `grep` for `Finished` / `test result:` rather than sto
 finished before reading any count out of it — a count read from a log cargo is still writing looks exactly
 like a pass, which the orchestrator also got wrong once.
 
-Per-agent private target dirs and sccache make parallel foreground builds practical; they do not change
-the foreground-only lifecycle rule above.
+The shared Cargo queue does not change the foreground-only lifecycle rule above. A queued command remains
+live and must be polled to completion rather than abandoned or restarted in another target directory.
 
 **Slow new feature work when architecture would pay more.** Landing modularity, throughput and
 performance improvements ahead of the next feature batch is wanted, not a detour. The four choke-point

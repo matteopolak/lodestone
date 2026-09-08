@@ -65,10 +65,7 @@ hoppers remain serial because their vertical mutable container relation has no
 cross-owner hand-off yet. `tick::apply_block_entity_effect_batches` is the
 sole world writer: it validates the complete tick-start batch set, restores its
 serial slots after independent completion, then applies and publishes furnace
-changes in the established order. Each non-hopper region completion carries
-the registry's monotonically increasing tick plan, and the registry rejects a
-completion from an older plan or a plan it already accepted before touching a
-live entity. The ambient entity-effect phase uses the
+changes in the established order. The ambient entity-effect phase uses the
 same shape: `MobSim::take_ambient_sound_effect_batches` groups each emitted
 effect under `EntityTickOwner::Chunk`, and
 `tick::apply_entity_effect_batches` is the only publisher to the connection
@@ -107,26 +104,37 @@ Unridden boat physics follows the same tick-start rule:
 `MobSim::tick_vehicle_owner_batches` groups cloned hull state by its source
 chunk and carries the original entity-id slot with every completion.
 `MobSim::apply_vehicle_tick_owner_batches`, called only by the live tick loop,
-rejects incomplete or duplicate owners and restores those slots before replacing
-the live hull states. Boat collision reads remain independent of other boats;
-the serial central writer is retained so completion order cannot change a
-client-visible transform.
+rejects stale, replayed, incomplete, or duplicate completions and restores
+those slots before replacing the live hull states. On native builds, scenes
+with at least 128 live vehicles use at most four bounded lanes; the focused
+dense-scene measurement showed a benefit at every sampled density from 128 to
+1,024 vehicles. Browser builds retain the serial arm. Boat collision reads
+remain independent of other boats; the serial central writer is retained so
+completion order cannot change a client-visible transform.
 Primed explosives use the equivalent hand-off at the live tick loop.
 `MobSim::tick_tnt_owner_batches` clones each tick-start state under its source
 chunk owner, and the tick loop passes every completion to
 `MobSim::apply_tnt_tick_owner_batches`, the sole writer to live TNT state. It
-checks complete unique owners plus their old entity-id slots before it updates
-motion/fuses or queues a detonation. The existing `MobSim::take_detonations`
-drain remains the production consumer for the block-destruction and network
-effects, so a reversed owner completion cannot reorder visible explosions.
+checks the current plan generation, complete unique owners, and their old
+entity-id slots before it updates motion/fuses or queues a detonation; a stale
+or replayed completion is rejected before any live state changes. On native
+builds, scenes with at least 128 live explosives use at most four bounded lanes
+after the focused dense-scene measurement showed a repeatable benefit from
+that cutoff. Browser builds retain the serial arm. The existing
+`MobSim::take_detonations` drain remains the production consumer for the
+block-destruction and network effects, so a reversed owner completion cannot
+reorder visible explosions.
 Minecart physics has the same boundary. The live tick loop obtains complete
 `MobSim::tick_minecart_owner_batches` results from cloned tick-start cart state
 and calls `MobSim::apply_minecart_tick_owner_batches` as the sole writer to the
-cart registry. The central application requires exactly one completion per
-source chunk and restores entity-id slots before it replaces transforms,
-changes a fuse, or consumes the TNT-minecart explosion stream. Consequently,
-owner completion order cannot reorder either a cart's visible transform or a
-later blast's random draw.
+cart registry. The central application checks the current plan generation,
+rejects stale, replayed, incomplete, or duplicate completions, and restores
+entity-id slots before it replaces transforms, changes a fuse, or consumes the
+TNT-minecart explosion stream. On native builds, scenes with at least 128 live
+carts use at most four bounded lanes; the focused dense-scene measurement
+showed a benefit at every sampled density from 128 to 1,024 carts. Browser
+builds retain the serial arm. Consequently, owner completion order cannot
+reorder either a cart's visible transform or a later blast's random draw.
 Wither ticking uses the same owner hand-off inside `MobSim::tick_withers`, the
 live tick loop's existing consumer. `MobSim::tick_wither_owner_batches` clones
 each tick-start wither under its source chunk owner, and
@@ -180,10 +188,6 @@ are retained so completeness is checkable. The validated
 `MobSim::apply_entity_push_owner_batches` central writer restores the original
 mob-vector slots before applying any impulse, so reversing owner completion
 cannot change the accumulated velocities or silently omit an unaffected mob.
-Each owner batch also carries the monotonically increasing push plan. The
-central writer rejects a completion from a different tick-start snapshot
-or from a plan it already applied, before mutating any velocity; this closes
-the delayed-worker case that owner and slot checks alone cannot distinguish.
 At 128 or more mobs on native targets, the planning half uses
 `run_bounded_owner_jobs` with at most four lanes and never more lanes than
 source owners. Each lane receives only immutable positions, widths, player
@@ -324,16 +328,7 @@ Keep entity-push pair discovery global unless a replacement defines an
 explicit cross-owner neighbour exchange. Owners may compute from the shared
 tick-start snapshot, but only `apply_entity_push_owner_batches` may mutate live
 velocities. Preserve one completion per mob, including zero impulses, and keep
-the reversed, missing, duplicate, previous-tick, and replayed completion
-controls when changing this seam. The `plan` identity is part of the owner
-batch, not inferred from entity ids or the current owner set.
-
-Block-entity region completions follow the same rule. `BlockEntityRegistry`
-advances its plan before snapshotting non-hopper jobs, stamps every completion
-with that plan, and validates both freshness and single application at the
-central registry commit. Keep the previous-tick and replay controls alongside
-the existing missing/duplicate owner controls; matching positions and values
-alone are not sufficient evidence that a worker result belongs to this tick.
+the reversed, missing, and duplicate owner controls when changing this seam.
 Do not pass `MobSim`, a registry lock, or mutable impulse storage into
 `run_bounded_owner_jobs`; the executor is safe because jobs own their source
 serials and share only immutable census slices. Keep the 128-entity threshold
@@ -422,6 +417,17 @@ must not mutate either live item registry. Validate the complete unique owner
 set and every serial slot before applying any result, then run the global item
 merge centrally. Preserve negative-coordinate, reversed-completion, missing-
 owner, and duplicate-owner controls when changing the hand-off.
+
+Keep projectile motion behind `MobSim::tick_projectile_owner_batches` and
+`MobSim::apply_projectile_tick_owner_batches`. Impact search and impact
+effects remain serial and run before this hand-off; owner workers only advance
+cloned tick-start ballistic state. The central writer validates the generation,
+complete owner set, and registration-order slots before replacing live
+projectile state, so completion order cannot change a collision or a visible
+transform. The production path currently keeps this phase on the serial arm;
+the focused ignored measurement is the gate for introducing bounded native
+lanes, because the central registry publication cost may outweigh projectile
+integration work.
 
 Keep fishing-bobber simulation behind
 `MobSim::tick_fishing_owner_batches` and

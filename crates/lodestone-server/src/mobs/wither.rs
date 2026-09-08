@@ -695,7 +695,7 @@ mod tests {
     #[test]
     fn an_active_wither_with_a_nearby_player_fires_a_skull() {
         let mut sim = sim();
-        let id = sim.spawn_wither_at(Vec3::new(0.0, 64.0, 0.0));
+        let _id = sim.spawn_wither_at(Vec3::new(0.0, 64.0, 0.0));
         for _ in 0..220 {
             sim.tick_withers();
         }

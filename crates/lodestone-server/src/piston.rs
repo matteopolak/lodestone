@@ -91,7 +91,7 @@
 //!   projection of [`apply_move`]'s output on purpose; recomputing them is how the
 //!   animated path and the one-step path drift apart, and the drift would be
 //!   invisible for every shape whose resolution happens to be stable.
-//! * The commit is carried in the scheduled tick's *kind* string
+//! * The commit is carried in the scheduled tick's open extension payload
 //!   ([`finish_kind`]/[`parse_finish_kind`]), because the reaction surface a move
 //!   runs on holds no block-entity map. Changing the encoding means changing both
 //!   halves and the round-trip test between them.
@@ -967,8 +967,8 @@ pub fn finish_kind(entity: &MovingBlockEntity) -> String {
 /// Whether `kind` is a pending piston commit. A prefix test, not an equality
 /// test, because [`finish_kind`] appends the record.
 #[must_use]
-pub fn is_finish_kind(kind: &str) -> bool {
-    kind.starts_with(TICK_PISTON_FINISH)
+pub fn is_finish_kind(kind: impl AsRef<str>) -> bool {
+    kind.as_ref().starts_with(TICK_PISTON_FINISH)
 }
 
 /// [`finish_kind`]'s inverse. `None` for any kind this did not write.
@@ -976,8 +976,8 @@ pub fn is_finish_kind(kind: &str) -> bool {
 /// `splitn(4, '|')` rather than `split`: the runtime state is the last field and
 /// is taken whole, including any data-pack text it contains.
 #[must_use]
-pub fn parse_finish_kind(kind: &str) -> Option<MovingBlockEntity> {
-    let rest = kind.strip_prefix(TICK_PISTON_FINISH)?.strip_prefix('|')?;
+pub fn parse_finish_kind(kind: impl AsRef<str>) -> Option<MovingBlockEntity> {
+    let rest = kind.as_ref().strip_prefix(TICK_PISTON_FINISH)?.strip_prefix('|')?;
     let mut parts = rest.splitn(4, '|');
     let direction = direction_named(parts.next()?)?;
     let extending = parse_bool(parts.next()?)?;

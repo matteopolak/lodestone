@@ -126,7 +126,11 @@ impl Sim {
     /// [`Sim::end_session`] later knows every section the GPU is holding for
     /// this session and can queue every one of them for removal.
     pub fn drain_meshes(&mut self) -> Vec<Meshed> {
-        self.terrain_mut(TerrainMesh::drain_meshes)
+        let meshes = self.terrain_mut(TerrainMesh::drain_meshes);
+        for mesh in &meshes {
+            self.join_trace.mark("remeshed", mesh.key.cx, mesh.key.cz);
+        }
+        meshes
     }
 
     /// Consume relighting work completed during the current simulated frame.

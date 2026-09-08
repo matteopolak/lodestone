@@ -61,6 +61,62 @@ fn full_cube_quads() -> Vec<BakedQuad> {
     ALL_DIRECTIONS.iter().map(|&d| cube_face(d, Some(d))).collect()
 }
 
+/// A real axis-aligned inset face, with coordinates expressed in the same
+/// block-local `0.0..=1.0` space as the baked model. The slime model's nested
+/// element is `[3, 13]` in model texels, so its six faces sit at `3/16` and
+/// `13/16` and span that interval on the other two axes.
+fn inset_face(dir: Direction, low: f32, high: f32) -> BakedQuad {
+    let (fixed, negative) = match dir {
+        Direction::West => (0usize, true),
+        Direction::East => (0, false),
+        Direction::Down => (1, true),
+        Direction::Up => (1, false),
+        Direction::North => (2, true),
+        Direction::South => (2, false),
+    };
+    let (a, b) = match fixed {
+        0 => (1usize, 2usize),
+        1 => (0, 2),
+        _ => (0, 1),
+    };
+    let plane = if negative { low } else { high };
+    let corner = |ca: f32, cb: f32| {
+        let mut p = [0.0f32; 3];
+        p[fixed] = plane;
+        p[a] = ca;
+        p[b] = cb;
+        p
+    };
+    BakedQuad {
+        positions: [
+            corner(low, low),
+            corner(high, low),
+            corner(high, high),
+            corner(low, high),
+        ],
+        uvs: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+        direction: dir,
+        cullface: None,
+        tint_index: None,
+        shade: true,
+        layer: 0,
+        anim: 0,
+        sprite: 0,
+    }
+}
+
+/// The twelve quads produced by the measured slime model: six boundary faces
+/// plus six unculled faces for its nested `[3, 13]` cube.
+fn slime_model_quads() -> Vec<BakedQuad> {
+    let mut quads = full_cube_quads();
+    quads.extend(
+        ALL_DIRECTIONS
+            .into_iter()
+            .map(|dir| inset_face(dir, 3.0 / 16.0, 13.0 / 16.0)),
+    );
+    quads
+}
+
 /// Three full cubes in a row along +X at `y == 8, z == 8`: `x == 7` and
 /// `x == 8` are the same vanilla half-transparent block family ("ice"),
 /// `x == 9` is a **different** one ("glass") — every other cell is air.
@@ -155,6 +211,66 @@ impl ModelSectionView for NeuteredRow {
     }
     // No override: inherits the trait default (`false`), reproducing exactly
     // what every implementor answered before this fix existed.
+}
+
+/// Two cells at `(8, 8, 8)` and `(9, 8, 8)` carrying an arbitrary model. The
+/// left cell is always slime; `right_class` selects a matching slime neighbour,
+/// a different honey neighbour, or air. This keeps the geometry and location
+/// fixed while each assertion changes only the identity control.
+struct InsetRow {
+    quads: Vec<BakedQuad>,
+    right_class: Option<&'static str>,
+    skip_same: bool,
+}
+
+impl InsetRow {
+    fn class_at(&self, x: i32, y: i32, z: i32) -> Option<&'static str> {
+        if y != 8 || z != 8 {
+            return None;
+        }
+        match x {
+            8 => Some("slime_block"),
+            9 => self.right_class,
+            _ => None,
+        }
+    }
+}
+
+impl ModelSectionView for InsetRow {
+    fn quads_at(&self, x: usize, y: usize, z: usize) -> &[BakedQuad] {
+        if self.class_at(x as i32, y as i32, z as i32).is_some() {
+            &self.quads
+        } else {
+            &[]
+        }
+    }
+
+    fn occludes_at(&self, _x: i32, _y: i32, _z: i32) -> bool {
+        // The half-transparent family deliberately has no full occlusion
+        // shape, so the inset-face branch is the only possible seam culler.
+        false
+    }
+
+    fn quad_layer(
+        &self,
+        x: usize,
+        y: usize,
+        z: usize,
+        _quad: &BakedQuad,
+    ) -> Option<RenderLayer> {
+        self.class_at(x as i32, y as i32, z as i32)
+            .map(|_| RenderLayer::Translucent)
+            .or(Some(RenderLayer::Solid))
+    }
+
+    fn skips_rendering_against(&self, x: i32, y: i32, z: i32, nx: i32, ny: i32, nz: i32) -> bool {
+        if !self.skip_same {
+            return false;
+        }
+        let here = self.class_at(x, y, z);
+        let neighbour = self.class_at(nx, ny, nz);
+        here.is_some() && here == neighbour
+    }
 }
 
 /// Predicted quad counts, derived from vanilla's rule rather than guessed:
@@ -283,6 +399,96 @@ fn distinct_half_transparent_siblings_do_not_skip_against_each_other() {
         18,
         "ice/blue_ice/frosted_ice are three different vanilla blocks and must \
          not cull each other's interior faces"
+    );
+}
+
+/// The nested six-face element is culled only at a matching neighbour. The
+/// outer shell still loses its shared boundary pair, while an isolated slime
+/// keeps all twelve model quads and a slime/honey seam keeps every quad.
+#[test]
+fn slime_inset_faces_skip_only_at_a_matching_neighbour() {
+    let isolated = InsetRow {
+        quads: slime_model_quads(),
+        right_class: None,
+        skip_same: true,
+    };
+    let (_, isolated_translucent) = mesh_models_layers(&isolated);
+    assert_eq!(
+        isolated_translucent.quad_count(),
+        12,
+        "an isolated slime block must retain its six outer and six nested faces"
+    );
+
+    let matching = InsetRow {
+        quads: slime_model_quads(),
+        right_class: Some("slime_block"),
+        skip_same: true,
+    };
+    let (_, matching_translucent) = mesh_models_layers(&matching);
+    assert_eq!(
+        matching_translucent.quad_count(),
+        20,
+        "two touching slime blocks must remove one outer and one nested face per cell"
+    );
+
+    // Executed negative control for the old path: without the same-material
+    // hook, both the boundary pair and the nested pair remain.
+    let neutered = InsetRow {
+        quads: slime_model_quads(),
+        right_class: Some("slime_block"),
+        skip_same: false,
+    };
+    let (_, neutered_translucent) = mesh_models_layers(&neutered);
+    assert_eq!(
+        neutered_translucent.quad_count(),
+        24,
+        "without same-material culling, every outer and nested face survives"
+    );
+
+    let different = InsetRow {
+        quads: slime_model_quads(),
+        right_class: Some("honey_block"),
+        skip_same: true,
+    };
+    let (_, different_translucent) = mesh_models_layers(&different);
+    assert_eq!(
+        different_translucent.quad_count(),
+        24,
+        "a slime/honey seam must not use a same-material skip"
+    );
+}
+
+/// A no-cull diagonal blade is a discriminating control for the geometry gate:
+/// a view that reports every neighbour as the same material must not suppress
+/// arbitrary translucent model geometry merely because it lacks `cullface`.
+#[test]
+fn same_material_skip_does_not_cull_diagonal_no_cull_geometry() {
+    let blade = BakedQuad {
+        positions: [
+            [0.1, 0.0, 0.1],
+            [0.9, 0.0, 0.9],
+            [0.9, 1.0, 0.9],
+            [0.1, 1.0, 0.1],
+        ],
+        uvs: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+        direction: Direction::North,
+        cullface: None,
+        tint_index: None,
+        shade: true,
+        layer: 0,
+        anim: 0,
+        sprite: 0,
+    };
+    let view = InsetRow {
+        quads: vec![blade],
+        right_class: Some("slime_block"),
+        skip_same: true,
+    };
+    let (_, translucent) = mesh_models_layers(&view);
+    assert_eq!(
+        translucent.quad_count(),
+        2,
+        "same-material identity must not suppress diagonal no-cull model quads"
     );
 }
 

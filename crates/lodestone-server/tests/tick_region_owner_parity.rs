@@ -17,7 +17,8 @@
 use std::collections::BTreeMap;
 
 use lodestone_server::{
-    ChunkColumn, ChunkSource, RandomTickEvent, RandomTickScheduler, ScheduledTickQueue,
+    ChunkColumn, ChunkSource, RandomTickEvent, RandomTickScheduler, ScheduledTickKind,
+    ScheduledTickQueue,
     next_random_tick_pos,
     tick_region::{TickOwnedChunk, TickOwner, TickRegionPlan},
 };
@@ -159,7 +160,7 @@ fn independently_scheduled_region_reference(fixture: &Fixture) -> TickOutcome {
 /// to its block-update feed after it persists them.
 fn run_owner_sequence(sequence: &[TickOwnedChunk], mut fixture: Fixture) -> TickOutcome {
     let mut scheduler = RandomTickScheduler::new(POSITION_SEED, BEHAVIOR_SEED);
-    let mut block_ticks = ScheduledTickQueue::new();
+    let mut block_ticks: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
     let mut updates = Vec::new();
     for owned in sequence {
         let TickOwner::Chunk { cx, cz } = owned.owner else {

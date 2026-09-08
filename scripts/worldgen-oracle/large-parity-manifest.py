@@ -6,6 +6,7 @@ MAGIC = b"LWP26P03"
 MAGIC_V4 = b"LWP26P04"
 MAGIC_V5 = b"LWP26P05"
 MAGIC_V6 = b"LWP26P06"
+PACKET_AUDIT_MAGIC = b"LWP26A06"
 HEADER = 256
 WIDTH = 32
 RAW_WIDTH = 2
@@ -13,6 +14,7 @@ DOMAIN = b"lodestone.worldgen.large-parity.manifest/v3/semantic"
 DOMAIN_V4 = b"lodestone.worldgen.large-parity.manifest/v4/semantic"
 DOMAIN_V5 = b"lodestone.worldgen.large-parity.manifest/v5/semantic"
 DOMAIN_V6 = b"lodestone.worldgen.large-parity.manifest/v6/raw-packet"
+PACKET_AUDIT_DOMAIN = b"lodestone.worldgen.large-parity.packet-audit/v6/raw-packet"
 # These names are retained for the v3-v5 semantic diagnostics. Do not change
 # them when the raw-packet grid changes: old manifests are still readable.
 GRID_MIN = -250
@@ -130,18 +132,92 @@ def read(path):
     return h, payload, dim
 
 
+def packet_audit_path(manifest_path):
+    """Return the only accepted sidecar spelling for a v6 manifest."""
+    return pathlib.Path(str(manifest_path) + ".packet-audit")
+
+
+def read_packet_audit(manifest_path, manifest_header, manifest_payload, manifest_dim):
+    """Authenticate the v6 full-digest sidecar associated with one manifest.
+
+    The sidecar is intentionally not accepted by ``read`` or as a standalone
+    CLI input. Its identity, payload checksum, and every two-byte prefix must
+    agree with the adjacent main manifest.
+    """
+    if manifest_header[1] != 6:
+        return None
+    path = packet_audit_path(manifest_path)
+    if not path.is_file():
+        raise ValueError(f"{manifest_path}: required packet-audit sidecar is missing: {path}")
+    raw = path.read_bytes()
+    expected_count = manifest_header[15]
+    expected_bytes = HEADER + expected_count * WIDTH
+    if len(raw) != expected_bytes:
+        raise ValueError(f"{path}: packet-audit size is {len(raw)}, expected {expected_bytes}")
+    h = struct.unpack(FMT, raw[:HEADER])
+    (magic, version, size, algorithm, schema, protocol, seed, gx0, gx1, gz0,
+     gz1, sx0, sx1, sz0, sz1, count, width, reserved, domain, frozen,
+     payload_digest) = h
+    if (magic, version, size, algorithm, schema, protocol, seed, width, reserved) != (
+        PACKET_AUDIT_MAGIC, 6, HEADER, 3, 6, 776, 42, WIDTH, 0
+    ):
+        raise ValueError(f"{path}: packet-audit header identity differs")
+    if (gx0, gx1, gz0, gz1) != (RAW_GRID_MIN, RAW_GRID_MAX, RAW_GRID_MIN, RAW_GRID_MAX):
+        raise ValueError(f"{path}: packet-audit global bounds differ")
+    if (sx0, sx1, sz0, sz1, count) != tuple(manifest_header[11:16]):
+        raise ValueError(f"{path}: packet-audit shard geometry differs from {manifest_path}")
+    if domain != hashlib.sha256(PACKET_AUDIT_DOMAIN).digest():
+        raise ValueError(f"{path}: packet-audit schema digest differs")
+    if frozen != manifest_header[19]:
+        raise ValueError(f"{path}: packet-audit frozen-world identity differs")
+    expected_dimension = hashlib.sha256(DIMENSIONS[manifest_dim]).digest()
+    if raw[168:200] != expected_dimension:
+        raise ValueError(f"{path}: packet-audit dimension identity differs")
+    payload = raw[HEADER:]
+    if payload_digest != hashlib.sha256(payload).digest():
+        raise ValueError(f"{path}: packet-audit payload checksum differs")
+    for index, prefix in enumerate(
+        manifest_payload[offset:offset + RAW_WIDTH]
+        for offset in range(0, len(manifest_payload), RAW_WIDTH)
+    ):
+        audit_prefix = payload[index * WIDTH:index * WIDTH + RAW_WIDTH]
+        if audit_prefix != prefix:
+            width = manifest_header[12] - manifest_header[11] + 1
+            cx = manifest_header[11] + index % width
+            cz = manifest_header[13] + index // width
+            raise ValueError(f"{path}: packet-audit digest prefix differs at ({cx},{cz})")
+    return payload
+
+
+def make_packet_audit_header(manifest_header, manifest_dim, payload_digest):
+    """Build the fixed sidecar header from an authenticated v6 manifest."""
+    sx0, sx1, sz0, sz1, count = manifest_header[11:16]
+    header = struct.pack(
+        FMT, PACKET_AUDIT_MAGIC, 6, HEADER, 3, 6, 776, 42,
+        RAW_GRID_MIN, RAW_GRID_MAX, RAW_GRID_MIN, RAW_GRID_MAX,
+        sx0, sx1, sz0, sz1, count, WIDTH, 0,
+        hashlib.sha256(PACKET_AUDIT_DOMAIN).digest(), manifest_header[19],
+        payload_digest,
+    )
+    dimension_digest = hashlib.sha256(DIMENSIONS[manifest_dim]).digest()
+    return header[:168] + dimension_digest + header[200:]
+
+
 def validate(paths):
     for path in paths:
-        h, _, dim = read(path)
+        h, payload, dim = read(path)
+        audit = read_packet_audit(path, h, payload, dim)
         kind = "raw-packet" if h[1] == 6 else "semantic"
-        print(f"ok {path}: kind={kind} width={h[16]} dimension={dim} cx={h[11]}..{h[12]} cz={h[13]}..{h[14]} payload_sha256={h[20].hex()} frozen={h[19].hex()}")
+        audit_text = f" packet_audit_sha256={hashlib.sha256(audit).hexdigest()}" if audit is not None else ""
+        print(f"ok {path}: kind={kind} width={h[16]} dimension={dim} cx={h[11]}..{h[12]} cz={h[13]}..{h[14]} payload_sha256={h[20].hex()} frozen={h[19].hex()}{audit_text}")
 
 
 def merge(out, paths):
-    slots, frozen, dim, version = {}, None, None, None
+    slots, audit_slots, frozen, dim, version = {}, {}, None, None, None
     record_width = None
     for path in paths:
         h, payload, shard_dim = read(path)
+        audit_payload = read_packet_audit(path, h, payload, shard_dim)
         if version is None:
             version, dim, record_width = h[1], shard_dim, h[16]
         elif (h[1], shard_dim) != (version, dim):
@@ -158,6 +234,8 @@ def merge(out, paths):
                 if key in slots:
                     raise ValueError(f"overlap at {key}: {path}")
                 slots[key] = payload[record*record_width:(record+1)*record_width]
+                if audit_payload is not None:
+                    audit_slots[key] = audit_payload[record * WIDTH:(record + 1) * WIDTH]
                 record += 1
     required = RAW_GRID_COUNT if version == 6 else GRID_COUNT
     grid_min, grid_max = (RAW_GRID_MIN, RAW_GRID_MAX) if version == 6 else (GRID_MIN, GRID_MAX)
@@ -170,6 +248,16 @@ def merge(out, paths):
     header = make_header(version, dim, grid_min, grid_max, grid_min, grid_max,
                          required, frozen, hashlib.sha256(payload).digest())
     pathlib.Path(out).write_bytes(header + payload)
+    if version == 6:
+        audit = bytearray()
+        for cz in range(grid_min, grid_max + 1):
+            for cx in range(grid_min, grid_max + 1):
+                audit.extend(audit_slots[(cx, cz)])
+        pathlib.Path(packet_audit_path(out)).write_bytes(
+            make_packet_audit_header(
+                struct.unpack(FMT, header), dim, hashlib.sha256(audit).digest()
+            ) + audit
+        )
     kind = "raw packet hashes" if version == 6 else "semantic SHA-256 digests"
     print(f"merged {required} {kind} into {out}")
 
@@ -178,6 +266,8 @@ def accept(out, first, second):
     """Freeze a baseline only after two independent read-only exports agree."""
     first_header, first_payload, first_dim = read(first)
     second_header, second_payload, second_dim = read(second)
+    first_audit = read_packet_audit(first, first_header, first_payload, first_dim)
+    second_audit = read_packet_audit(second, second_header, second_payload, second_dim)
     grid_min, grid_max = (RAW_GRID_MIN, RAW_GRID_MAX) if first_header[1] == 6 else (GRID_MIN, GRID_MAX)
     required = RAW_GRID_COUNT if first_header[1] == 6 else GRID_COUNT
     if first_header[11:16] != (grid_min, grid_max, grid_min, grid_max, required):
@@ -189,6 +279,12 @@ def accept(out, first, second):
     if second_payload != first_payload:
         raise ValueError("duplicate frozen-world reads differ; baseline is not accepted")
     pathlib.Path(out).write_bytes(pathlib.Path(first).read_bytes())
+    if first_audit is not None:
+        if second_audit != first_audit:
+            raise ValueError("duplicate frozen-world packet-audit reads differ; baseline is not accepted")
+        pathlib.Path(packet_audit_path(out)).write_bytes(
+            make_packet_audit_header(first_header, first_dim, hashlib.sha256(first_audit).digest()) + first_audit
+        )
     print(f"accepted duplicate-read baseline into {out}")
 
 
@@ -196,6 +292,8 @@ def reproducible(first, second):
     """Require independent materializations to agree without sharing a root id."""
     first_header, first_payload, first_dim = read(first)
     second_header, second_payload, second_dim = read(second)
+    first_audit = read_packet_audit(first, first_header, first_payload, first_dim)
+    second_audit = read_packet_audit(second, second_header, second_payload, second_dim)
     raw_records = first_header[1] == 6
     record_kind = "raw packet hash payload" if raw_records else "semantic payload"
     grid_min, grid_max = (RAW_GRID_MIN, RAW_GRID_MAX) if raw_records else (GRID_MIN, GRID_MAX)
@@ -213,6 +311,8 @@ def reproducible(first, second):
         raise ValueError("independent materializations cover different geometry")
     if second_payload != first_payload:
         raise ValueError(f"independent materializations differ in {record_kind}")
+    if first_audit is not None and second_audit != first_audit:
+        raise ValueError("independent materializations differ in raw packet audit payload")
     print(f"independent materializations reproduce {record_kind}: dimension={first_dim} cx={first_header[11]}..{first_header[12]} cz={first_header[13]}..{first_header[14]}")
 
 
@@ -330,18 +430,58 @@ def selftest():
             payload = bytes([value, value ^ 0x5A]) * count
             path.write_bytes(make_header(6, "nether", sx0, sx1, RAW_GRID_MIN, RAW_GRID_MAX,
                                          count, raw_frozen, hashlib.sha256(payload).digest()) + payload)
+        def make_v6_audit(manifest):
+            h, payload, dim = read(manifest)
+            audit = bytearray()
+            for index in range(0, len(payload), RAW_WIDTH):
+                suffix = hashlib.sha256(f"audit-{index}".encode()).digest()[RAW_WIDTH:]
+                audit.extend(payload[index:index + RAW_WIDTH] + suffix)
+            packet_audit_path(manifest).write_bytes(
+                make_packet_audit_header(h, dim, hashlib.sha256(audit).digest()) + audit
+            )
         make_v6(v6_left, RAW_GRID_MIN, 0, 0x61); make_v6(v6_right, 1, RAW_GRID_MAX, 0xA2)
+        make_v6_audit(v6_left); make_v6_audit(v6_right)
         merge(v6_full, [v6_left, v6_right]); v6_header, v6_payload, v6_dim = read(v6_full)
         assert v6_dim == "nether" and v6_header[1] == 6 and v6_header[16] == RAW_WIDTH
         assert len(v6_payload) == RAW_GRID_COUNT * RAW_WIDTH
         assert raw_packet_hash(b"packet body") == hashlib.sha256(b"packet body").digest()[:2]
+        validate([v6_full])
+        try: validate([packet_audit_path(v6_full)])
+        except ValueError as error: assert "unsupported manifest magic" in str(error)
+        else: raise AssertionError("a packet-audit sidecar was treated as a standalone manifest")
         v6_copy = directory / "raw-copy.lwp"; v6_copy.write_bytes(v6_full.read_bytes())
+        packet_audit_path(v6_copy).write_bytes(packet_audit_path(v6_full).read_bytes())
         accepted_v6 = directory / "raw-accepted.lwp"; accept(accepted_v6, v6_full, v6_copy)
+        assert packet_audit_path(accepted_v6).read_bytes() == packet_audit_path(v6_full).read_bytes()
         reproducible(v6_full, v6_copy)
         changed = bytearray(v6_copy.read_bytes()); changed[HEADER + 1] ^= 1; v6_copy.write_bytes(changed)
         try: read(v6_copy)
         except ValueError as error: assert "checksum" in str(error)
         else: raise AssertionError("v6 payload corruption was accepted")
+        missing_audit = directory / "raw-missing-audit.lwp"
+        missing_audit.write_bytes(v6_full.read_bytes())
+        try: validate([missing_audit])
+        except ValueError as error: assert "sidecar" in str(error)
+        else: raise AssertionError("v6 manifest without its sidecar was accepted")
+        tampered_audit = directory / "raw-tampered-audit.lwp"
+        tampered_audit.write_bytes(v6_full.read_bytes())
+        tampered_sidecar = bytearray(packet_audit_path(v6_full).read_bytes()); tampered_sidecar[-1] ^= 1
+        packet_audit_path(tampered_audit).write_bytes(tampered_sidecar)
+        try: validate([tampered_audit])
+        except ValueError as error: assert "checksum" in str(error)
+        else: raise AssertionError("tampered v6 sidecar was accepted")
+        misaligned_audit = directory / "raw-misaligned-audit.lwp"
+        misaligned_audit.write_bytes(v6_full.read_bytes())
+        misaligned_sidecar = bytearray(packet_audit_path(v6_full).read_bytes())
+        first = bytes(misaligned_sidecar[HEADER:HEADER + WIDTH])
+        second_offset = HEADER + 501 * WIDTH
+        misaligned_sidecar[HEADER:HEADER + WIDTH] = misaligned_sidecar[second_offset:second_offset + WIDTH]
+        misaligned_sidecar[second_offset:second_offset + WIDTH] = first
+        misaligned_sidecar[136:168] = hashlib.sha256(misaligned_sidecar[HEADER:]).digest()
+        packet_audit_path(misaligned_audit).write_bytes(misaligned_sidecar)
+        try: validate([misaligned_audit])
+        except ValueError as error: assert "prefix" in str(error)
+        else: raise AssertionError("misaligned v6 sidecar was accepted")
         bad_dim = directory / "raw-bad-dimension.lwp"
         bad = bytearray(v6_full.read_bytes()); bad[168] ^= 1; bad_dim.write_bytes(bad)
         try: read(bad_dim)

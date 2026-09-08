@@ -1098,18 +1098,16 @@ fn potion_color_for(base: &str, suffix: &str, model: &mut lodestone_model::ItemS
     ) {
         return;
     }
-    let Some(potion) = lodestone_data::potion::potion_id(&format!("minecraft:{suffix}")) else {
+    let Some(potion) = lodestone_data::potion::PotionId::from_name(&format!("minecraft:{suffix}")) else {
         return;
     };
-    let potion_id = lodestone_data::potion::PotionId::from_registry_id(potion)
-        .expect("generated potion id must validate against its own census");
-    model.components.potion_color = Some(lodestone_data::potion::potion_color(Some(potion_id), None, &[]));
+    model.components.potion_color = Some(lodestone_data::potion::potion_color(Some(potion), None, &[]));
     // Carries the potion's identity, not just its mixed tint, across the crate
     // boundary — `tooltip.rs`'s title and effect-lore lines need to tell
     // `swiftness` from `long_swiftness` from `strong_swiftness`, which all three
     // mix to the same colour and so cannot be told apart from `potion_color`
     // alone. See `lodestone_model::ItemComponents::potion`'s own doc.
-    model.components.potion = Some(potion);
+    model.components.potion = Some(potion.registry_id());
 }
 
 /// Attaches an [`lodestone_model::AuthoredEnchantment`] to a synthetic
@@ -1485,7 +1483,9 @@ mod tests {
     /// correctly at build time.
     #[test]
     fn stack_of_carries_the_raw_potion_id_not_just_its_colour() {
-        let expected = lodestone_data::potion::potion_id("minecraft:strong_turtle_master").unwrap();
+        let expected = lodestone_data::potion::PotionId::from_name("minecraft:strong_turtle_master")
+            .expect("known potion")
+            .registry_id();
         let stack = stack_of("minecraft:lingering_potion#strong_turtle_master").expect("valid id");
         assert_eq!(stack.potion_effect_id(), Some(expected));
     }

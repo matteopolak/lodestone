@@ -156,6 +156,7 @@ impl MinecartTickOwner {
 #[derive(Debug, Clone)]
 pub(crate) struct MinecartTickOwnerBatch {
     owner: MinecartTickOwner,
+    plan: u64,
     expected_batch_count: usize,
     effects: Vec<MinecartTickEffect>,
 }
@@ -174,6 +175,14 @@ struct MinecartTickEffect {
     id: i32,
     minecart: TrackedMinecart,
     detonation: Option<(Vec3, f32)>,
+}
+
+#[derive(Debug, Clone)]
+struct MinecartTickInput {
+    owner: MinecartTickOwner,
+    serial: usize,
+    id: i32,
+    minecart: TrackedMinecart,
 }
 
 /// `minecraft:rail` — the one rail block not already named as a constant
@@ -374,6 +383,9 @@ pub const TNT_MINECART_FUSE: i32 = 80;
 const TNT_EXPLOSION_POWER_BASE: f32 = 4.0;
 /// `MinecartTNT.explosionSpeedFactor`'s default.
 const TNT_EXPLOSION_SPEED_FACTOR: f64 = 1.0;
+
+/// Dense-scene cutoff measured by `measure_dense_minecart_owner_workers`.
+const MINECART_OWNER_PARALLEL_THRESHOLD: usize = 128;
 
 /// `AbstractMinecart`'s hitbox, `0.98 x 0.7`
 /// (`crates/lodestone-data/src/generated/entity_dimensions.rs`), no
@@ -738,13 +750,35 @@ impl<'w> MobSim<'w> {
     /// writer restores the serial slots before it does either.
     pub(crate) fn tick_minecart_owner_batches(
         &mut self,
-        block_state: &dyn Fn(i32, i32, i32) -> String,
+        block_state: &(dyn Fn(i32, i32, i32) -> String + Sync),
     ) -> Vec<MinecartTickOwnerBatch> {
         self.clear_disconnected_minecart_riders();
+        self.minecart_owner_plan = self
+            .minecart_owner_plan
+            .checked_add(1)
+            .expect("minecart owner plan generation must not wrap");
+        #[cfg(not(target_arch = "wasm32"))]
+        let workers = if self.minecarts.len() >= MINECART_OWNER_PARALLEL_THRESHOLD {
+            std::thread::available_parallelism()
+                .map(std::num::NonZero::get)
+                .unwrap_or(1)
+                .min(4)
+        } else {
+            1
+        };
+        #[cfg(target_arch = "wasm32")]
+        let workers = 1;
+        self.tick_minecart_owner_batches_with_workers(block_state, workers)
+    }
+
+    fn tick_minecart_owner_batches_with_workers(
+        &self,
+        block_state: &(dyn Fn(i32, i32, i32) -> String + Sync),
+        worker_count: usize,
+    ) -> Vec<MinecartTickOwnerBatch> {
         let mut ids: Vec<i32> = self.minecarts.keys().copied().collect();
         ids.sort_unstable();
-        let mut batches = Vec::<MinecartTickOwnerBatch>::new();
-
+        let mut jobs = Vec::<(MinecartTickOwner, Vec<MinecartTickInput>)>::new();
         for (serial, id) in ids.into_iter().enumerate() {
             let minecart = self
                 .minecarts
@@ -752,25 +786,48 @@ impl<'w> MobSim<'w> {
                 .cloned()
                 .expect("a tick-start minecart id must remain live while planning");
             let owner = MinecartTickOwner::for_position(minecart.motion.position);
-            let mut ticked = minecart;
-            let detonation = tick_one_minecart(&mut ticked, block_state);
-            let effect = MinecartTickEffect {
+            let input = MinecartTickInput {
                 owner,
                 serial,
                 id,
-                minecart: ticked,
-                detonation,
+                minecart,
             };
-            if let Some(batch) = batches.iter_mut().find(|batch| batch.owner == owner) {
-                batch.effects.push(effect);
+            if let Some((_, inputs)) = jobs
+                .iter_mut()
+                .find(|(candidate, _)| *candidate == owner)
+            {
+                inputs.push(input);
             } else {
-                batches.push(MinecartTickOwnerBatch {
-                    owner,
-                    expected_batch_count: 0,
-                    effects: vec![effect],
-                });
+                jobs.push((owner, vec![input]));
             }
         }
+        let plan = self.minecart_owner_plan;
+        let mut batches = crate::tick_region::run_bounded_owner_jobs(
+            jobs,
+            worker_count,
+            &|(owner, inputs)| {
+                let effects = inputs
+                    .into_iter()
+                    .map(|input| {
+                        let mut minecart = input.minecart;
+                        let detonation = tick_one_minecart(&mut minecart, block_state);
+                        MinecartTickEffect {
+                            owner: input.owner,
+                            serial: input.serial,
+                            id: input.id,
+                            minecart,
+                            detonation,
+                        }
+                    })
+                    .collect();
+                MinecartTickOwnerBatch {
+                    owner,
+                    plan,
+                    expected_batch_count: 0,
+                    effects,
+                }
+            },
+        );
         let batch_count = batches.len();
         for batch in &mut batches {
             batch.expected_batch_count = batch_count;
@@ -791,6 +848,15 @@ impl<'w> MobSim<'w> {
         if batches.is_empty() {
             return;
         }
+        let plan = batches[0].plan;
+        assert_eq!(
+            plan, self.minecart_owner_plan,
+            "minecart owner completion must name the latest tick-start plan"
+        );
+        assert!(
+            plan > self.applied_minecart_owner_plan,
+            "minecart owner completion may not replay an applied plan"
+        );
         let effects = merge_minecart_tick_owner_batches(batches);
         let mut detonated = Vec::new();
         for effect in effects {
@@ -804,6 +870,7 @@ impl<'w> MobSim<'w> {
             }
         }
         self.apply_minecart_detonations(detonated);
+        self.applied_minecart_owner_plan = plan;
     }
 
     fn clear_disconnected_minecart_riders(&mut self) {
@@ -1211,6 +1278,16 @@ mod tests {
         sim
     }
 
+    fn dense_minecart_owner_fixture(count: usize) -> MobSim<'static> {
+        let mut sim = sim();
+        for serial in 0..count {
+            let x = [-7.5, 24.5, 40.5, 56.5][serial % 4];
+            let z = f64::from((serial / 4 % 8) as u8) + 0.5;
+            sim.spawn_minecart(MinecartKind::Plain, Vec3::new(x, 70.0, z));
+        }
+        sim
+    }
+
     fn flat_world() -> impl Fn(i32, i32, i32) -> String {
         |_x, y, _z| {
             if y <= 60 {
@@ -1264,6 +1341,52 @@ mod tests {
     }
 
     #[test]
+    fn minecart_owner_batches_match_between_one_and_four_lanes() {
+        let mut serial = owner_batch_fixture();
+        serial.minecart_owner_plan = 1;
+        let serial_batches = serial.tick_minecart_owner_batches_with_workers(&flat_world(), 1);
+        serial.apply_minecart_tick_owner_batches(serial_batches);
+
+        let mut parallel = owner_batch_fixture();
+        parallel.minecart_owner_plan = 1;
+        let parallel_batches = parallel.tick_minecart_owner_batches_with_workers(&flat_world(), 4);
+        parallel.apply_minecart_tick_owner_batches(parallel_batches);
+
+        let public_state = |sim: &MobSim<'_>| {
+            sim.snapshots()
+                .into_iter()
+                .map(|snapshot| {
+                    (
+                        snapshot.id,
+                        snapshot.position,
+                        snapshot.velocity,
+                        snapshot.metadata,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(public_state(&parallel), public_state(&serial));
+    }
+
+    #[test]
+    #[should_panic(expected = "latest tick-start plan")]
+    fn minecart_owner_batches_reject_a_stale_plan() {
+        let mut sim = owner_batch_fixture();
+        let stale = sim.tick_minecart_owner_batches(&flat_world());
+        let _current = sim.tick_minecart_owner_batches(&flat_world());
+        sim.apply_minecart_tick_owner_batches(stale);
+    }
+
+    #[test]
+    #[should_panic(expected = "may not replay an applied plan")]
+    fn minecart_owner_batches_reject_a_replayed_plan() {
+        let mut sim = owner_batch_fixture();
+        let batches = sim.tick_minecart_owner_batches(&flat_world());
+        sim.apply_minecart_tick_owner_batches(batches.clone());
+        sim.apply_minecart_tick_owner_batches(batches);
+    }
+
+    #[test]
     #[should_panic(expected = "every tick-start owner batch exactly once")]
     fn minecart_owner_batch_merge_rejects_a_missing_owner() {
         let mut sim = owner_batch_fixture();
@@ -1279,6 +1402,31 @@ mod tests {
         let mut batches = sim.tick_minecart_owner_batches(&flat_world());
         batches.push(batches[0].clone());
         sim.apply_minecart_tick_owner_batches(batches);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "focused minecart worker measurement; run explicitly before choosing a production cutoff"]
+    fn measure_dense_minecart_owner_workers() {
+        use std::time::Instant;
+
+        for count in [64, 128, 256, 512, 1_024] {
+            let serial = dense_minecart_owner_fixture(count);
+            let parallel = dense_minecart_owner_fixture(count);
+
+            let started = Instant::now();
+            let _ = serial.tick_minecart_owner_batches_with_workers(&flat_world(), 1);
+            let serial_ms = started.elapsed().as_secs_f64() * 1_000.0;
+
+            let started = Instant::now();
+            let _ = parallel.tick_minecart_owner_batches_with_workers(&flat_world(), 4);
+            let parallel_ms = started.elapsed().as_secs_f64() * 1_000.0;
+
+            println!(
+                "dense_minecart owners=4 minecarts={count} serial_ms={serial_ms:.3} parallel_ms={parallel_ms:.3} speedup={:.3}",
+                serial_ms / parallel_ms
+            );
+        }
     }
 
     /// A flat stone floor at `y = 60`, plain rail at `y = 61` running

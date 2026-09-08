@@ -9,7 +9,6 @@
 
 use std::collections::HashSet;
 
-use serde::Deserialize;
 use serde_json::Value;
 
 use crate::density::Resolver;
@@ -23,28 +22,6 @@ use super::config::{
     BlockStateProvider, VegTags, is_air, resolve_block_set, try_parse_int_provider,
 };
 use super::grid::VegGrid;
-
-/// Strict geode configuration envelope. Provider and holder-set payloads are
-/// kept dynamic because their state ids and tags are versioned registry data;
-/// the geode codec still owns and validates the surrounding field set.
-#[allow(dead_code)]
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GeodeConfigJson {
-    blocks: Value,
-    layers: Value,
-    crack: Value,
-    invalid_blocks_threshold: i32,
-    outer_wall_distance: Option<Value>,
-    distribution_points: Option<Value>,
-    point_offset: Option<Value>,
-    use_potential_placements_chance: Option<f64>,
-    use_alternate_layer0_chance: Option<f64>,
-    placements_require_layer0_alternate: Option<bool>,
-    min_gen_offset: Option<i32>,
-    max_gen_offset: Option<i32>,
-    noise_multiplier: Option<f64>,
-}
 
 /// Parsed configuration for the geode body used by 26.2's cave decoration.
 ///
@@ -86,7 +63,6 @@ impl GeodeCfg {
     /// bundled data. A malformed provider or holder set leaves the enclosing
     /// configured feature unsupported instead of guessing a shape.
     pub(super) fn try_parse(resolver: &dyn Resolver, c: &Value) -> Option<Self> {
-        serde_json::from_value::<GeodeConfigJson>(c.clone()).ok()?;
         let blocks = c.get("blocks")?;
         let filling_provider = BlockStateProvider::try_parse(&blocks["filling_provider"])?;
         let inner_layer_provider = BlockStateProvider::try_parse(&blocks["inner_layer_provider"])?;
@@ -242,6 +218,7 @@ fn max_inclusive(provider: &IntProvider) -> i32 {
     match provider {
         IntProvider::Constant(value) => *value,
         IntProvider::Uniform { max, .. }
+        | IntProvider::Clamped { max, .. }
         | IntProvider::BiasedToBottom { max, .. }
         | IntProvider::Trapezoid { max, .. }
         | IntProvider::ClampedNormal { max, .. } => *max,
@@ -258,6 +235,7 @@ fn provider_bounds(provider: &IntProvider) -> Option<(i32, i32)> {
     match provider {
         IntProvider::Constant(value) => Some((*value, *value)),
         IntProvider::Uniform { min, max }
+        | IntProvider::Clamped { min, max, .. }
         | IntProvider::BiasedToBottom { min, max }
         | IntProvider::Trapezoid { min, max, .. }
         | IntProvider::ClampedNormal { min, max, .. } => Some((*min, *max)),

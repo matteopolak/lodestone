@@ -152,6 +152,7 @@ impl Sim {
         let handle = net.shared_handle();
         self.write(|w| w.insert_resource(NetHandle(Some(handle))));
         self.net = Some(net);
+        self.join_trace.restart();
         self.status = "connecting…".into();
         self.set_phase(SessionPhase::Connecting);
         // The store itself is adopted later, in `poll_net`: `NetClient::connect`
@@ -1160,6 +1161,24 @@ impl Sim {
         self.read(|w| {
             w.get::<Attributes>(self.local)
                 .map(|attrs| attribute_value(&attrs.0, &key).floor() as i32)
+        })
+    }
+
+    /// Maximum health reported in the local player's attribute snapshot.
+    ///
+    /// `None` retains the normal one-row HUD before a live server has supplied
+    /// attributes. Once present, Health Boost's folded `minecraft:max_health`
+    /// value determines the number of heart rows; it is deliberately not
+    /// inferred from current health, since a hurt boosted player can be below
+    /// 20 while still needing the second row.
+    #[must_use]
+    pub fn max_health(&self) -> Option<f32> {
+        let key = lodestone_model::Identifier::new("minecraft", "max_health")
+            .expect("valid built-in identifier");
+        self.read(|w| {
+            w.get::<Attributes>(self.local)
+                .and_then(|attrs| attrs.0.iter().find(|snapshot| snapshot.attribute == key))
+                .map(|snapshot| snapshot.base.clamp(1.0, 1024.0) as f32)
         })
     }
 

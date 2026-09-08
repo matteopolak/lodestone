@@ -590,8 +590,8 @@ pub struct UiState {
     /// whichever opened it. See [`UiState::open_settings`],
     /// [`UiState::open_settings_from_pause`] and [`UiState::close_settings`].
     settings_return: Screen,
-    /// Where the Friends screen returns to. Besides the title and pause menu,
-    /// Online Options can open its account-scoped settings directly.
+    /// Where the Friends screen returns to. Unlike Settings, only the title
+    /// and pause menu can open it.
     friends_return: Screen,
     /// The current death's message, populated only on [`Screen::Death`] — see
     /// [`Self::die`]. Mirrors how [`Self::error`] carries `Screen::Error`'s
@@ -769,13 +769,10 @@ impl UiState {
         self.screen == Screen::Settings
     }
 
-    /// Whether Friends is open over a paused world, directly or through Options,
-    /// rather than from the title.
+    /// Whether Friends is open over a paused world rather than from the title.
     #[must_use]
     pub fn friends_in_world(&self) -> bool {
-        self.screen == Screen::Friends
-            && (self.friends_return == Screen::Paused
-                || (self.friends_return == Screen::Settings && self.settings_in_world()))
+        self.screen == Screen::Friends && self.friends_return == Screen::Paused
     }
 
     /// Whether the shell is on any pre-session menu screen, i.e. no world is
@@ -1057,17 +1054,6 @@ impl UiState {
     pub fn open_friends_from_pause(&mut self) {
         if self.screen == Screen::Paused {
             self.friends_return = Screen::Paused;
-            self.screen = Screen::Friends;
-        }
-    }
-
-    /// Open Friends' Settings tab from Online Options while preserving the
-    /// settings return stack. This is the one route that can make Friends an
-    /// overlay indirectly: when Options was opened from pause,
-    /// `friends_in_world` remains true through the two-screen stack.
-    pub fn open_friends_from_settings(&mut self) {
-        if self.screen == Screen::Settings {
-            self.friends_return = Screen::Settings;
             self.screen = Screen::Friends;
         }
     }
@@ -2366,32 +2352,6 @@ mod tests {
             Screen::Playing,
             "playing, not paused, so no-op"
         );
-    }
-
-    #[test]
-    fn friends_settings_preserve_the_options_return_stack() {
-        let mut ui = UiState::new();
-        ui.open_settings();
-        ui.open_friends_from_settings();
-        assert_eq!(ui.screen(), Screen::Friends);
-        assert!(!ui.friends_in_world());
-        ui.close_friends();
-        assert_eq!(ui.screen(), Screen::Settings);
-        ui.close_settings();
-        assert_eq!(ui.screen(), Screen::MainMenu);
-
-        let mut ui = UiState::new();
-        ui.enter_dev_world();
-        ui.pause();
-        ui.open_settings_from_pause();
-        ui.open_friends_from_settings();
-        assert_eq!(ui.screen(), Screen::Friends);
-        assert!(ui.friends_in_world(), "pause -> Options -> Friends stays an overlay");
-        assert!(!ui.is_menu(), "the paused world remains behind Friends");
-        ui.close_friends();
-        assert_eq!(ui.screen(), Screen::Settings);
-        ui.close_settings();
-        assert_eq!(ui.screen(), Screen::Paused);
     }
 
     #[test]

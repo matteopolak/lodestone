@@ -28,7 +28,8 @@ use std::sync::{Arc, RwLock, RwLockWriteGuard};
 use lodestone_ecs::ecs::entity::Entity;
 use lodestone_ecs::session::{
     ServerAlive, ServerBiomeSkyColors, ServerDimension, ServerDimensionType, ServerEntityId,
-    ServerGameMode, SessionBossBars, SessionMenus, SessionScoreboard, SessionTabList, Vitals, Xp,
+    ServerGameMode, SessionBlockDestruction, SessionBossBars, SessionMenus, SessionScoreboard,
+    SessionTabList, Vitals, Xp,
 };
 use lodestone_ecs::{ChunkWorld, ChunkWorldWrite, EcsHandle, WorldTime};
 use lodestone_game::bossbar::BossBarSet;
@@ -405,6 +406,11 @@ pub(crate) struct SharedState {
     /// cached at construction so the ordinary client does not clone inbound
     /// packet payloads or take an ECS lock when no plugin observes them.
     raw_packet_bus_enabled: bool,
+    /// Whether [`Self::ecs`] carries [`lodestone_ecs::OutboundRawPacketBus`].
+    /// This is cached at construction so the ordinary client does not clone
+    /// outbound packet payloads or take an ECS lock when no plugin observes
+    /// them.
+    outbound_raw_packet_bus_enabled: bool,
     /// Whether the driver's live [`ConnectionState`](lodestone_model::ConnectionState)
     /// is currently `Play`, kept in lockstep with `Driver::state` by the
     /// `Directive::SetState` arm in `driver.rs`.
@@ -438,7 +444,12 @@ impl Default for SharedState {
         // systems as well as `IngestPlugin`'s, so this `World` folds the session
         // read-model too. It needs one entity to hang those components off.
         let world = Arc::new(RwLock::new(World::new()));
-        let (session, game_event_bus_enabled, raw_packet_bus_enabled) =
+        let (
+            session,
+            game_event_bus_enabled,
+            raw_packet_bus_enabled,
+            outbound_raw_packet_bus_enabled,
+        ) =
             lodestone_ecs::hold_write(&ecs, |world_ecs| {
                 world_ecs.insert_resource(WorldTime::default());
                 // Stage 4 (§4.1(d)): the chunk store is a resource, and it is the
@@ -457,7 +468,14 @@ impl Default for SharedState {
                     world_ecs.contains_resource::<lodestone_ecs::GameEventBus>();
                 let raw_packet_bus_enabled =
                     world_ecs.contains_resource::<lodestone_ecs::RawPacketBus>();
-                (session, game_event_bus_enabled, raw_packet_bus_enabled)
+                let outbound_raw_packet_bus_enabled = world_ecs
+                    .contains_resource::<lodestone_ecs::OutboundRawPacketBus>();
+                (
+                    session,
+                    game_event_bus_enabled,
+                    raw_packet_bus_enabled,
+                    outbound_raw_packet_bus_enabled,
+                )
             });
         Self {
             inner: Arc::new(RwLock::new(LocalEcho::default())),
@@ -467,6 +485,7 @@ impl Default for SharedState {
             session,
             game_event_bus_enabled,
             raw_packet_bus_enabled,
+            outbound_raw_packet_bus_enabled,
             in_play: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -532,11 +551,16 @@ impl SharedState {
     /// `lodestone_shell::sim::Sim`, brokered / out of this pass's scope)
     /// decides by adding `GameEventBusPlugin` before calling this.
     pub(crate) fn adopting(ecs: EcsHandle, session: Entity) -> Self {
-        let (game_event_bus_enabled, raw_packet_bus_enabled) =
+        let (
+            game_event_bus_enabled,
+            raw_packet_bus_enabled,
+            outbound_raw_packet_bus_enabled,
+        ) =
             lodestone_ecs::hold_read(&ecs, |world| {
                 (
                     world.contains_resource::<lodestone_ecs::GameEventBus>(),
                     world.contains_resource::<lodestone_ecs::RawPacketBus>(),
+                    world.contains_resource::<lodestone_ecs::OutboundRawPacketBus>(),
                 )
             });
         Self {
@@ -547,6 +571,7 @@ impl SharedState {
             session,
             game_event_bus_enabled,
             raw_packet_bus_enabled,
+            outbound_raw_packet_bus_enabled,
             in_play: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -571,6 +596,35 @@ impl SharedState {
         }
     }
 
+    /// Publishes one outbound packet after the version adapter (and any
+    /// decorator around it) has encoded it, before transport framing. The
+    /// packet is still written when the observer's bounded window is full;
+    /// only the copy for the observer is dropped.
+    pub(crate) fn record_outbound_raw_packet(
+        &self,
+        state: ConnectionState,
+        packet_id: i32,
+        payload: &[u8],
+    ) {
+        #[cfg(target_arch = "wasm32")]
+        let _ = (state, packet_id, payload);
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.outbound_raw_packet_bus_enabled {
+            lodestone_ecs::hold_write(&self.ecs, |world| {
+                let accepted = world
+                    .resource_mut::<lodestone_ecs::OutboundRawPacketBus>()
+                    .try_reserve(payload.len());
+                if accepted {
+                    world.write_message(lodestone_ecs::OutboundRawPacket {
+                        state,
+                        packet_id,
+                        payload: payload.to_vec(),
+                    });
+                }
+            });
+        }
+    }
+
     /// Returns a future-friendly handle used by waiters to be woken when the
     /// state changes. Callers register `notified()` *before* re-checking their
     /// predicate to avoid missing a wake-up.
@@ -584,6 +638,33 @@ impl SharedState {
     /// notification separately).
     pub(crate) fn wake(&self) {
         self.notify.notify_waiters();
+    }
+
+    /// Clear renderer-owned block-crack state for an event whose normal
+    /// consumer is outside the ECS session fold.
+    ///
+    /// `ChunkUnloaded`, `Disconnect`, and `SessionFailed` are intentionally
+    /// routed to the shell/client stream, not to `SessionPlugin`: the former
+    /// drives mesh eviction and the latter ends the shell session. The crack
+    /// state nevertheless lives on the shared session entity, so clear it at
+    /// this broker boundary before forwarding the event. This keeps a dropped
+    /// chunk or dead transport from leaving a drawable overlay behind.
+    fn clear_block_destruction_lifecycle(&self, event: &ClientEvent) {
+        let clear_chunk = match event {
+            ClientEvent::ChunkUnloaded { pos } => Some((pos.x, pos.z)),
+            ClientEvent::Disconnect { .. } | ClientEvent::SessionFailed { .. } => None,
+            _ => return,
+        };
+        lodestone_ecs::hold_write(&self.ecs, |world| {
+            let Some(mut overlays) = world.get_mut::<SessionBlockDestruction>(self.session) else {
+                return;
+            };
+            if let Some((chunk_x, chunk_z)) = clear_chunk {
+                overlays.0.clear_chunk(chunk_x, chunk_z);
+            } else {
+                overlays.0.clear();
+            }
+        });
     }
 
     /// Folds a non-chunk event into the read-model, then wakes waiters.
@@ -616,6 +697,7 @@ impl SharedState {
     /// entities, so it is not worth an API change to avoid — but if `apply` ever
     /// takes the event by value, drop it.
     pub(crate) fn apply(&self, event: &ClientEvent) {
+        self.clear_block_destruction_lifecycle(event);
         // Push to the optional event bus before routing. This deliberately
         // avoids matching on `event`, so every event variant reaches the bus
         // without needing a parallel routing table here.
@@ -1675,6 +1757,74 @@ mod tests {
             ecs.get::<ServerSimulationDistance>(state.session).unwrap().0,
             Some(11),
             "an unrelated event is not a simulation-distance update"
+        );
+    }
+
+    #[test]
+    fn apply_clears_crack_overlays_for_chunk_and_session_lifecycles() {
+        let state = SharedState::default();
+        let unloaded = BlockPos::new(-1, 64, -1);
+        let retained = BlockPos::new(16, 64, 0);
+
+        state.apply(&ClientEvent::BlockDestruction {
+            entity_id: 7,
+            pos: unloaded,
+            progress: 3,
+        });
+        state.apply(&ClientEvent::BlockDestruction {
+            entity_id: 8,
+            pos: retained,
+            progress: 6,
+        });
+        state.apply(&ClientEvent::ChunkUnloaded {
+            pos: ChunkPos::new(-1, -1),
+        });
+        {
+            let ecs = state.ecs.read();
+            let overlays = &ecs
+                .get::<SessionBlockDestruction>(state.session)
+                .expect("the session owns crack state")
+                .0;
+            assert_eq!(overlays.stage_at(unloaded), None);
+            assert_eq!(overlays.stage_at(retained), Some(6));
+        }
+
+        // Re-populate the unloaded chunk before each session-ending event so
+        // both event variants prove their own cleanup path.
+        state.apply(&ClientEvent::BlockDestruction {
+            entity_id: 9,
+            pos: unloaded,
+            progress: 2,
+        });
+        state.apply(&ClientEvent::Disconnect {
+            reason: Text::literal("closed"),
+        });
+        {
+            let ecs = state.ecs.read();
+            assert!(
+                ecs.get::<SessionBlockDestruction>(state.session)
+                    .expect("the session owns crack state")
+                    .0
+                    .is_empty(),
+                "server disconnect must clear all drawable crack state"
+            );
+        }
+
+        state.apply(&ClientEvent::BlockDestruction {
+            entity_id: 10,
+            pos: retained,
+            progress: 1,
+        });
+        state.apply(&ClientEvent::SessionFailed {
+            reason: "transport closed".to_owned(),
+        });
+        let ecs = state.ecs.read();
+        assert!(
+            ecs.get::<SessionBlockDestruction>(state.session)
+                .expect("the session owns crack state")
+                .0
+                .is_empty(),
+            "client-side session failure must clear all drawable crack state"
         );
     }
 

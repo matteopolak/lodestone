@@ -68,8 +68,9 @@ message LightData {
   }
 }
 
-// Only built-in server actions have a native representation. Custom actions
-// have no lossless decoder in this format and must be rejected by its adapter.
+// Built-in actions use the compact enum. An extension action leaves kind at
+// UNSPECIFIED and carries its exact producer-owned discriminator in
+// extension_kind, so a reader can preserve an action it does not execute yet.
 message ScheduledTick {
   sint32 x = 1;
   sint32 y = 2;
@@ -78,6 +79,7 @@ message ScheduledTick {
   uint64 trigger_tick = 5;
   ScheduledTickPriority priority = 6;
   uint64 insertion_order = 7;
+  string extension_kind = 8;
 }
 
 enum ScheduledTickKind {

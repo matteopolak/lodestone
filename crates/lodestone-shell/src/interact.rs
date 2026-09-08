@@ -79,7 +79,7 @@ use lodestone_ecs::player::{
     LastFlyingSent, LastSprintingSent, LocalPlayer, MovementIntent, PhysicsState, PlaceIntent,
     PlaceOutcome, PlaceRejection, PlaceStatus, Profile, SelectSlotIntent, SelectedSlot, Submersion,
 };
-use lodestone_ecs::session::{Abilities, ServerEntityId, SessionMenus};
+use lodestone_ecs::session::{Abilities, HudEffects, ServerEntityId, SessionMenus};
 use lodestone_ecs::veto::{ActionVetoes, VerbContext, Verdict};
 use lodestone_ecs::{ChunkWorld, ChunkWorldWrite, FrameClock, GameTick, TickSet, VersionData};
 use lodestone_game::mining::Mining;
@@ -94,7 +94,8 @@ use crate::particles::Particles;
 use crate::raycast::{PickBox, RayHit, raycast};
 use crate::sim::{
     AudioEngine, HOTBAR_SLOTS, OFFHAND_NATIVE_INDEX, bare_handed_tool_mining,
-    block_intersects_player, block_sound_seed, block_states_of, dig_break_inputs, face_from_normal,
+    block_intersects_player, block_sound_seed, block_states_of, dig_break_inputs_with_effects,
+    face_from_normal, mining_effect_amplifiers,
     hit_cursor, orientation_for_placement, particle_face, placement_facts, state_for_placement,
     write_predicted_block,
 };
@@ -726,6 +727,7 @@ pub fn drive_mining(
             Option<&BreakIntent>,
             &mut BreakOutcome,
             Option<&Abilities>,
+            Option<&HudEffects>,
         ),
         With<LocalPlayer>,
     >,
@@ -733,7 +735,7 @@ pub fn drive_mining(
     if !(egress.in_world && egress.live) {
         return;
     }
-    let Ok((state, submersion, slot, dead, menus, intent, mut outcome, abilities)) =
+    let Ok((state, submersion, slot, dead, menus, intent, mut outcome, abilities, effects)) =
         players.single_mut()
     else {
         return;
@@ -857,7 +859,8 @@ pub fn drive_mining(
     let tool = version
         .tool_mining(held.as_ref(), state_id)
         .unwrap_or_else(|| bare_handed_tool_mining(entry));
-    let inputs = dig_break_inputs(
+    let (haste_amplifier, mining_fatigue) = mining_effect_amplifiers(effects);
+    let inputs = dig_break_inputs_with_effects(
         entry,
         tool,
         id_value == id::AIR,
@@ -865,6 +868,8 @@ pub fn drive_mining(
         // `eye_in_water`, not `under_water()` — see "Trap 2" on `dig_break_inputs`.
         submersion.0.eye_in_water,
         creative,
+        haste_amplifier,
+        mining_fatigue,
     );
 
     // The block-break veto is checked *before* `continue_` advances the dig

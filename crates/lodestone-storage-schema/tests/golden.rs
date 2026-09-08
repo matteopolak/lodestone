@@ -446,6 +446,80 @@ fn scheduled_tick_enums_reject_unknown_or_unspecified_actions_before_storage() {
     );
 }
 
+#[test]
+fn scheduled_tick_extension_kind_is_validated_and_wire_lossless() {
+    let mut record = StorageRecord::decode(fixture(CHUNK_V1).as_slice()).unwrap();
+    set_scheduled_tick(
+        &mut record,
+        ScheduledTickKind::Unspecified as i32,
+        ScheduledTickPriority::High as i32,
+    );
+    {
+        let Some(storage_record::Record::Chunk(chunk)) = &mut record.record else {
+            unreachable!();
+        };
+        chunk.block_scheduled_ticks[0].extension_kind = "example:plugin_tick".to_owned();
+    }
+    validate_record(&record).unwrap();
+
+    {
+        let Some(storage_record::Record::Chunk(chunk)) = &mut record.record else {
+            unreachable!();
+        };
+        chunk.block_scheduled_ticks[0].kind = ScheduledTickKind::Repeater as i32;
+    }
+    assert_eq!(
+        validate_record(&record),
+        Err(ValidationError::ScheduledTickKindConflict)
+    );
+    {
+        let Some(storage_record::Record::Chunk(chunk)) = &mut record.record else {
+            unreachable!();
+        };
+        chunk.block_scheduled_ticks[0].kind = 99;
+    }
+    assert_eq!(
+        validate_record(&record),
+        Err(ValidationError::UnknownScheduledTickKind(99))
+    );
+    {
+        let Some(storage_record::Record::Chunk(chunk)) = &mut record.record else {
+            unreachable!();
+        };
+        chunk.block_scheduled_ticks[0].kind = ScheduledTickKind::Unspecified as i32;
+    }
+
+    // Independent wire control: x/y/z use sint32 zig-zag, and field 8 is a
+    // length-delimited string. The unspecified enum kind is omitted by the
+    // protobuf default-value rule.
+    let encoded_tick = {
+        let Some(storage_record::Record::Chunk(chunk)) = &record.record else {
+            unreachable!();
+        };
+        chunk.block_scheduled_ticks[0].encode_to_vec()
+    };
+    assert_eq!(
+        encoded_tick,
+        vec![
+            0x08, 0x1f, 0x10, 0x8c, 0x01, 0x18, 0x40, 0x28, 0x7b, 0x30, 0x03, 0x38, 0x09,
+            0x42, 0x13, b'e', b'x', b'a', b'm', b'p', b'l', b'e', b':', b'p', b'l', b'u',
+            b'g', b'i', b'n', b'_', b't', b'i', b'c', b'k',
+        ]
+    );
+
+    let encoded = record.encode_to_vec();
+    let decoded = StorageRecord::decode(encoded.as_slice()).unwrap();
+    let Some(storage_record::Record::Chunk(chunk)) = decoded.record.as_ref() else {
+        unreachable!();
+    };
+    assert_eq!(
+        chunk.block_scheduled_ticks[0].kind,
+        ScheduledTickKind::Unspecified as i32,
+    );
+    assert_eq!(chunk.block_scheduled_ticks[0].extension_kind, "example:plugin_tick");
+    assert_eq!(decoded.encode_to_vec(), encoded);
+}
+
 fn set_scheduled_tick(record: &mut StorageRecord, kind: i32, priority: i32) {
     let Some(storage_record::Record::Chunk(chunk)) = &mut record.record else {
         unreachable!();
@@ -458,6 +532,7 @@ fn set_scheduled_tick(record: &mut StorageRecord, kind: i32, priority: i32) {
         trigger_tick: 123,
         priority,
         insertion_order: 9,
+        extension_kind: String::new(),
     }];
 }
 

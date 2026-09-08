@@ -487,7 +487,7 @@ fn hosted_block_place_lifts_both_cursor_encodings_into_server_consumed_actions()
                 pos: BlockPos::new(1, 64, -2),
                 face: BlockFace::East,
                 cursor: expected_cursor,
-                sequence: lodestone_model::PredictionSequence::INITIAL,
+                sequence: 0,
                 hand: 1,
             }
         );
@@ -591,6 +591,69 @@ fn hosted_block_place_sentinel_reaches_the_use_item_consumer() {
             yaw: 0.0,
             pitch: 0.0,
         }
+    );
+}
+
+#[test]
+fn protocol_340_use_entity_forms_reach_shared_entity_consumers() {
+    let protocol = lodestone_registry::server_protocol_for_protocol(340)
+        .expect("protocol 340 must resolve to the hosted server protocol");
+    let packet_id = lodestone_v1_9::packet_ids::play::serverbound::USE_ENTITY;
+
+    // Literal VarInt target 300 (`ac 02`) followed by attack (`1`). Attack
+    // has no hand field on this wire and therefore reaches its own canonical
+    // consumer directly.
+    assert_eq!(
+        protocol.decode(State::Play, packet_id, &[0xac, 0x02, 0x01]),
+        ServerBound::Attack { entity_id: 300 }
+    );
+
+    // Plain interaction (`0`) carries the off-hand ordinal (`1`).
+    assert_eq!(
+        protocol.decode(State::Play, packet_id, &[0xac, 0x02, 0x00, 0x01]),
+        ServerBound::InteractEntity {
+            entity_id: 300,
+            hand: 1,
+            using_secondary_action: false,
+        }
+    );
+
+    // Interact-at (`2`) carries three big-endian f32 coordinates before its
+    // main-hand ordinal. The shared action has no point-bearing carrier, so
+    // the coordinates are consumed and validated, then deliberately dropped.
+    let interact_at = [
+        0xac, 0x02, 0x02,
+        0x3f, 0xa0, 0x00, 0x00, // x = 1.25
+        0xbf, 0x00, 0x00, 0x00, // y = -0.5
+        0x3f, 0x40, 0x00, 0x00, // z = 0.75
+        0x00, // main hand
+    ];
+    assert_eq!(
+        protocol.decode(State::Play, packet_id, &interact_at),
+        ServerBound::InteractEntity {
+            entity_id: 300,
+            hand: 0,
+            using_secondary_action: false,
+        }
+    );
+
+    // Controls cover every rejection arm at this packet boundary.
+    for body in [
+        &[0xac, 0x02, 0x03][..], // unknown mouse discriminator
+        &[0xac, 0x02, 0x00, 0x02][..], // unknown hand
+        &[0xac, 0x02, 0x02, 0x3f, 0xa0][..], // truncated point
+        &[0xac, 0x02, 0x00, 0x00, 0x00][..], // trailing byte
+    ] {
+        assert_eq!(
+            protocol.decode(State::Play, packet_id, body),
+            ServerBound::Ignored,
+            "malformed use_entity body {body:?} must not reach a shared consumer"
+        );
+    }
+    assert_eq!(
+        protocol.decode(State::Login, packet_id, &[0xac, 0x02, 0x01]),
+        ServerBound::Ignored,
+        "use_entity must not bypass the Play-state boundary"
     );
 }
 

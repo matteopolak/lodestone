@@ -538,6 +538,16 @@ impl ProjectileRegistry {
         Some(self.entries.remove(idx))
     }
 
+    /// Replaces the complete tracked state for `id`, preserving its lifetime
+    /// counter and projectile family data from the caller's tick-start plan.
+    pub fn replace(&mut self, tracked: TrackedProjectile) -> bool {
+        let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == tracked.id) else {
+            return false;
+        };
+        *entry = tracked;
+        true
+    }
+
     /// The current ballistic state of `id`, if tracked.
     #[must_use]
     pub fn get(&self, id: i32) -> Option<&Projectile> {

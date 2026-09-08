@@ -373,9 +373,7 @@ pub(super) fn recipe_panel_pointer_hit(
 /// `None` for an id outside the generated table, same "draw nothing rather
 /// than guess" contract as [`crate::container::merchant::cost_item_stack`],
 /// which resolves the same table for the same reason.
-pub(super) fn recipe_item_identifier(
-    id: lodestone_model::ItemId,
-) -> Option<lodestone_model::Identifier> {
+pub(super) fn recipe_item_identifier(id: lodestone_model::ItemId) -> Option<lodestone_model::Identifier> {
     u16::try_from(id.canonical_raw()?)
         .ok()
         .and_then(Item::from_registry_id)
@@ -440,12 +438,12 @@ mod ghost_result_stack_tests {
     /// the case that would fail if the fallback lookup were skipped.
     #[test]
     fn the_first_resolvable_candidate_wins_over_an_earlier_unresolvable_one() {
-        let id = lodestone_model::ItemId::canonical(350);
+        let id = 350;
         let ghost = GhostRecipe {
             window_id: 1,
             result_items: vec![
                 lodestone_model::ItemId::protocol_local(i32::MAX as u32),
-                id,
+                lodestone_model::ItemId::canonical(id),
             ],
         };
         let stack = ghost_result_stack(&ghost).expect("the second candidate must resolve");

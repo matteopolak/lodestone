@@ -143,10 +143,9 @@ world-write = []
 # A denied-by-default filesystem write import. The fixture writes one file inside
 # the configured root and attempts one path outside it for the confinement gate.
 fs-write = []
-# The privileged, exact-version broker fixture. It reads only the copied
-# descriptor and protocol record during `init`; the host tests grant this
-# capability explicitly and provide the matching version lock.
-version-broker = []
+# The lifecycle fixture writes a file and then deletes it through the ABI's
+# empty-write deletion convention, proving the guest controls deletion too.
+fs-delete = []
 
 [dependencies]
 # The only dependency, and it must stay that way: everything a guest links is

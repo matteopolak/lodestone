@@ -47,7 +47,6 @@ live-entity = []
 live-interaction = []
 
 [dev-dependencies]
-lodestone-ecs = { workspace = true }
 lodestone-client = { workspace = true }
 lodestone-net = { workspace = true }
 lodestone-registry = { workspace = true, features = ["v1-9"] }

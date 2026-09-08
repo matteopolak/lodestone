@@ -14,6 +14,14 @@ The wire adapter and render-side type-path consumers resolve their external id o
 path before that lookup; an unknown or plugin type remains a miss and follows
 the caller's existing fallback instead of borrowing a built-in hitbox.
 
+The programmable client read-model follows the same ownership rule for entity
+instances: `ClientHandle::entity_by_network_id` accepts an `EntityNetworkId`
+classified as server-owned, while plugin-local ids remain at the ECS/plugin
+boundary. The raw `ClientHandle::entity(i32)` compatibility method performs
+that server-wire classification first, so an unknown or removed server id is a
+normal lookup miss and a negative local id cannot be mistaken for a server
+entity.
+
 Display-entity billboard metadata crosses the version seam as
 `lodestone_model::BillboardMode`, so the ECS and renderer cannot confuse its
 four semantic modes with an arbitrary byte. The version adapter performs the
@@ -96,12 +104,23 @@ The ominous spawner needed no protocol work — metadata routes `ITEM_STACK` fie
 
 ### Nametags
 
-Two vanilla resolution rules, applied once:
+Two wire-backed resolution rules feed one `NameTag { text, see_through }`:
 
-- **A player's tag is always its tab-list display name.** UUID-keyed rows are looked up by the entity UUID. Protocol 5 instead preserves the profile name carried beside the UUID in `named_entity_spawn` as `PlayerProfileName`, then uses an exact match on that wire-authored name to find the name-keyed row. It never derives one identity from the other. A server can decorate or truncate the separate player-list name so the two names do not match; that case is unresolvable from protocol 5's wire data and draws no player tag rather than guessing. A resolved name must also survive a tab-list entry that's since been removed (a server-spawned fake-player NPC commonly adds then removes one), via a per-UUID last-known-name cache, the name-side twin of the skin cache.
+- **A player's tag is its tab-list display name.** UUID-keyed rows are looked up by the entity UUID. Protocol 5 instead preserves the profile name carried beside the UUID in `named_entity_spawn` as `PlayerProfileName`, then uses an exact match on that wire-authored name to find the name-keyed row. It never derives one identity from the other. A server can decorate or truncate the separate player-list name so the two names do not match; that case is unresolvable from protocol 5's wire data and draws no player tag rather than guessing.
 - **Every other entity's tag is `CUSTOM_NAME`, gated on `CUSTOM_NAME_VISIBLE`.** No fallback to a translated type name.
 
-Both resolve to one `NameTag { text, see_through }`, gated further by the target's team `name_tag_visibility` rule; `see_through` is sneaking, and suppresses the depth-testless pass.
+`TabList` keeps active rows separate from a session-local identity history. A
+remove therefore clears the overlay immediately while a still-spawned entity
+can resolve its profile name; this also covers an add/remove pair folded before
+the first entity render. The history is reset with the session component, and
+the UUID/name fallback remains per identity rather than leaking one player's
+name to another. A resolved name is additionally retained in the render skin
+cache for a transient missing-row frame.
+
+Both sources are gated by the target team's `name_tag_visibility` rule and the
+shared invisibility flag; armour stands are the intentional exception so an
+invisible named stand remains a hologram. `see_through` is the crouching
+visibility pass switch, and suppresses the depth-testless pass.
 
 Style (colour incl. hex, bold, italic, underline, strikethrough) walks a real `Text`/`TextSpan` tree, no legacy-string bridge, so hex colour survives. Bold redraws the glyph offset (not a font weight) and widens the advance. **No drop shadow** (vanilla passes `drawShadow = false` here). **`§k` (obfuscated) is not implemented** — needs per-frame resample state this renderer doesn't keep.
 
@@ -109,7 +128,13 @@ Style (colour incl. hex, bold, italic, underline, strikethrough) walks a real `T
 
 The plate (background rect) has asymmetric one-pixel padding, left/top only — symmetric padding is a plausible-looking wrong port — and needs no z-offset (a billboard is planar to the view axis, so draw order, not depth, separates plate from glyph). It's black at `0.25` opacity in vanilla's *gamma* space: drawing into an sRGB swapchain view instead blends in linear light and reads too weak against a bright backdrop, fixed by drawing world-text passes into a raw non-sRGB view rather than tuning the constant. The normal and see-through passes each submit a different colour/background/plate combination, so both must be read together or the composite silently loses the plate or the sneaking-tag alpha.
 
-Distance cutoff is 64 blocks squared, camera to the entity's **feet**, not the tag anchor; anchor height comes from the jar-derived per-type hitbox census. Per-type attachment overrides (sitting cat, sleeping villager) aren't ported — every entity uses the generic fallback.
+Distance cutoff is 64 blocks squared, camera to the entity's **feet**, not the
+tag anchor. The anchor is the entity's current bounding-box top plus `0.5`
+blocks: the jar-derived per-type dimensions census supplies the standing
+height, `EntityDraw::scale` carries baby/small-stand scale, a crouching player
+uses its 1.5-block pose box, and a marker armour stand overrides the height to
+zero. Per-type attachment overrides (sitting cat, sleeping villager) aren't
+ported, so the generic bounding-box point remains the fallback.
 
 ### Entity picking
 
@@ -140,7 +165,7 @@ Gotchas: `(double)0.6F != 0.6` — pose heights are widened `f32` literals, buil
 * **Wiring real world light / sky darkening**: both ride a source function installed at connect time, on *every* connect path; until installed, mobs render full-bright / permanent-noon. Terrain does not yet read the sky-darken lane, though the shared uniform already carries it.
 * **Adding a picking filter**: goes ahead of the hitbox lookup. Keep the table a default-deny allowlist, never a denylist.
 * **Adding a pose**: extend the pose table with vanilla's real dimensions and check `getDesiredPose`'s priority order before wiring the input.
-* **Entity metadata indices are reused across unrelated classes** — always run the metadata index oracle rather than hand-counting when adding a new decoded field; a class guard (not a bare index check) is what keeps two mobs' same-index fields from colliding.
+* **Entity metadata indices are reused across unrelated classes** — always run the metadata index oracle rather than hand-counting when adding a new decoded field; a class guard (not a bare index check) is what keeps two mobs' same-index fields from colliding. When changing name visibility or stand anchors, keep a literal byte fixture through the metadata decoder and a render/state control through `EntityDraw`, so a symmetric test cannot hide a wrong index or a disconnected consumer.
 
 ## Configuration
 

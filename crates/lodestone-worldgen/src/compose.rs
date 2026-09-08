@@ -194,6 +194,44 @@ impl DecorationCatalog {
         out
     }
 
+    /// Selects modeled non-ore features from `UNDERGROUND_ORES` with their
+    /// global raw index. This remains separate from [`Self::select`] because
+    /// step 6 has an interleaved ore stream; currently underwater magma is the
+    /// only non-ore body in that stream.
+    #[must_use]
+    pub fn select_step6_non_ore<'a>(
+        &'a self,
+        biomes: impl IntoIterator<Item = &'a str>,
+    ) -> Vec<(i32, usize, crate::feature::vegetation::PlacedRef)> {
+        let mut selected = HashSet::new();
+        for biome in biomes {
+            if let Some(entries) = self.members.get(biome) {
+                selected.extend(entries.iter().cloned());
+            }
+        }
+        let mut per_step = HashMap::<i32, usize>::new();
+        self.ordered
+            .iter()
+            .filter_map(|(step, id)| {
+                let index = per_step.entry(*step).or_default();
+                let result = (*step == STEP_UNDERGROUND_ORES
+                    && selected.contains(&(*step, id.clone())))
+                    .then(|| {
+                        self.placed.get(id).and_then(|placed| {
+                            matches!(
+                                placed.feature.as_ref(),
+                                crate::feature::vegetation::ConfiguredFeature::UnderwaterMagma(_)
+                            )
+                            .then(|| (*step, *index, placed.clone()))
+                        })
+                    })
+                    .flatten();
+                *index += 1;
+                result
+            })
+            .collect()
+    }
+
     /// Resolves all ore-capable selected entries with their **global** index in
     /// `UNDERGROUND_ORES`. The eligible set is the source chunk's complete
     /// section-biome container: one point biome is insufficient when an
@@ -830,6 +868,7 @@ mod tests {
         let mut first_steps = vec![Value::Array(Vec::new()); 7];
         first_steps[STEP_UNDERGROUND_ORES as usize] = serde_json::json!([
             "minecraft:non_disk_a",
+            "minecraft:underwater_magma",
             "minecraft:disk_gravel"
         ]);
         let mut second_steps = vec![Value::Array(Vec::new()); 7];
@@ -849,8 +888,23 @@ mod tests {
             "minecraft:disk_gravel",
             serde_json::json!({"feature": "minecraft:disk_gravel_cf", "placement": []}),
         );
+        placed.insert(
+            "minecraft:underwater_magma",
+            serde_json::json!({"feature": "minecraft:underwater_magma_cf", "placement": []}),
+        );
         let mut features = HashMap::new();
         features.insert("minecraft:plain", serde_json::json!({"type": "minecraft:lake", "config": {}}));
+        features.insert(
+            "minecraft:underwater_magma_cf",
+            serde_json::json!({
+                "type": "minecraft:underwater_magma",
+                "config": {
+                    "floor_search_range": 5,
+                    "placement_probability_per_valid_position": 0.5,
+                    "placement_radius_around_floor": 1
+                }
+            }),
+        );
         features.insert(
             "minecraft:disk_gravel_cf",
             serde_json::json!({
@@ -881,10 +935,18 @@ mod tests {
         let disks = catalog.select_step6_disks(["minecraft:first"]);
         assert_eq!(disks.len(), 1);
         assert_eq!(disks[0].0, STEP_UNDERGROUND_ORES);
-        assert_eq!(disks[0].1, 2, "step-6 index includes both preceding global entries");
+        assert_eq!(disks[0].1, 3, "step-6 index includes all preceding global entries");
         assert!(matches!(
             disks[0].2.feature.as_ref(),
             crate::feature::vegetation::ConfiguredFeature::Disk(_)
+        ));
+        let non_ore = catalog.select_step6_non_ore(["minecraft:first"]);
+        assert_eq!(non_ore.len(), 1);
+        assert_eq!(non_ore[0].0, STEP_UNDERGROUND_ORES);
+        assert_eq!(non_ore[0].1, 2, "step-6 non-ore keeps its raw position before the disk");
+        assert!(matches!(
+            non_ore[0].2.feature.as_ref(),
+            crate::feature::vegetation::ConfiguredFeature::UnderwaterMagma(_)
         ));
         assert!(catalog
             .select(["minecraft:first"])

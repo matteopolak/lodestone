@@ -29,7 +29,7 @@ use lodestone_anvil::region::{RegionFile, region_and_local};
 use lodestone_core::{Nbt, Reader, read_named_nbt};
 use lodestone_server::dimension::Dimension;
 use lodestone_server::region_source::RegionChunkSource;
-use lodestone_server::{ChunkColumn, ChunkSource, TickPriority};
+use lodestone_server::{ChunkColumn, ChunkSource, ScheduledTickKind, TickPriority};
 
 const MIN_Y: i32 = -64;
 const HEIGHT: i32 = 384;
@@ -171,7 +171,7 @@ fn pending_ticks_survive_a_close_and_reopen_with_the_right_delay_and_priority() 
         scheduled.with(|queues| {
             assert!(queues.block.schedule(
                 block_pos,
-                "minecraft:redstone_wire".to_owned(),
+                ScheduledTickKind::Extension("minecraft:redstone_wire".to_owned()),
                 block_trigger,
                 TickPriority::Normal,
             ));
@@ -270,7 +270,7 @@ fn pending_ticks_survive_a_close_and_reopen_with_the_right_delay_and_priority() 
     let expected_block = LOAD_TICK as i64 + i64::from(expected_block_delay);
     let expected_fluid = LOAD_TICK as i64 + i64::from(expected_fluid_delay);
     let (block, fluid) = scheduled.with(|queues| {
-        let b: Vec<(u64, TickPriority, String)> = queues
+        let b: Vec<(u64, TickPriority, ScheduledTickKind)> = queues
             .block
             .iter()
             .map(|t| (t.trigger_tick, t.priority, t.kind.clone()))
@@ -288,7 +288,7 @@ fn pending_ticks_survive_a_close_and_reopen_with_the_right_delay_and_priority() 
         vec![(
             expected_block as u64,
             TickPriority::Normal,
-            "minecraft:redstone_wire".to_owned()
+            ScheduledTickKind::Extension("minecraft:redstone_wire".to_owned())
         )],
         "the block tick must be due {expected_block} — {LOAD_TICK} + {expected_block_delay}. \
          Its original absolute trigger was {block_trigger}, which is what a save that \
@@ -336,7 +336,7 @@ fn an_overdue_tick_whose_delay_predates_the_clock_becomes_due_immediately() {
             // Trigger 0 against a game tick of 40 is a delay of -40.
             assert!(queues.block.schedule(
                 pos,
-                "minecraft:sand".to_owned(),
+                ScheduledTickKind::Extension("minecraft:sand".to_owned()),
                 0,
                 TickPriority::Normal
             ));
@@ -387,10 +387,20 @@ fn the_world_hands_out_one_shared_scheduled_tick_queue() {
 
     a.with(|q| {
         q.block
-            .schedule((1, 2, 3), "minecraft:fire".to_owned(), 9, TickPriority::Low)
+            .schedule(
+                (1, 2, 3),
+                ScheduledTickKind::Extension("minecraft:fire".to_owned()),
+                9,
+                TickPriority::Low,
+            )
     });
     assert!(
-        b.with(|q| q.block.has_scheduled((1, 2, 3), &"minecraft:fire".to_owned())),
+        b.with(|q| {
+            q.block.has_scheduled(
+                (1, 2, 3),
+                &ScheduledTickKind::Extension("minecraft:fire".to_owned()),
+            )
+        }),
         "a clone of the world must see the same queue"
     );
 

@@ -444,7 +444,7 @@ pub async fn finish_interactive(
         // The host allow list (`crate::texture`) is applied at *fetch* time
         // instead, so a URL that later becomes disallowed cannot be
         // laundered by already being in `profiles.json`.
-        skin_url: session.profile.skin.as_ref().map(|s| s.url.clone()),
+        skin_url: session.profile.skin.as_ref().map(|s| s.url.to_string()),
         last_used: unix_now(),
     });
     metadata.selected = Some(session.profile.id);

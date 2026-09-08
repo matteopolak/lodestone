@@ -41,7 +41,7 @@ use std::time::Duration;
 
 use lodestone_server::dimension::Dimension;
 use lodestone_server::region_source::RegionChunkSource;
-use lodestone_server::{ChunkColumn, ChunkSource, TickPriority};
+use lodestone_server::{ChunkColumn, ChunkSource, ScheduledTickKind, TickPriority};
 
 const MIN_Y: i32 = -64;
 const HEIGHT: i32 = 384;
@@ -118,7 +118,7 @@ fn write_fixture(dir: &Path) {
     scheduled.with(|queues| {
         assert!(queues.block.schedule(
             (5, 70, 5),
-            "minecraft:redstone_wire".to_owned(),
+            ScheduledTickKind::Extension("minecraft:redstone_wire".to_owned()),
             SAVE_TICK + 5,
             TickPriority::Normal,
         ));
@@ -202,8 +202,13 @@ fn a_saved_worlds_columns_load_from_inside_the_tick_loops_own_queue_lock() {
         let mut all: Vec<(u64, String)> = queues
             .block
             .iter()
-            .chain(queues.fluid.iter())
-            .map(|tick| (tick.trigger_tick, tick.kind.clone()))
+            .map(|tick| (tick.trigger_tick, tick.kind.as_ref().to_owned()))
+            .chain(
+                queues
+                    .fluid
+                    .iter()
+                    .map(|tick| (tick.trigger_tick, tick.kind.clone())),
+            )
             .collect();
         all.sort();
         all

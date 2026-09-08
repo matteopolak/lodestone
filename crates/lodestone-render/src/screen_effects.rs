@@ -378,6 +378,23 @@ pub fn freeze_overlay_triangles(percent: f32) -> [ScreenOverlayVertex; 6] {
     [q[0], q[1], q[2], q[2], q[3], q[0]]
 }
 
+/// A full-screen black layer for a bounded vision-obscuration effect. The
+/// caller supplies an already-resolved `0.0..=1.0` strength; a plain layer is
+/// intentional here because fog distance and lightmap gamma remain separate
+/// renderer concerns.
+#[must_use]
+pub fn vision_obscuration_triangles(strength: f32) -> [ScreenOverlayVertex; 6] {
+    let alpha = strength.clamp(0.0, 1.0);
+    let color = [0.0, 0.0, 0.0, alpha];
+    let q = [
+        vertex([-1.0, -1.0], [0.0, 1.0], color),
+        vertex([1.0, -1.0], [1.0, 1.0], color),
+        vertex([1.0, 1.0], [1.0, 0.0], color),
+        vertex([-1.0, 1.0], [0.0, 0.0], color),
+    ];
+    [q[0], q[1], q[2], q[2], q[3], q[0]]
+}
+
 // ---------------------------------------------------------------------------
 // Spyglass overlay: vanilla's HUD spyglass-overlay extraction
 // function. Not the generic `camera_overlay` component path
@@ -794,6 +811,7 @@ pub struct ScreenEffectRenderer {
     spyglass_bars_vbuf: wgpu::Buffer,
     nausea_vbuf: wgpu::Buffer,
     portal_vbuf: wgpu::Buffer,
+    obscuration_vbuf: wgpu::Buffer,
     border_warning_vbuf: wgpu::Buffer,
 }
 
@@ -1040,6 +1058,11 @@ impl ScreenEffectRenderer {
             "lodestone-portal-vbuf",
             &portal_overlay_triangles(0, portal_frame_count, 0.0),
         );
+        let obscuration_vbuf = vertex_buffer(
+            device,
+            "lodestone-vision-obscuration-vbuf",
+            &vision_obscuration_triangles(0.0),
+        );
         let border_warning_vbuf = vertex_buffer(
             device,
             "lodestone-border-warning-vbuf",
@@ -1068,6 +1091,7 @@ impl ScreenEffectRenderer {
             spyglass_bars_vbuf,
             nausea_vbuf,
             portal_vbuf,
+            obscuration_vbuf,
             border_warning_vbuf,
         })
     }
@@ -1222,6 +1246,40 @@ impl ScreenEffectRenderer {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.freeze_bind_group, &[]);
         pass.set_vertex_buffer(0, self.freeze_vbuf.slice(..));
+        pass.draw(0..verts.len() as u32, 0..1);
+    }
+
+    /// Draws a uniform black layer for the bounded Blindness/Darkness
+    /// presentation path. It shares the ordinary alpha pipeline and the
+    /// renderer's procedural white texture, so it adds no asset dependency.
+    pub fn draw_vision_obscuration(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        strength: f32,
+    ) {
+        let verts = vision_obscuration_triangles(strength);
+        queue.write_buffer(&self.obscuration_vbuf, 0, bytemuck::cast_slice(&verts));
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("lodestone-vision-obscuration-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.white_bind_group, &[]);
+        pass.set_vertex_buffer(0, self.obscuration_vbuf.slice(..));
         pass.draw(0..verts.len() as u32, 0..1);
     }
 

@@ -207,6 +207,67 @@ pub(crate) fn entity_hitbox_vertices_with_states(
     out
 }
 
+/// Colour used for an entity carrying the outline-producing status effect.
+/// Kept explicit rather than inheriting F3's white so the gameplay effect is
+/// distinguishable when both overlays are enabled.
+pub(crate) const GLOW_OUTLINE_COLOR: [f32; 4] = [0.35, 1.0, 0.35, 1.0];
+
+/// Small separation from the model surface. Without it, the outline's edge
+/// can compete with the model depth at exactly the same world coordinate.
+const GLOW_OUTLINE_PADDING: f32 = 0.02;
+
+fn glow_box_vertices(feet: glam::Vec3, width: f32, height: f32) -> Vec<DebugLineVertex> {
+    let half = width * 0.5;
+    let pad = GLOW_OUTLINE_PADDING;
+    let mut out = Vec::with_capacity(24);
+    push_box(
+        &mut out,
+        [feet.x - half - pad, feet.y - pad, feet.z - half - pad],
+        [feet.x + half + pad, feet.y + height + pad, feet.z + half + pad],
+        GLOW_OUTLINE_COLOR,
+    );
+    out
+}
+
+/// Build the visible wireframe for currently glowing entities.
+///
+/// The ids are sampled independently from the current `EntityDraw` slice. That
+/// split is intentional: the state source tracks effect expiry/removal, while
+/// the draw slice owns the interpolated position and scale for this frame. An
+/// unknown entity type contributes no geometry rather than a guessed box.
+#[must_use]
+pub(crate) fn glowing_entity_outline_vertices(
+    draws: &[crate::entities::EntityDraw],
+    glowing_ids: &[i32],
+) -> Vec<DebugLineVertex> {
+    let mut out = Vec::new();
+    for draw in draws {
+        if !glowing_ids.contains(&draw.id) {
+            continue;
+        }
+        let (width, height) = match draw.type_path.as_ref() {
+            "player" | "player_wide" | "player_slim" => (0.6, 1.8),
+            type_path => {
+                let Some(dims) = lodestone_data::entity_type::EntityType::from_name(type_path)
+                    .map(lodestone_data::entity_dimensions::base_dimensions)
+                else {
+                    continue;
+                };
+                (dims.width, dims.height)
+            }
+        };
+        if !draw.scale.is_finite() || draw.scale <= 0.0 {
+            continue;
+        }
+        out.extend(glow_box_vertices(
+            draw.feet,
+            width * draw.scale,
+            height * draw.scale,
+        ));
+    }
+    out
+}
+
 /// `Avatar.POSES` / `LivingEntity.getDimensions`: the player-specific box and
 /// eye-height pair for F3+B. `SLEEPING` and `DYING` are fixed dimensions, so
 /// unlike every scalable pose they deliberately do not consume
@@ -394,7 +455,7 @@ fn grown_segment_capacity(current: usize, required: usize, max_segments: usize) 
 
 #[cfg(test)]
 mod tests {
-    use super::{grown_segment_capacity, player_hitbox_metrics};
+    use super::{GLOW_OUTLINE_COLOR, glow_box_vertices, grown_segment_capacity, player_hitbox_metrics};
 
     #[test]
     fn capacity_grows_geometrically_and_never_shrinks() {
@@ -417,6 +478,17 @@ mod tests {
         assert_eq!(player_hitbox_metrics(EntityPose::Swimming, 2.0), (1.2, 1.2, 0.8));
         assert_eq!(player_hitbox_metrics(EntityPose::Sleeping, 2.0), (0.2, 0.2, 0.2));
         assert_eq!(player_hitbox_metrics(EntityPose::Dying, 2.0), (0.2, 0.2, 1.62));
+    }
+
+    #[test]
+    fn glow_outline_box_has_stable_world_location_and_effect_colour() {
+        let vertices = glow_box_vertices(glam::Vec3::new(4.0, 10.0, -2.0), 0.6, 1.8);
+        assert_eq!(vertices.len(), 24, "one entity contributes twelve complete edges");
+        assert!((vertices[0].position[0] - 3.68).abs() < 1e-6);
+        assert!((vertices[0].position[1] - 9.98).abs() < 1e-6);
+        assert!((vertices[0].position[2] + 2.32).abs() < 1e-6);
+        assert!((vertices[8].position[1] - 11.82).abs() < 1e-6);
+        assert!(vertices.iter().all(|vertex| vertex.color == GLOW_OUTLINE_COLOR));
     }
 }
 

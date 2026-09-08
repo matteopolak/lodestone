@@ -184,14 +184,60 @@ impl SkinVariant {
     }
 }
 
+/// A structurally parsed profile URL that retains the original spelling.
+///
+/// The texture host check intentionally distinguishes lower-case from
+/// upper-case schemes and hosts. Keeping the original spelling here means
+/// parsing cannot silently normalize a URL into one that the fetch boundary
+/// would previously have rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileSkinUrl(String);
+
+impl ProfileSkinUrl {
+    /// Parses a profile URL without applying the texture-host allow list.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`url::ParseError`] when the value is not an absolute URL.
+    pub fn parse(raw: impl Into<String>) -> std::result::Result<Self, url::ParseError> {
+        let raw = raw.into();
+        url::Url::parse(&raw)?;
+        Ok(Self(raw))
+    }
+
+    /// Returns the original URL spelling for the fetch and persistence
+    /// boundaries.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ProfileSkinUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ProfileSkinUrl {
+    type Err = url::ParseError;
+
+    fn from_str(raw: &str) -> std::result::Result<Self, Self::Err> {
+        Self::parse(raw)
+    }
+}
+
 /// The active skin declared on a services profile: where to fetch it and which
 /// rig it is drawn on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfileSkin {
-    /// The texture URL. **Not yet screened** — pass it through
-    /// [`crate::texture::fetch_texture`], which applies authlib's
-    /// `TextureUrlChecker` host restriction, rather than fetching it directly.
-    pub url: String,
+    /// The structurally valid texture URL. Host authorization is still **not
+    /// screened** here — pass it through [`crate::texture::fetch_texture`],
+    /// which applies authlib's `TextureUrlChecker` host restriction, rather
+    /// than fetching it directly. This type represents only a real profile
+    /// URL; empty or synthetic skin keys used by the renderer remain in its
+    /// separate string-based representation.
+    pub url: ProfileSkinUrl,
     /// The rig the sheet is authored for.
     pub variant: SkinVariant,
 }
@@ -793,7 +839,8 @@ struct SkinResponse {
 fn active_skin(skins: Vec<SkinResponse>) -> Option<ProfileSkin> {
     let mut fallback = None;
     for skin in skins {
-        let Some(url) = skin.url else { continue };
+        let Some(raw_url) = skin.url else { continue };
+        let Ok(url) = ProfileSkinUrl::parse(raw_url) else { continue };
         let variant = SkinVariant::from_services_variant(skin.variant.as_deref().unwrap_or(""));
         let active = skin
             .state
@@ -1052,7 +1099,7 @@ mod tests {
         }"#;
         let resp: ProfileResponse = serde_json::from_str(json).unwrap();
         let skin = active_skin(resp.skins).expect("an active skin must resolve");
-        assert_eq!(skin.url, "https://textures.minecraft.net/texture/new");
+        assert_eq!(skin.url.as_str(), "https://textures.minecraft.net/texture/new");
         assert_eq!(skin.variant, SkinVariant::Slim);
         // The bridge to the rig, not a second parse: the wide spelling on the
         // wire is `default`, so this pair is what a swapped mapping cannot pass.
@@ -1099,8 +1146,25 @@ mod tests {
         )
         .unwrap();
         let skin = active_skin(resp.skins).unwrap();
-        assert_eq!(skin.url, "https://textures.minecraft.net/texture/a");
+        assert_eq!(skin.url.as_str(), "https://textures.minecraft.net/texture/a");
         assert_eq!(skin.variant, SkinVariant::Classic);
+    }
+
+    #[test]
+    fn malformed_skin_urls_are_skipped_without_becoming_renderer_sentinels() {
+        let resp: ProfileResponse = serde_json::from_str(
+            r#"{"id":"069a79f444e94726a5befca90e38aaf5","name":"Notch",
+                "skins":[{"state":"ACTIVE","url":"not a URL","variant":"SLIM"}] }"#,
+        )
+        .unwrap();
+        assert!(active_skin(resp.skins).is_none());
+    }
+
+    #[test]
+    fn profile_skin_url_retains_raw_spelling_for_the_strict_fetch_check() {
+        let raw = "HTTPS://textures.minecraft.net/texture/abc123";
+        let url = ProfileSkinUrl::parse(raw).expect("the URL is structurally valid");
+        assert_eq!(url.as_str(), raw);
     }
 
     #[test]

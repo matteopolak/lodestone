@@ -30,7 +30,7 @@ use lodestone_server::plugin_dimension::DimensionRegistry;
 use lodestone_server::{IntegratedServer, NoEntities};
 use lodestone_v26_2::V770ServerProtocol;
 use lodestone_v26_2::adapter;
-use lodestone_void_world::{DIMENSION_KEY, FLOOR_Y};
+use lodestone_void_world::{dimension_key, FLOOR_Y};
 use uuid::Uuid;
 
 fn profile() -> LoginProfile {
@@ -61,9 +61,10 @@ fn state_id(name: &str) -> u32 {
 async fn a_real_client_observes_the_registered_dimensions_terrain_and_both_structure_placements() {
     let registry = DimensionRegistry::new();
     lodestone_void_world::register(&registry);
+    let dimension_key = dimension_key();
     let source = registry
-        .chunk_source(DIMENSION_KEY)
-        .expect("just registered under DIMENSION_KEY");
+        .chunk_source(&dimension_key)
+        .expect("just registered under the typed dimension key");
 
     // The live-placement half of structure placement, exercised *before*
     // anyone joins: paste a marker into the world through the real `ChunkSource` the

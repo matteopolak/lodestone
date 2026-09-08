@@ -7,32 +7,22 @@
 use lodestone_core::{
     Ctx, Decode, Encode, Nbt, NbtTag, Reader, State, Writer, encode_body, write_named_nbt,
 };
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ItemStack, Rotation, Text, Vec3, Vec3f};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation, Vec3f};
 use lodestone_server::{ChunkColumn, ChunkEncodeError, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_world::{Heightmap, LongArrayFraming, PaletteKind, PalettedContainer};
 use uuid::Uuid;
 
 use crate::PROTOCOL_1_19_4;
 use crate::canonical::wire_state_for_762;
-use crate::registry::{
-    item as protocol_item, item_id as protocol_item_id, menu_id as protocol_menu_id,
-};
 use crate::packet_ids::{handshaking, login, play};
 use crate::packets::game::{
-    BlockDig, BlockPlace, ClientCommand, ClientboundPositionLook, JoinGame, Respawn,
-    ServerboundFlying, ServerboundLook, ServerboundArmAnimation, ServerboundPosition,
-    ServerboundPositionLook, UpdateHealth,
+    BlockDig, BlockPlace, ClientboundPositionLook, JoinGame, ServerboundFlying, ServerboundLook,
+    ServerboundArmAnimation, ServerboundPosition, ServerboundPositionLook,
 };
-use crate::packets::entity::EntityMetadataPacket;
-use crate::packets::metadata::{EntityMetadata, MetadataEntry, MetadataValue};
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
 use crate::packets::position::{Position, pack_position};
-use crate::packets::slot::Slot;
-use crate::packets::window::{
-    OpenWindow, ServerboundCloseWindow, ServerboundHeldItemSlot, SetSlot, WindowClick,
-    WindowItems,
-};
+use crate::packets::window::ServerboundHeldItemSlot;
 
 const CTX: Ctx = Ctx {
     version: PROTOCOL_1_19_4,
@@ -44,8 +34,6 @@ const SECTION_EDGE: i32 = 16;
 const SECTION_COUNT: usize = 24;
 const SECTION_BLOCKS: usize = 4096;
 const PLAINS_BIOME_ID: i32 = 0;
-const LOCAL_PLAYER_ENTITY_ID: i32 = 1;
-const METADATA_IDX_AIR_SUPPLY: u8 = 1;
 
 /// Server implementation for protocol 762.
 #[derive(Clone, Copy, Debug, Default)]
@@ -63,70 +51,6 @@ fn decode_full<T: Decode>(payload: &[u8]) -> Option<T> {
     let value = T::decode(&mut reader, CTX).ok()?;
     reader.ensure_empty().ok()?;
     Some(value)
-}
-
-fn decode_slot(slot: Slot) -> Result<Option<ItemStack>, ()> {
-    let Slot::Item { id, count, nbt } = slot else {
-        return Ok(None);
-    };
-    let item = protocol_item(PROTOCOL_1_19_4, id).ok_or(())?;
-    let count = u32::try_from(count).map_err(|_| ())?;
-    if count == 0 {
-        return Err(());
-    }
-    Ok(Some(ItemStack {
-        item,
-        count,
-        components: lodestone_model::ItemComponents {
-            has_unmodeled: nbt.is_some(),
-            ..lodestone_model::ItemComponents::default()
-        },
-    }))
-}
-
-fn encode_slot(item: Option<&ItemStack>) -> Slot {
-    let Some(item) = item else {
-        return Slot::Empty;
-    };
-    assert_eq!(
-        item.components,
-        lodestone_model::ItemComponents::default(),
-        "protocol-762 container slots only support bare item stacks"
-    );
-    let id = protocol_item_id(PROTOCOL_1_19_4, &item.item)
-        .unwrap_or_else(|| panic!("unknown protocol-762 item {}", item.item));
-    let count = i8::try_from(item.count)
-        .unwrap_or_else(|_| panic!("protocol-762 item count {} overflows i8", item.count));
-    assert!(count > 0, "protocol-762 item count must be positive");
-    Slot::Item {
-        id,
-        count,
-        nbt: None,
-    }
-}
-
-fn decode_container_click(payload: &[u8]) -> Option<ServerBound> {
-    let body = decode_full::<WindowClick>(payload)?;
-    let changed_slots = body
-        .changed_slots
-        .into_iter()
-        .map(|entry| {
-            Ok((
-                i32::from(entry.location),
-                decode_slot(entry.item).map_err(|_| ())?,
-            ))
-        })
-        .collect::<Result<Vec<_>, ()>>()
-        .ok()?;
-    Some(ServerBound::ContainerClicked {
-        window_id: i32::from(body.window_id),
-        state_id: body.state_id,
-        slot: i32::from(body.slot),
-        button: body.button,
-        click_type: body.mode,
-        changed_slots,
-        carried_item: decode_slot(body.cursor_item).ok()?,
-    })
 }
 
 fn block_action(status: i32) -> Option<BlockActionKind> {
@@ -322,34 +246,6 @@ impl V762ServerProtocol {
     }
 }
 
-fn text_to_json(text: &Text) -> serde_json::Value {
-    let mut object = serde_json::Map::new();
-    match &text.content {
-        lodestone_model::TextContent::Literal(literal) => {
-            object.insert("text".to_owned(), serde_json::Value::String(literal.clone()));
-        }
-        lodestone_model::TextContent::Translate { key, with, fallback } => {
-            object.insert("translate".to_owned(), serde_json::Value::String(key.clone()));
-            if let Some(fallback) = fallback {
-                object.insert("fallback".to_owned(), serde_json::Value::String(fallback.clone()));
-            }
-            if !with.is_empty() {
-                object.insert(
-                    "with".to_owned(),
-                    serde_json::Value::Array(with.iter().map(text_to_json).collect()),
-                );
-            }
-        }
-    }
-    if !text.extra.is_empty() {
-        object.insert(
-            "extra".to_owned(),
-            serde_json::Value::Array(text.extra.iter().map(text_to_json).collect()),
-        );
-    }
-    serde_json::Value::Object(object)
-}
-
 impl ServerProtocol for V762ServerProtocol {
     fn decode(&self, state: State, packet_id: i32, payload: &[u8]) -> ServerBound {
         match state {
@@ -370,11 +266,6 @@ impl ServerProtocol for V762ServerProtocol {
                         username: start.username,
                         uuid: Uuid::nil(),
                     }
-                })
-            }
-            State::Play if packet_id == play::serverbound::CLIENT_COMMAND => {
-                decode_full::<ClientCommand>(payload).map_or(ServerBound::Ignored, |command| {
-                    ServerBound::ClientCommand { action: command.action }
                 })
             }
             State::Play if packet_id == play::serverbound::BLOCK_DIG => {
@@ -448,16 +339,6 @@ impl ServerProtocol for V762ServerProtocol {
                     return ServerBound::Ignored;
                 };
                 ServerBound::CarriedItemChanged { slot }
-            }
-            State::Play if packet_id == play::serverbound::WINDOW_CLICK => {
-                decode_container_click(payload).unwrap_or(ServerBound::Ignored)
-            }
-            State::Play if packet_id == play::serverbound::CLOSE_WINDOW => {
-                decode_full::<ServerboundCloseWindow>(payload).map_or(ServerBound::Ignored, |body| {
-                    ServerBound::ContainerClosed {
-                        window_id: i32::from(body.window_id),
-                    }
-                })
             }
             State::Play if packet_id == play::serverbound::POSITION => {
                 let Some(ServerboundPosition {
@@ -616,102 +497,6 @@ impl ServerProtocol for V762ServerProtocol {
         ServerDirective::None
     }
 
-    fn encode_player_combat_kill(
-        &self,
-        player_entity_id: i32,
-        message: &Text,
-    ) -> ServerDirective {
-        let mut payload = Writer::default();
-        payload.var_i32(player_entity_id);
-        payload.i32(0);
-        payload.string(&text_to_json(message).to_string());
-        ServerDirective::Send {
-            packet_id: play::clientbound::DEATH_COMBAT_EVENT,
-            payload: payload.into_vec(),
-        }
-    }
-
-    fn encode_respawn(&self, spawn: Vec3) -> Vec<ServerDirective> {
-        self.encode_respawn_with_teleport_id(0, spawn)
-    }
-
-    fn encode_respawn_with_teleport_id(
-        &self,
-        teleport_id: i32,
-        spawn: Vec3,
-    ) -> Vec<ServerDirective> {
-        vec![
-            send(
-                play::clientbound::RESPAWN,
-                &Respawn {
-                    world_type: "minecraft:overworld".to_owned(),
-                    world_name: "minecraft:overworld".to_owned(),
-                    hashed_seed: 0,
-                    game_mode: 0,
-                    previous_game_mode: u8::MAX,
-                    is_debug: false,
-                    is_flat: false,
-                    copy_metadata: false,
-                    has_death_location: false,
-                    death_dimension: None,
-                    death_location: None,
-                },
-            ),
-            self.encode_teleport_with_id(teleport_id, spawn.x, spawn.y, spawn.z, 0.0, 0.0),
-        ]
-    }
-
-    fn encode_teleport(&self, x: f64, y: f64, z: f64, yaw: f32, pitch: f32) -> ServerDirective {
-        self.encode_teleport_with_id(0, x, y, z, yaw, pitch)
-    }
-
-    fn encode_teleport_with_id(
-        &self,
-        teleport_id: i32,
-        x: f64,
-        y: f64,
-        z: f64,
-        yaw: f32,
-        pitch: f32,
-    ) -> ServerDirective {
-        send(
-            play::clientbound::POSITION,
-            &ClientboundPositionLook {
-                x,
-                y,
-                z,
-                yaw,
-                pitch,
-                flags: 0,
-                teleport_id,
-            },
-        )
-    }
-
-    fn encode_set_health(&self, health: f32, food: i32, saturation: f32) -> ServerDirective {
-        send(
-            play::clientbound::UPDATE_HEALTH,
-            &UpdateHealth {
-                health,
-                food,
-                food_saturation: saturation,
-            },
-        )
-    }
-
-    fn encode_air_supply_update(&self, air: i32) -> ServerDirective {
-        send(
-            play::clientbound::ENTITY_METADATA,
-            &EntityMetadataPacket {
-                entity_id: LOCAL_PLAYER_ENTITY_ID,
-                metadata: EntityMetadata(vec![MetadataEntry {
-                    key: METADATA_IDX_AIR_SUPPLY,
-                    value: MetadataValue::VarInt(air),
-                }]),
-            },
-        )
-    }
-
     fn encode_animate(&self, entity_id: i32, action: u8) -> ServerDirective {
         let mut payload = Writer::default();
         payload.var_i32(entity_id);
@@ -720,66 +505,6 @@ impl ServerProtocol for V762ServerProtocol {
             packet_id: play::clientbound::ANIMATION,
             payload: payload.into_vec(),
         }
-    }
-
-    fn encode_open_screen(&self, window_id: i32, menu: &str, title: &str) -> ServerDirective {
-        let Ok(menu) = menu.parse() else {
-            return ServerDirective::None;
-        };
-        let Some(inventory_type) = protocol_menu_id(PROTOCOL_1_19_4, &menu) else {
-            return ServerDirective::None;
-        };
-        let window_title = format!(
-            "{{\"text\":{}}}",
-            serde_json::to_string(title).expect("container title is serializable")
-        );
-        send(
-            play::clientbound::OPEN_WINDOW,
-            &OpenWindow {
-                window_id,
-                inventory_type,
-                window_title,
-            },
-        )
-    }
-
-    fn encode_container_content(
-        &self,
-        window_id: i32,
-        state_id: i32,
-        items: &[Option<ItemStack>],
-        carried: Option<&ItemStack>,
-    ) -> ServerDirective {
-        let window_id = u8::try_from(window_id).expect("protocol-762 window id fits u8");
-        send(
-            play::clientbound::WINDOW_ITEMS,
-            &WindowItems {
-                window_id,
-                state_id,
-                items: items.iter().map(|item| encode_slot(item.as_ref())).collect(),
-                carried_item: encode_slot(carried),
-            },
-        )
-    }
-
-    fn encode_container_slot(
-        &self,
-        window_id: i32,
-        state_id: i32,
-        slot: i32,
-        item: Option<&ItemStack>,
-    ) -> ServerDirective {
-        let window_id = i8::try_from(window_id).expect("protocol-762 window id fits i8");
-        let slot = i16::try_from(slot).expect("protocol-762 container slot fits i16");
-        send(
-            play::clientbound::SET_SLOT,
-            &SetSlot {
-                window_id,
-                state_id,
-                slot,
-                item: encode_slot(item),
-            },
-        )
     }
 
     fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {

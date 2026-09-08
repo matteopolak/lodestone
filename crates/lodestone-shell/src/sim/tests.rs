@@ -527,15 +527,58 @@ fn tool_inputs_stay_at_bare_hand_defaults() {
     // specifically (an empty main hand), so `tool_speed` must stay at the
     // bare-hand `1.0` here — a live dig instead resolves a real
     // `ToolMining` through `VersionAdapter::tool_mining` in `drive_mining`.
-    // Mining efficiency, haste and fatigue have no modeled source at all
-    // yet (no enchantment/potion/attribute inputs), so those stay at
-    // `BreakInputs::default` regardless of what is held.
+    // The bare builder has no local HUD component to consult, so potion
+    // fields stay at their defaults here. Live mining uses
+    // `dig_break_inputs_with_effects` after reading `HudEffects`.
     let inputs = dry_ground(census::STONE);
     assert_eq!(inputs.tool_speed, 1.0);
     assert_eq!(inputs.mining_efficiency, 0.0);
     assert_eq!(inputs.haste_amplifier, None);
     assert_eq!(inputs.mining_fatigue, None);
     assert_eq!(inputs.block_break_speed, 1.0);
+}
+
+#[test]
+fn mining_effect_amplifiers_choose_the_stronger_haste_source_and_keep_fatigue() {
+    use lodestone_ecs::session::HudEffects;
+    use lodestone_game::effect::{ActiveEffects, StatusEffect};
+
+    let mut active = ActiveEffects::new();
+    active.apply(StatusEffect::new(
+        "minecraft:haste".parse().expect("valid id"),
+        0,
+        200,
+    ));
+    active.apply(StatusEffect::new(
+        "minecraft:conduit_power".parse().expect("valid id"),
+        2,
+        200,
+    ));
+    active.apply(StatusEffect::new(
+        "minecraft:mining_fatigue".parse().expect("valid id"),
+        1,
+        200,
+    ));
+    let (haste, fatigue) = mining_effect_amplifiers(Some(&HudEffects(active)));
+    assert_eq!(haste, Some(2), "Haste and Conduit Power do not stack");
+    assert_eq!(fatigue, Some(1));
+
+    let inputs = dig_break_inputs_with_effects(
+        census::STONE,
+        lodestone_model::ToolMining { speed: 8.0, correct_tool: true, damage_per_block: 1 },
+        false,
+        true,
+        false,
+        false,
+        haste,
+        fatigue,
+    );
+    assert_eq!(inputs.haste_amplifier, Some(2));
+    assert_eq!(inputs.mining_fatigue, Some(1));
+    assert!(
+        inputs.dig_speed() < 8.0,
+        "Mining Fatigue II must win over the faster Conduit Power multiplier"
+    );
 }
 
 /// Replay a held dig for `ticks` and report the crack stage the shell would
@@ -2416,7 +2459,9 @@ fn mob_effect_applied_for_local_player_reaches_status_effects() {
         amplifier: 2,
         duration_ticks: 200,
         ambient: false,
+        show_particles: true,
         show_icon: true,
+        blend: true,
     })
     .unwrap();
     sim.poll_net();
@@ -2438,6 +2483,10 @@ fn mob_effect_applied_for_local_player_reaches_status_effects() {
     let rows = crate::effects::inventory_rows(&sim.active_effects(), &|_| None);
     assert_eq!(rows.len(), 1, "the inventory column must fold it too");
     assert_eq!(rows[0].duration, "00:10"); // 200 ticks -> 10 s
+    assert!(
+        sim.active_effects().iter().next().unwrap().show_particles,
+        "the normal-particle bit must survive the wire fold"
+    );
 
     feed.send(NetUpdate::EffectRemoved {
         entity_id: 7,
@@ -2449,6 +2498,61 @@ fn mob_effect_applied_for_local_player_reaches_status_effects() {
     assert!(
         sim.active_effects().is_empty(),
         "removal must clear the HUD effect model as well"
+    );
+}
+
+#[test]
+fn night_vision_reaches_the_shared_effect_light_source_without_an_icon_or_particles() {
+    use crate::net::NetUpdate;
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.attach_net(net);
+    feed.send(NetUpdate::LoggedIn { entity_id: 7 }).unwrap();
+    ingest(&mut sim, login_event(7));
+    sim.poll_net();
+
+    feed.send(NetUpdate::EffectApplied {
+        entity_id: 7,
+        effect: "night_vision".into(),
+        amplifier: 0,
+        duration_ticks: 3_600,
+        ambient: false,
+        show_particles: false,
+        show_icon: false,
+        blend: false,
+    })
+    .unwrap();
+    sim.poll_net();
+
+    let active_effects = sim.active_effects();
+    let effect = active_effects
+        .iter()
+        .next()
+        .expect("Night Vision must be retained");
+    assert!(!effect.show_particles, "the server can suppress normal particles");
+    assert!(!effect.show_icon, "the server can suppress the HUD icon independently");
+    assert!(
+        crate::effects::hud_icons(&active_effects).is_empty(),
+        "the hidden-icon control proves this did not accidentally test the HUD path"
+    );
+
+    let floor = sim.effect_light_source()().expect("Night Vision must feed the render source");
+    assert_eq!(
+        floor,
+        lodestone_render::NIGHT_VISION_COLOR,
+        "a fresh Night Vision effect must reach the shared lightmap floor"
+    );
+
+    feed.send(NetUpdate::EffectRemoved {
+        entity_id: 7,
+        effect: "night_vision".into(),
+    })
+    .unwrap();
+    sim.poll_net();
+    assert_eq!(
+        sim.effect_light_source()(),
+        None,
+        "removal must restore the dimension-only lightmap path"
     );
 }
 
@@ -2470,7 +2574,9 @@ fn mob_effect_for_a_different_entity_is_not_applied_to_the_local_player() {
         amplifier: 0,
         duration_ticks: 200,
         ambient: false,
+        show_particles: true,
         show_icon: true,
+        blend: true,
     })
     .unwrap();
     sim.poll_net();
@@ -2481,6 +2587,115 @@ fn mob_effect_for_a_different_entity_is_not_applied_to_the_local_player() {
     assert!(
         sim.active_effects().is_empty(),
         "a remote entity's effect must not reach the local HUD overlay either"
+    );
+    assert!(
+        sim.read(|world| {
+            world
+                .resource::<lodestone_ecs::EntityStatusEffects>()
+                .get(1234)
+                .is_some_and(|effects| !effects.is_empty())
+        }),
+        "remote effects must remain available to the continuous particle emitter"
+    );
+
+    feed.send(NetUpdate::EffectRemoved {
+        entity_id: 1234,
+        effect: "levitation".into(),
+    })
+    .unwrap();
+    sim.poll_net();
+    assert!(
+        sim.read(|world| {
+            world
+                .resource::<lodestone_ecs::EntityStatusEffects>()
+                .get(1234)
+                .is_none()
+        }),
+        "an explicit removal must prune a remote entity's particle state"
+    );
+}
+
+#[test]
+fn status_particle_source_respects_the_wire_visible_flag() {
+    use crate::net::NetUpdate;
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.attach_net(net);
+    feed.send(NetUpdate::LoggedIn { entity_id: 7 }).unwrap();
+    ingest(&mut sim, login_event(7));
+    sim.poll_net();
+
+    let apply = |show_particles| NetUpdate::EffectApplied {
+        entity_id: 7,
+        effect: "speed".into(),
+        amplifier: 0,
+        duration_ticks: 200,
+        ambient: false,
+        show_particles,
+        show_icon: false,
+        blend: false,
+    };
+    feed.send(apply(false)).unwrap();
+    sim.poll_net();
+    assert!(
+        sim.status_particle_sources([0.0; 3]).is_empty(),
+        "the visible flag must suppress continuous status-particle extraction"
+    );
+
+    feed.send(apply(true)).unwrap();
+    sim.poll_net();
+    assert_eq!(
+        sim.status_particle_sources([0.0; 3]).len(),
+        1,
+        "the same active effect must reach the particle source when visibility is restored"
+    );
+}
+
+#[test]
+fn nausea_blend_flag_controls_the_live_screen_effect_source() {
+    use crate::net::NetUpdate;
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.attach_net(net);
+    feed.send(NetUpdate::LoggedIn { entity_id: 7 }).unwrap();
+    ingest(&mut sim, login_event(7));
+    sim.poll_net();
+
+    feed.send(NetUpdate::EffectApplied {
+        entity_id: 7,
+        effect: "nausea".into(),
+        amplifier: 0,
+        duration_ticks: 200,
+        ambient: false,
+        show_particles: false,
+        show_icon: false,
+        blend: false,
+    })
+    .unwrap();
+    sim.poll_net();
+    assert_eq!(
+        sim.nausea_intensity(),
+        1.0,
+        "the wire's no-blend control must adopt the effect immediately"
+    );
+
+    feed.send(NetUpdate::EffectApplied {
+        entity_id: 7,
+        effect: "nausea".into(),
+        amplifier: 0,
+        duration_ticks: 200,
+        ambient: false,
+        show_particles: false,
+        show_icon: false,
+        blend: true,
+    })
+    .unwrap();
+    sim.poll_net();
+    assert_eq!(sim.nausea_intensity(), 0.0, "a blended replacement starts dark");
+    sim.step(1.0 / 20.0);
+    assert!(
+        (0.0..0.01).contains(&sim.nausea_intensity()),
+        "one 20 Hz tick must begin, but not complete, the 150-tick Nausea ramp"
     );
 }
 
@@ -5749,14 +5964,17 @@ fn two_pending_placements() -> Placement {
         target_obstructed: false,
     };
     let mut placement = Placement::new();
-    for expected_sequence in [1, 2] {
+    for expected_sequence in [
+        lodestone_model::PredictionSequence::new(1),
+        lodestone_model::PredictionSequence::new(2),
+    ] {
         let decision = placement.use_on(&context, &facts);
         assert!(matches!(
             decision,
             UseOnDecision::Place {
                 prediction: lodestone_game::placement::PlacePrediction { sequence, .. },
                 ..
-            } if sequence == lodestone_model::PredictionSequence::new(expected_sequence)
+            } if sequence == expected_sequence
         ));
     }
     placement
@@ -6334,9 +6552,7 @@ fn player_interact_veto_denies_block_branch_before_prediction_or_send() {
     assert!(
         allowed_actions.iter().any(|action| matches!(
             action,
-            ClientAction::UseItemOn { pos, sequence, .. }
-                if *pos == clicked
-                    && *sequence == lodestone_model::PredictionSequence::new(1)
+            ClientAction::UseItemOn { pos, sequence: 1, .. } if *pos == clicked
         )),
         "the first allowed block interaction must retain sequence one: {allowed_actions:?}"
     );

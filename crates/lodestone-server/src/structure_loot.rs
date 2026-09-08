@@ -5,8 +5,8 @@
 //! Shipwrecks, ocean ruins, igloos and End cities generate for real (`lodestone-worldgen`'s
 //! `structure` S2 unit), and every one of them arrived with an *empty* chest —
 //! or, for an ocean ruin, no chest at all. This module is vanilla's
-//! `TemplateStructurePiece.postProcess` data-marker pass plus the three
-//! `handleDataMarker` overrides it dispatches to, run on the server side of the
+//! template post-processing data-marker pass plus the four
+//! structure-specific marker handlers it dispatches to, run on the server side of the
 //! seam: it finds each piece's `structure_block` DATA markers, resolves the loot
 //! table the marker names, rolls it, and attaches a filled
 //! [`BlockEntity::Container`] to the column.
@@ -923,7 +923,7 @@ mod tests {
         assert_eq!(marker_position, [6, 6, 2], "fixture preserves the marker local position");
     }
 
-    /// The seven structure-chest tables are bundled and roll real items.
+    /// The eleven structure-chest tables are bundled and roll real items.
     ///
     /// The expected values come from vanilla's own `igloo_chest.json`, not from
     /// our roller: two pools, `rolls: uniform 2..8` and `rolls: 1`, no `empty`
@@ -940,6 +940,10 @@ mod tests {
             "minecraft:chests/shipwreck_treasure",
             "minecraft:chests/igloo_chest",
             "minecraft:chests/end_city_treasure",
+            "minecraft:chests/jungle_temple",
+            "minecraft:chests/stronghold_corridor",
+            "minecraft:chests/stronghold_crossing",
+            "minecraft:chests/stronghold_library",
             "minecraft:chests/underwater_ruin_small",
             "minecraft:chests/underwater_ruin_big",
         ] {

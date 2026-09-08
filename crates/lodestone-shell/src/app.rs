@@ -669,6 +669,10 @@ fn capture_key_for(physical_key: PhysicalKey) -> Option<CaptureKey> {
 /// this timing before it arms the gather.
 const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(400);
 
+/// Maximum time a middle-click may wait for pointer capture and a fresh ray
+/// target before it is discarded.
+const PENDING_PICK_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// The presentation target used by the shared frame pipeline. A terminal
 /// session owns the same target interface as a window; only acquisition and
 /// final readback differ.
@@ -742,6 +746,16 @@ impl PresentationTarget {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PendingPick {
+    /// Whether the initiating middle-click held Control, which asks the server
+    /// to include target data when it can provide it.
+    include_data: bool,
+    /// Monotonic timestamp used to discard a request when pointer capture never
+    /// completes.
+    requested_at: Instant,
+}
+
 pub(crate) struct WindowApp {
     config: Config,
     /// Opt-in deterministic benchmark choreography. `None` is the ordinary
@@ -758,6 +772,10 @@ pub(crate) struct WindowApp {
     hud: Option<HudRenderer>,
     container: Option<ContainerRenderer>,
     grabbed: bool,
+    /// A one-shot gameplay pick pressed while the pointer was not yet captured.
+    /// The lifecycle driver replays it after capture and a fresh target are both
+    /// available, or drops it on focus/menu transitions and timeout.
+    pending_pick: Option<PendingPick>,
     /// Frame clock: clamps catch-up and throttles presentation when the window
     /// is unfocused or occluded. The sim ticks regardless.
     pacer: FramePacer,

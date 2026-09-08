@@ -68,6 +68,21 @@ rather than inventing one. Literal wire bodies prove the decoder separately
 for 498, 578 and 754; adapter-to-registry tests prove the matching producer and
 host agree, including rejection outside Play and for an invalid face.
 
+Container transport now crosses the same three selectors. The open-screen
+menu registry id, full window item list, single-slot correction, click
+transaction and close packets each have literal byte controls; the production
+adapter and host are checked against those controls. An in-memory chest test
+then opens a real block entity, moves its stone stack through the client
+inventory, observes the host's authoritative full-list corrections, and
+confirms the block entity is empty after close. The legacy slot bridge uses the
+historical item registry for each selector and keeps unsupported item keys
+empty rather than inventing a numeric id.
+
+The three hosts also decode `client_command`'s single VarInt action. The
+literal zero-byte body becomes `ServerBound::ClientCommand { action: 0 }` after
+registry selection, which is the server-loop input used to request a respawn;
+trailing bytes and packets received outside Play remain ignored.
+
 The three hosts also lift the arm-swing request: its one VarInt hand field
 (`0` main hand or `1` off hand) becomes `ServerBound::Swing`. The shared swing
 consumer's broadcast is encoded as a VarInt entity id followed by the raw
@@ -268,14 +283,6 @@ position, two opaque parameters, and canonical block key. Equipment is
 consumed by the ECS entity-equipment ingest path; block events are forwarded
 into the shell's chest, bell, spawner, and gateway event trackers, so both
 signals reach a visible production consumer.
-
-`crates/versions/1.14/tests/metadata_equipment_attributes_ecs.rs` exercises that complete
-consumer path with literal packet bodies for all three protocol tables. The 498/578 cases cover
-the single-slot equipment shape and dotted attribute keys; the 754 case additionally carries a
-continued second equipment record and a namespaced attribute key. Every decoded event is queued
-into the production `NetIngest` schedule, and the assertions read the indexed entity's
-`EntityFlags`, `Equipment`, and `Attributes` components with non-default controls that distinguish
-an absent or truncated update from the expected value.
 
 ### External-client acceptance
 

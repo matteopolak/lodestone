@@ -32,6 +32,12 @@ exist yet at start time). Stronghold writes are a fourth, ordered post-surface l
 selector boxes skip a candidate only when the current state is air, while later decorations remain
 unconditional. Keeping the guarded and unguarded writes in one list preserves their source order.
 
+Concentric-ring sets are generator-wide: `StructureRegistry` resolves the placement set's preferred
+biome holder-set, searches the 112-block square around each initial candidate at quart resolution,
+and caches the relocated chunk list for `starts_at`. The resulting list is consumed by the same
+structure-set gates as random-spread sets, so a ring candidate reaches the ordinary biome check,
+piece generator and placement stages instead of stopping at parsed placement data.
+
 Jigsaw pools also contain **feature elements**. `PoolStore::load` resolves their placed-feature
 document into a `PoolFeaturePlacement`, retaining the assembled world-space origin instead of
 reducing the element to its graph-only synthetic jigsaw block. `PoolFeaturePlacement::place` hands
@@ -53,14 +59,6 @@ and that same complete registry position before writing pieces. The 17×17 sourc
 the persistence and retention order; a stable tie-break keeps starts of one structure in that walk's
 order while putting different structure types in the order their decoration lifecycle consumes.
 
-Structure JSON crosses a strict serde boundary in `structure::json`: placement
-records, jigsaw configurations, pool aliases, and template-pool elements use
-closed discriminated enums and deny unknown fields. Wrong primitive types and
-unknown variants become path-prefixed load errors instead of silently taking a
-default. Processor lists and placed-feature bodies remain explicit string-or-
-inline unions because those registry payloads have their own polymorphic
-schemas; they are handed to their existing parsers unchanged.
-
 Mineshaft starts eagerly retain their complete tree and bounding boxes, because the vertical shift
 depends on the finished tree. Their block-writing walk is replayed for the decorating chunk instead:
 the liquid-shell refusal is clipped to that chunk before the piece writes. This matters at a chunk
@@ -73,11 +71,12 @@ the structure ledger.
 
 A ruined portal combines the latter two forms: the template first writes the frame, then its
 placement-time refinement grows the netherrack skirt and downward columns and adds optional vines or
-leaves. The refinement is position-forked so every touched chunk can independently regenerate and clip
-its part of that halo; its random pattern is therefore deterministic but not byte-for-byte identical to
-a shared decoration stream, which is recorded as a deviation in the ledger.
+leaves. The refinement receives the target chunk's `surface_structures` stream, reset at the portal's
+runtime registry index and shared by starts of that portal entry. The receiving grid still clips writes
+to its own 16×16 columns, so the random sequence is the same lifecycle input even when the portal halo
+crosses a chunk border.
 
-**Per-chunk independence forces every random draw to be position-seeded, never chunk-order
+**Per-chunk independence forces every eager structure draw to be position-seeded, never chunk-order
 dependent.** Vanilla resolves a lot of structure state lazily, the first time any chunk touches it,
 and mutates a shared object other chunks then read back — a template piece's final Y, a coded
 piece's average ground height, a decoration-time RNG draw. This engine generates chunks
@@ -109,14 +108,18 @@ filter can even run, carrying the half-consumed RNG stream across it in a `Stub`
 registry parsed but cannot fully generate, with a reason — read it rather than assuming coverage.
 A structure on the ledger still gets a start when placement and biome say so, but with no children
 and is filtered out of what actually reaches a chunk (a start with no children is invalid). Nether `fortress`
-now builds its recursive coded piece tree, and Overworld `mansion` places a seeded exterior, corridors and roofs;
-the mansion's unimplemented room interiors remain named by `mansion:room_templates`. `end_city` has its
+now builds its recursive coded piece tree, and Overworld `mansion` places its seeded shell, corridors, rooms and roofs;
+entity data markers remain a server-side consumer concern. End-city chest markers now resolve to the bundled treasure
+table in the server-side structure pass. `end_city` has its
 piece generator and is consumed by the End dimension's structure stage. Both ruined-portal variants build a template
 piece and run their post-template terrain refinement in their dimension's placement stage. Narrow per-structure deviations have their own ledger keys (for example,
-a coded chest's facing always reading `north`, or a decoration step whose RNG is position- rather than
-chunk-order-seeded). Template containers whose loot table lives in their own NBT, coded containers,
-buried-treasure chests, and resolved pool feature elements are server- and placement-stage connected;
-they must stay off the ledger. A stale
+a decoration step whose RNG is position- rather than
+chunk-order-seeded). Coded chest facing is resolved from the receiving grid immediately before its write,
+so the reorientation does not spend or shift the coded loot seed stream. Mineshaft block replay is already clipped per decorating chunk; its remaining
+mineshaft-specific ledger row is the pre-surface world-read limitation. Template containers whose loot table lives in their own NBT, coded containers,
+buried-treasure chests, and resolved pool feature elements are server- and placement-stage connected.
+The desert-pyramid roof's world-seeded positional picks are wired through structure generation;
+these completed paths must stay off the ledger. A stale
 ledger row is worse than none, because it hides the real gap from the reader who came looking; keep ledger
 text current when you close or narrow a gap.
 
@@ -155,8 +158,23 @@ candidate) is verified in both directions against a vanilla-authored save
 recorded start reproduced at exactly its chunk, and zero extra starts anywhere in a large sampled
 window. Block-level correctness (not just placement) is checked the same way for template and coded
 structures — a signature block count at a known chunk, against a structure-free control over
-identical data reading zero. `concentric_rings` (stronghold) placement math is verified only against
-its record definition; the oracle world's generated area does not reach a stronghold ring.
+identical data reading zero. `concentric_rings` (stronghold) placement uses an external JVM fixture
+for the xoroshiro stream and synthetic all-preferred-biome relocation, then drives the captured chunk through
+`StructureRegistry::starts_at`; the oracle world's generated area still does not reach a real
+stronghold ring, so full world-save parity remains open.
+The coded chest-facing rule has an independent asymmetric direction fixture at
+`crates/lodestone-worldgen/tests/support/coded_chest_reorient_external.txt`, including a vertical-neighbour
+control, plus a production-column gate over a jungle temple that checks both resulting facings and the
+unchanged coded loot sidecar.
+The desert-pyramid roof position and chest-stream gate use the external JVM capture from
+`scripts/worldgen-oracle/PyramidRoofOracle.java`, recorded at
+`crates/lodestone-worldgen/tests/support/coded_pyramid_roof_external.txt`; four asymmetric seeds
+reject the former fixed-fork result while the four chest roll seeds remain byte-for-byte unchanged.
+The ruined-portal terrain stream and full post-template write walk use the external JVM capture from
+`scripts/worldgen-oracle/RuinedPortalTerrainOracle.java`, recorded at
+`crates/lodestone-worldgen/tests/support/coded_ruined_portal_terrain_external.txt`; the same portal
+geometry is run against three target chunks, and the stream-derived distance draw plus resulting
+netherrack hash differ from the position-only control.
 
 ## Configuration
 

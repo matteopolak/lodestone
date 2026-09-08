@@ -10,6 +10,7 @@ mod connection;
 mod crypto;
 mod error;
 #[cfg(any(
+    test,
     all(feature = "ws-native", not(target_arch = "wasm32")),
     all(feature = "ws-web", target_arch = "wasm32"),
     all(feature = "worker-web", target_arch = "wasm32")
@@ -56,4 +57,6 @@ pub use ws_native::WsTransport;
 #[cfg(all(feature = "ws-web", target_arch = "wasm32"))]
 pub use ws_web::WsWebTransport;
 #[cfg(all(feature = "worker-web", target_arch = "wasm32"))]
-pub use worker_web::{MessagePortShutdown, MessagePortTransport};
+pub use worker_web::{
+    DEFAULT_MESSAGE_PORT_CREDIT_BYTES, MessagePortShutdown, MessagePortTransport,
+};

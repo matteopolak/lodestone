@@ -372,6 +372,43 @@ fn a_runtime_loaded_wasm_plugin_pushes_a_real_client_action_onto_the_real_queue(
     );
 }
 
+/// Failure isolation is a production conductor guarantee, not only a host
+/// helper property: a guest that exhausts its fuel must not prevent the next
+/// loaded guest from reaching the same real client action queue.
+#[test]
+fn a_failed_guest_does_not_suppress_a_later_guest_in_the_real_conductor() {
+    let spinner = support::build_example_plugin(&["spin"]);
+    let responder = support::build_example_plugin(&[]);
+    let capabilities = responder_capabilities();
+    let mut host = PluginHost::new(CapabilitySet::default_policy())
+        .expect("engine")
+        .with_fuel(2_000_000);
+    host.load_file("spinner", &spinner, &capabilities)
+        .expect("the spinning guest must load before it is driven");
+    host.load_file("responder", &responder, &capabilities)
+        .expect("the healthy guest must load");
+
+    let mut app = lodestone_app::client_app();
+    app.add_plugins(WasmHostPlugin::new(host));
+    lodestone_app::spawn_session(&mut app, PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0));
+    app.world_mut().write_message(chat("hello ping there"));
+    app.world_mut().run_schedule(GameTick);
+
+    assert_eq!(
+        chat_actions(&app),
+        vec![ClientAction::SendChat {
+            text: "pong (chat messages seen: 1)".to_owned(),
+        }],
+        "a failed earlier guest must not stop a later guest from producing an action"
+    );
+    app.world()
+        .resource::<WasmPlugins>()
+        .with_host(|host| {
+            assert!(host.plugins()[0].failure().is_some(), "the spinner must be failed");
+            assert_eq!(host.plugins()[1].failure(), None, "the responder must remain healthy");
+        });
+}
+
 /// The native and runtime-loaded tiers observe the same populated session store.
 ///
 /// This is deliberately a composed client `App`, not a hand-built `World`: the

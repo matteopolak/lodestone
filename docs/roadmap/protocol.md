@@ -34,10 +34,7 @@ the live shell enables `v26-2`.
 matrix in `crates/lodestone-registry/tests/hosted_action_matrix.rs`. With every registry feature
 enabled, it runs the rows serially through an in-memory server and real adapter: a block-breaking
 Play action must change the received client block, then movement must stream the newly centred
-column on the same session. The matrix adopts the initial authoritative placement before waiting
-for chunks, because the client driver intentionally pauses its read loop until a caller confirms
-that a placement correction reached the local simulation; batch and chunk frames can already be
-buffered behind that teleport. This is an internal compatibility gate, not a substitute for an
+column on the same session. This is an internal compatibility gate, not a substitute for an
 external-client join against each release.
 
 ## Server compatibility roadmap

@@ -393,6 +393,21 @@ impl VegGrid {
         &self.interner
     }
 
+    /// Exclusive upper Y bound of the generated source field, distinct from
+    /// this grid's receiving window. Nether decoration keeps a widened window
+    /// so upper-half writes remain visible to later features, while some
+    /// feature bounds are relative to the source generator's depth instead.
+    #[must_use]
+    pub(super) fn generation_top(&self) -> i32 {
+        let centre = wide_slot_of_offset(0, 0);
+        self.sources[centre]
+            .as_ref()
+            .map_or(self.min_y + self.height, |source| {
+                let (_, min_y, _, _, height, _) = source.bounds();
+                min_y + height
+            })
+    }
+
     /// Records a block entity decoration produced, at an **absolute**
     /// world position. Unbounded by the grid's footprint on purpose — the caller
     /// filters to the served chunk, exactly as it does for [`Self::dirty_cells`].
@@ -563,6 +578,25 @@ impl VegGrid {
         let (lx, lz) = self.to_local_clamped(x, z);
         for y in (self.min_y..self.min_y + self.height).rev() {
             if !self.is_air_id(self.get_local_id(lx, y, lz)) {
+                return y + 1;
+            }
+        }
+        self.min_y
+    }
+
+    /// `Heightmap.Types.MOTION_BLOCKING` — the first free row above the
+    /// highest motion-blocking block or fluid. Decorative plants and vines do
+    /// not raise this heightmap even though they are non-air, while fluids do.
+    #[must_use]
+    pub fn height_motion_blocking(&self, x: i32, z: i32) -> i32 {
+        let (lx, lz) = self.to_local_clamped(x, z);
+        for y in (self.min_y..self.min_y + self.height).rev() {
+            let id = self.get_local_id(lx, y, lz);
+            if self.is_air_id(id) {
+                continue;
+            }
+            let base = base_id(self.interner.name_of(id));
+            if super::config::blocks_motion(base) || is_fluid(base) {
                 return y + 1;
             }
         }

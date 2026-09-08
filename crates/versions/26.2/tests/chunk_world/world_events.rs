@@ -531,6 +531,27 @@ fn block_destruction_emits_entity_pos_and_stage() {
 }
 
 #[test]
+fn block_destruction_preserves_reset_stage_byte() {
+    let adapter = V770Adapter::new();
+    let mut payload = var_i32(300); // breaker entity id
+    payload.extend_from_slice(&pack_block_pos(-3, 70, 5).to_be_bytes());
+    payload.push(u8::MAX); // reset stage remains raw for the session overlay
+    let directives = handle(&adapter, play::clientbound::BLOCK_DESTRUCTION, &payload);
+    assert_eq!(
+        directives,
+        vec![Directive::Emit(ClientEvent::BlockDestruction {
+            entity_id: 300,
+            pos: BlockPos {
+                x: -3,
+                y: 70,
+                z: 5,
+            },
+            progress: u8::MAX,
+        })]
+    );
+}
+
+#[test]
 fn block_destruction_rejects_trailing_bytes() {
     let adapter = V770Adapter::new();
     let mut payload = var_i32(1);
@@ -559,6 +580,22 @@ fn block_changed_ack_emits_sequence() {
         directives,
         vec![Directive::Emit(ClientEvent::BlockChangedAck {
             sequence: lodestone_model::PredictionSequence::new(99),
+        })]
+    );
+}
+
+#[test]
+fn block_changed_ack_preserves_signed_wire_boundary() {
+    let adapter = V770Adapter::new();
+    let directives = handle(
+        &adapter,
+        play::clientbound::BLOCK_CHANGED_ACK,
+        &var_i32(i32::MIN),
+    );
+    assert_eq!(
+        directives,
+        vec![Directive::Emit(ClientEvent::BlockChangedAck {
+            sequence: lodestone_model::PredictionSequence::from_wire(i32::MIN),
         })]
     );
 }

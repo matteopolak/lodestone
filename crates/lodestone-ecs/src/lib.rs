@@ -189,7 +189,9 @@ pub use input::{
 };
 pub use plugin_draw::{PluginBillboard, PluginBillboards, PluginTexture, clear_plugin_billboards};
 pub use events::{
-    GameEvent, GameEventBus, GameEventBusPlugin, RawPacket, RawPacketBus, RawPacketBusPlugin,
+    GameEvent, GameEventBus, GameEventBusPlugin, OutboundRawPacket, OutboundRawPacketBus,
+    OutboundRawPacketBusPlugin, OutboundRawPacketLimits, OutboundRawPacketStats, RawPacket,
+    RawPacketBus, RawPacketBusPlugin,
 };
 pub use handle::{
     EcsHandle, HoldStats, LockHolds, hold_read, hold_write, new_handle, new_ingest_handle,
@@ -227,7 +229,7 @@ pub use runner::Runner;
 pub use scheduler::{SchedulerPlugin, TaskId, TaskScheduler, run_due_tasks};
 pub use schedules::{Extract, GameTick, NetIngest, Update};
 pub use session::{
-    Abilities, ActionBarOverlay, CombatSession, HudEffects, Phase, RespawnCount, Riding,
+    Abilities, ActionBarOverlay, CombatSession, EntityStatusEffects, HudEffects, Phase, RespawnCount, Riding,
     ServerAlive,
     ServerDifficulty, ServerDimension, ServerEntityId, ServerGameMode, ServerSimulationDistance,
     SessionBlockDestruction, SessionBossBars, SessionChat, SessionCombat, SessionDebugFeeds,

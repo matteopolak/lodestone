@@ -239,7 +239,8 @@ mod tests {
     /// always returns `None`.
     #[test]
     fn server_result_stack_resolves_the_first_nameable_candidate() {
-        let stone_slab = ItemId::canonical(u32::from(Item::StoneSlab.registry_id()));
+        let stone_slab =
+            ItemId::canonical(u32::from(Item::StoneSlab.registry_id()));
         let stack =
             server_result_stack(&[stone_slab]).expect("a real id must resolve");
         assert_eq!(stack.item().to_string(), "minecraft:stone_slab");
@@ -251,7 +252,9 @@ mod tests {
     /// a guessed icon.
     #[test]
     fn server_result_stack_is_none_for_an_id_outside_the_table() {
-        assert!(server_result_stack(&[ItemId::protocol_local(i32::MAX as u32)]).is_none());
+        assert!(
+            server_result_stack(&[ItemId::protocol_local(i32::MAX as u32)]).is_none()
+        );
     }
 
     /// A tag-shaped display can offer several candidate ids for the same
@@ -259,7 +262,8 @@ mod tests {
     /// `app/recipe_panel.rs`'s `ghost_result_stack`.
     #[test]
     fn server_result_stack_skips_an_unresolvable_leading_candidate() {
-        let stone_slab = ItemId::canonical(u32::from(Item::StoneSlab.registry_id()));
+        let stone_slab =
+            ItemId::canonical(u32::from(Item::StoneSlab.registry_id()));
         let stack = server_result_stack(&[
             ItemId::protocol_local(i32::MAX as u32),
             stone_slab,

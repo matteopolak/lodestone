@@ -163,3 +163,26 @@ fn declaring_an_ungranted_capability_is_refused_before_the_module_is_compiled() 
     assert!(text.contains("fs:read"), "{text}");
     assert!(host.is_empty());
 }
+
+/// The privileged version broker follows the same fail-closed production path
+/// as filesystem and scheduler imports: the default policy rejects the request
+/// before the module is read. The ordinary example module is the control for
+/// the loader path; it does not need a broker import for this policy check.
+#[test]
+fn declaring_the_privileged_version_broker_is_denied_by_default() {
+    let wasm = support::build_example_plugin(&[]);
+    let mut host = PluginHost::new(CapabilitySet::default_policy()).expect("engine");
+
+    let mut requested = declared_capabilities();
+    requested.insert(Capability::VersionBroker);
+    let err = host
+        .load_file("privileged-plugin", &wasm, &requested)
+        .expect_err("the default policy must deny the privileged broker");
+
+    assert!(
+        matches!(err, HostError::CapabilityDenied { .. }),
+        "expected CapabilityDenied, got {err:?}"
+    );
+    assert!(err.to_string().contains("version:broker"));
+    assert!(host.is_empty(), "denied guests must never be retained");
+}

@@ -5,9 +5,10 @@ use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, LoginProfile, PlayerLoadedPolicy, ServerAddress};
 use lodestone_model::{
-    BlockActionKind, BlockFace, BlockPos, ChatKind, ClientAction, ClientEvent, Rotation, Vec3,
+    BlockActionKind, BlockFace, BlockPos, ChatKind, ClientAction, ClientEvent, EntityInteraction,
+    Hand, Rotation, Vec3,
 };
-use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
+use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer, MobOwner};
 use lodestone_v1_7::adapter;
 
 const PROTOCOL: i32 = 5;
@@ -168,6 +169,77 @@ async fn registry_selected_protocol_5_echoes_legacy_chat_to_the_client_event_str
         kind,
         ChatKind::Chat,
         "protocol 5 has no chat-position byte to distinguish system output"
+    );
+
+    handle.shutdown();
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn protocol_5_entity_interaction_reaches_the_shared_mob_consumer() {
+    let protocol = lodestone_registry::server_protocol_for_protocol(PROTOCOL)
+        .expect("protocol 5 must resolve to a hosted family");
+    let source = Arc::new(LegacyFixtureSource::new());
+    let (server, client_io) = IntegratedServer::open_in_memory_with_mobs(
+        protocol,
+        source,
+        (0..=0, 0..=0),
+        (0, 0),
+        0,
+        0,
+    );
+    let profile = profile();
+    // Legacy login_start carries only the username; the hosted decoder uses
+    // the nil UUID for this connection, so that is the actor identity the
+    // shared mob consumer receives.
+    let player_uuid = uuid::Uuid::nil();
+    let (mut handle, _events) = ClientBuilder::new(address(), profile, Box::new(adapter()))
+        .player_loaded_policy(PlayerLoadedPolicy::Manual)
+        .connect_with(client_io);
+    handle
+        .wait_for_spawn(Duration::from_secs(10))
+        .await
+        .expect("legacy login must reach Play");
+
+    let mobs = server.mobs().expect("mob-backed host must expose its live sim");
+    let ready = tokio::time::Instant::now() + Duration::from_secs(10);
+    while mobs.with(|sim| sim.next_id()) < 1000 && tokio::time::Instant::now() < ready {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        mobs.with(|sim| sim.next_id()) >= 1000,
+        "the mob reseed must finish before the interaction fixture is inserted"
+    );
+
+    let wolf = mobs.with(|sim| {
+        let id = sim
+            .spawn_species(
+                "minecraft:wolf".parse().expect("wolf resource key"),
+                Vec3::new(1.0, 64.0, 3.0),
+            )
+            .id();
+        sim.get_mut(id)
+            .expect("just-spawned wolf")
+            .tame(MobOwner::Player(player_uuid));
+        id
+    });
+    handle
+        .send_action(ClientAction::InteractEntity {
+            entity_id: wolf,
+            interaction: EntityInteraction::Interact { hand: Hand::Main },
+            sneaking: false,
+        })
+        .expect("the hosted client must encode the entity interaction");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !mobs.with(|sim| sim.get(wolf).is_some_and(|mob| mob.is_ordered_to_sit()))
+        && tokio::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        mobs.with(|sim| sim.get(wolf).is_some_and(|mob| mob.is_ordered_to_sit())),
+        "protocol-5 use_entity must reach the shared tamed-mob interaction consumer"
     );
 
     handle.shutdown();

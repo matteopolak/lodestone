@@ -80,7 +80,7 @@ use std::sync::{Arc, Mutex};
 use lodestone_model::{GameMode, ResourceKey, Rotation, Vec3};
 use uuid::Uuid;
 
-use crate::protocol::{EntitySnapshot, PlayerListing, ServerDirective, ServerProtocol};
+use crate::protocol::{EntitySnapshot, MetadataField, PlayerListing, ServerDirective, ServerProtocol};
 use crate::server::EntitySource;
 
 /// The first network entity id a player is allocated.
@@ -175,6 +175,10 @@ struct TrackedPlayer {
     /// mutable menu state. It is deliberately absent from [`PlayerView`]:
     /// another network client must never receive another player's inventory.
     inventory: crate::inventory::PlayerInventory,
+    /// The base-entity shared flags the effect store currently exposes to
+    /// other players. This is kept on the streamed snapshot, not only on the
+    /// owning connection, so remote renderers receive effect-driven state.
+    shared_flags: u8,
 }
 
 /// A consistent single-lock read of the registry, from one viewer's point of
@@ -463,6 +467,7 @@ impl PlayerRegistry {
                 xp_level: 0,
                 xp_points: 0,
                 inventory: crate::inventory::PlayerInventory::default(),
+                shared_flags: 0,
             });
             entity_id
         };
@@ -485,6 +490,21 @@ impl PlayerRegistry {
             .find(|p| p.entity_id == entity_id)
         {
             player.position = position;
+        }
+    }
+
+    /// Publishes the complete base-entity shared-flags byte for one tracked
+    /// player. The owning connection derives it from its active effects before
+    /// each entity-stream pass; a changed byte becomes a metadata diff for
+    /// every remote viewer.
+    pub fn set_shared_flags(&self, entity_id: i32, shared_flags: u8) {
+        if let Some(player) = self
+            .lock()
+            .players
+            .iter_mut()
+            .find(|player| player.entity_id == entity_id)
+        {
+            player.shared_flags = shared_flags;
         }
     }
 
@@ -556,14 +576,11 @@ impl PlayerRegistry {
                     // per-tick delta to publish. An absolute position update
                     // is what the streamer sends anyway.
                     velocity: Vec3::new(0.0, 0.0, 0.0),
-                    // No player metadata is modelled yet. Adding any means
-                    // running the entity-data index oracle first — index 8 is
-                    // shared by living entities' own flags field *and*
-                    // an arrow's flags field, and a player is a
-                    // living entity, so the census column that separates the
-                    // claimants is not guessable from the previous
-                    // collision's guard.
-                    metadata: Vec::new(),
+                    // Index zero's base-entity byte is unambiguous for a
+                    // player. Keep it present even at zero: a remote viewer
+                    // that previously received invisibility needs an explicit
+                    // zero transition to restore the body.
+                    metadata: vec![MetadataField::SharedFlags(p.shared_flags)],
                     // The real player entity does not override the
                     // add-entity-packet builder, so the
                     // Object Data field is `0`.
@@ -948,6 +965,35 @@ mod tests {
         // list, so both entries appear in both views.
         assert_eq!(alice_view.roster.len(), 2);
         assert_eq!(bob_view.roster.len(), 2);
+    }
+
+    #[test]
+    fn shared_flags_reach_remote_player_snapshots_and_clear_explicitly() {
+        let registry = PlayerRegistry::new();
+        let alice = registry.join("Alice", uuid(1), Vec3::new(8.0, 100.0, 8.0));
+        let bob = registry.join("Bob", uuid(2), Vec3::new(9.0, 100.0, 8.0));
+
+        registry.set_shared_flags(bob.entity_id(), 0x20);
+        let bob_for_alice = registry
+            .view(Some(alice.entity_id()))
+            .entities
+            .into_iter()
+            .find(|entity| entity.id == bob.entity_id())
+            .expect("Alice receives Bob");
+        assert_eq!(bob_for_alice.metadata, vec![MetadataField::SharedFlags(0x20)]);
+
+        registry.set_shared_flags(bob.entity_id(), 0);
+        let cleared = registry
+            .view(Some(alice.entity_id()))
+            .entities
+            .into_iter()
+            .find(|entity| entity.id == bob.entity_id())
+            .expect("Alice still receives Bob");
+        assert_eq!(
+            cleared.metadata,
+            vec![MetadataField::SharedFlags(0)],
+            "clearing invisibility must transmit a zero byte, not omit metadata"
+        );
     }
 
     /// `set_experience`/`candidates` round trip — the producer/mirror split

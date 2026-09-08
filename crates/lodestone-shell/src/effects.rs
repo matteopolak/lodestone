@@ -556,6 +556,7 @@ mod tests {
             ambient: true,
             show_particles: true,
             show_icon: true,
+            blend: true,
         });
         fx.apply(StatusEffect {
             id: id("hidden"),
@@ -564,6 +565,7 @@ mod tests {
             ambient: false,
             show_particles: true,
             show_icon: false,
+            blend: true,
         });
         let icons = hud_icons(&fx);
         assert_eq!(icons.len(), 1, "the show_icon=false effect draws no icon");
@@ -896,6 +898,7 @@ mod tests {
             ambient: false,
             show_particles: true,
             show_icon: true,
+            blend: true,
         });
         assert_eq!(inventory_rows(&fx, &translate).remove(0).duration, "INF");
     }
@@ -917,6 +920,7 @@ mod tests {
             ambient: true,
             show_particles: true,
             show_icon: true,
+            blend: true,
         });
         fx.apply(StatusEffect {
             id: id("haste"),
@@ -925,6 +929,7 @@ mod tests {
             ambient: false,
             show_particles: true,
             show_icon: true,
+            blend: true,
         });
         fx.apply(effect("strength", 0, 600));
         fx.apply(effect("speed", 0, 200));
@@ -959,6 +964,7 @@ mod tests {
             ambient: false,
             show_particles: true,
             show_icon: false,
+            blend: true,
         });
         assert_eq!(
             inventory_rows(&fx, &|_| None).len(),

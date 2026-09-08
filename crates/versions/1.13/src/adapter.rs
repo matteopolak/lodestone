@@ -9,8 +9,7 @@ use lodestone_data::mob_effects::{mob_effect_name_for, MobEffectId};
 use lodestone_model::{
     AdapterError, AnimationAction, BlockActionKind, BlockFace, BossAction, BossColor, BossOverlay,
     ChatKind, ChatMode, ChunkPos, ClientAction, ClientEvent, ClientSettings, CollisionRule,
-    ConnectionState, ContainerClickType, ContainerStateId, Difficulty, Directive, DisplaySlot,
-    DisplayedSkinParts, EntityEquipment,
+    ConnectionState, ContainerClickType, ContainerStateId, Difficulty, Directive, DisplaySlot, DisplayedSkinParts, EntityEquipment,
     EntityAttributeModifier, EntityAttributeSnapshot, EntityInteraction, EntityMetadataUpdate,
     EntityMovement, EquipmentSlot, GameMode, Hand, ItemStack, LoginProfile, MainHand, ObjectiveMode, ObjectiveRenderType,
     PlayerCommand, PlayerListEntry, ProfileProperty, RecipeBookType, Reported, ResourceKey,

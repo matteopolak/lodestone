@@ -144,7 +144,7 @@ impl CachedSession {
             expires_at: session.expires_at,
             profile_id: session.profile.id.to_string(),
             profile_name: session.profile.name.clone(),
-            skin_url: session.profile.skin.as_ref().map(|s| s.url.clone()),
+            skin_url: session.profile.skin.as_ref().map(|s| s.url.to_string()),
             skin_variant: session
                 .profile
                 .skin
@@ -159,14 +159,18 @@ impl CachedSession {
     #[must_use]
     pub fn to_session(&self) -> Option<crate::flow::Session> {
         let id = Uuid::parse_str(&self.profile_id).ok()?;
-        let skin = self.skin_url.clone().map(|url| crate::flow::ProfileSkin {
-            url,
-            variant: self
-                .skin_variant
-                .as_deref()
-                .map(skin_variant_from_tag)
-                .unwrap_or(crate::flow::SkinVariant::Classic),
-        });
+        let skin = self
+            .skin_url
+            .as_deref()
+            .and_then(|url| url.parse::<crate::flow::ProfileSkinUrl>().ok())
+            .map(|url| crate::flow::ProfileSkin {
+                url,
+                variant: self
+                    .skin_variant
+                    .as_deref()
+                    .map(skin_variant_from_tag)
+                    .unwrap_or(crate::flow::SkinVariant::Classic),
+            });
         Some(crate::flow::Session {
             access_token: self.access_token.clone(),
             profile: crate::flow::Profile {
@@ -874,7 +878,7 @@ mod tests {
                 name: "Notch".to_owned(),
                 id,
                 skin: Some(crate::flow::ProfileSkin {
-                    url: "https://textures.minecraft.net/texture/abc123".to_owned(),
+                    url: "https://textures.minecraft.net/texture/abc123".parse().unwrap(),
                     variant: crate::flow::SkinVariant::Slim,
                 }),
             },
@@ -920,6 +924,16 @@ mod tests {
         assert_eq!(cached.skin_url, None);
         assert_eq!(cached.skin_variant, None);
         let restored = cached.to_session().unwrap();
+        assert_eq!(restored.profile.skin, None);
+    }
+
+    #[test]
+    fn cached_session_with_an_invalid_skin_url_restores_without_a_skin() {
+        let id = Uuid::new_v4();
+        let mut cached = CachedSession::from_session(&sample_session(id));
+        cached.skin_url = Some("not a URL".to_owned());
+
+        let restored = cached.to_session().expect("valid profile id must restore");
         assert_eq!(restored.profile.skin, None);
     }
 

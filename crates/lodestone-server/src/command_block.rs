@@ -80,7 +80,7 @@ use uuid::Uuid;
 
 use crate::neighbor_update::Direction;
 use crate::redstone::{base_name, direction_from_str, direction_to_str, get_bool_property, get_str_property};
-use crate::scheduled_tick::{ScheduledTick, ScheduledTickQueue, TickPriority};
+use crate::scheduled_tick::{ScheduledTick, ScheduledTickKind, ScheduledTickQueue, TickPriority};
 
 pub const COMMAND_BLOCK: &str = "minecraft:command_block";
 pub const CHAIN_COMMAND_BLOCK: &str = "minecraft:chain_command_block";
@@ -377,9 +377,9 @@ pub fn state_with(base: &str, facing: Direction, conditional: bool) -> String {
 /// private — the same idiom `crate::fluid::ticks_after_edit`/
 /// `crate::gravity_tick::ticks_after_place` already use, for the same reason.
 #[must_use]
-pub fn ticks_after_schedule(pos: BlockPos) -> Vec<ScheduledTick<String>> {
-    let mut pending: ScheduledTickQueue<String> = ScheduledTickQueue::new();
-    pending.schedule((pos.x, pos.y, pos.z), TICK_COMMAND_BLOCK.to_owned(), 1, TickPriority::Normal);
+pub fn ticks_after_schedule(pos: BlockPos) -> Vec<ScheduledTick<ScheduledTickKind>> {
+    let mut pending: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
+    pending.schedule((pos.x, pos.y, pos.z), ScheduledTickKind::CommandBlock, 1, TickPriority::Normal);
     pending.drain_due(u64::MAX, usize::MAX)
 }
 

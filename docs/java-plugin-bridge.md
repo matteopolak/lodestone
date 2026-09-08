@@ -932,6 +932,11 @@ native inventory slot: it returns the item key, or `null` for an empty slot.
 The host rejects a stack with unmodeled components before returning a partial
 projection, and the surface deliberately has no Java item-object or mutation
 operation until their serialization and connection-task handoff are modeled.
+The generated player census is also an opt-in contract for the direct
+`AdapterHost` class: an adapter may declare any exact subset of those static
+native methods, and the worker registers only declarations with the matching
+JNI descriptor. Missing declarations remain unsupported, so adding a method
+name to an adapter does not imply a mutation or a server-object surface.
 `AdapterHost::start_with_setup` mints the corresponding capability token only
 from its worker's request ports; consuming it keeps that token with the retained loader state, and the
 dedicated `JavaAdapter::poll` call is the matching live producer through

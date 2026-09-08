@@ -38,6 +38,9 @@
 //! a pointwise `Density::compute` would silently drop the interpolation and
 //! produce veins in the right *places* with the wrong *shape*, which is the
 //! hardest kind of wrong to notice.
+//! The sampler geometry is captured from the settings document when these
+//! programs are built, so dimensions with different horizontal or vertical
+//! sizes retain their own interpolation lattice.
 //!
 //! **Not yet anchored on a JVM fixture.** A vein-positive dump would be the
 //! right gate; what exists today is a generated-column spot check
@@ -83,6 +86,8 @@ pub(super) struct VeinPrograms {
     positional: AnyPositionalFactory,
     copper: VeinType,
     iron: VeinType,
+    cell_width: i32,
+    cell_height: i32,
 }
 
 impl VeinPrograms {
@@ -104,6 +109,7 @@ impl VeinPrograms {
                 return None;
             }
         }
+        let (cell_width, cell_height) = crate::aquifer::cell_geometry(settings);
         let id = |name: &str| interner.id_of(name);
         Some(Self {
             toggle: Program::compile(
@@ -133,6 +139,8 @@ impl VeinPrograms {
                 min_y: -60,
                 max_y: -8,
             },
+            cell_width,
+            cell_height,
         })
     }
 
@@ -152,13 +160,30 @@ impl VeinPrograms {
             y: (min_y, min_y + height - 1),
             z: (min_block_z, min_block_z + 15),
         };
-        // Cell width/height are vanilla's `NoiseSettings` 4/8 — the same pair
-        // `crate::aquifer` passes, and the reason they are not read from the
-        // settings here is that nothing in this crate reads them from there yet.
+        // All interpolated vein channels share the dimensions selected by this
+        // generator's settings document.
         VeinChunk {
-            toggle: NoiseChunkSampler::from_program(self.toggle.clone(), slots, 4, 8, Some(bounds)),
-            ridged: NoiseChunkSampler::from_program(self.ridged.clone(), slots, 4, 8, Some(bounds)),
-            gap: NoiseChunkSampler::from_program(self.gap.clone(), slots, 4, 8, Some(bounds)),
+            toggle: NoiseChunkSampler::from_program(
+                self.toggle.clone(),
+                slots,
+                self.cell_width,
+                self.cell_height,
+                Some(bounds),
+            ),
+            ridged: NoiseChunkSampler::from_program(
+                self.ridged.clone(),
+                slots,
+                self.cell_width,
+                self.cell_height,
+                Some(bounds),
+            ),
+            gap: NoiseChunkSampler::from_program(
+                self.gap.clone(),
+                slots,
+                self.cell_width,
+                self.cell_height,
+                Some(bounds),
+            ),
             programs: self.clone(),
         }
     }
@@ -229,5 +254,62 @@ impl VeinChunk {
         } else {
             Some(vein.filler)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VeinPrograms;
+    use crate::density::{Builder, NoiseParams, Resolver};
+    use crate::interner::StateInterner;
+    use serde_json::Value;
+
+    struct NoReferences;
+
+    impl Resolver for NoReferences {
+        fn density_function(&self, id: &str) -> Value {
+            panic!("unexpected density-function reference: {id}");
+        }
+
+        fn noise(&self, id: &str) -> NoiseParams {
+            panic!("unexpected noise reference: {id}");
+        }
+    }
+
+    #[test]
+    fn vein_sampler_uses_settings_cell_geometry() {
+        let settings = serde_json::json!({
+            "ore_veins_enabled": true,
+            "noise": {"size_horizontal": 2, "size_vertical": 1},
+            "noise_router": {
+                "vein_toggle": {
+                    "type": "minecraft:interpolated",
+                    "argument": {
+                        "type": "minecraft:square",
+                        "argument": {
+                            "type": "minecraft:y_clamped_gradient",
+                            "from_y": 0,
+                            "to_y": 8,
+                            "from_value": 0.0,
+                            "to_value": 1.0
+                        }
+                    }
+                },
+                "vein_ridged": {"type": "minecraft:constant", "argument": 0.0},
+                "vein_gap": {"type": "minecraft:constant", "argument": 0.0}
+            }
+        });
+        let resolver = NoReferences;
+        let builder = Builder::new(0, &resolver);
+        let interner = StateInterner::new();
+        let programs = VeinPrograms::build(&builder, &settings, &interner)
+            .expect("complete vein settings should build");
+
+        assert_eq!((programs.cell_width, programs.cell_height), (8, 4));
+        let chunk = programs.for_chunk(builder.slot_count(), 0, 0, 0, 16);
+
+        // The square of the gradient is 0 at y=0 and 0.25 at y=4. With a
+        // four-block cell, y=2 is halfway between those corners.
+        assert_eq!(chunk.toggle.final_density(0, 2, 0).to_bits(), 0.125_f64.to_bits());
     }
 }

@@ -34,6 +34,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
+use lodestone_model::ResourceKey;
 use lodestone_worldgen::generator::ChunkGenerator;
 
 use crate::chunk::ChunkSource;
@@ -102,10 +103,10 @@ impl Default for DimensionProperties {
 /// One plugin-registered dimension: a key, its properties, and the generator
 /// backing it.
 pub struct PluginDimension {
-    /// A namespaced id (`"myplugin:void"`), the plugin's own key — never a
+    /// A validated namespaced key (`"myplugin:void"`), the plugin's own key — never a
     /// vanilla `minecraft:` key, so a registration can never shadow
     /// [`crate::dimension::Dimension`]'s three hosted levels.
-    pub key: String,
+    pub key: ResourceKey,
     pub properties: DimensionProperties,
     pub generator: Arc<dyn ChunkGenerator>,
 }
@@ -130,8 +131,8 @@ impl std::fmt::Debug for PluginDimension {
 /// independent, edit-blind copy of the world.
 #[derive(Default)]
 pub struct DimensionRegistry {
-    entries: RwLock<HashMap<String, Arc<PluginDimension>>>,
-    sources: Mutex<HashMap<String, Arc<dyn ChunkSource>>>,
+    entries: RwLock<HashMap<ResourceKey, Arc<PluginDimension>>>,
+    sources: Mutex<HashMap<ResourceKey, Arc<dyn ChunkSource>>>,
 }
 
 impl std::fmt::Debug for DimensionRegistry {
@@ -166,7 +167,7 @@ impl DimensionRegistry {
 
     /// The registered entry for `key`, if any.
     #[must_use]
-    pub fn get(&self, key: &str) -> Option<Arc<PluginDimension>> {
+    pub fn get(&self, key: &ResourceKey) -> Option<Arc<PluginDimension>> {
         self.entries
             .read()
             .expect("dimension registry lock poisoned")
@@ -177,7 +178,7 @@ impl DimensionRegistry {
     /// Every registered key, for a caller listing available custom worlds
     /// (a world-creation menu, a `/world list` command).
     #[must_use]
-    pub fn keys(&self) -> Vec<String> {
+    pub fn keys(&self) -> Vec<ResourceKey> {
         self.entries
             .read()
             .expect("dimension registry lock poisoned")
@@ -194,7 +195,7 @@ impl DimensionRegistry {
     /// `IntegratedServer::open_in_memory_with_entities`/
     /// `open_persistent_with_mobs` in place of `overworld_chunk_source(seed)`.
     #[must_use]
-    pub fn chunk_source(&self, key: &str) -> Option<Arc<dyn ChunkSource>> {
+    pub fn chunk_source(&self, key: &ResourceKey) -> Option<Arc<dyn ChunkSource>> {
         if let Some(cached) = self
             .sources
             .lock()
@@ -209,7 +210,7 @@ impl DimensionRegistry {
         self.sources
             .lock()
             .expect("dimension source cache lock poisoned")
-            .insert(key.to_string(), Arc::clone(&source));
+            .insert(key.clone(), Arc::clone(&source));
         Some(source)
     }
 }
@@ -218,6 +219,10 @@ impl DimensionRegistry {
 mod tests {
     use super::*;
     use lodestone_worldgen::dense_grid::DenseBlockGrid;
+
+    fn key(value: &str) -> ResourceKey {
+        value.parse().expect("test dimension key must be valid")
+    }
 
     struct AllStone {
         min_y: i32,
@@ -249,15 +254,16 @@ mod tests {
     #[test]
     fn unregistered_key_returns_nothing() {
         let registry = DimensionRegistry::new();
-        assert!(registry.get("nope:nothing").is_none());
-        assert!(registry.chunk_source("nope:nothing").is_none());
+        let missing = key("example.plugin:nothing");
+        assert!(registry.get(&missing).is_none());
+        assert!(registry.chunk_source(&missing).is_none());
     }
 
     #[test]
     fn registered_dimension_is_reachable_by_key_and_generates_real_terrain() {
         let registry = DimensionRegistry::new();
         registry.register(PluginDimension {
-            key: "voidworld:test".to_string(),
+            key: key("example.plugin:skylands"),
             properties: DimensionProperties {
                 min_y: 0,
                 height: 16,
@@ -267,11 +273,12 @@ mod tests {
             generator: Arc::new(AllStone { min_y: 0, height: 16 }),
         });
 
-        assert_eq!(registry.keys(), vec!["voidworld:test".to_string()]);
-        let entry = registry.get("voidworld:test").expect("just registered");
+        let dimension_key = key("example.plugin:skylands");
+        assert_eq!(registry.keys(), vec![dimension_key.clone()]);
+        let entry = registry.get(&dimension_key).expect("just registered");
         assert_eq!(entry.properties.height, 16);
 
-        let source = registry.chunk_source("voidworld:test").expect("just registered");
+        let source = registry.chunk_source(&dimension_key).expect("just registered");
         assert_eq!(source.block_state(0, 0, 0), "minecraft:stone");
         assert_eq!(source.block_state(0, 1, 0), "minecraft:air");
     }
@@ -280,15 +287,16 @@ mod tests {
     fn chunk_source_is_cached_so_edits_persist_across_lookups() {
         let registry = DimensionRegistry::new();
         registry.register(PluginDimension {
-            key: "voidworld:test".to_string(),
+            key: key("voidworld:test"),
             properties: DimensionProperties::default(),
             generator: Arc::new(AllStone { min_y: 0, height: 16 }),
         });
 
-        let first = registry.chunk_source("voidworld:test").unwrap();
+        let dimension_key = key("voidworld:test");
+        let first = registry.chunk_source(&dimension_key).unwrap();
         first.set_block(0, 1, 0, "minecraft:diamond_block");
 
-        let second = registry.chunk_source("voidworld:test").unwrap();
+        let second = registry.chunk_source(&dimension_key).unwrap();
         assert_eq!(
             second.block_state(0, 1, 0),
             "minecraft:diamond_block",
@@ -301,18 +309,19 @@ mod tests {
     fn re_registering_a_key_drops_the_stale_cached_source() {
         let registry = DimensionRegistry::new();
         registry.register(PluginDimension {
-            key: "voidworld:test".to_string(),
+            key: key("voidworld:test"),
             properties: DimensionProperties::default(),
             generator: Arc::new(AllStone { min_y: 0, height: 16 }),
         });
-        let _ = registry.chunk_source("voidworld:test").unwrap();
+        let dimension_key = key("voidworld:test");
+        let _ = registry.chunk_source(&dimension_key).unwrap();
 
         registry.register(PluginDimension {
-            key: "voidworld:test".to_string(),
+            key: dimension_key.clone(),
             properties: DimensionProperties::default(),
             generator: Arc::new(AllStone { min_y: 5, height: 16 }),
         });
-        let source = registry.chunk_source("voidworld:test").unwrap();
+        let source = registry.chunk_source(&dimension_key).unwrap();
         assert_eq!(
             source.block_state(0, 5, 0),
             "minecraft:stone",
@@ -320,5 +329,20 @@ mod tests {
              stale cached source built from the first registration (stone at y=0)"
         );
         assert_eq!(source.block_state(0, 0, 0), "minecraft:air");
+    }
+
+    #[test]
+    fn malformed_keys_are_rejected_before_registration() {
+        for value in [
+            "",
+            "example.plugin:",
+            "Example.plugin:skylands",
+            "example.plugin:sky lands",
+        ] {
+            assert!(
+                value.parse::<ResourceKey>().is_err(),
+                "malformed resource key {value:?} must not cross the registry seam"
+            );
+        }
     }
 }

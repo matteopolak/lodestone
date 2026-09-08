@@ -105,6 +105,14 @@ lists and string UUIDs before emitting canonical snapshots. `block_event`
 translates the 1,166-entry block registry through `src/block_registry.rs` and
 preserves both opaque event bytes for rendering and audio consumers.
 
+`set_entity_data` resolves the protocol's indexed serializer list and emits
+the shared entity-flags byte as `ClientEvent::EntityMetadataUpdated`; the
+client ingest route claims that event so fire, crouching, sprinting, swimming,
+invisibility, glowing and fall-flying state can reach their consumers. The
+literal body in `tests/packet_events.rs` uses entity 300, index 0, serializer 0,
+flags `0xa1` and the `0xff` terminator, then checks both the resolved value and
+the ingest route rather than relying on an encode/decode round trip.
+
 `block_update` resolves its protocol-local flat state id before writing through
 the canonical world sink. `section_blocks_update` performs the same resolution
 for every record, then submits the complete one-section batch through
@@ -294,6 +302,29 @@ neighbourhood, so adjacent columns contribute at seams from the first load
 when already resident and throughout later relights. Missing columns retain an
 opaque seam rather than being generated for light. An edit recomputes and sends
 that whole bounded footprint.
+
+### Basic container session
+
+Protocol 774 now carries the complete basic container session boundary. The
+adapter consumes `open_screen`, `container_set_content`, `container_set_slot`,
+`container_set_data` and `container_close` into the shared screen/container
+events, while plain item predictions in `container_click` encode through the
+adapter and decode through `V774ServerProtocol` into `ServerBound`.
+
+The wire uses a VarInt window id and state id, a signed-short slot index, and
+component-shaped item slots. This slice intentionally supports empty slots and
+plain stacks with an empty component patch; componentful predictions are
+rejected rather than guessed. The menu id ordering and item id bridge are local
+to this family, because neither is delivered as synchronized configuration
+data. `ServerProtocol::encode_open_screen`,
+`encode_container_content`, `encode_container_slot` and
+`encode_container_data` produce the matching host packets. The literal controls
+in `tests/packet_events.rs` and `tests/server_protocol.rs` pin the six packet
+layouts, while `tests/server_integration.rs` exercises the real adapter-to-host
+click and close paths through the registry-selected protocol consumer. Its
+joined-server control submits a literal forged prediction, waits for the
+server's correction, and reads the authoritative player inventory snapshot to
+prove that client-supplied item contents are never persisted.
 
 ### External-client acceptance
 

@@ -105,7 +105,7 @@
 //! logs a banner naming the fix rather than silently rendering an empty world.
 
 use std::sync::{
-    Arc, Mutex, OnceLock, PoisonError,
+    Arc, LazyLock, Mutex, OnceLock, PoisonError,
     atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
     mpsc::{self, Receiver, Sender, SyncSender},
 };
@@ -1184,8 +1184,12 @@ pub enum NetUpdate {
         /// Whether the effect is ambient (beacon/aura source): the HUD draws it
         /// fainter.
         ambient: bool,
+        /// Whether the effect emits its normal particles.
+        show_particles: bool,
         /// Whether the effect shows a HUD icon at all.
         show_icon: bool,
+        /// Whether effect-specific visual transitions should animate.
+        blend: bool,
     },
     /// An entity played its hurt animation (`hurt_animation`), carrying the yaw
     /// the damage came from.
@@ -1764,7 +1768,34 @@ impl tokio::io::AsyncWrite for BrowserIntegratedTransport {
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match &mut *self {
             Self::InPage(stream) => Pin::new(stream).poll_shutdown(cx),
-            Self::Worker { port, .. } => Pin::new(port).poll_shutdown(cx),
+            Self::Worker { _worker, port, .. } => {
+                let result = Pin::new(port).poll_shutdown(cx);
+                if matches!(result, Poll::Ready(_)) {
+                    // A MessagePort has no peer-close event. Once the client
+                    // endpoint is shut down there is no reliable signal for
+                    // the server task to observe, so terminate the sole
+                    // authoritative Worker explicitly. `Drop` repeats this
+                    // as a guard for callers that discard the transport
+                    // without polling shutdown.
+                    _worker.terminate();
+                }
+                result
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Drop for BrowserIntegratedTransport {
+    fn drop(&mut self) {
+        if let Self::Worker { _worker, .. } = self {
+            // `Worker` has no Rust-side join handle, and dropping the JS
+            // wrapper does not guarantee that its event loop stops. Terminate
+            // the one authoritative server worker when the client endpoint is
+            // dropped; this prevents a quit/rejoin cycle from leaving an old
+            // world ticking behind the page. Startup failures already
+            // terminate explicitly in `launch_browser_worker`.
+            _worker.terminate();
         }
     }
 }
@@ -1817,6 +1848,26 @@ enum BrowserWorkerStartupState {
     Waiting,
     Ready,
     Failed,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Debug, PartialEq, Eq)]
+enum BrowserWorkerErrorAction {
+    /// Startup did not finish, so the caller may still use the in-page
+    /// fallback without creating a second world.
+    StartupFailure(String),
+    /// The worker was already handed to the running client. Only disconnect is
+    /// valid now; starting another server would create two mutable worlds.
+    SessionFailure(String),
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn browser_worker_error_action(startup_pending: bool, message: String) -> BrowserWorkerErrorAction {
+    if startup_pending {
+        BrowserWorkerErrorAction::StartupFailure(message)
+    } else {
+        BrowserWorkerErrorAction::SessionFailure(message)
+    }
 }
 
 impl BrowserWorkerStartupState {
@@ -1930,10 +1981,15 @@ async fn launch_browser_worker(
             } else {
                 event.message()
             };
-            if let Some(tx) = ready_tx.borrow_mut().take() {
-                let _ = tx.send(Err(message));
-            } else {
-                port_shutdown.signal(message);
+            match browser_worker_error_action(ready_tx.borrow().is_some(), message) {
+                BrowserWorkerErrorAction::StartupFailure(message) => {
+                    if let Some(tx) = ready_tx.borrow_mut().take() {
+                        let _ = tx.send(Err(message));
+                    }
+                }
+                BrowserWorkerErrorAction::SessionFailure(message) => {
+                    port_shutdown.signal(message);
+                }
             }
         })
     };
@@ -2564,6 +2620,14 @@ impl NetClient {
     /// idempotent — the second rewrite either writes the same pose or the newer
     /// one, which is the one the server is waiting to hear.
     pub fn send_action(&self, action: ClientAction) {
+        // The action is a snapshot of the simulation pose at queue time. If a
+        // correction has reached the simulation channel but has not yet been
+        // adopted, keep that snapshot from contradicting the server's target.
+        // The net-loop drain repeats the same check for the opposite ordering.
+        let action = match pending_authorised_pose() {
+            Some(pose) => with_authorised_pose(action, pose),
+            None => action,
+        };
         let _ = self.action_tx.try_send(action);
     }
 
@@ -3183,6 +3247,103 @@ fn should_forward_action(action: &ClientAction, in_play: bool) -> bool {
     !matches!(action, ClientAction::Move { .. }) || in_play
 }
 
+/// The server-authorised pose carried by an absolute player correction.
+///
+/// The net thread can retain an absolute position, but it cannot resolve a
+/// relative position without the simulation's current pose. Rotation is
+/// retained independently for the same reason: a correction with a relative
+/// yaw or pitch still authorises its absolute position.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct AuthorisedPose {
+    pos: Vec3,
+    rotation: Option<Rotation>,
+}
+
+/// Tracks the correction window between forwarding a teleport to the
+/// simulation and the simulation adopting it.
+///
+/// Movement is produced on the simulation side and can cross the action relay
+/// after the driver's protocol acknowledgement has already been written. The
+/// counters make that ordering explicit: while forwarded corrections exceed
+/// adopted corrections, an outbound movement claim must use the newest
+/// resolvable server target. This is an ordering guarantee, not a comparison
+/// against movement history or spatial proximity.
+#[derive(Debug, Default)]
+struct TeleportSync {
+    forwarded: AtomicU64,
+    applied: AtomicU64,
+    pose: Mutex<Option<AuthorisedPose>>,
+}
+
+impl TeleportSync {
+    fn reset(&self) {
+        self.forwarded.store(0, Ordering::SeqCst);
+        self.applied.store(0, Ordering::SeqCst);
+        *self.pose.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+
+    fn note_forwarded(&self, pose: Option<AuthorisedPose>) {
+        *self.pose.lock().unwrap_or_else(PoisonError::into_inner) = pose;
+        self.forwarded.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn note_applied(&self) {
+        self.applied.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn pending(&self) -> Option<AuthorisedPose> {
+        let forwarded = self.forwarded.load(Ordering::SeqCst);
+        if self.applied.load(Ordering::SeqCst) >= forwarded {
+            return None;
+        }
+        *self.pose.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+static TELEPORT_SYNC: LazyLock<TeleportSync> = LazyLock::new(TeleportSync::default);
+
+/// Marks the point where `Sim` has adopted a forwarded player correction.
+pub(crate) fn note_teleport_applied() {
+    TELEPORT_SYNC.note_applied();
+}
+
+fn reset_teleport_sync() {
+    TELEPORT_SYNC.reset();
+}
+
+fn note_teleport_forwarded(pose: Option<AuthorisedPose>) {
+    TELEPORT_SYNC.note_forwarded(pose);
+}
+
+fn authorised_pose(
+    pos: Vec3,
+    rotation: Rotation,
+    flags: &lodestone_model::event::TeleportFlags,
+) -> Option<AuthorisedPose> {
+    (!flags.relative_x && !flags.relative_y && !flags.relative_z).then(|| AuthorisedPose {
+        pos,
+        rotation: (!flags.relative_yaw && !flags.relative_pitch).then_some(rotation),
+    })
+}
+
+fn pending_authorised_pose() -> Option<AuthorisedPose> {
+    TELEPORT_SYNC.pending()
+}
+
+/// Rewrites a movement action to the pose the server authorised while the
+/// simulation is still catching up. Other actions pass through untouched.
+fn with_authorised_pose(action: ClientAction, pose: AuthorisedPose) -> ClientAction {
+    match action {
+        ClientAction::Move { rotation, .. } => ClientAction::Move {
+            pos: pose.pos,
+            rotation: pose.rotation.unwrap_or(rotation),
+            on_ground: false,
+            horizontal_collision: false,
+        },
+        other => other,
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "the driver's shared cells, one per subsystem the render thread reads; \
@@ -3224,6 +3385,7 @@ async fn run_async(
         };
 
         let _ = tx.try_send(NetUpdate::Connecting);
+        reset_teleport_sync();
 
         // Start the integrated server *before* the client, when this is a
         // singleplayer session. Its serving task goes onto this thread's runtime
@@ -4076,6 +4238,14 @@ async fn run_async(
                     }
                     continue;
                 }
+                // An action can have been queued before the simulation adopted
+                // a correction but drained after the adoption marker changed.
+                // Rewrite it while the correction window is open so the driver
+                // cannot assign a post-adoption generation to a stale pose.
+                let action = match pending_authorised_pose() {
+                    Some(pose) => with_authorised_pose(action, pose),
+                    None => action,
+                };
                 let _ = handle.send_action(action);
                 handed_actions += 1;
                 if handed_actions == 1 {
@@ -5455,15 +5625,18 @@ fn forward(
             amplifier,
             duration_ticks,
             ambient,
+            visible,
             show_icon,
-            ..
+            blend,
         } => NetUpdate::EffectApplied {
             entity_id,
             effect: effect.path().to_string(),
             amplifier: u32::try_from(amplifier).unwrap_or(0),
             duration_ticks,
             ambient,
+            show_particles: visible,
             show_icon,
+            blend,
         },
         // Forwarded unfiltered, like the effect arms above: `net_apply` compares
         // against `server_entity_id()`. The filtering deliberately does **not**
@@ -5610,6 +5783,7 @@ fn forward(
             // and leaves the simulation's own claim alone, which is the
             // harmless direction: a relative correction is a small delta, and a
             // stale claim against one is inside the server's own tolerance.
+            note_teleport_forwarded(authorised_pose(pos, rotation, &flags));
             NetUpdate::Teleport {
                 pos,
                 rotation,
@@ -5832,6 +6006,26 @@ mod tests {
             BrowserWorkerStartupAction::Ready
         );
         assert_eq!(startup, BrowserWorkerStartupState::Ready);
+    }
+
+    #[test]
+    fn browser_worker_error_before_ready_keeps_fallback_eligible() {
+        assert_eq!(
+            browser_worker_error_action(true, "module failed".to_string()),
+            BrowserWorkerErrorAction::StartupFailure("module failed".to_string())
+        );
+    }
+
+    #[test]
+    fn browser_worker_error_after_ready_only_disconnects_the_session() {
+        let action = browser_worker_error_action(false, "worker crashed".to_string());
+        assert_eq!(
+            action,
+            BrowserWorkerErrorAction::SessionFailure("worker crashed".to_string())
+        );
+        // This is the detector control: changing the post-ready branch to the
+        // pre-ready fallback would produce `StartupFailure` and fail here.
+        assert!(!matches!(action, BrowserWorkerErrorAction::StartupFailure(_)));
     }
 
     #[test]
@@ -6603,7 +6797,9 @@ mod tests {
                 amplifier,
                 duration_ticks,
                 ambient,
+                show_particles,
                 show_icon,
+                blend,
             } => {
                 assert_eq!(entity_id, 42);
                 // Namespace stripped, matching the `NetUpdate::Sound` convention.
@@ -6611,7 +6807,9 @@ mod tests {
                 assert_eq!(amplifier, 1);
                 assert_eq!(duration_ticks, 200, "duration must reach the HUD model");
                 assert!(!ambient);
+                assert!(show_particles);
                 assert!(show_icon);
+                assert!(!blend);
             }
             other => panic!("expected EffectApplied, got {other:?}"),
         }
@@ -7391,6 +7589,99 @@ mod tests {
             should_forward_action(&swing, false),
             "a non-Move action must reach the driver regardless of play state -- \
              only Move has no encode arm outside Play"
+        );
+    }
+
+    #[test]
+    fn absolute_correction_with_relative_rotation_authorises_position_only() {
+        let target = Vec3::new(17.183872876050742, 105.0, 3.162941876050186);
+        let flags = lodestone_model::event::TeleportFlags {
+            relative_yaw: true,
+            relative_pitch: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            authorised_pose(target, Rotation::new(0.0, 0.0), &flags),
+            Some(AuthorisedPose {
+                pos: target,
+                rotation: None,
+            }),
+            "relative yaw/pitch must not make an absolute position unusable"
+        );
+
+        let relative_position = lodestone_model::event::TeleportFlags {
+            relative_z: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            authorised_pose(target, Rotation::new(0.0, 0.0), &relative_position),
+            None,
+            "the net thread cannot resolve a relative position without the simulation pose"
+        );
+    }
+
+    #[test]
+    fn correction_window_rewrites_stale_move_until_simulation_adopts_it() {
+        let stale = ClientAction::Move {
+            pos: Vec3::new(17.212020593099, 104.0, 3.7112639893995163),
+            rotation: Rotation::new(35.0, 12.0),
+            on_ground: true,
+            horizontal_collision: true,
+        };
+        let authorised = AuthorisedPose {
+            pos: Vec3::new(17.212020593099, 105.0, 3.7112639893995163),
+            rotation: None,
+        };
+        let sync = TeleportSync::default();
+        sync.note_forwarded(Some(authorised));
+
+        let before_adoption = sync
+            .pending()
+            .map_or_else(|| stale.clone(), |pose| with_authorised_pose(stale.clone(), pose));
+        let ClientAction::Move {
+            pos,
+            rotation,
+            on_ground,
+            horizontal_collision,
+        } = before_adoption
+        else {
+            panic!("a movement action must remain a movement action");
+        };
+        assert_eq!(pos, authorised.pos);
+        assert_eq!(rotation, Rotation::new(35.0, 12.0));
+        assert!(!on_ground);
+        assert!(!horizontal_collision);
+
+        sync.note_applied();
+        let after_adoption = sync
+            .pending()
+            .map_or_else(|| stale.clone(), |pose| with_authorised_pose(stale.clone(), pose));
+        assert_eq!(
+            after_adoption, stale,
+            "once the simulation adopts the correction, its own movement claim stands"
+        );
+    }
+
+    #[test]
+    fn relative_correction_does_not_invent_a_net_thread_pose() {
+        let sync = TeleportSync::default();
+        sync.note_forwarded(None);
+        assert_eq!(
+            sync.pending(),
+            None,
+            "a relative position must be resolved by the simulation"
+        );
+
+        let keep_alive = ClientAction::KeepAliveResponse { id: 7 };
+        let pose = AuthorisedPose {
+            pos: Vec3::new(0.0, 0.0, 0.0),
+            rotation: Some(Rotation::new(0.0, 0.0)),
+        };
+        assert_eq!(
+            with_authorised_pose(keep_alive.clone(), pose),
+            keep_alive,
+            "only movement claims participate in the correction rewrite"
         );
     }
 

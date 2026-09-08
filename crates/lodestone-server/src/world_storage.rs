@@ -25,7 +25,8 @@ use lodestone_storage_schema::{
     PlayerInventory as StoredPlayerInventory, PlayerInventorySlot as StoredPlayerInventorySlot,
     PlayerRecord,
     RegisteredExtension, WorldProperties,
-    ScheduledTick as StoredScheduledTick, ScheduledTickKind, ScheduledTickPriority, StorageRecord,
+    ScheduledTick as StoredScheduledTick, ScheduledTickKind as StoredScheduledTickKind,
+    ScheduledTickPriority, StorageRecord,
     generated::{entity_record, general_record, light_data, storage_record},
 };
 
@@ -2132,14 +2133,16 @@ fn decode_light_data(
 fn encode_scheduled_tick(
     tick: crate::scheduled_tick::PersistedScheduledTick,
 ) -> Result<StoredScheduledTick, ChunkRecordError> {
+    let (kind, extension_kind) = encode_tick_kind(&tick.kind)?;
     Ok(StoredScheduledTick {
         x: tick.pos.0,
         y: tick.pos.1,
         z: tick.pos.2,
-        kind: scheduled_tick_kind(&tick.kind)? as i32,
+        kind: kind as i32,
         trigger_tick: tick.trigger_tick,
         priority: stored_tick_priority(tick.priority) as i32,
         insertion_order: tick.insertion_order,
+        extension_kind,
     })
 }
 
@@ -2188,59 +2191,78 @@ fn decode_scheduled_tick(
     if !insertion_orders.insert(stored.insertion_order) {
         return Err(ChunkRecordError::DuplicateScheduledTickOrder(stored.insertion_order));
     }
-    let kind = ScheduledTickKind::try_from(stored.kind)
-        .map_err(|_| ChunkRecordError::UnknownScheduledTickKind(stored.kind))?;
+    let kind = decode_tick_kind(stored)?;
     let priority = ScheduledTickPriority::try_from(stored.priority)
         .map_err(|_| ChunkRecordError::UnknownScheduledTickPriority(stored.priority))?;
     Ok(crate::scheduled_tick::PersistedScheduledTick {
         pos: (stored.x, stored.y, stored.z),
-        kind: tick_kind_string(kind)?,
+        kind,
         trigger_tick: stored.trigger_tick,
         priority: tick_priority(priority),
         insertion_order: stored.insertion_order,
     })
 }
 
-fn scheduled_tick_kind(kind: &str) -> Result<ScheduledTickKind, ChunkRecordError> {
-    let kind = match kind {
-        crate::fluid::TICK_FLUID => ScheduledTickKind::Fluid,
-        crate::redstone::TICK_TORCH => ScheduledTickKind::Torch,
-        crate::redstone::TICK_REPEATER => ScheduledTickKind::Repeater,
-        crate::redstone::TICK_COMPARATOR => ScheduledTickKind::Comparator,
-        crate::redstone::TICK_OBSERVER => ScheduledTickKind::Observer,
-        crate::redstone_target::TICK_TARGET_DECAY => ScheduledTickKind::TargetDecay,
-        crate::redstone_tripwire::TICK_TRIPWIRE_RECHECK => ScheduledTickKind::TripwireRecheck,
-        crate::piston::TICK_PISTON => ScheduledTickKind::Piston,
-        crate::gravity_tick::TICK_GRAVITY => ScheduledTickKind::Gravity,
-        crate::fire::TICK_FIRE => ScheduledTickKind::Fire,
-        crate::mobs::tnt::TICK_TNT_PRIME => ScheduledTickKind::TntPrime,
-        crate::command_block::TICK_COMMAND_BLOCK => ScheduledTickKind::CommandBlock,
-        crate::hand_use::TICK_BUTTON => ScheduledTickKind::ButtonRelease,
-        crate::redstone_dispenser::TICK_DISPENSER_FIRE => ScheduledTickKind::DispenserFire,
-        _ => return Err(ChunkRecordError::UnsupportedScheduledTickKind(kind.to_owned())),
+fn encode_tick_kind(
+    kind: &crate::scheduled_tick::ScheduledTickKind,
+) -> Result<(StoredScheduledTickKind, String), ChunkRecordError> {
+    let builtin = match kind {
+        crate::scheduled_tick::ScheduledTickKind::Fluid => StoredScheduledTickKind::Fluid,
+        crate::scheduled_tick::ScheduledTickKind::Torch => StoredScheduledTickKind::Torch,
+        crate::scheduled_tick::ScheduledTickKind::Repeater => StoredScheduledTickKind::Repeater,
+        crate::scheduled_tick::ScheduledTickKind::Comparator => StoredScheduledTickKind::Comparator,
+        crate::scheduled_tick::ScheduledTickKind::Observer => StoredScheduledTickKind::Observer,
+        crate::scheduled_tick::ScheduledTickKind::TargetDecay => StoredScheduledTickKind::TargetDecay,
+        crate::scheduled_tick::ScheduledTickKind::TripwireRecheck => StoredScheduledTickKind::TripwireRecheck,
+        crate::scheduled_tick::ScheduledTickKind::Piston => StoredScheduledTickKind::Piston,
+        crate::scheduled_tick::ScheduledTickKind::Gravity => StoredScheduledTickKind::Gravity,
+        crate::scheduled_tick::ScheduledTickKind::Fire => StoredScheduledTickKind::Fire,
+        crate::scheduled_tick::ScheduledTickKind::TntPrime => StoredScheduledTickKind::TntPrime,
+        crate::scheduled_tick::ScheduledTickKind::CommandBlock => StoredScheduledTickKind::CommandBlock,
+        crate::scheduled_tick::ScheduledTickKind::ButtonRelease => StoredScheduledTickKind::ButtonRelease,
+        crate::scheduled_tick::ScheduledTickKind::DispenserFire => StoredScheduledTickKind::DispenserFire,
+        crate::scheduled_tick::ScheduledTickKind::Extension(name) => {
+            if name.is_empty() {
+                return Err(ChunkRecordError::UnsupportedScheduledTickKind(name.clone()));
+            }
+            return Ok((StoredScheduledTickKind::Unspecified, name.clone()));
+        }
     };
-    Ok(kind)
+    Ok((builtin, String::new()))
 }
 
-fn tick_kind_string(kind: ScheduledTickKind) -> Result<String, ChunkRecordError> {
-    let kind = match kind {
-        ScheduledTickKind::Fluid => crate::fluid::TICK_FLUID,
-        ScheduledTickKind::Torch => crate::redstone::TICK_TORCH,
-        ScheduledTickKind::Repeater => crate::redstone::TICK_REPEATER,
-        ScheduledTickKind::Comparator => crate::redstone::TICK_COMPARATOR,
-        ScheduledTickKind::Observer => crate::redstone::TICK_OBSERVER,
-        ScheduledTickKind::TargetDecay => crate::redstone_target::TICK_TARGET_DECAY,
-        ScheduledTickKind::TripwireRecheck => crate::redstone_tripwire::TICK_TRIPWIRE_RECHECK,
-        ScheduledTickKind::Piston => crate::piston::TICK_PISTON,
-        ScheduledTickKind::Gravity => crate::gravity_tick::TICK_GRAVITY,
-        ScheduledTickKind::Fire => crate::fire::TICK_FIRE,
-        ScheduledTickKind::TntPrime => crate::mobs::tnt::TICK_TNT_PRIME,
-        ScheduledTickKind::CommandBlock => crate::command_block::TICK_COMMAND_BLOCK,
-        ScheduledTickKind::ButtonRelease => crate::hand_use::TICK_BUTTON,
-        ScheduledTickKind::DispenserFire => crate::redstone_dispenser::TICK_DISPENSER_FIRE,
-        ScheduledTickKind::Unspecified => return Err(ChunkRecordError::UnknownScheduledTickKind(0)),
-    };
-    Ok(kind.to_owned())
+fn decode_tick_kind(
+    stored: &StoredScheduledTick,
+) -> Result<crate::scheduled_tick::ScheduledTickKind, ChunkRecordError> {
+    if !stored.extension_kind.is_empty() {
+        if stored.kind != StoredScheduledTickKind::Unspecified as i32 {
+            return Err(ChunkRecordError::UnknownScheduledTickKind(stored.kind));
+        }
+        return Ok(crate::scheduled_tick::ScheduledTickKind::Extension(
+            stored.extension_kind.clone(),
+        ));
+    }
+    let kind = StoredScheduledTickKind::try_from(stored.kind)
+        .map_err(|_| ChunkRecordError::UnknownScheduledTickKind(stored.kind))?;
+    match kind {
+        StoredScheduledTickKind::Unspecified => {
+            Err(ChunkRecordError::UnknownScheduledTickKind(stored.kind))
+        }
+        StoredScheduledTickKind::Fluid => Ok(crate::scheduled_tick::ScheduledTickKind::Fluid),
+        StoredScheduledTickKind::Torch => Ok(crate::scheduled_tick::ScheduledTickKind::Torch),
+        StoredScheduledTickKind::Repeater => Ok(crate::scheduled_tick::ScheduledTickKind::Repeater),
+        StoredScheduledTickKind::Comparator => Ok(crate::scheduled_tick::ScheduledTickKind::Comparator),
+        StoredScheduledTickKind::Observer => Ok(crate::scheduled_tick::ScheduledTickKind::Observer),
+        StoredScheduledTickKind::TargetDecay => Ok(crate::scheduled_tick::ScheduledTickKind::TargetDecay),
+        StoredScheduledTickKind::TripwireRecheck => Ok(crate::scheduled_tick::ScheduledTickKind::TripwireRecheck),
+        StoredScheduledTickKind::Piston => Ok(crate::scheduled_tick::ScheduledTickKind::Piston),
+        StoredScheduledTickKind::Gravity => Ok(crate::scheduled_tick::ScheduledTickKind::Gravity),
+        StoredScheduledTickKind::Fire => Ok(crate::scheduled_tick::ScheduledTickKind::Fire),
+        StoredScheduledTickKind::TntPrime => Ok(crate::scheduled_tick::ScheduledTickKind::TntPrime),
+        StoredScheduledTickKind::CommandBlock => Ok(crate::scheduled_tick::ScheduledTickKind::CommandBlock),
+        StoredScheduledTickKind::ButtonRelease => Ok(crate::scheduled_tick::ScheduledTickKind::ButtonRelease),
+        StoredScheduledTickKind::DispenserFire => Ok(crate::scheduled_tick::ScheduledTickKind::DispenserFire),
+    }
 }
 
 fn stored_tick_priority(priority: crate::scheduled_tick::TickPriority) -> ScheduledTickPriority {

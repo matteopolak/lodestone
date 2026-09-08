@@ -155,6 +155,7 @@ fn changed_chunk() -> RecordWrite {
         trigger_tick: 18_002,
         priority: ScheduledTickPriority::High as i32,
         insertion_order: 91,
+        extension_kind: String::new(),
     }];
     RecordWrite::new(chunk_key(37), record)
 }

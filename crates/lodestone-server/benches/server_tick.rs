@@ -54,6 +54,9 @@
 //! * **Asserted**: the tick count advanced exactly as many times as time was
 //!   advanced; the populated world retains a strictly larger live roster
 //!   sample than the empty one; the loop forgave no overruns.
+//! * **Asserted**: the generated arm invokes its source exactly once during
+//!   setup and not at all during its measured ticks; its no-mob roster and
+//!   phase sample counts remain intact.
 //! * **Recorded as diagnostics**: the normalized count of cold-load
 //!   `ChunkSource::column` calls, which is a property of fixture setup rather
 //!   than a wall-clock measurement.
@@ -75,8 +78,8 @@ use criterion::{Criterion, criterion_group, criterion_main};
 
 use lodestone_model::{ResourceKey, Vec3};
 use lodestone_server::{
-    ChunkColumn, ChunkSource, IntegratedServer, PhaseStats, TickPhase, WorstPhaseWindow,
-    TICK_HISTORY_LEN,
+    ChunkColumn, ChunkSource, IntegratedServer, OverworldChunkSource, PhaseStats, TICK_HISTORY_LEN,
+    TickPhase, WorstPhaseWindow, overworld_chunk_source,
 };
 use lodestone_v26_2::server_protocol::V770ServerProtocol;
 
@@ -96,6 +99,18 @@ const TICKS: u64 = 200;
 /// description and assertion makes removing fixture seeding observable.
 const POPULATED_MOBS: usize = 48;
 
+/// The measured 5x5 tick area fits below the integrated cache floor. Once the
+/// asynchronous setup has installed those columns, a tick must clone retained
+/// data rather than invoke the potentially generator-backed source again.
+/// Keeping this as a count gate makes the known tick/worldgen starvation path
+/// observable without imposing a machine-dependent duration ceiling.
+const MAX_COLD_COLUMNS_DURING_TICKS: u64 = 0;
+
+/// A short generated-world arm still crosses the real tick loop's startup
+/// deferral and eight steady-state ticks, while bounding local benchmark cost
+/// to one cold generated column during fixture setup.
+const GENERATED_TICKS: u64 = 48;
+
 /// Cooperative polls allowed for the constructor's off-thread reseed before
 /// the fixture uses the live mob handle. The clock stays paused throughout.
 const RESEED_POLLS: usize = 100_000;
@@ -108,14 +123,54 @@ const FLOOR_TOP: i32 = 4;
 
 /// A flat, cheap, deterministic world.
 ///
-/// Deliberately not the real generator: this bench is measuring the *tick*, and
-/// a generator-backed source would fold ~30 ms of column generation into
-/// whichever tick first touched a cold chunk, drowning the quantity under
-/// study. The counter is the point -- it turns "how much terrain work does a
-/// tick do" into a count rather than a duration.
+/// Deliberately not the real generator: the flat arms measure the *tick*, and
+/// a generator-backed source would fold column generation into whichever tick
+/// first touched a cold chunk, drowning that quantity under study. The separate
+/// generated arm below exercises that boundary in a bounded scene. The counter
+/// is the point -- it turns "how much terrain work does a tick do" into a count
+/// rather than a duration.
 struct CountingFlatWorld {
     columns: Arc<AtomicU64>,
     block_reads: Arc<AtomicU64>,
+}
+
+/// The production overworld source with only a benchmark-side generation
+/// counter. The integrated constructor wraps this source in its normal
+/// retaining store, so a post-setup counter increase is evidence that the
+/// tick path regenerated terrain instead of reading the retained column.
+struct CountingGeneratedWorld {
+    source: OverworldChunkSource,
+    columns: Arc<AtomicU64>,
+}
+
+impl ChunkSource for CountingGeneratedWorld {
+    fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+        self.columns.fetch_add(1, Ordering::Relaxed);
+        self.source.column(cx, cz)
+    }
+
+    fn column_at(
+        &self,
+        cx: i32,
+        cz: i32,
+        stage: lodestone_server::ChunkGenerationStage,
+    ) -> ChunkColumn {
+        self.columns.fetch_add(1, Ordering::Relaxed);
+        self.source.column_at(cx, cz, stage)
+    }
+
+    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        self.columns.fetch_add(1, Ordering::Relaxed);
+        self.source.block_state(x, y, z)
+    }
+
+    fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+        self.source.biome_state_at(x, y, z)
+    }
+
+    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+        self.source.set_block(x, y, z, name);
+    }
 }
 
 impl CountingFlatWorld {
@@ -180,6 +235,10 @@ struct TickRun {
     wall: Duration,
     /// What the tick loop's own clock believed, for the side-by-side above.
     reported_mspt_avg_ms: f64,
+    /// Source generations during asynchronous setup, before the measured
+    /// tick counters are reset. This proves the generated arm really crossed
+    /// the production source rather than silently using a synthetic world.
+    setup_column_calls: u64,
     /// The three summaries captured by the live tick instrument, in execution
     /// order. Keeping the complete snapshots here prevents the recorder from
     /// silently dropping percentile and budget information at the bench edge.
@@ -219,6 +278,38 @@ fn phase_metrics(stats: PhaseStats) -> [PhaseMetric; 7] {
 
 fn phase_has_samples(stats: PhaseStats) -> bool {
     stats.sample_count > 0 && stats.total_sample_count > 0
+}
+
+fn cold_column_budget_violation(scene: &str, ticks: u64, column_calls: u64) -> Option<String> {
+    (column_calls > MAX_COLD_COLUMNS_DURING_TICKS).then(|| {
+        format!(
+            concat!(
+                "{}: {} cold column generations across {} driven ticks; ",
+                "the retained tick area must not regenerate terrain on the tick thread",
+            ),
+            scene, column_calls, ticks,
+        )
+    })
+}
+
+fn assert_cold_column_budget(scene: &str, run: &TickRun) {
+    if let Some(message) = cold_column_budget_violation(scene, run.ticks, run.column_calls) {
+        panic!("{message}");
+    }
+}
+
+/// The negative control for the cold-column gate. A detector that only ever
+/// sees the healthy zero arm could be neutered and still report success, so
+/// the benchmark exercises one synthetic generation and requires rejection
+/// before it measures the real fixture.
+fn assert_cold_column_control() {
+    assert!(
+        cold_column_budget_violation("retained", TICKS, MAX_COLD_COLUMNS_DURING_TICKS,).is_none()
+    );
+    let violation =
+        cold_column_budget_violation("regressed", TICKS, MAX_COLD_COLUMNS_DURING_TICKS + 1)
+            .expect("a source generation must fail the starvation guard");
+    assert!(violation.contains("regenerated terrain on the tick thread"));
 }
 
 /// A synthetic zero summary is the negative control for the recorder. If the
@@ -301,8 +392,45 @@ async fn seed_fixture_mobs(server: &IntegratedServer, mob_count: usize) -> usize
 fn run_ticks(mob_count: usize, view_radius: i32, area: i32) -> TickRun {
     let columns = Arc::new(AtomicU64::new(0));
     let block_reads = Arc::new(AtomicU64::new(0));
-    let world = CountingFlatWorld { columns: Arc::clone(&columns), block_reads: Arc::clone(&block_reads) };
+    let world = CountingFlatWorld {
+        columns: Arc::clone(&columns),
+        block_reads: Arc::clone(&block_reads),
+    };
 
+    run_ticks_with_source(
+        mob_count,
+        view_radius,
+        area,
+        TICKS,
+        world,
+        columns,
+        block_reads,
+    )
+}
+
+fn run_generated_ticks() -> TickRun {
+    let columns = Arc::new(AtomicU64::new(0));
+    let block_reads = Arc::new(AtomicU64::new(0));
+    let world = CountingGeneratedWorld {
+        source: overworld_chunk_source(0),
+        columns: Arc::clone(&columns),
+    };
+
+    run_ticks_with_source(0, 1, 0, GENERATED_TICKS, world, columns, block_reads)
+}
+
+fn run_ticks_with_source<W>(
+    mob_count: usize,
+    view_radius: i32,
+    area: i32,
+    ticks: u64,
+    world: W,
+    columns: Arc<AtomicU64>,
+    block_reads: Arc<AtomicU64>,
+) -> TickRun
+where
+    W: ChunkSource + 'static,
+{
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .start_paused(true)
@@ -325,9 +453,10 @@ fn run_ticks(mob_count: usize, view_radius: i32, area: i32) -> TickRun {
             .mobs()
             .expect("open_in_memory_with_mobs exposes its live mob handle");
 
-        // The asynchronous install fetches the fixture's complete 5x5 area.
+        // The asynchronous install fetches the fixture's complete tick area.
         // That setup work establishes a live simulation but is not work done
         // by the driven ticks, so discard it before taking per-tick counts.
+        let setup_column_calls = columns.load(Ordering::Relaxed);
         columns.store(0, Ordering::Relaxed);
         block_reads.store(0, Ordering::Relaxed);
         assert_eq!(
@@ -349,7 +478,7 @@ fn run_ticks(mob_count: usize, view_radius: i32, area: i32) -> TickRun {
 
         let started = Instant::now();
         let mut mob_roster_samples = 0;
-        for _ in 0..TICKS {
+        for _ in 0..ticks {
             tokio::time::advance(TICK_PERIOD).await;
             // `advance` wakes the tick task, but the current task can keep
             // running until it yields. Sampling after this yield makes each
@@ -373,7 +502,12 @@ fn run_ticks(mob_count: usize, view_radius: i32, area: i32) -> TickRun {
             block_reads: block_reads.load(Ordering::Relaxed),
             wall,
             reported_mspt_avg_ms: stats.mspt_avg_ms,
-            phase_stats: [stats.mobs_and_items, stats.weather_and_sleep, stats.scheduled_and_physics],
+            setup_column_calls,
+            phase_stats: [
+                stats.mobs_and_items,
+                stats.weather_and_sleep,
+                stats.scheduled_and_physics,
+            ],
             worst_phase: stats
                 .worst_phase_window
                 .expect("every completed tick records every phase, so the worst window exists"),
@@ -385,12 +519,14 @@ fn run_ticks(mob_count: usize, view_radius: i32, area: i32) -> TickRun {
 
 fn tick_cost(c: &mut Criterion) {
     assert_phase_metric_control();
+    assert_cold_column_control();
     // Two sweep points, and the pair is the measurement: an empty world and a
     // populated one. A single point would be a number with nothing to compare
     // it against, which is the shape this workspace's rules single out as
     // unfalsifiable.
     let empty = run_ticks(0, 2, 2);
     let populated = run_ticks(POPULATED_MOBS, 2, 2);
+    let generated = run_generated_ticks();
 
     assert_eq!(
         empty.ticks, TICKS,
@@ -400,10 +536,17 @@ fn tick_cost(c: &mut Criterion) {
          something else.",
         empty.ticks
     );
-    assert_eq!(populated.ticks, TICKS, "same, for the populated sweep point");
+    assert_eq!(
+        populated.ticks, TICKS,
+        "same, for the populated sweep point"
+    );
     assert_eq!(
         empty.overruns, 0,
         "a healthy loop under a paused clock never falls behind schedule"
+    );
+    assert_eq!(
+        populated.overruns, 0,
+        "the populated sweep must not accumulate a virtual-clock backlog"
     );
     assert_eq!(empty.roster, 0, "the empty sweep point's roster");
     assert_eq!(
@@ -416,6 +559,26 @@ fn tick_cost(c: &mut Criterion) {
     );
 
     for (label, run) in [("empty", &empty), ("populated", &populated)] {
+        assert_cold_column_budget(label, run);
+    }
+
+    assert_eq!(
+        generated.setup_column_calls, 1,
+        "the generated arm must cross the production source exactly once during its one-column setup"
+    );
+    assert_eq!(generated.ticks, GENERATED_TICKS);
+    assert_eq!(generated.roster, 0);
+    assert_eq!(generated.overruns, 0);
+    assert_cold_column_budget("generated", &generated);
+    for stats in generated.phase_stats {
+        assert_eq!(stats.total_sample_count, GENERATED_TICKS);
+        assert_eq!(
+            stats.sample_count,
+            GENERATED_TICKS.min(TICK_HISTORY_LEN as u64)
+        );
+    }
+
+    for (label, run) in [("empty", &empty), ("populated", &populated)] {
         let expected_rolling_samples = TICKS.min(TICK_HISTORY_LEN as u64);
         for stats in run.phase_stats {
             assert!(
@@ -423,10 +586,15 @@ fn tick_cost(c: &mut Criterion) {
                 "{label}: {:?} must have a rolling and cumulative sample",
                 stats.phase
             );
-            assert_eq!(stats.total_sample_count, TICKS, "{label}: {:?} total samples", stats.phase);
+            assert_eq!(
+                stats.total_sample_count, TICKS,
+                "{label}: {:?} total samples",
+                stats.phase
+            );
             assert_eq!(
                 stats.sample_count, expected_rolling_samples,
-                "{label}: {:?} rolling samples", stats.phase
+                "{label}: {:?} rolling samples",
+                stats.phase
             );
         }
         assert_eq!(
@@ -435,6 +603,15 @@ fn tick_cost(c: &mut Criterion) {
             "{label}: the paused clock gives every phase a zero duration, so the first recorded phase owns the tied worst window"
         );
     }
+
+    println!(
+        "[server_tick] generated: {} ticks, setup={} column() calls, {} cold calls during ticks, \
+         {:.3} ms wall for the whole loop (measured outside the paused clock)",
+        generated.ticks,
+        generated.setup_column_calls,
+        generated.column_calls,
+        generated.wall.as_secs_f64() * 1e3,
+    );
 
     // The control that the instrument sees the simulation at all. The source
     // counters intentionally measure only cold loads: the constructor's
@@ -499,6 +676,13 @@ fn tick_cost(c: &mut Criterion) {
         });
         support::record(support::Record {
             bench: "server_tick",
+            metric: "overrun_count",
+            scene,
+            value: run.overruns as f64,
+            unit: "ticks",
+        });
+        support::record(support::Record {
+            bench: "server_tick",
             metric: "mob_roster_samples_per_tick",
             scene,
             value: run.mob_roster_samples as f64 / run.ticks as f64,
@@ -510,6 +694,13 @@ fn tick_cost(c: &mut Criterion) {
             scene,
             value: run.column_calls as f64 / run.ticks as f64,
             unit: "calls",
+        });
+        support::record(support::Record {
+            bench: "server_tick",
+            metric: "cold_columns_during_ticks",
+            scene,
+            value: run.column_calls as f64,
+            unit: "columns",
         });
         support::record(support::Record {
             bench: "server_tick",
@@ -554,6 +745,30 @@ fn tick_cost(c: &mut Criterion) {
             scene,
             value: run.worst_phase.tick_count as f64,
             unit: "tick",
+        });
+    }
+
+    let generated_scene = "generated overworld world, mobs=0 area=1x1 view_radius=1";
+    for (metric, value, unit) in [
+        ("ticks", generated.ticks as f64, "ticks"),
+        (
+            "setup_column_generations",
+            generated.setup_column_calls as f64,
+            "columns",
+        ),
+        (
+            "cold_columns_during_ticks",
+            generated.column_calls as f64,
+            "columns",
+        ),
+        ("overrun_count", generated.overruns as f64, "ticks"),
+    ] {
+        support::record(support::Record {
+            bench: "server_tick",
+            metric,
+            scene: generated_scene,
+            value,
+            unit,
         });
     }
 

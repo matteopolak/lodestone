@@ -55,7 +55,10 @@
 //! So [`EntityStorage::save`] clears by **identity**: every entity the live sim
 //! holds is in `live_uuids`, so a stored record whose UUID is in that set is one
 //! of ours that has moved, and is dropped. A record whose UUID is unknown belongs
-//! to something else and is preserved byte-for-byte. This is exact rather than
+//! to something else and is preserved byte-for-byte. A caller that also owns
+//! records that have despawned supplies that complete ownership set to
+//! [`EntityStorage::save_owned`], which turns those missing UUIDs into
+//! tombstones without touching opaque records. This is exact rather than
 //! heuristic, and it is why [`SavedEntity::uuid`] is round-tripped rather than
 //! regenerated on load.
 //!
@@ -64,7 +67,7 @@
 //! - **A region file is rewritten whole**, exactly as
 //!   [`crate::region_source`] documents: untouched chunks are re-emitted as their
 //!   *original compressed bytes* without decoding, so the cost is a sector copy.
-//!   Only chunks we write, or that hold a live UUID, are decoded.
+//!   Only chunks we write, or that hold an owned UUID, are decoded.
 //! - **The write is atomic per region** — temp file in the same directory, then
 //!   `rename`. Same reasoning as the terrain writer.
 //! - **`DataVersion` is checked on read**: an entity chunk from
@@ -535,6 +538,29 @@ impl EntityStorage {
     /// so a transient error costs a retry rather than the population.
     pub fn save(&self, entities: &[SavedEntity]) -> Result<usize, Error> {
         let live_uuids: HashSet<Uuid> = entities.iter().map(|e| e.uuid).collect();
+        self.save_owned(entities, &live_uuids)
+    }
+
+    /// Writes a live population and removes its owned records that have
+    /// despawned since the previous snapshot.
+    ///
+    /// `owned_uuids` is the complete UUID set this caller owns, including
+    /// entities that are no longer present in `entities`. The current live
+    /// UUIDs are added automatically, so callers may retain a session's set
+    /// across snapshots and remove a UUID only after the entity has truly
+    /// left the simulation. Stored records whose UUID is outside this set are
+    /// opaque to the caller and are preserved.
+    ///
+    /// This is the tombstone-capable counterpart to [`save`](Self::save): the
+    /// older method remains suitable for a one-shot or movement-only snapshot
+    /// whose ownership set is exactly its live population.
+    pub fn save_owned(
+        &self,
+        entities: &[SavedEntity],
+        owned_uuids: &HashSet<Uuid>,
+    ) -> Result<usize, Error> {
+        let mut owned_uuids = owned_uuids.clone();
+        owned_uuids.extend(entities.iter().map(|entity| entity.uuid));
 
         let mut by_chunk: HashMap<(i32, i32), Vec<&SavedEntity>> = HashMap::new();
         for entity in entities {
@@ -552,13 +578,13 @@ impl EntityStorage {
                 (rx, rz)
             })
             .collect();
-        if !live_uuids.is_empty() {
+        if !owned_uuids.is_empty() {
             regions.extend(self.existing_regions()?);
         }
 
         let mut written = 0usize;
         for (rx, rz) in regions {
-            written += self.save_region(rx, rz, &by_chunk, &live_uuids)?;
+            written += self.save_region(rx, rz, &by_chunk, &owned_uuids)?;
         }
         Ok(written)
     }
@@ -597,14 +623,14 @@ impl EntityStorage {
     }
 
     /// Rewrites one region file. Chunks we are not writing are passed through as
-    /// their original compressed bytes unless they hold a live UUID, in which
+    /// their original compressed bytes unless they hold an owned UUID, in which
     /// case they are decoded, filtered and re-emitted.
     fn save_region(
         &self,
         rx: i32,
         rz: i32,
         by_chunk: &HashMap<(i32, i32), Vec<&SavedEntity>>,
-        live_uuids: &HashSet<Uuid>,
+        owned_uuids: &HashSet<Uuid>,
     ) -> Result<usize, Error> {
         let path = self.region_path(rx, rz);
         let existing = match std::fs::read(&path) {
@@ -655,7 +681,7 @@ impl EntityStorage {
                     continue;
                 };
                 // Decoded only to ask "does this chunk still hold a record of
-                // one of *our* live entities?". When the answer is no — the
+                // one of *our* owned entities? When the answer is no — the
                 // common case, and the whole of a vanilla world — the original
                 // **compressed** bytes go straight back out, untouched.
                 let unchanged = |entries: &mut Vec<ChunkToWrite>| -> Result<(), Error> {
@@ -695,7 +721,7 @@ impl EntityStorage {
                 let kept: Vec<Nbt> = stored
                     .iter()
                     .filter(|entry| {
-                        read_uuid(field(entry, "UUID")).is_none_or(|u| !live_uuids.contains(&u))
+                        read_uuid(field(entry, "UUID")).is_none_or(|u| !owned_uuids.contains(&u))
                     })
                     .cloned()
                     .collect();

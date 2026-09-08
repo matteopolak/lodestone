@@ -7,13 +7,15 @@
 //! boundary explicit instead of silently treating an End document as an
 //! Overworld vegetation document.
 
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
 use serde_json::Value;
 
 use crate::dense_grid::DenseBlockGrid;
 use crate::density::Resolver;
 use crate::rng::{RandomSource, WorldgenRandom, XoroshiroRandomSource};
 
-use super::{END_HIGHLANDS, SMALL_END_ISLANDS, THE_END, end_spike_blocks, end_spikes_for_seed};
+use super::{END_HIGHLANDS, SMALL_END_ISLANDS, THE_END, EndSpike, end_spike_blocks, end_spikes_for_seed};
 
 /// The exit metadata attached to a generated return gateway.  The block itself
 /// belongs in the palette; this record is the data the gateway block entity
@@ -58,73 +60,87 @@ struct GatewayConfig {
 pub(crate) struct EndDecoration {
     platforms: Vec<PlatformOrigin>,
     outer_islands: bool,
+    outer_island_index: Option<usize>,
     chorus: bool,
+    chorus_index: Option<usize>,
     gateway_return: Option<GatewayConfig>,
-    spikes: bool,
+    gateway_index: Option<usize>,
+    /// `None` means the End biome has no spike feature. An empty list means
+    /// the feature uses its seed-derived ten-spike fallback; a non-empty list
+    /// is the configured explicit layout and must be used verbatim.
+    spikes: Option<Vec<EndSpike>>,
+    spike_index: Option<usize>,
 }
 
 impl EndDecoration {
     pub(crate) fn from_resolver(resolver: &dyn Resolver) -> Self {
         let document = resolver.biome_document(THE_END);
-        let Some(entries) = document
+        let platform_entries = document
             .get("features")
             .and_then(Value::as_array)
             .and_then(|steps| steps.get(10))
-            .and_then(Value::as_array)
-        else {
-            return Self::default();
-        };
+            .and_then(Value::as_array);
 
         let mut platforms = Vec::new();
-        for entry in entries {
-            let Some(id) = entry.as_str() else {
-                continue;
-            };
-            let placed = resolver.placed_feature(id);
-            let Some(configured_id) = placed.get("feature").and_then(Value::as_str) else {
-                continue;
-            };
-            if resolver
-                .configured_feature(configured_id)
-                .get("type")
-                .and_then(Value::as_str)
-                != Some("minecraft:end_platform")
-            {
-                continue;
-            }
-            let Some(placement) = placed.get("placement").and_then(Value::as_array) else {
-                continue;
-            };
-            for modifier in placement {
-                if modifier.get("type").and_then(Value::as_str) != Some("minecraft:fixed_placement") {
-                    continue;
-                }
-                let Some(positions) = modifier.get("positions").and_then(Value::as_array) else {
+        if let Some(entries) = platform_entries {
+            for entry in entries {
+                let Some(id) = entry.as_str() else {
                     continue;
                 };
-                for position in positions {
-                    let Some(position) = position.as_array() else {
+                let placed = resolver.placed_feature(id);
+                let Some(configured_id) = placed.get("feature").and_then(Value::as_str) else {
+                    continue;
+                };
+                if resolver
+                    .configured_feature(configured_id)
+                    .get("type")
+                    .and_then(Value::as_str)
+                    != Some("minecraft:end_platform")
+                {
+                    continue;
+                }
+                let Some(placement) = placed.get("placement").and_then(Value::as_array) else {
+                    continue;
+                };
+                for modifier in placement {
+                    if modifier.get("type").and_then(Value::as_str) != Some("minecraft:fixed_placement") {
+                        continue;
+                    }
+                    let Some(positions) = modifier.get("positions").and_then(Value::as_array) else {
                         continue;
                     };
-                    let [x, y, z] = position.as_slice() else {
-                        continue;
-                    };
-                    let (Some(x), Some(y), Some(z)) = (x.as_i64(), y.as_i64(), z.as_i64()) else {
-                        continue;
-                    };
-                    let (Ok(x), Ok(y), Ok(z)) = (i32::try_from(x), i32::try_from(y), i32::try_from(z)) else {
-                        continue;
-                    };
-                    platforms.push(PlatformOrigin { x, y, z });
+                    for position in positions {
+                        let Some(position) = position.as_array() else {
+                            continue;
+                        };
+                        let [x, y, z] = position.as_slice() else {
+                            continue;
+                        };
+                        let (Some(x), Some(y), Some(z)) = (x.as_i64(), y.as_i64(), z.as_i64()) else {
+                            continue;
+                        };
+                        let (Ok(x), Ok(y), Ok(z)) = (i32::try_from(x), i32::try_from(y), i32::try_from(z)) else {
+                            continue;
+                        };
+                        platforms.push(PlatformOrigin { x, y, z });
+                    }
                 }
             }
         }
+        let outer_island_index = feature_index_in_step(resolver, SMALL_END_ISLANDS, 0, "minecraft:end_island");
+        let chorus_index = feature_index_in_step(resolver, END_HIGHLANDS, 9, "minecraft:chorus_plant");
+        let gateway_index = feature_index_in_step(resolver, END_HIGHLANDS, 4, "minecraft:end_gateway");
+        let spike_index = feature_index_in_step(resolver, THE_END, 4, "minecraft:end_spike");
         Self {
             platforms,
-            outer_islands: feature_in_step(resolver, SMALL_END_ISLANDS, 0, "minecraft:end_island"),
-            chorus: feature_in_step(resolver, END_HIGHLANDS, 9, "minecraft:chorus_plant"),
+            outer_islands: outer_island_index.is_some(),
+            outer_island_index,
+            chorus: chorus_index.is_some(),
+            chorus_index,
             gateway_return: gateway_config_in_step(resolver, END_HIGHLANDS, 4),
-            spikes: feature_in_step(resolver, THE_END, 4, "minecraft:end_spike"),
+            gateway_index,
+            spikes: spike_config_in_step(resolver, THE_END, 4),
+            spike_index,
         }
     }
 
@@ -160,16 +176,36 @@ impl EndDecoration {
     ) -> Vec<EndGateway> {
         self.apply(world);
         let mut gateways = Vec::new();
+        // An empty `spikes` config is the feature's documented signal to use
+        // the seed-derived default layout. A non-empty config is an explicit
+        // layout and must not consume or replace it with a generated one.
+        let generated_spikes = self
+            .spikes
+            .as_ref()
+            .filter(|configured| configured.is_empty())
+            .map(|_| end_spikes_for_seed(seed));
         for source_x in cx - 1..=cx + 1 {
             for source_z in cz - 1..=cz + 1 {
                 let biome = biome_at_chunk(source_x, source_z);
                 let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
                 let decoration_seed = random.set_decoration_seed(seed, source_x * 16, source_z * 16);
-                if biome == THE_END && self.spikes {
+                if biome == THE_END {
+                    random.set_feature_seed(
+                        decoration_seed,
+                        self.spike_index.unwrap_or_default() as i32,
+                        4,
+                    );
                     // This feature has no placement modifiers before its biome
                     // filter. Its producer is therefore the chunk containing a
                     // spike centre, rather than the chunk receiving an edge write.
-                    for spike in end_spikes_for_seed(seed) {
+                    let spikes: &[EndSpike] = match self.spikes.as_deref() {
+                        Some(configured) if !configured.is_empty() => configured,
+                        Some(_) => generated_spikes
+                            .as_ref()
+                            .expect("empty spike config must have a generated fallback"),
+                        None => &[],
+                    };
+                    for spike in spikes {
                         if spike.center_x.div_euclid(16) != source_x || spike.center_z.div_euclid(16) != source_z {
                             continue;
                         }
@@ -181,7 +217,11 @@ impl EndDecoration {
                     }
                 }
                 if biome == SMALL_END_ISLANDS && self.outer_islands {
-                    random.set_feature_seed(decoration_seed, 0, 0);
+                    random.set_feature_seed(
+                        decoration_seed,
+                        self.outer_island_index.unwrap_or_default() as i32,
+                        0,
+                    );
                     if random.next_float() < 1.0 / 14.0 {
                         let count = if random.next_int_bounded(4) < 3 { 1 } else { 2 };
                         for _ in 0..count {
@@ -193,7 +233,11 @@ impl EndDecoration {
                     }
                 }
                 if biome == END_HIGHLANDS && self.gateway_return.is_some() {
-                    random.set_feature_seed(decoration_seed, 0, 4);
+                    random.set_feature_seed(
+                        decoration_seed,
+                        self.gateway_index.unwrap_or_default() as i32,
+                        4,
+                    );
                     if random.next_float() < 1.0 / 700.0 {
                         let x = source_x * 16 + random.next_int_bounded(16);
                         let z = source_z * 16 + random.next_int_bounded(16);
@@ -208,7 +252,11 @@ impl EndDecoration {
                     }
                 }
                 if biome == END_HIGHLANDS && self.chorus {
-                    random.set_feature_seed(decoration_seed, 0, 9);
+                    random.set_feature_seed(
+                        decoration_seed,
+                        self.chorus_index.unwrap_or_default() as i32,
+                        9,
+                    );
                     for _ in 0..random.next_int_bounded(5) {
                         let x = source_x * 16 + random.next_int_bounded(16);
                         let z = source_z * 16 + random.next_int_bounded(16);
@@ -291,23 +339,174 @@ fn grow_chorus<R: RandomSource>(
     }
 }
 
-fn feature_in_step(resolver: &dyn Resolver, biome: &str, step: usize, kind: &str) -> bool {
-    resolver
-        .biome_document(biome)
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct FeatureNode {
+    step: i32,
+    first_seen: usize,
+}
+
+/// Visits the global feature-order graph in the same post-order used by the
+/// native decoration scheduler. A feature's seed index is assigned after this
+/// graph is reversed and filtered to its generation step; it is not the local
+/// index in one biome document.
+fn visit_feature_node(
+    node: FeatureNode,
+    edges: &BTreeMap<FeatureNode, BTreeSet<FeatureNode>>,
+    discovered: &mut HashSet<FeatureNode>,
+    visiting: &mut HashSet<FeatureNode>,
+    ordered: &mut Vec<FeatureNode>,
+) -> bool {
+    if discovered.contains(&node) {
+        return false;
+    }
+    if !visiting.insert(node) {
+        return true;
+    }
+    for next in edges.get(&node).into_iter().flatten().copied() {
+        if visit_feature_node(next, edges, discovered, visiting, ordered) {
+            return true;
+        }
+    }
+    visiting.remove(&node);
+    discovered.insert(node);
+    ordered.push(node);
+    false
+}
+
+/// Returns the global raw seed index for the first placed feature of `kind` in
+/// `biome`'s `step`. The graph is built from all five End biomes in source
+/// order, because a serving chunk's nearby-biome set only selects members from
+/// a global order that was computed once for the dimension.
+fn feature_index_in_step(resolver: &dyn Resolver, biome: &str, step: usize, kind: &str) -> Option<usize> {
+    let mut first_seen = HashMap::<String, usize>::new();
+    let mut node_ids = BTreeMap::<FeatureNode, String>::new();
+    let mut edges = BTreeMap::<FeatureNode, BTreeSet<FeatureNode>>::new();
+    let mut next_first_seen = 0usize;
+    let mut target_ids = HashSet::<String>::new();
+
+    for source_biome in super::EndBiomeSource::possible_biomes() {
+        let document = resolver.biome_document(source_biome);
+        let Some(steps) = document.get("features").and_then(Value::as_array) else {
+            continue;
+        };
+        let mut sequence = Vec::new();
+        for (source_step, entries) in steps.iter().enumerate() {
+            let Some(entries) = entries.as_array() else {
+                continue;
+            };
+            for entry in entries {
+                let Some(id) = entry.as_str() else {
+                    continue;
+                };
+                if resolver.placed_feature(id).is_null() {
+                    continue;
+                }
+                let ordinal = *first_seen.entry(id.to_owned()).or_insert_with(|| {
+                    let assigned = next_first_seen;
+                    next_first_seen += 1;
+                    assigned
+                });
+                let node = FeatureNode { step: source_step as i32, first_seen: ordinal };
+                node_ids.entry(node).or_insert_with(|| id.to_owned());
+                edges.entry(node).or_default();
+                sequence.push(node);
+                if source_biome == biome
+                    && source_step == step
+                    && resolver
+                        .placed_feature(id)
+                        .get("feature")
+                        .and_then(Value::as_str)
+                        .is_some_and(|configured| {
+                            resolver.configured_feature(configured).get("type").and_then(Value::as_str) == Some(kind)
+                        })
+                {
+                    target_ids.insert(id.to_owned());
+                }
+            }
+        }
+        for pair in sequence.windows(2) {
+            edges.entry(pair[0]).or_default().insert(pair[1]);
+        }
+    }
+
+    if target_ids.is_empty() {
+        return None;
+    }
+    let mut discovered = HashSet::new();
+    let mut visiting = HashSet::new();
+    let mut ordered = Vec::with_capacity(node_ids.len());
+    for node in edges.keys().copied() {
+        if visit_feature_node(node, &edges, &mut discovered, &mut visiting, &mut ordered) {
+            return None;
+        }
+    }
+    ordered.reverse();
+
+    ordered
+        .into_iter()
+        .filter(|node| node.step == step as i32)
+        .enumerate()
+        .find_map(|(index, node)| {
+            node_ids
+                .get(&node)
+                .filter(|id| target_ids.contains(*id))
+                .map(|_| index)
+        })
+}
+
+/// Resolves the End spike feature's optional explicit layout.
+///
+/// The feature's codec treats an absent or empty `spikes` list as a request
+/// for the seed-derived ten-spike layout. A non-empty list carries the complete
+/// geometry, so each entry is retained rather than silently replacing it with
+/// the default ring.
+fn spike_config_in_step(resolver: &dyn Resolver, biome: &str, step: usize) -> Option<Vec<EndSpike>> {
+    let document = resolver.biome_document(biome);
+    let entries = document
         .get("features")
         .and_then(Value::as_array)
         .and_then(|steps| steps.get(step))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .any(|id| {
-            let placed = resolver.placed_feature(id);
-            placed
-                .get("feature")
-                .and_then(Value::as_str)
-                .is_some_and(|configured| resolver.configured_feature(configured).get("type").and_then(Value::as_str) == Some(kind))
-        })
+        .and_then(Value::as_array)?;
+
+    for id in entries.iter().filter_map(Value::as_str) {
+        let placed = resolver.placed_feature(id);
+        let Some(configured_id) = placed.get("feature").and_then(Value::as_str) else {
+            continue;
+        };
+        let configured = resolver.configured_feature(configured_id);
+        if configured.get("type").and_then(Value::as_str) != Some("minecraft:end_spike") {
+            continue;
+        }
+        let spikes = configured
+            .get("config")
+            .and_then(|config| config.get("spikes"))
+            .and_then(Value::as_array)
+            .map(|entries| entries.iter().filter_map(parse_end_spike).collect())
+            .unwrap_or_default();
+        return Some(spikes);
+    }
+    None
+}
+
+/// Parses one `EndSpike` record. The bundled codec gives every field a zero or
+/// false default; preserving those defaults keeps malformed-but-readable
+/// records deterministic while valid records retain all configured geometry.
+fn parse_end_spike(value: &Value) -> Option<EndSpike> {
+    let object = value.as_object()?;
+    let integer = |key: &str| -> i32 {
+        object
+            .get(key)
+            .and_then(Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok())
+            .unwrap_or(0)
+    };
+    Some(EndSpike {
+        center_x: integer("centerX"),
+        center_z: integer("centerZ"),
+        radius: integer("radius"),
+        height: integer("height"),
+        guarded: object.get("guarded").and_then(Value::as_bool).unwrap_or(false),
+    })
 }
 
 /// Resolves the first End-gateway configured feature in a biome step.
@@ -599,5 +798,174 @@ mod tests {
         };
         let decoration = EndDecoration::from_resolver(&resolver);
         assert_eq!(decoration.gateway_return, None);
+    }
+
+    struct SpikeResolver;
+
+    impl Resolver for SpikeResolver {
+        fn density_function(&self, _id: &str) -> Value {
+            Value::Null
+        }
+
+        fn noise(&self, _id: &str) -> NoiseParams {
+            NoiseParams { first_octave: 0, amplitudes: Vec::new() }
+        }
+
+        fn biome_document(&self, id: &str) -> Value {
+            if id == THE_END {
+                serde_json::json!({
+                    "features": [[], [], [], [], ["minecraft:test_spike"]]
+                })
+            } else {
+                Value::Null
+            }
+        }
+
+        fn placed_feature(&self, id: &str) -> Value {
+            if id == "minecraft:test_spike" {
+                serde_json::json!({
+                    "feature": "minecraft:test_spike",
+                    "placement": [{ "type": "minecraft:biome" }]
+                })
+            } else {
+                Value::Null
+            }
+        }
+
+        fn configured_feature(&self, id: &str) -> Value {
+            if id == "minecraft:test_spike" {
+                serde_json::json!({
+                    "type": "minecraft:end_spike",
+                    "config": {
+                        "spikes": [{
+                            "centerX": 0,
+                            "centerZ": 0,
+                            "radius": 1,
+                            "height": 70,
+                            "guarded": true
+                        }]
+                    }
+                })
+            } else {
+                Value::Null
+            }
+        }
+    }
+
+    /// A non-empty configured spike list is the feature's explicit geometry,
+    /// not a hint to regenerate the ten-spike ring from the world seed. This
+    /// test drives the production region writer so a list that only parses but
+    /// never reaches a served grid cannot pass.
+    #[test]
+    fn explicit_spike_layout_reaches_the_region_writer() {
+        let decoration = EndDecoration::from_resolver(&SpikeResolver);
+        assert_eq!(decoration.spikes.as_ref().map(Vec::len), Some(1));
+
+        let mut world = DenseBlockGrid::new(-16, 0, -16, 48, 128, 48, "minecraft:air");
+        decoration.apply_region(17, 0, 0, &mut world, |_, _| THE_END);
+
+        assert_eq!(world.get(0, 69, 0), "minecraft:obsidian", "configured center/radius must be used");
+        assert_eq!(world.get(2, 69, 0), "minecraft:air", "the configured radius must clip the pillar");
+        assert_eq!(
+            world.get(2, 70, 0),
+            "minecraft:iron_bars[north=true,south=true,west=false,east=false]",
+            "the configured guarded flag must reach cage placement",
+        );
+    }
+
+    struct FeatureOrderResolver;
+
+    impl Resolver for FeatureOrderResolver {
+        fn density_function(&self, _id: &str) -> Value {
+            Value::Null
+        }
+
+        fn noise(&self, _id: &str) -> NoiseParams {
+            NoiseParams { first_octave: 0, amplitudes: Vec::new() }
+        }
+
+        fn biome_document(&self, id: &str) -> Value {
+            match id {
+                THE_END => serde_json::json!({
+                    "features": [[], [], [], [], ["minecraft:end_spike"], [], [], [], [], [], ["minecraft:end_platform"]]
+                }),
+                END_HIGHLANDS => serde_json::json!({
+                    "features": [[], [], [], [], ["minecraft:end_gateway_return"], [], [], [], [], ["minecraft:chorus_plant"]]
+                }),
+                super::SMALL_END_ISLANDS => serde_json::json!({
+                    "features": [["minecraft:end_island_decorated"]]
+                }),
+                _ => Value::Null,
+            }
+        }
+
+        fn placed_feature(&self, id: &str) -> Value {
+            if matches!(
+                id,
+                "minecraft:end_spike"
+                    | "minecraft:end_platform"
+                    | "minecraft:end_gateway_return"
+                    | "minecraft:chorus_plant"
+                    | "minecraft:end_island_decorated"
+            ) {
+                serde_json::json!({ "feature": id, "placement": [] })
+            } else {
+                Value::Null
+            }
+        }
+
+        fn configured_feature(&self, id: &str) -> Value {
+            let kind = match id {
+                "minecraft:end_spike" => "minecraft:end_spike",
+                "minecraft:end_platform" => "minecraft:end_platform",
+                "minecraft:end_gateway_return" => "minecraft:end_gateway",
+                "minecraft:chorus_plant" => "minecraft:chorus_plant",
+                "minecraft:end_island_decorated" => "minecraft:end_island",
+                _ => return Value::Null,
+            };
+            if kind == "minecraft:end_gateway" {
+                serde_json::json!({
+                    "type": kind,
+                    "config": { "exit": [100, 50, 0], "exact": true }
+                })
+            } else {
+                serde_json::json!({ "type": kind, "config": {} })
+            }
+        }
+    }
+
+    /// The global order fixture is independent of the End driver's local
+    /// resolver walk. In particular, the spike is index 1 because the gateway
+    /// occupies index 0 in the same generation step, even though each feature
+    /// is the first entry in its own biome document.
+    #[test]
+    fn end_feature_indices_match_the_independent_order_fixture() {
+        let resolver = FeatureOrderResolver;
+        let decoration = EndDecoration::from_resolver(&resolver);
+        let mut rows = 0usize;
+        for line in include_str!("../../tests/support/end_feature_order_jvm.txt").lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let fields: Vec<_> = line.split_whitespace().collect();
+            assert_eq!(fields.len(), 4, "malformed feature-order fixture row: {line}");
+            assert_eq!(fields[0], "feature");
+            let step: usize = fields[1].parse().expect("feature step");
+            let index: usize = fields[2].parse().expect("feature index");
+            let actual = match fields[3] {
+                "minecraft:end_island_decorated" => feature_index_in_step(&resolver, SMALL_END_ISLANDS, step, "minecraft:end_island"),
+                "minecraft:end_gateway_return" => feature_index_in_step(&resolver, END_HIGHLANDS, step, "minecraft:end_gateway"),
+                "minecraft:end_spike" => feature_index_in_step(&resolver, THE_END, step, "minecraft:end_spike"),
+                "minecraft:chorus_plant" => feature_index_in_step(&resolver, END_HIGHLANDS, step, "minecraft:chorus_plant"),
+                "minecraft:end_platform" => feature_index_in_step(&resolver, THE_END, step, "minecraft:end_platform"),
+                other => panic!("unknown feature in order fixture: {other}"),
+            };
+            assert_eq!(actual, Some(index), "feature-order row: {line}");
+            rows += 1;
+        }
+        assert_eq!(rows, 5, "fixture must cover every End feature");
+        assert_eq!(decoration.spike_index, Some(1), "the production decoration state must retain the global spike index");
+        assert_eq!(decoration.gateway_index, Some(0), "the production decoration state must retain the global gateway index");
     }
 }

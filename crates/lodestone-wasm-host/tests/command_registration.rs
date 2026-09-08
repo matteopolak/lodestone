@@ -10,7 +10,7 @@ mod support;
 use std::str::FromStr;
 
 use lodestone_ecs::commands::{
-    CommandAnchor, CommandExecutionContext, CommandOutcome, CommandSource, dispatch,
+    CommandAnchor, CommandExecutionContext, CommandOutcome, CommandSource, dispatch, suggest,
 };
 use lodestone_ecs::permissions::PermissionSubject;
 use lodestone_model::{ResourceKey, Rotation, Vec3};
@@ -87,6 +87,36 @@ fn a_contextual_command_reaches_the_guest_with_value_only_execution_state() {
         dispatch(app.world_mut(), &source, "/wp"),
         Ok(CommandOutcome::Success(61)),
         "the alias must be canonicalised before the guest sees the complete copied context"
+    );
+}
+
+#[test]
+fn a_guest_typed_schema_parses_and_suggests_through_the_real_registry() {
+    let mut app = client_app_with_guest(true);
+    let source = CommandSource::console();
+
+    assert_eq!(
+        suggest(app.world(), &source, "/wasm-typed "),
+        vec!["fast".to_owned(), "safe".to_owned()],
+        "the closed choices declared by the guest must reach native completion"
+    );
+    assert_eq!(
+        suggest(app.world(), &source, "/wasm-typed safe "),
+        vec!["1".to_owned(), "42".to_owned(), "7".to_owned()],
+        "static suggestions on a typed argument must be prefix-filtered by the registry"
+    );
+    assert_eq!(
+        dispatch(app.world_mut(), &source, "/wt safe 7"),
+        Ok(CommandOutcome::Success(47)),
+        "aliases and typed argument parsing must complete before the guest handler runs"
+    );
+    assert!(
+        dispatch(app.world_mut(), &source, "/wasm-typed invalid 7").is_err(),
+        "a closed choices argument must reject values outside the guest declaration"
+    );
+    assert!(
+        dispatch(app.world_mut(), &source, "/wasm-typed safe nope").is_err(),
+        "an integer argument must reject non-integer input before guest invocation"
     );
 }
 

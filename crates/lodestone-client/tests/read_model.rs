@@ -18,6 +18,7 @@ use lodestone_client::{
     ScoreboardSlot, ServerAddress, TeamAction, TeamParameters, Vec3, Visibility, WaitError,
 };
 use lodestone_game::click::{Click, PlayerCtx};
+use lodestone_ecs::entity::EntityNetworkId;
 use lodestone_model::event::{
     ChatKind, EntityAttributeModifier, EntityAttributeSnapshot, EntityEquipment,
     EntityMetadataUpdate, EntityMovement, EntityPose, EquipmentSlot, TeleportFlags,
@@ -1215,10 +1216,29 @@ async fn entities_are_tracked_moved_and_removed() {
 
     let entities = handle.entities();
     assert_eq!(entities.len(), 1, "entity 11 was removed");
-    let pig = handle.entity(10).expect("entity 10 present");
+    let pig = handle
+        .entity_by_network_id(EntityNetworkId::from_wire(10).expect("server id"))
+        .expect("entity 10 present");
     assert_eq!(pig.position, Vec3::new(1.0, 64.0, 0.0));
     assert!(pig.on_ground);
-    assert!(handle.entity(11).is_none());
+    assert!(
+        handle
+            .entity_by_network_id(EntityNetworkId::from_wire(11).expect("server id"))
+            .is_none(),
+        "a removed server entity must not remain in the typed read model"
+    );
+    assert!(
+        handle
+            .entity_by_network_id(EntityNetworkId::Plugin(-1))
+            .is_none(),
+        "a plugin-local id must not cross the server read-model boundary"
+    );
+    assert!(
+        handle
+            .entity_by_network_id(EntityNetworkId::Server(999))
+            .is_none(),
+        "an unknown server id must be an ordinary read-model miss"
+    );
 
     drop(handle);
 }

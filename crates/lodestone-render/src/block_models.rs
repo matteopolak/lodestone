@@ -409,8 +409,8 @@ fn classify_fluid(block_path: &str, props: &BTreeMap<String, String>) -> Option<
 /// side face's back copy (`addBackFace = !isOverlay`).
 ///
 /// Neither the render layer nor the baked geometry can stand in for this: a
-/// `slime_block`/`honey_block` sprite is fully opaque (they'd land on the
-/// `Solid` layer, indistinguishable from any ordinary block by alpha), and
+/// `slime_block`/`honey_block` sprite uses partial alpha and lands on the
+/// `Translucent` layer, but that layer is shared by many unrelated blocks, and
 /// the leaves-block family renders `Cutout`, not `Translucent`, so no alpha-derived rule
 /// separates "is this family" from "is this some other cutout/translucent
 /// block". This is the same situation `UNCONDITIONAL_WATER_BLOCKS` already

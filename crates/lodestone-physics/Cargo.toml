@@ -10,6 +10,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+tracing = { workspace = true }
 
 [dev-dependencies]
 lodestone-testsupport = { workspace = true, features = ["bench-record"] }

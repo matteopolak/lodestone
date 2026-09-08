@@ -675,12 +675,12 @@ fn a_discrete_attack_press_survives_a_same_frame_release() {
     );
 }
 
-/// The real `drive_mining` consumer must accept both forms of creative input:
-/// a queued press whose release happened before delivery, and a held button on
-/// the following tick. Reloading the fixture block between ticks isolates the
-/// predictor's cadence from the world mutation it correctly predicts.
+/// The real `drive_mining` consumer must preserve creative mode's held-input
+/// delay after an instant break. Reloading the fixture block between ticks
+/// isolates the predictor's cadence from the world mutation it correctly
+/// predicts.
 #[test]
-fn creative_press_and_hold_have_no_post_break_cooldown_in_the_consumer() {
+fn creative_held_input_waits_five_ticks_after_an_instant_break() {
     let version = progressive_fixture();
     let harness = Harness::build(version);
     harness.set_creative();
@@ -714,29 +714,52 @@ fn creative_press_and_hold_have_no_post_break_cooldown_in_the_consumer() {
     }
 
     harness.reload_target(version.state);
-    {
+    for tick in 0..5 {
         let mut world = harness.ecs.write();
-        world.resource_mut::<Attacking>().0 = false;
-        world
-            .resource_mut::<AttackPresses>()
-            .0
-            .push_back(RayHit::face_center(TARGET, [0, 1, 0]));
+        world.resource_mut::<Attacking>().0 = true;
         world.run_schedule(GameTick);
         let actions = std::mem::take(&mut world.resource_mut::<ActionQueue>().0);
         assert!(
-            actions.iter().any(|action| matches!(
+            !actions.iter().any(|action| matches!(
                 action,
                 ClientAction::BlockAction {
                     action: lodestone_model::BlockActionKind::StartDestroy,
                     ..
                 }
             )),
-            "a second discrete creative press must break immediately: {actions:?}"
+            "creative held input must wait during delay tick {tick}: {actions:?}"
         );
     }
 
-    harness.reload_target(version.state);
-    {
+    let mut world = harness.ecs.write();
+    world.resource_mut::<Attacking>().0 = true;
+    world.run_schedule(GameTick);
+    let actions = std::mem::take(&mut world.resource_mut::<ActionQueue>().0);
+    assert!(
+        actions.iter().any(|action| matches!(
+            action,
+            ClientAction::BlockAction {
+                action: lodestone_model::BlockActionKind::StartDestroy,
+                ..
+            }
+        )),
+        "creative held input must break on the sixth tick after the delay: {actions:?}"
+    );
+}
+
+/// A survival zero-hardness block must not arm the creative/progressive
+/// cooldown. Re-loading the block after each predicted local break models a
+/// row of grass or flowers and proves that the held `drive_mining` path emits a
+/// `START` on consecutive simulation ticks.
+#[test]
+fn survival_instant_breaks_on_consecutive_held_ticks() {
+    let version = instant_break_fixture();
+    let harness = Harness::build(version);
+
+    for tick in 0..3 {
+        if tick != 0 {
+            harness.reload_target(version.state);
+        }
         let mut world = harness.ecs.write();
         world.resource_mut::<Attacking>().0 = true;
         world.run_schedule(GameTick);
@@ -749,7 +772,23 @@ fn creative_press_and_hold_have_no_post_break_cooldown_in_the_consumer() {
                     ..
                 }
             )),
-            "held creative input must break on the next tick without cooldown: {actions:?}"
+            "survival zero-hardness held tick {tick} must send START: {actions:?}"
+        );
+        assert!(
+            !actions.iter().any(|action| matches!(
+                action,
+                ClientAction::BlockAction {
+                    action: lodestone_model::BlockActionKind::StopDestroy,
+                    ..
+                }
+            )),
+            "survival instant break must not synthesize STOP: {actions:?}"
+        );
+        drop(world);
+        assert_eq!(
+            harness.block_at(TARGET),
+            lodestone::blocks::id::AIR,
+            "survival instant break must predict air on held tick {tick}"
         );
     }
 }

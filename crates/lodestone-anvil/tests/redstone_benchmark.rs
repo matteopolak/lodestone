@@ -102,8 +102,8 @@ use lodestone_anvil::schematic::{self, Schematic, SchematicBlock, SchematicPendi
 use lodestone_core::State;
 use lodestone_net::Connection;
 use lodestone_server::{
-    ChunkColumn, ChunkSource, IntegratedServer, ScheduledTickQueue, ServerBound, ServerDirective,
-    ServerProtocol, TickPriority, redstone_counters,
+    ChunkColumn, ChunkSource, IntegratedServer, ScheduledTickKind, ScheduledTickQueue, ServerBound,
+    ServerDirective, ServerProtocol, TickPriority, redstone_counters,
 };
 use uuid::Uuid;
 
@@ -311,8 +311,8 @@ fn stamp(
     (min_x, max_x, min_z, max_z)
 }
 
-/// Maps a `PendingBlockTicks` entry's `Block` name onto the same
-/// scheduled-tick `kind` string `lodestone_server`'s own production dispatch
+/// Maps a `PendingBlockTicks` entry's `Block` name onto the same typed
+/// scheduled-tick kind `lodestone_server`'s own production dispatch
 /// (`react_to_notification`'s torch/repeater/comparator/observer arms) would
 /// have scheduled, so re-injecting one resumes it through the identical
 /// production code path a live notification would use — not a bespoke one
@@ -321,14 +321,14 @@ fn stamp(
 /// tick, seen in one real fixture, ticks on its own family this harness does
 /// not re-inject — see the module doc for why only the redstone-scheduled
 /// families are in scope here).
-fn scheduled_kind_for_block(block: &str) -> Option<&'static str> {
+fn scheduled_kind_for_block(block: &str) -> Option<ScheduledTickKind> {
     match block {
-        "minecraft:repeater" => Some(lodestone_server::TICK_REPEATER),
-        "minecraft:comparator" => Some(lodestone_server::TICK_COMPARATOR),
+        "minecraft:repeater" => Some(ScheduledTickKind::Repeater),
+        "minecraft:comparator" => Some(ScheduledTickKind::Comparator),
         "minecraft:redstone_torch" | "minecraft:redstone_wall_torch" => {
-            Some(lodestone_server::TICK_TORCH)
+            Some(ScheduledTickKind::Torch)
         }
-        "minecraft:observer" => Some(lodestone_server::TICK_OBSERVER),
+        "minecraft:observer" => Some(ScheduledTickKind::Observer),
         _ => None,
     }
 }
@@ -366,7 +366,7 @@ fn pending_ticks_for_reinjection(
     origin_z: i32,
     floor_top_y: i32,
     local_min_y: i32,
-) -> Vec<((i32, i32, i32), String, u64, TickPriority, String)> {
+) -> Vec<((i32, i32, i32), ScheduledTickKind, u64, TickPriority, String)> {
     let dy = floor_top_y + 1 - local_min_y;
     pending
         .iter()
@@ -380,7 +380,13 @@ fn pending_ticks_for_reinjection(
             // this harness has not observed negative in practice, but
             // `ScheduledTickQueue::schedule` takes a `u64`.
             let delay = u64::try_from(t.time).unwrap_or(0);
-            Some((pos, kind.to_owned(), delay, tick_priority_from_ordinal(t.priority), t.block.clone()))
+            Some((
+                pos,
+                kind,
+                delay,
+                tick_priority_from_ordinal(t.priority),
+                t.block.clone(),
+            ))
         })
         .collect()
 }
@@ -527,7 +533,7 @@ async fn run_one(fixture: &LoadedFixture) {
     if reinject.is_empty() {
         println!("   [WHILE ACTIVE] skipped: nothing in this fixture to reinject");
     } else if let Some(block_ticks) = server.block_ticks() {
-        let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        let mut queue: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
         let injected_count = reinject.len();
         for (pos, kind, delay, priority, _block) in reinject {
             queue.schedule(pos, kind, delay, priority);

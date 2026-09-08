@@ -58,35 +58,71 @@ fn setup() -> Option<Gpu> {
     })
 }
 
-/// A full-frame water quad in clip space (identity camera): tinted (`tint = 0`)
-/// so the fluid shader applies the water colour, full-bright, unoccluded.
-fn water_quad() -> ModelMesh {
-    let v = |x: f32, y: f32, u: f32, w: f32| ModelVertex {
-        position: [x, y, 0.5],
-        uv: [u, w],
-        ao: 1.0,
-        light: 0xFF,
-        tint: 0,
-        anim: 0,
-        cutout_bypass: 0,
-        tint_rgb_override: [0, 0, 0, 0],
-    };
-    ModelMesh {
-        // CCW from the front; the fluid pass disables culling anyway.
-        vertices: vec![
-            v(-1.0, -1.0, 0.0, 1.0),
-            v(1.0, -1.0, 1.0, 1.0),
-            v(1.0, 1.0, 1.0, 0.0),
-            v(-1.0, 1.0, 0.0, 0.0),
-        ],
-        indices: vec![0, 1, 2, 0, 2, 3],
+/// Append one full-frame water quad in clip space (identity camera): tinted
+/// (`tint = 0`) so the fluid shader applies the water colour, full-bright and
+/// unoccluded. `reverse` follows `bake_fluid`'s back-copy convention: the
+/// positions and UVs are both visited in `[0, 3, 2, 1]` order, so the copy has
+/// the opposite winding but the same texture orientation.
+fn append_water_quad(mesh: &mut ModelMesh, z: f32, reverse: bool) {
+    let positions = [
+        [-1.0, -1.0, z],
+        [1.0, -1.0, z],
+        [1.0, 1.0, z],
+        [-1.0, 1.0, z],
+    ];
+    let uvs = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
+    let order = if reverse { [0, 3, 2, 1] } else { [0, 1, 2, 3] };
+    let base = mesh.vertices.len() as u32;
+    for &i in &order {
+        let [x, y, z] = positions[i];
+        let [u, w] = uvs[i];
+        mesh.vertices.push(ModelVertex {
+            position: [x, y, z],
+            uv: [u, w],
+            ao: 1.0,
+            light: 0xFF,
+            tint: 0,
+            anim: 0,
+            cutout_bypass: 0,
+            tint_rgb_override: [0, 0, 0, 0],
+        });
     }
+    mesh.indices
+        .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
-/// Render the water quad over a red floor and read back the centre pixel.
+/// A single water layer, optionally with the reverse-winding copy emitted by
+/// the production fluid baker. `stacked` adds a second *front-facing* layer at
+/// a different depth; that is a real two-layer control and must still blend
+/// twice after the reverse copy is culled.
+fn water_mesh(reverse_copy: bool, stacked: bool) -> ModelMesh {
+    let mut mesh = ModelMesh::default();
+    append_water_quad(&mut mesh, 0.5, false);
+    if reverse_copy {
+        append_water_quad(&mut mesh, 0.5, true);
+    }
+    if stacked {
+        append_water_quad(&mut mesh, 0.65, false);
+    }
+    mesh
+}
+
+/// A full-frame water quad in clip space (identity camera), with no explicit
+/// reverse copy. This is the single-layer control used by the original
+/// translucency gate.
+fn water_quad() -> ModelMesh {
+    water_mesh(false, false)
+}
+
+/// Render `mesh` over a caller-selected floor and read back the centre pixel.
 /// `water_alpha` is the alpha of the (otherwise white) water texture: `180` is
 /// water's real translucency, `255` is the opaque negative control.
-fn render_center(gpu: &Gpu, water_alpha: u8) -> (u8, u8, u8) {
+fn render_mesh_center(
+    gpu: &Gpu,
+    water_alpha: u8,
+    source_mesh: &ModelMesh,
+    floor: wgpu::Color,
+) -> (u8, u8, u8) {
     let device = &gpu.device;
     let queue = &gpu.queue;
 
@@ -108,7 +144,7 @@ fn render_center(gpu: &Gpu, water_alpha: u8) -> (u8, u8, u8) {
     // empty (all-static) slot table so no quad animates.
     let anim_buffer = model_anim_buffer(device, &[]);
     let anim_bg = pipeline.anim_bind_group(device, &anim_buffer);
-    let mesh = GpuModelMesh::upload(device, &water_quad()).expect("non-empty water mesh");
+    let mesh = GpuModelMesh::upload(device, source_mesh).expect("non-empty water mesh");
 
     let color = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("floor+water target"),
@@ -150,13 +186,8 @@ fn render_center(gpu: &Gpu, water_alpha: u8) -> (u8, u8, u8) {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    // The "sea floor": a solid red already in the framebuffer.
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 1.0,
-                        g: 0.0,
-                        b: 0.0,
-                        a: 1.0,
-                    }),
+                    // The caller supplies the already-present sea floor.
+                    load: wgpu::LoadOp::Clear(floor),
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -217,6 +248,108 @@ fn render_center(gpu: &Gpu, water_alpha: u8) -> (u8, u8, u8) {
     let (cx, cy) = (W / 2, H / 2);
     let i = (cy * padded + cx * 4) as usize;
     (data[i], data[i + 1], data[i + 2])
+}
+
+/// Render the original red-floor water scene; retained as a small wrapper so
+/// its opaque-texture negative control remains unchanged.
+fn render_center(gpu: &Gpu, water_alpha: u8) -> (u8, u8, u8) {
+    render_mesh_center(
+        gpu,
+        water_alpha,
+        &water_quad(),
+        wgpu::Color {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        },
+    )
+}
+
+fn max_rgb_delta(a: (u8, u8, u8), b: (u8, u8, u8)) -> u8 {
+    [a.0.abs_diff(b.0), a.1.abs_diff(b.1), a.2.abs_diff(b.2)]
+        .into_iter()
+        .max()
+        .expect("three RGB channels")
+}
+
+/// The fluid baker emits a reverse-winding copy for an open side. The copy is
+/// necessary when viewed from the opposite side, but must not become a second
+/// translucent layer when the camera is on the front side. This gate renders
+/// one layer, that layer plus its reverse copy at the same depth, and two real
+/// front-facing layers at different depths. The first two must match; the last
+/// must differ in the predicted direction. Running both a dark and a bright
+/// floor makes the comparison location-specific and rules out a fixed clear/
+/// tint coincidence: the extra layer moves the result toward water's blue tint
+/// from either background.
+#[test]
+#[ignore = "requires a GPU adapter; run explicitly to watch the no-double-blend control fail"]
+fn reverse_copy_is_not_a_second_layer() {
+    let Some(gpu) = setup() else {
+        panic!(
+            "fluid_gate: no GPU adapter. This test is #[ignore]d, so running it is an explicit \
+             request for a real GPU frame."
+        );
+    };
+
+    for (name, floor, dark_background) in [
+        (
+            "dark",
+            wgpu::Color {
+                r: 0.08,
+                g: 0.08,
+                b: 0.08,
+                a: 1.0,
+            },
+            true,
+        ),
+        (
+            "bright",
+            wgpu::Color {
+                r: 0.92,
+                g: 0.92,
+                b: 0.92,
+                a: 1.0,
+            },
+            false,
+        ),
+    ] {
+        let single = render_mesh_center(&gpu, 180, &water_mesh(false, false), floor);
+        let reverse_pair = render_mesh_center(&gpu, 180, &water_mesh(true, false), floor);
+        let stacked = render_mesh_center(&gpu, 180, &water_mesh(false, true), floor);
+        println!(
+            "{name} floor, centre ({}, {}): single={single:?} reverse-pair={reverse_pair:?} \
+             stacked={stacked:?}",
+            W / 2,
+            H / 2
+        );
+
+        let duplicate_delta = max_rgb_delta(single, reverse_pair);
+        assert!(
+            duplicate_delta <= 2,
+            "reverse copy must be culled instead of composited twice at centre ({}, {}): \
+             single={single:?}, reverse-pair={reverse_pair:?}, max channel delta={duplicate_delta}",
+            W / 2,
+            H / 2
+        );
+        if dark_background {
+            assert!(
+                stacked.2 > single.2 + 8,
+                "a real second layer must move a dark floor toward water's blue tint: \
+                 single={single:?}, stacked={stacked:?} at centre ({}, {})",
+                W / 2,
+                H / 2
+            );
+        } else {
+            assert!(
+                stacked.0 + 8 < single.0,
+                "a real second layer must move a bright floor toward water's red tint: \
+                 single={single:?}, stacked={stacked:?} at centre ({}, {})",
+                W / 2,
+                H / 2
+            );
+        }
+    }
 }
 
 #[test]

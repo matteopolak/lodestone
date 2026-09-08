@@ -108,11 +108,13 @@ use lodestone_model::{BlockPos, Difficulty};
 
 use crate::chunk::ChunkSource;
 use crate::mob_spawn::SpawnRng;
-use crate::scheduled_tick::{ScheduledTick, ScheduledTickQueue, ScheduledTickQueueAccess, TickPriority};
+use crate::scheduled_tick::{
+    ScheduledTick, ScheduledTickKind, ScheduledTickQueue, ScheduledTickQueueAccess, TickPriority,
+};
 
-/// The scheduled-tick `kind` every fire tick carries, in the same `String`-keyed
-/// space `crate::redstone`'s `TICK_TORCH` and `crate::fluid`'s `TICK_FLUID`
-/// already use. `tick::run_tick_loop`'s block-tick drain dispatches on it.
+/// The legacy name retained for persistence and external diagnostics. Live
+/// block scheduling uses [`ScheduledTickKind::Fire`], and
+/// `tick::run_tick_loop` dispatches on that typed key.
 pub const TICK_FIRE: &str = "lodestone:fire";
 
 /// `FireBlock.MAX_AGE`.
@@ -550,13 +552,13 @@ fn with_age(state: &str, age: u32) -> String {
 /// [`run_scheduled_tick`]. That is a timing jitter, not a decision — the same
 /// class of documented reduction as the lava spread delay in the fluid port.
 #[must_use]
-pub fn ticks_after_edit(pos: BlockPos) -> Vec<ScheduledTick<String>> {
+pub fn ticks_after_edit(pos: BlockPos) -> Vec<ScheduledTick<ScheduledTickKind>> {
     // Built through a real queue rather than struct literals because
     // `ScheduledTick::sub_tick_order` is private.
-    let mut pending: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+    let mut pending: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
     pending.schedule(
         (pos.x, pos.y, pos.z),
-        TICK_FIRE.to_owned(),
+        ScheduledTickKind::Fire,
         TICK_DELAY_BASE,
         TickPriority::Normal,
     );
@@ -583,7 +585,7 @@ pub fn ticks_after_edit(pos: BlockPos) -> Vec<ScheduledTick<String>> {
 /// fire-primed TNT starts at the ordinary
 /// [`crate::mobs::tnt::DEFAULT_FUSE_TIME`].
 #[allow(clippy::too_many_arguments)]
-pub fn run_scheduled_tick<S: ChunkSource + ?Sized, Q: ScheduledTickQueueAccess<String> + ?Sized>(
+pub fn run_scheduled_tick<S: ChunkSource + ?Sized, Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized>(
     world: &S,
     env: FireEnv,
     pos: BlockPos,
@@ -605,7 +607,7 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized, Q: ScheduledTickQueueAccess<S
     let delay = fire_tick_delay(rng);
     block_ticks.schedule(
         (pos.x, pos.y, pos.z),
-        TICK_FIRE.to_owned(),
+        ScheduledTickKind::Fire,
         current_tick + delay,
         TickPriority::Normal,
     );
@@ -704,7 +706,7 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized, Q: ScheduledTickQueueAccess<S
                     // The new fire owes itself a tick, or it is inert forever.
                     block_ticks.schedule(
                         (test.x, test.y, test.z),
-                        TICK_FIRE.to_owned(),
+                        ScheduledTickKind::Fire,
                         current_tick + TICK_DELAY_BASE,
                         TickPriority::Normal,
                     );

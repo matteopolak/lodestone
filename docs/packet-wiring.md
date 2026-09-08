@@ -125,21 +125,26 @@ until it gets an arm, closing the same "compiles, tests green, reaches nothing" 
 serverbound gate closes from the other side. `ClientAction` (serverbound, outbound from us) has
 the mirror problem with no equivalent exhaustive table — check for a real producer by hand.
 
-### Raw inbound packet observation
+### Raw packet observation
 
 `RawPacketBusPlugin` installs the opt-in `Messages<RawPacket>` bus in the
 caller's ECS world. The connection driver publishes `RawPacket { state,
 packet_id, payload }` immediately after framing and before it calls the version
 adapter, so a `MessageReader<RawPacket>` can inspect an undecoded packet without
-taking a version-crate dependency. The payload excludes the packet id and outer
-length framing and is copied only when the marker resource is present.
+taking a version-crate dependency. `OutboundRawPacketBusPlugin` provides the
+native counterpart: it publishes `OutboundRawPacket { state, packet_id,
+payload }` after adapter/decorator encoding and before transport framing. Both
+payloads exclude the packet id and outer length framing.
 
 This surface is observation-only. A reader cannot replace the bytes, cancel the
 packet, or inject another packet; the adapter remains the sole decoder and
-directive producer. The bus is separate from `GameEventBusPlugin`, so a plugin
-that needs only decoded events does not pay to copy every inbound payload.
-Messages age at `TickSet::Send`; a reader that runs in another schedule must
-choose its own hand-off or accept that the normal tick is the retention boundary.
+directive producer. The outbound bus is bounded by per-tick packet and payload
+byte limits; when full it drops only the observer copy, increments its stats,
+and still writes the original packet. Both buses are separate from
+`GameEventBusPlugin`, so a plugin that needs only decoded events does not pay to
+copy packet payloads. Messages age at `TickSet::Send`; a reader that runs in
+another schedule must choose its own hand-off or accept that the normal tick is
+the retention boundary.
 
 ### The outbound action hook: `EgressFilters`
 
@@ -214,6 +219,11 @@ a special case of the egress hook.
   mutation or cancellation to this bus; those operations belong to a
   version-typed adapter decorator and are intentionally outside the shared
   plugin surface.
+- **Observing raw outbound packets**: add `OutboundRawPacketBusPlugin` (or use
+  `OutboundPacketLoggerPlugin`) and read `OutboundRawPacket` with
+  `MessageReader<OutboundRawPacket>`. Set explicit packet/byte limits when a
+  plugin may receive bursts; overflow drops the observation, never the wire
+  packet.
 - **Expected values for any wiring gate must come from outside the code under test** — a
   decompiled `STREAM_CODEC`, a registry report, or captured bytes, never `decode(encode(x))
   == x` against our own encoder.
@@ -233,6 +243,9 @@ a special case of the egress hook.
   neither installed pays only a `get_resource`/bitset-test lookup per tick/ask.
 - `RawPacketBusPlugin` is independently opt-in. Without it, the client does not
   clone inbound payloads or write to an ECS message queue.
+- `OutboundRawPacketBusPlugin` is independently opt-in. Without it, the client
+  does not clone outbound payloads or write to an ECS message queue. Its
+  default policy admits 256 packets and 1 MiB of payload per tick.
 - No environment variables gate any of this.
 
 ## Dependencies
@@ -243,8 +256,11 @@ a special case of the egress hook.
 - `lodestone-ecs/src/egress.rs` and `veto.rs`, both depending only on `bevy_app`/`bevy_ecs`/
   `lodestone-model`; ask/drain call sites live in `lodestone-client`, `lodestone-shell`, and
   `lodestone-controller`.
-- `lodestone-ecs/src/events.rs` (`RawPacket`, `RawPacketBusPlugin`) and
-  `lodestone-client/src/driver.rs`/`state.rs` for the pre-decode publication
-  point and the opt-in cache.
+- `lodestone-ecs/src/events.rs` (`RawPacket`, `OutboundRawPacket`, and their
+  bus plugins) and `lodestone-client/src/driver.rs`/`state.rs` for the
+  pre-decode and post-encode publication points and opt-in caches.
+- `crates/plugins/lodestone-event-logger`'s `OutboundPacketLoggerPlugin` is the
+  production observer example; it drains the bounded outbound stream at
+  `EventPriority::Monitor`.
 - `cargo xtask connectedness` for the decoded/connected measurement this doc's gates
   complement.

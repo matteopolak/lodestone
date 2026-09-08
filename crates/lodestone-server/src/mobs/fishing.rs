@@ -357,8 +357,9 @@ impl<'w> MobSim<'w> {
     ///
     /// `owner_pos`/`owner_luck` are the reeling player's current position (the
     /// item's pull target, read at retrieve time rather than cast time) and
-    /// luck value, added to the rod's own luck; `0` for a caller with no luck
-    /// effect modelled yet.
+    /// luck value, added to the rod's own luck. The server supplies the
+    /// folded Luck/Unluck attribute when a player reels in a catch; other
+    /// callers may supply `0`.
     ///
     /// Returns `None` if `id` is not a tracked bobber.
     pub fn retrieve_fishing_bobber(
@@ -955,6 +956,43 @@ mod fishing_tests {
             "treasure share at luck 15 was {treasure_pct}%, the derived value is ~33.3% (35/105)"
         );
         assert_eq!(junk, 0, "junk's effective weight floors to 0 at luck 15 — it must never be drawn");
+    }
+
+    /// A reeled catch uses the player's current Luck/Unluck value in addition
+    /// to the rod's stored luck. This chooses a seed where those two inputs
+    /// have different exact outcomes, then checks the actual item entity that
+    /// `retrieve_fishing_bobber` creates rather than the category helper alone.
+    #[test]
+    fn retrieving_a_bite_applies_the_reeling_players_luck_to_the_real_loot_roll() {
+        const PLAYER_LUCK: i32 = 15;
+        let world = pond_world();
+        let position = Vec3::new(0.0, 4.0, 0.0);
+        let (seed, expected) = (0_u64..1_024)
+            .find_map(|seed| {
+                let mut plain_rng = SpawnRng::new(seed);
+                let plain = roll_loot(true, 0, &world, position, &mut plain_rng);
+                let mut lucky_rng = SpawnRng::new(seed);
+                let lucky = roll_loot(true, PLAYER_LUCK, &world, position, &mut lucky_rng);
+                (plain != lucky).then_some((seed, lucky))
+            })
+            .expect("the fixed loot table has a discriminating player-luck roll");
+
+        let mut sim = MobSim::new(&world);
+        let id = sim.cast_fishing_bobber(1, position, 4.6, 0.0, 90.0, 0, 0);
+        let bobber = sim.fishing_bobbers.get_mut(&id).expect("the cast is tracked");
+        bobber.nibble = 1;
+        bobber.open_water = true;
+        sim.fishing_rng = SpawnRng::new(seed);
+
+        let retrieve = sim
+            .retrieve_fishing_bobber(id, Vec3::new(5.0, 4.0, 0.0), PLAYER_LUCK)
+            .expect("the tracked bite can be retrieved");
+        assert_eq!(retrieve.rod_damage, 1);
+        assert_eq!(
+            sim.dropped_items(),
+            vec![(expected.0.to_string(), expected.1)],
+            "the player attribute must reach the real retrieve loot roll"
+        );
     }
 
     /// **The control: without open water, treasure is not a candidate at

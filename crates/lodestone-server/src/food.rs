@@ -294,6 +294,15 @@ impl FoodData {
         self.add(nutrition, nutrition as f32 * saturation_modifier * 2.0);
     }
 
+    /// Applies one instant Saturation effect tick.
+    ///
+    /// The effect is a food application with an exact `1.0` saturation
+    /// modifier, not a direct write to the hidden buffer. Reusing
+    /// [`eat`](Self::eat) keeps food and saturation clamped as one operation.
+    pub fn apply_saturation_effect(&mut self, food_points: i32) {
+        self.eat(food_points.max(0), 1.0);
+    }
+
     /// The real add rule — the private half [`eat`](Self::eat) goes through.
     fn add(&mut self, food: i32, saturation: f32) {
         self.food_level = (self.food_level + food).clamp(0, MAX_FOOD);
@@ -428,6 +437,18 @@ mod tests {
         assert_eq!(food.food_level(), 20);
         assert_eq!(food.saturation(), 5.0);
         assert_eq!(food.exhaustion(), 0.0);
+    }
+
+    #[test]
+    fn saturation_effect_uses_food_then_the_full_modifier_rule() {
+        let mut food = FoodData::restored(16, 0.0, 0.0, 0);
+        food.apply_saturation_effect(3);
+        assert_eq!(food.food_level(), 19);
+        assert_eq!(food.saturation(), 6.0, "three food at modifier one gains six saturation");
+
+        food.apply_saturation_effect(99);
+        assert_eq!(food.food_level(), MAX_FOOD);
+        assert_eq!(food.saturation(), MAX_FOOD as f32, "the shared food cap still wins");
     }
 
     /// **The magnitude gate for the three-layer buffer**, and the number to know:

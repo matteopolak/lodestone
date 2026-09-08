@@ -38,6 +38,13 @@ their feature seed. Step 9 then runs the usual vegetal interpreter. This avoids
 the tempting but wrong approach of filtering the list before seeding, which
 changes every later ore stream.
 
+Nether forest vegetation resolves its provider state before checking whether the
+candidate can survive. The survival check is state-specific: crimson roots use
+the `supports_crimson_roots` tag, while ordinary vegetation uses
+`supports_vegetation`. Do not replace this with the generic sturdy-floor test;
+that accepts or rejects the same candidate differently for provider states that
+have their own support family.
+
 The reference world at
 `.cache/mc/survival/world/dimensions/minecraft/the_nether/region/` supplies
 the biome and bedrock-shell oracle fixture used by `nether_gen`. The feature
@@ -64,12 +71,6 @@ single-element list and preserve array order exactly. The source chunk and list
 index seed each carver, so dropping or reordering an entry changes the whole
 17×17 carve neighbourhood.
 
-When adding another replay consumer, pass its complete target coordinate list
-to the preparation helper rather than choosing a fixed cache size. If the
-consumer reads beyond the packet's 3×3 neighbours, expose a separate
-coordinate-derived closure helper and add a byte-identity control against the
-unprepared source before enabling the larger memo.
-
 ## Configuration
 
 There are no runtime flags. `noise_settings/nether.json` selects
@@ -77,11 +78,6 @@ There are no runtime flags. `noise_settings/nether.json` selects
 `crates/lodestone-server/assets/worldgen/biome/` select placed features and the
 configured/placed-feature documents provide their bodies and placement
 modifiers.
-
-The read-only one-target profile is an opt-in developer probe. Run
-`cargo run -p lodestone-v26-2 --example nether_packet_profile` to see the
-prefix, full-column, packet and cache-counter timings without starting the
-game.
 
 ## Dependencies
 

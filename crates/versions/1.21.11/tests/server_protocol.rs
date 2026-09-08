@@ -9,6 +9,56 @@ use lodestone_v1_21_11::packets::game::JoinGame;
 const CTX: Ctx = Ctx { version: 774 };
 
 #[test]
+fn container_session_hosting_uses_literal_774_layouts() {
+    let protocol = V774ServerProtocol;
+    // A real client click: window 130, state 17, pickup slot 37, with the
+    // predicted stone stack moved into slot 46 and an empty cursor.
+    let click = [
+        0x82, 0x01, 17, 0, 37, 0, 0, 2, 0, 37, 0, 0, 46, 1, 1, 3, 0, 0, 0,
+    ];
+    assert_eq!(
+        protocol.decode(State::Play, packet_ids::play::serverbound::CONTAINER_CLICK, &click),
+        ServerBound::ContainerClicked {
+            window_id: 130,
+            state_id: 17,
+            slot: 37,
+            button: 0,
+            click_type: 0,
+            changed_slots: vec![(37, None), (46, Some(ItemStack::new("minecraft:stone".parse().unwrap(), 3)))],
+            carried_item: None,
+        }
+    );
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            packet_ids::play::serverbound::CONTAINER_CLOSE,
+            &[0x82, 0x01],
+        ),
+        ServerBound::ContainerClosed { window_id: 130 }
+    );
+
+    let item = ItemStack::new("minecraft:stone".parse().unwrap(), 3);
+    let ServerDirective::Send { packet_id, payload } =
+        protocol.encode_open_screen(130, "minecraft:generic_9x3", "Chest") else { panic!("open"); };
+    assert_eq!(packet_id, packet_ids::play::clientbound::OPEN_SCREEN);
+    assert_eq!(
+        payload,
+        vec![0x82, 0x01, 2, 10, 8, 0, 4, b't', b'e', b'x', b't', 0, 5, b'C', b'h', b'e', b's', b't', 0],
+    );
+    let ServerDirective::Send { packet_id, payload } =
+        protocol.encode_container_content(130, 17, &[None, Some(item.clone())], None) else { panic!("content"); };
+    assert_eq!(packet_id, packet_ids::play::clientbound::CONTAINER_SET_CONTENT);
+    assert_eq!(payload, vec![0x82, 0x01, 17, 2, 0, 3, 1, 0, 0, 0]);
+    let ServerDirective::Send { packet_id, payload } =
+        protocol.encode_container_slot(130, 18, 37, Some(&item)) else { panic!("slot"); };
+    assert_eq!(packet_id, packet_ids::play::clientbound::CONTAINER_SET_SLOT);
+    assert_eq!(payload, vec![0x82, 0x01, 18, 0, 37, 3, 1, 0, 0]);
+    let ServerDirective::Send { packet_id, payload } = protocol.encode_container_data(130, 2, 300) else { panic!("data"); };
+    assert_eq!(packet_id, packet_ids::play::clientbound::CONTAINER_SET_DATA);
+    assert_eq!(payload, vec![0x82, 0x01, 0, 2, 1, 44]);
+}
+
+#[test]
 fn protocol_774_does_not_opt_into_retained_initial_light() {
     assert!(!V774ServerProtocol.retains_initial_column_light());
 }
@@ -173,7 +223,7 @@ fn block_use_decodes_the_774_border_flag_before_its_prediction_sequence() {
                 y: 1.0,
                 z: 0.75,
             },
-            sequence: lodestone_model::PredictionSequence::new(17),
+            sequence: 17,
             hand: 0,
         }
     );
@@ -191,46 +241,6 @@ fn block_use_decodes_the_774_border_flag_before_its_prediction_sequence() {
         ServerBound::Ignored,
         "only the two real interaction hands reach the server consumer"
     );
-}
-
-#[test]
-fn container_encoders_emit_the_774_open_content_and_slot_wire_shapes() {
-    let protocol = V774ServerProtocol;
-    let stack = ItemStack::new("minecraft:stone".parse().unwrap(), 4);
-
-    let ServerDirective::Send { packet_id, payload } =
-        protocol.encode_open_screen(7, "minecraft:generic_9x3", "Chest")
-    else {
-        panic!("generic chest must be representable in the 774 menu registry");
-    };
-    assert_eq!(packet_id, packet_ids::play::clientbound::OPEN_SCREEN);
-    // Window 7, menu id 2, then anonymous-NBT {text:"Chest"}. This expected
-    // byte sequence is assembled from the 774 field order, not decoded back
-    // through this crate's packet type.
-    assert_eq!(payload, [
-        7, 2, 0x0a, 0x08, 0, 4, b't', b'e', b'x', b't', 0, 5, b'C', b'h', b'e', b's', b't', 0,
-    ]);
-
-    let ServerDirective::Send { packet_id, payload } =
-        protocol.encode_container_content(7, 9, &[None, Some(stack.clone()), None], None)
-    else {
-        panic!("container content must be emitted for protocol 774");
-    };
-    assert_eq!(packet_id, packet_ids::play::clientbound::CONTAINER_SET_CONTENT);
-    // Window, state, slot count, then empty / stone x4 / empty / empty cursor.
-    assert_eq!(payload, [7, 9, 3, 0, 4, 1, 0, 0, 0, 0]);
-
-    let ServerDirective::Send { packet_id, payload } =
-        protocol.encode_container_slot(7, 10, 1, None)
-    else {
-        panic!("container slot must be emitted for protocol 774");
-    };
-    assert_eq!(packet_id, packet_ids::play::clientbound::CONTAINER_SET_SLOT);
-    assert_eq!(payload, [7, 10, 0, 1, 0]);
-    assert!(matches!(
-        protocol.encode_open_screen(7, "minecraft:not_a_menu", "ignored"),
-        ServerDirective::None
-    ));
 }
 
 #[test]

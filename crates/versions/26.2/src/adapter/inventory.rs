@@ -7,8 +7,7 @@ use lodestone_data::block::Block;
 // here rather than widening that shared glob for one type this file alone
 // needs.
 use lodestone_model::{
-    AttackRange, BlocksAttacks, ConsumeEffect, DamageReduction, ItemId, MobEffectInstance,
-    RegistrySet,
+    AttackRange, BlocksAttacks, ConsumeEffect, DamageReduction, MobEffectInstance, RegistrySet,
 };
 
 /// Maximum nesting this module will walk through sender-chosen structure.

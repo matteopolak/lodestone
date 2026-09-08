@@ -32,7 +32,7 @@ insert-to-take-control/remove-to-release convention for plugin movement control.
 | capability | status | completion gate or remaining work |
 |---|---|---|
 | Typed event subscription | done (native) | `GameEvent(ClientEvent)` is a bevy `Message`, read through `MessageReader<GameEvent>`; every `ClientEvent` variant reaches the single write site. |
-| Raw inbound packet observation | done (native) | `RawPacketBusPlugin` publishes an opt-in `RawPacket` message with the connection state, packet id, and exact payload before version-specific decoding. The version-locked route remains documented in [`../plugin-packet-decorators.md`](../plugin-packet-decorators.md). |
+| Raw inbound/outbound packet observation | done (native) | `RawPacketBusPlugin` publishes an opt-in `RawPacket` message with the connection state, packet id, and exact payload before version-specific decoding; `OutboundRawPacketBusPlugin` publishes exact adapter/decorator output before transport framing with bounded per-tick packet/byte admission. The version-locked route remains documented in [`../plugin-packet-decorators.md`](../plugin-packet-decorators.md). |
 | Action cancellation | done (native) | `ActionVetoes` asks a priority-keyed predicate before effects are computed; first `Deny` wins for break, place, damage, inventory click, movement, and interaction. |
 | Priority and monitor phase | done (native), bounded | `EventPriority` chains all public schedules. Monitor rejects mutable `World` access; deferred `Commands` mutation remains the boundary to document and test. |
 | Plugin-defined events | partial | Define a convention and provide a worked example; a bevy `Message` already works for statically linked plugins. |
@@ -74,7 +74,7 @@ insert-to-take-control/remove-to-release convention for plugin movement control.
 | Plugin metadata | partial | `EntityDataStore` and `ChunkDataStore` are in-memory. Persistence requires the world/player persistence layer. |
 | Config/data directory | gap | Establish one shared convention rather than another per-plugin directory implementation. |
 | Database access | done (native) | Native plugins may use normal Rust database libraries. |
-| Shared packet observation | done (native), observation-only ceiling | `RawPacketBusPlugin` provides read-only, opt-in `RawPacket` messages before adapter decoding; the version-free surface cannot mutate, cancel, or inject wire data. |
+| Shared packet observation | done (native), observation-only ceiling | `RawPacketBusPlugin` and bounded `OutboundRawPacketBusPlugin` provide read-only, opt-in messages before decoding and after adapter/decorator encoding; the version-free surface cannot mutate, cancel, or inject wire data. |
 | Version-locked packet mutation | done at the escape-hatch layer | A `ServerProtocol` decorator can drop, rewrite, or append directives. It is compiled into the server, unsandboxed, and version-locked; see [`../plugin-packet-decorators.md`](../plugin-packet-decorators.md). |
 | Outbound action filtering | done locally; partial on server | `EgressFilters` operates at `ActionQueue` drain. Five direct `send_action` sites bypass it for wire ordering; `egress_hook_coverage.rs` must enumerate exactly those five and fail when the set changes. |
 | Internal version-crate access | done, deliberately version-locked | A native plugin may depend on a version leaf crate directly. This is a compile-time compatibility choice, not a dynamic plugin API. |
@@ -92,7 +92,7 @@ insert-to-take-control/remove-to-release convention for plugin movement control.
 | capability | status | completion gate or remaining work |
 |---|---|---|
 | Host and sandbox | done, narrow | `lodestone-wasm-host`, `PluginHost`, fuel, memory, filesystem-root, trap, and memory gates are real. |
-| Capability ABI | done, narrow | `wit/lodestone-plugin.wit` has three event kinds, three actions, root command declaration and synchronous handling, `log`/`fs:read`, and delayed/repeating task scheduling with cancellation. Add typed command schemas and suggestions, block access, and entity actions before claiming feature parity. |
+| Capability ABI | done, narrow | `wit/lodestone-plugin.wit` has curated event/action types, typed command schemas and suggestions, `log`, confined `fs:read`/`fs:write`, and delayed/repeating task scheduling with cancellation. Add broader block/entity coverage before claiming feature parity. |
 | Shipped application reach | done, native windowed client | The runner discovers cwd-relative `plugins/` through the real shell `Sim`; browser hosting remains excluded because Wasmtime is native-only. |
 
 ## Scheduling, reentrancy, and testability

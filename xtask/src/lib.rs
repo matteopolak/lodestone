@@ -9581,6 +9581,15 @@ pub fn confinement_rules() -> Vec<ConfinementRule> {
             banned: "web_time::",
             allowlist: &[],
         },
+        // Rayon is the native batch dispatcher only. The browser path uses the
+        // same source algorithm through its yielding serial loop, so a new
+        // Rayon call outside the target-confined chunk seam is a wasm trap risk.
+        ConfinementRule {
+            label: "lodestone-server rayon-confinement",
+            src_dir: "crates/lodestone-server/src",
+            banned: "rayon::",
+            allowlist: &["chunk.rs", "worldgen_dispatch.rs"],
+        },
         ConfinementRule {
             label: "lodestone-worldgen instant-ban",
             src_dir: "crates/lodestone-worldgen/src",

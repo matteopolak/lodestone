@@ -1411,25 +1411,27 @@ pub fn player_physics(
         *player = player.with_water_movement_efficiency(efficiency as f32);
 
         if let PlayerCollision::View(source) = &*collision {
-            source.with_view(&mut |view| {
-                // `tick_among_entities` with an empty `nearby` is bit-for-bit
-                // `tick` — see [`NearbyEntities`]'s own doc for why that makes
-                // this swap provably inert for every caller that does not
-                // populate the resource.
-                tick_among_entities(
-                    player,
-                    intent,
-                    view,
-                    profile,
-                    &nearby.list,
-                    PushSelf {
-                        collision_rule: nearby.self_collision_rule,
-                        ..PushSelf::LIVING_PLAYER
-                    },
-                );
-                // The same view movement collided against, so the submerged
-                // summary is consistent with where the tick left the player.
-                fluid.0 = player_fluid_state(player, profile, view);
+            lodestone_physics::trace::with_local_player(|| {
+                source.with_view(&mut |view| {
+                    // `tick_among_entities` with an empty `nearby` is bit-for-bit
+                    // `tick` — see [`NearbyEntities`]'s own doc for why that makes
+                    // this swap provably inert for every caller that does not
+                    // populate the resource.
+                    tick_among_entities(
+                        player,
+                        intent,
+                        view,
+                        profile,
+                        &nearby.list,
+                        PushSelf {
+                            collision_rule: nearby.self_collision_rule,
+                            ..PushSelf::LIVING_PLAYER
+                        },
+                    );
+                    // The same view movement collided against, so the submerged
+                    // summary is consistent with where the tick left the player.
+                    fluid.0 = player_fluid_state(player, profile, view);
+                });
             });
         } else {
             // `Pending`: we know nothing about the fluid around the player, so
