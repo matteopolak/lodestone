@@ -554,8 +554,8 @@ pub use brewing::{
     mix_bottle,
 };
 pub use chunk::{
-    ChunkColumn, ChunkGenerationStage, ColumnLightSettlementError, ChunkSource, EndChunkSource,
-    NetherChunkSource, OverworldChunkSource, WorldgenChunkSource,
+    ChunkColumn, ChunkGenerationStage, ColumnLightSettlement, ColumnLightSettlementError,
+    ChunkSource, EndChunkSource, NetherChunkSource, OverworldChunkSource, WorldgenChunkSource,
 };
 // `chunk_store::ChunkStore` itself stays crate-private (its methods
 // are `pub(crate)` and `IntegratedServer` is the only thing that should build

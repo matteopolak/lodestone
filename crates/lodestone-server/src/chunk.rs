@@ -1451,6 +1451,67 @@ pub enum ColumnLightSettlementError {
     Conflict,
 }
 
+/// Light snapshots produced for one admitted chunk footprint.
+///
+/// The centre entry is always present. Additional entries use chunk-relative
+/// offsets in the admitted 3x3 neighbourhood, so a version adapter can return
+/// every snapshot it produced while the source still owns one revision-checked
+/// transaction. The constructor rejects offsets outside that footprint and
+/// duplicate coordinates instead of leaving a source to interpret an
+/// untyped coordinate list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnLightSettlement {
+    entries: Vec<((i32, i32), lodestone_world::ColumnLight)>,
+}
+
+impl ColumnLightSettlement {
+    /// Creates a centre-only settlement, preserving the existing protocol
+    /// behaviour for adapters that compute one column at a time.
+    #[must_use]
+    pub fn centre(light: lodestone_world::ColumnLight) -> Self {
+        Self {
+            entries: vec![((0, 0), light)],
+        }
+    }
+
+    /// Creates a settlement with the centre and any additional 3x3 entries.
+    ///
+    /// `neighbours` contains `(dx, dz, light)` triples. `(0, 0)` is reserved
+    /// for `centre`; offsets outside `-1..=1` or duplicate coordinates return
+    /// `None`. A caller can therefore construct a batch from a version-specific
+    /// solver without exposing an unchecked coordinate-to-light map to the
+    /// source transaction.
+    pub fn with_neighbours(
+        centre: lodestone_world::ColumnLight,
+        neighbours: impl IntoIterator<Item = (i32, i32, lodestone_world::ColumnLight)>,
+    ) -> Option<Self> {
+        let mut entries = vec![((0, 0), centre)];
+        for (dx, dz, light) in neighbours {
+            if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dz) || (dx, dz) == (0, 0) {
+                return None;
+            }
+            if entries.iter().any(|(offset, _)| *offset == (dx, dz)) {
+                return None;
+            }
+            entries.push(((dx, dz), light));
+        }
+        Some(Self { entries })
+    }
+
+    /// The centre snapshot, which every valid settlement contains.
+    #[must_use]
+    pub fn centre_light(&self) -> &lodestone_world::ColumnLight {
+        &self.entries[0].1
+    }
+
+    /// Iterates over `(dx, dz, light)` entries, with the centre first.
+    pub(crate) fn iter(
+        &self,
+    ) -> impl Iterator<Item = ((i32, i32), &lodestone_world::ColumnLight)> + '_ {
+        self.entries.iter().map(|(offset, light)| (*offset, light))
+    }
+}
+
 /// Supplies terrain columns to the integrated server.
 pub trait ChunkSource: Send + Sync {
     /// Generates the column at chunk coordinates `(cx, cz)`.
@@ -1522,6 +1583,22 @@ pub trait ChunkSource: Send + Sync {
     /// retention layer applies the same lifecycle rule.
     fn invalidate_retained_light_neighbourhood(&self, _cx: i32, _cz: i32) {}
 
+    /// Persists several complete columns as one source transaction.
+    ///
+    /// The default keeps small or legacy sources compatible by forwarding each
+    /// column through [`store_resident_column`](Self::store_resident_column).
+    /// Persistent wrappers that can hold their edit lock across the batch may
+    /// override this to make every touched coordinate visible together.
+    fn store_resident_columns(&self, columns: &[(i32, i32, ChunkColumn)]) -> bool {
+        let mut stored = true;
+        for &(cx, cz, ref column) in columns {
+            if !self.store_resident_column(cx, cz, column) {
+                stored = false;
+            }
+        }
+        stored
+    }
+
     /// Computes and installs a retained light snapshot from one stable column
     /// view. The callback runs without a source or cache lock held. A source
     /// with a versioned cache may reject the result when a concurrent block
@@ -1546,6 +1623,40 @@ pub trait ChunkSource: Send + Sync {
             false,
             replace_existing,
             false,
+            &mut compute_centre,
+        )
+    }
+
+    /// Computes and installs every light snapshot returned by one admitted
+    /// footprint. The default adapts the historical centre-only transaction,
+    /// so existing sources and protocols keep their exact behaviour until they
+    /// opt into the batch hook.
+    fn settle_resident_column_lights_with_neighbours(
+        &self,
+        cx: i32,
+        cz: i32,
+        fallback: &ChunkColumn,
+        neighbour_offsets: &[(i32, i32)],
+        resident_only: bool,
+        replace_existing: bool,
+        exclusive: bool,
+        compute: &mut dyn FnMut(
+            &ChunkColumn,
+            &[(i32, i32, ChunkColumn)],
+        ) -> Option<ColumnLightSettlement>,
+    ) -> Result<ChunkColumn, ColumnLightSettlementError> {
+        let mut compute_centre = |current: &ChunkColumn,
+                                  neighbours: &[(i32, i32, ChunkColumn)]| {
+            compute(current, neighbours).map(|settlement| settlement.centre_light().clone())
+        };
+        self.settle_resident_column_light_with_neighbours(
+            cx,
+            cz,
+            fallback,
+            neighbour_offsets,
+            resident_only,
+            replace_existing,
+            exclusive,
             &mut compute_centre,
         )
     }
@@ -1866,6 +1977,10 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
         (**self).invalidate_retained_light_neighbourhood(cx, cz);
     }
 
+    fn store_resident_columns(&self, columns: &[(i32, i32, ChunkColumn)]) -> bool {
+        (**self).store_resident_columns(columns)
+    }
+
     fn settle_resident_column_light(
         &self,
         cx: i32,
@@ -1875,6 +1990,32 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
         compute: &mut dyn FnMut(&ChunkColumn) -> Option<lodestone_world::ColumnLight>,
     ) -> Result<ChunkColumn, ColumnLightSettlementError> {
         (**self).settle_resident_column_light(cx, cz, fallback, replace_existing, compute)
+    }
+
+    fn settle_resident_column_lights_with_neighbours(
+        &self,
+        cx: i32,
+        cz: i32,
+        fallback: &ChunkColumn,
+        neighbour_offsets: &[(i32, i32)],
+        resident_only: bool,
+        replace_existing: bool,
+        exclusive: bool,
+        compute: &mut dyn FnMut(
+            &ChunkColumn,
+            &[(i32, i32, ChunkColumn)],
+        ) -> Option<ColumnLightSettlement>,
+    ) -> Result<ChunkColumn, ColumnLightSettlementError> {
+        (**self).settle_resident_column_lights_with_neighbours(
+            cx,
+            cz,
+            fallback,
+            neighbour_offsets,
+            resident_only,
+            replace_existing,
+            exclusive,
+            compute,
+        )
     }
 
     fn settle_resident_column_light_with_neighbours(
@@ -1997,6 +2138,10 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
         (**self).invalidate_retained_light_neighbourhood(cx, cz);
     }
 
+    fn store_resident_columns(&self, columns: &[(i32, i32, ChunkColumn)]) -> bool {
+        (**self).store_resident_columns(columns)
+    }
+
     fn settle_resident_column_light(
         &self,
         cx: i32,
@@ -2006,6 +2151,32 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
         compute: &mut dyn FnMut(&ChunkColumn) -> Option<lodestone_world::ColumnLight>,
     ) -> Result<ChunkColumn, ColumnLightSettlementError> {
         (**self).settle_resident_column_light(cx, cz, fallback, replace_existing, compute)
+    }
+
+    fn settle_resident_column_lights_with_neighbours(
+        &self,
+        cx: i32,
+        cz: i32,
+        fallback: &ChunkColumn,
+        neighbour_offsets: &[(i32, i32)],
+        resident_only: bool,
+        replace_existing: bool,
+        exclusive: bool,
+        compute: &mut dyn FnMut(
+            &ChunkColumn,
+            &[(i32, i32, ChunkColumn)],
+        ) -> Option<ColumnLightSettlement>,
+    ) -> Result<ChunkColumn, ColumnLightSettlementError> {
+        (**self).settle_resident_column_lights_with_neighbours(
+            cx,
+            cz,
+            fallback,
+            neighbour_offsets,
+            resident_only,
+            replace_existing,
+            exclusive,
+            compute,
+        )
     }
 
     fn settle_resident_column_light_with_neighbours(

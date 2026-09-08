@@ -57,23 +57,32 @@ forward its label.
 
 ### Retained snapshots and reloads
 
-For a protocol that opts into retained initial light, the server stores the exact `ColumnLight` result
-on the centre column when its settlement transaction completes. The initial
-`LEVEL_CHUNK_WITH_LIGHT` encoder consumes that snapshot verbatim, including `Missing`, explicit empty,
-full, and varied sections. An independent sealed-world capture showed that a persisted End section
-mask can differ from the first in-memory settlement, so a reload must serve what storage restored
-rather than recomputing from the current terrain or a neighbour subset. That capture is external
-evidence for the storage contract; it does not claim that this repository drives the capture's
-scheduler or loading-ticket sequence in a production test.
+For a protocol that opts into retained initial light, one admission may produce more than the centre
+snapshot. `ServerProtocol::compute_initial_column_lights_with_neighbours_in_dimension` returns a
+typed `ColumnLightSettlement`: the centre is mandatory, and each additional entry names a relative
+coordinate in the admitted 3x3 footprint together with its exact `ColumnLight` (including its
+`Missing`, explicit-empty, full, or varied section representation). `ChunkStore` captures every
+requested coordinate, checks all of their revisions, and forwards the returned entries to the source
+as one batch before releasing the gates. Existing protocol adapters use the default centre-only
+adapter, while a version adapter can return whichever sparse or fully populated dependency records
+its wire lifecycle actually produces; the source does not infer a dimension policy.
+
+The initial chunk encoder consumes a retained snapshot verbatim. An independent sealed-world capture
+showed that a persisted End section mask can differ from the first in-memory settlement, so a reload
+must serve what storage restored rather than recomputing from the current terrain or a neighbour
+subset. That capture is external evidence for the storage contract; it does not claim that this
+repository drives the capture's scheduler or loading-ticket sequence in a production test.
 
 `column_to_nbt` writes the retained snapshot's sky and block arrays, including the light-only sections
 immediately below and above the block range, and marks the column as light-complete. `column_from_nbt`
 restores those arrays into `ChunkColumn` before a source can serve the column again. Only protocols
 that return `true` from `ServerProtocol::retains_initial_column_light` enter this settlement path;
 the default is `false`, so legacy one-column protocols do not admit neighbours or persist a snapshot
-they do not consume. `RegionChunkSource` keeps an opted-in snapshot in its edit/persistence path,
-while `ChunkStore::store_resident_column` updates the cache and forwards the value instead of
-allowing an in-memory cache hit to hide a future reload.
+they do not consume. `RegionChunkSource` keeps opted-in snapshots in its edit/persistence path, while
+`ChunkStore::store_resident_columns` updates the cache and forwards the complete batch instead of
+allowing an in-memory cache hit to hide a future reload. The source trait's default batch method
+preserves compatibility for small sources by forwarding individual columns; persistent sources
+that need an all-at-once visibility boundary override it.
 The typed native record path stores the same `ColumnLight` beside terrain and reattaches it to the
 decoded `ChunkColumn` on reopen, so a caller can feed that record directly back to the serving source.
 Persisted columns remain authoritative after eviction and restart; admission and ticket policy remain
@@ -129,11 +138,12 @@ before the update is sent. `ChunkColumn::set_block` also invalidates any old sna
 a later initial send cannot mistake derived light for current state.
 
 For an opted-in protocol, initial chunk encoding assembles the centre and its eight neighbours in a
-fixed relative-coordinate order, then settles the centre's retained snapshot through the validated
-read/compute/commit fence. The order is only a deterministic admission/assembly rule; the light
-result is not allowed to depend on direction, coordinate, or holder ordinal. A missing neighbour is
-resolved through the source's normal column path so the fence has a complete 3×3 input; the snapshot
-is stored before the initial packet is written. Protocols that do not opt into retained initial light
+fixed relative-coordinate order, then settles every snapshot returned for that admission through the
+validated read/compute/commit fence. The order is only a deterministic admission/assembly rule; the
+light result is not allowed to depend on direction, coordinate, or holder ordinal. A missing
+neighbour is resolved through the source's normal column path so the fence has a complete 3×3 input;
+the centre and any returned dependency snapshots are stored before the initial packet is written.
+Protocols that do not opt into retained initial light
 keep their one-column encoder and do not pay for adjacent reads. The detached worker encoder remains
 on the one-column contract until it can carry the same neighbourhood explicitly.
 

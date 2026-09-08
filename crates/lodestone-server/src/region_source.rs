@@ -1413,6 +1413,18 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
         }
     }
 
+    /// Retains a complete light-admission batch while holding the edit lock,
+    /// so a resident read cannot observe only part of the 3x3 settlement.
+    fn store_resident_columns(&self, columns: &[(i32, i32, ChunkColumn)]) -> bool {
+        let mut edits = self.state.edits.lock().expect("world edit lock poisoned");
+        for &(cx, cz, ref column) in columns {
+            edits.insert((cx, cz), column.clone());
+        }
+        let mut dirty = self.state.dirty.lock().expect("world dirty lock poisoned");
+        dirty.extend(columns.iter().map(|&(cx, cz, _)| (cx, cz)));
+        true
+    }
+
     /// The cache above has evicted this column, so the save path may release
     /// it once it is on disk.
     ///
