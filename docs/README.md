@@ -861,6 +861,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   entities travel with the column, so the server's chunk packet carries their registry
   records while the save path retains the deferred loot, occupants, and spawner state
   needed after reload.
+- [World-generation JSON schemas](./worldgen-json-schemas.md) — World-generation
+  density functions and surface rules are parsed through strict serde schemas before
+  they are instantiated. Typed discriminated unions reject unknown fields, unknown
+  type tags, and implicit numeric/string conversions at the data boundary.
 - [Large worldgen parity harness](./worldgen-large-parity.md) —
   `scripts/worldgen-oracle/LargeParityOracle.java` is the resumable, 251,001-chunk
   parity oracle for the 501 by 501 grid centred at `(0, 0)`. It freezes one generated
