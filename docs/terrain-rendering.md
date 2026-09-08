@@ -54,6 +54,45 @@ spin cannot starve what's behind the player), the frustum penalty only reorders
 within one distance band. `DIRTY_COLUMN_BUDGET` bounds how many columns are re-meshed
 per frame.
 
+### Loaded-column empty diagnostics
+
+The network path decodes and validates a column before writing its block and
+biome data to the client-owned `World`; the following `ChunkLoaded` notification
+contains only the position because the payload is already in that store. The
+arrival handler meshes that column immediately and then queues its loaded
+neighbours for boundary healing. A later dirty signal therefore sees either the
+same decoded storage or a newer edit, not a second packet representation.
+
+`ChunkColumn` elides sections that are all air with the default biome, but it can
+retain a biome-only section. `ChunkSection::non_air_count` is recomputed from
+decoded block states and maintained by edits, so `TerrainMesh::mesh_column_inner`
+uses a cheap `ColumnBlockSummary` to count actual non-air blocks rather than
+assuming that an allocated section must draw. A loaded column with zero
+non-air blocks is intentional empty geometry: its normal section-removal queue
+still runs, but it does not increment `TerrainMesh::drops` or emit a warning.
+
+If every section snapshot is `Empty` while the summary contains non-air blocks,
+the input is inconsistent and remains actionable. The drop counter increments,
+and the warning reports the coordinates, section shape, retained-section count,
+non-air section count, and non-air block count. Warnings are sampled at
+power-of-two occurrences so a bad stream cannot produce one line per column (the
+id-space guard uses the same sampling rule); `drops` still records every
+occurrence. A missing column and a `Deferred` snapshot
+return before this diagnostic, preserving the distinction between an unload and
+a frontier that is still waiting for neighbours. Legacy packet decoders also
+report unresolved state substitutions at the decode boundary, so a fallback to
+air is not silently presented as an intentionally empty column.
+
+The controls in `crates/lodestone-shell/src/mesher.rs` exercise both sides of
+this boundary: a direct block-container scan agrees with the maintained count,
+and a loaded biome-only column proves that empty storage queues removals without
+becoming a mesh drop. Extend `ColumnBlockSummary` and its controls together when
+the storage model changes. There is no configuration flag; the only runtime
+surface is the existing debug HUD `drops` value and the sampled `mesh` warning.
+This behavior depends on the version adapters and `WorldSink` for validated
+ingestion, `lodestone-world` for section counts and elision, and the shell
+mesher's snapshot/route/heal pipeline for scheduling.
+
 ### Culling and the section-visibility graph
 
 `crates/lodestone-render/src/cull.rs`'s `TerrainCull` is built once per frame and

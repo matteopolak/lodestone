@@ -1375,10 +1375,10 @@ impl Sim {
             self.vanilla_atlas.is_none()
         };
         // A condition that discards 100% of terrain must not be indistinguishable
-        // from an empty world. `TerrainMesh::mesh_column_inner`'s own
-        // `tracing::warn!` fires once *per dropped column* — thousands of
-        // identical lines at a real render distance, which reads as noise rather
-        // than as a cause, and it never names *why* the atlas is missing.
+        // from an empty world. The mesh path counts the guard failure, while its
+        // detailed warning is sampled rather than emitted once per column —
+        // thousands of identical lines at a real render distance read as noise
+        // rather than as a cause, and never name *why* the atlas is missing.
         //
         // Deliberately narrower than `!id_spaces_agree`: the "reverse" arm above
         // (no `net`, a vanilla atlas present) is the ordinary pre-connection

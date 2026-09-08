@@ -181,8 +181,8 @@ fn player_stands_on_the_server_ground_not_the_demo_world() {
         live.mesh_drops == 0,
         "the live session logged {} mesh drop(s) — a live column that a chunk event dirtied \
          produced no geometry (the 'invisible blocks' defect class). The counter is meant to \
-         stay 0 in a healthy session; a non-zero value means columns are silently failing to \
-         mesh. Check the `live-all-air-column` / `live-guard-rejected` warnings.",
+         stay 0 in a healthy session; a non-zero value means non-air columns are silently failing \
+         to mesh. Check the `non-air-loaded-column` / `id-space-mismatch` warnings.",
         live.mesh_drops
     );
     assert!(
