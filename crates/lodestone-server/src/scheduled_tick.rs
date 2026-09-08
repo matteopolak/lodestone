@@ -145,14 +145,14 @@ impl ScheduledTickKind {
             "redstone:comparator" => Self::Comparator,
             "redstone:observer" => Self::Observer,
             "redstone:target_decay" => Self::TargetDecay,
-            "redstone:tripwire_recheck" => Self::TripwireRecheck,
+            crate::redstone_tripwire::TICK_TRIPWIRE_RECHECK => Self::TripwireRecheck,
             "redstone:piston" => Self::Piston,
-            "gravity" => Self::Gravity,
+            crate::gravity_tick::TICK_GRAVITY => Self::Gravity,
             "lodestone:fire" => Self::Fire,
-            "redstone:tnt_prime" => Self::TntPrime,
-            "command:tick" => Self::CommandBlock,
+            crate::mobs::tnt::TICK_TNT_PRIME => Self::TntPrime,
+            crate::command_block::TICK_COMMAND_BLOCK => Self::CommandBlock,
             "lodestone:button_release" => Self::ButtonRelease,
-            "redstone:dispenser_fire" => Self::DispenserFire,
+            crate::redstone_dispenser::TICK_DISPENSER_FIRE => Self::DispenserFire,
             _ => Self::Extension(name),
         }
     }
@@ -168,14 +168,14 @@ impl ScheduledTickKind {
             Self::Comparator => "redstone:comparator",
             Self::Observer => "redstone:observer",
             Self::TargetDecay => "redstone:target_decay",
-            Self::TripwireRecheck => "redstone:tripwire_recheck",
+            Self::TripwireRecheck => crate::redstone_tripwire::TICK_TRIPWIRE_RECHECK,
             Self::Piston => "redstone:piston",
-            Self::Gravity => "gravity",
+            Self::Gravity => crate::gravity_tick::TICK_GRAVITY,
             Self::Fire => "lodestone:fire",
-            Self::TntPrime => "redstone:tnt_prime",
-            Self::CommandBlock => "command:tick",
+            Self::TntPrime => crate::mobs::tnt::TICK_TNT_PRIME,
+            Self::CommandBlock => crate::command_block::TICK_COMMAND_BLOCK,
             Self::ButtonRelease => "lodestone:button_release",
-            Self::DispenserFire => "redstone:dispenser_fire",
+            Self::DispenserFire => crate::redstone_dispenser::TICK_DISPENSER_FIRE,
             Self::Extension(name) => return Cow::Borrowed(name),
         })
     }
@@ -206,14 +206,14 @@ impl AsRef<str> for ScheduledTickKind {
             Self::Comparator => "redstone:comparator",
             Self::Observer => "redstone:observer",
             Self::TargetDecay => "redstone:target_decay",
-            Self::TripwireRecheck => "redstone:tripwire_recheck",
+            Self::TripwireRecheck => crate::redstone_tripwire::TICK_TRIPWIRE_RECHECK,
             Self::Piston => "redstone:piston",
-            Self::Gravity => "gravity",
+            Self::Gravity => crate::gravity_tick::TICK_GRAVITY,
             Self::Fire => "lodestone:fire",
-            Self::TntPrime => "redstone:tnt_prime",
-            Self::CommandBlock => "command:tick",
+            Self::TntPrime => crate::mobs::tnt::TICK_TNT_PRIME,
+            Self::CommandBlock => crate::command_block::TICK_COMMAND_BLOCK,
             Self::ButtonRelease => "lodestone:button_release",
-            Self::DispenserFire => "redstone:dispenser_fire",
+            Self::DispenserFire => crate::redstone_dispenser::TICK_DISPENSER_FIRE,
             Self::Extension(name) => name,
         }
     }
@@ -1451,6 +1451,22 @@ mod tests {
         assert_eq!(unknown.name().as_ref(), "example:plugin_tick");
         assert_eq!(unknown.clone().into_name(), "example:plugin_tick");
         assert!(unknown.is_extension());
+    }
+
+    #[test]
+    fn legacy_family_constants_are_the_typed_boundary_names() {
+        let builtins = [
+            (crate::command_block::TICK_COMMAND_BLOCK, ScheduledTickKind::CommandBlock),
+            (crate::gravity_tick::TICK_GRAVITY, ScheduledTickKind::Gravity),
+            (crate::mobs::tnt::TICK_TNT_PRIME, ScheduledTickKind::TntPrime),
+            (crate::redstone_dispenser::TICK_DISPENSER_FIRE, ScheduledTickKind::DispenserFire),
+            (crate::redstone_tripwire::TICK_TRIPWIRE_RECHECK, ScheduledTickKind::TripwireRecheck),
+        ];
+        for (name, expected) in builtins {
+            assert_eq!(ScheduledTickKind::from_name(name), expected);
+            assert_eq!(expected.name().as_ref(), name);
+            assert!(!expected.is_extension());
+        }
     }
 
     #[test]
