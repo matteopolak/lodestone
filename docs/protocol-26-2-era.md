@@ -57,6 +57,17 @@ The literal dispatch fixture in
 `crates/versions/26.2/tests/chunk_world/world_events.rs` also rejects trailing
 bytes, keeping the packet boundary independent of the encoder.
 
+Entity attribute updates are decoded by `V770Adapter`'s entity dispatcher as an
+entity id followed by registry-id snapshots, each with an `f64` base and
+textual modifier records. The adapter emits
+`ClientEvent::EntityAttributesUpdated`; the ECS ingest schedule resolves the
+id through `EntityIndex` and merges each snapshot into the entity's
+`Attributes` component, replacing only a matching attribute key. The
+adapter-to-ingest fixture in
+`crates/versions/26.2/tests/entity/attributes_ingest.rs` uses literal packet
+bytes and checks the resulting component, so a decoder that emits nothing or a
+route that stops before ECS state cannot pass.
+
 ## How to change it
 
 Keep `encode_column_body` and `LevelChunkWithLight::decode` in matching wire
@@ -69,6 +80,13 @@ If a new heightmap is sent, add its explicit registry id and predicate to
 `served_heightmaps`, then use inputs where its answer differs from every
 existing map. Do not infer a predicate from a visually similar material; use
 the checked-in per-state census or an external packet/chunk capture.
+
+When changing `update_attributes`, keep its registry-id table and field order
+aligned with the protocol capture. Update the literal adapter-to-ingest fixture
+with an independently calculated byte vector and a value that distinguishes the
+base from every modifier operation under test; do not replace it with an
+encode/decode round trip. If the event shape changes, update the model event,
+the `IngestSet::Apply` fold, and this end-to-end fixture together.
 
 For initial neighbour-aware light, preserve the server's resident-only rule:
 pass a consistent centre plus any resident neighbours all the way to
