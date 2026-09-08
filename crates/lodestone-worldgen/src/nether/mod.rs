@@ -117,9 +117,10 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc, Mutex,
+    atomic::{AtomicU64, AtomicUsize, Ordering},
+    Arc, Mutex, OnceLock,
 };
+use std::time::Instant;
 
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
@@ -170,6 +171,194 @@ type PreDecorationResult = (
 );
 
 type DecorationFeatures = Vec<(i32, usize, crate::feature::vegetation::PlacedRef)>;
+
+const MEMO_SHARD_COUNT: usize = 32;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NetherCacheStats {
+    pub lock_attempts: u64,
+    pub lock_wait_nanos: u64,
+    pub lock_hold_nanos: u64,
+    pub slot_waits: u64,
+    pub slot_wait_nanos: u64,
+    pub computes: u64,
+    pub compute_nanos: u64,
+    pub evictions: u64,
+}
+
+#[derive(Debug, Default)]
+struct MemoStats {
+    lock_attempts: AtomicU64,
+    lock_wait_nanos: AtomicU64,
+    lock_hold_nanos: AtomicU64,
+    slot_waits: AtomicU64,
+    slot_wait_nanos: AtomicU64,
+    computes: AtomicU64,
+    compute_nanos: AtomicU64,
+    evictions: AtomicU64,
+}
+
+impl MemoStats {
+    fn read(&self) -> NetherCacheStats {
+        NetherCacheStats {
+            lock_attempts: self.lock_attempts.load(Ordering::Relaxed),
+            lock_wait_nanos: self.lock_wait_nanos.load(Ordering::Relaxed),
+            lock_hold_nanos: self.lock_hold_nanos.load(Ordering::Relaxed),
+            slot_waits: self.slot_waits.load(Ordering::Relaxed),
+            slot_wait_nanos: self.slot_wait_nanos.load(Ordering::Relaxed),
+            computes: self.computes.load(Ordering::Relaxed),
+            compute_nanos: self.compute_nanos.load(Ordering::Relaxed),
+            evictions: self.evictions.load(Ordering::Relaxed),
+        }
+    }
+
+    fn reset(&self) {
+        for value in [
+            &self.lock_attempts,
+            &self.lock_wait_nanos,
+            &self.lock_hold_nanos,
+            &self.slot_waits,
+            &self.slot_wait_nanos,
+            &self.computes,
+            &self.compute_nanos,
+            &self.evictions,
+        ] {
+            value.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
+struct MemoShard<T> {
+    entries: Mutex<HashMap<(i32, i32), Arc<OnceLock<Arc<T>>>>>,
+}
+
+impl<T> Default for MemoShard<T> {
+    fn default() -> Self {
+        Self { entries: Mutex::new(HashMap::new()) }
+    }
+}
+
+struct ShardedMemo<T> {
+    shards: [MemoShard<T>; MEMO_SHARD_COUNT],
+    capacity: AtomicUsize,
+    stats: MemoStats,
+}
+
+impl<T> ShardedMemo<T> {
+    fn new(capacity: usize) -> Self {
+        Self {
+            shards: std::array::from_fn(|_| MemoShard::default()),
+            capacity: AtomicUsize::new(capacity),
+            stats: MemoStats::default(),
+        }
+    }
+
+    fn shard(key: (i32, i32)) -> usize {
+        let x = (key.0 as i64 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let z = (key.1 as i64 as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+        ((x ^ z.rotate_left(32)) >> 59) as usize
+    }
+
+    fn slot(&self, key: (i32, i32)) -> Arc<OnceLock<Arc<T>>> {
+        let profile = profile_enabled();
+        let lock_started = profile.then(Instant::now);
+        let mut entries = self.shards[Self::shard(key)]
+            .entries
+            .lock()
+            .expect("nether memo shard poisoned");
+        if let Some(started) = lock_started {
+            self.stats.lock_attempts.fetch_add(1, Ordering::Relaxed);
+            self.stats.lock_wait_nanos.fetch_add(
+                started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
+                Ordering::Relaxed,
+            );
+        }
+        let hold_started = profile.then(Instant::now);
+        if let Some(slot) = entries.get(&key) {
+            let slot = Arc::clone(slot);
+            if let Some(started) = hold_started {
+                self.stats.lock_hold_nanos.fetch_add(
+                    started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
+                    Ordering::Relaxed,
+                );
+            }
+            return slot;
+        }
+        let per_shard = self
+            .capacity
+            .load(Ordering::Relaxed)
+            .div_ceil(MEMO_SHARD_COUNT)
+            .max(1);
+        if entries.len() >= per_shard {
+            let before = entries.len();
+            entries.retain(|_, slot| Arc::strong_count(slot) > 1);
+            if entries.len() != before {
+                self.stats.evictions.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let slot = Arc::clone(entries.entry(key).or_insert_with(|| Arc::new(OnceLock::new())));
+        if let Some(started) = hold_started {
+            self.stats.lock_hold_nanos.fetch_add(
+                started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
+                Ordering::Relaxed,
+            );
+        }
+        slot
+    }
+
+    fn get_or_compute(&self, key: (i32, i32), compute: impl FnOnce() -> T) -> Arc<T> {
+        let slot = self.slot(key);
+        if let Some(value) = slot.get() {
+            return Arc::clone(value);
+        }
+        let started = profile_enabled().then(Instant::now);
+        let mut computed = false;
+        let value = slot.get_or_init(|| {
+            computed = true;
+            let value = compute();
+            if let Some(started) = started {
+                self.stats.compute_nanos.fetch_add(
+                    started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
+                    Ordering::Relaxed,
+                );
+            }
+            self.stats.computes.fetch_add(1, Ordering::Relaxed);
+            Arc::new(value)
+        });
+        if computed {
+            return Arc::clone(value);
+        }
+        if let Some(started) = started {
+            self.stats.slot_waits.fetch_add(1, Ordering::Relaxed);
+            self.stats.slot_wait_nanos.fetch_add(
+                started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
+                Ordering::Relaxed,
+            );
+        }
+        Arc::clone(value)
+    }
+
+    fn set_capacity(&self, capacity: usize) {
+        self.capacity.store(capacity, Ordering::Relaxed);
+        self.stats.reset();
+    }
+
+    fn clear(&self) {
+        for shard in &self.shards {
+            shard.entries.lock().expect("nether memo shard poisoned").clear();
+        }
+        self.stats.reset();
+    }
+
+    fn stats(&self) -> NetherCacheStats {
+        self.stats.read()
+    }
+}
+
+fn profile_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("LODESTONE_NETHER_PROFILE").is_some())
+}
 
 /// A step-7 ore entry retains the body selected by its configured feature.
 /// Standard and scattered entries share the raw index and target parser, but
@@ -376,19 +565,16 @@ pub struct NetherGenerator {
     /// sized against a 37×37 pinned closure this dimension does not have.
     ///
     /// **Eviction cannot change a byte of output**, only cost — see
-    /// [`STARTS_MEMO_CEILING`] for why the crude policy is sound where the
-    /// Overworld needed a view-pinned one.
-    starts: Mutex<HashMap<(i32, i32), Arc<Vec<Arc<StructureStart>>>>>,
-    pre_decoration: Mutex<HashMap<(i32, i32), Arc<PreDecorationResult>>>,
-    /// Capacity of the pure pre-decoration memo. Production keeps the small
-    /// demand-ordered bound; an explicit lifecycle or packet replay raises it
+    /// [`STARTS_MEMO_CEILING`] for why this pure memo can use bounded sharded
+    /// retention where the Overworld needed a view-pinned one.
+    starts: ShardedMemo<Vec<Arc<StructureStart>>>,
+    pre_decoration: ShardedMemo<PreDecorationResult>,
+    /// Capacity of the pure pre-decoration memo. Production keeps the bounded
+    /// sharded floor; an explicit lifecycle or packet replay raises retention
     /// only for the requested closure, so a bounded replay cannot trigger the
     /// same prefix repeatedly while its authenticated source order is replayed.
-    pre_decoration_capacity: AtomicUsize,
     /// Number of cache-miss computations, exposed for parity diagnostics.
     pre_decoration_computations: AtomicUsize,
-    /// Number of whole-memo evictions, exposed for parity diagnostics.
-    pre_decoration_evictions: AtomicUsize,
 }
 
 /// Entries [`NetherGenerator::starts`] holds before it is cleared wholesale.
@@ -408,11 +594,12 @@ const STARTS_MEMO_CEILING: usize = 8192;
 /// The ruined-portal terrain pass can grow fourteen blocks beyond the frame,
 /// so references used for placement must reach farther than the beardifier.
 const PORTAL_TERRAIN_REACH: i32 = 14;
-/// Thirty-two full pre/post fields are enough for one 5×5 decoration read
-/// closure plus a small sequential sweep, without retaining hundreds of MiB of
-/// 16×128×16 grids in a long-lived production generator. Lifecycle replay uses
-/// a separate, replay-scoped capacity derived from its admitted closure.
-const DECORATION_MEMO_CEILING: usize = 32;
+/// A thousand full pre/post fields cover the ordinary decorated join convoy's
+/// 5×5 neighbour closure without demand-order thrashing. The memo is sharded
+/// and each entry is once-initialized, so this larger ceiling removes repeated
+/// work without putting a global lock across generation. Lifecycle replay uses
+/// a separate capacity derived from its admitted closure.
+const DECORATION_MEMO_CEILING: usize = 1024;
 /// The Nether dimension exposes two 128-row halves. Noise fills the lower
 /// half; vegetation placement still runs against the full 256-row dimension
 /// window, where `MOTION_BLOCKING` can return the first air row above the roof.
@@ -437,7 +624,6 @@ fn pre_decoration_capacity(admissions: &[(i32, i32)], radius: i32) -> usize {
     width
         .checked_mul(height)
         .expect("immutable-stage closure must fit usize")
-        .max(DECORATION_MEMO_CEILING)
 }
 
 #[cfg(test)]
@@ -984,11 +1170,9 @@ impl NetherGenerator {
             ore_tag_map,
             veg_tags,
             structures,
-            starts: Mutex::new(HashMap::new()),
-            pre_decoration: Mutex::new(HashMap::new()),
-            pre_decoration_capacity: AtomicUsize::new(DECORATION_MEMO_CEILING),
+            starts: ShardedMemo::new(STARTS_MEMO_CEILING),
+            pre_decoration: ShardedMemo::new(DECORATION_MEMO_CEILING),
             pre_decoration_computations: AtomicUsize::new(0),
-            pre_decoration_evictions: AtomicUsize::new(0),
         }
     }
 
@@ -1011,8 +1195,8 @@ impl NetherGenerator {
     /// generated column reads the wider 5×5 immutable prefix context. The
     /// capacity is therefore derived from the target coordinates expanded by
     /// one packet-neighbour radius and then by the generator's wide radius.
-    /// The production demand-ordered bound remains unchanged for callers that
-    /// do not explicitly prepare a replay.
+    /// The production sharded floor remains unchanged for callers that do not
+    /// explicitly prepare a replay.
     pub fn prepare_packet_replay(&self, targets: &[(i32, i32)]) -> usize {
         let mut packet_targets = Vec::with_capacity(targets.len().saturating_mul(9));
         for &(cx, cz) in targets {
@@ -1029,27 +1213,22 @@ impl NetherGenerator {
     }
 
     /// Releases the immutable pre-decoration state retained by a packet
-    /// replay and restores the ordinary demand-ordered cache bound.
+    /// replay and restores the ordinary sharded cache floor.
     ///
     /// A large raw-packet sweep calls this after each bounded spatial window;
     /// clearing the memo is part of the replay boundary, not an eviction that
     /// changes generation order or bytes.
     pub fn reset_packet_replay(&self) {
-        self.pre_decoration
-            .lock()
-            .expect("nether pre-decoration memo poisoned")
-            .clear();
-        self.pre_decoration_capacity
-            .store(DECORATION_MEMO_CEILING, Ordering::Relaxed);
+        self.pre_decoration.clear();
+        self.pre_decoration.set_capacity(DECORATION_MEMO_CEILING);
         self.pre_decoration_computations.store(0, Ordering::Relaxed);
-        self.pre_decoration_evictions.store(0, Ordering::Relaxed);
     }
 
     fn prepare_immutable_stage_cache(&self, admissions: &[(i32, i32)], radius: i32) -> usize {
         let capacity = pre_decoration_capacity(admissions, radius);
-        self.pre_decoration_capacity.store(capacity, Ordering::Relaxed);
+        self.pre_decoration
+            .set_capacity(capacity.max(DECORATION_MEMO_CEILING));
         self.pre_decoration_computations.store(0, Ordering::Relaxed);
-        self.pre_decoration_evictions.store(0, Ordering::Relaxed);
         capacity
     }
 
@@ -1060,12 +1239,19 @@ impl NetherGenerator {
         self.pre_decoration_computations.load(Ordering::Relaxed)
     }
 
-    /// Number of whole pre-decoration memo clears since the last explicit
-    /// replay preparation (or since generator construction before the first
+    /// Number of pre-decoration shard evictions since the last explicit replay
+    /// preparation (or since generator construction before the first
     /// preparation).
     #[must_use]
     pub fn pre_decoration_evictions(&self) -> usize {
-        self.pre_decoration_evictions.load(Ordering::Relaxed)
+        self.pre_decoration.stats().evictions as usize
+    }
+
+    /// Lock and once-cell timings for the Nether's two shared generator caches.
+    /// Timings are collected only when `LODESTONE_NETHER_PROFILE` is set.
+    #[must_use]
+    pub fn cache_stats(&self) -> (NetherCacheStats, NetherCacheStats) {
+        (self.starts.stats(), self.pre_decoration.stats())
     }
 
     /// The generated column for chunk `(cx, cz)`.
@@ -1489,44 +1675,23 @@ impl NetherGenerator {
     /// It is cached by exact chunk coordinate because both 3×3 drivers need
     /// neighbours' real terrain, not a copy of the centre field.
     fn pre_decoration_stage(&self, cx: i32, cz: i32) -> Arc<PreDecorationResult> {
-        if let Some(existing) = self
-            .pre_decoration
-            .lock()
-            .expect("nether pre-decoration memo poisoned")
-            .get(&(cx, cz))
-            .cloned()
-        {
-            return existing;
-        }
-        self.pre_decoration_computations
-            .fetch_add(1, Ordering::Relaxed);
-        let base_x = cx * 16;
-        let base_z = cz * 16;
-        let refs = self.structure_refs(cx, cz);
-        let beard = self.beardifier_for(cx, cz, &refs);
-        let aquifer = self.build_fill(cx, cz);
-        let field = self.fill_stage(&aquifer, base_x, base_z, &beard);
-        let heights = self.heights_from_field(&field);
-        let biome_quarts = self.biome_quarts(cx, cz);
-        let surface_diff = self.surface_stage(&field, &heights, base_x, base_z);
-        let world = self.materialize_world(&field, surface_diff, base_x, base_z);
-        let world = self.carve_stage(cx, cz, &aquifer, world);
-        let (world, placement_loot) = self.structure_place_stage(cx, cz, &refs, world);
-        let computed = Arc::new((
-            Arc::new(world),
-            heights,
-            biome_quarts,
-            placement_loot,
-        ));
-        let mut memo = self
-            .pre_decoration
-            .lock()
-            .expect("nether pre-decoration memo poisoned");
-        if memo.len() >= self.pre_decoration_capacity.load(Ordering::Relaxed) {
-            memo.clear();
-            self.pre_decoration_evictions.fetch_add(1, Ordering::Relaxed);
-        }
-        Arc::clone(memo.entry((cx, cz)).or_insert_with(|| Arc::clone(&computed)))
+        self.pre_decoration.get_or_compute((cx, cz), || {
+            self.pre_decoration_computations
+                .fetch_add(1, Ordering::Relaxed);
+            let base_x = cx * 16;
+            let base_z = cz * 16;
+            let refs = self.structure_refs(cx, cz);
+            let beard = self.beardifier_for(cx, cz, &refs);
+            let aquifer = self.build_fill(cx, cz);
+            let field = self.fill_stage(&aquifer, base_x, base_z, &beard);
+            let heights = self.heights_from_field(&field);
+            let biome_quarts = self.biome_quarts(cx, cz);
+            let surface_diff = self.surface_stage(&field, &heights, base_x, base_z);
+            let world = self.materialize_world(&field, surface_diff, base_x, base_z);
+            let world = self.carve_stage(cx, cz, &aquifer, world);
+            let (world, placement_loot) = self.structure_place_stage(cx, cz, &refs, world);
+            (Arc::new(world), heights, biome_quarts, placement_loot)
+        })
     }
 
     /// Selects the mixed source list from the same globally ordered catalog
@@ -1925,40 +2090,26 @@ impl NetherGenerator {
     ///
     /// Empty and allocation-cheap for a generator with no structure data.
     fn structure_starts_stage(&self, cx: i32, cz: i32) -> Arc<Vec<Arc<StructureStart>>> {
-        if let Some(existing) = self
-            .starts
-            .lock()
-            .expect("nether starts memo poisoned")
-            .get(&(cx, cz))
-        {
-            return Arc::clone(existing);
-        }
-        // Computed **outside** the lock: `starts_at` samples columns and can assemble
-        // a whole jigsaw, and holding a single global mutex across that would
-        // serialise every generating thread on the memo. Two threads racing the same
-        // key both compute, and both compute the same value — the memo is a pure
-        // function of `(seed, cx, cz)`, so a duplicated computation costs time and
-        // cannot change a byte.
-        let computed: Arc<Vec<Arc<StructureStart>>> = Arc::new(match &self.structures {
-            None => Vec::new(),
-            Some(registry) => {
-                let sampler = NetherStartSampler {
-                    generator: self,
-                    aquifers: RefCell::new(HashMap::new()),
-                };
-                registry
-                    .starts_at(cx, cz, &sampler)
-                    .into_iter()
-                    .map(Arc::new)
-                    .collect()
+        self.starts.get_or_compute((cx, cz), || {
+            // `starts_at` samples columns and can assemble a whole jigsaw, so the
+            // sharded map lock is released before this OnceLock computes. A second
+            // worker racing the same key waits for the published value instead of
+            // repeating the registry work.
+            match &self.structures {
+                None => Vec::new(),
+                Some(registry) => {
+                    let sampler = NetherStartSampler {
+                        generator: self,
+                        aquifers: RefCell::new(HashMap::new()),
+                    };
+                    registry
+                        .starts_at(cx, cz, &sampler)
+                        .into_iter()
+                        .map(Arc::new)
+                        .collect()
+                }
             }
-        });
-        let mut memo = self.starts.lock().expect("nether starts memo poisoned");
-        if memo.len() >= STARTS_MEMO_CEILING {
-            memo.clear();
-        }
-        memo.insert((cx, cz), Arc::clone(&computed));
-        computed
+        })
     }
 
     /// Stage 0b: vanilla's own structure-reference-gathering 17×17 walk, keeping the starts whose adjusted
@@ -2279,12 +2430,14 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+    use std::sync::atomic::Ordering;
 
     use sha2::{Digest as _, Sha256};
 
     use super::{
         MixedEntryWriter, NetherGenerator, build_nether_feature_lists, decoration_random,
         lifecycle_pre_decoration_capacity, pre_decoration_capacity, synchronize_mixed_entry,
+        ShardedMemo,
     };
     use crate::dense_grid::DenseBlockGrid;
     use crate::density::{NoiseParams, Resolver};
@@ -2300,8 +2453,8 @@ mod tests {
             .flat_map(|z| (-9..=8).map(move |x| (x, z)))
             .collect::<Vec<_>>();
         assert_eq!(lifecycle_pre_decoration_capacity(&admissions), 484);
-        assert_eq!(lifecycle_pre_decoration_capacity(&[(0, 0)]), 32);
-        assert_eq!(lifecycle_pre_decoration_capacity(&[]), 32);
+        assert_eq!(lifecycle_pre_decoration_capacity(&[(0, 0)]), 25);
+        assert_eq!(lifecycle_pre_decoration_capacity(&[]), 1024);
 
         let computes = |capacity: usize| {
             let mut memo = HashSet::new();
@@ -2352,6 +2505,33 @@ mod tests {
             pre_decoration_capacity(&[(-26, -26), (26, 26)], radius),
             3_249,
         );
+    }
+
+    #[test]
+    fn sharded_memo_computes_one_value_for_a_concurrent_miss() {
+        let memo = Arc::new(ShardedMemo::<usize>::new(1024));
+        let computes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let memo = Arc::clone(&memo);
+            let computes = Arc::clone(&computes);
+            let barrier = Arc::clone(&barrier);
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                assert_eq!(
+                    *memo.get_or_compute((17, -23), || {
+                        computes.fetch_add(1, Ordering::Relaxed);
+                        776
+                    }),
+                    776
+                );
+            }));
+        }
+        for worker in workers {
+            worker.join().expect("memo worker must not panic");
+        }
+        assert_eq!(computes.load(Ordering::Relaxed), 1);
     }
 
     struct NetherAssets {
