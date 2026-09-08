@@ -19,7 +19,7 @@
 //!
 //! ```text
 //! for each structure set, in registration order:
-//!     placement.is_placement_chunk(seed, cx, cz)?      <- the jittered grid
+//!     placement chunk?                                  <- jittered grid or ring list
 //!     placement.passes_frequency(seed, cx, cz)?        <- 2 of 20 sets only
 //!     no excluded neighbour placement in range?        <- 1 of 20 sets only
 //!     select a structure from the set's weighted entries
@@ -90,15 +90,15 @@
 //! of room-interior decorations are deliberately left out — see `monument`'s
 //! own deviations list for exactly which and why.
 //!
-//! **What genuinely remains**: `mansion` places its seeded exterior shell,
-//! corridors and roofs, while its room interiors remain ledgered.
+//! **What genuinely remains**: `mansion` places its seeded shell, corridors,
+//! rooms and roofs; entity data markers remain a server-side consumer concern.
 //! `end_city` has a template-piece generator consumed by the End dimension's
 //! placement stage, and `fortress` has a coded recursive piece tree consumed
 //! by the Nether stage. Both portal variants have a complete setup parser,
 //! suitable-Y rule and post-template terrain refinement. `ruined_portal`'s own frame,
-//! terrain skirt, drip columns and optional overgrowth are real. The latter's
-//! chunk-independent random forks are named by `coded:ruined_portal_terrain_skirt`
-//! on the ledger.
+//! terrain skirt, drip columns and optional overgrowth are real. The refinement
+//! consumes the target chunk's `surface_structures` stream in registry order,
+//! including the same shared stream across starts of one portal entry.
 //!
 //! **S2 landed the template engine** ([`template`], [`processor`]): shipwreck,
 //! ocean ruin, igloo and (S8) ruined_portal build real piece lists out of the
@@ -164,7 +164,7 @@ pub mod stronghold;
 pub mod template;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use lodestone_worldgen_core::rng::{
     LegacyRandomSource, PositionalRandomFactory, RandomSource, WorldgenRandom, XoroshiroRandomSource,
@@ -1074,8 +1074,8 @@ pub enum StructureKind {
     },
     /// `minecraft:end_city` — a recursively assembled set of template pieces.
     EndCity,
-    /// `minecraft:mansion` — a seeded exterior, corridor and roof assembly.
-    /// Room interiors remain explicitly ledgered by [`mansion::MansionCoverage`].
+    /// `minecraft:mansion` — a seeded shell, corridor, room and roof assembly.
+    /// Entity data markers remain a server-side consumer concern.
     Mansion,
     /// `minecraft:stronghold` — the recursive piece tree. No
     /// fields: unlike every other kind here its start predicate reads no
@@ -1254,7 +1254,7 @@ impl StructureKind {
             "minecraft:stronghold" => Self::Stronghold,
             "minecraft:fortress" => Self::Fortress,
             "minecraft:end_city" => Self::EndCity,
-            "minecraft:mansion" => Self::Mansion,
+            "minecraft:mansion" | "minecraft:woodland_mansion" => Self::Mansion,
             "minecraft:buried_treasure" => Self::BuriedTreasure,
             "minecraft:ocean_monument" => Self::OceanMonument {
                 surrounding: resolve_biome_set(
@@ -1728,7 +1728,7 @@ impl StructureKind {
             }
             Self::DesertPyramid => {
                 let mut random = structure_random(seed, cx, cz);
-                Some(coded::desert_pyramid_pieces(cx, cz, ctx, &mut random))
+                Some(coded::desert_pyramid_pieces(cx, cz, ctx, seed, &mut random))
             }
             Self::JunglePyramid => {
                 let mut random = structure_random(seed, cx, cz);
@@ -2668,6 +2668,11 @@ pub struct StructureSetDef {
 pub struct StructureRegistry {
     seed: i64,
     sets: Vec<StructureSetDef>,
+    /// Ring positions depend on the generator's biome sampler, which is only
+    /// available through [`StartContext`]. The registry is owned by one
+    /// generator, so compute the list on its first start query and reuse it for
+    /// the remaining chunks.
+    ring_positions: OnceLock<HashMap<String, Vec<(i32, i32)>>>,
     set_index: HashMap<String, usize>,
     structures: HashMap<String, StructureDef>,
     structure_order: Vec<String>,
@@ -2785,7 +2790,17 @@ impl StructureRegistry {
                 }
             }
 
-            let placement = Placement::parse(&document["placement"]);
+            let mut placement = Placement::parse(&document["placement"]);
+            if let PlacementKind::ConcentricRings { preferred_biomes, .. } = &mut placement.kind {
+                let mut resolved: Vec<_> = resolve_biome_set(
+                    resolver,
+                    &document["placement"]["preferred_biomes"],
+                )
+                .into_iter()
+                .collect();
+                resolved.sort();
+                *preferred_biomes = resolved;
+            }
             if let PlacementKind::Unsupported(kind) = &placement.kind {
                 unsupported.insert(set_id.clone(), format!("placement type '{kind}'"));
             }
@@ -2885,11 +2900,6 @@ impl StructureRegistry {
         // structure id (the placement oracle asserts implemented structures are
         // *absent* from this map).
         if !templates.is_empty() {
-            unsupported.insert(
-                "mansion:room_templates".into(),
-                "the mansion assembler places its seeded exterior shell, corridor floors and roof templates, but does not yet place room divider, door, carpet, stairs, secret-room or furnishing templates; MansionAssembly::coverage reports ExteriorAndCorridors so this partial result is inspectable rather than full support"
-                    .into(),
-            );
             // Archaeology's state change is real, but using it still needs gameplay
             // support. The container-loot paths below are deliberately absent from
             // this ledger: their server-side consumers now attach filled containers.
@@ -2923,17 +2933,10 @@ impl StructureRegistry {
             );
             unsupported.insert(
                 "coded:region_random".into(),
-                "`desert_pyramid`'s cellar variant and collapsed-roof rolls come from \
-                 `level.getRandom()` in vanilla — the decorating region's stream, so \
-                 chunk-order dependent. Position-seeded here, like every processor draw"
-                    .into(),
-            );
-            unsupported.insert(
-                "coded:pyramid_roof_seed".into(),
-                "`randomCollapsedRoofPos` and `afterPlace`'s shuffle fork the **world** \
-                 seed positionally, and the piece generator is three layers below the \
-                 start predicate that holds it: a fixed fork seed is used, so those two \
-                 picks are position-dependent but seed-independent"
+                "`desert_pyramid`'s cellar variant and collapsed-roof material rolls come from \
+                 the decorating region's stream, so they are chunk-order dependent. The \
+                 collapsed-roof position and post-placement shuffle use world-seeded positional \
+                 forks; the remaining region draws are position-seeded here, like every processor draw"
                     .into(),
             );
             unsupported.insert(
@@ -2963,18 +2966,6 @@ impl StructureRegistry {
                     .into(),
             );
             unsupported.insert(
-                "mineshaft:post_process_scope".into(),
-                "a mineshaft piece's block-writing walk normally runs once **per decorating \
-                 chunk** and clips every read and write to that chunk. The liquid-shell \
-                 survey, interior checks, sturdy-neighbour checks and every other block read \
-                 follow that boundary now. A corridor spanning two \
-                 chunks draws its cobwebs twice from the two target-chunk structure streams. \
-                 Tree reconstruction is start-seeded, while the block walk consumes the \
-                 target chunk's underground-structures stream. The remaining limitation is \
-                 the pre-surface state exposed through `StartContext`"
-                    .into(),
-            );
-            unsupported.insert(
                 "mineshaft:pre_surface_world_reads".into(),
                 "six mineshaft placement helpers branch on what the world already holds \
                  (replaceability, support-box, support-pillar placement, \
@@ -2988,15 +2979,6 @@ impl StructureRegistry {
                     .into(),
             );
             unsupported.insert(
-                "coded:chest_reorient".into(),
-                "a coded chest's own reorient step picks its `facing` from the \
-                 render-solidity of its four horizontal neighbours *in the world as \
-                 written so far*; `StartContext` has no block-state read and this crate \
-                 has no solidity table, so a coded chest keeps `facing=north`. Cosmetic, \
-                 and the only coded-piece property that is knowingly not faithful"
-                    .into(),
-            );
-            unsupported.insert(
                 "coded:decoration_random".into(),
                 "a coded piece's reference block-writing random is the \
                  **decorating chunk's** feature stream, \
@@ -3005,39 +2987,6 @@ impl StructureRegistry {
                  creation seed. They come out of the structure's own per-chunk \
                  stream here, in the reference order and count, which makes the piece a pure \
                  function of `(seed, chunk)`"
-                    .into(),
-            );
-            unsupported.insert(
-                "coded:ruined_portal_terrain_skirt".into(),
-                "the post-template netherrack skirt, drip columns and optional \
-                 vine/leaf growth are placed against the real grid. Their random \
-                 choices are forked from `(world seed, block position)` so every \
-                 intersecting chunk independently reproduces the same clipped pass; \
-                 the reference uses one mutable decoration stream per decorating \
-                 chunk. This keeps border generation deterministic but does not \
-                 reproduce that stream's exact sequence"
-                    .into(),
-            );
-        }
-        // Reachability, not mechanism — and the one class of row that looks like no
-        // row is needed, because every *other* instrument says these are fine.
-        //
-        // **The composition and structure halves of this row are closed.** `NetherGenerator` runs
-        // starts / refs / beardifier / place, so `bastion_remnant` writes real blocks
-        // into a real Nether column. The row remains because a reader asking "can I
-        // walk into a bastion" needs to know that no chunk source serves this dimension.
-        if !structures.is_empty() {
-            unsupported.insert(
-                "dimension:nether_structures".into(),
-                "`NetherGenerator` composes a structure stage now, so \
-                 `bastion_remnant` assembles **and places blocks** in a generated \
-                 Nether column, and so does `nether_fossil` — the only structure \
-                 whose `beard_thin` terrain flattening is now observable outside a \
-                 jigsaw, and `fortress` builds and places its recursive piece tree. \
-                 The remaining gap is serving the dimension: \
-                 `lodestone-server`'s `EmbeddedResolver` hardcodes the Overworld \
-                 documents and `OverworldChunkSource` is the only chunk source, so a \
-                 portal trip still does not land in this terrain"
                     .into(),
             );
         }
@@ -3076,6 +3025,7 @@ impl StructureRegistry {
         Self {
             seed,
             sets,
+            ring_positions: OnceLock::new(),
             set_index,
             structures,
             structure_order,
@@ -3270,6 +3220,92 @@ impl StructureRegistry {
         &self.unsupported
     }
 
+    /// Computes the ring positions once for the generator's biome sampler.
+    /// Concentric-ring placement is a property of the whole generator rather
+    /// than of one source chunk: each candidate is nudged toward a preferred
+    /// biome before the per-chunk start walk can see it.
+    fn ring_positions_for_context(
+        &self,
+        ctx: &dyn StartContext,
+    ) -> &HashMap<String, Vec<(i32, i32)>> {
+        let sets = &self.sets;
+        let seed = self.seed;
+        self.ring_positions
+            .get_or_init(|| build_ring_positions(sets, seed, ctx))
+    }
+
+    /// Placement check that also knows the generator-wide ring list. Random
+    /// spread remains the data-only predicate used by the public compatibility
+    /// method above; ring placement requires the `StartContext` biome sampler.
+    fn placement_chunk_with_context(
+        &self,
+        set: &StructureSetDef,
+        cx: i32,
+        cz: i32,
+        ring_positions: &HashMap<String, Vec<(i32, i32)>>,
+    ) -> bool {
+        match &set.placement.kind {
+            PlacementKind::ConcentricRings { .. } => ring_positions
+                .get(&set.id)
+                .is_some_and(|positions| positions.contains(&(cx, cz))),
+            PlacementKind::RandomSpread { .. } | PlacementKind::Unsupported(_) => {
+                set.placement.is_placement_chunk(self.seed, cx, cz)
+            }
+        }
+    }
+
+    /// Exclusion-zone walk using the same placement source as the owning set.
+    fn has_placement_in_range_with_context(
+        &self,
+        other_set: &str,
+        cx: i32,
+        cz: i32,
+        range: i32,
+        ring_positions: &HashMap<String, Vec<(i32, i32)>>,
+    ) -> bool {
+        let Some(&index) = self.set_index.get(other_set) else {
+            return false;
+        };
+        let other = &self.sets[index];
+        for x in (cx - range)..=(cx + range) {
+            for z in (cz - range)..=(cz + range) {
+                if self.placement_chunk_with_context(other, x, z, ring_positions)
+                    && other.placement.passes_frequency(self.seed, x, z)
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Full structure-set gate for a generator context, including concentric
+    /// ring membership and any exclusion zone.
+    fn is_structure_chunk_with_context(
+        &self,
+        set: &StructureSetDef,
+        cx: i32,
+        cz: i32,
+        ring_positions: &HashMap<String, Vec<(i32, i32)>>,
+    ) -> bool {
+        if !self.placement_chunk_with_context(set, cx, cz, ring_positions) {
+            return false;
+        }
+        if !set.placement.passes_frequency(self.seed, cx, cz) {
+            return false;
+        }
+        match &set.placement.exclusion_zone {
+            None => true,
+            Some(zone) => !self.has_placement_in_range_with_context(
+                &zone.other_set,
+                cx,
+                cz,
+                zone.chunk_count,
+                ring_positions,
+            ),
+        }
+    }
+
     /// Whether an exclusion
     /// zone's `other_set` places anywhere within `range` chunks.
     ///
@@ -3320,9 +3356,10 @@ impl StructureRegistry {
     /// Pure in `(seed, cx, cz, ctx)`. Starts are returned in structure-set
     /// (bootstrap) order.
     pub fn starts_at(&self, cx: i32, cz: i32, ctx: &dyn StartContext) -> Vec<StructureStart> {
+        let ring_positions = self.ring_positions_for_context(ctx);
         let mut out = Vec::new();
         for set in &self.sets {
-            if !self.is_structure_chunk(set, cx, cz) {
+            if !self.is_structure_chunk_with_context(set, cx, cz, ring_positions) {
                 continue;
             }
             if set.entries.len() == 1 {
@@ -3510,6 +3547,69 @@ fn collect(
     }
 }
 
+/// Builds every concentric-ring set's generator-wide candidate list. The
+/// placement helper owns the angle and distance draws; this layer supplies the
+/// biome search that can move each candidate from its initial chunk.
+fn build_ring_positions(
+    sets: &[StructureSetDef],
+    seed: i64,
+    ctx: &dyn StartContext,
+) -> HashMap<String, Vec<(i32, i32)>> {
+    let mut out = HashMap::new();
+    for set in sets {
+        let PlacementKind::ConcentricRings {
+            distance,
+            spread,
+            count,
+            preferred_biomes,
+        } = &set.placement.kind
+        else {
+            continue;
+        };
+        let positions = if *count <= 0 || *spread <= 0 {
+            Vec::new()
+        } else {
+            let preferred: HashSet<String> = preferred_biomes.iter().cloned().collect();
+            placement::ring_positions(seed, *distance, *spread, *count, |random, x, z| {
+                preferred_ring_chunk(random, x, z, &preferred, ctx)
+            })
+        };
+        out.insert(set.id.clone(), positions);
+    }
+    out
+}
+
+/// Searches the 112-block square around a ring candidate for a preferred
+/// biome. The sampler is quart-based, and the reservoir draw selects one
+/// matching cell while consuming exactly one forked stream.
+fn preferred_ring_chunk(
+    random: &mut XoroshiroRandomSource,
+    initial_x: i32,
+    initial_z: i32,
+    preferred: &HashSet<String>,
+    ctx: &dyn StartContext,
+) -> Option<(i32, i32)> {
+    const SEARCH_RADIUS_QUARTS: i32 = 28;
+    let center_x = initial_x * 4 + 2;
+    let center_z = initial_z * 4 + 2;
+    let mut found = 0;
+    let mut selected = None;
+    for offset_z in -SEARCH_RADIUS_QUARTS..=SEARCH_RADIUS_QUARTS {
+        for offset_x in -SEARCH_RADIUS_QUARTS..=SEARCH_RADIUS_QUARTS {
+            let quart_x = center_x + offset_x;
+            let quart_z = center_z + offset_z;
+            if !preferred.contains(&ctx.biome_at_quart(quart_x, 0, quart_z)) {
+                continue;
+            }
+            if random.next_int_bounded(found + 1) == 0 {
+                selected = Some((quart_x.div_euclid(4), quart_z.div_euclid(4)));
+            }
+            found += 1;
+        }
+    }
+    selected
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3590,6 +3690,129 @@ mod tests {
             }
         }
         assert!(registry.starts_at(0, 0, &NoWorld).is_empty());
+    }
+
+    /// The JVM fixture pins the first-ring candidate and its preferred-biome
+    /// relocation. This test then drives that captured chunk through the real
+    /// registry start path, proving a concentric set is consumed rather than
+    /// merely parsed by [`Placement`].
+    #[test]
+    fn stronghold_ring_relocation_reaches_registry_start() {
+        const CAPTURE: &str =
+            include_str!("../../tests/support/stronghold_ring_external.txt");
+        let fields: Vec<i32> = CAPTURE
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .next()
+            .expect("external ring fixture row")
+            .split_whitespace()
+            .map(|field| field.parse().expect("integer ring fixture field"))
+            .collect();
+        assert_eq!(fields, [0, 0, -4, 1, -5]);
+
+        struct RingResolver;
+        impl Resolver for RingResolver {
+            fn density_function(&self, _id: &str) -> Value {
+                Value::Null
+            }
+
+            fn noise(&self, _id: &str) -> crate::density::NoiseParams {
+                unreachable!("ring placement does not resolve noise")
+            }
+
+            fn structure_set_ids(&self) -> Vec<String> {
+                vec!["minecraft:strongholds".into()]
+            }
+
+            fn structure_set(&self, id: &str) -> Value {
+                if id != "minecraft:strongholds" {
+                    return Value::Null;
+                }
+                serde_json::json!({
+                    "placement": {
+                        "type": "minecraft:concentric_rings",
+                        "distance": 1,
+                        "spread": 1,
+                        "count": 1,
+                        "preferred_biomes": "#test:stronghold_preferred"
+                    },
+                    "structures": [{"structure": "minecraft:stronghold", "weight": 1}]
+                })
+            }
+
+            fn structure(&self, id: &str) -> Value {
+                if id != "minecraft:stronghold" {
+                    return Value::Null;
+                }
+                serde_json::json!({
+                    "type": "minecraft:stronghold",
+                    "biomes": ["test:stronghold_preferred"],
+                    "step": "surface_structures",
+                    "terrain_adaptation": "bury"
+                })
+            }
+
+            fn biome_tag(&self, id: &str) -> Value {
+                if id == "test:stronghold_preferred" {
+                    serde_json::json!({"values": ["test:stronghold_preferred"]})
+                } else {
+                    Value::Null
+                }
+            }
+        }
+
+        struct RingContext;
+        impl StartContext for RingContext {
+            fn first_occupied_height(&self, _x: i32, _z: i32, _h: HeightmapKind) -> i32 {
+                63
+            }
+
+            fn biome_at_quart(&self, _qx: i32, _qy: i32, _qz: i32) -> String {
+                "test:stronghold_preferred".into()
+            }
+
+            fn sea_level(&self) -> i32 {
+                63
+            }
+        }
+
+        let registry = StructureRegistry::new(42, &RingResolver);
+        let ctx = RingContext;
+        let starts = registry.starts_at(fields[3], fields[4], &ctx);
+        assert_eq!(starts.len(), 1);
+        assert_eq!(starts[0].structure, "minecraft:stronghold");
+        assert!(starts[0].pieces_complete);
+        assert!(!registry.starts_at(fields[1], fields[2], &ctx).iter().any(|start| {
+            start.structure == "minecraft:stronghold"
+        }));
+
+        struct SparseRingContext;
+        impl StartContext for SparseRingContext {
+            fn first_occupied_height(&self, _x: i32, _z: i32, _h: HeightmapKind) -> i32 {
+                63
+            }
+
+            fn biome_at_quart(&self, qx: i32, _qy: i32, qz: i32) -> String {
+                if (4..=7).contains(&qx) && (-12..=-9).contains(&qz) {
+                    "test:stronghold_preferred".into()
+                } else {
+                    "test:other".into()
+                }
+            }
+
+            fn sea_level(&self) -> i32 {
+                63
+            }
+        }
+
+        let sparse_registry = StructureRegistry::new(42, &RingResolver);
+        let sparse = SparseRingContext;
+        let sparse_starts = sparse_registry.starts_at(1, -3, &sparse);
+        assert_eq!(sparse_starts.len(), 1);
+        assert_eq!(sparse_starts[0].structure, "minecraft:stronghold");
+        assert!(!sparse_registry.starts_at(0, -4, &sparse).iter().any(|start| {
+            start.structure == "minecraft:stronghold"
+        }));
     }
 
     /// `is_close_to_chunk` is the beardifier's reach test; a box one block

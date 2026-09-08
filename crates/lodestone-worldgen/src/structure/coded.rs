@@ -406,9 +406,8 @@ impl Builder {
     ///   this fixed order, is the same total.
     /// * a faithful implementation's facing comes from a reorient step, which reads the
     ///   render-solidity of the four horizontal neighbours *of the world as written
-    ///   so far*. There is no block-state read on [`StartContext`] and no solidity
-    ///   table in this crate, so the default `facing=north` is kept and the
-    ///   deviation is on the ledger as `coded:chest_reorient`.
+    ///   so far*. The eager list keeps the default state until placement, where the
+    ///   receiving grid resolves that state without consuming another random draw.
     pub fn create_chest<R: RandomSource>(
         &mut self,
         random: &mut R,
@@ -602,13 +601,18 @@ pub fn swamp_hut_pieces<R: RandomSource>(
 /// A desert pyramid's piece generator, including the cellar and the
 /// post-placement suspicious-sand pass.
 ///
-/// # Two deviations, both forced and both the same shape
+/// # Random streams
 ///
-/// * A faithful implementation's cellar `variant` boolean and its collapsed-roof draw below 0.33
-///   come from the *decorating region's* random, so a faithful implementation's
-///   own answer depends on which chunk placed the piece. Both are position-seeded
-///   here, exactly as [`super::processor::Processor::BlockRot`] is, so two chunks
-///   placing two halves of one pyramid agree.
+/// * A faithful implementation's cellar `variant` boolean and each collapsed-roof material draw
+///   below 0.33 come from the *decorating region's* random, so its answer depends on which chunk
+///   placed the piece. Both are position-seeded here, exactly as
+///   [`super::processor::Processor::BlockRot`] is, so two chunks placing two halves of one pyramid
+///   agree.
+///
+/// The world seed is passed separately for the collapsed-roof position and the post-placement
+/// suspicious-sand shuffle. Those positional forks do not consume the piece stream, so threading
+/// the seed through cannot move any of the piece's unrelated draws.
+///
 /// * The chests (own chest placement ×4) attach their table and roll seed to the
 ///   resulting [`StructurePiece`]; the server consumes that side list when it
 ///   builds container block entities. Suspicious sand remains gameplay-inert:
@@ -618,6 +622,7 @@ pub fn desert_pyramid_pieces<R: RandomSource>(
     cx: i32,
     cz: i32,
     ctx: &dyn StartContext,
+    world_seed: i64,
     random: &mut R,
 ) -> Vec<StructurePiece> {
     let orientation = Facing::random(random);
@@ -907,12 +912,12 @@ pub fn desert_pyramid_pieces<R: RandomSource>(
         }
     }
     // `randomCollapsedRoofPos` — one guaranteed suspicious block in the roof,
-    // chosen by a positional fork at the roof's own corner. This one is vanilla's
-    // own positional random, not a deviation.
+    // chosen by a positional fork at the roof's own corner. The source is the world seed,
+    // independent of the piece's own stream.
     let roof_corner = b.world_pos(rx - 2, roof_y, rz - 2);
     let collapsed_roof_pos = {
         use lodestone_worldgen_core::rng::{LegacyRandomSource, PositionalRandomFactory};
-        let mut r = LegacyRandomSource::new(PYRAMID_ROOF_SEED_PLACEHOLDER)
+        let mut r = LegacyRandomSource::new(world_seed)
             .fork_positional()
             .at(roof_corner[0], roof_corner[1], roof_corner[2]);
         let rpx = r.next_int_bounded(5) + (rx - 2);
@@ -953,7 +958,7 @@ pub fn desert_pyramid_pieces<R: RandomSource>(
     b.place(&chiseled, rx, -2, rz - 4);
 
     let mut piece = b.finish("minecraft:tedp");
-    after_place_suspicious_sand(&mut piece, &candidates, collapsed_roof_pos);
+    after_place_suspicious_sand(&mut piece, &candidates, collapsed_roof_pos, world_seed);
     vec![piece]
 }
 
@@ -964,18 +969,6 @@ pub fn desert_pyramid_pieces<R: RandomSource>(
 pub const PYRAMID_WIDTH: i32 = 21;
 /// A desert pyramid's footprint depth.
 pub const PYRAMID_DEPTH: i32 = 21;
-
-/// A stand-in for the world seed inside the pyramid's roof pick.
-///
-/// The random collapsed-roof-position pick forks the **world** seed positionally, and the piece
-/// generator does not have it: a start predicate is handed `seed` but the roof pick
-/// happens inside `postProcess`, three layers down. Using a fixed value here makes
-/// the pick a pure function of position, which is the property that matters (it is
-/// one block in a 5×5 patch that is already ~⅓ sandstone and ⅔ sand); threading the
-/// world seed down would be the faithful version and is the one thing in this
-/// generator that is knowingly seed-independent. Recorded as
-/// `coded:pyramid_roof_seed` on the ledger.
-const PYRAMID_ROOF_SEED_PLACEHOLDER: i64 = 0;
 
 /// A desert pyramid's post-placement pass — turn some of the cellar's recorded sand
 /// candidates into suspicious sand and the rest into plain sand.
@@ -989,6 +982,7 @@ fn after_place_suspicious_sand(
     piece: &mut StructurePiece,
     candidates: &[[i32; 3]],
     collapsed_roof_pos: [i32; 3],
+    world_seed: i64,
 ) {
     use lodestone_worldgen_core::rng::{LegacyRandomSource, PositionalRandomFactory};
     let suspicious = "minecraft:suspicious_sand[dusted=0]";
@@ -1015,7 +1009,7 @@ fn after_place_suspicious_sand(
             b.min[2] + (b.max[2] - b.min[2] + 1) / 2,
         ]
     };
-    let mut random = LegacyRandomSource::new(PYRAMID_ROOF_SEED_PLACEHOLDER)
+    let mut random = LegacyRandomSource::new(world_seed)
         .fork_positional()
         .at(centre[0], centre[1], centre[2]);
     super::pool::shuffle(&mut unique, &mut random);
@@ -1494,7 +1488,7 @@ mod tests {
         let ctx = Flat(74);
         for seed in 0..12i64 {
             let mut random = WorldgenRandom::new(LegacyRandomSource::new(seed));
-            let pieces = desert_pyramid_pieces(0, 0, &ctx, &mut random);
+            let pieces = desert_pyramid_pieces(0, 0, &ctx, seed, &mut random);
             assert_eq!(pieces.len(), 1);
             let blocks = pieces[0].blocks.as_ref().expect("blocks");
             assert!(
@@ -1519,6 +1513,144 @@ mod tests {
                  (5..=7 from the walk plus at most one distinct roof block)"
             );
         }
+    }
+
+    /// The world-seeded roof forks match an external JVM capture, and changing
+    /// that seed leaves the four chest roll seeds untouched. The fixed-fork
+    /// control is deliberately included: it must disagree with the first
+    /// asymmetric roof row, or the detector would be vacuous.
+    #[test]
+    fn desert_pyramid_roof_seed_matches_external_fixture_and_preserves_loot() {
+        use lodestone_worldgen_core::rng::{LegacyRandomSource, WorldgenRandom};
+        const EXTERNAL: &str =
+            include_str!("../../tests/support/coded_pyramid_roof_external.txt");
+
+        let mut cases = Vec::new();
+        let mut shuffle_cases = Vec::new();
+        let mut expected_loot = None;
+        for line in EXTERNAL
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            match fields.first().copied() {
+                Some("case") => {
+                    assert_eq!(fields.len(), 8, "roof fixture fields: {line}");
+                    let parse = |field: &str| {
+                        field.parse::<i32>().unwrap_or_else(|error| {
+                            panic!("invalid roof fixture field {field}: {error}")
+                        })
+                    };
+                    let seed = fields[1].parse::<i64>().unwrap_or_else(|error| {
+                        panic!("invalid roof fixture seed {}: {error}", fields[1])
+                    });
+                    cases.push((
+                        seed,
+                        [parse(fields[2]), parse(fields[3]), parse(fields[4])],
+                        [parse(fields[5]), parse(fields[6]), parse(fields[7])],
+                    ));
+                }
+                Some("loot") => {
+                    assert_eq!(fields.len(), 5, "loot fixture fields: {line}");
+                    let seeds = fields[1..]
+                        .iter()
+                        .map(|field| {
+                            field.parse::<i64>().unwrap_or_else(|error| {
+                                panic!("invalid loot fixture seed {field}: {error}")
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    expected_loot = Some(seeds);
+                }
+                Some("shuffle") => {
+                    assert!(fields.len() >= 3, "shuffle fixture fields: {line}");
+                    let seed = fields[1].parse::<i64>().unwrap_or_else(|error| {
+                        panic!("invalid shuffle fixture seed {}: {error}", fields[1])
+                    });
+                    let count = fields[2].parse::<usize>().unwrap_or_else(|error| {
+                        panic!("invalid shuffle fixture count {}: {error}", fields[2])
+                    });
+                    assert_eq!(fields.len(), 3 + count * 3, "shuffle fixture fields: {line}");
+                    let positions = fields[3..]
+                        .chunks_exact(3)
+                        .map(|position| {
+                            position
+                                .iter()
+                                .map(|field| {
+                                    field.parse::<i32>().unwrap_or_else(|error| {
+                                        panic!("invalid shuffle fixture position {field}: {error}")
+                                    })
+                                })
+                                .collect::<Vec<_>>()
+                                .try_into()
+                                .expect("shuffle fixture position has three coordinates")
+                        })
+                        .collect::<Vec<[i32; 3]>>();
+                    shuffle_cases.push((seed, positions));
+                }
+                _ => panic!("unknown roof fixture row: {line}"),
+            }
+        }
+        assert_eq!(cases.len(), 4, "external roof fixture case count");
+        assert_eq!(shuffle_cases.len(), 4, "external shuffle fixture case count");
+        let expected_loot = expected_loot.expect("external loot fixture row");
+
+        let ctx = Flat(74);
+        let mut baseline_loot = None;
+        for (world_seed, corner, expected_roof) in cases {
+            assert_eq!(corner, [14, 74, 11], "fixed-stream roof corner");
+            let mut random = WorldgenRandom::new(LegacyRandomSource::new(0));
+            let pieces = desert_pyramid_pieces(0, 0, &ctx, world_seed, &mut random);
+            assert_eq!(pieces.len(), 1);
+            let blocks = pieces[0].blocks.as_ref().expect("pyramid blocks");
+            let roof_positions: Vec<[i32; 3]> = blocks
+                .iter()
+                .filter(|block| {
+                    block.pos[1] == corner[1]
+                        && block.state.starts_with("minecraft:suspicious_sand")
+                })
+                .map(|block| block.pos)
+                .collect();
+            assert_eq!(roof_positions, vec![expected_roof], "roof case {world_seed}");
+
+            let expected_shuffle = shuffle_cases
+                .iter()
+                .find(|(seed, _)| *seed == world_seed)
+                .map(|(_, positions)| positions)
+                .unwrap_or_else(|| panic!("missing shuffle fixture case {world_seed}"));
+            let actual_shuffle: Vec<[i32; 3]> = blocks
+                .iter()
+                .filter(|block| {
+                    block.pos[1] < corner[1]
+                        && block.state.starts_with("minecraft:suspicious_sand")
+                })
+                .map(|block| block.pos)
+                .collect();
+            assert_eq!(actual_shuffle, *expected_shuffle, "shuffle case {world_seed}");
+
+            let loot_seeds: Vec<i64> = pieces[0].loot.iter().map(|loot| loot.seed).collect();
+            assert_eq!(loot_seeds, expected_loot, "loot stream case {world_seed}");
+            if let Some(previous) = &baseline_loot {
+                assert_eq!(previous, &pieces[0].loot, "world seed must not redraw loot");
+            } else {
+                baseline_loot = Some(pieces[0].loot.clone());
+            }
+        }
+
+        // The old fixed-fork implementation always selected the corner itself
+        // for this probe. This negative control proves the fixture distinguishes
+        // that implementation from the world-seeded one.
+        let mut control_random = WorldgenRandom::new(LegacyRandomSource::new(0));
+        let control = desert_pyramid_pieces(0, 0, &ctx, 0, &mut control_random);
+        let control_blocks = control[0].blocks.as_ref().expect("control blocks");
+        let control_roof = control_blocks
+            .iter()
+            .find(|block| {
+                block.pos[1] == 74 && block.state.starts_with("minecraft:suspicious_sand")
+            })
+            .map(|block| block.pos)
+            .expect("control roof position");
+        assert_ne!(control_roof, [17, 74, 15], "fixed fork must fail the fixture");
     }
 
     /// The jungle temple consumes **exactly 1,531** primitive draws, and its
@@ -1607,7 +1739,7 @@ mod tests {
         );
     }
 
-    /// A pyramid is a pure function of `(chunk, terrain)` — the property the
+    /// A pyramid is a pure function of `(world seed, chunk, terrain)` — the property the
     /// per-chunk clip depends on, and the one vanilla's `level.getRandom()` cellar
     /// draws do **not** have.
     #[test]
@@ -1616,7 +1748,7 @@ mod tests {
         let ctx = Flat(74);
         let build = || {
             let mut random = WorldgenRandom::new(LegacyRandomSource::new(-195_764_831));
-            let pieces = desert_pyramid_pieces(-4, 9, &ctx, &mut random);
+            let pieces = desert_pyramid_pieces(-4, 9, &ctx, -195_764_831, &mut random);
             pieces[0]
                 .blocks
                 .as_ref()
