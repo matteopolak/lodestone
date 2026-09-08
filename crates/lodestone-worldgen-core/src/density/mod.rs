@@ -118,6 +118,8 @@
 //! (The cell interpolation `interpolated` drives inside a real `NoiseChunk` is
 //! a separate, later stage — [`NoiseChunkSampler`], not this module.)
 
+use serde::de::{self, MapAccess, Visitor};
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::math::{clamp, clamped_map};
@@ -138,6 +140,287 @@ pub struct NoiseParams {
     pub first_octave: i32,
     /// `amplitudes`.
     pub amplitudes: Vec<f64>,
+}
+
+/// The strict wire representation of a density-function document.
+///
+/// The registry uses three shapes: a literal number, a string reference, or
+/// an object discriminated by `type`. Keeping this shape separate from the
+/// instantiated [`Density`] tree means malformed documents fail before any
+/// child is evaluated, and `deny_unknown_fields` catches silently ignored
+/// generator data. The string and number forms are the only intentionally
+/// untagged part of this schema; they are real alternatives in the registry
+/// format rather than a convenience for accepting implicit conversions.
+#[derive(Debug, Clone)]
+enum DensityNode {
+    Number(f64),
+    Reference(String),
+    Object(DensityObject),
+}
+
+impl<'de> Deserialize<'de> for DensityNode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct DensityNodeVisitor;
+
+        impl<'de> Visitor<'de> for DensityNodeVisitor {
+            type Value = DensityNode;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a density number, registry reference string, or typed object")
+            }
+
+            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(DensityNode::Number(value))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(DensityNode::Number(value as f64))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(DensityNode::Number(value as f64))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(DensityNode::Reference(value.to_owned()))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(DensityNode::Reference(value))
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let object = DensityObject::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                Ok(DensityNode::Object(object))
+            }
+        }
+
+        deserializer.deserialize_any(DensityNodeVisitor)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
+enum DensityObject {
+    #[serde(rename = "minecraft:constant")]
+    Constant(ScalarField),
+    #[serde(rename = "minecraft:blend_alpha")]
+    BlendAlpha(EmptyObject),
+    #[serde(rename = "minecraft:blend_offset")]
+    BlendOffset(EmptyObject),
+    #[serde(rename = "minecraft:beardifier")]
+    Beardifier(EmptyObject),
+    #[serde(rename = "minecraft:y_clamped_gradient")]
+    YClampedGradient(YClampedGradientFields),
+    #[serde(rename = "minecraft:add")]
+    Add(BinaryFields),
+    #[serde(rename = "minecraft:mul")]
+    Mul(BinaryFields),
+    #[serde(rename = "minecraft:min")]
+    Min(BinaryFields),
+    #[serde(rename = "minecraft:max")]
+    Max(BinaryFields),
+    #[serde(rename = "minecraft:abs")]
+    Abs(UnaryFields),
+    #[serde(rename = "minecraft:square")]
+    Square(UnaryFields),
+    #[serde(rename = "minecraft:cube")]
+    Cube(UnaryFields),
+    #[serde(rename = "minecraft:half_negative")]
+    HalfNegative(UnaryFields),
+    #[serde(rename = "minecraft:quarter_negative")]
+    QuarterNegative(UnaryFields),
+    #[serde(rename = "minecraft:squeeze")]
+    Squeeze(UnaryFields),
+    #[serde(rename = "minecraft:invert")]
+    Invert(UnaryFields),
+    #[serde(rename = "minecraft:clamp")]
+    Clamp(ClampFields),
+    #[serde(rename = "minecraft:interpolated")]
+    Interpolated(UnaryFields),
+    #[serde(rename = "minecraft:flat_cache")]
+    FlatCache(UnaryFields),
+    #[serde(rename = "minecraft:cache_2d")]
+    Cache2d(UnaryFields),
+    #[serde(rename = "minecraft:cache_once")]
+    CacheOnce(UnaryFields),
+    #[serde(rename = "minecraft:cache_all_in_cell")]
+    CacheAllInCell(UnaryFields),
+    #[serde(rename = "minecraft:blend_density")]
+    BlendDensity(UnaryFields),
+    #[serde(rename = "minecraft:noise")]
+    Noise(NoiseFields),
+    #[serde(rename = "minecraft:shifted_noise")]
+    ShiftedNoise(ShiftedNoiseFields),
+    #[serde(rename = "minecraft:shift_a")]
+    ShiftA(ArgumentStringField),
+    #[serde(rename = "minecraft:shift_b")]
+    ShiftB(ArgumentStringField),
+    #[serde(rename = "minecraft:shift")]
+    Shift(ArgumentStringField),
+    #[serde(rename = "minecraft:range_choice")]
+    RangeChoice(RangeChoiceFields),
+    #[serde(rename = "minecraft:interval_select")]
+    IntervalSelect(IntervalSelectFields),
+    #[serde(rename = "minecraft:spline")]
+    Spline(SplineField),
+    #[serde(rename = "minecraft:old_blended_noise")]
+    OldBlendedNoise(OldBlendedNoiseFields),
+    #[serde(rename = "minecraft:find_top_surface")]
+    FindTopSurface(FindTopSurfaceFields),
+    #[serde(rename = "minecraft:end_islands")]
+    EndIslands(EmptyObject),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyObject {}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScalarField {
+    argument: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UnaryFields {
+    argument: Box<DensityNode>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BinaryFields {
+    argument1: Box<DensityNode>,
+    argument2: Box<DensityNode>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct YClampedGradientFields {
+    from_y: f64,
+    to_y: f64,
+    from_value: f64,
+    to_value: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClampFields {
+    input: Box<DensityNode>,
+    min: f64,
+    max: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoiseFields {
+    noise: String,
+    xz_scale: f64,
+    y_scale: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShiftedNoiseFields {
+    shift_x: Box<DensityNode>,
+    shift_y: Box<DensityNode>,
+    shift_z: Box<DensityNode>,
+    xz_scale: f64,
+    y_scale: f64,
+    noise: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArgumentStringField {
+    argument: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RangeChoiceFields {
+    input: Box<DensityNode>,
+    min_inclusive: f64,
+    max_exclusive: f64,
+    when_in_range: Box<DensityNode>,
+    when_out_of_range: Box<DensityNode>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IntervalSelectFields {
+    input: Box<DensityNode>,
+    thresholds: Vec<f64>,
+    functions: Vec<DensityNode>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SplineField {
+    spline: SplineNode,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum SplineNode {
+    Constant(f64),
+    Multipoint(SplineObject),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SplineObject {
+    coordinate: Box<DensityNode>,
+    points: Vec<SplinePointFields>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SplinePointFields {
+    location: f32,
+    derivative: f32,
+    value: SplineNode,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OldBlendedNoiseFields {
+    xz_scale: f64,
+    y_scale: f64,
+    xz_factor: f64,
+    y_factor: f64,
+    smear_scale_multiplier: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FindTopSurfaceFields {
+    density: Box<DensityNode>,
+    upper_bound: Box<DensityNode>,
+    lower_bound: i32,
+    cell_height: i32,
 }
 
 /// Resolves references encountered while building a density-function tree.
@@ -1200,7 +1483,7 @@ impl<'a> Builder<'a> {
         self.algorithm
     }
 
-    fn instantiate_blended(&self, node: &Value) -> Result<BlendedNoise, DensityBuildError> {
+    fn instantiate_blended(&self, node: &OldBlendedNoiseFields) -> Result<BlendedNoise, DensityBuildError> {
         // Vanilla's own random-state class: `useLegacyInit ? newLegacyInstance(0L)
         // : random.fromHashOf("terrain")`. Both `old_blended_noise` dimensions
         // (Nether, End) take the first arm, on the raw world seed.
@@ -1211,11 +1494,11 @@ impl<'a> Builder<'a> {
         };
         Ok(BlendedNoise::new(
             &mut src,
-            f(node, "xz_scale")?,
-            f(node, "y_scale")?,
-            f(node, "xz_factor")?,
-            f(node, "y_factor")?,
-            f(node, "smear_scale_multiplier")?,
+            node.xz_scale,
+            node.y_scale,
+            node.xz_factor,
+            node.y_factor,
+            node.smear_scale_multiplier,
         ))
     }
 
@@ -1235,116 +1518,100 @@ impl<'a> Builder<'a> {
     /// `dimension_type`/noise-settings registry entry is exactly this shape,
     /// and those travel over the wire to a joining client).
     pub fn build(&self, node: &Value) -> Result<Density, DensityBuildError> {
-        match node {
-            Value::Number(n) => n.as_f64().map(Density::Const).ok_or(DensityBuildError::InvalidNumber),
-            Value::String(id) => {
+        let node = parse_node(node)?;
+        self.build_node(&node)
+    }
+
+    fn child(&self, node: &DensityNode) -> Result<Box<Density>, DensityBuildError> {
+        Ok(Box::new(self.build_node(node)?))
+    }
+
+    fn build_node(&self, node: &DensityNode) -> Result<Density, DensityBuildError> {
+        Ok(match node {
+            DensityNode::Number(value) => Density::Const(*value),
+            DensityNode::Reference(id) => {
                 let referenced = self.resolver.density_function(id);
-                self.build(&referenced)
+                return self.build(&referenced);
             }
-            Value::Object(_) => self.build_object(node),
-            _ => Err(DensityBuildError::NotNumberStringOrObject),
-        }
-    }
-
-    fn child(&self, node: &Value, key: &str) -> Result<Box<Density>, DensityBuildError> {
-        Ok(Box::new(self.build(&node[key])?))
-    }
-
-    fn build_object(&self, node: &Value) -> Result<Density, DensityBuildError> {
-        let ty_full = node.get("type").and_then(Value::as_str).ok_or(DensityBuildError::MissingType)?;
-        let ty = ty_full
-            .strip_prefix("minecraft:")
-            .ok_or_else(|| DensityBuildError::NotMinecraftNamespaced(ty_full.to_owned()))?;
-        Ok(match ty {
-            "constant" => Density::Const(f(node, "argument")?),
-            "blend_alpha" => Density::BlendAlpha,
-            "blend_offset" => Density::BlendOffset,
-            "beardifier" => Density::Beardifier,
-            "y_clamped_gradient" => Density::YClampedGradient {
-                from_y: f(node, "from_y")?,
-                to_y: f(node, "to_y")?,
-                from_value: f(node, "from_value")?,
-                to_value: f(node, "to_value")?,
+            DensityNode::Object(object) => match object {
+            DensityObject::Constant(fields) => Density::Const(fields.argument),
+            DensityObject::BlendAlpha(_) => Density::BlendAlpha,
+            DensityObject::BlendOffset(_) => Density::BlendOffset,
+            DensityObject::Beardifier(_) => Density::Beardifier,
+            DensityObject::YClampedGradient(fields) => Density::YClampedGradient {
+                from_y: fields.from_y,
+                to_y: fields.to_y,
+                from_value: fields.from_value,
+                to_value: fields.to_value,
             },
-            "add" => Density::Add(self.child(node, "argument1")?, self.child(node, "argument2")?),
-            "mul" => Density::Mul(self.child(node, "argument1")?, self.child(node, "argument2")?),
-            "min" => Density::Min(self.child(node, "argument1")?, self.child(node, "argument2")?),
-            "max" => Density::Max(self.child(node, "argument1")?, self.child(node, "argument2")?),
-            "abs" => Density::Abs(self.child(node, "argument")?),
-            "square" => Density::Square(self.child(node, "argument")?),
-            "cube" => Density::Cube(self.child(node, "argument")?),
-            "half_negative" => Density::HalfNegative(self.child(node, "argument")?),
-            "quarter_negative" => Density::QuarterNegative(self.child(node, "argument")?),
-            "squeeze" => Density::Squeeze(self.child(node, "argument")?),
-            "invert" => Density::Invert(self.child(node, "argument")?),
-            "clamp" => Density::Clamp {
-                input: self.child(node, "input")?,
-                min: f(node, "min")?,
-                max: f(node, "max")?,
+            DensityObject::Add(fields) => Density::Add(self.child(&fields.argument1)?, self.child(&fields.argument2)?),
+            DensityObject::Mul(fields) => Density::Mul(self.child(&fields.argument1)?, self.child(&fields.argument2)?),
+            DensityObject::Min(fields) => Density::Min(self.child(&fields.argument1)?, self.child(&fields.argument2)?),
+            DensityObject::Max(fields) => Density::Max(self.child(&fields.argument1)?, self.child(&fields.argument2)?),
+            DensityObject::Abs(fields) => Density::Abs(self.child(&fields.argument)?),
+            DensityObject::Square(fields) => Density::Square(self.child(&fields.argument)?),
+            DensityObject::Cube(fields) => Density::Cube(self.child(&fields.argument)?),
+            DensityObject::HalfNegative(fields) => Density::HalfNegative(self.child(&fields.argument)?),
+            DensityObject::QuarterNegative(fields) => Density::QuarterNegative(self.child(&fields.argument)?),
+            DensityObject::Squeeze(fields) => Density::Squeeze(self.child(&fields.argument)?),
+            DensityObject::Invert(fields) => Density::Invert(self.child(&fields.argument)?),
+            DensityObject::Clamp(fields) => Density::Clamp {
+                input: self.child(&fields.input)?,
+                min: fields.min,
+                max: fields.max,
             },
-            "interpolated" => Density::Interpolated {
-                inner: self.child(node, "argument")?,
+            DensityObject::Interpolated(fields) => Density::Interpolated {
+                inner: self.child(&fields.argument)?,
                 slot: self.next_slot(),
             },
-            "flat_cache" => {
-                let inner = self.child(node, "argument")?;
+            DensityObject::FlatCache(fields) => {
+                let inner = self.child(&fields.argument)?;
                 Density::FlatCache {
                     memo: memo_id_for(&inner),
                     inner,
                     slot: self.next_slot(),
                 }
             }
-            "cache_2d" => {
-                let inner = self.child(node, "argument")?;
+            DensityObject::Cache2d(fields) => {
+                let inner = self.child(&fields.argument)?;
                 Density::Cache2D {
                     memo: memo_id_for(&inner),
                     inner,
                 }
             }
-            "cache_once" | "cache_all_in_cell" | "blend_density" => {
-                Density::Marker(self.child(node, "argument")?)
+            DensityObject::CacheOnce(fields)
+            | DensityObject::CacheAllInCell(fields)
+            | DensityObject::BlendDensity(fields) => {
+                Density::Marker(self.child(&fields.argument)?)
             }
-            "noise" => Density::Noise {
-                noise: self.instantiate_noise(str_field(node, "noise")?),
-                xz_scale: f(node, "xz_scale")?,
-                y_scale: f(node, "y_scale")?,
+            DensityObject::Noise(fields) => Density::Noise {
+                noise: self.instantiate_noise(&fields.noise),
+                xz_scale: fields.xz_scale,
+                y_scale: fields.y_scale,
             },
-            "shifted_noise" => Density::ShiftedNoise {
-                shift_x: self.child(node, "shift_x")?,
-                shift_y: self.child(node, "shift_y")?,
-                shift_z: self.child(node, "shift_z")?,
-                xz_scale: f(node, "xz_scale")?,
-                y_scale: f(node, "y_scale")?,
-                noise: self.instantiate_noise(str_field(node, "noise")?),
+            DensityObject::ShiftedNoise(fields) => Density::ShiftedNoise {
+                shift_x: self.child(&fields.shift_x)?,
+                shift_y: self.child(&fields.shift_y)?,
+                shift_z: self.child(&fields.shift_z)?,
+                xz_scale: fields.xz_scale,
+                y_scale: fields.y_scale,
+                noise: self.instantiate_noise(&fields.noise),
             },
-            "shift_a" => Density::ShiftA(self.instantiate_noise(str_field(node, "argument")?)),
-            "shift_b" => Density::ShiftB(self.instantiate_noise(str_field(node, "argument")?)),
-            "shift" => Density::Shift(self.instantiate_noise(str_field(node, "argument")?)),
-            "range_choice" => Density::RangeChoice {
-                input: self.child(node, "input")?,
-                min_inclusive: f(node, "min_inclusive")?,
-                max_exclusive: f(node, "max_exclusive")?,
-                when_in_range: self.child(node, "when_in_range")?,
-                when_out_of_range: self.child(node, "when_out_of_range")?,
+            DensityObject::ShiftA(fields) => Density::ShiftA(self.instantiate_noise(&fields.argument)),
+            DensityObject::ShiftB(fields) => Density::ShiftB(self.instantiate_noise(&fields.argument)),
+            DensityObject::Shift(fields) => Density::Shift(self.instantiate_noise(&fields.argument)),
+            DensityObject::RangeChoice(fields) => Density::RangeChoice {
+                input: self.child(&fields.input)?,
+                min_inclusive: fields.min_inclusive,
+                max_exclusive: fields.max_exclusive,
+                when_in_range: self.child(&fields.when_in_range)?,
+                when_out_of_range: self.child(&fields.when_out_of_range)?,
             },
-            "interval_select" => {
-                let thresholds = match node["thresholds"].as_array() {
-                    Some(values) => values
-                        .iter()
-                        .map(|v| v.as_f64().ok_or(DensityBuildError::MissingNumberField("thresholds")))
-                        .collect::<Result<Vec<_>, _>>()?,
-                    None => Vec::new(),
-                };
-                let functions = node["functions"]
-                    .as_array()
-                    .ok_or(DensityBuildError::MissingArrayField("functions"))?
-                    .iter()
-                    .map(|v| self.build(v))
-                    .collect::<Result<Vec<_>, _>>()?;
+            DensityObject::IntervalSelect(fields) => {
                 Density::IntervalSelect {
-                    input: self.child(node, "input")?,
-                    thresholds,
-                    functions,
+                    input: self.child(&fields.input)?,
+                    thresholds: fields.thresholds.clone(),
+                    functions: fields.functions.iter().map(|v| self.build_node(v)).collect::<Result<_, _>>()?,
                 }
             }
             // Vanilla's own codec for this density-function type is a unit
@@ -1353,41 +1620,36 @@ impl<'a> Builder<'a> {
             // carries no arguments at all and always deserialises with seed 0;
             // vanilla's own random-state class substitutes the raw world seed afterwards,
             // which is `self.seed` and *not* a positional fork.
-            "end_islands" => Density::EndIslands(std::sync::Arc::clone(
+            DensityObject::EndIslands(_) => Density::EndIslands(std::sync::Arc::clone(
                 self.end_islands.get_or_init(|| {
                     std::sync::Arc::new(crate::noise::EndIslandNoise::new(self.seed))
                 }),
             )),
-            "spline" => Density::Spline(self.build_spline(&node["spline"])?),
-            "old_blended_noise" => Density::Blended(self.instantiate_blended(node)?),
-            "find_top_surface" => Density::FindTopSurface {
-                density: self.child(node, "density")?,
-                upper_bound: self.child(node, "upper_bound")?,
-                lower_bound: int_field(node, "lower_bound")? as i32,
-                cell_height: int_field(node, "cell_height")? as i32,
+            DensityObject::Spline(fields) => Density::Spline(self.build_spline(&fields.spline)?),
+            DensityObject::OldBlendedNoise(fields) => Density::Blended(self.instantiate_blended(fields)?),
+            DensityObject::FindTopSurface(fields) => Density::FindTopSurface {
+                density: self.child(&fields.density)?,
+                upper_bound: self.child(&fields.upper_bound)?,
+                lower_bound: fields.lower_bound,
+                cell_height: fields.cell_height,
             },
-            other => return Err(DensityBuildError::UnhandledType(other.to_owned())),
-        })
+        }})
     }
 
-    fn build_spline(&self, node: &Value) -> Result<Spline, DensityBuildError> {
-        if let Some(n) = node.as_f64() {
-            return Ok(Spline::Constant(n as f32));
+    fn build_spline(&self, node: &SplineNode) -> Result<Spline, DensityBuildError> {
+        match node {
+            SplineNode::Constant(value) => Ok(Spline::Constant(*value as f32)),
+            SplineNode::Multipoint(fields) => Ok(Spline::Multipoint {
+                coordinate: Box::new(self.build_node(&fields.coordinate)?),
+                points: fields.points.iter().map(|point| {
+                    Ok(SplinePoint {
+                        location: point.location,
+                        derivative: point.derivative,
+                        value: Box::new(self.build_spline(&point.value)?),
+                    })
+                }).collect::<Result<_, DensityBuildError>>()?,
+            }),
         }
-        let coordinate = Box::new(self.build(&node["coordinate"])?);
-        let points = node["points"]
-            .as_array()
-            .ok_or(DensityBuildError::MissingArrayField("points"))?
-            .iter()
-            .map(|p| -> Result<SplinePoint, DensityBuildError> {
-                Ok(SplinePoint {
-                    location: f(p, "location")? as f32,
-                    derivative: f(p, "derivative")? as f32,
-                    value: Box::new(self.build_spline(&p["value"])?),
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Spline::Multipoint { coordinate, points })
     }
 }
 
@@ -1398,6 +1660,10 @@ impl<'a> Builder<'a> {
 /// `.expect()` at each of those same spots.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DensityBuildError {
+    /// The document did not match the strict density-function schema. The
+    /// message includes serde's structural path so malformed registry data is
+    /// actionable instead of becoming an unchecked default.
+    InvalidDocument(String),
     /// The node was JSON, but not a number, string or object.
     NotNumberStringOrObject,
     /// A number node's value could not be read as `f64`.
@@ -1421,6 +1687,9 @@ pub enum DensityBuildError {
 impl std::fmt::Display for DensityBuildError {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            DensityBuildError::InvalidDocument(message) => {
+                write!(out, "invalid density-function document: {message}")
+            }
             DensityBuildError::NotNumberStringOrObject => {
                 write!(out, "density-function node is not a number, string or object")
             }
@@ -1454,16 +1723,13 @@ impl std::fmt::Display for DensityBuildError {
 
 impl std::error::Error for DensityBuildError {}
 
-fn f(node: &Value, key: &'static str) -> Result<f64, DensityBuildError> {
-    node[key].as_f64().ok_or(DensityBuildError::MissingNumberField(key))
-}
-
-fn str_field<'v>(node: &'v Value, key: &'static str) -> Result<&'v str, DensityBuildError> {
-    node[key].as_str().ok_or(DensityBuildError::MissingStringField(key))
-}
-
-fn int_field(node: &Value, key: &'static str) -> Result<i64, DensityBuildError> {
-    node[key].as_i64().ok_or(DensityBuildError::MissingIntField(key))
+fn parse_node(node: &Value) -> Result<DensityNode, DensityBuildError> {
+    let bytes = serde_json::to_vec(node)
+        .map_err(|error| DensityBuildError::InvalidDocument(error.to_string()))?;
+    let mut deserializer = serde_json::Deserializer::from_slice(&bytes);
+    serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
+        DensityBuildError::InvalidDocument(format!("{} at {}", error, error.path()))
+    })
 }
 
 #[cfg(test)]
@@ -1611,6 +1877,56 @@ mod kind_index_tests {
              deliberately rather than letting the test measure fewer variants \
              than it claims"
         );
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::parse_node;
+    use serde_json::json;
+
+    #[test]
+    fn density_schema_accepts_real_number_reference_and_discriminated_shapes() {
+        assert!(parse_node(&json!(0.25)).is_ok());
+        assert!(parse_node(&json!("minecraft:overworld/continents")).is_ok());
+        assert!(parse_node(&json!({
+            "type": "minecraft:add",
+            "argument1": 0.25,
+            "argument2": {"type": "minecraft:constant", "argument": 1.0}
+        }))
+        .is_ok());
+    }
+
+    #[test]
+    fn density_schema_rejects_unknown_fields() {
+        let error = parse_node(&json!({
+            "type": "minecraft:constant",
+            "argument": 1.0,
+            "typo": true
+        }))
+        .expect_err("unknown density fields must not be ignored");
+        assert!(error.to_string().contains("typo"), "{error:?}");
+    }
+
+    #[test]
+    fn density_schema_rejects_unknown_discriminators() {
+        let error = parse_node(&json!({
+            "type": "minecraft:not_a_density_function",
+            "argument": 1.0
+        }))
+        .expect_err("unknown density discriminators must not fall through");
+        assert!(error.to_string().contains("type"), "{error:?}");
+    }
+
+    #[test]
+    fn density_schema_reports_nested_path_for_malformed_child() {
+        let error = parse_node(&json!({
+            "type": "minecraft:add",
+            "argument1": 0.25,
+            "argument2": {"type": "minecraft:constant", "argument": "not a number"}
+        }))
+        .expect_err("wrong scalar kind must fail");
+        assert!(error.to_string().contains("expected f64"), "{error:?}");
     }
 }
 

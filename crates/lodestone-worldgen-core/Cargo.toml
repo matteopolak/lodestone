@@ -34,6 +34,8 @@ default = []
 gen-counters = []
 
 [dependencies]
+serde = { workspace = true }
+serde_path_to_error = { workspace = true }
 # `density`'s data layer parses noise settings, spline tables and biome/climate
 # documents straight from the version crate's JSON. The only non-`std` dependency
 # in the whole crate, deliberately: this is a leaf, and every unit scheduled

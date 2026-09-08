@@ -65,6 +65,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use lodestone_worldgen_core::hash::FastMap;
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::density::{Builder, Context as DfContext, Density};
@@ -72,6 +73,189 @@ use crate::interner::{StateId, StateInterner};
 use crate::math::{floor, lerp2, map, random_between_inclusive, round};
 use crate::noise::NormalNoise;
 use crate::rng::{PositionalRandomFactory, RandomSource, AnyPositionalFactory};
+
+/// Strict schema for the surface-rule tree embedded in noise settings.
+///
+/// The rule and condition objects are closed discriminated unions. The only
+/// untagged shape is `biome_is` (one string or a list), which is a documented
+/// two-shape field in the registry format. Block `Properties` remains a map
+/// because property names are defined by the referenced block registry rather
+/// than by this engine.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
+enum SurfaceRuleNode {
+    #[serde(rename = "minecraft:block")]
+    Block(BlockRuleFields),
+    #[serde(rename = "minecraft:sequence")]
+    Sequence(SequenceRuleFields),
+    #[serde(rename = "minecraft:condition")]
+    Condition(ConditionRuleFields),
+    #[serde(rename = "minecraft:bandlands")]
+    Bandlands(EmptySurfaceObject),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptySurfaceObject {}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BlockRuleFields {
+    result_state: BlockStateDocument,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SequenceRuleFields {
+    sequence: Vec<SurfaceRuleNode>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConditionRuleFields {
+    if_true: SurfaceConditionNode,
+    then_run: Box<SurfaceRuleNode>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BlockStateDocument {
+    #[serde(rename = "Name")]
+    name: String,
+    #[serde(rename = "Properties", default)]
+    properties: Option<std::collections::BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
+enum SurfaceConditionNode {
+    #[serde(rename = "minecraft:above_preliminary_surface")]
+    AbovePreliminarySurface(EmptySurfaceObject),
+    #[serde(rename = "minecraft:biome")]
+    Biome(BiomeConditionFields),
+    #[serde(rename = "minecraft:noise_threshold")]
+    NoiseThreshold(NoiseThresholdConditionFields),
+    #[serde(rename = "minecraft:not")]
+    Not(NotConditionFields),
+    #[serde(rename = "minecraft:steep")]
+    Steep(EmptySurfaceObject),
+    #[serde(rename = "minecraft:stone_depth")]
+    StoneDepth(StoneDepthConditionFields),
+    #[serde(rename = "minecraft:temperature")]
+    Temperature(EmptySurfaceObject),
+    #[serde(rename = "minecraft:hole")]
+    Hole(EmptySurfaceObject),
+    #[serde(rename = "minecraft:vertical_gradient")]
+    VerticalGradient(VerticalGradientConditionFields),
+    #[serde(rename = "minecraft:water")]
+    Water(WaterConditionFields),
+    #[serde(rename = "minecraft:y_above")]
+    YAbove(YAboveConditionFields),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BiomeConditionFields {
+    biome_is: OneOrManyStrings,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum OneOrManyStrings {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl OneOrManyStrings {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            Self::One(value) => vec![value],
+            Self::Many(values) => values,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoiseThresholdConditionFields {
+    noise: String,
+    min_threshold: f64,
+    max_threshold: f64,
+    #[serde(default)]
+    is_3d: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NotConditionFields {
+    invert: Box<SurfaceConditionNode>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoneDepthConditionFields {
+    offset: i32,
+    add_surface_depth: bool,
+    secondary_depth_range: i32,
+    surface_type: SurfaceType,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum SurfaceType {
+    Floor,
+    Ceiling,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VerticalGradientConditionFields {
+    random_name: String,
+    true_at_and_below: VerticalAnchor,
+    false_at_and_above: VerticalAnchor,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WaterConditionFields {
+    offset: i32,
+    surface_depth_multiplier: i32,
+    add_stone_depth: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct YAboveConditionFields {
+    anchor: VerticalAnchor,
+    surface_depth_multiplier: i32,
+    add_stone_depth: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum VerticalAnchor {
+    Absolute(AbsoluteAnchor),
+    AboveBottom(AboveBottomAnchor),
+    BelowTop(BelowTopAnchor),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AbsoluteAnchor {
+    absolute: i32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AboveBottomAnchor {
+    above_bottom: i32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BelowTopAnchor {
+    below_top: i32,
+}
 
 /// The vanilla `Integer.MIN_VALUE` sentinel meaning "no water above".
 const NO_WATER: i32 = i32::MIN;
@@ -347,7 +531,7 @@ impl BandBlocks {
 ///
 /// The seven result blocks (`minecraft:terracotta` and six
 /// `minecraft:*_terracotta` dye variants) are hardcoded here rather than
-/// routed through [`BlockCanon`]/[`canonical_from_block_json`] because
+/// routed through [`BlockCanon`]/[`canonical_from_block_document`] because
 /// vanilla's own `minecraft:bandlands` rule JSON node carries no `result_state` at all
 /// (it is `{"type": "minecraft:bandlands"}`, nothing else — vanilla's own
 /// rule type has zero fields), so
@@ -583,8 +767,9 @@ impl SurfaceSystem {
     ) -> Self {
         let min_y = settings["noise"]["min_y"].as_i64().unwrap_or(-64) as i32;
         let gen_depth = settings["noise"]["height"].as_i64().unwrap_or(384) as i32;
-        let default_block =
-            interner.id_of(&canonical_from_block_json(&settings["default_block"], canon));
+        let default_block_document: BlockStateDocument = parse_surface_document(&settings["default_block"])
+            .expect("bundled noise settings default_block must match the strict block-state schema");
+        let default_block = interner.id_of(&canonical_from_block_document(&default_block_document, canon));
 
         let surface_noise = builder.noise("minecraft:surface");
         let surface_secondary_noise = builder.noise("minecraft:surface_secondary");
@@ -602,7 +787,9 @@ impl SurfaceSystem {
             xz_cache_slots: Cell::new(0),
             y_cache_slots: Cell::new(0),
         };
-        let rule = parser.rule(&settings["surface_rule"]);
+        let surface_rule: SurfaceRuleNode = parse_surface_document(&settings["surface_rule"])
+            .expect("bundled noise settings surface_rule must match the strict rule schema");
+        let rule = parser.rule(&surface_rule);
         let xz_cache_slots = parser.xz_cache_slots.get();
         let y_cache_slots = parser.y_cache_slots.get();
 
@@ -1162,27 +1349,20 @@ impl RuleParser<'_, '_> {
         slot
     }
 
-    fn rule(&self, node: &Value) -> Rule {
-        let ty = strip(node["type"].as_str().expect("rule type"));
-        match ty {
-            "block" => Rule::Block(
+    fn rule(&self, node: &SurfaceRuleNode) -> Rule {
+        match node {
+            SurfaceRuleNode::Block(fields) => Rule::Block(
                 self.interner
-                    .id_of(&canonical_from_block_json(&node["result_state"], self.canon)),
+                    .id_of(&canonical_from_block_document(&fields.result_state, self.canon)),
             ),
-            "sequence" => Rule::Sequence(
-                node["sequence"]
-                    .as_array()
-                    .expect("sequence")
-                    .iter()
-                    .map(|n| self.rule(n))
-                    .collect(),
+            SurfaceRuleNode::Sequence(fields) => Rule::Sequence(
+                fields.sequence.iter().map(|child| self.rule(child)).collect(),
             ),
-            "condition" => Rule::Condition(
-                self.cond(&node["if_true"]),
-                Box::new(self.rule(&node["then_run"])),
+            SurfaceRuleNode::Condition(fields) => Rule::Condition(
+                self.cond(&fields.if_true),
+                Box::new(self.rule(&fields.then_run)),
             ),
-            "bandlands" => Rule::Bandlands(Box::new(self.bandlands())),
-            other => panic!("unhandled surface rule type: minecraft:{other}"),
+            SurfaceRuleNode::Bandlands(_) => Rule::Bandlands(Box::new(self.bandlands())),
         }
     }
 
@@ -1234,33 +1414,18 @@ impl RuleParser<'_, '_> {
         }
     }
 
-    fn cond(&self, node: &Value) -> Cond {
-        let ty = strip(node["type"].as_str().expect("condition type"));
-        match ty {
-            "above_preliminary_surface" => Cond::AbovePreliminarySurface,
-            "biome" => {
-                let list = node["biome_is"]
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|b| b.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_else(|| {
-                        vec![
-                            node["biome_is"]
-                                .as_str()
-                                .expect("biome_is must be a string or array of strings")
-                            .to_string(),
-                        ]
-                    });
+    fn cond(&self, node: &SurfaceConditionNode) -> Cond {
+        match node {
+            SurfaceConditionNode::AbovePreliminarySurface(_) => Cond::AbovePreliminarySurface,
+            SurfaceConditionNode::Biome(fields) => {
+                let list = fields.biome_is.clone().into_vec();
                 Cond::BiomeIs {
                     list,
                     cache: self.next_y_cache_slot(),
                 }
             }
-            "noise_threshold" => {
-                let is_3d = node["is_3d"].as_bool().unwrap_or(false);
+            SurfaceConditionNode::NoiseThreshold(fields) => {
+                let is_3d = fields.is_3d;
                 let cache = if is_3d {
                     self.next_y_cache_slot()
                 } else {
@@ -1269,82 +1434,63 @@ impl RuleParser<'_, '_> {
                 Cond::NoiseThreshold {
                     noise: self
                         .builder
-                        .noise(node["noise"].as_str().expect("noise id")),
-                    min: node["min_threshold"].as_f64().expect("min_threshold"),
-                    max: node["max_threshold"].as_f64().expect("max_threshold"),
+                        .noise(&fields.noise),
+                    min: fields.min_threshold,
+                    max: fields.max_threshold,
                     is_3d,
                     cache,
                 }
             }
-            "not" => Cond::Not(Box::new(self.cond(&node["invert"]))),
-            "steep" => Cond::Steep {
+            SurfaceConditionNode::Not(fields) => Cond::Not(Box::new(self.cond(&fields.invert))),
+            SurfaceConditionNode::Steep(_) => Cond::Steep {
                 cache: self.next_xz_cache_slot(),
             },
-            "stone_depth" => Cond::StoneDepth {
-                offset: node["offset"].as_i64().expect("offset") as i32,
-                add_surface_depth: node["add_surface_depth"]
-                    .as_bool()
-                    .expect("add_surface_depth"),
-                secondary_depth_range: node["secondary_depth_range"]
-                    .as_i64()
-                    .expect("secondary_depth_range") as i32,
-                ceiling: node["surface_type"].as_str() == Some("ceiling"),
+            SurfaceConditionNode::StoneDepth(fields) => Cond::StoneDepth {
+                offset: fields.offset,
+                add_surface_depth: fields.add_surface_depth,
+                secondary_depth_range: fields.secondary_depth_range,
+                ceiling: matches!(fields.surface_type, SurfaceType::Ceiling),
                 cache: self.next_y_cache_slot(),
             },
-            "temperature" => Cond::Temperature {
+            SurfaceConditionNode::Temperature(_) => Cond::Temperature {
                 cache: self.next_y_cache_slot(),
             },
-            "hole" => Cond::Hole {
+            SurfaceConditionNode::Hole(_) => Cond::Hole {
                 cache: self.next_xz_cache_slot(),
             },
-            "vertical_gradient" => Cond::VerticalGradient {
+            SurfaceConditionNode::VerticalGradient(fields) => Cond::VerticalGradient {
                 factory: self
                     .builder
                     .positional_factory()
-                    .from_hash_of(node["random_name"].as_str().expect("random_name"))
+                    .from_hash_of(&fields.random_name)
                     .fork_positional(),
-                true_at_and_below: self.resolve_anchor(&node["true_at_and_below"]),
-                false_at_and_above: self.resolve_anchor(&node["false_at_and_above"]),
+                true_at_and_below: self.resolve_anchor(&fields.true_at_and_below),
+                false_at_and_above: self.resolve_anchor(&fields.false_at_and_above),
                 cache: self.next_y_cache_slot(),
             },
-            "water" => Cond::Water {
-                offset: node["offset"].as_i64().expect("offset") as i32,
-                surface_depth_multiplier: node["surface_depth_multiplier"]
-                    .as_i64()
-                    .expect("surface_depth_multiplier")
-                    as i32,
-                add_stone_depth: node["add_stone_depth"].as_bool().expect("add_stone_depth"),
+            SurfaceConditionNode::Water(fields) => Cond::Water {
+                offset: fields.offset,
+                surface_depth_multiplier: fields.surface_depth_multiplier,
+                add_stone_depth: fields.add_stone_depth,
                 cache: self.next_y_cache_slot(),
             },
-            "y_above" => Cond::YAbove {
-                anchor_y: self.resolve_anchor(&node["anchor"]),
-                surface_depth_multiplier: node["surface_depth_multiplier"]
-                    .as_i64()
-                    .expect("surface_depth_multiplier")
-                    as i32,
-                add_stone_depth: node["add_stone_depth"].as_bool().expect("add_stone_depth"),
+            SurfaceConditionNode::YAbove(fields) => Cond::YAbove {
+                anchor_y: self.resolve_anchor(&fields.anchor),
+                surface_depth_multiplier: fields.surface_depth_multiplier,
+                add_stone_depth: fields.add_stone_depth,
                 cache: self.next_y_cache_slot(),
             },
-            other => panic!("unhandled surface condition type: minecraft:{other}"),
         }
     }
 
     /// Vanilla's own vertical-anchor resolution against the world-generation context.
-    fn resolve_anchor(&self, node: &Value) -> i32 {
-        if let Some(y) = node["absolute"].as_i64() {
-            y as i32
-        } else if let Some(offset) = node["above_bottom"].as_i64() {
-            self.min_y + offset as i32
-        } else if let Some(offset) = node["below_top"].as_i64() {
-            self.gen_depth - 1 + self.min_y - offset as i32
-        } else {
-            panic!("unhandled vertical anchor: {node:?}")
+    fn resolve_anchor(&self, node: &VerticalAnchor) -> i32 {
+        match node {
+            VerticalAnchor::Absolute(anchor) => anchor.absolute,
+            VerticalAnchor::AboveBottom(anchor) => self.min_y + anchor.above_bottom,
+            VerticalAnchor::BelowTop(anchor) => self.gen_depth - 1 + self.min_y - anchor.below_top,
         }
     }
-}
-
-fn strip(id: &str) -> &str {
-    id.strip_prefix("minecraft:").unwrap_or(id)
 }
 
 fn is_air(s: &str) -> bool {
@@ -1391,15 +1537,35 @@ fn block_json_key(node: &Value) -> String {
     key
 }
 
-/// Resolves a `{Name, Properties?}` block JSON to its full canonical string via
-/// the caller-supplied [`BlockCanon`] table (produced by vanilla's own
-/// `BlockState.CODEC`).
-fn canonical_from_block_json(node: &Value, canon: &BlockCanon) -> String {
-    let key = block_json_key(node);
+fn canonical_from_block_document(node: &BlockStateDocument, canon: &BlockCanon) -> String {
+    let mut key = node.name.clone();
+    if let Some(properties) = &node.properties {
+        if !properties.is_empty() {
+            key.push('[');
+            for (index, (property, value)) in properties.iter().enumerate() {
+                if index > 0 {
+                    key.push(',');
+                }
+                key.push_str(property);
+                key.push('=');
+                key.push_str(value);
+            }
+            key.push(']');
+        }
+    }
     canon
         .get(&key)
         .cloned()
         .unwrap_or_else(|| panic!("no canonical block for result_state key {key:?}"))
+}
+
+fn parse_surface_document<T: for<'de> Deserialize<'de>>(
+    value: &Value,
+) -> Result<T, String> {
+    let bytes = serde_json::to_vec(value).map_err(|error| error.to_string())?;
+    let mut deserializer = serde_json::Deserializer::from_slice(&bytes);
+    serde_path_to_error::deserialize(&mut deserializer)
+        .map_err(|error| format!("{} at {}", error, error.path()))
 }
 
 /// Builds an **identity** [`BlockCanon`] for a settings value by walking its
@@ -1443,7 +1609,9 @@ pub fn identity_canon(settings: &Value) -> BlockCanon {
 
 #[cfg(test)]
 mod tests {
-    use super::{class_of_name, EvalCache, PreClass, WAY_BELOW_MIN_Y};
+    use super::{class_of_name, parse_surface_document, EvalCache, PreClass, SurfaceConditionNode,
+        SurfaceRuleNode, WAY_BELOW_MIN_Y};
+    use serde_json::json;
 
     #[test]
     fn block_classification_treats_all_air_states_as_air() {
@@ -1486,5 +1654,38 @@ mod tests {
     fn ceiling_scan_sentinel_is_dimension_independent() {
         assert_eq!(WAY_BELOW_MIN_Y, -2032 << 4);
         assert_ne!(WAY_BELOW_MIN_Y, -64 << 4);
+    }
+
+    #[test]
+    fn surface_schema_accepts_real_rule_and_condition_shapes() {
+        let rule: SurfaceRuleNode = parse_surface_document(&json!({
+            "type": "minecraft:condition",
+            "if_true": {"type": "minecraft:biome", "biome_is": ["minecraft:plains"]},
+            "then_run": {"type": "minecraft:block", "result_state": {"Name": "minecraft:grass_block"}}
+        }))
+        .expect("document uses the real rule schema");
+        assert!(matches!(rule, SurfaceRuleNode::Condition(_)));
+        let condition: SurfaceConditionNode = parse_surface_document(&json!({
+            "type": "minecraft:biome", "biome_is": "minecraft:plains"
+        }))
+        .expect("single biome string is a documented alternate shape");
+        assert!(matches!(condition, SurfaceConditionNode::Biome(_)));
+    }
+
+    #[test]
+    fn surface_schema_rejects_unknown_rule_fields_and_discriminators() {
+        let unknown_field = parse_surface_document::<SurfaceRuleNode>(&json!({
+            "type": "minecraft:block",
+            "result_state": {"Name": "minecraft:stone"},
+            "typo": true
+        }))
+        .expect_err("unknown rule fields must not be ignored");
+        assert!(unknown_field.contains("typo"), "{unknown_field}");
+
+        let unknown_type = parse_surface_document::<SurfaceRuleNode>(&json!({
+            "type": "minecraft:not_a_rule"
+        }))
+        .expect_err("unknown rule discriminators must not fall through");
+        assert!(unknown_type.contains("type"), "{unknown_type}");
     }
 }
