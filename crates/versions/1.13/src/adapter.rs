@@ -9,7 +9,8 @@ use lodestone_data::mob_effects::{mob_effect_name_for, MobEffectId};
 use lodestone_model::{
     AdapterError, AnimationAction, BlockActionKind, BlockFace, BossAction, BossColor, BossOverlay,
     ChatKind, ChatMode, ChunkPos, ClientAction, ClientEvent, ClientSettings, CollisionRule,
-    ConnectionState, Difficulty, Directive, DisplaySlot, DisplayedSkinParts, EntityEquipment,
+    ConnectionState, ContainerClickType, ContainerStateId, Difficulty, Directive, DisplaySlot,
+    DisplayedSkinParts, EntityEquipment,
     EntityAttributeModifier, EntityAttributeSnapshot, EntityInteraction, EntityMetadataUpdate,
     EntityMovement, EquipmentSlot, GameMode, Hand, ItemStack, LoginProfile, MainHand, ObjectiveMode, ObjectiveRenderType,
     PlayerCommand, PlayerListEntry, ProfileProperty, RecipeBookType, Reported, ResourceKey,
@@ -50,8 +51,8 @@ use crate::packets::position::Position;
 use crate::packets::settings::{BrandPayload, PlayerAbilities, ResourcePackReceive, Settings};
 use crate::packets::slot::Slot;
 use crate::packets::window::{
-    CloseWindow, EnchantItem, HeldItemSlot, ServerboundCloseWindow, ServerboundHeldItemSlot,
-    SetCreativeSlot,
+    CloseWindow, EnchantItem, HeldItemSlot, OpenWindow, ServerboundCloseWindow,
+    ServerboundHeldItemSlot, SetCreativeSlot, SetSlot, WindowClick, WindowItems,
 };
 
 /// The only protocol this family speaks (Minecraft 1.13.2).
@@ -158,6 +159,8 @@ struct PacketIds {
     use_entity: i32,
     /// `minecraft:use_item`, serverbound play.
     use_item: i32,
+    /// `minecraft:window_click`, serverbound play.
+    window_click: i32,
     /// `minecraft:crafting_book_data`, serverbound play — the packet that
     /// toggles a recipe-book pane. 1.16 split it into `recipe_book` (the
     /// pane state) and `displayed_recipe`; 404 still has the single packet
@@ -200,6 +203,7 @@ macro_rules! packet_ids_from {
             teleport_confirm: crate::$table::play::serverbound::TELEPORT_CONFIRM,
             use_entity: crate::$table::play::serverbound::USE_ENTITY,
             use_item: crate::$table::play::serverbound::USE_ITEM,
+            window_click: crate::$table::play::serverbound::WINDOW_CLICK,
             crafting_book_data: crate::$table::play::serverbound::CRAFTING_BOOK_DATA,
         }
     };
@@ -226,6 +230,47 @@ fn ids_for(protocol: i32) -> &'static PacketIds {
              callers must test membership before constructing an adapter"
         ),
     }
+}
+
+fn resolve_menu_type(inventory_type: &str, slot_count: u8) -> ResourceKey {
+    let generic_rows = || {
+        let rows = (u32::from(slot_count).div_ceil(9)).clamp(1, 6);
+        format!("minecraft:generic_9x{rows}")
+    };
+    let key = match inventory_type {
+        "minecraft:chest" | "minecraft:container" | "EntityHorse" => generic_rows(),
+        "minecraft:dispenser" | "minecraft:dropper" => "minecraft:generic_3x3".to_owned(),
+        "minecraft:crafting_table" => "minecraft:crafting".to_owned(),
+        "minecraft:enchanting_table" => "minecraft:enchantment".to_owned(),
+        "minecraft:villager" => "minecraft:merchant".to_owned(),
+        other => other.to_owned(),
+    };
+    key.parse().unwrap_or_else(|_| {
+        generic_rows().parse().expect("generic menu key is valid")
+    })
+}
+
+fn slot_to_item_stack(slot: &Slot) -> Result<Option<ItemStack>, AdapterError> {
+    let Slot::Item { id, count, nbt } = slot else {
+        return Ok(None);
+    };
+    let name = item_name(*id).ok_or_else(|| {
+        AdapterError::Decode(format!("unsupported protocol-404 item id {id}"))
+    })?;
+    let count = u32::try_from(*count).map_err(|_| {
+        AdapterError::Decode(format!("invalid protocol-404 item count {count}"))
+    })?;
+    if count == 0 {
+        return Err(AdapterError::Decode(
+            "protocol-404 item slot has a zero count".to_owned(),
+        ));
+    }
+    let key = name.parse().map_err(|_| {
+        AdapterError::Decode(format!("item registry entry {name} is not a key"))
+    })?;
+    let mut stack = ItemStack::new(key, count);
+    stack.components.has_unmodeled = nbt.is_some();
+    Ok(Some(stack))
 }
 
 /// Requested next-state value in the handshake for a login connection.
@@ -2061,6 +2106,67 @@ impl V404Adapter {
         })])
     }
 
+    /// `minecraft:open_window` with the protocol-404 string type and slot
+    /// count. The title is already a JSON component from the server.
+    fn handle_play_open_window(
+        adapter: &V404Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: OpenWindow = adapter.decode_body_exact(payload)?;
+        Ok(vec![Directive::Emit(ClientEvent::ScreenOpened {
+            window_id: i32::from(body.window_id),
+            menu_type: resolve_menu_type(&body.inventory_type, body.slot_count),
+            title: Text::from_json(&body.window_title),
+        })])
+    }
+
+    /// `minecraft:window_items` provides the authoritative full menu snapshot.
+    fn handle_play_window_items(
+        adapter: &V404Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: WindowItems = adapter.decode_body_exact(payload)?;
+        let items = body
+            .items
+            .iter()
+            .map(slot_to_item_stack)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(vec![Directive::Emit(ClientEvent::ContainerContent {
+            window_id: i32::from(body.window_id),
+            state_id: ContainerStateId::INITIAL,
+            items,
+            carried_item: None,
+        })])
+    }
+
+    /// `minecraft:set_slot` updates either the cursor, player inventory, or
+    /// the currently open menu according to its signed window sentinel.
+    fn handle_play_set_slot(
+        adapter: &V404Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: SetSlot = adapter.decode_body_exact(payload)?;
+        let item = slot_to_item_stack(&body.item)?;
+        if body.window_id == -1 {
+            return Ok(vec![Directive::Emit(ClientEvent::CursorItemChanged { item })]);
+        }
+        if body.window_id == 0 {
+            return Ok(vec![Directive::Emit(ClientEvent::InventorySlotChanged {
+                slot: i32::from(body.slot),
+                item,
+            })]);
+        }
+        Ok(vec![Directive::Emit(ClientEvent::ContainerSlot {
+            window_id: i32::from(body.window_id),
+            state_id: ContainerStateId::INITIAL,
+            slot: i32::from(body.slot),
+            item,
+        })])
+    }
+
     /// `minecraft:craft_progress_bar`. No synchronization state id, so it
     /// maps directly onto the same `ContainerData` 26.2's
     /// `minecraft:container_set_data` produces.
@@ -2994,6 +3100,27 @@ static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = 
         ),
     ),
     (
+        "minecraft:open_window",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V404Adapter::handle_play_open_window,
+        ),
+    ),
+    (
+        "minecraft:window_items",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V404Adapter::handle_play_window_items,
+        ),
+    ),
+    (
+        "minecraft:set_slot",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V404Adapter::handle_play_set_slot,
+        ),
+    ),
+    (
         "minecraft:craft_progress_bar",
         lodestone_core::dispatch::Handler::new(
             lodestone_core::ProtocolRange::ALL,
@@ -3096,11 +3223,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
         "minecraft:transaction",
         "v26-2 has this; backport (PING is the modern inventory-transaction ack)",
     ),
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:window_items",
-        "v26-2 has this; backport (CONTAINER_SET_CONTENT)",
-    ),
-    lodestone_core::dispatch::IGNORED::new("minecraft:set_slot", "v26-2 has this; backport (CONTAINER_SET_SLOT)"),
     lodestone_core::dispatch::IGNORED::new("minecraft:set_cooldown", "v26-2 has this; backport (COOLDOWN)"),
     lodestone_core::dispatch::IGNORED::new("minecraft:custom_payload", "v26-2 has this; backport (CUSTOM_PAYLOAD)"),
     lodestone_core::dispatch::IGNORED::new(
@@ -3120,7 +3242,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
          packet, which a real server never sends standalone (it always sends one of the concrete \
          rel_entity_move/entity_look/entity_move_look variants instead)",
     ),
-    lodestone_core::dispatch::IGNORED::new("minecraft:open_window", "v26-2 has this; backport (OPEN_SCREEN)"),
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:craft_recipe_response",
         "v26-2 has this; backport (PLACE_GHOST_RECIPE)",
@@ -3541,27 +3662,43 @@ impl VersionAdapter for V404Adapter {
                     self.encode_body(&body)?,
                 )))
             }
-            // Container clicks predate the modern `state_id` reconciliation.
-            // Faithfully encoding 1.16's `window_click` needs a client-tracked
-            // transaction id (the `action` counter, absent from the model which
-            // carries only the 1.17+ `state_id`; this adapter is stateless) and
-            // an item registry (`ResourceKey` -> numeric id) for the clicked
-            // stack. 1.16 slots are flattened, so unlike v1-8/v1-9 there is no
-            // item-metadata gap — but the transaction id and registry alone are
-            // enough to make an encoded click be rejected by a live server (via a
-            // failed transaction) rather than silently applied. Refused loudly.
-            //
-            // This is also why clientbound `TRANSACTION` has no decode arm: it
-            // exists solely to accept or reject a `window_click` this client
-            // cannot yet send, so nothing here could ever receive one — wiring a
-            // decode for it now would be an event with no producer that could
-            // trigger it. It becomes real work once `ContainerClick` above is.
-            ClientAction::ContainerClick { .. } => Err(AdapterError::Unsupported(
-                "this era's ContainerClick needs a client-tracked transaction id (model carries \
-                 only the 1.17+ state_id) and an item registry; refused rather than sending bytes \
-                 a live server rejects via a failed transaction"
-                    .to_owned(),
-            )),
+            // Container clicks use this era's action counter instead of a
+            // modern state id. The shared state id supplies that counter and
+            // the server remains authoritative over the pre-click item claim.
+            ClientAction::ContainerClick {
+                window_id,
+                state_id,
+                slot,
+                button,
+                click_type,
+                ..
+            } => {
+                let body = WindowClick {
+                    window_id: u8::try_from(*window_id).map_err(|_| {
+                        AdapterError::Encode(format!("window id {window_id} does not fit a byte"))
+                    })?,
+                    slot: i16::try_from(*slot).map_err(|_| {
+                        AdapterError::Encode(format!("container slot {slot} does not fit an i16"))
+                    })?,
+                    button: i8::try_from(*button).map_err(|_| {
+                        AdapterError::Encode(format!("click button {button} does not fit an i8"))
+                    })?,
+                    action: i16::try_from(state_id.as_wire()).map_err(|_| {
+                        AdapterError::Encode(format!("container state {} does not fit an i16", state_id.as_wire()))
+                    })?,
+                    mode: match click_type {
+                        ContainerClickType::Pickup => 0,
+                        ContainerClickType::QuickMove => 1,
+                        ContainerClickType::Swap => 2,
+                        ContainerClickType::Clone => 3,
+                        ContainerClickType::Throw => 4,
+                        ContainerClickType::QuickCraft => 5,
+                        ContainerClickType::PickupAll => 6,
+                    },
+                    item: Slot::Empty,
+                };
+                Ok(Some((self.ids().window_click, self.encode_body(&body)?)))
+            }
 
             // Genuinely absent in 1.16: there is no player-input packet (added
             // much later). `Stab` (off-hand attack) has no dedicated 1.16 packet
