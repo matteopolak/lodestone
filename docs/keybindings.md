@@ -28,6 +28,15 @@ before gameplay ever sees it (so nothing leaks through behind an inventory). Esc
 container layer specifically so it closes a container through the normal pause-adjacent path rather than
 a container-specific escape case.
 
+Opening the player inventory (`key.inventory`) or any server/plugin container
+screen releases gameplay pointer capture and focuses the visible pointer at the
+integer centre of the physical framebuffer. The windowed path moves both the
+native pointer and the shared hit-test cursor once on that open edge; later
+pointer movement is authoritative and repeated grab-release reconciliation does
+not recenter it. The terminal surface applies the same shared-cursor centre
+when its inventory toggle opens a screen, so its first slot hover does not
+depend on the last gameplay cell.
+
 Default bindings, action names, and category grouping are all sourced directly from the vanilla client
 rather than guessed — including category sort order, which is vanilla's own *registration* order and is
 not alphabetical (a commonly-mis-guessed detail: the Misc category sorts second, ahead of Multiplayer,
@@ -47,6 +56,14 @@ actually applies the effect, not inside the pure key-resolution function — tha
 about keys, not about session state. A modifier read off currently-held keys (Ctrl, Shift) is the one
 exception that does belong inside the resolution function, since it's tracked key state rather than
 session state.
+
+### Middle-click across pointer capture
+
+Gameplay middle-click is a one-shot pick action. If the first click also has to acquire pointer
+capture, the window keeps that pick for at most 500 ms and dispatches it once capture and a current
+ray target are available; a failed grab, focus/menu transition, or expiry drops it. This preserves
+the first left/right click as capture-only. The terminal surface has no pointer-capture boundary and
+routes its middle-click directly through the same `Sim::pick_block_or_entity` action.
 
 ### F3 debug chords
 

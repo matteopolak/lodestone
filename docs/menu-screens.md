@@ -42,6 +42,23 @@ Several screens share infrastructure worth knowing about up front:
   block editor) use the same `EditBox`/focus machinery documented in `ui-framework.md`, not a
   screen-specific input hack.
 
+### Container-screen pointer focus
+
+The inventory and container family is an overlay over the live world. When any
+container screen first opens—player inventory, a server menu such as a chest,
+or a plugin-owned local menu—the shell releases gameplay pointer capture and
+centres the visible pointer in the physical framebuffer. This is one transition
+operation shared by the window and terminal surfaces: the native window pointer
+and the framebuffer coordinate used by slot hit-testing are updated together.
+The operation runs only on the open edge, so ordinary pointer movement and the
+later close/re-grab cycle retain their normal positions.
+
+The production edges are the inventory key, the per-frame reconciliation that
+observes a newly opened server menu, and the terminal inventory toggle. Extend
+that shared focus operation when adding another container entry point; do not
+add a centre write to generic cursor-grab cleanup, because cleanup also runs
+while a screen remains open or after focus loss.
+
 ## Screens
 
 ### Main menu
@@ -77,6 +94,17 @@ renderer); the only distinguishing fact is `LOCAL_MENU_WINDOW_ID` (`i32::MIN`), 
 could ever legitimately allocate, which marks a menu as having nothing to send over the wire. A
 server-side plugin opening a menu to a *remote* player is out of scope here — it needs the real
 container-open packet family, which needs `lodestone-server`'s container protocol support first.
+
+### Plugin inventory/menu observations
+
+Native plugins observe the same decoded stream through `lodestone_ecs::events::GameEvent`. Calling
+`GameEvent::inventory_menu()` returns a borrowed `InventoryMenuEvent` for full window contents,
+single-slot and menu-property updates, open/close lifecycle (including mount inventories), cursor
+changes, selected-slot changes, and native player-inventory updates. Item references remain the full
+`lodestone_model::ItemStack`, including modeled data components and the `has_unmodeled` marker; no
+second item schema or plugin-owned inventory cache is introduced. The event bus is opt-in through
+`GameEventBusPlugin`, and the view cannot outlive the message being read, so observing a menu does not
+create a stale state writer or bypass the session's existing prediction and server reconciliation.
 
 ### Settings
 
