@@ -18,7 +18,7 @@ use lodestone_worldgen_parity::lifecycle::{
     LifecycleWorldgenSource,
 };
 use support::large_parity_manifest::{
-    Dimension, Header as ManifestHeader, HEADER_BYTES, PACKET_AUDIT_RECORD_BYTES, RAW_PACKET_HASH_BYTES,
+    Dimension, Header as ManifestHeader, IncrementalSha256, HEADER_BYTES, PACKET_AUDIT_RECORD_BYTES, RAW_PACKET_HASH_BYTES,
     canonical_nbt, payload_digest_from_header,
     raw_packet_full_digest, read_header, read_packet_audit_header,
     semantic_digest, semantic_digest_for_dimension, semantic_digest_v5_for_dimension,
@@ -31,6 +31,9 @@ type ChunkPos = (i32, i32);
 
 const MAX_RAW_DIAGNOSTIC_EXAMPLES: usize = 32;
 const MAX_RAW_DIAGNOSTIC_GROUPS: usize = 64;
+const PERSISTED_WORLD_ROOT_ENV: &str = "LODESTONE_LARGE_PARITY_FROZEN_WORLD_ROOT";
+const PERSISTED_BATCH_SIZE_ENV: &str = "LODESTONE_LARGE_PARITY_PERSISTED_BATCH_SIZE";
+const PERSISTED_BATCH_SIZE: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RawPacketMismatch {
@@ -542,6 +545,131 @@ fn verify_raw_packet_audit_files(
     .unwrap_or_else(|error| panic!("v6 manifest/packet-audit payload authentication failed: {error}"));
 }
 
+fn persisted_world_freeze_stamp(header: &ManifestHeader) -> String {
+    let contract = if header.semantic_version == 6 { "v6" } else { "v2" };
+    let dimension = match header.dimension {
+        Dimension::Overworld => "overworld",
+        Dimension::Nether => "nether",
+        Dimension::End => "end",
+    };
+    format!("lodestone-large-parity-materialization-{contract}-{dimension}.freeze.sha256")
+}
+
+fn collect_persisted_world_files(
+    root: &Path,
+    current: &Path,
+    files: &mut Vec<(String, PathBuf)>,
+) -> std::io::Result<()> {
+    let mut entries = std::fs::read_dir(current)
+        .map_err(|error| std::io::Error::new(error.kind(), format!("read {}: {error}", current.display())))?
+        .collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.path());
+    for entry in entries {
+        let path = entry.path();
+        let metadata = std::fs::metadata(&path)?;
+        if metadata.is_dir() {
+            collect_persisted_world_files(root, &path, files)?;
+        } else if metadata.is_file() {
+            let relative = path
+                .strip_prefix(root)
+                .expect("walked path must be below frozen root")
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/");
+            files.push((relative, path));
+        }
+    }
+    Ok(())
+}
+
+/// Reproduces the oracle's authenticated tree digest without loading all
+/// region bytes at once. The selected freeze stamp is excluded exactly as the
+/// external exporter excludes it before sealing the world.
+fn persisted_world_tree_digest(root: &Path, freeze_stamp: &str) -> std::io::Result<[u8; 32]> {
+    let mut files = Vec::new();
+    collect_persisted_world_files(root, root, &mut files)?;
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut digest = IncrementalSha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    for (relative, path) in files {
+        if relative == freeze_stamp {
+            continue;
+        }
+        let name = relative.as_bytes();
+        let name_len = i32::try_from(name.len()).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "frozen-world path is too long")
+        })?;
+        digest.update(&name_len.to_be_bytes());
+        digest.update(name);
+        let size = std::fs::metadata(&path)?.len();
+        digest.update(&size.to_be_bytes());
+        let mut file = File::open(&path)?;
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&buffer[..read]);
+        }
+    }
+    Ok(digest.finish())
+}
+
+fn parse_persisted_world_digest(value: &str, path: &Path) -> [u8; 32] {
+    let value = value.trim();
+    assert_eq!(value.len(), 64, "frozen-world seal {} must contain 64 hex characters", path.display());
+    let mut digest = [0u8; 32];
+    for (index, byte) in digest.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .unwrap_or_else(|error| panic!("frozen-world seal {} contains invalid hex: {error}", path.display()));
+    }
+    digest
+}
+
+fn validated_persisted_world_root(header: &ManifestHeader) -> PathBuf {
+    let root = std::env::var_os(PERSISTED_WORLD_ROOT_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| panic!("persisted End parity requires {PERSISTED_WORLD_ROOT_ENV}=/absolute/path/to/validated-frozen-world"));
+    assert!(root.is_dir(), "persisted End parity root {} is not a directory", root.display());
+    let freeze_stamp = persisted_world_freeze_stamp(header);
+    let stamp = root.join(&freeze_stamp);
+    let sealed = parse_persisted_world_digest(
+        &std::fs::read_to_string(&stamp)
+            .unwrap_or_else(|error| panic!("read frozen-world seal {}: {error}", stamp.display())),
+        &stamp,
+    );
+    let actual = persisted_world_tree_digest(&root, &freeze_stamp)
+        .unwrap_or_else(|error| panic!("digest frozen-world root {}: {error}", root.display()));
+    assert_eq!(actual, sealed, "frozen-world tree differs from its seal {}", stamp.display());
+    assert_eq!(actual, header.frozen_world, "frozen-world seal {} differs from manifest identity", stamp.display());
+    root
+}
+
+fn persisted_batch_size() -> usize {
+    let value = std::env::var(PERSISTED_BATCH_SIZE_ENV).unwrap_or_else(|_| PERSISTED_BATCH_SIZE.to_string());
+    let parsed = value.parse::<usize>().unwrap_or_else(|error| {
+        panic!("{PERSISTED_BATCH_SIZE_ENV} must be a positive integer: {error}")
+    });
+    assert!(parsed > 0, "{PERSISTED_BATCH_SIZE_ENV} must be a positive integer");
+    parsed
+}
+
+fn persisted_export_coordinate(header: &ManifestHeader, index: usize) -> ChunkPos {
+    let width = usize::try_from(i64::from(header.cx1) - i64::from(header.cx0) + 1)
+        .expect("persisted export width fits usize");
+    (
+        header.cx0 + i32::try_from(index % width).expect("persisted export x offset fits i32"),
+        header.cz0 + i32::try_from(index / width).expect("persisted export z offset fits i32"),
+    )
+}
+
+fn persisted_batch_ranges(limit: usize, batch_size: usize) -> Vec<(usize, usize)> {
+    assert!(batch_size > 0, "persisted batch size must be positive");
+    (0..limit)
+        .step_by(batch_size)
+        .map(|start| (start, (start + batch_size).min(limit)))
+        .collect()
+}
+
 fn optional_usize_env(name: &str) -> Result<Option<usize>, String> {
     std::env::var_os(name)
         .map(|value| {
@@ -743,6 +871,144 @@ fn materialization_prefix_for_export_prefix(
     bound
 }
 
+/// Compares against the externally sealed End world without replaying
+/// admissions. This is intentionally a diagnostic import/encoder arm: its
+/// mismatches never enter the generated-world acceptance vectors below.
+fn compare_end_raw_from_persisted_world(
+    source: &dyn ChunkSource,
+    manifest: &Path,
+    h: &ManifestHeader,
+    limit: u64,
+    scan_all: bool,
+    reference_packets: &BTreeMap<ChunkPos, PathBuf>,
+    batch_size: usize,
+) -> Vec<RawPacketMismatch> {
+    let mut expected = BufReader::new(
+        File::open(manifest).unwrap_or_else(|error| panic!("open persisted-world manifest {}: {error}", manifest.display())),
+    );
+    expected
+        .seek(SeekFrom::Start(HEADER_BYTES as u64))
+        .unwrap_or_else(|error| panic!("seek persisted-world manifest payload: {error}"));
+    let audit_path = raw_packet_audit_path(manifest);
+    let mut expected_audit = BufReader::new(
+        File::open(&audit_path)
+            .unwrap_or_else(|error| panic!("open persisted-world packet audit {}: {error}", audit_path.display())),
+    );
+    expected_audit
+        .seek(SeekFrom::Start(HEADER_BYTES as u64))
+        .unwrap_or_else(|error| panic!("seek persisted-world packet audit payload: {error}"));
+
+    let mut mismatches = Vec::new();
+    let mut reference_mismatches = Vec::new();
+    let mut retained_target_lights = 0usize;
+    let total = usize::try_from(limit).expect("persisted export limit fits usize");
+    for (batch_start, batch_end) in persisted_batch_ranges(total, batch_size) {
+        let mut records = Vec::with_capacity(batch_end - batch_start);
+        for index in batch_start..batch_end {
+            let mut prefix = [0u8; RAW_PACKET_HASH_BYTES];
+            expected
+                .read_exact(&mut prefix)
+                .unwrap_or_else(|error| panic!("read persisted-world manifest record {index}: {error}"));
+            let mut full = [0u8; PACKET_AUDIT_RECORD_BYTES];
+            expected_audit
+                .read_exact(&mut full)
+                .unwrap_or_else(|error| panic!("read persisted-world packet audit record {index}: {error}"));
+            let index = u64::try_from(index).expect("persisted export index fits u64");
+            let (cx, cz) = persisted_export_coordinate(h, usize::try_from(index).expect("persisted export index fits usize"));
+            records.push(((cx, cz), prefix, full, index));
+        }
+
+        // Keep the batch boundary explicit even though RegionChunkSource owns
+        // immutable persisted state rather than a ticket graph. The source is
+        // opened once, matching the oracle's one-server sequential batches;
+        // each batch owns its packet inputs until its captures finish.
+        for ((cx, cz), expected_prefix, expected_full, index) in records {
+            let settled = source.column(cx, cz);
+            // A fresh reopen legitimately has no persisted light layers for a
+            // dark first target. The production encoder's fallback then emits
+            // empty masks; later targets use the persisted light graph. Do not
+            // recompute or settle a target here, and do not infer masks from
+            // block occupancy.
+            if settled.retained_light().is_some() {
+                retained_target_lights += 1;
+            }
+            let mut neighbours = Vec::with_capacity(8);
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    if (dx, dz) != (0, 0) {
+                        neighbours.push((dx, dz, source.column(cx + dx, cz + dz)));
+                    }
+                }
+            }
+            let directive = V770ServerProtocol
+                .try_encode_chunk_with_neighbours_in_dimension(
+                    cx,
+                    cz,
+                    &settled,
+                    &neighbours,
+                    ServerDimension::End,
+                )
+                .expect("production neighbour-aware chunk encoder for persisted End");
+            let payload = match directive {
+                ServerDirective::Send { packet_id, payload } => {
+                    assert_eq!(packet_id, lodestone_v26_2::packet_ids::play::clientbound::LEVEL_CHUNK_WITH_LIGHT);
+                    payload
+                }
+                other => panic!("production chunk encoder returned {other:?} at persisted ({cx},{cz})"),
+            };
+            let actual_full = raw_packet_full_digest(&payload);
+            let actual_prefix = [actual_full[0], actual_full[1]];
+            if actual_prefix != expected_prefix || actual_full != expected_full {
+                let mismatch = RawPacketMismatch {
+                    target: (cx, cz),
+                    index,
+                    expected_prefix,
+                    actual_prefix,
+                    expected_full,
+                    actual_full,
+                    payload_bytes: payload.len(),
+                };
+                if !scan_all {
+                    panic!(
+                        "persisted-world import/encoder parity mismatch at ({cx},{cz}) after {index} matching chunks: expected prefix {}, actual prefix {}, expected full SHA-256 {}, actual full SHA-256 {}, collision={}, payload bytes={}",
+                        hex(&mismatch.expected_prefix),
+                        hex(&mismatch.actual_prefix),
+                        hex(&mismatch.expected_full),
+                        hex(&mismatch.actual_full),
+                        mismatch.collision(),
+                        mismatch.payload_bytes,
+                    );
+                }
+                mismatches.push(mismatch);
+            }
+            if let Some(reference_path) = reference_packets.get(&(cx, cz)) {
+                let reference = std::fs::read(reference_path)
+                    .unwrap_or_else(|error| panic!("read persisted-world reference {}: {error}", reference_path.display()));
+                let reference_full = raw_packet_full_digest(&reference);
+                if reference_full != actual_full {
+                    reference_mismatches.push(((cx, cz), reference_path.clone(), reference_full, actual_full));
+                }
+            }
+        }
+        eprintln!(
+            "large persisted-world import/encoder parity: compared {}..{} of {} targets (batch size {batch_size}, retained target lights {retained_target_lights})",
+            batch_start,
+            batch_end,
+            total,
+        );
+    }
+    if !reference_mismatches.is_empty() {
+        eprintln!(
+            "large persisted-world import/encoder reference mismatches: {:?}",
+            reference_mismatches
+                .iter()
+                .map(|(target, path, expected, actual)| (*target, path, hex(expected), hex(actual)))
+                .collect::<Vec<_>>(),
+        );
+    }
+    mismatches
+}
+
 fn compare_end_raw_after_materialization<R: Read, A: Read>(
     source: &dyn ChunkSource,
     expected: &mut R,
@@ -880,6 +1146,49 @@ fn compare_end_raw_after_materialization<R: Read, A: Read>(
         }
     }
     mismatches
+}
+
+#[test]
+fn persisted_end_export_mapping_is_x_fastest_and_batch_generic() {
+    let header = ManifestHeader {
+        semantic_version: 6,
+        cx0: -25,
+        cx1: 25,
+        cz0: -25,
+        cz1: 25,
+        count: 51 * 51,
+        frozen_world: [1; 32],
+        dimension: Dimension::End,
+        record_width: RAW_PACKET_HASH_BYTES as u16,
+        kind: 2,
+    };
+    assert_eq!(persisted_export_coordinate(&header, 0), (-25, -25));
+    assert_eq!(persisted_export_coordinate(&header, 890), (-2, -8));
+    assert_eq!(persisted_export_coordinate(&header, 1050), (5, -5));
+    assert_eq!(
+        persisted_batch_ranges(1051, PERSISTED_BATCH_SIZE),
+        vec![(0, 256), (256, 512), (512, 768), (768, 1024), (1024, 1051)],
+    );
+}
+
+#[test]
+fn persisted_end_freeze_stamp_uses_raw_materialization_contract() {
+    let header = ManifestHeader {
+        semantic_version: 6,
+        cx0: -500,
+        cx1: 500,
+        cz0: -500,
+        cz1: 500,
+        count: 1001 * 1001,
+        frozen_world: [1; 32],
+        dimension: Dimension::End,
+        record_width: RAW_PACKET_HASH_BYTES as u16,
+        kind: 2,
+    };
+    assert_eq!(
+        persisted_world_freeze_stamp(&header),
+        "lodestone-large-parity-materialization-v6-end.freeze.sha256",
+    );
 }
 
 #[test]
@@ -1434,6 +1743,61 @@ fn parity_manifest_streams_before_rust_comparison() {
     } else {
         BTreeMap::new()
     };
+    if raw_packet && dimension == Dimension::End && std::env::var_os(PERSISTED_WORLD_ROOT_ENV).is_some() {
+        let root = validated_persisted_world_root(&h);
+        eprintln!(
+            "large persisted-world import/encoder parity: opening validated End root {} (diagnostic only; generated replay remains acceptance authority)",
+            root.display(),
+        );
+        let persisted = RegionChunkSource::new(
+            end_chunk_source(42),
+            &root,
+            ServerDimension::End,
+            0,
+            256,
+        )
+        .unwrap_or_else(|error| panic!("open validated persisted End root {}: {error}", root.display()));
+        let generated_before = persisted
+            .stats()
+            .generated
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let loaded_before = persisted
+            .stats()
+            .loaded_from_disk
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let persisted_mismatches = compare_end_raw_from_persisted_world(
+            &persisted,
+            Path::new(&path),
+            &h,
+            limit,
+            scan_all,
+            &reference_packets,
+            persisted_batch_size(),
+        );
+        let generated_after = persisted
+            .stats()
+            .generated
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let loaded_after = persisted
+            .stats()
+            .loaded_from_disk
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            generated_after - generated_before,
+            0,
+            "persisted End diagnostic fell back to generated columns",
+        );
+        assert!(
+            loaded_after > loaded_before,
+            "persisted End diagnostic loaded no columns from disk",
+        );
+        eprintln!(
+            "large persisted-world import/encoder parity: loaded_from_disk_delta={} generated_delta={} packet_mismatches={}",
+            loaded_after - loaded_before,
+            generated_after - generated_before,
+            persisted_mismatches.len(),
+        );
+    }
     let mut digest_mismatches = Vec::new();
     let mut raw_mismatches = Vec::new();
     let mut component_reports = Vec::new();
