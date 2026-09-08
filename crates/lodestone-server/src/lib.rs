@@ -540,7 +540,9 @@ pub use advancements::{
     AdvancementUpdate, GrantOutcome, PlayerAdvancementState, PlayerProgress, PlayerStatistics, StatKey,
     StatType,
 };
-pub use block_entities::{BlockEntity, BlockEntityHandle, BlockEntityRegistry, block_entity_for_item};
+pub use block_entities::{
+    BlockEntity, BlockEntityHandle, BlockEntityKind, BlockEntityRegistry, block_entity_for_item,
+};
 // `command_block` itself stays private (its module doc is an internal design
 // record, not a public surface); this one type is re-exported because
 // `BlockEntity::CommandBlock`'s payload is otherwise unreachable from outside
