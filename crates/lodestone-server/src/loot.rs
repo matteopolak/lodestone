@@ -46,6 +46,7 @@
 //! | `entity_properties` / `damage_source_properties` / `location_check` | `false` (no entity/source/level) |
 //! | `table_bonus` | `chances[0]` (fortune level 0) |
 //! | `set_count` | uniform/constant/binomial rolled |
+//! | `enchant_with_levels` | item-aware weighted enchantment selection; plain books become enchanted books |
 //! | `enchanted_count_increase` | no-op (no attacker → level 0) |
 //! | `apply_bonus` | no-op (no tool) |
 //! | `explosion_decay` | no-op (no `EXPLOSION_RADIUS`) |
@@ -69,7 +70,7 @@
 //! condition with its own enum variant — and then evaluated as a constant
 //! `false`, so [`LootTable::unsupported_features`] reported nothing and the
 //! curated bundle's own "zero unsupported features" guarantee held while 154 of
-//! its 1,241 tables took the wrong branch of an `alternatives` on every roll.
+//! its 1,246 tables took the wrong branch of an `alternatives` on every roll.
 //! Fully-grown wheat dropped one seed and no wheat; a slab dropped one instead of
 //! two; a candle dropped one regardless of how many were stacked.
 //!
@@ -178,7 +179,7 @@ pub struct LootContext {
     /// branch**, silently: `block_state_property` was a hardcoded `false`, so
     /// fully-grown wheat dropped one seed and no wheat (the `alternatives` fell
     /// through to the seed child, and the bonus-seed pool's pool-level condition
-    /// skipped the pool entirely). 154 of the 1,241 bundled tables carry the
+    /// skipped the pool entirely). 154 of the 1,246 bundled tables carry the
     /// condition — crops, candles, slabs, doors, beds, tall flowers, snow layers,
     /// cave vines and sea pickles — so this is not one block's quirk.
     pub block_state: Option<LootBlockState>,
@@ -535,8 +536,8 @@ impl LootTableBuilder {
 /// unsupported entry or number provider is the same class of loss. Those must
 /// still keep a table out of the bundle.
 ///
-/// The four structure-chest tables (`chests/shipwreck_{map,supply}`,
-/// `chests/underwater_ruin_{small,big}`) are bundled under exactly this rule.
+/// The structure-chest tables are bundled under exactly this rule; level-based
+/// enchantments are evaluated by the loot function itself.
 pub const DECORATION_ONLY_UNSUPPORTED: &[&str] = &[
     "function minecraft:enchant_randomly",
     "function minecraft:exploration_map",
@@ -1092,6 +1093,94 @@ impl NumberProvider {
     }
 }
 
+/// The registry holder set used by `minecraft:enchant_with_levels`.
+///
+/// The JSON codec accepts either a tag (the bundled table uses
+/// `#minecraft:on_random_loot`) or explicit enchantment ids. An omitted
+/// `options` field means the complete registry, matching the source codec's
+/// optional holder set rather than silently applying the random-loot tag.
+#[derive(Debug, Clone)]
+enum EnchantmentOptions {
+    All,
+    OnRandomLoot,
+    Explicit(Vec<&'static str>),
+    Unsupported,
+}
+
+impl EnchantmentOptions {
+    fn allows(&self, definition: &crate::enchantment_data::EnchantmentDef) -> bool {
+        match self {
+            Self::All => true,
+            Self::OnRandomLoot => crate::enchantment_data::on_random_loot(definition),
+            Self::Explicit(keys) => keys.contains(&definition.key),
+            Self::Unsupported => false,
+        }
+    }
+
+    fn from_value(value: Option<&Value>, audit: &mut Vec<String>) -> Result<Self, LootError> {
+        let Some(value) = value else {
+            return Ok(Self::All);
+        };
+        match value {
+            Value::String(raw) => Self::from_id(raw, audit),
+            Value::Array(entries) => {
+                let mut explicit = Vec::with_capacity(entries.len());
+                let mut on_random_loot = false;
+                for entry in entries {
+                    let raw = entry
+                        .as_str()
+                        .ok_or(LootError::UnexpectedType("enchant_with_levels options entry", "a string"))?;
+                    if raw == "#minecraft:on_random_loot" {
+                        on_random_loot = true;
+                    } else if raw.starts_with('#') {
+                        audit.push(format!("function minecraft:enchant_with_levels options {raw}"));
+                        return Ok(Self::Unsupported);
+                    } else {
+                        let key = raw
+                            .parse::<ResourceKey>()
+                            .map_err(|_| LootError::BadIdentifier(raw.to_string()))?;
+                        if let Some(definition) = crate::enchantment_data::by_key(&key.to_string()) {
+                            explicit.push(definition.key);
+                        } else {
+                            audit.push(format!("function minecraft:enchant_with_levels option {raw}"));
+                        }
+                    }
+                }
+                if on_random_loot {
+                    if explicit.is_empty() {
+                        Ok(Self::OnRandomLoot)
+                    } else {
+                        audit.push("function minecraft:enchant_with_levels options mixes a tag and ids".to_string());
+                        Ok(Self::Unsupported)
+                    }
+                } else {
+                    Ok(Self::Explicit(explicit))
+                }
+            }
+            _ => Err(LootError::UnexpectedType("enchant_with_levels options", "a string or array")),
+        }
+    }
+
+    fn from_id(raw: &str, audit: &mut Vec<String>) -> Result<Self, LootError> {
+        if raw == "#minecraft:on_random_loot" {
+            return Ok(Self::OnRandomLoot);
+        }
+        if raw.starts_with('#') {
+            audit.push(format!("function minecraft:enchant_with_levels options {raw}"));
+            return Ok(Self::Unsupported);
+        }
+        let key = raw
+            .parse::<ResourceKey>()
+            .map_err(|_| LootError::BadIdentifier(raw.to_string()))?;
+        if let Some(definition) = crate::enchantment_data::by_key(&key.to_string()) {
+            Ok(Self::Explicit(vec![definition.key]))
+        } else {
+            audit.push(format!("function minecraft:enchant_with_levels option {raw}"));
+            Ok(Self::Explicit(Vec::new()))
+        }
+    }
+}
+
 /// A loot-table function (`LootItemFunctions` dispatch on `function`).
 ///
 /// Each variant here has a defined empty-context effect (see the module doc's
@@ -1127,6 +1216,15 @@ enum LootFunction {
     },
     FurnaceSmelt {
         use_input_count: bool,
+        conditions: Vec<LootCondition>,
+    },
+    /// Applies the weighted enchantment selection used by the enchanting
+    /// system. The optional holder set selects the registry entries eligible
+    /// for this roll; an empty context still has all item/cost semantics, but
+    /// cannot represent the optional additional trade-cost component.
+    EnchantWithLevels {
+        levels: NumberProvider,
+        options: EnchantmentOptions,
         conditions: Vec<LootCondition>,
     },
     /// `minecraft:sequence` — applies each child in order.
@@ -1168,6 +1266,31 @@ impl LootFunction {
             "minecraft:furnace_smelt" => {
                 let use_input_count = value.get("use_input_count").and_then(Value::as_bool).unwrap_or(true);
                 Ok(Self::FurnaceSmelt { use_input_count, conditions })
+            }
+            "minecraft:enchant_with_levels" => {
+                let levels = parse_number_provider(
+                    value.get("levels").ok_or(LootError::MissingField("levels"))?,
+                    audit,
+                )?;
+                let options = EnchantmentOptions::from_value(value.get("options"), audit)?;
+                if value
+                    .get("include_additional_cost_component")
+                    .map(|raw| {
+                        raw.as_bool().ok_or(LootError::UnexpectedType(
+                            "include_additional_cost_component",
+                            "a boolean",
+                        ))
+                    })
+                    .transpose()?
+                    .unwrap_or(false)
+                {
+                    // The version-free item model has no additional-trade-cost
+                    // component. Keep the enchantment itself useful, but retain
+                    // an audit entry so callers cannot mistake the result for
+                    // a fully represented function.
+                    audit.push("function minecraft:enchant_with_levels include_additional_cost_component".to_string());
+                }
+                Ok(Self::EnchantWithLevels { levels, options, conditions })
             }
             "minecraft:sequence" => {
                 let functions = parse_functions(value.get("functions"), audit)?;
@@ -1270,6 +1393,34 @@ impl LootFunction {
                         stack.item = output;
                         stack.count = count;
                     }
+                }
+            }
+            Self::EnchantWithLevels { levels, options, conditions } => {
+                if !conditions.iter().all(|c| c.test(context, rng)) {
+                    return;
+                }
+                // The cost provider is evaluated before the item-aware
+                // selection, including for an item that cannot be enchanted.
+                let cost = levels.int(context, rng);
+                let was_book = stack.item.to_string() == "minecraft:book";
+                let offers = crate::enchanting::select_enchantments_filtered(
+                    rng,
+                    stack,
+                    cost,
+                    |definition| options.allows(definition),
+                );
+                // The item conversion happens even when the candidate set is
+                // empty. The current model stores the resulting enchantments
+                // in its regular list; the separate stored-enchantments and
+                // additional-trade-cost components remain audited above when
+                // a table asks for them.
+                if was_book {
+                    stack.item = "minecraft:enchanted_book"
+                        .parse()
+                        .expect("literal enchanted-book resource key");
+                }
+                for offer in offers {
+                    crate::anvil::apply_enchantment(stack, offer.key, offer.level);
                 }
             }
             Self::Sequence(functions) => {
@@ -1668,7 +1819,7 @@ impl StatePropertyMatcher {
 /// An `EnumProperty`'s ordering is its **declaration order**, which is not
 /// recoverable from a serialized name, so a ranged matcher over an enum property
 /// fails closed here. That path is unreachable from the bundle: all 258
-/// `block_state_property` conditions across the 1,241 bundled tables use the
+/// `block_state_property` conditions across the 1,246 bundled tables use the
 /// exact-string form and **none** uses a range, measured by walking the JSON.
 #[derive(Debug, Clone, PartialEq)]
 enum StateValueMatcher {
@@ -2100,6 +2251,7 @@ fn parse_entries(value: Option<&Value>, audit: &mut Vec<String>) -> Result<Vec<L
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::enchantment_data;
 
     /// The bundled `minecraft:blocks/dirt` table, re-parsed from a raw string
     /// so the test does not depend on the embedded build table (which
@@ -2328,6 +2480,111 @@ mod tests {
     }
 
     #[test]
+    fn enchant_with_levels_applies_an_explicit_holder_set() {
+        let t = table(
+            "minecraft:test/enchant_with_levels",
+            r#"{
+              "pools": [{
+                "entries": [{
+                  "type": "minecraft:item",
+                  "name": "minecraft:diamond_sword",
+                  "functions": [{
+                    "function": "minecraft:enchant_with_levels",
+                    "levels": 30,
+                    "options": ["minecraft:mending"]
+                  }]
+                }],
+                "rolls": 1.0
+              }]
+            }"#,
+        );
+        assert!(t.unsupported_features().is_empty());
+
+        for seed in 0..128u64 {
+            let mut rng = SpawnRng::new(seed);
+            let out = t.roll(&LootContext::default(), &mut rng);
+            assert_eq!(out.len(), 1);
+            let stack = &out[0];
+            assert_eq!(stack.item.to_string(), "minecraft:diamond_sword");
+            assert_eq!(stack.components.enchantments.len(), 1, "seed {seed}");
+            let enchantment = &stack.components.enchantments[0];
+            assert_eq!(enchantment_data::name_of(enchantment.id), Some("minecraft:mending"));
+            assert_eq!(enchantment.level, 1);
+        }
+    }
+
+    #[test]
+    fn enchant_with_levels_converts_books_and_reports_unknown_options() {
+        let book = table(
+            "minecraft:test/enchant_book",
+            r##"{
+              "pools": [{
+                "entries": [{
+                  "type": "minecraft:item",
+                  "name": "minecraft:book",
+                  "functions": [{
+                    "function": "minecraft:enchant_with_levels",
+                    "levels": 30,
+                    "options": "#minecraft:not_a_real_enchantment_tag"
+                  }]
+                }],
+                "rolls": 1.0
+              }]
+            }"##,
+        );
+        assert_eq!(
+            book.unsupported_features(),
+            &["function minecraft:enchant_with_levels options #minecraft:not_a_real_enchantment_tag".to_string()]
+        );
+        let mut rng = SpawnRng::new(3);
+        let out = book.roll(&LootContext::default(), &mut rng);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].item.to_string(), "minecraft:enchanted_book");
+        assert!(out[0].components.enchantments.is_empty());
+    }
+
+    #[test]
+    fn enchant_with_levels_does_not_draw_for_an_unenchantable_item() {
+        let with_function = table(
+            "minecraft:test/unenchantable_with_function",
+            r##"{
+              "pools": [{
+                "entries": [{
+                  "type": "minecraft:item",
+                  "name": "minecraft:stone",
+                  "functions": [{
+                    "function": "minecraft:enchant_with_levels",
+                    "levels": 30,
+                    "options": "#minecraft:on_random_loot"
+                  }]
+                }],
+                "rolls": 1.0
+              }]
+            }"##,
+        );
+        let control = table(
+            "minecraft:test/unenchantable_control",
+            r#"{
+              "pools": [{
+                "entries": [{ "type": "minecraft:item", "name": "minecraft:stone" }],
+                "rolls": 1.0
+              }]
+            }"#,
+        );
+        assert!(with_function.unsupported_features().is_empty());
+        for seed in 0..32u64 {
+            let mut actual_rng = SpawnRng::new(seed);
+            let actual = with_function.roll(&LootContext::default(), &mut actual_rng);
+            let actual_next = actual_rng.next_int(1_000_000);
+            let mut control_rng = SpawnRng::new(seed);
+            let expected = control.roll(&LootContext::default(), &mut control_rng);
+            let expected_next = control_rng.next_int(1_000_000);
+            assert_eq!(actual, expected, "seed {seed}");
+            assert_eq!(actual_next, expected_next, "enchanting stone consumed a draw at seed {seed}");
+        }
+    }
+
+    #[test]
     fn self_referential_table_terminates() {
         // The self branch shares the pool's weight with the anchor, so a roll
         // that selects it correctly produces nothing rather than recursing
@@ -2444,7 +2701,7 @@ mod tests {
     /// corpus, not a hand-picked handful. Two invariants, and the count is
     /// deliberately exact rather than a floor.
     ///
-    /// `1241` is not a preference: it is the number of tables in
+    /// `1246` is not a preference: it is the number of tables in
     /// `.cache/mc/26.2/client-src/data/minecraft/loot_table/` (1,355) this roller
     /// either fully evaluates or only fails to *decorate*
     /// ([`DECORATION_ONLY_UNSUPPORTED`]), measured by `tests/loot_corpus.rs`'s own
@@ -2465,7 +2722,7 @@ mod tests {
         let set = LootTableSet::load_bundled();
         assert_eq!(
             set.len(),
-            1241,
+            1246,
             "the bundle is the clean subset of the 1,355-table vanilla corpus; \
              if this moved, regenerate with `just regen-loot-corpus` and say why"
         );
@@ -2494,7 +2751,7 @@ mod tests {
         }
         assert!(
             produced > 1000,
-            "one seed across 1,230 tables must produce a lot of stacks; {produced} \
+            "one seed across 1,246 tables must produce a lot of stacks; {produced} \
              suggests the roller is short-circuiting"
         );
         // The clean bundle's five sampled tables retain their expected outputs;
@@ -3458,7 +3715,7 @@ mod tests {
         );
         assert_eq!(
             tables_with_any, 30,
-            "30 of the 1,241 bundled tables carry at least one; the four counts \
+            "30 of the 1,246 bundled tables carry at least one; the four counts \
              above come from walking assets/loot_table/**/*.json for the condition \
              ids, not from this accessor"
         );

@@ -182,13 +182,22 @@ pub struct EnchantmentOffer {
 /// level)` in the real pool whose `[min_cost(level), max_cost(level)]` window
 /// contains `value` — highest matching level first per enchantment (the real
 /// rule's own `for (level = max; level >= min; level--)` break-on-first-match), and
-/// gated on being a primary item or a book (the real `#minecraft:non_treasure`
-/// table pool, [`enchantment_data::non_treasure`]).
-fn available_results(value: i32, item: &ItemStack, is_book: bool) -> Vec<(&'static EnchantmentDef, u32)> {
+/// gated on being a primary item or a book. `allowed` is the holder-set filter
+/// supplied by the caller (`#minecraft:non_treasure` for the enchanting table,
+/// or a loot function's `options` set).
+fn available_results<F>(
+    value: i32,
+    item: &ItemStack,
+    is_book: bool,
+    allowed: &mut F,
+) -> Vec<(&'static EnchantmentDef, u32)>
+where
+    F: FnMut(&EnchantmentDef) -> bool,
+{
     let item_name = item.item.to_string();
     let mut results = Vec::new();
-    for def in enchantment_data::non_treasure() {
-        if !(def.supported.matches(&item_name) || is_book) {
+    for def in enchantment_data::all() {
+        if !allowed(def) || !(def.supported.matches(&item_name) || is_book) {
             continue;
         }
         for level in (1..=def.max_level).rev() {
@@ -208,7 +217,24 @@ fn available_results(value: i32, item: &ItemStack, is_book: bool) -> Vec<(&'stat
 /// [`enchantment_data::compatible`] with everything already chosen) while
 /// `rng.next_int(50) <= cost`, halving `cost` each extra draw.
 #[must_use]
-pub fn select_enchantments(rng: &mut SpawnRng, item: &ItemStack, mut cost: i32) -> Vec<EnchantmentOffer> {
+pub fn select_enchantments(rng: &mut SpawnRng, item: &ItemStack, cost: i32) -> Vec<EnchantmentOffer> {
+    select_enchantments_filtered(rng, item, cost, |def| !def.treasure)
+}
+
+/// Selects enchantments with the same cost/spread/compatibility algorithm as
+/// [`select_enchantments`], but with an explicit registry filter. Loot-table
+/// functions use this to honour their `options` holder set, which can include
+/// treasure enchantments that the enchanting table excludes.
+#[must_use]
+pub(crate) fn select_enchantments_filtered<F>(
+    rng: &mut SpawnRng,
+    item: &ItemStack,
+    mut cost: i32,
+    mut allowed: F,
+) -> Vec<EnchantmentOffer>
+where
+    F: FnMut(&EnchantmentDef) -> bool,
+{
     let mut results = Vec::new();
     let Some(value) = enchantment_data::enchantable_value(&item.item.to_string()) else {
         return results;
@@ -219,7 +245,7 @@ pub fn select_enchantments(rng: &mut SpawnRng, item: &ItemStack, mut cost: i32) 
     cost = ((cost as f32) + (cost as f32) * span).round().max(1.0) as i32;
 
     let is_book = item.item.to_string() == "minecraft:book";
-    let mut candidates = available_results(cost, item, is_book);
+    let mut candidates = available_results(cost, item, is_book, &mut allowed);
     if candidates.is_empty() {
         return results;
     }
