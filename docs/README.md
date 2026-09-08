@@ -532,6 +532,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   ballistics and impact resolution (snowballs, eggs, ender pearls, potions, fireballs,
   arrows), the fishing rod's bobber, the riptide trident and elytra firework boost
   impulses, primed TNT, and the block-destroying half of an explosion.
+- [Protocol 1.13 entity ingest](./protocol-1-13-entity-ingest.md) — Protocol 404
+  still carries initial entity metadata on living-entity and player spawn packets,
+  while attribute updates use textual names and UUID modifiers. This document records
+  the independent fixture boundary that proves those packets reach the ECS entity
+  components.
 - [The 1.13 era crate: one family, one protocol, two breaks](./protocol-1-13-era.md) —
   `crates/versions/1.13` (package `lodestone-v1-13`) serves Minecraft 1.13.2 —
   protocol **404** — from one adapter, one generated packet-id table, one generated
@@ -608,6 +613,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   in `docs/plans/multi-version-protocol-dedup.md`; `v1-8`, `v1-9` and `v1-14` now all
   dispatch through it, and `v1-9` is a four-protocol era crate built on it (see
   [`protocol-1-9-era.md`](./protocol-1-9-era.md)).
+- [Protocol family census](./protocol-family-census.md) — The registry census is the
+  aggregation-level guard for the supported joining families. It checks that every
+  compiled protocol appears once, resolves through the registry, and is claimed by the
+  adapter returned for that protocol.
 - [Recipe item IDs](./recipe-item-ids.md) — Recipe displays, ghost previews, and
   recipe property sets carry item-registry numbers. `lodestone_model::ItemId` keeps
   each number together with whether it has been validated against this build's
