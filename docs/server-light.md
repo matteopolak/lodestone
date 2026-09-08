@@ -66,6 +66,9 @@ requested coordinate, checks all of their revisions, and forwards the returned e
 as one batch before releasing the gates. Existing protocol adapters use the default centre-only
 adapter, while a version adapter can return whichever sparse or fully populated dependency records
 its wire lifecycle actually produces; the source does not infer a dimension policy.
+An allocated light column whose sky and block layers are all zero is still an
+unsettled dependency, so a later admission may compute and populate it; only a
+non-zero retained snapshot can satisfy the centre fast path.
 
 The initial chunk encoder consumes a retained snapshot verbatim. An independent sealed-world capture
 showed that a persisted End section mask can differ from the first in-memory settlement, so a reload

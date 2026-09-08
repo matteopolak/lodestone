@@ -1688,7 +1688,11 @@ pub trait ChunkSource: Send + Sync {
             .resident_column(cx, cz)
             .or_else(|| (!resident_only).then(|| fallback.clone()))
             .ok_or(ColumnLightSettlementError::MissingFootprint)?;
-        if !replace_existing && current.retained_light().is_some() {
+        if !replace_existing
+            && current
+                .retained_light()
+                .is_some_and(lodestone_world::ColumnLight::has_nonzero_values)
+        {
             return Ok(current);
         }
         let mut neighbours = Vec::with_capacity(neighbour_offsets.len());
