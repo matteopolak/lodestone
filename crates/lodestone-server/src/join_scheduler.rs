@@ -579,7 +579,7 @@ pub fn generation_window_for(parallelism: usize) -> usize {
 ///
 /// # wasm32
 ///
-/// There is no blocking pool, so the window is forced to 1 and columns are
+/// There is no native worker pool, so the window is forced to 1 and columns are
 /// generated inline — the unchanged behaviour of a target that never had a second
 /// thread. Same as `crate::chunk::generate_columns_offloaded`'s `cfg`.
 pub struct ColumnPipeline<S> {
@@ -609,7 +609,7 @@ pub struct ColumnPipeline<S> {
     /// order they finish in. Pairing them here (rather than indexing a `coords`
     /// vector) is what lets the spawn order itself be dynamic.
     #[cfg(not(target_arch = "wasm32"))]
-    inflight: VecDeque<((i32, i32), tokio::task::JoinHandle<Result<ColumnPayload, ChunkEncodeError>>)>,
+    inflight: VecDeque<((i32, i32), tokio::sync::oneshot::Receiver<Result<ColumnPayload, ChunkEncodeError>>)>,
     #[cfg(target_arch = "wasm32")]
     inflight: VecDeque<((i32, i32), ColumnPayload)>,
 }
@@ -742,7 +742,7 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
     ///
     /// A newly visible strip contains `2r + 1` columns (`33` at
     /// `view_radius = 16`). Enqueuing it here lets the connection task keep
-    /// reading and writing while the blocking pool generates the strip; one
+    /// reading and writing while the shared native pool generates the strip; one
     /// await covers only the first strip segment.
     ///
     /// Enqueueing into the live pipeline gives the strip the same primed window
@@ -782,7 +782,7 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
     ///
     /// **In-flight columns are not cancelled.** They have already been spawned, there
     /// are at most [`window`](Self::window) of them, and reaching into the pool to
-    /// abandon a `JoinHandle` would lose the column for a player who walks back into
+    /// abandon its queued result would lose the column for a player who walks back into
     /// it. So the guarantee is "a forgotten column is not *newly started*", not "no
     /// forgotten column is ever sent".
     pub(crate) fn cancel(&mut self, dropped: &std::collections::HashSet<(i32, i32)>) -> usize {
@@ -821,7 +821,7 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
     /// column is in hand, so a cancelled `next` leaves the pipeline exactly as it
     /// found it and the next call re-awaits the same worker. Popping first — as
     /// this did while it was only ever driven to completion — would have dropped
-    /// the `JoinHandle` on cancellation and silently lost that column from the
+    /// the queued result on cancellation and silently lost that column from the
     /// wire.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn next(&mut self) -> Result<Option<((i32, i32), ColumnPayload)>, ChunkEncodeError> {
@@ -846,32 +846,34 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
             // terrain: it receives ~40 KiB of finished frame instead of a
             // multi-hundred-KiB column plus 62 M instructions of work to do to it.
             let encoder = self.encoder.clone();
-            self.inflight.push_back((
-                (cx, cz),
-                tokio::task::spawn_blocking(move || {
-                    let column = source.column_at(cx, cz, stage);
-                    match encoder {
-                        Some(encoder) => encoder
-                            .try_encode_chunk_in_dimension(cx, cz, &column, dimension)
-                            .map(ColumnPayload::Encoded),
-                        None => Ok(ColumnPayload::Column(column)),
-                    }
-                }),
-            ));
+            // This await is only global-pool admission: it does not await the
+            // column. Once admitted, `spawn` has no suspension point before its
+            // receiver is stored, so cancellation cannot lose an in-flight result.
+            let result = crate::worldgen_dispatch::spawn(move || {
+                let column = source.column_at(cx, cz, stage);
+                match encoder {
+                    Some(encoder) => encoder
+                        .try_encode_chunk_in_dimension(cx, cz, &column, dimension)
+                        .map(ColumnPayload::Encoded),
+                    None => Ok(ColumnPayload::Column(column)),
+                }
+            })
+            .await;
+            self.inflight.push_back(((cx, cz), result));
         }
         let (pos, handle) = self
             .inflight
             .front_mut()
             .expect("the top-up above spawns at least one column while any remain");
         let pos = *pos;
-        let payload = handle.await.expect("worldgen join burst panicked")?;
+        let payload = handle.await.expect("worldgen Rayon worker panicked")?;
         self.inflight.pop_front();
         self.emitted += 1;
         self.primed = true;
         Ok(Some((pos, payload)))
     }
 
-    /// wasm32: no blocking pool, so this is the serial path. See the struct doc.
+    /// wasm32: no native worker pool, so this is the serial path. See the struct doc.
     #[cfg(target_arch = "wasm32")]
     pub async fn next(&mut self) -> Result<Option<((i32, i32), ColumnPayload)>, ChunkEncodeError> {
         if self.remaining() == 0 {
@@ -1419,6 +1421,126 @@ mod tests {
             window < 289,
             "a window of {window} would reproduce 5104adf's 289 concurrent generator calls \
              on this machine — the in-flight count must derive from cores, not the view"
+        );
+    }
+
+    /// Multiple connections share the reusable Rayon pool. The old shape gave
+    /// every pipeline its own Tokio blocking-pool window, so simultaneous joins
+    /// could exceed the core count. The source also gives each coordinate
+    /// deterministic content; the digest check makes this a concurrency test
+    /// rather than only a worker-count test.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_pipelines_share_a_core_budget_and_preserve_content_digest() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        struct DispatchProbe {
+            active: AtomicUsize,
+            max_active: AtomicUsize,
+        }
+
+        impl DispatchProbe {
+            fn digest_for(coords: &[(i32, i32)]) -> u64 {
+                let mut digest = DefaultHasher::new();
+                for &(cx, cz) in coords {
+                    cx.hash(&mut digest);
+                    cz.hash(&mut digest);
+                    let state = if (cx as i64 * 31 + cz as i64 * 17) & 1 == 0 {
+                        "minecraft:stone"
+                    } else {
+                        "minecraft:dirt"
+                    };
+                    state.hash(&mut digest);
+                }
+                digest.finish()
+            }
+        }
+
+        impl ChunkSource for DispatchProbe {
+            fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+                let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+                self.max_active.fetch_max(active, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(2));
+                let state = if (cx as i64 * 31 + cz as i64 * 17) & 1 == 0 {
+                    "minecraft:stone"
+                } else {
+                    "minecraft:dirt"
+                };
+                let mut column = ChunkColumn::new(0, 16);
+                column.set_block(0, 0, 0, state);
+                self.active.fetch_sub(1, Ordering::SeqCst);
+                column
+            }
+
+            fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+                "minecraft:air".to_string()
+            }
+
+            fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+                crate::chunk::DEFAULT_BIOME.to_string()
+            }
+
+            fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        }
+
+        let parallelism = crate::worldgen_dispatch::parallelism();
+        let pipeline_count = parallelism.max(2);
+        let source = Arc::new(DispatchProbe {
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+        });
+        let mut expected_coords = Vec::with_capacity(pipeline_count * 4);
+        let mut tasks = Vec::with_capacity(pipeline_count);
+
+        for pipeline_id in 0..pipeline_count {
+            let coords: Vec<(i32, i32)> = (0..4)
+                .map(|offset| {
+                    let x = (pipeline_id * 4 + offset) as i32;
+                    (x, -x - 1)
+                })
+                .collect();
+            expected_coords.extend(coords.iter().copied());
+            let source = Arc::clone(&source);
+            tasks.push(tokio::spawn(async move {
+                let mut pipeline = ColumnPipeline::with_window(source, coords.clone(), 2);
+                let mut observed = Vec::with_capacity(coords.len());
+                while let Some((position, payload)) = pipeline
+                    .next()
+                    .await
+                    .expect("the deterministic probe cannot encode-fail")
+                {
+                    let column = payload
+                        .column()
+                        .expect("the probe pipeline has no off-task encoder");
+                    observed.push((position, column.block_state(0, 0, 0).to_string()));
+                }
+                observed
+            }));
+        }
+
+        let mut observed_coords = Vec::with_capacity(expected_coords.len());
+        let mut observed_digest = DefaultHasher::new();
+        for task in tasks {
+            for ((cx, cz), state) in task.await.expect("pipeline task must not panic") {
+                observed_coords.push((cx, cz));
+                cx.hash(&mut observed_digest);
+                cz.hash(&mut observed_digest);
+                state.hash(&mut observed_digest);
+            }
+        }
+
+        assert_eq!(observed_coords, expected_coords, "dispatch changed wire order");
+        assert_eq!(
+            observed_digest.finish(),
+            DispatchProbe::digest_for(&expected_coords),
+            "concurrent dispatch changed generated content"
+        );
+        assert!(
+            source.max_active.load(Ordering::SeqCst) <= parallelism,
+            "native dispatch exceeded its core budget: observed {}, budget {}",
+            source.max_active.load(Ordering::SeqCst),
+            parallelism
         );
     }
 

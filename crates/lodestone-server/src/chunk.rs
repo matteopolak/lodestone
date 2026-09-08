@@ -2176,7 +2176,8 @@ pub struct WorldRegistries {
     pub native_storage: Option<std::sync::Arc<crate::world_storage::WorldStorage>>,
 }
 
-/// Generates every column in `coords` across scoped OS threads over `&source`,
+/// Generates every column in `coords` across the shared native Rayon pool over
+/// `&source`,
 /// returning them in the **same order as `coords`** regardless of which
 /// thread finished which column first.
 ///
@@ -2186,10 +2187,12 @@ pub struct WorldRegistries {
 /// and no shared RNG stream exists anywhere in
 /// `lodestone-worldgen`, so results are order-independent by construction —
 /// see `OverworldGenerator::column`'s own doc comment and
-/// `examples/bench_worldgen.rs`, which already shares a generator across
-/// `std::thread::scope` workers the same way. `ChunkSource: Send + Sync`
-/// (this trait's own bound, above) is what makes `&S` shareable across the
-/// scope in the first place.
+/// `examples/bench_worldgen.rs`, which already shares a generator across a
+/// reusable worker pool the same way. `ChunkSource: Send + Sync` (this trait's
+/// own bound, above) is what makes `&S` shareable across the pool in the first
+/// place. Reusing one pool is load-bearing: a fresh scoped thread set per
+/// batch would multiply native workers when players cross chunk boundaries
+/// together.
 ///
 /// Callers that care about the wire being independent of thread scheduling
 /// (i.e. every caller) must still encode/send the returned columns in the
@@ -2246,30 +2249,26 @@ where
             .collect();
     }
 
-    let workers = std::thread::available_parallelism()
-        .map(std::num::NonZero::get)
-        .unwrap_or(4)
-        .max(1);
-    let batch = coords.len().div_ceil(workers).max(1);
+    // Indexed parallel collection retains coordinate order while Rayon reuses
+    // the process-wide pool for every native batch and connection.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use rayon::prelude::*;
 
-    std::thread::scope(|scope| {
-        let handles: Vec<_> = coords
-            .chunks(batch)
-            .map(|slice| {
-                let f = &f;
-                scope.spawn(move || {
-                    slice
-                        .iter()
-                        .map(|&(cx, cz)| f((cx, cz), source.column(cx, cz)))
-                        .collect::<Vec<_>>()
-                })
-            })
+        return coords
+            .par_iter()
+            .map(|&(cx, cz)| f((cx, cz), source.column(cx, cz)))
             .collect();
-        handles
-            .into_iter()
-            .flat_map(|h| h.join().expect("worldgen worker thread panicked"))
-            .collect()
-    })
+    }
+
+    // Browser builds deliberately keep the yielding caller above this helper;
+    // this fallback also keeps the generic function available to wasm tests
+    // without linking Rayon into the browser target.
+    #[cfg(target_arch = "wasm32")]
+    coords
+        .iter()
+        .map(|&(cx, cz)| f((cx, cz), source.column(cx, cz)))
+        .collect()
 }
 
 /// [`map_columns_parallel`]'s single-threaded, **yielding** twin — the wasm32
@@ -2364,10 +2363,10 @@ async fn yield_to_browser() {
 ///
 /// # Why this exists when generation is already parallel
 ///
-/// [`generate_columns_parallel`] improves *throughput*: the batch is
-/// fanned out over scoped OS threads. It did nothing about *latency*, because
-/// its final `std::thread::scope` join blocks the calling thread until every
-/// worker finishes. Parallel is not the same as non-blocking, and the
+/// [`generate_columns_parallel`] improves *throughput*: the batch is fanned out
+/// over the shared Rayon pool. It did nothing about *latency* when called
+/// inline, because waiting for every worker still blocks the caller. Parallel
+/// is not the same as non-blocking, and the
 /// distinction is total rather than academic here: the shell builds the
 /// server's runtime with `tokio::runtime::Builder::new_current_thread()`
 /// (`crates/lodestone-shell/src/net.rs`), so the connection task and
@@ -2375,31 +2374,17 @@ async fn yield_to_browser() {
 /// *every* task in the process — the world tick included — so an inline
 /// chunk-boundary generation can drop one or more 50 ms ticks.
 ///
-/// # Why `spawn_blocking` and not `block_in_place`
+/// # Why a Rayon handoff and not `spawn_blocking`
 ///
-/// [`tokio::task::block_in_place`] needs no signature change and is the
-/// obvious-looking fix. It **panics** on a current-thread runtime —
-/// `can call blocking only when running on the multi-threaded runtime` —
-/// which is exactly the runtime production builds, so it would panic in
-/// singleplayer rather than merely fail a test. Measured, on a
-/// `new_current_thread` runtime:
-///
-/// | call | result |
-/// |---|---|
-/// | `block_in_place` | panics |
-/// | `spawn_blocking` | `Ok` |
-/// | 10 ms timer ticks during a 300 ms `spawn_blocking` | **25** |
-/// | 10 ms timer ticks during a 300 ms inline block | **0** |
-///
-/// `spawn_blocking` is correct on a current-thread runtime because the
-/// blocking pool is a separate set of threads from the core thread, and it
-/// stays correct on a multi-thread runtime as well, so the behavior is
-/// independent of the runtime's thread count.
+/// A Rayon job is correct on both current-thread and multi-thread Tokio
+/// runtimes: generation runs on the shared native pool and the caller awaits a
+/// oneshot result, so no runtime worker is blocked and no second blocking pool
+/// is created per connection.
 ///
 /// # Why `Arc<S>` rather than `&S`
 ///
-/// `spawn_blocking` requires a `'static` closure, so the source cannot be
-/// borrowed across it. Callers thread the shared handle they already hold
+/// The dispatched closure requires a `'static` lifetime, so the source cannot
+/// be borrowed across it. Callers thread the shared handle they already hold
 /// (`crate::integrated` builds `Arc::new(source)` for exactly this reason);
 /// `crate::server::SourceRef` is the wrapper that lets a borrow-shaped
 /// caller keep the old blocking path without duplicating any of
@@ -2407,15 +2392,9 @@ async fn yield_to_browser() {
 ///
 /// # wasm32
 ///
-/// `wasm32-unknown-unknown` has no blocking pool and does **not** call
-/// `generate_columns_parallel` straight through: that function's
-/// `coords.len() > 1` arm fans out
-/// over `std::thread::scope`, and a `Scope::spawn` on this target reaches
-/// `Builder::spawn`'s `Err` through an internal `.expect()` — measured,
-/// executed in a wasm VM: `unreachable`, i.e. it TRAPS, and with this crate's
-/// `panic = "abort"` release profile that is unrecoverable. `portal.rs`'s
-/// `create_portal` gates its own `generate_columns_parallel` call off on wasm32
-/// for the same constraint. This helper therefore
+/// `wasm32-unknown-unknown` has no native Rayon pool and does **not** call
+/// `generate_columns_parallel` straight through. `portal.rs`'s `create_portal`
+/// gates its own call off on wasm32 for the same constraint. This helper therefore
 /// wasm32 instead calls [`generate_columns_yielding`], which never enters
 /// `map_columns_parallel`'s multi-column branch (it generates one column at a
 /// time) and yields to the browser's own task queue between columns, avoiding
@@ -2432,9 +2411,12 @@ pub(crate) async fn generate_columns_offloaded<S: ChunkSource + 'static + ?Sized
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        tokio::task::spawn_blocking(move || generate_columns_parallel(&*source, &coords))
+        crate::worldgen_dispatch::spawn(move || {
+            generate_columns_parallel(&*source, &coords)
+        })
             .await
-            .expect("worldgen blocking task panicked")
+            .await
+            .expect("worldgen Rayon worker panicked")
     }
 }
 
@@ -2476,10 +2458,8 @@ pub(crate) async fn generate_and_encode_columns_offloaded<S: ChunkSource + 'stat
     // wasm32: `map_columns_yielding`, one column generated-and-encoded at a
     // time with a real browser yield between each — see
     // `generate_columns_offloaded`'s wasm32 doc for why this is not merely a
-    // latency nicety on this target. `map_columns_parallel`'s
-    // `coords.len() > 1` branch (native's own past shape here) TRAPS on
-    // wasm32 via `std::thread::scope`, so this is also what keeps the browser
-    // build from crashing on any batch bigger than one column.
+    // latency nicety on this target. The native Rayon branch is not compiled
+    // into the browser build, so this path cannot create native workers there.
     #[cfg(target_arch = "wasm32")]
     {
         Some(
@@ -2509,9 +2489,10 @@ pub(crate) async fn generate_and_encode_columns_offloaded<S: ChunkSource + 'stat
             })
         };
         Some(
-            tokio::task::spawn_blocking(encode)
+            crate::worldgen_dispatch::spawn(encode)
                 .await
-                .expect("worldgen blocking task panicked")
+                .await
+                .expect("worldgen Rayon worker panicked")
                 .into_iter()
                 .collect(),
         )
@@ -3639,7 +3620,7 @@ mod tests {
             "the timer task ran {offloaded_ticks} times during a {offloaded_elapsed:?} \
              offloaded generation burst; expected at least {floor} (≈{expected} periods of \
              {GATE_TICK_PERIOD:?}). A count near 0 means generation is still blocking the \
-             runtime — i.e. `spawn_blocking` is not being reached"
+             runtime — i.e. the Rayon handoff is not being reached"
         );
 
         // The control. If this is ever non-zero, `generate_columns_parallel`
@@ -3695,12 +3676,137 @@ mod tests {
         );
     }
 
+    /// Two production batch calls must share the Rayon pool rather than each
+    /// creating a Tokio blocking task that fans out another `P` scoped threads.
+    /// The source records both simultaneous occupancy and worker identities;
+    /// either exceeding the pool size would expose nested/per-batch thread
+    /// creation. The returned digest and order are checked at the same time so
+    /// the regression cannot be reduced to a thread-count-only fixture.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn concurrent_offloaded_batches_share_rayon_workers_and_content() {
+        use std::collections::{HashSet, hash_map::DefaultHasher};
+        use std::hash::{Hash, Hasher};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+
+        struct BatchProbe {
+            active: AtomicUsize,
+            max_active: AtomicUsize,
+            workers: Mutex<HashSet<std::thread::ThreadId>>,
+        }
+
+        impl ChunkSource for BatchProbe {
+            fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+                let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+                self.max_active.fetch_max(active, Ordering::SeqCst);
+                self.workers
+                    .lock()
+                    .expect("batch worker log poisoned")
+                    .insert(std::thread::current().id());
+                std::thread::sleep(std::time::Duration::from_millis(3));
+                let mut column = ChunkColumn::new(0, 16);
+                let state = if (cx as i64 * 31 + cz as i64 * 17) & 1 == 0 {
+                    "minecraft:stone"
+                } else {
+                    "minecraft:dirt"
+                };
+                column.set_block(0, 0, 0, state);
+                self.active.fetch_sub(1, Ordering::SeqCst);
+                column
+            }
+
+            fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+                "minecraft:air".to_string()
+            }
+
+            fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+                crate::chunk::DEFAULT_BIOME.to_string()
+            }
+
+            fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        }
+
+        fn coords(offset: i32, count: usize) -> Vec<(i32, i32)> {
+            (0..count)
+                .map(|i| {
+                    let x = offset + i as i32;
+                    (x, -x - 1)
+                })
+                .collect()
+        }
+
+        fn digest(columns: &[ChunkColumn], coords: &[(i32, i32)]) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            for (&(cx, cz), column) in coords.iter().zip(columns) {
+                cx.hash(&mut hasher);
+                cz.hash(&mut hasher);
+                column.block_state(0, 0, 0).hash(&mut hasher);
+            }
+            hasher.finish()
+        }
+
+        let workers = rayon::current_num_threads().max(1);
+        let first_coords = coords(0, workers * 3);
+        let second_coords = coords(10_000, workers * 3);
+        let source = Arc::new(BatchProbe {
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+            workers: Mutex::new(HashSet::new()),
+        });
+        let (first, second) = tokio::join!(
+            generate_columns_offloaded(Arc::clone(&source), first_coords.clone()),
+            generate_columns_offloaded(Arc::clone(&source), second_coords.clone()),
+        );
+
+        assert_eq!(first.len(), first_coords.len());
+        assert_eq!(second.len(), second_coords.len());
+        assert_eq!(
+            digest(&first, &first_coords),
+            digest_serial(&first_coords),
+            "the first batch changed generated content or order"
+        );
+        assert_eq!(
+            digest(&second, &second_coords),
+            digest_serial(&second_coords),
+            "the second batch changed generated content or order"
+        );
+        let max_active = source.max_active.load(Ordering::SeqCst);
+        let unique_workers = source
+            .workers
+            .lock()
+            .expect("batch worker log poisoned")
+            .len();
+        assert!(
+            max_active <= workers,
+            "concurrent batches exceeded the shared Rayon pool: {max_active} active, {workers} workers"
+        );
+        assert!(
+            unique_workers <= workers,
+            "batch dispatch created per-batch workers: observed {unique_workers}, pool has {workers}"
+        );
+
+        fn digest_serial(coords: &[(i32, i32)]) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            for &(cx, cz) in coords {
+                cx.hash(&mut hasher);
+                cz.hash(&mut hasher);
+                let state = if (cx as i64 * 31 + cz as i64 * 17) & 1 == 0 {
+                    "minecraft:stone"
+                } else {
+                    "minecraft:dirt"
+                };
+                state.hash(&mut hasher);
+            }
+            hasher.finish()
+        }
+    }
+
     /// [`generate_columns_yielding`]/[`map_columns_yielding`] are what
     /// `generate_columns_offloaded`/`generate_and_encode_columns_offloaded`'s
-    /// wasm32 branches call instead of `generate_columns_parallel` — whose
-    /// `coords.len() > 1` branch TRAPS on wasm32 via `std::thread::scope` (see
-    /// their doc comments; measured executing the equivalent
-    /// `std::thread::scope(|s| s.spawn(...))` in a wasm VM: `unreachable`).
+    /// wasm32 branches call instead of the native Rayon branch of
+    /// `generate_columns_parallel`; native worker dispatch is not compiled
+    /// into the browser target.
     /// wasm32-only code cannot be exercised by a native `cargo test`, so this
     /// gate proves the one property that is target-independent by
     /// construction: **the yield closure runs exactly once per column,
