@@ -20,6 +20,16 @@ This split prevents two independent failure modes. A generated chunk can receive
 
 The P06 raw-packet format is an independent opt-in path: pass `--raw-packet` (or `--format v6`) to materialize and export the 1001 by 1001 target grid `-500..=500`, with its complete 1003 by 1003 halo `-501..=501`. The materialization wrapper selects the matching v6 seal and does not confuse it with the v2 semantic provenance stamp. Each manifest record is the first two bytes of the SHA-256 digest of the exact stabilized compiled-codec packet body, emitted in x-fastest then z order. The manifest carries the v6 dimension, frozen-world and materialization identities; each export also writes a `.packet-audit` sidecar containing a matching identity header and one full 32-byte packet digest per coordinate. The sidecar is checked during resume, so a matching 16-bit payload cannot hide a missing or misaligned full audit stream. P06 does not reinterpret or regenerate v3-v5 semantic manifests.
 
+For a Nether P06 comparison, the Rust gate prepares the immutable pre-decoration
+cache from the selected target prefix before wrapping it in the retained source.
+The packet's 3×3 light neighbourhood expands the generator's 5×5 prefix read
+closure by one chunk on each side. Thus a 51×51 target shard derives a 57×57
+prefix capacity (3,249 entries); a bounded pilot derives the smaller rectangle
+it actually visits. Preparation changes retention only. The worldgen counter
+control reports prefix computations and whole-cache evictions, and the ignored
+raw-byte control compares a fresh unprepared source with the prepared source
+before this path is used for an external packet comparison.
+
 ### Lifecycle replay for the accepted 16 by 16 manifests
 
 The accepted partial manifests at `/private/tmp/lodestone-worldgen-parity-overworld-16-outputs/overworld-partial.lwp` and `/private/tmp/lodestone-worldgen-parity-nether-16-outputs/nether-partial.lwp` have an independent full-run lifecycle capture beside them at `/private/tmp/lodestone-worldgen-lifecycle-capture-20260907-r1/out`. The Rust gate authenticates `provenance.txt`, the 324-row `replay.tsv`, and the 4,608-row `replay-completion-order.tsv` before generating a packet. The capture schema is `lodestone-worldgen-lifecycle-capture-v1`, with seed `42`, a one-chunk halo, and tile-z-major/tile-x-major admission order. The accepted manifest SHA-256 values are `54f3a7e62ed8dbd0d976a27eefef64f6d11152d3e26b94e162e2561192f81071` (Overworld) and `cb4d341f6826ebf7bce49ee195618d48e314729b6bd4251b3b97124e4f948789` (Nether). The canonical replay-sequence SHA-256 is `4e2eeb0217c06e7ed68e3976df04ebef5648ff1b14516141c49095d8ef15498f`; the source-capture SHA-256 is `b47516b6f47ec74aba6201cd8d54401deb12edf94cc4272c0dd9c2b52845f9a3`; and `replay.tsv` is `b8678c8a8b847a94d82bba31c9250aeace0d43e02fc309c923838e327c209986`. The Overworld completion file is `4af54ab035bc7febad74da7a6dffdd9c79a6b9e10c90a164523d98c5e995b1e0`; the Nether completion file is `7115c80a42320ed2ca7c3b8fe7160ea4516cdc6436a10633e212f405f2f0b52a`.

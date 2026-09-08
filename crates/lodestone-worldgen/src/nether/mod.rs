@@ -369,12 +369,14 @@ pub struct NetherGenerator {
     starts: Mutex<HashMap<(i32, i32), Arc<Vec<Arc<StructureStart>>>>>,
     pre_decoration: Mutex<HashMap<(i32, i32), Arc<PreDecorationResult>>>,
     /// Capacity of the pure pre-decoration memo. Production keeps the small
-    /// demand-ordered bound; the lifecycle comparator raises it only for the
-    /// admitted replay closure, so a partial packet limit cannot trigger the
-    /// same prefix repeatedly while the authenticated source order is replayed.
+    /// demand-ordered bound; an explicit lifecycle or packet replay raises it
+    /// only for the requested closure, so a bounded replay cannot trigger the
+    /// same prefix repeatedly while its authenticated source order is replayed.
     pre_decoration_capacity: AtomicUsize,
     /// Number of cache-miss computations, exposed for parity diagnostics.
     pre_decoration_computations: AtomicUsize,
+    /// Number of whole-memo evictions, exposed for parity diagnostics.
+    pre_decoration_evictions: AtomicUsize,
 }
 
 /// Entries [`NetherGenerator::starts`] holds before it is cleared wholesale.
@@ -404,7 +406,7 @@ const DECORATION_MEMO_CEILING: usize = 32;
 /// window, where `MOTION_BLOCKING` can return the first air row above the roof.
 const DECORATION_WINDOW_HEIGHT: i32 = 256;
 
-fn lifecycle_pre_decoration_capacity(admissions: &[(i32, i32)]) -> usize {
+fn pre_decoration_capacity(admissions: &[(i32, i32)], radius: i32) -> usize {
     let Some(&(first_x, first_z)) = admissions.first() else {
         return DECORATION_MEMO_CEILING;
     };
@@ -414,17 +416,21 @@ fn lifecycle_pre_decoration_capacity(admissions: &[(i32, i32)]) -> usize {
             (min_x.min(x), max_x.max(x), min_z.min(z), max_z.max(z))
         },
     );
-    let radius = crate::feature::region_view::WIDE_RADIUS;
     let width: usize = (i64::from(max_x) - i64::from(min_x) + 1 + i64::from(radius) * 2)
         .try_into()
-        .expect("lifecycle replay x closure must fit usize");
+        .expect("immutable-stage x closure must fit usize");
     let height: usize = (i64::from(max_z) - i64::from(min_z) + 1 + i64::from(radius) * 2)
         .try_into()
-        .expect("lifecycle replay z closure must fit usize");
+        .expect("immutable-stage z closure must fit usize");
     width
         .checked_mul(height)
-        .expect("lifecycle replay closure must fit usize")
+        .expect("immutable-stage closure must fit usize")
         .max(DECORATION_MEMO_CEILING)
+}
+
+#[cfg(test)]
+fn lifecycle_pre_decoration_capacity(admissions: &[(i32, i32)]) -> usize {
+    pre_decoration_capacity(admissions, crate::feature::region_view::WIDE_RADIUS)
 }
 
 /// Re-express a generated-column height anchor for the wider resident window.
@@ -935,6 +941,7 @@ impl NetherGenerator {
             pre_decoration: Mutex::new(HashMap::new()),
             pre_decoration_capacity: AtomicUsize::new(DECORATION_MEMO_CEILING),
             pre_decoration_computations: AtomicUsize::new(0),
+            pre_decoration_evictions: AtomicUsize::new(0),
         }
     }
 
@@ -945,9 +952,40 @@ impl NetherGenerator {
     /// The returned capacity is useful to diagnostics and tests; an empty
     /// admission list leaves the production bound unchanged.
     pub fn prepare_lifecycle_replay(&self, admissions: &[(i32, i32)]) -> usize {
-        let capacity = lifecycle_pre_decoration_capacity(admissions);
+        self.prepare_immutable_stage_cache(
+            admissions,
+            crate::feature::region_view::WIDE_RADIUS,
+        )
+    }
+
+    /// Raises the pure pre-decoration memo for packet replay over `targets`.
+    ///
+    /// A packet needs the target plus its eight light neighbours, and each
+    /// generated column reads the wider 5×5 immutable prefix context. The
+    /// capacity is therefore derived from the target coordinates expanded by
+    /// one packet-neighbour radius and then by the generator's wide radius.
+    /// The production demand-ordered bound remains unchanged for callers that
+    /// do not explicitly prepare a replay.
+    pub fn prepare_packet_replay(&self, targets: &[(i32, i32)]) -> usize {
+        let mut packet_targets = Vec::with_capacity(targets.len().saturating_mul(9));
+        for &(cx, cz) in targets {
+            for dx in -1..=1 {
+                for dz in -1..=1 {
+                    packet_targets.push((cx + dx, cz + dz));
+                }
+            }
+        }
+        self.prepare_immutable_stage_cache(
+            &packet_targets,
+            crate::feature::region_view::WIDE_RADIUS,
+        )
+    }
+
+    fn prepare_immutable_stage_cache(&self, admissions: &[(i32, i32)], radius: i32) -> usize {
+        let capacity = pre_decoration_capacity(admissions, radius);
         self.pre_decoration_capacity.store(capacity, Ordering::Relaxed);
         self.pre_decoration_computations.store(0, Ordering::Relaxed);
+        self.pre_decoration_evictions.store(0, Ordering::Relaxed);
         capacity
     }
 
@@ -956,6 +994,14 @@ impl NetherGenerator {
     #[must_use]
     pub fn pre_decoration_computations(&self) -> usize {
         self.pre_decoration_computations.load(Ordering::Relaxed)
+    }
+
+    /// Number of whole pre-decoration memo clears since the last explicit
+    /// replay preparation (or since generator construction before the first
+    /// preparation).
+    #[must_use]
+    pub fn pre_decoration_evictions(&self) -> usize {
+        self.pre_decoration_evictions.load(Ordering::Relaxed)
     }
 
     /// The generated column for chunk `(cx, cz)`.
@@ -1359,10 +1405,8 @@ impl NetherGenerator {
         {
             return existing;
         }
-        if self.pre_decoration_capacity.load(Ordering::Relaxed) > DECORATION_MEMO_CEILING {
-            self.pre_decoration_computations
-                .fetch_add(1, Ordering::Relaxed);
-        }
+        self.pre_decoration_computations
+            .fetch_add(1, Ordering::Relaxed);
         let base_x = cx * 16;
         let base_z = cz * 16;
         let refs = self.structure_refs(cx, cz);
@@ -1387,6 +1431,7 @@ impl NetherGenerator {
             .expect("nether pre-decoration memo poisoned");
         if memo.len() >= self.pre_decoration_capacity.load(Ordering::Relaxed) {
             memo.clear();
+            self.pre_decoration_evictions.fetch_add(1, Ordering::Relaxed);
         }
         Arc::clone(memo.entry((cx, cz)).or_insert_with(|| Arc::clone(&computed)))
     }
@@ -2146,7 +2191,7 @@ mod tests {
 
     use super::{
         MixedEntryWriter, NetherGenerator, build_nether_feature_lists, decoration_random,
-        lifecycle_pre_decoration_capacity, synchronize_mixed_entry,
+        lifecycle_pre_decoration_capacity, pre_decoration_capacity, synchronize_mixed_entry,
     };
     use crate::dense_grid::DenseBlockGrid;
     use crate::density::{NoiseParams, Resolver};
@@ -2204,6 +2249,16 @@ mod tests {
         };
         assert_eq!(computes(32), 5_534);
         assert_eq!(computes(484), 484);
+    }
+
+    #[test]
+    fn packet_cache_capacity_covers_target_neighbour_prefix_closure() {
+        let radius = crate::feature::region_view::WIDE_RADIUS;
+        assert_eq!(pre_decoration_capacity(&[(-1, -1), (1, 1)], radius), 49);
+        assert_eq!(
+            pre_decoration_capacity(&[(-26, -26), (26, 26)], radius),
+            3_249,
+        );
     }
 
     struct NetherAssets {
