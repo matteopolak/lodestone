@@ -210,6 +210,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   heightfield visual horizon beyond the real streamed-chunk radius. It is a local
   integrated-Overworld feature, not a chunk cache: it cannot request, retain, or mesh
   ordinary chunks.
+- [Entity ownership transfer](./entity-ownership-transfer.md) —
+  `lodestone_server::entity_handoff::EntityOwnershipHandoff` is the typed barrier for
+  a moving entity that crosses from one tick-region owner to another. The first
+  production consumer is dropped-item motion, which now carries its admitted chunk
+  owner through each tick and changes owners only through this barrier.
 - [Entity physics](./entity-physics.md) — General entity and block physics:
   per-block-state collision geometry, the movement constants a block applies to
   whatever stands on it, entity-versus-entity pushing and hard collision, vehicles

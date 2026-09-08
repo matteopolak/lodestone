@@ -219,6 +219,10 @@ pub mod stonecutting;
 /// Sounds, particles and level events the server owns. Public
 /// because `ServerProtocol`'s three new encoders name [`effects::WorldEffect`].
 pub mod effects;
+/// Typed source-stop/destination-start barriers for moving entities that cross
+/// tick-region boundaries. The first production consumer is dropped-item
+/// motion; see `docs/entity-ownership-transfer.md`.
+pub mod entity_handoff;
 mod fall;
 /// Fire spread and burnout on the block-tick queue (`docs/fire-spread.md`).
 /// Public for the same reason [`fluid`] is: any code that writes a fire block

@@ -85,6 +85,7 @@ use lodestone_model::{BlockPos, Difficulty, Identifier, ResourceKey, Rotation, V
 use uuid::Uuid;
 
 use crate::chunk::{AIR, ChunkColumn, ChunkSource};
+use crate::entity_handoff::{EntityHandoffToken, EntityOwnershipHandoff};
 use crate::gravity_tick::FallingBlockEffect;
 use crate::protocol::{EntitySnapshot, MetadataField};
 use crate::mob_spawn::{
@@ -3242,6 +3243,11 @@ struct ItemState {
     uuid: Uuid,
     item: ResourceKey,
     motion: ItemMotion,
+    /// The owner admitted by the last central source-stop/destination-start
+    /// barrier. Workers use this value as their tick-start authority rather
+    /// than re-deriving ownership from a state that another owner may have
+    /// already moved.
+    owner: ItemTickOwner,
 }
 
 /// The chunk that owns a dropped item at the start of its tick.
@@ -3255,6 +3261,12 @@ impl ItemTickOwner {
         Self::Chunk {
             cx: (position.x.floor() as i32).div_euclid(16),
             cz: (position.z.floor() as i32).div_euclid(16),
+        }
+    }
+
+    fn tick_owner(self) -> crate::tick_region::TickOwner {
+        match self {
+            Self::Chunk { cx, cz } => crate::tick_region::TickOwner::Chunk { cx, cz },
         }
     }
 }
@@ -3271,6 +3283,7 @@ pub(crate) struct ItemTickOwnerBatch {
 #[derive(Debug, Clone)]
 struct ItemTickEffect {
     owner: ItemTickOwner,
+    destination: ItemTickOwner,
     serial: usize,
     id: i32,
     lifecycle: ItemLifecycle,
@@ -3509,6 +3522,9 @@ pub struct MobSim<'w> {
     item_owner_plan: u64,
     /// The newest dropped-item owner plan accepted by the central writer.
     applied_item_owner_plan: u64,
+    /// Source-stop/destination-start barrier for dropped items that cross a
+    /// chunk owner during their motion pass.
+    item_handoff: EntityOwnershipHandoff,
     /// The latest experience-orb owner plan issued from this simulation.
     orb_owner_plan: u64,
     /// The newest experience-orb owner plan accepted by the central writer.
@@ -4267,6 +4283,7 @@ impl<'w> MobSim<'w> {
             tick_count: 0,
             item_owner_plan: 0,
             applied_item_owner_plan: 0,
+            item_handoff: EntityOwnershipHandoff::default(),
             orb_owner_plan: 0,
             applied_orb_owner_plan: 0,
             burn_owner_plan: 0,
@@ -5651,7 +5668,7 @@ impl<'w> MobSim<'w> {
                 .get(&tracked.id)
                 .cloned()
                 .expect("a tracked item lifecycle must have matching motion state");
-            let owner = ItemTickOwner::for_position(state.motion.position);
+            let owner = state.owner;
             let input = ItemTickInput {
                 owner,
                 serial,
@@ -5685,8 +5702,10 @@ impl<'w> MobSim<'w> {
                         settle_item(&view, &mut state.motion, before);
                         discard = state.motion.position.y < min_y - VOID_DESPAWN_DEPTH;
                     }
+                    let destination = ItemTickOwner::for_position(state.motion.position);
                     ItemTickEffect {
                         owner: input.owner,
+                        destination,
                         serial: input.serial,
                         id: input.id,
                         lifecycle,
@@ -5752,15 +5771,57 @@ impl<'w> MobSim<'w> {
                 self.items.get(effect.id).is_some() && self.item_state.contains_key(&effect.id),
                 "item owner completion may update only a live tick-start item"
             );
+            assert_eq!(
+                self.item_state
+                    .get(&effect.id)
+                    .expect("checked above")
+                    .owner,
+                effect.owner,
+                "item owner completion must stop the item's tick-start owner"
+            );
+        }
+        let transfers: Vec<_> = effects
+            .iter()
+            .filter_map(|effect| {
+                (!effect.discard && effect.owner != effect.destination).then(|| {
+                    EntityHandoffToken::new(
+                        effect.id,
+                        effect.serial,
+                        plan,
+                        effect.owner.tick_owner(),
+                        effect.destination.tick_owner(),
+                    )
+                    .expect("a nonzero item plan names a real cross-owner transfer")
+                })
+            })
+            .collect();
+        // All sources stop before any destination is admitted. This is the
+        // central barrier: workers never receive an item whose source owner is
+        // still allowed to publish a later completion.
+        for &token in &transfers {
+            self.item_handoff
+                .stop_source(token)
+                .expect("item source stop must be unique and newer than the last transfer");
         }
         for effect in effects {
             self.items.remove(effect.id);
             if effect.discard {
                 self.item_state.remove(&effect.id);
+                self.item_handoff.forget_entity(effect.id);
             } else {
+                let mut state = effect.state;
+                state.owner = effect.destination;
                 self.items.spawn(effect.id, effect.lifecycle);
-                self.item_state.insert(effect.id, effect.state);
+                self.item_state.insert(effect.id, state);
             }
+        }
+        // Destination admission follows the source-stop phase and the live
+        // state replacement. A subsequent tick can therefore submit this
+        // entity only to its newly admitted owner.
+        for token in transfers {
+            self.item_handoff
+                .start_destination(token)
+                .expect("item destination start must follow its source stop");
         }
         self.applied_item_owner_plan = plan;
     }
@@ -10026,7 +10087,13 @@ impl<'w> MobSim<'w> {
                 });
             }
         }
-        for (&id, state) in &self.item_state {
+        let mut item_ids: Vec<i32> = self.item_state.keys().copied().collect();
+        item_ids.sort_unstable();
+        for id in item_ids {
+            let state = self
+                .item_state
+                .get(&id)
+                .expect("sorted item ids came from the live item state map");
             out.push(EntitySnapshot {
                 id,
                 // **`minecraft:item`, not the item's own key.** This field is an
@@ -11555,7 +11622,7 @@ mod item_owner_tests {
         sim
     }
 
-    fn item_state(sim: &MobSim<'_>) -> Vec<(i32, ItemLifecycle, ItemMotion)> {
+    fn item_state(sim: &MobSim<'_>) -> Vec<(i32, ItemLifecycle, ItemMotion, ItemTickOwner)> {
         sim.items
             .iter()
             .map(|tracked| {
@@ -11563,6 +11630,7 @@ mod item_owner_tests {
                     tracked.id,
                     tracked.lifecycle,
                     sim.item_state.get(&tracked.id).expect("matching motion").motion,
+                    sim.item_state.get(&tracked.id).expect("matching owner").owner,
                 )
             })
             .collect()
@@ -11624,6 +11692,126 @@ mod item_owner_tests {
 
         assert_eq!(item_state(&completed), expected);
         assert_eq!(completed_probes, serial_probes);
+    }
+
+    #[test]
+    fn moving_items_crossing_negative_and_positive_boundaries_use_one_barrier_and_keep_ids() {
+        let mut world = ChunkWorld::new(-64, 384);
+        for x in -4..=35 {
+            world.set_solid(x, 0, 0, true);
+        }
+        let world = Box::leak(Box::new(world));
+        let mut sim = MobSim::new(world);
+        let item = ResourceKey::from_str("minecraft:stone").expect("valid key");
+        let negative_to_zero = sim.spawn_item(
+            item.clone(),
+            Vec3::new(-0.1, 2.0, 0.5),
+            Vec3::new(1.0, 0.0, 0.0),
+            ItemLifecycle::newly_dropped(1, 64),
+        );
+        let zero_to_one = sim.spawn_item(
+            item,
+            Vec3::new(15.9, 2.0, 0.5),
+            Vec3::new(1.0, 0.0, 0.0),
+            ItemLifecycle::newly_dropped(1, 64),
+        );
+        let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
+        let (mut batches, _) = sim.tick_item_owner_batches(&state_at);
+        assert_eq!(
+            batches.iter().map(|batch| batch.owner).collect::<Vec<_>>(),
+            [
+                ItemTickOwner::Chunk { cx: -1, cz: 0 },
+                ItemTickOwner::Chunk { cx: 0, cz: 0 },
+            ],
+            "the source owner must use Euclidean division on both sides of zero"
+        );
+        assert_eq!(
+            batches
+                .iter()
+                .flat_map(|batch| batch.effects.iter())
+                .map(|effect| (effect.id, effect.destination))
+                .collect::<Vec<_>>(),
+            [
+                (negative_to_zero, ItemTickOwner::Chunk { cx: 0, cz: 0 }),
+                (zero_to_one, ItemTickOwner::Chunk { cx: 1, cz: 0 }),
+            ],
+            "each crossing must name its destination before central apply"
+        );
+        batches.reverse();
+        sim.apply_item_tick_owner_batches(batches);
+        assert_eq!(sim.item_handoff.pending(), 0, "destination admission closes each route");
+        assert_eq!(
+            sim.item_state
+                .iter()
+                .map(|(&id, state)| (id, state.owner))
+                .collect::<Vec<_>>(),
+            vec![
+                (negative_to_zero, ItemTickOwner::Chunk { cx: 0, cz: 0 }),
+                (zero_to_one, ItemTickOwner::Chunk { cx: 1, cz: 0 }),
+            ]
+        );
+        let snapshot_ids: Vec<_> = sim.snapshots().into_iter().map(|snapshot| snapshot.id).collect();
+        assert_eq!(
+            snapshot_ids,
+            vec![negative_to_zero, zero_to_one],
+            "cross-owner publication keeps entity ids and serial order deterministic"
+        );
+
+        let (next_batches, _) = sim.tick_item_owner_batches(&state_at);
+        assert_eq!(
+            next_batches.iter().map(|batch| batch.owner).collect::<Vec<_>>(),
+            [
+                ItemTickOwner::Chunk { cx: 0, cz: 0 },
+                ItemTickOwner::Chunk { cx: 1, cz: 0 },
+            ],
+            "the destination, not the old source, owns the next tick"
+        );
+        sim.apply_item_tick_owner_batches(next_batches);
+        assert_eq!(sim.item_count(), 2);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn serial_and_four_lane_boundary_crossing_have_identical_owner_and_id_results() {
+        fn crossing_fixture() -> MobSim<'static> {
+            let mut world = ChunkWorld::new(-64, 384);
+            for x in -4..=35 {
+                world.set_solid(x, 0, 0, true);
+            }
+            let world = Box::leak(Box::new(world));
+            let mut sim = MobSim::new(world);
+            let item = ResourceKey::from_str("minecraft:stone").expect("valid key");
+            for x in [-0.1, 15.9, 31.9, 47.9] {
+                sim.spawn_item(
+                    item.clone(),
+                    Vec3::new(x, 2.0, 0.5),
+                    Vec3::new(1.0, 0.0, 0.0),
+                    ItemLifecycle::newly_dropped(1, 64),
+                );
+            }
+            sim
+        }
+
+        let mut serial = crossing_fixture();
+        serial.item_owner_plan = 1;
+        let serial_world = serial.world;
+        let serial_state_at = |x, y, z| serial_world.block_state(x, y, z).to_owned();
+        let serial_batches = serial.tick_item_owner_batches_with_workers(&serial_state_at, 1).0;
+        serial.apply_item_tick_owner_batches(serial_batches);
+
+        let mut parallel = crossing_fixture();
+        parallel.item_owner_plan = 1;
+        let parallel_world = parallel.world;
+        let parallel_state_at = |x, y, z| parallel_world.block_state(x, y, z).to_owned();
+        let parallel_batches = parallel.tick_item_owner_batches_with_workers(&parallel_state_at, 4).0;
+        parallel.apply_item_tick_owner_batches(parallel_batches);
+
+        assert_eq!(item_state(&parallel), item_state(&serial));
+        assert_eq!(
+            parallel.snapshots().into_iter().map(|snapshot| snapshot.id).collect::<Vec<_>>(),
+            [1, 2, 3, 4],
+            "four owner completions retain the stable entity-id publication order"
+        );
     }
 
     #[test]
