@@ -536,8 +536,8 @@ impl LootTableBuilder {
 /// unsupported entry or number provider is the same class of loss. Those must
 /// still keep a table out of the bundle.
 ///
-/// The structure-chest tables are bundled under exactly this rule; level-based
-/// enchantments are evaluated by the loot function itself.
+/// The four structure-chest tables (`chests/shipwreck_{map,supply}`,
+/// `chests/underwater_ruin_{small,big}`) are bundled under exactly this rule.
 pub const DECORATION_ONLY_UNSUPPORTED: &[&str] = &[
     "function minecraft:enchant_randomly",
     "function minecraft:exploration_map",

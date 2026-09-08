@@ -77,10 +77,6 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   benchmark metric is *supposed* to be, `scripts/bench-gate.py` compares a fresh run
   against it and fails on drift in either direction, and CI's `bench-gate` job runs
   both on every push and pull request. It gates counts only — never a duration.
-- [Block-entity runtime keys](./block-entity-kinds.md) —
-  `lodestone-server::block_entities::BlockEntityKind` is the typed runtime key for a
-  block-entity record. Built-in records use enum variants, while plugin-defined and
-  newer keys use `Extension(String)` so unknown values remain lossless.
 - [Block entity renderers](./block-entity-renderers.md) — The render path for blocks
   whose visible geometry is not (fully) described by their own block model — chests,
   skulls, signs, banners, shields, bells, shulker boxes, lecterns, campfires,
@@ -108,11 +104,6 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   and its signing flow, and the read-only screen for a signed book (plus a lectern's
   book display). All three share one texture, one word-wrap model, and one overlay
   frame builder.
-- [Browser integrated tick loop](./browser-integrated-tick-loop.md) — The browser
-  integrated server runs the same authoritative world simulation tick as the native
-  server at 20 ticks per second. A browser-compatible timer supplies the scheduling
-  boundary while the world source, scheduled queues, block-entity registry, and entity
-  source remain shared with the connection.
 - [Browser shell port](./browser-shell-port.md) — The wasm32 target: `web/` runs the
   real `lodestone-shell` — the same menu, `Sim`, and renderer the native binary uses
   — fetching `client.jar` and `blocks.json` at startup instead of reading them off a
@@ -178,11 +169,6 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   counter that ties a predicted menu click to authoritative container updates. It
   replaces raw integer state identifiers in the client event/action model and menu
   reconciliation path.
-- [Block-destruction crack rendering](./crack-rendering.md) — The block-destruction
-  overlay draws the server-reported progress of every breaking entity on top of the
-  corresponding block face. It is a renderer-owned visual effect, while the progress
-  and its lifecycle are folded into the shared session entity so headless clients and
-  the shell observe the same state.
 - [Crafting](./crafting.md) — The version-free crafting stack in `lodestone-game`:
   the recipe data model and matching rules (`recipe.rs`), a loader for Mojang's own
   datapack JSON (`recipe_json.rs`), the crafting-table menu layout, the plugin-facing
@@ -238,11 +224,6 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   754 (1.16.5), 756 (1.17.1), 758 (1.18.2), 762 (1.19.4), 766 (1.20.6), 774 (1.21.11),
   and 776 (26.2). It starts one dedicated Lodestone server per selected row and
   accepts a witness only from an installed, unmodified release client.
-- [Face occlusion data](./face-occlusion.md) — The face-occlusion table answers
-  whether each of the six faces of a canonical 26.2 block state is a complete
-  unit-face occluder. It supplies the directional enclosure predicate used by
-  underwater floor decoration without confusing occlusion with collision, outline, or
-  motion-blocking behavior.
 - [Friends service](./friends-service.md) — `lodestone-auth::friends` is the
   credential-safe HTTP boundary for the Java 26.2 Friends List. It turns an
   already-resolved account session into typed friend lists, relationship changes,
@@ -310,11 +291,6 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   Bukkit/Spigot/Paper plugin jars** against this server, with **zero cost when no Java
   plugin is loaded**. The crate's JVM runtime boundary is opt-in; the complete plugin
   bridge remains future work.
-- [Join-stage tracing](./join-tracing.md) — The optional join trace records the
-  initial chunk timeline across the integrated server and shell: generation, packet
-  encoding, socket delivery, client receipt, remesh scheduling, and completed mesh
-  work. It is intended to distinguish a world-generation stall from a network or
-  renderer publication gap.
 - [Keybindings and input options](./keybindings.md) — The rebindable action table
   that maps logical actions (`key.forward`, `key.inventory`) to physical inputs (a
   keyboard key or mouse button) so nothing in the gameplay input path names a key
@@ -415,11 +391,6 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   round-trip agreement, the redstone benchmark harness that measures the real tick
   loop against downloaded contraptions, and the profile-guided-optimization experiment
   that measured whether PGO is worth adding to the release build.
-- [Overworld light snapshot controls](./overworld-light-snapshot-controls.md) — The
-  `overworld_light_snapshot` integration controls pin the distinction between an
-  initial chunk light fallback and a light snapshot restored from storage. They focus
-  on the `(-25,-25)` serving coordinate and make the wire representation of high sky
-  and zero block-light sections observable.
 - [Packet and action wiring: routers, gates, and cancellation](./packet-wiring.md) —
   How a decoded packet reaches a real consumer instead of an island, on both the
   serverbound (hosting) and clientbound (joining) sides, and the two plugin-facing
@@ -429,12 +400,6 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   for the optional Java compatibility host. It gives a host an owned, authoritative
   snapshot of a connected player's native inventory without exposing a connection
   task, mutable menu state, or a second inventory simulation.
-- [Paper plugin conformance harness](./paper-plugin-conformance.md) — The Paper
-  plugin conformance harness defines reproducible, operator-supplied fixtures for
-  comparing one unmodified plugin scenario on Paper and Lodestone. Its current runner
-  validates the contract and emits an explicit blocked result; it does not claim
-  compatibility while Lodestone lacks the required plugin lifecycle, event dispatch,
-  and shared scenario driver.
 - [Paper world bridge](./paper-world-bridge.md) — `lodestone-jvm-bridge` exposes a
   deliberately small, loader-local world/block surface to an operator-built
   `lodestone.bridge.IsolatedPaperShim`. It supplies resident block-state reads and
@@ -515,10 +480,6 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   `lodestone-worldgen` and `lodestone-server`: a version-free, oracle-verified terrain
   interpreter (see `docs/worldgen.md`'s parity discipline) called imperatively from
   plain functions, never installed as a bevy `System`.
-- [Prediction sequences](./prediction-sequences.md) — `PredictionSequence` is the
-  version-free identity attached to client-side block predictions. It keeps the
-  protocol's signed VarInt representation at the wire boundary while giving placement
-  and acknowledgement code a wrapping counter with explicit serial ordering.
 - [Projectile and effect rendering](./projectile-and-effect-rendering.md) — The draw
   paths for entities that are neither an ordinary mob rig nor a plain billboard:
   velocity-aligned projectiles (arrow, spectral arrow, trident), firework rockets,
@@ -602,10 +563,6 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   in `docs/plans/multi-version-protocol-dedup.md`; `v1-8`, `v1-9` and `v1-14` now all
   dispatch through it, and `v1-9` is a four-protocol era crate built on it (see
   [`protocol-1-9-era.md`](./protocol-1-9-era.md)).
-- [Recipe item IDs](./recipe-item-ids.md) — Recipe displays, ghost previews, and
-  recipe property sets carry item-registry numbers. `lodestone_model::ItemId` keeps
-  each number together with whether it has been validated against this build's
-  canonical item census or remains owned by a protocol/session registry.
 - [Redstone execution model](./redstone-execution.md) — How a redstone change
   actually gets *executed* — what wakes up, what it costs, and why. This is the
   layer underneath `docs/redstone.md`'s per-device behaviour: the
@@ -639,10 +596,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   The tools that keep this workspace buildable and testable at scale: the `just` task
   runner that gives every health check a short canonical name, the GitHub Actions CI
   workflow that verifies pushes without contending for the shared dev machine, the
-  machine-level shared-target and `sccache` policy that queues local builds, and the
-  `cargo xtask` static scanners (`islands`, `world-coverage`, and their siblings
-  `connectedness`, `check-ptr-const`, `wasm-check`) that catch classes of defect no
-  compiler check can see.
+  `sccache`/private-target-dir build policy that lets many agents build concurrently
+  in one checkout, and the `cargo xtask` static scanners (`islands`, `world-coverage`,
+  and their siblings `connectedness`, `check-ptr-const`, `wasm-check`) that catch
+  classes of defect no compiler check can see.
 - [Server resource packs](./resource-packs.md) — The end-to-end flow for a
   server-pushed resource pack: the accept/decline prompt, the per-server policy that
   can skip it, the download/verify/apply pipeline, and how a downloaded pack actually
@@ -656,11 +613,6 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   systems) and later have a window attached to it — or a windowed session can drop
   its window and GPU state and keep ticking headlessly. Behind the
   `runtime-presentation` Cargo feature on `lodestone-shell` (on by default).
-- [Scheduled tick kinds](./scheduled-tick-kinds.md) — Scheduled tick records use a
-  typed key for the built-in update lanes while retaining an exact open extension
-  value for plugin-defined actions. The live block queue is typed, while fluid
-  processing retains an explicit string-keyed boundary until that implementation is
-  migrated.
 - [Screen effects](./screen-effects.md) — `lodestone_render::ScreenEffectRenderer`
   draws the client's full-screen and near-full-screen post-hand-pass overlays:
   underwater tint and scroll, fire, a carved-pumpkin vignette, freezing in powder
@@ -708,11 +660,6 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   engine (`lodestone-audio`) and the event registry
   (`lodestone-sound`/`lodestone-assets`) were built and correct from early on; this
   doc is mostly about what sits either side of them.
-- [Status effects](./status-effects.md) — Status effects are the per-player effect
-  instances that the integrated server stores and ticks, protocol adapters transport,
-  and the shell uses for movement, HUD state, and effect-driven rendering. The 26.2
-  built-in registry contains 40 ids; recognizing an id on the wire is separate from
-  implementing its game rule.
 - [Terrain rendering](./terrain-rendering.md) — Everything between "a chunk section
   changed" and "its quads are the right shape, in the right place, drawn or correctly
   not drawn, on screen": meshing and mesh invalidation as chunks stream in,
@@ -844,19 +791,18 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
 - [World-generation dungeons](./worldgen-dungeons.md) — The `monster_room`
   configured feature places an underground cobblestone room, up to two deferred-loot
   chests, and one monster spawner during Overworld decoration. Generated block
-  entities travel with the column, so the server's chunk packet carries their registry
-  records while the save path retains the deferred loot, occupants, and spawner state
-  needed after reload.
+  entities travel with the column, so the room's metadata is present when the server
+  encodes or saves the receiving chunk.
 - [Large worldgen parity harness](./worldgen-large-parity.md) —
   `scripts/worldgen-oracle/LargeParityOracle.java` is the resumable, 251,001-chunk
   parity oracle for the 501 by 501 grid centred at `(0, 0)`. It freezes one generated
   reference world first, then records a full SHA-256 digest of each chunk's canonical
   semantic record; the old v2 raw 16-bit packet fingerprints are explicitly rejected.
 - [Woodland mansion assembly](./worldgen-mansion.md) — `structure::mansion` builds
-  the complete template-piece list for a woodland mansion. The seeded plan, exterior
-  shell, corridors, room dividers, doors, carpets, stairs, secret rooms, furnishings,
-  and roof layers all reach the normal template placement stage; entity data markers
-  remain a server-side consumer concern.
+  the template-piece list for the currently supported exterior of a woodland mansion.
+  It is intentionally partial: the seeded plan, entrance, exterior walls, corridor
+  floors, and roof layers place blocks; room dividers, doors, carpets, stairs, secret
+  rooms, furnishings, and entity markers do not yet place.
 - [Nether fortress generation](./worldgen-nether-fortress.md) — The Nether fortress
   generator constructs the entire recursive bridge-and-castle piece tree for a placed
   start. Its output is a set of oriented, collision-free bounding boxes plus eager
@@ -866,12 +812,6 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   `lodestone_worldgen::nether::NetherGenerator` produces a complete Nether column from
   the bundled noise, biome, feature, tag and structure documents. It uses the legacy
   world-generation random family required by the Nether settings.
-- [Worldgen registry-consumption census](./worldgen-registry-census.md) —
-  `crates/lodestone-worldgen/tests/registry_consumption_census.rs` is a data-only
-  coverage gate for the configured-feature and placed-feature records reachable from
-  the three bundled dimensions. It checks that every declared placement modifier
-  survives parsing, in order, so an unrecognised record cannot quietly change the
-  candidate-position stream.
 - [Root-system world generation](./worldgen-root-system.md) — The root-system
   configured feature grows an elevated nested feature through a cave ceiling, replaces
   eligible material in the column below it, and scatters hanging roots around the
