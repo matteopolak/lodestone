@@ -18,7 +18,10 @@ const REGISTRIES_758: &str = include_str!("../tests/support/registries_1_18_2_ja
 #[derive(Default)]
 struct Registries {
     items: HashMap<i32, ResourceKey>,
+    item_ids: HashMap<ResourceKey, i32>,
     blocks: HashMap<i32, ResourceKey>,
+    menus: HashMap<i32, ResourceKey>,
+    menu_ids: HashMap<ResourceKey, i32>,
 }
 
 fn registry(report: &'static str, registry: &str) -> HashMap<i32, ResourceKey> {
@@ -45,9 +48,14 @@ fn registry(report: &'static str, registry: &str) -> HashMap<i32, ResourceKey> {
 }
 
 fn parse(report: &'static str) -> Registries {
+    let items = registry(report, "minecraft:item");
+    let menus = registry(report, "minecraft:menu");
     Registries {
-        items: registry(report, "minecraft:item"),
+        item_ids: items.iter().map(|(id, key)| (key.clone(), *id)).collect(),
+        items,
         blocks: registry(report, "minecraft:block"),
+        menu_ids: menus.iter().map(|(id, key)| (key.clone(), *id)).collect(),
+        menus,
     }
 }
 
@@ -64,6 +72,21 @@ fn for_protocol(protocol: i32) -> &'static Registries {
 /// Resolves a protocol-local item registry id to its canonical key.
 pub(crate) fn item(protocol: i32, id: i32) -> Option<ResourceKey> {
     for_protocol(protocol).items.get(&id).cloned()
+}
+
+/// Resolves a canonical item key to the protocol-local flattened item id.
+pub(crate) fn item_id(protocol: i32, key: &ResourceKey) -> Option<i32> {
+    for_protocol(protocol).item_ids.get(key).copied()
+}
+
+/// Resolves a protocol-local menu registry id to its canonical key.
+pub(crate) fn menu(protocol: i32, id: i32) -> Option<ResourceKey> {
+    for_protocol(protocol).menus.get(&id).cloned()
+}
+
+/// Resolves a canonical menu key to the protocol-local menu registry id.
+pub(crate) fn menu_id(protocol: i32, key: &ResourceKey) -> Option<i32> {
+    for_protocol(protocol).menu_ids.get(key).copied()
 }
 
 /// Resolves a protocol-local block registry id to its canonical key.

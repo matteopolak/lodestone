@@ -77,6 +77,18 @@ literal `[0x00]` body becomes `ServerBound::ClientCommand { action: 0 }` after
 registry selection, which is the server-loop input used to request a respawn;
 trailing bytes and packets received outside Play remain ignored.
 
+The hosted container path now covers one complete chest session for both
+protocols. `open_window` carries the protocol-local menu registry id and JSON
+title; `window_items` carries a VarInt state id, a VarInt-length slot list and
+the cursor slot; `set_slot` carries the same state id and uses window `-1` for
+cursor updates. Client `window_click` packets carry the state id, mode,
+predicted changed-slot pairs and cursor item, and `close_window` clears the
+tracked session. The adapter resolves numeric menu and item ids through each
+jar-backed registry, while the server derives the authoritative chest result
+and sends a full content correction when a prediction disagrees. Legacy NBT or
+modern item components are rejected at the boundary because this wire era's
+canonical model cannot preserve them.
+
 ### External-client acceptance
 
 The opt-in release-client gate covers both hosted rows in this era: protocol 756 (1.17.1) and

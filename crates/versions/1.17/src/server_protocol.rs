@@ -6,7 +6,9 @@
 //! one by protocol range.
 
 use lodestone_core::{Ctx, Decode, Encode, Nbt, Reader, State, Writer, encode_body, write_named_nbt};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation, Vec3f};
+use lodestone_model::{
+    BlockActionKind, BlockFace, BlockPos, ItemComponents, ItemStack, Rotation, Vec3f,
+};
 use lodestone_server::{ChunkColumn, ChunkEncodeError, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_world::{Heightmap, LongArrayFraming, PaletteKind, PalettedContainer};
 use uuid::Uuid;
@@ -25,7 +27,11 @@ use crate::packets::game::{
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
 use crate::packets::position::{Position, pack_position};
-use crate::packets::window::ServerboundHeldItemSlot;
+use crate::packets::window::{
+    OpenWindow, ServerboundCloseWindow, ServerboundHeldItemSlot, SetSlot, WindowClick,
+    WindowItems,
+};
+use crate::registry;
 
 const CTX: Ctx = Ctx {
     version: PROTOCOL_1_17_1,
@@ -112,6 +118,63 @@ fn decode_full_758<T: Decode>(payload: &[u8]) -> Option<T> {
     let value = T::decode(&mut reader, CTX_758).ok()?;
     reader.ensure_empty().ok()?;
     Some(value)
+}
+
+fn decode_item_slot(
+    protocol: i32,
+    slot: crate::packets::slot::Slot,
+) -> Result<Option<ItemStack>, ()> {
+    let crate::packets::slot::Slot::Item { id, count, nbt } = slot else {
+        return Ok(None);
+    };
+    if nbt.is_some() {
+        return Err(());
+    }
+    let count = u32::try_from(count).map_err(|_| ())?;
+    if count == 0 {
+        return Err(());
+    }
+    Ok(Some(ItemStack {
+        item: registry::item(protocol, id).ok_or(())?,
+        count,
+        components: ItemComponents::default(),
+    }))
+}
+
+fn encode_item_slot(protocol: i32, item: Option<&ItemStack>) -> crate::packets::slot::Slot {
+    let Some(item) = item else {
+        return crate::packets::slot::Slot::Empty;
+    };
+    let id = registry::item_id(protocol, &item.item)
+        .unwrap_or_else(|| panic!("protocol-{protocol} has no numeric item id for {}", item.item));
+    let count = i8::try_from(item.count)
+        .unwrap_or_else(|_| panic!("container item count {} does not fit i8", item.count));
+    assert!(count > 0, "container item count must be positive");
+    assert_eq!(item.components, ItemComponents::default(), "legacy container slots cannot carry components");
+    crate::packets::slot::Slot::Item { id, count, nbt: None }
+}
+
+fn decode_container_click(protocol: i32, packet: WindowClick) -> Option<ServerBound> {
+    let changed_slots = packet
+        .changed_slots
+        .into_iter()
+        .map(|change| {
+            Some((
+                i32::from(change.location),
+                decode_item_slot(protocol, change.item).ok()?,
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let carried_item = decode_item_slot(protocol, packet.cursor_item).ok()?;
+    Some(ServerBound::ContainerClicked {
+        window_id: i32::from(packet.window_id),
+        state_id: packet.state_id,
+        slot: i32::from(packet.slot),
+        button: packet.mouse_button,
+        click_type: packet.mode,
+        changed_slots,
+        carried_item,
+    })
 }
 
 fn block_action(status: i32) -> Option<BlockActionKind> {
@@ -388,6 +451,16 @@ impl ServerProtocol for V756ServerProtocol {
                 };
                 ServerBound::CarriedItemChanged { slot }
             }
+            State::Play if packet_id == play::serverbound::WINDOW_CLICK => {
+                decode_full::<WindowClick>(payload)
+                    .and_then(|packet| decode_container_click(PROTOCOL_1_17_1, packet))
+                    .unwrap_or(ServerBound::Ignored)
+            }
+            State::Play if packet_id == play::serverbound::CLOSE_WINDOW => {
+                decode_full::<ServerboundCloseWindow>(payload).map_or(ServerBound::Ignored, |packet| {
+                    ServerBound::ContainerClosed { window_id: i32::from(packet.window_id) }
+                })
+            }
             State::Play if packet_id == play::serverbound::KEEP_ALIVE => {
                 decode_full::<KeepAliveResponse>(payload).map_or(ServerBound::Ignored, |response| {
                     ServerBound::KeepAlive { id: response.id }
@@ -535,6 +608,71 @@ impl ServerProtocol for V756ServerProtocol {
 
     fn encode_system_chat(&self, message: &str) -> ServerDirective {
         send(play::clientbound::CHAT, &system_chat(message))
+    }
+
+    fn encode_open_screen(&self, window_id: i32, menu: &str, title: &str) -> ServerDirective {
+        let menu = menu.parse().expect("container menu must be a resource key");
+        let inventory_type = registry::menu_id(PROTOCOL_1_17_1, &menu)
+            .unwrap_or_else(|| panic!("protocol-756 has no menu registry id for {menu}"));
+        send(
+            play::clientbound::OPEN_WINDOW,
+            &OpenWindow {
+                window_id,
+                inventory_type,
+                window_title: system_chat_text(title),
+            },
+        )
+    }
+
+    fn encode_container_content(
+        &self,
+        window_id: i32,
+        state_id: i32,
+        items: &[Option<ItemStack>],
+        carried: Option<&ItemStack>,
+    ) -> ServerDirective {
+        let items = items
+            .iter()
+            .map(|item| encode_item_slot(PROTOCOL_1_17_1, item.as_ref()))
+            .collect();
+        send(
+            play::clientbound::WINDOW_ITEMS,
+            &WindowItems {
+                window_id: u8::try_from(window_id).expect("protocol-756 window id must fit u8"),
+                state_id,
+                items,
+                carried_item: encode_item_slot(PROTOCOL_1_17_1, carried),
+            },
+        )
+    }
+
+    fn encode_container_slot(
+        &self,
+        window_id: i32,
+        state_id: i32,
+        slot: i32,
+        item: Option<&ItemStack>,
+    ) -> ServerDirective {
+        send(
+            play::clientbound::SET_SLOT,
+            &SetSlot {
+                window_id: i8::try_from(window_id).expect("protocol-756 window id must fit i8"),
+                state_id,
+                slot: i16::try_from(slot).expect("protocol-756 slot must fit i16"),
+                item: encode_item_slot(PROTOCOL_1_17_1, item),
+            },
+        )
+    }
+
+    fn encode_container_data(&self, window_id: i32, property: i32, value: i32) -> ServerDirective {
+        let window_id = u8::try_from(window_id).expect("protocol-756 window id must fit u8");
+        let property = i16::try_from(property).expect("protocol-756 property must fit i16");
+        let value = i16::try_from(value).expect("protocol-756 value must fit i16");
+        let mut payload = Writer::default();
+        payload.u8(window_id);
+        payload.i16(property);
+        payload.i16(value);
+        ServerDirective::Send { packet_id: play::clientbound::CRAFT_PROGRESS_BAR, payload: payload.into_vec() }
     }
 
     fn encode_animate(&self, entity_id: i32, action: u8) -> ServerDirective {
@@ -811,6 +949,16 @@ impl ServerProtocol for V758ServerProtocol {
                 };
                 ServerBound::CarriedItemChanged { slot }
             }
+            State::Play if packet_id == play_758::serverbound::WINDOW_CLICK => {
+                decode_full_758::<WindowClick>(payload)
+                    .and_then(|packet| decode_container_click(PROTOCOL_1_18_2, packet))
+                    .unwrap_or(ServerBound::Ignored)
+            }
+            State::Play if packet_id == play_758::serverbound::CLOSE_WINDOW => {
+                decode_full_758::<ServerboundCloseWindow>(payload).map_or(ServerBound::Ignored, |packet| {
+                    ServerBound::ContainerClosed { window_id: i32::from(packet.window_id) }
+                })
+            }
             State::Play if packet_id == play_758::serverbound::KEEP_ALIVE => {
                 decode_full_758::<KeepAliveResponse>(payload).map_or(ServerBound::Ignored, |response| {
                     ServerBound::KeepAlive { id: response.id }
@@ -958,6 +1106,71 @@ impl ServerProtocol for V758ServerProtocol {
 
     fn encode_system_chat(&self, message: &str) -> ServerDirective {
         send_758(play_758::clientbound::CHAT, &system_chat(message))
+    }
+
+    fn encode_open_screen(&self, window_id: i32, menu: &str, title: &str) -> ServerDirective {
+        let menu = menu.parse().expect("container menu must be a resource key");
+        let inventory_type = registry::menu_id(PROTOCOL_1_18_2, &menu)
+            .unwrap_or_else(|| panic!("protocol-758 has no menu registry id for {menu}"));
+        send_758(
+            play_758::clientbound::OPEN_WINDOW,
+            &OpenWindow {
+                window_id,
+                inventory_type,
+                window_title: system_chat_text(title),
+            },
+        )
+    }
+
+    fn encode_container_content(
+        &self,
+        window_id: i32,
+        state_id: i32,
+        items: &[Option<ItemStack>],
+        carried: Option<&ItemStack>,
+    ) -> ServerDirective {
+        let items = items
+            .iter()
+            .map(|item| encode_item_slot(PROTOCOL_1_18_2, item.as_ref()))
+            .collect();
+        send_758(
+            play_758::clientbound::WINDOW_ITEMS,
+            &WindowItems {
+                window_id: u8::try_from(window_id).expect("protocol-758 window id must fit u8"),
+                state_id,
+                items,
+                carried_item: encode_item_slot(PROTOCOL_1_18_2, carried),
+            },
+        )
+    }
+
+    fn encode_container_slot(
+        &self,
+        window_id: i32,
+        state_id: i32,
+        slot: i32,
+        item: Option<&ItemStack>,
+    ) -> ServerDirective {
+        send_758(
+            play_758::clientbound::SET_SLOT,
+            &SetSlot {
+                window_id: i8::try_from(window_id).expect("protocol-758 window id must fit i8"),
+                state_id,
+                slot: i16::try_from(slot).expect("protocol-758 slot must fit i16"),
+                item: encode_item_slot(PROTOCOL_1_18_2, item),
+            },
+        )
+    }
+
+    fn encode_container_data(&self, window_id: i32, property: i32, value: i32) -> ServerDirective {
+        let window_id = u8::try_from(window_id).expect("protocol-758 window id must fit u8");
+        let property = i16::try_from(property).expect("protocol-758 property must fit i16");
+        let value = i16::try_from(value).expect("protocol-758 value must fit i16");
+        let mut payload = Writer::default();
+        payload.u8(window_id);
+        payload.i16(property);
+        payload.i16(value);
+        ServerDirective::Send { packet_id: play_758::clientbound::CRAFT_PROGRESS_BAR, payload: payload.into_vec() }
     }
 
     fn encode_animate(&self, entity_id: i32, action: u8) -> ServerDirective {

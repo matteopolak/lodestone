@@ -1,15 +1,17 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use lodestone_client::{ClientBuilder, LoginProfile, PlayerLoadedPolicy, ServerAddress};
+use lodestone_client::{ClientBuilder, EventStream, LoginProfile, PlayerLoadedPolicy, ServerAddress};
 use lodestone_model::{
     AnimationAction, BlockActionKind, BlockFace, BlockPos, ChatKind, ClientAction, ClientEvent,
-    ConnectionState, Hand, Rotation, Vec3, Vec3f, VersionAdapter,
+    ConnectionState, ContainerClickType, ContainerSlotChange, ContainerStateId, Hand, Rotation,
+    Vec3, Vec3f, VersionAdapter,
 };
-use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer, PLAYER_ENTITY_ID_BASE};
+use lodestone_server::{BlockEntity, ChunkColumn, ChunkSource, IntegratedServer, PLAYER_ENTITY_ID_BASE};
 use lodestone_v1_17::adapter_for;
 
 const TARGET: BlockPos = BlockPos::new(8, 100, 8);
+const CHEST: BlockPos = BlockPos::new(9, 100, 8);
 
 fn assert_adapter_block_use_reaches_host(protocol_version: i32) {
     let adapter = adapter_for(protocol_version);
@@ -115,10 +117,145 @@ impl FixtureSource {
     fn new() -> Self {
         let mut column = ChunkColumn::new(-64, 384);
         column.set_block(TARGET.x, TARGET.y, TARGET.z, "minecraft:dandelion");
+        column.set_block(CHEST.x, CHEST.y, CHEST.z, "minecraft:chest");
         Self {
             column: Mutex::new(column),
         }
     }
+}
+
+async fn next_content(events: &mut EventStream, window_id: i32) -> Vec<Option<lodestone_model::ItemStack>> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ClientEvent::ContainerContent { window_id: id, items, .. }) = events.recv().await
+                && id == window_id
+            {
+                return items;
+            }
+        }
+    })
+    .await
+    .expect("server must send authoritative container content")
+}
+
+async fn assert_protocol_container_chest_move(protocol_version: i32) {
+    let protocol = lodestone_registry::server_protocol_for_protocol(protocol_version)
+        .expect("the hosted protocol must resolve from the registry");
+    let source = Arc::new(FixtureSource::new());
+    let (server, client_io) = IntegratedServer::open_in_memory_with_mobs(
+        protocol,
+        Arc::clone(&source),
+        (0..=0, 0..=0),
+        (8, 8),
+        0,
+        0,
+    );
+    let entities = server
+        .block_entities()
+        .expect("the live integrated server owns block entities")
+        .clone();
+    entities.with(|registry| {
+        let mut chest = BlockEntity::container("minecraft:chest");
+        chest.set_container_slot(
+            0,
+            Some(lodestone_model::ItemStack::new(
+                "minecraft:stone".parse().expect("stone key"),
+                1,
+            )),
+        );
+        registry.insert(CHEST, chest);
+    });
+
+    let profile = LoginProfile {
+        username: format!("Protocol{protocol_version}Chest"),
+        uuid: uuid::Uuid::new_v4(),
+    };
+    let (mut handle, mut events) = ClientBuilder::new(
+        ServerAddress { host: "memory".to_owned(), port: 0 },
+        profile,
+        Box::new(adapter_for(protocol_version)),
+    )
+    .player_loaded_policy(PlayerLoadedPolicy::Manual)
+    .connect_with(client_io);
+    handle
+        .wait_for_spawn(Duration::from_secs(20))
+        .await
+        .expect("the client must reach Play");
+    handle
+        .send_action(ClientAction::UseItemOn {
+            hand: Hand::Main,
+            pos: CHEST,
+            face: BlockFace::North,
+            cursor: Vec3f::new(0.5, 0.5, 0.5),
+            inside_block: false,
+            sequence: 0,
+        })
+        .expect("the client must use the chest");
+
+    let window_id = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ClientEvent::ScreenOpened { window_id, menu_type, .. }) = events.recv().await {
+                assert_eq!(menu_type.to_string(), "minecraft:generic_9x3");
+                break window_id;
+            }
+        }
+    })
+    .await
+    .expect("server must open the chest window");
+    let initial = next_content(&mut events, window_id).await;
+    assert_eq!(initial.len(), 63);
+    assert_eq!(initial[0].as_ref().map(|item| item.count), Some(1));
+
+    // Deliberately claim no changed slots and no cursor item. The server must
+    // still move the authoritative stack and send a correction content frame.
+    handle
+        .send_action(ClientAction::ContainerClick {
+            window_id,
+            state_id: ContainerStateId::INITIAL,
+            slot: 0,
+            button: 0,
+            click_type: ContainerClickType::Pickup,
+            changed_slots: Vec::<ContainerSlotChange>::new(),
+            carried_item: None,
+        })
+        .expect("the client must send the pickup click");
+    let after_pickup = next_content(&mut events, window_id).await;
+    assert!(after_pickup[0].is_none());
+
+    handle
+        .send_action(ClientAction::ContainerClick {
+            window_id,
+            state_id: ContainerStateId::INITIAL,
+            slot: 27,
+            button: 0,
+            click_type: ContainerClickType::Pickup,
+            changed_slots: Vec::<ContainerSlotChange>::new(),
+            carried_item: None,
+        })
+        .expect("the client must send the placement click");
+    let after_place = next_content(&mut events, window_id).await;
+    assert_eq!(after_place[27].as_ref().map(|item| item.count), Some(1));
+
+    handle
+        .send_action(ClientAction::ContainerClose { window_id })
+        .expect("the client must close the chest window");
+    handle.shutdown();
+    let _ = handle.join().await;
+    server.shutdown().await;
+    assert!(entities.with(|registry| match registry.get(CHEST) {
+        Some(BlockEntity::Container { slots, .. }) => slots[0].is_none(),
+        _ => false,
+    }));
+}
+
+#[tokio::test]
+async fn registry_selected_protocol_756_moves_a_chest_item_and_corrects_the_client() {
+    assert_protocol_container_chest_move(756).await;
+}
+
+#[tokio::test]
+async fn registry_selected_protocol_758_moves_a_chest_item_and_corrects_the_client() {
+    assert_protocol_container_chest_move(758).await;
 }
 
 async fn assert_registry_selected_host_echoes_legacy_chat(protocol_version: i32) {
