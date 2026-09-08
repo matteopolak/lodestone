@@ -60,6 +60,55 @@ use uuid::Uuid;
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MinecraftEntityId(pub i32);
 
+/// An entity id after its ownership boundary has been identified.
+///
+/// Server-assigned ids occupy the non-negative wire range. Plugin-created
+/// entities use the strictly-negative range reserved by
+/// [`crate::entity_spawn::PluginEntityIds`].
+/// Keeping the ranges in separate variants prevents a local plugin id from
+/// being mistaken for a server entity while an id-addressed lookup is in
+/// progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum EntityNetworkId {
+    /// An id received from the server's entity stream.
+    Server(u32),
+    /// An id minted at the local plugin boundary.
+    Plugin(i32),
+}
+
+impl EntityNetworkId {
+    /// Classifies a non-negative id received from the wire.
+    #[must_use]
+    pub const fn from_wire(raw: i32) -> Option<Self> {
+        if raw < 0 {
+            None
+        } else {
+            Some(Self::Server(raw as u32))
+        }
+    }
+
+    /// Classifies a strictly-negative id minted for a local plugin entity.
+    #[must_use]
+    pub const fn plugin(raw: i32) -> Option<Self> {
+        if raw < 0 { Some(Self::Plugin(raw)) } else { None }
+    }
+
+    /// Returns the original integer representation at an explicit boundary.
+    #[must_use]
+    pub const fn raw(self) -> i32 {
+        match self {
+            Self::Server(raw) => raw as i32,
+            Self::Plugin(raw) => raw,
+        }
+    }
+
+    /// Whether this id belongs to a locally spawned plugin entity.
+    #[must_use]
+    pub const fn is_plugin(self) -> bool {
+        matches!(self, Self::Plugin(_))
+    }
+}
+
 /// The entity's UUID, when the spawn carried one.
 ///
 /// **Absent** means the spawn did not carry one — the `Option` in
@@ -932,15 +981,31 @@ impl EntityIndex {
         self.0.get(&entity_id).copied()
     }
 
+    /// The ECS entity for a classified network id, if it is currently tracked.
+    #[must_use]
+    pub fn get_typed(&self, entity_id: EntityNetworkId) -> Option<Entity> {
+        self.get(entity_id.raw())
+    }
+
     /// Records `entity` as the holder of `entity_id`, replacing any previous
     /// mapping (servers reuse ids freely).
     pub fn insert(&mut self, entity_id: i32, entity: Entity) {
         self.0.insert(entity_id, entity);
     }
 
+    /// Records an entity under a classified network id.
+    pub fn insert_typed(&mut self, entity_id: EntityNetworkId, entity: Entity) {
+        self.insert(entity_id.raw(), entity);
+    }
+
     /// Forgets `entity_id`, returning the ECS entity it mapped to.
     pub fn remove(&mut self, entity_id: i32) -> Option<Entity> {
         self.0.remove(&entity_id)
+    }
+
+    /// Forgets a classified network id, returning the ECS entity it mapped to.
+    pub fn remove_typed(&mut self, entity_id: EntityNetworkId) -> Option<Entity> {
+        self.remove(entity_id.raw())
     }
 
     /// Every tracked `(server id, ECS entity)` pair. Order is unspecified.
@@ -967,5 +1032,30 @@ impl EntityIndex {
     /// both, in that order.
     pub fn clear(&mut self) {
         self.0.clear();
+    }
+}
+
+#[cfg(test)]
+mod network_id_tests {
+    use super::EntityNetworkId;
+
+    #[test]
+    fn wire_and_plugin_ranges_are_classified_without_overlap() {
+        let server = EntityNetworkId::from_wire(42).expect("non-negative wire id");
+        let plugin = EntityNetworkId::plugin(-42).expect("negative plugin id");
+
+        assert_eq!(server, EntityNetworkId::Server(42));
+        assert_eq!(plugin, EntityNetworkId::Plugin(-42));
+        assert_eq!(server.raw(), 42);
+        assert_eq!(plugin.raw(), -42);
+        assert!(!server.is_plugin());
+        assert!(plugin.is_plugin());
+        assert_ne!(server.raw(), plugin.raw());
+    }
+
+    #[test]
+    fn invalid_signs_are_rejected_at_the_appropriate_boundary() {
+        assert!(EntityNetworkId::from_wire(-1).is_none());
+        assert!(EntityNetworkId::plugin(0).is_none());
     }
 }

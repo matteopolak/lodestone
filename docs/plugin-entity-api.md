@@ -106,6 +106,13 @@ system's own doc comment records: nothing else stops a caller naming an id the l
 hold, and despawning that entity would take `PhysicsState`, the HUD components and the driver's own
 identity with it.
 
+`EntityNetworkId` makes that ownership explicit for the index-facing portion of the API:
+`EntityNetworkId::Server` represents a non-negative wire id, while `EntityNetworkId::Plugin` represents
+the strictly-negative range minted for local entities. `EntityIndex::get_typed`, `insert_typed`, and
+`remove_typed` preserve the distinction. The raw `i32` remains only at the existing plugin function
+boundary for compatibility; `despawn_entity` rejects non-negative values before it consults the index,
+so an unknown server id cannot remove a local plugin entity.
+
 ### Client-side custom entity types are a vanilla kind plus a tag, never a new registry id
 
 The same wire ceiling `lodestone_game::custom_item` already solved for items: the wire protocol carries

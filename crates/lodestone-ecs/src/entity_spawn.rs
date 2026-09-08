@@ -125,8 +125,8 @@ use bevy_ecs::system::{Commands, Query};
 use lodestone_model::{ResourceKey, Rotation as ReportedRotation, Vec3};
 
 use crate::entity::{
-    Attributes, EntityIndex, EntityKind, Equipment, HeadYaw, MinecraftEntityId, OnGround, Position,
-    Rotation,
+    Attributes, EntityIndex, EntityKind, EntityNetworkId, Equipment, HeadYaw, MinecraftEntityId,
+    OnGround, Position, Rotation,
 };
 use crate::player::LocalPlayer;
 
@@ -168,6 +168,12 @@ impl PluginEntityIds {
         let id = self.next;
         self.next = self.next.saturating_sub(1);
         id
+    }
+
+    /// Mints the next id as a classified local-plugin id.
+    #[must_use]
+    pub fn reserve_network_id(&mut self) -> EntityNetworkId {
+        EntityNetworkId::plugin(self.reserve()).expect("PluginEntityIds only mints negative ids")
     }
 }
 
@@ -216,10 +222,10 @@ pub fn spawn_entity(
     ids: &mut PluginEntityIds,
     spawn: EntitySpawn,
 ) -> (i32, Entity) {
-    let entity_id = ids.reserve();
+    let entity_id = ids.reserve_network_id();
     let entity = commands
         .spawn((
-            MinecraftEntityId(entity_id),
+            MinecraftEntityId(entity_id.raw()),
             EntityKind(spawn.kind),
             Position(spawn.position),
             Rotation(spawn.rotation),
@@ -229,8 +235,8 @@ pub fn spawn_entity(
             Equipment::default(),
         ))
         .id();
-    index.insert(entity_id, entity);
-    (entity_id, entity)
+    index.insert_typed(entity_id, entity);
+    (entity_id.raw(), entity)
 }
 
 /// Despawns the entity behind `entity_id`.
@@ -250,13 +256,16 @@ pub fn despawn_entity(
     locals: &Query<(), With<LocalPlayer>>,
     entity_id: i32,
 ) -> bool {
+    let Some(entity_id) = EntityNetworkId::plugin(entity_id) else {
+        return false;
+    };
     if index
-        .get(entity_id)
+        .get_typed(entity_id)
         .is_some_and(|held| locals.contains(held))
     {
         return false;
     }
-    let Some(entity) = index.remove(entity_id) else {
+    let Some(entity) = index.remove_typed(entity_id) else {
         return false;
     };
     commands.entity(entity).despawn();
@@ -421,10 +430,10 @@ pub fn spawn_custom_entity(
     let Some(disguise) = registry.disguise(&custom_kind).cloned() else {
         return Err(UnknownCustomEntityType(custom_kind));
     };
-    let entity_id = ids.reserve();
+    let entity_id = ids.reserve_network_id();
     let entity = commands
         .spawn((
-            MinecraftEntityId(entity_id),
+            MinecraftEntityId(entity_id.raw()),
             EntityKind(disguise),
             CustomEntityKind(custom_kind),
             Position(position),
@@ -435,8 +444,8 @@ pub fn spawn_custom_entity(
             Equipment::default(),
         ))
         .id();
-    index.insert(entity_id, entity);
-    Ok((entity_id, entity))
+    index.insert_typed(entity_id, entity);
+    Ok((entity_id.raw(), entity))
 }
 
 /// Installs [`EntityIndex`] and [`CustomEntityRegistry`] for a plugin that
@@ -577,6 +586,38 @@ mod tests {
         assert!(!despawned, "control failed: the LocalPlayer guard did not fire");
         assert_eq!(world.resource::<EntityIndex>().get(7), Some(local));
         assert!(world.get_entity(local).is_ok(), "the local player must survive");
+    }
+
+    #[test]
+    fn despawn_entity_ignores_unknown_server_ids_without_touching_plugin_entities() {
+        let mut world = bare_world();
+        let (plugin_id, entity) = world
+            .run_system_once(
+                |mut commands: Commands,
+                 mut index: bevy_ecs::system::ResMut<EntityIndex>,
+                 mut ids: bevy_ecs::system::ResMut<PluginEntityIds>| {
+                    spawn_entity(
+                        &mut commands,
+                        &mut index,
+                        &mut ids,
+                        EntitySpawn::new(key("minecraft:cow"), position(), rotation()),
+                    )
+                },
+            )
+            .expect("system runs");
+
+        let removed = world
+            .run_system_once(
+                |mut commands: Commands,
+                 mut index: bevy_ecs::system::ResMut<EntityIndex>,
+                 locals: Query<(), With<LocalPlayer>>| {
+                    despawn_entity(&mut commands, &mut index, &locals, 42)
+                },
+            )
+            .expect("system runs");
+        assert!(!removed, "an unknown server id is outside the plugin boundary");
+        assert_eq!(world.resource::<EntityIndex>().get(plugin_id), Some(entity));
+        assert!(world.get_entity(entity).is_ok());
     }
 
     #[test]
