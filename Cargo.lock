@@ -3730,9 +3730,11 @@ dependencies = [
 name = "lodestone-v1-20-6"
 version = "0.1.0"
 dependencies = [
+ "bevy_ecs",
  "lodestone-client",
  "lodestone-core",
  "lodestone-data",
+ "lodestone-ecs",
  "lodestone-macros",
  "lodestone-model",
  "lodestone-net",
@@ -3751,9 +3753,11 @@ dependencies = [
 name = "lodestone-v1-21-11"
 version = "0.1.0"
 dependencies = [
+ "bevy_ecs",
  "lodestone-client",
  "lodestone-core",
  "lodestone-data",
+ "lodestone-ecs",
  "lodestone-macros",
  "lodestone-model",
  "lodestone-net",

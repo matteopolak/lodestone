@@ -630,6 +630,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   aggregation-level guard for the supported joining families. It checks that every
   compiled protocol appears once, resolves through the registry, and is claimed by the
   adapter returned for that protocol.
+- [Modern protocol ECS fixtures](./protocol-modern-ecs-fixtures.md) — The modern
+  protocol fixture suites prove that entity metadata, equipment, and attribute packets
+  reach the production `NetIngest` schedule and become the ECS components consumed by
+  the client. They cover protocol 766, protocol 774 with its `set_entity_data` name,
+  and protocol 776.
 - [Recipe item IDs](./recipe-item-ids.md) — Recipe displays, ghost previews, and
   recipe property sets carry item-registry numbers. `lodestone_model::ItemId` keeps
   each number together with whether it has been validated against this build's
