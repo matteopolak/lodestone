@@ -49,6 +49,19 @@ and its eight dependencies and requires the reopened source to report zero
 generated columns and at least one disk load; it does not add a retention layer
 to the test.
 
+Set `LODESTONE_LARGE_PARITY_PHASE_PROFILE=1` on a bounded generated End run to
+report reusable phase timings and counters. The profile separates manifest and
+reference I/O, centre materialization, save, reopen, batch halo loads, target
+loads, packet hashing, and the combined source-aware light-settlement/packet
+encode seam. Each line includes wall time, calls, unique coordinates, cache
+hits/misses, and source-generated/source-loaded deltas; the latter expose
+discarded generated reads inside the production seam rather than counting only
+the outer admission. For a content-only calibration that measures admissions
+without settling light or encoding packets, also set
+`LODESTONE_LARGE_PARITY_CONTENT_ONLY=1`. This diagnostic intentionally skips
+save/reopen and exact comparison, so it cannot establish parity or persistence
+correctness.
+
 End raw comparisons bound this replay to the requested export prefix. Export
 records are x-fastest/z, while admissions are tile-z/tile-x/z/x; for each
 requested target, the comparator finds the latest admission whose centre or

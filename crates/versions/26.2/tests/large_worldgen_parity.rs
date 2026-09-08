@@ -2,7 +2,7 @@
 //! a full 501² run is an external oracle job, not a regular unit test.
 mod support { pub mod large_parity_manifest; }
 
-use std::{collections::{BTreeMap, BTreeSet}, fs::File, io::{BufReader, Read, Seek, SeekFrom}, path::{Path, PathBuf}, time::Instant};
+use std::{collections::{BTreeMap, BTreeSet}, fs::File, io::{BufReader, Read, Seek, SeekFrom}, path::{Path, PathBuf}, time::{Duration, Instant}};
 use lodestone_core::{Reader, Writer};
 use lodestone_server::{
     ChunkColumn, ChunkSource, ServerDirective, ServerProtocol,
@@ -10,7 +10,7 @@ use lodestone_server::{
     nether_chunk_source, overworld_chunk_source, retained_chunk_source_for_view_radius,
 };
 use lodestone_server::dimension::Dimension as ServerDimension;
-use lodestone_server::region_source::RegionChunkSource;
+use lodestone_server::region_source::{PersistenceStats, RegionChunkSource};
 use lodestone_v26_2::V770ServerProtocol;
 use lodestone_v26_2::packets::chunk::{ChunkShape, LevelChunkWithLight};
 use lodestone_world::{ColumnLight, LightData};
@@ -37,6 +37,8 @@ const PERSISTED_BATCH_SIZE_ENV: &str = "LODESTONE_LARGE_PARITY_PERSISTED_BATCH_S
 const PERSISTED_ONLY_ENV: &str = "LODESTONE_LARGE_PARITY_PERSISTED_ONLY";
 const TRACE_COLUMN_ENV: &str = "LODESTONE_LARGE_PARITY_TRACE_COLUMN";
 const TRACE_OUT_ENV: &str = "LODESTONE_LARGE_PARITY_TRACE_OUT";
+const PHASE_PROFILE_ENV: &str = "LODESTONE_LARGE_PARITY_PHASE_PROFILE";
+const CONTENT_ONLY_ENV: &str = "LODESTONE_LARGE_PARITY_CONTENT_ONLY";
 const PERSISTED_PACKET_OUT_ENV: &str = "LODESTONE_LARGE_PARITY_PERSISTED_PACKET_OUT";
 const PERSISTED_BATCH_SIZE: usize = 256;
 
@@ -49,6 +51,153 @@ struct RawPacketMismatch {
     expected_full: [u8; PACKET_AUDIT_RECORD_BYTES],
     actual_full: [u8; 32],
     payload_bytes: usize,
+}
+
+#[derive(Default)]
+struct PhaseProfile {
+    enabled: bool,
+    phases: BTreeMap<&'static str, PhaseProfileEntry>,
+}
+
+#[derive(Default)]
+struct PhaseProfileEntry {
+    elapsed: Duration,
+    calls: u64,
+    coordinates: BTreeSet<ChunkPos>,
+    cache_hits: u64,
+    cache_misses: u64,
+    source_generated: u64,
+    source_loaded_from_disk: u64,
+}
+
+impl PhaseProfile {
+    fn from_env() -> Self {
+        Self {
+            enabled: std::env::var_os(PHASE_PROFILE_ENV).is_some(),
+            phases: BTreeMap::new(),
+        }
+    }
+
+    fn call<T>(&mut self, phase: &'static str, coordinate: Option<ChunkPos>, work: impl FnOnce() -> T) -> T {
+        if !self.enabled {
+            return work();
+        }
+        let started = Instant::now();
+        let result = work();
+        self.record(phase, coordinate, started.elapsed(), None);
+        result
+    }
+
+    fn call_with_source_stats<T>(
+        &mut self,
+        phase: &'static str,
+        coordinate: Option<ChunkPos>,
+        stats: &PersistenceStats,
+        work: impl FnOnce() -> T,
+    ) -> T {
+        if !self.enabled {
+            return work();
+        }
+        let generated_before = stats
+            .generated
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let loaded_before = stats
+            .loaded_from_disk
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let result = self.call(phase, coordinate, work);
+        let generated = stats
+            .generated
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .saturating_sub(generated_before);
+        let loaded_from_disk = stats
+            .loaded_from_disk
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .saturating_sub(loaded_before);
+        let entry = self.phases.get_mut(phase).expect("profile phase exists");
+        entry.source_generated += generated;
+        entry.source_loaded_from_disk += loaded_from_disk;
+        let misses = generated + loaded_from_disk;
+        entry.cache_misses += misses;
+        if misses == 0 {
+            entry.cache_hits += 1;
+        }
+        result
+    }
+
+    fn source_column(
+        &mut self,
+        phase: &'static str,
+        source: &dyn ChunkSource,
+        stats: &PersistenceStats,
+        coordinate: ChunkPos,
+    ) -> ChunkColumn {
+        if !self.enabled {
+            return source.column(coordinate.0, coordinate.1);
+        }
+        let loaded_before = stats
+            .loaded_from_disk
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let generated_before = stats
+            .generated
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let started = Instant::now();
+        let column = source.column(coordinate.0, coordinate.1);
+        let loaded_after = stats
+            .loaded_from_disk
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let generated_after = stats
+            .generated
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let loaded_delta = loaded_after.saturating_sub(loaded_before);
+        let generated_delta = generated_after.saturating_sub(generated_before);
+        let cache_miss = loaded_delta != 0 || generated_delta != 0;
+        self.record(phase, Some(coordinate), started.elapsed(), Some(!cache_miss));
+        let entry = self.phases.get_mut(phase).expect("profile phase exists");
+        entry.source_generated += generated_delta;
+        entry.source_loaded_from_disk += loaded_delta;
+        column
+    }
+
+    fn record(
+        &mut self,
+        phase: &'static str,
+        coordinate: Option<ChunkPos>,
+        elapsed: Duration,
+        cache_hit: Option<bool>,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        let entry = self.phases.entry(phase).or_default();
+        entry.elapsed += elapsed;
+        entry.calls += 1;
+        if let Some(coordinate) = coordinate {
+            entry.coordinates.insert(coordinate);
+        }
+        match cache_hit {
+            Some(true) => entry.cache_hits += 1,
+            Some(false) => entry.cache_misses += 1,
+            None => {}
+        }
+    }
+
+    fn report(&self) {
+        if !self.enabled {
+            return;
+        }
+        for (phase, entry) in &self.phases {
+            eprintln!(
+                "large generated phase profile: phase={phase} wall_ms={:.3} calls={} unique_coordinates={} cache_hits={} cache_misses={} source_generated={} source_loaded_from_disk={}",
+                entry.elapsed.as_secs_f64() * 1000.0,
+                entry.calls,
+                entry.coordinates.len(),
+                entry.cache_hits,
+                entry.cache_misses,
+                entry.source_generated,
+                entry.source_loaded_from_disk,
+            );
+        }
+    }
 }
 
 impl RawPacketMismatch {
@@ -1201,19 +1350,22 @@ fn compare_end_raw_after_generated_save_reopen<R: Read, A: Read>(
     scan_all: bool,
     reference_packets: &BTreeMap<ChunkPos, PathBuf>,
     component_reports: &mut Vec<(ChunkPos, PacketComponentReport)>,
+    profile: &mut PhaseProfile,
 ) -> Vec<RawPacketMismatch> {
     let width = u64::try_from(i64::from(h.cx1) - i64::from(h.cx0) + 1)
         .expect("authenticated manifest coordinate width fits u64");
     let mut records = Vec::with_capacity(usize::try_from(limit).expect("parity prefix fits memory"));
-    for index in 0..limit {
-        let mut prefix = [0u8; RAW_PACKET_HASH_BYTES];
-        expected.read_exact(&mut prefix).expect("manifest raw packet hash prefix");
-        let mut full = [0u8; PACKET_AUDIT_RECORD_BYTES];
-        expected_audit.read_exact(&mut full).expect("packet-audit full packet digest");
-        let cx = h.cx0 + (index % width) as i32;
-        let cz = h.cz0 + (index / width) as i32;
-        records.push(((cx, cz), prefix, full, index));
-    }
+    profile.call("manifest_io", None, || {
+        for index in 0..limit {
+            let mut prefix = [0u8; RAW_PACKET_HASH_BYTES];
+            expected.read_exact(&mut prefix).expect("manifest raw packet hash prefix");
+            let mut full = [0u8; PACKET_AUDIT_RECORD_BYTES];
+            expected_audit.read_exact(&mut full).expect("packet-audit full packet digest");
+            let cx = h.cx0 + (index % width) as i32;
+            let cz = h.cz0 + (index / width) as i32;
+            records.push(((cx, cz), prefix, full, index));
+        }
+    });
 
     let source = RegionChunkSource::new(
         end_chunk_source(42),
@@ -1224,6 +1376,8 @@ fn compare_end_raw_after_generated_save_reopen<R: Read, A: Read>(
     )
     .unwrap_or_else(|error| panic!("open generated End persistence source {}: {error}", world_dir.display()));
     let admissions = end_materialization_positions(h);
+    let source_stats = source.save_handle();
+    let content_only = std::env::var_os(CONTENT_ONLY_ENV).is_some();
     let admission_limit = materialization_prefix_for_export_prefix(
         &admissions,
         (h.cx0, h.cx1, h.cz0, h.cz1),
@@ -1237,36 +1391,65 @@ fn compare_end_raw_after_generated_save_reopen<R: Read, A: Read>(
     );
     let mut trace = EndTrace::from_env();
     for (admission_index, &(cx, cz)) in admissions.iter().take(admission_limit).enumerate() {
-        let column = source.column(cx, cz);
+        let column = profile.source_column(
+            "materialization",
+            &source,
+            source_stats.stats(),
+            (cx, cz),
+        );
         let mut trace_pre = None;
         let mut trace_footprint = Vec::new();
         if trace.as_ref().is_some_and(|trace| trace.includes(cx, cz)) {
             let target = trace.as_ref().expect("trace configuration").target;
-            trace_pre = Some(source.column(target.0, target.1));
+            trace_pre = Some(profile.source_column(
+                "trace_source_reads",
+                &source,
+                source_stats.stats(),
+                target,
+            ));
             for dz in -1..=1 {
                 for dx in -1..=1 {
                     let position = (cx + dx, cz + dz);
                     trace_footprint.push((
                         position,
-                        non_air_sections(&source.column(position.0, position.1)),
+                        non_air_sections(&profile.source_column(
+                            "trace_source_reads",
+                            &source,
+                            source_stats.stats(),
+                            position,
+                        )),
                     ));
                 }
             }
         }
-        let _ = encode_end_packet_with_source(
-            &source,
-            cx,
-            cz,
-            &column,
-            "generated materialization",
-        );
-        if let Some(pre) = trace_pre.as_ref() {
-            let target = trace.as_ref().expect("trace configuration").target;
-            let post = source.column(target.0, target.1);
-            trace
-                .as_mut()
-                .expect("trace configuration")
-                .record(admission_index, (cx, cz), pre, &post, &trace_footprint);
+        if !content_only {
+            let _ = profile.call_with_source_stats(
+                "light_settlement_and_packet_encode",
+                Some((cx, cz)),
+                source_stats.stats(),
+                || {
+                    encode_end_packet_with_source(
+                        &source,
+                        cx,
+                        cz,
+                        &column,
+                        "generated materialization",
+                    )
+                },
+            );
+            if let Some(pre) = trace_pre.as_ref() {
+                let target = trace.as_ref().expect("trace configuration").target;
+                let post = profile.source_column(
+                    "trace_source_reads",
+                    &source,
+                    source_stats.stats(),
+                    target,
+                );
+                trace
+                    .as_mut()
+                    .expect("trace configuration")
+                    .record(admission_index, (cx, cz), pre, &post, &trace_footprint);
+            }
         }
         if (admission_index + 1) % 256 == 0 || admission_index + 1 == admission_limit {
             eprintln!(
@@ -1279,23 +1462,34 @@ fn compare_end_raw_after_generated_save_reopen<R: Read, A: Read>(
     if let Some(trace) = trace.take() {
         trace.finish();
     }
+    if content_only {
+        eprintln!(
+            "large generated content-only profile: materialized {admission_limit} End admissions; skipped light settlement, packet encode, save, reopen, and packet comparison",
+        );
+        return Vec::new();
+    }
 
     let save_handle: lodestone_server::region_source::WorldSaveHandle = source.save_handle();
-    let written = save_handle
-        .save()
-        .unwrap_or_else(|error| panic!("save generated End materialization through WorldSaveHandle: {error}"));
+    let written = profile.call("save", None, || {
+        save_handle
+            .save()
+            .unwrap_or_else(|error| panic!("save generated End materialization through WorldSaveHandle: {error}"))
+    });
     assert!(written > 0, "generated End materialization must write its settled centres");
     drop(save_handle);
     drop(source);
 
-    let reopened = RegionChunkSource::new(
-        end_chunk_source(42),
-        world_dir,
-        server_dimension,
-        0,
-        256,
-    )
-    .unwrap_or_else(|error| panic!("reopen generated End persistence source {}: {error}", world_dir.display()));
+    let reopened = profile.call("reopen", None, || {
+        RegionChunkSource::new(
+            end_chunk_source(42),
+            world_dir,
+            server_dimension,
+            0,
+            256,
+        )
+        .unwrap_or_else(|error| panic!("reopen generated End persistence source {}: {error}", world_dir.display()))
+    });
+    let reopened_stats = reopened.save_handle();
 
     let mut mismatches = Vec::new();
     for (batch_start, batch_end) in persisted_batch_ranges(
@@ -1312,18 +1506,35 @@ fn compare_end_raw_after_generated_save_reopen<R: Read, A: Read>(
             }
         }
         for &(cx, cz) in &halo {
-            let _ = reopened.column(cx, cz);
+            let _ = profile.source_column(
+                "batch_halo_load",
+                &reopened,
+                reopened_stats.stats(),
+                (cx, cz),
+            );
         }
         for &((cx, cz), expected_prefix, expected_full, index) in batch {
-            let column = reopened.column(cx, cz);
-            let payload = encode_end_packet_with_source(
+            let column = profile.source_column(
+                "batch_target_load",
                 &reopened,
-                cx,
-                cz,
-                &column,
-                "generated save/reopen capture",
+                reopened_stats.stats(),
+                (cx, cz),
             );
-            let actual_full = raw_packet_full_digest(&payload);
+            let payload = profile.call_with_source_stats(
+                "light_settlement_and_packet_encode",
+                Some((cx, cz)),
+                reopened_stats.stats(),
+                || {
+                    encode_end_packet_with_source(
+                        &reopened,
+                        cx,
+                        cz,
+                        &column,
+                        "generated save/reopen capture",
+                    )
+                },
+            );
+            let actual_full = profile.call("packet_hash", Some((cx, cz)), || raw_packet_full_digest(&payload));
             let actual_prefix = [actual_full[0], actual_full[1]];
             if actual_prefix != expected_prefix || actual_full != expected_full {
                 let mismatch = RawPacketMismatch {
@@ -1349,8 +1560,10 @@ fn compare_end_raw_after_generated_save_reopen<R: Read, A: Read>(
                 mismatches.push(mismatch);
             }
             if let Some(reference_path) = reference_packets.get(&(cx, cz)) {
-                let reference_packet = std::fs::read(reference_path)
-                    .unwrap_or_else(|error| panic!("read {}: {error}", reference_path.display()));
+                let reference_packet = profile.call("reference_packet_io", Some((cx, cz)), || {
+                    std::fs::read(reference_path)
+                        .unwrap_or_else(|error| panic!("read {}: {error}", reference_path.display()))
+                });
                 component_reports.push((
                     (cx, cz),
                     packet_component_difference(&reference_packet, &payload, Dimension::End),
@@ -2047,6 +2260,7 @@ fn parity_manifest_streams_before_rust_comparison() {
     } else {
         BTreeMap::new()
     };
+    let mut phase_profile = PhaseProfile::from_env();
     if raw_packet && dimension == Dimension::End && std::env::var_os(PERSISTED_WORLD_ROOT_ENV).is_some() {
         let root = validated_persisted_world_root(&h);
         eprintln!(
@@ -2191,6 +2405,7 @@ fn parity_manifest_streams_before_rust_comparison() {
                 scan_all,
                 &reference_packets,
                 &mut component_reports,
+                &mut phase_profile,
             ));
         } else {
         let source: Box<dyn ChunkSource> = match dimension {
@@ -2363,6 +2578,7 @@ fn parity_manifest_streams_before_rust_comparison() {
             let _ = std::fs::remove_dir_all(dir);
         }
     }
+    phase_profile.report();
     if limit < h.count {
         eprintln!(
             "large {} parity: bounded pilot completed successfully at {} chunks; full grid remains pending",
