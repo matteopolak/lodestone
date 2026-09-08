@@ -6,10 +6,14 @@ use std::time::Duration;
 use lodestone_client::{ClientBuilder, LoginProfile, PlayerLoadedPolicy, ServerAddress};
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, ChatKind, ClientAction, ClientEvent, ConnectionState,
-    Hand, Rotation, Vec3, Vec3f, VersionAdapter,
+    EntityInteraction, Hand, ResourceKey, Rotation, Vec3, Vec3f, VersionAdapter,
 };
-use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer, ServerBound};
-use lodestone_v1_13::{adapter, V404Adapter};
+use lodestone_net::{Connection, memory_pair};
+use lodestone_server::{
+    BlockEntityHandle, ChunkColumn, ChunkSource, ChunkWorld, IntegratedServer, MobHandle, MobOwner,
+    NoEntities, ServerBound, serve_connection,
+};
+use lodestone_v1_13::{adapter, V404Adapter, V404ServerProtocol};
 
 const PROTOCOL: i32 = 404;
 const TARGET: BlockPos = BlockPos::new(8, 100, 8);
@@ -207,6 +211,127 @@ async fn teleport_confirmation_unblocks_hosted_protocol_404_movement() {
         .expect("confirmed teleport must unblock movement and recenter the view");
     handle.shutdown();
     server.shutdown().await;
+}
+
+/// The production bridge for protocol 404: a real client sends both an attack
+/// and a plain entity interaction, the shared server dispatch mutates the same
+/// live `MobHandle`, and the mount result returns through the 404 passenger
+/// packet to the client's event stream.
+#[tokio::test]
+async fn registry_selected_404_entity_actions_reach_live_mob_consumers() {
+    let (client_io, server_io) = memory_pair();
+    let mob_handle = MobHandle::new(ChunkWorld::new(-4, 24));
+    let profile = profile();
+    let (zombie_id, horse_id, zombie_health) = mob_handle.with(|sim| {
+        sim.set_next_id(1000);
+        let zombie_id = sim
+            .spawn_species(
+                ResourceKey::new("minecraft", "zombie").expect("valid key"),
+                Vec3::new(10.0, 100.0, 8.0),
+            )
+            .id();
+        let horse_id = sim
+            .spawn_species(
+                ResourceKey::new("minecraft", "horse").expect("valid key"),
+                Vec3::new(11.0, 100.0, 8.0),
+            )
+            .id();
+        sim.get_mut(horse_id)
+            .expect("just-spawned horse")
+            .tame(MobOwner::Player(profile.uuid));
+        let zombie_health = sim.get(zombie_id).expect("just-spawned zombie").health();
+        (zombie_id, horse_id, zombie_health)
+    });
+
+    let server_mobs = mob_handle.clone();
+    let source = FlatFixtureSource::new();
+    let server_task = tokio::spawn(async move {
+        let mut conn = Connection::new(server_io);
+        let block_entities = BlockEntityHandle::default();
+        serve_connection(
+            &mut conn,
+            &V404ServerProtocol,
+            &source,
+            &NoEntities,
+            0,
+            &block_entities,
+            &server_mobs,
+        )
+        .await
+    });
+
+    let (mut handle, mut events) = ClientBuilder::new(address(), profile, Box::new(adapter()))
+        .player_loaded_policy(PlayerLoadedPolicy::Manual)
+        .connect_with(client_io);
+    handle
+        .wait_for_spawn(Duration::from_secs(30))
+        .await
+        .expect("protocol-404 client reaches Play");
+    handle
+        .wait_for_chunks(1, Duration::from_secs(30))
+        .await
+        .expect("protocol-404 initial column never arrived");
+
+    handle
+        .send_action(ClientAction::InteractEntity {
+            entity_id: zombie_id,
+            interaction: EntityInteraction::Attack,
+            sneaking: false,
+        })
+        .expect("attack action must reach the client transport");
+    let health_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Some(health) = mob_handle.with(|sim| sim.get(zombie_id).map(|mob| mob.health()))
+            && health < zombie_health
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < health_deadline,
+            "the decoded attack never reached the live mob consumer"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    handle
+        .send_action(ClientAction::InteractEntity {
+            entity_id: horse_id,
+            interaction: EntityInteraction::Interact { hand: Hand::Main },
+            sneaking: false,
+        })
+        .expect("interact action must reach the client transport");
+    let mount_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if mob_handle.with(|sim| sim.mob_ridden_by(1) == Some(horse_id)) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < mount_deadline,
+            "the decoded interaction never reached the live mob consumer"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let passenger_event = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Some(ClientEvent::EntityPassengersChanged {
+                vehicle_id,
+                passenger_ids,
+            }) = events.recv().await
+                && vehicle_id == horse_id
+            {
+                break passenger_ids;
+            }
+        }
+    })
+    .await
+    .expect("the 404 host must broadcast the mount result");
+    assert_eq!(passenger_event, vec![1]);
+
+    handle.shutdown();
+    let _ = handle.join().await;
+    let _ = tokio::time::timeout(Duration::from_secs(10), server_task)
+        .await
+        .expect("protocol-404 server task did not finish in time");
 }
 
 #[test]
