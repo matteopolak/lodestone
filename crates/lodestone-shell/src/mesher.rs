@@ -60,7 +60,7 @@ use lodestone_render::biome_tint::{
 use lodestone_assets::{BakedQuad, Direction};
 use lodestone_model::BlockPos;
 use lodestone_world::{
-    ChunkPos, ChunkSection, PaletteKind, SectionLight as SectionLightData, World,
+    ChunkColumn, ChunkPos, ChunkSection, PaletteKind, SectionLight as SectionLightData, World,
 };
 
 use crate::blocks::{ShellClassifier, id};
@@ -667,6 +667,59 @@ pub fn sky_default_for_dimension(
 /// — answers exactly the same question this scan did.
 fn is_all_air(section: &ChunkSection) -> bool {
     section.is_air_only()
+}
+
+/// Cheap, column-wide content facts used to interpret a mesh result.
+///
+/// `ChunkColumn` elides an all-air section, but it can still retain an allocated
+/// section whose biome differs from the column default. That section is valid
+/// storage and still has no block geometry. Counting the section's maintained
+/// non-air total rather than using `allocated_sections()` keeps those cases
+/// distinct from a loaded column whose block data disappeared before meshing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ColumnBlockSummary {
+    allocated_sections: usize,
+    non_air_sections: usize,
+    non_air_blocks: usize,
+}
+
+impl ColumnBlockSummary {
+    /// Summarise block content without walking every cell in every section.
+    #[must_use]
+    fn from_column(column: &ChunkColumn) -> Self {
+        let mut summary = Self::default();
+        for section_index in 0..column.section_count() {
+            let Some(section) = column.section(section_index) else {
+                continue;
+            };
+            summary.allocated_sections += 1;
+            let non_air_blocks = usize::from(section.non_air_count());
+            summary.non_air_blocks += non_air_blocks;
+            if non_air_blocks > 0 {
+                summary.non_air_sections += 1;
+            }
+        }
+        summary
+    }
+
+    /// Whether every retained section is air-only (or the column is fully
+    /// elided). Biome-only sections intentionally classify as empty geometry.
+    #[must_use]
+    const fn is_all_air(self) -> bool {
+        self.non_air_blocks == 0
+    }
+}
+
+/// A no-snapshot result is actionable only when the loaded block storage says
+/// that some non-air data should have reached the mesher. Streaming deferrals
+/// are handled separately and intentional all-air columns are routine.
+#[must_use]
+fn should_report_empty_column(
+    summary: ColumnBlockSummary,
+    meshed_any: bool,
+    deferred_any: bool,
+) -> bool {
+    !meshed_any && !deferred_any && !summary.is_all_air()
 }
 
 /// A section's light source for the mesh pass: either the world's real light
@@ -2684,8 +2737,8 @@ pub(crate) struct RelightWorkload {
 /// `dirty_columns`, `pending_removals`, `uploaded_sections` and `mesh_drops`
 /// here. **One** resource rather than five because they are one subsystem's
 /// state and every operation touches several at once: a column that snapshots to
-/// nothing pushes a removal *and* may count a drop, and a drained mesh records an
-/// upload. Five `ResMut`s would be five borrows of one invariant.
+/// nothing pushes a removal and a drained mesh records an upload. Five `ResMut`s
+/// would be five borrows of one invariant.
 ///
 /// The worker pool is still a worker pool ([`MeshScheduler`]'s docs say why that
 /// matters). Systems here only enqueue and drain.
@@ -2784,12 +2837,21 @@ pub struct TerrainMesh {
     /// the *previous* server's terrain rendered until a new chunk happened to land
     /// on the exact same key.
     pub uploaded_sections: HashSet<SectionKey>,
-    /// Count of loaded columns that failed to mesh (id spaces disagreed, or an
-    /// all-air centre on a column the server reports loaded). Surfaced in the
-    /// debug HUD next to `live_cols` so this defect class is a one-line diagnosis
-    /// instead of a play-test archaeology session. Should stay `0` in a healthy
-    /// session.
+    /// Count of loaded columns that failed a meshing guard (id spaces disagreed,
+    /// or block storage reported non-air data but no section snapshot was
+    /// eligible). A deliberately all-air column is valid and is not counted.
+    /// Surfaced in the debug HUD next to `live_cols` so this defect class is a
+    /// one-line diagnosis instead of a play-test archaeology session. Should
+    /// stay `0` in a healthy session.
     pub drops: u64,
+    /// Number of non-air columns for which a dirty signal yielded no meshable
+    /// section. Kept separate from [`Self::drops`] so the diagnostic can sample
+    /// warnings without making the id-space guard's count ambiguous.
+    non_air_empty_columns: u64,
+    /// Number of columns rejected because the classifier and storage use
+    /// different block-id spaces. Kept separate so its warning can be sampled
+    /// independently from the non-air content diagnostic.
+    id_space_mismatch_columns: u64,
     /// Whether an absent neighbour column means "edge of the world" or "not here
     /// yet", taken from the worker pool's classifier — see
     /// [`MeshScheduler::new`].
@@ -2833,6 +2895,8 @@ impl TerrainMesh {
             pending_removals: Vec::new(),
             uploaded_sections: HashSet::new(),
             drops: 0,
+            non_air_empty_columns: 0,
+            id_space_mismatch_columns: 0,
             deferred: 0,
             policy: MeshPolicy::default(),
             biome_names: Arc::from([]),
@@ -2901,8 +2965,10 @@ impl TerrainMesh {
     ///
     /// An **unloaded** column is a silent no-op: it will be queued for real by its
     /// own arrival, and counting it would drown the drop counter in noise. A
-    /// *loaded* column that yields no geometry at all is the "invisible blocks"
-    /// defect class and is counted and logged loudly.
+    /// loaded column whose stored block data is all air is also a valid no-op;
+    /// biome-only sections and elided sky sections are expected to produce no
+    /// geometry. Only a loaded column whose storage contains non-air blocks but
+    /// yields no eligible snapshot reaches the "invisible blocks" alarm.
     pub fn mesh_column(&mut self, store: &ChunkWorld, cx: i32, cz: i32) {
         self.mesh_column_inner(store, cx, cz, false);
     }
@@ -3027,17 +3093,18 @@ impl TerrainMesh {
 
     fn mesh_column_inner(&mut self, store: &ChunkWorld, cx: i32, cz: i32, force: bool) {
         if !self.policy.id_spaces_agree {
+            self.id_space_mismatch_columns += 1;
             self.drops += 1;
-            tracing::warn!(
-                cx,
-                cz,
-                branch = "id-space-mismatch",
-                "column skipped: the mesh classifier's block-id space is not the store's \
-                 (vanilla assets missing on a live session, or the reverse)"
-            );
-            return;
-        }
-        if !store.contains_column(cx, cz) {
+            if self.id_space_mismatch_columns.is_power_of_two() {
+                tracing::warn!(
+                    cx,
+                    cz,
+                    branch = "id-space-mismatch",
+                    occurrences = self.id_space_mismatch_columns,
+                    "column skipped: the mesh classifier's block-id space is not the store's \
+                     (vanilla assets missing on a live session, or the reverse)"
+                );
+            }
             return;
         }
         let Some(extent) = store.extent() else {
@@ -3049,8 +3116,16 @@ impl TerrainMesh {
         // never locked while meshing.
         let mut jobs: Vec<(SectionKey, SnapshotOutcome)> =
             Vec::with_capacity(extent.section_count);
-        {
+        let (summary, column_section_count) = {
             let world = store.read();
+            // The arrival/unload signal and this read can race. Do not turn an
+            // already-unloaded column into a false non-air diagnostic between
+            // the extent read above and this snapshot lock.
+            let Some(chunk) = world.get(ChunkPos::new(cx, cz)) else {
+                return;
+            };
+            let summary = ColumnBlockSummary::from_column(&chunk.column);
+            let column_section_count = chunk.column.section_count();
             for si in 0..extent.section_count {
                 let key = SectionKey {
                     cx,
@@ -3070,7 +3145,8 @@ impl TerrainMesh {
                     .with_biome_names(Arc::clone(&self.biome_names)),
                 ));
             }
-        }
+            (summary, column_section_count)
+        };
 
         let mut meshed_any = false;
         let mut deferred_any = false;
@@ -3081,14 +3157,25 @@ impl TerrainMesh {
         // A column held back for its neighbourhood is not a drop: it is the
         // frontier of a streaming load doing exactly what it should, and counting
         // it would drown the "invisible blocks" alarm in noise on every join.
-        if !meshed_any && !deferred_any {
+        // All-air storage is the other expected no-geometry result. A non-air
+        // column with no eligible snapshot is the actionable case.
+        if should_report_empty_column(summary, meshed_any, deferred_any) {
+            self.non_air_empty_columns += 1;
             self.drops += 1;
-            tracing::warn!(
-                cx,
-                cz,
-                branch = "all-air-loaded-column",
-                "loaded column produced no geometry despite a dirty signal"
-            );
+            if self.non_air_empty_columns.is_power_of_two() {
+                tracing::warn!(
+                    cx,
+                    cz,
+                    branch = "non-air-loaded-column",
+                    occurrences = self.non_air_empty_columns,
+                    allocated_sections = summary.allocated_sections,
+                    non_air_sections = summary.non_air_sections,
+                    non_air_blocks = summary.non_air_blocks,
+                    column_section_count,
+                    mesh_section_count = extent.section_count,
+                    "loaded column contains non-air blocks but produced no eligible mesh section"
+                );
+            }
         }
     }
 
@@ -3340,6 +3427,8 @@ impl TerrainMesh {
         self.departed.clear();
         self.light_dirty_sections.clear();
         self.drops = 0;
+        self.non_air_empty_columns = 0;
+        self.id_space_mismatch_columns = 0;
         self.deferred = 0;
         self.pending_removals.extend(self.uploaded_sections.drain());
     }
@@ -4304,6 +4393,103 @@ mod tests {
             "control: no loaded section had geometry, so `is_none()` above is \
              satisfied by a function that always returns None"
         );
+    }
+
+    /// Independent control for the column-level diagnostic. An allocated
+    /// biome-only section is still intentionally empty geometry, while one
+    /// non-air block must make the same column actionable. The direct scan is
+    /// deliberately separate from `ChunkSection::non_air_count`, so this test
+    /// checks the cached count rather than merely repeating it.
+    #[test]
+    fn column_summary_distinguishes_biome_only_air_from_non_air_storage() {
+        fn direct_non_air_blocks(column: &ChunkColumn) -> usize {
+            (0..column.section_count())
+                .filter_map(|section_index| column.section(section_index))
+                .map(|section| {
+                    (0..section.block_states().entry_count())
+                        .filter(|&index| {
+                            section.block_states().get(index) != section.air_id()
+                        })
+                        .count()
+                })
+                .sum()
+        }
+
+        let mut column = ChunkColumn::new(
+            0,
+            2,
+            PaletteKind::block_states(),
+            PaletteKind::biomes(),
+            id::AIR,
+            0,
+        );
+        // A non-default biome allocates storage without adding a block.
+        column.set_biome(0, 0, 0, 1);
+        let air = ColumnBlockSummary::from_column(&column);
+        assert_eq!(air.allocated_sections, 1);
+        assert_eq!(air.non_air_sections, 0);
+        assert_eq!(air.non_air_blocks, 0);
+        assert_eq!(direct_non_air_blocks(&column), 0);
+        assert!(air.is_all_air());
+        assert!(
+            !should_report_empty_column(air, false, false),
+            "biome-only storage is a valid all-air mesh result"
+        );
+
+        column.set_block(0, 0, 0, id::WATER);
+        let non_air = ColumnBlockSummary::from_column(&column);
+        assert_eq!(non_air.allocated_sections, 1);
+        assert_eq!(non_air.non_air_sections, 1);
+        assert_eq!(non_air.non_air_blocks, 1);
+        assert_eq!(direct_non_air_blocks(&column), 1);
+        assert!(!non_air.is_all_air());
+        assert!(
+            should_report_empty_column(non_air, false, false),
+            "a loaded non-air column with no eligible snapshot is actionable"
+        );
+        assert!(
+            !should_report_empty_column(non_air, false, true),
+            "a streaming deferral is not a dropped column"
+        );
+        assert!(
+            !should_report_empty_column(non_air, true, false),
+            "a submitted section is not an empty-column diagnostic"
+        );
+    }
+
+    /// A loaded column can be all air while still carrying biome-only section
+    /// storage. It must queue ordinary GPU removals without incrementing the
+    /// dropped-column diagnostic that is reserved for non-air data.
+    #[test]
+    fn loaded_all_air_column_is_an_expected_mesh_noop() {
+        use lodestone_world::{ColumnLight, Heightmaps, LoadedChunk};
+
+        let mut column = ChunkColumn::new(
+            0,
+            2,
+            PaletteKind::block_states(),
+            PaletteKind::biomes(),
+            id::AIR,
+            0,
+        );
+        column.set_biome(0, 0, 0, 1);
+        let mut world = World::new();
+        world.load(
+            ChunkPos::new(0, 0),
+            LoadedChunk::new(column, ColumnLight::new(2), Heightmaps::new(), Vec::new()),
+        );
+        let write = ChunkWorldWrite::new(world);
+        let store = write.read_handle();
+        let mut terrain = TerrainMesh::new(MeshScheduler::new(
+            1,
+            ShellClassifier::Demo(DemoClassifier),
+        ));
+
+        terrain.mesh_column(&store, 0, 0);
+
+        assert_eq!(terrain.drops, 0);
+        assert_eq!(terrain.non_air_empty_columns, 0);
+        assert_eq!(terrain.pending_removals.len(), 2);
     }
 
     #[test]
