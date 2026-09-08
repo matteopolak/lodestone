@@ -136,9 +136,14 @@ composed terrain-prefix grid and folded back afterward. Trunk placers cover stra
 the vanilla equivalents plus cherry's hanging-leaves pass and mangrove's dart-throw scatter; a
 mangrove root placer and a fallen-tree feature (stump + horizontal log, sharing decorator machinery
 with standing trees) are also modelled. Huge red and brown mushrooms use their configured ground
-tags, a random four-to-six-block stem height, and their distinct directional cap layouts (brown's cornerless
-square versus red's three rim layers and smaller filled top). Every reachable overworld biome's tree content is now
-covered by a real placer. Multiface growth writes complete directional state, checks its support,
+tags, a four-to-six-block stem height with a one-in-twelve doubled branch, and their distinct directional
+cap layouts (brown's cornerless square versus red's three plus-shaped rim layers and smaller filled top).
+Their preflight clearance accepts air and leaves, while the cap/stem writes use the dedicated mushroom
+replacement set, so a valid canopy can be replaced without allowing a solid obstruction to produce a
+partial tree. Brown's clearance reserves its configured radius above the fourth stem layer; red's
+preflight clearance remains stem-column-only before its cap is written. Every reachable overworld biome's
+tree content is now covered by a real placer. Multiface
+growth writes complete directional state, checks its support,
 and performs its one seeded outward spread; the external single-source and 3×3 fixtures compare that
 layout exactly. The fixed-seed `vegetation_mushroom_fields_neg1_0_jvm.txt` and
 `vegetation_mushroom_fields_5_5_jvm.txt` external captures exercise the production mushroom-fields
@@ -194,8 +199,8 @@ Vegetation-patch configurations may name block tags in `replaceable`, including
 IDs silently makes patches skip terrain such as deepslate, so preserve tag expansion when extending
 the configuration parser.
 
-Placement is off block-state strings only at the edges: tag-membership questions (17 of them — 11
-registry tags plus 6 base-name equalities) are answered by fixed bitsets indexed by `StateId`,
+Placement is off block-state strings only at the edges: tag-membership questions are answered by
+fixed bitsets indexed by `StateId`,
 exact and never needing to grow since a `StateId` is a `u16`. A bit above the interner's watermark
 (minted *during* the current decoration pass — a rewritten leaf's `distance=N` state, for instance)
 falls back to the pre-bitset string path, which is a correctness requirement, not a slow path: an
