@@ -1,5 +1,6 @@
-//! A minigame/mob-farm-class plugin: queued entity spawn/despawn requests,
-//! plus one custom entity type registered at build time.
+//! A minigame/mob-farm-class plugin: queued entity spawn/despawn and copied
+//! entity-mutation requests, plus one custom entity type registered at build
+//! time.
 //!
 //! # What this is
 //!
@@ -32,6 +33,11 @@
 //! registry, which is what makes the crate's own tests a real consumer rather
 //! than a closed loop.
 //!
+//! [`EntityMutationRequests`] uses the same request boundary for the smallest
+//! manipulation slice: teleport, velocity, health, and equipment. The queue resolves an
+//! id only while the tick runs and ignores unknown ids, so a plugin never
+//! retains an ECS handle as a mutation capability.
+//!
 //! # How to change it
 //!
 //! This crate is transport, matching `lodestone_worldedit`'s own "how to
@@ -47,15 +53,16 @@
 
 use bevy_ecs::query::With;
 use bevy_ecs::resource::Resource;
+use bevy_ecs::schedule::IntoScheduleConfigs;
 use bevy_ecs::system::{Commands, Query, Res, ResMut};
 use lodestone_ecs::app::{App, Plugin};
-use lodestone_ecs::entity::EntityIndex;
+use lodestone_ecs::entity::{EntityIndex, Equipment, Health, Position, Velocity};
 use lodestone_ecs::entity_spawn::{
     CustomEntityRegistry, CustomEntityTypesExt, EntitySpawn, PluginEntityIds, despawn_entity,
     spawn_custom_entity, spawn_entity,
 };
 use lodestone_ecs::{GameTick, LocalPlayer};
-use lodestone_model::{ResourceKey, Rotation, Vec3};
+use lodestone_model::{EntityEquipment, ResourceKey, Rotation, Vec3};
 
 /// The custom entity kind [`MobSpawnerPlugin`] registers at build time,
 /// disguised as `minecraft:zombie`. A logical id in this crate's own
@@ -91,6 +98,28 @@ pub struct SpawnRequests(pub Vec<SpawnRequest>);
 /// Entity ids queued for despawn since the last drain.
 #[derive(Resource, Debug, Default)]
 pub struct DespawnRequests(pub Vec<i32>);
+
+/// A bounded mutation request for an entity this plugin can resolve through
+/// [`EntityIndex`]. The request carries copied component values; the system
+/// below owns the only lookup and applies them through deferred ECS commands.
+#[derive(Debug, Clone)]
+pub enum EntityMutation {
+    /// Move an entity to an absolute position.
+    Teleport { entity_id: i32, position: Vec3 },
+    /// Replace an entity's reported velocity.
+    SetVelocity { entity_id: i32, velocity: Vec3 },
+    /// Replace an entity's reported health.
+    SetHealth { entity_id: i32, health: f32 },
+    /// Replace the entity's explicitly reported equipment slots.
+    SetEquipment {
+        entity_id: i32,
+        equipment: Vec<EntityEquipment>,
+    },
+}
+
+/// Entity mutations queued since the last drain.
+#[derive(Resource, Debug, Default)]
+pub struct EntityMutationRequests(pub Vec<EntityMutation>);
 
 /// Every id this plugin has spawned that has not yet been despawned — the
 /// "return value" a familiar plugin-API spawn caller gets back, published so a
@@ -157,6 +186,49 @@ fn apply_despawn_requests(
     }
 }
 
+/// Drains [`EntityMutationRequests`] through the public component surface. An
+/// unknown id is ignored: a plugin must not manufacture an ECS entity or hold
+/// an internal handle past the lookup that resolves this request.
+fn apply_entity_mutations(
+    mut requests: ResMut<EntityMutationRequests>,
+    mut commands: Commands,
+    index: Res<EntityIndex>,
+) {
+    for request in requests.0.drain(..) {
+        let (entity_id, component) = match request {
+            EntityMutation::Teleport { entity_id, position } => {
+                (entity_id, EntityMutationComponent::Position(Position(position)))
+            }
+            EntityMutation::SetVelocity { entity_id, velocity } => {
+                (entity_id, EntityMutationComponent::Velocity(Velocity(velocity)))
+            }
+            EntityMutation::SetHealth { entity_id, health } => {
+                (entity_id, EntityMutationComponent::Health(Health(health)))
+            }
+            EntityMutation::SetEquipment {
+                entity_id,
+                equipment,
+            } => (entity_id, EntityMutationComponent::Equipment(Equipment(equipment))),
+        };
+        let Some(entity) = index.get(entity_id) else {
+            continue;
+        };
+        match component {
+            EntityMutationComponent::Position(value) => commands.entity(entity).insert(value),
+            EntityMutationComponent::Velocity(value) => commands.entity(entity).insert(value),
+            EntityMutationComponent::Health(value) => commands.entity(entity).insert(value),
+            EntityMutationComponent::Equipment(value) => commands.entity(entity).insert(value),
+        };
+    }
+}
+
+enum EntityMutationComponent {
+    Position(Position),
+    Velocity(Velocity),
+    Health(Health),
+    Equipment(Equipment),
+}
+
 /// Installs [`SpawnRequests`]/[`DespawnRequests`]/[`SpawnedEntities`], the
 /// systems draining them into [`lodestone_ecs::entity_spawn`], and registers
 /// [`TRAINING_DUMMY`].
@@ -175,6 +247,7 @@ impl Plugin for MobSpawnerPlugin {
         app.init_resource::<EntityIndex>();
         app.init_resource::<SpawnRequests>();
         app.init_resource::<DespawnRequests>();
+        app.init_resource::<EntityMutationRequests>();
         app.init_resource::<SpawnedEntities>();
         app.add_custom_entity_type(
             training_dummy_kind(),
@@ -183,6 +256,9 @@ impl Plugin for MobSpawnerPlugin {
                 .expect("valid resource key"),
         )
         .expect("the training dummy type registers exactly once per App");
-        app.add_systems(GameTick, (apply_spawn_requests, apply_despawn_requests));
+        app.add_systems(
+            GameTick,
+            (apply_spawn_requests, apply_entity_mutations, apply_despawn_requests).chain(),
+        );
     }
 }
