@@ -1564,7 +1564,7 @@ mod tests {
     #[test]
     fn max_distance_from_center_parses_both_spellings() {
         let bare: Value = serde_json::from_str(
-            r#"{"start_pool":"minecraft:x","start_height":{"absolute":0},
+            r#"{"type":"minecraft:jigsaw","biomes":"minecraft:plains","step":"surface_structures","start_pool":"minecraft:x","start_height":{"absolute":0},
                 "size":6,"max_distance_from_center":80}"#,
         )
         .unwrap();
@@ -1572,7 +1572,7 @@ mod tests {
         assert_eq!((config.max_horizontal, config.max_vertical), (80, 80));
 
         let full: Value = serde_json::from_str(
-            r#"{"start_pool":"minecraft:x","start_height":{"absolute":0},
+            r#"{"type":"minecraft:jigsaw","biomes":"minecraft:plains","step":"surface_structures","start_pool":"minecraft:x","start_height":{"absolute":0},
                 "size":6,"max_distance_from_center":{"horizontal":116}}"#,
         )
         .unwrap();
