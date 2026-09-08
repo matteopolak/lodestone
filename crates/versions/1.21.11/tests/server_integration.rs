@@ -57,6 +57,46 @@ fn adapter_block_use_reaches_the_registry_selected_host_consumer() {
 }
 
 #[test]
+fn adapter_block_use_preserves_signed_prediction_sequence_bits() {
+    let adapter = adapter_for(774);
+    let action = ClientAction::UseItemOn {
+        hand: lodestone_model::Hand::Main,
+        pos: BlockPos::new(5, -10, -7),
+        face: BlockFace::South,
+        cursor: Vec3f {
+            x: 0.25,
+            y: 1.0,
+            z: 0.75,
+        },
+        inside_block: false,
+        sequence: lodestone_model::PredictionSequence::from_wire(i32::MIN),
+    };
+    let Some((packet_id, payload)) = adapter
+        .encode_action(ConnectionState::Play, &action)
+        .expect("the protocol-774 adapter must encode a block use")
+    else {
+        panic!("block use must have a serverbound packet");
+    };
+    let host = lodestone_registry::server_protocol_for_protocol(774)
+        .expect("protocol 774 must resolve to the hosted family");
+    assert_eq!(
+        host.decode(lodestone_core::State::Play, packet_id, &payload),
+        lodestone_server::ServerBound::UseItemOn {
+            pos: BlockPos::new(5, -10, -7),
+            face: BlockFace::South,
+            cursor: Vec3f {
+                x: 0.25,
+                y: 1.0,
+                z: 0.75,
+            },
+            sequence: lodestone_model::PredictionSequence::from_wire(i32::MIN),
+            hand: 0,
+        },
+        "the adapter must preserve the signed VarInt bit pattern at the wire boundary"
+    );
+}
+
+#[test]
 fn adapter_air_use_reaches_the_registry_selected_host_consumer() {
     let adapter = adapter_for(774);
     let action = ClientAction::UseItem {
