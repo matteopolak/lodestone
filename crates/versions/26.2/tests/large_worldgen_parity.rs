@@ -921,7 +921,9 @@ fn compare_end_raw_from_persisted_world(
         // Keep the batch boundary explicit even though RegionChunkSource owns
         // immutable persisted state rather than a ticket graph. The source is
         // opened once, matching the oracle's one-server sequential batches;
-        // each batch owns its packet inputs until its captures finish.
+        // load the complete batch before any packet capture, then retain those
+        // owned inputs until every capture in the batch finishes.
+        let mut resident = Vec::with_capacity(records.len());
         for ((cx, cz), expected_prefix, expected_full, index) in records {
             let settled = source.column(cx, cz);
             // A fresh reopen legitimately has no persisted light layers for a
@@ -940,6 +942,9 @@ fn compare_end_raw_from_persisted_world(
                     }
                 }
             }
+            resident.push(((cx, cz), expected_prefix, expected_full, index, settled, neighbours));
+        }
+        for ((cx, cz), expected_prefix, expected_full, index, settled, neighbours) in resident {
             let directive = V770ServerProtocol
                 .try_encode_chunk_with_neighbours_in_dimension(
                     cx,
