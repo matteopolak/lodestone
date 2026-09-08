@@ -35,7 +35,23 @@ variant carries a world borrow, source handle, or raw registry integer. Plugins 
 with `MessageReader<ServerProposal>` and call `ServerProposalDecisions::decide`. `Allow` leaves an
 action unchanged, `Deny` reports a typed refusal, and `Replace` supplies the action the single
 apply path will perform. Lower numeric priorities win; equal priorities retain the first system to
-decide. The vocabulary has no durable history or read-only monitor tier yet.
+decide. Direct proposal consumers have no durable history or read-only monitor tier; the
+proposal-backed Paper event bus adds ordered listener priorities separately.
+
+### Proposal-backed Paper events
+
+`ecs::PaperEventBus` gives the proposal path a small Paper-shaped listener surface for
+`PaperEventKind::EntitySpawn` and `PaperEventKind::ResidentBlockChange`. Registration rejects
+unsupported kinds explicitly; `PlayerInteract`, for example, has no proposal owner yet and cannot
+silently become a successful no-op subscription.
+
+Listeners are sorted by `PaperEventPriority`, then registration order. Each receives the same
+mutable event, so a later listener observes an earlier replacement and cancellation. Once dispatch
+finishes, cancellation becomes `ProposalVerdict::Deny`, a changed event becomes `Replace`, and an
+unchanged event becomes `Allow`; the existing apply pass remains the only writer. A panicking
+listener is caught, recorded in `PaperEventBus`, and does not prevent later listeners from running.
+The bus intentionally leaves proposal variants without a registered event kind to their existing
+consumers until those actions acquire an event owner.
 
 ### Native tick scheduling
 
