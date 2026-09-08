@@ -100,6 +100,8 @@ use lodestone_server::join_scheduler::{ColumnPipeline, generation_window};
 use lodestone_server::overworld_chunk_source;
 use lodestone_worldgen::overworld::store::{self, WaitStats};
 
+mod core_parallel_scaling;
+
 /// 17×17 at `view_radius = 8` — the burst `4307b59` named, and the scene §12.112
 /// and `join_scheduler_counters.rs` both use.
 const BURST_RADIUS: i32 = 8;
