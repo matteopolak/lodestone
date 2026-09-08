@@ -16848,15 +16848,14 @@ mod tests {
                 neighbours,
                 dimension,
             )?;
-            self.dependency_light.as_ref().map_or_else(
-                || Some(crate::chunk::ColumnLightSettlement::centre(centre)),
-                |dependency| {
-                    crate::chunk::ColumnLightSettlement::with_neighbours(
-                        centre,
-                        [(1, 0, dependency.clone())],
-                    )
-                },
-            )
+            if let Some(dependency) = self.dependency_light.as_ref() {
+                crate::chunk::ColumnLightSettlement::with_neighbours(
+                    centre,
+                    [(1, 0, dependency.clone())],
+                )
+            } else {
+                Some(crate::chunk::ColumnLightSettlement::centre(centre))
+            }
         }
 
         fn uses_cross_column_light(&self) -> bool {
