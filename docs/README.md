@@ -210,6 +210,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   heightfield visual horizon beyond the real streamed-chunk radius. It is a local
   integrated-Overworld feature, not a chunk cache: it cannot request, retain, or mesh
   ordinary chunks.
+- [End light replay](./end-light-replay.md) — End light replay keeps an initial
+  chunk packet tied to the light snapshot captured after its admitted footprint is
+  settled. A block change invalidates every retained snapshot that could have read the
+  changed column, so a later packet cannot reuse light from an earlier admission
+  state.
 - [Entity ownership transfer](./entity-ownership-transfer.md) —
   `lodestone_server::entity_handoff::EntityOwnershipHandoff` is the typed barrier for
   a moving entity that crosses from one tick-region owner to another. The first
