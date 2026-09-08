@@ -19,7 +19,7 @@ impl WindowApp {
         self.drive_friends();
         if self.sim.open_menu().is_some() && self.ui.is_playing() {
             self.ui.open_container();
-            self.set_grab(false);
+            self.focus_container_screen();
         }
 
         // Pace the frame and tick **before** the GPU-readiness guard. Simulation
@@ -358,12 +358,10 @@ impl WindowApp {
             // here: it is a different owner and needs its sheets rebound rather
             // than a latch cleared.
             //
-            // It sits outside the `format`/`gpu` guards above because it needs
-            // neither: the rebuild happens lazily on the next frame carrying a
-            // special icon, and that is also what makes a *failed* first build
-            // recoverable — `special_tried` latched on that one attempt and
-            // nothing else ever cleared it, so a stream that came up dark stayed
-            // dark for the whole process.
+            // It sits outside the `format`/`gpu` guards above because dropping
+            // the pass needs neither. The explicit prewarm below uses both
+            // handles, so a reload pays the rebuild while this boundary is
+            // already doing loading work rather than on a later first-use frame.
             //
             // Both screens keep their own `IconRenderer`, so both are reached.
             if let Some(hud) = self.hud.as_mut() {
@@ -371,6 +369,18 @@ impl WindowApp {
             }
             if let Some(container) = self.container.as_mut() {
                 container.reload_special_icons();
+            }
+            // Rebuild the dropped pass on this explicit reload boundary, not
+            // on a later inventory frame. The reload is already a loading
+            // operation; keeping its one-time GPU work here preserves the
+            // first-open guarantee after a server resource-pack swap too.
+            if let Some(gpu) = self.gpu.as_ref() {
+                if let Some(hud) = self.hud.as_mut() {
+                    hud.prewarm_special_icons(gpu.device(), gpu.queue());
+                }
+                if let Some(container) = self.container.as_mut() {
+                    container.prewarm_special_icons(gpu.device(), gpu.queue());
+                }
             }
         }
         // Vanilla's eleven `soundSource.*` sliders, pushed beside View Bobbing and
@@ -1319,11 +1329,8 @@ impl WindowApp {
                 && held_for_scoping
                     .as_ref()
                     .is_some_and(|loc| loc.namespace() == "minecraft" && loc.path() == "spyglass"),
-            // No potion-effect-duration tracker exists anywhere in this
-            // codebase yet, so `0.0` is still the honest answer for nausea —
-            // a placeholder pretending to work would be worse. See
-            // `docs/screen-overlays.md`'s "Confusion and portal" section.
-            nausea_intensity: 0.0,
+            nausea_intensity: self.sim.nausea_intensity(),
+            vision_obscuration: self.sim.vision_obscuration(),
             // The portal overlay's alpha, live: `Sim::portal_effect_intensity`
             // is vanilla's `Mth.lerp(partialTicks, oPortalEffectIntensity,
             // portalEffectIntensity)`, ramped +0.0125/tick while the player's
@@ -1930,6 +1937,11 @@ impl WindowApp {
         hud_frame.boss_bars = &boss_bars;
         hud_frame.can_hurt_player = can_hurt_player;
         hud_frame.health = health;
+        // Health Boost arrives as the local player's ordinary
+        // `minecraft:max_health` attribute update. Keep the ceiling separate
+        // from current health: a hurt boosted player can be below 20 yet still
+        // needs the second heart row.
+        hud_frame.max_health = self.sim.max_health();
         // The armour row. `Sim::armour_value` is `floor(minecraft:armor)` off the
         // local player's folded attribute snapshot — matching vanilla's own
         // armor-value accessor — so equipment reaches the bar the way it
