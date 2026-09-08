@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use lodestone_core::{Ctx, Decode, Encode, Reader, State, Writer, encode_body};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation, Vec3f};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ItemStack, Rotation, Vec3f};
 use lodestone_server::{
     ChunkColumn, ChunkEncodeError, ServerBound, ServerDirective, ServerProtocol,
 };
@@ -26,7 +26,7 @@ use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
 use crate::packets::position::{Position, pack_position};
 use crate::packets::settings::Settings;
-use crate::packets::window::ServerboundHeldItemSlot;
+use crate::packets::window::{ServerboundCloseWindow, ServerboundHeldItemSlot, WindowClick};
 
 const CTX: Ctx = Ctx { version: PROTOCOL };
 const COMPRESSION_THRESHOLD: i32 = 256;
@@ -430,6 +430,39 @@ impl ServerProtocol for V404ServerProtocol {
                 };
                 ServerBound::CarriedItemChanged { slot }
             }
+            State::Play if packet_id == play::serverbound::WINDOW_CLICK => {
+                let Some(WindowClick {
+                    window_id,
+                    slot,
+                    button,
+                    mode,
+                    item: _,
+                    action: _,
+                }) = decode_full(payload)
+                else {
+                    return ServerBound::Ignored;
+                };
+                if !(0..=6).contains(&mode) {
+                    return ServerBound::Ignored;
+                }
+                ServerBound::ContainerClicked {
+                    window_id: i32::from(window_id),
+                    state_id: 0,
+                    slot: i32::from(slot),
+                    button,
+                    click_type: i32::from(mode),
+                    changed_slots: Vec::new(),
+                    carried_item: None,
+                }
+            }
+            State::Play if packet_id == play::serverbound::CLOSE_WINDOW => {
+                decode_full::<ServerboundCloseWindow>(payload).map_or(
+                    ServerBound::Ignored,
+                    |close| ServerBound::ContainerClosed {
+                        window_id: i32::from(close.window_id),
+                    },
+                )
+            }
             State::Play if packet_id == play::serverbound::TELEPORT_CONFIRM => {
                 decode_full::<TeleportConfirm>(payload).map_or(ServerBound::Ignored, |confirm| {
                     ServerBound::TeleportationAccepted { id: confirm.teleport_id }
@@ -608,6 +641,67 @@ impl ServerProtocol for V404ServerProtocol {
         )
     }
 
+    fn encode_open_screen(&self, window_id: i32, menu: &str, title: &str) -> ServerDirective {
+        let Ok(window_id) = u8::try_from(window_id) else {
+            return ServerDirective::None;
+        };
+        let (inventory_type, slot_count) = match menu {
+            "minecraft:generic_9x3" => ("minecraft:chest", 27),
+            "minecraft:generic_3x3" => ("minecraft:dispenser", 9),
+            "minecraft:furnace" => ("minecraft:furnace", 3),
+            "minecraft:hopper" => ("minecraft:hopper", 5),
+            "minecraft:beacon" => ("minecraft:beacon", 1),
+            other => (other, 0),
+        };
+        send(
+            play::clientbound::OPEN_WINDOW,
+            &crate::packets::window::OpenWindow {
+                window_id,
+                inventory_type: inventory_type.to_owned(),
+                window_title: legacy_text_component(title),
+                slot_count,
+                entity_id: None,
+            },
+        )
+    }
+
+    fn encode_container_content(
+        &self,
+        window_id: i32,
+        _state_id: i32,
+        items: &[Option<ItemStack>],
+        _carried: Option<&ItemStack>,
+    ) -> ServerDirective {
+        let Ok(window_id) = u8::try_from(window_id) else {
+            return ServerDirective::None;
+        };
+        let items = items.iter().map(|item| legacy_slot(item.as_ref())).collect();
+        send(
+            play::clientbound::WINDOW_ITEMS,
+            &crate::packets::window::WindowItems { window_id, items },
+        )
+    }
+
+    fn encode_container_slot(
+        &self,
+        window_id: i32,
+        _state_id: i32,
+        slot: i32,
+        item: Option<&ItemStack>,
+    ) -> ServerDirective {
+        let (Ok(window_id), Ok(slot)) = (i8::try_from(window_id), i16::try_from(slot)) else {
+            return ServerDirective::None;
+        };
+        send(
+            play::clientbound::SET_SLOT,
+            &crate::packets::window::SetSlot {
+                window_id,
+                slot,
+                item: legacy_slot(item),
+            },
+        )
+    }
+
     fn encode_keep_alive(&self, id: i64) -> ServerDirective {
         send(play::clientbound::KEEP_ALIVE, &KeepAliveRequest { id })
     }
@@ -615,5 +709,25 @@ impl ServerProtocol for V404ServerProtocol {
     fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
         self.try_encode_block_update(x, y, z, state)
             .expect("call try_encode_block_update to handle an unrepresentable protocol-404 state")
+    }
+}
+
+fn legacy_slot(item: Option<&ItemStack>) -> crate::packets::slot::Slot {
+    let Some(item) = item.filter(|item| item.count > 0) else {
+        return crate::packets::slot::Slot::Empty;
+    };
+    let Some((id, _)) = crate::generated_item_types::ITEM_TYPES
+        .iter()
+        .find(|(_, name)| *name == item.item.to_string())
+    else {
+        return crate::packets::slot::Slot::Empty;
+    };
+    let (Ok(id), Ok(count)) = (i32::try_from(*id), i8::try_from(item.count)) else {
+        return crate::packets::slot::Slot::Empty;
+    };
+    crate::packets::slot::Slot::Item {
+        id,
+        count,
+        nbt: None,
     }
 }

@@ -66,6 +66,16 @@ three entity-base fields whose index/serializer pair is universal here
 are textual on this wire; modifier UUIDs are retained losslessly as
 `minecraft:uuid/<uuid>` identifiers.
 
+Protocol 404 now carries the basic container session through the production
+bridge. A canonical `generic_9x3` menu opens as a string-typed
+`minecraft:chest` window with 27 slots; `window_items` and `set_slot` use the
+flattened 404 item registry and become canonical container events. The
+serverbound `window_click` retains the legacy action counter and pre-click
+slot, while the shared server derives the authoritative mutation. Literal
+open/content/slot/click/close bodies live in `tests/inventory.rs`, and
+`tests/container_integration.rs` drives a real chest move and verifies the
+mutated block entity after clean close.
+
 `block_action` reads its packed pre-1.14 position, two opaque bytes and a
 protocol-404 block-*type* id. Its complete 598-entry block-type census is
 generated from the vendored 1.13.2 data and is deliberately separate from the
