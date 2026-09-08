@@ -3325,6 +3325,14 @@ fn compute_served_initial_lights_with_neighbours_and_storage(
         stored,
         initial_full_sky_sections(dimension),
     );
+    let retained_nether_centre = match (dimension, statuses[4], stored[4]) {
+        (
+            Dimension::Nether,
+            Some(RetainedLightStatus::DependencyInitialized),
+            Some(light),
+        ) => Some((*light).clone()),
+        _ => None,
+    };
     let admitted_neighbours = neighbours
         .iter()
         .zip(&neighbour_columns)
@@ -3438,6 +3446,12 @@ fn compute_served_initial_lights_with_neighbours_and_storage(
             );
             light.set_storage(storage);
         }
+    }
+    if let Some(retained) = retained_nether_centre {
+        // A dependency snapshot was already settled by an earlier footprint.
+        // Promote that exact value when this column becomes the centre; only
+        // newly touched dependencies receive the fresh shared-admission result.
+        lights[4] = retained;
     }
     lights
 }
@@ -8489,6 +8503,89 @@ mod block_edit_tests {
             decode(&dependency),
             empty_light,
             "centre-settled light must be consumed verbatim"
+        );
+    }
+
+    /// A Nether dependency snapshot becomes the centre snapshot unchanged on
+    /// its later admission. The fixture deliberately gives that snapshot a
+    /// value and allocation shape that a fresh computation cannot reproduce;
+    /// the same admission must still initialize a previously missing emitter
+    /// dependency.
+    #[test]
+    fn nether_dependency_admission_promotes_exact_snapshot_and_initializes_new_dependency() {
+        let shape = ChunkShape::nether_or_end_1_21();
+        let section_count = shape.section_count;
+        let light_section_count = section_count + 2;
+        let mut retained = ColumnLight::new(section_count);
+        let mut block_values = NibbleArray::filled(11);
+        block_values.set(NibbleArray::index(3, 5, 7), 2);
+        *retained.sky_mut(1) = LightData::Uniform(4);
+        *retained.block_mut(6) = LightData::Values(block_values);
+        let mut allocated = vec![false; light_section_count];
+        allocated[1] = true;
+        allocated[6] = true;
+        let mut light_and_data = vec![false; light_section_count];
+        light_and_data[6] = true;
+        let storage = LightStorage::from_masks(allocated, light_and_data);
+        retained.set_storage(storage.clone());
+
+        let mut centre = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
+        centre.set_block(8, 82, 8, "minecraft:netherrack");
+        centre.set_retained_light_with_status(
+            retained.clone(),
+            RetainedLightStatus::DependencyInitialized,
+        );
+        let mut new_dependency = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
+        new_dependency.set_block(0, 82, 0, "minecraft:glowstone");
+        assert!(new_dependency.retained_light().is_none());
+
+        let proto = V770ServerProtocol;
+        let fresh_centre = {
+            let mut column = centre.clone();
+            column.clear_retained_light();
+            proto
+                .compute_initial_column_light_with_neighbours_in_dimension(
+                    &column,
+                    &[(1, 0, new_dependency.clone())],
+                    Dimension::Nether,
+                )
+                .expect("fresh Nether centre computation")
+        };
+        assert_ne!(
+            fresh_centre, retained,
+            "the retained fixture must differ from a fresh computation"
+        );
+
+        let settlement = proto
+            .compute_initial_column_lights_with_neighbours_in_dimension(
+                &centre,
+                &[(1, 0, new_dependency)],
+                Dimension::Nether,
+            )
+            .expect("Nether dependency admission");
+        assert_eq!(
+            settlement.centre_light(),
+            &retained,
+            "dependency promotion must preserve values and allocation verbatim"
+        );
+        assert_eq!(settlement.centre_light().storage(), Some(&storage));
+
+        let dependency = settlement
+            .iter()
+            .find_map(|(offset, light)| (offset == (1, 0)).then_some(light))
+            .expect("new dependency must be returned by the shared admission");
+        let dependency_storage = dependency
+            .storage()
+            .expect("new dependency must receive allocated light storage");
+        assert_eq!(dependency_storage.section_count(), light_section_count);
+        assert!(
+            (0..dependency_storage.section_count())
+                .any(|section| dependency_storage.is_allocated(section)),
+            "the emitter dependency must retain at least one allocated section"
+        );
+        assert!(
+            dependency.has_nonzero_values(),
+            "the newly admitted emitter dependency must retain its computed light"
         );
     }
 

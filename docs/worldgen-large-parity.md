@@ -18,12 +18,13 @@ still receives the complete 3 by 3 terrain footprint. A generated dependency
 whose light layer has not been admitted remains an opaque seam; its terrain is
 not allowed to leak an emission or propagation result into an earlier centre.
 After a centre is settled, missing queued dependencies receive their own
-retained light and allocation records. A later centre admission distinguishes
-that dependency snapshot from a centre-settled one: it may seed retained
-dependency values while computing the new centre, but only the resulting
-centre snapshot becomes eligible for the fast path. The deterministic
-materialization-order control in `large_worldgen_parity.rs` guards this
-bootstrap-to-retained transition.
+retained light and allocation records. When a dependency-initialized column
+later becomes the centre, its retained values and allocation metadata are
+promoted unchanged into the centre result; the shared admission still computes
+and retains any newly touched dependencies. Only the resulting centre snapshot
+becomes eligible for the fast path. The deterministic materialization-order
+control in `large_worldgen_parity.rs` guards this bootstrap-to-retained
+transition.
 
 End raw replay carries light-engine storage independently from terrain. Each
 admission keeps the real three-by-three block footprint, seeds the flood from
