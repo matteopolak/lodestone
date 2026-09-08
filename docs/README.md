@@ -558,6 +558,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   and applies the range and era-sharing rules in
   [`docs/plans/multi-version-protocol-dedup.md`](./plans/multi-version-protocol-dedup.md)
   to the pre-1.17 legacy gap between 1.13 and 1.17.
+- [Protocol 1.17 entity ingest](./protocol-1-17-entity-ingest.md) — This document
+  records the protocol-756 entity fixture boundary for metadata, equipment, and
+  attribute updates. It proves that bytes decoded by `lodestone-v1-17` reach the
+  production ECS components through `NetIngest`.
 - [The 1.17 era crate: one family, two protocols, a world that moved](./protocol-1-17-era.md) —
   `crates/versions/1.17` (package `lodestone-v1-17`) serves Minecraft 1.17.1 and
   1.18.2 — protocols **756** and **758** — from a single adapter, two generated
@@ -565,6 +569,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   and nine explicitly-carried shape deltas, rather than two copies of a family. It is
   the fourth era crate, after [`1.9`](./protocol-1-9-era.md),
   [`1.14`](./protocol-1-14-era.md) and [`1.13`](./protocol-1-13-era.md).
+- [Protocol 1.19 entity ingest](./protocol-1-19-entity-ingest.md) — This document
+  records the protocol-762 entity fixture boundary for metadata, equipment, and
+  attribute updates. It proves that bytes decoded by `lodestone-v1-19` reach the
+  production ECS components through `NetIngest`.
 - [The 1.19 era crate: one family, one protocol, chat that has to be answered](./protocol-1-19-era.md) —
   `crates/versions/1.19` (package `lodestone-v1-19`) joins and hosts Minecraft 1.19.4
   — protocol **762** — from one generated packet-id table, one generated
