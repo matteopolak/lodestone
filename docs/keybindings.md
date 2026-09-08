@@ -57,14 +57,6 @@ about keys, not about session state. A modifier read off currently-held keys (Ct
 exception that does belong inside the resolution function, since it's tracked key state rather than
 session state.
 
-### Middle-click across pointer capture
-
-Gameplay middle-click is a one-shot pick action. If the first click also has to acquire pointer
-capture, the window keeps that pick for at most 500 ms and dispatches it once capture and a current
-ray target are available; a failed grab, focus/menu transition, or expiry drops it. This preserves
-the first left/right click as capture-only. The terminal surface has no pointer-capture boundary and
-routes its middle-click directly through the same `Sim::pick_block_or_entity` action.
-
 ### F3 debug chords
 
 The F3 modifier plus a letter (B for hitboxes, G for chunk borders, and others) are real, rebindable
