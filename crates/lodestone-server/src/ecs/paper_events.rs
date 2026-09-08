@@ -109,7 +109,8 @@ impl PaperEvent {
                 })
             }
             ServerProposalAction::NaturalSpawnMob { .. }
-            | ServerProposalAction::DespawnMob { .. } => None,
+            | ServerProposalAction::DespawnMob { .. }
+            | ServerProposalAction::SetPlayerGameMode { .. } => None,
         }
     }
 

@@ -2137,6 +2137,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                             // spawn candidates above. A replacement outside the
                             // mob vocabulary cannot become a mob-side effect.
                             Ok(crate::ecs::ServerProposalAction::DespawnMob { .. })
+                            | Ok(crate::ecs::ServerProposalAction::SetPlayerGameMode { .. })
                             | Ok(crate::ecs::ServerProposalAction::SetResidentBlock { .. })
                             | Err(_) => {}
                         }
