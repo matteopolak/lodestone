@@ -227,6 +227,87 @@ fn plural_admission_commits_center_and_dependency_readiness_atomically() {
 }
 
 #[test]
+fn dependency_initialization_uses_its_own_unsettled_neighbour_sources() {
+    let shape = ChunkShape::nether_or_end_1_21();
+    let blank = || ChunkColumn::new(shape.min_y, shape.world_height as i32);
+    let centre = blank();
+    let mut retained_dependency = ColumnLight::new(shape.section_count);
+    let mut retained_values = NibbleArray::filled(0);
+    retained_values.set(NibbleArray::index(3, 4, 3), 9);
+    *retained_dependency.block_mut(5) = LightData::Values(retained_values);
+    let mut retained_column = blank();
+    retained_column.set_retained_light_with_status(
+        retained_dependency.clone(),
+        RetainedLightStatus::DependencyInitialized,
+    );
+    let mut future_neighbour = blank();
+    future_neighbour.set_block(8, 82, 8, "minecraft:glowstone");
+    let mut neighbours = Vec::new();
+    for dz in -1..=1 {
+        for dx in -1..=1 {
+            if (dx, dz) == (0, 0) {
+                continue;
+            }
+            let column = if (dx, dz) == (0, -1) {
+                retained_column.clone()
+            } else if (dx, dz) == (1, 1) {
+                future_neighbour.clone()
+            } else {
+                blank()
+            };
+            neighbours.push((dx, dz, column));
+        }
+    }
+    let mut without_future = neighbours.clone();
+    without_future
+        .iter_mut()
+        .find(|(dx, dz, _)| (*dx, *dz) == (1, 1))
+        .expect("future dependency is in the admission footprint")
+        .2 = blank();
+    let baseline = V770ServerProtocol
+        .compute_initial_column_lights_with_neighbours_in_dimension(
+            &centre,
+            &without_future,
+            Dimension::Nether,
+        )
+        .expect("baseline dependency light admission");
+
+    let settlement = V770ServerProtocol
+        .compute_initial_column_lights_with_neighbours_in_dimension(
+            &centre,
+            &neighbours,
+            Dimension::Nether,
+        )
+        .expect("dependency light admission");
+    assert_eq!(
+        settlement.centre_light(),
+        baseline.centre_light(),
+        "uninitialized dependency terrain must not change the original centre snapshot"
+    );
+    let retained = settlement
+        .dependency_lights()
+        .find_map(|((dx, dz), light)| ((dx, dz) == (0, -1)).then_some(light))
+        .expect("retained dependency light");
+    assert_eq!(
+        retained, &retained_dependency,
+        "an already initialized dependency must be retained byte-for-byte"
+    );
+    let east = settlement
+        .dependency_lights()
+        .find_map(|((dx, dz), light)| ((dx, dz) == (1, 0)).then_some(light))
+        .expect("east dependency light");
+    assert!(
+        block_at(east, 82, 8, 15) > 0,
+        "an uninitialized dependency must include sources from its own future neighbour"
+    );
+    assert_eq!(
+        block_at(settlement.centre_light(), 82, 8, 15),
+        0,
+        "the original centre must not seed from an uninitialized dependency"
+    );
+}
+
+#[test]
 fn dependency_centre_admission_preserves_values_and_center_storage_shape() {
     let shape = ChunkShape::nether_or_end_1_21();
     let section_count = shape.section_count;
