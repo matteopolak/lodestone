@@ -722,10 +722,8 @@ impl NetherLightTrace {
                     column.retained_light(),
                 ),
                 None => self.lines.push(format!(
-                    concat!(
-                        "admission={admission} phase={phase} slot_dx={dx} slot_dz={dz} ",
-                        "coordinate_x={cx} coordinate_z={cz} status=absent light=absent"
-                    )
+                    "admission={} phase={} slot_dx={} slot_dz={} coordinate_x={} coordinate_z={} status=absent light=absent",
+                    admission, phase, dx, dz, cx, cz
                 )),
             }
         }
@@ -777,11 +775,14 @@ impl NetherLightTrace {
                 admission, phase, offset, coordinate, status, light,
             ),
             None => self.lines.push(format!(
-                concat!(
-                    "admission={admission} phase={phase} slot_dx={} slot_dz={} ",
-                    "coordinate_x={} coordinate_z={} status={status} light=absent"
-                ),
-                offset.0, offset.1, coordinate.0, coordinate.1
+                "admission={} phase={} slot_dx={} slot_dz={} coordinate_x={} coordinate_z={} status={} light=absent",
+                admission,
+                phase,
+                offset.0,
+                offset.1,
+                coordinate.0,
+                coordinate.1,
+                status,
             )),
         }
     }
@@ -796,14 +797,14 @@ impl NetherLightTrace {
         light: &lodestone_world::ColumnLight,
     ) {
         self.lines.push(format!(
-            concat!(
-                "admission={admission} phase={phase} slot_dx={} slot_dz={} ",
-                "coordinate_x={} coordinate_z={} status={status} light=present sections={}"
-            ),
+            "admission={} phase={} slot_dx={} slot_dz={} coordinate_x={} coordinate_z={} status={} light=present sections={}",
+            admission,
+            phase,
             offset.0,
             offset.1,
             coordinate.0,
             coordinate.1,
+            status,
             light.light_section_count(),
         ));
         let storage = light.storage();
@@ -819,12 +820,9 @@ impl NetherLightTrace {
                 ),
             );
             self.lines.push(format!(
-                concat!(
-                    "admission={admission} phase={phase} slot_dx={} slot_dz={} ",
-                    "section_y={} sky_state={} sky_sha256={} sky_nonzero={} sky_max={} ",
-                    "block_state={} block_sha256={} block_nonzero={} block_max={} ",
-                    "storage_allocated={:?} storage_light_only={:?} storage_block_data={:?}"
-                ),
+                "admission={} phase={} slot_dx={} slot_dz={} section_y={} sky_state={} sky_sha256={} sky_nonzero={} sky_max={} block_state={} block_sha256={} block_nonzero={} block_max={} storage_allocated={:?} storage_light_only={:?} storage_block_data={:?}",
+                admission,
+                phase,
                 offset.0,
                 offset.1,
                 section as isize - 1,
