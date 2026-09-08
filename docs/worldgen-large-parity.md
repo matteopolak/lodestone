@@ -32,6 +32,11 @@ never substitutes an all-air column for missing light storage or resets the
 layer map at a batch boundary. The authenticated controls cover an empty
 dependency footprint and a later admission with retained northwest, north,
 west, and centre layers plus an allocated-zero east layer.
+Fresh End dependency layers use the computed allocation mask for the complete
+admitted footprint: an all-air footprint keeps both layers Missing, while an
+all-air selected column with admitted terrain keeps only that terrain-induced
+vertical corridor. This control is coordinate-independent and does not encode
+retention policy in the parity test.
 The comparator replays those admissions through the production
 `encode_chunk_with_source` seam, then exports from the same source; the test
 does not maintain a parallel light-storage map. The generated End raw arm

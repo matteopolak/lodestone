@@ -3017,7 +3017,9 @@ fn initial_block_light_storage_sections(
 /// section. A terrain section seeds the block and sky layers, and propagation
 /// allocates the intervening empty sections from the lowest admitted non-air
 /// section through the one-section light apron above the highest one. An
-/// all-air footprint allocates no storage.
+/// all-air footprint allocates no storage. The selected centre may itself be
+/// all air: storage follows the admitted footprint, so a neighbouring terrain
+/// column still contributes its corridor.
 fn initial_end_light_storage_sections(
     center: &WorldChunkColumn,
     neighbours: &[WorldChunkColumn],
@@ -3026,10 +3028,10 @@ fn initial_end_light_storage_sections(
 }
 
 /// Extends End storage from an already retained centre snapshot when one
-/// exists. A fresh all-air centre must not borrow storage from terrain in a
-/// neighbouring column: that neighbour's corridor belongs to its own retained
-/// dependency snapshot and may be serialized when that column becomes the
-/// centre of an admission.
+/// exists. A retained centre remains authoritative; fresh storage is derived
+/// from the complete admitted footprint, including terrain in neighbouring
+/// columns. This keeps a fresh all-air centre and its new dependencies on the
+/// same coordinate-independent allocation rule.
 fn initial_end_light_storage_sections_with_prior(
     center: &WorldChunkColumn,
     neighbours: &[WorldChunkColumn],
@@ -3042,15 +3044,6 @@ fn initial_end_light_storage_sections_with_prior(
                 || !matches!(prior_center.block(section), LightData::Missing);
         }
     }
-    let center_has_non_air = (0..center.section_count()).any(|block_section| {
-        center
-            .section(block_section)
-            .is_some_and(|section| !section.is_air_only())
-    });
-    if !center_has_non_air {
-        return stored;
-    }
-
     let mut lowest_non_air = None;
     let mut highest_non_air = None;
     for column in std::iter::once(center).chain(neighbours) {
@@ -5462,9 +5455,32 @@ impl ServerProtocol for V770ServerProtocol {
                 &stored,
                 dimension,
             )?;
-        for slot in 0..lights.len() {
-            if slot != 4 && stored[slot].is_none() {
-                lights[slot] = empty_light_storage_like(&lights[slot]);
+        if dimension == Dimension::End {
+            let shape = shape_for_column(column);
+            let centre = build_world_column(&shape, column);
+            let neighbour_columns = neighbours
+                .iter()
+                .map(|(_, _, neighbour)| build_world_column(&shape, neighbour))
+                .collect::<Vec<_>>();
+            let admitted_columns = std::iter::once(centre)
+                .chain(neighbour_columns.iter().cloned())
+                .collect::<Vec<_>>();
+            for ((dx, dz, _), dependency) in neighbours.iter().zip(&neighbour_columns) {
+                let slot = ((*dz + 1) * 3 + (*dx + 1)) as usize;
+                if stored[slot].is_none() {
+                    let storage = initial_end_light_storage_sections(dependency, &admitted_columns);
+                    normalize_initial_chunk_light(
+                        &mut lights[slot],
+                        dimension,
+                        Some(&storage),
+                    );
+                }
+            }
+        } else {
+            for slot in 0..lights.len() {
+                if slot != 4 && stored[slot].is_none() {
+                    lights[slot] = empty_light_storage_like(&lights[slot]);
+                }
             }
         }
         let dependency_lights = neighbours.iter().map(|&(dx, dz, _)| {
@@ -8219,11 +8235,12 @@ mod block_edit_tests {
         assert!(all_air.iter().all(|&stored| !stored));
     }
 
-    /// A fresh all-air centre does not inherit an End light corridor merely
-    /// because a neighbouring column contains terrain. The non-air neighbour
-    /// still has a positive corridor when it is admitted as a centre itself.
+    /// End storage follows the admitted footprint, even when the selected
+    /// centre is all air. The neighbour's two occupied sections induce the
+    /// exact four-section corridor in both fresh centre and dependency
+    /// snapshots; an all-air footprint remains entirely Missing.
     #[test]
-    fn end_initial_storage_is_owned_by_the_admitted_centre() {
+    fn end_initial_storage_follows_admitted_footprint_for_fresh_columns() {
         let column = || {
             WorldChunkColumn::new(
                 0,
@@ -8236,17 +8253,90 @@ mod block_edit_tests {
         };
         let center = column();
         let mut neighbour = column();
-        neighbour.set_block(8, 80, 8, 1);
+        neighbour.set_block(8, 16, 8, 1);
+        neighbour.set_block(8, 32, 8, 1);
         let borrowed = initial_end_light_storage_sections(&center, &[neighbour.clone()]);
         assert!(
-            borrowed.iter().all(|&stored| !stored),
-            "an all-air centre must not borrow a neighbour's End storage corridor"
+            borrowed[1..=4].iter().all(|&stored| stored),
+            "an all-air centre inherits the admitted neighbour corridor"
         );
-        let owned = initial_end_light_storage_sections(&neighbour, &[]);
         assert!(
-            owned.iter().any(|&stored| stored),
-            "a non-air admitted centre must retain its own End storage corridor"
+            borrowed
+                .iter()
+                .enumerate()
+                .filter(|(section, _)| !(1..=4).contains(section))
+                .all(|(_, &stored)| !stored),
+            "the neighbour corridor must not allocate unrelated sections"
         );
+        let all_air = initial_end_light_storage_sections(&center, &[]);
+        assert!(all_air.iter().all(|&stored| !stored));
+    }
+
+    #[test]
+    fn end_initial_dependency_layers_use_admitted_storage_shape() {
+        let center = ServerChunkColumn::new(0, 256);
+        let mut neighbour = ServerChunkColumn::new(0, 256);
+        neighbour.set_block(8, 16, 8, "minecraft:end_stone");
+        neighbour.set_block(8, 32, 8, "minecraft:end_stone");
+        let proto = V770ServerProtocol;
+
+        let all_air = proto
+            .compute_initial_column_lights_with_neighbours_in_dimension(
+                &center,
+                &[(1, 0, neighbour.clone())],
+                Dimension::End,
+            )
+            .expect("fresh End settlement");
+        let centre_light = all_air.centre_light();
+        for section in 0..centre_light.light_section_count() {
+            let expected = (1..=4).contains(&section);
+            assert_eq!(
+                !matches!(centre_light.sky(section), LightData::Missing),
+                expected,
+                "centre sky storage at section {section}"
+            );
+            assert_eq!(
+                !matches!(centre_light.block(section), LightData::Missing),
+                expected,
+                "centre block storage at section {section}"
+            );
+        }
+        let dependency = all_air
+            .iter()
+            .find_map(|((dx, dz), light)| (*dx == 1 && *dz == 0).then_some(light))
+            .expect("east dependency snapshot");
+        for section in 0..dependency.light_section_count() {
+            let expected = (1..=4).contains(&section);
+            assert_eq!(
+                !matches!(dependency.sky(section), LightData::Missing),
+                expected,
+                "dependency sky storage at section {section}"
+            );
+            assert_eq!(
+                !matches!(dependency.block(section), LightData::Missing),
+                expected,
+                "dependency block storage at section {section}"
+            );
+        }
+
+        let empty_neighbours = (-1..=1)
+            .flat_map(|dz| (-1..=1).map(move |dx| (dx, dz)))
+            .filter(|&(dx, dz)| (dx, dz) != (0, 0))
+            .map(|(dx, dz)| (dx, dz, ServerChunkColumn::new(0, 256)))
+            .collect::<Vec<_>>();
+        let empty_footprint = proto
+            .compute_initial_column_lights_with_neighbours_in_dimension(
+                &center,
+                &empty_neighbours,
+                Dimension::End,
+            )
+            .expect("fresh all-air settlement");
+        for (_, light) in empty_footprint.iter() {
+            for section in 0..light.light_section_count() {
+                assert!(matches!(light.sky(section), LightData::Missing));
+                assert!(matches!(light.block(section), LightData::Missing));
+            }
+        }
     }
 
     /// Dependency-initialized light is valid input to a later light admission,

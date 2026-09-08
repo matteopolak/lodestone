@@ -49,8 +49,12 @@ initial packet consumes the exact `ColumnLight` snapshot captured by the source'
 transaction. A generated source without a retained snapshot uses a bounded fallback: it keeps the
 complete computed sky result, then removes both light layers from sections that the centre plus loaded
 3x3 footprint would not allocate. This preserves the lower-apron omission and full-sky run seen in
-the first small-batch capture while leaving persisted snapshots untouched. The Overworld keeps the
-one-section sky form and elides uniform zero block light in an initial chunk. `ChunkSource::dimension`
+the first small-batch capture while leaving persisted snapshots untouched. The same footprint mask is
+applied to each newly computed End dependency layer: an all-air footprint remains entirely Missing,
+while an all-air selected column inherits only the vertical corridor induced by admitted neighbouring
+terrain. The mask is derived from block occupancy in the admitted columns, never from coordinates or
+state-name strings. The Overworld keeps the one-section sky form and elides uniform zero block light in
+an initial chunk. `ChunkSource::dimension`
 carries that choice to the protocol's dimension-aware initial-encoding and light-computation hooks. An
 unlabelled source uses the Overworld as the compatibility default; a dimension wrapper must always
 forward its label.
