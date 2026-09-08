@@ -7,11 +7,7 @@
 use lodestone_core::{
     Ctx, Decode, Encode, Nbt, NbtTag, Reader, State, Writer, encode_body, write_named_nbt,
 };
-<<<<<<< HEAD
 use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ItemStack, Rotation, Text, Vec3, Vec3f};
-=======
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ItemStack, Rotation, Vec3f};
->>>>>>> 6054560a (feat(v1-19): host protocol 762 container sessions)
 use lodestone_server::{ChunkColumn, ChunkEncodeError, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_world::{Heightmap, LongArrayFraming, PaletteKind, PalettedContainer};
 use uuid::Uuid;
