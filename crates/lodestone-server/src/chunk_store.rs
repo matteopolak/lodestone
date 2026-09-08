@@ -3146,7 +3146,7 @@ mod tests {
     fn later_dependency_admission_preserves_settled_centre_snapshot() {
         let store = ChunkStore::with_capacity(CountingSource::new(), 16);
         let target = store.column(0, 0);
-        let mut expected = lodestone_world::ColumnLight::new(target.section_count());
+        let mut expected = lodestone_world::ColumnLight::new(target.section_count() + 2);
         for section in 1..=4 {
             *expected.sky_mut(section) = lodestone_world::LightData::Uniform(15);
             *expected.block_mut(section) = lodestone_world::LightData::Uniform(0);
