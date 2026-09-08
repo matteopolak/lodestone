@@ -53,6 +53,12 @@ and that same complete registry position before writing pieces. The 17×17 sourc
 the persistence and retention order; a stable tie-break keeps starts of one structure in that walk's
 order while putting different structure types in the order their decoration lifecycle consumes.
 
+`EndGenerator` memoises each pure `(seed, origin-chunk)` start calculation behind a bounded cache.
+End-city placement scans a 33×33 origin window for each of the nine source chunks used to serve one
+column, so sharing the cached `Arc` avoids rebuilding the same piece tree while preserving start and
+piece order. The cache is cleared at its ceiling; eviction can repeat work but cannot change bytes,
+because a start depends only on its seed, origin and resolver data.
+
 Structure JSON crosses a strict serde boundary in `structure::json`: placement
 records, jigsaw configurations, pool aliases, and template-pool elements use
 closed discriminated enums and deny unknown fields. Wrong primitive types and
