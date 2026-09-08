@@ -253,6 +253,14 @@ fn all_gui_sprites() -> impl Iterator<Item = &'static str> {
 
 const CONTAINER_WGSL: &str = include_str!("shaders/container.wgsl");
 
+/// The shared in-game container backdrop uses a straight-alpha black source.
+/// Keeping RGB at zero is important: a non-black tint can raise already-dark
+/// world pixels even when its alpha is large. `ContainerRenderer`'s flat
+/// pipeline uses `ALPHA_BLENDING`, so these values are intentionally
+/// non-premultiplied (`rgb` is independent from `alpha`).
+pub(crate) const BACKDROP_DIM_TOP: [f32; 4] = [0.0, 0.0, 0.0, 192.0 / 255.0];
+pub(crate) const BACKDROP_DIM_BOTTOM: [f32; 4] = [0.0, 0.0, 0.0, 208.0 / 255.0];
+
 /// A plain textured quad shader for [`ContainerBackground`]'s atlas — the same
 /// shape as `menu/render.rs`'s `MENU_SPRITE_WGSL`, restated here rather than
 /// shared because that one is `menu`'s own module-private constant.

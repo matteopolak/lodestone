@@ -1046,8 +1046,8 @@ pub fn advancements_geometry(
         0.0,
         w,
         h,
-        [16.0 / 255.0, 16.0 / 255.0, 16.0 / 255.0, 192.0 / 255.0],
-        [16.0 / 255.0, 16.0 / 255.0, 16.0 / 255.0, 208.0 / 255.0],
+        crate::container::BACKDROP_DIM_TOP,
+        crate::container::BACKDROP_DIM_BOTTOM,
     );
     let dim_floats = b.verts.len();
 
