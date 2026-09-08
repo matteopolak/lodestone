@@ -97,6 +97,11 @@ neighbour subset. A `DependencyInitialized` snapshot instead remains input to th
 admission. That capture is external evidence for the storage contract; it does not claim that this
 repository drives the capture's scheduler or loading-ticket sequence in a production test.
 
+When an imported End `CentreSettled` snapshot has persisted sky storage but omitted uniformly-zero
+block arrays, the region source restores explicit `Uniform(0)` block storage for those same sections.
+This preserves the saved allocation mask while leaving all light values unchanged; other dimensions,
+dependency snapshots, and unlabelled generated columns keep their existing representation rules.
+
 `column_to_nbt` writes the retained snapshot's sky and block arrays, including the light-only sections
 immediately below and above the block range, and marks the column as light-complete. `column_from_nbt`
 restores those arrays into `ChunkColumn` before a source can serve the column again. Only protocols

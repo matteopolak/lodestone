@@ -67,6 +67,11 @@ block-light representation after a disk load; an unlabelled in-memory generator 
 coordinate or terrain inference, so Nether and End region sources keep their dimension-specific
 wire rules after eviction and reopen.
 
+For End `CentreSettled` snapshots, reopen also repairs a representation-only gap from older saves:
+when a section has persisted sky storage but no block-light array, the loader restores an explicit
+zero block layer for that same section. The repair is dimension- and lifecycle-gated, so it does not
+alter dependency snapshots, generated columns, or non-End worlds.
+
 A save writes only the dirty set, not everything resident — a player standing still should not
 cost megabytes of disk writes every autosave interval — and untouched chunks inside a rewritten
 region file are re-emitted as their original compressed bytes rather than being decoded and
