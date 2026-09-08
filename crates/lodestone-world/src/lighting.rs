@@ -226,6 +226,8 @@ pub fn compute_column_light_for_initial_chunk(
         blocks.air_state(),
         props,
         full_sky_sections,
+        |_, _, _| 0,
+        |_, _| true,
         |x, world_y, z| Some(blocks.block(x, world_y, z)),
     )
 }
@@ -356,6 +358,72 @@ pub fn compute_column_light_with_neighbours_for_initial_chunk(
         center.air_state(),
         props,
         full_sky_sections,
+        |_, _, _| 0,
+        |_, _| true,
+        |fx, world_y, fz| {
+            let dx = (fx / EDGE) as i32 - 1;
+            let dz = (fz / EDGE) as i32 - 1;
+            neighbourhood
+                .at(dx, dz)
+                .map(|v| v.block(fx % EDGE, world_y, fz % EDGE))
+        },
+    )
+}
+
+/// Computes initial-chunk light from an admitted neighbourhood and retained
+/// block-light levels.
+///
+/// A serial light admission can retain a dependency's block-light layer after
+/// its holder is evicted.  A later centre admission must use those retained
+/// levels as seeds rather than rebuilding the dependency from terrain, because
+/// the source column may be outside the new admission's footprint.  The
+/// `seed` callback supplies such retained values in chunk-relative coordinates;
+/// it returns zero for a missing or unallocated cell.  `terrain_source_active`
+/// controls which supplied terrain columns seed fresh emissions.  Callers can
+/// therefore keep the centre's own emissions active while using retained
+/// neighbour layers for already-admitted dependencies.
+///
+/// Missing columns in `neighbourhood` remain opaque barriers.  Allocation and
+/// packet-section metadata belong to the caller; this function returns only
+/// the settled values and never infers readiness from a zero-valued layer.
+#[must_use]
+pub fn compute_column_light_with_neighbours_seeded<F>(
+    neighbourhood: &Neighbourhood<'_, impl BlockVolume>,
+    props: &impl LightProperties,
+    full_sky_sections: usize,
+    seed: F,
+    terrain_source_active: impl Fn(i32, i32) -> bool,
+) -> ColumnLight
+where
+    F: Fn(i32, i32, usize, i32, usize) -> u8,
+{
+    assert!(
+        full_sky_sections > 0,
+        "initial chunk light must keep at least one full-sky section"
+    );
+    let center = neighbourhood.center;
+    let section_count = center.section_count();
+    let min_y = center.min_y();
+    let field = Field {
+        wx: 3 * EDGE,
+        wz: 3 * EDGE,
+        height: (section_count + 2) * EDGE,
+    };
+    compute_lit(
+        section_count,
+        min_y,
+        field,
+        EDGE,
+        EDGE,
+        center.air_state(),
+        props,
+        full_sky_sections,
+        |fx, world_y, fz| {
+            let dx = (fx / EDGE) as i32 - 1;
+            let dz = (fz / EDGE) as i32 - 1;
+            seed(dx, dz, fx % EDGE, world_y, fz % EDGE)
+        },
+        |fx, fz| terrain_source_active((fx / EDGE) as i32 - 1, (fz / EDGE) as i32 - 1),
         |fx, world_y, fz| {
             let dx = (fx / EDGE) as i32 - 1;
             let dz = (fz / EDGE) as i32 - 1;
@@ -516,6 +584,8 @@ fn compute_lit(
     air_state: u32,
     props: &impl LightProperties,
     full_sky_sections: usize,
+    seed: impl Fn(usize, i32, usize) -> u8,
+    source_active: impl Fn(usize, usize) -> bool,
     sample: impl Fn(usize, i32, usize) -> Option<u32>,
 ) -> ColumnLight {
     let light_sections = section_count + 2;
@@ -545,12 +615,20 @@ fn compute_lit(
                             highest_non_air_light_section = Some(y_rel / EDGE);
                         }
                         opacity[idx] = props.opacity(state).min(MAX_LIGHT);
-                        let emission = props.emission(state).min(MAX_LIGHT);
-                        if emission > 0 {
+                        let emission = if source_active(fx, fz) {
+                            props.emission(state).min(MAX_LIGHT)
+                        } else {
+                            0
+                        };
+                        let retained = seed(fx, world_y, fz).min(MAX_LIGHT);
+                        let value = emission.max(retained);
+                        if value > 0 {
                             // A source holds its emission regardless of its own
-                            // opacity (a jack-o'-lantern is opaque yet lit).
-                            block[idx] = emission;
-                            block_buckets.push(emission, idx as u32);
+                            // opacity (a jack-o'-lantern is opaque yet lit). A
+                            // retained layer is an equally authoritative seed
+                            // for a later serial admission.
+                            block[idx] = value;
+                            block_buckets.push(value, idx as u32);
                         }
                     }
                     None => opacity[idx] = MAX_LIGHT,

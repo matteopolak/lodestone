@@ -79,7 +79,18 @@ stored with the retained light in chunk NBT and is cleared with the light on any
 block mutation. Version-specific initial-chunk encoders consume retained light
 only after the centre reaches `CentreSettled`; dependency snapshots remain
 available as seeds for the next admission and are never serialized as though
-their own centre admission had completed.
+their own centre admission had completed. If a later footprint returns an
+already centre-settled column as an unchanged dependency, the batch commit
+preserves that stronger stage instead of downgrading it.
+
+The Nether admission path also keeps a missing dependency out of the flood
+entirely. A generated column may be present as terrain for allocation accounting,
+but until its light layer is admitted it is an opaque seam and cannot contribute
+emission or propagation to a neighbouring centre. A later centre uses retained
+block-light values from admitted dependencies as seeds, settles its own terrain
+first, then records newly queued dependency allocation separately. This keeps
+zero-valued storage distinguishable from an absent layer and prevents packet
+section masks from being reconstructed from terrain after holder eviction.
 
 The initial chunk encoder consumes a `CentreSettled` retained snapshot verbatim. An independent sealed-
 world capture showed that a persisted End section mask can differ from the first in-memory settlement,

@@ -71,7 +71,7 @@ use lodestone_model::{
 };
 use lodestone_server::{
     Abilities, ChunkColumn as ServerChunkColumn, ChunkEncoder, ColumnLightSettlement,
-    EntitySnapshot, HOTBAR_SIZE,
+    EntitySnapshot, HOTBAR_SIZE, RetainedLightStatus,
     MOTION_BLOCKING_HEIGHTMAP_TYPE_ID, MerchantOfferOut, MetadataField, PlayerListing,
     ResourcePackPush, RetainedLightStatus, ServerBound, ServerDirective, ServerProtocol,
     WorldBorder, WorldgenScope,
@@ -90,10 +90,11 @@ use lodestone_server::crafting::{
 };
 use lodestone_world::{
     ChunkColumn as WorldChunkColumn, ChunkSection, ColumnLight, Heightmap, Heightmaps,
-    LightData, LightProperties, Neighbourhood, compute_column_light,
+    LightData, LightProperties, LightStorage, Neighbourhood, compute_column_light,
     compute_column_light_for_initial_chunk, compute_column_light_with_neighbours,
     compute_column_lights_with_neighbours_and_storage,
     compute_column_light_with_neighbours_for_initial_chunk,
+    compute_column_light_with_neighbours_seeded,
 };
 use lodestone_data::block::Block;
 use lodestone_data::item::Item;
@@ -3012,6 +3013,42 @@ fn initial_block_light_storage_sections(
     stored
 }
 
+/// Describes a retained Nether light layer independently from its packet
+/// values. A zero-valued layer can still be allocated, and a layer attached to
+/// block data is distinct from a light-only dependency section.
+fn initial_nether_light_storage(
+    center: &WorldChunkColumn,
+    neighbours: &[WorldChunkColumn],
+) -> LightStorage {
+    initial_nether_light_storage_for_column(center, center, neighbours)
+}
+
+/// Builds the retained allocation metadata for one packed column in a shared
+/// 3×3 admission. Allocation is a property of the complete loaded footprint,
+/// while `LIGHT_AND_DATA` belongs to the selected column itself; keeping those
+/// masks separate is what lets a dependency retain a light-only section rather
+/// than accidentally borrowing the centre's block-data mask.
+fn initial_nether_light_storage_for_column(
+    selected: &WorldChunkColumn,
+    footprint_center: &WorldChunkColumn,
+    neighbours: &[WorldChunkColumn],
+) -> LightStorage {
+    let allocated = initial_block_light_storage_sections(footprint_center, neighbours);
+    let mut light_and_data = vec![false; allocated.len()];
+    for block_section in 0..selected.section_count() {
+        if selected
+            .section(block_section)
+            .is_some_and(|section| !section.is_air_only())
+            // Light section zero is the lower apron, so block section `n`
+            // carries its block data in light section `n + 1`.
+            && let Some(slot) = light_and_data.get_mut(block_section + 1)
+        {
+            *slot = true;
+        }
+    }
+    LightStorage::from_masks(allocated, light_and_data)
+}
+
 /// End's initial light engine retains a vertical propagation corridor in the
 /// loaded footprint, not just the three sections adjacent to each non-air
 /// section. A terrain section seeds the block and sky layers, and propagation
@@ -3258,6 +3295,7 @@ fn compute_served_initial_lights_with_neighbours_and_storage(
     shape: &ChunkShape,
     neighbours: &[(i32, i32, ServerChunkColumn)],
     stored: &[Option<&ColumnLight>; 9],
+    statuses: &[Option<RetainedLightStatus>; 9],
     dimension: Dimension,
 ) -> [ColumnLight; 9] {
     let neighbour_columns = neighbours
@@ -3270,11 +3308,15 @@ fn compute_served_initial_lights_with_neighbours_and_storage(
             neighbourhood = neighbourhood.with(*dx, *dz, neighbour);
         }
     }
-    let retained_storage = stored.iter().flatten().any(|light| {
-        (0..light.light_section_count()).any(|section| {
-            light_data_has_nonzero(light.sky(section))
+    let retained_storage = if dimension == Dimension::Nether {
+        statuses.iter().any(Option::is_some)
+    } else {
+        stored.iter().flatten().any(|light| {
+            (0..light.light_section_count()).any(|section| {
+                light_data_has_nonzero(light.sky(section))
+            })
         })
-    });
+    };
     let mut lights = compute_column_lights_with_neighbours_and_storage(
         &neighbourhood,
         &V770LightProps {
@@ -3283,7 +3325,56 @@ fn compute_served_initial_lights_with_neighbours_and_storage(
         stored,
         initial_full_sky_sections(dimension),
     );
-    let storage_neighbours = if retained_storage {
+    let admitted_neighbours = neighbours
+        .iter()
+        .zip(&neighbour_columns)
+        .filter(|((dx, dz, _), _)| {
+            let slot = ((*dz + 1) * 3 + (*dx + 1)) as usize;
+            statuses
+                .get(slot)
+                .copied()
+                .flatten()
+                .is_some_and(retained_light_is_initialized)
+        })
+        .map(|((dx, dz, _), column)| (*dx, *dz, column.clone()))
+        .collect::<Vec<_>>();
+    if dimension == Dimension::Nether {
+        let mut admitted_neighbourhood = Neighbourhood::new(center);
+        for (dx, dz, column) in &admitted_neighbours {
+            admitted_neighbourhood = admitted_neighbourhood.with(*dx, *dz, column);
+        }
+        let section_min_y = center.min_y();
+        let seeded = compute_column_light_with_neighbours_seeded(
+            &admitted_neighbourhood,
+            &V770LightProps { has_skylight: false },
+            initial_full_sky_sections(dimension),
+            |dx, dz, x, y, z| {
+                let slot = ((dz + 1) * 3 + (dx + 1)) as usize;
+                let section = usize::try_from((y - section_min_y).div_euclid(16) + 1)
+                    .expect("Nether light section index");
+                statuses
+                    .get(slot)
+                    .copied()
+                    .flatten()
+                    .filter(|status| retained_light_is_initialized(*status))
+                    .and_then(|_| stored.get(slot).and_then(Option::as_ref))
+                    .and_then(|light| {
+                        light
+                            .block(section)
+                            .get(NibbleArray::index(x, y.rem_euclid(16) as usize, z))
+                    })
+                    .unwrap_or(0)
+            },
+            |dx, dz| (dx, dz) == (0, 0),
+        );
+        lights[4] = seeded;
+    }
+    let storage_neighbours = if dimension == Dimension::Nether {
+        admitted_neighbours
+            .iter()
+            .map(|(_, _, column)| column.clone())
+            .collect::<Vec<_>>()
+    } else if retained_storage {
         neighbours
             .iter()
             .zip(&neighbour_columns)
@@ -3318,7 +3409,44 @@ fn compute_served_initial_lights_with_neighbours_and_storage(
         dimension,
         block_light_storage.as_deref(),
     );
+    if dimension == Dimension::Nether {
+        let storage = initial_nether_light_storage(center, &storage_neighbours);
+        lights[4].set_storage(storage.clone());
+        let all_neighbours = neighbour_columns.clone();
+        for (slot, light) in lights.iter_mut().enumerate() {
+            if slot == 4 {
+                continue;
+            }
+            if let Some(retained) = stored[slot] {
+                if statuses[slot].is_some_and(retained_light_is_initialized) {
+                    *light = retained.clone();
+                    continue;
+                }
+            }
+            let selected = neighbours
+                .iter()
+                .zip(&neighbour_columns)
+                .find(|((dx, dz, _), _)| {
+                    ((*dz + 1) * 3 + (*dx + 1)) as usize == slot
+                })
+                .map(|(_, column)| column)
+                .expect("every non-centre Nether light slot has a footprint column");
+            let storage = initial_nether_light_storage_for_column(
+                selected,
+                center,
+                &all_neighbours,
+            );
+            light.set_storage(storage);
+        }
+    }
     lights
+}
+
+fn retained_light_is_initialized(status: RetainedLightStatus) -> bool {
+    matches!(
+        status,
+        RetainedLightStatus::DependencyInitialized | RetainedLightStatus::CentreSettled
+    )
 }
 
 fn light_data_has_nonzero(data: &LightData) -> bool {
@@ -3350,6 +3478,48 @@ fn empty_light_storage_like(light: &ColumnLight) -> ColumnLight {
 pub struct V770ServerProtocol;
 
 impl V770ServerProtocol {
+    /// Computes one initial Nether light snapshot from the columns admitted by
+    /// the caller and retained block-light levels from earlier admissions.
+    ///
+    /// The centre's terrain is the only fresh emission source.  Previously
+    /// admitted neighbours are supplied as opaque-aware terrain and their
+    /// retained block-light values seed the flood.  A missing neighbour is not
+    /// represented in the neighbourhood, so it remains a real seam barrier
+    /// instead of leaking terrain emissions into the centre.  Allocation masks
+    /// are owned by the admission store and are deliberately not inferred from
+    /// this value-only result.
+    #[must_use]
+    pub fn compute_initial_column_light_with_neighbours_seeded<F>(
+        &self,
+        center: &ServerChunkColumn,
+        neighbours: &[(i32, i32, ServerChunkColumn)],
+        dimension: Dimension,
+        seed: F,
+    ) -> ColumnLight
+    where
+        F: Fn(i32, i32, usize, i32, usize) -> u8,
+    {
+        let shape = shape_for_column(center);
+        let center_world = build_world_column(&shape, center);
+        let neighbour_world = neighbours
+            .iter()
+            .map(|(_, _, neighbour)| build_world_column(&shape, neighbour))
+            .collect::<Vec<_>>();
+        let mut neighbourhood = Neighbourhood::new(&center_world);
+        for ((dx, dz, _), neighbour) in neighbours.iter().zip(&neighbour_world) {
+            neighbourhood = neighbourhood.with(*dx, *dz, neighbour);
+        }
+        compute_column_light_with_neighbours_seeded(
+            &neighbourhood,
+            &V770LightProps {
+                has_skylight: dimension.has_skylight(),
+            },
+            initial_full_sky_sections(dimension),
+            seed,
+            |dx, dz| (dx, dz) == (0, 0),
+        )
+    }
+
     /// Computes and returns all nine retained light snapshots produced by one
     /// shared three-by-three admission. The array uses row-major offset slots.
     pub fn compute_initial_column_lights_with_neighbours_and_storage_in_dimension(
@@ -3361,8 +3531,16 @@ impl V770ServerProtocol {
     ) -> Option<[lodestone_world::ColumnLight; 9]> {
         let shape = shape_for_column(column);
         let center = build_world_column(&shape, column);
+        let statuses = std::array::from_fn(|slot| {
+            stored[slot].map(|_| RetainedLightStatus::CentreSettled)
+        });
         Some(compute_served_initial_lights_with_neighbours_and_storage(
-            &center, &shape, neighbours, stored, dimension,
+            &center,
+            &shape,
+            neighbours,
+            stored,
+            &statuses,
+            dimension,
         ))
     }
 }
@@ -5448,28 +5626,42 @@ impl ServerProtocol for V770ServerProtocol {
         dimension: Dimension,
     ) -> Option<ColumnLightSettlement> {
         let mut stored: [Option<&ColumnLight>; 9] = [None; 9];
+        let mut statuses: [Option<RetainedLightStatus>; 9] = [None; 9];
         stored[4] = column.retained_light();
+        statuses[4] = column.retained_light_status();
         for &(dx, dz, ref neighbour) in neighbours {
             let slot = ((dz + 1) * 3 + (dx + 1)) as usize;
             if slot < stored.len() {
                 stored[slot] = neighbour.retained_light();
+                statuses[slot] = neighbour.retained_light_status();
             }
         }
-        let mut lights = self
-            .compute_initial_column_lights_with_neighbours_and_storage_in_dimension(
-                column,
-                neighbours,
-                &stored,
-                dimension,
-            )?;
-        for slot in 0..lights.len() {
-            if slot != 4 && stored[slot].is_none() {
-                lights[slot] = empty_light_storage_like(&lights[slot]);
+        let shape = shape_for_column(column);
+        let center = build_world_column(&shape, column);
+        let mut lights = compute_served_initial_lights_with_neighbours_and_storage(
+            &center,
+            &shape,
+            neighbours,
+            &stored,
+            &statuses,
+            dimension,
+        );
+        if dimension != Dimension::Nether {
+            for slot in 0..lights.len() {
+                if slot != 4 && stored[slot].is_none() {
+                    lights[slot] = empty_light_storage_like(&lights[slot]);
+                }
             }
         }
-        let dependency_lights = neighbours.iter().map(|&(dx, dz, _)| {
+        let dependency_lights = neighbours.iter().filter_map(|&(dx, dz, _)| {
+            if (dx, dz) == (0, 0)
+                || !(-1..=1).contains(&dx)
+                || !(-1..=1).contains(&dz)
+            {
+                return None;
+            }
             let slot = ((dz + 1) * 3 + (dx + 1)) as usize;
-            (dx, dz, lights[slot].clone())
+            Some((dx, dz, lights[slot].clone()))
         });
         ColumnLightSettlement::with_neighbours(lights[4].clone(), dependency_lights)
     }

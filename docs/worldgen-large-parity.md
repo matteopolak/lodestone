@@ -10,17 +10,20 @@ The reference seed is `42` and the target coordinates are `cx, cz = -250..=250`,
 
 For every compared coordinate, the Rust gate obtains the centre and its eight adjacent columns through the normal generation dispatcher, then calls the production neighbour-aware initial-chunk encoder. This is required for light too: an emissive block in a neighbouring column can illuminate the centre across its border, while the one-column encoder deliberately has no such input. The gate keeps that light in the canonical record; it never substitutes a synthetic or all-missing light payload. The frozen-world materialization halo supplies the corresponding settled neighbours on the reference side.
 
-Raw P06 prefixes also replay the initial-light admission boundary. The first
-target is the bootstrap admission: its retained initial-light snapshot uses the
-centre only. Every later target adopts the four cardinal source columns before
-its initial snapshot is retained, while the encoder still receives the complete
-3 by 3 packet footprint. This separates source admission state from packet
-neighbour input and is intentionally coordinate-independent. The deterministic
-two-record control is `LODESTONE_LARGE_PARITY_MAX_CHUNKS=2` with the
-authenticated manifest, packet-audit sidecar, and a reference-packet directory;
-it must match both the bootstrap record and the following cardinal-admission
-record before a longer prefix is attempted. The admission-order unit control
-in `large_worldgen_parity.rs` guards the bootstrap-to-cardinal transition.
+Raw P06 comparison replays the serial light-admission lifecycle, not the
+read-only export batch size. The first target is the bootstrap admission and
+sees only its centre as a light source. Each later centre uses the retained
+block-light layers that existed before its admission, while the packet encoder
+still receives the complete 3 by 3 terrain footprint. A generated dependency
+whose light layer has not been admitted remains an opaque seam; its terrain is
+not allowed to leak an emission or propagation result into an earlier centre.
+After a centre is settled, missing queued dependencies receive their own
+retained light and allocation records. A later centre admission distinguishes
+that dependency snapshot from a centre-settled one: it may seed retained
+dependency values while computing the new centre, but only the resulting
+centre snapshot becomes eligible for the fast path. The deterministic
+materialization-order control in `large_worldgen_parity.rs` guards this
+bootstrap-to-retained transition.
 
 End raw replay carries light-engine storage independently from terrain. Each
 admission keeps the real three-by-three block footprint, seeds the flood from
@@ -56,15 +59,11 @@ This split prevents two independent failure modes. A generated chunk can receive
 
 The P06 raw-packet format is an independent opt-in path: pass `--raw-packet` (or `--format v6`) to materialize and export the 1001 by 1001 target grid `-500..=500`, with its complete 1003 by 1003 halo `-501..=501`. The materialization wrapper selects the matching v6 seal and does not confuse it with the v2 semantic provenance stamp. Each manifest record is the first two bytes of the SHA-256 digest of the exact stabilized compiled-codec packet body, emitted in x-fastest then z order. The manifest carries the v6 dimension, frozen-world and materialization identities; each export also writes a `.packet-audit` sidecar containing a matching identity header and one full 32-byte packet digest per coordinate. The sidecar is checked during resume, so a matching 16-bit payload cannot hide a missing or misaligned full audit stream. P06 does not reinterpret or regenerate v3-v5 semantic manifests.
 
-For a Nether P06 comparison, the Rust gate prepares the immutable pre-decoration
-cache from the selected target prefix before wrapping it in the retained source.
-The packet's 3×3 light neighbourhood expands the generator's 5×5 prefix read
-closure by one chunk on each side. Thus a 51×51 target shard derives a 57×57
-prefix capacity (3,249 entries); a bounded pilot derives the smaller rectangle
-it actually visits. Preparation changes retention only. The worldgen counter
-control reports prefix computations and whole-cache evictions, and the ignored
-raw-byte control compares a fresh unprepared source with the prepared source
-before this path is used for an external packet comparison.
+For a Nether P06 comparison, the Rust gate generates the terrain columns needed
+by the serial admission prefix and then applies a persistent light store. The
+packet's 3×3 light neighbourhood is independent of read-only export batch
+selection. Worldgen preparation and cache-retention controls remain separate
+from the packet lifecycle and must not alter the authenticated packet bytes.
 
 The section-header non-empty count is a wire field, not the version-neutral
 column occupancy count. `packet_non_empty_block_count` excludes `air`,
