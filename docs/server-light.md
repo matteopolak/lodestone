@@ -79,9 +79,10 @@ stored with the retained light in chunk NBT and is cleared with the light on any
 block mutation. Version-specific initial-chunk encoders consume retained light
 only after the centre reaches `CentreSettled`; dependency snapshots remain
 available as seeds for the next admission and are never serialized as though
-their own centre admission had completed. If a later footprint returns an
-already centre-settled column as an unchanged dependency, the batch commit
-preserves that stronger stage instead of downgrading it.
+their own centre admission had completed. A later footprint may read a
+`CentreSettled` column as a dependency, but its dependency result cannot
+downgrade or replace that authoritative centre snapshot; a block mutation
+clears the status before any replacement is allowed.
 
 The Nether admission path also keeps a missing dependency out of the flood
 entirely. A generated column may be present as terrain for allocation accounting,
