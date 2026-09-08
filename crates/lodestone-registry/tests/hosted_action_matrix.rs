@@ -27,6 +27,15 @@ struct FixtureSource {
 impl FixtureSource {
     fn new() -> Self {
         let mut column = ChunkColumn::new(-64, 384);
+        // A hosted join is a valid-world path: the server resolves its initial
+        // spawn before opening the chunk stream. Keep a surface in the origin
+        // column so this matrix measures protocol admission and action routing,
+        // rather than the 121-column fallback search for a void world.
+        for x in 0..16 {
+            for z in 0..16 {
+                column.set_block(x, 63, z, "minecraft:stone");
+            }
+        }
         column.set_block(TARGET.x, TARGET.y, TARGET.z, "minecraft:dandelion");
         Self {
             column: Mutex::new(column),
@@ -106,6 +115,7 @@ async fn every_registry_selected_host_consumes_a_real_adapter_action_and_keeps_p
         );
 
         let source = Arc::new(FixtureSource::new());
+        let has_player_loaded_packet = host.has_player_loaded_packet();
         let (server, client_io) = IntegratedServer::open_in_memory(host, Arc::clone(&source), 0);
         let profile = LoginProfile {
             username: "Matrix".to_owned(),
@@ -115,19 +125,51 @@ async fn every_registry_selected_host_consumes_a_real_adapter_action_and_keeps_p
             host: "memory".to_owned(),
             port: 0,
         };
+        let player_loaded_policy = if has_player_loaded_packet {
+            PlayerLoadedPolicy::Automatic
+        } else {
+            PlayerLoadedPolicy::Manual
+        };
         let (mut handle, _) = ClientBuilder::new(address, profile, adapter)
-            .player_loaded_policy(PlayerLoadedPolicy::Manual)
+            .player_loaded_policy(player_loaded_policy)
             .connect_with(client_io);
 
         handle
             .wait_for_spawn(DEADLINE)
             .await
             .unwrap_or_else(|error| panic!("protocol {protocol_version} must reach Play: {error}"));
+        let spawn_pos = handle
+            .position()
+            .expect("wait_for_spawn must expose the authoritative placement");
+        // The driver deliberately stops reading after a placement teleport
+        // until the shell adopts that pose. The server may already have
+        // queued the batch marker and chunk in the same transport read, so
+        // acknowledge the pose before waiting for those frames.
+        handle
+            .acknowledge_teleport_correction(spawn_pos, handle.rotation())
+            .unwrap_or_else(|error| {
+                panic!("protocol {protocol_version} must adopt its placement: {error}")
+            });
         handle
             .wait_for_chunk(lodestone_client::ChunkPos::new(0, 0), DEADLINE)
             .await
             .unwrap_or_else(|error| {
-                panic!("protocol {protocol_version} must receive the fixture column: {error}")
+                panic!(
+                    "protocol {protocol_version} must receive the fixture column: {error}"
+                )
+            });
+        // Protocol 5's join packet has a fixed placement while later rows use
+        // the server-selected spawn. Move to the known fixture block before
+        // the action so every row exercises the same in-range break path.
+        handle
+            .move_to(
+                Vec3::new(TARGET.x as f64, TARGET.y as f64, TARGET.z as f64),
+                Rotation::default(),
+                false,
+                false,
+            )
+            .unwrap_or_else(|error| {
+                panic!("protocol {protocol_version} must reach the action fixture: {error}")
             });
 
         handle

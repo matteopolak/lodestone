@@ -6,7 +6,7 @@ The registry census is the aggregation-level guard for the supported joining fam
 
 ## How it works
 
-`crates/lodestone-registry/tests/family_census.rs` validates every feature configuration without requiring all families in a default build. Partial builds must expose only known protocol rows with no duplicates. An `--all-features` run additionally requires the complete ten-family and sixteen-protocol set.
+`crates/lodestone-registry/tests/family_census.rs` validates every feature configuration without requiring all families in a default build. Partial builds must expose only known protocol rows and family labels with no duplicates. An `--all-features` run additionally requires the complete ten-family and sixteen-protocol set. Family labels are compared as a set: `compiled_families()` preserves the deterministic source-table order for diagnostics, but that order is not a chronological API contract.
 
 Family-specific packet fixtures remain in each `crates/versions/*/tests` directory. The census deliberately stops at registry resolution, so it cannot hide a missing adapter→ECS or adapter→server consumer behind an aggregation assertion.
 
