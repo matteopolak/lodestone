@@ -255,6 +255,27 @@ fn dependency_centre_admission_promotes_exact_snapshot_and_initializes_new_depen
     assert!(source.store_resident_column(1, 0, &new_dependency));
     assert!(new_dependency.retained_light().is_none());
 
+    let neighbour_offsets = vec![
+        (-1, -1),
+        (0, -1),
+        (1, -1),
+        (-1, 0),
+        (1, 0),
+        (-1, 1),
+        (0, 1),
+        (1, 1),
+    ];
+    let neighbours = neighbour_offsets
+        .iter()
+        .map(|&(dx, dz)| {
+            let column = if (dx, dz) == (1, 0) {
+                new_dependency.clone()
+            } else {
+                source.column(dx, dz)
+            };
+            (dx, dz, column)
+        })
+        .collect::<Vec<_>>();
     let proto = V770ServerProtocol;
     let fresh_centre = {
         let mut column = centre.clone();
@@ -262,7 +283,7 @@ fn dependency_centre_admission_promotes_exact_snapshot_and_initializes_new_depen
         proto
             .compute_initial_column_light_with_neighbours_in_dimension(
                 &column,
-                &[(1, 0, new_dependency.clone())],
+                &neighbours,
                 Dimension::Nether,
             )
             .expect("fresh Nether centre computation")
@@ -277,7 +298,7 @@ fn dependency_centre_admission_promotes_exact_snapshot_and_initializes_new_depen
             0,
             0,
             &centre,
-            &[(1, 0)],
+            &neighbour_offsets,
             false,
             false,
             true,
