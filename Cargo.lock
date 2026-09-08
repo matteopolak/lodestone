@@ -3358,9 +3358,6 @@ dependencies = [
 name = "lodestone-registry"
 version = "0.1.0"
 dependencies = [
- "bevy_app",
- "bevy_ecs",
- "lodestone-app",
  "lodestone-client",
  "lodestone-core",
  "lodestone-data",
@@ -3931,7 +3928,6 @@ dependencies = [
  "criterion",
  "flate2",
  "lodestone-core",
- "lodestone-data",
  "lodestone-server",
  "lodestone-testsupport",
  "lodestone-time",
