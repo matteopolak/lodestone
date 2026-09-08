@@ -77,6 +77,34 @@ impl VersionDescriptor {
     }
 }
 
+/// Opt-in marker for a native plugin that carries a version-specific surface.
+///
+/// Implementors publish the exact descriptor they were built against. The
+/// trait has no ECS or application dependency, so a host can inspect the
+/// requirement before it hands the plugin to its own registration API.
+pub trait VersionLockedPlugin {
+    /// Returns the family, protocol, and privileged ABI required by this
+    /// plugin.
+    fn version_descriptor(&self) -> VersionDescriptor;
+}
+
+/// Validates and registers a plugin that implements [`VersionLockedPlugin`].
+///
+/// The plugin is moved into the callback only after its declared descriptor
+/// matches the selected host descriptor. This is the convenient form for a
+/// host whose registration API takes ownership of a plugin value.
+pub fn register_version_locked_plugin<P, R>(
+    plugin: P,
+    actual: VersionDescriptor,
+    register: impl FnOnce(P) -> R,
+) -> Result<R, VersionCompatibilityError>
+where
+    P: VersionLockedPlugin,
+{
+    plugin.version_descriptor().validate(actual)?;
+    Ok(register(plugin))
+}
+
 /// A native plugin's required descriptor did not match the selected host.
 ///
 /// The complete required and actual descriptors are retained so diagnostics
@@ -140,8 +168,12 @@ mod tests {
         assert_eq!(error.required(), REQUIRED);
         assert_eq!(error.actual(), actual);
         let message = error.to_string();
-        assert!(message.contains("requires family=v26-2 protocol=776 ABI=lodestone:native-version@0.1"));
-        assert!(message.contains("host provides family=v1-21-11 protocol=774 ABI=lodestone:native-version@0.1"));
+        assert!(
+            message.contains("requires family=v26-2 protocol=776 ABI=lodestone:native-version@0.1")
+        );
+        assert!(message.contains(
+            "host provides family=v1-21-11 protocol=774 ABI=lodestone:native-version@0.1"
+        ));
     }
 
     #[test]
@@ -159,15 +191,27 @@ mod tests {
 
     #[test]
     fn abi_mismatch_is_rejected_even_with_the_same_family_and_protocol() {
-        let actual = VersionDescriptor::new(REQUIRED.family(), REQUIRED.protocol(), "lodestone:native-version@0.2");
+        let actual = VersionDescriptor::new(
+            REQUIRED.family(),
+            REQUIRED.protocol(),
+            "lodestone:native-version@0.2",
+        );
         let error = REQUIRED
             .validate(actual)
             .expect_err("different privileged ABIs must not load");
 
         assert_eq!(error.required().abi(), "lodestone:native-version@0.1");
         assert_eq!(error.actual().abi(), "lodestone:native-version@0.2");
-        assert!(error.to_string().contains("ABI=lodestone:native-version@0.1"));
-        assert!(error.to_string().contains("ABI=lodestone:native-version@0.2"));
+        assert!(
+            error
+                .to_string()
+                .contains("ABI=lodestone:native-version@0.1")
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("ABI=lodestone:native-version@0.2")
+        );
     }
 
     #[test]
@@ -178,5 +222,28 @@ mod tests {
         assert_eq!(DESCRIPTOR.protocol(), 47);
         assert_eq!(DESCRIPTOR.abi(), "lodestone:native-version@0.1");
         assert_eq!(DESCRIPTOR, DESCRIPTOR);
+    }
+
+    #[test]
+    fn version_locked_plugin_declares_the_requirement_before_registration() {
+        struct Plugin;
+
+        impl VersionLockedPlugin for Plugin {
+            fn version_descriptor(&self) -> VersionDescriptor {
+                REQUIRED
+            }
+        }
+
+        let mut called = false;
+        let result = register_version_locked_plugin(Plugin, REQUIRED, |_| {
+            called = true;
+        })
+        .expect("a plugin's declared descriptor should match the host");
+
+        let _ = result;
+        assert!(
+            called,
+            "a matching plugin must reach the registration callback"
+        );
     }
 }
