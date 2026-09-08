@@ -8,6 +8,7 @@
 
 use std::collections::HashSet;
 
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::density::Resolver;
@@ -19,6 +20,95 @@ use super::grid::census::bump as census_bump;
 use super::ids::{IdTags, Tag, tag_at};
 use super::super::top_layer::StatePredicate;
 use super::tree::{FoliagePlacerCfg, RootPlacerCfg, TrunkPlacerCfg};
+
+/// Strict envelope for a placed feature. The feature holder is intentionally
+/// left dynamic because it may be a registry id or an inline holder; placement
+/// modifiers themselves still have a closed set of field names.
+#[allow(dead_code)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlacedFeatureJson {
+    feature: Value,
+    placement: Vec<PlacementJson>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlacementJson {
+    #[serde(rename = "type")]
+    type_name: String,
+    count: Option<Value>,
+    heightmap: Option<String>,
+    chance: Option<i32>,
+    max_water_depth: Option<i32>,
+    noise_level: Option<f64>,
+    below_noise: Option<i32>,
+    above_noise: Option<i32>,
+    xz_spread: Option<Value>,
+    y_spread: Option<Value>,
+    predicate: Option<Value>,
+    height: Option<Value>,
+    target_condition: Option<Value>,
+    allowed_search_condition: Option<Value>,
+    direction_of_search: Option<String>,
+    max_steps: Option<i32>,
+    noise_to_count_ratio: Option<i32>,
+    noise_factor: Option<f64>,
+    noise_offset: Option<f64>,
+    min_inclusive: Option<i32>,
+    max_inclusive: Option<i32>,
+    positions: Option<Value>,
+}
+
+/// Strict top-level tree configuration. Provider and predicate payloads remain
+/// dynamic registry data; the tree codec owns the surrounding field set.
+#[allow(dead_code)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TreeConfigJson {
+    trunk_provider: Value,
+    foliage_provider: Value,
+    trunk_placer: Value,
+    foliage_placer: Value,
+    minimum_size: Value,
+    #[serde(default)]
+    below_trunk_provider: Option<Value>,
+    #[serde(default)]
+    decorators: Vec<Value>,
+    #[serde(default)]
+    root_placer: Option<Value>,
+    #[serde(default)]
+    ignore_vines: Option<bool>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfiguredFeatureJson {
+    #[serde(rename = "type")]
+    type_name: String,
+    config: Value,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyConfigJson {}
+
+/// Closed field set shared by glow-lichen and sculk-vein multiface growth.
+#[allow(dead_code)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MultifaceGrowthJson {
+    block: Option<String>,
+    search_range: Option<i32>,
+    can_place_on_floor: Option<bool>,
+    can_place_on_ceiling: Option<bool>,
+    can_place_on_wall: Option<bool>,
+    chance_of_spreading: Option<f64>,
+    can_be_placed_on: Option<Value>,
+}
 
 /// The reference heightmap-type enum (the subset vegetal decoration references). See this
 /// module's doc "Approximations, named" for why only two scans back all
@@ -1908,6 +1998,9 @@ pub fn resolve_placed_feature_ref(resolver: &dyn Resolver, value: &Value) -> Pla
 }
 
 pub(super) fn parse_placed_feature_doc(resolver: &dyn Resolver, doc: &Value) -> PlacedRef {
+    if let Err(error) = serde_json::from_value::<PlacedFeatureJson>(doc.clone()) {
+        return unsupported_placed_ref(&format!("placed-feature schema: {error}"));
+    }
     let placements = doc
         .get("placement")
         .and_then(Value::as_array)
@@ -2026,19 +2119,28 @@ fn parse_root_system_config(resolver: &dyn Resolver, config: &Value) -> Option<s
 }
 
 pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value) -> ConfiguredFeature {
-    let ty = doc["type"].as_str().unwrap_or("");
-    let short = ty.strip_prefix("minecraft:").unwrap_or(ty);
+    let typed = match serde_json::from_value::<ConfiguredFeatureJson>(doc.clone()) {
+        Ok(value) => value,
+        Err(error) => return ConfiguredFeature::Unsupported(format!("configured-feature schema: {error}")),
+    };
+    let ty = typed.type_name;
+    let short = ty.strip_prefix("minecraft:").unwrap_or(&ty);
     match short {
         "simple_block" => match BlockStateProvider::try_parse(&doc["config"]["to_place"]) {
             Some(p) => ConfiguredFeature::SimpleBlock(p),
             None => ConfiguredFeature::Unsupported("simple_block: unsupported to_place".into()),
         },
-        "tree" => match TreeConfig::try_parse(&doc["config"]) {
+        "tree" => {
+            if serde_json::from_value::<TreeConfigJson>(doc["config"].clone()).is_err() {
+                return ConfiguredFeature::Unsupported("tree: schema validation failed".into());
+            }
+            match TreeConfig::try_parse(&doc["config"]) {
             Some(cfg) => ConfiguredFeature::Tree(Box::new(cfg)),
             None => ConfiguredFeature::Unsupported(
                 "tree: unsupported trunk/foliage/size/provider".into(),
             ),
-        },
+            }
+        }
         "block_column" => match BlockColumnConfig::try_parse(&doc["config"]) {
             Some(cfg) => ConfiguredFeature::BlockColumn(Box::new(cfg)),
             None => ConfiguredFeature::Unsupported(
@@ -2239,6 +2341,11 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
         "bamboo" => ConfiguredFeature::Bamboo(doc["config"]["probability"].as_f64().unwrap_or(0.0)),
         "multiface_growth" => {
             let c = &doc["config"];
+            if serde_json::from_value::<MultifaceGrowthJson>(c.clone()).is_err() {
+                return ConfiguredFeature::Unsupported(
+                    "multiface_growth: schema validation failed".into(),
+                );
+            }
             ConfiguredFeature::MultifaceGrowth(Box::new(super::features::MultifaceGrowthCfg {
                 block: c["block"].as_str().unwrap_or("minecraft:glow_lichen").to_string(),
                 search_range: c["search_range"].as_i64().unwrap_or(10) as i32,
@@ -2363,7 +2470,13 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
                 _ => ConfiguredFeature::Unsupported("lake: unsupported fluid/barrier".into()),
             }
         }
-        "monster_room" => ConfiguredFeature::MonsterRoom,
+        "monster_room" => {
+            if serde_json::from_value::<EmptyConfigJson>(doc["config"].clone()).is_ok() {
+                ConfiguredFeature::MonsterRoom
+            } else {
+                ConfiguredFeature::Unsupported("monster_room: schema validation failed".into())
+            }
+        }
         "huge_brown_mushroom" | "huge_red_mushroom" => {
             let c = &doc["config"];
             match (
