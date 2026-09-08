@@ -628,15 +628,9 @@ impl VanillaFont {
         Some(Arc::clone(cache.entry(key).or_insert(built)))
     }
 
-    /// Number of cached glyph scanline runs. This is a diagnostic read only;
-    /// the cache itself remains private so drawing is the sole producer.
-    pub(crate) fn ink_run_count(&self) -> usize {
-        recover_poisoned_lock(self.ink_runs.lock()).len()
-    }
-
     #[cfg(test)]
     fn ink_run_cache_len(&self) -> usize {
-        self.ink_run_count()
+        recover_poisoned_lock(self.ink_runs.lock()).len()
     }
 
     /// The advance of `ch` in **device** pixels at `scale`.

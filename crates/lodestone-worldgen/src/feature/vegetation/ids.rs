@@ -25,7 +25,7 @@
 //! [`IdTags`] is one bitset per [`Tag`], each covering the **entire** `StateId`
 //! space. That is not a generous over-allocation, it is exact: [`StateId`] wraps a
 //! `u16`, so 65,536 ids is the whole space and the table can never need to grow.
-//! 13 tags × 65,536 bits = 106 KiB per [`super::VegTags`], one `alloc_zeroed` at
+//! 26 tags × 65,536 bits = 208 KiB per [`super::VegTags`], one `alloc_zeroed` at
 //! construction, and a [`super::VegTags`] is per-generator.
 //!
 //! Bits are only *meaningful* for ids the table has actually examined, so
@@ -98,9 +98,10 @@ use super::config::VegTags;
 
 /// The membership questions vegetal decoration asks of a block state.
 ///
-/// The first seven are real registry tags resolved by [`super::build_veg_tags`];
-/// the rest are base-name equalities the old engine spelled inline. See the
-/// module doc on why they share one mechanism.
+/// Registry-backed variants are resolved by [`super::build_veg_tags`]; the
+/// built-in state-name questions are kept in the same table so hot callers do
+/// not need a second membership path. See the module doc on why they share one
+/// mechanism.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Tag {
     CannotReplaceBelowTreeTrunk,
@@ -136,6 +137,8 @@ pub(super) enum Tag {
     HugeBrownMushroomCanPlaceOn,
     /// The ground tag used by the bundled huge-red-mushroom feature.
     HugeRedMushroomCanPlaceOn,
+    /// Blocks that the mushroom cap and stem writers may replace.
+    ReplaceableByMushrooms,
     /// `#minecraft:supports_bamboo` — bamboo's own floor survival rule.
     SupportsBamboo,
     /// Dedicated floors for simple-block dry vegetation.
@@ -157,7 +160,7 @@ pub(super) enum Tag {
 impl Tag {
     /// Every variant, in declaration order. `TAG_COUNT` and the mask layout are
     /// both derived from this, so it is the single place a new tag registers.
-    pub(super) const ALL: [Tag; 25] = [
+    pub(super) const ALL: [Tag; 26] = [
         Tag::CannotReplaceBelowTreeTrunk,
         Tag::SupportsVegetation,
         Tag::ReplaceableByTrees,
@@ -175,6 +178,7 @@ impl Tag {
         Tag::MangroveRootsCanGrowThrough,
         Tag::HugeBrownMushroomCanPlaceOn,
         Tag::HugeRedMushroomCanPlaceOn,
+        Tag::ReplaceableByMushrooms,
         Tag::SupportsBamboo,
         Tag::SupportsDryVegetation,
         Tag::SupportsAzalea,
@@ -306,7 +310,7 @@ impl Clone for IdTags {
 }
 
 impl std::fmt::Debug for IdTags {
-    /// A summary, not 13,312 atomics. `VegTags` derives `Debug` and is printed in
+    /// A summary, not 26,624 atomics. `VegTags` derives `Debug` and is printed in
     /// test failure messages; dumping the raw masks would bury the tag sets that
     /// are the actually useful part.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -404,6 +408,7 @@ impl VegTags {
             Tag::MangroveRootsCanGrowThrough => self.mangrove_roots_can_grow_through.contains(base),
             Tag::HugeBrownMushroomCanPlaceOn => self.huge_brown_mushroom_can_place_on.contains(base),
             Tag::HugeRedMushroomCanPlaceOn => self.huge_red_mushroom_can_place_on.contains(base),
+            Tag::ReplaceableByMushrooms => self.replaceable_by_mushrooms.contains(base),
             Tag::SupportsBamboo => self.supports_bamboo.contains(base),
             Tag::SupportsDryVegetation => self.supports_dry_vegetation.contains(base),
             Tag::SupportsAzalea => self.supports_azalea.contains(base),
@@ -611,7 +616,7 @@ mod tests {
     /// order and complete.
     #[test]
     fn tag_all_is_complete_and_in_discriminant_order() {
-        assert_eq!(TAG_COUNT, 25, "TAG_COUNT is derived from Tag::ALL");
+        assert_eq!(TAG_COUNT, 26, "TAG_COUNT is derived from Tag::ALL");
         for (i, tag) in Tag::ALL.iter().enumerate() {
             assert_eq!(
                 tag.slot(),

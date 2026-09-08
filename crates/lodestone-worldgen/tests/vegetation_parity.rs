@@ -779,24 +779,24 @@ fn mushroom_fields_fixture_proves_both_huge_mushroom_branches_are_consumed() {
     ] {
         let fixture = load(name);
         let expected: HashMap<_, _> = fixture
-            .single_diff
+            .full_diff
             .iter()
-            .filter(|(_, state)| state.contains(cap) || state.contains("mushroom_stem"))
+            .filter(|(_, state)| state.contains("mushroom_block") || state.contains("mushroom_stem"))
             .map(|(pos, state)| (*pos, state.clone()))
             .collect();
         assert!(!expected.is_empty(), "{name}: external capture must contain the selected huge-mushroom branch");
+        assert!(expected.values().any(|state| state.contains(cap)), "{name}: external capture must contain its selected cap branch");
         assert!(expected.values().any(|state| state.contains("mushroom_stem")), "{name}: external capture must contain stems");
 
-        // The production stage uses the widened 3x3 write-radius grid.  The
-        // single-source helper intentionally drops writes outside the centre
-        // chunk, which would hide the north half of a cap placed across this
-        // fixture's z=0 seam.
+        // The production stage uses the widened 3x3 write-radius grid. Compare
+        // against its complete external diff so a cap or stem written by a
+        // neighbouring source cannot hide behind a centre-only filter.
         let ours = run_our_engine_full3x3(&fixture, &resolver);
         let actual: HashMap<_, _> = ours
             .into_iter()
-            .filter(|(pos, _)| expected.contains_key(pos))
+            .filter(|(_, state)| state.contains("mushroom_block") || state.contains("mushroom_stem"))
             .collect();
-        assert_eq!(actual, expected, "{name}: mushroom-fields production selector must reach the huge-mushroom placer with exact states");
+        assert_eq!(actual, expected, "{name}: mushroom-fields production selector must reach the huge-mushroom placer with exact states and no extra mushroom writes");
     }
 }
 

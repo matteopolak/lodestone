@@ -100,7 +100,6 @@ use lodestone_render::{
 use super::font;
 use super::vanilla_font::{self, VanillaFont};
 use super::{FLOATS_PER_VERTEX, HUD_GLINT_WGSL, HUD_SPRITE_WGSL, SPRITE_FLOATS_PER_VERTEX};
-use crate::platform::Instant;
 
 /// One occupied slot's drawable state, resolved shell-side from a
 /// [`lodestone_game::menu::Menu`]. `item` is the item id
@@ -2272,15 +2271,15 @@ impl GuiGlint {
 pub(crate) struct IconRenderer {
     sprites: Option<SpriteIcons>,
     models: Option<ModelIcons>,
-    /// The block-entity icon pass (chests). Built during renderer bring-up when
-    /// a model pass is attached, with a lazy fallback after a pack reload.
+    /// The block-entity icon pass (chests). Built **lazily**, on the first frame
+    /// that actually contains a special icon — see [`Self::upload`].
     special: Option<SpecialIcons>,
-    /// How many consecutive frames a special build has been *declined* — either
+    /// How many consecutive frames the lazy build has been *declined* — either
     /// because there was nowhere to draw (no model pass attached) or because
     /// [`SpecialIcons::new`] returned `None`. Reset to `0` the moment a build
     /// succeeds.
     ///
-    /// # Why a counter instead of a one-shot attempt flag
+    /// # Why a counter and not the `special_tried` bool this replaces
     ///
     /// That bool latched. It was set on the *first* attempt and nothing ever
     /// cleared it, so a build that failed once left the whole special stream
@@ -2300,8 +2299,7 @@ pub(crate) struct IconRenderer {
     /// when it ends.
     special_declines: u32,
     /// The colour format [`Self::attach_item_models`] was given, kept for the
-    /// bring-up prewarm and reload fallback. `None` means the model pass was
-    /// never attached, which is also
+    /// lazy build. `None` means the model pass was never attached, which is also
     /// the condition under which the special pass must stay dark: both are the
     /// same "there is somewhere to draw 3-D icons" signal, and both gates' negative
     /// control turns exactly on it.
@@ -2433,8 +2431,8 @@ impl IconRenderer {
     /// Whether the 3-D item-model pass is attached. Building model geometry when
     /// it is not is pure waste — there is nowhere to draw it.
     ///
-    /// Also gates the **special** (block-entity) icon pass, which is prewarmed off
-    /// the same signal: both need a depth attachment and both are absent on a
+    /// Also gates the **special** (block-entity) icon pass, which is built lazily
+    /// off the same signal: both need a depth attachment and both are absent on a
     /// jar-less run, so the two screens' single `want_models` branch covers both
     /// and no caller has to learn about a second flag.
     pub(crate) fn models_attached(&self) -> bool {
@@ -2449,13 +2447,11 @@ impl IconRenderer {
         self.special.as_ref().map_or(0, SpecialIcons::sheet_count)
     }
 
-    /// Drop the special-renderer pass so bring-up or the next frame that needs one
-    /// rebuilds it against the **current** pack stack. The reload-time sibling of
+    /// Drop the special-renderer pass so the next frame that needs one rebuilds
+    /// it against the **current** pack stack. The reload-time sibling of
     /// [`Self::attach_items`]/[`Self::attach_item_models`], and it has to exist
-    /// separately from them because this pass is *not* attached — it needs a
-    /// queue for its uploads, which those two do not have. Call
-    /// [`Self::prewarm_special`] after a reload when the next draw should not pay
-    /// that cost.
+    /// separately from them because this pass is *not* attached — it builds
+    /// itself lazily on first use, off `queue`, which those two do not have.
     ///
     /// # Why a reload needs this at all
     ///
@@ -2469,13 +2465,13 @@ impl IconRenderer {
     /// therefore reached the world's own block-entity pass and never reached a
     /// GUI slot, with nothing red and nothing dropped.
     ///
-    /// The fallback build itself no longer latches — see [`Self::special_declines`]
+    /// The lazy build itself no longer latches — see [`Self::special_declines`]
     /// — so this is now purely about *which pack* the sheets came from, not
     /// about recovering a stream that failed to build.
     ///
-    /// Cheap for the same reason dropping an attached pass is affordable:
-    /// nothing is rebuilt here, and bring-up/reload code decides when to pay the
-    /// rebuild cost rather than a random frame carrying a special icon.
+    /// Cheap for the same reason the lazy build is affordable: nothing is
+    /// rebuilt here, and the next rebuild only happens on a frame that actually
+    /// carries a special icon.
     /// Log one episode of the special pass declining to draw, and count the
     /// frames it lasts.
     ///
@@ -2691,40 +2687,12 @@ impl IconRenderer {
             buffer,
             capacity_bytes,
         });
-        // The special (block-entity) pass needs a `queue` to upload its sheets
-        // and this call has none — callers invoke `prewarm_special` immediately
-        // after attachment, when both handles are available. Keep the format so
-        // a reload fallback can still rebuild it from `upload` if needed.
+        // The special (block-entity) pass needs a `queue` to upload its sheets and
+        // this call has none — every caller's wrapper takes `device` only, up
+        // through `app.rs`. Rather than widen four signatures across three
+        // contended files, remember the format and build on first use in
+        // `upload`, which has both.
         self.color_format = Some(color_format);
-    }
-
-    /// Build the block-entity icon pass while the renderer is being brought up.
-    /// The pass owns baked meshes, decoded sheets, bind groups and pattern
-    /// masks; constructing all of those from `upload` made the first container
-    /// containing a special item pay the entire cost on the frame thread.
-    pub(crate) fn prewarm_special(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
-        if self.special.is_some() {
-            return;
-        }
-        let Some(format) = self.color_format else {
-            return;
-        };
-        let started = tracing::enabled!(target: "container_profile", tracing::Level::DEBUG)
-            .then(Instant::now);
-        let built = SpecialIcons::new(device, queue, format);
-        if let Some(started) = started {
-            tracing::debug!(
-                target: "container_profile",
-                stage = "special_prewarm",
-                elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0,
-                success = built.is_some(),
-                "prewarmed GUI special-icon resources"
-            );
-        }
-        self.special = built;
-        if self.special.is_some() {
-            self.special_declines = 0;
-        }
     }
 
     /// Grow the buffers as needed, upload both streams, and rewrite the model
@@ -2828,10 +2796,9 @@ impl IconRenderer {
         (sprite_count, model_count)
     }
 
-    /// Build this frame's special-icon batches: ensure the pass exists (the
-    /// normal bring-up path prewarms it), group the draws by `(model, sheet)`,
-    /// compose one matrix per mesh part per icon, and upload them as per-part
-    /// instance buffers.
+    /// Build this frame's special-icon batches: lazily construct the pass, group
+    /// the draws by `(model, sheet)`, compose one matrix per mesh part per icon,
+    /// and upload them as per-part instance buffers.
     ///
     /// # Why `part_transforms` per icon rather than one matrix per icon
     ///
@@ -2891,27 +2858,9 @@ impl IconRenderer {
             return;
         };
         // Retried whenever the pass is absent, never latched — see
-        // [`Self::special_declines`]. The normal path has already prewarmed the
-        // pass, so this branch is a reload/failure fallback. Keep its timing
-        // separate from the container's general upload stage: if it ever runs
-        // during redraw, the log must identify the exact lazy constructor that
-        // reintroduced a first-use stall.
+        // [`Self::special_declines`].
         if self.special.is_none() {
-            let started =
-                tracing::enabled!(target: "container_profile", tracing::Level::DEBUG)
-                    .then(Instant::now);
-            let built = SpecialIcons::new(device, queue, format);
-            if let Some(started) = started {
-                tracing::debug!(
-                    target: "container_profile",
-                    stage = "special_lazy_build",
-                    elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0,
-                    success = built.is_some(),
-                    special_icons = special.len(),
-                    "built GUI special-icon resources during redraw"
-                );
-            }
-            self.special = built;
+            self.special = SpecialIcons::new(device, queue, format);
         }
         let Some(s) = self.special.as_mut() else {
             self.note_special_decline(

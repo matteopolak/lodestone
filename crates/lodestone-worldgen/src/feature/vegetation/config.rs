@@ -270,6 +270,8 @@ pub(super)     fn test(&self, grid: &VegGrid, tags: &VegTags, pos: BlockPos) -> 
                     tag_at(grid, tags, Tag::HugeBrownMushroomCanPlaceOn, pos.x, pos.y, pos.z)
                 } else if tag == "minecraft:huge_red_mushroom_can_place_on" {
                     tag_at(grid, tags, Tag::HugeRedMushroomCanPlaceOn, pos.x, pos.y, pos.z)
+                } else if tag == "minecraft:replaceable_by_mushrooms" {
+                    tag_at(grid, tags, Tag::ReplaceableByMushrooms, pos.x, pos.y, pos.z)
                 } else if tag == "minecraft:replaceable_by_trees" {
                     tag_at(grid, tags, Tag::ReplaceableByTrees, pos.x, pos.y, pos.z)
                 } else if tag == "minecraft:azalea_grows_on" {
@@ -822,12 +824,11 @@ fn noise_state_index(value: f64, state_count: usize) -> usize {
     (((value + 1.0) * 0.5 * state_count as f64) as usize).min(state_count - 1)
 }
 
-/// `#minecraft:cannot_replace_below_tree_trunk`/`#minecraft:supports_vegetation`/
-/// `#minecraft:replaceable_by_trees`/`#minecraft:logs`, resolved once at
-/// generator construction via [`crate::compose::resolve_block_tag`] — the
-/// same tag-closure machinery [`crate::compose::build_ore_tag_map`] already
-/// uses for ore `RuleTest::TagMatch`, applied here to the four tags this
-/// module's own predicates/checks reference.
+/// Registry-backed vegetation tags, resolved once at generator construction
+/// via [`crate::compose::resolve_block_tag`] — the same tag-closure machinery
+/// [`crate::compose::build_ore_tag_map`] already uses for ore
+/// `RuleTest::TagMatch`, applied here to every tag this module's own
+/// predicates/checks reference.
 #[derive(Debug, Default, Clone)]
 pub struct VegTags {
     /// `#minecraft:features_cannot_replace` — blocks protected from feature
@@ -865,6 +866,10 @@ pub struct VegTags {
     /// `#minecraft:huge_red_mushroom_can_place_on` — the exact floor gate
     /// in the bundled red mushroom record.
     pub huge_red_mushroom_can_place_on: HashSet<String>,
+    /// `#minecraft:replaceable_by_mushrooms` — the write target set for huge
+    /// mushroom caps and stems. The feature's clearance check is narrower and
+    /// accepts only air or leaves; this set is used after that check succeeds.
+    pub replaceable_by_mushrooms: HashSet<String>,
     /// `#minecraft:supports_bamboo` — bamboo's floor survival rule.
     pub supports_bamboo: HashSet<String>,
     /// The dedicated floor tag for dry grass and dead bushes.
@@ -950,6 +955,7 @@ pub fn build_veg_tags(resolver: &dyn Resolver) -> VegTags {
         mangrove_roots_can_grow_through: resolve("minecraft:mangrove_roots_can_grow_through"),
         huge_brown_mushroom_can_place_on: resolve("minecraft:huge_brown_mushroom_can_place_on"),
         huge_red_mushroom_can_place_on: resolve("minecraft:huge_red_mushroom_can_place_on"),
+        replaceable_by_mushrooms: resolve("minecraft:replaceable_by_mushrooms"),
         supports_bamboo: resolve("minecraft:supports_bamboo"),
         supports_dry_vegetation: resolve("minecraft:supports_dry_vegetation"),
         supports_azalea: resolve("minecraft:supports_azalea"),

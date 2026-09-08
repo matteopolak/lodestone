@@ -2200,10 +2200,37 @@ fn mushroom_cap_state(state: &str, west: bool, east: bool, north: bool, south: b
     out
 }
 
-/// Huge-mushroom placement shares one bounded `0..3` height draw plus four
-/// across the brown and red variants. Keeping the deterministic body
-/// separate lets the layout tests exercise the bundled cap records without
-/// coupling their assertions to a particular random-source seed.
+/// The feature's clearance rule admits only air and leaves. It is deliberately
+/// separate from the write rule below: a leaf canopy may be displaced after a
+/// valid mushroom site is found, while an arbitrary solid block cancels the
+/// whole attempt before any partial cap or stem is written.
+fn valid_mushroom_pos(grid: &VegGrid, tags: &VegTags, x: i32, y: i32, z: i32) -> bool {
+    tag_at(grid, tags, Tag::Air, x, y, z) || tag_at(grid, tags, Tag::Leaves, x, y, z)
+}
+
+/// Cap and stem blocks replace air and the dedicated mushroom-replaceable set.
+/// This is wider than [`valid_mushroom_pos`] because the placement body is
+/// allowed to overwrite leaves and other replaceable vegetation once the
+/// preflight clearance scan has passed.
+fn replaceable_mushroom_pos(grid: &VegGrid, tags: &VegTags, x: i32, y: i32, z: i32) -> bool {
+    tag_at(grid, tags, Tag::Air, x, y, z)
+        || tag_at(grid, tags, Tag::ReplaceableByMushrooms, x, y, z)
+}
+
+fn mushroom_valid_radius(cfg: &HugeMushroomCfg, y: i32) -> i32 {
+    match cfg.kind {
+        HugeMushroomKind::Brown => (y > 3).then_some(cfg.foliage_radius).unwrap_or(0),
+        // The red feature's validity call uses the trunk/top sentinels, which
+        // makes every preflight layer a stem-column check. Its cap still grows
+        // with the full configured radius after that check succeeds.
+        HugeMushroomKind::Red => 0,
+    }
+}
+
+/// Huge-mushroom placement shares one bounded `0..3` height draw plus four,
+/// with a one-in-twelve second draw that doubles the height. Keeping the
+/// deterministic body separate lets the layout tests exercise the bundled cap
+/// records without coupling their assertions to a particular random-source seed.
 pub(super) fn place_huge_mushroom<R: RandomSource>(
     random: &mut R,
     pos: BlockPos,
@@ -2211,7 +2238,10 @@ pub(super) fn place_huge_mushroom<R: RandomSource>(
     grid: &mut VegGrid,
     tags: &VegTags,
 ) {
-    let height = random.next_int_bounded(3) + 4;
+    let mut height = random.next_int_bounded(3) + 4;
+    if random.next_int_bounded(12) == 0 {
+        height *= 2;
+    }
     place_huge_mushroom_at_height(random, pos, cfg, height, grid, tags);
 }
 
@@ -2235,15 +2265,15 @@ pub(super) fn place_huge_mushroom_at_height<R: RandomSource>(
         return;
     }
 
-    // The feature's validity scan reserves only the stem column until the
-    // cap layer, then its complete configured radius. This is intentionally
-    // broader than either cap's final cut-out shape: a blocked skipped corner
-    // still rejects the attempt before any stem write occurs.
+    // The feature's validity scan is intentionally broader than either cap's
+    // final cut-out shape: a blocked skipped corner still rejects the attempt
+    // before any stem write occurs. Brown keeps its full radius for every
+    // layer above the first four; red's reference check is stem-column-only.
     for y in 0..=height {
-        let radius = if y == height { cfg.foliage_radius } else { 0 };
+        let radius = mushroom_valid_radius(cfg, y);
         for dx in -radius..=radius {
             for dz in -radius..=radius {
-                if !valid_tree_pos(grid, tags, pos.x + dx, pos.y + y, pos.z + dz) {
+                if !valid_mushroom_pos(grid, tags, pos.x + dx, pos.y + y, pos.z + dz) {
                     return;
                 }
             }
@@ -2251,16 +2281,15 @@ pub(super) fn place_huge_mushroom_at_height<R: RandomSource>(
     }
 
     let mut place_cap = |at: BlockPos, west: bool, east: bool, north: bool, south: bool, up: bool| {
-        if sturdy_at(grid, at.x, at.y, at.z) {
-            return;
-        }
         if let Some(state) = cfg.cap_provider.get_state(grid, tags, random, pos) {
-            grid.set_if_in_bounds(
-                at.x,
-                at.y,
-                at.z,
-                mushroom_cap_state(state, west, east, north, south, up),
-            );
+            if replaceable_mushroom_pos(grid, tags, at.x, at.y, at.z) {
+                grid.set_if_in_bounds(
+                    at.x,
+                    at.y,
+                    at.z,
+                    mushroom_cap_state(state, west, east, north, south, up),
+                );
+            }
         }
     };
 
@@ -2292,6 +2321,7 @@ pub(super) fn place_huge_mushroom_at_height<R: RandomSource>(
             }
         }
         HugeMushroomKind::Red => {
+            let center = cfg.foliage_radius - 2;
             for y in (height - 3)..=height {
                 let radius = if y < height { cfg.foliage_radius } else { cfg.foliage_radius - 1 };
                 let positions: Vec<_> = (-radius..=radius)
@@ -2307,10 +2337,10 @@ pub(super) fn place_huge_mushroom_at_height<R: RandomSource>(
                 for (dx, dz) in positions {
                     place_cap(
                         BlockPos { x: pos.x + dx, y: pos.y + y, z: pos.z + dz },
-                        dx < 0,
-                        dx > 0,
-                        dz < 0,
-                        dz > 0,
+                        dx < -center,
+                        dx > center,
+                        dz < -center,
+                        dz > center,
                         y >= height - 1,
                     );
                 }
@@ -2323,8 +2353,8 @@ pub(super) fn place_huge_mushroom_at_height<R: RandomSource>(
     // are simple states.
     for y in 0..height {
         let at = BlockPos { x: pos.x, y: pos.y + y, z: pos.z };
-        if !sturdy_at(grid, at.x, at.y, at.z) {
-            if let Some(state) = cfg.stem_provider.get_state(grid, tags, random, pos) {
+        if let Some(state) = cfg.stem_provider.get_state(grid, tags, random, pos) {
+            if replaceable_mushroom_pos(grid, tags, at.x, at.y, at.z) {
                 grid.set_if_in_bounds(at.x, at.y, at.z, state.to_string());
             }
         }

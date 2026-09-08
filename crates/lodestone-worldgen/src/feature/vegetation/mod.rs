@@ -819,7 +819,7 @@ fn place_configured_feature_with_seed<R: RandomSource>(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::{BTreeMap, HashMap, HashSet}, sync::Arc};
+    use std::{collections::{BTreeMap, HashMap, HashSet, VecDeque}, sync::Arc};
 
     use super::*;
     use crate::dense_grid::DenseBlockGrid;
@@ -828,7 +828,7 @@ mod tests {
     use crate::interner::StateInterner;
     use crate::overworld::BiomeCells;
     use serde_json::Value;
-    use crate::rng::{LegacyRandomSource, XoroshiroRandomSource};
+    use crate::rng::{LegacyRandomSource, RandomSource, XoroshiroPositionalFactory, XoroshiroRandomSource};
 
     fn grid_with_flat_ground(min_y: i32, height: i32, ground_y: i32) -> VegGrid {
         let mut grid = VegGrid::new(min_y, height, 0, 0);
@@ -2868,7 +2868,40 @@ mod tests {
         let mut tags = VegTags::default();
         tags.huge_brown_mushroom_can_place_on.insert("minecraft:grass_block".to_string());
         tags.huge_red_mushroom_can_place_on.insert("minecraft:grass_block".to_string());
+        for block in ["minecraft:brown_mushroom_block", "minecraft:red_mushroom_block"] {
+            tags.replaceable_by_mushrooms.insert(block.to_string());
+        }
         tags
+    }
+
+    struct HugeMushroomScriptRandom {
+        bounded: VecDeque<i32>,
+    }
+
+    impl HugeMushroomScriptRandom {
+        fn new(bounded: [i32; 2]) -> Self {
+            Self { bounded: bounded.into() }
+        }
+    }
+
+    impl RandomSource for HugeMushroomScriptRandom {
+        type Positional = XoroshiroPositionalFactory;
+
+        fn fork_positional(&mut self) -> Self::Positional { panic!("mushroom height script does not fork") }
+        fn set_seed(&mut self, _: i64) { panic!("mushroom height script does not reseed") }
+        fn next_bits(&mut self, _: u32) -> i32 { panic!("mushroom height script only samples bounded draws") }
+        fn next_int(&mut self) -> i32 { panic!("mushroom height script only samples bounded draws") }
+        fn next_int_bounded(&mut self, bound: i32) -> i32 {
+            let value = self.bounded.pop_front().expect("scripted mushroom height draw");
+            assert!((0..bound).contains(&value));
+            value
+        }
+        fn next_long(&mut self) -> i64 { panic!("mushroom height script only samples bounded draws") }
+        fn next_bool(&mut self) -> bool { panic!("mushroom height script only samples bounded draws") }
+        fn next_float(&mut self) -> f32 { panic!("mushroom height script only samples bounded draws") }
+        fn next_double(&mut self) -> f64 { panic!("mushroom height script only samples bounded draws") }
+        fn next_gaussian(&mut self) -> f64 { panic!("mushroom height script only samples bounded draws") }
+        fn consume_count(&mut self, _: u32) { panic!("mushroom height script does not consume draws") }
     }
 
     fn bundled_huge_fungus_cfg(name: &str) -> features::HugeFungusCfg {
@@ -3060,6 +3093,87 @@ mod tests {
             "minecraft:red_mushroom_block[down=false,east=false,north=true,south=false,up=true,west=true]",
             "a top corner exposes both outward horizontal faces"
         );
+    }
+
+    #[test]
+    fn red_huge_mushroom_directional_faces_use_the_configured_radius_center() {
+        let mut cfg = bundled_huge_mushroom_cfg("red");
+        cfg.foliage_radius = 3;
+        let mut grid = grid_with_flat_ground(-64, 384, 69);
+        let tags = mushroom_tags();
+        let mut random = LegacyRandomSource::new(0);
+        let origin = BlockPos { x: 8, y: 70, z: 8 };
+
+        features::place_huge_mushroom_at_height(&mut random, origin, &cfg, 4, &mut grid, &tags);
+
+        assert_eq!(
+            grid.get(6, 74, 8),
+            "minecraft:red_mushroom_block[down=false,east=false,north=false,south=false,up=true,west=true]",
+            "the outer top edge exposes west when its offset is beyond radius minus two"
+        );
+        assert_eq!(
+            grid.get(7, 74, 8),
+            "minecraft:red_mushroom_block[down=false,east=false,north=false,south=false,up=true,west=false]",
+            "the inner top edge remains covered at the configured radius center"
+        );
+    }
+
+    #[test]
+    fn huge_mushroom_consumes_the_rare_height_draw_and_doubles_the_stem() {
+        // The compiled 26.2 server consumes a second bounded draw and doubles
+        // the four-to-six height when that draw is zero.
+        let cfg = bundled_huge_mushroom_cfg("red");
+        let mut grid = grid_with_flat_ground(-64, 384, 69);
+        let tags = mushroom_tags();
+        let origin = BlockPos { x: 8, y: 70, z: 8 };
+        let mut random = HugeMushroomScriptRandom::new([0, 0]);
+
+        features::place_huge_mushroom(&mut random, origin, &cfg, &mut grid, &tags);
+
+        assert!(random.bounded.is_empty(), "height must consume both external bounded draws");
+        for y in 70..78 {
+            assert_eq!(
+                base_id(grid.get(8, y, 8)),
+                "minecraft:mushroom_stem",
+                "a rare doubled height must place an eight-block stem"
+            );
+        }
+        assert_eq!(base_id(grid.get(8, 78, 8)), "minecraft:red_mushroom_block");
+        assert_eq!(base_id(grid.get(8, 79, 8)), "minecraft:air");
+    }
+
+    #[test]
+    fn huge_mushroom_clearance_accepts_leaves_but_writes_only_replaceable_states() {
+        // The external placement rule allows leaves through the clearance scan
+        // and then replaces them only when they belong to the mushroom set.
+        let cfg = bundled_huge_mushroom_cfg("brown");
+        let mut grid = grid_with_flat_ground(-64, 384, 69);
+        let mut tags = mushroom_tags();
+        tags.leaves.insert("minecraft:leaves".to_string());
+        tags.replaceable_by_mushrooms.insert("minecraft:leaves".to_string());
+        let origin = BlockPos { x: 8, y: 70, z: 8 };
+        grid.seed(8, 70, 8, "minecraft:leaves".to_string());
+        grid.seed(8, 74, 8, "minecraft:leaves".to_string());
+        let mut random = LegacyRandomSource::new(0);
+
+        features::place_huge_mushroom_at_height(&mut random, origin, &cfg, 4, &mut grid, &tags);
+
+        assert_eq!(base_id(grid.get(8, 70, 8)), "minecraft:mushroom_stem");
+        assert_eq!(base_id(grid.get(8, 74, 8)), "minecraft:brown_mushroom_block");
+    }
+
+    #[test]
+    fn huge_brown_mushroom_rejects_a_solid_in_the_cap_clearance_radius() {
+        let cfg = bundled_huge_mushroom_cfg("brown");
+        let mut grid = grid_with_flat_ground(-64, 384, 69);
+        let tags = mushroom_tags();
+        let origin = BlockPos { x: 8, y: 70, z: 8 };
+        grid.seed(9, 74, 8, "minecraft:stone".to_string());
+        let mut random = LegacyRandomSource::new(0);
+
+        features::place_huge_mushroom_at_height(&mut random, origin, &cfg, 4, &mut grid, &tags);
+
+        assert_eq!(grid.dirty_cells().count(), 0, "clearance must reject before partial writes");
     }
 
     /// Both bundled Nether fungus records must resolve to a real configured
