@@ -625,6 +625,40 @@ fn raw_packet_targets(
         .collect()
 }
 
+/// The first packet is the bootstrap admission and has no previously adopted
+/// neighbour light. Later admissions adopt the cardinal source columns before
+/// their initial packet is encoded; the full 3x3 footprint is still supplied
+/// to the encoder for packet construction.
+const INITIAL_CARDINAL_NEIGHBOUR_OFFSETS: [(i32, i32); 4] =
+    [(-1, 0), (0, -1), (1, 0), (0, 1)];
+
+fn initial_light_admission_neighbour_offsets(record_index: u64) -> &'static [(i32, i32)] {
+    if record_index == 0 {
+        &[]
+    } else {
+        &INITIAL_CARDINAL_NEIGHBOUR_OFFSETS
+    }
+}
+
+fn initial_light_snapshot_for_admission(
+    proto: &V770ServerProtocol,
+    centre: &ChunkColumn,
+    admitted_neighbours: &[(i32, i32, ChunkColumn)],
+    dimension: ServerDimension,
+) -> ChunkColumn {
+    let mut settled = centre.clone();
+    if proto.retains_initial_column_light()
+        && let Some(light) = proto.compute_initial_column_light_with_neighbours_in_dimension(
+            centre,
+            admitted_neighbours,
+            dimension,
+        )
+    {
+        settled.set_retained_light(light);
+    }
+    settled
+}
+
 #[test]
 fn lifecycle_target_selection_rejects_ambiguous_single_target_requests() {
     assert_eq!(
@@ -641,6 +675,19 @@ fn lifecycle_target_selection_rejects_ambiguous_single_target_requests() {
     assert_eq!(
         lifecycle_target_selection(256, Some(2), None, false),
         Ok(LifecycleTargetSelection::Prefix { limit: 2 }),
+    );
+}
+
+#[test]
+fn initial_light_admission_has_bootstrap_then_cardinal_sources() {
+    assert!(initial_light_admission_neighbour_offsets(0).is_empty());
+    assert_eq!(
+        initial_light_admission_neighbour_offsets(1),
+        INITIAL_CARDINAL_NEIGHBOUR_OFFSETS.as_slice(),
+    );
+    assert_eq!(
+        initial_light_admission_neighbour_offsets(31),
+        INITIAL_CARDINAL_NEIGHBOUR_OFFSETS.as_slice(),
     );
 }
 
@@ -1176,6 +1223,18 @@ fn parity_manifest_streams_before_rust_comparison() {
             let cx = h.cx0 + (index % width) as i32;
             let cz = h.cz0 + (index / width) as i32;
             let column = column_for(cx, cz);
+            let admitted_neighbour_offsets =
+                initial_light_admission_neighbour_offsets(index);
+            let admitted_neighbours = admitted_neighbour_offsets
+                .iter()
+                .map(|&(dx, dz)| (dx, dz, column_for(cx + dx, cz + dz)))
+                .collect::<Vec<_>>();
+            let settled_column = initial_light_snapshot_for_admission(
+                &V770ServerProtocol,
+                &column,
+                &admitted_neighbours,
+                server_dimension,
+            );
             let mut neighbours = Vec::with_capacity(8);
             for dz in -1..=1 {
                 for dx in -1..=1 {
@@ -1188,7 +1247,7 @@ fn parity_manifest_streams_before_rust_comparison() {
                 .try_encode_chunk_with_neighbours_in_dimension(
                     cx,
                     cz,
-                    &column,
+                    &settled_column,
                     &neighbours,
                     server_dimension,
                 )
