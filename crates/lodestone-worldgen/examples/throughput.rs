@@ -28,6 +28,7 @@ use lodestone_worldgen::aquifer::BlockKind;
 use lodestone_worldgen::end::EndGenerator;
 use lodestone_worldgen::nether::NetherGenerator;
 use lodestone_worldgen::overworld::OverworldGenerator;
+use sha2::{Digest as _, Sha256};
 
 struct CountingAllocator;
 
@@ -127,6 +128,223 @@ impl Generator {
     }
 }
 
+/// Hashes one generated grid's complete observable content without changing
+/// the timed or allocation-counted paths.  The digest deliberately uses
+/// canonical state strings instead of generator-local palette indexes: those
+/// indexes are an implementation detail and can change when a generator warms
+/// up in a different order, while the strings are the exact generated states.
+fn generated_content_digest(generator: &Generator, mode: Mode, coords: &[(i32, i32)]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    hash_bytes(&mut digest, b"lodestone-worldgen-content-v1");
+    hash_str(&mut digest, mode.label());
+    for &(cx, cz) in coords {
+        hash_i32(&mut digest, cx);
+        hash_i32(&mut digest, cz);
+        match (generator, mode) {
+            (Generator::Overworld(generator), Mode::Shaped) => {
+                hash_overworld_column(&mut digest, &generator.column_shaped(cx, cz));
+            }
+            (Generator::Overworld(generator), Mode::Decorated) => {
+                hash_overworld_column(&mut digest, &generator.column(cx, cz));
+            }
+            (Generator::Nether(generator), Mode::Shaped) => {
+                hash_nether_column(&mut digest, &generator.column_shaped(cx, cz));
+            }
+            (Generator::Nether(generator), Mode::Decorated) => {
+                hash_nether_column(&mut digest, &generator.column(cx, cz));
+            }
+            (Generator::End(generator), Mode::Shaped) => {
+                hash_i32(&mut digest, generator.min_y());
+                hash_i32(&mut digest, generator.height());
+                for state in generator.shape_field(cx, cz) {
+                    hash_str(&mut digest, end_block_kind_name(state));
+                }
+                // The shaped End seam exposes only the pre-surface block field;
+                // its biome and entity products become available with `column`.
+                hash_u64(&mut digest, 0);
+                hash_u64(&mut digest, 0);
+            }
+            (Generator::End(generator), Mode::Decorated) => {
+                hash_end_column(&mut digest, &generator.column(cx, cz));
+            }
+        }
+    }
+    digest.finalize().into()
+}
+
+fn hash_overworld_column(digest: &mut Sha256, column: &lodestone_worldgen::overworld::GeneratedColumn) {
+    hash_i32(digest, column.min_y());
+    hash_i32(digest, column.height());
+    for y in column.min_y()..column.min_y() + column.height() {
+        for z in 0..16 {
+            for x in 0..16 {
+                hash_str(digest, column.block_state(x, y, z));
+            }
+        }
+    }
+    let biomes = column.biome_cells();
+    hash_i32(digest, biomes.min_y());
+    hash_u64(digest, biomes.y_quarts() as u64);
+    for qy in 0..biomes.y_quarts() {
+        for qz in 0..4 {
+            for qx in 0..4 {
+                hash_str(digest, biomes.at_quart(qx, qy, qz));
+            }
+        }
+    }
+    hash_u64(digest, column.block_entities().len() as u64);
+    for entity in column.block_entities() {
+        hash_str(digest, entity.type_id());
+        let (x, y, z) = entity.position();
+        hash_i32(digest, x);
+        hash_i32(digest, y);
+        hash_i32(digest, z);
+        match entity {
+            lodestone_worldgen::overworld::GeneratedBlockEntity::Beehive { bees, .. } => {
+                hash_str(digest, "bees");
+                hash_u64(digest, bees.len() as u64);
+                for bee in bees {
+                    hash_i32(digest, bee.ticks_in_hive);
+                    hash_i32(digest, bee.min_ticks_in_hive);
+                }
+            }
+            lodestone_worldgen::overworld::GeneratedBlockEntity::DungeonChest {
+                facing,
+                loot_table,
+                loot_table_seed,
+                ..
+            } => {
+                hash_str(digest, facing);
+                hash_str(digest, loot_table);
+                hash_i64(digest, *loot_table_seed);
+            }
+            lodestone_worldgen::overworld::GeneratedBlockEntity::DungeonSpawner {
+                entity_type, ..
+            } => hash_str(digest, entity_type),
+        }
+    }
+}
+
+fn hash_nether_column(digest: &mut Sha256, column: &lodestone_worldgen::nether::NetherColumn) {
+    hash_i32(digest, column.min_y());
+    hash_i32(digest, column.height());
+    for y in column.min_y()..column.min_y() + column.height() {
+        for z in 0..16 {
+            for x in 0..16 {
+                hash_str(digest, column.block_state(x, y, z));
+            }
+        }
+    }
+    for qz in 0..4 {
+        for qx in 0..4 {
+            hash_str(digest, column.biome_at_quart(qx, qz));
+        }
+    }
+    hash_u64(digest, column.placement_loot().len() as u64);
+    for loot in column.placement_loot() {
+        for coordinate in loot.pos {
+            hash_i32(digest, coordinate);
+        }
+        hash_str(digest, &loot.table);
+        hash_i64(digest, loot.seed);
+    }
+}
+
+fn hash_end_column(digest: &mut Sha256, column: &lodestone_worldgen::end::EndColumn) {
+    hash_i32(digest, column.min_y());
+    hash_i32(digest, column.height());
+    for y in column.min_y()..column.min_y() + column.height() {
+        for z in 0..16 {
+            for x in 0..16 {
+                hash_str(digest, column.block_state(x, y, z));
+            }
+        }
+    }
+    for qz in 0..4 {
+        for qx in 0..4 {
+            hash_str(digest, column.biome_at_quart(qx, qz));
+        }
+    }
+    hash_u64(digest, column.gateways().len() as u64);
+    for gateway in column.gateways() {
+        for coordinate in [gateway.pos, gateway.exit] {
+            hash_i32(digest, coordinate.0);
+            hash_i32(digest, coordinate.1);
+            hash_i32(digest, coordinate.2);
+        }
+        hash_bool(digest, gateway.exact);
+    }
+}
+
+fn end_block_kind_name(state: BlockKind) -> &'static str {
+    match state {
+        BlockKind::Stone => "minecraft:end_stone",
+        BlockKind::Air => "minecraft:air",
+        BlockKind::Water => "minecraft:water",
+        BlockKind::Lava => "minecraft:lava",
+    }
+}
+
+fn hash_bytes(digest: &mut Sha256, bytes: &[u8]) {
+    hash_u64(digest, bytes.len() as u64);
+    digest.update(bytes);
+}
+
+fn hash_str(digest: &mut Sha256, value: &str) {
+    hash_bytes(digest, value.as_bytes());
+}
+
+fn hash_i32(digest: &mut Sha256, value: i32) {
+    digest.update(value.to_le_bytes());
+}
+
+fn hash_i64(digest: &mut Sha256, value: i64) {
+    digest.update(value.to_le_bytes());
+}
+
+fn hash_u64(digest: &mut Sha256, value: u64) {
+    digest.update(value.to_le_bytes());
+}
+
+fn hash_bool(digest: &mut Sha256, value: bool) {
+    digest.update([u8::from(value)]);
+}
+
+fn state_cell_digest(states: &[&str]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    hash_bytes(&mut digest, b"lodestone-worldgen-content-v1-cell-control");
+    hash_u64(&mut digest, states.len() as u64);
+    for state in states {
+        hash_str(&mut digest, state);
+    }
+    digest.finalize().into()
+}
+
+/// Proves the full-content instrument sees a one-cell content change even when
+/// the non-air count stays constant. This runs once outside every measurement.
+fn assert_content_digest_mutation_control() {
+    let baseline = ["minecraft:stone", "minecraft:stone"];
+    let mutated = ["minecraft:stone", "minecraft:dirt"];
+    assert_eq!(
+        baseline.iter().filter(|state| **state != "minecraft:air").count(),
+        mutated.iter().filter(|state| **state != "minecraft:air").count(),
+        "mutation control must preserve the old non-air digest's input"
+    );
+    assert_ne!(
+        state_cell_digest(&baseline),
+        state_cell_digest(&mutated),
+        "full-content digest failed to detect one-cell block-state mutation"
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn one_cell_mutation_changes_content_digest_without_changing_non_air_count() {
+        super::assert_content_digest_mutation_control();
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Mode {
     Shaped,
@@ -155,7 +373,13 @@ impl Mode {
 struct Pass {
     seconds: f64,
     chunks: usize,
+    /// Compatibility digest over the old non-air-count stream. Keep this in
+    /// the output so existing result parsers and historical runs remain
+    /// comparable while the full digest below gets stronger.
     digest: u64,
+    /// SHA-256 over every generated state and all biome/entity sidecars that
+    /// the selected generation seam exposes. Computed after timing stops.
+    content_digest: [u8; 32],
     peak_rss_growth: Option<u64>,
     cpu_utilization: Option<f64>,
 }
@@ -178,11 +402,17 @@ fn run_pass(generator: &Generator, mode: Mode, coords: &[(i32, i32)]) -> Pass {
     let cpu_utilization = cpu_before
         .zip(cpu_seconds())
         .map(|(before, after)| (after - before) / seconds.max(f64::MIN_POSITIVE) * 100.0);
+    // Keep the content verification out of both the timed loop and the
+    // allocation-counted sample. It regenerates the same grid and hashes the
+    // complete observable result, so a count-preserving content regression is
+    // visible without moving the reported throughput number.
+    let content_digest = generated_content_digest(generator, mode, coords);
     black_box(digest);
     Pass {
         seconds,
         chunks: coords.len(),
         digest,
+        content_digest,
         peak_rss_growth: baseline_rss.zip(peak_rss).map(|(base, peak)| peak.saturating_sub(base)),
         cpu_utilization,
     }
@@ -249,7 +479,7 @@ fn print_result(dimension: DimensionName, mode: Mode, cold: &Pass, warm: &Pass, 
     let cold_allocs = allocs.0 as f64 / cold.chunks.min(16) as f64;
     let warm_allocs = allocs.1 as f64 / warm.chunks.min(16) as f64;
     println!(
-        "{:<10} {:<9} cold {:>8.2} chunks/s warm {:>8.2} chunks/s cpu cold={} warm={} rss-growth cold={} warm={} allocs/chunk sample16 cold={cold_allocs:.1} warm={warm_allocs:.1} digest={:#x}",
+        "{:<10} {:<9} cold {:>8.2} chunks/s warm {:>8.2} chunks/s cpu cold={} warm={} rss-growth cold={} warm={} allocs/chunk sample16 cold={cold_allocs:.1} warm={warm_allocs:.1} digest={:#x} content_digest={}",
         dimension.label(),
         mode.label(),
         cold.chunks as f64 / cold.seconds,
@@ -259,7 +489,12 @@ fn print_result(dimension: DimensionName, mode: Mode, cold: &Pass, warm: &Pass, 
         format_bytes(cold.peak_rss_growth),
         format_bytes(warm.peak_rss_growth),
         warm.digest,
+        format_digest(warm.content_digest),
     );
+}
+
+fn format_digest(digest: [u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn format_percent(value: Option<f64>) -> String {
@@ -271,6 +506,7 @@ fn format_bytes(value: Option<u64>) -> String {
 }
 
 fn main() {
+    assert_content_digest_mutation_control();
     let mut args = std::env::args().skip(1);
     let seed = args.next().and_then(|value| value.parse().ok()).unwrap_or(42);
     let side = args.next().and_then(|value| value.parse().ok()).unwrap_or(16);
@@ -302,6 +538,12 @@ fn main() {
             let generator = Generator::new(dimension, seed);
             let cold = run_pass(&generator, mode, &coords);
             let warm = run_pass(&generator, mode, &coords);
+            assert_eq!(
+                cold.content_digest, warm.content_digest,
+                "cold and warm {}/{} generated-content digests differ; generation is not deterministic",
+                dimension.label(),
+                mode.label()
+            );
             let allocs = allocation_sample(dimension, seed, &generator, mode, &coords);
             print_result(dimension, mode, &cold, &warm, allocs);
         }
