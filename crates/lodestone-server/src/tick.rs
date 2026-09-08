@@ -52,7 +52,7 @@ use std::time::Duration;
 use bevy_ecs::world::World;
 use crate::block_entities::BlockEntityHandle;
 use crate::border::{BorderFeed, WorldBorder};
-use crate::chunk::ChunkSource;
+use crate::chunk::{ChunkColumn, ChunkSource};
 use crate::mob_spawner::{apply_spawner_tick_owner_batches, SpawnerTickBatchBuilder};
 use crate::mobs::{
     merge_falling_block_tick_effect_batches, Detonation, EntityTickEffectBatch, EntityTickOwner,
@@ -163,11 +163,11 @@ pub enum TickPhase {
     WeatherAndSleep = 1,
     /// Everything inside `scheduled.with`: the scheduled block-tick drain,
     /// fire/redstone/fluid propagation, random ticks, falling blocks,
-    /// vehicles, TNT, minecarts, dragons. The only phase that calls
-    /// `world.column()` — a chunk-boundary block tick can trigger real
-    /// worldgen — so it is the phase a keep-alive-timeout-shaped stall (see
-    /// this module's own doc for the incident this instrument exists to
-    /// catch a repeat of) would show up in.
+    /// vehicles, TNT, minecarts, dragons. Most direct `world.column()` calls
+    /// live here; a chunk-boundary block tick can trigger real worldgen, so it
+    /// is the phase a keep-alive-timeout-shaped stall (see this module's own doc
+    /// for the incident this instrument exists to catch a repeat of) would
+    /// usually show up in. Bounded area passes use resident-only reads.
     ScheduledAndPhysics = 2,
 }
 
@@ -189,6 +189,83 @@ pub(crate) const TICK_PHASE_NAMES: [&str; TICK_PHASE_COUNT] =
 /// own evidence-standard rules warn about. Revisit once real per-phase
 /// percentiles from a loaded server exist to derive one from.
 const PHASE_SOFT_BUDGET: Duration = Duration::from_millis(MILLIS_PER_TICK / 5);
+
+/// A slow phase is worth an operator-facing trace once it consumes a complete
+/// tick period. The ordinary clock still records every phase, while this higher
+/// threshold keeps an enabled trace useful during a healthy 20 Hz run.
+const PHASE_TRACE_THRESHOLD: Duration = TICK_PERIOD;
+
+/// Optional structured timing for the three shared world-tick phases.
+///
+/// Phase histograms are always collected in [`TickClock`], but they are
+/// snapshots a caller has to fetch after the fact. This trace is the live
+/// counterpart for reproducing a join stall: it emits only phases that exceed
+/// one full tick period, and only when `LODESTONE_TICK_TRACE` is explicitly
+/// enabled. The same implementation is used on native and `wasm32`; the
+/// browser simply does not opt in through the native environment-variable
+/// switch.
+#[derive(Debug, Clone, Copy)]
+struct TickTrace;
+
+impl TickTrace {
+    /// Creates the trace only when both the operator requested it and the
+    /// dedicated target is enabled. `None` is the default, so normal ticks do
+    /// not read an environment variable, allocate a trace, or log per-phase
+    /// events.
+    fn new() -> Option<Self> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let requested = std::env::var_os("LODESTONE_TICK_TRACE")
+            .is_some_and(|value| !value.is_empty() && value != "0");
+        #[cfg(target_arch = "wasm32")]
+        let requested = false;
+        (requested && tracing::enabled!(target: "lodestone_tick_trace", tracing::Level::INFO))
+            .then_some(Self)
+    }
+
+    /// Logs a single slow-phase event with the area residency context needed to
+    /// distinguish a cold-area handoff from ordinary simulation work.
+    fn phase(
+        self,
+        tick: u64,
+        phase: TickPhase,
+        elapsed: Duration,
+        area_moved: bool,
+        area_columns: usize,
+        resident_columns: usize,
+    ) {
+        if elapsed < PHASE_TRACE_THRESHOLD {
+            return;
+        }
+        tracing::info!(
+            target: "lodestone_tick_trace",
+            tick,
+            phase = TICK_PHASE_NAMES[phase as usize],
+            elapsed_micros = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX),
+            area_moved,
+            area_columns,
+            resident_columns,
+            "slow world tick phase",
+        );
+    }
+}
+
+/// Reads a column for tick work without starting generation when a bounded
+/// source says the coordinate is cold.
+///
+/// Bare generator sources retain the trait's `is_column_resident` default and
+/// therefore keep their historical behavior. `ChunkStore` overrides that
+/// answer with a cache lookup, so integrated-server tick work gets `None` for a
+/// miss and waits for the join/seed worker to populate it instead of holding a
+/// coordinate write gate across generation.
+fn resident_tick_column<S: ChunkSource + ?Sized>(
+    source: &S,
+    cx: i32,
+    cz: i32,
+) -> Option<ChunkColumn> {
+    source
+        .resident_column(cx, cz)
+        .or_else(|| source.is_column_resident(cx, cz).then(|| source.column(cx, cz)))
+}
 
 /// The single largest [`TickPhase`] duration a [`TickClock`] has ever
 /// recorded, and which phase and (approximately) which tick it was — "the
@@ -276,18 +353,17 @@ const MAX_SCHEDULED_TICKS_PER_TICK: usize = 65536;
 /// workers (≥ 2 in production), the batch completes in under 1.5 real seconds.
 ///
 /// Deferring random ticks for 40 ticks (2.0 s) gives the seeding task time to
-/// finish before the first `world.column()` call lands — so by the time random
-/// ticks start, every column of `tick_area` is a cheap ~3.1 µs clone rather
-/// than a cold ~909 ms generator run on the core thread.
+/// finish before the first random-tick pass. The resident-only boundary below
+/// is the correctness guard: if a column is still cold after the deferral, that
+/// pass skips it and retries after the streaming worker installs it.
 ///
 /// Two seconds of deferred random ticks is imperceptible: grass spreading
 /// takes minutes, and nothing else in the random-tick pass produces a visible
 /// result on a sub-second timescale.
 ///
-/// This is not a correctness gate — if the seed task has not finished after
-/// 40 ticks, the random-tick pass pays the remaining cold generations on the
-/// core thread, exactly as it did before this deferral existed. The gate only
-/// removes the common case where the tick loop starts before seeding does.
+/// The deferral is a startup-smoothing measure, not permission for the tick task
+/// to generate terrain. Keeping those concerns separate means a slow seed or a
+/// teleport cannot turn a timing assumption into a multi-second tick stall.
 ///
 /// `pub(crate)` because it is *observable*: a gate counting column generations
 /// over N ticks sees `N - INITIAL_RANDOM_TICK_DEFERRAL_TICKS` random-tick
@@ -297,12 +373,12 @@ const MAX_SCHEDULED_TICKS_PER_TICK: usize = 65536;
 /// tick count from this constant rather than restate `40`, so raising the
 /// deferral moves the expectations with it instead of silently voiding them.
 ///
-/// # This defers *one* of three `world.column()` callers, not all of them
+/// # Cold-column callers outside the bounded area passes
 ///
-/// This comment used to claim the random-tick pass was "the only thing in this
-/// loop that touches `world.column()`". It is not, in two ways, and **the
-/// deferral covers neither** — so it is a startup-smoothing measure, not a bound
-/// on tick-thread generation:
+/// The random-tick, fluid-seeding, and natural-spawn area passes use
+/// `resident_tick_column`/`snapshot_terrain_if_resident`, so a cold selected
+/// column is deferred rather than generated on the clock thread. Event-driven
+/// operations still have separate cold-read boundaries to document:
 ///
 /// * `block_ticks.drain_due` calls `world.column()` directly, from tick 1,
 ///   *above* the deferral gate.
@@ -1915,6 +1991,7 @@ async fn run_tick_loop_with_weather_impl<W>(
     let mut reinforcement_rng = crate::mob_spawn::SpawnRng::new(NATURAL_SPAWN_SEED ^ 0x5245_494E);
     // The world border ticks first each loop. `border` is the shared handle passed
     // in — see this function's own parameter comment.
+    let tick_trace = TickTrace::new();
 
     loop {
         driver.wait_for_tick(&clock, &mobs).await;
@@ -1926,6 +2003,14 @@ async fn run_tick_loop_with_weather_impl<W>(
         // returns, which is what keeps a chunk-boundary crossing from putting a
         // whole area's worth of column fetches inside one unserviced window.
         let area_moved = area.recompute();
+        let trace_tick = clock.tick_count().saturating_add(1);
+        let trace_area_columns = area.chunks().len();
+        let trace_resident_columns = tick_trace.as_ref().map(|_| {
+            area.chunks()
+                .iter()
+                .filter(|&&(cx, cz)| world.is_column_resident(cx, cz))
+                .count()
+        });
         // Tick the border before the rest of the world tick, matching the
         // required order. The shared feed means
         // against the shared feed, so a `/worldborder` resize's lerp actually
@@ -2069,17 +2154,17 @@ async fn run_tick_loop_with_weather_impl<W>(
                 let stale = game_tick.saturating_sub(spawn_terrain_built_at)
                     >= crate::natural_spawn::LIGHT_TTL_TICKS;
                 if area_moved || stale || spawn_terrain.is_none() {
-                    spawn_terrain = Some(area.snapshot_terrain(&*world));
-                    spawn_terrain_built_at = game_tick;
+                    // A moving player can publish an anchor before the join
+                    // stream has populated the whole tick area. Do not turn
+                    // that ordinary hand-off into synchronous worldgen on the
+                    // tick task; retry next tick after the stream or seed worker
+                    // has made the columns resident.
+                    spawn_terrain = area.snapshot_terrain_if_resident(&*world);
+                    if spawn_terrain.is_some() {
+                        spawn_terrain_built_at = game_tick;
+                    }
                 }
-                // `expect` over a second `if let`: the branch above assigns `Some`
-                // whenever it is `None`, so this cannot fail, and unwrapping here
-                // keeps the failure loud rather than silently skipping a cycle.
-                let spawn_world = std::sync::Arc::clone(
-                    spawn_terrain
-                        .as_ref()
-                        .expect("the branch above assigns a terrain view when none exists"),
-                );
+                if let Some(spawn_world) = spawn_terrain.clone() {
                 // The moon phase, which in 26.2 is the whole of
                 // `SURFACE_SLIME_SPAWN_CHANCE` (0.0 at new moon, 0.5 at full) —
                 // see `NaturalSpawner::surface_slime_spawn_chance`. This loop's own
@@ -2128,6 +2213,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                         let mut state = sim.census(area.spawnable_chunks());
                         sim.run_spawn_cycle(&mut state, &mut natural_spawner, area.chunks());
                     });
+                }
                 }
             }
         }
@@ -2593,7 +2679,18 @@ async fn run_tick_loop_with_weather_impl<W>(
         // just above. A bare timestamp, no lock held, so it cannot
         // deadlock and cannot fold in the top-of-loop `sleep_until` wait.
         let t_mobs_end = driver.now();
-        clock.record_phase(TickPhase::MobsAndItems, t_mobs_end.duration_since(tick_start));
+        let mobs_elapsed = t_mobs_end.duration_since(tick_start);
+        clock.record_phase(TickPhase::MobsAndItems, mobs_elapsed);
+        if let Some(trace) = tick_trace {
+            trace.phase(
+                trace_tick,
+                TickPhase::MobsAndItems,
+                mobs_elapsed,
+                area_moved,
+                trace_area_columns,
+                trace_resident_columns.unwrap_or(0),
+            );
+        }
 
         // The clock is the **world's**, not this loop's: one
         // `tick_time` advances `game_time` unconditionally and `day_time` only
@@ -2700,7 +2797,18 @@ async fn run_tick_loop_with_weather_impl<W>(
         // *before* `scheduled.with` opens below, never from inside it — see
         // `TickPhase::ScheduledAndPhysics`'s doc for why.
         let t_weather_end = driver.now();
-        clock.record_phase(TickPhase::WeatherAndSleep, t_weather_end.duration_since(t_mobs_end));
+        let weather_elapsed = t_weather_end.duration_since(t_mobs_end);
+        clock.record_phase(TickPhase::WeatherAndSleep, weather_elapsed);
+        if let Some(trace) = tick_trace {
+            trace.phase(
+                trace_tick,
+                TickPhase::WeatherAndSleep,
+                weather_elapsed,
+                area_moved,
+                trace_area_columns,
+                trace_resident_columns.unwrap_or(0),
+            );
+        }
 
         // both queues are borrowed out of `scheduled` for the whole
         // scheduled-tick and random-tick section, and every use site inside is
@@ -2731,10 +2839,17 @@ async fn run_tick_loop_with_weather_impl<W>(
         if area_moved || fluid_seeded_chunks.is_empty() {
             for owned in area.owned_chunks() {
                 let (cx, cz) = owned.chunk;
-                if !fluid_seeded_chunks.insert((cx, cz)) {
+                if fluid_seeded_chunks.contains(&(cx, cz)) {
                     continue;
                 }
-                let column = world.column(cx, cz);
+                let Some(column) = resident_tick_column(&*world, cx, cz) else {
+                    // The join stream owns generation for a newly visible
+                    // column. Retrying admission after it becomes resident
+                    // preserves the generated-fluid handoff without making
+                    // this tick task wait on the same coordinate gate.
+                    continue;
+                };
+                fluid_seeded_chunks.insert((cx, cz));
                 let env = *fluid_env.get_or_insert_with(|| {
                     crate::fluid::FluidEnv::for_dimension(
                         follow_dimension,
@@ -3623,8 +3738,7 @@ async fn run_tick_loop_with_weather_impl<W>(
             // player is standing instead of only around chunk (0, 0).
             for owned in area.owned_chunks() {
                 let (cx, cz) = owned.chunk;
-                {
-                    let mut column = world.column(cx, cz);
+                if let Some(mut column) = resident_tick_column(&*world, cx, cz) {
                     // Read the current game rule, not `DEFAULT_RANDOM_TICK_SPEED`.
                     // The getter is already covered by tests; this line
                     // is the reader it was missing, and `/gamerule
@@ -3876,7 +3990,18 @@ async fn run_tick_loop_with_weather_impl<W>(
         // immediately after the closure returns (the mutex is already
         // released by here), so this timestamp is outside the lock too.
         let t_scheduled_end = driver.now();
-        clock.record_phase(TickPhase::ScheduledAndPhysics, t_scheduled_end.duration_since(t_weather_end));
+        let scheduled_elapsed = t_scheduled_end.duration_since(t_weather_end);
+        clock.record_phase(TickPhase::ScheduledAndPhysics, scheduled_elapsed);
+        if let Some(trace) = tick_trace {
+            trace.phase(
+                trace_tick,
+                TickPhase::ScheduledAndPhysics,
+                scheduled_elapsed,
+                area_moved,
+                trace_area_columns,
+                trace_resident_columns.unwrap_or(0),
+            );
+        }
 
         clock.record_tick(tick_start.elapsed());
     }

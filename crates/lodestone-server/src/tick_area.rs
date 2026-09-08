@@ -329,11 +329,45 @@ impl FollowArea {
                 .map(|&(cx, cz)| ((cx, cz), source.column(cx, cz))),
         ))
     }
+
+    /// Snapshots this area's terrain only when every selected column is already
+    /// resident.
+    ///
+    /// The ordinary [`snapshot_terrain`](Self::snapshot_terrain) API is still
+    /// useful to callers that explicitly want a complete, loading snapshot.
+    /// The live tick loop cannot make that choice for a bounded source: a player
+    /// anchor can arrive while the join stream is still generating the same
+    /// columns, and a cold `ChunkSource::column` call would synchronously wait
+    /// on that generation while the 20 Hz world clock is supposed to keep
+    /// moving. Returning `None` leaves the caller to retry after the stream has
+    /// populated the cache, without taking a write gate or starting generation
+    /// on the tick task. Sources with no bounded cache retain the trait's
+    /// `is_column_resident` default and therefore keep their historical
+    /// generating behavior.
+    #[must_use]
+    pub fn snapshot_terrain_if_resident<S: ChunkSource + ?Sized>(
+        &self,
+        source: &S,
+    ) -> Option<Arc<ChunkWorld>> {
+        let mut columns = Vec::with_capacity(self.chunks().len());
+        for &(cx, cz) in self.chunks() {
+            let column = source.resident_column(cx, cz).or_else(|| {
+                source
+                    .is_column_resident(cx, cz)
+                    .then(|| source.column(cx, cz))
+            })?;
+            columns.push(((cx, cz), column));
+        }
+        Some(Arc::new(ChunkWorld::from_columns(columns)))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::chunk::ChunkColumn;
 
     fn anchors_at(dimension: Dimension, cx: i32, cz: i32) -> TickAnchors {
         let anchors = TickAnchors::default();
@@ -347,6 +381,94 @@ mod tests {
             radius,
             anchors,
         }
+    }
+
+    struct SnapshotProbe {
+        resident: bool,
+        cold_calls: AtomicUsize,
+    }
+
+    impl ChunkSource for SnapshotProbe {
+        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            self.cold_calls.fetch_add(1, Ordering::Relaxed);
+            ChunkColumn::new(0, 16)
+        }
+
+        fn resident_column(&self, _cx: i32, _cz: i32) -> Option<ChunkColumn> {
+            self.resident.then(|| ChunkColumn::new(0, 16))
+        }
+
+        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+            "minecraft:air".to_owned()
+        }
+
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::DEFAULT_BIOME.to_owned()
+        }
+
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+
+        fn is_column_resident(&self, _cx: i32, _cz: i32) -> bool {
+            self.resident
+        }
+    }
+
+    /// The control first proves that the probe would observe a cold load, then
+    /// proves the resident-only seam returns no view without making one. This
+    /// keeps the zero-call assertion meaningful rather than testing a source
+    /// whose detector was never exercised.
+    #[test]
+    fn resident_snapshot_never_falls_back_to_cold_generation() {
+        let area = FollowArea::new(
+            TickFollow::default(),
+            0..=0,
+            0..=0,
+        );
+        let source = SnapshotProbe {
+            resident: false,
+            cold_calls: AtomicUsize::new(0),
+        };
+
+        let _ = area.snapshot_terrain(&source);
+        assert_eq!(
+            source.cold_calls.load(Ordering::Relaxed),
+            1,
+            "the control must demonstrate that the ordinary snapshot loads cold terrain",
+        );
+        source.cold_calls.store(0, Ordering::Relaxed);
+
+        assert!(
+            area.snapshot_terrain_if_resident(&source).is_none(),
+            "a missing resident column must defer the snapshot",
+        );
+        assert_eq!(
+            source.cold_calls.load(Ordering::Relaxed),
+            0,
+            "the resident-only snapshot must not call the generating API",
+        );
+    }
+
+    #[test]
+    fn resident_snapshot_copies_available_columns_without_loading() {
+        let area = FollowArea::new(
+            TickFollow::default(),
+            0..=0,
+            0..=0,
+        );
+        let source = SnapshotProbe {
+            resident: true,
+            cold_calls: AtomicUsize::new(0),
+        };
+
+        assert!(
+            area.snapshot_terrain_if_resident(&source).is_some(),
+            "a resident area must produce the terrain view",
+        );
+        assert_eq!(
+            source.cold_calls.load(Ordering::Relaxed),
+            0,
+            "resident snapshots must copy rather than regenerate",
+        );
     }
 
     /// **The discriminating input.** Every existing gate in this area spawns the
