@@ -761,6 +761,33 @@ fn columns_are_byte_identical_regardless_of_order_or_generator_instance() {
     }
 }
 
+/// The bounded End-city-start memo is shared by concurrent callers, but its
+/// lock and eviction path must not make output depend on which worker wins a
+/// cold miss. Compare independent raw columns rather than only non-air counts,
+/// including palette order because that reaches the wire.
+#[test]
+fn concurrent_columns_are_byte_identical_to_sequential_columns() {
+    let coords = [(0, 0), (1, 0), (0, 1), (1, 1)];
+    let sequential = generator(SEED);
+    let want: Vec<_> = coords
+        .iter()
+        .map(|&(cx, cz)| sequential.column(cx, cz).into_raw())
+        .collect();
+
+    let concurrent = std::sync::Arc::new(generator(SEED));
+    let got = std::thread::scope(|scope| {
+        coords
+            .iter()
+            .map(|&(cx, cz)| {
+                let generator = std::sync::Arc::clone(&concurrent);
+                scope.spawn(move || generator.column(cx, cz).into_raw())
+            })
+            .map(|handle| handle.join().expect("End generation worker panicked"))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(want, got, "concurrent End columns differ from sequential output");
+}
+
 /// The surface rule is a no-op, and that is derived rather than assumed.
 ///
 /// `end.json`'s `surface_rule` is a bare `minecraft:block` with `result_state`
