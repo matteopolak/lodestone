@@ -1097,6 +1097,7 @@ impl<S: ChunkSource> RegionChunkSource<S> {
         let (_, nbt) = read_named_nbt(&mut reader).ok()?;
         let mut column =
             chunk_nbt::column_from_nbt(&nbt, self.state.min_y, self.state.height).ok()?;
+        normalize_imported_end_light_storage(&mut column, self.state.dimension);
         let mut extras = chunk_nbt::extras_from_nbt(&nbt);
         // The column carries its own copy so `encode_chunk` can put them on the
         // wire. The chunk payload includes these entities so clients see the
@@ -1208,6 +1209,39 @@ fn load_column_for_light(
     let mut reader = Reader::new(&raw);
     let (_, nbt) = read_named_nbt(&mut reader).ok()?;
     chunk_nbt::column_from_nbt(&nbt, state.min_y, state.height).ok()
+}
+
+/// Restores the explicit zero block-light storage that an End `CentreSettled`
+/// snapshot allocated alongside persisted sky light. Older persisted columns
+/// can carry the sky arrays while omitting uniformly-zero block arrays; after
+/// reopen those omitted sections would encode as `Missing`, even though the
+/// settled snapshot's allocation still includes them. Preserve the allocation
+/// from the sky layer without inferring anything from coordinates or terrain.
+fn normalize_imported_end_light_storage(column: &mut ChunkColumn, dimension: Dimension) {
+    if dimension != Dimension::End
+        || column.retained_light_status()
+            != Some(crate::chunk::RetainedLightStatus::CentreSettled)
+    {
+        return;
+    }
+    let Some(mut light) = column.retained_light().cloned() else {
+        return;
+    };
+    let mut changed = false;
+    for section in 0..light.light_section_count() {
+        if !matches!(light.sky(section), lodestone_world::LightData::Missing)
+            && matches!(light.block(section), lodestone_world::LightData::Missing)
+        {
+            *light.block_mut(section) = lodestone_world::LightData::Uniform(0);
+            changed = true;
+        }
+    }
+    if changed {
+        column.set_retained_light_with_status(
+            light,
+            crate::chunk::RetainedLightStatus::CentreSettled,
+        );
+    }
 }
 
 impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
@@ -2590,6 +2624,31 @@ mod tests {
         assert_eq!(overworld.retained_columns(), 1);
         assert_eq!(nether.retained_columns(), 1);
         assert_eq!(end.retained_columns(), 0, "the End was never written to");
+    }
+
+    #[test]
+    fn imported_end_centre_settled_light_matches_block_storage_to_sky_storage() {
+        let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
+        let mut light = lodestone_world::ColumnLight::new(column.section_count());
+        *light.sky_mut(1) = lodestone_world::LightData::Uniform(15);
+        *light.sky_mut(3) = lodestone_world::LightData::Uniform(7);
+        *light.block_mut(4) = lodestone_world::LightData::Uniform(4);
+        column.set_retained_light_with_status(
+            light,
+            crate::chunk::RetainedLightStatus::CentreSettled,
+        );
+
+        normalize_imported_end_light_storage(&mut column, Dimension::End);
+        let restored = column.retained_light().expect("retained End light");
+        assert_eq!(restored.block(0), &lodestone_world::LightData::Missing);
+        assert_eq!(restored.block(1), &lodestone_world::LightData::Uniform(0));
+        assert_eq!(restored.block(2), &lodestone_world::LightData::Missing);
+        assert_eq!(restored.block(3), &lodestone_world::LightData::Uniform(0));
+        assert_eq!(restored.block(4), &lodestone_world::LightData::Uniform(4));
+        assert_eq!(
+            column.retained_light_status(),
+            Some(crate::chunk::RetainedLightStatus::CentreSettled)
+        );
     }
 
     fn tempdir(name: &str) -> PathBuf {
