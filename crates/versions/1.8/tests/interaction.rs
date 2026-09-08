@@ -113,7 +113,7 @@ fn use_item_on_block_places_with_empty_slot_and_quantised_cursor() {
             z: 0.0,
         },
         inside_block: false,
-        sequence: 7,
+        sequence: lodestone_model::PredictionSequence::new(7),
     });
     assert_eq!(id, play::serverbound::BLOCK_PLACE);
     let place: BlockPlace = decode(&body);
@@ -155,7 +155,7 @@ fn off_hand_use_is_rejected_loudly() {
                 z: 0.0,
             },
             inside_block: false,
-            sequence: 0,
+            sequence: lodestone_model::PredictionSequence::INITIAL,
         },
         ClientAction::UseItem {
             hand: Hand::Off,

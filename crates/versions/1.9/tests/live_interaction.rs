@@ -344,7 +344,7 @@ async fn breaks_and_places_blocks_on_live_1_12_server() {
                     z: 0.5,
                 },
                 inside_block: false,
-                sequence: 0,
+                sequence: lodestone_model::PredictionSequence::INITIAL,
             },
         )
         .await;

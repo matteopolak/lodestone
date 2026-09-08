@@ -670,7 +670,7 @@ fn block_place_lifts_the_protocol_5_body_to_the_shared_placement_consumer() {
             face: BlockFace::East,
             cursor: Vec3f::new(0.25, 0.5, 0.75),
             hand: 0,
-            sequence: 0,
+            sequence: lodestone_model::PredictionSequence::INITIAL,
         }
     );
     assert_eq!(
@@ -710,7 +710,7 @@ fn adapter_emitted_block_place_reaches_the_hosted_placement_boundary() {
         face: BlockFace::North,
         cursor: Vec3f::new(0.5, 0.25, 0.75),
         inside_block: false,
-        sequence: 123,
+        sequence: lodestone_model::PredictionSequence::new(123),
     };
     let (packet_id, body) = V5Adapter::new()
         .encode_action(ConnectionState::Play, &action)
@@ -724,7 +724,7 @@ fn adapter_emitted_block_place_reaches_the_hosted_placement_boundary() {
             face: BlockFace::North,
             cursor: Vec3f::new(0.5, 0.25, 0.75),
             hand: 0,
-            sequence: 0,
+            sequence: lodestone_model::PredictionSequence::INITIAL,
         },
         "the adapter frame must reach the shared server variant consumed by placement"
     );

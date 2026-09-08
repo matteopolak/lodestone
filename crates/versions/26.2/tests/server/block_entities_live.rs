@@ -231,7 +231,7 @@ async fn real_client_places_a_furnace_and_the_server_registers_it() {
             face: BlockFace::Up,
             cursor: Vec3f::new(0.5, 0.0, 0.5),
             inside_block: false,
-            sequence: 1,
+            sequence: lodestone_model::PredictionSequence::new(1),
         })
         .expect("send use item on");
 
@@ -361,7 +361,7 @@ async fn placing_with_an_empty_hand_places_nothing_and_registers_nothing() {
             face: BlockFace::Up,
             cursor: Vec3f::new(0.5, 0.0, 0.5),
             inside_block: false,
-            sequence: 1,
+            sequence: lodestone_model::PredictionSequence::new(1),
         })
         .expect("send use item on");
 
@@ -392,7 +392,7 @@ async fn placing_with_an_empty_hand_places_nothing_and_registers_nothing() {
             face: BlockFace::Up,
             cursor: Vec3f::new(0.5, 0.0, 0.5),
             inside_block: false,
-            sequence: 2,
+            sequence: lodestone_model::PredictionSequence::new(2),
         })
         .expect("send use item on");
     handle
@@ -495,7 +495,7 @@ async fn real_client_opens_a_placed_furnace_and_loads_it_via_container_click() {
             face: BlockFace::Up,
             cursor: Vec3f::new(0.5, 0.0, 0.5),
             inside_block: false,
-            sequence: 1,
+            sequence: lodestone_model::PredictionSequence::new(1),
         })
         .expect("send use item on (place)");
     handle
@@ -516,7 +516,7 @@ async fn real_client_opens_a_placed_furnace_and_loads_it_via_container_click() {
             face: BlockFace::Up,
             cursor: Vec3f::new(0.5, 0.0, 0.5),
             inside_block: false,
-            sequence: 2,
+            sequence: lodestone_model::PredictionSequence::new(2),
         })
         .expect("send use item on (open)");
 
@@ -669,7 +669,7 @@ async fn opening_a_furnace_does_not_reset_its_already_loaded_contents() {
             face: BlockFace::Up,
             cursor: Vec3f::new(0.5, 0.0, 0.5),
             inside_block: false,
-            sequence: 1,
+            sequence: lodestone_model::PredictionSequence::new(1),
         })
         .expect("send use item on (open)");
     handle

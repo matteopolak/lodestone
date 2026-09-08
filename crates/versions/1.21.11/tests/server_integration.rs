@@ -24,7 +24,7 @@ fn adapter_block_use_reaches_the_registry_selected_host_consumer() {
             z: 0.75,
         },
         inside_block: true,
-        sequence: 17,
+        sequence: lodestone_model::PredictionSequence::new(17),
     };
     let Some((packet_id, payload)) = adapter
         .encode_action(ConnectionState::Play, &action)
@@ -44,7 +44,7 @@ fn adapter_block_use_reaches_the_registry_selected_host_consumer() {
                 y: 1.0,
                 z: 0.75,
             },
-            sequence: 17,
+            sequence: lodestone_model::PredictionSequence::new(17),
             hand: 1,
         },
         "the real adapter and registry-selected host must agree on the server consumer input"

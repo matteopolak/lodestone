@@ -272,7 +272,7 @@ fn block_place_literal_reaches_the_server_use_on_consumer_shape() {
                 y: 1.0,
                 z: 0.75,
             },
-            sequence: 17,
+            sequence: lodestone_model::PredictionSequence::new(17),
             hand: 1,
         }
     );

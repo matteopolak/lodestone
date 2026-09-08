@@ -25,7 +25,7 @@ fn assert_adapter_block_use_reaches_host(protocol_version: i32) {
             z: 0.75,
         },
         inside_block: true,
-        sequence: 17,
+        sequence: lodestone_model::PredictionSequence::new(17),
     };
     let Some((packet_id, payload)) = adapter
         .encode_action(ConnectionState::Play, &action)
@@ -45,7 +45,7 @@ fn assert_adapter_block_use_reaches_host(protocol_version: i32) {
                 y: 1.0,
                 z: 0.75,
             },
-            sequence: 0,
+            sequence: lodestone_model::PredictionSequence::INITIAL,
             hand: 1,
         },
         "the adapter and registry-selected host must agree on the server consumer input"

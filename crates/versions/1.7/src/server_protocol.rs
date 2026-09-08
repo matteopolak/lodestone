@@ -415,7 +415,7 @@ impl ServerProtocol for V5ServerProtocol {
                     cursor: Vec3f::new(cursor_x, cursor_y, cursor_z),
                     // The wire pre-dates off-hand and prediction sequences.
                     hand: 0,
-                    sequence: 0,
+                    sequence: lodestone_model::PredictionSequence::INITIAL,
                 }
             }
             // Protocol 5 carries the sender id and an animation ordinal in

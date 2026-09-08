@@ -522,7 +522,7 @@ async fn places_a_block_on_live_1_8_server() {
                     z: 0.5,
                 },
                 inside_block: false,
-                sequence: 0,
+                sequence: lodestone_model::PredictionSequence::INITIAL,
             },
         )
         .await;

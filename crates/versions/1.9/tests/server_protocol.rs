@@ -487,7 +487,7 @@ fn hosted_block_place_lifts_both_cursor_encodings_into_server_consumed_actions()
                 pos: BlockPos::new(1, 64, -2),
                 face: BlockFace::East,
                 cursor: expected_cursor,
-                sequence: 0,
+                sequence: lodestone_model::PredictionSequence::INITIAL,
                 hand: 1,
             }
         );

@@ -5756,7 +5756,7 @@ fn two_pending_placements() -> Placement {
             UseOnDecision::Place {
                 prediction: lodestone_game::placement::PlacePrediction { sequence, .. },
                 ..
-            } if sequence == expected_sequence
+            } if sequence == lodestone_model::PredictionSequence::new(expected_sequence)
         ));
     }
     placement
@@ -5771,7 +5771,9 @@ fn block_changed_ack_retires_only_the_predictions_the_server_has_processed() {
         world.insert_resource(PlacementPredictor(two_pending_placements()));
     });
 
-    feed.send(NetUpdate::BlockChangedAck { sequence: 1 })
+    feed.send(NetUpdate::BlockChangedAck {
+        sequence: lodestone_model::PredictionSequence::new(1),
+    })
         .expect("loopback accepts the server acknowledgement");
     sim.poll_net();
     assert_eq!(
@@ -5781,7 +5783,9 @@ fn block_changed_ack_retires_only_the_predictions_the_server_has_processed() {
     );
 
     // A stale acknowledgement cannot retire the still-pending newer prediction.
-    feed.send(NetUpdate::BlockChangedAck { sequence: 0 })
+    feed.send(NetUpdate::BlockChangedAck {
+        sequence: lodestone_model::PredictionSequence::new(0),
+    })
         .expect("loopback accepts a stale acknowledgement");
     sim.poll_net();
     assert_eq!(
@@ -5790,7 +5794,9 @@ fn block_changed_ack_retires_only_the_predictions_the_server_has_processed() {
         "a stale acknowledgement must not clear sequence 2"
     );
 
-    feed.send(NetUpdate::BlockChangedAck { sequence: 2 })
+    feed.send(NetUpdate::BlockChangedAck {
+        sequence: lodestone_model::PredictionSequence::new(2),
+    })
         .expect("loopback accepts the final acknowledgement");
     sim.poll_net();
     assert!(
@@ -6328,7 +6334,9 @@ fn player_interact_veto_denies_block_branch_before_prediction_or_send() {
     assert!(
         allowed_actions.iter().any(|action| matches!(
             action,
-            ClientAction::UseItemOn { pos, sequence: 1, .. } if *pos == clicked
+            ClientAction::UseItemOn { pos, sequence, .. }
+                if *pos == clicked
+                    && *sequence == lodestone_model::PredictionSequence::new(1)
         )),
         "the first allowed block interaction must retain sequence one: {allowed_actions:?}"
     );

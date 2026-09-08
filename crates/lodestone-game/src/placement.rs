@@ -58,7 +58,7 @@
 //! transliteration.
 
 use lodestone_model::math::{BlockPos, Rotation, Vec3f};
-use lodestone_model::{BlockFace, ClientAction, Hand, Identifier};
+use lodestone_model::{BlockFace, ClientAction, Hand, Identifier, PredictionSequence};
 
 /// A block axis (vanilla's own direction-axis type). Version-free; the model models faces but not
 /// a bare axis, so pillar/log placement needs its own.
@@ -442,7 +442,7 @@ pub enum UseOnDecision {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlacePrediction {
     /// The block-prediction sequence the server echoes on ack.
-    pub sequence: i32,
+    pub sequence: PredictionSequence,
     /// Where the block was placed.
     pub pos: BlockPos,
     /// The block that was placed.
@@ -470,7 +470,7 @@ pub struct PlaceReconciliation {
 /// awaiting server confirmation.
 #[derive(Debug, Default)]
 pub struct Placement {
-    next_sequence: i32,
+    next_sequence: PredictionSequence,
     pending: Vec<PlacePrediction>,
 }
 
@@ -487,10 +487,10 @@ impl Placement {
         &self.pending
     }
 
-    fn take_sequence(&mut self) -> i32 {
+    fn take_sequence(&mut self) -> PredictionSequence {
         // Vanilla's `BlockStatePredictionHandler` pre-increments, so the first
         // prediction is sequence 1.
-        self.next_sequence += 1;
+        self.next_sequence = self.next_sequence.next();
         self.next_sequence
     }
 
@@ -507,7 +507,7 @@ impl Placement {
     /// independent count.
     #[must_use]
     pub fn take_use_sequence(&mut self) -> i32 {
-        self.take_sequence()
+        self.take_sequence().as_wire()
     }
 
     /// Handle a right-click on a block, mirroring `performUseItemOn`'s ordering.
@@ -571,10 +571,10 @@ impl Placement {
     /// server truth. Either way this machine stops tracking it. Returns the
     /// settled predictions so the driver knows which optimistic blocks to
     /// reconcile against its world.
-    pub fn acknowledge(&mut self, sequence: i32) -> Vec<PlacePrediction> {
+    pub fn acknowledge(&mut self, sequence: PredictionSequence) -> Vec<PlacePrediction> {
         let mut settled = Vec::new();
         self.pending.retain(|p| {
-            if p.sequence <= sequence {
+            if p.sequence.is_at_or_before(sequence) {
                 settled.push(p.clone());
                 false
             } else {
@@ -789,8 +789,8 @@ mod tests {
                 _ => panic!("expected UseItemOn"),
             },
         };
-        assert_eq!(seq(&d1), 1, "first prediction is sequence 1");
-        assert_eq!(seq(&d2), 2, "sequence pre-increments per use");
+        assert_eq!(seq(&d1), PredictionSequence::new(1), "first prediction is sequence 1");
+        assert_eq!(seq(&d2), PredictionSequence::new(2), "sequence pre-increments per use");
     }
 
     #[test]
@@ -894,10 +894,10 @@ mod tests {
         m.use_on(&ctx(BlockPos::new(1, 64, 0), BlockFace::Up), &world);
         m.use_on(&ctx(BlockPos::new(2, 64, 0), BlockFace::Up), &world);
         assert_eq!(m.pending().len(), 3);
-        let settled = m.acknowledge(2);
+        let settled = m.acknowledge(PredictionSequence::new(2));
         assert_eq!(settled.len(), 2, "sequences 1 and 2 settle");
         assert_eq!(m.pending().len(), 1, "sequence 3 is still pending");
-        assert_eq!(m.pending()[0].sequence, 3);
+        assert_eq!(m.pending()[0].sequence, PredictionSequence::new(3));
     }
 
     #[test]

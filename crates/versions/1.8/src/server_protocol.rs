@@ -297,7 +297,7 @@ impl ServerProtocol for V47ServerProtocol {
                     cursor: Vec3f::new(cursor_x, cursor_y, cursor_z),
                     // Protocol 47 predates off-hand and prediction sequences.
                     hand: 0,
-                    sequence: 0,
+                    sequence: lodestone_model::PredictionSequence::INITIAL,
                 }
             }
             // Protocol 47's arm-animation request is an empty body. The

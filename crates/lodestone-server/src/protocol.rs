@@ -13,7 +13,7 @@ use lodestone_model::command_tree::{CommandSuggestionsResponse, CommandTree};
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, CommandBlockMode, Difficulty, EntityAttributeSnapshot, GameMode, Hand,
     ItemStack, RecipeBookType, ResourceKey, ResourcePackResponseKind, Rotation, SoundCategory,
-    Text, Vec3, Vec3f,
+    Text, Vec3, Vec3f, PredictionSequence,
 };
 use uuid::Uuid;
 
@@ -942,7 +942,7 @@ pub enum ServerBound {
         /// Client block-prediction sequence number (see
         /// [`BlockAction::sequence`](Self::BlockAction) for why it is
         /// decoded but not yet acted on).
-        sequence: i32,
+        sequence: PredictionSequence,
         /// `0` main hand, `1` off hand — vanilla's own interaction-hand enum ordinal.
         /// `crate::server`'s `apply_use_item_on` reads this to resolve which
         /// native inventory slot the spawn-egg/flint-and-steel/placement
@@ -3019,6 +3019,14 @@ pub trait ServerProtocol: Send + Sync {
     /// `encode_chunk` already crosses. The default emits nothing.
     fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
         let _ = (x, y, z, state);
+        ServerDirective::None
+    }
+
+    /// Encodes the highest client prediction sequence processed by the server.
+    /// A protocol without this acknowledgement leaves the client ledger
+    /// pending, so the default is deliberately empty for legacy families.
+    fn encode_block_changed_ack(&self, sequence: PredictionSequence) -> ServerDirective {
+        let _ = sequence;
         ServerDirective::None
     }
 

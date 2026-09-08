@@ -566,7 +566,7 @@ async fn run_gate() {
                 face: BlockFace::Up,
                 cursor: Vec3f::new(0.5, 1.0, 0.5),
                 inside_block: false,
-                sequence: 0,
+                sequence: lodestone_model::PredictionSequence::INITIAL,
             });
             tokio::time::sleep(Duration::from_millis(500)).await;
             // Wait for the *content* too: the menu is not built until the server's

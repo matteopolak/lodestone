@@ -128,7 +128,7 @@ async fn place_command_block(
             face: BlockFace::Up,
             cursor: Vec3f::new(0.5, 0.0, 0.5),
             inside_block: false,
-            sequence: 1,
+            sequence: lodestone_model::PredictionSequence::new(1),
         })
         .expect("send use item on");
     handle

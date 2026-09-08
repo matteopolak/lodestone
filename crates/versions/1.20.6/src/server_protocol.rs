@@ -398,7 +398,7 @@ impl ServerProtocol for V766ServerProtocol {
                         y: cursor_y,
                         z: cursor_z,
                     },
-                    sequence,
+                    sequence: lodestone_model::PredictionSequence::from_wire(sequence),
                     hand,
                 }
             }

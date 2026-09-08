@@ -3781,7 +3781,7 @@ impl VersionAdapter for V762Adapter {
                     cursor_y: cursor.y,
                     cursor_z: cursor.z,
                     inside_block: *inside_block,
-                    sequence: *sequence,
+                    sequence: sequence.as_wire(),
                 };
                 Ok(Some((self.ids().block_place, self.encode_body(&body)?)))
             }

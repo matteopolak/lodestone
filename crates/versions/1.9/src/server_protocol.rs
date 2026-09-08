@@ -273,7 +273,7 @@ fn use_item_on(
         pos: BlockPos::from(location),
         face,
         cursor,
-        sequence: 0,
+        sequence: lodestone_model::PredictionSequence::INITIAL,
         hand,
     }
 }

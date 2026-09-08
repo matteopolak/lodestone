@@ -759,7 +759,7 @@ impl V770Adapter {
                     cursor_z: cursor.z,
                     inside_block: *inside_block,
                     world_border_hit: false,
-                    sequence: *sequence,
+                    sequence: sequence.as_wire(),
                 };
                 Ok(Some((play::serverbound::USE_ITEM_ON, encode_body(&body)?)))
             }

@@ -477,7 +477,7 @@ impl V770Adapter {
             let sequence = reader.var_i32().map_err(dec_err)?;
             reader.ensure_empty().map_err(dec_err)?;
             return Ok(vec![Directive::Emit(ClientEvent::BlockChangedAck {
-                sequence,
+                sequence: lodestone_model::PredictionSequence::from_wire(sequence),
             })]);
         }
         if packet_id == play::clientbound::SET_CHUNK_CACHE_CENTER {

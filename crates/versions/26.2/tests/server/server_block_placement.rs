@@ -211,7 +211,7 @@ async fn every_held_item_places_its_own_block_in_the_servers_own_world() {
                 face: BlockFace::Up,
                 cursor: Vec3f::new(0.5, 0.0, 0.5),
                 inside_block: false,
-                sequence: 1,
+                sequence: lodestone_model::PredictionSequence::new(1),
             })
             .expect("send use item on");
     }
@@ -378,7 +378,7 @@ async fn use_item_on_with_hand_off_places_the_off_hand_item_not_the_main_hand_on
             face: BlockFace::Up,
             cursor: Vec3f::new(0.5, 0.0, 0.5),
             inside_block: false,
-            sequence: 1,
+            sequence: lodestone_model::PredictionSequence::new(1),
         })
         .expect("send use item on");
 

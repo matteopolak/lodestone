@@ -109,7 +109,7 @@ async fn assert_registry_selected_server_reaches_play_and_confirms_a_block_break
             action: BlockActionKind::StartDestroy,
             pos: TARGET,
             face: BlockFace::Up,
-            sequence: 0,
+        sequence: lodestone_model::PredictionSequence::INITIAL,
         })
         .expect("joined client accepts a block action");
     let air = lodestone_data::block_states::air_state_id();
@@ -161,7 +161,7 @@ async fn assert_registry_selected_server_consumes_block_use(protocol_version: i3
             face: BlockFace::Up,
             cursor: Vec3f::new(0.5, 0.5, 0.5),
             inside_block: false,
-            sequence: 0,
+            sequence: lodestone_model::PredictionSequence::INITIAL,
         })
         .expect("joined client accepts block use");
     let powered = lodestone_data::block_states::state_id(
