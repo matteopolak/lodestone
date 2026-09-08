@@ -2642,6 +2642,14 @@ mod tests {
         let reloaded_east = store.column(1, 0);
         assert_eq!(reloaded_centre.retained_light(), Some(&centre_light));
         assert_eq!(reloaded_east.retained_light(), Some(&east_light));
+        assert_eq!(
+            reloaded_centre.retained_light_status(),
+            Some(crate::chunk::RetainedLightStatus::CentreSettled)
+        );
+        assert_eq!(
+            reloaded_east.retained_light_status(),
+            Some(crate::chunk::RetainedLightStatus::DependencyInitialized)
+        );
 
         store.set_block(1, 60, 1, MARKER);
         assert_eq!(
@@ -2650,9 +2658,19 @@ mod tests {
             "a centre mutation must clear its reloaded snapshot"
         );
         assert_eq!(
+            store.column(0, 0).retained_light_status(),
+            None,
+            "a centre mutation must clear its reloaded lifecycle stage"
+        );
+        assert_eq!(
             store.column(1, 0).retained_light(),
             None,
             "a centre mutation must clear its reloaded dependency snapshot"
+        );
+        assert_eq!(
+            store.column(1, 0).retained_light_status(),
+            None,
+            "a centre mutation must clear its dependency lifecycle stage"
         );
     }
 

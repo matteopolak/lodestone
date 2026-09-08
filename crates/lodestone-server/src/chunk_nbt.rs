@@ -114,7 +114,7 @@ use lodestone_worldgen::overworld::block_entities::GeneratedBlockEntity;
 
 use crate::block_entities::BlockEntity;
 use crate::brewing::{Bottle, BottleKind, BrewingStand};
-use crate::chunk::ChunkColumn;
+use crate::chunk::{ChunkColumn, RetainedLightStatus};
 use crate::composter::Composter;
 use crate::furnace::{Furnace, FurnaceKind};
 use crate::hopper::Hopper;
@@ -444,7 +444,7 @@ pub fn column_to_nbt_with(cx: i32, cz: i32, column: &ChunkColumn, extras: &Chunk
         append_retained_light(&mut sections, min_section, section_count, light);
     }
 
-    Nbt::Compound(vec![
+    let mut fields = vec![
         ("DataVersion".to_owned(), Nbt::Int(DATA_VERSION)),
         ("xPos".to_owned(), Nbt::Int(cx)),
         ("yPos".to_owned(), Nbt::Int(min_section)),
@@ -488,7 +488,17 @@ pub fn column_to_nbt_with(cx: i32, cz: i32, column: &ChunkColumn, extras: &Chunk
             nbt_list(extras.fluid_ticks.iter().map(saved_tick_to_nbt).collect()),
         ),
         ("structures".to_owned(), structures_to_nbt(column)),
-    ])
+    ];
+    if let Some(status) = column.retained_light_status() {
+        fields.push((
+            "LodestoneLightStatus".to_owned(),
+            Nbt::Byte(match status {
+                RetainedLightStatus::DependencyInitialized => 1,
+                RetainedLightStatus::CentreSettled => 2,
+            }),
+        ));
+    }
+    Nbt::Compound(fields)
 }
 
 /// Appends the exact retained sky/block light state to a chunk's section list.
@@ -667,6 +677,12 @@ pub fn column_from_nbt(nbt: &Nbt, min_y: i32, height: i32) -> Result<ChunkColumn
     let section_count = (height as usize).div_ceil(SECTION_EDGE);
     let mut retained_light = matches!(field(nbt, "isLightOn"), Some(Nbt::Byte(1)))
         .then(|| ColumnLight::new(section_count));
+    let retained_light_status = match field(nbt, "LodestoneLightStatus") {
+        None => None,
+        Some(Nbt::Byte(1)) => Some(RetainedLightStatus::DependencyInitialized),
+        Some(Nbt::Byte(2)) => Some(RetainedLightStatus::CentreSettled),
+        Some(_) => return Err(bad("LodestoneLightStatus")),
+    };
 
     for (i, section) in sections.iter().enumerate() {
         let Some(&Nbt::Byte(y)) = field(section, "Y") else {
@@ -819,7 +835,10 @@ pub fn column_from_nbt(nbt: &Nbt, min_y: i32, height: i32) -> Result<ChunkColumn
     }
 
     if let Some(light) = retained_light {
-        column.set_retained_light(light);
+        column.set_retained_light_with_status(
+            light,
+            retained_light_status.unwrap_or(RetainedLightStatus::CentreSettled),
+        );
     }
 
     Ok(column)
@@ -2282,7 +2301,7 @@ mod retained_light_tests {
     use lodestone_world::{ColumnLight, LightData, NibbleArray};
 
     use super::{Error, column_from_nbt, column_to_nbt, field};
-    use crate::chunk::ChunkColumn;
+    use crate::chunk::{ChunkColumn, RetainedLightStatus};
 
     #[test]
     fn retained_light_round_trips_boundaries_and_varied_sections() {
@@ -2307,6 +2326,27 @@ mod retained_light_tests {
         let restored = column_from_nbt(&nbt, column.min_y, column.height)
             .expect("retained light must decode with the terrain");
         assert_eq!(restored.retained_light(), Some(&light));
+        assert_eq!(
+            restored.retained_light_status(),
+            Some(RetainedLightStatus::CentreSettled)
+        );
+    }
+
+    #[test]
+    fn dependency_light_status_round_trips_without_inference_from_values() {
+        let mut column = ChunkColumn::new(0, 16);
+        let mut light = ColumnLight::new(column.section_count());
+        *light.sky_mut(0) = LightData::Uniform(15);
+        column.set_retained_light_with_status(light.clone(), RetainedLightStatus::DependencyInitialized);
+
+        let nbt = column_to_nbt(0, 0, &column);
+        let restored = column_from_nbt(&nbt, column.min_y, column.height)
+            .expect("dependency light must decode with its lifecycle status");
+        assert_eq!(restored.retained_light(), Some(&light));
+        assert_eq!(
+            restored.retained_light_status(),
+            Some(RetainedLightStatus::DependencyInitialized)
+        );
     }
 
     #[test]

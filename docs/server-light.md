@@ -68,7 +68,15 @@ adapter, while a version adapter can return whichever sparse or fully populated 
 its wire lifecycle actually produces; the source does not infer a dimension policy.
 An allocated light column whose sky and block layers are all zero is still an
 unsettled dependency, so a later admission may compute and populate it; only a
-non-zero retained snapshot can satisfy the centre fast path.
+`CentreSettled` retained snapshot can satisfy the centre fast path.
+
+The snapshot also carries a typed lifecycle stage on `ChunkColumn`: a
+`DependencyInitialized` entry records storage created while settling another
+centre, while `CentreSettled` records completion of that column's own initial
+admission. The fast path checks this stage rather than inspecting light values,
+so a populated dependency still receives its centre admission. The stage is
+stored with the retained light in chunk NBT and is cleared with the light on any
+block mutation.
 
 The initial chunk encoder consumes a retained snapshot verbatim. An independent sealed-world capture
 showed that a persisted End section mask can differ from the first in-memory settlement, so a reload
