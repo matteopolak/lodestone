@@ -34,7 +34,7 @@
 //     it observes in its `plugin.toml`, and a kind this world does not define is
 //     a loud manifest rejection at load time.
 
-package lodestone:plugin@0.26.0;
+package lodestone:plugin@0.27.0;
 
 /// The vocabulary itself: the intent doctrine's own observe/act types, lifted
 /// into WIT. Nothing here is invented for wasm — every record below is a
@@ -631,7 +631,7 @@ interface types {
         name: string,
         version: string,
         /// The world version this guest was built against, e.g.
-        /// `"lodestone:plugin@0.25.0"`.
+        /// `"lodestone:plugin@0.27.0"`.
         abi: string,
         /// Root commands this guest wants the host to register. The host only
         /// installs them when the manifest grants `commands:register`.
@@ -708,6 +708,34 @@ interface world-snapshot {
     read-blocks: func(positions: list<block-pos>) -> result<list<option<u32>>, string>;
 }
 
+/// Capability `version:broker` — denied unless explicitly granted and an
+/// exact `[version-lock]` matches the selected host source.
+///
+/// The source returns only copied identity and provider-defined key/value
+/// records. Protocol-family types, registry handles, ECS/world guards,
+/// sockets, callbacks, and raw packet bytes never cross this interface.
+interface version-broker {
+    record descriptor {
+        family: string,
+        protocol: s32,
+        abi: string,
+    }
+
+    record value {
+        key: string,
+        value: string,
+    }
+
+    /// Make the selected source identity observable to the guest after the
+    /// host has already validated the manifest's version lock.
+    get-descriptor: func() -> descriptor;
+
+    /// Return one bounded copied record for a provider-defined key. Unknown
+    /// keys return `none`; providers must keep their vocabulary finite and
+    /// document it rather than exposing an arbitrary internal map.
+    lookup: func(key: string) -> option<value>;
+}
+
 world plugin {
     use types.{action, command-context, command-outcome, event, plugin-info, plugin-verdict, task-id, verdict-context};
 
@@ -716,6 +744,7 @@ world plugin {
     import filesystem-write;
     import scheduler;
     import world-snapshot;
+    import version-broker;
 
     /// Called once, immediately after instantiation. The returned
     /// [`plugin-info`] is cross-checked against the manifest.

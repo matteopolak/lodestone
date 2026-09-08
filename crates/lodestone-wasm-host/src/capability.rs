@@ -214,6 +214,12 @@ pub enum Capability {
     /// **Never in [`CapabilitySet::default_policy`].** The scheduler is exposed
     /// as an import so a guest that does not declare it fails to instantiate.
     ScheduleTasks,
+    /// Read copied, version-specific values from the selected protocol adapter.
+    ///
+    /// **Never in [`CapabilitySet::default_policy`].** The broker is an import
+    /// and is linked only after the manifest's exact version lock matches the
+    /// host's configured source.
+    VersionBroker,
 }
 
 impl Capability {
@@ -257,6 +263,7 @@ impl Capability {
         Self::FsRead,
         Self::FsWrite,
         Self::ScheduleTasks,
+        Self::VersionBroker,
     ];
 
     /// The name that appears in a `plugin.toml`.
@@ -298,6 +305,7 @@ impl Capability {
             Self::FsRead => "fs:read",
             Self::FsWrite => "fs:write",
             Self::ScheduleTasks => "schedule:tasks",
+            Self::VersionBroker => "version:broker",
         }
     }
 
@@ -323,7 +331,8 @@ impl Capability {
             | Self::FsRead
             | Self::FsWrite
             | Self::ScheduleTasks
-            | Self::ReadWorld => true,
+            | Self::ReadWorld
+            | Self::VersionBroker => true,
             Self::ObserveChat
             | Self::ObserveHealth
             | Self::ObserveInventory
@@ -595,6 +604,11 @@ mod tests {
         assert!(CapabilitySet::permissive().contains(Capability::FsWrite));
         assert!(CapabilitySet::permissive().contains(Capability::ScheduleTasks));
         assert!(CapabilitySet::permissive().contains(Capability::ReadWorld));
+        assert!(
+            !policy.contains(Capability::VersionBroker),
+            "version:broker must not be granted by default"
+        );
+        assert!(CapabilitySet::permissive().contains(Capability::VersionBroker));
         assert!(CapabilitySet::permissive().contains(Capability::RegisterCommands));
         assert!(CapabilitySet::permissive().contains(Capability::ActSelectSlot));
     }
@@ -621,6 +635,7 @@ mod tests {
         assert!(Capability::FsWrite.is_import());
         assert!(Capability::ScheduleTasks.is_import());
         assert!(Capability::ReadWorld.is_import());
+        assert!(Capability::VersionBroker.is_import());
         assert!(!Capability::ObserveChat.is_import());
         assert!(!Capability::ActChat.is_import());
     }

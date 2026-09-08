@@ -8,7 +8,7 @@
 //! version = "0.1.0"
 //! # The WIT world the module was built against. Checked against
 //! # `lodestone_wasm_host::ABI_WORLD` before the module is compiled.
-//! abi = "lodestone:plugin@0.26.0"
+//! abi = "lodestone:plugin@0.27.0"
 //! # The `.wasm`, relative to this file. A core module or a component; the host
 //! # encodes the former.
 //! module = "chat_responder.wasm"
@@ -74,6 +74,7 @@ use serde::Deserialize;
 
 use crate::capability::{Capability, CapabilitySet};
 use crate::host::ABI_WORLD;
+use crate::version_broker::VersionBrokerDescriptor;
 
 /// Conductor ordering, mirroring `lodestone_ecs::EventPriority`'s six Bukkit tiers.
 ///
@@ -132,6 +133,30 @@ pub struct Dependencies {
     /// Plugins that are ordered before this plugin when present, but may be absent.
     #[serde(default)]
     pub optional: Vec<String>,
+}
+
+/// Exact identity required by a plugin that requests `version:broker`.
+///
+/// The loader checks this declaration against the configured source before it
+/// reads or compiles the module. A plugin that does not request the broker does
+/// not need this table.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VersionLock {
+    /// Version-family label, for example `v26-2`.
+    pub family: String,
+    /// Negotiated protocol number within that family.
+    pub protocol: i32,
+    /// Broker ABI identifier, for example `lodestone:version-broker@0.1`.
+    pub abi: String,
+}
+
+impl VersionLock {
+    /// Convert this manifest declaration to the host comparison type.
+    #[must_use]
+    pub fn descriptor(&self) -> VersionBrokerDescriptor {
+        VersionBrokerDescriptor::new(&self.family, self.protocol, &self.abi)
+    }
 }
 
 /// Everything that can be wrong with a `plugin.toml`.
@@ -213,6 +238,9 @@ pub struct Manifest {
     /// gets a default grant.
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Required when `capabilities` contains `version:broker`.
+    #[serde(rename = "version-lock", default)]
+    pub version_lock: Option<VersionLock>,
     /// Required and optional plugin edges used by directory discovery.
     #[serde(default)]
     pub dependencies: Dependencies,
@@ -542,7 +570,7 @@ mod tests {
     const GOOD: &str = r#"
 name = "chat-responder"
 version = "0.1.0"
-abi = "lodestone:plugin@0.26.0"
+abi = "lodestone:plugin@0.27.0"
 module = "chat_responder.wasm"
 priority = "normal"
 description = "Replies pong to ping."
@@ -572,6 +600,7 @@ capabilities = ["log", "observe:chat", "act:chat"]
         assert_eq!(m.name, "chat-responder");
         assert_eq!(m.priority, Priority::Normal);
         assert_eq!(m.dependencies, Dependencies::default());
+        assert_eq!(m.version_lock, None);
         let caps = m.requested_capabilities().expect("capabilities");
         assert_eq!(caps.len(), 3);
         assert!(caps.contains(Capability::ObserveChat));
@@ -579,6 +608,24 @@ capabilities = ["log", "observe:chat", "act:chat"]
         // The one that matters: a manifest declaring three capabilities does not
         // quietly acquire a fourth.
         assert!(!caps.contains(Capability::FsRead));
+    }
+
+    #[test]
+    fn a_version_lock_parses_as_an_exact_broker_identity() {
+        let text = format!(
+            "{}\n\n[version-lock]\nfamily = \"v26-2\"\nprotocol = 776\nabi = \"lodestone:version-broker@0.1\"\n",
+            GOOD.replace(
+                r#"capabilities = ["log", "observe:chat", "act:chat"]"#,
+                r#"capabilities = ["log", "version:broker"]"#,
+            )
+        );
+        let manifest = parse(&text).expect("version lock must parse");
+        let lock = manifest.version_lock.expect("version lock declaration");
+        assert_eq!(lock.family, "v26-2");
+        assert_eq!(lock.protocol, 776);
+        assert_eq!(lock.descriptor().family(), "v26-2");
+        assert_eq!(lock.descriptor().protocol(), 776);
+        assert_eq!(lock.descriptor().abi(), "lodestone:version-broker@0.1");
     }
 
     #[test]
@@ -642,7 +689,7 @@ capabilities = ["log", "observe:chat", "act:chat"]
     /// at instantiation would not have been.
     #[test]
     fn a_newer_abi_world_is_rejected_naming_both_versions() {
-        let text = GOOD.replace("lodestone:plugin@0.26.0", "lodestone:plugin@0.12.0");
+        let text = GOOD.replace(ABI_WORLD, "lodestone:plugin@0.12.0");
         let err = parse(&text).expect_err("must reject");
         let msg = err.to_string();
         assert!(msg.contains("0.12.0"), "{msg}");

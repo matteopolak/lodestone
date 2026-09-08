@@ -3,17 +3,134 @@
 //! The shipped windowed client scans [`lodestone_wasm_host::DEFAULT_PLUGIN_DIR`]
 //! before `WindowApp` adopts its `App`. Tests and embedders use
 //! [`install_from_directory`] or [`install_from_directory_with_grants`] with an
-//! explicit path; both routes call the same
+//! explicit path; the desktop launcher uses
+//! [`install_from_directory_with_grants_for_protocol`] so privileged plugins
+//! receive the negotiated registry-backed broker. All routes call the same
 //! [`lodestone_wasm_host::PluginHost::load_directory_with_grants`] implementation.
 
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Component, Path};
+use std::sync::Arc;
 
 use lodestone_wasm_host::{
     Capability, CapabilitySet, HostError, PluginGrantPolicy, PluginHost, PluginIdentity,
-    WasmHostPlugin, WasmReloadError,
+    VersionBroker, VersionBrokerDescriptor, VersionBrokerRecord, WasmHostPlugin,
+    WasmReloadError, VERSION_BROKER_ABI,
 };
+use lodestone_model::{BlockHardness, VersionAdapter};
+
+/// Key for the negotiated protocol number exposed by [`RegistryVersionBroker`].
+pub const VERSION_BROKER_PROTOCOL_KEY: &str = "protocol";
+/// Key for the comma-separated release labels exposed by [`RegistryVersionBroker`].
+pub const VERSION_BROKER_RELEASES_KEY: &str = "release-names";
+/// Prefix for a copied block-state name lookup. The suffix is a decimal state id.
+pub const VERSION_BROKER_BLOCK_NAME_PREFIX: &str = "block-name/";
+/// Prefix for a copied block-state hardness lookup. The suffix is a decimal state id.
+pub const VERSION_BROKER_BLOCK_HARDNESS_PREFIX: &str = "block-hardness/";
+
+/// The production WASM broker backed by the registry's version-free adapter seam.
+///
+/// This is deliberately a small, read-only projection of [`VersionAdapter`].
+/// It exposes protocol identity, release labels, and two block-state facts as
+/// copied strings; it never returns the adapter, a registry, packet bytes, ECS
+/// access, or a borrowed value. The key vocabulary is finite and documented by
+/// the constants above, so a plugin cannot turn the broker into a general
+/// reflection API.
+#[derive(Debug)]
+pub struct RegistryVersionBroker {
+    descriptor: VersionBrokerDescriptor,
+    adapter: Box<dyn VersionAdapter>,
+}
+
+impl RegistryVersionBroker {
+    /// Select the adapter and family row for one negotiated protocol.
+    #[must_use]
+    pub fn for_protocol(protocol: i32) -> Option<Self> {
+        let family = lodestone_registry::family_for_protocol(protocol)?;
+        let adapter = lodestone_registry::adapter_for_protocol(protocol)?;
+        Some(Self {
+            descriptor: VersionBrokerDescriptor::new(family, protocol, VERSION_BROKER_ABI),
+            adapter,
+        })
+    }
+
+    fn block_hardness_value(hardness: BlockHardness) -> String {
+        format!(
+            "hardness={};requires-correct-tool={}",
+            hardness.hardness, hardness.requires_correct_tool
+        )
+    }
+}
+
+impl VersionBroker for RegistryVersionBroker {
+    fn descriptor(&self) -> VersionBrokerDescriptor {
+        self.descriptor.clone()
+    }
+
+    fn lookup(&self, key: &str) -> Option<VersionBrokerRecord> {
+        if key == VERSION_BROKER_PROTOCOL_KEY {
+            return Some(VersionBrokerRecord::new(
+                VERSION_BROKER_PROTOCOL_KEY,
+                self.adapter.protocol_version().to_string(),
+            ));
+        }
+        if key == VERSION_BROKER_RELEASES_KEY {
+            return Some(VersionBrokerRecord::new(
+                VERSION_BROKER_RELEASES_KEY,
+                self.adapter.minecraft_versions().join(","),
+            ));
+        }
+        if let Some(id) = key.strip_prefix(VERSION_BROKER_BLOCK_NAME_PREFIX) {
+            let state_id = id.parse::<u32>().ok()?;
+            return self.adapter.block_name(state_id).map(|name| {
+                VersionBrokerRecord::new(
+                    format!("{VERSION_BROKER_BLOCK_NAME_PREFIX}{state_id}"),
+                    name,
+                )
+            });
+        }
+        if let Some(id) = key.strip_prefix(VERSION_BROKER_BLOCK_HARDNESS_PREFIX) {
+            let state_id = id.parse::<u32>().ok()?;
+            return self.adapter.block_hardness(state_id).map(|hardness| {
+                VersionBrokerRecord::new(
+                    format!("{VERSION_BROKER_BLOCK_HARDNESS_PREFIX}{state_id}"),
+                    Self::block_hardness_value(hardness),
+                )
+            });
+        }
+        None
+    }
+}
+
+#[cfg(test)]
+mod version_broker_tests {
+    use super::*;
+
+    #[test]
+    fn an_uncompiled_protocol_has_no_privileged_source() {
+        assert!(RegistryVersionBroker::for_protocol(-1).is_none());
+    }
+
+    #[cfg(feature = "live")]
+    #[test]
+    fn the_production_broker_projects_only_owned_registry_values() {
+        let broker = RegistryVersionBroker::for_protocol(776)
+            .expect("the default live shell compiles the 776 family");
+        let descriptor = broker.descriptor();
+        assert_eq!(descriptor.family(), "v26-2");
+        assert_eq!(descriptor.protocol(), 776);
+        assert_eq!(descriptor.abi(), VERSION_BROKER_ABI);
+
+        let protocol = broker
+            .lookup(VERSION_BROKER_PROTOCOL_KEY)
+            .expect("protocol is part of the bounded broker vocabulary");
+        assert_eq!(protocol.key(), VERSION_BROKER_PROTOCOL_KEY);
+        assert_eq!(protocol.value(), "776");
+        assert!(broker.lookup("adapter-pointer").is_none());
+        assert!(broker.lookup("block-name/not-a-number").is_none());
+    }
+}
 
 /// An invalid persisted WASM grant configuration.
 ///
@@ -297,6 +414,32 @@ pub fn install_from_directory_with_grants(
     directory: &Path,
     grants: &PluginGrantPolicy,
 ) -> Result<(), HostError> {
+    install_from_directory_with_optional_broker(app, directory, grants, None)
+}
+
+/// Load plugins with the registry-backed broker selected for `protocol`.
+///
+/// The desktop launcher uses this entry point so a plugin that explicitly
+/// requests `version:broker` sees the same negotiated adapter as the client.
+/// A protocol that is not compiled into this shell gets no broker; a plugin
+/// requesting it then fails closed with [`HostError::VersionBrokerUnavailable`].
+pub fn install_from_directory_with_grants_for_protocol(
+    app: &mut lodestone_app::App,
+    directory: &Path,
+    grants: &PluginGrantPolicy,
+    protocol: i32,
+) -> Result<(), HostError> {
+    let broker = RegistryVersionBroker::for_protocol(protocol)
+        .map(|broker| Arc::new(broker) as Arc<dyn VersionBroker>);
+    install_from_directory_with_optional_broker(app, directory, grants, broker)
+}
+
+fn install_from_directory_with_optional_broker(
+    app: &mut lodestone_app::App,
+    directory: &Path,
+    grants: &PluginGrantPolicy,
+    broker: Option<Arc<dyn VersionBroker>>,
+) -> Result<(), HostError> {
     if app.is_plugin_added::<WasmHostPlugin>() {
         tracing::debug!(
             path = %directory.display(),
@@ -306,6 +449,9 @@ pub fn install_from_directory_with_grants(
     }
 
     let mut host = PluginHost::new(CapabilitySet::default_policy())?;
+    if let Some(broker) = broker {
+        host = host.with_version_broker(broker);
+    }
     for result in host.load_directory_with_grants(directory, grants) {
         if let Err(error) = result {
             tracing::error!(

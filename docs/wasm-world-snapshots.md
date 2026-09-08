@@ -9,7 +9,7 @@ server; it never writes the client replica.
 
 ## How it works
 
-`lodestone:plugin@0.26.0` imports `world-snapshot.read-blocks(positions)` (the
+`lodestone:plugin@0.27.0` imports `world-snapshot.read-blocks(positions)` (the
 Rust guest binding is `world_snapshot::read_blocks`). A call accepts
 at most 128 positions and returns one `option<u32>` for each input in the same
 order. `WasmHostPlugin` attaches the composed session's `ChunkWorld` handle to

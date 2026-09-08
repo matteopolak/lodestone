@@ -29,6 +29,8 @@ wit_bindgen::generate!({
 
 use lodestone::plugin::logging::{log, LogLevel};
 use lodestone::plugin::types::CommandSpec;
+#[cfg(feature = "version-broker")]
+use lodestone::plugin::version_broker::{get_descriptor, lookup};
 #[cfg(feature = "fs-write")]
 use lodestone::plugin::filesystem_write::write_file;
 #[cfg(any(feature = "inventory-click", feature = "inventory-click-invalid"))]
@@ -102,6 +104,20 @@ struct ChatResponder;
 impl Guest for ChatResponder {
     fn init() -> PluginInfo {
         log(LogLevel::Info, "chat-responder starting up");
+        #[cfg(feature = "version-broker")]
+        {
+            let descriptor = get_descriptor();
+            let protocol = lookup("protocol")
+                .map(|record| record.value)
+                .unwrap_or_else(|| "missing".to_owned());
+            log(
+                LogLevel::Info,
+                &format!(
+                    "version broker family={} protocol={} abi={} selected-protocol={protocol}",
+                    descriptor.family, descriptor.protocol, descriptor.abi
+                ),
+            );
+        }
         #[cfg(feature = "scheduler")]
         {
             schedule_once(2, 11);
@@ -117,7 +133,7 @@ impl Guest for ChatResponder {
             version: env!("CARGO_PKG_VERSION").to_string(),
             // Must match `lodestone_wasm_host::ABI_WORLD`, or the host refuses to
             // load this plugin with a message that names both sides.
-            abi: "lodestone:plugin@0.26.0".to_string(),
+            abi: "lodestone:plugin@0.27.0".to_string(),
             commands: command_specs(),
         }
     }
