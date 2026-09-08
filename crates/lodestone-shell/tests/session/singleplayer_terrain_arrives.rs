@@ -139,8 +139,10 @@ fn assert_spawn_column_has_terrain(net: &NetClient, radius: i32) {
          (air id {air}) — this is the empty-world symptom, not a delivery failure"
     );
     println!(
-        "view_radius {radius}: spawn column ({spawn_x}, {spawn_z}) surface y={surface:?}, "
+        concat!(
+            "view_radius {radius}: spawn column ({spawn_x}, {spawn_z}) surface y={surface:?}, ",
             "{solid} non-air blocks, air id {air}"
+        )
     );
 }
 
