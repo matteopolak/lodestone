@@ -559,6 +559,10 @@ struct WorldState {
     /// `<world>/dimensions/minecraft/<dimension>/region` — see
     /// [`RegionChunkSource::new`]'s `dimension` parameter.
     region_dir: PathBuf,
+    /// The typed dimension label used by source-aware packet encoders. Keeping
+    /// it beside the persistence state prevents a bare region source from
+    /// silently falling back to the overworld wire rules.
+    dimension: Dimension,
     /// `<world>/players/data`, or `None` if it could not be created (a
     /// non-persistable player store). Handed out through [`ChunkSource::world_registries`].
     player_data: Option<crate::player_data::PlayerDataStore>,
@@ -946,6 +950,7 @@ impl<S: ChunkSource> RegionChunkSource<S> {
             inner: Arc::new(inner),
             state: Arc::new(WorldState {
                 region_dir,
+                dimension,
                 player_data,
                 native_storage: Mutex::new(None),
                 min_y,
@@ -1101,6 +1106,7 @@ impl<S: ChunkSource> RegionChunkSource<S> {
         let (_, nbt) = read_named_nbt(&mut reader).ok()?;
         let mut column =
             chunk_nbt::column_from_nbt(&nbt, self.state.min_y, self.state.height).ok()?;
+        normalize_imported_end_light_storage(&mut column, self.state.dimension);
         let mut extras = chunk_nbt::extras_from_nbt(&nbt);
         // The column carries its own copy so `encode_chunk` can put them on the
         // wire. The chunk payload includes these entities so clients see the
@@ -1214,6 +1220,39 @@ fn load_column_for_light(
     chunk_nbt::column_from_nbt(&nbt, state.min_y, state.height).ok()
 }
 
+/// Restores the explicit zero block-light storage that an End `CentreSettled`
+/// snapshot allocated alongside persisted sky light. Older persisted columns
+/// can carry the sky arrays while omitting uniformly-zero block arrays; after
+/// reopen those omitted sections would encode as `Missing`, even though the
+/// settled snapshot's allocation still includes them. Preserve the allocation
+/// from the sky layer without inferring anything from coordinates or terrain.
+fn normalize_imported_end_light_storage(column: &mut ChunkColumn, dimension: Dimension) {
+    if dimension != Dimension::End
+        || column.retained_light_status()
+            != Some(crate::chunk::RetainedLightStatus::CentreSettled)
+    {
+        return;
+    }
+    let Some(mut light) = column.retained_light().cloned() else {
+        return;
+    };
+    let mut changed = false;
+    for section in 0..light.light_section_count() {
+        if !matches!(light.sky(section), lodestone_world::LightData::Missing)
+            && matches!(light.block(section), lodestone_world::LightData::Missing)
+        {
+            *light.block_mut(section) = lodestone_world::LightData::Uniform(0);
+            changed = true;
+        }
+    }
+    if changed {
+        column.set_retained_light_with_status(
+            light,
+            crate::chunk::RetainedLightStatus::CentreSettled,
+        );
+    }
+}
+
 impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
     /// The one implementor that answers `Some`: this source *is* the world on
     /// disk, so these are the registries whose contents a save writes.
@@ -1230,6 +1269,10 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
                 .expect("native storage lock poisoned")
                 .clone(),
         })
+    }
+
+    fn dimension(&self) -> Option<Dimension> {
+        Some(self.state.dimension)
     }
 
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
@@ -1428,6 +1471,18 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
                 }
             }
         }
+    }
+
+    /// Retains a complete light-admission batch while holding the edit lock,
+    /// so a resident read cannot observe only part of the 3x3 settlement.
+    fn store_resident_columns(&self, columns: &[(i32, i32, ChunkColumn)]) -> bool {
+        let mut edits = self.state.edits.lock().expect("world edit lock poisoned");
+        for &(cx, cz, ref column) in columns {
+            edits.insert((cx, cz), column.clone());
+        }
+        let mut dirty = self.state.dirty.lock().expect("world dirty lock poisoned");
+        dirty.extend(columns.iter().map(|&(cx, cz, _)| (cx, cz)));
+        true
     }
 
     /// The cache above has evicted this column, so the save path may release
@@ -2574,6 +2629,10 @@ mod tests {
         assert!(dir.join("dimensions/minecraft/overworld/region").is_dir());
         assert!(dir.join("dimensions/minecraft/the_nether/region").is_dir());
         assert!(dir.join("dimensions/minecraft/the_end/region").is_dir());
+        assert_eq!(overworld.dimension(), Some(Dimension::Overworld));
+        assert_eq!(nether.dimension(), Some(Dimension::Nether));
+        assert_eq!(end.dimension(), Some(Dimension::End));
+        assert_eq!(Flat.dimension(), None, "an unlabelled in-memory source stays unlabelled");
 
         // A block set into one dimension's edit map must not appear as an
         // edit in another's — the collision this test exists to rule out.
@@ -2584,11 +2643,124 @@ mod tests {
         assert_eq!(end.retained_columns(), 0, "the End was never written to");
     }
 
+    #[test]
+    fn imported_end_centre_settled_light_matches_block_storage_to_sky_storage() {
+        let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
+        let mut light = lodestone_world::ColumnLight::new(column.section_count());
+        *light.sky_mut(1) = lodestone_world::LightData::Uniform(15);
+        *light.sky_mut(3) = lodestone_world::LightData::Uniform(7);
+        *light.block_mut(4) = lodestone_world::LightData::Uniform(4);
+        column.set_retained_light_with_status(
+            light,
+            crate::chunk::RetainedLightStatus::CentreSettled,
+        );
+
+        normalize_imported_end_light_storage(&mut column, Dimension::End);
+        let restored = column.retained_light().expect("retained End light");
+        assert_eq!(restored.block(0), &lodestone_world::LightData::Missing);
+        assert_eq!(restored.block(1), &lodestone_world::LightData::Uniform(0));
+        assert_eq!(restored.block(2), &lodestone_world::LightData::Missing);
+        assert_eq!(restored.block(3), &lodestone_world::LightData::Uniform(0));
+        assert_eq!(restored.block(4), &lodestone_world::LightData::Uniform(4));
+        assert_eq!(
+            column.retained_light_status(),
+            Some(crate::chunk::RetainedLightStatus::CentreSettled)
+        );
+    }
+
     fn tempdir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("lodestone-unload-4m8k-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create scratch world dir");
         dir
+    }
+
+    /// A plural light admission must remain authoritative after the bounded
+    /// cache evicts every member of its footprint and the persistence layer
+    /// reloads them from disk. A block mutation then invalidates both the
+    /// centre and dependency snapshots rather than resurrecting stale light.
+    #[test]
+    fn plural_light_survives_cache_eviction_reload_and_mutation_invalidation() {
+        let dir = tempdir("plural-light-eviction");
+        let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT)
+            .expect("open persistent source");
+        let save = source.save_handle();
+        let store = ChunkStore::with_capacity(source, 1);
+        let centre = store.column(0, 0);
+        let mut centre_light = lodestone_world::ColumnLight::new(centre.section_count());
+        *centre_light.sky_mut(0) = lodestone_world::LightData::Uniform(7);
+        let mut east_light = lodestone_world::ColumnLight::new(centre.section_count());
+        *east_light.sky_mut(0) = lodestone_world::LightData::Uniform(3);
+        let offsets = [(1, 0)];
+        let mut compute = |_: &ChunkColumn, _: &[(i32, i32, ChunkColumn)]| {
+            crate::chunk::ColumnLightSettlement::with_neighbours(
+                centre_light.clone(),
+                [(1, 0, east_light.clone())],
+            )
+        };
+
+        store
+            .settle_resident_column_lights_with_neighbours(
+                0,
+                0,
+                &centre,
+                &offsets,
+                false,
+                false,
+                true,
+                &mut compute,
+            )
+            .expect("persistent plural admission");
+        // The footprint capture may have left a dependency as the only cache
+        // resident; touch the centre explicitly so both members get a real
+        // unload hand-off below.
+        let _ = store.column(0, 0);
+        assert_eq!(
+            save.save().expect("write plural light snapshots"),
+            2,
+            "the centre and dependency snapshots must be written together"
+        );
+
+        // Cycle both footprint members through a capacity-one store, then save
+        // the unload hand-offs so the next reads genuinely come from disk.
+        let _ = store.column(4, 0);
+        let _ = store.column(1, 0);
+        let _ = store.column(5, 0);
+        save.save().expect("release evicted persisted snapshots");
+        let reloaded_centre = store.column(0, 0);
+        let reloaded_east = store.column(1, 0);
+        assert_eq!(reloaded_centre.retained_light(), Some(&centre_light));
+        assert_eq!(reloaded_east.retained_light(), Some(&east_light));
+        assert_eq!(
+            reloaded_centre.retained_light_status(),
+            Some(crate::chunk::RetainedLightStatus::CentreSettled)
+        );
+        assert_eq!(
+            reloaded_east.retained_light_status(),
+            Some(crate::chunk::RetainedLightStatus::DependencyInitialized)
+        );
+
+        store.set_block(1, 60, 1, MARKER);
+        assert_eq!(
+            store.column(0, 0).retained_light(),
+            None,
+            "a centre mutation must clear its reloaded snapshot"
+        );
+        assert_eq!(
+            store.column(0, 0).retained_light_status(),
+            None,
+            "a centre mutation must clear its reloaded lifecycle stage"
+        );
+        assert_eq!(
+            store.column(1, 0).retained_light(),
+            None,
+            "a centre mutation must clear its reloaded dependency snapshot"
+        );
+        assert_eq!(
+            store.column(1, 0).retained_light_status(),
+            None,
+            "a centre mutation must clear its dependency lifecycle stage"
+        );
     }
 
     /// **The unload gate**, over the real composition: a [`ChunkStore`] above a

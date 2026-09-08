@@ -49,41 +49,83 @@ block light from the centre and cardinal-neighbour columns, while diagonal-neigh
 wait for the later seam-aware update; this keeps the initial packet at the persisted-column lifecycle
 boundary without changing the 3x3 storage mask. The End has sky light, and its
 initial packet consumes the exact `ColumnLight` snapshot captured by the source's settlement
-transaction. A generated source without a retained snapshot requests the complete computed sky first,
-then derives the padded-tail cutoff from the highest non-air block section in the supplied footprint,
-retaining the terrain section and one full section above it. This sky rule is independent of the
-block-light storage mask. Its initial block layer admits centre and cardinal-neighbour sources while
-deferring diagonal-neighbour sources until a later seam-aware update; the storage mask still reflects
-the complete loaded 3x3 footprint. This preserves the lower-apron omission and terrain-dependent
-full-sky run while leaving persisted snapshots untouched. The Overworld keeps the
-one-section sky form and elides uniform zero block light in an initial chunk. `ChunkSource::dimension`
+transaction. A generated source without a retained snapshot uses a bounded fallback: it keeps the
+complete computed sky result, then removes both light layers from sections that the centre plus loaded
+3x3 footprint would not allocate. This preserves the lower-apron omission and full-sky run seen in
+the first small-batch capture while leaving persisted snapshots untouched. The same footprint mask is
+applied to each newly computed End dependency layer: an all-air footprint remains entirely Missing,
+while an all-air selected column inherits only the vertical corridor induced by admitted neighbouring
+terrain. Its initial block layer admits centre and cardinal-neighbour sources while deferring diagonal
+propagation until a later seam-aware update; the allocation mask still reflects the complete loaded
+3x3 footprint. The mask is derived from block occupancy in the admitted columns, never from coordinates
+or state-name strings. The Overworld keeps the one-section sky form and elides uniform zero block light
+in an initial chunk. `ChunkSource::dimension`
 carries that choice to the protocol's dimension-aware initial-encoding and light-computation hooks. An
-unlabelled source uses the Overworld as the compatibility default; a dimension wrapper must always
-forward its label.
+unlabelled source uses the Overworld as the compatibility default; an in-memory generator therefore
+stays unlabelled, while `RegionChunkSource` forwards the typed dimension it was opened for so a bare
+persistent source cannot silently apply Overworld normalization to Nether or End packets. A dimension
+wrapper must always forward its label.
 
 ### Retained snapshots and reloads
 
-For a protocol that opts into retained initial light, the server stores the exact `ColumnLight` result
-on the centre column when its settlement transaction completes. The initial
-`LEVEL_CHUNK_WITH_LIGHT` encoder consumes that snapshot verbatim, including `Missing`, explicit empty,
-full, and varied sections. An independent sealed-world capture showed that a persisted End section
-mask can differ from the first in-memory settlement, so a reload must serve what storage restored
-rather than recomputing from the current terrain or a neighbour subset. That capture is external
-evidence for the storage contract; it does not claim that this repository drives the capture's
-scheduler or loading-ticket sequence in a production test.
+For a protocol that opts into retained initial light, one admission may produce more than the centre
+snapshot. `ServerProtocol::compute_initial_column_lights_with_neighbours_in_dimension` returns a
+typed `ColumnLightSettlement`: the centre is mandatory, and each additional entry names a relative
+coordinate in the admitted 3x3 footprint together with its exact `ColumnLight` (including its
+`Missing`, explicit-empty, full, or varied section representation). `ChunkStore` captures every
+requested coordinate, checks all of their revisions, and forwards the returned entries to the source
+as one batch before releasing the gates. Existing protocol adapters use the default centre-only
+adapter, while a version adapter can return whichever sparse or fully populated dependency records
+its wire lifecycle actually produces; the source does not infer a dimension policy.
+An allocated light column whose sky and block layers are all zero is still an
+unsettled dependency, so a later admission may compute and populate it; only a
+`CentreSettled` retained snapshot can satisfy the centre fast path.
+
+The snapshot also carries a typed lifecycle stage on `ChunkColumn`: a
+`DependencyInitialized` entry records storage created while settling another
+centre, while `CentreSettled` records completion of that column's own initial
+admission. The fast path checks this stage rather than inspecting light values,
+so a populated dependency still receives its centre admission. The stage is
+stored with the retained light in chunk NBT and is cleared with the light on any
+block mutation. Version-specific initial-chunk encoders consume retained light
+only after the centre reaches `CentreSettled`; dependency snapshots remain
+available as seeds for the next admission and are never serialized as though
+their own centre admission had completed. A later footprint may read a
+`CentreSettled` column as a dependency, but its dependency result cannot
+downgrade that authoritative centre snapshot; a block mutation clears the
+status before any replacement is allowed.
+
+The initial chunk encoder consumes a `CentreSettled` retained snapshot verbatim. An independent sealed-
+world capture showed that a persisted End section mask can differ from the first in-memory settlement,
+so a reload must serve what storage restored rather than recomputing from the current terrain or a
+neighbour subset. A `DependencyInitialized` snapshot instead remains input to the next centre
+admission. That capture is external evidence for the storage contract; it does not claim that this
+repository drives the capture's scheduler or loading-ticket sequence in a production test.
+
+When an imported End `CentreSettled` snapshot has persisted sky storage but omitted uniformly-zero
+block arrays, the region source restores explicit `Uniform(0)` block storage for those same sections.
+This preserves the saved allocation mask while leaving all light values unchanged; other dimensions,
+dependency snapshots, and unlabelled generated columns keep their existing representation rules.
 
 `column_to_nbt` writes the retained snapshot's sky and block arrays, including the light-only sections
 immediately below and above the block range, and marks the column as light-complete. `column_from_nbt`
 restores those arrays into `ChunkColumn` before a source can serve the column again. Only protocols
 that return `true` from `ServerProtocol::retains_initial_column_light` enter this settlement path;
 the default is `false`, so legacy one-column protocols do not admit neighbours or persist a snapshot
-they do not consume. `RegionChunkSource` keeps an opted-in snapshot in its edit/persistence path,
-while `ChunkStore::store_resident_column` updates the cache and forwards the value instead of
-allowing an in-memory cache hit to hide a future reload.
+they do not consume. `RegionChunkSource` keeps opted-in snapshots in its edit/persistence path, while
+`ChunkStore::store_resident_columns` updates the cache and forwards the complete batch instead of
+allowing an in-memory cache hit to hide a future reload. The source trait's default batch method
+preserves compatibility for small sources by forwarding individual columns; persistent sources
+that need an all-at-once visibility boundary override it.
 The typed native record path stores the same `ColumnLight` beside terrain and reattaches it to the
 decoded `ChunkColumn` on reopen, so a caller can feed that record directly back to the serving source.
 Persisted columns remain authoritative after eviction and restart; admission and ticket policy remain
 the responsibility of the source/cache lifecycle that owns the column.
+
+The bounded cache must therefore sit above a persistence-capable source whenever retained light is
+part of the serving contract. The focused `RegionChunkSource` control exercises a plural admission,
+evicts and reloads both footprint members, then mutates the centre and verifies that invalidation
+clears both restored snapshots; a bare generator is intentionally not an equivalent substitute.
 
 The coordinate-free controls in `crates/versions/26.2/tests/overworld_light_lifecycle.rs` make the
 initial wire distinction independently observable. They build the same synthetic column with 29
@@ -135,13 +177,14 @@ before the update is sent. `ChunkColumn::set_block` also invalidates any old sna
 a later initial send cannot mistake derived light for current state.
 
 For an opted-in protocol, initial chunk encoding assembles the centre and its eight neighbours in a
-fixed relative-coordinate order, then settles the centre's retained snapshot through the validated
-read/compute/commit fence. The order is only a deterministic admission/assembly rule; the light
-result is not allowed to depend on direction, coordinate, or holder ordinal. The Nether initial
-fallback admits centre and cardinal-neighbour block-light sources and defers diagonal-neighbour
-propagation until a light update; persisted snapshots remain authoritative. A missing neighbour is
-resolved through the source's normal column path so the fence has a complete 3×3 input; the snapshot
-is stored before the initial packet is written. Protocols that do not opt into retained initial light
+fixed relative-coordinate order, then settles every snapshot returned for that admission through the
+validated read/compute/commit fence. The order is only a deterministic admission/assembly rule; the
+light result is not allowed to depend on direction, coordinate, or holder ordinal. A missing
+neighbour is resolved through the source's normal column path so the fence has a complete 3×3 input;
+the centre and any returned dependency snapshots are stored before the initial packet is written.
+The Nether fallback admits centre and cardinal-neighbour block-light sources and defers diagonal
+propagation until a light update; persisted snapshots remain authoritative.
+Protocols that do not opt into retained initial light
 keep their one-column encoder and do not pay for adjacent reads. The detached worker encoder remains
 on the one-column contract until it can carry the same neighbourhood explicitly.
 

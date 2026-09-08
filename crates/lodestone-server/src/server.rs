@@ -2569,19 +2569,18 @@ fn live_publish_player(
     live_save.publish(store.cloned(), uuid, data);
 }
 
-/// Turns one [`ColumnPayload`](crate::join_scheduler::ColumnPayload) into the
-/// directive to write, whichever arm it is on.
+/// Encodes one complete chunk through the production source-aware initial-
+/// chunk path.
 ///
-/// This is the join path's *only* remaining branch on where encode happened, and
-/// it is deliberately a total function rather than two call sites: the
-/// [`Encoded`](crate::join_scheduler::ColumnPayload::Encoded) arm carries bytes a
-/// blocking worker already produced (the win — see
-/// [`crate::protocol::ChunkEncoder`]), while the
-/// [`Column`](crate::join_scheduler::ColumnPayload::Column) arm is the
-/// pre-existing shape for a protocol with no off-task encoder and for the
-/// non-`'static` [`SourceRef::Borrowed`] arm. Both produce the same bytes, so no
-/// caller has to know which one it is on.
-fn encode_chunk_with_source<P: ServerProtocol>(
+/// Protocols that retain initial column light use the source's required
+/// settled footprint (the complete three-by-three footprint when cross-column
+/// light is enabled) before encoding; protocols without that lifecycle use
+/// their ordinary dimension-aware encoder.
+/// The supplied `column` is the caller's fallback when the source has no
+/// resident centre copy. This is the same seam used by the live join path and
+/// by persistence parity harnesses, so callers must provide the source that
+/// owns the world lifecycle rather than a detached generator.
+pub fn encode_chunk_with_source<P: ServerProtocol>(
     proto: &P,
     source: &dyn ChunkSource,
     cx: i32,
@@ -2609,13 +2608,13 @@ fn encode_chunk_with_source<P: ServerProtocol>(
         let exclusive = attempt == LIGHT_SETTLEMENT_OPTIMISTIC_RETRIES;
         let mut compute = |centre: &ChunkColumn, neighbours: &[(i32, i32, ChunkColumn)]| {
             captured_neighbours = neighbours.to_vec();
-            proto.compute_initial_column_light_with_neighbours_in_dimension(
+            proto.compute_initial_column_lights_with_neighbours_in_dimension(
                 centre,
                 neighbours,
                 dimension,
             )
         };
-        match source.settle_resident_column_light_with_neighbours(
+        match source.settle_resident_column_lights_with_neighbours(
             cx,
             cz,
             &fallback,
@@ -2626,6 +2625,17 @@ fn encode_chunk_with_source<P: ServerProtocol>(
             &mut compute,
         ) {
             Ok(centre) => {
+                // A persisted centre may already carry a settled light
+                // snapshot, so the source transaction can return before the
+                // compute callback captures its neighbours. The packet still
+                // needs that complete footprint; load it for encoding without
+                // replacing the retained centre snapshot.
+                if captured_neighbours.is_empty() && !neighbour_offsets.is_empty() {
+                    captured_neighbours = neighbour_offsets
+                        .iter()
+                        .map(|&(dx, dz)| (dx, dz, source.column(cx + dx, cz + dz)))
+                        .collect();
+                }
                 return proto.try_encode_chunk_with_neighbours_in_dimension(
                     cx,
                     cz,
@@ -2635,6 +2645,12 @@ fn encode_chunk_with_source<P: ServerProtocol>(
                 );
             }
             Err(ColumnLightSettlementError::NoLight) => {
+                if captured_neighbours.is_empty() && !neighbour_offsets.is_empty() {
+                    captured_neighbours = neighbour_offsets
+                        .iter()
+                        .map(|&(dx, dz)| (dx, dz, source.column(cx + dx, cz + dz)))
+                        .collect();
+                }
                 return proto.try_encode_chunk_with_neighbours_in_dimension(
                     cx,
                     cz,
@@ -17193,6 +17209,7 @@ mod tests {
         computes: Arc<AtomicUsize>,
         retain_initial_light: bool,
         fallback_encodes: Arc<AtomicUsize>,
+        dependency_light: Option<lodestone_world::ColumnLight>,
     }
 
     impl ServerProtocol for RetainedLifecycleProtocol {
@@ -17271,6 +17288,27 @@ mod tests {
             Some(light)
         }
 
+        fn compute_initial_column_lights_with_neighbours_in_dimension(
+            &self,
+            column: &ChunkColumn,
+            neighbours: &[(i32, i32, ChunkColumn)],
+            dimension: crate::dimension::Dimension,
+        ) -> Option<crate::chunk::ColumnLightSettlement> {
+            let centre = self.compute_initial_column_light_with_neighbours_in_dimension(
+                column,
+                neighbours,
+                dimension,
+            )?;
+            if let Some(dependency) = self.dependency_light.as_ref() {
+                crate::chunk::ColumnLightSettlement::with_neighbours(
+                    centre,
+                    [(1, 0, dependency.clone())],
+                )
+            } else {
+                Some(crate::chunk::ColumnLightSettlement::centre(centre))
+            }
+        }
+
         fn uses_cross_column_light(&self) -> bool {
             true
         }
@@ -17307,6 +17345,7 @@ mod tests {
             computes: Arc::new(AtomicUsize::new(0)),
             retain_initial_light: true,
             fallback_encodes: Arc::new(AtomicUsize::new(0)),
+            dependency_light: None,
         };
 
         let first_column = source.column(0, 0);
@@ -17378,6 +17417,71 @@ mod tests {
         );
     }
 
+    /// Exercises the same production admission consumer with a protocol that
+    /// returns one dependency snapshot as well as the centre. The dependency is
+    /// recovered through the source's normal later column admission, proving
+    /// that the batch source path retained it rather than only updating the
+    /// centre cache entry.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn retained_dependency_light_survives_later_full_serialization() {
+        let world_dir = tempfile::tempdir().expect("create dependency retained-light world");
+        let region = crate::region_source::RegionChunkSource::new(
+            OneColumnSource,
+            world_dir.path(),
+            crate::dimension::Dimension::End,
+            0,
+            256,
+        )
+        .expect("open dependency retained-light source");
+        let store = crate::chunk_store::ChunkStore::with_capacity(region.clone(), 64);
+        let source = crate::dimension::DimensionalSource::alone(
+            store,
+            crate::dimension::Dimension::End,
+            crate::portal::PortalIndex::default(),
+        );
+        let mut dependency_light = lodestone_world::ColumnLight::new(
+            ChunkColumn::new(0, 256).section_count(),
+        );
+        *dependency_light.sky_mut(0) = lodestone_world::LightData::Uniform(3);
+        *dependency_light.block_mut(1) = lodestone_world::LightData::Uniform(11);
+        let computes = Arc::new(AtomicUsize::new(0));
+        let protocol = RetainedLifecycleProtocol {
+            computes: Arc::clone(&computes),
+            retain_initial_light: true,
+            fallback_encodes: Arc::new(AtomicUsize::new(0)),
+            dependency_light: Some(dependency_light.clone()),
+        };
+
+        let first_column = source.column(0, 0);
+        encode_chunk_with_source(&protocol, &source, 0, 0, &first_column)
+            .expect("admit and encode the End centre with its dependency");
+        assert_eq!(computes.load(Ordering::Acquire), 1);
+
+        let retained_dependency = source
+            .column(1, 0)
+            .retained_light()
+            .cloned()
+            .expect("the source batch must retain the dependency snapshot");
+        assert_eq!(retained_dependency, dependency_light);
+
+        let mut expected = lodestone_core::Writer::default();
+        dependency_light.encode(&mut expected);
+        let later_column = source.column(1, 0);
+        let later = encode_chunk_with_source(&protocol, &source, 1, 0, &later_column)
+            .expect("serialize the retained dependency as a later full column");
+        let payload = match later {
+            ServerDirective::Send { payload, .. } => payload,
+            other => panic!("later dependency encode emitted {other:?}"),
+        };
+        assert_eq!(payload, expected.as_slice());
+        assert_eq!(
+            computes.load(Ordering::Acquire),
+            1,
+            "later full serialization must consume the retained snapshot verbatim"
+        );
+    }
+
     /// A legacy family that does not consume retained snapshots must keep the
     /// one-column path: no neighbour generation, light settlement, or source
     /// persistence is admitted merely because it can compute cross-column
@@ -17395,6 +17499,7 @@ mod tests {
             computes: Arc::clone(&computes),
             retain_initial_light: false,
             fallback_encodes: Arc::new(AtomicUsize::new(0)),
+            dependency_light: None,
         };
         let column = ChunkColumn::new(0, 256);
         assert!(matches!(
@@ -17433,6 +17538,7 @@ mod tests {
             computes: Arc::new(AtomicUsize::new(0)),
             retain_initial_light: true,
             fallback_encodes: Arc::new(AtomicUsize::new(0)),
+            dependency_light: None,
         };
 
         let mut expected = None;
@@ -17570,6 +17676,7 @@ mod tests {
             computes: Arc::new(AtomicUsize::new(0)),
             retain_initial_light: true,
             fallback_encodes: Arc::new(AtomicUsize::new(0)),
+            dependency_light: None,
         };
         let (client_end, server_end) = lodestone_net::memory_pair();
         let mut conn = Connection::new(server_end);
@@ -17608,6 +17715,7 @@ mod tests {
             computes: Arc::new(AtomicUsize::new(0)),
             retain_initial_light: true,
             fallback_encodes: Arc::new(AtomicUsize::new(0)),
+            dependency_light: None,
         };
         let (_client_end, server_end) = lodestone_net::memory_pair();
         let mut conn = Connection::new(server_end);

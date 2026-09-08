@@ -70,9 +70,11 @@ use lodestone_model::{
     SoundCategory, Text, TextContent, Vec3, Vec3f, WrittenBookContent, PredictionSequence,
 };
 use lodestone_server::{
-    Abilities, ChunkColumn as ServerChunkColumn, ChunkEncoder, EntitySnapshot, HOTBAR_SIZE,
+    Abilities, ChunkColumn as ServerChunkColumn, ChunkEncoder, ColumnLightSettlement,
+    EntitySnapshot, HOTBAR_SIZE,
     MOTION_BLOCKING_HEIGHTMAP_TYPE_ID, MerchantOfferOut, MetadataField, PlayerListing,
-    ResourcePackPush, ServerBound, ServerDirective, ServerProtocol, WorldBorder, WorldgenScope,
+    ResourcePackPush, RetainedLightStatus, ServerBound, ServerDirective, ServerProtocol,
+    WorldBorder, WorldgenScope,
 };
 use lodestone_server::dimension::Dimension;
 // Test-only: `encode_initialize_border_wire_layout` asserts the wire byte
@@ -90,6 +92,7 @@ use lodestone_world::{
     ChunkColumn as WorldChunkColumn, ChunkSection, ColumnLight, Heightmap, Heightmaps,
     LightData, LightProperties, Neighbourhood, compute_column_light,
     compute_column_light_for_initial_chunk, compute_column_light_with_neighbours,
+    compute_column_lights_with_neighbours_and_storage,
     compute_column_light_with_neighbours_for_initial_chunk,
 };
 use lodestone_data::block::Block;
@@ -3011,6 +3014,70 @@ fn initial_block_light_storage_sections(
     stored
 }
 
+/// End's initial light engine retains a vertical propagation corridor in the
+/// loaded footprint, not just the three sections adjacent to each non-air
+/// section. A terrain section seeds the block and sky layers, and propagation
+/// allocates the intervening empty sections from the lowest admitted non-air
+/// section through the one-section light apron above the highest one. An
+/// all-air footprint allocates no storage. The selected centre may itself be
+/// all air: storage follows the admitted footprint, so a neighbouring terrain
+/// column still contributes its corridor.
+fn initial_end_light_storage_sections(
+    center: &WorldChunkColumn,
+    neighbours: &[WorldChunkColumn],
+) -> Vec<bool> {
+    initial_end_light_storage_sections_with_prior(center, neighbours, None)
+}
+
+/// Extends End storage from an already retained centre snapshot when one
+/// exists. A retained centre remains authoritative; fresh storage is derived
+/// from the complete admitted footprint, including terrain in neighbouring
+/// columns. This keeps a fresh all-air centre and its new dependencies on the
+/// same coordinate-independent allocation rule.
+fn initial_end_light_storage_sections_with_prior(
+    center: &WorldChunkColumn,
+    neighbours: &[WorldChunkColumn],
+    prior_center: Option<&ColumnLight>,
+) -> Vec<bool> {
+    let mut stored = vec![false; center.section_count() + 2];
+    if let Some(prior_center) = prior_center {
+        for section in 0..stored.len().min(prior_center.light_section_count()) {
+            stored[section] = !matches!(prior_center.sky(section), LightData::Missing)
+                || !matches!(prior_center.block(section), LightData::Missing);
+        }
+    }
+    let mut lowest_non_air = None;
+    let mut highest_non_air = None;
+    for column in std::iter::once(center).chain(neighbours) {
+        for block_section in 0..column.section_count() {
+            if !column
+                .section(block_section)
+                .is_some_and(|section| !section.is_air_only())
+            {
+                continue;
+            }
+            lowest_non_air = Some(lowest_non_air.map_or(block_section, |lowest: usize| {
+                lowest.min(block_section)
+            }));
+            highest_non_air = Some(highest_non_air.map_or(block_section, |highest: usize| {
+                highest.max(block_section)
+            }));
+        }
+    }
+
+    let Some(highest_non_air) = highest_non_air else {
+        return stored;
+    };
+    let first = lowest_non_air.expect("End storage has a non-air section");
+    let last = highest_non_air
+        .saturating_add(2)
+        .min(stored.len().saturating_sub(1));
+    for section in first..=last {
+        stored[section] = true;
+    }
+    stored
+}
+
 /// Retains explicit zero block-light sections only where the light engine has
 /// allocated storage, eliding unallocated sections. Values are never touched:
 /// a non-uniform section carries a real source or propagation result even if
@@ -3175,6 +3242,91 @@ fn compute_served_initial_light_with_neighbours(
     light
 }
 
+fn compute_served_initial_lights_with_neighbours_and_storage(
+    center: &WorldChunkColumn,
+    shape: &ChunkShape,
+    neighbours: &[(i32, i32, ServerChunkColumn)],
+    stored: &[Option<&ColumnLight>; 9],
+    dimension: Dimension,
+) -> [ColumnLight; 9] {
+    let neighbour_columns = neighbours
+        .iter()
+        .map(|(_, _, neighbour)| build_world_column(shape, neighbour))
+        .collect::<Vec<_>>();
+    let mut neighbourhood = Neighbourhood::new(center);
+    for ((dx, dz, _), neighbour) in neighbours.iter().zip(&neighbour_columns) {
+        if (*dx, *dz) != (0, 0) {
+            neighbourhood = neighbourhood.with(*dx, *dz, neighbour);
+        }
+    }
+    let retained_storage = stored.iter().flatten().any(|light| {
+        (0..light.light_section_count()).any(|section| {
+            light_data_has_nonzero(light.sky(section))
+        })
+    });
+    let mut lights = compute_column_lights_with_neighbours_and_storage(
+        &neighbourhood,
+        &V770LightProps {
+            has_skylight: dimension.has_skylight(),
+        },
+        stored,
+        initial_full_sky_sections(dimension),
+    );
+    let storage_neighbours = if retained_storage {
+        neighbours
+            .iter()
+            .zip(&neighbour_columns)
+            .filter(|((dx, dz, _), _)| {
+                let slot = ((*dz + 1) * 3 + (*dx + 1)) as usize;
+                stored[slot].is_some_and(|light| {
+                    (0..light.light_section_count()).any(|section| {
+                        light_data_has_nonzero(light.sky(section))
+                    })
+                })
+            })
+            .map(|(_, column)| column.clone())
+            .collect::<Vec<_>>()
+    } else {
+        neighbour_columns.clone()
+    };
+    let block_light_storage = match dimension {
+        Dimension::End => Some(initial_end_light_storage_sections_with_prior(
+            center,
+            &storage_neighbours,
+            stored[4],
+        )),
+        Dimension::Nether => Some(initial_block_light_storage_sections(center, &storage_neighbours)),
+        Dimension::Overworld => None,
+    };
+    // Only the centre snapshot is serialized by this admission. The other
+    // eight snapshots are retained light-engine state, so keep their raw
+    // layers intact instead of applying the centre packet's sparse mask to
+    // unrelated columns.
+    normalize_initial_chunk_light(
+        &mut lights[4],
+        dimension,
+        block_light_storage.as_deref(),
+    );
+    lights
+}
+
+fn light_data_has_nonzero(data: &LightData) -> bool {
+    match data {
+        LightData::Missing | LightData::Uniform(0) => false,
+        LightData::Uniform(_) => true,
+        LightData::Values(array) => array.as_bytes().iter().any(|byte| *byte != 0),
+    }
+}
+
+fn empty_light_storage_like(light: &ColumnLight) -> ColumnLight {
+    let mut empty = ColumnLight::new(light.light_section_count());
+    for section in 0..empty.light_section_count() {
+        *empty.sky_mut(section) = LightData::Uniform(0);
+        *empty.block_mut(section) = LightData::Uniform(0);
+    }
+    empty
+}
+
 /// Server-side implementation of the protocol-776 (Minecraft 26.2) wire
 /// format, driving `lodestone-server`'s [`ServerProtocol`] seam.
 ///
@@ -3185,6 +3337,24 @@ fn compute_served_initial_light_with_neighbours(
 /// need to thread shape through here the same way the adapter does.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct V770ServerProtocol;
+
+impl V770ServerProtocol {
+    /// Computes and returns all nine retained light snapshots produced by one
+    /// shared three-by-three admission. The array uses row-major offset slots.
+    pub fn compute_initial_column_lights_with_neighbours_and_storage_in_dimension(
+        &self,
+        column: &lodestone_server::ChunkColumn,
+        neighbours: &[(i32, i32, lodestone_server::ChunkColumn)],
+        stored: &[Option<&lodestone_world::ColumnLight>; 9],
+        dimension: Dimension,
+    ) -> Option<[lodestone_world::ColumnLight; 9]> {
+        let shape = shape_for_column(column);
+        let center = build_world_column(&shape, column);
+        Some(compute_served_initial_lights_with_neighbours_and_storage(
+            &center, &shape, neighbours, stored, dimension,
+        ))
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Configuration-phase `registry_data` payloads
@@ -3568,6 +3738,7 @@ fn encode_chunk_in_dimension(
     let world_column = build_world_column(&shape, column);
     let light = column
         .retained_light()
+        .filter(|_| column.retained_light_status() == Some(RetainedLightStatus::CentreSettled))
         .filter(|light| light.light_section_count() == shape.section_count + 2)
         .cloned()
         .unwrap_or_else(|| compute_served_initial_light(&world_column, dimension));
@@ -5221,6 +5392,7 @@ impl ServerProtocol for V770ServerProtocol {
         let world_column = build_world_column(&shape, column);
         let light = column
             .retained_light()
+            .filter(|_| column.retained_light_status() == Some(RetainedLightStatus::CentreSettled))
             .filter(|light| light.light_section_count() == shape.section_count + 2)
             .cloned()
             .unwrap_or_else(|| {
@@ -5252,6 +5424,62 @@ impl ServerProtocol for V770ServerProtocol {
             neighbours,
             dimension,
         ))
+    }
+
+    fn compute_initial_column_lights_with_neighbours_in_dimension(
+        &self,
+        column: &ServerChunkColumn,
+        neighbours: &[(i32, i32, ServerChunkColumn)],
+        dimension: Dimension,
+    ) -> Option<ColumnLightSettlement> {
+        let mut stored: [Option<&ColumnLight>; 9] = [None; 9];
+        stored[4] = column.retained_light();
+        for &(dx, dz, ref neighbour) in neighbours {
+            let slot = ((dz + 1) * 3 + (dx + 1)) as usize;
+            if slot < stored.len() {
+                stored[slot] = neighbour.retained_light();
+            }
+        }
+        let mut lights = self
+            .compute_initial_column_lights_with_neighbours_and_storage_in_dimension(
+                column,
+                neighbours,
+                &stored,
+                dimension,
+            )?;
+        if dimension == Dimension::End {
+            let shape = shape_for_column(column);
+            let centre = build_world_column(&shape, column);
+            let neighbour_columns = neighbours
+                .iter()
+                .map(|(_, _, neighbour)| build_world_column(&shape, neighbour))
+                .collect::<Vec<_>>();
+            let admitted_columns = std::iter::once(centre)
+                .chain(neighbour_columns.iter().cloned())
+                .collect::<Vec<_>>();
+            for ((dx, dz, _), dependency) in neighbours.iter().zip(&neighbour_columns) {
+                let slot = ((*dz + 1) * 3 + (*dx + 1)) as usize;
+                if stored[slot].is_none() {
+                    let storage = initial_end_light_storage_sections(dependency, &admitted_columns);
+                    normalize_initial_chunk_light(
+                        &mut lights[slot],
+                        dimension,
+                        Some(&storage),
+                    );
+                }
+            }
+        } else {
+            for slot in 0..lights.len() {
+                if slot != 4 && stored[slot].is_none() {
+                    lights[slot] = empty_light_storage_like(&lights[slot]);
+                }
+            }
+        }
+        let dependency_lights = neighbours.iter().map(|&(dx, dz, _)| {
+            let slot = ((dz + 1) * 3 + (dx + 1)) as usize;
+            (dx, dz, lights[slot].clone())
+        });
+        ColumnLightSettlement::with_neighbours(lights[4].clone(), dependency_lights)
     }
 
     fn compute_column_light_with_neighbours(
@@ -7959,6 +8187,222 @@ mod block_edit_tests {
         assert_eq!(packet.light.block(0), &LightData::Missing);
         assert_eq!(packet.light.block(6), &LightData::Uniform(0));
         assert_eq!(packet.light.block(7), &LightData::Missing);
+    }
+
+    /// End initial storage is derived from admitted occupancy. A high
+    /// neighbour extends the same relative corridor, while a footprint with
+    /// no non-air section allocates nothing; neither result depends on a world
+    /// coordinate or a fixed section count.
+    #[test]
+    fn end_initial_storage_corridor_follows_admitted_occupancy() {
+        let column = || {
+            WorldChunkColumn::new(
+                0,
+                16,
+                PaletteKind::block_states(),
+                PaletteKind::biomes(),
+                0,
+                0,
+            )
+        };
+        let mut center = column();
+        center.set_block(8, 80, 8, 1);
+        let empty = column();
+        let storage = initial_end_light_storage_sections(&center, std::slice::from_ref(&empty));
+        assert!(!storage[0]);
+        assert!(storage[5..=7].iter().all(|&stored| stored));
+        assert!(storage[..5].iter().all(|&stored| !stored));
+        assert!(storage[8..].iter().all(|&stored| !stored));
+
+        let mut high_neighbour = empty.clone();
+        high_neighbour.set_block(8, 128, 8, 1);
+        let extended = initial_end_light_storage_sections(&center, &[high_neighbour]);
+        assert!(extended[5..=10].iter().all(|&stored| stored));
+        assert!(extended[..5].iter().all(|&stored| !stored));
+        assert!(extended[11..].iter().all(|&stored| !stored));
+
+        let all_air = initial_end_light_storage_sections(&empty, &[]);
+        assert!(all_air.iter().all(|&stored| !stored));
+    }
+
+    /// End storage follows the admitted footprint, even when the selected
+    /// centre is all air. The neighbour's two occupied sections induce the
+    /// exact four-section corridor in both fresh centre and dependency
+    /// snapshots; an all-air footprint remains entirely Missing.
+    #[test]
+    fn end_initial_storage_follows_admitted_footprint_for_fresh_columns() {
+        let column = || {
+            WorldChunkColumn::new(
+                0,
+                16,
+                PaletteKind::block_states(),
+                PaletteKind::biomes(),
+                0,
+                0,
+            )
+        };
+        let center = column();
+        let mut neighbour = column();
+        neighbour.set_block(8, 16, 8, 1);
+        neighbour.set_block(8, 32, 8, 1);
+        let borrowed = initial_end_light_storage_sections(&center, &[neighbour.clone()]);
+        assert!(
+            borrowed[1..=4].iter().all(|&stored| stored),
+            "an all-air centre inherits the admitted neighbour corridor"
+        );
+        assert!(
+            borrowed
+                .iter()
+                .enumerate()
+                .filter(|(section, _)| !(1..=4).contains(section))
+                .all(|(_, &stored)| !stored),
+            "the neighbour corridor must not allocate unrelated sections"
+        );
+        let all_air = initial_end_light_storage_sections(&center, &[]);
+        assert!(all_air.iter().all(|&stored| !stored));
+    }
+
+    #[test]
+    fn end_initial_dependency_layers_use_admitted_storage_shape() {
+        let center = ServerChunkColumn::new(0, 256);
+        let mut neighbour = ServerChunkColumn::new(0, 256);
+        neighbour.set_block(8, 16, 8, "minecraft:stone");
+        neighbour.set_block(8, 32, 8, "minecraft:stone");
+        let proto = V770ServerProtocol;
+
+        let all_air = proto
+            .compute_initial_column_lights_with_neighbours_in_dimension(
+                &center,
+                &[(1, 0, neighbour.clone())],
+                Dimension::End,
+            )
+            .expect("fresh End settlement");
+        let shape = shape_for_column(&center);
+        let centre_world = build_world_column(&shape, &center);
+        let neighbour_world = build_world_column(&shape, &neighbour);
+        let storage = initial_end_light_storage_sections(&centre_world, &[neighbour_world]);
+        assert!(storage[1..=4].iter().all(|&stored| stored));
+        let mut expected_lights = proto
+            .compute_initial_column_lights_with_neighbours_and_storage_in_dimension(
+                &center,
+                &[(1, 0, neighbour.clone())],
+                &[None; 9],
+                Dimension::End,
+            )
+            .expect("raw End settlement");
+        normalize_initial_chunk_light(
+            &mut expected_lights[4],
+            Dimension::End,
+            Some(&storage),
+        );
+        normalize_initial_chunk_light(
+            &mut expected_lights[5],
+            Dimension::End,
+            Some(&storage),
+        );
+        let expected = ColumnLightSettlement::with_neighbours(
+            expected_lights[4].clone(),
+            [(1, 0, expected_lights[5].clone())],
+        )
+        .expect("expected centre and dependency settlement");
+        assert_eq!(all_air, expected);
+        for section in 0..expected_lights[4].light_section_count() {
+            let expected_stored = (1..=4).contains(&section);
+            assert_eq!(
+                !matches!(expected_lights[4].sky(section), LightData::Missing),
+                expected_stored,
+                "centre sky storage at section {section}"
+            );
+            assert_eq!(
+                !matches!(expected_lights[5].block(section), LightData::Missing),
+                expected_stored,
+                "dependency block storage at section {section}"
+            );
+        }
+
+        let empty_neighbours = (-1..=1)
+            .flat_map(|dz| (-1..=1).map(move |dx| (dx, dz)))
+            .filter(|&(dx, dz)| (dx, dz) != (0, 0))
+            .map(|(dx, dz)| (dx, dz, ServerChunkColumn::new(0, 256)))
+            .collect::<Vec<_>>();
+        let empty_footprint = proto
+            .compute_initial_column_lights_with_neighbours_in_dimension(
+                &center,
+                &empty_neighbours,
+                Dimension::End,
+            )
+            .expect("fresh all-air settlement");
+        let empty = ColumnLight::new(shape.section_count);
+        let expected_empty = ColumnLightSettlement::with_neighbours(
+            empty.clone(),
+            [
+                (-1, -1, empty.clone()),
+                (0, -1, empty.clone()),
+                (1, -1, empty.clone()),
+                (-1, 0, empty.clone()),
+                (1, 0, empty.clone()),
+                (-1, 1, empty.clone()),
+                (0, 1, empty.clone()),
+                (1, 1, empty),
+            ],
+        )
+        .expect("expected all-air settlement");
+        assert_eq!(empty_footprint, expected_empty);
+        for section in 0..shape.section_count + 2 {
+            assert!(matches!(expected_empty.centre_light().sky(section), LightData::Missing));
+            assert!(matches!(expected_empty.centre_light().block(section), LightData::Missing));
+        }
+    }
+
+    /// Dependency-initialized light is valid input to a later light admission,
+    /// but it is not yet safe to serialize as the centre's initial packet.
+    #[test]
+    fn initial_encoder_only_consumes_centre_settled_light() {
+        use crate::packets::chunk::LevelChunkWithLight;
+
+        let shape = ChunkShape::nether_or_end_1_21();
+        let decode = |column: &ServerChunkColumn| {
+            let ServerDirective::Send { payload, .. } = V770ServerProtocol
+                .try_encode_chunk_with_neighbours_in_dimension(
+                    0,
+                    0,
+                    column,
+                    &[],
+                    Dimension::End,
+                )
+                .expect("End initial chunk")
+            else {
+                panic!("End initial chunk must send a packet");
+            };
+            let mut reader = Reader::new(&payload);
+            let packet = LevelChunkWithLight::decode(&mut reader, &shape)
+                .expect("decode End initial chunk");
+            reader.ensure_empty().expect("no End packet trailing bytes");
+            packet.light
+        };
+
+        let mut dependency = ServerChunkColumn::new(0, 256);
+        dependency.set_block(8, 0, 8, "minecraft:end_stone");
+        let empty_light = ColumnLight::new(shape.section_count);
+        dependency.set_retained_light_with_status(
+            empty_light.clone(),
+            RetainedLightStatus::DependencyInitialized,
+        );
+        let recomputed = decode(&dependency);
+        assert_ne!(
+            recomputed, empty_light,
+            "dependency light must be recomputed before its centre admission"
+        );
+
+        dependency.set_retained_light_with_status(
+            empty_light.clone(),
+            RetainedLightStatus::CentreSettled,
+        );
+        assert_eq!(
+            decode(&dependency),
+            empty_light,
+            "centre-settled light must be consumed verbatim"
+        );
     }
 
     /// End's initial path must actually consume the supplied east column. The
