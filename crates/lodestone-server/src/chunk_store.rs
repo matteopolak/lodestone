@@ -221,7 +221,9 @@ use std::collections::hash_map::Entry as MapEntry;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 
-use crate::chunk::{ChunkColumn, ColumnLightSettlementError, ChunkSource};
+use crate::chunk::{
+    ChunkColumn, ColumnLightSettlement, ColumnLightSettlementError, ChunkSource,
+};
 use crate::chunk_lifecycle::{ChunkLifecycleHandoff, ChunkLifecyclePlan};
 use crate::ticket::{TicketDelta, TicketStoreHandle};
 #[cfg(test)]
@@ -1301,6 +1303,29 @@ impl<S: ChunkSource> ChunkStore<S> {
             .invalidate_retained_light_neighbourhood(cx, cz);
     }
 
+    /// Replaces every cached column in one footprint, then forwards the same
+    /// complete batch to the wrapped source. The caller owns all coordinate
+    /// gates, so no block mutation can observe a partially committed light
+    /// admission between these two retention layers.
+    fn store_resident_columns_inner(&self, columns: &[(i32, i32, ChunkColumn)]) -> bool {
+        let cached = {
+            let mut guard = self.lock();
+            let cache = &mut *guard;
+            let stamp = cache.next_stamp();
+            let mut cached = false;
+            for &(cx, cz, ref column) in columns {
+                if let Some(entry) = cache.columns.get_mut(&(cx, cz)) {
+                    entry.column = column.clone();
+                    entry.last_used = stamp;
+                    cached = true;
+                }
+            }
+            cached
+        };
+        let stored = self.source.store_resident_columns(columns);
+        cached || stored
+    }
+
     fn light_coordinates(
         cx: i32,
         cz: i32,
@@ -1380,6 +1405,60 @@ impl<S: ChunkSource> ChunkStore<S> {
             .collect::<Result<Vec<_>, _>>()?;
         Ok((centre_column, neighbours))
     }
+
+    fn settled_columns(
+        snapshot: &ChunkWriteSnapshot,
+        centre: (i32, i32),
+        neighbour_offsets: &[(i32, i32)],
+        settlement: &ColumnLightSettlement,
+    ) -> Result<(Vec<(i32, i32, ChunkColumn)>, ChunkColumn), ColumnLightSettlementError> {
+        let mut updates = Vec::new();
+        let mut settled_centre = None;
+        for (offset, light) in settlement.iter() {
+            if offset != (0, 0) && !neighbour_offsets.contains(&offset) {
+                return Err(ColumnLightSettlementError::MissingFootprint);
+            }
+            let coordinate = (centre.0 + offset.0, centre.1 + offset.1);
+            let observation = snapshot
+                .observations
+                .iter()
+                .find(|observation| observation.chunk == coordinate)
+                .ok_or(ColumnLightSettlementError::MissingFootprint)?;
+            let mut column = observation.column.clone();
+            if offset != (0, 0)
+                && column.retained_light_status()
+                    == Some(crate::chunk::RetainedLightStatus::CentreSettled)
+            {
+                // A later footprint may read this column as a dependency, but
+                // must not downgrade its already admitted centre snapshot.
+                // Block mutations clear the status across the dependency
+                // neighbourhood before a refresh, so retaining it here cannot
+                // hide a changed terrain state.
+                updates.push((coordinate.0, coordinate.1, column));
+                continue;
+            }
+            let status = if offset == (0, 0) {
+                crate::chunk::RetainedLightStatus::CentreSettled
+            } else {
+                crate::chunk::RetainedLightStatus::DependencyInitialized
+            };
+            column.set_retained_light_with_status(light.clone(), status);
+            if offset == (0, 0) {
+                settled_centre = Some(column.clone());
+            }
+            updates.push((coordinate.0, coordinate.1, column));
+        }
+        let settled_centre = settled_centre
+            .or_else(|| {
+                snapshot
+                    .observations
+                    .iter()
+                    .find(|observation| observation.chunk == centre)
+                    .map(|observation| observation.column.clone())
+            })
+            .ok_or(ColumnLightSettlementError::MissingFootprint)?;
+        Ok((updates, settled_centre))
+    }
 }
 
 impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
@@ -1414,6 +1493,17 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         drop(lease);
     }
 
+    fn store_resident_columns(&self, columns: &[(i32, i32, ChunkColumn)]) -> bool {
+        let coordinates = columns
+            .iter()
+            .map(|&(cx, cz, _)| (cx, cz))
+            .collect::<Vec<_>>();
+        let lease = self.write_gates.acquire_many(&coordinates, true);
+        let stored = self.store_resident_columns_inner(columns);
+        drop(lease);
+        stored
+    }
+
     /// Captures the complete light footprint, computes outside the cache lock,
     /// then commits only when every captured coordinate revision is still
     /// current. The exclusive path is the bounded final attempt: all
@@ -1433,6 +1523,41 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
             &[(i32, i32, ChunkColumn)],
         ) -> Option<lodestone_world::ColumnLight>,
     ) -> Result<ChunkColumn, ColumnLightSettlementError> {
+        let mut compute_batch = |centre: &ChunkColumn,
+                                 neighbours: &[(i32, i32, ChunkColumn)]| {
+            compute(centre, neighbours).map(ColumnLightSettlement::centre)
+        };
+        self.settle_resident_column_lights_with_neighbours(
+            cx,
+            cz,
+            fallback,
+            neighbour_offsets,
+            resident_only,
+            replace_existing,
+            exclusive,
+            &mut compute_batch,
+        )
+    }
+
+    /// Captures a complete light footprint, computes outside the cache lock,
+    /// then commits every returned snapshot only when every captured coordinate
+    /// revision is still current. The exclusive path holds every dependency
+    /// gate through compute and commit, giving the bounded retry loop a
+    /// guaranteed-progress final attempt.
+    fn settle_resident_column_lights_with_neighbours(
+        &self,
+        cx: i32,
+        cz: i32,
+        fallback: &ChunkColumn,
+        neighbour_offsets: &[(i32, i32)],
+        resident_only: bool,
+        replace_existing: bool,
+        exclusive: bool,
+        compute: &mut dyn FnMut(
+            &ChunkColumn,
+            &[(i32, i32, ChunkColumn)],
+        ) -> Option<ColumnLightSettlement>,
+    ) -> Result<ChunkColumn, ColumnLightSettlementError> {
         let centre = (cx, cz);
         if !replace_existing {
             let snapshot = self.capture_light_snapshot(
@@ -1447,7 +1572,9 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
                 .expect("the centre snapshot is always requested")
                 .column
                 .clone();
-            if current.retained_light().is_some() {
+            if current.retained_light_status()
+                == Some(crate::chunk::RetainedLightStatus::CentreSettled)
+            {
                 return Ok(current);
             }
         }
@@ -1474,17 +1601,24 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
                 centre,
                 neighbour_offsets,
             )?;
-            if !replace_existing && centre_column.retained_light().is_some() {
+            if !replace_existing
+                && centre_column.retained_light_status()
+                    == Some(crate::chunk::RetainedLightStatus::CentreSettled)
+            {
                 drop(lease);
                 return Ok(centre_column);
             }
-            let Some(light) = compute(&centre_column, &neighbours) else {
+            let Some(settlement) = compute(&centre_column, &neighbours) else {
                 drop(lease);
                 return Err(ColumnLightSettlementError::NoLight);
             };
-            let mut settled = centre_column;
-            settled.set_retained_light(light);
-            let _ = self.store_resident_column_inner(cx, cz, &settled);
+            let (updates, settled) = Self::settled_columns(
+                &snapshot,
+                centre,
+                neighbour_offsets,
+                &settlement,
+            )?;
+            let _ = self.store_resident_columns_inner(&updates);
             lease.bump_revision = true;
             drop(lease);
             return Ok(settled);
@@ -1501,16 +1635,23 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
             centre,
             neighbour_offsets,
         )?;
-        if !replace_existing && centre_column.retained_light().is_some() {
+        if !replace_existing
+            && centre_column.retained_light_status()
+                == Some(crate::chunk::RetainedLightStatus::CentreSettled)
+        {
             return Ok(centre_column);
         }
-        let Some(light) = compute(&centre_column, &neighbours) else {
+        let Some(settlement) = compute(&centre_column, &neighbours) else {
             return Err(ColumnLightSettlementError::NoLight);
         };
-        let mut settled = centre_column;
-        settled.set_retained_light(light);
+        let (updates, settled) = Self::settled_columns(
+            &snapshot,
+            centre,
+            neighbour_offsets,
+            &settlement,
+        )?;
         self.write_gates
-            .try_commit(snapshot, || self.store_resident_column_inner(cx, cz, &settled))
+            .try_commit(snapshot, || self.store_resident_columns_inner(&updates))
             .map(|_| settled)
             .map_err(|()| ColumnLightSettlementError::Conflict)
     }
@@ -2924,6 +3065,227 @@ mod tests {
                 .retained_light(),
             Some(&unrelated_light)
         );
+    }
+
+    /// An allocated-zero dependency is storage, not a settled centre result.
+    /// The next admission at that coordinate must still run its solver and may
+    /// replace the zero layer with populated light.
+    #[test]
+    fn allocated_zero_dependency_can_become_populated_on_later_admission() {
+        let offsets = vec![
+            (-1, -1),
+            (0, -1),
+            (1, -1),
+            (-1, 0),
+            (1, 0),
+            (-1, 1),
+            (0, 1),
+            (1, 1),
+        ];
+        let store = ChunkStore::with_capacity(CountingSource::new(), 32);
+        let centre = store.column(0, 0);
+        let mut centre_light = lodestone_world::ColumnLight::new(centre.section_count());
+        *centre_light.sky_mut(0) = lodestone_world::LightData::Uniform(4);
+        let mut zero_dependency = lodestone_world::ColumnLight::new(centre.section_count());
+        for section in 0..zero_dependency.light_section_count() {
+            *zero_dependency.sky_mut(section) = lodestone_world::LightData::Uniform(0);
+            *zero_dependency.block_mut(section) = lodestone_world::LightData::Uniform(0);
+        }
+        let zero_for_first = zero_dependency.clone();
+        let mut first_compute = |_: &ChunkColumn, _: &[(i32, i32, ChunkColumn)]| {
+            ColumnLightSettlement::with_neighbours(
+                centre_light.clone(),
+                [(1, 0, zero_for_first.clone())],
+            )
+        };
+        store
+            .settle_resident_column_lights_with_neighbours(
+                0,
+                0,
+                &centre,
+                &offsets,
+                false,
+                false,
+                true,
+                &mut first_compute,
+            )
+            .expect("the first footprint admission must retain its dependency");
+        let retained_zero = store
+            .resident_column(1, 0)
+            .expect("the east dependency remains available")
+            .retained_light()
+            .cloned()
+            .expect("the dependency layer was allocated");
+        assert!(!retained_zero.has_nonzero_values());
+
+        let east = store
+            .resident_column(1, 0)
+            .expect("the allocated dependency is resident");
+        let mut populated_compute_calls = 0;
+        let mut populated_compute = |column: &ChunkColumn, _: &[(i32, i32, ChunkColumn)]| {
+            populated_compute_calls += 1;
+            let mut populated = lodestone_world::ColumnLight::new(column.section_count());
+            *populated.sky_mut(0) = lodestone_world::LightData::Uniform(9);
+            Some(ColumnLightSettlement::centre(populated))
+        };
+        let settled = store
+            .settle_resident_column_lights_with_neighbours(
+                1,
+                0,
+                &east,
+                &offsets,
+                false,
+                false,
+                true,
+                &mut populated_compute,
+            )
+            .expect("the later centre admission must replace allocated zero");
+        assert_eq!(populated_compute_calls, 1);
+        assert!(settled
+            .retained_light()
+            .is_some_and(lodestone_world::ColumnLight::has_nonzero_values));
+    }
+
+    /// A later footprint can observe a centre as a dependency, but that read
+    /// must not replace the centre's settled snapshot with its own dependency
+    /// representation. Mutations clear the settled status before recompute;
+    /// this control isolates the admission-order case from invalidation.
+    #[test]
+    fn later_dependency_admission_preserves_settled_centre_snapshot() {
+        let store = ChunkStore::with_capacity(CountingSource::new(), 16);
+        let target = store.column(0, 0);
+        let mut expected = lodestone_world::ColumnLight::new(target.section_count() + 2);
+        for section in 1..=4 {
+            *expected.sky_mut(section) = lodestone_world::LightData::Uniform(15);
+            *expected.block_mut(section) = lodestone_world::LightData::Uniform(0);
+        }
+        let mut first_compute = |_: &ChunkColumn, _: &[(i32, i32, ChunkColumn)]| {
+            Some(ColumnLightSettlement::centre(expected.clone()))
+        };
+        store
+            .settle_resident_column_lights_with_neighbours(
+                0,
+                0,
+                &target,
+                &[(1, 0)],
+                false,
+                false,
+                true,
+                &mut first_compute,
+            )
+            .expect("centre admission");
+
+        let east = store.column(1, 0);
+        let empty = lodestone_world::ColumnLight::new(east.section_count());
+        let mut second_compute = |_: &ChunkColumn, _: &[(i32, i32, ChunkColumn)]| {
+            ColumnLightSettlement::with_neighbours(empty.clone(), [(-1, 0, empty.clone())])
+        };
+        store
+            .settle_resident_column_lights_with_neighbours(
+                1,
+                0,
+                &east,
+                &[(-1, 0)],
+                false,
+                false,
+                true,
+                &mut second_compute,
+            )
+            .expect("dependency admission");
+
+        let retained = store
+            .resident_column(0, 0)
+            .expect("settled centre remains resident");
+        assert_eq!(retained.retained_light(), Some(&expected));
+        assert_eq!(
+            retained.retained_light_status(),
+            Some(crate::chunk::RetainedLightStatus::CentreSettled)
+        );
+    }
+
+    /// A dependency can already contain populated light and still be only an
+    /// initialized holder. It must run its own centre admission before the
+    /// fast path becomes eligible; the second call proves the settled status
+    /// then skips a redundant computation.
+    #[test]
+    fn populated_dependency_runs_centre_admission_before_fast_path() {
+        let offsets = [(1, 0)];
+        let store = ChunkStore::with_capacity(CountingSource::new(), 16);
+        let centre = store.column(0, 0);
+        let mut dependency_light = lodestone_world::ColumnLight::new(centre.section_count());
+        *dependency_light.sky_mut(0) = lodestone_world::LightData::Uniform(11);
+        let mut first_compute =
+            |_column: &ChunkColumn, _neighbours: &[(i32, i32, ChunkColumn)]| {
+                ColumnLightSettlement::with_neighbours(
+                    lodestone_world::ColumnLight::new(centre.section_count()),
+                    [(1, 0, dependency_light.clone())],
+                )
+            };
+        store
+            .settle_resident_column_lights_with_neighbours(
+                0,
+                0,
+                &centre,
+                &offsets,
+                false,
+                false,
+                true,
+                &mut first_compute,
+            )
+            .expect("initial dependency admission");
+        let dependency = store
+            .resident_column(1, 0)
+            .expect("dependency remains resident");
+        assert_eq!(
+            dependency.retained_light_status(),
+            Some(crate::chunk::RetainedLightStatus::DependencyInitialized)
+        );
+        let mut centre_calls = 0;
+        let mut centre_compute =
+            |column: &ChunkColumn, _neighbours: &[(i32, i32, ChunkColumn)]| {
+                centre_calls += 1;
+                Some(ColumnLightSettlement::centre(
+                    lodestone_world::ColumnLight::new(column.section_count()),
+                ))
+            };
+        let settled = store
+            .settle_resident_column_lights_with_neighbours(
+                1,
+                0,
+                &dependency,
+                &offsets,
+                false,
+                false,
+                true,
+                &mut centre_compute,
+            )
+            .expect("populated dependency must run its centre admission");
+        assert_eq!(centre_calls, 1);
+        assert_eq!(
+            settled.retained_light_status(),
+            Some(crate::chunk::RetainedLightStatus::CentreSettled)
+        );
+        let mut skipped_calls = 0;
+        let mut skipped_compute =
+            |_column: &ChunkColumn, _neighbours: &[(i32, i32, ChunkColumn)]| {
+                skipped_calls += 1;
+                Some(ColumnLightSettlement::centre(
+                    lodestone_world::ColumnLight::new(centre.section_count()),
+                ))
+            };
+        store
+            .settle_resident_column_lights_with_neighbours(
+                1,
+                0,
+                &settled,
+                &offsets,
+                false,
+                false,
+                true,
+                &mut skipped_compute,
+            )
+            .expect("centre-settled snapshot must use the fast path");
+        assert_eq!(skipped_calls, 0);
     }
 
     /// A retained light refresh and a block mutation for one coordinate must

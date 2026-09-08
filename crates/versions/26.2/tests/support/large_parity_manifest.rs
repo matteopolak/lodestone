@@ -942,6 +942,20 @@ mod tests {
     }
 }
 
+/// Incremental SHA-256 used by provenance checks that must not materialize a
+/// frozen world's complete file tree in memory.
+pub struct IncrementalSha256(Sha256);
+
+impl IncrementalSha256 {
+    #[must_use]
+    pub fn new() -> Self { Self(Sha256::new()) }
+
+    pub fn update(&mut self, input: &[u8]) { self.0.update(input); }
+
+    #[must_use]
+    pub fn finish(self) -> [u8; 32] { self.0.finish() }
+}
+
 pub fn sha256(input: &[u8]) -> [u8; 32] { let mut s = Sha256::new(); s.update(input); s.finish() }
 struct Sha256 { state: [u32; 8], len: u64, buf: [u8; 64], used: usize }
 impl Sha256 {

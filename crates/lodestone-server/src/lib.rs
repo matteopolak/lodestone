@@ -559,8 +559,9 @@ pub use brewing::{
     mix_bottle,
 };
 pub use chunk::{
-    ChunkColumn, ChunkGenerationStage, ColumnLightSettlementError, ChunkSource, EndChunkSource,
-    NetherChunkSource, OverworldChunkSource, WorldgenChunkSource,
+    ChunkColumn, ChunkGenerationStage, ColumnLightSettlement, ColumnLightSettlementError,
+    ChunkSource, EndChunkSource, NetherChunkSource, OverworldChunkSource, RetainedLightStatus,
+    WorldgenChunkSource,
 };
 // `chunk_store::ChunkStore` itself stays crate-private (its methods
 // are `pub(crate)` and `IntegratedServer` is the only thing that should build
@@ -664,7 +665,8 @@ pub use server::{
     // time that the radius it raises the slider to is one `ViewTracker::max_radius`
     // actually permits — a premise it must not restate as a literal.
     MAX_CLIENT_VIEW_RADIUS,
-    EntitySource, NoEntities, ResourcePackPushFeed, ServeSummary, ServerError, serve_connection,
+    encode_chunk_with_source, EntitySource, NoEntities, ResourcePackPushFeed, ServeSummary,
+    ServerError, serve_connection,
     serve_connection_with_commands, serve_connection_with_mob_events,
     serve_connection_with_plugin_channels, serve_connection_with_resource_pack,
 };

@@ -11970,7 +11970,7 @@ mod follow_range_tests {
     #[test]
     #[should_panic(expected = "every tick-start owner batch exactly once")]
     fn entity_push_owner_batch_merge_rejects_a_missing_owner() {
-        let sim = push_owner_fixture();
+        let mut sim = push_owner_fixture();
         let mut batches = sim.tick_entity_push_owner_batches();
         batches.pop();
         let _ = merge_entity_push_owner_batches(batches);
@@ -11979,7 +11979,7 @@ mod follow_range_tests {
     #[test]
     #[should_panic(expected = "may not contain one owner twice")]
     fn entity_push_owner_batch_merge_rejects_a_duplicate_owner() {
-        let sim = push_owner_fixture();
+        let mut sim = push_owner_fixture();
         let mut batches = sim.tick_entity_push_owner_batches();
         batches[1] = batches[0].clone();
         let _ = merge_entity_push_owner_batches(batches);

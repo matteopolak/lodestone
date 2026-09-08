@@ -10,6 +10,95 @@ The reference seed is `42` and the target coordinates are `cx, cz = -250..=250`,
 
 For every compared coordinate, the Rust gate obtains the centre and its eight adjacent columns through the normal generation dispatcher, then calls the production neighbour-aware initial-chunk encoder. This is required for light too: an emissive block in a neighbouring column can illuminate the centre across its border, while the one-column encoder deliberately has no such input. The gate keeps that light in the canonical record; it never substitutes a synthetic or all-missing light payload. The frozen-world materialization halo supplies the corresponding settled neighbours on the reference side.
 
+Raw P06 prefixes also replay the initial-light admission boundary. The first
+target is the bootstrap admission: its retained initial-light snapshot uses the
+centre only. Every later target adopts the four cardinal source columns before
+its initial snapshot is retained, while the encoder still receives the complete
+3 by 3 packet footprint. This separates source admission state from packet
+neighbour input and is intentionally coordinate-independent. The deterministic
+two-record control is `LODESTONE_LARGE_PARITY_MAX_CHUNKS=2` with the
+authenticated manifest, packet-audit sidecar, and a reference-packet directory;
+it must match both the bootstrap record and the following cardinal-admission
+record before a longer prefix is attempted. The admission-order unit control
+in `large_worldgen_parity.rs` guards the bootstrap-to-cardinal transition.
+
+End raw replay carries light-engine storage independently from terrain. Each
+admission keeps the real three-by-three block footprint, seeds the flood from
+any retained layers, keeps the centre snapshot separate from dependency
+storage, and retains allocated-zero dependency layers separately before holder
+eviction. A
+later packet therefore distinguishes populated and allocated-zero layers; it
+never substitutes an all-air column for missing light storage or resets the
+layer map at a batch boundary. The authenticated controls cover an empty
+dependency footprint and a later admission with retained northwest, north,
+west, and centre layers plus an allocated-zero east layer.
+Fresh End dependency layers use the computed allocation mask for the complete
+admitted footprint: an all-air footprint keeps both layers Missing, while an
+all-air selected column with admitted terrain keeps only that terrain-induced
+vertical corridor. This control is coordinate-independent and does not encode
+retention policy in the parity test.
+The comparator replays those admissions through the production
+`encode_chunk_with_source` seam, then exports from the same source; the test
+does not maintain a parallel light-storage map. The generated End raw arm
+explicitly flushes the `RegionChunkSource` through its `WorldSaveHandle`, drops
+that source, reopens a fresh `RegionChunkSource`, preloads each target's full
+three-by-three batch, and encodes through the same seam again. Its diagnostics
+are labelled generated save/reopen parity and remain separate from the frozen
+world import diagnostic below. The focused persistence control saves a centre
+and its eight dependencies and requires the reopened source to report zero
+generated columns and at least one disk load; it does not add a retention layer
+to the test.
+
+Set `LODESTONE_LARGE_PARITY_PHASE_PROFILE=1` on a bounded generated End run to
+report reusable phase timings and counters. The profile separates manifest and
+reference I/O, centre materialization, save, reopen, batch halo loads, target
+loads, packet hashing, and the combined source-aware light-settlement/packet
+encode seam. Each line includes wall time, calls, unique coordinates, cache
+hits/misses, and source-generated/source-loaded deltas; the latter expose
+discarded generated reads inside the production seam rather than counting only
+the outer admission. For a content-only calibration that measures admissions
+without settling light or encoding packets, also set
+`LODESTONE_LARGE_PARITY_CONTENT_ONLY=1`. This diagnostic intentionally skips
+save/reopen and exact comparison, so it cannot establish parity or persistence
+correctness.
+
+End raw comparisons bound this replay to the requested export prefix. Export
+records are x-fastest/z, while admissions are tile-z/tile-x/z/x; for each
+requested target, the comparator finds the latest admission whose centre or
+one of its eight light dependencies can write that target's retained state,
+then replays that exclusive admission prefix. Later admissions cannot affect
+those targets. On the authenticated 51×51 End shard, prefixes ending at
+export indices 890 and 1050 therefore require 1,631 and 1,646 admissions
+respectively, instead of the full 53×53 halo's 2,809. The complete export
+still uses the complete admission stream.
+
+For a persisted-world import/encoder diagnostic, set
+`LODESTONE_LARGE_PARITY_FROZEN_WORLD_ROOT` to a writable copy of the validated
+sealed End world. The gate recomputes the oracle tree digest, checks the
+dimension-specific freeze stamp and authenticated manifest identity, then
+opens one fresh `RegionChunkSource` over the sealed root's `world/` persisted
+Anvil columns. It reads
+the x-fastest/z export prefix in batches of 256 by default (override with
+`LODESTONE_LARGE_PARITY_PERSISTED_BATCH_SIZE`), requires zero generated-column
+fallbacks, and encodes each retained centre through the production V770 End
+encoder. This arm is labelled persisted-world import/encoder parity and keeps
+its mismatch inventory separate from generated-world replay acceptance; a
+persisted pass cannot establish generated-world parity. The batch loop models
+the oracle's one-server sequential export: ticket removal changes residency,
+not immutable sealed bytes, so the source is opened once rather than reset for
+every batch. The minimal external controls are index 0 `(-25,-25)` and index
+890 `(-2,-8)` in a `-25..25` shard; packet references can be supplied with the
+existing reference-packet directory. A fresh reopen may legitimately load no
+retained light for the first dark target, producing empty masks; later targets
+can carry persisted sky/block layers and neighbour-derived masks. The
+diagnostic therefore delegates missing-layer handling to the production
+encoder and never infers masks from occupancy or performs an independent
+target recomputation. Set `LODESTONE_LARGE_PARITY_PERSISTED_ONLY=1` to stop
+after this diagnostic and avoid entering the generated replay arm. Set
+`LODESTONE_LARGE_PARITY_PERSISTED_PACKET_OUT` to retain the first actual
+persisted-arm mismatch packet for component decoding; the hook is bounded and
+does not select coordinates.
+
 The dimension-aware v4 format is additive. It keeps the same 501 by 501 bounds and 32-byte per-chunk digests, but authenticates one of the three dimension identities (`minecraft:overworld`, `minecraft:the_nether`, or `minecraft:the_end`) in header bytes `168..200` as SHA-256 of its resource-location string and uses that dimension's decoded window: overworld `min_y=-64` with 24 sections, Nether/End `min_y=0` with 16 sections. The v5 End format keeps that header shape but has new manifest and record domains. Its export reads the persisted settled light from each requested chunk in the sealed world copy; it does not reset or recompute light, or load an export-only neighborhood. Normal per-batch ticket removal is safe because the sealed world is not mutated during export. It also elides only a trailing all-15 sky-light layer, because an initial chunk enables its column after queueing supplied layers and a missing top sky layer resolves to the same full value. Mixed sky arrays and all block-light tags remain exact. This avoids treating allocation history as terrain while preserving a real light-value mismatch. V3 and v4 records remain readable and byte-for-byte unchanged; a merge or duplicate-read acceptance rejects different dimensions or semantic versions.
 
 The workflow has two mandatory phases. `--mode materialize` generates the requested rectangle **plus its one-chunk halo** (the complete baseline therefore materializes `-251..=251`, or `253,009` chunks), completes the real chunk-status work, post-processes it, saves it, and writes a tree-digest seal. The launcher fixes the generation executor at one worker and the oracle refuses to start if that setting is absent. Materialization visits centres in tile row-major order, but within each tile it admits exactly one centre, waits for its full result and deferred-light settlement, then removes that centre's ticket before admitting the next. Both boundaries are provenance rather than throughput knobs: fresh roots produced different semantic records without the one-worker setting, and concurrent admissions likewise changed sealed feature state. It advances only the scheduler (never resident chunk ticks), fences deferred light work, and checks that the resident full chunk reports correct light. Normal eviction and clean epoch shutdown persist that settled state; materialization does not force a whole-cache flush for every centre. It does not add an export-specific loading halo or change tile/order geometry. Each bounded epoch runs in a fresh container/JVM against the same persistent root; the shell drives the epochs automatically. This matters because the server retains point-of-interest section data beyond ticket removal, and an in-process server restart closes shared executors instead of yielding a reusable clean heap. A progress journal records the exact geometry, epoch size, next tile, and an in-flight tile range. Its `lodestone-large-parity-materialization-v2-<dimension>` filename and marker bind that journal and its seal to the serial, one-worker construction contract rather than the semantic record version. Earlier v3/v4 seals and journals are refused for every dimension because they may have been produced under concurrent construction; create a new empty root instead. It advances only after the prior JVM exited cleanly; an interrupted epoch, a changed range or epoch size, a missing journal, or an already sealed root fails closed rather than being resumed ambiguously. For the complete baseline, omit the range flags so the requested grid is `-250..=250` and its halo is `-251..=251` in both axes. `--mode export` accepts only that sealed world through a read-only mount, copies it into the container's ephemeral server-access directory, and exports semantic digests from the restarted persisted content. The manifest carries the frozen-world digest, schema digest, geometry, full digest width, and SHA-256 payload checksum; merge refuses a shard from a different frozen world. A root sealed before this per-centre light settlement is not an acceptable End baseline and must be regenerated.

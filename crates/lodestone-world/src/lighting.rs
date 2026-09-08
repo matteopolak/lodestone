@@ -366,6 +366,144 @@ pub fn compute_column_light_with_neighbours_for_initial_chunk(
     )
 }
 
+/// Computes an initial chunk light result from a three-by-three terrain field
+/// and the light-layer storage already retained for that field.
+///
+/// The terrain footprint is always sampled in full, including columns whose
+/// light layers are allocated but still all zero. `stored[slot]` uses the same
+/// row-major layout as [`Neighbourhood`]; `None` means that no layer has been
+/// retained for that column. The centre is bootstrapped from the sky when its
+/// slot is `None`, while retained layers seed the flood directly. This keeps
+/// the light engine's storage lifecycle separate from chunk terrain lifetime.
+#[must_use]
+pub fn compute_column_light_with_neighbours_and_storage(
+    neighbourhood: &Neighbourhood<'_, impl BlockVolume>,
+    props: &impl LightProperties,
+    stored: &[Option<&ColumnLight>; 9],
+    full_sky_sections: usize,
+) -> ColumnLight {
+    compute_column_lights_with_neighbours_and_storage(
+        neighbourhood,
+        props,
+        stored,
+        full_sky_sections,
+    )[4]
+        .clone()
+}
+
+/// Computes settled light for every column in a three-by-three footprint.
+///
+/// The returned array uses the same row-major slot indexing as Neighbourhood.
+/// All nine snapshots come from one shared terrain/light flood, so a caller
+/// can evict holders while retaining storage for each touched column.
+#[must_use]
+pub fn compute_column_lights_with_neighbours_and_storage(
+    neighbourhood: &Neighbourhood<'_, impl BlockVolume>,
+    props: &impl LightProperties,
+    stored: &[Option<&ColumnLight>; 9],
+    full_sky_sections: usize,
+) -> [ColumnLight; 9] {
+    assert!(
+        full_sky_sections > 0,
+        "initial chunk light must keep at least one full-sky section"
+    );
+    let center = neighbourhood.center;
+    let section_count = center.section_count();
+    let min_y = center.min_y();
+    let field = Field {
+        wx: 3 * EDGE,
+        wz: 3 * EDGE,
+        height: (section_count + 2) * EDGE,
+    };
+    let field_bottom_y = min_y - EDGE as i32;
+    let mut opacity = vec![0u8; field.len()];
+    let mut block = vec![0u8; field.len()];
+    let mut block_buckets = Buckets::new();
+    let mut highest_non_air_light_section = [None; 9];
+    let has_retained_sky = stored.iter().flatten().any(|light| {
+        (0..light.light_section_count()).any(|section| {
+            !light_data_is_zero(light.sky(section))
+        })
+    });
+
+    for y_rel in 0..field.height {
+        let world_y = field_bottom_y + y_rel as i32;
+        for fz in 0..field.wz {
+            for fx in 0..field.wx {
+                let idx = field.cell(fx, y_rel, fz);
+                let dx = (fx / EDGE) as i32 - 1;
+                let dz = (fz / EDGE) as i32 - 1;
+                match neighbourhood
+                    .at(dx, dz)
+                    .map(|column| column.block(fx % EDGE, world_y, fz % EDGE))
+                {
+                    Some(state) => {
+                        let slot = (fz / EDGE) * 3 + (fx / EDGE);
+                        if state != center.air_state() {
+                            highest_non_air_light_section[slot] = Some(y_rel / EDGE);
+                        }
+                        opacity[idx] = props.opacity(state).min(MAX_LIGHT);
+                        let emission = props.emission(state).min(MAX_LIGHT);
+                        if emission > 0 {
+                            block[idx] = emission;
+                            block_buckets.push(emission, idx as u32);
+                        }
+                    }
+                    None => opacity[idx] = MAX_LIGHT,
+                }
+            }
+        }
+    }
+
+    let sky = if props.has_skylight() {
+        if has_retained_sky {
+            compute_sky_from_storage(
+                &field,
+                &opacity,
+                stored,
+                stored[4].is_none() || stored[4].is_some_and(|light| {
+                    (0..light.light_section_count()).all(|section| {
+                        light_data_is_zero(light.sky(section))
+                    })
+                }),
+            )
+        } else {
+            compute_sky(&field, &opacity)
+        }
+    } else {
+        vec![0; field.len()]
+    };
+    propagate(&field, &mut block, &opacity, &mut block_buckets);
+
+    std::array::from_fn(|slot| {
+        let ox = (slot % 3) * EDGE;
+        let oz = (slot / 3) * EDGE;
+        let mut packed = pack(
+            section_count,
+            section_count + 2,
+            &field,
+            ox,
+            oz,
+            &sky,
+            &block,
+        );
+        trim_sky_after_full_sections(
+            &mut packed,
+            highest_non_air_light_section[slot],
+            full_sky_sections,
+        );
+        packed
+    })
+}
+
+fn light_data_is_zero(data: &LightData) -> bool {
+    match data {
+        LightData::Missing | LightData::Uniform(0) => true,
+        LightData::Uniform(_) => false,
+        LightData::Values(array) => array.as_bytes().iter().all(|byte| *byte == 0),
+    }
+}
+
 /// The shared core: sample blocks over `field` (via `sample`, which returns the
 /// state id or `None` for a barrier cell), flood sky and block light, then pack
 /// the centre `16×16` sub-column at field offset `(ox, oz)`.
@@ -454,6 +592,48 @@ fn compute_sky(field: &Field, opacity: &[u8]) -> Vec<u8> {
                 }
                 level[idx] = MAX_LIGHT;
                 buckets.push(MAX_LIGHT, idx as u32);
+            }
+        }
+    }
+
+    propagate(field, &mut level, opacity, &mut buckets);
+    level
+}
+
+/// Seeds sky light from retained per-column layers, with optional centre-only
+/// top-of-world bootstrap for a newly admitted target.
+fn compute_sky_from_storage(
+    field: &Field,
+    opacity: &[u8],
+    stored: &[Option<&ColumnLight>; 9],
+    bootstrap_center: bool,
+) -> Vec<u8> {
+    let mut level = vec![0u8; field.len()];
+    let mut buckets = Buckets::new();
+
+    for y_rel in 0..field.height {
+        for fz in 0..field.wz {
+            for fx in 0..field.wx {
+                let slot = (fz / EDGE) * 3 + (fx / EDGE);
+                let local_x = fx % EDGE;
+                let local_z = fz % EDGE;
+                let section = y_rel / EDGE;
+                let local_y = y_rel % EDGE;
+                let idx = field.cell(fx, y_rel, fz);
+                let retained = stored[slot].and_then(|light| {
+                    light
+                        .sky(section)
+                        .get(NibbleArray::index(local_x, local_y, local_z))
+                });
+                if let Some(value) = retained {
+                    if value > 0 {
+                        level[idx] = value;
+                        buckets.push(value, idx as u32);
+                    }
+                } else if bootstrap_center && slot == 4 && opacity[idx] == 0 {
+                    level[idx] = MAX_LIGHT;
+                    buckets.push(MAX_LIGHT, idx as u32);
+                }
             }
         }
     }
