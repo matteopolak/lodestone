@@ -43,10 +43,11 @@
 //! |---|---|
 //! | [`host`] | the embedding: engine, per-guest `Store` and scheduler, the gated `Linker`, fuel preemption |
 //! | [`capability`] | the capability vocabulary and the two enforcement mechanisms |
+//! | [`version_broker`] | the copied, privileged version identity and lookup contract |
 //! | `wit/lodestone-plugin.wit` | the ABI surface — the WIT world, vendored as the single source of truth |
 //! | [`abi`] | the lift from `ClientEvent` and the lower to `ClientAction`, each capability-gated |
 //! | [`conductor`] | [`WasmHostPlugin`]: the one native system that drives every guest, writes protocol actions to `ActionQueue`, and routes copied intents to their existing ECS consumers |
-//! | [`manifest`] | `plugin.toml`: name, version, ABI world, priority, declared capabilities |
+//! | [`manifest`] | `plugin.toml`: name, version, ABI world, priority, declared capabilities, and the optional exact broker lock |
 //!
 //! # Why the ABI is the intent doctrine, not a new vocabulary
 //!
@@ -89,8 +90,10 @@
 //! # Configuration
 //!
 //! [`host::PluginHost::new`] takes the policy; [`capability::CapabilitySet::default_policy`]
-//! is the "denied unless granted" default. `with_fuel`, `with_memory_limit` and
-//! `with_filesystem_root` are the three knobs.
+//! is the "denied unless granted" default. `with_fuel`, `with_memory_limit`,
+//! `with_filesystem_root`, and `with_version_broker` configure host resources.
+//! The broker remains unavailable unless an embedding supplies a source and a
+//! manifest declares the matching `[version-lock]`.
 //!
 //! # Dependencies
 //!
@@ -108,6 +111,7 @@ pub mod capability;
 pub mod conductor;
 pub mod host;
 pub mod manifest;
+pub mod version_broker;
 
 pub use abi::{
     IntentAction, InventoryClickButton, InventoryClickIntent, InventoryClickMode, InventoryThrowMode,
@@ -136,7 +140,11 @@ pub use host::{
     PlayerTeleported, ReloadError, ResidentBlockMutation, ResidentBlockMutationOutcome,
     TeleportRelative, Vec3, VerdictDispatch,
 };
-pub use manifest::{Dependencies, Manifest, ManifestError, Priority, scan_directory};
+pub use manifest::{Dependencies, Manifest, ManifestError, Priority, VersionLock, scan_directory};
+pub use version_broker::{
+    ABI as VERSION_BROKER_ABI, VersionBroker, VersionBrokerCompatibilityError,
+    VersionBrokerDescriptor, VersionBrokerRecord,
+};
 
 /// The default directory a host scans for plugins, relative to the working
 /// directory — `plugins/`, one subdirectory per plugin, matching what a Bukkit user

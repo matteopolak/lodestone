@@ -24,10 +24,11 @@ pub(super) fn run_windowed_with_app(
             Some(path) => crate::wasm_plugins::load_grants_from_file(path)?,
             None => lodestone_wasm_host::PluginGrantPolicy::default(),
         };
-        crate::wasm_plugins::install_from_directory_with_grants(
+        crate::wasm_plugins::install_from_directory_with_grants_for_protocol(
             &mut plugin_app,
             std::path::Path::new(lodestone_wasm_host::DEFAULT_PLUGIN_DIR),
             &grants,
+            config.protocol,
         )?;
     }
 

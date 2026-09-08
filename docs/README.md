@@ -797,6 +797,12 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   ordinary clicks, bulk transfers, pickup-all double clicks, hotbar swaps, drops,
   held-item actions, or respawn while native systems retain menu, simulation, and
   network ownership.
+- [WASM version-locked broker](./wasm-version-broker.md) — The privileged
+  `version:broker` capability gives a WASM plugin a small, typed import for data
+  selected by the host's negotiated protocol family. It is the sandboxed counterpart
+  to the native version-locked adapter escape hatch: a plugin must declare an exact
+  family, protocol, and broker ABI, and the host refuses it before reading or
+  compiling the module when that identity does not match.
 - [WASM world snapshots and authoritative mutations](./wasm-world-snapshots.md) —
   The `world:read` WASM capability gives a runtime-loaded plugin a bounded, copied
   view of block-state ids in the current client chunk store. `world:write` adds a

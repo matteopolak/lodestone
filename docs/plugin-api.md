@@ -149,6 +149,11 @@ this is a permanent ceiling, not a gap). Texture/model *substitution* is separat
 resource-pack override stack and server-push resource packs swap textures with no rendering work at all,
 the same way a real Bukkit/Paper plugin does it too.
 
+The WASM tier has one deliberately narrower exception: a plugin granted `version:broker` may request
+an exact `[version-lock]` identity and receive copied descriptor/key-value records from the selected
+registry adapter. It still receives no version types, packet bytes, registry handles, ECS borrows,
+sockets, callbacks, or arbitrary host calls; see [`wasm-version-broker.md`](./wasm-version-broker.md).
+
 ### Reading and writing state
 
 | kind | examples | notes |
@@ -351,6 +356,12 @@ never lifted to an ungranted guest and its actions are refused, counted, and log
 *declaration*, not the enforcement, and anything genuinely dangerous (filesystem, network, subprocess)
 must be modelled as an import rather than trusted as data-flow.
 
+`version:broker` is another import-column capability, but it is additionally version-locked: the
+manifest must carry an exact `[version-lock]` family/protocol/broker-ABI triple, and the embedding must
+configure a matching source before the module is read. The interface returns only copied typed WIT
+records from a finite provider vocabulary; it is not a route to protocol objects or arbitrary host
+internals. See [`wasm-version-broker.md`](wasm-version-broker.md).
+
 `on-verdict(context)` is the synchronous cancellation half. It receives one copy-only typed context
 for each existing action veto and returns only `allow` or `deny`. The conductor brokers it into
 `ActionVetoes`, so it runs under the tick owner rather than re-entering the world. Eligible guests run
@@ -445,7 +456,7 @@ absent.
 
 **WASM tier:** `PluginHost::new(policy)` takes a `CapabilitySet` (`default_policy()` withholds
 `fs:read`, `schedule:tasks`, `commands:register`, `act:look`, `act:movement`, `act:place`, and
-`observe:place`); `with_fuel(n)` bounds each guest's per-host-tick instruction budget —
+`observe:place`, plus the privileged `version:broker`); `with_fuel(n)` bounds each guest's per-host-tick instruction budget —
 fuel rather than
 epoch-based preemption, since an epoch deadline needs a watchdog and a host without one has a deadline
 that never trips; `with_memory_limit(n)` bounds linear memory; `with_filesystem_root(p)` is required in

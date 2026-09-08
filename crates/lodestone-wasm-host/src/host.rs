@@ -40,15 +40,17 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use wasmtime::component::{Component, Linker, TypedFunc};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 use bevy_ecs::entity::Entity;
 
 use crate::bindings::lodestone::plugin::{
-    filesystem, filesystem_write, logging, scheduler, types, world_snapshot,
+    filesystem, filesystem_write, logging, scheduler, types, version_broker, world_snapshot,
 };
 use crate::capability::{Capability, CapabilitySet};
+use crate::version_broker::{VersionBroker, VersionBrokerDescriptor};
 use lodestone_ecs::ChunkWorld;
 
 /// The WIT vocabulary, re-exported from the generated bindings so that nothing
@@ -76,9 +78,9 @@ pub use crate::bindings::lodestone::plugin::types::{
 /// manifest must declare it; anything else is a load-time rejection.
 ///
 /// The WIT world is a named, versioned unit, so "a guest built against
-/// `lodestone:plugin@0.2.0`" is a thing the host can *detect* rather than
+/// `lodestone:plugin@0.27.0`" is a thing the host can *detect* rather than
 /// discover as a mysterious trap.
-pub const ABI_WORLD: &str = "lodestone:plugin@0.26.0";
+pub const ABI_WORLD: &str = "lodestone:plugin@0.27.0";
 
 /// Default per-tick fuel budget. Chosen as "enough for any plugin doing plain
 /// data work over a tick's event batch, nowhere near enough to survive a spin
@@ -169,6 +171,30 @@ pub enum HostError {
         name: String,
         found: String,
         expected: String,
+    },
+    #[error(
+        "plugin `{name}` requests the privileged version broker but does not declare a \
+         [version-lock] identity"
+    )]
+    VersionBrokerLockMissing { name: String },
+    #[error(
+        "plugin `{name}` requests the privileged version broker but no version-specific \
+         source is configured"
+    )]
+    VersionBrokerUnavailable { name: String },
+    #[error(
+        "plugin `{name}` requires WASM version broker family={required_family} \
+         protocol={required_protocol} ABI={required_abi}, but host provides \
+         family={actual_family} protocol={actual_protocol} ABI={actual_abi}"
+    )]
+    VersionBrokerMismatch {
+        name: String,
+        required_family: String,
+        required_protocol: i32,
+        required_abi: String,
+        actual_family: String,
+        actual_protocol: i32,
+        actual_abi: String,
     },
     #[error(
         "plugin `{name}` requests capabilities [{missing}] that host policy does not grant \
@@ -325,6 +351,9 @@ pub struct GuestState {
     /// callback. The guest never receives this handle: [`world_snapshot::Host`] copies a
     /// bounded result under its lock and drops the guard before returning.
     chunk_world: Option<ChunkWorld>,
+    /// The selected version-specific broker. Only owned descriptor/value data
+    /// is copied out by the import implementation below.
+    version_broker: Option<Arc<dyn VersionBroker>>,
     current_tick: u64,
     next_task_id: types::TaskId,
     scheduled_tasks: Vec<ScheduledTask>,
@@ -347,6 +376,13 @@ impl fmt::Debug for GuestState {
                     .collect::<Vec<_>>(),
             )
             .field("fs_root", &self.fs_root)
+            .field(
+                "version_broker",
+                &self
+                    .version_broker
+                    .as_ref()
+                    .map(|broker| broker.descriptor()),
+            )
             .field("current_tick", &self.current_tick)
             .field("scheduled_tasks", &self.scheduled_tasks.len())
             .finish_non_exhaustive()
@@ -523,6 +559,32 @@ impl world_snapshot::Host for GuestState {
             .into_iter()
             .map(|position| snapshot.block_state_at(position.x, position.y, position.z))
             .collect())
+    }
+}
+
+impl version_broker::Host for GuestState {
+    fn get_descriptor(&mut self) -> version_broker::Descriptor {
+        let descriptor = self
+            .version_broker
+            .as_ref()
+            .expect("version broker is linked only when configured")
+            .descriptor();
+        version_broker::Descriptor {
+            family: descriptor.family().to_owned(),
+            protocol: descriptor.protocol(),
+            abi: descriptor.abi().to_owned(),
+        }
+    }
+
+    fn lookup(&mut self, key: String) -> Option<version_broker::Value> {
+        self.version_broker
+            .as_ref()
+            .expect("version broker is linked only when configured")
+            .lookup(&key)
+            .map(|record| version_broker::Value {
+                key: record.key().to_owned(),
+                value: record.value().to_owned(),
+            })
     }
 }
 
@@ -839,6 +901,7 @@ pub struct PluginHost {
     verdict_fuel: u64,
     memory_limit: usize,
     fs_root: Option<PathBuf>,
+    version_broker: Option<Arc<dyn VersionBroker>>,
     plugins: Vec<LoadedPlugin>,
 }
 
@@ -860,6 +923,13 @@ impl fmt::Debug for PluginHost {
             .field("verdict_fuel", &self.verdict_fuel)
             .field("memory_limit", &self.memory_limit)
             .field("fs_root", &self.fs_root)
+            .field(
+                "version_broker",
+                &self
+                    .version_broker
+                    .as_ref()
+                    .map(|broker| broker.descriptor()),
+            )
             .field("plugins", &self.plugins)
             .finish()
     }
@@ -895,6 +965,7 @@ impl PluginHost {
             verdict_fuel: DEFAULT_FUEL_PER_VERDICT,
             memory_limit: DEFAULT_MEMORY_LIMIT,
             fs_root: None,
+            version_broker: None,
             plugins: Vec::new(),
         })
     }
@@ -924,6 +995,15 @@ impl PluginHost {
     #[must_use]
     pub fn with_filesystem_root(mut self, root: PathBuf) -> Self {
         self.fs_root = Some(root);
+        self
+    }
+
+    /// Configure the selected version-specific source for privileged broker
+    /// imports. A plugin still needs both the `version:broker` capability and
+    /// an exact `[version-lock]` manifest table before this source is linked.
+    #[must_use]
+    pub fn with_version_broker(mut self, broker: Arc<dyn VersionBroker>) -> Self {
+        self.version_broker = Some(broker);
         self
     }
 
@@ -1025,7 +1105,7 @@ impl PluginHost {
         requested: &CapabilitySet,
     ) -> Result<usize, HostError> {
         let policy = self.policy.clone();
-        self.load_file_with_policy(name, wasm_path, requested, &policy)
+        self.load_file_with_policy(name, wasm_path, requested, &policy, None)
     }
 
     /// The implementation behind [`Self::load_file`] and manifest discovery.
@@ -1037,6 +1117,7 @@ impl PluginHost {
         wasm_path: &Path,
         requested: &CapabilitySet,
         policy: &CapabilitySet,
+        version_lock: Option<&VersionBrokerDescriptor>,
     ) -> Result<usize, HostError> {
         let missing = requested.missing_from(policy);
         if !missing.is_empty() {
@@ -1049,6 +1130,30 @@ impl PluginHost {
                     .join(", "),
                 granted: policy.to_string(),
             });
+        }
+        if requested.contains(Capability::VersionBroker) {
+            let Some(required) = version_lock else {
+                return Err(HostError::VersionBrokerLockMissing {
+                    name: name.to_owned(),
+                });
+            };
+            let Some(broker) = self.version_broker.as_ref() else {
+                return Err(HostError::VersionBrokerUnavailable {
+                    name: name.to_owned(),
+                });
+            };
+            let actual = broker.descriptor();
+            if let Err(error) = required.validate_against(&actual) {
+                return Err(HostError::VersionBrokerMismatch {
+                    name: name.to_owned(),
+                    required_family: error.required().family().to_owned(),
+                    required_protocol: error.required().protocol(),
+                    required_abi: error.required().abi().to_owned(),
+                    actual_family: error.actual().family().to_owned(),
+                    actual_protocol: error.actual().protocol(),
+                    actual_abi: error.actual().abi().to_owned(),
+                });
+            }
         }
         // `requested ∩ policy`, which after the check above is just `requested`.
         // Written as the intersection anyway so the invariant does not depend on
@@ -1109,6 +1214,16 @@ impl PluginHost {
                     message: format!("linking world: {e:?}"),
                 })?;
         }
+        if granted.contains(Capability::VersionBroker) {
+            version_broker::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
+                &mut linker,
+                |s| s,
+            )
+            .map_err(|e| HostError::Compile {
+                name: name.to_owned(),
+                message: format!("linking version broker: {e:?}"),
+            })?;
+        }
 
         let state = GuestState {
             name: name.to_owned(),
@@ -1135,6 +1250,7 @@ impl PluginHost {
             } else {
                 None
             },
+            version_broker: self.version_broker.clone(),
             chunk_world: None,
             current_tick: 0,
             next_task_id: 0,
@@ -1268,7 +1384,17 @@ impl PluginHost {
     ) -> Result<usize, LoadError> {
         let module = manifest.resolved_module(manifest_path)?;
         let requested = manifest.requested_capabilities()?;
-        let index = self.load_file_with_policy(&manifest.name, &module, &requested, policy)?;
+        let version_lock = manifest
+            .version_lock
+            .as_ref()
+            .map(crate::manifest::VersionLock::descriptor);
+        let index = self.load_file_with_policy(
+            &manifest.name,
+            &module,
+            &requested,
+            policy,
+            version_lock.as_ref(),
+        )?;
         let reported = &self.plugins[index].info.name;
         if *reported != manifest.name {
             tracing::warn!(
@@ -1370,6 +1496,9 @@ impl PluginHost {
             .with_memory_limit(self.memory_limit);
         if let Some(root) = &self.fs_root {
             candidate = candidate.with_filesystem_root(root.clone());
+        }
+        if let Some(broker) = &self.version_broker {
+            candidate = candidate.with_version_broker(Arc::clone(broker));
         }
 
         let errors = candidate
