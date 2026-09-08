@@ -12,13 +12,14 @@
 //! `lodestone-worldedit`'s own real-schedule test uses for `ChunkWorld`.
 
 use lodestone_ecs::app::App;
-use lodestone_ecs::entity::{CustomName, EntityIndex, EntityKind, Health, Position};
+use lodestone_ecs::entity::{CustomName, EntityIndex, EntityKind, Equipment, Health, Position};
 use lodestone_ecs::entity_spawn::CustomEntityKind;
 use lodestone_ecs::{CorePlugin, GameTick, LocalPlayer};
 use lodestone_mob_spawner::{
-    DespawnRequests, MobSpawnerPlugin, SpawnRequest, SpawnRequests, SpawnedEntities, TRAINING_DUMMY,
+    DespawnRequests, EntityMutation, EntityMutationRequests, MobSpawnerPlugin, SpawnRequest,
+    SpawnRequests, SpawnedEntities, TRAINING_DUMMY,
 };
-use lodestone_model::{Rotation, Text, Vec3};
+use lodestone_model::{EntityEquipment, EquipmentSlot, Rotation, Text, Vec3};
 
 fn app() -> App {
     let mut app = App::new();
@@ -101,6 +102,81 @@ fn a_queued_spawn_reaches_the_index_can_be_modified_and_a_queued_despawn_removes
     assert!(
         app.world().resource::<SpawnedEntities>().0.is_empty(),
         "the despawned id must drop out of the plugin's own live-entity list"
+    );
+}
+
+/// The plugin-facing mutation queue resolves an id at tick time and applies
+/// copied values through the same entity components the render fold reads.
+#[test]
+fn queued_entity_mutations_reach_the_spawned_entity_and_unknown_ids_are_ignored() {
+    let mut app = app();
+    app.world_mut()
+        .resource_mut::<SpawnRequests>()
+        .0
+        .push(SpawnRequest::Vanilla {
+            kind: key("minecraft:pig"),
+            position: Vec3::new(0.0, 64.0, 0.0),
+            rotation: Rotation::new(0.0, 0.0),
+        });
+    app.world_mut().run_schedule(GameTick);
+
+    let id = app.world().resource::<SpawnedEntities>().0[0];
+    let entity = app
+        .world()
+        .resource::<EntityIndex>()
+        .get(id)
+        .expect("the spawned entity must be indexed before mutation");
+
+    app.world_mut()
+        .resource_mut::<EntityMutationRequests>()
+        .0
+        .extend([
+            EntityMutation::Teleport {
+                entity_id: id,
+                position: Vec3::new(8.0, 70.0, -2.0),
+            },
+            EntityMutation::SetVelocity {
+                entity_id: id,
+                velocity: Vec3::new(0.25, 0.5, -0.75),
+            },
+            EntityMutation::SetHealth {
+                entity_id: id,
+                health: 17.5,
+            },
+            EntityMutation::SetEquipment {
+                entity_id: id,
+                equipment: vec![EntityEquipment {
+                    slot: EquipmentSlot::Head,
+                    item: None,
+                }],
+            },
+            EntityMutation::SetHealth {
+                entity_id: 404,
+                health: 1.0,
+            },
+        ]);
+    app.world_mut().run_schedule(GameTick);
+
+    assert_eq!(
+        app.world().get::<Position>(entity).map(|value| value.0),
+        Some(Vec3::new(8.0, 70.0, -2.0))
+    );
+    assert_eq!(
+        app.world().get::<lodestone_ecs::entity::Velocity>(entity).map(|value| value.0),
+        Some(Vec3::new(0.25, 0.5, -0.75))
+    );
+    assert_eq!(app.world().get::<Health>(entity).map(|value| value.0), Some(17.5));
+    assert_eq!(
+        app.world().get::<Equipment>(entity).map(|value| value.0.clone()),
+        Some(vec![EntityEquipment {
+            slot: EquipmentSlot::Head,
+            item: None,
+        }])
+    );
+    assert_eq!(
+        app.world().resource::<EntityMutationRequests>().0.len(),
+        0,
+        "the queue must drain even when one request names an unknown id"
     );
 }
 

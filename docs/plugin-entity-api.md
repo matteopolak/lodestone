@@ -83,6 +83,14 @@ writing state" table's non-player-entity-components row. Ordinary `Commands`/`Qu
 whole story there; `crates/plugins/lodestone-mob-spawner`'s own test exercises it directly (a plain
 `Position`/`Health` insert) to confirm nothing about the new spawn/despawn path disturbs it.
 
+For plugins that prefer a request boundary, `lodestone-mob-spawner::EntityMutationRequests` is the
+small reference consumer: `Teleport`, `SetVelocity`, `SetHealth`, and `SetEquipment` carry copied
+values and an id,
+then `MobSpawnerPlugin` resolves the id during `GameTick` and applies the matching component through
+deferred commands. Unknown ids are consumed as no-ops, so a request cannot create an entity or retain
+an ECS handle past its generation. This convenience is intentionally client-local; a server-visible
+mutation must use the server's authoritative mob handle and its ordinary network update path.
+
 ### Client-side id safety
 
 Vanilla's own entity-id counter (`Entity.ENTITY_COUNTER`) starts at `0` and only ever increments, so
