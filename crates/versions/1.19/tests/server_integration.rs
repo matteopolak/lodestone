@@ -291,10 +291,29 @@ async fn joined_protocol_762_chest_moves_a_slot_and_corrects_prediction() {
             }),
         Some(Some("minecraft:diamond".to_owned()))
     );
-    // `apply_use_item_on` hydrates a generated block entity from this source
-    // on the first right-click. That is the same path a generated chest uses;
-    // keeping the registry private prevents the fixture from bypassing it.
-    let (server, client_io) = IntegratedServer::open_in_memory(protocol, Arc::clone(&source), 0);
+    let (server, client_io) = IntegratedServer::open_in_memory_with_mobs(
+        protocol,
+        Arc::clone(&source),
+        (0..=0, 0..=0),
+        (0, 0),
+        0,
+        0,
+    );
+    let entities = server
+        .block_entities()
+        .expect("the live integrated server owns block entities")
+        .clone();
+    entities.with(|registry| {
+        let mut slots = vec![None; 27];
+        slots[0] = Some(ItemStack::new("minecraft:diamond".parse().unwrap(), 1));
+        registry.insert(
+            TARGET,
+            BlockEntity::Container {
+                id: "minecraft:chest".to_owned(),
+                slots,
+            },
+        );
+    });
     let profile = LoginProfile {
         username: "ChestFixture".to_owned(),
         uuid: uuid::Uuid::new_v4(),
@@ -303,7 +322,7 @@ async fn joined_protocol_762_chest_moves_a_slot_and_corrects_prediction() {
         host: "memory".to_owned(),
         port: 0,
     };
-    let (mut handle, _) = ClientBuilder::new(address, profile, Box::new(adapter_for(762)))
+    let (mut handle, mut events) = ClientBuilder::new(address, profile, Box::new(adapter_for(762)))
         .player_loaded_policy(PlayerLoadedPolicy::Manual)
         .connect_with(client_io);
 
@@ -315,6 +334,16 @@ async fn joined_protocol_762_chest_moves_a_slot_and_corrects_prediction() {
         .wait_for_chunk(lodestone_client::ChunkPos::new(0, 0), Duration::from_secs(10))
         .await
         .expect("protocol-762 chunk arrives");
+    assert_eq!(
+        entities.with(|registry| {
+            registry
+                .get(TARGET)
+                .map(BlockEntity::container_slots)
+                .and_then(|slots| slots.first().cloned())
+                .and_then(|item| item.map(|item| item.item.to_string()))
+        }),
+        Some("minecraft:diamond".to_owned())
+    );
     handle
         .send_action(ClientAction::UseItemOn {
             hand: Hand::Main,
@@ -326,13 +355,30 @@ async fn joined_protocol_762_chest_moves_a_slot_and_corrects_prediction() {
                 z: 0.5,
             },
             inside_block: false,
-            sequence: 0,
+            sequence: lodestone_model::PredictionSequence::INITIAL,
         })
         .expect("joined client accepts the chest interaction");
-    handle
-        .wait_for(Duration::from_secs(10), |client| client.open_menu().is_some())
-        .await
-        .expect("the chest opens through the joined protocol path");
+    let window_id = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ClientEvent::ScreenOpened { window_id, .. }) = events.recv().await {
+                break window_id;
+            }
+        }
+    })
+    .await
+    .expect("the chest opens through the joined protocol path");
+    let initial = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ClientEvent::ContainerContent { window_id: id, items, .. }) = events.recv().await
+                && id == window_id
+            {
+                break items;
+            }
+        }
+    })
+    .await
+    .expect("the chest's initial content reaches the joined client");
+    assert_eq!(initial[0].as_ref().map(|item| item.count), Some(1));
     let opened = handle.open_menu().expect("the chest menu remains open");
     assert_eq!(opened.window_id, 1);
     assert_eq!(opened.menu.slot_item(0).map(|item| item.count()), Some(1));
@@ -351,20 +397,19 @@ async fn joined_protocol_762_chest_moves_a_slot_and_corrects_prediction() {
             carried_item: None,
         })
         .expect("joined client accepts the chest click");
-    handle
-        .wait_for(Duration::from_secs(10), |client| {
-            client
-                .open_menu()
-                .is_some_and(|menu| {
-                    menu.menu.slot_item(0).is_none()
-                        && menu
-                            .menu
-                            .slot_item(27)
-                            .is_some_and(|item| item.count() == 1)
-                })
-        })
-        .await
-        .expect("the host mutation and corrective content reach the client");
+    let corrected = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ClientEvent::ContainerContent { window_id: id, items, .. }) = events.recv().await
+                && id == window_id
+            {
+                break items;
+            }
+        }
+    })
+    .await
+    .expect("the host mutation and corrective content reach the client");
+    assert!(corrected[0].is_none());
+    assert_eq!(corrected[27].as_ref().map(|item| item.count), Some(1));
 
     handle
         .send_action(ClientAction::ContainerClose {
@@ -387,23 +432,31 @@ async fn joined_protocol_762_chest_moves_a_slot_and_corrects_prediction() {
                 z: 0.5,
             },
             inside_block: false,
-            sequence: 1,
+            sequence: lodestone_model::PredictionSequence::new(1),
         })
         .expect("joined client reopens the chest");
-    handle
-        .wait_for(Duration::from_secs(10), |client| {
-            client
-                .open_menu()
-                .is_some_and(|menu| {
-                    menu.menu.slot_item(0).is_none()
-                        && menu
-                            .menu
-                            .slot_item(27)
-                            .is_some_and(|item| item.count() == 1)
-                })
-        })
-        .await
-        .expect("the authoritative slot mutation persists after reopening");
+    let reopened_window_id = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ClientEvent::ScreenOpened { window_id, .. }) = events.recv().await {
+                break window_id;
+            }
+        }
+    })
+    .await
+    .expect("the chest reopens through the joined protocol path");
+    let reopened = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ClientEvent::ContainerContent { window_id: id, items, .. }) = events.recv().await
+                && id == reopened_window_id
+            {
+                break items;
+            }
+        }
+    })
+    .await
+    .expect("the authoritative slot mutation persists after reopening");
+    assert!(reopened[0].is_none());
+    assert_eq!(reopened[27].as_ref().map(|item| item.count), Some(1));
 
     handle.shutdown();
     let _ = handle.join().await;

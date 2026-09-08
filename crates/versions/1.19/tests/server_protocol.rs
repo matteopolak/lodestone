@@ -125,7 +125,7 @@ fn protocol_762_uses_its_capture_ids_and_encodes_a_registry_shaped_chunk() {
             status: 0,
             location: Position::new(3, 100, 5),
             face: 1,
-            sequence: lodestone_model::PredictionSequence::new(17),
+            sequence: 17,
         },
         CTX,
     )
