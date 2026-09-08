@@ -16,10 +16,22 @@
       "domain": "world-editing",
       "jar": "/operator/plugins/protection-plugin.jar",
       "sha256": "replace-with-the-plugin-sha256",
-      "entrypoint": "example.protection.Plugin",
+      "entrypoint": "io.lodestone.conformance.PaperConformancePlugin",
       "unmodified": true
     }
   ],
+  "driver": {
+    "plugin": "operator-protection-plugin",
+    "entrypoint": "io.lodestone.conformance.PaperConformancePlugin",
+    "protocol": "paper-observation-v1",
+    "controls": ["listener-present", "no-listener"],
+    "requires_real_block_break": true,
+    "build": {
+      "jdk_release": 25,
+      "paper_api": "{paper_jar}",
+      "network": false
+    }
+  },
   "scenario": "scenario-block-break-cancel.json",
   "commands": {
     "paper": ["{java}", "-jar", "{paper_jar}", "--nogui"],
