@@ -7,6 +7,7 @@ use lodestone_server::{
 };
 use lodestone_v26_2::packets::chunk::ChunkShape;
 use lodestone_v26_2::V770ServerProtocol;
+use lodestone_world::{ColumnLight, LightData, LightStorage, NibbleArray};
 
 fn block_at(light: &lodestone_world::ColumnLight, y: i32, x: usize, z: usize) -> u8 {
     let section = ((y + 16) / 16) as usize;
@@ -220,4 +221,100 @@ fn plural_admission_commits_center_and_dependency_readiness_atomically() {
         )
         .expect("a centre-settled snapshot must use the fast path");
     assert_eq!(skipped_calls, 0);
+}
+
+#[test]
+fn dependency_centre_admission_promotes_exact_snapshot_and_initializes_new_dependency() {
+    let shape = ChunkShape::nether_or_end_1_21();
+    let section_count = shape.section_count;
+    let light_section_count = section_count + 2;
+    let source = retained_chunk_source_for_view_radius(lodestone_server::nether_chunk_source(42), 8);
+    let mut retained = ColumnLight::new(section_count);
+    let mut block_values = NibbleArray::filled(11);
+    block_values.set(NibbleArray::index(3, 5, 7), 2);
+    *retained.sky_mut(1) = LightData::Uniform(4);
+    *retained.block_mut(6) = LightData::Values(block_values);
+    let mut allocated = vec![false; light_section_count];
+    allocated[1] = true;
+    allocated[6] = true;
+    let mut light_and_data = vec![false; light_section_count];
+    light_and_data[6] = true;
+    let storage = LightStorage::from_masks(allocated, light_and_data);
+
+    let mut centre = source.column(0, 0);
+    centre.set_block(8, 82, 8, "minecraft:netherrack");
+    retained.set_storage(storage.clone());
+    centre.set_retained_light_with_status(
+        retained.clone(),
+        RetainedLightStatus::DependencyInitialized,
+    );
+    assert!(source.store_resident_column(0, 0, &centre));
+
+    let mut new_dependency = source.column(1, 0);
+    new_dependency.set_block(0, 82, 0, "minecraft:glowstone");
+    assert!(source.store_resident_column(1, 0, &new_dependency));
+    assert!(new_dependency.retained_light().is_none());
+
+    let proto = V770ServerProtocol;
+    let fresh_centre = {
+        let mut column = centre.clone();
+        column.clear_retained_light();
+        proto
+            .compute_initial_column_light_with_neighbours_in_dimension(
+                &column,
+                &[(1, 0, new_dependency.clone())],
+                Dimension::Nether,
+            )
+            .expect("fresh Nether centre computation")
+    };
+    assert_ne!(
+        fresh_centre, retained,
+        "the retained fixture must differ from a fresh computation"
+    );
+
+    let settled = source
+        .settle_resident_column_lights_with_neighbours(
+            0,
+            0,
+            &centre,
+            &[(1, 0)],
+            false,
+            false,
+            true,
+            &mut |centre, neighbours| {
+                proto.compute_initial_column_lights_with_neighbours_in_dimension(
+                    centre,
+                    neighbours,
+                    Dimension::Nether,
+                )
+            },
+        )
+        .expect("Nether dependency centre admission");
+    assert_eq!(settled.retained_light(), Some(&retained));
+    assert_eq!(settled.retained_light_status(), Some(RetainedLightStatus::CentreSettled));
+    assert_eq!(settled.retained_light().and_then(|light| light.storage()), Some(&storage));
+
+    let dependency = source
+        .resident_column(1, 0)
+        .expect("new dependency remains resident");
+    let dependency_storage = dependency
+        .retained_light()
+        .and_then(|light| light.storage())
+        .expect("new dependency receives allocated light storage");
+    assert_eq!(dependency_storage.section_count(), light_section_count);
+    assert!(
+        (0..dependency_storage.section_count())
+            .any(|section| dependency_storage.is_allocated(section)),
+        "the emitter dependency must retain at least one allocated section"
+    );
+    assert!(
+        dependency
+            .retained_light()
+            .is_some_and(ColumnLight::has_nonzero_values),
+        "the newly admitted emitter dependency must retain its computed light"
+    );
+    assert_eq!(
+        dependency.retained_light_status(),
+        Some(RetainedLightStatus::DependencyInitialized)
+    );
 }
