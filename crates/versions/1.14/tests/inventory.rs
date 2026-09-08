@@ -7,7 +7,10 @@
 //! The varint type can name a nonexistent serializer, so there is an explicit
 //! invalid-type-id test here.
 
-use lodestone_core::{Ctx, Decode, Encode, Error, Packet, Reader, Writer};
+use lodestone_core::{Ctx, Decode, Encode, Error, Packet, Reader, Writer, State};
+use lodestone_model::{ClientAction, ClientEvent, ConnectionState, ContainerClickType, ContainerStateId, Directive, ItemStack, VersionAdapter};
+use lodestone_server::{ServerBound, ServerDirective, ServerProtocol};
+use lodestone_v1_14::{adapter_for, packet_ids_498, packet_ids_578};
 use lodestone_v1_14::packet_ids::{BOUND_CLIENTBOUND, BOUND_SERVERBOUND, STATE_PLAY, id_for, play};
 use lodestone_v1_14::packets::entity::{EntityMetadataPacket, SpawnEntityLiving};
 use lodestone_v1_14::packets::metadata::{EntityMetadata, MetadataEntry, MetadataValue};
@@ -320,6 +323,133 @@ fn simple_window_packets_round_trip() {
             nbt: None,
         },
     });
+}
+
+fn stone() -> ItemStack {
+    ItemStack::new("minecraft:stone".parse().expect("stone key"), 1)
+}
+
+#[test]
+fn every_hosted_protocol_routes_literal_container_fixtures_through_production() {
+    for (protocol, open, content, slot, click, close) in [
+        (
+            498,
+            packet_ids_498::play::clientbound::OPEN_WINDOW,
+            packet_ids_498::play::clientbound::WINDOW_ITEMS,
+            packet_ids_498::play::clientbound::SET_SLOT,
+            packet_ids_498::play::serverbound::WINDOW_CLICK,
+            packet_ids_498::play::serverbound::CLOSE_WINDOW,
+        ),
+        (
+            578,
+            packet_ids_578::play::clientbound::OPEN_WINDOW,
+            packet_ids_578::play::clientbound::WINDOW_ITEMS,
+            packet_ids_578::play::clientbound::SET_SLOT,
+            packet_ids_578::play::serverbound::WINDOW_CLICK,
+            packet_ids_578::play::serverbound::CLOSE_WINDOW,
+        ),
+        (
+            754,
+            play::clientbound::OPEN_WINDOW,
+            play::clientbound::WINDOW_ITEMS,
+            play::clientbound::SET_SLOT,
+            play::serverbound::WINDOW_CLICK,
+            play::serverbound::CLOSE_WINDOW,
+        ),
+    ] {
+        let adapter = adapter_for(protocol);
+        let host = lodestone_registry::server_protocol_for_protocol(protocol)
+            .expect("hosted protocol must resolve");
+        let open_body = [
+            0x01, 0x02, 0x10, b'{', b'"', b't', b'e', b'x', b't', b'"', b':', b'"', b'C',
+            b'h', b'e', b's', b't', b'"', b'}',
+        ];
+        let events = adapter
+            .handle_packet(&mut lodestone_world::World::new(), ConnectionState::Play, open, &open_body)
+            .expect("open fixture must reach the adapter");
+        assert!(matches!(
+            events.as_slice(),
+            [Directive::Emit(ClientEvent::ScreenOpened { window_id: 1, menu_type, title })]
+                if menu_type.to_string() == "minecraft:generic_9x3" && title.to_plain_string() == "Chest"
+        ));
+
+        let content_body = [1, 0, 2, 1, 1, 1, 0, 0];
+        let events = adapter
+            .handle_packet(&mut lodestone_world::World::new(), ConnectionState::Play, content, &content_body)
+            .expect("content fixture must reach the adapter");
+        assert!(matches!(
+            events.as_slice(),
+            [Directive::Emit(ClientEvent::ContainerContent { window_id: 1, state_id, items, carried_item: None })]
+                if *state_id == ContainerStateId::INITIAL
+                    && items.len() == 2
+                    && items[0].as_ref().is_some_and(|item| item.item.to_string() == "minecraft:stone" && item.count == 1)
+                    && items[1].is_none()
+        ));
+
+        let slot_body = [1, 0, 0, 1, 1, 1, 0];
+        let events = adapter
+            .handle_packet(&mut lodestone_world::World::new(), ConnectionState::Play, slot, &slot_body)
+            .expect("slot fixture must reach the adapter");
+        assert!(matches!(
+            events.as_slice(),
+            [Directive::Emit(ClientEvent::ContainerSlot { window_id: 1, state_id, slot: 0, item: Some(item) })]
+                if *state_id == ContainerStateId::INITIAL
+                    && item.item.to_string() == "minecraft:stone"
+                    && item.count == 1
+        ));
+
+        let click_action = ClientAction::ContainerClick {
+            window_id: 1,
+            state_id: ContainerStateId::new(7),
+            slot: 0,
+            button: 0,
+            click_type: ContainerClickType::Pickup,
+            changed_slots: Vec::new(),
+            carried_item: None,
+        };
+        let (encoded_click, click_payload) = adapter
+            .encode_action(ConnectionState::Play, &click_action)
+            .expect("click must encode")
+            .expect("click has a wire packet");
+        assert_eq!(encoded_click, click);
+        assert_eq!(click_payload, [1, 0, 0, 0, 0, 7, 0, 0]);
+        assert_eq!(
+            host.decode(State::Play, click, &click_payload),
+            ServerBound::ContainerClicked {
+                window_id: 1,
+                state_id: 0,
+                slot: 0,
+                button: 0,
+                click_type: 0,
+                changed_slots: Vec::new(),
+                carried_item: None,
+            }
+        );
+
+        let (encoded_close, close_payload) = adapter
+            .encode_action(ConnectionState::Play, &ClientAction::ContainerClose { window_id: 1 })
+            .expect("close must encode")
+            .expect("close has a wire packet");
+        assert_eq!(encoded_close, close);
+        assert_eq!(close_payload, [1]);
+        assert_eq!(host.decode(State::Play, close, &close_payload), ServerBound::ContainerClosed { window_id: 1 });
+
+        let ServerDirective::Send { packet_id, payload } = host.encode_open_screen(1, "minecraft:generic_9x3", "Chest") else {
+            panic!("protocol {protocol} must emit open-window");
+        };
+        assert_eq!(packet_id, open);
+        assert_eq!(payload, open_body);
+        let ServerDirective::Send { packet_id, payload } = host.encode_container_content(1, 0, &[Some(stone()), None], None) else {
+            panic!("protocol {protocol} must emit window-items");
+        };
+        assert_eq!(packet_id, content);
+        assert_eq!(payload, content_body);
+        let ServerDirective::Send { packet_id, payload } = host.encode_container_slot(1, 0, 0, Some(&stone())) else {
+            panic!("protocol {protocol} must emit set-slot");
+        };
+        assert_eq!(packet_id, slot);
+        assert_eq!(payload, slot_body);
+    }
 }
 
 // ---------------------------------------------------------------------------
