@@ -58,7 +58,7 @@ a system exists, not just that it was asked for.
 
 ### The island count
 
-**0 of 136** variants are currently `Route::NOWHERE`. Most of those are simply decoded ahead
+**0 of 137** variants are currently `Route::NOWHERE`. Most of those are simply decoded ahead
 of a consumer, a normal state for a from-scratch client, not a defect in itself — but a handful
 have been genuine islands where a fold already existed (or was cheap to add) and nothing fed
 it, found by walking the list variant by variant and asking what a real consumer would need.
@@ -169,7 +169,7 @@ None. No features, no environment variables.
 
 - `crates/lodestone-model/src/event.rs` — `Route`, `route`, and the table; also
   `include_str!`s this very file to check the island count against its own source, so this
-  file's path and the exact `**N of 136**` phrasing are load-bearing, not decorative.
+  file's path and the exact `**N of 137**` phrasing are load-bearing, not decorative.
 - `crates/lodestone-ecs/src/ingest.rs`, `session.rs` — `handles_event`, each a one-line
   derivation of `route(e).ingest` / `route(e).session`.
 - `crates/lodestone-shell/src/net.rs` — the `debug_assert!` in `forward`'s catch-all.
