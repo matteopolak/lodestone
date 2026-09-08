@@ -577,15 +577,21 @@ fn simple_particle_registry_id(
 ///
 /// # Panics
 /// Panics if the captured registry has no `"minecraft:plains"` entry.
-fn resolve_biome_id(name: &str) -> u32 {
-    static BIOME_REGISTRY_NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    let names = BIOME_REGISTRY_NAMES.get_or_init(crate::registry_data_fixtures::biome_registry_names);
-    names.iter().position(|n| n == name).unwrap_or_else(|| {
-        names
-            .iter()
-            .position(|n| n == "minecraft:plains")
+pub fn biome_registry_id(name: &str) -> u32 {
+    static BIOME_REGISTRY_IDS: std::sync::OnceLock<std::collections::HashMap<String, u32>> =
+        std::sync::OnceLock::new();
+    let ids = BIOME_REGISTRY_IDS.get_or_init(|| {
+        crate::registry_data_fixtures::biome_registry_names()
+            .into_iter()
+            .enumerate()
+            .map(|(id, name)| (name, id as u32))
+            .collect()
+    });
+    ids.get(name).copied().unwrap_or_else(|| {
+        ids.get("minecraft:plains")
+            .copied()
             .expect("biome registry missing minecraft:plains")
-    }) as u32
+    })
 }
 
 /// vanilla's own clientbound game-event packet's own change-game-mode accessor's own event code.
@@ -2562,7 +2568,7 @@ fn encode_game_login_rest() -> Vec<u8> {
 /// biome assignment rather than one constant id everywhere. Every block
 /// cell is read as an **integer** via [`ServerChunkColumn::block_state_id`];
 /// every biome **cell** via [`ServerChunkColumn::biome_cell_index`] through
-/// [`resolve_biome_id`] — a real per-`y` grid, not one surface
+/// [`biome_registry_id`] — a real per-`y` grid, not one surface
 /// sample broadcast down the column.
 ///
 /// # This function does no string work at all, and that is recent
@@ -2582,9 +2588,9 @@ fn encode_game_login_rest() -> Vec<u8> {
 /// palette resolves through, so the two cannot drift. `DESIGN.md` §12.131 has
 /// the measurement.
 ///
-/// [`resolve_biome_id`] is a 55-entry linear scan, and it is called once per
-/// entry in the column's own biome *palette* (`biome_palette_ids` below) — a
-/// handful, measured in single digits — never once per cell. That is what makes
+/// [`biome_registry_id`] uses a cached name-to-id map, and it is called once per
+/// entry in the column's own biome *palette* (`biome_palette_ids` below), never
+/// once per cell. That is what makes
 /// a 1,536-cell 3-D grid cost strictly less than the 16 calls the old
 /// vertically-broadcast surface array made. It is now the only string work left
 /// in this function.
@@ -2605,14 +2611,14 @@ fn build_world_column(shape: &ChunkShape, source: &ServerChunkColumn) -> WorldCh
     // This column's real 3-D biome grid. The column stores its
     // cells as indices into a small per-column palette — a handful of entries,
     // never the 1,536 cells — so resolving that palette once and indexing per
-    // cell is *cheaper* than the 16 `resolve_biome_id` calls this replaced,
+    // cell is *cheaper* than the 16 `biome_registry_id` calls this replaced,
     // while carrying a per-`y` answer instead of one broadcast vertically.
     // Broadcasting was what erased `lush_caves`/`dripstone_caves`/`deep_dark`
     // from every column the server sent.
     let biome_palette_ids: Vec<u32> = source
         .biome_cell_palette()
         .iter()
-        .map(|name| resolve_biome_id(name))
+        .map(|name| biome_registry_id(name))
         .collect();
 
     for section_index in 0..shape.section_count {
@@ -2739,25 +2745,20 @@ const MOTION_BLOCKING_NO_LEAVES_HEIGHTMAP_TYPE_ID: u32 = 5;
 /// so the all-air answer is zero. Scanning the shape rather than the source's
 /// allocation is deliberate: short test columns are padded with air on the
 /// wire and must therefore have the same heightmaps as their decoded form.
-type HeightmapPredicate = fn(lodestone_data::block_states::StateId) -> bool;
-
 fn served_heightmaps(shape: &ChunkShape, source: &ServerChunkColumn) -> Heightmaps {
     let mut maps = Heightmaps::new();
-    let predicates: [(u32, HeightmapPredicate); 3] = [
-        (WORLD_SURFACE_HEIGHTMAP_TYPE_ID, heightmap_world_surface),
-        (MOTION_BLOCKING_HEIGHTMAP_TYPE_ID, heightmap_motion_blocking),
-        (
-            MOTION_BLOCKING_NO_LEAVES_HEIGHTMAP_TYPE_ID,
-            heightmap_motion_blocking_no_leaves,
-        ),
+    let type_ids = [
+        WORLD_SURFACE_HEIGHTMAP_TYPE_ID,
+        MOTION_BLOCKING_HEIGHTMAP_TYPE_ID,
+        MOTION_BLOCKING_NO_LEAVES_HEIGHTMAP_TYPE_ID,
     ];
-    for (type_id, includes) in predicates {
+    for type_id in type_ids {
         let mut map = Heightmap::new(shape.world_height);
         for z in 0..16i32 {
             for x in 0..16i32 {
                 let stored = (shape.min_y..shape.min_y + shape.world_height as i32)
                     .rev()
-                    .find(|&y| includes(source.resolved_block_state_id(x, y, z)))
+                    .find(|&y| client_heightmap_includes(type_id, source.resolved_block_state_id(x, y, z)))
                     .map_or(0, |y| (y + 1 - shape.min_y) as u32);
                 map.set(x as usize, z as usize, stored);
             }
@@ -2780,21 +2781,24 @@ fn heightmap_motion_blocking_no_leaves(state: lodestone_data::block_states::Stat
     heightmap_motion_blocking(state) && !is_leaves(state.block())
 }
 
+/// Returns the authoritative inclusion predicate for one of the three
+/// client-visible heightmap registry ids. The packet encoder and the
+/// light-free parity record share this boundary, so a new block census cannot
+/// make the two content paths disagree about leaves, fluids, or air.
+pub fn client_heightmap_includes(
+    type_id: u32,
+    state: lodestone_data::block_states::StateId,
+) -> bool {
+    match type_id {
+        WORLD_SURFACE_HEIGHTMAP_TYPE_ID => heightmap_world_surface(state),
+        MOTION_BLOCKING_HEIGHTMAP_TYPE_ID => heightmap_motion_blocking(state),
+        MOTION_BLOCKING_NO_LEAVES_HEIGHTMAP_TYPE_ID => heightmap_motion_blocking_no_leaves(state),
+        _ => false,
+    }
+}
+
 fn is_leaves(block: Block) -> bool {
-    matches!(
-        block,
-        Block::OakLeaves
-            | Block::SpruceLeaves
-            | Block::BirchLeaves
-            | Block::JungleLeaves
-            | Block::AcaciaLeaves
-            | Block::CherryLeaves
-            | Block::DarkOakLeaves
-            | Block::PaleOakLeaves
-            | Block::MangroveLeaves
-            | Block::AzaleaLeaves
-            | Block::FloweringAzaleaLeaves
-    )
+    lodestone_data::tool::builtin_block_tag_contains("minecraft:leaves", block)
 }
 
 /// Counts states with a non-empty fluid state in one section. The field counts
@@ -8321,8 +8325,8 @@ mod block_edit_tests {
         let served_column = source.column(0, 0);
         assert_eq!(served_column.biome_state(0, 0), "minecraft:dark_forest");
         assert_eq!(served_column.biome_state(8, 8), "minecraft:river");
-        let dark_forest_id = resolve_biome_id("minecraft:dark_forest");
-        let river_id = resolve_biome_id("minecraft:river");
+        let dark_forest_id = biome_registry_id("minecraft:dark_forest");
+        let river_id = biome_registry_id("minecraft:river");
         assert_ne!(
             dark_forest_id, river_id,
             "fixture sanity: the two biomes must resolve to different wire ids"

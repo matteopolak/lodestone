@@ -2,7 +2,7 @@
 //! a full 501² run is an external oracle job, not a regular unit test.
 mod support { pub mod large_parity_manifest; }
 
-use std::{collections::{BTreeMap, BTreeSet}, fs::File, io::{BufReader, Read, Seek, SeekFrom}, path::{Path, PathBuf}, time::Instant};
+use std::{collections::{BTreeMap, BTreeSet}, fs::File, io::{BufReader, Cursor, Read, Seek, SeekFrom}, path::{Path, PathBuf}, time::Instant};
 use lodestone_core::{Reader, Writer};
 use lodestone_server::{
     ChunkColumn, ChunkSource, ServerDirective, ServerProtocol,
@@ -18,11 +18,15 @@ use lodestone_worldgen_parity::lifecycle::{
 };
 use support::large_parity_manifest::{
     Dimension, HEADER_BYTES, PACKET_AUDIT_RECORD_BYTES, RAW_PACKET_HASH_BYTES,
-    canonical_nbt, payload_digest_from_header,
+    LIGHT_FREE_AUDIT_RECORD_BYTES,
+    canonical_nbt, payload_digest_from_header, sha256,
+    light_free_record,
     raw_packet_full_digest, read_header, read_packet_audit_header,
+    read_light_free_audit_header,
     semantic_digest, semantic_digest_for_dimension, semantic_digest_v5_for_dimension,
     semantic_record, semantic_record_for_dimension, semantic_record_v5_for_dimension,
-    validate_packet_audit_header, verify_payload, verify_manifest_payload,
+    validate_light_free_audit_header, validate_packet_audit_header,
+    verify_light_free_audit_pair, verify_payload, verify_manifest_payload,
     verify_raw_packet_audit_pair,
 };
 
@@ -523,6 +527,11 @@ fn load_raw_packet_audit(
     (path, header)
 }
 
+enum ManifestAuditHeader {
+    Raw(support::large_parity_manifest::PacketAuditHeader),
+    LightFree(support::large_parity_manifest::LightFreeAuditHeader),
+}
+
 fn verify_raw_packet_audit_files(
     manifest: &Path,
     raw_header: &[u8; HEADER_BYTES],
@@ -542,6 +551,55 @@ fn verify_raw_packet_audit_files(
         audit_header.payload_digest,
     )
     .unwrap_or_else(|error| panic!("v6 manifest/packet-audit payload authentication failed: {error}"));
+}
+
+fn light_free_audit_path(manifest: &Path) -> PathBuf {
+    if let Some(path) = std::env::var_os("LODESTONE_LARGE_PARITY_LIGHT_FREE_AUDIT") {
+        return PathBuf::from(path);
+    }
+    let mut path = manifest.as_os_str().to_os_string();
+    path.push(".light-free-audit");
+    PathBuf::from(path)
+}
+
+fn load_light_free_audit(
+    manifest: &Path,
+    main_header: &support::large_parity_manifest::Header,
+) -> (PathBuf, support::large_parity_manifest::LightFreeAuditHeader) {
+    let path = light_free_audit_path(manifest);
+    let mut file = File::open(&path)
+        .unwrap_or_else(|error| panic!("open v7 light-free audit sidecar {}: {error}", path.display()));
+    let mut raw = [0u8; HEADER_BYTES];
+    file.read_exact(&mut raw)
+        .unwrap_or_else(|error| panic!("read v7 light-free audit sidecar {} header: {error}", path.display()));
+    let header = read_light_free_audit_header(&raw[..]).unwrap_or_else(|error| {
+        panic!("invalid v7 light-free audit sidecar {}: {error}", path.display())
+    });
+    validate_light_free_audit_header(main_header, &header).unwrap_or_else(|error| {
+        panic!("v7 light-free audit sidecar {} does not match manifest: {error}", path.display())
+    });
+    (path, header)
+}
+
+fn verify_light_free_audit_files(
+    manifest: &Path,
+    raw_header: &[u8; HEADER_BYTES],
+    main_header: &support::large_parity_manifest::Header,
+    audit_path: &Path,
+    audit_header: &support::large_parity_manifest::LightFreeAuditHeader,
+) {
+    let mut main = File::open(manifest).unwrap_or_else(|error| panic!("reopen v7 manifest {}: {error}", manifest.display()));
+    main.seek(SeekFrom::Start(HEADER_BYTES as u64)).unwrap_or_else(|error| panic!("seek v7 manifest payload: {error}"));
+    let mut audit = File::open(audit_path).unwrap_or_else(|error| panic!("reopen light-free audit sidecar {}: {error}", audit_path.display()));
+    audit.seek(SeekFrom::Start(HEADER_BYTES as u64)).unwrap_or_else(|error| panic!("seek light-free audit payload: {error}"));
+    verify_light_free_audit_pair(
+        BufReader::new(main),
+        BufReader::new(audit),
+        main_header.count,
+        payload_digest_from_header(raw_header),
+        audit_header.payload_digest,
+    )
+    .unwrap_or_else(|error| panic!("v7 manifest/light-free audit payload authentication failed: {error}"));
 }
 
 fn optional_usize_env(name: &str) -> Result<Option<usize>, String> {
@@ -605,7 +663,7 @@ fn parity_batch_limit(
 }
 
 fn is_partial_lifecycle_manifest(header: &support::large_parity_manifest::Header) -> bool {
-    header.semantic_version != 6
+    header.semantic_version != 6 && header.semantic_version != 7
         && header.dimension != Dimension::End
         && header.count == 256
         && i64::from(header.cx1) - i64::from(header.cx0) == 15
@@ -1133,6 +1191,54 @@ fn java_and_rust_raw_packet_digests_agree() {
     assert_eq!([actual_full[0], actual_full[1]], expected_prefix, "Rust raw prefix must match Java manifest");
 }
 
+/// Cross-language control for P07. Both sides serialize the generated column
+/// directly; neither constructs a light-bearing packet or settles light.
+#[test]
+#[ignore = "requires a one-chunk Java v7 light-free export; see docs/worldgen-large-parity.md"]
+fn java_and_rust_light_free_records_agree() {
+    let record_path = std::env::var("LODESTONE_LARGE_PARITY_CROSS_LANGUAGE_RECORD")
+        .expect("set LODESTONE_LARGE_PARITY_CROSS_LANGUAGE_RECORD to Java's light-free record");
+    let manifest_path = std::env::var("LODESTONE_LARGE_PARITY_CROSS_LANGUAGE_MANIFEST")
+        .expect("set LODESTONE_LARGE_PARITY_CROSS_LANGUAGE_MANIFEST to Java's one-chunk v7 manifest");
+    let audit_path = std::env::var("LODESTONE_LARGE_PARITY_CROSS_LANGUAGE_LIGHT_FREE_AUDIT")
+        .unwrap_or_else(|_| format!("{manifest_path}.light-free-audit"));
+    let java_record = std::fs::read(&record_path).expect("read Java light-free record");
+    let manifest_bytes = std::fs::read(&manifest_path).expect("read Java v7 manifest");
+    assert!(manifest_bytes.len() >= HEADER_BYTES + RAW_PACKET_HASH_BYTES);
+    let mut raw_header = [0u8; HEADER_BYTES]; raw_header.copy_from_slice(&manifest_bytes[..HEADER_BYTES]);
+    let header = read_header(&raw_header[..]).expect("validate Java v7 manifest header");
+    assert_eq!(header.semantic_version, 7, "light-free control requires P07");
+    assert_eq!(header.count, 1, "light-free control must use exactly one chunk");
+    let expected_prefix: [u8; RAW_PACKET_HASH_BYTES] = manifest_bytes[HEADER_BYTES..HEADER_BYTES + RAW_PACKET_HASH_BYTES].try_into().unwrap();
+    let audit_bytes = std::fs::read(&audit_path).expect("read Java v7 light-free audit sidecar");
+    assert!(audit_bytes.len() >= HEADER_BYTES + LIGHT_FREE_AUDIT_RECORD_BYTES);
+    let mut audit_raw_header = [0u8; HEADER_BYTES]; audit_raw_header.copy_from_slice(&audit_bytes[..HEADER_BYTES]);
+    let audit = read_light_free_audit_header(&audit_raw_header[..]).expect("validate Java v7 light-free audit header");
+    validate_light_free_audit_header(&header, &audit).expect("sidecar identity must match manifest");
+    let expected_full: [u8; LIGHT_FREE_AUDIT_RECORD_BYTES] = audit_bytes[HEADER_BYTES..HEADER_BYTES + LIGHT_FREE_AUDIT_RECORD_BYTES].try_into().unwrap();
+    verify_light_free_audit_pair(
+        Cursor::new(expected_prefix),
+        Cursor::new(expected_full),
+        1,
+        payload_digest_from_header(&raw_header),
+        audit.payload_digest,
+    ).expect("Java manifest and light-free sidecar must authenticate together");
+    assert_eq!(sha256(&java_record), expected_full, "Java sidecar must authenticate Java light-free bytes");
+
+    let source: Box<dyn ChunkSource> = match header.dimension {
+        Dimension::Overworld => Box::new(overworld_chunk_source(42)),
+        Dimension::Nether => Box::new(nether_chunk_source(42)),
+        Dimension::End => Box::new(end_chunk_source(42)),
+    };
+    let rust_record = light_free_record(&source.column(header.cx0, header.cz0), header.cx0, header.cz0, header.dimension);
+    if rust_record != java_record {
+        let first = rust_record.iter().zip(&java_record).position(|(left, right)| left != right).unwrap_or(rust_record.len().min(java_record.len()));
+        panic!("light-free content bytes differ at offset {first}: Java length {}, Rust length {}, Java byte {:?}, Rust byte {:?}", java_record.len(), rust_record.len(), java_record.get(first), rust_record.get(first));
+    }
+    assert_eq!(sha256(&rust_record), expected_full, "Rust light-free digest must match Java sidecar");
+    assert_eq!([expected_full[0], expected_full[1]], expected_prefix, "Rust light-free prefix must match Java manifest");
+}
+
 /// Reads any authenticated frozen-world shard strictly sequentially and uses
 /// only one full semantic digest at a time.
 #[test]
@@ -1142,8 +1248,9 @@ fn parity_manifest_streams_before_rust_comparison() {
     let mut raw_header = [0; HEADER_BYTES]; let mut f = File::open(&path).expect("open manifest"); f.read_exact(&mut raw_header).expect("read header");
     let h = read_header(&raw_header[..]).expect("valid parity shard header");
     let raw_packet = h.semantic_version == 6;
+    let light_free = h.semantic_version == 7;
     if std::env::var_os("LODESTONE_LARGE_PARITY_REQUIRE_FULL_GRID").is_some() {
-        let (grid_min, grid_max, grid_count) = if raw_packet {
+        let (grid_min, grid_max, grid_count) = if raw_packet || light_free {
             (
                 support::large_parity_manifest::RAW_GRID_MIN,
                 support::large_parity_manifest::RAW_GRID_MAX,
@@ -1161,18 +1268,19 @@ fn parity_manifest_streams_before_rust_comparison() {
         ));
     }
     let audit = if raw_packet {
-        Some(load_raw_packet_audit(Path::new(&path), &h))
+        let (path, header) = load_raw_packet_audit(Path::new(&path), &h);
+        Some((path, ManifestAuditHeader::Raw(header)))
+    } else if light_free {
+        let (path, header) = load_light_free_audit(Path::new(&path), &h);
+        Some((path, ManifestAuditHeader::LightFree(header)))
     } else {
         None
     };
     if let Some((audit_path, audit_header)) = &audit {
-        verify_raw_packet_audit_files(
-            Path::new(&path),
-            &raw_header,
-            &h,
-            audit_path,
-            audit_header,
-        );
+        match audit_header {
+            ManifestAuditHeader::Raw(header) => verify_raw_packet_audit_files(Path::new(&path), &raw_header, &h, audit_path, header),
+            ManifestAuditHeader::LightFree(header) => verify_light_free_audit_files(Path::new(&path), &raw_header, &h, audit_path, header),
+        }
     } else {
         let mut payload_file = File::open(&path).expect("reopen manifest");
         payload_file.seek(SeekFrom::Start(HEADER_BYTES as u64)).expect("seek payload");
@@ -1209,7 +1317,7 @@ fn parity_manifest_streams_before_rust_comparison() {
     let scan_all = std::env::var_os("LODESTONE_LARGE_PARITY_SCAN_ALL").is_some();
     let target_index = optional_usize_env("LODESTONE_LARGE_PARITY_TARGET_INDEX")
         .unwrap_or_else(|error| panic!("invalid lifecycle target selection: {error}"));
-    if raw_packet && target_index.is_some() {
+    if (raw_packet || light_free) && target_index.is_some() {
         panic!("LODESTONE_LARGE_PARITY_TARGET_INDEX is only supported for semantic lifecycle manifests");
     }
     let batch_size = optional_u64_env("LODESTONE_LARGE_PARITY_BATCH_SIZE")
@@ -1219,10 +1327,10 @@ fn parity_manifest_streams_before_rust_comparison() {
     if batch_size.is_some() {
         eprintln!(
             "large {} parity: authenticated scan-all batch selected ({limit} targets)",
-            if raw_packet { "raw-packet" } else { "semantic" },
+            if raw_packet { "raw-packet" } else if light_free { "light-free" } else { "semantic" },
         );
     }
-    let reference_packets = if scan_all {
+    let reference_packets = if scan_all && !light_free {
         load_reference_packets(dimension, h.cx0, h.cx1, h.cz0, h.cz1, limit)
     } else {
         BTreeMap::new()
@@ -1273,7 +1381,14 @@ fn parity_manifest_streams_before_rust_comparison() {
     } else {
         let width = u64::try_from(i64::from(h.cx1) - i64::from(h.cx0) + 1)
             .expect("authenticated manifest coordinate width fits u64");
-        let source: Box<dyn ChunkSource> = match dimension {
+        let source: Box<dyn ChunkSource> = if light_free {
+            match dimension {
+                Dimension::Overworld => Box::new(overworld_chunk_source(42)),
+                Dimension::Nether => Box::new(nether_chunk_source(42)),
+                Dimension::End => Box::new(end_chunk_source(42)),
+            }
+        } else {
+            match dimension {
             // A frozen external world is a retained, settled lifecycle result.
             // Keep the comparator on the server's retained-source path rather than
             // regenerating an isolated column for every packet request.
@@ -1282,11 +1397,53 @@ fn parity_manifest_streams_before_rust_comparison() {
                 Box::new(retained_chunk_source_for_view_radius(nether_chunk_source(42), 8))
             }
             Dimension::End => Box::new(retained_chunk_source_for_view_radius(end_chunk_source(42), 8)),
+            }
         };
         let column_for = |cx, cz| -> ChunkColumn { source.column(cx, cz) };
         let mut expected_digest = [0u8; 32];
         let mut nether_replay_window_end = 0;
         for index in 0..limit {
+            if light_free {
+                let mut expected_prefix = [0u8; RAW_PACKET_HASH_BYTES];
+                expected.read_exact(&mut expected_prefix).expect("manifest light-free hash prefix");
+                let mut expected_full = [0u8; LIGHT_FREE_AUDIT_RECORD_BYTES];
+                expected_audit
+                    .as_mut()
+                    .expect("v7 light-free comparison has an audit reader")
+                    .read_exact(&mut expected_full)
+                    .expect("light-free audit full content digest");
+                let (cx, cz) = raw_packet_target(&h, index, width);
+                let column = column_for(cx, cz);
+                let record = light_free_record(&column, cx, cz, dimension);
+                let actual_full = sha256(&record);
+                let actual_prefix = [actual_full[0], actual_full[1]];
+                if actual_prefix != expected_prefix || actual_full != expected_full {
+                    let mismatch = RawPacketMismatch {
+                        target: (cx, cz),
+                        index,
+                        expected_prefix,
+                        actual_prefix,
+                        expected_full,
+                        actual_full,
+                        payload_bytes: record.len(),
+                    };
+                    if !scan_all {
+                        panic!(
+                            "large light-free parity mismatch at ({cx},{cz}) after {index} matching chunks: expected prefix {}, actual prefix {}, expected full SHA-256 {}, actual full SHA-256 {}, collision={}",
+                            hex(&mismatch.expected_prefix),
+                            hex(&mismatch.actual_prefix),
+                            hex(&mismatch.expected_full),
+                            hex(&mismatch.actual_full),
+                            mismatch.collision(),
+                        );
+                    }
+                    raw_mismatches.push(mismatch);
+                }
+                if (index + 1) % 256 == 0 || index + 1 == limit {
+                    eprintln!("large light-free parity: compared {}/{} chunks (batch boundary at ({cx},{cz}))", index + 1, limit);
+                }
+                continue;
+            }
             if raw_packet && dimension == Dimension::Nether && index >= nether_replay_window_end {
                 let window_end = nether_packet_replay_window_end(index, width, limit);
                 let targets = raw_packet_targets_for_window(&h, index, window_end, width);

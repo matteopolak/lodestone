@@ -80,6 +80,8 @@ public final class LargeParityOracle {
     static final byte[] MAGIC_V4 = "LWP26P04".getBytes(StandardCharsets.US_ASCII);
     static final byte[] MAGIC_V5 = "LWP26P05".getBytes(StandardCharsets.US_ASCII);
     static final byte[] MAGIC_V6 = "LWP26P06".getBytes(StandardCharsets.US_ASCII);
+    static final byte[] MAGIC_V7 = "LWP26P07".getBytes(StandardCharsets.US_ASCII);
+    static final byte[] LIGHT_FREE_AUDIT_MAGIC = "LWP26A07".getBytes(StandardCharsets.US_ASCII);
     static final int HEADER_BYTES = 256, FORMAT_VERSION = 3, SCHEMA_VERSION = 3, DIGEST_BYTES = 32;
     static final int GRID_MIN = -250, GRID_MAX = 250;
     static final int RAW_GRID_MIN = -500, RAW_GRID_MAX = 500, RAW_RECORD_BYTES = 2;
@@ -92,16 +94,20 @@ public final class LargeParityOracle {
     static final byte[] MANIFEST_DOMAIN_V4 = "lodestone.worldgen.large-parity.manifest/v4/semantic".getBytes(StandardCharsets.US_ASCII);
     static final byte[] MANIFEST_DOMAIN_V5 = "lodestone.worldgen.large-parity.manifest/v5/semantic".getBytes(StandardCharsets.US_ASCII);
     static final byte[] MANIFEST_DOMAIN_V6 = "lodestone.worldgen.large-parity.manifest/v6/raw-packet".getBytes(StandardCharsets.US_ASCII);
+    static final byte[] MANIFEST_DOMAIN_V7 = "lodestone.worldgen.large-parity.manifest/v7/light-free".getBytes(StandardCharsets.US_ASCII);
     static final byte[] PACKET_AUDIT_MAGIC = "LWP26A06".getBytes(StandardCharsets.US_ASCII);
     static final byte[] PACKET_AUDIT_DOMAIN = "lodestone.worldgen.large-parity.packet-audit/v6/raw-packet".getBytes(StandardCharsets.US_ASCII);
+    static final byte[] LIGHT_FREE_AUDIT_DOMAIN = "lodestone.worldgen.large-parity.audit/v7/light-free".getBytes(StandardCharsets.US_ASCII);
     static final byte[] RECORD_DOMAIN = "lodestone.worldgen.large-parity.chunk/v3/semantic".getBytes(StandardCharsets.US_ASCII);
     static final byte[] RECORD_DOMAIN_V4 = "lodestone.worldgen.large-parity.chunk/v4/semantic".getBytes(StandardCharsets.US_ASCII);
     static final byte[] RECORD_DOMAIN_V5 = "lodestone.worldgen.large-parity.chunk/v5/semantic".getBytes(StandardCharsets.US_ASCII);
+    static final byte[] RECORD_DOMAIN_V7 = "lodestone.worldgen.large-parity.chunk/v7/light-free".getBytes(StandardCharsets.US_ASCII);
     // This namespace describes the generation scheduling contract, not the
     // semantic manifest format. It changes whenever a root's construction
     // rules change, even if its exported records do not.
     static final String MATERIALIZATION_CONTRACT = "lodestone-large-parity-materialization-v2";
     static final String MATERIALIZATION_CONTRACT_V6 = "lodestone-large-parity-materialization-v6";
+    static final String MATERIALIZATION_CONTRACT_V7 = "lodestone-large-parity-materialization-v7";
     static final int MATERIALIZE_TILE = 16;
     static final String OVERWORLD = "overworld", NETHER = "nether", END = "end";
     static String diagnosticPacketOut, diagnosticRecordOut;
@@ -119,19 +125,20 @@ public final class LargeParityOracle {
         String packetAuditOut;
         String recordOut;
         int loX = GRID_MIN, hiX = GRID_MAX, loZ = GRID_MIN, hiZ = GRID_MAX;
-        boolean resume, help, provenanceSelftest, determinismSelftest, rawPacketV6;
+        boolean resume, help, provenanceSelftest, determinismSelftest, rawPacketV6, lightFreeV7;
         boolean explicitCx, explicitCz;
         String dimension = OVERWORLD;
         boolean explicitDimension;
         boolean dimensionFormat() { return explicitDimension || !OVERWORLD.equals(dimension); }
         boolean v5() { return END.equals(dimension); }
         boolean v6() { return rawPacketV6; }
-        int semanticVersion() { return v6() ? 6 : v5() ? 5 : dimensionFormat() ? 4 : FORMAT_VERSION; }
-        int gridMin() { return v6() ? RAW_GRID_MIN : GRID_MIN; }
-        int gridMax() { return v6() ? RAW_GRID_MAX : GRID_MAX; }
-        int recordWidth() { return v6() ? RAW_RECORD_BYTES : DIGEST_BYTES; }
-        byte[] magic() { return v6() ? MAGIC_V6 : v5() ? MAGIC_V5 : dimensionFormat() ? MAGIC_V4 : MAGIC; }
-        byte[] manifestDomain() { return v6() ? MANIFEST_DOMAIN_V6 : v5() ? MANIFEST_DOMAIN_V5 : dimensionFormat() ? MANIFEST_DOMAIN_V4 : MANIFEST_DOMAIN; }
+        boolean v7() { return lightFreeV7; }
+        int semanticVersion() { return v7() ? 7 : v6() ? 6 : v5() ? 5 : dimensionFormat() ? 4 : FORMAT_VERSION; }
+        int gridMin() { return v6() || v7() ? RAW_GRID_MIN : GRID_MIN; }
+        int gridMax() { return v6() || v7() ? RAW_GRID_MAX : GRID_MAX; }
+        int recordWidth() { return v6() || v7() ? RAW_RECORD_BYTES : DIGEST_BYTES; }
+        byte[] magic() { return v7() ? MAGIC_V7 : v6() ? MAGIC_V6 : v5() ? MAGIC_V5 : dimensionFormat() ? MAGIC_V4 : MAGIC; }
+        byte[] manifestDomain() { return v7() ? MANIFEST_DOMAIN_V7 : v6() ? MANIFEST_DOMAIN_V6 : v5() ? MANIFEST_DOMAIN_V5 : dimensionFormat() ? MANIFEST_DOMAIN_V4 : MANIFEST_DOMAIN; }
         String dimensionKey() { return switch (dimension) { case NETHER -> "minecraft:the_nether"; case END -> "minecraft:the_end"; default -> "minecraft:overworld"; }; }
     }
 
@@ -146,7 +153,13 @@ public final class LargeParityOracle {
             case "--provenance-selftest" -> out.provenanceSelftest = true;
             case "--determinism-selftest" -> out.determinismSelftest = true;
             case "--raw-packet", "--format-v6" -> out.rawPacketV6 = true;
-            case "--format" -> { if (!"v6".equals(a[++i])) throw new IllegalArgumentException("--format accepts only v6 for raw packet exports"); out.rawPacketV6 = true; }
+            case "--light-free", "--format-v7" -> out.lightFreeV7 = true;
+            case "--format" -> {
+                String format = a[++i];
+                if ("v6".equals(format)) out.rawPacketV6 = true;
+                else if ("v7".equals(format)) out.lightFreeV7 = true;
+                else throw new IllegalArgumentException("--format accepts only v6 (raw packet) or v7 (light-free)");
+            }
             case "--mode" -> out.mode = a[++i];
             case "--out" -> out.out = a[++i];
             case "--cx" -> { out.loX = Integer.parseInt(a[++i]); out.hiX = Integer.parseInt(a[++i]); out.explicitCx = true; }
@@ -158,8 +171,9 @@ public final class LargeParityOracle {
             case "--dimension" -> { out.dimension = a[++i].toLowerCase(); out.explicitDimension = true; }
             default -> throw new IllegalArgumentException("unknown argument " + a[i]);
         }
-        if (!out.rawPacketV6 && (out.loX < GRID_MIN || out.hiX > GRID_MAX || out.loZ < GRID_MIN || out.hiZ > GRID_MAX)) out.rawPacketV6 = true;
-        if (out.rawPacketV6) {
+        if (out.rawPacketV6 && out.lightFreeV7) throw new IllegalArgumentException("--raw-packet and --light-free select different explicit formats");
+        if (!out.rawPacketV6 && !out.lightFreeV7 && (out.loX < GRID_MIN || out.hiX > GRID_MAX || out.loZ < GRID_MIN || out.hiZ > GRID_MAX)) out.rawPacketV6 = true;
+        if (out.rawPacketV6 || out.lightFreeV7) {
             if (!out.explicitCx) { out.loX = RAW_GRID_MIN; out.hiX = RAW_GRID_MAX; }
             if (!out.explicitCz) { out.loZ = RAW_GRID_MIN; out.hiZ = RAW_GRID_MAX; }
         }
@@ -170,12 +184,15 @@ public final class LargeParityOracle {
         if ("materialize".equals(out.mode) && out.out != null) throw new IllegalArgumentException("materialize has no --out; it seals the persistent world");
         if ("export".equals(out.mode) && out.out == null) throw new IllegalArgumentException("export requires --out");
         if ((out.packetOut != null || out.recordOut != null) && (out.loX != out.hiX || out.loZ != out.hiZ)) throw new IllegalArgumentException("--packet-out and --record-out require exactly one chunk");
+        if (out.v7() && out.packetOut != null) throw new IllegalArgumentException("--packet-out requires the full-packet v6 format; light-free v7 never encodes a packet");
+        if (out.v7() && out.packetAuditOut != null) throw new IllegalArgumentException("--packet-audit-out requires the full-packet v6 format; light-free v7 has no packet audit");
+        if (out.v7() && out.determinismSelftest) throw new IllegalArgumentException("--determinism-selftest requires a packet-bearing format; light-free v7 has no packet path");
         return out;
     }
 
     static void usage() {
         System.out.println("materialize: LargeParityOracle --mode materialize [--dimension overworld|nether|end]");
-        System.out.println("export:      LargeParityOracle --mode export --out /oracle/shard.lwp --cx LO HI --cz LO HI [--raw-packet] [--dimension overworld|nether|end] [--resume] [--packet-out /oracle/chunk.bin] [--packet-audit-out /oracle/shard.packet-audit] [--record-out /oracle/chunk.record]");
+        System.out.println("export:      LargeParityOracle --mode export --out /oracle/shard.lwp --cx LO HI --cz LO HI [--raw-packet|--light-free] [--dimension overworld|nether|end] [--resume] [--packet-out /oracle/chunk.bin] [--packet-audit-out /oracle/shard.packet-audit] [--record-out /oracle/chunk.record]");
         System.out.println("control:     LargeParityOracle --provenance-selftest");
         System.out.println("control:     LargeParityOracle --determinism-selftest [--dimension overworld|nether|end]");
         System.out.println("materialize needs LODESTONE_ORACLE_WORLD_ROOT; export needs LODESTONE_ORACLE_FROZEN_WORLD_ROOT.");
@@ -191,7 +208,7 @@ public final class LargeParityOracle {
         b.put(magic).putShort((short)a.semanticVersion()).putShort((short)HEADER_BYTES).putShort((short)2).putShort((short)a.semanticVersion()).putInt(776).putLong(SEED);
         b.putInt(a.gridMin()).putInt(a.gridMax()).putInt(a.gridMin()).putInt(a.gridMax()).putInt(a.loX).putInt(a.hiX).putInt(a.loZ).putInt(a.hiZ).putLong(count);
         b.putShort((short)a.recordWidth()).putShort((short)0).put(digest(domain)).put(frozenDigest).put(payloadDigest);
-        if (a.v6() || a.dimensionFormat()) b.put(digest(a.dimensionKey().getBytes(StandardCharsets.UTF_8)));
+        if (a.v6() || a.v7() || a.dimensionFormat()) b.put(digest(a.dimensionKey().getBytes(StandardCharsets.UTF_8)));
         return b.array();
     }
 
@@ -207,7 +224,7 @@ public final class LargeParityOracle {
             if (b.getInt()!=a.gridMin() || b.getInt()!=a.gridMax() || b.getInt()!=a.gridMin() || b.getInt()!=a.gridMax() || b.getInt()!=a.loX || b.getInt()!=a.hiX || b.getInt()!=a.loZ || b.getInt()!=a.hiZ || b.getLong()!=count || b.getShort()!=width) throw new IllegalStateException("resume shard geometry differs: " + f);
             b.getShort(); byte[] domain = new byte[32]; b.get(domain); byte[] recordedFrozen = new byte[32]; b.get(recordedFrozen); byte[] expected = new byte[32]; b.get(expected);
             if (!Arrays.equals(domain, digest(a.manifestDomain())) || !Arrays.equals(recordedFrozen, frozenDigest)) throw new IllegalStateException("resume schema or frozen-world identity differs: " + f);
-            if (a.v6() || a.dimensionFormat()) { byte[] recordedDimension = new byte[32]; b.get(recordedDimension); if (!Arrays.equals(recordedDimension, digest(a.dimensionKey().getBytes(StandardCharsets.UTF_8)))) throw new IllegalStateException("resume dimension identity differs: " + f); }
+            if (a.v6() || a.v7() || a.dimensionFormat()) { byte[] recordedDimension = new byte[32]; b.get(recordedDimension); if (!Arrays.equals(recordedDimension, digest(a.dimensionKey().getBytes(StandardCharsets.UTF_8)))) throw new IllegalStateException("resume dimension identity differs: " + f); }
             long records = (f.length() - HEADER_BYTES) / width;
             if (records == count) { MessageDigest actual = sha256(); byte[] buf = new byte[8192]; int n; while ((n = in.read(buf)) != -1) actual.update(buf, 0, n); if (!Arrays.equals(expected, actual.digest())) throw new IllegalStateException("resume payload checksum differs: " + f); }
             else if (!Arrays.equals(expected, new byte[32])) throw new IllegalStateException("partial shard has a non-zero final checksum: " + f);
@@ -238,6 +255,30 @@ public final class LargeParityOracle {
         }
     }
 
+    static byte[] lightFreeAuditHeader(Args a, long count, byte[] frozenDigest, byte[] payloadDigest) {
+        ByteBuffer b = ByteBuffer.allocate(HEADER_BYTES).order(ByteOrder.BIG_ENDIAN);
+        b.put(LIGHT_FREE_AUDIT_MAGIC).putShort((short)7).putShort((short)HEADER_BYTES).putShort((short)3).putShort((short)7).putInt(776).putLong(SEED);
+        b.putInt(a.gridMin()).putInt(a.gridMax()).putInt(a.gridMin()).putInt(a.gridMax()).putInt(a.loX).putInt(a.hiX).putInt(a.loZ).putInt(a.hiZ).putLong(count);
+        b.putShort((short)DIGEST_BYTES).putShort((short)0).put(digest(LIGHT_FREE_AUDIT_DOMAIN)).put(frozenDigest).put(payloadDigest).put(digest(a.dimensionKey().getBytes(StandardCharsets.UTF_8)));
+        return b.array();
+    }
+
+    static long resumeLightFreeAudits(File f, Args a, long count, byte[] frozenDigest) throws Exception {
+        if (!f.isFile() || f.length() < HEADER_BYTES || f.length() > HEADER_BYTES + count * DIGEST_BYTES || ((f.length() - HEADER_BYTES) % DIGEST_BYTES) != 0) throw new IllegalStateException("resume refuses malformed light-free audit sidecar: " + f);
+        try (RandomAccessFile in = new RandomAccessFile(f, "r")) {
+            byte[] h = new byte[HEADER_BYTES]; in.readFully(h); ByteBuffer b = ByteBuffer.wrap(h).order(ByteOrder.BIG_ENDIAN); byte[] magic = new byte[8]; b.get(magic);
+            if (!Arrays.equals(magic, LIGHT_FREE_AUDIT_MAGIC) || b.getShort() != 7 || b.getShort() != HEADER_BYTES || b.getShort() != 3 || b.getShort() != 7 || b.getInt() != 776 || b.getLong() != SEED) throw new IllegalStateException("light-free audit sidecar identity differs: " + f);
+            b.position(28);
+            if (b.getInt()!=a.gridMin() || b.getInt()!=a.gridMax() || b.getInt()!=a.gridMin() || b.getInt()!=a.gridMax() || b.getInt()!=a.loX || b.getInt()!=a.hiX || b.getInt()!=a.loZ || b.getInt()!=a.hiZ || b.getLong()!=count || b.getShort()!=DIGEST_BYTES) throw new IllegalStateException("light-free audit sidecar geometry differs: " + f);
+            b.getShort(); byte[] domain = new byte[32]; b.get(domain); byte[] recordedFrozen = new byte[32]; b.get(recordedFrozen); byte[] expected = new byte[32]; b.get(expected); byte[] recordedDimension = new byte[32]; b.get(recordedDimension);
+            if (!Arrays.equals(domain, digest(LIGHT_FREE_AUDIT_DOMAIN)) || !Arrays.equals(recordedFrozen, frozenDigest) || !Arrays.equals(recordedDimension, digest(a.dimensionKey().getBytes(StandardCharsets.UTF_8)))) throw new IllegalStateException("light-free audit sidecar provenance differs: " + f);
+            long records = (f.length() - HEADER_BYTES) / DIGEST_BYTES;
+            if (records == count) { MessageDigest actual = sha256(); byte[] buf = new byte[8192]; int n; while ((n = in.read(buf)) != -1) actual.update(buf, 0, n); if (!Arrays.equals(expected, actual.digest())) throw new IllegalStateException("light-free audit sidecar checksum differs: " + f); }
+            else if (!Arrays.equals(expected, new byte[32])) throw new IllegalStateException("partial light-free audit sidecar has a non-zero final checksum: " + f);
+            return records;
+        }
+    }
+
     static <T> T privateMain(String name, Class<?>[] types, Object... values) throws Exception { Method method = Main.class.getDeclaredMethod(name, types); method.setAccessible(true); @SuppressWarnings("unchecked") T result = (T) method.invoke(null, values); return result; }
     static WorldStem loadWorld(DedicatedServerProperties properties, LevelStorageSource.LevelStorageAccess access, PackRepository packs, Dynamic<?> tag) throws Exception {
         WorldLoader.InitConfig config = privateMain("loadOrCreateConfig", new Class<?>[]{DedicatedServerProperties.class, Dynamic.class, boolean.class, PackRepository.class}, properties, tag, false, packs);
@@ -260,8 +301,12 @@ public final class LargeParityOracle {
         try (var paths = Files.walk(source)) { for (Path from : paths.sorted().toList()) { Path to = copy.resolve(source.relativize(from).toString()); if (Files.isDirectory(from)) Files.createDirectories(to); else Files.copy(from, to, StandardCopyOption.COPY_ATTRIBUTES); } }
         return copy;
     }
-    static String materializationContract(Args a) { return a.v6() ? MATERIALIZATION_CONTRACT_V6 : MATERIALIZATION_CONTRACT; }
+    static String materializationContract(Args a) { return a.v7() ? MATERIALIZATION_CONTRACT_V7 : a.v6() ? MATERIALIZATION_CONTRACT_V6 : MATERIALIZATION_CONTRACT; }
     static String freezeStamp(Args a) { return materializationContract(a) + "-" + a.dimension + ".freeze.sha256"; }
+    static List<String> acceptedFreezeStamps(Args a) {
+        if (a.v7()) return List.of(freezeStamp(a), MATERIALIZATION_CONTRACT_V6 + "-" + a.dimension + ".freeze.sha256");
+        return List.of(freezeStamp(a));
+    }
     static String progressFile(Args a) { return materializationContract(a) + "-" + a.dimension + ".materialize"; }
     static String progressMarker(Args a) { return materializationContract(a) + "-" + a.dimension + "-progress"; }
     static List<Path> legacyProvenancePaths(Path root) {
@@ -284,7 +329,8 @@ public final class LargeParityOracle {
     static String formatLabel(Args a) { return "v" + a.semanticVersion() + "-" + a.dimension; }
     static byte[] worldTreeDigest(Path root, Args a) throws Exception {
         MessageDigest sha = sha256();
-        try (var paths = Files.walk(root)) { for (Path path : paths.filter(Files::isRegularFile).filter(p -> !p.getFileName().toString().equals(freezeStamp(a))).sorted().toList()) {
+        List<String> freezeStamps = acceptedFreezeStamps(a);
+        try (var paths = Files.walk(root)) { for (Path path : paths.filter(Files::isRegularFile).filter(p -> !freezeStamps.contains(p.getFileName().toString())).sorted().toList()) {
             byte[] name = root.relativize(path).toString().replace(File.separatorChar, '/').getBytes(StandardCharsets.UTF_8);
             sha.update(ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putInt(name.length).array()); sha.update(name); sha.update(ByteBuffer.allocate(8).order(ByteOrder.BIG_ENDIAN).putLong(Files.size(path)).array());
             try (var input = Files.newInputStream(path)) { byte[] buf = new byte[8192]; for (int n; (n = input.read(buf)) != -1;) sha.update(buf, 0, n); }
@@ -293,7 +339,7 @@ public final class LargeParityOracle {
     }
     static byte[] frozenDigest(Path root, Args a) throws Exception {
         rejectLegacyProvenance(root);
-        Path stamp = root.resolve(freezeStamp(a)); if (!Files.isRegularFile(stamp)) throw new IllegalStateException("frozen world has no selected-dimension seal: " + stamp);
+        Path stamp = acceptedFreezeStamps(a).stream().map(root::resolve).filter(Files::isRegularFile).findFirst().orElse(root.resolve(freezeStamp(a))); if (!Files.isRegularFile(stamp)) throw new IllegalStateException("frozen world has no selected-dimension seal: " + stamp);
         byte[] actual = worldTreeDigest(root, a); String expected = Files.readString(stamp, StandardCharsets.US_ASCII).trim(); if (!hex(actual).equals(expected)) throw new IllegalStateException("frozen world differs from its seal; re-materialize before export"); return actual;
     }
     interface CheckedWork { void run() throws Exception; }
@@ -508,6 +554,54 @@ public final class LargeParityOracle {
         var light = packet.getLightData(); int lightSections = chunk.getSections().length + 2; canonicalLight(out, light.getSkyYMask(), light.getEmptySkyYMask(), light.getSkyUpdates(), lightSections, true, a.v5()); canonicalLight(out, light.getBlockYMask(), light.getEmptyBlockYMask(), light.getBlockUpdates(), lightSections, false, false); out.flush(); return bytes.toByteArray();
     }
 
+    /**
+     * Emits the authenticated v7 content record without constructing a packet
+     * or consulting the light engine. The field order is fixed by the schema:
+     * domain/coordinates/dimension, the three client heightmaps, then section
+     * state/biome cells, then canonical block entities. Dimension identity is always present in v7,
+     * including for the overworld, so a record cannot cross vertical shapes.
+     */
+    static byte[] lightFreeRecord(ServerLevel level, LevelChunk chunk, Args a) throws Exception {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream(120_000); DataOutputStream out = new DataOutputStream(bytes);
+        out.write(RECORD_DOMAIN_V7); out.writeInt(chunk.getPos().x()); out.writeInt(chunk.getPos().z()); out.write(a.dimensionKey().getBytes(StandardCharsets.UTF_8));
+
+        Map<Integer, Heightmap> heightmaps = new HashMap<>();
+        for (Map.Entry<Heightmap.Types, Heightmap> entry : chunk.getHeightmaps()) {
+            int id = entry.getKey().ordinal();
+            if (id == 1 || id == 4 || id == 5) heightmaps.put(id, entry.getValue());
+        }
+        out.writeInt(3);
+        for (int id : new int[] {1, 4, 5}) {
+            Heightmap map = heightmaps.get(id);
+            if (map == null) throw new IllegalStateException("light-free chunk is missing client heightmap id " + id);
+            out.writeInt(id);
+            for (int z = 0; z < 16; z++) for (int x = 0; x < 16; x++) out.writeInt(map.getFirstAvailable(x, z));
+        }
+
+        Registry<Biome> biomes = level.registryAccess().lookupOrThrow(Registries.BIOME);
+        LevelChunkSection[] sections = chunk.getSections();
+        out.writeInt(sections.length);
+        for (LevelChunkSection section : sections) {
+            for (int y = 0; y < 16; y++) for (int z = 0; z < 16; z++) for (int x = 0; x < 16; x++) out.writeInt(Block.getId(section.getBlockState(x, y, z)));
+            for (int y = 0; y < 4; y++) for (int z = 0; z < 4; z++) for (int x = 0; x < 4; x++) {
+                Holder<Biome> biome = section.getNoiseBiome(x, y, z);
+                out.writeInt(biomes.getId(biome.value()));
+            }
+        }
+
+        Registry<net.minecraft.world.level.block.entity.BlockEntityType<?>> types = level.registryAccess().lookupOrThrow(Registries.BLOCK_ENTITY_TYPE);
+        List<BlockEntity> entities = new ArrayList<>(chunk.getBlockEntities().values());
+        entities.sort(Comparator.comparingInt((BlockEntity e) -> e.getBlockPos().getX() & 15).thenComparingInt(e -> e.getBlockPos().getY()).thenComparingInt(e -> e.getBlockPos().getZ() & 15).thenComparingInt(e -> types.getId(e.getType())));
+        out.writeInt(entities.size());
+        for (BlockEntity entity : entities) {
+            out.writeByte(entity.getBlockPos().getX() & 15); out.writeShort(entity.getBlockPos().getY()); out.writeByte(entity.getBlockPos().getZ() & 15); out.writeInt(types.getId(entity.getType()));
+            CompoundTag tag = entity.getUpdateTag(level.registryAccess());
+            if (tag.isEmpty()) out.writeByte(Tag.TAG_END); else canonicalTag(out, tag);
+        }
+        out.flush();
+        return bytes.toByteArray();
+    }
+
     static void settleMaterializedBatch(MinecraftServer server, ServerLevel level, List<ChunkPos> positions) {
         // A completed FULL future does not order deferred sky propagation before
         // its loading ticket is removed. Run only scheduler work (no resident
@@ -530,24 +624,24 @@ public final class LargeParityOracle {
         }).join();
     }
 
-    static void materializeOne(MinecraftServer server, ServerLevel level, ChunkPos pos) {
+    static void materializeOne(MinecraftServer server, ServerLevel level, Args a, ChunkPos pos) {
         CompletableFuture<?> future = server.submit(() -> level.getChunkSource().addTicketAndLoadWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, 0)).join();
         net.minecraft.server.level.ChunkResult<?> result = (net.minecraft.server.level.ChunkResult<?>)future.join();
         if (!result.isSuccess()) throw new IllegalStateException("chunk generation failed at " + pos + ": " + result.getError());
-        settleMaterializedBatch(server, level, List.of(pos));
+        if (!a.v7()) settleMaterializedBatch(server, level, List.of(pos));
         server.submit(() -> level.getChunkSource().removeTicketWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, 0)).join();
     }
 
     static void loadBatch(MinecraftServer server, ServerLevel level, Args a, List<ChunkPos> positions, boolean capture, List<byte[]> out) { loadBatch(server, level, a, positions, capture, out, null); }
     static void loadBatch(MinecraftServer server, ServerLevel level, Args a, List<ChunkPos> positions, boolean capture, List<byte[]> out, List<byte[]> packetAudits) {
         if (!capture) {
-            for (ChunkPos pos : positions) materializeOne(server, level, pos);
+            for (ChunkPos pos : positions) materializeOne(server, level, a, pos);
             return;
         }
         List<ChunkPos> loaded = positions;
         List<CompletableFuture<?>> futures = server.submit(() -> { List<CompletableFuture<?>> result = new ArrayList<>(loaded.size()); for (ChunkPos pos : loaded) result.add(level.getChunkSource().addTicketAndLoadWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, 0)); return result; }).join();
         for (int i = 0; i < loaded.size(); i++) { net.minecraft.server.level.ChunkResult<?> result = (net.minecraft.server.level.ChunkResult<?>)futures.get(i).join(); if (!result.isSuccess()) throw new IllegalStateException("chunk generation failed at " + loaded.get(i) + ": " + result.getError()); }
-        if (capture) out.addAll(server.submit(() -> { try { List<byte[]> result = new ArrayList<>(positions.size()); for (ChunkPos pos : positions) { LevelChunk chunk = level.getChunkSource().getChunkNow(pos.x(), pos.z()); if (chunk == null) throw new IllegalStateException("loaded chunk was evicted: " + pos); byte[] packet = a.v6() || diagnosticPacketOut != null ? packetBody(server, chunk, level) : null; if (diagnosticPacketOut != null) Files.write(Path.of(diagnosticPacketOut), packet); if (a.v6()) { byte[] full = digest(packet); if (packetAudits != null) packetAudits.add(full); result.add(Arrays.copyOf(full, RAW_RECORD_BYTES)); } else { byte[] record = semanticRecord(level, chunk, a); if (diagnosticRecordOut != null) Files.write(Path.of(diagnosticRecordOut), record); result.add(digest(record)); } } return result; } catch (Exception e) { throw new IllegalStateException("canonical chunk export failed", e); } }).join());
+        if (capture) out.addAll(server.submit(() -> { try { List<byte[]> result = new ArrayList<>(positions.size()); for (ChunkPos pos : positions) { LevelChunk chunk = level.getChunkSource().getChunkNow(pos.x(), pos.z()); if (chunk == null) throw new IllegalStateException("loaded chunk was evicted: " + pos); byte[] packet = a.v6() || diagnosticPacketOut != null ? packetBody(server, chunk, level) : null; if (diagnosticPacketOut != null) Files.write(Path.of(diagnosticPacketOut), packet); if (a.v7()) { byte[] record = lightFreeRecord(level, chunk, a); byte[] full = digest(record); if (packetAudits != null) packetAudits.add(full); if (diagnosticRecordOut != null) Files.write(Path.of(diagnosticRecordOut), record); result.add(Arrays.copyOf(full, RAW_RECORD_BYTES)); } else if (a.v6()) { byte[] full = digest(packet); if (packetAudits != null) packetAudits.add(full); result.add(Arrays.copyOf(full, RAW_RECORD_BYTES)); } else { byte[] record = semanticRecord(level, chunk, a); if (diagnosticRecordOut != null) Files.write(Path.of(diagnosticRecordOut), record); result.add(digest(record)); } } return result; } catch (Exception e) { throw new IllegalStateException("canonical chunk export failed", e); } }).join());
         server.submit(() -> { for (ChunkPos pos : loaded) level.getChunkSource().removeTicketWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, 0); }).join();
     }
 
@@ -600,7 +694,7 @@ public final class LargeParityOracle {
     }
 
     static void verifyProgress(Args a, MaterializeProgress progress, int epochTiles) {
-        int haloMin = a.v6() ? RAW_HALO_MIN : HALO_MIN, haloMax = a.v6() ? RAW_HALO_MAX : HALO_MAX;
+        int haloMin = a.v6() || a.v7() ? RAW_HALO_MIN : HALO_MIN, haloMax = a.v6() || a.v7() ? RAW_HALO_MAX : HALO_MAX;
         int minX = Math.max(haloMin, a.loX - 1), maxX = Math.min(haloMax, a.hiX + 1), minZ = Math.max(haloMin, a.loZ - 1), maxZ = Math.min(haloMax, a.hiZ + 1);
         if (progress.minX != minX || progress.maxX != maxX || progress.minZ != minZ || progress.maxZ != maxZ || progress.epochTiles != epochTiles) throw new IllegalStateException("materialization geometry or epoch size differs from durable progress; refusing gap or reorder");
         if (progress.inflightEnd != -1) throw new IllegalStateException("previous materialization epoch did not exit cleanly; refusing to resume uncertain world state at tiles " + progress.nextTile + ".." + progress.inflightEnd);
@@ -624,7 +718,7 @@ public final class LargeParityOracle {
             try (var entries = Files.list(root)) {
                 if (entries.findAny().isPresent()) throw new IllegalStateException("materialize requires an empty world root or its validated " + MATERIALIZATION_CONTRACT + " progress journal: " + root);
             }
-            int haloMin = a.v6() ? RAW_HALO_MIN : HALO_MIN, haloMax = a.v6() ? RAW_HALO_MAX : HALO_MAX;
+            int haloMin = a.v6() || a.v7() ? RAW_HALO_MIN : HALO_MIN, haloMax = a.v6() || a.v7() ? RAW_HALO_MAX : HALO_MAX;
             int minX = Math.max(haloMin, a.loX - 1), maxX = Math.min(haloMax, a.hiX + 1), minZ = Math.max(haloMin, a.loZ - 1), maxZ = Math.min(haloMax, a.hiZ + 1);
             progress = new MaterializeProgress(minX, maxX, minZ, maxZ, (maxX - minX) / MATERIALIZE_TILE + 1, (maxZ - minZ) / MATERIALIZE_TILE + 1, epochTiles, 0, -1);
             writeProgress(root, a, progress);
@@ -679,15 +773,29 @@ public final class LargeParityOracle {
         if (!Arrays.equals(frozen, frozenDigest(copy, a))) throw new IllegalStateException("prepared frozen-world clone differs from its sealed source");
         long count = (long)(a.hiX - a.loX + 1) * (a.hiZ - a.loZ + 1); File out = new File(a.out); long done = a.resume ? resumeRecords(out, a, count, frozen) : 0;
         File packetAudit = a.v6() ? new File(a.packetAuditOut == null ? a.out + ".packet-audit" : a.packetAuditOut) : null;
+        File lightFreeAudit = a.v7() ? new File(a.out + ".light-free-audit") : null;
         if (a.v6() && a.resume && done > 0) { long auditDone = resumePacketAudits(packetAudit, a, count, frozen); if (auditDone != done) throw new IllegalStateException("packet audit sidecar is not aligned with manifest records: " + packetAudit); }
-        if (done == count) { System.err.println("[large-parity " + formatLabel(a) + "] authenticated shard already complete: " + out); return; } if (out.getParentFile() != null) out.getParentFile().mkdirs();
+        if (a.v7() && a.resume && done > 0) { long auditDone = resumeLightFreeAudits(lightFreeAudit, a, count, frozen); if (auditDone != done) throw new IllegalStateException("light-free audit sidecar is not aligned with manifest records: " + lightFreeAudit); }
+        if (done == count) {
+            if (a.v6()) resumePacketAudits(packetAudit, a, count, frozen);
+            if (a.v7()) resumeLightFreeAudits(lightFreeAudit, a, count, frozen);
+            System.err.println("[large-parity " + formatLabel(a) + "] authenticated shard already complete: " + out); return;
+        } if (out.getParentFile() != null) out.getParentFile().mkdirs();
         if (packetAudit != null && packetAudit.getParentFile() != null) packetAudit.getParentFile().mkdirs();
-        try { runServer(copy, true, a, (server, level) -> { MessageDigest payload = sha256(), packetPayload = sha256(); try (RandomAccessFile file = new RandomAccessFile(out, "rw"); RandomAccessFile audit = packetAudit == null ? null : new RandomAccessFile(packetAudit, "rw")) {
-            if (done == 0) { file.setLength(HEADER_BYTES); file.seek(0); file.write(header(a, count, frozen, new byte[32])); file.seek(HEADER_BYTES); if (audit != null) { audit.setLength(HEADER_BYTES); audit.seek(0); audit.write(packetAuditHeader(a, count, frozen, new byte[32])); audit.seek(HEADER_BYTES); } }
-            else { file.seek(HEADER_BYTES); byte[] prefix = new byte[8192]; long left = done * a.recordWidth(); while (left != 0) { int n = file.read(prefix, 0, (int)Math.min(left, prefix.length)); if (n < 0) throw new IllegalStateException("partial shard ended before prefix"); payload.update(prefix, 0, n); left -= n; } file.seek(HEADER_BYTES + done * a.recordWidth()); if (audit != null) { audit.seek(HEADER_BYTES); left = done * DIGEST_BYTES; while (left != 0) { int n = audit.read(prefix, 0, (int)Math.min(left, prefix.length)); if (n < 0) throw new IllegalStateException("partial packet audit ended before prefix"); packetPayload.update(prefix, 0, n); left -= n; } audit.seek(HEADER_BYTES + done * DIGEST_BYTES); } }
+        if (lightFreeAudit != null && lightFreeAudit.getParentFile() != null) lightFreeAudit.getParentFile().mkdirs();
+        try { runServer(copy, true, a, (server, level) -> { MessageDigest payload = sha256(), auditPayload = sha256(); try (RandomAccessFile file = new RandomAccessFile(out, "rw"); RandomAccessFile audit = packetAudit == null ? null : new RandomAccessFile(packetAudit, "rw"); RandomAccessFile lightAudit = lightFreeAudit == null ? null : new RandomAccessFile(lightFreeAudit, "rw")) {
+            if (done == 0) {
+                file.setLength(HEADER_BYTES); file.seek(0); file.write(header(a, count, frozen, new byte[32])); file.seek(HEADER_BYTES);
+                if (audit != null) { audit.setLength(HEADER_BYTES); audit.seek(0); audit.write(packetAuditHeader(a, count, frozen, new byte[32])); audit.seek(HEADER_BYTES); }
+                if (lightAudit != null) { lightAudit.setLength(HEADER_BYTES); lightAudit.seek(0); lightAudit.write(lightFreeAuditHeader(a, count, frozen, new byte[32])); lightAudit.seek(HEADER_BYTES); }
+            } else {
+                file.seek(HEADER_BYTES); byte[] prefix = new byte[8192]; long left = done * a.recordWidth(); while (left != 0) { int n = file.read(prefix, 0, (int)Math.min(left, prefix.length)); if (n < 0) throw new IllegalStateException("partial shard ended before prefix"); payload.update(prefix, 0, n); left -= n; } file.seek(HEADER_BYTES + done * a.recordWidth());
+                if (audit != null) { audit.seek(HEADER_BYTES); left = done * DIGEST_BYTES; while (left != 0) { int n = audit.read(prefix, 0, (int)Math.min(left, prefix.length)); if (n < 0) throw new IllegalStateException("partial packet audit ended before prefix"); auditPayload.update(prefix, 0, n); left -= n; } audit.seek(HEADER_BYTES + done * DIGEST_BYTES); }
+                if (lightAudit != null) { lightAudit.seek(HEADER_BYTES); left = done * DIGEST_BYTES; while (left != 0) { int n = lightAudit.read(prefix, 0, (int)Math.min(left, prefix.length)); if (n < 0) throw new IllegalStateException("partial light-free audit ended before prefix"); auditPayload.update(prefix, 0, n); left -= n; } lightAudit.seek(HEADER_BYTES + done * DIGEST_BYTES); }
+            }
             int width = a.hiX - a.loX + 1, batch = Math.max(1, Integer.parseInt(System.getenv().getOrDefault("LODESTONE_ORACLE_BATCH", "256"))); long start = System.nanoTime();
-            for (long at = done; at < count; at += batch) { long end = Math.min(count, at + batch); List<ChunkPos> positions = new ArrayList<>(); for (long i = at; i < end; i++) positions.add(new ChunkPos(a.loX + (int)(i % width), a.loZ + (int)(i / width))); List<byte[]> hashes = new ArrayList<>(), audits = a.v6() ? new ArrayList<>() : null; loadBatch(server, level, a, positions, true, hashes, audits); for (int i = 0; i < hashes.size(); i++) { file.write(hashes.get(i)); payload.update(hashes.get(i)); if (audit != null) { audit.write(audits.get(i)); packetPayload.update(audits.get(i)); } } double rate = (end - done) / ((System.nanoTime() - start) / 1_000_000_000.0); ChunkPos last = positions.get(positions.size()-1); System.err.printf("[large-parity] %s chunks=%d/%d rate=%.1f chunks/s coord=(%d,%d)%n", a.dimension, end, count, rate, last.x(), last.z()); }
-            file.seek(0); file.write(header(a, count, frozen, payload.digest())); if (audit != null) { audit.seek(0); audit.write(packetAuditHeader(a, count, frozen, packetPayload.digest())); }
+            for (long at = done; at < count; at += batch) { long end = Math.min(count, at + batch); List<ChunkPos> positions = new ArrayList<>(); for (long i = at; i < end; i++) positions.add(new ChunkPos(a.loX + (int)(i % width), a.loZ + (int)(i / width))); List<byte[]> hashes = new ArrayList<>(), audits = a.v6() || a.v7() ? new ArrayList<>() : null; loadBatch(server, level, a, positions, true, hashes, audits); for (int i = 0; i < hashes.size(); i++) { file.write(hashes.get(i)); payload.update(hashes.get(i)); if (audit != null) { audit.write(audits.get(i)); auditPayload.update(audits.get(i)); } if (lightAudit != null) { lightAudit.write(audits.get(i)); auditPayload.update(audits.get(i)); } } double rate = (end - done) / ((System.nanoTime() - start) / 1_000_000_000.0); ChunkPos last = positions.get(positions.size()-1); System.err.printf("[large-parity] %s chunks=%d/%d rate=%.1f chunks/s coord=(%d,%d)%n", a.dimension, end, count, rate, last.x(), last.z()); }
+            file.seek(0); file.write(header(a, count, frozen, payload.digest())); if (audit != null) { audit.seek(0); audit.write(packetAuditHeader(a, count, frozen, auditPayload.digest())); } if (lightAudit != null) { lightAudit.seek(0); lightAudit.write(lightFreeAuditHeader(a, count, frozen, auditPayload.digest())); }
             } });
         } finally {
             if (!Arrays.equals(frozen, frozenDigest(frozenRoot, a))) throw new IllegalStateException("sealed frozen-world source changed during export");

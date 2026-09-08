@@ -6,6 +6,8 @@ MAGIC = b"LWP26P03"
 MAGIC_V4 = b"LWP26P04"
 MAGIC_V5 = b"LWP26P05"
 MAGIC_V6 = b"LWP26P06"
+MAGIC_V7 = b"LWP26P07"
+LIGHT_FREE_AUDIT_MAGIC = b"LWP26A07"
 HEADER = 256
 WIDTH = 32
 RAW_WIDTH = 2
@@ -13,6 +15,8 @@ DOMAIN = b"lodestone.worldgen.large-parity.manifest/v3/semantic"
 DOMAIN_V4 = b"lodestone.worldgen.large-parity.manifest/v4/semantic"
 DOMAIN_V5 = b"lodestone.worldgen.large-parity.manifest/v5/semantic"
 DOMAIN_V6 = b"lodestone.worldgen.large-parity.manifest/v6/raw-packet"
+DOMAIN_V7 = b"lodestone.worldgen.large-parity.manifest/v7/light-free"
+LIGHT_FREE_AUDIT_DOMAIN = b"lodestone.worldgen.large-parity.audit/v7/light-free"
 # These names are retained for the v3-v5 semantic diagnostics. Do not change
 # them when the raw-packet grid changes: old manifests are still readable.
 GRID_MIN = -250
@@ -50,6 +54,8 @@ def _format(version):
         return MAGIC_V5, 5, DOMAIN_V5, WIDTH, (GRID_MIN, GRID_MAX)
     if version == 6:
         return MAGIC_V6, 6, DOMAIN_V6, RAW_WIDTH, (RAW_GRID_MIN, RAW_GRID_MAX)
+    if version == 7:
+        return MAGIC_V7, 7, DOMAIN_V7, RAW_WIDTH, (RAW_GRID_MIN, RAW_GRID_MAX)
     raise ValueError(f"unsupported manifest version {version}")
 
 
@@ -96,7 +102,7 @@ def _parse_header(path, raw_header, payload_size):
     (magic, version, size, algorithm, schema, protocol, seed, gx0, gx1, gz0,
      gz1, sx0, sx1, sz0, sz1, count, width, reserved, domain, frozen,
      payload_digest) = h
-    if magic not in (MAGIC, MAGIC_V4, MAGIC_V5, MAGIC_V6):
+    if magic not in (MAGIC, MAGIC_V4, MAGIC_V5, MAGIC_V6, MAGIC_V7):
         if magic == b"LWP26P02":
             raise ValueError(f"{path}: v2 stores raw 16-bit packet fingerprints and is rejected; regenerate from a frozen world as v3")
         raise ValueError(f"{path}: unsupported manifest magic {magic!r}")
@@ -104,10 +110,11 @@ def _parse_header(path, raw_header, payload_size):
     valid_v4 = (magic == MAGIC_V4 and version == 4 and schema == 4)
     valid_v5 = (magic == MAGIC_V5 and version == 5 and schema == 5)
     valid_v6 = (magic == MAGIC_V6 and version == 6 and schema == 6)
-    expected_width = RAW_WIDTH if valid_v6 else WIDTH
-    if not (valid_v3 or valid_v4 or valid_v5 or valid_v6) or (size, algorithm, protocol, seed, width, reserved) != (HEADER, 2, 776, 42, expected_width, 0):
+    valid_v7 = (magic == MAGIC_V7 and version == 7 and schema == 7)
+    expected_width = RAW_WIDTH if (valid_v6 or valid_v7) else WIDTH
+    if not (valid_v3 or valid_v4 or valid_v5 or valid_v6 or valid_v7) or (size, algorithm, protocol, seed, width, reserved) != (HEADER, 2, 776, 42, expected_width, 0):
         raise ValueError(f"{path}: unsupported parity manifest header")
-    grid_min, grid_max = (RAW_GRID_MIN, RAW_GRID_MAX) if valid_v6 else (GRID_MIN, GRID_MAX)
+    grid_min, grid_max = (RAW_GRID_MIN, RAW_GRID_MAX) if (valid_v6 or valid_v7) else (GRID_MIN, GRID_MAX)
     if (gx0, gx1, gz0, gz1) != (grid_min, grid_max, grid_min, grid_max):
         side = grid_max - grid_min + 1
         raise ValueError(f"{path}: not the required {side}x{side} grid")
@@ -115,9 +122,9 @@ def _parse_header(path, raw_header, payload_size):
     if sx0 < gx0 or sx1 > gx1 or sz0 < gz0 or sz1 > gz1 or count != expected:
         raise ValueError(f"{path}: invalid shard bounds/count")
     expected_domain = (DOMAIN if version == 3 else DOMAIN_V4 if version == 4 else
-                       DOMAIN_V5 if version == 5 else DOMAIN_V6)
+                       DOMAIN_V5 if version == 5 else DOMAIN_V6 if version == 6 else DOMAIN_V7)
     if domain != hashlib.sha256(expected_domain).digest():
-        kind = "raw-packet" if version == 6 else "semantic-record"
+        kind = "raw-packet" if version == 6 else "light-free" if version == 7 else "semantic-record"
         raise ValueError(f"{path}: {kind} schema digest differs")
     dim = dimension(raw_header, h)
     if frozen == bytes(32):
@@ -186,6 +193,119 @@ class _ManifestStream:
         self.source.close()
 
 
+class _LightFreeAuditStream:
+    """Stream one authenticated P07 full-digest sidecar."""
+
+    def __init__(self, path, manifest_header, manifest_dimension):
+        self.path = pathlib.Path(str(path) + ".light-free-audit")
+        self.manifest_header = manifest_header
+        self.manifest_dimension = manifest_dimension
+        self.source = None
+        self.header = None
+
+    def __enter__(self):
+        if not self.path.is_file():
+            raise ValueError(f"{self.path}: required light-free audit sidecar is missing")
+        self.source = self.path.open("rb")
+        try:
+            raw_header = self.source.read(HEADER)
+            self.source.seek(0, 2)
+            payload_size = self.source.tell() - HEADER
+            self.source.seek(HEADER)
+            self.header = _parse_light_free_audit_header(
+                self.path, raw_header, payload_size, self.manifest_header, self.manifest_dimension
+            )
+        except BaseException:
+            self.source.close()
+            raise
+        self.payload_digest = hashlib.sha256()
+        return self
+
+    def records(self):
+        count = self.header[15]
+        for _ in range(count):
+            record = self.source.read(WIDTH)
+            if len(record) != WIDTH:
+                raise ValueError(f"{self.path}: payload ended before {count} full digests")
+            self.payload_digest.update(record)
+            yield record
+        if self.source.read(1):
+            raise ValueError(f"{self.path}: payload has trailing bytes")
+        if self.header[20] != self.payload_digest.digest():
+            raise ValueError(f"{self.path}: payload checksum differs")
+
+    def __exit__(self, _type, _value, _traceback):
+        self.source.close()
+
+
+def light_free_audit_path(manifest_path):
+    """Return the only accepted P07 sidecar spelling."""
+    return pathlib.Path(str(manifest_path) + ".light-free-audit")
+
+
+def _parse_light_free_audit_header(path, raw_header, payload_size, manifest_header, manifest_dimension):
+    if len(raw_header) != HEADER:
+        raise ValueError(f"{path}: shorter than {HEADER}-byte light-free audit header")
+    h = struct.unpack(FMT, raw_header)
+    (magic, version, size, algorithm, schema, protocol, seed, gx0, gx1, gz0,
+     gz1, sx0, sx1, sz0, sz1, count, width, reserved, domain, frozen,
+     payload_digest) = h
+    if (magic, version, size, algorithm, schema, protocol, seed, width, reserved) != (
+        LIGHT_FREE_AUDIT_MAGIC, 7, HEADER, 3, 7, 776, 42, WIDTH, 0
+    ):
+        raise ValueError(f"{path}: light-free audit header identity differs")
+    if (gx0, gx1, gz0, gz1) != (RAW_GRID_MIN, RAW_GRID_MAX, RAW_GRID_MIN, RAW_GRID_MAX):
+        raise ValueError(f"{path}: light-free audit global bounds differ")
+    if (sx0, sx1, sz0, sz1, count) != tuple(manifest_header[11:16]):
+        raise ValueError(f"{path}: light-free audit shard geometry differs from its manifest")
+    if domain != hashlib.sha256(LIGHT_FREE_AUDIT_DOMAIN).digest():
+        raise ValueError(f"{path}: light-free audit schema digest differs")
+    if frozen != manifest_header[19]:
+        raise ValueError(f"{path}: light-free audit frozen-world identity differs")
+    expected_dimension = hashlib.sha256(DIMENSIONS[manifest_dimension]).digest()
+    if raw_header[168:200] != expected_dimension:
+        raise ValueError(f"{path}: light-free audit dimension identity differs")
+    expected_size = count * WIDTH
+    if payload_size != expected_size:
+        raise ValueError(f"{path}: payload size is {payload_size}, expected {expected_size}")
+    return h
+
+
+def read_light_free_audit(manifest_path, manifest_header, manifest_dimension):
+    """Authenticate a P07 sidecar and return its complete payload digest.
+
+    The payload itself is streamed, so validating a 1001 by 1001 sidecar does
+    not retain 32 MiB of records in Python memory.
+    """
+    with pathlib.Path(manifest_path).open("rb") as main, _LightFreeAuditStream(
+        manifest_path, manifest_header, manifest_dimension
+    ) as audit:
+        main.seek(HEADER)
+        for index, full in enumerate(audit.records()):
+            prefix = main.read(RAW_WIDTH)
+            if prefix != full[:RAW_WIDTH]:
+                raise ValueError(
+                    f"{audit.path}: full digest prefix differs from manifest at record {index}"
+                )
+        if main.read(1):
+            raise ValueError(f"{manifest_path}: payload has trailing bytes")
+        return audit.header[20]
+
+
+def make_light_free_audit_header(manifest_header, manifest_dimension, payload_digest):
+    """Build the authenticated P07 full-digest sidecar header."""
+    sx0, sx1, sz0, sz1, count = manifest_header[11:16]
+    header = struct.pack(
+        FMT, LIGHT_FREE_AUDIT_MAGIC, 7, HEADER, 3, 7, 776, 42,
+        RAW_GRID_MIN, RAW_GRID_MAX, RAW_GRID_MIN, RAW_GRID_MAX,
+        sx0, sx1, sz0, sz1, count, WIDTH, 0,
+        hashlib.sha256(LIGHT_FREE_AUDIT_DOMAIN).digest(), manifest_header[19],
+        payload_digest,
+    )
+    dimension_digest = hashlib.sha256(DIMENSIONS[manifest_dimension]).digest()
+    return header[:168] + dimension_digest + header[200:]
+
+
 def _slot_seen(slots, index):
     """Return whether a dense occupancy bit is set, and set it otherwise."""
     byte = index >> 3
@@ -199,8 +319,10 @@ def _slot_seen(slots, index):
 def validate(paths):
     for path in paths:
         h, _, dim = read(path)
-        kind = "raw-packet" if h[1] == 6 else "semantic"
-        print(f"ok {path}: kind={kind} width={h[16]} dimension={dim} cx={h[11]}..{h[12]} cz={h[13]}..{h[14]} payload_sha256={h[20].hex()} frozen={h[19].hex()}")
+        kind = "raw-packet" if h[1] == 6 else "light-free" if h[1] == 7 else "semantic"
+        audit = read_light_free_audit(path, h, dim) if h[1] == 7 else None
+        suffix = f" audit_sha256={audit.hex()}" if audit is not None else ""
+        print(f"ok {path}: kind={kind} width={h[16]} dimension={dim} cx={h[11]}..{h[12]} cz={h[13]}..{h[14]} payload_sha256={h[20].hex()} frozen={h[19].hex()}{suffix}")
 
 
 def merge(out, paths):
@@ -215,6 +337,9 @@ def merge(out, paths):
         slot_path = pathlib.Path(directory) / "records"
         slot_file = None
         slot_map = None
+        audit_slot_path = pathlib.Path(directory) / "light-free-audit-records"
+        audit_slot_file = None
+        audit_slot_map = None
         seen = None
         try:
             for path in paths:
@@ -223,11 +348,15 @@ def merge(out, paths):
                     compatibility_error = None
                     if version is None:
                         version, dim, record_width = h[1], shard_dim, shard.record_width
-                        required = RAW_GRID_COUNT if version == 6 else GRID_COUNT
-                        grid_min, grid_max = (RAW_GRID_MIN, RAW_GRID_MAX) if version == 6 else (GRID_MIN, GRID_MAX)
+                        required = RAW_GRID_COUNT if version in (6, 7) else GRID_COUNT
+                        grid_min, grid_max = (RAW_GRID_MIN, RAW_GRID_MAX) if version in (6, 7) else (GRID_MIN, GRID_MAX)
                         slot_file = slot_path.open("w+b")
                         slot_file.truncate(required * record_width)
                         slot_map = mmap.mmap(slot_file.fileno(), 0, access=mmap.ACCESS_WRITE)
+                        if version == 7:
+                            audit_slot_file = audit_slot_path.open("w+b")
+                            audit_slot_file.truncate(required * WIDTH)
+                            audit_slot_map = mmap.mmap(audit_slot_file.fileno(), 0, access=mmap.ACCESS_WRITE)
                         seen = bytearray((required + 7) // 8)
                     elif (h[1], shard_dim) != (version, dim):
                         compatibility_error = ValueError(
@@ -241,28 +370,51 @@ def merge(out, paths):
                         )
                     sx0, sx1, sz0, sz1 = h[11:15]
                     records = shard.records()
-                    for cz in range(sz0, sz1 + 1):
-                        for cx in range(sx0, sx1 + 1):
-                            index = (cz - grid_min) * (grid_max - grid_min + 1) + (cx - grid_min)
-                            value = next(records)
-                            if compatibility_error is not None:
-                                continue
-                            if _slot_seen(seen, index):
-                                if overlap is None:
-                                    overlap = f"overlap at ({cx}, {cz}): {path}"
-                            else:
-                                offset = index * record_width
-                                slot_map[offset:offset + record_width] = value
-                                seen_count += 1
-                    # Exhaust the iterator here so the whole shard is
-                    # authenticated before overlap reporting.
+                    audit_context = _LightFreeAuditStream(path, h, shard_dim) if h[1] == 7 else None
+                    audit_records = None
+                    if audit_context is not None:
+                        audit_context.__enter__()
+                        audit_records = audit_context.records()
                     try:
-                        next(records)
-                    except StopIteration:
-                        pass
+                        for cz in range(sz0, sz1 + 1):
+                            for cx in range(sx0, sx1 + 1):
+                                index = (cz - grid_min) * (grid_max - grid_min + 1) + (cx - grid_min)
+                                value = next(records)
+                                audit_value = next(audit_records) if audit_records is not None else None
+                                if compatibility_error is not None:
+                                    continue
+                                if _slot_seen(seen, index):
+                                    if overlap is None:
+                                        overlap = f"overlap at ({cx}, {cz}): {path}"
+                                else:
+                                    offset = index * record_width
+                                    slot_map[offset:offset + record_width] = value
+                                    if audit_value is not None:
+                                        audit_offset = index * WIDTH
+                                        audit_slot_map[audit_offset:audit_offset + WIDTH] = audit_value
+                                    seen_count += 1
+                        # Exhaust both iterators here so the whole shard is
+                        # authenticated before overlap reporting.
+                        try:
+                            next(records)
+                        except StopIteration:
+                            pass
+                        if audit_records is not None:
+                            try:
+                                next(audit_records)
+                            except StopIteration:
+                                pass
+                    finally:
+                        if audit_context is not None:
+                            audit_context.__exit__(None, None, None)
                     if compatibility_error is not None:
                         raise compatibility_error
         finally:
+            if audit_slot_map is not None:
+                audit_slot_map.flush()
+                audit_slot_map.close()
+            if audit_slot_file is not None:
+                audit_slot_file.close()
             if slot_map is not None:
                 slot_map.flush()
                 slot_map.close()
@@ -290,7 +442,25 @@ def merge(out, paths):
                 if not block:
                     break
                 target.write(block)
-    kind = "raw packet hashes" if version == 6 else "semantic SHA-256 digests"
+        if version == 7:
+            audit_payload_digest = hashlib.sha256()
+            with audit_slot_path.open("rb") as source:
+                while True:
+                    block = source.read(1024 * 1024)
+                    if not block:
+                        break
+                    audit_payload_digest.update(block)
+            audit_header = make_light_free_audit_header(
+                struct.unpack(FMT, header), dim, audit_payload_digest.digest()
+            )
+            with light_free_audit_path(out).open("wb") as target, audit_slot_path.open("rb") as source:
+                target.write(audit_header)
+                while True:
+                    block = source.read(1024 * 1024)
+                    if not block:
+                        break
+                    target.write(block)
+    kind = "raw packet hashes" if version == 6 else "light-free hashes" if version == 7 else "semantic SHA-256 digests"
     print(f"merged {required} {kind} into {out}")
 
 
@@ -298,8 +468,8 @@ def accept(out, first, second):
     """Freeze a baseline only after two independent read-only exports agree."""
     first_header, first_payload, first_dim = read(first)
     second_header, second_payload, second_dim = read(second)
-    grid_min, grid_max = (RAW_GRID_MIN, RAW_GRID_MAX) if first_header[1] == 6 else (GRID_MIN, GRID_MAX)
-    required = RAW_GRID_COUNT if first_header[1] == 6 else GRID_COUNT
+    grid_min, grid_max = (RAW_GRID_MIN, RAW_GRID_MAX) if first_header[1] in (6, 7) else (GRID_MIN, GRID_MAX)
+    required = RAW_GRID_COUNT if first_header[1] in (6, 7) else GRID_COUNT
     if first_header[11:16] != (grid_min, grid_max, grid_min, grid_max, required):
         raise ValueError(f"{first}: duplicate-read acceptance requires the complete {grid_max-grid_min+1}x{grid_max-grid_min+1} manifest")
     if second_header[11:16] != first_header[11:16]:
@@ -309,6 +479,12 @@ def accept(out, first, second):
     if second_payload != first_payload:
         raise ValueError("duplicate frozen-world reads differ; baseline is not accepted")
     pathlib.Path(out).write_bytes(pathlib.Path(first).read_bytes())
+    if first_header[1] == 7:
+        first_audit = read_light_free_audit(first, first_header, first_dim)
+        second_audit = read_light_free_audit(second, second_header, second_dim)
+        if first_audit != second_audit:
+            raise ValueError("duplicate frozen-world light-free audit reads differ; baseline is not accepted")
+        pathlib.Path(light_free_audit_path(out)).write_bytes(light_free_audit_path(first).read_bytes())
     print(f"accepted duplicate-read baseline into {out}")
 
 
@@ -316,8 +492,8 @@ def reproducible(first, second):
     """Require independent materializations to agree without sharing a root id."""
     first_header, first_payload, first_dim = read(first)
     second_header, second_payload, second_dim = read(second)
-    raw_records = first_header[1] == 6
-    record_kind = "raw packet hash payload" if raw_records else "semantic payload"
+    raw_records = first_header[1] in (6, 7)
+    record_kind = "raw packet hash payload" if first_header[1] == 6 else "light-free hash payload" if first_header[1] == 7 else "semantic payload"
     grid_min, grid_max = (RAW_GRID_MIN, RAW_GRID_MAX) if raw_records else (GRID_MIN, GRID_MAX)
     required = RAW_GRID_COUNT if raw_records else GRID_COUNT
     complete = (grid_min, grid_max, grid_min, grid_max, required)
@@ -333,6 +509,11 @@ def reproducible(first, second):
         raise ValueError("independent materializations cover different geometry")
     if second_payload != first_payload:
         raise ValueError(f"independent materializations differ in {record_kind}")
+    if first_header[1] == 7:
+        first_audit = read_light_free_audit(first, first_header, first_dim)
+        second_audit = read_light_free_audit(second, second_header, second_dim)
+        if first_audit != second_audit:
+            raise ValueError("independent materializations differ in light-free full-digest sidecar")
     print(f"independent materializations reproduce {record_kind}: dimension={first_dim} cx={first_header[11]}..{first_header[12]} cz={first_header[13]}..{first_header[14]}")
 
 
@@ -467,7 +648,51 @@ def selftest():
         try: read(bad_dim)
         except ValueError as error: assert "dimension" in str(error)
         else: raise AssertionError("v6 dimension identity corruption was accepted")
-    print("selftest ok: authenticated v3/v4/v5 compatibility plus v6 raw-packet merge, duplicate-read, reproducibility, tamper, dimension, and frozen-world controls")
+
+        # P07 keeps the same 1001-square geometry and compact main records,
+        # but authenticates canonical light-free terrain records in a required
+        # full-digest sidecar.  Exercise merge, duplicate-read acceptance,
+        # independent-root comparison, and both payload streams' tamper gates.
+        v7_left = directory / "light-free-left.lwp"; v7_right = directory / "light-free-right.lwp"; v7_full = directory / "light-free-full.lwp"
+        v7_frozen = hashlib.sha256(b"light-free frozen world control").digest()
+        def make_v7(path, sx0, sx1, value, sidecar_value=None):
+            count = (sx1 - sx0 + 1) * RAW_GRID_SIDE
+            prefixes = bytes([value, value ^ 0xA5]) * count
+            full = bytearray([sidecar_value if sidecar_value is not None else value] * WIDTH * count)
+            # Make every full record's prefix agree with the compact payload.
+            for record in range(count):
+                full[record * WIDTH:record * WIDTH + RAW_WIDTH] = prefixes[record * RAW_WIDTH:(record + 1) * RAW_WIDTH]
+            full = bytes(full)
+            main_header = make_header(7, "end", sx0, sx1, RAW_GRID_MIN, RAW_GRID_MAX,
+                                      count, v7_frozen, hashlib.sha256(prefixes).digest())
+            path.write_bytes(main_header + prefixes)
+            audit_header = make_light_free_audit_header(
+                struct.unpack(FMT, main_header), "end", hashlib.sha256(full).digest()
+            )
+            light_free_audit_path(path).write_bytes(audit_header + full)
+        make_v7(v7_left, RAW_GRID_MIN, 0, 0x71); make_v7(v7_right, 1, RAW_GRID_MAX, 0xB2)
+        merge(v7_full, [v7_left, v7_right])
+        v7_header, v7_payload, v7_dim = read(v7_full)
+        assert v7_header[1] == 7 and v7_dim == "end" and len(v7_payload) == RAW_GRID_COUNT * RAW_WIDTH
+        assert read_light_free_audit(v7_full, v7_header, v7_dim)
+        v7_copy = directory / "light-free-copy.lwp"
+        v7_copy.write_bytes(v7_full.read_bytes())
+        light_free_audit_path(v7_copy).write_bytes(light_free_audit_path(v7_full).read_bytes())
+        accepted_v7 = directory / "light-free-accepted.lwp"
+        accept(accepted_v7, v7_full, v7_copy)
+        reproducible(v7_full, v7_copy)
+        bad_audit = bytearray(light_free_audit_path(v7_copy).read_bytes()); bad_audit[HEADER + 7] ^= 1
+        light_free_audit_path(v7_copy).write_bytes(bad_audit)
+        try: read_light_free_audit(v7_copy, v7_header, v7_dim)
+        except ValueError as error: assert "checksum" in str(error) or "prefix" in str(error)
+        else: raise AssertionError("v7 light-free sidecar corruption was accepted")
+        light_free_audit_path(v7_copy).write_bytes(light_free_audit_path(v7_full).read_bytes())
+        mismatched_audit = bytearray(light_free_audit_path(v7_copy).read_bytes()); mismatched_audit[HEADER + 1] ^= 1
+        light_free_audit_path(v7_copy).write_bytes(mismatched_audit)
+        try: read_light_free_audit(v7_copy, v7_header, v7_dim)
+        except ValueError as error: assert "prefix" in str(error)
+        else: raise AssertionError("v7 sidecar prefix collision was accepted")
+    print("selftest ok: authenticated v3/v4/v5 compatibility plus v6 raw-packet and v7 light-free merge, duplicate-read, reproducibility, tamper, dimension, and frozen-world controls")
 
 
 def main():

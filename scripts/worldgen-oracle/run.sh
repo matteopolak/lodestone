@@ -57,12 +57,34 @@ if [ -n "${LODESTONE_ORACLE_FROZEN_WORLD_ROOT:-}" ]; then
   WORLD_ENV+=( -e ORACLE_FROZEN_WORLD_ROOT=/frozen )
   oracle_dimension="${LODESTONE_ORACLE_DIMENSION:-overworld}"
   raw_packet=0
-  for arg in "$@"; do
+  light_free=0
+  for (( i = 1; i <= $#; i++ )); do
+    arg="${!i}"
     case "$arg" in
       --raw-packet|--format-v6) raw_packet=1 ;;
+      --light-free|--format-v7) light_free=1 ;;
+      --format)
+        next=$((i + 1))
+        if [ "$next" -le "$#" ] && [ "${!next}" = v7 ]; then light_free=1; fi
+        if [ "$next" -le "$#" ] && [ "${!next}" = v6 ]; then raw_packet=1; fi
+        ;;
     esac
   done
-  if [ "$raw_packet" -eq 1 ]; then
+  if [ "$raw_packet" -eq 1 ] && [ "$light_free" -eq 1 ]; then
+    echo "--raw-packet and --light-free select different explicit formats" >&2
+    exit 2
+  fi
+  if [ "$light_free" -eq 1 ]; then
+    v7_stamp="lodestone-large-parity-materialization-v7-${oracle_dimension}.freeze.sha256"
+    v6_stamp="lodestone-large-parity-materialization-v6-${oracle_dimension}.freeze.sha256"
+    if [ -f "$LODESTONE_ORACLE_FROZEN_WORLD_ROOT/$v7_stamp" ]; then
+      freeze_stamp="$v7_stamp"
+    else
+      # P07 is content-only, so an authenticated v6 frozen root is a valid
+      # source and avoids a second 1001x1001 materialization pass.
+      freeze_stamp="$v6_stamp"
+    fi
+  elif [ "$raw_packet" -eq 1 ]; then
     freeze_stamp="lodestone-large-parity-materialization-v6-${oracle_dimension}.freeze.sha256"
   else
     freeze_stamp="lodestone-large-parity-materialization-v2-${oracle_dimension}.freeze.sha256"
