@@ -72,6 +72,11 @@ controls join each registry-selected server, read a known chunk block and
 observe its block update after a break. Real 1.17.1 and 1.18.2 client sessions
 remain required validation.
 
+Both hosted protocols decode `client_command`'s single VarInt action. The
+literal `[0x00]` body becomes `ServerBound::ClientCommand { action: 0 }` after
+registry selection, which is the server-loop input used to request a respawn;
+trailing bytes and packets received outside Play remain ignored.
+
 ### External-client acceptance
 
 The opt-in release-client gate covers both hosted rows in this era: protocol 756 (1.17.1) and

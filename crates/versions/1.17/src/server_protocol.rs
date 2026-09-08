@@ -18,9 +18,9 @@ use crate::packets::common::{KeepAliveRequest, KeepAliveResponse};
 use crate::packet_ids::{handshaking, login, play};
 use crate::packet_ids_758::{handshaking as handshaking_758, login as login_758, play as play_758};
 use crate::packets::game::{
-    BlockDig, BlockPlace, ClientboundChat, ClientboundPositionLook, JoinGame, ServerboundChat,
-    ServerboundArmAnimation, ServerboundFlying, ServerboundLook, ServerboundPosition,
-    ServerboundPositionLook,
+    BlockDig, BlockPlace, ClientCommand, ClientboundChat, ClientboundPositionLook, JoinGame,
+    ServerboundChat, ServerboundArmAnimation, ServerboundFlying, ServerboundLook,
+    ServerboundPosition, ServerboundPositionLook,
 };
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
@@ -296,6 +296,11 @@ impl ServerProtocol for V756ServerProtocol {
                         username: start.username,
                         uuid: Uuid::nil(),
                     }
+                })
+            }
+            State::Play if packet_id == play::serverbound::CLIENT_COMMAND => {
+                decode_full::<ClientCommand>(payload).map_or(ServerBound::Ignored, |command| {
+                    ServerBound::ClientCommand { action: command.action }
                 })
             }
             State::Play if packet_id == play::serverbound::BLOCK_DIG => {
@@ -718,6 +723,11 @@ impl ServerProtocol for V758ServerProtocol {
                         username: start.username,
                         uuid: Uuid::nil(),
                     }
+                })
+            }
+            State::Play if packet_id == play_758::serverbound::CLIENT_COMMAND => {
+                decode_full_758::<ClientCommand>(payload).map_or(ServerBound::Ignored, |command| {
+                    ServerBound::ClientCommand { action: command.action }
                 })
             }
             State::Play if packet_id == play_758::serverbound::BLOCK_DIG => {
