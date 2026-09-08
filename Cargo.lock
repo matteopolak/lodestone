@@ -3777,11 +3777,13 @@ dependencies = [
 name = "lodestone-v1-7"
 version = "0.1.0"
 dependencies = [
+ "bevy_ecs",
  "flate2",
  "lodestone-canonical",
  "lodestone-client",
  "lodestone-core",
  "lodestone-data",
+ "lodestone-ecs",
  "lodestone-macros",
  "lodestone-model",
  "lodestone-net",
@@ -3800,10 +3802,12 @@ dependencies = [
 name = "lodestone-v1-8"
 version = "0.1.0"
 dependencies = [
+ "bevy_ecs",
  "lodestone-canonical",
  "lodestone-client",
  "lodestone-core",
  "lodestone-data",
+ "lodestone-ecs",
  "lodestone-macros",
  "lodestone-model",
  "lodestone-net",
