@@ -375,6 +375,30 @@ pub fn non_treasure() -> impl Iterator<Item = &'static EnchantmentDef> {
     ENCHANTMENTS.iter().filter(|e| !e.treasure)
 }
 
+/// Every enchantment in the registry, in the stable order used by the local
+/// enchantment census. Loot functions can replace the enchanting-table tag
+/// with a narrower holder set, so their selector must be able to see treasure
+/// enchantments too.
+pub fn all() -> impl Iterator<Item = &'static EnchantmentDef> {
+    ENCHANTMENTS.iter()
+}
+
+/// Whether `def` belongs to the random-loot holder set used by the bundled
+/// enchant-with-levels tables. This is intentionally not the same as
+/// [`non_treasure`]: the tag adds binding curse, vanishing curse, frost walker,
+/// and mending to the non-treasure set.
+#[must_use]
+pub fn on_random_loot(def: &EnchantmentDef) -> bool {
+    !def.treasure
+        || matches!(
+            def.key,
+            "minecraft:binding_curse"
+                | "minecraft:vanishing_curse"
+                | "minecraft:frost_walker"
+                | "minecraft:mending"
+        )
+}
+
 /// A stable, **this-server-only** enchantment id — alphabetical index into
 /// [`ENCHANTMENTS`]. See the module doc for why this cannot be vanilla's real
 /// registry id.
@@ -516,6 +540,22 @@ mod tests {
     fn seven_treasure_and_two_curse_enchantments() {
         assert_eq!(ENCHANTMENTS.iter().filter(|e| e.treasure).count(), 7);
         assert_eq!(ENCHANTMENTS.iter().filter(|e| e.curse).count(), 2);
+    }
+
+    #[test]
+    fn random_loot_holder_set_adds_only_the_four_tagged_treasures() {
+        let names: Vec<_> = all().filter(|definition| on_random_loot(definition)).map(|definition| definition.key).collect();
+        for key in [
+            "minecraft:binding_curse",
+            "minecraft:vanishing_curse",
+            "minecraft:frost_walker",
+            "minecraft:mending",
+        ] {
+            assert!(names.contains(&key), "{key} belongs to #minecraft:on_random_loot");
+        }
+        for key in ["minecraft:soul_speed", "minecraft:swift_sneak", "minecraft:wind_burst"] {
+            assert!(!names.contains(&key), "{key} is not in #minecraft:on_random_loot");
+        }
     }
 
     /// `AnvilMenu`'s exclusive-set gate: sharpness and smite must conflict,
