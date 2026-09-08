@@ -137,7 +137,7 @@ fn adapter_consumes_container_packets_and_encodes_click_close() {
             state_id: lodestone_model::ContainerStateId::new(7),
             items: vec![None, Some(diamond_item())],
             carried_item: None,
-        })])
+        })]
     );
     let cursor = adapter
         .handle_packet(
