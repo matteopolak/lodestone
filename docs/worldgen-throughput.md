@@ -10,6 +10,8 @@ The executable builds one production generator per dimension and seed, walks a r
 
 Each pass reports chunks per second, process CPU utilization when the host exposes `getrusage`, and sampled resident-set growth. A separate 16-chunk allocation pass uses a benchmark-local counting allocator, so allocation counts do not distort the wall-clock throughput numbers. The legacy rolling digest over non-air counts remains in the output for historical comparison, while an out-of-band SHA-256 content digest hashes every canonical block-state string, exposed biome cell, and generated block-entity sidecar (or the dimension's equivalent loot/gateway sidecar). The content pass is outside both the timed loop and allocation-counted closure, and cold/warm digests must agree.
 
+The mixed ore/vegetation bridge reuses its ordered overlay and changed-cell buffers for the lifetime of one feature stage. The buffers are cleared before reuse, while the deterministic coordinate sort and overwrite filtering remain unchanged; this removes cumulative temporary-vector traffic without changing generated content.
+
 Run a 256-chunk sweep in release mode:
 
 ```text
