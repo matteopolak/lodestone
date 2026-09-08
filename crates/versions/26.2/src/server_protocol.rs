@@ -3012,16 +3012,15 @@ fn initial_block_light_storage_sections(
 /// End's initial light engine retains a vertical propagation corridor in the
 /// loaded footprint, not just the three sections adjacent to each non-air
 /// section. A terrain section seeds the block and sky layers, and propagation
-/// allocates the intervening empty sections down to the first in-world light
-/// section. The below-world apron is included only when the footprint itself
-/// reaches block section zero. The upper bound is the one-section light apron
-/// above the highest admitted non-air section.
+/// allocates the intervening empty sections from the lowest admitted non-air
+/// section through the one-section light apron above the highest one. An
+/// all-air footprint allocates no storage.
 fn initial_end_light_storage_sections(
     center: &WorldChunkColumn,
     neighbours: &[WorldChunkColumn],
 ) -> Vec<bool> {
+    let mut lowest_non_air = None;
     let mut highest_non_air = None;
-    let mut reaches_bottom = false;
     for column in std::iter::once(center).chain(neighbours) {
         for block_section in 0..column.section_count() {
             if !column
@@ -3030,10 +3029,12 @@ fn initial_end_light_storage_sections(
             {
                 continue;
             }
+            lowest_non_air = Some(lowest_non_air.map_or(block_section, |lowest: usize| {
+                lowest.min(block_section)
+            }));
             highest_non_air = Some(highest_non_air.map_or(block_section, |highest: usize| {
                 highest.max(block_section)
             }));
-            reaches_bottom |= block_section == 0;
         }
     }
 
@@ -3041,7 +3042,7 @@ fn initial_end_light_storage_sections(
     let Some(highest_non_air) = highest_non_air else {
         return stored;
     };
-    let first = usize::from(!reaches_bottom);
+    let first = lowest_non_air.expect("End storage has a non-air section");
     let last = highest_non_air
         .saturating_add(2)
         .min(stored.len().saturating_sub(1));
@@ -8030,13 +8031,15 @@ mod block_edit_tests {
         let empty = column();
         let storage = initial_end_light_storage_sections(&center, std::slice::from_ref(&empty));
         assert!(!storage[0]);
-        assert!(storage[1..=7].iter().all(|&stored| stored));
+        assert!(storage[5..=7].iter().all(|&stored| stored));
+        assert!(storage[..5].iter().all(|&stored| !stored));
         assert!(storage[8..].iter().all(|&stored| !stored));
 
         let mut high_neighbour = empty.clone();
         high_neighbour.set_block(8, 128, 8, 1);
         let extended = initial_end_light_storage_sections(&center, &[high_neighbour]);
-        assert!(extended[1..=10].iter().all(|&stored| stored));
+        assert!(extended[5..=10].iter().all(|&stored| stored));
+        assert!(extended[..5].iter().all(|&stored| !stored));
         assert!(extended[11..].iter().all(|&stored| !stored));
 
         let all_air = initial_end_light_storage_sections(&empty, &[]);
