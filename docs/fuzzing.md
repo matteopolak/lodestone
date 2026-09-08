@@ -271,6 +271,25 @@ What exists:
   self-check. The fixture retains the recorder command and real-server
   provenance next to its expected state.
 
+  `tests/differential_fixed_redstone_production.rs` applies the same seam to a
+  three-probe redstone trace: the externally measured signal arrives at the
+  immediate probe on the first elapsed tick, at the delayed probe on replay
+  tick 9, and at the far probe on replay tick 13. Those post-tick labels are
+  intentionally distinct from the pre-advance labels used by the standalone
+  model gate. `tick_corpus_26_2_redstone.json` carries the measured state at
+  every bounded tick, and its corruption control targets the delayed arrival.
+
+  `tests/differential_fixed_water_production.rs` adds a delayed fluid case:
+  `tick_corpus_26_2_water_spread.json` records a real 26.2 source spreading to
+  four floored neighbours. The externally captured neighbours stay air for
+  four replay ticks, then all become water on replay tick 4 (the fifth elapsed
+  server tick). Its corruption control removes the recorded state at that
+  arrival tick and asserts the first probe and tick, so a runner that only
+  checks the final settled shape cannot satisfy the test. The matching input
+  plan is `scripts/live-oracles/tick-corpus-water-spread.json`; re-capture it
+  with `capture-differential-ticks.py` and review the provenance before replacing
+  the fixture.
+
 - [`Action`]/[`ScriptStep`]/[`Script`] — the shared action-sequence type used
   by both hand-written live scripts and the hermetic generator.
 - [`WorldOracle`] — the trait a "side" of the comparison implements:
