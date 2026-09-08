@@ -583,6 +583,14 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
         self.primary.set_retention_radius(view_radius);
     }
 
+    fn prepare_packet_replay(&self, targets: &[(i32, i32)]) -> Option<usize> {
+        self.primary.prepare_packet_replay(targets)
+    }
+
+    fn reset_packet_replay(&self) {
+        self.primary.reset_packet_replay();
+    }
+
     /// `self.primary`'s own answer first — for a *persistent* sibling that is
     /// `Some`, carrying real `player_data`, so this must not shadow it with
     /// the coarser [`Self::own_registries`] copy. Only when `primary` has
