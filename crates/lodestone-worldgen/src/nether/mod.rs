@@ -981,6 +981,23 @@ impl NetherGenerator {
         )
     }
 
+    /// Releases the immutable pre-decoration state retained by a packet
+    /// replay and restores the ordinary demand-ordered cache bound.
+    ///
+    /// A large raw-packet sweep calls this after each bounded spatial window;
+    /// clearing the memo is part of the replay boundary, not an eviction that
+    /// changes generation order or bytes.
+    pub fn reset_packet_replay(&self) {
+        self.pre_decoration
+            .lock()
+            .expect("nether pre-decoration memo poisoned")
+            .clear();
+        self.pre_decoration_capacity
+            .store(DECORATION_MEMO_CEILING, Ordering::Relaxed);
+        self.pre_decoration_computations.store(0, Ordering::Relaxed);
+        self.pre_decoration_evictions.store(0, Ordering::Relaxed);
+    }
+
     fn prepare_immutable_stage_cache(&self, admissions: &[(i32, i32)], radius: i32) -> usize {
         let capacity = pre_decoration_capacity(admissions, radius);
         self.pre_decoration_capacity.store(capacity, Ordering::Relaxed);

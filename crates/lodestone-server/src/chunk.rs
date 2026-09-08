@@ -1728,6 +1728,18 @@ pub trait ChunkSource: Send + Sync {
         let _ = view_radius;
     }
 
+    /// Prepares an immutable packet-replay cache for the supplied target
+    /// coordinates and returns its bounded capacity, when the source supports
+    /// that diagnostic seam. Wrappers must forward this method so a retained
+    /// source prepares the generator that actually serves columns.
+    fn prepare_packet_replay(&self, _targets: &[(i32, i32)]) -> Option<usize> {
+        None
+    }
+
+    /// Releases immutable packet-replay state prepared by
+    /// [`ChunkSource::prepare_packet_replay`].
+    fn reset_packet_replay(&self) {}
+
     /// The live-world registries this source persists, when it persists any.
     ///
     /// A source backed by a world directory owns the *one* block-entity registry
@@ -1939,6 +1951,14 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
         (**self).set_retention_radius(view_radius);
     }
 
+    fn prepare_packet_replay(&self, targets: &[(i32, i32)]) -> Option<usize> {
+        (**self).prepare_packet_replay(targets)
+    }
+
+    fn reset_packet_replay(&self) {
+        (**self).reset_packet_replay();
+    }
+
     fn world_registries(&self) -> Option<WorldRegistries> {
         (**self).world_registries()
     }
@@ -2068,6 +2088,14 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
 
     fn set_retention_radius(&self, view_radius: i32) {
         (**self).set_retention_radius(view_radius);
+    }
+
+    fn prepare_packet_replay(&self, targets: &[(i32, i32)]) -> Option<usize> {
+        (**self).prepare_packet_replay(targets)
+    }
+
+    fn reset_packet_replay(&self) {
+        (**self).reset_packet_replay();
     }
 
     fn world_registries(&self) -> Option<WorldRegistries> {
@@ -2857,6 +2885,14 @@ impl ChunkSource for NetherChunkSource {
         }
         drop(edits);
         self.generate(cx, cz)
+    }
+
+    fn prepare_packet_replay(&self, targets: &[(i32, i32)]) -> Option<usize> {
+        Some(self.generator.prepare_packet_replay(targets))
+    }
+
+    fn reset_packet_replay(&self) {
+        self.generator.reset_packet_replay();
     }
 
     fn block_state(&self, x: i32, y: i32, z: i32) -> String {

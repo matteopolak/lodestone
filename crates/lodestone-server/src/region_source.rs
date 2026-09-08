@@ -1288,6 +1288,14 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
         self.inner.column_at(cx, cz, stage)
     }
 
+    fn prepare_packet_replay(&self, targets: &[(i32, i32)]) -> Option<usize> {
+        self.inner.prepare_packet_replay(targets)
+    }
+
+    fn reset_packet_replay(&self) {
+        self.inner.reset_packet_replay();
+    }
+
     fn block_state(&self, x: i32, y: i32, z: i32) -> String {
         // Goes through `self.column()`, which consults `edits` and disk before
         // the inner source — so the answer reflects a `set_block` edit exactly

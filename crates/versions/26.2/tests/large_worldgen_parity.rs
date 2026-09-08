@@ -30,6 +30,9 @@ type ChunkPos = (i32, i32);
 
 const MAX_RAW_DIAGNOSTIC_EXAMPLES: usize = 32;
 const MAX_RAW_DIAGNOSTIC_GROUPS: usize = 64;
+/// Keep the Nether immutable replay closure bounded while preserving the
+/// manifest's z-major, x-fastest target order.
+const NETHER_PACKET_REPLAY_WINDOW_ROWS: u64 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RawPacketMismatch {
@@ -609,19 +612,33 @@ fn is_partial_lifecycle_manifest(header: &support::large_parity_manifest::Header
         && i64::from(header.cz1) - i64::from(header.cz0) == 15
 }
 
-fn raw_packet_targets(
+fn raw_packet_target(
     header: &support::large_parity_manifest::Header,
-    limit: u64,
+    index: u64,
+    width: u64,
+) -> ChunkPos {
+    (
+        header.cx0 + i32::try_from(index % width).expect("raw target x offset fits i32"),
+        header.cz0 + i32::try_from(index / width).expect("raw target z offset fits i32"),
+    )
+}
+
+fn nether_packet_replay_window_end(index: u64, width: u64, limit: u64) -> u64 {
+    let window_size = width
+        .checked_mul(NETHER_PACKET_REPLAY_WINDOW_ROWS)
+        .expect("Nether replay window size fits u64");
+    let window_start = (index / window_size) * window_size;
+    (window_start + window_size).min(limit)
+}
+
+fn raw_packet_targets_for_window(
+    header: &support::large_parity_manifest::Header,
+    start: u64,
+    end: u64,
+    width: u64,
 ) -> Vec<ChunkPos> {
-    let width = u64::try_from(i64::from(header.cx1) - i64::from(header.cx0) + 1)
-        .expect("authenticated manifest coordinate width fits u64");
-    (0..limit)
-        .map(|index| {
-            (
-                header.cx0 + i32::try_from(index % width).expect("raw target x offset fits i32"),
-                header.cz0 + i32::try_from(index / width).expect("raw target z offset fits i32"),
-            )
-        })
+    (start..end)
+        .map(|index| raw_packet_target(header, index, width))
         .collect()
 }
 
@@ -631,6 +648,82 @@ fn raw_packet_targets(
 /// to the encoder for packet construction.
 const INITIAL_CARDINAL_NEIGHBOUR_OFFSETS: [(i32, i32); 4] =
     [(-1, 0), (0, -1), (1, 0), (0, 1)];
+
+fn nether_packet_replay_capacity_bound(width: u64, rows: u64) -> usize {
+    let halo = 1_u64
+        .checked_add(
+            u64::try_from(lodestone_worldgen::feature::region_view::WIDE_RADIUS)
+                .expect("Nether replay radius fits u64"),
+        )
+        .expect("Nether replay halo fits u64");
+    usize::try_from(
+        width
+            .checked_add(halo * 2)
+            .expect("Nether replay width fits u64")
+            .checked_mul(
+                rows.checked_add(halo * 2)
+                    .expect("Nether replay height fits u64"),
+            )
+            .expect("Nether replay closure fits u64"),
+    )
+    .expect("Nether replay closure fits usize")
+}
+
+#[test]
+fn nether_packet_replay_windows_preserve_order_and_retention_bound() {
+    let header = support::large_parity_manifest::Header {
+        semantic_version: 6,
+        cx0: -500,
+        cx1: 500,
+        cz0: -500,
+        cz1: 500,
+        count: 1_002_001,
+        frozen_world: [0; 32],
+        dimension: Dimension::Nether,
+        record_width: RAW_PACKET_HASH_BYTES as u16,
+        kind: 2,
+    };
+    let width = 1_001;
+    let first_end = nether_packet_replay_window_end(0, width, header.count);
+    let second_end = nether_packet_replay_window_end(first_end, width, header.count);
+    let first = raw_packet_targets_for_window(&header, 0, first_end, width);
+    let second = raw_packet_targets_for_window(&header, first_end, second_end, width);
+
+    assert_eq!(first.len(), width as usize);
+    assert_eq!(second.len(), width as usize);
+    assert_eq!(first[0], (-500, -500));
+    assert_eq!(first[width as usize - 1], (500, -500));
+    assert_eq!(second[0], (-500, -499));
+    assert_eq!(
+        first
+            .iter()
+            .chain(second.iter())
+            .copied()
+            .collect::<Vec<_>>(),
+        (0..second_end)
+            .map(|index| raw_packet_target(&header, index, width))
+            .collect::<Vec<_>>(),
+        "windowing must not reorder or skip manifest targets",
+    );
+
+    let window_capacity = nether_packet_replay_capacity_bound(width, NETHER_PACKET_REPLAY_WINDOW_ROWS);
+    let full_capacity = nether_packet_replay_capacity_bound(width, width);
+    assert_eq!(window_capacity, 7_049, "the 1001-wide one-row closure is bounded");
+    assert!(window_capacity < full_capacity / 100, "retention must not scale with the full grid");
+}
+
+#[test]
+fn nether_packet_replay_generator_capacity_is_row_bounded() {
+    let source = nether_chunk_source(42);
+    let targets = (-500..=500).map(|x| (x, -500)).collect::<Vec<_>>();
+    let capacity = source.generator().prepare_packet_replay(&targets);
+    assert_eq!(
+        capacity,
+        nether_packet_replay_capacity_bound(1_001, NETHER_PACKET_REPLAY_WINDOW_ROWS),
+        "the generator must retain one row's target-plus-halo closure only",
+    );
+    source.generator().reset_packet_replay();
+}
 
 fn initial_light_admission_neighbour_offsets(record_index: u64) -> &'static [(i32, i32)] {
     if record_index == 0 {
@@ -1180,32 +1273,42 @@ fn parity_manifest_streams_before_rust_comparison() {
     } else {
         let width = u64::try_from(i64::from(h.cx1) - i64::from(h.cx0) + 1)
             .expect("authenticated manifest coordinate width fits u64");
-        let prepared_raw_targets = if raw_packet && dimension == Dimension::Nether {
-            Some(raw_packet_targets(&h, limit))
-        } else {
-            None
-        };
         let source: Box<dyn ChunkSource> = match dimension {
             // A frozen external world is a retained, settled lifecycle result.
             // Keep the comparator on the server's retained-source path rather than
             // regenerating an isolated column for every packet request.
             Dimension::Overworld => Box::new(retained_chunk_source_for_view_radius(overworld_chunk_source(42), 8)),
             Dimension::Nether => {
-                let source = nether_chunk_source(42);
-                if let Some(targets) = prepared_raw_targets.as_deref() {
-                    let capacity = source.generator().prepare_packet_replay(targets);
-                    eprintln!(
-                        "large raw-packet parity: prepared Nether immutable prefix for {} targets (capacity={capacity})",
-                        targets.len(),
-                    );
-                }
-                Box::new(retained_chunk_source_for_view_radius(source, 8))
+                Box::new(retained_chunk_source_for_view_radius(nether_chunk_source(42), 8))
             }
             Dimension::End => Box::new(retained_chunk_source_for_view_radius(end_chunk_source(42), 8)),
         };
         let column_for = |cx, cz| -> ChunkColumn { source.column(cx, cz) };
         let mut expected_digest = [0u8; 32];
+        let mut nether_replay_window_end = 0;
         for index in 0..limit {
+            if raw_packet && dimension == Dimension::Nether && index >= nether_replay_window_end {
+                let window_end = nether_packet_replay_window_end(index, width, limit);
+                let targets = raw_packet_targets_for_window(&h, index, window_end, width);
+                let capacity = source
+                    .prepare_packet_replay(&targets)
+                    .expect("Nether source exposes the packet replay seam");
+                let bound = nether_packet_replay_capacity_bound(
+                    width,
+                    NETHER_PACKET_REPLAY_WINDOW_ROWS,
+                );
+                assert!(
+                    capacity <= bound,
+                    "Nether replay cache capacity {capacity} exceeds window bound {bound}"
+                );
+                eprintln!(
+                    "large raw-packet parity: prepared Nether immutable window {}..{} ({} targets, capacity={capacity})",
+                    index,
+                    window_end,
+                    targets.len(),
+                );
+                nether_replay_window_end = window_end;
+            }
             let (expected_prefix, expected_full) = if raw_packet {
                 let mut prefix = [0u8; RAW_PACKET_HASH_BYTES];
                 expected.read_exact(&mut prefix).expect("manifest raw packet hash prefix");
@@ -1220,8 +1323,7 @@ fn parity_manifest_streams_before_rust_comparison() {
                 expected.read_exact(&mut expected_digest).expect("manifest semantic digest");
                 (None, None)
             };
-            let cx = h.cx0 + (index % width) as i32;
-            let cz = h.cz0 + (index / width) as i32;
+            let (cx, cz) = raw_packet_target(&h, index, width);
             let column = column_for(cx, cz);
             let settled_column = if raw_packet && dimension == Dimension::Nether {
                 let admitted_neighbour_offsets =
@@ -1324,6 +1426,12 @@ fn parity_manifest_streams_before_rust_comparison() {
                     .unwrap_or_else(|error| panic!("read {}: {error}", reference_path.display()));
                 let report = packet_component_difference(&reference_packet, &payload, dimension);
                 component_reports.push(((cx, cz), report));
+            }
+            if raw_packet
+                && dimension == Dimension::Nether
+                && index + 1 == nether_replay_window_end
+            {
+                source.reset_packet_replay();
             }
             if (index + 1) % 256 == 0 || index + 1 == limit {
                 eprintln!(
@@ -1597,6 +1705,42 @@ fn nether_packet_replay_cache_preserves_raw_packet_bytes() {
     assert_eq!(prepared_source.generator().pre_decoration_evictions(), 0);
     assert!(baseline_source.generator().pre_decoration_computations() > capacity);
     assert!(baseline_source.generator().pre_decoration_evictions() > 0);
+}
+
+/// Independent seam control for the row-window implementation: packet bytes
+/// and their full digests must match one-shot preparation when a row boundary
+/// releases and rebuilds the immutable pre-decoration cache.
+#[test]
+#[ignore = "long-running raw-byte identity control; see docs/worldgen-large-parity.md"]
+fn nether_packet_replay_window_seam_preserves_raw_packet_bytes_and_digests() {
+    let targets = [(0, 0), (1, 0), (0, 1), (1, 1)];
+    let one_shot_source = nether_chunk_source(42);
+    one_shot_source.generator().prepare_packet_replay(&targets);
+    let one_shot = targets
+        .iter()
+        .map(|&target| nether_packet_payload(&one_shot_source, target))
+        .collect::<Vec<_>>();
+
+    let windowed_source = nether_chunk_source(42);
+    let first_row = [targets[0], targets[1]];
+    windowed_source.generator().prepare_packet_replay(&first_row);
+    let mut windowed = first_row
+        .iter()
+        .map(|&target| nether_packet_payload(&windowed_source, target))
+        .collect::<Vec<_>>();
+    windowed_source.generator().reset_packet_replay();
+    let second_row = [targets[2], targets[3]];
+    windowed_source.generator().prepare_packet_replay(&second_row);
+    windowed.extend(
+        second_row
+            .iter()
+            .map(|&target| nether_packet_payload(&windowed_source, target)),
+    );
+
+    assert_eq!(one_shot, windowed, "row-window preparation changed packet bytes");
+    let one_shot_digests = one_shot.iter().map(|payload| raw_packet_full_digest(payload)).collect::<Vec<_>>();
+    let windowed_digests = windowed.iter().map(|payload| raw_packet_full_digest(payload)).collect::<Vec<_>>();
+    assert_eq!(one_shot_digests, windowed_digests, "row-window preparation changed packet digests");
 }
 
 fn assert_full_and_pruned_lifecycle_packet_bytes(path: &Path, target: ChunkPos, audit_corner_counts: bool) {
