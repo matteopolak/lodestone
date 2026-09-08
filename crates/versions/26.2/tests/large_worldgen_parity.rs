@@ -879,6 +879,7 @@ fn compare_end_raw_after_materialization<R: Read, A: Read>(
     limit: u64,
     scan_all: bool,
     reference_packets: &BTreeMap<ChunkPos, PathBuf>,
+    raw_packet_output: &mut Option<RawPacketOutput>,
     component_reports: &mut Vec<(ChunkPos, PacketComponentReport)>,
 ) -> Vec<RawPacketMismatch> {
     let width = u64::try_from(i64::from(h.cx1) - i64::from(h.cx0) + 1)
@@ -972,6 +973,9 @@ fn compare_end_raw_after_materialization<R: Read, A: Read>(
             }
             other => panic!("production chunk encoder returned {other:?} at ({cx},{cz})"),
         };
+        if let Some(output) = raw_packet_output.as_mut() {
+            output.write((cx, cz), &payload);
+        }
         let actual_full = raw_packet_full_digest(&payload);
         let actual_prefix = [actual_full[0], actual_full[1]];
         if actual_prefix != expected_prefix || actual_full != expected_full {
@@ -1583,6 +1587,7 @@ fn parity_manifest_streams_before_rust_comparison() {
         .unwrap_or_else(|error| panic!("invalid parity batch selection: {error}"));
     let limit = parity_batch_limit(h.count, max_chunks, batch_size, target_index, scan_all)
         .unwrap_or_else(|error| panic!("invalid parity batch selection: {error}"));
+    let mut raw_packet_output = prepare_raw_packet_output(raw_packet, limit);
     if batch_size.is_some() {
         eprintln!(
             "large {} parity: authenticated scan-all batch selected ({limit} targets)",
@@ -1714,6 +1719,7 @@ fn parity_manifest_streams_before_rust_comparison() {
                 limit,
                 scan_all,
                 &reference_packets,
+                &mut raw_packet_output,
                 &mut component_reports,
             ));
         } else {
@@ -1765,6 +1771,9 @@ fn parity_manifest_streams_before_rust_comparison() {
                 }
                 other => panic!("production chunk encoder returned {other:?} at ({cx},{cz})"),
             };
+            if let Some(output) = raw_packet_output.as_mut() {
+                output.write((cx, cz), &payload);
+            }
             if index == 0 {
                 if let Some(path) = std::env::var_os("LODESTONE_LARGE_PARITY_PACKET_OUT") {
                     std::fs::write(&path, &payload).expect("write requested Lodestone packet capture");
@@ -2492,6 +2501,112 @@ const MAX_COMPONENT_EXAMPLES: usize = 32;
 const MAX_COMPONENT_SIGNATURES: usize = 32;
 const MAX_REFERENCE_PACKET_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_REFERENCE_PACKET_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_RAW_PACKET_OUTPUT_PACKETS: u64 = 4_096;
+const MAX_RAW_PACKET_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
+
+struct RawPacketOutput {
+    directory: PathBuf,
+    packets: u64,
+    bytes: u64,
+}
+
+fn validate_raw_packet_output_limit(limit: u64) -> Result<(), String> {
+    if limit > MAX_RAW_PACKET_OUTPUT_PACKETS {
+        return Err(format!(
+            "LODESTONE_LARGE_PARITY_PACKET_OUT_DIR supports at most {MAX_RAW_PACKET_OUTPUT_PACKETS} packets, got {limit}"
+        ));
+    }
+    Ok(())
+}
+
+fn raw_packet_output_path(directory: &Path, target: ChunkPos) -> PathBuf {
+    directory.join(format!("x{}_z{}.packet", target.0, target.1))
+}
+
+fn prepare_raw_packet_output(raw_packet: bool, limit: u64) -> Option<RawPacketOutput> {
+    let path = std::env::var_os("LODESTONE_LARGE_PARITY_PACKET_OUT_DIR")?;
+    assert!(
+        raw_packet,
+        "LODESTONE_LARGE_PARITY_PACKET_OUT_DIR is only supported for raw-packet manifests"
+    );
+    validate_raw_packet_output_limit(limit)
+        .unwrap_or_else(|error| panic!("invalid raw packet output directory: {error}"));
+    let directory = PathBuf::from(path);
+    std::fs::create_dir_all(&directory).unwrap_or_else(|error| {
+        panic!(
+            "create raw packet output directory {}: {error}",
+            directory.display()
+        )
+    });
+    let mut entries = std::fs::read_dir(&directory).unwrap_or_else(|error| {
+        panic!(
+            "read raw packet output directory {}: {error}",
+            directory.display()
+        )
+    });
+    if let Some(entry) = entries.next() {
+        let entry = entry.unwrap_or_else(|error| {
+            panic!(
+                "read raw packet output directory {} entry: {error}",
+                directory.display()
+            )
+        });
+        panic!(
+            "raw packet output directory {} must be empty; found {}",
+            directory.display(),
+            entry.path().display()
+        );
+    }
+    Some(RawPacketOutput {
+        directory,
+        packets: 0,
+        bytes: 0,
+    })
+}
+
+impl RawPacketOutput {
+    fn write(&mut self, target: ChunkPos, payload: &[u8]) {
+        assert!(
+            self.packets < MAX_RAW_PACKET_OUTPUT_PACKETS,
+            "raw packet output exceeded the {MAX_RAW_PACKET_OUTPUT_PACKETS}-packet bound"
+        );
+        let packet_bytes = u64::try_from(payload.len()).expect("raw packet length fits u64");
+        assert!(
+            packet_bytes <= MAX_REFERENCE_PACKET_BYTES,
+            "raw packet at {target:?} is {packet_bytes} bytes, over the {MAX_REFERENCE_PACKET_BYTES}-byte diagnostic bound"
+        );
+        let total = self
+            .bytes
+            .checked_add(packet_bytes)
+            .expect("raw packet output byte count overflow");
+        assert!(
+            total <= MAX_RAW_PACKET_OUTPUT_BYTES,
+            "raw packet output exceeded the {MAX_RAW_PACKET_OUTPUT_BYTES}-byte bound"
+        );
+        let path = raw_packet_output_path(&self.directory, target);
+        assert!(
+            !path.exists(),
+            "raw packet output path already exists for {target:?}: {}",
+            path.display()
+        );
+        std::fs::write(&path, payload).unwrap_or_else(|error| {
+            panic!("write raw packet output {}: {error}", path.display())
+        });
+        self.packets += 1;
+        self.bytes = total;
+    }
+}
+
+#[test]
+fn raw_packet_output_directory_is_bounded_and_coordinate_keyed() {
+    assert!(validate_raw_packet_output_limit(0).is_ok());
+    assert!(validate_raw_packet_output_limit(MAX_RAW_PACKET_OUTPUT_PACKETS).is_ok());
+    assert!(validate_raw_packet_output_limit(MAX_RAW_PACKET_OUTPUT_PACKETS + 1).is_err());
+    assert_eq!(
+        raw_packet_output_path(Path::new("/tmp/raw-packets"), (-24, -25)),
+        PathBuf::from("/tmp/raw-packets/x-24_z-25.packet")
+    );
+}
 
 #[derive(Default)]
 struct ComponentDiff {
