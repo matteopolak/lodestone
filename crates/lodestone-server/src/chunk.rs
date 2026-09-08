@@ -1561,6 +1561,22 @@ impl ColumnLightSettlement {
     ) -> impl Iterator<Item = ((i32, i32), &lodestone_world::ColumnLight)> + '_ {
         self.entries.iter().map(|(offset, light)| (*offset, light))
     }
+
+    /// Iterates over the dependency snapshots without yielding the centre.
+    ///
+    /// This read-only view is intentionally hidden from generated API docs:
+    /// parity and diagnostic consumers need to inspect the exact settlement
+    /// boundary, while normal callers should continue to use
+    /// [`Self::centre_light`] and let the source own dependency persistence.
+    #[doc(hidden)]
+    pub fn dependency_lights(
+        &self,
+    ) -> impl Iterator<Item = ((i32, i32), &lodestone_world::ColumnLight)> + '_ {
+        self.entries
+            .iter()
+            .skip(1)
+            .map(|(offset, light)| (*offset, light))
+    }
 }
 
 /// Supplies terrain columns to the integrated server.
