@@ -5,13 +5,13 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use bevy_ecs::message::{Message, MessageWriter};
+use bevy_ecs::message::{Message, MessageReader, MessageWriter};
 use bevy_ecs::prelude::{ResMut, Resource};
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockPos, ResourceKey, Vec3};
 
-use super::TickSet;
+use super::{TickSet, paper_events::PaperEventBus};
 
 const QUEUE_CAPACITY: usize = 64;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -248,9 +248,28 @@ impl bevy_app::Plugin for ServerProposalPlugin {
         });
         app.insert_resource(ServerProposalHandle { sender });
         app.init_resource::<ServerProposalDecisions>();
+        app.init_resource::<PaperEventBus>();
         app.add_message::<ServerProposal>();
         app.add_systems(super::GameTick, drain_proposals.in_set(TickSet::Drain));
+        app.add_systems(
+            super::GameTick,
+            dispatch_paper_events.in_set(TickSet::Adjudicate),
+        );
         app.add_systems(super::GameTick, apply_proposals.in_set(TickSet::Apply));
+    }
+}
+
+fn dispatch_paper_events(
+    mut proposals: MessageReader<ServerProposal>,
+    mut events: ResMut<PaperEventBus>,
+    mut decisions: ResMut<ServerProposalDecisions>,
+) {
+    for proposal in proposals.read() {
+        if let Some(verdict) = events.adjudicate(&proposal.action) {
+            // The bus has already applied Paper's priority/order rules. Make
+            // its final verdict authoritative over native proposal consumers.
+            decisions.decide(proposal.id(), i32::MIN, verdict);
+        }
     }
 }
 

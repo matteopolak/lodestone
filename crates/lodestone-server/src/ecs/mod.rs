@@ -98,11 +98,16 @@ mod gate;
 #[cfg(test)]
 mod messages;
 pub(crate) mod plugin;
+pub mod paper_events;
 pub mod proposals;
 pub(crate) mod schedules;
 mod scheduler;
 
 pub use plugin::{ServerCorePlugin, ServerTick, ServerTickWitness, advance_server_tick};
+pub use paper_events::{
+    PaperEvent, PaperEventBus, PaperEventFailure, PaperEventKind, PaperEventPriority,
+    PaperEventRegistrationError,
+};
 pub use proposals::{
     DespawnProposalRefusal, ProposalRefusal, ProposalVerdict, ServerProposal,
     ServerProposalAction, ServerProposalDecisions, ServerProposalHandle, ServerProposalPlugin,
