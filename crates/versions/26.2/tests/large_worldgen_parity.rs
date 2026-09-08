@@ -10,6 +10,7 @@ use lodestone_server::{
     nether_chunk_source, overworld_chunk_source, retained_chunk_source_for_view_radius,
 };
 use lodestone_server::dimension::Dimension as ServerDimension;
+use lodestone_server::region_source::RegionChunkSource;
 use lodestone_v26_2::V770ServerProtocol;
 use lodestone_v26_2::packets::chunk::{ChunkShape, LevelChunkWithLight};
 use lodestone_worldgen_parity::lifecycle::{
@@ -697,6 +698,51 @@ fn end_materialization_positions(h: &ManifestHeader) -> Vec<ChunkPos> {
     positions
 }
 
+/// Returns the exclusive admission prefix needed to export the requested
+/// x-fastest/z prefix.  An admission settles the centre and all columns in
+/// `dependency_offsets`, so the final retained state of a target is fixed by
+/// the last admission whose footprint contains that target.  Admissions after
+/// that point cannot write the target and are causally irrelevant to its
+/// packet.  The mapping is deliberately independent of the materializer so it
+/// can be checked against small synthetic grids.
+fn materialization_prefix_for_export_prefix(
+    admissions: &[ChunkPos],
+    export_bounds: (i32, i32, i32, i32),
+    dependency_offsets: &[(i32, i32)],
+    export_limit: usize,
+) -> usize {
+    let (min_x, max_x, min_z, max_z) = export_bounds;
+    let width = usize::try_from(max_x - min_x + 1).expect("export width fits usize");
+    let height = usize::try_from(max_z - min_z + 1).expect("export height fits usize");
+    let export_count = width.checked_mul(height).expect("export count fits usize");
+    assert!(export_limit <= export_count, "export prefix exceeds authenticated bounds");
+
+    let admission_indices = admissions
+        .iter()
+        .enumerate()
+        .map(|(index, &chunk)| (chunk, index))
+        .collect::<BTreeMap<_, _>>();
+    let mut bound = 0;
+    for export_index in 0..export_limit {
+        let cx = min_x + i32::try_from(export_index % width).expect("export x offset fits i32");
+        let cz = min_z + i32::try_from(export_index / width).expect("export z offset fits i32");
+        let mut last = *admission_indices
+            .get(&(cx, cz))
+            .expect("export target must be in the materialization admissions")
+            + 1;
+        for &(dx, dz) in dependency_offsets {
+            let writer = (cx - dx, cz - dz);
+            let admission = *admission_indices
+                .get(&writer)
+                .expect("export dependency writer must be in the materialization admissions")
+                + 1;
+            last = last.max(admission);
+        }
+        bound = bound.max(last);
+    }
+    bound
+}
+
 fn compare_end_raw_after_materialization<R: Read, A: Read>(
     source: &dyn ChunkSource,
     expected: &mut R,
@@ -722,11 +768,18 @@ fn compare_end_raw_after_materialization<R: Read, A: Read>(
     }
 
     let admissions = end_materialization_positions(h);
-    eprintln!(
-        "large raw-packet parity: replaying {} End materialization admissions before export",
-        admissions.len(),
+    let admission_limit = materialization_prefix_for_export_prefix(
+        &admissions,
+        (h.cx0, h.cx1, h.cz0, h.cz1),
+        &END_LIGHT_NEIGHBOUR_OFFSETS,
+        usize::try_from(limit).expect("export prefix fits usize"),
     );
-    for (admission_index, &(cx, cz)) in admissions.iter().enumerate() {
+    eprintln!(
+        "large raw-packet parity: replaying {admission_limit}/{} End materialization admissions before {} export records",
+        admissions.len(),
+        limit,
+    );
+    for (admission_index, &(cx, cz)) in admissions.iter().take(admission_limit).enumerate() {
         let fallback = source
             .resident_column(cx, cz)
             .unwrap_or_else(|| source.column(cx, cz));
@@ -749,7 +802,7 @@ fn compare_end_raw_after_materialization<R: Read, A: Read>(
                 &mut compute,
             )
             .unwrap_or_else(|error| panic!("stored End light computation at ({cx},{cz}): {error:?}"));
-        if (admission_index + 1) % 256 == 0 || admission_index + 1 == admissions.len() {
+        if (admission_index + 1) % 256 == 0 || admission_index + 1 == admission_limit {
             eprintln!(
                 "large raw-packet parity: materialized {}/{} End admissions",
                 admission_index + 1,
@@ -885,6 +938,83 @@ fn raw_v6_16x16_shards_never_enter_lifecycle_replay() {
         kind: 2,
     };
     assert!(!is_partial_lifecycle_manifest(&header));
+}
+
+#[test]
+fn end_replay_bound_preserves_the_required_light_prefix_for_export_records() {
+    let header = support::large_parity_manifest::Header {
+        semantic_version: 6,
+        cx0: -25,
+        cx1: 25,
+        cz0: -25,
+        cz1: 25,
+        count: 51 * 51,
+        frozen_world: [0; 32],
+        dimension: Dimension::End,
+        record_width: RAW_PACKET_HASH_BYTES as u16,
+        kind: 2,
+    };
+    let admissions = end_materialization_positions(&header);
+    assert_eq!(admissions.len(), 2_809);
+    assert_eq!(
+        materialization_prefix_for_export_prefix(
+            &admissions,
+            (header.cx0, header.cx1, header.cz0, header.cz1),
+            &END_LIGHT_NEIGHBOUR_OFFSETS,
+            891,
+        ),
+        1_631,
+        "a prefix ending at export index 890 must retain every earlier target's light",
+    );
+    assert_eq!(
+        materialization_prefix_for_export_prefix(
+            &admissions,
+            (header.cx0, header.cx1, header.cz0, header.cz1),
+            &END_LIGHT_NEIGHBOUR_OFFSETS,
+            1_051,
+        ),
+        1_646,
+        "a prefix ending at export index 1050 must retain every earlier target's light",
+    );
+    assert_eq!(
+        materialization_prefix_for_export_prefix(
+            &admissions,
+            (header.cx0, header.cx1, header.cz0, header.cz1),
+            &END_LIGHT_NEIGHBOUR_OFFSETS,
+            header.count as usize,
+        ),
+        admissions.len(),
+        "the complete export still requires the complete admission stream",
+    );
+}
+
+#[test]
+fn materialization_prefix_bound_uses_x_fast_export_rows_and_supplied_dependencies() {
+    let admissions = (0..=3)
+        .flat_map(|z| (-1..=2).map(move |x| (x, z - 1)))
+        .collect::<Vec<_>>();
+    let dependencies = [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)];
+
+    assert_eq!(
+        materialization_prefix_for_export_prefix(&admissions, (0, 1, 0, 1), &dependencies, 1),
+        11,
+        "the first x-fast export record uses the full dependency footprint",
+    );
+    assert_eq!(
+        materialization_prefix_for_export_prefix(&admissions, (0, 1, 0, 1), &dependencies, 2),
+        12,
+        "the second x-fast export record advances within the same z row",
+    );
+    assert_eq!(
+        materialization_prefix_for_export_prefix(&admissions, (0, 1, 0, 1), &dependencies, 3),
+        15,
+        "the third export record starts the next z row",
+    );
+    assert_eq!(
+        materialization_prefix_for_export_prefix(&admissions, (0, 1, 0, 1), &dependencies, 0),
+        0,
+        "an empty export prefix requires no admissions",
+    );
 }
 
 #[test]
@@ -1355,6 +1485,14 @@ fn parity_manifest_streams_before_rust_comparison() {
         } else {
             None
         };
+        let end_persistence_dir = (dimension == Dimension::End).then(|| {
+            let dir = std::env::temp_dir().join(format!(
+                "lodestone-end-large-parity-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            dir
+        });
         let source: Box<dyn ChunkSource> = match dimension {
             // A frozen external world is a retained, settled lifecycle result.
             // Keep the comparator on the server's retained-source path rather than
@@ -1371,7 +1509,22 @@ fn parity_manifest_streams_before_rust_comparison() {
                 }
                 Box::new(retained_chunk_source_for_view_radius(source, 8))
             }
-            Dimension::End => Box::new(retained_chunk_source_for_view_radius(end_chunk_source(42), 8)),
+            Dimension::End => {
+                let dir = end_persistence_dir
+                    .as_deref()
+                    .expect("End raw replay must have a persistence directory");
+                let persistent = RegionChunkSource::new(
+                    end_chunk_source(42),
+                    dir,
+                    server_dimension,
+                    0,
+                    256,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("open temporary End persistence source {}: {error}", dir.display())
+                });
+                Box::new(retained_chunk_source_for_view_radius(persistent, 8))
+            }
         };
         let column_for = |cx, cz| -> ChunkColumn { source.column(cx, cz) };
         if raw_packet && dimension == Dimension::End {
@@ -1520,6 +1673,10 @@ fn parity_manifest_streams_before_rust_comparison() {
                 );
             }
         }
+        }
+        drop(source);
+        if let Some(dir) = end_persistence_dir {
+            let _ = std::fs::remove_dir_all(dir);
         }
     }
     if limit < h.count {
