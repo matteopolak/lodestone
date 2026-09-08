@@ -35,3 +35,5 @@ mod titles;
 mod sound_particle_screen;
 #[path = "session/maps_and_advancements.rs"]
 mod maps_and_advancements;
+#[path = "session/recipe_item_id_ingress.rs"]
+mod recipe_item_id_ingress;
