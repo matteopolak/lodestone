@@ -191,6 +191,13 @@ to the ECS metadata consumer, which inserts `EntityFlags` and drives the existin
 views. `crates/versions/1.9/tests/entity_metadata.rs` feeds literal packet bodies through each
 protocol's generated packet id and asserts that handoff, plus trailing-byte rejection.
 
+`crates/versions/1.9/tests/metadata_equipment_attributes_ecs.rs` is the broader ingress gate: one
+literal named-player spawn, metadata update, equipment update, and attribute update is selected
+through each of the four packet-id tables, then all emitted events are queued into the production
+`NetIngest` schedule. The assertions read `EntityFlags`, `Equipment`, and `Attributes` from the
+indexed ECS entity, and each deliberately non-default value has a distinct non-equality control so
+an empty or defaulted component cannot satisfy the test.
+
 The codec still decodes every known serializer and retains every decoded entry, but the semantic
 fold deliberately leaves class-specific indices, health, custom-name serializers, pose, and
 living/mob flags unsupported. Their historical index/type assignments require an entity-class
