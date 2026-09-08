@@ -66,15 +66,12 @@ unresolvable. `mining_efficiency`/`haste_amplifier`/`mining_fatigue`/
 `block_break_speed` remain at their defaults — no enchantment, potion or
 attribute input is modelled on this path yet.
 
-Creative block breaking is instant and arms a five-tick client-side delay for
-held input. Progressive survival breaks use the same delay after their `STOP`
-action, while survival blocks whose break progress is already instant (grass,
-flowers and similar zero-hardness blocks) do not arm it. The window input path
-records each block ray hit when the attack press arrives, so a press followed by
-a release between fixed ticks is still delivered to `drive_mining`; queued
-presses are consumed one per tick in arrival order. Holding the button therefore
-clears adjacent zero-hardness blocks on consecutive ticks while retaining the
-creative/progressive cooldowns.
+Creative block breaking is instant and has no client-side post-break delay. The
+window input path records each block ray hit when the attack press arrives, so
+a press followed by a release between fixed ticks is still delivered to
+`drive_mining`; queued presses are consumed one per tick in arrival order.
+Holding the button continues to use the same predictor, while survival keeps
+the five-tick post-break delay.
 
 `block_type_name`, the registry-id-to-name lookup used while decoding block
 events, reads `generated_block_registry::BLOCK_REGISTRY_NAMES`. This table is
@@ -157,17 +154,18 @@ copied verbatim and regenerated with `just regen-loot-corpus` — never add a
 table by hand, since the drift gate compares the tree against the cache in
 both directions (every bundled table must be clean, and every clean cache
 table must be bundled). The 109 excluded tables use a feature the roller does
-not model (`copy_components`, `set_potion`, mostly). A four-entry allowlist
-(`enchant_randomly`, `exploration_map`, `set_name`, `set_stew_effect`) lets a table in anyway when the *unsupported* part is
+not model (`copy_components`, `set_potion`, mostly). A
+four-entry allowlist (`enchant_randomly`, `exploration_map`, `set_name`,
+`set_stew_effect`) lets a table in anyway when the *unsupported* part is
 purely decorative — the item and count are still right, only the
-enchantment/name/map-target/effect is absent — which is what lets the
+enchantment/name/map-target/effect is absent — which is what lets the four
 decoration-only structure-chest tables (below) into the bundle. End-city
 treasure is fully evaluated, including its level-based enchantments.
 
 ### Structure chests
 
-Generated shipwrecks, ocean ruins, igloos and End cities arrive with chest
-contents. Four decisions carry the weight: the data markers that name a chest's table
+Generated shipwrecks, ocean ruins and igloos arrive with chest contents.
+Four decisions carry the weight: the data markers that name a chest's table
 come from the **raw template bytes**, not the parsed structure (the parser
 deliberately drops marker blocks and their NBT compound — `metadata` strings
 like `"supply_chest"` exist only in the file); the
@@ -183,8 +181,7 @@ ask for a roll at the same coordinates); and a chest is a real
 after which it is authoritative and a regeneration cannot refill it.
 
 Shipwreck and igloo markers sit **one block above** the chest position;
-End-city markers also sit one block above the chest, while an ocean-ruin marker
-**is** the chest position — getting this off by one
+an ocean-ruin marker **is** the chest position — getting this off by one
 puts loot in a block of air where nothing can reach it, invisible to a test
 that only counts rolls. `drowned` markers inside big ocean-ruin templates
 are read and ignored: there is no structure-spawn path for a mob yet.

@@ -14,12 +14,21 @@
 # the raw command beside it as the definition, so this file is never the only
 # record of what a recipe actually runs.
 
-# Cargo owns the build queue. Local machine policy in `~/.cargo/config.toml`
-# selects one shared target directory, wraps rustc in sccache, and admits eight
-# cross-crate jobs. CI has no such user config and resolves its normal target.
-# The path is queried only because profiler recipes need to locate binaries;
-# there is no per-agent target or job override.
-tdir := `cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])'`
+# Per-agent private target dir (docs/repo-tooling.md). Deliberately NOT a
+# CARGO_*-prefixed name: sccache hashes CARGO_* env vars into its cache keys,
+# and the env-var form of --target-dir measured 0% cache hits vs 78-94% for
+# the FLAG form. just interpolates {{tdir}} into the command line BEFORE
+# cargo runs, so cargo always sees the flag form — never rename this to
+# CARGO_TARGET_DIR, and never add `set export`, which would leak it into the
+# environment for cargo to read as one. Default "target" preserves today's
+# behaviour exactly for anyone (including CI) who sets nothing.
+tdir := env("LODESTONE_TARGET_DIR", "target")
+
+# Overridable job cap, defaulting to EMPTY — not hardcoded to 4. A fixed -j
+# here would silently throttle CI and any idle-machine run. Set
+# LODESTONE_JOBS=4 yourself for local multi-agent courtesy (docs/repo-tooling.md).
+jobs := env("LODESTONE_JOBS", "")
+jflag := if jobs != "" { "-j " + jobs } else { "" }
 
 # Default endpoints for the STANDALONE `lodestone-relay` binary via `run-relay`
 # only — `run-wasm` below no longer uses this at all (its own binary,
@@ -31,15 +40,17 @@ tdir := `cargo metadata --format-version 1 --no-deps | python3 -c 'import json,s
 # its own.
 relay_defaults := "--listen 127.0.0.1:25580 --target 127.0.0.1:25565"
 
-# PGO profile data is not a Cargo target directory. Instrumented builds still
-# use {{tdir}} and Cargo fingerprints their distinct RUSTFLAGS there.
-pgo_dir := env("LODESTONE_PGO_DIR", tdir + "/pgo-data")
+# Private target dir for the PGO recipes at the bottom of this file. Separate
+# from {{tdir}} on purpose: those recipes set RUSTFLAGS, and cargo keys its
+# cache on RUSTFLAGS, so pointing them at the shared dir would cost every
+# other build on this machine a full cold rebuild each time you switch.
+pgo_dir := env("LODESTONE_PGO_DIR", "target/pgo")
 
 # --- Health checks (CLAUDE.md "Build and test") ---------------------------
 
 # cargo check --workspace --all-targets
 check:
-    cargo check --workspace --all-targets
+    cargo check --workspace --all-targets {{jflag}} --target-dir {{tdir}}
 
 # cargo check --workspace --all-features --all-targets --exclude lodestone-allocbench
 # The --exclude is NOT a workaround: lodestone-allocbench has a deliberate
@@ -48,7 +59,7 @@ check:
 # cannot pass for that one crate. With it excluded, the whole rest of the
 # workspace is clean under --all-features.
 check-all:
-    cargo check --workspace --all-features --all-targets --exclude lodestone-allocbench
+    cargo check --workspace --all-features --all-targets --exclude lodestone-allocbench {{jflag}} --target-dir {{tdir}}
 
 # cargo check -p lodestone-shell --no-default-features — the version-seam
 # check. No protocol family is enabled by default; this is the only thing
@@ -60,14 +71,14 @@ check-all:
 # asks the resolved dependency graph instead, so a headless or server build
 # cannot quietly start linking winit again.
 check-seam:
-    cargo check -p lodestone-shell --no-default-features
+    cargo check -p lodestone-shell --no-default-features {{jflag}} --target-dir {{tdir}}
     cargo run -p xtask -- check-no-winit-headless
 
 # cargo test --workspace --no-fail-fast. Plain `cargo test` stops at the
 # first failing test BINARY, hiding every alphabetically-later crate's
 # failures — --no-fail-fast is not optional here.
 test:
-    cargo test --workspace --no-fail-fast
+    cargo test --workspace --no-fail-fast {{jflag}} --target-dir {{tdir}}
 
 # cargo xtask check-comment-voice — fails on issue references and
 # change-voice comments ("this change", "this commit", ...) in .rs/.md/.wgsl
@@ -75,7 +86,7 @@ test:
 # xtask/check-comment-voice.toml. See that file's header and
 # xtask/src/comment_voice.rs's module doc for what counts and why.
 check-comment-voice:
-    cargo run -q -p xtask -- check-comment-voice
+    cargo run -q -p xtask {{jflag}} --target-dir {{tdir}} -- check-comment-voice
 
 # All five checks above, in order.
 health: check check-all check-seam test check-comment-voice
@@ -90,7 +101,7 @@ health: check check-all check-seam test check-comment-voice
 # `cargo run --no-default-features` to reproduce a version-family-free build.
 # cargo run --release -p lodestone-shell --bin lodestone — launch the game
 run *args:
-    cargo run --release -p lodestone-shell --bin lodestone -- {{args}}
+    cargo run --release -p lodestone-shell --bin lodestone {{jflag}} --target-dir {{tdir}} -- {{args}}
 
 # scripts/run-wasm.sh — keep the browser build rebuilding on change (`trunk
 # watch`) AND serve it, page plus the /relay WebSocket->TCP bridge, from ONE
@@ -115,7 +126,7 @@ run *args:
 # BOTH halves now — `trunk watch --release` for the wasm bundle, and a --release
 # build of `lodestone-web-server` itself.
 #
-# No explicit job or target flags; Cargo's resolved configuration owns both.
+# No {{jflag}} and no --target-dir {{tdir}}, and their absence is deliberate
 # rather than an oversight, for BOTH the wasm build and lodestone-web-server's own
 # build: trunk drives cargo itself and exposes neither flag (its output knob is
 # --dist), and both `web/` and `web/server` are members of web/'s own workspace
@@ -173,7 +184,7 @@ run-wasm *args:
 # `just run-relay --listen 127.0.0.1:25580 --target 127.0.0.1:25570`.
 [doc("cargo run -p lodestone-relay — the STANDALONE relay (run-wasm no longer needs this)")]
 run-relay *args=relay_defaults:
-    cargo run --release -p lodestone-relay -- {{args}}
+    cargo run --release -p lodestone-relay {{jflag}} --target-dir {{tdir}} -- {{args}}
 
 # --- xtask ------------------------------------------------------------------
 
@@ -182,7 +193,7 @@ run-relay *args=relay_defaults:
 # --target-dir (docs/repo-tooling.md), so agents were hand-expanding this
 # every time; this recipe bakes that expansion instead.
 xtask *args:
-    cargo run -q -p xtask -- {{args}}
+    cargo run -q -p xtask {{jflag}} --target-dir {{tdir}} -- {{args}}
 
 # --- LODESTONE_REGEN regeneration recipes -----------------------------------
 # Each of these mirrors a committed-table drift gate that is #[ignore]d by
@@ -192,21 +203,21 @@ xtask *args:
 # summary. docs/README.md is GENERATED — never hand-edit it; `cargo test -p
 # xtask` fails loudly if the committed file drifts from this output.
 regen-docs-index:
-    cargo run -q -p xtask -- docs-index
+    cargo run -q -p xtask {{jflag}} --target-dir {{tdir}} -- docs-index
 
 # Regenerate crates/lodestone-data's collision-shape table
 # (src/generated/collision_shapes.rs) from the committed physics oracle
 # dump. Test: crates/lodestone-data/tests/collision_shapes.rs ::
 # committed_table_matches_dump (#[ignore]d).
 regen-collision:
-    LODESTONE_REGEN=1 cargo test -p lodestone-data --test collision_shapes committed_table_matches_dump -- --ignored --nocapture
+    LODESTONE_REGEN=1 cargo test -p lodestone-data --test collision_shapes {{jflag}} --target-dir {{tdir}} committed_table_matches_dump -- --ignored --nocapture
 
 # Regenerate crates/lodestone-data's hardness/correct-tool table
 # (src/generated/hardness.rs) from the committed JVM dump. Test:
 # crates/lodestone-data/tests/hardness.rs :: committed_table_matches_dump
 # (#[ignore]d).
 regen-hardness:
-    LODESTONE_REGEN=1 cargo test -p lodestone-data --test hardness committed_table_matches_dump -- --ignored --nocapture
+    LODESTONE_REGEN=1 cargo test -p lodestone-data --test hardness {{jflag}} --target-dir {{tdir}} committed_table_matches_dump -- --ignored --nocapture
 
 # Regenerate crates/lodestone-data's damage-type + tag table
 # (src/generated/damage_types.rs) from vanilla's own datapack JSON. Unlike the
@@ -217,7 +228,7 @@ regen-hardness:
 # (#[ignore]d).
 regen-damage-types:
     python3 scripts/extract-damage-types.py .cache/mc/26.2/versions/26.2/server-26.2.jar crates/lodestone-data/tests/support/damage_types_jar.txt
-    LODESTONE_REGEN=1 cargo test -p lodestone-data --test damage_types committed_table_matches_dump -- --ignored --nocapture
+    LODESTONE_REGEN=1 cargo test -p lodestone-data --test damage_types {{jflag}} --target-dir {{tdir}} committed_table_matches_dump -- --ignored --nocapture
 
 # Re-extract the bundled 26.2 structure corpus (1606 files: 34 structures, 20
 # structure sets, 188 template pools, 40 processor lists, 7 world presets, 9 flat
@@ -231,7 +242,7 @@ regen-damage-types:
 # (#[ignore]d).
 regen-worldgen-structures:
     python3 scripts/extract-worldgen-structures.py
-    cargo test -p lodestone-server --test worldgen_structure_corpus -- --nocapture
+    cargo test -p lodestone-server --test worldgen_structure_corpus {{jflag}} --target-dir {{tdir}} -- --nocapture
 
 # Re-extract crates/lodestone-server/assets/loot_table/ VERBATIM from the
 # decompiled client's datapack data: every one of the 1355 26.2 loot tables
@@ -246,15 +257,15 @@ regen-worldgen-structures:
 # which is also the drift gate -- it compares the bundle against the CACHE, not
 # against itself, so a table falling in or out of scope fails loudly.
 regen-loot-corpus:
-    LODESTONE_REGEN=1 cargo test -p lodestone-server --test loot_corpus the_bundle_is_exactly -- --ignored --nocapture
-    cargo test -p lodestone-server --test loot_corpus -- --ignored --nocapture
+    LODESTONE_REGEN=1 cargo test -p lodestone-server --test loot_corpus {{jflag}} --target-dir {{tdir}} the_bundle_is_exactly -- --ignored --nocapture
+    cargo test -p lodestone-server --test loot_corpus {{jflag}} --target-dir {{tdir}} -- --ignored --nocapture
 
 # Regenerate crates/lodestone-data's freeze_top_layer support table
 # (src/generated/snow_support.rs) from the committed JVM dump. Test:
 # crates/lodestone-data/tests/snow_support.rs :: committed_table_matches_dump
 # (#[ignore]d). Re-dump first with `just oracle-snow-support` after a data bump.
 regen-snow-support:
-    LODESTONE_REGEN=1 cargo test -p lodestone-data --test snow_support committed_table_matches_dump -- --ignored --nocapture
+    LODESTONE_REGEN=1 cargo test -p lodestone-data --test snow_support {{jflag}} --target-dir {{tdir}} committed_table_matches_dump -- --ignored --nocapture
 
 # Re-dump the five per-block-state freeze_top_layer facts from the real 26.2
 # server, over the committed anchor. Needs Apple `container` (see
@@ -273,30 +284,6 @@ oracle-snow-support:
         javac -cp "$CP" -d /work /work/SnowSupportOracle.java
         java -cp "/work:$CP" SnowSupportOracle
       ' > crates/lodestone-data/tests/support/snow_support_jvm.txt
-
-# Re-dump the six-direction effective face-occlusion mask for every 26.2
-# block state. Needs Apple `container` (see docs/oracles-and-benchmarks.md).
-# Follow with `just regen-face-occlusion`.
-oracle-face-occlusion:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    CACHE="$(cd .cache/mc/26.2 && pwd)"
-    HERE="$(cd crates/lodestone-data/oracle-java && pwd)"
-    container system start >/dev/null 2>&1 || true
-    container run --rm --memory 3g -v "$CACHE":/mc:ro -v "$HERE":/oracle:ro -w /work \
-      eclipse-temurin:25-jdk bash -c '
-        set -e
-        CP="/mc/versions/26.2/server-26.2.jar:$(find /mc/libraries -name "*.jar" | tr "\n" ":")"
-        mkdir -p /work && cp /oracle/FaceOcclusionOracle.java /work/
-        javac -cp "$CP" -d /work /work/FaceOcclusionOracle.java
-        java -cp "/work:$CP" FaceOcclusionOracle
-      ' > crates/lodestone-data/tests/support/face_occlusion_jvm.txt
-
-# Regenerate crates/lodestone-data's effective face-occlusion table from the
-# committed JVM dump. Test: crates/lodestone-data/tests/face_occlusion.rs ::
-# committed_table_matches_dump (#[ignore]d).
-regen-face-occlusion:
-    LODESTONE_REGEN=1 cargo test -p lodestone-data --test face_occlusion committed_table_matches_dump -- --ignored --nocapture
 
 # Re-dump the exact simple-block survival predicates from the real 26.2 server.
 oracle-block-survival:
@@ -347,7 +334,7 @@ oracle-top-layer:
 # inside wasm-check is the only thing that does.
 [doc("wasm32 compile + confinement-guard tripwire — does NOT prove the browser runs")]
 wasm-check:
-    cargo run -q -p xtask -- wasm-check
+    cargo run -q -p xtask {{jflag}} --target-dir {{tdir}} -- wasm-check
 
 # Release wasm bundle-size ceiling (gzip-enforced; brotli reported when
 # available). Separate from wasm-check because a --release + lto=fat build
@@ -394,20 +381,20 @@ profile-heavy-server capture:
 # A finite Samply input for the chunk-owner hand-off architecture. The example
 # drives a paused 128-tick scene and exits; it is an investigation, never CI.
 bench-chunk-owner-tick:
-    cargo bench -p lodestone-server --features profile-harness --bench chunk_owner_tick -- --quick
+    cargo bench {{jflag}} -p lodestone-server --features profile-harness --bench chunk_owner_tick -- --quick
 
 samply-chunk-owner-tick *args:
-    cargo build --release -p lodestone-server --features profile-harness --example chunk-owner-tick-profile
+    cargo build --release {{jflag}} --target-dir {{tdir}} -p lodestone-server --features profile-harness --example chunk-owner-tick-profile
     python3 scripts/samply-chunk-owner-tick.py --server {{tdir}}/release/examples/chunk-owner-tick-profile {{args}}
 
 # A finite, adapter-free profiling input for the 256-chunk coarse horizon.
 # It requests 256 reduced far columns plus a fixed tile budget per recenter and
 # fails if any far request returns a full column, so Samply has explicit path witnesses.
 profile-distant-horizon:
-    cargo run --release -p lodestone-shell --bin horizon-profile
+    cargo run --release {{jflag}} --target-dir {{tdir}} -p lodestone-shell --bin horizon-profile
 
 samply-distant-horizon capture:
-    cargo build --release -p lodestone-shell --bin horizon-profile
+    cargo build --release {{jflag}} --target-dir {{tdir}} -p lodestone-shell --bin horizon-profile
     python3 scripts/samply-distant-horizon.py --binary {{tdir}}/release/horizon-profile --capture {{capture}}
 
 test-samply-distant-horizon:
@@ -427,7 +414,7 @@ test-samply-distant-horizon:
 # Run the hermetic, count-producing benches once each (criterion --test mode:
 # one iteration per benchmark, since the recorded counts do not need samples).
 bench-record:
-    cargo bench -p lodestone-render -p lodestone-world \
+    cargo bench {{jflag}} --target-dir {{tdir}} -p lodestone-render -p lodestone-world \
       --bench meshing --bench render_submit --bench memory_footprint -- --test
 
 # Compare the recorded counts against bench-baselines/. --min-compared makes
@@ -468,7 +455,7 @@ worldgen-sweep *args:
 # under load says so rather than being quietly believed.
 [doc("where a frame goes, CPU and GPU, over a fixed camera path (needs a GPU adapter)")]
 bench-frame:
-    cargo bench -p lodestone-shell --bench frame_profile
+    cargo bench {{jflag}} --target-dir {{tdir}} -p lodestone-shell --bench frame_profile
 
 # Three Java-backed normal-terrain trials at physical 2560x1440, RD24,
 # unlimited/no-VSync. The foreground runner owns the child until it exits.
@@ -567,7 +554,7 @@ external-client-acceptance *args:
 # and one GPU context, and the harness rebuilds the stage between shots.
 [doc("re-capture docs/images/*.png from a live session (needs `just oracle-creative`)")]
 screenshots:
-    cargo test -p lodestone-shell --features live --test capture_screenshots -- --ignored --nocapture --test-threads=1
+    cargo test {{jflag}} --target-dir {{tdir}} -p lodestone-shell --features live --test capture_screenshots -- --ignored --nocapture --test-threads=1
 
 # Re-dump the per-block blast-resistance + flammability facts (#312/#313) from
 # the real 26.2 server, over the committed anchor
@@ -593,7 +580,7 @@ oracle-blast-fire:
 # crates/lodestone-data/tests/block_blast.rs :: committed_table_matches_dump
 # (#[ignore]d). Re-dump first with `just oracle-blast-fire` after a data bump.
 regen-blast-fire:
-    LODESTONE_REGEN=1 cargo test -p lodestone-data --test block_blast committed_table_matches_dump -- --ignored --nocapture
+    LODESTONE_REGEN=1 cargo test -p lodestone-data --test block_blast {{jflag}} --target-dir {{tdir}} committed_table_matches_dump -- --ignored --nocapture
 
 # Reproduces docs/oracles-and-benchmarks.md's baseline-vs-PGO instructions-retired
 # comparison on demand (issue #556: opt-in, NOT a default build-config
@@ -602,7 +589,7 @@ regen-blast-fire:
 # (RUSTFLAGS changes between them, so a shared target dir would cost every
 # other live agent a cold-rebuild wave); expect several minutes per build on
 # a loaded machine, not the doc's original "a few minutes total" figure.
-# macOS only (the counter is proc_pid_rusage). No explicit Cargo overrides: this
+# macOS only (the counter is proc_pid_rusage). No {{jflag}}/{{tdir}}: this
 # recipe deliberately does not touch the shared target dir at all.
 pgo-probe:
     ./scripts/pgo-probe.sh
@@ -626,14 +613,15 @@ pgo-probe:
 # minutes doing whatever you care about being fast; you quit; `pgo-merge`
 # folds the .profraw files into one .profdata; `run-pgo` rebuilds against it.
 #
-# All three use the shared Cargo target. `LODESTONE_PGO_DIR` contains only
-# profile data; Cargo fingerprints the differing RUSTFLAGS in the shared build.
+# All three use a private target dir (LODESTONE_PGO_DIR, default
+# target/pgo) because RUSTFLAGS differs from every other recipe here and a
+# shared target dir would cost every concurrent build a cold rebuild.
 # `pgo-merge` needs llvm-profdata: `xcrun llvm-profdata` on macOS, or the
 # one in ~/.rustup/toolchains/*/lib/rustlib/*/bin/.
 
 # cargo run --release with -Cprofile-generate -- play a representative session, then quit
 pgo-instrument:
-    RUSTFLAGS="-Cprofile-generate={{pgo_dir}}/raw" cargo run --release -p lodestone-shell --bin lodestone
+    RUSTFLAGS="-Cprofile-generate={{pgo_dir}}/raw" cargo run --release -p lodestone-shell --bin lodestone {{jflag}} --target-dir {{pgo_dir}}/build
 
 # xcrun llvm-profdata merge -- fold the recorded .profraw files into one .profdata
 pgo-merge:
@@ -641,11 +629,11 @@ pgo-merge:
 
 # cargo build --release with -Cprofile-use -- the optimised binary, not installed anywhere
 build-pgo:
-    RUSTFLAGS="-Cprofile-use={{pgo_dir}}/merged.profdata -Cllvm-args=-pgo-warn-missing-function" cargo build --release -p lodestone-shell --bin lodestone
+    RUSTFLAGS="-Cprofile-use={{pgo_dir}}/merged.profdata -Cllvm-args=-pgo-warn-missing-function" cargo build --release -p lodestone-shell --bin lodestone {{jflag}} --target-dir {{pgo_dir}}/build
 
 # cargo run --release with -Cprofile-use -- play the PGO-optimised build
 run-pgo *args:
-    RUSTFLAGS="-Cprofile-use={{pgo_dir}}/merged.profdata -Cllvm-args=-pgo-warn-missing-function" cargo run --release -p lodestone-shell --bin lodestone -- {{args}}
+    RUSTFLAGS="-Cprofile-use={{pgo_dir}}/merged.profdata -Cllvm-args=-pgo-warn-missing-function" cargo run --release -p lodestone-shell --bin lodestone {{jflag}} --target-dir {{pgo_dir}}/build -- {{args}}
 
 # --- Git hooks --------------------------------------------------------------
 
