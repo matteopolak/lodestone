@@ -417,6 +417,7 @@ async fn joined_protocol_762_chest_moves_a_slot_and_corrects_prediction() {
         .expect("the authoritative slot mutation persists after reopening");
 
     handle.shutdown();
+    let _ = handle.join().await;
     server.shutdown().await;
 }
 
