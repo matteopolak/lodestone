@@ -18,6 +18,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   rubberbanding across a server transfer, the TLS crypto-provider choice underneath
   every HTTPS call, secure (signed) chat, and how a server's `Text` component becomes
   displayed words.
+- [Server advancement state](./advancements.md) — The server advancement subsystem
+  owns advancement completion, per-player progress, visibility, and the version-free
+  update payload consumed by protocol encoders. Registry-backed advancement IDs are
+  validated as `lodestone_model::ResourceKey` values at the manager's internal tree
+  and progress seams.
 - [Anvil import preflight](./anvil-import-preflight.md) —
   `lodestone_anvil::import_preflight` inventories an Anvil world before native
   conversion. It separates source values with a typed destination, values that a lossy
@@ -158,6 +163,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   ticker and its HUD indicator, hurt/death visual feedback, equipment-derived combat
   attributes (damage, armor, toughness), and the damage-type registry that tags how a
   hit is reduced.
+- [Container first-open performance](./container-first-open.md) — The container
+  renderer prewarms its block-entity icon resources during GPU bring-up and can emit
+  one location-level timing sample for the first drawable container frame. This keeps
+  one-time asset work out of inventory and chest opening while preserving an opt-in
+  diagnostic for regressions.
 - [Container screens](./container-screens.md) — The container/inventory screen
   family: the shared model that draws any open `Menu` (chest, furnace, crafting table,
   anvil-family, creative inventory, merchant), the client-side click predictor that
@@ -224,6 +234,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   754 (1.16.5), 756 (1.17.1), 758 (1.18.2), 762 (1.19.4), 766 (1.20.6), 774 (1.21.11),
   and 776 (26.2). It starts one dedicated Lodestone server per selected row and
   accepts a witness only from an installed, unmodified release client.
+- [Face occlusion data](./face-occlusion.md) — The face-occlusion table answers
+  whether each of the six faces of a canonical 26.2 block state is a complete
+  unit-face occluder. It supplies the directional enclosure predicate used by
+  underwater floor decoration without confusing occlusion with collision, outline, or
+  motion-blocking behavior.
 - [Friends service](./friends-service.md) — `lodestone-auth::friends` is the
   credential-safe HTTP boundary for the Java 26.2 Friends List. It turns an
   already-resolved account session into typed friend lists, relationship changes,
@@ -400,6 +415,12 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   for the optional Java compatibility host. It gives a host an owned, authoritative
   snapshot of a connected player's native inventory without exposing a connection
   task, mutable menu state, or a second inventory simulation.
+- [Paper plugin conformance harness](./paper-plugin-conformance.md) — The Paper
+  plugin conformance harness defines reproducible, operator-supplied fixtures for
+  comparing one unmodified plugin scenario on Paper and Lodestone. Its runner
+  validates and can execute the operator Paper driver, while refusing to claim
+  compatibility until the Lodestone side has the required plugin lifecycle, event
+  dispatch, and shared scenario driver.
 - [Paper world bridge](./paper-world-bridge.md) — `lodestone-jvm-bridge` exposes a
   deliberately small, loader-local world/block surface to an operator-built
   `lodestone.bridge.IsolatedPaperShim`. It supplies resident block-state reads and
@@ -465,6 +486,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   `crates/versions/26.2/tests/singleplayer_lan/client_adapter_decorator_escape_hatch.rs`
   are executable proof, one test per verb per direction, each with a control showing
   the undecorated protocol's own behaviour first.
+- [Plugin player game-mode control](./plugin-player-control.md) —
+  `IntegratedServer::set_player_game_mode_proposed` is the native plugin bridge for
+  changing one connected player's game mode. It resolves a typed proposal before
+  queuing a copied effect, then lets the target connection apply the change and emit
+  the protocol-specific state.
 - [Server-side plugin capability parity](./plugin-server-capabilities.md) — A survey
   of what a server-side plugin can actually do today, set against the client's
   five-clause intent doctrine (`docs/plugin-api.md`), and the first working slice of a
@@ -480,6 +506,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   `lodestone-worldgen` and `lodestone-server`: a version-free, oracle-verified terrain
   interpreter (see `docs/worldgen.md`'s parity discipline) called imperatively from
   plain functions, never installed as a bevy `System`.
+- [Prediction sequences](./prediction-sequences.md) — `PredictionSequence` is the
+  version-free identity attached to a client-side block placement. It preserves the
+  protocol's signed VarInt bit pattern at the wire boundary while giving the placement
+  ledger explicit wrapping order.
 - [Projectile and effect rendering](./projectile-and-effect-rendering.md) — The draw
   paths for entities that are neither an ordinary mob rig nor a plain billboard:
   velocity-aligned projectiles (arrow, spectral arrow, trident), firework rockets,
@@ -530,6 +560,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   crate, after [`1.9`](./protocol-1-9-era.md), [`1.14`](./protocol-1-14-era.md),
   [`1.13`](./protocol-1-13-era.md), [`1.17`](./protocol-1-17-era.md) and
   [`1.19`](./protocol-1-19-era.md).
+- [Protocol 1.21.11 container sessions](./protocol-1-21-11-containers.md) — This
+  document describes the hosted protocol-774 container bridge. It carries a basic
+  chest session from the server's real inventory producers to the client read model:
+  opening the menu, sending its contents, applying single-slot corrections, and
+  closing it.
 - [The 1.21.11 era crate: a wire era with four protocols, and a client that must answer its own teleports](./protocol-1-21-11-era.md) —
   `crates/versions/1.21.11` (package `lodestone-v1-21-11`, feature `v1-21-11`) joins
   Minecraft **1.21.11** — protocol **774** — with one adapter, one generated
@@ -563,6 +598,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   in `docs/plans/multi-version-protocol-dedup.md`; `v1-8`, `v1-9` and `v1-14` now all
   dispatch through it, and `v1-9` is a four-protocol era crate built on it (see
   [`protocol-1-9-era.md`](./protocol-1-9-era.md)).
+- [Recipe item IDs](./recipe-item-ids.md) — Recipe displays, ghost previews, and
+  recipe property sets carry item-registry numbers. `lodestone_model::ItemId` keeps
+  each number together with whether it has been validated against this build's
+  canonical item census or remains owned by a protocol/session registry.
 - [Redstone execution model](./redstone-execution.md) — How a redstone change
   actually gets *executed* — what wakes up, what it costs, and why. This is the
   layer underneath `docs/redstone.md`'s per-device behaviour: the
@@ -791,8 +830,9 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
 - [World-generation dungeons](./worldgen-dungeons.md) — The `monster_room`
   configured feature places an underground cobblestone room, up to two deferred-loot
   chests, and one monster spawner during Overworld decoration. Generated block
-  entities travel with the column, so the room's metadata is present when the server
-  encodes or saves the receiving chunk.
+  entities travel with the column, so the server's chunk packet carries their registry
+  records while the save path retains the deferred loot, occupants, and spawner state
+  needed after reload.
 - [Large worldgen parity harness](./worldgen-large-parity.md) —
   `scripts/worldgen-oracle/LargeParityOracle.java` is the resumable, 251,001-chunk
   parity oracle for the 501 by 501 grid centred at `(0, 0)`. It freezes one generated
