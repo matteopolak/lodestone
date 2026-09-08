@@ -56,8 +56,10 @@ terrain. The mask is derived from block occupancy in the admitted columns, never
 state-name strings. The Overworld keeps the one-section sky form and elides uniform zero block light in
 an initial chunk. `ChunkSource::dimension`
 carries that choice to the protocol's dimension-aware initial-encoding and light-computation hooks. An
-unlabelled source uses the Overworld as the compatibility default; a dimension wrapper must always
-forward its label.
+unlabelled source uses the Overworld as the compatibility default; an in-memory generator therefore
+stays unlabelled, while `RegionChunkSource` forwards the typed dimension it was opened for so a bare
+persistent source cannot silently apply Overworld normalization to Nether or End packets. A dimension
+wrapper must always forward its label.
 
 ### Retained snapshots and reloads
 

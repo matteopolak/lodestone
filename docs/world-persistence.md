@@ -60,6 +60,13 @@ seeded by generating the column fresh — forwarding would silently regenerate a
 disk-loaded edit with no error. Every mutation in the server funnels through this one call, so
 hooking persistence in cost no changes to the tick loop or the mob simulation.
 
+`RegionChunkSource` also retains the typed dimension selected at open time and returns it through
+`ChunkSource::dimension`. Source-aware packet encoders use that label to select the correct sky and
+block-light representation after a disk load; an unlabelled in-memory generator continues to return
+`None` and uses the compatibility default. This forwarding is part of the persistence seam, not a
+coordinate or terrain inference, so Nether and End region sources keep their dimension-specific
+wire rules after eviction and reopen.
+
 A save writes only the dirty set, not everything resident — a player standing still should not
 cost megabytes of disk writes every autosave interval — and untouched chunks inside a rewritten
 region file are re-emitted as their original compressed bytes rather than being decoded and
