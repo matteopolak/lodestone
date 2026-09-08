@@ -109,10 +109,14 @@ they do not consume. `RegionChunkSource` keeps opted-in snapshots in its edit/pe
 allowing an in-memory cache hit to hide a future reload. The source trait's default batch method
 preserves compatibility for small sources by forwarding individual columns; persistent sources
 that need an all-at-once visibility boundary override it.
-The typed native record path stores the same `ColumnLight` beside terrain and reattaches it to the
-decoded `ChunkColumn` on reopen, so a caller can feed that record directly back to the serving source.
-Persisted columns remain authoritative after eviction and restart; admission and ticket policy remain
-the responsibility of the source/cache lifecycle that owns the column.
+The typed native record path stores only a canonical, centre-settled `ColumnLight` beside terrain and
+reattaches it to the decoded `ChunkColumn` on reopen. Native saves recompute when a dirty column has
+only dependency-initialized storage, clear the attached lifecycle marker before writing, and mark the
+separate decoded payload as `CentreSettled`; this prevents a dependency snapshot from being paired
+with an unrelated canonical payload. An Anvil import follows the same rule, while the NBT decoder
+rejects a lifecycle marker that has no retained light arrays. Persisted columns remain authoritative
+after eviction and restart; admission and ticket policy remain the responsibility of the source/cache
+lifecycle that owns the column.
 
 The bounded cache must therefore sit above a persistence-capable source whenever retained light is
 part of the serving contract. The focused `RegionChunkSource` control exercises a plural admission,

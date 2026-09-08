@@ -797,6 +797,17 @@ impl ChunkColumn {
         self.retained_light_status
     }
 
+    /// Returns the retained light only when this column completed its own
+    /// initial admission. Dependency-initialized storage is deliberately not
+    /// eligible for packet or final-save consumers: it still has to pass
+    /// through the centre admission when this coordinate is requested.
+    #[must_use]
+    pub fn centre_settled_light(&self) -> Option<&lodestone_world::ColumnLight> {
+        (self.retained_light_status == Some(RetainedLightStatus::CentreSettled))
+            .then(|| self.retained_light.as_ref())
+            .flatten()
+    }
+
     /// Installs a complete light snapshot for this column.
     ///
     /// The snapshot spans the column's block sections plus the one-section

@@ -834,6 +834,10 @@ pub fn column_from_nbt(nbt: &Nbt, min_y: i32, height: i32) -> Result<ChunkColumn
         }
     }
 
+    if retained_light.is_none() && retained_light_status.is_some() {
+        return Err(bad("LodestoneLightStatus"));
+    }
+
     if let Some(light) = retained_light {
         column.set_retained_light_with_status(
             light,
@@ -2369,6 +2373,27 @@ mod retained_light_tests {
         assert!(
             matches!(error, Error::InvalidLight { actual: 1, .. }),
             "unexpected malformed-light error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn retained_light_status_without_light_is_rejected() {
+        let nbt = Nbt::Compound(vec![
+            ("LodestoneLightStatus".to_owned(), Nbt::Byte(1)),
+            (
+                "sections".to_owned(),
+                Nbt::List {
+                    element_type: NbtTag::Compound,
+                    elements: Vec::new(),
+                },
+            ),
+        ]);
+
+        let error = column_from_nbt(&nbt, 0, 16)
+            .expect_err("a lifecycle marker without retained light must fail closed");
+        assert!(
+            matches!(error, Error::BadField { field } if field == "LodestoneLightStatus"),
+            "unexpected lifecycle-marker error: {error:?}"
         );
     }
 

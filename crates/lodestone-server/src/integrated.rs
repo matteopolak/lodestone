@@ -1021,7 +1021,7 @@ fn save_native_dirty_chunks(context: &NativeSaveContext) -> Result<usize, crate:
         .dimension()
         .unwrap_or(crate::dimension::Dimension::Overworld);
     let mut lights = Vec::with_capacity(snapshots.len());
-    for snapshot in &snapshots {
+    for snapshot in &mut snapshots {
         if snapshot.column.motion_blocking().is_none() {
             return Err(crate::world_storage::Error::Chunk(
                 crate::world_storage::ChunkRecordError::MissingMotionBlockingHeightmap,
@@ -1029,7 +1029,7 @@ fn save_native_dirty_chunks(context: &NativeSaveContext) -> Result<usize, crate:
         }
         let light = snapshot
             .column
-            .retained_light()
+            .centre_settled_light()
             .filter(|light| light.light_section_count() == snapshot.column.section_count() + 2)
             .cloned()
             .or_else(|| {
@@ -1058,6 +1058,11 @@ fn save_native_dirty_chunks(context: &NativeSaveContext) -> Result<usize, crate:
                 crate::world_storage::ChunkRecordError::MissingComputedLight,
             ));
         };
+        // Native storage is deliberately final-only: the canonical light is
+        // carried in `NativeDirtyChunkRecord::light`, and the attached source
+        // snapshot must not smuggle dependency-initialized lifecycle metadata
+        // into a record that reloads as centre-settled.
+        snapshot.column.clear_retained_light();
         lights.push(light);
     }
     let records = snapshots.iter().zip(&lights).map(|(snapshot, light)| {
