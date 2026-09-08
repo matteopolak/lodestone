@@ -445,6 +445,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   server-authoritative (`crates/lodestone-server/src`); movement integration and
   component wiring live client-side (`lodestone-physics`, `lodestone-ecs`,
   `lodestone-shell`).
+- [Player skin pipeline](./player-skin-pipeline.md) — The player skin pipeline draws
+  a 64×64 skin sheet over the baked player rig, including the optional hat, jacket,
+  sleeve and pants boxes. It keeps the partially transparent outer layer while
+  preventing an interior cube face from painting a one-pixel seam through a nearer
+  body part.
 - [The plugin API](./plugin-api.md) — The surface a third-party plugin uses to
   extend Lodestone: a native, compiled-in `bevy_ecs` plugin tier with the same power
   as internal engine code, and a sandboxed WASM plugin host that loads a
@@ -699,6 +704,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   engine (`lodestone-audio`) and the event registry
   (`lodestone-sound`/`lodestone-assets`) were built and correct from early on; this
   doc is mostly about what sits either side of them.
+- [Tab-list player heads](./tab-list-heads.md) — The tab-list overlay shows each
+  listed player’s 8×8 skin face to the left of their name, including the optional
+  hat layer. A profile without a usable remote skin still gets a deterministic
+  packaged fallback.
 - [Terrain rendering](./terrain-rendering.md) — Everything between "a chunk section
   changed" and "its quads are the right shape, in the right place, drawn or correctly
   not drawn, on screen": meshing and mesh invalidation as chunks stream in,
