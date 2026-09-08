@@ -73,7 +73,7 @@ use lodestone_server::{
     Abilities, ChunkColumn as ServerChunkColumn, ChunkEncoder, ColumnLightSettlement,
     EntitySnapshot, HOTBAR_SIZE, RetainedLightStatus,
     MOTION_BLOCKING_HEIGHTMAP_TYPE_ID, MerchantOfferOut, MetadataField, PlayerListing,
-    ResourcePackPush, RetainedLightStatus, ServerBound, ServerDirective, ServerProtocol,
+    ResourcePackPush, ServerBound, ServerDirective, ServerProtocol,
     WorldBorder, WorldgenScope,
 };
 use lodestone_server::dimension::Dimension;
@@ -90,7 +90,7 @@ use lodestone_server::crafting::{
 };
 use lodestone_world::{
     ChunkColumn as WorldChunkColumn, ChunkSection, ColumnLight, Heightmap, Heightmaps,
-    LightData, LightProperties, LightStorage, Neighbourhood, compute_column_light,
+    LightData, LightProperties, LightStorage, Neighbourhood, NibbleArray, compute_column_light,
     compute_column_light_for_initial_chunk, compute_column_light_with_neighbours,
     compute_column_lights_with_neighbours_and_storage,
     compute_column_light_with_neighbours_for_initial_chunk,
