@@ -196,6 +196,11 @@ async fn registry_selected_protocol_774_reaches_play_and_confirms_a_block_break(
         .wait_for_chunk(lodestone_client::ChunkPos::new(0, 0), Duration::from_secs(10))
         .await
         .expect("protocol-774 chunk arrives");
+    assert_eq!(
+        handle.player_menu().state_id(),
+        lodestone_model::ContainerStateId::new(1),
+        "the production join path must consume protocol-774's window-0 content snapshot"
+    );
     let flower = lodestone_data::block_states::state_id("minecraft:dandelion")
         .expect("fixture state exists");
     assert_eq!(handle.block_at(TARGET), Some(flower));

@@ -824,6 +824,47 @@ fn slot_to_item_stack(slot: &Slot) -> Result<Option<ItemStack>, AdapterError> {
     Ok(Some(stack))
 }
 
+/// The protocol-774 `minecraft:menu` registry, in wire-id order. This
+/// registry is not sent during Configuration, so the open-screen packet must
+/// resolve its id against the era's fixed table rather than the canonical
+/// 26.2 data table.
+const MENU_NAMES_774: [&str; 25] = [
+    "minecraft:generic_9x1",
+    "minecraft:generic_9x2",
+    "minecraft:generic_9x3",
+    "minecraft:generic_9x4",
+    "minecraft:generic_9x5",
+    "minecraft:generic_9x6",
+    "minecraft:generic_3x3",
+    "minecraft:crafter_3x3",
+    "minecraft:anvil",
+    "minecraft:beacon",
+    "minecraft:blast_furnace",
+    "minecraft:brewing_stand",
+    "minecraft:crafting",
+    "minecraft:enchantment",
+    "minecraft:furnace",
+    "minecraft:grindstone",
+    "minecraft:hopper",
+    "minecraft:lectern",
+    "minecraft:loom",
+    "minecraft:merchant",
+    "minecraft:shulker_box",
+    "minecraft:smithing",
+    "minecraft:smoker",
+    "minecraft:cartography_table",
+    "minecraft:stonecutter",
+];
+
+fn menu_name_774(raw: i32) -> Result<lodestone_model::ResourceKey, AdapterError> {
+    let name = usize::try_from(raw)
+        .ok()
+        .and_then(|id| MENU_NAMES_774.get(id))
+        .ok_or_else(|| AdapterError::Decode(format!("unknown protocol-774 menu id {raw}")))?;
+    name.parse()
+        .map_err(|error| AdapterError::Decode(format!("invalid protocol-774 menu name {name}: {error}")))
+}
+
 /// Decodes a JSON disconnect reason into a [`Text`] tree, falling back to a
 /// generic message when the component carries no text.
 fn json_reason_text(reason: &str) -> Text {
@@ -2181,6 +2222,80 @@ impl V774Adapter {
         })])
     }
 
+    /// `minecraft:open_screen`. The menu id is a fixed 774 registry entry,
+    /// while the title is an anonymous network-NBT text component.
+    fn handle_play_open_screen(
+        adapter: &V774Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: crate::packets::window::OpenScreen = adapter.decode_body_exact(payload)?;
+        Ok(vec![Directive::Emit(ClientEvent::ScreenOpened {
+            window_id: body.window_id,
+            menu_type: menu_name_774(body.inventory_type)?,
+            title: Text::from_nbt(&body.window_title.0),
+        })])
+    }
+
+    /// `minecraft:container_set_content`. A chest snapshot includes every
+    /// menu slot followed by the cursor stack, each using the component-shaped
+    /// 774 slot codec. The count is bounded before reserving so a malformed
+    /// frame cannot turn its declared length into an allocation request.
+    fn handle_play_container_set_content(
+        adapter: &V774Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        const MAX_CONTAINER_SLOTS: usize = 1024;
+        let mut reader = Reader::new(payload);
+        let window_id = reader.var_i32().map_err(dec_err)?;
+        let state_id = lodestone_model::ContainerStateId::from_wire(
+            reader.var_i32().map_err(dec_err)?,
+        );
+        let count = checked_count(
+            reader.var_i32().map_err(dec_err)?,
+            MAX_CONTAINER_SLOTS,
+            "container slot",
+        )?;
+        let mut items = Vec::with_capacity(count);
+        for _ in 0..count {
+            let slot = Slot::decode(&mut reader, adapter.ctx()).map_err(dec_err)?;
+            items.push(slot_to_item_stack(&slot)?);
+        }
+        let carried = Slot::decode(&mut reader, adapter.ctx()).map_err(dec_err)?;
+        reader.ensure_empty().map_err(dec_err)?;
+        Ok(vec![Directive::Emit(ClientEvent::ContainerContent {
+            window_id,
+            state_id,
+            items,
+            carried_item: slot_to_item_stack(&carried)?,
+        })])
+    }
+
+    /// `minecraft:container_set_slot`. The slot index is signed on the wire;
+    /// the version-free event retains it so the player-inventory sentinel and
+    /// menu-local indexes remain distinguishable to the session consumer.
+    fn handle_play_container_set_slot(
+        adapter: &V774Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let mut reader = Reader::new(payload);
+        let window_id = reader.var_i32().map_err(dec_err)?;
+        let state_id = lodestone_model::ContainerStateId::from_wire(
+            reader.var_i32().map_err(dec_err)?,
+        );
+        let slot = i32::from(reader.i16().map_err(dec_err)?);
+        let item = Slot::decode(&mut reader, adapter.ctx()).map_err(dec_err)?;
+        reader.ensure_empty().map_err(dec_err)?;
+        Ok(vec![Directive::Emit(ClientEvent::ContainerSlot {
+            window_id,
+            state_id,
+            slot,
+            item: slot_to_item_stack(&item)?,
+        })])
+    }
+
     /// `minecraft:container_close`. A varint window id here, where the era
     /// below sends an unsigned byte.
     fn handle_play_container_close(
@@ -2996,6 +3111,27 @@ static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = 
         ),
     ),
     (
+        "minecraft:open_screen",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V774Adapter::handle_play_open_screen,
+        ),
+    ),
+    (
+        "minecraft:container_set_content",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V774Adapter::handle_play_container_set_content,
+        ),
+    ),
+    (
+        "minecraft:container_set_slot",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V774Adapter::handle_play_container_set_slot,
+        ),
+    ),
+    (
         "minecraft:container_close",
         lodestone_core::dispatch::Handler::new(
             lodestone_core::ProtocolRange::ALL,
@@ -3162,15 +3298,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
         "the command tree is only needed to drive client-side completion",
     ),
     lodestone_core::dispatch::IGNORED::new(
-        "minecraft:container_set_content",
-        "container contents need the item-component decoder to produce canonical stacks, \
-         which is modelled but not yet bridged to a canonical item id",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:container_set_slot",
-        "one slot of the same container model container_set_content needs",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
         "minecraft:cookie_request",
         "server cookies are persisted only by a client that implements transfers",
     ),
@@ -3250,10 +3377,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:open_book",
         "the book screen has no surface for this era",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:open_screen",
-        "container screens need the item model container_set_content needs",
     ),
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:pong_response",

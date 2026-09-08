@@ -5,9 +5,9 @@
 //! unique 774 state return an error instead of becoming a different block.
 
 use lodestone_core::{
-    Ctx, Decode, Encode, Reader, State, Writer, encode_body,
+    Ctx, Decode, Encode, Nbt, Reader, State, Writer, encode_body,
 };
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation, Vec3f};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ItemStack, Rotation, Vec3f};
 use lodestone_server::{ChunkColumn, ChunkEncodeError, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_world::{Heightmap, PaletteKind, PalettedContainer};
 use uuid::Uuid;
@@ -23,6 +23,8 @@ use crate::packets::game::{
 use crate::packets::handshake::Intention;
 use crate::packets::login::{LoginStart, LoginFinished, SetCompression};
 use crate::packets::position::{Position, pack_position};
+use crate::packets::common::NetworkNbt;
+use crate::packets::window::OpenScreen;
 
 const CTX: Ctx = Ctx {
     version: PROTOCOL_1_21_11,
@@ -50,6 +52,105 @@ fn decode_full<T: Decode>(payload: &[u8]) -> Option<T> {
     let value = T::decode(&mut reader, CTX).ok()?;
     reader.ensure_empty().ok()?;
     Some(value)
+}
+
+/// The protocol-774 `minecraft:menu` registry, in wire-id order. The server
+/// sends this id in `open_screen`; it is not a canonical item/menu id.
+const MENU_NAMES_774: [&str; 25] = [
+    "minecraft:generic_9x1",
+    "minecraft:generic_9x2",
+    "minecraft:generic_9x3",
+    "minecraft:generic_9x4",
+    "minecraft:generic_9x5",
+    "minecraft:generic_9x6",
+    "minecraft:generic_3x3",
+    "minecraft:crafter_3x3",
+    "minecraft:anvil",
+    "minecraft:beacon",
+    "minecraft:blast_furnace",
+    "minecraft:brewing_stand",
+    "minecraft:crafting",
+    "minecraft:enchantment",
+    "minecraft:furnace",
+    "minecraft:grindstone",
+    "minecraft:hopper",
+    "minecraft:lectern",
+    "minecraft:loom",
+    "minecraft:merchant",
+    "minecraft:shulker_box",
+    "minecraft:smithing",
+    "minecraft:smoker",
+    "minecraft:cartography_table",
+    "minecraft:stonecutter",
+];
+
+fn menu_id_774(menu: &str) -> Option<i32> {
+    MENU_NAMES_774
+        .iter()
+        .position(|candidate| *candidate == menu)
+        .and_then(|id| i32::try_from(id).ok())
+}
+
+/// Writes the component-shaped 774 slot form for a bare canonical item.
+///
+/// The server's container producers currently send bare stacks for the basic
+/// chest path. Unknown/custom items degrade to the empty slot because this
+/// trait cannot return an encoding error; no made-up wire registry id is ever
+/// emitted.
+fn write_slot_774(writer: &mut Writer, item: Option<&ItemStack>) {
+    let Some(item) = item else {
+        writer.var_i32(0);
+        return;
+    };
+    let Some(item_type) = lodestone_data::item::Item::from_name(&item.item.to_string())
+        .and_then(crate::item_registry::wire_id_for_item)
+    else {
+        writer.var_i32(0);
+        return;
+    };
+    let Ok(count) = i32::try_from(item.count) else {
+        writer.var_i32(0);
+        return;
+    };
+    if count <= 0 {
+        writer.var_i32(0);
+        return;
+    }
+    writer.var_i32(count);
+    writer.var_i32(item_type);
+    writer.var_i32(0); // added component count
+    writer.var_i32(0); // removed component count
+}
+
+fn encode_container_content_body_774(
+    window_id: i32,
+    state_id: i32,
+    items: &[Option<ItemStack>],
+    carried: Option<&ItemStack>,
+) -> Vec<u8> {
+    let mut writer = Writer::default();
+    writer.var_i32(window_id);
+    writer.var_i32(state_id);
+    writer.var_i32(i32::try_from(items.len()).unwrap_or(i32::MAX));
+    for item in items {
+        write_slot_774(&mut writer, item.as_ref());
+    }
+    write_slot_774(&mut writer, carried);
+    writer.into_vec()
+}
+
+fn encode_container_slot_body_774(
+    window_id: i32,
+    state_id: i32,
+    slot: i32,
+    item: Option<&ItemStack>,
+) -> Vec<u8> {
+    let mut writer = Writer::default();
+    writer.var_i32(window_id);
+    writer.var_i32(state_id);
+    writer.i16(i16::try_from(slot).unwrap_or(if slot < 0 { i16::MIN } else { i16::MAX }));
+    write_slot_774(&mut writer, item);
+    writer.into_vec()
 }
 
 fn block_action(status: i32) -> Option<BlockActionKind> {
@@ -592,6 +693,49 @@ impl ServerProtocol for V774ServerProtocol {
     fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
         self.try_encode_block_update(x, y, z, state)
             .expect("call try_encode_block_update to handle an unrepresentable protocol-774 state")
+    }
+
+    fn encode_open_screen(&self, window_id: i32, menu: &str, title: &str) -> ServerDirective {
+        let Some(inventory_type) = menu_id_774(menu) else {
+            return ServerDirective::None;
+        };
+        send(
+            play::clientbound::OPEN_SCREEN,
+            &OpenScreen {
+                window_id,
+                inventory_type,
+                window_title: NetworkNbt(Nbt::Compound(vec![(
+                    "text".to_owned(),
+                    Nbt::String(title.to_owned()),
+                )])),
+            },
+        )
+    }
+
+    fn encode_container_content(
+        &self,
+        window_id: i32,
+        state_id: i32,
+        items: &[Option<ItemStack>],
+        carried: Option<&ItemStack>,
+    ) -> ServerDirective {
+        ServerDirective::Send {
+            packet_id: play::clientbound::CONTAINER_SET_CONTENT,
+            payload: encode_container_content_body_774(window_id, state_id, items, carried),
+        }
+    }
+
+    fn encode_container_slot(
+        &self,
+        window_id: i32,
+        state_id: i32,
+        slot: i32,
+        item: Option<&ItemStack>,
+    ) -> ServerDirective {
+        ServerDirective::Send {
+            packet_id: play::clientbound::CONTAINER_SET_SLOT,
+            payload: encode_container_slot_body_774(window_id, state_id, slot, item),
+        }
     }
 
     fn compute_column_light(&self, column: &ChunkColumn) -> Option<lodestone_world::ColumnLight> {

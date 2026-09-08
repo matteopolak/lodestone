@@ -74,6 +74,103 @@ fn packed_position(x: i64, y: i64, z: i64) -> [u8; 8] {
 }
 
 #[test]
+fn chest_session_774_decodes_open_content_and_slot_updates() {
+    // `open_screen`: window 7, menu registry id 2 (generic_9x3), and an
+    // independently assembled anonymous-NBT literal title component.
+    let mut open = var_i32(7);
+    open.extend(var_i32(2));
+    open.extend([0x0a, 0x08, 0, 4]);
+    open.extend(b"text");
+    open.extend([0, 5]);
+    open.extend(b"Chest");
+    open.push(0);
+    assert_eq!(
+        packet(&V774Adapter::default(), packet_ids::play::clientbound::OPEN_SCREEN, &open),
+        vec![Directive::Emit(ClientEvent::ScreenOpened {
+            window_id: 7,
+            menu_type: "minecraft:generic_9x3".parse().unwrap(),
+            title: lodestone_model::Text::literal("Chest"),
+        })]
+    );
+
+    // `container_set_content`: window 7, state 9, three slots (empty,
+    // stone x4, empty) and an empty carried item. A bare component patch is
+    // represented by two zero counts after the item id.
+    let mut content = var_i32(7);
+    content.extend(var_i32(9));
+    content.extend(var_i32(3));
+    content.push(0);
+    content.extend([4, 1, 0, 0]);
+    content.push(0);
+    content.push(0);
+    let events = packet(
+        &V774Adapter::default(),
+        packet_ids::play::clientbound::CONTAINER_SET_CONTENT,
+        &content,
+    );
+    let [Directive::Emit(ClientEvent::ContainerContent {
+        window_id,
+        state_id,
+        items,
+        carried_item,
+    })] = events.as_slice()
+    else {
+        panic!("expected container content event: {events:?}");
+    };
+    assert_eq!(*window_id, 7);
+    assert_eq!(*state_id, lodestone_model::ContainerStateId::new(9));
+    assert_eq!(items.len(), 3);
+    assert!(items[0].is_none());
+    assert_eq!(items[1].as_ref().map(|item| item.item.to_string()), Some("minecraft:stone".into()));
+    assert_eq!(items[1].as_ref().map(|item| item.count), Some(4));
+    assert!(items[2].is_none());
+    assert!(carried_item.is_none());
+
+    // `container_set_slot`: state 10, slot 1, and a now-empty slot.
+    let mut slot = var_i32(7);
+    slot.extend(var_i32(10));
+    slot.extend(1_i16.to_be_bytes());
+    slot.push(0);
+    assert_eq!(
+        packet(&V774Adapter::default(), packet_ids::play::clientbound::CONTAINER_SET_SLOT, &slot),
+        vec![Directive::Emit(ClientEvent::ContainerSlot {
+            window_id: 7,
+            state_id: lodestone_model::ContainerStateId::new(10),
+            slot: 1,
+            item: None,
+        })]
+    );
+}
+
+#[test]
+fn chest_session_774_rejects_unknown_menu_and_unbounded_content() {
+    let mut unknown_menu = var_i32(7);
+    unknown_menu.extend(var_i32(25));
+    unknown_menu.extend([0x0a, 0]);
+    let mut sink = Sink;
+    assert!(V774Adapter::default()
+        .handle_packet(
+            &mut sink,
+            ConnectionState::Play,
+            packet_ids::play::clientbound::OPEN_SCREEN,
+            &unknown_menu,
+        )
+        .is_err());
+
+    let mut huge = var_i32(7);
+    huge.extend(var_i32(1));
+    huge.extend(var_i32(1025));
+    assert!(V774Adapter::default()
+        .handle_packet(
+            &mut sink,
+            ConnectionState::Play,
+            packet_ids::play::clientbound::CONTAINER_SET_CONTENT,
+            &huge,
+        )
+        .is_err());
+}
+
+#[test]
 fn set_equipment_774_decodes_terminated_slots_and_registry_item() {
     // Entity 300; main hand carries one diamond chestplate (wire id 971,
     // which is not the same canonical id after later registry insertions),
