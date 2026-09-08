@@ -7,13 +7,16 @@
 use lodestone_core::{
     Ctx, Decode, Encode, Nbt, NbtTag, Reader, State, Writer, encode_body, write_named_nbt,
 };
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation, Vec3f};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ItemStack, Rotation, Vec3f};
 use lodestone_server::{ChunkColumn, ChunkEncodeError, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_world::{Heightmap, LongArrayFraming, PaletteKind, PalettedContainer};
 use uuid::Uuid;
 
 use crate::PROTOCOL_1_19_4;
 use crate::canonical::wire_state_for_762;
+use crate::registry::{
+    item as protocol_item, item_id as protocol_item_id, menu_id as protocol_menu_id,
+};
 use crate::packet_ids::{handshaking, login, play};
 use crate::packets::game::{
     BlockDig, BlockPlace, ClientboundPositionLook, JoinGame, ServerboundFlying, ServerboundLook,
@@ -22,7 +25,11 @@ use crate::packets::game::{
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
 use crate::packets::position::{Position, pack_position};
-use crate::packets::window::ServerboundHeldItemSlot;
+use crate::packets::slot::Slot;
+use crate::packets::window::{
+    OpenWindow, ServerboundCloseWindow, ServerboundHeldItemSlot, SetSlot, WindowClick,
+    WindowItems,
+};
 
 const CTX: Ctx = Ctx {
     version: PROTOCOL_1_19_4,
@@ -51,6 +58,70 @@ fn decode_full<T: Decode>(payload: &[u8]) -> Option<T> {
     let value = T::decode(&mut reader, CTX).ok()?;
     reader.ensure_empty().ok()?;
     Some(value)
+}
+
+fn decode_slot(slot: Slot) -> Result<Option<ItemStack>, ()> {
+    let Slot::Item { id, count, nbt } = slot else {
+        return Ok(None);
+    };
+    let item = protocol_item(PROTOCOL_1_19_4, id).ok_or(())?;
+    let count = u32::try_from(count).map_err(|_| ())?;
+    if count == 0 {
+        return Err(());
+    }
+    Ok(Some(ItemStack {
+        item,
+        count,
+        components: lodestone_model::ItemComponents {
+            has_unmodeled: nbt.is_some(),
+            ..lodestone_model::ItemComponents::default()
+        },
+    }))
+}
+
+fn encode_slot(item: Option<&ItemStack>) -> Slot {
+    let Some(item) = item else {
+        return Slot::Empty;
+    };
+    assert_eq!(
+        item.components,
+        lodestone_model::ItemComponents::default(),
+        "protocol-762 container slots only support bare item stacks"
+    );
+    let id = protocol_item_id(PROTOCOL_1_19_4, &item.item)
+        .unwrap_or_else(|| panic!("unknown protocol-762 item {}", item.item));
+    let count = i8::try_from(item.count)
+        .unwrap_or_else(|_| panic!("protocol-762 item count {} overflows i8", item.count));
+    assert!(count > 0, "protocol-762 item count must be positive");
+    Slot::Item {
+        id,
+        count,
+        nbt: None,
+    }
+}
+
+fn decode_container_click(payload: &[u8]) -> Option<ServerBound> {
+    let body = decode_full::<WindowClick>(payload)?;
+    let changed_slots = body
+        .changed_slots
+        .into_iter()
+        .map(|entry| {
+            Ok((
+                i32::from(entry.location),
+                decode_slot(entry.item).map_err(|_| ())?,
+            ))
+        })
+        .collect::<Result<Vec<_>, ()>>()
+        .ok()?;
+    Some(ServerBound::ContainerClicked {
+        window_id: i32::from(body.window_id),
+        state_id: body.state_id,
+        slot: i32::from(body.slot),
+        button: body.button,
+        click_type: body.mode,
+        changed_slots,
+        carried_item: decode_slot(body.cursor_item).ok()?,
+    })
 }
 
 fn block_action(status: i32) -> Option<BlockActionKind> {
@@ -340,6 +411,16 @@ impl ServerProtocol for V762ServerProtocol {
                 };
                 ServerBound::CarriedItemChanged { slot }
             }
+            State::Play if packet_id == play::serverbound::WINDOW_CLICK => {
+                decode_container_click(payload).unwrap_or(ServerBound::Ignored)
+            }
+            State::Play if packet_id == play::serverbound::CLOSE_WINDOW => {
+                decode_full::<ServerboundCloseWindow>(payload).map_or(ServerBound::Ignored, |body| {
+                    ServerBound::ContainerClosed {
+                        window_id: i32::from(body.window_id),
+                    }
+                })
+            }
             State::Play if packet_id == play::serverbound::POSITION => {
                 let Some(ServerboundPosition {
                     x,
@@ -505,6 +586,66 @@ impl ServerProtocol for V762ServerProtocol {
             packet_id: play::clientbound::ANIMATION,
             payload: payload.into_vec(),
         }
+    }
+
+    fn encode_open_screen(&self, window_id: i32, menu: &str, title: &str) -> ServerDirective {
+        let Ok(menu) = menu.parse() else {
+            return ServerDirective::None;
+        };
+        let Some(inventory_type) = protocol_menu_id(PROTOCOL_1_19_4, &menu) else {
+            return ServerDirective::None;
+        };
+        let window_title = format!(
+            "{{\"text\":{}}}",
+            serde_json::to_string(title).expect("container title is serializable")
+        );
+        send(
+            play::clientbound::OPEN_WINDOW,
+            &OpenWindow {
+                window_id,
+                inventory_type,
+                window_title,
+            },
+        )
+    }
+
+    fn encode_container_content(
+        &self,
+        window_id: i32,
+        state_id: i32,
+        items: &[Option<ItemStack>],
+        carried: Option<&ItemStack>,
+    ) -> ServerDirective {
+        let window_id = u8::try_from(window_id).expect("protocol-762 window id fits u8");
+        send(
+            play::clientbound::WINDOW_ITEMS,
+            &WindowItems {
+                window_id,
+                state_id,
+                items: items.iter().map(|item| encode_slot(item.as_ref())).collect(),
+                carried_item: encode_slot(carried),
+            },
+        )
+    }
+
+    fn encode_container_slot(
+        &self,
+        window_id: i32,
+        state_id: i32,
+        slot: i32,
+        item: Option<&ItemStack>,
+    ) -> ServerDirective {
+        let window_id = i8::try_from(window_id).expect("protocol-762 window id fits i8");
+        let slot = i16::try_from(slot).expect("protocol-762 container slot fits i16");
+        send(
+            play::clientbound::SET_SLOT,
+            &SetSlot {
+                window_id,
+                state_id,
+                slot,
+                item: encode_slot(item),
+            },
+        )
     }
 
     fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {

@@ -1,4 +1,4 @@
-//! Inventory / window packets for this era (protocols 756 and 758).
+//! Inventory / window packets for protocol 762 (Minecraft 1.19.4).
 //!
 //! `CloseWindow`, `EnchantItem`, `HeldItemSlot`, `ServerboundCloseWindow`
 //! and `ServerboundHeldItemSlot` carry no `Slot` field and are byte-identical
@@ -48,15 +48,22 @@ pub struct OpenWindow {
 
 /// Clientbound `window_items` — the full contents of a window.
 ///
-/// The item array is prefixed by a signed `i16` count (not the modern varint).
+/// Protocol 762 carries the server's state id, a varint item count, and the
+/// cursor stack after the window slots. This is the stateful layout introduced
+/// after the older 1.16-era packet.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:window_items", state = Play, bound = Client)]
 pub struct WindowItems {
     /// Window handle id.
     pub window_id: u8,
+    /// Server-managed revision counter for this window.
+    #[mc(varint)]
+    pub state_id: i32,
     /// Every slot in the window, in slot order.
-    #[mc(len = "i16")]
+    #[mc(len = "varint")]
     pub items: Vec<Slot>,
+    /// Item held by the cursor.
+    pub carried_item: Slot,
 }
 
 /// Clientbound `set_slot` — updates a single slot.
@@ -65,9 +72,21 @@ pub struct WindowItems {
 pub struct SetSlot {
     /// Window handle id (`-1` = cursor, `0` = player inventory).
     pub window_id: i8,
+    /// Server-managed revision counter for this window.
+    #[mc(varint)]
+    pub state_id: i32,
     /// Slot index.
     pub slot: i16,
     /// New slot contents.
+    pub item: Slot,
+}
+
+/// One slot changed by a client click, with the client's predicted contents.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+pub struct ChangedSlot {
+    /// Slot index.
+    pub location: i16,
+    /// Predicted stack in that slot.
     pub item: Slot,
 }
 
@@ -77,16 +96,21 @@ pub struct SetSlot {
 pub struct WindowClick {
     /// Window handle id.
     pub window_id: u8,
+    /// Server-managed revision counter echoed by the client.
+    #[mc(varint)]
+    pub state_id: i32,
     /// Clicked slot index.
     pub slot: i16,
     /// Mouse button used.
     pub button: i8,
-    /// Transaction id (echoed by the server in a confirm packet).
-    pub action: i16,
     /// Click mode (normal, shift, number key, …).
-    pub mode: i8,
-    /// The item that was in the clicked slot (for the server to verify).
-    pub item: Slot,
+    #[mc(varint)]
+    pub mode: i32,
+    /// Every slot the client predicts this click changed.
+    #[mc(len = "varint")]
+    pub changed_slots: Vec<ChangedSlot>,
+    /// Predicted item held by the cursor after the click.
+    pub cursor_item: Slot,
 }
 
 /// Serverbound `set_creative_slot` — the creative-mode client sets a slot's item
