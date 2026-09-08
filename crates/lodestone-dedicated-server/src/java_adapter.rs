@@ -16,6 +16,26 @@ use lodestone_jvm_bridge::paper::{
 use lodestone_jvm_bridge::runtime::JvmConfig;
 use lodestone_server::IntegratedServer;
 
+/// Applies one Java-requested block replacement through the server's checked
+/// proposal path. The adapter poll itself is synchronous because JNI port
+/// servicers must answer the worker before returning; `block_in_place` lets the
+/// multi-thread Tokio runtime continue draining the proposal on another worker
+/// while this bounded request waits for adjudication.
+fn propose_resident_block_state(
+    server: &IntegratedServer,
+    write: BlockStateWrite,
+    state: lodestone_data::block_states::StateId,
+) -> Result<(), String> {
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current()
+            .block_on(server.set_resident_block_state_proposed(
+                lodestone_model::BlockPos::new(write.x, write.y, write.z),
+                state,
+            ))
+            .map_err(|refusal| format!("resident block proposal refused: {refusal}"))
+    })
+}
+
 const MAX_PENDING_BLOCK_CHANGE_EVENTS: usize = 64;
 const MAX_PENDING_PLAYER_LIFECYCLE_EVENTS: usize = 64;
 
@@ -359,7 +379,13 @@ impl JavaAdapter {
         self.host.service_pending_block_writes(available_block_change_events, |write| {
             let state = lodestone_data::block_states::StateId::new(write.state_id)
                 .ok_or_else(|| format!("block state id {} is outside this server's state table", write.state_id))?;
-            server.set_resident_block_state_id(write.x, write.y, write.z, state)?;
+            // Scalar Java mutations use the checked server proposal path so
+            // native-plugin adjudication can deny or replace them before this
+            // host reports success to the worker. The batch path above keeps
+            // its all-or-nothing preflight contract until a batch proposal
+            // vocabulary exists; it must not be emulated as several scalar
+            // proposals because that could partially apply a rejected batch.
+            propose_resident_block_state(server, write, state)?;
             self.pending_block_change_events.push_back(write);
             Ok(())
         });

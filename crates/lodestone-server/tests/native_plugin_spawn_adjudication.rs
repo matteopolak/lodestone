@@ -77,13 +77,14 @@ impl ChunkSource for FlatWorld {
     }
 
     fn resident_block_state_id(&self, x: i32, y: i32, z: i32) -> Option<StateId> {
-        (MIN_Y..MIN_Y + HEIGHT).contains(&y)
+        ((x.div_euclid(16), z.div_euclid(16)) == (0, 0)
+            && (MIN_Y..MIN_Y + HEIGHT).contains(&y))
             .then(|| self.block_state(x, y, z))
             .and_then(|state| StateId::from_state_str(&state))
     }
 
-    fn resident_column(&self, _cx: i32, _cz: i32) -> Option<ChunkColumn> {
-        Some(ChunkColumn::new(MIN_Y, HEIGHT))
+    fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
+        ((cx, cz) == (0, 0)).then(|| ChunkColumn::new(MIN_Y, HEIGHT))
     }
 
     fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
@@ -275,6 +276,18 @@ async fn native_plugin_block_mutations_are_adjudicated_then_reach_the_authoritat
             .await,
         Err(BlockMutationRefusal::OutOfBounds),
         "a finite validation result must replace a source-specific error string"
+    );
+    assert_eq!(
+        server
+            .set_resident_block_state_proposed(BlockPos::new(16, 4, 3), state("minecraft:gold_block"))
+            .await,
+        Err(BlockMutationRefusal::ColumnNotResident),
+        "a proposal must refuse an unresident column rather than load or generate it"
+    );
+    assert_eq!(
+        server.resident_block_state_id(16, 4, 3),
+        None,
+        "an unresident proposal must leave the authoritative source unavailable"
     );
 
     server.shutdown().await;
