@@ -652,6 +652,258 @@ const PACKET_LIGHT_NEIGHBOUR_OFFSETS: [(i32, i32); 8] = [
     (1, 1),
 ];
 
+/// The admission trace is deliberately a small diagnostic window. It is
+/// opt-in because hashing every light nibble is useful for an oracle run but
+/// would be needless work in the ordinary parity gate.
+const MAX_LIGHT_TRACE_ADMISSIONS: usize = 64;
+const LIGHT_TRACE_ADMISSIONS_ENV: &str = "LODESTONE_LARGE_PARITY_LIGHT_TRACE_ADMISSIONS";
+const LIGHT_TRACE_OUT_ENV: &str = "LODESTONE_LARGE_PARITY_LIGHT_TRACE_OUT";
+
+struct NetherLightTrace {
+    next_admission: usize,
+    limit: usize,
+    output: Option<PathBuf>,
+    lines: Vec<String>,
+}
+
+impl NetherLightTrace {
+    fn from_env() -> Option<Self> {
+        let raw_limit = std::env::var(LIGHT_TRACE_ADMISSIONS_ENV).ok()?;
+        let limit = raw_limit.parse::<usize>().unwrap_or_else(|error| {
+            panic!(
+                "invalid {LIGHT_TRACE_ADMISSIONS_ENV} value {raw_limit:?}: {error}"
+            )
+        });
+        if limit == 0 {
+            return None;
+        }
+        assert!(
+            limit <= MAX_LIGHT_TRACE_ADMISSIONS,
+            "{LIGHT_TRACE_ADMISSIONS_ENV} must be at most {MAX_LIGHT_TRACE_ADMISSIONS}, got {limit}"
+        );
+        Some(Self {
+            next_admission: 0,
+            limit,
+            output: std::env::var_os(LIGHT_TRACE_OUT_ENV).map(PathBuf::from),
+            lines: Vec::new(),
+        })
+    }
+
+    fn begin_admission(&mut self) -> Option<usize> {
+        if self.next_admission >= self.limit {
+            return None;
+        }
+        let index = self.next_admission;
+        self.next_admission += 1;
+        Some(index)
+    }
+
+    fn record_source_phase(
+        &mut self,
+        admission: usize,
+        phase: &str,
+        center: ChunkPos,
+        source: &dyn ChunkSource,
+    ) {
+        self.lines.push(format!(
+            "admission={admission} phase={phase} center_x={} center_z={}",
+            center.0, center.1
+        ));
+        for (dx, dz) in trace_offsets() {
+            let cx = center.0 + dx;
+            let cz = center.1 + dz;
+            match source.resident_column(cx, cz) {
+                Some(column) => self.record_column(
+                    admission,
+                    phase,
+                    (dx, dz),
+                    (cx, cz),
+                    column.retained_light_status(),
+                    column.retained_light(),
+                ),
+                None => self.lines.push(format!(
+                    concat!(
+                        "admission={admission} phase={phase} slot_dx={dx} slot_dz={dz} ",
+                        "coordinate_x={cx} coordinate_z={cz} status=absent light=absent"
+                    )
+                )),
+            }
+        }
+    }
+
+    fn record_returned_settlement(
+        &mut self,
+        admission: usize,
+        center: ChunkPos,
+        settlement: &lodestone_server::ColumnLightSettlement,
+    ) {
+        let phase = "returned_settlement";
+        self.lines.push(format!(
+            "admission={admission} phase={phase} center_x={} center_z={}",
+            center.0, center.1
+        ));
+        self.record_light(
+            admission,
+            phase,
+            (0, 0),
+            center,
+            "centre_returned",
+            settlement.centre_light(),
+        );
+        for ((dx, dz), light) in settlement.dependency_lights() {
+            self.record_light(
+                admission,
+                phase,
+                (dx, dz),
+                (center.0 + dx, center.1 + dz),
+                "dependency_returned",
+                light,
+            );
+        }
+    }
+
+    fn record_column(
+        &mut self,
+        admission: usize,
+        phase: &str,
+        offset: (i32, i32),
+        coordinate: ChunkPos,
+        status: Option<RetainedLightStatus>,
+        light: Option<&lodestone_world::ColumnLight>,
+    ) {
+        let status = status.map(retained_light_status_name).unwrap_or("none");
+        match light {
+            Some(light) => self.record_light(
+                admission, phase, offset, coordinate, status, light,
+            ),
+            None => self.lines.push(format!(
+                concat!(
+                    "admission={admission} phase={phase} slot_dx={} slot_dz={} ",
+                    "coordinate_x={} coordinate_z={} status={status} light=absent"
+                ),
+                offset.0, offset.1, coordinate.0, coordinate.1
+            )),
+        }
+    }
+
+    fn record_light(
+        &mut self,
+        admission: usize,
+        phase: &str,
+        offset: (i32, i32),
+        coordinate: ChunkPos,
+        status: &str,
+        light: &lodestone_world::ColumnLight,
+    ) {
+        self.lines.push(format!(
+            concat!(
+                "admission={admission} phase={phase} slot_dx={} slot_dz={} ",
+                "coordinate_x={} coordinate_z={} status={status} light=present sections={}"
+            ),
+            offset.0,
+            offset.1,
+            coordinate.0,
+            coordinate.1,
+            light.light_section_count(),
+        ));
+        let storage = light.storage();
+        for section in 0..light.light_section_count() {
+            let sky = light_layer_summary(light.sky(section));
+            let block = light_layer_summary(light.block(section));
+            let (allocated, light_only, block_data) = storage.map_or(
+                (None, None, None),
+                |storage| (
+                    Some(storage.is_allocated(section)),
+                    Some(storage.is_light_only(section)),
+                    Some(storage.has_block_data(section)),
+                ),
+            );
+            self.lines.push(format!(
+                concat!(
+                    "admission={admission} phase={phase} slot_dx={} slot_dz={} ",
+                    "section_y={} sky_state={} sky_sha256={} sky_nonzero={} sky_max={} ",
+                    "block_state={} block_sha256={} block_nonzero={} block_max={} ",
+                    "storage_allocated={:?} storage_light_only={:?} storage_block_data={:?}"
+                ),
+                offset.0,
+                offset.1,
+                section as isize - 1,
+                sky.0,
+                sky.1,
+                sky.2,
+                sky.3,
+                block.0,
+                block.1,
+                block.2,
+                block.3,
+                allocated,
+                light_only,
+                block_data,
+            ));
+        }
+    }
+
+    fn finish(self) {
+        if self.lines.is_empty() {
+            return;
+        }
+        let mut output = self.lines.join("\n");
+        output.push('\n');
+        if let Some(path) = self.output {
+            std::fs::write(&path, output).unwrap_or_else(|error| {
+                panic!("write Nether light trace {}: {error}", path.display())
+            });
+        } else {
+            eprint!("{output}");
+        }
+    }
+}
+
+fn trace_offsets() -> impl Iterator<Item = (i32, i32)> {
+    std::iter::once((0, 0)).chain(PACKET_LIGHT_NEIGHBOUR_OFFSETS.iter().copied())
+}
+
+fn retained_light_status_name(status: RetainedLightStatus) -> &'static str {
+    match status {
+        RetainedLightStatus::DependencyInitialized => "dependency_initialized",
+        RetainedLightStatus::CentreSettled => "centre_settled",
+    }
+}
+
+fn light_layer_summary(data: &lodestone_world::LightData) -> (&'static str, String, usize, u8) {
+    match data {
+        lodestone_world::LightData::Missing => {
+            ("missing", "none".to_owned(), 0, 0)
+        }
+        lodestone_world::LightData::Uniform(value) => {
+            let value = value & 0x0f;
+            let byte = value | (value << 4);
+            let bytes = [byte; 2048];
+            (
+                "uniform",
+                hex(&support::large_parity_manifest::sha256(&bytes)),
+                if value == 0 { 0 } else { 4096 },
+                value,
+            )
+        }
+        lodestone_world::LightData::Values(values) => {
+            let mut nonzero = 0;
+            let mut max = 0;
+            for index in 0..lodestone_world::NibbleArray::LEN {
+                let value = values.get(index);
+                nonzero += usize::from(value != 0);
+                max = max.max(value);
+            }
+            (
+                "values",
+                hex(&support::large_parity_manifest::sha256(values.as_bytes())),
+                nonzero,
+                max,
+            )
+        }
+    }
+}
+
 /// Builds the production persistent source used by the Nether raw-packet
 /// comparator. The bounded cache is still the serving layer, while the region
 /// source below it owns settled light after an admission is evicted. This is
@@ -684,28 +936,46 @@ fn nether_parity_source(seed: i64, _root: &Path) -> Box<dyn ChunkSource> {
 /// it deliberately has no parallel terrain or light map of its own.
 struct NetherSerialLightStore<'a> {
     source: &'a dyn ChunkSource,
+    trace: Option<NetherLightTrace>,
 }
 
 impl<'a> NetherSerialLightStore<'a> {
-    fn new(source: &'a dyn ChunkSource) -> Self {
-        Self { source }
+    fn new(source: &'a dyn ChunkSource, trace: Option<NetherLightTrace>) -> Self {
+        Self { source, trace }
     }
 
-    fn admit(&self, center: ChunkPos) {
-        let fallback = self
-            .source
+    fn admit(&mut self, center: ChunkPos) {
+        let source = self.source;
+        let trace_admission = self
+            .trace
+            .as_mut()
+            .and_then(NetherLightTrace::begin_admission);
+        if let Some(admission) = trace_admission {
+            self.trace
+                .as_mut()
+                .expect("trace admission was allocated")
+                .record_source_phase(admission, "pre_callback", center, source);
+        }
+        let fallback = source
             .resident_column(center.0, center.1)
-            .unwrap_or_else(|| self.source.column(center.0, center.1));
+            .unwrap_or_else(|| source.column(center.0, center.1));
+        let trace = &mut self.trace;
         let mut compute = |column: &ChunkColumn,
                            neighbours: &[(i32, i32, ChunkColumn)]| {
-            V770ServerProtocol
+            let settlement = V770ServerProtocol
                 .compute_initial_column_lights_with_neighbours_in_dimension(
                     column,
                     neighbours,
                     ServerDimension::Nether,
-                )
+                );
+            if let (Some(admission), Some(trace), Some(settlement)) =
+                (trace_admission, trace.as_mut(), settlement.as_ref())
+            {
+                trace.record_returned_settlement(admission, center, settlement);
+            }
+            settlement
         };
-        self.source
+        source
             .settle_resident_column_lights_with_neighbours(
                 center.0,
                 center.1,
@@ -719,9 +989,15 @@ impl<'a> NetherSerialLightStore<'a> {
             .unwrap_or_else(|error| {
                 panic!("production Nether light admission failed at {center:?}: {error:?}")
             });
+        if let Some(admission) = trace_admission {
+            trace
+                .as_mut()
+                .expect("trace admission was allocated")
+                .record_source_phase(admission, "committed", center, source);
+        }
     }
 
-    fn materialize_until(&self, order: &[ChunkPos], targets: &BTreeSet<ChunkPos>) {
+    fn materialize_until(&mut self, order: &[ChunkPos], targets: &BTreeSet<ChunkPos>) {
         for &center in order {
             self.admit(center);
             if targets.iter().all(|target| self.is_centre_settled(*target)) {
@@ -732,6 +1008,12 @@ impl<'a> NetherSerialLightStore<'a> {
             targets.iter().all(|target| self.is_centre_settled(*target)),
             "serial materialization order ended before every requested target was retained",
         );
+    }
+
+    fn finish_trace(&mut self) {
+        if let Some(trace) = self.trace.take() {
+            trace.finish();
+        }
     }
 
     fn is_centre_settled(&self, target: ChunkPos) -> bool {
@@ -1696,8 +1978,9 @@ fn parity_manifest_streams_before_rust_comparison() {
                 .into_iter()
                 .collect::<BTreeSet<_>>();
             let order = nether_materialization_order(&h);
-            let mut store = NetherSerialLightStore::new(&*source);
+            let mut store = NetherSerialLightStore::new(&*source, NetherLightTrace::from_env());
             store.materialize_until(&order, &targets);
+            store.finish_trace();
             eprintln!(
                 "large raw-packet parity: settled serial Nether admissions for {} targets through the production source",
                 targets.len(),

@@ -3065,6 +3065,34 @@ mod tests {
         );
     }
 
+    /// The settlement centre is a distinct entry from its dependency
+    /// snapshots. The diagnostic iterator must expose only the latter and
+    /// preserve their relative offsets and values without cloning them.
+    #[test]
+    fn settlement_dependency_iteration_excludes_centre() {
+        let mut centre = lodestone_world::ColumnLight::new(0);
+        *centre.sky_mut(0) = lodestone_world::LightData::Uniform(3);
+        let mut west = lodestone_world::ColumnLight::new(0);
+        *west.block_mut(0) = lodestone_world::LightData::Uniform(7);
+        let mut south = lodestone_world::ColumnLight::new(0);
+        *south.sky_mut(1) = lodestone_world::LightData::Uniform(11);
+
+        let settlement = ColumnLightSettlement::with_neighbours(
+            centre.clone(),
+            [(-1, 0, west.clone()), (0, 1, south.clone())],
+        )
+        .expect("the two dependency offsets are distinct and in the 3x3 footprint");
+
+        assert_eq!(settlement.centre_light(), &centre);
+        let dependencies = settlement.dependency_lights().collect::<Vec<_>>();
+        assert_eq!(dependencies.len(), 2);
+        assert_eq!(dependencies[0], ((-1, 0), &west));
+        assert_eq!(dependencies[1], ((0, 1), &south));
+        assert!(dependencies
+            .iter()
+            .all(|(offset, _)| *offset != (0, 0)));
+    }
+
     /// An allocated-zero dependency is storage, not a settled centre result.
     /// The next admission at that coordinate must still run its solver and may
     /// replace the zero layer with populated light.
