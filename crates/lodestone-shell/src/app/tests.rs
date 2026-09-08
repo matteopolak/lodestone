@@ -115,6 +115,31 @@ fn ordinary_policy_remains_persisted_option_driven() {
     assert!(should_background_pace(&config));
 }
 
+#[test]
+fn container_focus_uses_the_integer_physical_framebuffer_centre() {
+    assert_eq!(container_cursor_center(1280, 720), (640.0, 360.0));
+    // The native cursor API takes integer physical pixels. Keep the same
+    // truncating half-size for odd dimensions instead of introducing a
+    // half-pixel position that the OS cannot represent.
+    assert_eq!(container_cursor_center(1279, 719), (639.0, 359.0));
+}
+
+#[test]
+fn terminal_inventory_toggle_focuses_only_on_the_open_edge() {
+    let mut app = WindowApp::new(Config::default());
+    app.ui.enter_dev_world();
+    app.cursor = (17.0, 23.0);
+
+    // There is no offscreen target on this constructor, so this test uses the
+    // state edge itself as the deterministic control: opening is a transition,
+    // while a second toggle is the close edge and must not re-open/re-focus it.
+    app.terminal_toggle_inventory();
+    assert_eq!(app.ui.screen(), Screen::Container);
+    app.terminal_toggle_inventory();
+    assert_eq!(app.ui.screen(), Screen::Playing);
+    assert_eq!(app.cursor, (17.0, 23.0));
+}
+
 fn open_test_stonecutter(
     app: &mut WindowApp,
     result_count: usize,
@@ -122,8 +147,8 @@ fn open_test_stonecutter(
     use lodestone_client::ClientEvent;
 
     const WINDOW_ID: i32 = 17;
-    let stone_id = i32::from(Item::Stone.registry_id());
-    let slab_id = i32::from(Item::StoneSlab.registry_id());
+    let stone_id = lodestone_model::ItemId::canonical(u32::from(Item::Stone.registry_id()));
+    let slab_id = lodestone_model::ItemId::canonical(u32::from(Item::StoneSlab.registry_id()));
     let ingest = |event| {
         app.sim
             .net()
@@ -1091,6 +1116,132 @@ fn terminal_enter_uses_the_same_menu_action_as_the_pointer() {
         Screen::WorldSelect,
         "terminal Enter must dispatch through MenuNav and the shared action handler"
     );
+}
+
+#[test]
+fn terminal_escape_and_wheel_reach_the_shared_playing_actions() {
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+    app.ui.begin(SessionKind::Singleplayer);
+    app.ui.session_ready();
+    assert!(app.ui.is_playing());
+
+    app.terminal_scroll(1.0);
+    assert_eq!(
+        app.sim.selected_slot(),
+        8,
+        "terminal wheel-up must select the previous shared hotbar slot"
+    );
+
+    app.terminal_escape();
+    assert!(app.ui.is_paused(), "terminal Escape must use the shared pause action");
+
+    app.ui.open_container();
+    assert!(app.terminal_has_container());
+    app.terminal_escape();
+    assert!(!app.terminal_has_container());
+    assert!(app.ui.is_playing());
+}
+
+#[test]
+fn terminal_middle_click_reaches_the_shared_pick_action() {
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+    let (net, actions, _feed) = NetClient::loopback_with_feed();
+    app.sim.attach_net(net);
+    app.sim.set_ray_target_for_test(Some(crate::raycast::RayHit::face_center(
+        [3, 70, -2],
+        [0, 1, 0],
+    )));
+
+    app.terminal_mouse_pick_item(true);
+
+    assert_eq!(
+        actions.try_recv(),
+        Ok(lodestone_model::ClientAction::PickItemFromBlock {
+            pos: lodestone_model::BlockPos::new(3, 70, -2),
+            include_data: true,
+        }),
+        "terminal middle-click must feed the same targeted pick action as the window path"
+    );
+}
+
+#[test]
+fn deferred_middle_pick_drops_failed_capture_and_replays_once_after_success() {
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+    app.ui.enter_dev_world();
+    let (net, actions, _feed) = NetClient::loopback_with_feed();
+    app.sim.attach_net(net);
+    app.sim.set_ray_target_for_test(Some(crate::raycast::RayHit::face_center(
+        [3, 70, -2],
+        [0, 1, 0],
+    )));
+
+    app.pending_pick = Some(PendingPick {
+        include_data: true,
+        requested_at: Instant::now(),
+    });
+    app.grabbed = false;
+    app.replay_pending_pick();
+    assert!(actions.try_recv().is_err(), "a failed grab must not emit a pick");
+    assert!(app.pending_pick.is_none(), "failed grabs clear the one-shot request");
+
+    app.pending_pick = Some(PendingPick {
+        include_data: true,
+        requested_at: Instant::now(),
+    });
+    app.grabbed = true;
+    app.replay_pending_pick();
+    assert_eq!(
+        actions.try_recv(),
+        Ok(lodestone_model::ClientAction::PickItemFromBlock {
+            pos: lodestone_model::BlockPos::new(3, 70, -2),
+            include_data: true,
+        })
+    );
+    assert!(app.pending_pick.is_none(), "successful dispatch consumes the request");
+    app.replay_pending_pick();
+    assert!(actions.try_recv().is_err(), "one middle-click emits exactly once");
+}
+
+#[test]
+fn deferred_middle_pick_expires_and_drops_when_play_ends() {
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+    app.ui.enter_dev_world();
+    let (net, actions, _feed) = NetClient::loopback_with_feed();
+    app.sim.attach_net(net);
+    app.sim.set_ray_target_for_test(Some(crate::raycast::RayHit::face_center(
+        [3, 70, -2],
+        [0, 1, 0],
+    )));
+
+    app.pending_pick = Some(PendingPick {
+        include_data: false,
+        requested_at: Instant::now() - PENDING_PICK_TIMEOUT - Duration::from_millis(1),
+    });
+    app.grabbed = true;
+    app.replay_pending_pick();
+    assert!(app.pending_pick.is_none(), "expired requests must be discarded");
+    assert!(actions.try_recv().is_err());
+
+    app.ui.on_escape();
+    app.pending_pick = Some(PendingPick {
+        include_data: false,
+        requested_at: Instant::now(),
+    });
+    app.replay_pending_pick();
+    assert!(app.pending_pick.is_none(), "menu transitions must clear pending picks");
+    assert!(actions.try_recv().is_err());
 }
 
 #[test]
@@ -3896,8 +4047,9 @@ fn drive_ui_from_session_toasts_a_newly_unlocked_recipe_but_not_the_join_time_se
     use lodestone_client::ClientEvent;
     use lodestone_model::event::RecipeBookEntry;
 
-    let torch = i32::from(Item::Torch.registry_id());
-    let crafting_table = i32::from(Item::CraftingTable.registry_id());
+    let torch = lodestone_model::ItemId::canonical(u32::from(Item::Torch.registry_id()));
+    let crafting_table =
+        lodestone_model::ItemId::canonical(u32::from(Item::CraftingTable.registry_id()));
 
     let mut app = WindowApp::new(Config {
         mode: Mode::Headless,
@@ -3972,8 +4124,9 @@ fn a_non_notifying_unlock_never_toasts() {
     use lodestone_client::ClientEvent;
     use lodestone_model::event::RecipeBookEntry;
 
-    let torch = i32::from(Item::Torch.registry_id());
-    let crafting_table = i32::from(Item::CraftingTable.registry_id());
+    let torch = lodestone_model::ItemId::canonical(u32::from(Item::Torch.registry_id()));
+    let crafting_table =
+        lodestone_model::ItemId::canonical(u32::from(Item::CraftingTable.registry_id()));
 
     let mut app = WindowApp::new(Config {
         mode: Mode::Headless,
@@ -4053,8 +4206,9 @@ fn drive_ui_from_session_reports_a_visible_highlighted_recipe_as_seen_exactly_on
         )),
     );
 
-    let torch = i32::from(Item::Torch.registry_id());
-    let crafting_table = i32::from(Item::CraftingTable.registry_id());
+    let torch = lodestone_model::ItemId::canonical(u32::from(Item::Torch.registry_id()));
+    let crafting_table =
+        lodestone_model::ItemId::canonical(u32::from(Item::CraftingTable.registry_id()));
 
     let mut app = WindowApp::new(Config {
         mode: Mode::Headless,
@@ -4135,8 +4289,9 @@ fn a_highlighted_recipe_is_not_reported_while_the_panel_is_closed() {
         )),
     );
 
-    let torch = i32::from(Item::Torch.registry_id());
-    let crafting_table = i32::from(Item::CraftingTable.registry_id());
+    let torch = lodestone_model::ItemId::canonical(u32::from(Item::Torch.registry_id()));
+    let crafting_table =
+        lodestone_model::ItemId::canonical(u32::from(Item::CraftingTable.registry_id()));
 
     let mut app = WindowApp::new(Config {
         mode: Mode::Headless,

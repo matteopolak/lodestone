@@ -19,7 +19,7 @@ impl WindowApp {
         self.drive_friends();
         if self.sim.open_menu().is_some() && self.ui.is_playing() {
             self.ui.open_container();
-            self.set_grab(false);
+            self.focus_container_screen();
         }
 
         // Pace the frame and tick **before** the GPU-readiness guard. Simulation
@@ -1329,11 +1329,8 @@ impl WindowApp {
                 && held_for_scoping
                     .as_ref()
                     .is_some_and(|loc| loc.namespace() == "minecraft" && loc.path() == "spyglass"),
-            // No potion-effect-duration tracker exists anywhere in this
-            // codebase yet, so `0.0` is still the honest answer for nausea —
-            // a placeholder pretending to work would be worse. See
-            // `docs/screen-overlays.md`'s "Confusion and portal" section.
-            nausea_intensity: 0.0,
+            nausea_intensity: self.sim.nausea_intensity(),
+            vision_obscuration: self.sim.vision_obscuration(),
             // The portal overlay's alpha, live: `Sim::portal_effect_intensity`
             // is vanilla's `Mth.lerp(partialTicks, oPortalEffectIntensity,
             // portalEffectIntensity)`, ramped +0.0125/tick while the player's
@@ -1940,6 +1937,11 @@ impl WindowApp {
         hud_frame.boss_bars = &boss_bars;
         hud_frame.can_hurt_player = can_hurt_player;
         hud_frame.health = health;
+        // Health Boost arrives as the local player's ordinary
+        // `minecraft:max_health` attribute update. Keep the ceiling separate
+        // from current health: a hurt boosted player can be below 20 yet still
+        // needs the second heart row.
+        hud_frame.max_health = self.sim.max_health();
         // The armour row. `Sim::armour_value` is `floor(minecraft:armor)` off the
         // local player's folded attribute snapshot — matching vanilla's own
         // armor-value accessor — so equipment reaches the bar the way it
@@ -2571,9 +2573,10 @@ impl WindowApp {
         }
 
         // The terrain-loading half. `Screen::Connecting` covers the
-        // handshake/configuration phase as a full frame (see `frame_for`); this
-        // block covers the moments after login while the player's own chunk is
-        // still streaming in. Drawn as an overlay over the still-rendering
+        // handshake/configuration phase as a full frame (and the menu path
+        // enriches it with singleplayer progress when available); this block
+        // covers the moments after login while the player's own chunk is still
+        // streaming in. Drawn as an overlay over the still-rendering
         // world rather than replacing it, for the same reason Paused/Death are
         // overlays: chunks must keep meshing and uploading behind the text —
         // the very thing a full-frame `owns_frame` screen would stop. It is
