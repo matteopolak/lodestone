@@ -400,7 +400,7 @@ impl Sim {
             presentation_attached: true,
             status,
             connect_phase: crate::menu::loading::ConnectPhase::default(),
-            expected_view_columns: None,
+            terrain_progress: crate::menu::loading::TerrainProgressTracker::default(),
             expected_view_radius: None,
             terrain_wait_started: None,
             vanilla_atlas: resources.vanilla_atlas,

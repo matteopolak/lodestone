@@ -527,21 +527,18 @@ pub fn frame_for<'a>(
             })
         }
         // The loading screen: the connect phase name over a flat dark
-        // backdrop while the handshake/configuration phase runs. Safe to take
-        // the whole frame here — no chunk packets arrive until after login, so
-        // nothing meshes or uploads behind the loading screen and the world
-        // path (`app::redraw`) is not needed under it. This supersedes the
-        // older note that `Screen::Connecting` was deliberately absent so the
-        // world "keeps rendering so chunks mesh and upload as they stream in":
-        // that concern belongs to the *post-login* terrain stream, which stays
-        // on the world path as an overlay in `app::redraw` (see its loading
-        // block) rather than piling behind a full screen.
-        // The label is the phase's own real vanilla string rather than a fixed
-        // literal (that fix's item (a)): "Connecting to the server..." while
-        // the socket is dialled and the integrated server opened, then "Joining
-        // world..." once the handle exists. No bar on this screen — there is
-        // nothing real to count before login, and a synthesised bar is the one
-        // thing the issue rules out.
+        // backdrop while the handshake/configuration phase runs. It remains a
+        // full-frame screen, and the app's connection path may enrich that
+        // frame with the declared singleplayer view square and its real
+        // resident-column statuses. Post-login streaming still uses the world
+        // path as an overlay in `app::redraw`, so a fast integrated-server join
+        // cannot skip the only frame that exposes terrain preparation.
+        // The label is the phase's own real string rather than a fixed literal:
+        // "Connecting to the server..." while the socket is dialled and the
+        // integrated server opened, then "Joining world..." once the handle
+        // exists. The connection-specific app path adds a bar only when the
+        // launcher declared a real singleplayer denominator; multiplayer keeps
+        // the bar-less form because it has no trustworthy denominator.
         Screen::Connecting => Some(loading_frame(ui.connect_phase().label())),
         // The error screen is drawn by this renderer too, even though it is not
         // an `is_menu()` screen: a session that dies mid-game used to leave a

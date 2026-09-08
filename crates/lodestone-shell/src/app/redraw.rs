@@ -2561,9 +2561,10 @@ impl WindowApp {
         }
 
         // The terrain-loading half. `Screen::Connecting` covers the
-        // handshake/configuration phase as a full frame (see `frame_for`); this
-        // block covers the moments after login while the player's own chunk is
-        // still streaming in. Drawn as an overlay over the still-rendering
+        // handshake/configuration phase as a full frame (and the menu path
+        // enriches it with singleplayer progress when available); this block
+        // covers the moments after login while the player's own chunk is still
+        // streaming in. Drawn as an overlay over the still-rendering
         // world rather than replacing it, for the same reason Paused/Death are
         // overlays: chunks must keep meshing and uploading behind the text —
         // the very thing a full-frame `owns_frame` screen would stop. It is

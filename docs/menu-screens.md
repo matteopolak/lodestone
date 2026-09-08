@@ -22,7 +22,8 @@ Screens fall into two draw shapes:
 
 - **Full-frame** screens (`owns_frame` lists them) replace the entire draw — the title screen, world
   select, settings. Used when there's no live world behind the screen, or when covering it is correct
-  (a full-frame connect screen while nothing is streaming yet).
+  (the connection screen covers the handshake and may show the singleplayer view square while the
+  first columns are arriving).
 - **Overlay** screens draw over a still-rendering, still-ticking world — the pause menu, chat, death,
   container screens, the command block editor, the post-login loading screen. These freeze gameplay
   input and release the pointer, but the world keeps meshing, uploading chunks and ticking behind the
@@ -222,14 +223,15 @@ regardless of which screen is open.
 
 ### Loading
 
-Two different mechanisms depending on when it applies, not one screen. Before login, `Screen::Connecting`
-is a full-frame screen (nothing is streaming yet, so nothing needs to keep rendering behind it) showing
-named connection phases. After login, the loading UI becomes an **overlay** drawn over the
-still-rendering world while terrain is loading, because chunks must keep meshing and uploading behind
-the text — a full-frame screen would stop that. It clears based on whether the player's own standing
-chunk has actually arrived, not when a progress bar visually fills. Both stages use the same panorama
-backdrop every other menu screen uses (see `ui-framework.md`) rather than a flat color wash — no
-vanilla loading screen ever shows a flat fill, even over a live level.
+Two draw shapes cover one loading flow. Before login, `Screen::Connecting` is a full-frame screen
+showing named connection phases. A singleplayer launch also supplies its declared view square here,
+so the real resident-column map and monotonic count can be visible even when the integrated server
+prepares terrain before the login transition. After login, the loading UI becomes an **overlay** drawn
+over the still-rendering world while terrain is loading, because chunks must keep meshing and
+uploading behind the text — a full-frame screen would stop that. It clears based on whether the
+player's own standing chunk has actually arrived, not when a progress bar visually fills. Both stages
+use the same panorama backdrop every other menu screen uses (see `ui-framework.md`) rather than a
+flat color wash.
 
 ### Advancements
 

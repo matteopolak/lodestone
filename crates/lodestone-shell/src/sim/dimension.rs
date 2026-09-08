@@ -357,6 +357,10 @@ impl Sim {
     /// clear is what makes a **vanilla** server correct too. See
     /// `docs/nether-portals.md`.
     pub(crate) fn reset_for_dimension_change(&mut self) {
+        // A dimension has its own streamed columns. Keep the denominator for
+        // the current session, but discard the previous dimension's high-water
+        // observations so the overlay starts at the new resident set.
+        self.terrain_progress.reset_observed();
         // The other entities. Vanilla builds a whole new `ClientLevel` on
         // `handleRespawn`, which drops every entity in the old one; this is the
         // same call `end_session` uses, and it exempts the local player for the
@@ -390,6 +394,7 @@ impl Sim {
     /// same server and its boss bars remain valid, while a second `LOGIN` or a
     /// newly attached connection starts a new server session.
     pub(crate) fn reset_for_server_transfer(&mut self) {
+        self.reset_loading_state();
         let local = self.local;
         self.write(|w| {
             if let Some(mut bars) = w.get_mut::<lodestone_ecs::session::SessionBossBars>(local) {

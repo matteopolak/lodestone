@@ -1078,7 +1078,9 @@ const LOADING_DETAIL: [f32; 4] = [160.0 / 255.0, 160.0 / 255.0, 160.0 / 255.0, 1
 ///
 /// `detail` is drawn dimmer than the phase name so a glance reads the phase
 /// first and the count second — the count is for diagnosing a stall ("stuck at
-/// 37/441"), not for watching.
+/// 37/441"), not for watching. The connection path may use this same builder
+/// before login for singleplayer, where the denominator was declared by the
+/// launcher and the count is still a real client observation.
 #[must_use]
 pub fn loading_frame_with_progress(
     text: &str,

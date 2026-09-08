@@ -22,6 +22,64 @@ fn benchmark_config(workload: crate::config::BenchmarkWorkload) -> Config {
     }
 }
 
+/// The connection screen is the first production consumer of singleplayer's
+/// terrain observations. Keep a progress-bearing frame on the full-frame path
+/// so a fast integrated-server join cannot jump from an empty handshake label
+/// straight to gameplay without ever submitting the map geometry.
+#[test]
+fn connection_loading_frame_carries_the_real_progress_and_grid() {
+    use crate::menu::loading::{ChunkCellStatus, TerrainChunkGrid, TerrainProgress};
+    use crate::menu::render::{CHUNK_CELL_FULL, geometry};
+
+    let progress = TerrainProgress {
+        loaded: 3,
+        expected: 9,
+    };
+    let grid = TerrainChunkGrid {
+        radius: 1,
+        center: (4, -2),
+        cells: vec![ChunkCellStatus::Full; 9],
+    };
+    let frame = crate::app::menus::connection_loading_frame(
+        crate::menu::loading::ConnectPhase::LoadingTerrain,
+        Some(progress),
+        Some(grid.clone()),
+    );
+
+    assert_eq!(frame.labels[0].text, "Loading terrain...");
+    assert_eq!(
+        frame.progress.map(|bar| bar.fraction),
+        Some(progress.fraction())
+    );
+    assert_eq!(
+        frame.chunk_grid.as_ref().map(|view| view.grid.clone()),
+        Some(grid)
+    );
+
+    // Geometry is the actual path the menu renderer submits. A Full grid cell
+    // contributes opaque white quads, proving the helper is not merely carrying
+    // data that no production frame can consume.
+    let vertices = geometry(&frame, 320.0, 240.0);
+    let full_cells = vertices.chunks_exact(6).filter(|vertex| {
+        (vertex[2] - CHUNK_CELL_FULL[0]).abs() < f32::EPSILON
+            && (vertex[3] - CHUNK_CELL_FULL[1]).abs() < f32::EPSILON
+            && (vertex[4] - CHUNK_CELL_FULL[2]).abs() < f32::EPSILON
+            && (vertex[5] - CHUNK_CELL_FULL[3]).abs() < f32::EPSILON
+    });
+    assert!(full_cells.count() >= 6, "the grid must reach menu geometry");
+
+    let bare = crate::app::menus::connection_loading_frame(
+        crate::menu::loading::ConnectPhase::Joining,
+        None,
+        None,
+    );
+    assert!(
+        bare.progress.is_none(),
+        "multiplayer/no-denominator stays bar-less"
+    );
+    assert!(bare.chunk_grid.is_none());
+}
+
 #[test]
 fn benchmark_policy_is_uncapped_unvsynced_and_uses_physical_1440p() {
     let config = benchmark_config(crate::config::BenchmarkWorkload::Terrain);

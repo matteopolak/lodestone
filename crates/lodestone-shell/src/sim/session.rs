@@ -246,6 +246,7 @@ impl Sim {
         // so nothing below can race a still-running poll against state this
         // method is about to reset out from under it.
         self.net = None;
+        self.reset_loading_state();
         // The session component is restored to its default below; drop its
         // read-side snapshot at the same boundary so a new session cannot
         // briefly expose the previous server's display ids.
@@ -403,6 +404,25 @@ impl Sim {
             .map_or(core::time::Duration::ZERO, |started| started.elapsed())
     }
 
+    /// Reset the connection-scoped loading view before another server can use
+    /// this `Sim`. Keeping this boundary in one method prevents a prior
+    /// denominator, high-water count, phase clock or cache center from
+    /// leaking into the next loading screen.
+    pub(crate) fn reset_loading_state(&mut self) {
+        self.connect_phase = crate::menu::loading::ConnectPhase::Connecting;
+        self.terrain_progress.reset();
+        self.expected_view_radius = None;
+        self.terrain_wait_started = None;
+        let local = self.local;
+        self.write(|world| {
+            if let Some(mut center) =
+                world.get_mut::<lodestone_ecs::ServerChunkCacheCenter>(local)
+            {
+                center.0 = None;
+            }
+        });
+    }
+
     /// The four observations `crate::menu::loading::is_level_ready` reads, or
     /// `None` with no live session — the demo/dev world has no net client and is
     /// never "loading terrain".
@@ -507,8 +527,9 @@ impl Sim {
     /// view radius the launcher asked the server for. Establishes the progress
     /// bar's denominator.
     pub fn set_view_radius(&mut self, view_radius: u32) {
-        self.expected_view_columns =
-            Some(crate::menu::loading::TerrainProgress::expected_for_radius(view_radius));
+        self.terrain_progress.set_expected(
+            crate::menu::loading::TerrainProgress::expected_for_radius(view_radius),
+        );
         self.expected_view_radius = Some(view_radius);
     }
 
@@ -540,18 +561,46 @@ impl Sim {
     /// How much of the initial view has landed, or `None` when there is no
     /// session or no declared view radius to divide by.
     ///
-    /// The numerator is the client's own loaded-column count and the denominator
-    /// is the view square — both are measured from session state. A missing
-    /// denominator yields `None` so the screen
-    /// draws a phase name with no bar, rather than a synthesised one.
+    /// The numerator is the high-water mark of the client's own loaded-column
+    /// observations inside the streamed square and the denominator is that
+    /// square. A missing denominator yields `None` so the screen draws a phase
+    /// name with no bar, rather than a synthesised one.
     #[must_use]
     pub fn terrain_progress(&self) -> Option<crate::menu::loading::TerrainProgress> {
-        let net = self.net()?;
-        let expected = self.expected_view_columns?;
-        Some(crate::menu::loading::TerrainProgress {
-            loaded: net.loaded_chunks().len(),
-            expected,
-        })
+        self.net()?;
+        self.terrain_progress.snapshot()
+    }
+
+    /// Fold the client's current resident columns into the loading
+    /// high-water mark. The count is restricted to the server's current
+    /// streamed square so columns outside the expected view cannot fill the
+    /// bar. This reads the client-owned world rather than trusting event
+    /// delivery: a dropped/coalesced chunk notification still leaves the
+    /// source of truth available to the next poll.
+    pub(crate) fn observe_terrain_progress(&mut self) {
+        let Some(radius) = self.expected_view_radius else {
+            return;
+        };
+        let position = self.player().position;
+        let player_center = (
+            (position.x.floor() as i32).div_euclid(16),
+            (position.z.floor() as i32).div_euclid(16),
+        );
+        let center = self.chunk_cache_center().unwrap_or(player_center);
+        let radius = i64::from(radius);
+        let loaded = {
+            let Some(net) = self.net.as_ref() else {
+                return;
+            };
+            net.loaded_chunks()
+                .into_iter()
+                .filter(|pos| {
+                    (i64::from(pos.x) - i64::from(center.0)).abs() <= radius
+                        && (i64::from(pos.z) - i64::from(center.1)).abs() <= radius
+                })
+                .count()
+        };
+        self.terrain_progress.observe(loaded);
     }
 
     /// The loading screen's chunk-status grid: real per-column
