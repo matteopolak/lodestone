@@ -37,6 +37,7 @@ const PERSISTED_BATCH_SIZE_ENV: &str = "LODESTONE_LARGE_PARITY_PERSISTED_BATCH_S
 const PERSISTED_ONLY_ENV: &str = "LODESTONE_LARGE_PARITY_PERSISTED_ONLY";
 const TRACE_COLUMN_ENV: &str = "LODESTONE_LARGE_PARITY_TRACE_COLUMN";
 const TRACE_OUT_ENV: &str = "LODESTONE_LARGE_PARITY_TRACE_OUT";
+const PERSISTED_PACKET_OUT_ENV: &str = "LODESTONE_LARGE_PARITY_PERSISTED_PACKET_OUT";
 const PERSISTED_BATCH_SIZE: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -987,6 +988,17 @@ fn compare_end_raw_from_persisted_world(
                         mismatch.collision(),
                         mismatch.payload_bytes,
                     );
+                }
+                if mismatches.is_empty() {
+                    if let Some(path) = std::env::var_os(PERSISTED_PACKET_OUT_ENV) {
+                        std::fs::write(&path, &payload).unwrap_or_else(|error| {
+                            panic!("write persisted-world packet capture {}: {error}", Path::new(&path).display())
+                        });
+                        eprintln!(
+                            "large persisted-world import/encoder parity: wrote first mismatch packet to {}",
+                            Path::new(&path).display(),
+                        );
+                    }
                 }
                 mismatches.push(mismatch);
             }

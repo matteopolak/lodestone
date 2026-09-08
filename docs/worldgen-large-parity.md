@@ -81,7 +81,10 @@ can carry persisted sky/block layers and neighbour-derived masks. The
 diagnostic therefore delegates missing-layer handling to the production
 encoder and never infers masks from occupancy or performs an independent
 target recomputation. Set `LODESTONE_LARGE_PARITY_PERSISTED_ONLY=1` to stop
-after this diagnostic and avoid entering the generated replay arm.
+after this diagnostic and avoid entering the generated replay arm. Set
+`LODESTONE_LARGE_PARITY_PERSISTED_PACKET_OUT` to retain the first actual
+persisted-arm mismatch packet for component decoding; the hook is bounded and
+does not select coordinates.
 
 The dimension-aware v4 format is additive. It keeps the same 501 by 501 bounds and 32-byte per-chunk digests, but authenticates one of the three dimension identities (`minecraft:overworld`, `minecraft:the_nether`, or `minecraft:the_end`) in header bytes `168..200` as SHA-256 of its resource-location string and uses that dimension's decoded window: overworld `min_y=-64` with 24 sections, Nether/End `min_y=0` with 16 sections. The v5 End format keeps that header shape but has new manifest and record domains. Its export reads the persisted settled light from each requested chunk in the sealed world copy; it does not reset or recompute light, or load an export-only neighborhood. Normal per-batch ticket removal is safe because the sealed world is not mutated during export. It also elides only a trailing all-15 sky-light layer, because an initial chunk enables its column after queueing supplied layers and a missing top sky layer resolves to the same full value. Mixed sky arrays and all block-light tags remain exact. This avoids treating allocation history as terrain while preserving a real light-value mismatch. V3 and v4 records remain readable and byte-for-byte unchanged; a merge or duplicate-read acceptance rejects different dimensions or semantic versions.
 
