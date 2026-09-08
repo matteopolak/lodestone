@@ -107,10 +107,11 @@
 //!
 //! # What is deliberately not here
 //!
-//! * **Attribute-modifier effects** (`speed`, `slowness`, `health_boost`,
-//!   `absorption`). Those need an attribute system; `lodestone_physics::effect`
-//!   already classifies the movement ones, and this module's job is to be the store
-//!   it reads from rather than to duplicate its table.
+//! * **Attribute-modifier effects** (`speed`, `slowness`, `absorption`).
+//!   `lodestone_physics::effect` already classifies the movement ones, and this
+//!   module's job is to be the store it reads from rather than to duplicate its
+//!   table. Health Boost is the exception: [`ActiveEffects::max_health`] folds
+//!   its one additive attribute into the server's authoritative health ceiling.
 //! * **A lingering potion's own `AreaEffectCloud` entity** — radius, a
 //!   radius-per-tick shrink, a duration, and a reapplication delay, so the same
 //!   burst lands repeatedly over up to 30 seconds rather than once. See
@@ -174,6 +175,48 @@ pub enum PeriodicAction {
     Exhaust,
 }
 
+/// How the active effect set changes a submerged player's air supply.
+///
+/// `Hold` prevents depletion but leaves the existing supply unchanged.
+/// `Refill` also uses the normal gradual `+4` refill step. The distinction is
+/// observable for the newer nautilus-breath effect, which protects against
+/// drowning but does not restore an already depleted air bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UnderwaterBreathing {
+    /// No effect changes the normal air-supply rule.
+    #[default]
+    None,
+    /// Air neither depletes nor refills while submerged.
+    Hold,
+    /// Air does not deplete and refills gradually while submerged.
+    Refill,
+}
+
+/// A one-shot consequence selected from an entity's effects when it dies.
+///
+/// This stays separate from [`EffectTick`]: the trigger belongs to the
+/// zero-health transition, not to duration advancement.  The caller consumes
+/// it exactly once by asking at its death choke point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeathTrigger {
+    /// Emit the small gust burst carried by `minecraft:wind_charged`.
+    WindCharged,
+}
+
+impl UnderwaterBreathing {
+    /// Whether the normal submerged `-1` air step is suppressed.
+    #[must_use]
+    pub const fn prevents_depletion(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    /// Whether an already-depleted air bar uses the regular gradual refill.
+    #[must_use]
+    pub const fn refills_air(self) -> bool {
+        matches!(self, Self::Refill)
+    }
+}
+
 /// The `(base interval, action)` for an effect id, or `None` for one this module does
 /// not tick.
 ///
@@ -234,6 +277,16 @@ pub fn instant_damage_amount(amplifier: u32) -> f32 {
     (6i32 << amplifier.min(24)) as f32
 }
 
+/// The food points an instant Saturation application grants.
+///
+/// The effect supplies `amplifier + 1` as nutrition with a saturation modifier
+/// of `1.0`; [`crate::food::FoodData::eat`] performs the shared clamp and its
+/// separate `nutrition * modifier * 2` saturation calculation.
+#[must_use]
+pub fn saturation_food_points(amplifier: u32) -> i32 {
+    i32::try_from(amplifier.saturating_add(1)).unwrap_or(i32::MAX)
+}
+
 // ---------------------------------------------------------------------------
 // A splash/lingering potion's impact-time burst — vanilla's own
 // splash-potion on-hit-as-potion routine.
@@ -262,20 +315,21 @@ pub fn splash_scale(distance_sq: f64) -> f64 {
     1.0 - distance_sq.sqrt() / SPLASH_RANGE
 }
 
-/// Returns `true` for the two instantaneous potion effects in this build's
-/// registry: `instant_health` and `instant_damage`. A bare path and a
+/// Returns `true` for the three instantaneous effects in this build's
+/// registry: `instant_health`, `instant_damage`, and `saturation`. A bare path and a
 /// namespaced id are both accepted, matching [`periodic_effect`].
 #[must_use]
 pub fn effect_is_instantaneous(effect_id: &str) -> bool {
     matches!(
         effect_id.strip_prefix("minecraft:").unwrap_or(effect_id),
-        "instant_health" | "instant_damage"
+        "instant_health" | "instant_damage" | "saturation"
     )
 }
 
 /// Computes an instantaneous splash amount as
 /// `(scale * base_amount + 0.5).floor()`, where `base_amount` is
-/// [`instant_health_amount`] or [`instant_damage_amount`] at the effect's
+/// [`instant_health_amount`], [`instant_damage_amount`], or
+/// [`saturation_food_points`] at the effect's
 /// amplifier. Both operands are non-negative, so truncation is well-defined.
 #[must_use]
 pub fn splash_instant_amount(base_amount: f32, scale: f64) -> f32 {
@@ -302,8 +356,8 @@ pub fn splash_would_be_dropped(duration: i32) -> bool {
 /// One potion effect as it lands on one entity after splash falloff.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SplashEffect {
-    /// `effect_id` is `instant_health` or `instant_damage`; `amount` is already
-    /// distance-scaled ([`splash_instant_amount`]) and ready to heal or damage.
+    /// `effect_id` is an instantaneous effect; `amount` is already
+    /// distance-scaled ([`splash_instant_amount`]) and ready for its consumer.
     Instant {
         /// Canonical `minecraft:*` mob-effect id.
         effect_id: String,
@@ -357,6 +411,7 @@ pub fn potion_splash_effects(
                 let base_amount = match effect_id.strip_prefix("minecraft:").unwrap_or(effect_id) {
                     "instant_health" => instant_health_amount(amplifier),
                     "instant_damage" => instant_damage_amount(amplifier),
+                    "saturation" => saturation_food_points(amplifier) as f32,
                     // No other id passes `effect_is_instantaneous`, so this
                     // arm is unreachable — kept explicit rather than panicking
                     // on a table this module does not own.
@@ -681,6 +736,9 @@ pub struct EffectTick {
     pub wither_damage: f32,
     /// Hunger exhaustion to charge.
     pub exhaustion: f32,
+    /// Food points to apply through the shared saturation rule. Each active
+    /// instant Saturation instance supplies `amplifier + 1` on every tick.
+    pub saturation: u32,
     /// `true` when an effect expired or a hidden one surfaced, so the caller knows
     /// the client's effect list is stale.
     pub list_changed: bool,
@@ -740,6 +798,92 @@ impl ActiveEffects {
     #[must_use]
     pub fn amplifier_of(&self, effect_id: &str) -> Option<u32> {
         self.0.get(effect_id).map(EffectInstance::amplifier)
+    }
+
+    /// Resolves every active effect that changes underwater air handling.
+    ///
+    /// Water Breathing and Conduit Power both prevent drowning and restore
+    /// depleted air. Breath of the Nautilus prevents drowning but deliberately
+    /// does not restore air, so callers must retain the three-way result rather
+    /// than reducing this to a boolean.
+    #[must_use]
+    pub fn underwater_breathing(&self) -> UnderwaterBreathing {
+        if self.get("minecraft:water_breathing").is_some()
+            || self.get("minecraft:conduit_power").is_some()
+        {
+            UnderwaterBreathing::Refill
+        } else if self.get("minecraft:breath_of_the_nautilus").is_some() {
+            UnderwaterBreathing::Hold
+        } else {
+            UnderwaterBreathing::None
+        }
+    }
+
+    /// Folds the active Strength and Weakness attribute modifiers into a
+    /// player's already-resolved weapon damage.
+    ///
+    /// These are additive modifiers, each scaled by `amplifier + 1`: Strength
+    /// adds `3.0` per level and Weakness subtracts `4.0` per level. Returning
+    /// the raw attribute value deliberately leaves the damage pipeline's
+    /// existing non-positive-damage gate in charge of deciding whether a hit
+    /// can land.
+    #[must_use]
+    pub fn melee_damage(&self, weapon_damage: f32) -> f32 {
+        let strength = self
+            .amplifier_of("minecraft:strength")
+            .map_or(0.0, |amplifier| 3.0 * (amplifier + 1) as f32);
+        let weakness = self
+            .amplifier_of("minecraft:weakness")
+            .map_or(0.0, |amplifier| 4.0 * (amplifier + 1) as f32);
+        weapon_damage + strength - weakness
+    }
+
+    /// The active maximum-health attribute value for a player.
+    ///
+    /// Health Boost adds four health points for every amplifier level, on top
+    /// of the normal 20-point base. The attribute's registered upper bound is
+    /// 1024, so a hostile amplifier cannot make an unencodable or unrenderable
+    /// ceiling. Keeping this fold beside the authoritative effect store means
+    /// add, replacement, hidden-effect restoration, and expiry all use the
+    /// same active instance rather than carrying a second Health Boost timer.
+    #[must_use]
+    pub fn max_health(&self) -> f32 {
+        const BASE: f32 = crate::vitals::MAX_HEALTH;
+        const PER_LEVEL: f32 = 4.0;
+        const ATTRIBUTE_MAX: f32 = 1024.0;
+        self.amplifier_of("minecraft:health_boost")
+            .map_or(BASE, |amplifier| {
+                (BASE + PER_LEVEL * (amplifier.saturating_add(1)) as f32).min(ATTRIBUTE_MAX)
+            })
+    }
+
+    /// Folds Luck and Unluck into the player's luck attribute.
+    ///
+    /// Both are additive, one point for every amplifier level, and have
+    /// independent modifier identities, so simultaneous instances cancel or
+    /// combine rather than one suppressing the other. The attribute's own
+    /// `-1024..=1024` bounds contain hostile amplifiers before a loot consumer
+    /// receives the value.
+    #[must_use]
+    pub fn luck(&self) -> i32 {
+        let magnitude = |id: &str| {
+            self.amplifier_of(id)
+                .map_or(0_i64, |amplifier| i64::from(amplifier.saturating_add(1)))
+        };
+        (magnitude("minecraft:luck") - magnitude("minecraft:unluck"))
+            .clamp(-1024, 1024) as i32
+    }
+
+    /// The active one-shot consequence to apply when this entity crosses the
+    /// zero-health boundary.
+    ///
+    /// An amplifier changes neither the selected burst nor its radius.  The
+    /// presence check deliberately reads the active map, so an expired or
+    /// replaced instance cannot fire later from a second timer.
+    #[must_use]
+    pub fn death_trigger(&self) -> Option<DeathTrigger> {
+        self.get("minecraft:wind_charged")
+            .map(|_| DeathTrigger::WindCharged)
     }
 
     /// Every active `(id, amplifier)`, in stable order — for handing the movement
@@ -834,7 +978,9 @@ impl ActiveEffects {
             } else {
                 instance.duration
             };
-            if let Some((base, action)) = periodic_effect(id)
+            if id == "minecraft:saturation" {
+                out.saturation = out.saturation.saturating_add(instance.amplifier + 1);
+            } else if let Some((base, action)) = periodic_effect(id)
                 && should_apply_this_tick(base, instance.amplifier, tick_count)
             {
                 match action {
@@ -877,6 +1023,77 @@ impl ActiveEffects {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn underwater_effects_keep_the_distinct_hold_and_refill_rules() {
+        let mut effects = ActiveEffects::new();
+        assert_eq!(effects.underwater_breathing(), UnderwaterBreathing::None);
+
+        effects.apply("minecraft:breath_of_the_nautilus", 200, 0);
+        assert_eq!(effects.underwater_breathing(), UnderwaterBreathing::Hold);
+
+        effects.apply("minecraft:water_breathing", 200, 0);
+        assert_eq!(effects.underwater_breathing(), UnderwaterBreathing::Refill);
+
+        effects.remove("minecraft:water_breathing");
+        effects.apply("minecraft:conduit_power", 200, 0);
+        assert_eq!(effects.underwater_breathing(), UnderwaterBreathing::Refill);
+    }
+
+    #[test]
+    fn health_boost_uses_the_active_amplifier_and_attribute_bound() {
+        let mut effects = ActiveEffects::new();
+        assert_eq!(effects.max_health(), crate::vitals::MAX_HEALTH);
+
+        effects.apply("minecraft:health_boost", 200, 0);
+        assert_eq!(effects.max_health(), 24.0, "level I adds four health points");
+
+        effects.apply("minecraft:health_boost", 200, 3);
+        assert_eq!(effects.max_health(), 36.0, "level IV adds four points per level");
+
+        effects.apply("minecraft:health_boost", 200, u32::MAX);
+        assert_eq!(effects.max_health(), crate::vitals::MAX_EFFECTIVE_HEALTH);
+    }
+
+    #[test]
+    fn luck_and_unluck_share_the_attribute_and_cancel_per_level() {
+        let mut effects = ActiveEffects::new();
+        effects.apply("minecraft:luck", 200, 2);
+        effects.apply("minecraft:unluck", 200, 0);
+        assert_eq!(effects.luck(), 2, "Luck III minus Unluck I");
+
+        effects.apply("minecraft:unluck", 200, 9);
+        assert_eq!(effects.luck(), -7, "Luck III minus Unluck X");
+
+        effects.apply("minecraft:luck", 200, u32::MAX);
+        assert_eq!(effects.luck(), 1024, "the combined attribute remains bounded");
+    }
+
+    #[test]
+    fn wind_charged_is_selected_only_while_its_active_instance_is_present() {
+        let mut effects = ActiveEffects::new();
+        assert_eq!(effects.death_trigger(), None, "control: ordinary death has no effect burst");
+
+        effects.apply("minecraft:wind_charged", 2, 7);
+        assert_eq!(effects.death_trigger(), Some(DeathTrigger::WindCharged));
+
+        effects.tick(0, 20.0, 20.0);
+        effects.tick(0, 20.0, 20.0);
+        assert_eq!(effects.death_trigger(), None, "an expired instance cannot fire after removal");
+    }
+
+    #[test]
+    fn saturation_is_instantaneous_and_emits_food_points_each_active_tick() {
+        assert!(effect_is_instantaneous("minecraft:saturation"));
+        assert_eq!(saturation_food_points(0), 1);
+        assert_eq!(saturation_food_points(2), 3);
+
+        let mut effects = ActiveEffects::new();
+        effects.apply("minecraft:saturation", 2, 2);
+        assert_eq!(effects.tick(0, 20.0, 20.0).saturation, 3);
+        assert_eq!(effects.tick(1, 20.0, 20.0).saturation, 3);
+        assert!(effects.is_empty(), "the two-tick effect must then expire");
+    }
 
     // ---- the interval shift, and the guard that makes it fire every tick ----
 
@@ -1110,6 +1327,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn strength_and_weakness_are_additive_melee_attribute_modifiers() {
+        let mut effects = ActiveEffects::new();
+        assert_eq!(effects.melee_damage(7.0), 7.0, "no effect leaves the weapon alone");
+
+        effects.apply("minecraft:strength", 200, 1);
+        assert_eq!(effects.melee_damage(7.0), 13.0, "Strength II adds six damage");
+
+        effects.apply("minecraft:weakness", 200, 0);
+        assert_eq!(
+            effects.melee_damage(7.0),
+            9.0,
+            "Weakness I subtracts four after Strength II adds six"
+        );
+
+        effects.remove("minecraft:strength");
+        effects.apply("minecraft:weakness", 200, 2);
+        assert_eq!(
+            effects.melee_damage(7.0),
+            -5.0,
+            "the downstream damage gate, not this attribute fold, owns non-positive hits"
+        );
+    }
+
     /// A **stronger but shorter** application pushes the current one onto the chain,
     /// so the longer weak effect comes back — the mirror image of the case above, and
     /// vanilla's `takeOver.isShorterDurationThan(this)` branch.
@@ -1307,12 +1548,13 @@ mod tests {
         assert_eq!(splash_scale(4.0), 0.5);
     }
 
-    /// Only the two `HealOrHarmMobEffect` ids are instantaneous — every other
-    /// potion-reachable effect, and a bare unrelated string, are not.
+    /// The three instant ids are distinct from timed effects and an unrelated
+    /// bare string.
     #[test]
-    fn only_heal_or_harm_effects_are_instantaneous() {
+    fn only_the_three_instant_effects_are_instantaneous() {
         assert!(effect_is_instantaneous("minecraft:instant_health"));
         assert!(effect_is_instantaneous("minecraft:instant_damage"));
+        assert!(effect_is_instantaneous("minecraft:saturation"));
         assert!(effect_is_instantaneous("instant_damage"), "bare path also works");
         assert!(!effect_is_instantaneous("minecraft:speed"));
         assert!(!effect_is_instantaneous("minecraft:regeneration"));

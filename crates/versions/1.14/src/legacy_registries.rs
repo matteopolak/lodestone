@@ -22,7 +22,7 @@ pub(crate) fn item_name(protocol: i32, id: i32) -> Option<&'static str> {
 
 /// Resolves a namespaced item key to this protocol's historical registration id.
 pub(crate) fn item_id(protocol: i32, name: &str) -> Option<i32> {
-    let table: &[u16] = match protocol {
+    let table = match protocol {
         crate::PROTOCOL_1_14_4 => &generated::ITEMS_498,
         crate::PROTOCOL_1_15_2 => &generated::ITEMS_578,
         crate::PROTOCOL_1_16_5 => &generated::ITEMS_754,

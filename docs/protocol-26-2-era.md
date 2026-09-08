@@ -18,33 +18,44 @@ imported terrain, and later block edits have one source of truth. The all-air
 answer is zero for every map.
 
 Each section then writes two signed 16-bit counters before its block and biome
-palettes. The first is the non-air count supplied by `ChunkSection`; the
-second counts every state with a non-empty fluid state, including waterlogged
-blocks. Fluid block-state ids remain unchanged in the block palette, so a
+palettes. The first is the protocol's non-empty count, excluding `air`,
+`cave_air`, and `void_air`; the second counts every state with a non-empty
+fluid state, including waterlogged blocks. The version-specific count is
+computed at the wire boundary so an all-cave-air section can retain its payload
+while reporting zero. Fluid block-state ids remain unchanged in the block palette, so a
 flowing-water or lava `level` property reaches the client as well as the
-section's aggregate count.
+section's aggregate count. Immediately before serialization, both containers
+are rebuilt from their decoded-value order. This removes palette entries no
+longer referenced after edits, remaps packed indices without changing any
+decoded cell, and collapses uniform sections to the single-value form. The
+order is the wire container's `y`, `z`, `x` traversal, so unused leading or
+middle entries cannot make otherwise identical packets diverge.
 
 The final light payload is computed from the version's state-id opacity and
-emission census. For initial chunks and light-relevant edits, the server passes
-each already-resident member of the 3x3 neighbourhood to
-`V770ServerProtocol::compute_column_light_with_neighbours`; its result is exact
-for the centre chunk when all eight are present because light cannot cross more
-than one 16-block chunk boundary at its maximum range. A missing neighbour is
-an opaque seam, never a request to generate it. The worker-facing
-`ChunkEncoder` remains a one-column contract, so this family deliberately uses
-the synchronous neighbourhood path instead of silently emitting isolated light
-from a worker. Initial chunk encoding elides uniformly zero block-light sections;
-non-zero arrays remain present, while explicit zero sections remain available to
+emission census. Light-relevant edits pass each already-resident member of the
+3x3 neighbourhood to `V770ServerProtocol::compute_column_light_with_neighbours`;
+its result is exact for the centre chunk when all eight are present because
+light cannot cross more than one 16-block chunk boundary at its maximum range.
+A missing neighbour is an opaque seam, never a request to generate it. For an
+initial Nether chunk, the centre block-light layer is retained while neighbour
+emission waits for the subsequent seam-aware update; the 3x3 footprint still
+determines allocation-only zero masks. The worker-facing `ChunkEncoder` remains
+a one-column contract, so this family deliberately uses the synchronous path.
+Initial chunk encoding elides uniformly zero block-light sections only when
+their storage is unallocated; explicit zero sections remain available to
 light-update packets that clear an existing value.
 
 The decoder in `packets::chunk::LevelChunkWithLight` consumes both section
 counters for alignment, bounds the length-prefixed section blob, and applies
 the decoded heightmaps and light through `V770Adapter`'s world sink.
 
-The clientbound `block_destruction` record preserves its entity id, packed block position,
-and raw progress in `ClientEvent::BlockDestruction`. `SessionBlockDestruction` clears reset
-stages and invalidates remote crack entries on entity replacement/removal, chunk unload, and
-disconnect before `Sim::crack_targets` resolves loaded block geometry for the renderer.
+The clientbound `block_destruction` frame is decoded as a VarInt breaker id,
+a packed block position, and one raw stage byte. `V770Adapter` emits those
+fields as `ClientEvent::BlockDestruction` without interpreting the stage, so
+the shared session overlay can distinguish visible stages from reset values.
+The literal dispatch fixture in
+`crates/versions/26.2/tests/chunk_world/world_events.rs` also rejects trailing
+bytes, keeping the packet boundary independent of the encoder.
 
 ## How to change it
 

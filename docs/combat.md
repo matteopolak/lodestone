@@ -124,6 +124,12 @@ correct value; only the camera plumbing is missing. There is no vanilla
 full-screen damage overlay or camera shake at all — nothing should be built
 for either.
 
+Protocol 766's split death-combat packet is decoded independently of health:
+its player id and killer id are consumed as routing fields, while its JSON
+message becomes `ClientEvent::Death`. That event enters the shared session,
+shell, and driver route, so the death screen and automatic respawn policy do
+not depend on the packet encoder or on a particular damage source.
+
 ### Shield, bow, and the generic-use fallthrough
 
 Two independent gaps kept the shield and bow (both `useOnRelease() ==

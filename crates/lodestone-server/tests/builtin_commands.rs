@@ -17,7 +17,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use lodestone_command::ParsedCommand;
 use lodestone_command_mc::{EntityArg, GameModeArg, SnbtValue};
 use lodestone_model::{GameMode, Rotation, Vec3};
 use lodestone_server::commands::registrar::{Ctx, RuleStore};

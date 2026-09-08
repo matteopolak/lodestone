@@ -2367,6 +2367,36 @@ mod tests {
         assert_eq!(md.living_flags, None);
     }
 
+    /// Literal bytes for the complete invisible-hologram combination: shared
+    /// invisibility, an optional text component, custom-name visibility, and
+    /// the armour-stand marker/no-base-plate flags. Keeping this fixture as a
+    /// byte stream (rather than using a local metadata encoder) makes the
+    /// index and serializer wiring independently checkable.
+    #[test]
+    fn literal_invisible_named_marker_armor_stand_metadata_reaches_all_name_tag_fields() {
+        let bytes = [
+            0x00, 0x00, 0x20, // shared flags: invisible
+            0x02, 0x06, 0x01, 0x08, 0x00, 0x07, b'W', b'e', b'l', b'c', b'o', b'm', b'e',
+            // custom name: optional component, present, root string "Welcome"
+            0x03, 0x08, 0x01, // custom name visible: true
+            0x0f, 0x00, 0x18, // armour-stand flags: marker | no-base-plate
+            0xff, // metadata terminator
+        ];
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, an_armor_stand())
+            .expect("the literal hologram metadata decodes")
+            .metadata;
+        reader.ensure_empty().expect("the fixture has no trailing bytes");
+
+        assert_eq!(md.flags, Some(0x20));
+        assert_eq!(
+            md.custom_name,
+            Reported::Reported(Some(Text::literal("Welcome")))
+        );
+        assert_eq!(md.custom_name_visible, Some(true));
+        assert_eq!(md.armor_stand_flags, Some(0x18));
+    }
+
     /// All six `ROTATIONS` accessors, indices 16-21, decode to their own pose
     /// field — **not** into one another.
     ///

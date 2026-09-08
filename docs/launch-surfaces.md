@@ -52,8 +52,12 @@ window are composited as readable Ratatui lines at the lower-left of the game fr
 duplicated or made unreadable by rasterization. The input line and history use the shared `ChatInput`
 edit box and history store as well.
 Mouse left/right/middle buttons invoke attack, use/place, and pick-item, while the wheel cycles the
-hotbar. `Ctrl-C` exits. A short release timeout prevents movement sticking on terminal emulators that
-do not report key-release events, and focus loss releases movement and active mouse actions.
+hotbar during play. On a menu or container screen, the same wheel is forwarded to that screen's list,
+creative grid, bundle, stonecutter, or loom scroll action; pointer movement updates the shared hover
+state and left/right/middle clicks use the shared menu/container hit-testing path. `Escape` pauses
+play or closes the active container, matching the window action. `Ctrl-C` exits. A short release
+timeout prevents movement sticking on terminal emulators that do not report key-release events, and
+focus loss releases movement, active mouse actions, and the stored hover pointer.
 
 The terminal does not draw a substitute hotbar or inventory: those are part of the shared GPU frame and
 therefore remain pixel-identical before rasterization. `E` and Escape still use the terminal input
@@ -69,7 +73,11 @@ state.
 - Change terminal layout in `crate::terminal::terminal_game_area`, keyboard mapping in
   `crate::terminal::key_command`, mouse mapping in `crate::terminal::mouse_event_command`, and
   route UI events through `WindowApp`'s terminal adapter (`terminal_menu_key`,
-  `terminal_pointer_moved`, and `terminal_pointer_button`) rather than mutating `Sim` directly.
+  `terminal_pointer_moved`, `terminal_pointer_button`, and `terminal_scroll`) rather than mutating
+  `Sim` directly. Keep terminal Escape on `WindowApp::terminal_escape` so pause/container close
+  semantics stay aligned with the window path. `TerminalSession::enable_input_capabilities` treats
+  mouse capture, focus reporting, and keyboard enhancement flags as optional capabilities; extend
+  its cleanup state if another terminal mode is added.
   Gameplay effects in `crate::terminal::handle_key`/`crate::terminal::handle_mouse`, target geometry in
   `crate::terminal::terminal_pixel_size`/`crate::terminal::terminal_render_dimensions`, and image conversion
   in `crate::terminal::halfblock_protocol`. Keep the frame boundary in
@@ -87,9 +95,11 @@ The terminal surface requires both stdin and stdout to be TTYs because Ratatui u
 alternate screen. Use `--surface stdio` when redirecting either side. Crossterm requests SGR mouse
 reporting and all-motion tracking, but terminals still report absolute cell coordinates rather than
 raw relative or pixel motion. The client derives deltas between in-game cells, resets the anchor at
-pane boundaries and resize, and cannot provide true pointer lock; look therefore remains cell-granular
-and depends on the terminal emulator delivering mouse-move/drag events. Mouse input outside the game
-pane is ignored so clicks on chat and the status chrome cannot change gameplay.
+pane boundaries, focus changes, and resize, and cannot provide true pointer lock: there is no portable
+terminal escape sequence that confines the host OS cursor or warps it back into the terminal. Look
+therefore remains cell-granular and depends on the terminal emulator delivering mouse-move/drag
+events while its window is under the pointer. Mouse input outside the game pane is ignored so clicks
+on chat and the status chrome cannot change gameplay.
 
 The physical cell fields come from the terminal's window-size query and are not required by the tty
 interface. They are therefore a best-effort aspect correction, not a pixel-perfect display contract;
@@ -106,9 +116,12 @@ fade timing, history, editor state, span colours, and basic formatting flags are
 native terminal text over the game pane.
 
 Ratatui restores raw mode and the alternate screen through its panic hook. The terminal surface also
-disables mouse capture, focus reporting, and keyboard enhancement flags on every normal or unwinding
-exit. Keyboard enhancement is terminal-dependent, so release timeouts and focus-loss cleanup remain
-necessary fallbacks.
+disables only the mouse capture, focus reporting, and keyboard enhancement capabilities it successfully
+enabled, on every normal or unwinding exit. Keyboard enhancement and focus reporting are terminal-
+dependent; unsupported terminals continue with basic keyboard input, so release timeouts and
+focus-loss cleanup remain necessary fallbacks. OS-level cursor confinement would require a
+platform-specific accessibility/automation API and is intentionally not attempted by this portable
+surface.
 
 The Unicode renderer still needs a GPU adapter: "terminal" means no window or swapchain, not software
 rendering. The `stdio` surface is the option for a genuinely GPU-free session.

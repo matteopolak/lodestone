@@ -18,17 +18,16 @@
 //!
 //! | vanilla concept | here | why |
 //! |---|---|---|
-//! | `isFaceSturdy(UP)` | "not air, not a fluid, and [`blocks_motion`]" | no per-state occlusion table in this crate |
+//! | full upward face support | the generated six-direction face-occlusion table | local ids bind to canonical ids once when interned |
 //! | `state.isSolid()` | same | same |
 //! | `canSurvive` | the target's own family rule, or "support below is not air" | vegetation blocks use `#supports_vegetation`; support-free blocks such as potent sulfur opt out |
 //! | `level.getSeaLevel()` | [`SEA_LEVEL`] | the overworld constant; a preset that moves it would need this parameterised |
 //! | `scheduleTick` | dropped | there is no tick queue at generation time; the *block* still lands |
 //! | block entities | dropped | the generator has no block-entity layer yet |
 //!
-//! The narrowings make some features place slightly more than vanilla would (a
-//! non-full block reads as sturdy). That direction is deliberate: the alternative
-//! reading, "sturdy only if in a hardcoded list", silently produced *nothing* for
-//! whole biomes, which is the failure mode this issue exists to close.
+//! The face lookup is exact for built-in states. A state outside the canonical
+//! table remains visible, which is the conservative result for a shape whose
+//! occlusion has not been measured.
 //!
 //! ## How to change it
 //!
@@ -46,6 +45,7 @@ use std::collections::HashSet;
 use crate::feature::{BlockPos, IntProvider};
 use crate::interner::StateId;
 use crate::rng::RandomSource;
+use lodestone_data::face_occlusion::{self, Face};
 
 use super::config::{
     BlockPredicate, BlockStateProvider, Decorator, PlacedRef, VegTags, blocks_motion, is_air, is_fluid,
@@ -83,6 +83,9 @@ fn sturdy_at(grid: &VegGrid, x: i32, y: i32, z: i32) -> bool {
 enum SimpleBlockSurvival {
     Vegetation,
     TagBelow(Tag),
+    NetherFungus,
+    NetherSprouts,
+    NetherRoots,
     Mushroom,
     SmallDripleaf,
     LilyPad,
@@ -138,10 +141,27 @@ pub(super) fn simple_block_can_survive(
     pos: BlockPos,
 ) -> bool {
     let base = super::base_id(grid.interner().name_of(state));
-    let rule = simple_block_survival_rule(base);
+    // These states are selected by nether_forest_vegetation as well as being
+    // placeable blocks. Their support tag includes nylium (and fungi also
+    // accept mycelium), while the ordinary vegetation tag intentionally does
+    // not. Keep the family rule here so a weighted provider's selected state
+    // participates in the same occupancy gate as the real block.
+    let rule = match base {
+        "minecraft:crimson_fungus" | "minecraft:warped_fungus" => SimpleBlockSurvival::NetherFungus,
+        "minecraft:nether_sprouts" => SimpleBlockSurvival::NetherSprouts,
+        // The warped-root support tag has the same closure as the sprouts
+        // tag, but there is no dedicated bitset slot for it yet. Keep the
+        // exact support family here rather than falling back to ordinary
+        // overworld vegetation (which would reject roots on nylium).
+        "minecraft:warped_roots" => SimpleBlockSurvival::NetherRoots,
+        _ => simple_block_survival_rule(base),
+    };
     match rule {
         SimpleBlockSurvival::Vegetation => tag_at(grid, tags, Tag::SupportsVegetation, pos.x, pos.y - 1, pos.z),
         SimpleBlockSurvival::TagBelow(tag) => tag_at(grid, tags, tag, pos.x, pos.y - 1, pos.z),
+        SimpleBlockSurvival::NetherFungus => nether_vegetation_can_survive(grid, tags, pos, true),
+        SimpleBlockSurvival::NetherSprouts => nether_vegetation_can_survive(grid, tags, pos, false),
+        SimpleBlockSurvival::NetherRoots => nether_vegetation_can_survive(grid, tags, pos, false),
         SimpleBlockSurvival::Mushroom => {
             tag_at(grid, tags, Tag::OverridesMushroomLightRequirement, pos.x, pos.y - 1, pos.z)
                 || tags.simple_block_support.solid_render.test(grid.interner().name_of(grid.get_id(pos.x, pos.y - 1, pos.z)))
@@ -170,6 +190,24 @@ pub(super) fn simple_block_can_survive(
         }
         SimpleBlockSurvival::Always => true,
     }
+}
+
+/// Nether forest plants use support tags that extend the ordinary vegetation
+/// floor with nylium. Fungi additionally accept mycelium. This is deliberately
+/// a base-name check only for the Nether forest blocks whose support tags have
+/// this shape; other vegetation must continue to use `supports_vegetation`.
+fn nether_vegetation_can_survive(
+    grid: &VegGrid,
+    tags: &VegTags,
+    pos: BlockPos,
+    fungus: bool,
+) -> bool {
+    let below = base_at(grid, pos.x, pos.y - 1, pos.z);
+    tags.supports_vegetation.contains(below)
+        || below == "minecraft:crimson_nylium"
+        || below == "minecraft:warped_nylium"
+        || below == "minecraft:soul_soil"
+        || (fungus && below == "minecraft:mycelium")
 }
 
 /// Exact per-state fire capability supplied by the version boundary.
@@ -613,6 +651,14 @@ pub struct SpringCfg {
     pub valid_blocks: HashSet<String>,
 }
 
+/// Configuration for magma patches on enclosed underwater floors.
+#[derive(Clone, Debug)]
+pub struct UnderwaterMagmaCfg {
+    pub floor_search_range: i32,
+    pub placement_probability_per_valid_position: f32,
+    pub placement_radius_around_floor: i32,
+}
+
 /// `DiskConfiguration`.
 #[derive(Clone, Debug)]
 pub struct DiskCfg {
@@ -848,6 +894,101 @@ pub(super) fn place_spring(pos: BlockPos, cfg: &SpringCfg, grid: &mut VegGrid) {
     }
 }
 
+fn underwater_floor_y(grid: &VegGrid, pos: BlockPos, search_range: i32) -> Option<i32> {
+    if base_at(grid, pos.x, pos.y, pos.z) != "minecraft:water" {
+        return None;
+    }
+    let mut y = pos.y;
+    for _ in 0..search_range.saturating_sub(1) {
+        y -= 1;
+        if base_at(grid, pos.x, y, pos.z) != "minecraft:water" {
+            return Some(y);
+        }
+    }
+    None
+}
+
+/// Whether a neighboring block leaves the covered face visible from outside.
+///
+/// The local interner binds each state to its canonical global id when the
+/// state is first seen. Unknown fixture or extension states are conservatively
+/// treated as visible, because guessing that an unbound shape closes a face
+/// would place magma in an enclosure the state table has not proved.
+fn visible_from_outside(
+    grid: &VegGrid,
+    x: i32,
+    y: i32,
+    z: i32,
+    covered_face: Face,
+) -> bool {
+    let state = grid.get_id(x, y, z);
+    grid.interner()
+        .canonical_id(state)
+        .is_none_or(|canonical| !face_occlusion::occludes(canonical, covered_face))
+}
+
+fn valid_underwater_magma_position(grid: &VegGrid, pos: BlockPos) -> bool {
+    let target = base_at(grid, pos.x, pos.y, pos.z);
+    if is_air(target) || is_fluid(target) {
+        return false;
+    }
+    if visible_from_outside(grid, pos.x, pos.y - 1, pos.z, Face::Up) {
+        return false;
+    }
+    for (dx, dz) in HORIZONTAL {
+        let covered_face = match (dx, dz) {
+            (0, -1) => Face::South,
+            (1, 0) => Face::West,
+            (0, 1) => Face::North,
+            (-1, 0) => Face::East,
+            _ => unreachable!("HORIZONTAL contains only cardinal offsets"),
+        };
+        if visible_from_outside(
+            grid,
+            pos.x + dx,
+            pos.y,
+            pos.z + dz,
+            covered_face,
+        ) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Places magma only on a floor reached through a water column, and only at
+/// positions whose floor and four horizontal sides are enclosed by complete
+/// unit faces from the generated canonical occlusion table.
+pub(super) fn place_underwater_magma<R: RandomSource>(
+    random: &mut R,
+    pos: BlockPos,
+    cfg: &UnderwaterMagmaCfg,
+    grid: &mut VegGrid,
+) {
+    let Some(floor_y) = underwater_floor_y(grid, pos, cfg.floor_search_range) else {
+        return;
+    };
+    let floor = BlockPos { y: floor_y, ..pos };
+    let radius = cfg.placement_radius_around_floor.max(0);
+    let magma = grid.interner().id_of("minecraft:magma_block");
+    for dz in -radius..=radius {
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                let candidate = BlockPos {
+                    x: floor.x + dx,
+                    y: floor.y + dy,
+                    z: floor.z + dz,
+                };
+                if random.next_float() < cfg.placement_probability_per_valid_position
+                    && valid_underwater_magma_position(grid, candidate)
+                {
+                    grid.set_id_if_in_bounds(candidate.x, candidate.y, candidate.z, magma);
+                }
+            }
+        }
+    }
+}
+
 /// Vanilla's own disk feature's place — one `radius` draw, then a column walk per in-circle cell.
 pub(super) fn place_disk<R: RandomSource>(
     random: &mut R,
@@ -964,15 +1105,14 @@ pub(super) fn place_nether_forest_vegetation<R: RandomSource>(
             y: pos.y + random.next_int_bounded(h) - random.next_int_bounded(h),
             z: pos.z + random.next_int_bounded(w) - random.next_int_bounded(w),
         };
-        let Some(state) = cfg.provider.get_state(grid, tags, random, target) else {
+        let Some(state) = cfg.provider.get_state_id(grid, tags, random, target) else {
             continue;
         };
-        let state = state.to_string();
         if air_at(grid, target.x, target.y, target.z)
             && target.y > grid.min_y
-            && sturdy_at(grid, target.x, target.y - 1, target.z)
+            && simple_block_can_survive(grid, tags, state, target)
         {
-            grid.set_if_in_bounds(target.x, target.y, target.z, state);
+            grid.set_id_if_in_bounds(target.x, target.y, target.z, state);
         }
     }
 }
@@ -2217,13 +2357,14 @@ fn replaceable_mushroom_pos(grid: &VegGrid, tags: &VegTags, x: i32, y: i32, z: i
         || tag_at(grid, tags, Tag::ReplaceableByMushrooms, x, y, z)
 }
 
-fn mushroom_valid_radius(cfg: &HugeMushroomCfg, y: i32) -> i32 {
+fn mushroom_valid_radius(cfg: &HugeMushroomCfg, height: i32, y: i32) -> i32 {
     match cfg.kind {
         HugeMushroomKind::Brown => (y > 3).then_some(cfg.foliage_radius).unwrap_or(0),
-        // The red feature's validity call uses the trunk/top sentinels, which
-        // makes every preflight layer a stem-column check. Its cap still grows
-        // with the full configured radius after that check succeeds.
-        HugeMushroomKind::Red => 0,
+        // Red uses the configured radius for each of its three lower cap rows
+        // and for the top row; the stem-only rows below that stay radius zero.
+        // This is the same clearance envelope as its cap geometry, including
+        // cells that the lower cap later omits at the corners.
+        HugeMushroomKind::Red => (y >= height - 3).then_some(cfg.foliage_radius).unwrap_or(0),
     }
 }
 
@@ -2253,7 +2394,9 @@ pub(super) fn place_huge_mushroom_at_height<R: RandomSource>(
     grid: &mut VegGrid,
     tags: &VegTags,
 ) {
-    let max_y = grid.min_y + grid.height;
+    // The height guard is relative to the source generator's depth, not the
+    // widened receiving window used by Nether decoration.
+    let max_y = grid.generation_top();
     if pos.y < grid.min_y + 1
         || pos.y + height + 1 > max_y
         || !cfg.can_place_on.test(
@@ -2268,9 +2411,10 @@ pub(super) fn place_huge_mushroom_at_height<R: RandomSource>(
     // The feature's validity scan is intentionally broader than either cap's
     // final cut-out shape: a blocked skipped corner still rejects the attempt
     // before any stem write occurs. Brown keeps its full radius for every
-    // layer above the first four; red's reference check is stem-column-only.
+    // layer above the first four; red checks the three lower cap rows and top
+    // row too.
     for y in 0..=height {
-        let radius = mushroom_valid_radius(cfg, y);
+        let radius = mushroom_valid_radius(cfg, height, y);
         for dx in -radius..=radius {
             for dz in -radius..=radius {
                 if !valid_mushroom_pos(grid, tags, pos.x + dx, pos.y + y, pos.z + dz) {
@@ -2379,12 +2523,17 @@ pub(super) fn place_huge_fungus<R: RandomSource>(
     if random.next_int_bounded(12) == 0 {
         total_height *= 2;
     }
-    let max_y = grid.min_y + grid.height;
+    // The source generator's depth, rather than the widened receiving window,
+    // is the upper bound for natural Nether fungus placement.
+    let max_y = grid.generation_top();
     if !cfg.planted && origin.y + total_height + 1 >= max_y {
         return;
     }
 
-    let huge = random.next_float() < 0.06;
+    // Planted fungi never roll the broad-stem variant. The conditional is
+    // important for the shared stream: the planted configuration must not
+    // consume a draw that its source feature does not make.
+    let huge = !cfg.planted && random.next_float() < 0.06;
     grid.set_if_in_bounds(origin.x, origin.y, origin.z, "minecraft:air".to_string());
 
     let stem_radius: i32 = if huge { 1 } else { 0 };
@@ -2450,8 +2599,54 @@ fn huge_fungus_replaceable(
     check_plants: bool,
 ) -> bool {
     let base = base_at(grid, pos.x, pos.y, pos.z);
-    (is_air(base) || (!is_fluid(base) && !blocks_motion(base)))
-        || (check_plants && cfg.replaceable_blocks.test(grid, tags, pos))
+    // The ordinary replaceability flag is narrower than `blocks_motion`:
+    // non-colliding
+    // blocks such as mushrooms and hanging vines are still protected during
+    // the hat pass. Using the motion approximation here made a preceding
+    // vegetation write disappear and, more importantly, skipped its random
+    // draws, shifting every later cap and vine. Keep the ordinary replaceable
+    // set separate; the configured predicate is the deliberate opt-in for
+    // non-replaceable plants during the stem pass.
+    can_be_replaced(base) || (check_plants && cfg.replaceable_blocks.test(grid, tags, pos))
+}
+
+/// The built-in block-state `canBeReplaced` flag for blocks that can occur in
+/// a generated decoration region. This is intentionally not the same as
+/// [`blocks_motion`]: several plant blocks have no collision but are not
+/// generally replaceable, and the huge-fungus hat must preserve those blocks.
+fn can_be_replaced(base: &str) -> bool {
+    matches!(
+        base,
+        "minecraft:air"
+            | "minecraft:water"
+            | "minecraft:lava"
+            | "minecraft:short_grass"
+            | "minecraft:fern"
+            | "minecraft:dead_bush"
+            | "minecraft:bush"
+            | "minecraft:short_dry_grass"
+            | "minecraft:tall_dry_grass"
+            | "minecraft:seagrass"
+            | "minecraft:tall_seagrass"
+            | "minecraft:fire"
+            | "minecraft:soul_fire"
+            | "minecraft:snow"
+            | "minecraft:vine"
+            | "minecraft:glow_lichen"
+            | "minecraft:resin_clump"
+            | "minecraft:light"
+            | "minecraft:tall_grass"
+            | "minecraft:large_fern"
+            | "minecraft:structure_void"
+            | "minecraft:void_air"
+            | "minecraft:cave_air"
+            | "minecraft:bubble_column"
+            | "minecraft:warped_roots"
+            | "minecraft:nether_sprouts"
+            | "minecraft:crimson_roots"
+            | "minecraft:leaf_litter"
+            | "minecraft:hanging_roots"
+    )
 }
 
 fn place_huge_fungus_hat_block<R: RandomSource>(
@@ -2860,6 +3055,224 @@ mod tests {
         }
     }
 
+    struct DrawCountingRandom {
+        floats: usize,
+    }
+
+    impl RandomSource for DrawCountingRandom {
+        type Positional = XoroshiroPositionalFactory;
+
+        fn fork_positional(&mut self) -> Self::Positional { panic!("underwater magma does not fork") }
+        fn set_seed(&mut self, _: i64) { panic!("underwater magma does not reseed") }
+        fn next_bits(&mut self, _: u32) -> i32 { panic!("underwater magma only samples floats") }
+        fn next_int(&mut self) -> i32 { panic!("underwater magma only samples floats") }
+        fn next_int_bounded(&mut self, _: i32) -> i32 { panic!("underwater magma only samples floats") }
+        fn next_long(&mut self) -> i64 { panic!("underwater magma only samples floats") }
+        fn next_bool(&mut self) -> bool { panic!("underwater magma only samples floats") }
+        fn next_float(&mut self) -> f32 {
+            let value = (self.floats != 0) as u8 as f32;
+            self.floats += 1;
+            value
+        }
+        fn next_double(&mut self) -> f64 { panic!("underwater magma only samples floats") }
+        fn next_gaussian(&mut self) -> f64 { panic!("underwater magma only samples floats") }
+        fn consume_count(&mut self, _: u32) { panic!("underwater magma does not consume by count") }
+    }
+
+    fn enclosed_underwater_floor() -> VegGrid {
+        let mut grid = VegGrid::new(-3, 8, 0, 0);
+        for x in 3..=5 {
+            for z in 3..=5 {
+                for y in -2..=2 {
+                    grid.seed(x, y, z, "minecraft:stone".to_string());
+                }
+                for y in 0..=2 {
+                    grid.seed(x, y, z, "minecraft:water[level=0]".to_string());
+                }
+            }
+        }
+        grid
+    }
+
+    #[test]
+    fn underwater_magma_requires_enclosed_floor_and_water_origin() {
+        let cfg = UnderwaterMagmaCfg {
+            floor_search_range: 5,
+            placement_probability_per_valid_position: 1.0,
+            placement_radius_around_floor: 0,
+        };
+        let mut enclosed = enclosed_underwater_floor();
+        let mut random = LegacyRandomSource::new(7);
+        place_underwater_magma(
+            &mut random,
+            BlockPos { x: 4, y: 2, z: 4 },
+            &cfg,
+            &mut enclosed,
+        );
+        assert_eq!(enclosed.get(4, -1, 4), "minecraft:magma_block");
+        assert_eq!(enclosed.dirty_len(), 1);
+
+        let mut exposed = enclosed_underwater_floor();
+        exposed.seed(5, -1, 4, "minecraft:air".to_string());
+        let mut random = LegacyRandomSource::new(7);
+        place_underwater_magma(
+            &mut random,
+            BlockPos { x: 4, y: 2, z: 4 },
+            &cfg,
+            &mut exposed,
+        );
+        assert_eq!(exposed.get(4, -1, 4), "minecraft:stone");
+        assert_eq!(exposed.dirty_len(), 0);
+
+        let mut no_water = enclosed_underwater_floor();
+        let mut random = LegacyRandomSource::new(7);
+        place_underwater_magma(
+            &mut random,
+            BlockPos { x: 4, y: 3, z: 4 },
+            &cfg,
+            &mut no_water,
+        );
+        assert_eq!(no_water.dirty_len(), 0);
+
+        let mut too_narrow = enclosed_underwater_floor();
+        let mut narrow_cfg = cfg.clone();
+        narrow_cfg.floor_search_range = 1;
+        let mut random = LegacyRandomSource::new(7);
+        place_underwater_magma(
+            &mut random,
+            BlockPos { x: 4, y: 2, z: 4 },
+            &narrow_cfg,
+            &mut too_narrow,
+        );
+        assert_eq!(too_narrow.dirty_len(), 0, "range one does not step below the water origin");
+
+        let mut draw_control = enclosed_underwater_floor();
+        for x in 3..=5 {
+            for z in 3..=5 {
+                for y in -2..=0 {
+                    draw_control.seed(x, y, z, "minecraft:air".to_string());
+                }
+            }
+        }
+        draw_control.seed(4, -2, 4, "minecraft:stone".to_string());
+        draw_control.seed(4, -1, 4, "minecraft:stone".to_string());
+        draw_control.seed(4, 0, 4, "minecraft:water[level=0]".to_string());
+        let draw_cfg = UnderwaterMagmaCfg {
+            floor_search_range: 5,
+            placement_probability_per_valid_position: 0.0,
+            placement_radius_around_floor: 1,
+        };
+        let mut random = DrawCountingRandom { floats: 0 };
+        place_underwater_magma(
+            &mut random,
+            BlockPos { x: 4, y: 2, z: 4 },
+            &draw_cfg,
+            &mut draw_control,
+        );
+        assert_eq!(random.floats, 27, "each closed-box candidate draws before validity");
+        assert_eq!(draw_control.dirty_len(), 0);
+
+        let mut order_control = enclosed_underwater_floor();
+        for (x, y, z) in [
+            (3, -2, 3),
+            (3, -3, 3),
+            (2, -2, 3),
+            (4, -2, 3),
+            (3, -2, 2),
+            (3, -2, 4),
+        ] {
+            order_control.seed(x, y, z, "minecraft:stone".to_string());
+        }
+        let order_cfg = UnderwaterMagmaCfg {
+            floor_search_range: 5,
+            placement_probability_per_valid_position: 0.5,
+            placement_radius_around_floor: 1,
+        };
+        let mut random = DrawCountingRandom { floats: 0 };
+        place_underwater_magma(
+            &mut random,
+            BlockPos { x: 4, y: 2, z: 4 },
+            &order_cfg,
+            &mut order_control,
+        );
+        assert_eq!(order_control.get(3, -2, 3), "minecraft:magma_block");
+        assert_eq!(random.floats, 27);
+    }
+
+    #[test]
+    fn red_huge_mushroom_rejects_blocked_lower_cap_cell() {
+        let cfg = HugeMushroomCfg {
+            can_place_on: BlockPredicate::MatchingBlocks {
+                blocks: ["minecraft:grass_block".to_string()].into_iter().collect(),
+                offset: (0, 0, 0),
+            },
+            cap_provider: BlockStateProvider::Simple(
+                "minecraft:red_mushroom_block[down=false,east=false,north=false,south=false,up=false,west=false]".to_string(),
+            ),
+            stem_provider: BlockStateProvider::Simple("minecraft:mushroom_stem".to_string()),
+            foliage_radius: 2,
+            kind: HugeMushroomKind::Red,
+        };
+        let mut grid = VegGrid::new(-64, 384, 0, 0);
+        grid.seed(8, 69, 8, "minecraft:grass_block".to_string());
+        // This lower-cap corner is skipped by the final cap geometry, but the
+        // feature's clearance scan still rejects it before writing anything.
+        grid.seed(10, 72, 10, "minecraft:stone".to_string());
+        let mut random = LegacyRandomSource::new(0);
+        place_huge_mushroom_at_height(
+            &mut random,
+            BlockPos { x: 8, y: 70, z: 8 },
+            &cfg,
+            4,
+            &mut grid,
+            &VegTags::default(),
+        );
+        assert_eq!(grid.dirty_len(), 0);
+    }
+
+    #[test]
+    fn partial_neighbor_shapes_do_not_close_an_underwater_magma_face() {
+        let cases = [
+            (
+                "minecraft:stone_slab[type=bottom,waterlogged=false]",
+                (0, -1, 0),
+                Face::Up,
+            ),
+            (
+                "minecraft:oak_stairs[facing=north,half=bottom,shape=straight,waterlogged=false]",
+                (0, 0, -1),
+                Face::South,
+            ),
+            (
+                "minecraft:oak_trapdoor[facing=north,half=bottom,open=false,powered=false,waterlogged=false]",
+                (1, 0, 0),
+                Face::West,
+            ),
+        ];
+
+        for (state, (dx, dy, dz), covered_face) in cases {
+            let mut grid = enclosed_underwater_floor();
+            let neighbour = BlockPos {
+                x: 4 + dx,
+                y: -1 + dy,
+                z: 4 + dz,
+            };
+            grid.seed(neighbour.x, neighbour.y, neighbour.z, state.to_owned());
+            let canonical = grid
+                .interner()
+                .canonical_id(grid.get_id(neighbour.x, neighbour.y, neighbour.z))
+                .expect("partial-shape control belongs to the canonical state table");
+            assert!(
+                !face_occlusion::occludes(canonical, covered_face),
+                "{state} must not completely occlude its {covered_face:?} face"
+            );
+            assert!(
+                !valid_underwater_magma_position(&grid, BlockPos { x: 4, y: -1, z: 4 }),
+                "{state} must expose the candidate's covered face"
+            );
+        }
+    }
+
     impl RandomSource for DeltaScriptRandom {
         type Positional = XoroshiroPositionalFactory;
 
@@ -3155,6 +3568,102 @@ mod tests {
         grid.seed(5, 69, 5, "minecraft:air".to_string());
         grid.seed(6, 70, 5, "minecraft:oak_planks".to_string());
         assert!(survives(&mut grid, "minecraft:fire[age=0,east=false,north=false,south=false,up=false,west=false]"), "a flammable side neighbour supports fire without a sturdy floor");
+    }
+
+    #[test]
+    fn crimson_roots_use_their_support_tag_when_sturdiness_disagrees() {
+        let mut grid = VegGrid::new(-64, 384, 0, 0);
+        let pos = BlockPos { x: 5, y: 70, z: 5 };
+        grid.seed(pos.x, pos.y - 1, pos.z, "minecraft:water[level=0]".to_string());
+        grid.seed(pos.x, pos.y, pos.z, "minecraft:crimson_roots".to_string());
+        let mut tags = VegTags::default();
+        tags.supports_crimson_roots.insert("minecraft:water".to_string());
+        let state = grid.get_id(pos.x, pos.y, pos.z);
+
+        assert!(simple_block_can_survive(&grid, &tags, state, pos));
+        assert!(!sturdy_at(&grid, pos.x, pos.y - 1, pos.z));
+    }
+
+    #[test]
+    fn nether_forest_vegetation_checks_the_selected_provider_state() {
+        let pos = BlockPos { x: 5, y: 70, z: 5 };
+        let cfg = |state: &str| NetherForestVegetationCfg {
+            provider: BlockStateProvider::Simple(state.to_string()),
+            spread_width: 1,
+            spread_height: 1,
+        };
+        let mut tags = VegTags::default();
+        tags.supports_crimson_roots.insert("minecraft:crimson_nylium".to_string());
+        let mut grid = VegGrid::new(-64, 384, 0, 0);
+        grid.seed(pos.x, pos.y - 1, pos.z, "minecraft:crimson_nylium".to_string());
+        place_nether_forest_vegetation(
+            &mut LegacyRandomSource::new(1),
+            pos,
+            &cfg("minecraft:crimson_roots"),
+            &mut grid,
+            &tags,
+        );
+        assert_eq!(grid.get(pos.x, pos.y, pos.z), "minecraft:crimson_roots");
+
+        for state in [
+            "minecraft:warped_roots",
+            "minecraft:crimson_fungus",
+            "minecraft:warped_fungus",
+            "minecraft:nether_sprouts",
+        ] {
+            grid.seed(pos.x, pos.y, pos.z, "minecraft:air".to_string());
+            place_nether_forest_vegetation(
+                &mut LegacyRandomSource::new(1),
+                pos,
+                &cfg(state),
+                &mut grid,
+                &tags,
+            );
+            assert_eq!(grid.get(pos.x, pos.y, pos.z), state);
+        }
+
+        grid.seed(pos.x, pos.y - 1, pos.z, "minecraft:netherrack".to_string());
+        grid.seed(pos.x, pos.y, pos.z, "minecraft:air".to_string());
+        place_nether_forest_vegetation(
+            &mut LegacyRandomSource::new(1),
+            pos,
+            &cfg("minecraft:crimson_fungus"),
+            &mut grid,
+            &tags,
+        );
+        assert_eq!(grid.get(pos.x, pos.y, pos.z), "minecraft:air");
+
+        grid.seed(pos.x, pos.y - 1, pos.z, "minecraft:netherrack".to_string());
+        grid.seed(pos.x, pos.y, pos.z, "minecraft:air".to_string());
+        place_nether_forest_vegetation(
+            &mut LegacyRandomSource::new(1),
+            pos,
+            &cfg("minecraft:warped_roots"),
+            &mut grid,
+            &tags,
+        );
+        assert_eq!(grid.get(pos.x, pos.y, pos.z), "minecraft:air");
+
+        grid.seed(pos.x, pos.y - 1, pos.z, "minecraft:crimson_nylium".to_string());
+        grid.seed(pos.x, pos.y, pos.z, "minecraft:air".to_string());
+        place_nether_forest_vegetation(
+            &mut LegacyRandomSource::new(1),
+            pos,
+            &cfg("minecraft:short_grass"),
+            &mut grid,
+            &tags,
+        );
+        assert_eq!(grid.get(pos.x, pos.y, pos.z), "minecraft:air");
+    }
+
+    #[test]
+    fn huge_fungus_keeps_non_replaceable_non_colliding_plants_during_hat_pass() {
+        assert!(can_be_replaced("minecraft:air"));
+        assert!(can_be_replaced("minecraft:crimson_roots"));
+        assert!(!can_be_replaced("minecraft:brown_mushroom"));
+        assert!(!can_be_replaced("minecraft:crimson_fungus"));
+        assert!(!can_be_replaced("minecraft:weeping_vines"));
+        assert!(!can_be_replaced("minecraft:weeping_vines_plant"));
     }
 
     #[test]

@@ -47,11 +47,10 @@
 use lodestone_model::BlockPos;
 
 use crate::redstone::with_property;
+use crate::scheduled_tick::ScheduledTickKind;
 
-/// The scheduled-tick kind a pressed button schedules to release itself, in the
-/// same `String`-keyed space `crate::redstone`'s `TICK_TORCH`/`TICK_REPEATER`
-/// already use. `tick::run_tick_loop`'s drain dispatches on it.
-pub const TICK_BUTTON: &str = "lodestone:button_release";
+/// The typed scheduled-tick key a pressed button uses to release itself.
+pub const TICK_BUTTON: ScheduledTickKind = ScheduledTickKind::ButtonRelease;
 
 /// The button's ticks-to-stay-pressed for the stone family: `20`. This also
 /// covers `polished_blackstone_button`, which uses the stone timing family.
@@ -68,7 +67,7 @@ pub struct HandUse {
     /// Every `(position, new state)` the click rewrites. One entry for a
     /// trapdoor/gate/lever/button, **two** for a door (both halves move together).
     pub changes: Vec<(BlockPos, String)>,
-    /// A delay in ticks after which `TICK_BUTTON` should fire at `pos` to release
+    /// A delay in ticks after which the `TICK_BUTTON` key should fire at `pos` to release
     /// a pressed button, or `None` for the other four families.
     pub release_after: Option<u64>,
 }
@@ -270,6 +269,16 @@ mod tests {
 
     fn pos(x: i32, y: i32, z: i32) -> BlockPos {
         BlockPos::new(x, y, z)
+    }
+
+    #[test]
+    fn button_release_key_is_typed_and_does_not_alias_an_extension() {
+        assert_eq!(TICK_BUTTON, ScheduledTickKind::ButtonRelease);
+        assert_eq!(TICK_BUTTON.name(), "lodestone:button_release");
+        assert_ne!(
+            TICK_BUTTON,
+            ScheduledTickKind::Extension("lodestone:button_release".to_owned())
+        );
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use lodestone_jvm_bridge::adapter::AdapterHost;
+use lodestone_jvm_bridge::adapter::{AdapterHost, PlayerIdentity, PlayerGameMode, PlayerSnapshot};
 use lodestone_jvm_bridge::runtime::JvmConfig;
 
 #[test]
@@ -65,6 +65,9 @@ fn java_adapter_registration_world_query_and_exception_are_connected() {
     ).expect("worker startup");
     let mut ready = false;
     let mut success = false;
+    let mut joined_once = false;
+    let mut disconnected = false;
+    let player = PlayerIdentity::new([7; 16], "Alice");
     let mut queries = Vec::new();
     let limit = Instant::now() + Duration::from_secs(15);
     let failure = loop {
@@ -77,44 +80,70 @@ fn java_adapter_registration_world_query_and_exception_are_connected() {
                 Ok((query.x * 31 + query.y * 7 - query.z * 5 + 17) as u32)
             }
         });
+        host.service_pending_player_positions(8, |query| {
+            assert_eq!(query.uuid, [7; 16]);
+            Ok(PlayerSnapshot {
+                entity_id: 91,
+                x: 12.5,
+                y: 64.0,
+                z: -9.25,
+                yaw: 45.0,
+                pitch: -12.0,
+                game_mode: PlayerGameMode::Adventure,
+                experience_level: 7,
+                experience_points: 23,
+            })
+        });
         match host.poll() {
             Ok(Some(AdapterEvent::Ready)) => {
                 assert!(!ready);
                 assert!(setup_ran.load(Ordering::SeqCst), "setup must finish before readiness");
                 assert!(!setup_dropped.load(Ordering::SeqCst), "setup state must survive readiness");
                 ready = true;
-                host.dispatch_tick(37).unwrap();
+                host.dispatch_player_joined(player.clone()).unwrap();
             }
             Ok(Some(AdapterEvent::TickCompleted(tick))) => {
-                assert_eq!(tick, 37);
-                success = true;
-                host.dispatch_block_state_changed(BlockStateWrite {
-                    x: -17,
-                    y: 64,
-                    z: 33,
-                    state_id: 1234,
-                })
-                .expect("dispatch host block-change callback");
+                if tick == 37 {
+                    success = true;
+                    host.dispatch_block_state_changed(BlockStateWrite {
+                        x: -17,
+                        y: 64,
+                        z: 33,
+                        state_id: 1234,
+                    })
+                    .expect("dispatch host block-change callback");
+                } else {
+                    panic!("tick 38 unexpectedly completed instead of failing");
+                }
             }
-            Ok(Some(AdapterEvent::PlayerJoinedCompleted { player, .. })) => {
-                panic!("unexpected adapter player join callback {player:?}");
+            Ok(Some(AdapterEvent::PlayerJoinedCompleted { player: joined, .. })) if !joined_once => {
+                assert_eq!(joined, player);
+                joined_once = true;
+                host.dispatch_tick(37).unwrap();
             }
-            Ok(Some(AdapterEvent::PlayerDisconnectedCompleted { player, .. })) => {
-                panic!("unexpected adapter player disconnect callback {player:?}");
+            Ok(Some(AdapterEvent::PlayerJoinedCompleted { player: joined, .. })) => {
+                assert_eq!(joined, player);
+                host.dispatch_tick(38).unwrap();
+            }
+            Ok(Some(AdapterEvent::PlayerDisconnectedCompleted { player: left, handle })) => {
+                assert_eq!(left, player);
+                assert!(handle.is_some(), "joined player must have a disconnect handle");
+                disconnected = true;
+                host.dispatch_player_joined(player.clone()).unwrap();
             }
             Ok(Some(AdapterEvent::BlockStateChangedCompleted { change, .. })) => {
                 assert_eq!(
                     change,
                     BlockStateWrite { x: -17, y: 64, z: 33, state_id: 1234 },
                 );
-                host.dispatch_tick(38).unwrap();
+                host.dispatch_player_disconnected(player.clone()).unwrap();
             }
             Err(error) => break error,
             Ok(None) => {}
         }
         std::thread::sleep(Duration::from_millis(1));
     };
-    assert!(ready && success, "registration/control callback failed: {failure}");
+    assert!(ready && success && joined_once && disconnected, "registration/control callback failed: {failure}");
     assert_eq!(queries, [(11, 7, -3), (-19, 5, 23)]);
     let failure = failure.to_string();
     assert!(failure.contains("onTick(J)V"), "{failure}");

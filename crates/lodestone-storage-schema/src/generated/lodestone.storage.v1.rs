@@ -96,9 +96,10 @@ pub mod light_data {
         Values(::prost::alloc::vec::Vec<u8>),
     }
 }
-/// Only built-in server actions have a native representation. Custom actions
-/// have no lossless decoder in this format and must be rejected by its adapter.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+/// Built-in actions use the compact enum. An extension action leaves kind at
+/// UNSPECIFIED and carries its exact producer-owned discriminator in
+/// extension_kind, so a reader can preserve an action it does not execute yet.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ScheduledTick {
     #[prost(sint32, tag = "1")]
     pub x: i32,
@@ -114,6 +115,8 @@ pub struct ScheduledTick {
     pub priority: i32,
     #[prost(uint64, tag = "7")]
     pub insertion_order: u64,
+    #[prost(string, tag = "8")]
+    pub extension_kind: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ChunkSection {

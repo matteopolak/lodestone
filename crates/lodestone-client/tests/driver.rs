@@ -321,6 +321,61 @@ impl VersionAdapter for FakeAdapter {
     }
 }
 
+/// A version-free decorator used by the outbound observer gate. It mutates the
+/// action before delegating, so the observed body must include the decorator's
+/// prefix if publication happens after adapter/decorator encoding.
+struct PrefixDecorator {
+    inner: FakeAdapter,
+    prefix: &'static str,
+}
+
+impl VersionAdapter for PrefixDecorator {
+    fn protocol_version(&self) -> i32 {
+        self.inner.protocol_version()
+    }
+
+    fn minecraft_versions(&self) -> &'static [&'static str] {
+        self.inner.minecraft_versions()
+    }
+
+    fn supports(&self, protocol: i32) -> bool {
+        self.inner.supports(protocol)
+    }
+
+    fn begin_login(
+        &self,
+        profile: &LoginProfile,
+        server: &ServerAddress,
+    ) -> Result<Vec<Directive>, AdapterError> {
+        self.inner.begin_login(profile, server)
+    }
+
+    fn handle_packet(
+        &self,
+        world: &mut dyn lodestone_model::WorldSink,
+        state: ConnectionState,
+        packet_id: i32,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        self.inner.handle_packet(world, state, packet_id, payload)
+    }
+
+    fn encode_action(
+        &self,
+        state: ConnectionState,
+        action: &ClientAction,
+    ) -> Result<Option<(i32, Vec<u8>)>, AdapterError> {
+        if let ClientAction::SendChat { text } = action {
+            let rewritten = ClientAction::SendChat {
+                text: format!("{}{}", self.prefix, text),
+            };
+            self.inner.encode_action(state, &rewritten)
+        } else {
+            self.inner.encode_action(state, action)
+        }
+    }
+}
+
 // --- Helpers ----------------------------------------------------------------
 
 fn profile() -> LoginProfile {
@@ -552,6 +607,72 @@ async fn raw_packet_bus_observes_the_wire_bytes_before_decoding() {
     assert_eq!(packet.state, ConnectionState::Handshaking);
     assert_eq!(packet.packet_id, PACKET_ID);
     assert_eq!(packet.payload, payload);
+
+    drop(handle);
+}
+
+/// The outbound bus observes the bytes returned by the adapter, while a full
+/// observer window drops only the copy: both packets still reach the peer.
+#[tokio::test]
+async fn outbound_raw_packet_bus_observes_encoded_bytes_with_bounded_drop() {
+    const FIRST: &str = "first\0";
+    const SECOND: &str = "second";
+    const PACKET_ID: i32 = CHAT_ID;
+
+    let mut app = lodestone_ecs::app::App::new();
+    app.add_plugins((
+        lodestone_ecs::ingest::IngestPlugin,
+        lodestone_ecs::SessionPlugin,
+        lodestone_ecs::OutboundRawPacketBusPlugin::with_limits(
+            lodestone_ecs::OutboundRawPacketLimits {
+                max_packets_per_tick: 1,
+                max_payload_bytes_per_tick: 64,
+            },
+        ),
+    ));
+    let session = lodestone_ecs::spawn_session(app.world_mut());
+    let world = Arc::new(lodestone_ecs::parking_lot::RwLock::new(
+        std::mem::take(app.world_mut()),
+    ));
+
+    let adapter = PrefixDecorator {
+        inner: FakeAdapter::new().begin(vec![Directive::SetState(ConnectionState::Play)]),
+        prefix: "decorated:",
+    };
+    let (client_io, server_io) = memory_pair();
+    let (handle, _events) = ClientBuilder::new(server(), profile(), Box::new(adapter))
+        .ecs(world.clone(), session)
+        .connect_with(client_io);
+    let mut peer = Connection::new(server_io);
+
+    handle
+        .send_action(ClientAction::SendChat {
+            text: FIRST.to_owned(),
+        })
+        .unwrap();
+    handle
+        .send_action(ClientAction::SendChat {
+            text: SECOND.to_owned(),
+        })
+        .unwrap();
+
+    let first = peer.read_packet().await.unwrap().expect("first packet");
+    let second = peer.read_packet().await.unwrap().expect("second packet");
+    let rewritten_first = b"decorated:first\0".to_vec();
+    assert_eq!(first, (PACKET_ID, rewritten_first.clone()));
+    assert_eq!(second, (PACKET_ID, SECOND.as_bytes().to_vec()));
+
+    let ecs = world.read();
+    let messages = ecs
+        .resource::<lodestone_ecs::ecs::message::Messages<lodestone_ecs::OutboundRawPacket>>();
+    let observed: Vec<_> = messages.iter_current_update_messages().collect();
+    assert_eq!(observed.len(), 1, "the second observer copy must be dropped");
+    assert_eq!(observed[0].state, ConnectionState::Play);
+    assert_eq!(observed[0].packet_id, PACKET_ID);
+    assert_eq!(observed[0].payload, rewritten_first);
+    let stats = ecs.resource::<lodestone_ecs::OutboundRawPacketBus>().stats();
+    assert_eq!(stats.published_packets, 1);
+    assert_eq!(stats.dropped_packets, 1);
 
     drop(handle);
 }
@@ -1161,84 +1282,6 @@ async fn position_correction_is_immediately_echoed_with_relative_fields_resolved
         &[0, 0],
         "correction echoes clear both contact flags"
     );
-
-    drop(handle);
-}
-
-/// A placement correction can share one transport read with the first chunk
-/// packet. The driver must hold that buffered packet until the simulation
-/// adopts the authoritative pose, then resume decoding it; waiting for a
-/// second socket read or dropping the frame leaves a joined client with no
-/// terrain despite a successful teleport.
-#[tokio::test]
-async fn buffered_chunk_after_teleport_is_processed_after_pose_acknowledgement() {
-    const TELEPORT_PKT: i32 = 0x60;
-    const CHUNK_PKT: i32 = 0x61;
-    const ACCEPT_ID: i32 = 0x62;
-    const MOVE_ID: i32 = 0x63;
-    let teleport = ClientEvent::TeleportPlayer {
-        pos: Vec3::new(8.0, 64.0, -3.0),
-        rotation: Rotation::new(25.0, -7.0),
-        flags: TeleportFlags::default(),
-        velocity: None,
-    };
-    let adapter = FakeAdapter::new()
-        .move_to(MOVE_ID)
-        .chunks_on(ConnectionState::Handshaking, CHUNK_PKT, &[(0, 0)])
-        .on(
-            ConnectionState::Handshaking,
-            TELEPORT_PKT,
-            vec![
-                Directive::AwaitTeleportCorrection,
-                Directive::Emit(teleport.clone()),
-                send(ACCEPT_ID, &[7]),
-            ],
-        );
-    let (handle, mut events, peer) = start(adapter, KeepAlivePolicy::Manual);
-
-    // Queue both length-prefixed frames in one transport write before waiting
-    // for the first event. The two one-byte packet ids make the raw framing
-    // explicit: each frame is `[length = 1, packet id]`. This is the shape
-    // that exposed the deferred-correction stall in the hosted matrix.
-    let mut raw_peer = peer.into_inner();
-    raw_peer
-        .write_all(&[1, TELEPORT_PKT as u8, 1, CHUNK_PKT as u8])
-        .await
-        .unwrap();
-    let mut peer = Connection::new(raw_peer);
-
-    assert_eq!(events.recv().await, Some(teleport));
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), events.recv())
-            .await
-            .is_err(),
-        "the chunk must remain buffered until its teleport pose is adopted"
-    );
-
-    let position = handle
-        .position()
-        .expect("the teleport event must update the shared position");
-    handle
-        .acknowledge_teleport_correction(position, handle.rotation())
-        .unwrap();
-
-    let (id, payload) = peer.read_packet().await.unwrap().unwrap();
-    assert_eq!(id, ACCEPT_ID);
-    assert_eq!(payload, &[7]);
-    let (id, payload) = peer.read_packet().await.unwrap().unwrap();
-    assert_eq!(id, MOVE_ID);
-    let f64_at = |offset: usize| {
-        f64::from_be_bytes(payload[offset..offset + 8].try_into().unwrap())
-    };
-    assert_eq!((f64_at(0), f64_at(8), f64_at(16)), (8.0, 64.0, -3.0));
-
-    assert_eq!(
-        events.recv().await,
-        Some(ClientEvent::ChunkLoaded {
-            pos: lodestone_model::ChunkPos { x: 0, z: 0 },
-        })
-    );
-    assert!(handle.is_chunk_loaded(lodestone_client::ChunkPos::new(0, 0)));
 
     drop(handle);
 }

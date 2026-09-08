@@ -12,7 +12,7 @@ use lodestone_model::{
     AdapterError, AnimationAction, BlockActionKind, BlockFace, BlockPos, BlockStateRef, ChatKind,
     ChatMode, ChunkPos, ClientAction, ClientActionKind, ClientEvent, ClientSettings, ConnectionState,
     Directive, EntityAttributeModifier, EntityAttributeSnapshot, EntityEquipment,
-    EntityInteraction, EntityMovement, EquipmentSlot, GameMode, Hand, ItemStack, LoginProfile,
+    ContainerClickType, EntityInteraction, EntityMovement, EquipmentSlot, GameMode, Hand, ItemStack, LoginProfile,
     LevelEventData, PlayerCommand, PlayerListEntry, ResourceKey, Rotation, SectionPos,
     ServerAddress, SoundCategory, TeleportFlags, Text, Vec3, VersionAdapter,
 };
@@ -44,7 +44,7 @@ use crate::packets::settings::{PlayerAbilities, Settings};
 use crate::packets::slot::Slot;
 use crate::packets::window::{
     CloseWindow, CraftProgressBar, EnchantItem, HeldItemSlot, OpenWindow, ServerboundCloseWindow,
-    ServerboundHeldItemSlot, SetCreativeSlot, SetSlot, WindowItems,
+    ServerboundHeldItemSlot, SetCreativeSlot, SetSlot, WindowClick, WindowItems,
 };
 use crate::packets::world::{
     BlockAction, BlockBreakAnimation, BlockChange, BlockDig, BlockPlace, Explosion,
@@ -2505,9 +2505,12 @@ impl VersionAdapter for V5Adapter {
                 interaction,
                 sneaking: _,
             } => {
+                // Protocol 5's ordinal order is the older one: `0` is attack
+                // and `1` is plain interaction. Interact-at has no distinct
+                // wire form here, so it follows the ordinary interaction arm.
                 let mouse = match interaction {
-                    EntityInteraction::Attack => 1,
-                    EntityInteraction::Interact { .. } | EntityInteraction::InteractAt { .. } => 0,
+                    EntityInteraction::Attack => 0,
+                    EntityInteraction::Interact { .. } | EntityInteraction::InteractAt { .. } => 1,
                 };
                 let body = UseEntity {
                     target: *entity_id,
@@ -2552,6 +2555,44 @@ impl VersionAdapter for V5Adapter {
                 })?;
                 let body = ServerboundCloseWindow { window_id };
                 Ok(Some((play::serverbound::CLOSE_WINDOW, encode_body(&body)?)))
+            }
+            ClientAction::ContainerClick {
+                window_id,
+                state_id,
+                slot,
+                button,
+                click_type,
+                ..
+            } => {
+                let body = WindowClick {
+                    window_id: u8::try_from(*window_id).map_err(|_| {
+                        AdapterError::Encode(format!("window id {window_id} does not fit a byte"))
+                    })?,
+                    slot: i16::try_from(*slot).map_err(|_| {
+                        AdapterError::Encode(format!("container slot {slot} does not fit an i16"))
+                    })?,
+                    button: i8::try_from(*button).map_err(|_| {
+                        AdapterError::Encode(format!("click button {button} does not fit an i8"))
+                    })?,
+                    action: i16::try_from(state_id.as_wire()).map_err(|_| {
+                        AdapterError::Encode(format!("container state {} does not fit an i16", state_id.as_wire()))
+                    })?,
+                    mode: match click_type {
+                        ContainerClickType::Pickup => 0,
+                        ContainerClickType::QuickMove => 1,
+                        ContainerClickType::Swap => 2,
+                        ContainerClickType::Clone => 3,
+                        ContainerClickType::Throw => 4,
+                        ContainerClickType::QuickCraft => 5,
+                        ContainerClickType::PickupAll => 6,
+                    },
+                    // Protocol 5 requires the pre-click stack here. The
+                    // canonical action only guarantees the post-click
+                    // prediction, so an empty claim keeps the server as the
+                    // authority instead of inventing a numeric legacy id.
+                    item: Slot::default(),
+                };
+                Ok(Some((play::serverbound::WINDOW_CLICK, encode_body(&body)?)))
             }
             ClientAction::SetCarriedItem { slot } => {
                 let slot_id = i16::try_from(*slot).map_err(|_| {

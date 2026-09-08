@@ -288,7 +288,7 @@ pub(crate) async fn fetch_own_skin(
         );
         return false;
     };
-    let png = match lodestone_auth::texture::fetch_texture(client, &skin.url).await {
+    let png = match lodestone_auth::texture::fetch_texture(client, skin.url.as_str()).await {
         Ok(bytes) => bytes,
         Err(e) => {
             // Deliberately includes the refused-host case: a URL outside

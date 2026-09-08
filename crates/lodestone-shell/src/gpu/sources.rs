@@ -140,6 +140,60 @@ impl AmbientLightSource {
     }
 }
 
+/// A local-player visual effect's minimum light colour for this frame.
+///
+/// The renderer combines this with the current dimension ambient colour by
+/// taking the channelwise maximum before it applies block or sky light. This
+/// keeps effect-driven light inputs separate from dimension data while sharing
+/// one lightmap input across terrain, entities, and the first-person passes.
+#[derive(Default)]
+pub struct EffectLightSource(pub(super) Option<Box<dyn Fn() -> Option<[f32; 3]> + Send + Sync>>);
+
+impl EffectLightSource {
+    /// The current effect floor, or black when no effect raises it.
+    #[must_use]
+    pub(super) fn value(&self) -> [f32; 3] {
+        self.0
+            .as_ref()
+            .and_then(|f| f())
+            .unwrap_or([0.0, 0.0, 0.0])
+    }
+}
+
+impl std::fmt::Debug for EffectLightSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("EffectLightSource")
+            .field(&if self.0.is_some() { "set" } else { "none" })
+            .finish()
+    }
+}
+
+/// The entity ids that carry an active outline-producing effect this frame.
+///
+/// Only ids cross this seam. Positions and dimensions stay on the render
+/// frame's [`EntityDraw`] values, so an outline cannot lag behind interpolation
+/// or survive after an entity draw has been removed.
+#[derive(Default)]
+pub struct EntityGlowSource(
+    #[allow(clippy::type_complexity)]
+    pub(super) Option<Box<dyn Fn() -> Vec<i32> + Send + Sync>>,
+);
+
+impl EntityGlowSource {
+    #[must_use]
+    pub(super) fn sample(&self) -> Vec<i32> {
+        self.0.as_ref().map_or_else(Vec::new, |f| f())
+    }
+}
+
+impl std::fmt::Debug for EntityGlowSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("EntityGlowSource")
+            .field(&if self.0.is_some() { "installed" } else { "empty" })
+            .finish()
+    }
+}
+
 impl std::fmt::Debug for AmbientLightSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("AmbientLightSource")

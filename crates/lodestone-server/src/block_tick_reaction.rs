@@ -59,7 +59,7 @@ use lodestone_model::BlockPos;
 use crate::block_entities::BlockEntityHandle;
 use crate::chunk::{ChunkColumn, ChunkSource};
 use crate::random_tick::RandomTickEvent;
-use crate::scheduled_tick::{ScheduledTickQueueAccess, TickPriority};
+use crate::scheduled_tick::{ScheduledTickKind, ScheduledTickQueueAccess, TickPriority};
 
 /// What one due block tick did.
 #[derive(Debug, Default)]
@@ -88,12 +88,12 @@ pub struct BlockTickReaction {
 /// so the cascade below it reads the post-change world exactly as the drain
 /// used to.
 #[allow(clippy::too_many_arguments)]
-pub fn run_due_block_tick<Q: ScheduledTickQueueAccess<String> + ?Sized>(
+pub fn run_due_block_tick<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized>(
     column: &mut ChunkColumn,
     min_x: i32,
     min_z: i32,
     world: &dyn ChunkSource,
-    kind: &str,
+    kind: &ScheduledTickKind,
     pos: BlockPos,
     state: &str,
     block_ticks: &mut Q,
@@ -105,14 +105,14 @@ pub fn run_due_block_tick<Q: ScheduledTickQueueAccess<String> + ?Sized>(
     // `column.set_block` below and before the cascade builds its own view.
     let new_state = {
         let columns = crate::random_tick::RedstoneColumns::new(column, min_x, min_z, world);
-        if kind == crate::redstone::TICK_TORCH {
+        if kind == &ScheduledTickKind::Torch {
             let has_signal = crate::redstone_torch::has_neighbor_signal(
                 &crate::redstone::make_columns_lookup(&columns),
                 pos,
                 state,
             );
             crate::redstone_torch::run_scheduled_tick(state, has_signal)
-        } else if kind == crate::redstone::TICK_REPEATER {
+        } else if kind == &ScheduledTickKind::Repeater {
             let facing = crate::redstone::diode_facing(state);
             let should_on = crate::redstone_diode::repeater_should_turn_on(
                 &crate::redstone::make_columns_lookup(&columns),
@@ -126,7 +126,7 @@ pub fn run_due_block_tick<Q: ScheduledTickQueueAccess<String> + ?Sized>(
                         let delay = crate::redstone_diode::repeater_delay(&new_state);
                         block_ticks.schedule(
                             (x, y, z),
-                            crate::redstone::TICK_REPEATER.to_string(),
+                            ScheduledTickKind::Repeater,
                             current_tick + u64::from(delay),
                             TickPriority::VeryHigh,
                         );
@@ -136,7 +136,7 @@ pub fn run_due_block_tick<Q: ScheduledTickQueueAccess<String> + ?Sized>(
                 crate::redstone_diode::RepeaterTickOutcome::Locked
                 | crate::redstone_diode::RepeaterTickOutcome::NoChange => None,
             }
-        } else if kind == crate::redstone::TICK_COMPARATOR {
+        } else if kind == &ScheduledTickKind::Comparator {
             let facing = crate::redstone::diode_facing(state);
             let input = crate::redstone::input_signal(
                 &crate::redstone::make_columns_lookup(&columns),
@@ -150,23 +150,23 @@ pub fn run_due_block_tick<Q: ScheduledTickQueueAccess<String> + ?Sized>(
                 false,
             );
             crate::redstone_diode::run_scheduled_comparator_tick(state, input, side)
-        } else if kind == crate::redstone::TICK_OBSERVER {
+        } else if kind == &ScheduledTickKind::Observer {
             let (new_state, reschedule) = crate::redstone_observer::run_scheduled_tick(state);
             if reschedule {
                 block_ticks.schedule(
                     (x, y, z),
-                    crate::redstone::TICK_OBSERVER.to_string(),
+                    ScheduledTickKind::Observer,
                     current_tick + 2,
                     TickPriority::Normal,
                 );
             }
             Some(new_state)
-        } else if kind == crate::redstone_target::TICK_TARGET_DECAY {
+        } else if kind == &ScheduledTickKind::TargetDecay {
             // A target block's analog `power` decaying back to 0 after a
             // projectile hit set it. Scheduled by the projectile-block-hit
             // resolution earlier in the same drain region.
             crate::redstone_target::run_scheduled_tick(state)
-        } else if kind == crate::hand_use::TICK_BUTTON {
+        } else if kind == &ScheduledTickKind::ButtonRelease {
             // A pressed button releasing itself once its hold time is up, so
             // a button feeding a door closes it again when the button pops.
             crate::hand_use::release_button(state)

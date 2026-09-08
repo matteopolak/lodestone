@@ -647,6 +647,10 @@ impl OverworldGenerator {
             self.decoration_catalog
                 .select_step6_disks(biomes.iter().map(String::as_str)),
         );
+        features.extend(
+            self.decoration_catalog
+                .select_step6_non_ore(biomes.iter().map(String::as_str)),
+        );
         features.sort_by_key(|(step, index, _)| (*step, *index));
         features
     }

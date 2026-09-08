@@ -19,6 +19,7 @@ tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
+url = { workspace = true }
 
 # The Minecraft server-ID hash is a non-standard SHA-1 rendered as a *signed*
 # two's-complement hex string (Java `BigInteger(bytes).toString(16)`), so we need

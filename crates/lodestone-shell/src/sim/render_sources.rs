@@ -50,7 +50,359 @@
 use super::*;
 use lodestone_data::block_states::StateId;
 
+#[derive(Clone)]
+pub(super) struct StatusParticleSource {
+    pos: [f64; 3],
+    effects: Vec<lodestone_game::effect::StatusEffect>,
+}
+
+fn status_particle_colour(effect: &lodestone_game::effect::StatusEffect) -> Option<[f32; 4]> {
+    let effect_id = lodestone_data::mob_effects::mob_effect_id(&effect.id.to_string())?;
+    let colour = lodestone_data::mob_effects::mob_effect_color_for(effect_id);
+    let alpha = if effect.ambient { 38.0 / 255.0 } else { 1.0 };
+    Some([
+        f32::from(((colour >> 16) & 0xff) as u8) / 255.0,
+        f32::from(((colour >> 8) & 0xff) as u8) / 255.0,
+        f32::from((colour & 0xff) as u8) / 255.0,
+        alpha,
+    ])
+}
+
+fn status_particle_bound(effects: &[lodestone_game::effect::StatusEffect]) -> i32 {
+    let all_ambient = effects.iter().all(|effect| effect.ambient);
+    let invisible = effects
+        .iter()
+        .any(|effect| effect.id.path() == "invisibility");
+    (if invisible { 15 } else { 4 }) * if all_ambient { 5 } else { 1 }
+}
+
+fn emit_status_particles(particles: &mut crate::particles::Particles, sources: &[StatusParticleSource]) {
+    for source in sources {
+        if particles
+            .engine_mut()
+            .rng()
+            .next_i32_bound(status_particle_bound(&source.effects))
+            != 0
+        {
+            continue;
+        }
+        let index = usize::try_from(particles.engine_mut().rng().next_i32_bound(
+            i32::try_from(source.effects.len()).expect("a particle source has an effect"),
+        ))
+        .expect("particle choice is non-negative");
+        let Some(colour) = status_particle_colour(&source.effects[index]) else {
+            continue;
+        };
+        let rng = particles.engine_mut().rng();
+        let pos = [
+            source.pos[0] + (rng.next_f64() - 0.5) * 0.5,
+            source.pos[1] + rng.next_f64(),
+            source.pos[2] + (rng.next_f64() - 0.5) * 0.5,
+        ];
+        particles.spawn_particles(
+            "entity_effect",
+            pos,
+            [1.0, 1.0, 1.0],
+            1.0,
+            0,
+            lodestone_model::event::ParticleOptions::Color { color: colour },
+        );
+    }
+}
+
+fn vision_obscuration_from_effects(
+    effects: &lodestone_game::effect::ActiveEffects,
+    partial: f32,
+) -> f32 {
+    let partial = partial.clamp(0.0, 1.0);
+    let blindness = lodestone_model::Identifier::new("minecraft", "blindness")
+        .ok()
+        .and_then(|id| effects.get(&id))
+        .map_or(0.0, |effect| {
+            if effect.duration_ticks < 0 || effect.duration_ticks > 19 {
+                1.0
+            } else {
+                (effect.duration_ticks as f32 - partial).max(0.0) / 20.0
+            }
+        });
+    let darkness_id = match lodestone_model::Identifier::new("minecraft", "darkness") {
+        Ok(id) => id,
+        Err(_) => return blindness,
+    };
+    let darkness = effects.get(&darkness_id).map_or(0.0, |effect| {
+        if !effect.blend {
+            return if effect.duration_ticks > 22 { 1.0 } else { 0.0 };
+        }
+        let elapsed = effects.elapsed_ticks(&darkness_id).unwrap_or_default() as f32 + partial;
+        let entering = (elapsed / 22.0).clamp(0.0, 1.0);
+        let leaving = ((effect.duration_ticks as f32 - partial) / 22.0).clamp(0.0, 1.0);
+        entering.min(leaving)
+    });
+    blindness.max(darkness)
+}
+
+#[cfg(test)]
+mod status_particle_tests {
+    use super::*;
+
+    fn effect(path: &str, ambient: bool) -> lodestone_game::effect::StatusEffect {
+        lodestone_game::effect::StatusEffect {
+            id: lodestone_model::Identifier::new("minecraft", path).expect("valid effect id"),
+            amplifier: 0,
+            duration_ticks: 200,
+            ambient,
+            show_particles: true,
+            show_icon: true,
+            blend: true,
+        }
+    }
+
+    #[test]
+    fn status_particle_colour_and_rate_preserve_effect_presentation_data() {
+        let speed = effect("speed", false);
+        assert_eq!(
+            status_particle_colour(&speed),
+            Some([0x33 as f32 / 255.0, 0xeb as f32 / 255.0, 1.0, 1.0]),
+            "the generated speed RGB must reach the entity-effect particle"
+        );
+        assert_eq!(status_particle_bound(&[speed]), 4);
+
+        let ambient_speed = effect("speed", true);
+        let colour = status_particle_colour(&ambient_speed).expect("known effect has a colour");
+        assert_eq!(colour[3], 38.0 / 255.0, "ambient particles use their translucent alpha");
+        assert_eq!(status_particle_bound(&[ambient_speed]), 20);
+
+        let invisible = effect("invisibility", false);
+        assert_eq!(status_particle_bound(&[invisible]), 15);
+        assert_eq!(
+            status_particle_bound(&[effect("invisibility", true)]),
+            75,
+            "the invisible and all-ambient reductions multiply"
+        );
+    }
+
+    #[test]
+    fn vision_obscuration_distinguishes_blindness_tail_and_darkness_blend() {
+        let mut effects = lodestone_game::effect::ActiveEffects::new();
+        effects.apply(effect("blindness", false));
+        assert_eq!(vision_obscuration_from_effects(&effects, 0.0), 1.0);
+
+        effects.apply(lodestone_game::effect::StatusEffect {
+            duration_ticks: 10,
+            ..effect("blindness", false)
+        });
+        assert_eq!(vision_obscuration_from_effects(&effects, 0.0), 0.5);
+
+        effects.remove(&lodestone_model::Identifier::new("minecraft", "blindness").unwrap());
+        effects.apply(lodestone_game::effect::StatusEffect {
+            duration_ticks: 200,
+            ..effect("darkness", true)
+        });
+        assert_eq!(
+            vision_obscuration_from_effects(&effects, 0.0),
+            0.0,
+            "Darkness starts at zero before its 22-tick blend-in"
+        );
+        effects.tick(11);
+        assert_eq!(vision_obscuration_from_effects(&effects, 0.0), 0.5);
+    }
+}
+
+fn glowing_entity_ids(world: &bevy_ecs::world::World) -> Vec<i32> {
+    let mut ids = std::collections::BTreeSet::new();
+    let effects = world.resource::<lodestone_ecs::EntityStatusEffects>();
+    for (entity_id, active) in effects.iter() {
+        if active.iter().any(|effect| {
+            effect.id.namespace() == "minecraft" && effect.id.path() == "glowing"
+        }) {
+            ids.insert(entity_id);
+        }
+    }
+
+    let index = world.resource::<lodestone_ecs::entity::EntityIndex>();
+    for (entity_id, entity) in index.iter() {
+        if world
+            .get::<lodestone_ecs::entity::EntityFlags>(entity)
+            .is_some_and(|flags| flags.0 & 0x40 != 0)
+        {
+            ids.insert(entity_id);
+        }
+    }
+    ids.into_iter().collect()
+}
+
+#[cfg(test)]
+mod glow_source_tests {
+    use super::*;
+
+    fn effect(duration_ticks: i32) -> lodestone_game::effect::StatusEffect {
+        lodestone_game::effect::StatusEffect::new(
+            lodestone_model::Identifier::new("minecraft", "glowing")
+                .expect("valid effect id"),
+            0,
+            duration_ticks,
+        )
+    }
+
+    #[test]
+    fn glow_source_reads_metadata_and_cleans_up_expiry_and_removal() {
+        let mut world = bevy_ecs::world::World::new();
+        world.insert_resource(lodestone_ecs::entity::EntityIndex::default());
+        world.insert_resource(lodestone_ecs::EntityStatusEffects::default());
+        let entity = world
+            .spawn(lodestone_ecs::entity::EntityFlags(0x40))
+            .id();
+        world
+            .resource_mut::<lodestone_ecs::entity::EntityIndex>()
+            .insert(7, entity);
+
+        assert_eq!(glowing_entity_ids(&world), vec![7]);
+
+        world
+            .entity_mut(entity)
+            .insert(lodestone_ecs::entity::EntityFlags(0));
+        world
+            .resource_mut::<lodestone_ecs::EntityStatusEffects>()
+            .apply(7, effect(1));
+        assert_eq!(glowing_entity_ids(&world), vec![7]);
+
+        let mut state: bevy_ecs::system::SystemState<
+            bevy_ecs::system::ResMut<lodestone_ecs::EntityStatusEffects>,
+        > = bevy_ecs::system::SystemState::new(&mut world);
+        let effects = state
+            .get_mut(&mut world)
+            .expect("EntityStatusEffects is installed for the glow test");
+        lodestone_ecs::session::tick_entity_status_effects(effects);
+        state.apply(&mut world);
+        assert!(
+            glowing_entity_ids(&world).is_empty(),
+            "an expired effect must stop producing outline ids"
+        );
+
+        world
+            .resource_mut::<lodestone_ecs::EntityStatusEffects>()
+            .apply(7, effect(-1));
+        assert_eq!(glowing_entity_ids(&world), vec![7]);
+        world
+            .resource_mut::<lodestone_ecs::EntityStatusEffects>()
+            .remove(
+                7,
+                &lodestone_model::Identifier::new("minecraft", "glowing")
+                    .expect("valid effect id"),
+            );
+        assert!(glowing_entity_ids(&world).is_empty());
+    }
+}
+
 impl Sim {
+    pub(super) fn status_particle_sources(&self, local_pos: [f64; 3]) -> Vec<StatusParticleSource> {
+        let local_id = self.server_entity_id();
+        self.read(|world| {
+            let index = world.resource::<lodestone_ecs::entity::EntityIndex>();
+            let effects = world.resource::<lodestone_ecs::EntityStatusEffects>();
+            effects
+                .iter()
+                .filter_map(|(entity_id, active)| {
+                    let effects: Vec<_> = active
+                        .iter()
+                        .filter(|effect| effect.show_particles)
+                        .cloned()
+                        .collect();
+                    if effects.is_empty() {
+                        return None;
+                    }
+                    let pos = if local_id == Some(entity_id) {
+                        local_pos
+                    } else {
+                        let entity = index.get(entity_id)?;
+                        let pos = world.get::<lodestone_ecs::entity::Position>(entity)?.0;
+                        [f64::from(pos.x), f64::from(pos.y), f64::from(pos.z)]
+                    };
+                    Some(StatusParticleSource { pos, effects })
+                })
+                .collect()
+        })
+    }
+
+    /// Entity ids whose current effect or metadata state requests an outline.
+    ///
+    /// The closure returns only ids; the renderer joins them with the current
+    /// interpolated `EntityDraw` values. Effect expiry/removal therefore takes
+    /// effect on the next frame without retaining an old position or box.
+    #[must_use]
+    pub fn glowing_entity_ids_source(&self) -> impl Fn() -> Vec<i32> + Send + Sync + 'static {
+        let ecs = self.ecs.clone();
+        move || lodestone_ecs::hold_read(&ecs, glowing_entity_ids)
+    }
+
+    /// A frame-polled local-effect light floor for [`crate::gpu::RenderState`].
+    ///
+    /// The closure owns the one ECS handle rather than borrowing `self`, so it
+    /// remains valid for the renderer's lifetime and reads the latest packet
+    /// fold every frame. It returns `None` when no current effect changes the
+    /// lightmap; the renderer then preserves the dimension's ordinary ambient
+    /// colour exactly.
+    #[must_use]
+    pub fn effect_light_source(
+        &self,
+    ) -> impl Fn() -> Option<[f32; 3]> + Send + Sync + 'static {
+        let ecs = self.ecs.clone();
+        let local = self.local;
+        move || {
+            lodestone_ecs::hold_read(&ecs, |world| {
+                let effects = world.get::<HudEffects>(local)?;
+                let night_vision = effects
+                    .0
+                    .iter()
+                    .find(|effect| effect.id.namespace() == "minecraft" && effect.id.path() == "night_vision")?;
+                let partial_tick = world.resource::<FrameClock>().interp_alpha.clamp(0.0, 1.0);
+                Some(lodestone_render::night_vision_effect_floor(
+                    night_vision.duration_ticks,
+                    partial_tick,
+                ))
+            })
+        }
+    }
+
+    /// The local Nausea effect's current visual-transition strength.
+    ///
+    /// The state is advanced at 20 Hz with the effect timer. A packet that
+    /// disables blending adopts its stable state immediately; an ordinary
+    /// Nausea instance ramps in for 150 ticks, then ramps out over the final
+    /// 20 ticks of its 60-tick advance window.
+    #[must_use]
+    pub fn nausea_intensity(&self) -> f32 {
+        self.read(|world| {
+            let effects = world.get::<HudEffects>(self.local)?;
+            let id = lodestone_model::Identifier::new("minecraft", "nausea").ok()?;
+            let effect = effects.0.get(&id)?;
+            let partial = world.resource::<FrameClock>().interp_alpha.clamp(0.0, 1.0);
+            let elapsed = effects.0.elapsed_ticks(&id)? as f32 + partial;
+            let stable = effect.duration_ticks > 60;
+            if !effect.blend {
+                return Some(if stable { 1.0 } else { 0.0 });
+            }
+            let entering = (elapsed / 150.0).clamp(0.0, 1.0);
+            let leaving = ((effect.duration_ticks as f32 - partial - 40.0) / 20.0)
+                .clamp(0.0, 1.0);
+            Some(entering.min(leaving))
+        })
+        .unwrap_or(0.0)
+    }
+
+    /// The bounded screen-obscuration strength for Blindness and Darkness.
+    /// Blindness is opaque until its final 19 ticks, while Darkness uses its
+    /// 22-tick visual transition. The larger value wins when both are active.
+    #[must_use]
+    pub fn vision_obscuration(&self) -> f32 {
+        self.read(|world| {
+            let effects = world.get::<HudEffects>(self.local)?;
+            let partial = world.resource::<FrameClock>().interp_alpha.clamp(0.0, 1.0);
+            Some(vision_obscuration_from_effects(&effects.0, partial))
+        })
+        .unwrap_or(0.0)
+    }
+
     /// A `'static` sampler of the **outline** boxes of the block at a world
     /// position, for `RenderState::set_outline_shape_source`.
     ///
@@ -816,6 +1168,7 @@ impl Sim {
         // The eye, for the ambient scan below. Read before either guard is taken.
         let player = self.player();
         let eye = [player.position.x, player.position.y, player.position.z];
+        let status_particle_sources = self.status_particle_sources(eye);
         let campfire_smoke_sources = self.net.as_ref().map_or_else(Vec::new, |net| {
             crate::block_entities::campfire_smoke_sources(
                 &net.shared_handle(),
@@ -832,6 +1185,7 @@ impl Sim {
                 // probes, and this is the one place per tick that already holds a
                 // block view with no `World` guard over it.
                 self.with_particles_unlocked(|p| {
+                    emit_status_particles(p, &status_particle_sources);
                     p.tick(&view);
                     p.ambient_tick(eye, &mut |b| view.block_at(b[0], b[1], b[2]));
                     p.campfire_block_entity_tick(&campfire_smoke_sources);
@@ -849,6 +1203,7 @@ impl Sim {
         // navigating it.
         let store = self.chunk_world();
         self.with_particles_unlocked(|p| {
+            emit_status_particles(p, &status_particle_sources);
             let world = store.read();
             p.tick(&WorldCollision::new(&world));
             p.ambient_tick(eye, &mut |b| {

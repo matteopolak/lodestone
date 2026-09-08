@@ -116,12 +116,12 @@ replace this with a raw id-to-string helper: it loses the distinction between a 
 state. A custom or data-pack key stays as its parsed identifier in the owning dynamic registry;
 it is not coerced into `Block` merely because its path resembles a built-in name.
 
-`Item` follows the same boundary rule. A packet or synchronized recipe carries
-`lodestone_model::ItemId`, which preserves an unknown/custom entry as a
-protocol-local value instead of making a bare number look canonical. A built-in
-consumer requires `ItemId::canonical_raw()` before converting with
-`u16::try_from(raw).ok().and_then(Item::from_registry_id)`; only then may it
-read `Item::name`, a prototype, or a sprite-table slot. Writers use
+`Item` follows the same boundary rule. A packet or synchronized recipe keeps an
+`lodestone_model::ItemId` while it needs to preserve an unknown/custom entry;
+the value's `ProtocolLocal` source prevents a built-in consumer from treating
+it as canonical. Such a consumer requires `ItemId::canonical_raw()` and then
+converts it with `u16::try_from(raw).ok().and_then(Item::from_registry_id)`
+before it reads `Item::name`, a prototype, or a sprite-table slot. Writers use
 `Item::from_name` and emit `i32::from(item.registry_id())`; an unresolved custom
 identifier stays unresolved rather than acquiring a made-up built-in id. The
 literal controls in the item-enum and packet fixtures pin `air = 0`, `stone = 1`,

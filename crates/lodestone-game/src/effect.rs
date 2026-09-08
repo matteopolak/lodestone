@@ -22,6 +22,11 @@ pub struct StatusEffect {
     pub show_particles: bool,
     /// Whether to show the HUD icon.
     pub show_icon: bool,
+    /// Whether a client should animate an effect-specific visual transition.
+    ///
+    /// A false value requests an immediate visual state. The wire flag does
+    /// not control normal particle visibility; [`Self::show_particles`] does.
+    pub blend: bool,
 }
 
 impl StatusEffect {
@@ -35,6 +40,7 @@ impl StatusEffect {
             ambient: false,
             show_particles: true,
             show_icon: true,
+            blend: true,
         }
     }
 
@@ -58,6 +64,7 @@ impl StatusEffect {
 pub struct ActiveEffects {
     order: Vec<Identifier>,
     effects: Vec<StatusEffect>,
+    elapsed_ticks: Vec<i32>,
 }
 
 impl ActiveEffects {
@@ -76,9 +83,11 @@ impl ActiveEffects {
     pub fn apply(&mut self, effect: StatusEffect) {
         if let Some(i) = self.index_of(&effect.id) {
             self.effects[i] = effect;
+            self.elapsed_ticks[i] = 0;
         } else {
             self.order.push(effect.id.clone());
             self.effects.push(effect);
+            self.elapsed_ticks.push(0);
         }
     }
 
@@ -86,6 +95,7 @@ impl ActiveEffects {
     pub fn remove(&mut self, id: &Identifier) -> Option<StatusEffect> {
         let i = self.index_of(id)?;
         self.order.remove(i);
+        self.elapsed_ticks.remove(i);
         Some(self.effects.remove(i))
     }
 
@@ -95,10 +105,17 @@ impl ActiveEffects {
         self.index_of(id).map(|i| &self.effects[i])
     }
 
+    /// Ticks elapsed since this effect was last applied or refreshed.
+    #[must_use]
+    pub fn elapsed_ticks(&self, id: &Identifier) -> Option<i32> {
+        self.index_of(id).map(|i| self.elapsed_ticks[i])
+    }
+
     /// Clears all effects (e.g. on death/respawn or milk).
     pub fn clear(&mut self) {
         self.order.clear();
         self.effects.clear();
+        self.elapsed_ticks.clear();
     }
 
     /// Advances all finite effects by `ticks`, dropping any that expire. Kept
@@ -108,11 +125,13 @@ impl ActiveEffects {
         let mut i = 0;
         while i < self.effects.len() {
             let effect = &mut self.effects[i];
+            self.elapsed_ticks[i] = self.elapsed_ticks[i].saturating_add(ticks);
             if effect.duration_ticks >= 0 {
                 effect.duration_ticks -= ticks;
                 if effect.duration_ticks <= 0 {
                     self.order.remove(i);
                     self.effects.remove(i);
+                    self.elapsed_ticks.remove(i);
                     continue;
                 }
             }
@@ -182,5 +201,19 @@ mod tests {
         fx.apply(StatusEffect::new(id("minecraft:haste"), 0, 40));
         fx.clear();
         assert!(fx.is_empty());
+    }
+
+    #[test]
+    fn elapsed_ticks_advance_and_reset_when_an_effect_is_refreshed() {
+        let speed = id("minecraft:speed");
+        let mut fx = ActiveEffects::new();
+        fx.apply(StatusEffect::new(speed.clone(), 0, 200));
+        fx.tick(12);
+        assert_eq!(fx.elapsed_ticks(&speed), Some(12));
+
+        fx.apply(StatusEffect::new(speed.clone(), 0, 200));
+        assert_eq!(fx.elapsed_ticks(&speed), Some(0));
+        assert!(fx.remove(&speed).is_some());
+        assert_eq!(fx.elapsed_ticks(&speed), None);
     }
 }

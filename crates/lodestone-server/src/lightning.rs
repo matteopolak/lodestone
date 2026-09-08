@@ -199,8 +199,7 @@ fn base_name(state: &str) -> &str {
 }
 
 fn blocks_motion(state: &str) -> bool {
-    lodestone_data::block_states::state_id(state)
-        .and_then(lodestone_data::block_states::StateId::new)
+    lodestone_data::block_states::StateId::from_state_str(state)
         .is_some_and(lodestone_data::block_solidity::blocks_motion)
 }
 
@@ -732,6 +731,11 @@ mod tests {
         let rig = Rig::with_floor("minecraft:stone", 4);
         let pos = motion_blocking_heightmap_pos(&rig, ENV, 0, 0);
         assert_eq!(pos, BlockPos::new(0, 5, 0), "must land directly above the floor top");
+    }
+
+    #[test]
+    fn unknown_block_state_is_not_treated_as_motion_blocking() {
+        assert!(!blocks_motion("minecraft:not_a_real_block"));
     }
 
     /// With no lightning rod and no candidate entities, target selection

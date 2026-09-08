@@ -74,29 +74,27 @@ fn setup() -> Option<Gpu> {
     })
 }
 
-/// One square filling clip space, `front` selecting CCW (front-facing under
-/// `FrontFace::Ccw`, the way ice's `Up` quad winds toward a camera looking
-/// down through it) or CW (the way its `Down` quad winds — back-facing to
-/// that same camera). Fullbright, untinted (`light = 0xFF`, `tint = 255`,
-/// `ao = 1.0`), alpha 255: this gate is about whether the quad draws **at
-/// all**, not about a blended byte value (which this backend does not let a
-/// test predict exactly — see `CLAUDE.md`'s `ALPHA_BLENDING` note).
-fn quad(front: bool) -> ModelMesh {
+/// Append one square filling clip space. `front` selects CCW (front-facing
+/// under `FrontFace::Ccw`, the way ice's `Up` quad winds toward a camera
+/// looking down through it) or CW (the way its `Down` quad winds — back-facing
+/// to that same camera). `z` is an identity-camera depth and `ao` supplies a
+/// controlled material difference for the depth-order regression below.
+fn append_quad(mesh: &mut ModelMesh, front: bool, z: f32, ao: f32) {
     let mut positions = [
-        [-1.0f32, -1.0, 0.5],
-        [1.0, -1.0, 0.5],
-        [1.0, 1.0, 0.5],
-        [-1.0, 1.0, 0.5],
+        [-1.0f32, -1.0, z],
+        [1.0, -1.0, z],
+        [1.0, 1.0, z],
+        [-1.0, 1.0, z],
     ];
     if !front {
         positions.reverse();
     }
-    let mut mesh = ModelMesh::default();
+    let base = mesh.vertices.len() as u32;
     for p in positions {
         mesh.vertices.push(ModelVertex {
             position: p,
             uv: [0.0, 0.0],
-            ao: 1.0,
+            ao,
             light: 0xFF,
             tint: 255,
             anim: 0,
@@ -104,7 +102,73 @@ fn quad(front: bool) -> ModelMesh {
             tint_rgb_override: [0, 0, 0, 0],
         });
     }
-    mesh.indices.extend_from_slice(&[0, 1, 2, 2, 3, 0]);
+    mesh.indices.extend_from_slice(&[
+        base,
+        base + 1,
+        base + 2,
+        base + 2,
+        base + 3,
+        base,
+    ]);
+}
+
+/// One full-screen quad at the depth used by the original culling gate.
+fn quad(front: bool) -> ModelMesh {
+    let mut mesh = ModelMesh::default();
+    append_quad(&mut mesh, front, 0.5, 1.0);
+    mesh
+}
+
+fn max_rgb_delta(a: (u8, u8, u8), b: (u8, u8, u8)) -> u8 {
+    [a.0.abs_diff(b.0), a.1.abs_diff(b.1), a.2.abs_diff(b.2)]
+        .into_iter()
+        .max()
+        .expect("three RGB channels")
+}
+
+fn srgb_byte(linear: f64) -> u8 {
+    let srgb = if linear <= 0.003_130_8 {
+        linear * 12.92
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    };
+    (srgb.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// Two overlapping, camera-facing ice surfaces. The near surface is at `z =
+/// 0.65` and is brighter than the far surface, so a depth-writing pipeline
+/// must reject the far surface when it arrives after the near one.
+fn overlapping_ice(near_first: bool) -> ModelMesh {
+    let mut mesh = ModelMesh::default();
+    let append = |mesh: &mut ModelMesh, near: bool| {
+        append_quad(mesh, true, if near { 0.65 } else { 0.5 }, if near { 1.0 } else { 0.5 });
+    };
+    if near_first {
+        append(&mut mesh, true);
+        append(&mut mesh, false);
+    } else {
+        append(&mut mesh, false);
+        append(&mut mesh, true);
+    }
+    mesh
+}
+
+/// One or two front-facing ice layers used by the alpha/transmission gate.
+fn ice_layers(stacked: bool) -> ModelMesh {
+    let mut mesh = ModelMesh::default();
+    append_quad(&mut mesh, true, 0.5, 1.0);
+    if stacked {
+        append_quad(&mut mesh, true, 0.65, 1.0);
+    }
+    mesh
+}
+
+/// One camera-facing ice surface. `near` selects the surface at `z = 0.65`
+/// used by the edge-face side of the overlap scene; the other surface is at
+/// `z = 0.5` and stands in for the connected sheet behind it.
+fn ice_surface(near: bool) -> ModelMesh {
+    let mut mesh = ModelMesh::default();
+    append_quad(&mut mesh, true, if near { 0.65 } else { 0.5 }, 1.0);
     mesh
 }
 
@@ -120,12 +184,16 @@ struct Scene<'a> {
 
 impl<'a> Scene<'a> {
     fn new(gpu: &'a Gpu) -> Self {
+        Self::with_alpha(gpu, 255)
+    }
+
+    fn with_alpha(gpu: &'a Gpu, alpha: u8) -> Self {
         let atlas = GpuAtlas::from_rgba(
             &gpu.device,
             &gpu.queue,
             4,
             4,
-            &[200, 220, 255, 255].repeat(16),
+            &[200, 220, 255, alpha].repeat(16),
             &[],
         );
         Scene {
@@ -135,8 +203,30 @@ impl<'a> Scene<'a> {
         }
     }
 
-    /// Render `mesh` through `pipeline` and read back the centre pixel.
+    /// Render `mesh` through `pipeline` over the usual dark clear and read
+    /// back the centre pixel.
     fn render_center(&self, pipeline: &ModelPipeline, mesh: &ModelMesh) -> (u8, u8, u8) {
+        self.render_center_over(
+            pipeline,
+            mesh,
+            wgpu::Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.2,
+                a: 1.0,
+            },
+        )
+    }
+
+    /// Render `mesh` through `pipeline` over a caller-selected background and
+    /// read back the centre pixel. Distinct bright/dark backgrounds keep the
+    /// alpha measurement independent from the source material colour.
+    fn render_center_over(
+        &self,
+        pipeline: &ModelPipeline,
+        mesh: &ModelMesh,
+        clear: wgpu::Color,
+    ) -> (u8, u8, u8) {
         let device = self.device;
         let queue = self.queue;
         let atlas_bg = pipeline.atlas_bind_group(device, &self.atlas);
@@ -191,12 +281,7 @@ impl<'a> Scene<'a> {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.2,
-                            a: 1.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(clear),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -299,5 +384,138 @@ fn translucent_pipeline_culls_the_far_face_of_a_solid_cube() {
         back_culled,
         "the far-facing quad must be culled (clear colour) through the fixed \
          Translucent pipeline — this is the fix: got rgb=({br},{bg},{bb})"
+    );
+}
+
+/// The real ice texture carries alpha `180/255`, not an opaque mask. A single
+/// isolated surface must therefore leave a measurable amount of both a dark
+/// and a bright outside background visible. A second connected front-facing
+/// layer must move the result toward the ice material; this is a distinct
+/// control from the depth-order scene below, and prevents a gate from passing
+/// with a fixed colour or an accidentally opaque atlas upload.
+#[test]
+#[ignore = "requires a GPU adapter; run explicitly"]
+fn ice_alpha_transmits_outside_background_for_isolated_and_connected_layers() {
+    let Some(gpu) = setup() else {
+        panic!(
+            "translucent_model_backface_cull_gate: no GPU adapter. This test is #[ignore]d, \
+             so running it is an explicit request for a real GPU frame."
+        );
+    };
+    let pipeline = ModelPipeline::for_layer(&gpu.device, FORMAT, RenderLayer::Translucent);
+    let translucent = Scene::with_alpha(&gpu, 180);
+    let opaque = Scene::with_alpha(&gpu, 255);
+
+    for (name, clear, dark_background) in [
+        (
+            "dark",
+            wgpu::Color {
+                r: 0.08,
+                g: 0.08,
+                b: 0.08,
+                a: 1.0,
+            },
+            true,
+        ),
+        (
+            "bright",
+            wgpu::Color {
+                r: 0.92,
+                g: 0.92,
+                b: 0.92,
+                a: 1.0,
+            },
+            false,
+        ),
+    ] {
+        let isolated = translucent.render_center_over(&pipeline, &ice_layers(false), clear);
+        let connected = translucent.render_center_over(&pipeline, &ice_layers(true), clear);
+        let opaque_surface = opaque.render_center_over(&pipeline, &ice_layers(false), clear);
+        let floor_r = srgb_byte(clear.r);
+        println!(
+            "{name} floor, centre ({}, {}): floor={floor_r}, isolated={isolated:?}, \
+             connected={connected:?}, opaque-control={opaque_surface:?}",
+            W / 2,
+            H / 2
+        );
+
+        let low = floor_r.min(opaque_surface.0);
+        let high = floor_r.max(opaque_surface.0);
+        assert!(
+            isolated.0 > low + 4 && isolated.0 + 4 < high,
+            "alpha=180 ice must leave the outside background between the floor and opaque \
+             material endpoints at centre ({}, {}): floor={floor_r}, isolated={isolated:?}, \
+             opaque={opaque_surface:?}",
+            W / 2,
+            H / 2
+        );
+        if dark_background {
+            assert!(
+                connected.0 > isolated.0 + 5,
+                "a second connected ice layer must move a dark background toward the ice \
+                 material: isolated={isolated:?}, connected={connected:?} at centre ({}, {})",
+                W / 2,
+                H / 2
+            );
+        } else {
+            assert!(
+                connected.0 + 5 < isolated.0,
+                "a second connected ice layer must move a bright background toward the ice \
+                 material: isolated={isolated:?}, connected={connected:?} at centre ({}, {})",
+                W / 2,
+                H / 2
+            );
+        }
+    }
+}
+
+/// Two overlapping ice surfaces can come from an edge face and a connected
+/// sheet in one section. Their materials differ through the measured AO/light
+/// inputs, so draw order is observable. When the nearer surface at `z=0.65`
+/// is submitted first, depth writes must reject the farther `z=0.5` surface;
+/// this is the order that made an exposed edge face paint over a nearer sheet
+/// before the fix. The opposite order is retained as a control: standard
+/// alpha blending correctly shows both surfaces when the farther one arrives
+/// first. The old no-write state is the executed negative control: the bad
+/// near-first order changes the centre pixel because both fragments blend.
+#[test]
+#[ignore = "requires a GPU adapter; run explicitly to watch the no-depth-write control fail"]
+fn a_far_ice_surface_cannot_paint_over_a_nearer_surface_submitted_first() {
+    let Some(gpu) = setup() else {
+        panic!(
+            "translucent_model_backface_cull_gate: no GPU adapter. This test is #[ignore]d, \
+             so running it is an explicit request for a real GPU frame."
+        );
+    };
+    let scene = Scene::with_alpha(&gpu, 180);
+    let pipeline = ModelPipeline::for_layer(&gpu.device, FORMAT, RenderLayer::Translucent);
+    let clear = wgpu::Color {
+        r: 0.08,
+        g: 0.08,
+        b: 0.08,
+        a: 1.0,
+    };
+    let near_first = scene.render_center_over(&pipeline, &overlapping_ice(true), clear);
+    let far_first = scene.render_center_over(&pipeline, &overlapping_ice(false), clear);
+    let near_only = scene.render_center_over(&pipeline, &ice_surface(true), clear);
+    println!(
+        "overlapping ice centre ({}, {}): near-first={near_first:?}, far-first={far_first:?}, \
+         near-only={near_only:?}",
+        W / 2,
+        H / 2
+    );
+    assert!(
+        max_rgb_delta(near_first, near_only) <= 2,
+        "a farther ice surface must be rejected after the nearer one at centre ({}, {}): \
+         near-first={near_first:?}, near-only={near_only:?}",
+        W / 2,
+        H / 2
+    );
+    assert!(
+        far_first.0 >= near_only.0.saturating_add(2),
+        "far-first control must retain the farther alpha layer at centre ({}, {}): \
+         far-first={far_first:?}, near-only={near_only:?}",
+        W / 2,
+        H / 2
     );
 }

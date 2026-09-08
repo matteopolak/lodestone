@@ -4,7 +4,7 @@
 
 use lodestone_core::Nbt;
 use lodestone_server::{
-    ChunkColumn, PersistedScheduledTick, TickPriority,
+    ChunkColumn, PersistedScheduledTick, ScheduledTickKind, TickPriority,
     anvil_export::{
         Error, ExportAuthorization, ExportLossDecision, TickQueue, UnsupportedNativeFeature,
         export_chunk, preflight_chunk,
@@ -160,7 +160,7 @@ fn native_tick_sequence_loss_is_reported_and_requires_matching_authorization() {
     let mut record = record_with_typed_payload();
     record.block_scheduled_ticks.push(PersistedScheduledTick {
         pos: (99, -60, 199),
-        kind: "minecraft:oak_leaves".to_owned(),
+        kind: ScheduledTickKind::from_name("minecraft:oak_leaves"),
         trigger_tick: 105,
         priority: TickPriority::High,
         insertion_order: 700,
@@ -219,7 +219,7 @@ fn impossible_native_tick_delay_refuses_the_whole_export() {
     let mut record = record_with_typed_payload();
     record.fluid_scheduled_ticks.push(PersistedScheduledTick {
         pos: (99, -60, 199),
-        kind: "minecraft:water".to_owned(),
+        kind: ScheduledTickKind::from_name("minecraft:water"),
         trigger_tick: u64::MAX,
         priority: TickPriority::Normal,
         insertion_order: 701,

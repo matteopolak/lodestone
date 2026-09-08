@@ -62,7 +62,7 @@ use lodestone_entity::ai::mob::EatenBlock;
 use crate::random_tick::RandomTickScheduler;
 use crate::scheduled_tick::{
     merge_due_owner_batches, ScheduledTick, ScheduledTickOwnerBatch, ScheduledTickQueueAccess,
-    TickPriority,
+    ScheduledTickKind, TickPriority,
 };
 use crate::sleep::{SleepEvent, SleepFeed, SleepState, SleepVote};
 use crate::weather::{WeatherFeed, WeatherState};
@@ -417,12 +417,16 @@ pub struct BlockTickFeed(
     Arc<Mutex<Vec<(i32, i32, i32, String)>>>,
     /// block ticks a connection's own mutation scheduled, waiting
     /// to be rebased onto the tick loop's counter and hosted in its
-    /// `block_ticks` queue. `trigger_tick` is a relative delay.
+    /// typed `block_ticks` queue. `trigger_tick` is a relative delay.
+    Arc<Mutex<Vec<ScheduledTick<ScheduledTickKind>>>>,
+    /// Fluid ticks remain on the legacy string-keyed path until the fluid
+    /// scheduler is migrated. This separate lane makes that compatibility
+    /// boundary explicit instead of routing both registries through one feed.
     Arc<Mutex<Vec<ScheduledTick<String>>>>,
     /// sounds, particles and level events the world tick produced —
     /// see [`crate::effects`].
     ///
-    /// **A third lane here rather than a feed of its own**, because a feed is
+    /// **An outbound lane here rather than a feed of its own**, because a feed is
     /// nine `serve_connection*` signatures wide and an effect is the same kind
     /// of thing as the block update in lane 0: something the world tick did that
     /// this connection has no other way to learn about. Outbound, so it splits
@@ -478,7 +482,7 @@ impl BlockTickFeed {
     }
 
     fn push_effect(&self, except: Option<uuid::Uuid>, effect: crate::effects::WorldEffect) {
-        self.2
+        self.3
             .lock()
             .expect("block tick feed lock poisoned")
             .push((except, effect));
@@ -494,7 +498,7 @@ impl BlockTickFeed {
     /// consumer, and each LAN connection owns its own outbound queue behind
     /// `IntegratedServer::bind`'s relay.
     pub fn drain_effects_for(&self, viewer: uuid::Uuid) -> Vec<crate::effects::WorldEffect> {
-        std::mem::take(&mut *self.2.lock().expect("block tick feed lock poisoned"))
+        std::mem::take(&mut *self.3.lock().expect("block tick feed lock poisoned"))
             .into_iter()
             .filter_map(|(except, effect)| (except != Some(viewer)).then_some(effect))
             .collect()
@@ -507,7 +511,7 @@ impl BlockTickFeed {
     pub(crate) fn drain_effects_tagged(
         &self,
     ) -> Vec<(Option<uuid::Uuid>, crate::effects::WorldEffect)> {
-        std::mem::take(&mut *self.2.lock().expect("block tick feed lock poisoned"))
+        std::mem::take(&mut *self.3.lock().expect("block tick feed lock poisoned"))
     }
 
     /// A feed with its **own** outbound queue and this one's **shared**
@@ -521,7 +525,12 @@ impl BlockTickFeed {
     /// multi-connection `open_to_lan` relay), and exercised directly by
     /// `a_subscriber_shares_the_inbound_queue_and_splits_the_outbound_one`.
     pub(crate) fn subscriber(&self) -> Self {
-        Self(Arc::default(), Arc::clone(&self.1), Arc::default())
+        Self(
+            Arc::default(),
+            Arc::clone(&self.1),
+            Arc::clone(&self.2),
+            Arc::default(),
+        )
     }
 
     /// Hands the tick loop block ticks a caller wants resumed against a live
@@ -539,7 +548,7 @@ impl BlockTickFeed {
     /// of its own to be absolute against) has no live `game_tick` counter to
     /// measure from; [`crate::tick::run_tick_loop`] rebases each one onto its
     /// own counter on drain.
-    pub fn request_scheduled_ticks(&self, ticks: Vec<ScheduledTick<String>>) {
+    pub fn request_scheduled_ticks(&self, ticks: Vec<ScheduledTick<ScheduledTickKind>>) {
         if ticks.is_empty() {
             return;
         }
@@ -549,10 +558,29 @@ impl BlockTickFeed {
             .extend(ticks);
     }
 
+    /// Hands legacy fluid ticks to the fluid queue. This is the only feed
+    /// entry point that still accepts a string discriminator; the central
+    /// block queue remains typed all the way through the live tick loop.
+    pub fn request_fluid_scheduled_ticks(&self, ticks: Vec<ScheduledTick<String>>) {
+        if ticks.is_empty() {
+            return;
+        }
+        self.2
+            .lock()
+            .expect("block tick feed lock poisoned")
+            .extend(ticks);
+    }
+
     /// Drains every block tick requested since the last call.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    pub(crate) fn drain_scheduled_ticks(&self) -> Vec<ScheduledTick<String>> {
+    pub(crate) fn drain_scheduled_ticks(&self) -> Vec<ScheduledTick<ScheduledTickKind>> {
         std::mem::take(&mut *self.1.lock().expect("block tick feed lock poisoned"))
+    }
+
+    /// Drains the explicitly legacy fluid lane.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn drain_fluid_scheduled_ticks(&self) -> Vec<ScheduledTick<String>> {
+        std::mem::take(&mut *self.2.lock().expect("block tick feed lock poisoned"))
     }
 }
 
@@ -697,7 +725,7 @@ fn post_note_block_vibration<W: crate::chunk::ChunkSource>(
 ///
 /// A no-op for any other state, so a caller can hand it every block change it
 /// publishes without testing first.
-fn publish_moving_piston<Q: ScheduledTickQueueAccess<String> + ?Sized>(
+fn publish_moving_piston<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized>(
     out: &BlockTickFeed,
     block_ticks: &Q,
     x: i32,
@@ -716,7 +744,9 @@ fn publish_moving_piston<Q: ScheduledTickQueueAccess<String> + ?Sized>(
     };
     out.publish_effect(crate::effects::WorldEffect::BlockEntityData {
         pos: BlockPos::new(x, y, z),
-        block_entity_type: crate::piston::PISTON_BLOCK_ENTITY.to_string(),
+        block_entity_type: crate::block_entities::BlockEntityKind::from_name(
+            crate::piston::PISTON_BLOCK_ENTITY,
+        ),
         nbt: crate::block_entities::moving_piston_nbt(&entity),
     });
 }
@@ -746,7 +776,7 @@ fn publish_moving_piston<Q: ScheduledTickQueueAccess<String> + ?Sized>(
 /// A no-op for any other state, so a caller can hand it every block change
 /// it publishes without testing first — the same convention
 /// [`publish_moving_piston`] already establishes.
-fn shove_entities_from_piston<Q: ScheduledTickQueueAccess<String> + ?Sized>(
+fn shove_entities_from_piston<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized>(
     mobs: &MobHandle,
     block_tick_out: &BlockTickFeed,
     block_ticks: &Q,
@@ -2138,7 +2168,9 @@ async fn run_tick_loop_with_weather_impl<W>(
                             // mob vocabulary cannot become a mob-side effect.
                             Ok(crate::ecs::ServerProposalAction::DespawnMob { .. })
                             | Ok(crate::ecs::ServerProposalAction::SetPlayerGameMode { .. })
+                            | Ok(crate::ecs::ServerProposalAction::PlayerInteract { .. })
                             | Ok(crate::ecs::ServerProposalAction::SetResidentBlock { .. })
+                            | Ok(crate::ecs::ServerProposalAction::SetResidentBlockBatch { .. })
                             | Err(_) => {}
                         }
                     }
@@ -2201,11 +2233,6 @@ async fn run_tick_loop_with_weather_impl<W>(
                 );
             });
         }
-        mob_out.publish(mobs.with(|sim| sim.snapshots()));
-        // The `BOSS_EVENT` twin of the snapshot publish immediately above —
-        // see `LiveMobSource::publish_boss_bars`'s own doc for why this is a
-        // second call rather than folded into `publish` itself.
-        mob_out.publish_boss_bars(mobs.with(|sim| sim.boss_bars()));
         // `MobSim::tick` already calls `MobSim::explode` for the
         // tick a creeper's own fuse completes (`1feed17`/`614acb8`), but
         // until now nothing read the detonation back out of the sim — see
@@ -2746,27 +2773,22 @@ async fn run_tick_loop_with_weather_impl<W>(
         // for the same reason `propagate_and_react` consults it: two placements
         // in one inter-tick window must not double-schedule one position.
         //
-        // Issue: fluid spread rides the **fluid** queue, not the block one, so
-        // this loop routes on `kind`. `BlockTickFeed` carries one relative-delay
-        // stream because it is one channel from the connection tasks; the split
-        // has to happen somewhere, and here is where both queues are in scope.
-        // `crate::fluid::TICK_FLUID` is the only kind that goes left.
+        // Block and fluid requests arrive through separate feed lanes. The
+        // block lane is already typed; the fluid lane is the explicit legacy
+        // string boundary that remains until the fluid scheduler is migrated.
         for pending in block_tick_out.drain_scheduled_ticks() {
-            if pending.kind == crate::fluid::TICK_FLUID {
-                if fluid_ticks.has_scheduled(pending.pos, &pending.kind) {
-                    continue;
-                }
-                fluid_ticks.schedule(
+            if !block_ticks.has_scheduled(pending.pos, &pending.kind) {
+                block_ticks.schedule(
                     pending.pos,
                     pending.kind,
                     game_tick + pending.trigger_tick,
                     pending.priority,
                 );
-            } else {
-                if block_ticks.has_scheduled(pending.pos, &pending.kind) {
-                    continue;
-                }
-                block_ticks.schedule(
+            }
+        }
+        for pending in block_tick_out.drain_fluid_scheduled_ticks() {
+            if !fluid_ticks.has_scheduled(pending.pos, &pending.kind) {
+                fluid_ticks.schedule(
                     pending.pos,
                     pending.kind,
                     game_tick + pending.trigger_tick,
@@ -2781,7 +2803,7 @@ async fn run_tick_loop_with_weather_impl<W>(
         // no longer (or never was) a `minecraft:target` by the time this runs
         // is silently dropped, matching every other drain here that re-checks
         // live state rather than trusting a snapshot taken a moment earlier.
-        let target_decay_kind = crate::redstone_target::TICK_TARGET_DECAY.to_owned();
+        let target_decay_kind = ScheduledTickKind::TargetDecay;
         for hit in &projectile_block_hits {
             let state = world.block_state(hit.pos.x, hit.pos.y, hit.pos.z);
             if !crate::redstone::is_target(&state) {
@@ -2791,7 +2813,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                 hit.axis, hit.frac.x, hit.frac.y, hit.frac.z,
             );
             let has_pending_decay =
-                block_ticks.has_scheduled((hit.pos.x, hit.pos.y, hit.pos.z), &target_decay_kind);
+                crate::redstone_target::has_pending_decay(&*block_ticks, hit.pos);
             let Some(outcome) =
                 crate::redstone_target::apply_hit(&state, strength, hit.is_arrow, has_pending_decay)
             else {
@@ -2865,7 +2887,7 @@ async fn run_tick_loop_with_weather_impl<W>(
             // alive at all. `random_tick::react_at_placement` seeds the first
             // pending tick for any fire a world edit writes; a fire that loses
             // its queue entry is inert forever.
-            if due.kind == crate::fire::TICK_FIRE {
+            if due.kind == ScheduledTickKind::Fire {
                 let (min_y, height) = *fire_env.get_or_insert_with(|| {
                     let probe = world.column(x.div_euclid(16), z.div_euclid(16));
                     (probe.min_y, probe.height)
@@ -2947,7 +2969,7 @@ async fn run_tick_loop_with_weather_impl<W>(
             // broadcast the entity). The effects are applied in the order given —
             // see `gravity_tick::FallingBlockEffect` for why that order is a
             // returned value rather than two statements here.
-            if due.kind == crate::gravity_tick::TICK_GRAVITY {
+            if due.kind == ScheduledTickKind::Gravity {
                 if let Some(settle) =
                     crate::random_tick::settle_gravity_at(&column, min_x, min_z, x, y, z)
                 {
@@ -2999,7 +3021,7 @@ async fn run_tick_loop_with_weather_impl<W>(
             // scan can rewrite the hook's own cell, a receiving hook, and every
             // wire segment between them, not a single position — see
             // `crate::random_tick::run_tripwire_recheck`'s own doc comment.
-            if due.kind == crate::redstone_tripwire::TICK_TRIPWIRE_RECHECK {
+            if due.kind == ScheduledTickKind::TripwireRecheck {
                 for event in crate::random_tick::run_tripwire_recheck(&mut column, min_x, min_z, &*world, BlockPos::new(x, y, z)) {
                     let (ex, ey, ez) = event.pos;
                     world.set_block(ex, ey, ez, &event.to);
@@ -3024,7 +3046,7 @@ async fn run_tick_loop_with_weather_impl<W>(
             // `crate::redstone_dispenser`'s own module doc for the full
             // behaviour table, including everything still deliberately
             // unmodelled and why.
-            if due.kind == crate::redstone_dispenser::TICK_DISPENSER_FIRE {
+            if due.kind == ScheduledTickKind::DispenserFire {
                 if crate::redstone_dispenser::is_dispenser_family(&state) {
                     let origin = BlockPos::new(x, y, z);
                     let slots = block_entities.with(|reg| {
@@ -3334,7 +3356,7 @@ async fn run_tick_loop_with_weather_impl<W>(
             // rather than trusting the scheduling arm's premise: a block that
             // changed again before this tick fires (mined, replaced) must not
             // spawn a phantom TNT entity where nothing is left.
-            if due.kind == crate::mobs::tnt::TICK_TNT_PRIME {
+            if due.kind == ScheduledTickKind::TntPrime {
                 if crate::mobs::tnt::is_tnt_block(&state) && world_state.tnt_explodes() {
                     let origin = BlockPos::new(x, y, z);
                     world.set_block(x, y, z, crate::chunk::AIR);
@@ -3357,7 +3379,7 @@ async fn run_tick_loop_with_weather_impl<W>(
             // has in scope. See `crate::command_block`'s own module doc for
             // exactly how a command block gets scheduled here in the first
             // place (today: "Always Active", not yet a live redstone pulse).
-            if due.kind == crate::command_block::TICK_COMMAND_BLOCK {
+            if due.kind == ScheduledTickKind::CommandBlock {
                 if crate::command_block::is_command_block_family(&state) {
                     let origin = BlockPos::new(x, y, z);
                     let mode = crate::command_block::mode_for_block(&state);
@@ -3409,7 +3431,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                         if decision.reschedule {
                             block_ticks.schedule(
                                 (x, y, z),
-                                crate::command_block::TICK_COMMAND_BLOCK.to_owned(),
+                                ScheduledTickKind::CommandBlock,
                                 game_tick + 1,
                                 TickPriority::Normal,
                             );
@@ -3838,6 +3860,17 @@ async fn run_tick_loop_with_weather_impl<W>(
         mobs.with(super::mobs::MobSim::tick_withers);
         });
 
+        // Publish the completed entity lifecycle, not the tick-start view.
+        // Lightning bolts (and every other short-lived sidecar) can be removed
+        // during the scheduled/physics phase above; publishing before that
+        // phase leaves the live source carrying one extra snapshot and delays
+        // the client's `REMOVE_ENTITIES` diff by one tick.
+        mob_out.publish(mobs.with(|sim| sim.snapshots()));
+        // The `BOSS_EVENT` twin of the snapshot publish immediately above —
+        // see `LiveMobSource::publish_boss_bars`'s own doc for why this is a
+        // second call rather than folded into `publish` itself.
+        mob_out.publish_boss_bars(mobs.with(|sim| sim.boss_bars()));
+
         // Per-phase timing (see `TickPhase::ScheduledAndPhysics`'s own doc):
         // closes out everything `scheduled.with`'s closure just ran. Taken
         // immediately after the closure returns (the mutex is already
@@ -3857,10 +3890,12 @@ mod tests {
     // warns on imports that only tests touch).
     use crate::weather::{LEVEL_STEP, WeatherEvent};
     use crate::mobs::ChunkWorld;
+    use crate::server::EntitySource;
     // `run_tick_loop` borrows its queues from `ScheduledTickHandle` internally,
     // so tests import only the queue value types here.
     use crate::scheduled_tick::{ChunkScheduledTickQueue, ScheduledTickQueue};
     // For `ResourceKey::from_str` in the grazing gates below.
+    use lodestone_model::Difficulty;
     use std::str::FromStr;
 
     fn handles() -> (MobHandle, LiveMobSource, BlockEntityHandle) {
@@ -4071,9 +4106,18 @@ mod tests {
     /// One pending block tick, built through a real `ScheduledTickQueue`
     /// because `ScheduledTick` carries a private `sub_tick_order` and cannot be
     /// constructed with a struct literal from here.
-    fn one_pending(pos: (i32, i32, i32)) -> Vec<ScheduledTick<String>> {
+    fn one_pending(pos: (i32, i32, i32)) -> Vec<ScheduledTick<ScheduledTickKind>> {
+        let mut queue: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
+        queue.schedule(pos, ScheduledTickKind::Repeater, 2, TickPriority::Normal);
+        queue.drain_due(u64::MAX, usize::MAX)
+    }
+
+    /// One pending fluid tick, kept string-keyed to exercise the explicit
+    /// legacy lane rather than accidentally routing it through the typed block
+    /// lane.
+    fn one_fluid_pending(pos: (i32, i32, i32)) -> Vec<ScheduledTick<String>> {
         let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
-        queue.schedule(pos, crate::redstone::TICK_REPEATER.to_owned(), 2, TickPriority::Normal);
+        queue.schedule(pos, "lodestone:fluid".to_owned(), 2, TickPriority::Normal);
         queue.drain_due(u64::MAX, usize::MAX)
     }
 
@@ -4093,10 +4137,19 @@ mod tests {
         let conn = hub.subscriber();
 
         conn.request_scheduled_ticks(one_pending((7, 1, 9)));
+        conn.request_fluid_scheduled_ticks(one_fluid_pending((8, 1, 9)));
         assert_eq!(
             hub.drain_scheduled_ticks().iter().map(|t| t.pos).collect::<Vec<_>>(),
             vec![(7, 1, 9)],
             "a subscriber's scheduled block tick must reach the hub the tick loop drains"
+        );
+        assert_eq!(
+            hub.drain_fluid_scheduled_ticks()
+                .iter()
+                .map(|t| t.pos)
+                .collect::<Vec<_>>(),
+            vec![(8, 1, 9)],
+            "a subscriber's fluid tick must reach only the explicit fluid lane"
         );
 
         conn.publish(1, 2, 3, "minecraft:stone".to_owned());
@@ -4110,10 +4163,15 @@ mod tests {
         // a delayed component is still dropped.
         let orphan = BlockTickFeed::default();
         orphan.request_scheduled_ticks(one_pending((7, 1, 9)));
+        orphan.request_fluid_scheduled_ticks(one_fluid_pending((8, 1, 9)));
         assert!(
             hub.drain_scheduled_ticks().is_empty(),
             "CONTROL FAILED: a `default()` feed already reaches the hub, so `subscriber()` would \
              not be needed and the LAN gap this documents would not exist"
+        );
+        assert!(
+            hub.drain_fluid_scheduled_ticks().is_empty(),
+            "CONTROL FAILED: a `default()` feed already reaches the hub's fluid lane"
         );
     }
 
@@ -5310,6 +5368,71 @@ mod tests {
         );
     }
 
+    /// The live source is the input to the connection's entity diff, so an
+    /// expired bolt must be absent immediately after the tick that removes it.
+    /// Predicting the exact expiry from a separate simulation makes the test
+    /// discriminate publication order: a pre-physics publish still contains
+    /// the bolt on that final tick, while the authoritative end-of-tick publish
+    /// reaches the next client snapshot without a one-tick stale entity.
+    #[tokio::test(start_paused = true)]
+    async fn an_expired_lightning_bolt_is_removed_from_the_next_published_snapshot() {
+        let strike = crate::lightning::Strike {
+            pos: BlockPos::new(0, 1, 0),
+            visual_only: true,
+        };
+        let probe_world = ChunkWorld::new(-64, 384);
+        let mut probe = MobSim::new(&probe_world);
+        probe.spawn_lightning_bolts(
+            vec![strike],
+            &mut crate::mob_spawn::SpawnRng::new(crate::lightning::LIGHTNING_BOLT_SEED),
+        );
+        let mut probe_rng = crate::mob_spawn::SpawnRng::new(crate::lightning::LIGHTNING_BOLT_SEED);
+        let mut ticks_until_discard = 0usize;
+        while probe.lightning_bolt_count() != 0 {
+            probe.tick_lightning(Difficulty::Normal, &mut probe_rng);
+            ticks_until_discard += 1;
+            assert!(ticks_until_discard <= 40, "a bolt must expire within the bounded lifecycle");
+        }
+
+        let (mobs, out, block_entities) = handles();
+        mobs.with(|sim| {
+            sim.spawn_lightning_bolts(
+                vec![strike],
+                &mut crate::mob_spawn::SpawnRng::new(crate::lightning::LIGHTNING_BOLT_SEED),
+            );
+        });
+        let clock = Arc::new(TickClock::new());
+        let (world, block_tick_out, tick_area) = world_tick_args();
+        tokio::spawn(run_tick_loop(
+            mobs.clone(),
+            out.clone(),
+            block_entities,
+            Arc::clone(&clock),
+            world,
+            block_tick_out,
+            tick_area,
+            ExplosionFeed::default(),
+            crate::region_source::ScheduledTickHandle::default(),
+            crate::tick_area::TickFollow::default(),
+        ));
+        tokio::task::yield_now().await;
+
+        let is_bolt = |snapshot: &crate::protocol::EntitySnapshot| {
+            snapshot.entity_type.to_string() == crate::lightning::LIGHTNING_BOLT
+        };
+        assert_eq!(out.snapshots().iter().filter(|snapshot| is_bolt(snapshot)).count(), 1);
+        for _ in 0..ticks_until_discard {
+            tokio::time::advance(TICK_PERIOD).await;
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(mobs.with(|sim| sim.lightning_bolt_count()), 0);
+        assert_eq!(
+            out.snapshots().iter().filter(|snapshot| is_bolt(snapshot)).count(),
+            0,
+            "the same end-of-tick snapshot that removes the sidecar must remove the client-visible bolt"
+        );
+    }
+
     /// Gate for wiring through the **production** loop, not at
     /// `SleepState` directly (its arithmetic is already pinned by
     /// `crate::sleep`'s own tests): a singleplayer-shaped vote — nobody calls
@@ -5467,12 +5590,7 @@ mod tests {
         let scheduled = crate::region_source::ScheduledTickHandle::default();
         // Due at tick 1, which is the first tick the loop drains.
         scheduled.with(|queues| {
-            queues.block.schedule(
-                pos,
-                crate::fire::TICK_FIRE.to_owned(),
-                1,
-                TickPriority::Normal,
-            );
+            queues.block.schedule(pos, ScheduledTickKind::Fire, 1, TickPriority::Normal);
         });
         let feed = BlockTickFeed::default();
         let (mobs, out, block_entities) = handles();
@@ -5621,12 +5739,7 @@ mod tests {
         let world = ColumnBackedWorld::with(&[(pos, "minecraft:dispenser[facing=east,triggered=true]")]);
         let scheduled = crate::region_source::ScheduledTickHandle::default();
         scheduled.with(|queues| {
-            queues.block.schedule(
-                pos,
-                crate::redstone_dispenser::TICK_DISPENSER_FIRE.to_owned(),
-                1,
-                TickPriority::Normal,
-            );
+            queues.block.schedule(pos, ScheduledTickKind::DispenserFire, 1, TickPriority::Normal);
         });
         let feed = BlockTickFeed::default();
         let (mobs, out, block_entities) = handles();
@@ -5817,12 +5930,7 @@ mod tests {
         let world = ColumnBackedWorld::with(&[(pos, "minecraft:dispenser[facing=east,triggered=true]")]);
         let scheduled = crate::region_source::ScheduledTickHandle::default();
         scheduled.with(|queues| {
-            queues.block.schedule(
-                pos,
-                crate::redstone_dispenser::TICK_DISPENSER_FIRE.to_owned(),
-                1,
-                TickPriority::Normal,
-            );
+            queues.block.schedule(pos, ScheduledTickKind::DispenserFire, 1, TickPriority::Normal);
         });
         let feed = BlockTickFeed::default();
         let (mobs, out, block_entities) = handles();
@@ -5931,12 +6039,7 @@ mod tests {
         ]);
         let scheduled = crate::region_source::ScheduledTickHandle::default();
         scheduled.with(|queues| {
-            queues.block.schedule(
-                pos,
-                crate::redstone_dispenser::TICK_DISPENSER_FIRE.to_owned(),
-                1,
-                TickPriority::Normal,
-            );
+            queues.block.schedule(pos, ScheduledTickKind::DispenserFire, 1, TickPriority::Normal);
         });
         let feed = BlockTickFeed::default();
         let (mobs, out, block_entities) = handles();
@@ -6015,12 +6118,7 @@ mod tests {
         ]);
         let scheduled = crate::region_source::ScheduledTickHandle::default();
         scheduled.with(|queues| {
-            queues.block.schedule(
-                pos,
-                crate::redstone_dispenser::TICK_DISPENSER_FIRE.to_owned(),
-                1,
-                TickPriority::Normal,
-            );
+            queues.block.schedule(pos, ScheduledTickKind::DispenserFire, 1, TickPriority::Normal);
         });
         let feed = BlockTickFeed::default();
         let (mobs, out, block_entities) = handles();

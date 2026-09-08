@@ -103,8 +103,6 @@ use uuid::Uuid;
 // rather than trusting a literal id.
 #[cfg(test)]
 use lodestone_data::block_states::{block_name, properties};
-#[cfg(test)]
-use lodestone_world::PaletteKind;
 use lodestone_data::entity_type::EntityType;
 use lodestone_data::menus::{MenuId, menu_id};
 use lodestone_data::mob_effects::{MobEffectId, mob_effect_id, mob_effect_name_for};
@@ -3009,49 +3007,6 @@ fn initial_block_light_storage_sections(
     stored
 }
 
-/// End's initial light engine retains a vertical propagation corridor in the
-/// loaded footprint, not just the three sections adjacent to each non-air
-/// section. A terrain section seeds the block and sky layers, and propagation
-/// allocates the intervening empty sections from the lowest admitted non-air
-/// section through the one-section light apron above the highest one. An
-/// all-air footprint allocates no storage.
-fn initial_end_light_storage_sections(
-    center: &WorldChunkColumn,
-    neighbours: &[WorldChunkColumn],
-) -> Vec<bool> {
-    let mut lowest_non_air = None;
-    let mut highest_non_air = None;
-    for column in std::iter::once(center).chain(neighbours) {
-        for block_section in 0..column.section_count() {
-            if !column
-                .section(block_section)
-                .is_some_and(|section| !section.is_air_only())
-            {
-                continue;
-            }
-            lowest_non_air = Some(lowest_non_air.map_or(block_section, |lowest: usize| {
-                lowest.min(block_section)
-            }));
-            highest_non_air = Some(highest_non_air.map_or(block_section, |highest: usize| {
-                highest.max(block_section)
-            }));
-        }
-    }
-
-    let mut stored = vec![false; center.section_count() + 2];
-    let Some(highest_non_air) = highest_non_air else {
-        return stored;
-    };
-    let first = lowest_non_air.expect("End storage has a non-air section");
-    let last = highest_non_air
-        .saturating_add(2)
-        .min(stored.len().saturating_sub(1));
-    for section in first..=last {
-        stored[section] = true;
-    }
-    stored
-}
-
 /// Retains explicit zero block-light sections only where the light engine has
 /// allocated storage, eliding unallocated sections. Values are never touched:
 /// a non-uniform section carries a real source or propagation result even if
@@ -3115,11 +3070,8 @@ fn compute_served_initial_light(column: &WorldChunkColumn, dimension: Dimension)
         },
         initial_full_sky_sections(dimension),
     );
-    let block_light_storage = match dimension {
-        Dimension::Nether => Some(initial_block_light_storage_sections(column, &[])),
-        Dimension::End => Some(initial_end_light_storage_sections(column, &[])),
-        Dimension::Overworld => None,
-    };
+    let block_light_storage = (dimension == Dimension::Nether || dimension == Dimension::End)
+        .then(|| initial_block_light_storage_sections(column, &[]));
     normalize_initial_chunk_light(&mut light, dimension, block_light_storage.as_deref());
     light
 }
@@ -3213,11 +3165,8 @@ fn compute_served_initial_light_with_neighbours(
             *light.block_mut(section) = cardinal_light.block(section).clone();
         }
     }
-    let block_light_storage = match dimension {
-        Dimension::Nether => Some(initial_block_light_storage_sections(center, &neighbour_columns)),
-        Dimension::End => Some(initial_end_light_storage_sections(center, &neighbour_columns)),
-        Dimension::Overworld => None,
-    };
+    let block_light_storage = (dimension == Dimension::Nether || dimension == Dimension::End)
+        .then(|| initial_block_light_storage_sections(center, &neighbour_columns));
     normalize_initial_chunk_light(&mut light, dimension, block_light_storage.as_deref());
     light
 }
@@ -3661,10 +3610,6 @@ impl ChunkEncoder for V770ServerProtocol {
 const COMPRESSION_THRESHOLD: i32 = 256;
 
 impl ServerProtocol for V770ServerProtocol {
-    fn has_player_loaded_packet(&self) -> bool {
-        true
-    }
-
     fn decode(&self, state: lodestone_core::State, packet_id: i32, payload: &[u8]) -> ServerBound {
         use lodestone_core::State;
 
@@ -7958,9 +7903,10 @@ mod block_edit_tests {
 
     /// A generated End column has no persisted settlement snapshot in this
     /// direct source control. Its initial fallback must nevertheless use the
-    /// vertical storage corridor: the below-world apron stays absent, the
-    /// empty sections below the island remain represented, and the next section
-    /// above the admitted terrain is omitted.
+    /// sparse storage shape: the lower apron stays absent, the two full sky
+    /// sections above the island remain present, and the next section is
+    /// omitted. This is the negative control for accidentally applying the
+    /// Overworld one-section trim to End columns.
     #[test]
     fn end_generated_initial_fallback_keeps_storage_shape_without_snapshot() {
         use crate::packets::chunk::LevelChunkWithLight;
@@ -8003,51 +7949,12 @@ mod block_edit_tests {
         reader.ensure_empty().expect("no End packet trailing bytes");
 
         assert_eq!(packet.light.sky(0), &LightData::Missing);
-        for section in 1..=6 {
-            assert_ne!(packet.light.sky(section), &LightData::Missing);
-        }
+        assert_eq!(packet.light.sky(5), &LightData::Uniform(15));
+        assert_eq!(packet.light.sky(6), &LightData::Uniform(15));
         assert_eq!(packet.light.sky(7), &LightData::Missing);
         assert_eq!(packet.light.block(0), &LightData::Missing);
-        for section in 1..=6 {
-            assert_eq!(packet.light.block(section), &LightData::Uniform(0));
-        }
+        assert_eq!(packet.light.block(6), &LightData::Uniform(0));
         assert_eq!(packet.light.block(7), &LightData::Missing);
-    }
-
-    /// End initial storage is derived from admitted occupancy. A high
-    /// neighbour extends the same relative corridor, while a footprint with
-    /// no non-air section allocates nothing; neither result depends on a world
-    /// coordinate or a fixed section count.
-    #[test]
-    fn end_initial_storage_corridor_follows_admitted_occupancy() {
-        let column = || {
-            WorldChunkColumn::new(
-                0,
-                16,
-                PaletteKind::block_states(),
-                PaletteKind::biomes(),
-                0,
-                0,
-            )
-        };
-        let mut center = column();
-        center.set_block(8, 80, 8, 1);
-        let empty = column();
-        let storage = initial_end_light_storage_sections(&center, std::slice::from_ref(&empty));
-        assert!(!storage[0]);
-        assert!(storage[5..=7].iter().all(|&stored| stored));
-        assert!(storage[..5].iter().all(|&stored| !stored));
-        assert!(storage[8..].iter().all(|&stored| !stored));
-
-        let mut high_neighbour = empty.clone();
-        high_neighbour.set_block(8, 128, 8, 1);
-        let extended = initial_end_light_storage_sections(&center, &[high_neighbour]);
-        assert!(extended[5..=10].iter().all(|&stored| stored));
-        assert!(extended[..5].iter().all(|&stored| !stored));
-        assert!(extended[11..].iter().all(|&stored| !stored));
-
-        let all_air = initial_end_light_storage_sections(&empty, &[]);
-        assert!(all_air.iter().all(|&stored| !stored));
     }
 
     /// End's initial path must actually consume the supplied east column. The

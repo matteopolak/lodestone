@@ -2968,6 +2968,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tracing",
+ "url",
  "uuid",
  "web-sys",
 ]
@@ -3328,6 +3329,7 @@ dependencies = [
  "criterion",
  "lodestone-testsupport",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -3454,6 +3456,7 @@ dependencies = [
  "lodestone-v26-2",
  "lodestone-world",
  "lodestone-worldgen",
+ "rayon",
  "reqwest",
  "rsa",
  "serde",
@@ -3464,6 +3467,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
 ]
@@ -3645,7 +3649,6 @@ dependencies = [
  "lodestone-client",
  "lodestone-core",
  "lodestone-data",
- "lodestone-ecs",
  "lodestone-macros",
  "lodestone-model",
  "lodestone-net",
@@ -3667,7 +3670,6 @@ dependencies = [
  "lodestone-client",
  "lodestone-core",
  "lodestone-data",
- "lodestone-ecs",
  "lodestone-macros",
  "lodestone-model",
  "lodestone-net",
@@ -3689,7 +3691,6 @@ dependencies = [
  "lodestone-client",
  "lodestone-core",
  "lodestone-data",
- "lodestone-ecs",
  "lodestone-macros",
  "lodestone-model",
  "lodestone-net",
@@ -3711,7 +3712,6 @@ dependencies = [
  "lodestone-client",
  "lodestone-core",
  "lodestone-data",
- "lodestone-ecs",
  "lodestone-macros",
  "lodestone-model",
  "lodestone-net",
@@ -3730,11 +3730,9 @@ dependencies = [
 name = "lodestone-v1-20-6"
 version = "0.1.0"
 dependencies = [
- "bevy_ecs",
  "lodestone-client",
  "lodestone-core",
  "lodestone-data",
- "lodestone-ecs",
  "lodestone-macros",
  "lodestone-model",
  "lodestone-net",
@@ -3753,11 +3751,9 @@ dependencies = [
 name = "lodestone-v1-21-11"
 version = "0.1.0"
 dependencies = [
- "bevy_ecs",
  "lodestone-client",
  "lodestone-core",
  "lodestone-data",
- "lodestone-ecs",
  "lodestone-macros",
  "lodestone-model",
  "lodestone-net",
@@ -3777,13 +3773,11 @@ dependencies = [
 name = "lodestone-v1-7"
 version = "0.1.0"
 dependencies = [
- "bevy_ecs",
  "flate2",
  "lodestone-canonical",
  "lodestone-client",
  "lodestone-core",
  "lodestone-data",
- "lodestone-ecs",
  "lodestone-macros",
  "lodestone-model",
  "lodestone-net",
@@ -3802,12 +3796,10 @@ dependencies = [
 name = "lodestone-v1-8"
 version = "0.1.0"
 dependencies = [
- "bevy_ecs",
  "lodestone-canonical",
  "lodestone-client",
  "lodestone-core",
  "lodestone-data",
- "lodestone-ecs",
  "lodestone-macros",
  "lodestone-model",
  "lodestone-net",
@@ -3830,7 +3822,6 @@ dependencies = [
  "lodestone-client",
  "lodestone-core",
  "lodestone-data",
- "lodestone-ecs",
  "lodestone-macros",
  "lodestone-model",
  "lodestone-net",
@@ -3898,15 +3889,20 @@ dependencies = [
  "lodestone-app",
  "lodestone-command",
  "lodestone-controller",
+ "lodestone-core",
+ "lodestone-data",
  "lodestone-ecs",
  "lodestone-model",
  "lodestone-physics",
+ "lodestone-server",
  "lodestone-shell",
  "lodestone-world",
  "serde",
  "thiserror 2.0.19",
+ "tokio",
  "toml",
  "tracing",
+ "uuid",
  "wasmtime",
  "wit-component",
 ]
@@ -3960,9 +3956,7 @@ dependencies = [
 name = "lodestone-worldgen-core"
 version = "0.1.0"
 dependencies = [
- "serde",
  "serde_json",
- "serde_path_to_error",
 ]
 
 [[package]]

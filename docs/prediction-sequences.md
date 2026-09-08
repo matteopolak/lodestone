@@ -2,42 +2,36 @@
 
 ## What it is
 
-`PredictionSequence` is the version-free identity attached to a client-side
-block placement. It preserves the protocol's signed VarInt bit pattern at the
-wire boundary while giving the placement ledger explicit wrapping order.
+`PredictionSequence` is the version-free identity attached to client-side block
+predictions. It keeps the protocol's signed VarInt representation at the wire
+boundary while giving placement and acknowledgement code a wrapping counter
+with explicit serial ordering.
 
 ## How it works
 
-`Placement` allocates the next typed sequence before constructing a
-`ClientAction::UseItemOn`. Each adapter that exposes a signed VarInt packet
-field converts the typed value with `as_wire()` at that packet boundary. The
-integrated server converts that field back, applies the authoritative
-interaction, emits its block updates, and then sends a `block_changed_ack`
-carrying the same sequence. The client applies those block updates first and
-retires predictions through serial-number ordering.
-
-The counter wraps across all 32 bits. A signed wire value is not invalid merely
-because it is negative; malformed or truncated packet bodies are rejected by
-the protocol decoder before they can reach the server consumer. Distances of
-exactly half the counter domain are intentionally ambiguous, so the client
-must keep fewer than half the possible predictions outstanding.
+The model stores the counter as `u32`; `from_wire` and `as_wire` reinterpret the
+same 32 bits as the protocol's `i32`. `next` wraps across the complete domain.
+Placement records the typed value for every optimistic placement, and the shell
+settles entries through `is_at_or_before`, which correctly handles a
+max-to-zero rollover. Serial distances of half the domain are intentionally
+ambiguous; the client cannot retain that many pending predictions.
 
 ## How to change it
 
-Keep conversion at the version adapter and protocol decoder. Extend the
-placement tests with an independently chosen wire value, a rollover case, and
-a malformed-body control whenever the packet shape changes. Test each adapter
-that carries the sequence, including the signed-bit-pattern boundary. Do not
-compare raw signed values in the reconciliation ledger.
+Keep integer conversion at protocol adapters and use the domain predicate for
+ledger comparisons. Do not restore signed `<=` comparisons or compare the raw
+wire values after rollover. Add controls in `lodestone-model` for any new
+boundary or ordering rule before changing the placement ledger.
 
 ## Configuration
 
 There are no runtime flags. `PredictionSequence::INITIAL` is zero, and each
-predictive placement allocates the next value before it is emitted.
+predictive action allocates its next value before being emitted.
 
 ## Dependencies
 
 The type lives in `lodestone-model`; `lodestone-game::placement` owns pending
-predictions; `lodestone-server` owns authoritative interaction and
-acknowledgement; and the version adapters perform packet encoding and
-decoding.
+predictions, `lodestone-game::mining` owns action allocation, and the shell
+settles the ledger after the model acknowledgement event reaches its network
+update fold. Version adapters only convert the typed value to and from their
+signed VarInt packet fields.

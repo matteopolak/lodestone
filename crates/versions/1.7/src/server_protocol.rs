@@ -21,13 +21,13 @@ use crate::packets::game::{
     ClientboundChat, ClientboundPositionLook, JoinGame, KeepAliveRequest, KeepAliveResponse,
     EntityAction, ServerboundArmAnimation, ServerboundChat, ServerboundFlying,
     ServerboundLook, ServerboundPosition, ServerboundPositionLook,
-    ServerboundCustomPayload, UpdateHealth,
+    ServerboundCustomPayload, UpdateHealth, UseEntity,
 };
 use crate::packets::entity::Animation;
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess};
 use crate::packets::settings::Settings;
-use crate::packets::window::ServerboundHeldItemSlot;
+use crate::packets::window::{ServerboundHeldItemSlot, ServerboundCloseWindow, WindowClick};
 use crate::packets::world::{BlockChange, BlockDig, BlockPlace};
 use crate::packets::position::PositionIbi;
 
@@ -415,8 +415,61 @@ impl ServerProtocol for V5ServerProtocol {
                     cursor: Vec3f::new(cursor_x, cursor_y, cursor_z),
                     // The wire pre-dates off-hand and prediction sequences.
                     hand: 0,
-                    sequence: lodestone_model::PredictionSequence::INITIAL,
+                    sequence: 0,
                 }
+            }
+            // Protocol 5's `use_entity` body is fixed-width and reverses the
+            // later mouse ordinals: `0` is attack and `1` is plain interact.
+            // There is no hand or sneak field in this era, so the bridge
+            // supplies the only honest values for the shared interaction
+            // consumer. The wire carries only the target id; the connection
+            // identifies the player that issued the action.
+            State::Play if packet_id == play::serverbound::USE_ENTITY => {
+                let Some(UseEntity { target, mouse }) = decode_full(payload) else {
+                    return ServerBound::Ignored;
+                };
+                match mouse {
+                    0 => ServerBound::Attack { entity_id: target },
+                    1 => ServerBound::InteractEntity {
+                        entity_id: target,
+                        hand: 0,
+                        using_secondary_action: false,
+                    },
+                    _ => ServerBound::Ignored,
+                }
+            }
+            State::Play if packet_id == play::serverbound::WINDOW_CLICK => {
+                let Some(WindowClick {
+                    window_id,
+                    slot,
+                    button,
+                    mode,
+                    item: _,
+                    action: _,
+                }) = decode_full(payload)
+                else {
+                    return ServerBound::Ignored;
+                };
+                if !(0..=6).contains(&mode) {
+                    return ServerBound::Ignored;
+                }
+                ServerBound::ContainerClicked {
+                    window_id: i32::from(window_id),
+                    state_id: 0,
+                    slot: i32::from(slot),
+                    button,
+                    click_type: i32::from(mode),
+                    changed_slots: Vec::new(),
+                    carried_item: None,
+                }
+            }
+            State::Play if packet_id == play::serverbound::CLOSE_WINDOW => {
+                decode_full::<ServerboundCloseWindow>(payload).map_or(
+                    ServerBound::Ignored,
+                    |close| ServerBound::ContainerClosed {
+                        window_id: i32::from(close.window_id),
+                    },
+                )
             }
             // Protocol 5 carries the sender id and an animation ordinal in
             // this request, but the host derives the sender from the
@@ -635,6 +688,68 @@ impl ServerProtocol for V5ServerProtocol {
         )
     }
 
+    fn encode_open_screen(&self, window_id: i32, menu: &str, title: &str) -> ServerDirective {
+        let Ok(window_id) = u8::try_from(window_id) else {
+            return ServerDirective::None;
+        };
+        let (inventory_type, slot_count) = match menu {
+            "minecraft:generic_9x3" => ("minecraft:chest", 27),
+            "minecraft:generic_3x3" => ("minecraft:dispenser", 9),
+            "minecraft:furnace" => ("minecraft:furnace", 3),
+            "minecraft:hopper" => ("minecraft:hopper", 5),
+            "minecraft:beacon" => ("minecraft:beacon", 1),
+            other => (other, 0),
+        };
+        send(
+            play::clientbound::OPEN_WINDOW,
+            &crate::packets::window::OpenWindow {
+                window_id,
+                inventory_type: inventory_type.to_owned(),
+                window_title: title.to_owned(),
+                slot_count,
+                use_provided_title: true,
+                entity_id: None,
+            },
+        )
+    }
+
+    fn encode_container_content(
+        &self,
+        window_id: i32,
+        _state_id: i32,
+        items: &[Option<lodestone_model::ItemStack>],
+        _carried: Option<&lodestone_model::ItemStack>,
+    ) -> ServerDirective {
+        let Ok(window_id) = u8::try_from(window_id) else {
+            return ServerDirective::None;
+        };
+        let items = items.iter().map(|item| legacy_slot(item.as_ref())).collect();
+        send(
+            play::clientbound::WINDOW_ITEMS,
+            &crate::packets::window::WindowItems { window_id, items },
+        )
+    }
+
+    fn encode_container_slot(
+        &self,
+        window_id: i32,
+        _state_id: i32,
+        slot: i32,
+        item: Option<&lodestone_model::ItemStack>,
+    ) -> ServerDirective {
+        let (Ok(window_id), Ok(slot)) = (i8::try_from(window_id), i16::try_from(slot)) else {
+            return ServerDirective::None;
+        };
+        send(
+            play::clientbound::SET_SLOT,
+            &crate::packets::window::SetSlot {
+                window_id,
+                slot,
+                item: legacy_slot(item),
+            },
+        )
+    }
+
     fn encode_animate(&self, entity_id: i32, action: u8) -> ServerDirective {
         // Protocol 5 predates the off-hand. The shared server uses action 3
         // for an off-hand swing, but this era's client interprets that byte as
@@ -650,5 +765,29 @@ impl ServerProtocol for V5ServerProtocol {
     fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
         self.try_encode_block_update(x, y, z, state)
             .expect("call try_encode_block_update to handle an unrepresentable protocol-5 state")
+    }
+}
+
+fn legacy_slot(item: Option<&lodestone_model::ItemStack>) -> crate::packets::slot::Slot {
+    let Some(item) = item.filter(|item| item.count > 0) else {
+        return crate::packets::slot::Slot::default();
+    };
+    if item.item.namespace() != "minecraft" {
+        return crate::packets::slot::Slot::default();
+    }
+    let Some((id, _)) = crate::generated_item_types::ITEM_TYPES
+        .iter()
+        .find(|(_, name)| *name == item.item.path())
+    else {
+        return crate::packets::slot::Slot::default();
+    };
+    let (Ok(id), Ok(count)) = (i16::try_from(*id), i8::try_from(item.count)) else {
+        return crate::packets::slot::Slot::default();
+    };
+    crate::packets::slot::Slot {
+        id: Some(id),
+        count,
+        damage: 0,
+        nbt_bytes: None,
     }
 }

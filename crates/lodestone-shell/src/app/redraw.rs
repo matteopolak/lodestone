@@ -1329,11 +1329,8 @@ impl WindowApp {
                 && held_for_scoping
                     .as_ref()
                     .is_some_and(|loc| loc.namespace() == "minecraft" && loc.path() == "spyglass"),
-            // No potion-effect-duration tracker exists anywhere in this
-            // codebase yet, so `0.0` is still the honest answer for nausea —
-            // a placeholder pretending to work would be worse. See
-            // `docs/screen-overlays.md`'s "Confusion and portal" section.
-            nausea_intensity: 0.0,
+            nausea_intensity: self.sim.nausea_intensity(),
+            vision_obscuration: self.sim.vision_obscuration(),
             // The portal overlay's alpha, live: `Sim::portal_effect_intensity`
             // is vanilla's `Mth.lerp(partialTicks, oPortalEffectIntensity,
             // portalEffectIntensity)`, ramped +0.0125/tick while the player's
@@ -1721,12 +1718,6 @@ impl WindowApp {
         // Rows, header and footer together — the whole `PlayerTabOverlay` frame.
         // Read only while the overlay is up, because it is a world clone.
         let tab_view = self.tab_held.then(|| self.sim.tab_list_view());
-        // Tab-list heads use the same asynchronous, URL-keyed cache as world
-        // player skins. Start requests during frame gather; the HUD only pulls
-        // already-decoded sheets, so a slow profile host can never stall draw.
-        crate::remote_skins::request_all(tab_view.iter().flat_map(|view| {
-            view.rows.iter().filter_map(|row| row.head.skin_url.as_deref())
-        }));
         let health = self.sim.health();
         let food = self.sim.food();
         // Vanilla's `canHurtPlayer()` — the single gate `extractPlayerHealth` sits
@@ -1946,6 +1937,11 @@ impl WindowApp {
         hud_frame.boss_bars = &boss_bars;
         hud_frame.can_hurt_player = can_hurt_player;
         hud_frame.health = health;
+        // Health Boost arrives as the local player's ordinary
+        // `minecraft:max_health` attribute update. Keep the ceiling separate
+        // from current health: a hurt boosted player can be below 20 yet still
+        // needs the second heart row.
+        hud_frame.max_health = self.sim.max_health();
         // The armour row. `Sim::armour_value` is `floor(minecraft:armor)` off the
         // local player's folded attribute snapshot — matching vanilla's own
         // armor-value accessor — so equipment reaches the bar the way it
@@ -2577,9 +2573,10 @@ impl WindowApp {
         }
 
         // The terrain-loading half. `Screen::Connecting` covers the
-        // handshake/configuration phase as a full frame (see `frame_for`); this
-        // block covers the moments after login while the player's own chunk is
-        // still streaming in. Drawn as an overlay over the still-rendering
+        // handshake/configuration phase as a full frame (and the menu path
+        // enriches it with singleplayer progress when available); this block
+        // covers the moments after login while the player's own chunk is still
+        // streaming in. Drawn as an overlay over the still-rendering
         // world rather than replacing it, for the same reason Paused/Death are
         // overlays: chunks must keep meshing and uploading behind the text —
         // the very thing a full-frame `owns_frame` screen would stop. It is

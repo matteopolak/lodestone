@@ -47,12 +47,17 @@
 //! plate rather than drawing an empty gap. Do not synthesise either to fill
 //! space.
 //!
-//! The overlay reserves an 8×8 face slot for every row. The head source is
-//! resolved here from the same profile property used by the world player
-//! renderer, while the HUD owns the GPU-side upload and batching. Keeping the
-//! network/cache boundary out of the draw builder means an unresolved profile
-//! immediately shows its deterministic packaged fallback and never blocks the
-//! frame waiting for a texture fetch.
+//! **This client draws no player head, and that is vanilla's own behaviour on
+//! every server we can host.** Vanilla's own overlay render-state extract routine gates the
+//! 8×8 face on `showHead = this.minecraft.getConnection().onlineMode()`, which
+//! comes from the LOGIN packet's `onlineMode` field. Our own server writes
+//! `false` there (`v770`'s `server_protocol`), so vanilla joined to it would
+//! draw no head either, and the layout below — which reserves the 9 px only when
+//! [`TabListView::show_head`] is set — is exactly vanilla's no-head layout.
+//! Turning heads on needs two things this module cannot supply: the client-side
+//! decode of that `onlineMode` field, and a texture path in the HUD pass (the
+//! HUD has a colour pipeline and a single GUI-atlas sprite pipeline; a per-player
+//! skin needs a third).
 //!
 //! ## Dependencies
 //!
@@ -86,20 +91,6 @@ pub struct TabListRow {
     /// this font has no italic variant and a fabricated slant would be worse
     /// than the dimming alone.
     pub spectator: bool,
-    /// The 8×8 face and optional hat-layer source for this row.
-    pub head: TabListHead,
-}
-
-/// Texture source for a tab-list avatar.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TabListHead {
-    /// Remote skin URL, when the profile declared a usable texture. Fetching
-    /// is asynchronous; the HUD falls back until the remote sheet is cached.
-    pub skin_url: Option<String>,
-    /// Packaged UUID/name-derived sheet used while the remote sheet is absent.
-    pub fallback_sheet: &'static str,
-    /// Whether the profile's second skin layer is visible in the row.
-    pub show_hat: bool,
 }
 
 /// Everything the tab overlay draws for one frame.
@@ -118,7 +109,10 @@ pub struct TabListView {
     pub header: Vec<Vec<TextSpan>>,
     /// The server's footer, same shape and same rule.
     pub footer: Vec<Vec<TextSpan>>,
-    /// Whether each row reserves 9 px for an 8×8 player face.
+    /// Whether each row reserves 9 px for an 8×8 player face — vanilla's
+    /// `showHead = connection.onlineMode()`. Always `false` here; see the module
+    /// doc for what it would take to turn on, and why an offline-mode server
+    /// makes `false` the *correct* answer rather than a placeholder.
     pub show_head: bool,
 }
 
@@ -182,36 +176,15 @@ pub fn tab_list_view(
                 .to_spans(),
             ping_sprite: ping_sprite(entry.latency),
             spectator: entry.game_mode == lodestone_model::GameMode::Spectator,
-            head: head_for_entry(entry),
         })
         .collect();
     TabListView {
         rows,
         header: banner_lines(tab_list.header.as_ref(), translate),
         footer: banner_lines(tab_list.footer.as_ref(), translate),
-        show_head: true,
-    }
-}
-
-/// Resolve one row's avatar without opening a socket. The profile decoder is
-/// memoised by [`crate::remote_skins`], and only the returned URL is handed to
-/// the frame gather's idempotent asynchronous request path.
-#[must_use]
-fn head_for_entry(entry: &PlayerListEntry) -> TabListHead {
-    let skin = crate::remote_skins::skin_for_profile(&entry.profile);
-    let fallback_sheet = skin.as_ref().map_or_else(
-        || {
-            entry.profile.id.map_or(
-                lodestone_assets::skin::default_skin().texture,
-                crate::remote_skins::default_sheet_for_uuid,
-            )
-        },
-        |skin| skin.default_sheet,
-    );
-    TabListHead {
-        skin_url: skin.map(|skin| skin.url),
-        fallback_sheet,
-        show_hat: entry.show_hat,
+        // See the module doc: vanilla's own gate is `onlineMode()`, which our
+        // server reports as `false` and our client does not yet decode.
+        show_head: false,
     }
 }
 
@@ -302,21 +275,6 @@ mod tests {
             .iter()
             .map(|row| crate::overlay::spans_text(&row.name))
             .collect()
-    }
-
-    #[test]
-    fn heads_use_uuid_default_and_preserve_hat_visibility() {
-        let id = Uuid::from_u128(1);
-        let mut player = PlayerListEntry::new(GameProfile::new(id, "Alice"));
-        player.show_hat = false;
-        let mut tabs = TabList::new();
-        tabs.insert(player);
-        let view = tab_list_view(&tabs, None, &no_tr);
-        assert!(view.show_head);
-        assert_eq!(view.rows.len(), 1);
-        assert_eq!(view.rows[0].head.skin_url, None);
-        assert_eq!(view.rows[0].head.fallback_sheet, "entity/player/slim/ari");
-        assert!(!view.rows[0].head.show_hat);
     }
 
     #[test]

@@ -66,7 +66,9 @@ use lodestone_client::{ClientBuilder, ClientEvent, LoginProfile, ServerAddress};
 use lodestone_ecs::GameTick;
 use lodestone_ecs::ecs::entity::Entity;
 use lodestone_ecs::parking_lot::RwLock;
-use lodestone_event_logger::{EventLog, EventLoggerPlugin};
+use lodestone_event_logger::{
+    EventLog, EventLoggerPlugin, OutboundPacketLog, OutboundPacketLoggerPlugin,
+};
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
 
 /// Protocol 776 — MC 26.2, the `v26-2` family. The **only** family that
@@ -161,6 +163,13 @@ fn profile() -> LoginProfile {
 /// control built out of a second, parallel setup would be free to drift into
 /// proving something other than "registration is what causes observation".
 fn compose(logger: Option<EventLoggerPlugin>) -> (lodestone_ecs::EcsHandle, Entity) {
+    compose_with_outbound(logger, None)
+}
+
+fn compose_with_outbound(
+    logger: Option<EventLoggerPlugin>,
+    outbound: Option<OutboundPacketLoggerPlugin>,
+) -> (lodestone_ecs::EcsHandle, Entity) {
     // The six version-free plugins production composes. `lodestone_shell::sim::
     // Sim::client_app` is this plus four shell-local, render-shaped ones, none
     // of which the event bus touches.
@@ -173,6 +182,9 @@ fn compose(logger: Option<EventLoggerPlugin>) -> (lodestone_ecs::EcsHandle, Enti
     // the whole opt-in mechanism, so it must happen before the `World` is taken.
     if let Some(logger) = logger {
         app.add_plugins(logger);
+    }
+    if let Some(outbound) = outbound {
+        app.add_plugins(outbound);
     }
 
     // After every `add_plugins`, per `spawn_session`'s own contract.
@@ -335,6 +347,29 @@ async fn an_unregistered_logger_observes_nothing_from_the_same_real_session() {
         log.events().is_empty(),
         "an unregistered plugin must observe nothing, but its log holds {:#?}",
         log.events()
+    );
+}
+
+/// The outbound observer reaches the same production driver write path as the
+/// inbound logger. A real join necessarily emits adapter-encoded packets (the
+/// configuration handshake and client-loaded signal), so an empty log would
+/// prove that the consumer was never reached rather than that no traffic was
+/// produced.
+#[tokio::test]
+async fn a_registered_outbound_logger_observes_real_encoded_packets() {
+    let (plugin, log): (OutboundPacketLoggerPlugin, OutboundPacketLog) =
+        OutboundPacketLoggerPlugin::new();
+    let (ecs, session) = compose_with_outbound(None, Some(plugin));
+
+    let oracle = run_session(&ecs, session).await;
+    assert!(!oracle.is_empty() && play_reached(&oracle));
+    assert!(
+        !log.is_empty(),
+        "a real joined session must reach the outbound observer consumer"
+    );
+    assert!(
+        log.packets().iter().any(|packet| !packet.payload.is_empty()),
+        "at least one observed adapter packet must carry a body"
     );
 }
 

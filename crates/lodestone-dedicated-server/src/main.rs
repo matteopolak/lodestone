@@ -20,6 +20,7 @@
 //! `directory` defaults to the current directory. It is created if missing.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncBufReadExt;
 
@@ -35,6 +36,10 @@ use lodestone_server::ServerProtocol;
 use lodestone_server::WorldType;
 use lodestone_server::dimension::Dimension;
 use lodestone_server::ecs::ServerApp;
+use lodestone_server::plugin_commands::{
+    ServerCommandOwner, ServerCommandOutcome, ServerCommandRegistry, ServerPermissionDefault,
+    ServerPermissions, ServerPluginCommand,
+};
 use lodestone_server::{eula, parse_seed};
 
 #[cfg(feature = "jvm")]
@@ -67,6 +72,46 @@ const MAX_SIM_RADIUS: i32 = 2;
 /// optional plugin.
 fn dedicated_server_app() -> ServerApp {
     ServerApp::bootstrap()
+}
+
+/// Builds the command sink used by the real dedicated listeners.
+///
+/// The registry is empty until a compiled-in server plugin registers commands,
+/// but installing the server-owned sink here keeps the production path ready
+/// for those registrations and preserves the fail-closed unknown-command
+/// behaviour in a stock binary.
+fn dedicated_command_dispatch() -> CommandDispatch {
+    dedicated_command_owner().dispatch()
+}
+
+/// The compiled-in command tree used by the shipped dedicated binary.
+///
+/// `info` is available to every caller; `admin` demonstrates the same
+/// caller-specific permission predicate used by future server plugins.
+fn dedicated_command_owner() -> ServerCommandOwner {
+    let mut registry = ServerCommandRegistry::default();
+    let mut command = ServerPluginCommand::new("lodestone");
+    let root = command.root();
+    let info = command.literal(root, "info");
+    command.on_execute(info, |_| {
+        ServerCommandOutcome::Ran {
+            feedback: vec!["Lodestone dedicated server".to_string()],
+            result: 1,
+        }
+    });
+    let admin = command.literal(root, "admin");
+    command.require_permission(admin, "lodestone.admin");
+    command.on_execute(admin, |_| {
+        ServerCommandOutcome::Ran {
+            feedback: vec!["Lodestone administration".to_string()],
+            result: 1,
+        }
+    });
+    registry.register(command).expect("the compiled-in lodestone command must be unique");
+
+    let mut permissions = ServerPermissions::default();
+    permissions.declare("lodestone.admin", ServerPermissionDefault::Op);
+    Arc::new(registry).into_owner(Arc::new(permissions))
 }
 
 /// Opens the persistent world through the same application-injection leaf an
@@ -107,7 +152,7 @@ where
         0,
         view_radius,
         AUTOSAVE_INTERVAL,
-        CommandDispatch::none(),
+        dedicated_command_dispatch(),
         server_app,
     )
 }
@@ -313,7 +358,7 @@ async fn main() {
     let addr = (bind_ip.as_str(), props.server_port);
     let publish_config = PublishConfig {
         access: access.clone(),
-        commands: CommandDispatch::none(),
+        commands: dedicated_command_dispatch(),
         online_mode,
     };
     let bound = match server.publish_with_config(addr, None, publish_config).await {
@@ -334,7 +379,7 @@ async fn main() {
                 props.rcon_port,
             );
             let players = server.players().cloned();
-            let config = RconConfig::new(rcon_addr, props.rcon_password.clone(), CommandDispatch::none())
+            let config = RconConfig::new(rcon_addr, props.rcon_password.clone(), dedicated_command_dispatch())
                 .with_world(server.world_state().clone(), players);
             match server.start_rcon(config) {
                 Ok(addr) => tracing::info!("RCON listening on {addr}"),
@@ -593,6 +638,40 @@ mod tests {
     fn launch_arguments_reject_ambiguous_directories() {
         let error = parse_launch_args(["first", "second"]).unwrap_err();
         assert!(error.contains("one server directory"));
+    }
+
+    #[test]
+    fn dedicated_command_owner_installs_the_server_registry_sink() {
+        let owner = dedicated_command_owner();
+        let dispatch = owner.dispatch();
+        let caller = lodestone_server::CommandCaller::new(uuid::Uuid::nil(), "tester");
+        assert!(dispatch.is_installed());
+        assert_eq!(dispatch.run(&caller, "lodestone info"), lodestone_server::CommandResponse::Ran {
+            feedback: vec!["Lodestone dedicated server".to_string()],
+        });
+        assert_eq!(dispatch.run(&caller, "not-registered"), lodestone_server::CommandResponse::refused(
+            lodestone_server::UNKNOWN_COMMAND,
+        ));
+    }
+
+    #[test]
+    fn dedicated_command_tree_filters_suggestions_and_execution_by_caller_level() {
+        let owner = dedicated_command_owner();
+        let player = lodestone_server::CommandCaller::new(uuid::Uuid::from_u128(1), "player");
+        let operator = lodestone_server::CommandCaller::with_permission_level(
+            uuid::Uuid::from_u128(2),
+            "operator",
+            2,
+        );
+        assert_eq!(owner.suggest(&player, "lodestone "), vec!["info"]);
+        assert_eq!(owner.suggest(&operator, "lodestone "), vec!["admin", "info"]);
+        assert!(matches!(
+            owner.dispatch().run(&player, "lodestone admin"),
+            lodestone_server::CommandResponse::Refused { .. }
+        ));
+        assert_eq!(owner.dispatch().run(&operator, "lodestone admin"), lodestone_server::CommandResponse::Ran {
+            feedback: vec!["Lodestone administration".to_string()],
+        });
     }
 
     #[tokio::test(start_paused = true)]

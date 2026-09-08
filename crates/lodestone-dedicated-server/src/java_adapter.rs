@@ -36,6 +36,29 @@ fn propose_resident_block_state(
     })
 }
 
+/// Applies one Java-requested block batch through the same checked proposal
+/// path, preserving the adjudicator's resolved writes and notification policy.
+fn propose_resident_block_state_batch(
+    server: &IntegratedServer,
+    writes: Vec<(
+        lodestone_model::BlockPos,
+        lodestone_data::block_states::StateId,
+    )>,
+    notify_listeners: bool,
+) -> Result<(
+    Vec<(
+        lodestone_model::BlockPos,
+        lodestone_data::block_states::StateId,
+    )>,
+    bool,
+), String> {
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current()
+            .block_on(server.set_resident_block_states_proposed(writes, notify_listeners))
+            .map_err(|refusal| format!("resident block batch proposal refused: {refusal}"))
+    })
+}
+
 const MAX_PENDING_BLOCK_CHANGE_EVENTS: usize = 64;
 const MAX_PENDING_PLAYER_LIFECYCLE_EVENTS: usize = 64;
 
@@ -358,19 +381,23 @@ impl JavaAdapter {
                             "block state id {} is outside this server's state table",
                             write.state_id,
                         ))?;
-                    server.resident_block_state_id(write.x, write.y, write.z)
-                        .ok_or_else(|| format!(
-                            "primary-world block unavailable at {},{},{}",
-                            write.x, write.y, write.z,
-                        ))?;
-                    Ok((write, state))
+                    Ok((lodestone_model::BlockPos::new(write.x, write.y, write.z), state))
                 })
                 .collect::<Result<Vec<_>, String>>()?;
-            for (write, state) in &writes {
-                server.set_resident_block_state_id(write.x, write.y, write.z, *state)?;
-            }
+            let (writes, notify_listeners) = propose_resident_block_state_batch(
+                server,
+                writes,
+                notify_listeners,
+            )?;
             if notify_listeners {
-                self.pending_block_change_events.extend(writes.into_iter().map(|(write, _)| write));
+                self.pending_block_change_events.extend(writes.into_iter().map(|(pos, state)| {
+                    BlockStateWrite {
+                        x: pos.x,
+                        y: pos.y,
+                        z: pos.z,
+                        state_id: state.raw(),
+                    }
+                }));
             }
             Ok(())
         });
@@ -381,9 +408,8 @@ impl JavaAdapter {
                 .ok_or_else(|| format!("block state id {} is outside this server's state table", write.state_id))?;
             // Scalar Java mutations use the checked server proposal path so
             // native-plugin adjudication can deny or replace them before this
-            // host reports success to the worker. The batch path above keeps
-            // its all-or-nothing preflight contract until a batch proposal
-            // vocabulary exists; it must not be emulated as several scalar
+            // host reports success to the worker. Batches use the matching
+            // batch action above; they must not be emulated as several scalar
             // proposals because that could partially apply a rejected batch.
             propose_resident_block_state(server, write, state)?;
             self.pending_block_change_events.push_back(write);

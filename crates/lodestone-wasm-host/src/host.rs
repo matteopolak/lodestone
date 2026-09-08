@@ -39,7 +39,9 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use wasmtime::component::{Component, Linker, TypedFunc};
@@ -78,7 +80,7 @@ pub use crate::bindings::lodestone::plugin::types::{
 /// manifest must declare it; anything else is a load-time rejection.
 ///
 /// The WIT world is a named, versioned unit, so "a guest built against
-/// `lodestone:plugin@0.27.0`" is a thing the host can *detect* rather than
+/// `lodestone:plugin@0.2.0`" is a thing the host can *detect* rather than
 /// discover as a mysterious trap.
 pub const ABI_WORLD: &str = "lodestone:plugin@0.27.0";
 
@@ -101,9 +103,70 @@ pub const DEFAULT_MEMORY_LIMIT: usize = 32 * 1024 * 1024;
 /// larger scan must spread it across ticks, keeping the host tick cooperative.
 pub const MAX_BLOCK_SNAPSHOT_POSITIONS: usize = 128;
 
+/// Maximum size of one file a plugin can write through the persisted-data
+/// capability. Persistent state is intentionally made up of small records; a
+/// plugin that needs a larger dataset should use a native integration rather
+/// than turning the plugin directory into an unbounded blob store.
+pub const MAX_PLUGIN_FILE_BYTES: usize = 1024 * 1024;
+
 /// How many *core* wasm instances one plugin may create. See the comment at the
 /// `StoreLimitsBuilder` call site for why this is not 1.
 const MAX_CORE_INSTANCES_PER_PLUGIN: usize = 32;
+
+static NEXT_ATOMIC_WRITE_ID: AtomicU64 = AtomicU64::new(0);
+
+fn valid_filesystem_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn remove_file_if_present(path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("{}: {error}", path.display())),
+    }
+}
+
+fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| format!("{} has no file name", path.display()))?
+        .to_string_lossy();
+    let temp = parent.join(format!(
+        ".{file_name}.tmp-{}-{}",
+        std::process::id(),
+        NEXT_ATOMIC_WRITE_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|error| format!("{}: {error}", temp.display()))?;
+        file.write_all(contents)
+            .map_err(|error| format!("{}: {error}", temp.display()))?;
+        file.sync_all()
+            .map_err(|error| format!("{}: {error}", temp.display()))?;
+        std::fs::rename(&temp, path)
+            .map_err(|error| format!("{} -> {}: {error}", temp.display(), path.display()))?;
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("{}: {error}", parent.display()))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
 
 #[derive(Debug, Clone, Copy)]
 struct ScheduledTask {
@@ -173,19 +236,20 @@ pub enum HostError {
         expected: String,
     },
     #[error(
-        "plugin `{name}` requests the privileged version broker but does not declare a \
-         [version-lock] identity"
+        "plugin `{name}` requests capabilities [{missing}] that host policy does not grant \
+         (granted: [{granted}])"
     )]
-    VersionBrokerLockMissing { name: String },
+    CapabilityDenied {
+        name: String,
+        missing: String,
+        granted: String,
+    },
     #[error(
-        "plugin `{name}` requests the privileged version broker but no version-specific \
-         source is configured"
+        "plugin `{name}` requests the version broker but no broker identity is declared or configured"
     )]
     VersionBrokerUnavailable { name: String },
     #[error(
-        "plugin `{name}` requires WASM version broker family={required_family} \
-         protocol={required_protocol} ABI={required_abi}, but host provides \
-         family={actual_family} protocol={actual_protocol} ABI={actual_abi}"
+        "plugin `{name}` requires WASM version broker family={required_family} protocol={required_protocol} ABI={required_abi}, but host provides family={actual_family} protocol={actual_protocol} ABI={actual_abi}"
     )]
     VersionBrokerMismatch {
         name: String,
@@ -196,21 +260,16 @@ pub enum HostError {
         actual_protocol: i32,
         actual_abi: String,
     },
-    #[error(
-        "plugin `{name}` requests capabilities [{missing}] that host policy does not grant \
-         (granted: [{granted}])"
-    )]
-    CapabilityDenied {
-        name: String,
-        missing: String,
-        granted: String,
-    },
     #[error("plugin `{name}` declared invalid command `{command}`: {reason}")]
     InvalidCommandSpec {
         name: String,
         command: String,
         reason: &'static str,
     },
+    #[error("plugin `{name}` has an unsafe filesystem name; use only ASCII letters, digits, `.`, `_`, or `-`")]
+    InvalidFilesystemName { name: String },
+    #[error("plugin `{plugin}` filesystem root: {message}")]
+    Filesystem { plugin: String, message: String },
 }
 
 /// Either half of loading a plugin from a manifest can fail, and the two halves have
@@ -343,17 +402,17 @@ pub struct GuestState {
     /// Every `filesystem-write.write-file` call that reached the host, in order,
     /// with the copied bytes supplied by the guest.
     pub(crate) fs_writes: Vec<(String, Vec<u8>)>,
-    /// Reads and writes are additionally confined to this subtree when their
-    /// respective capabilities are granted. `None` refuses both, while still
-    /// recording attempts.
+    /// Reads and writes are additionally confined to this plugin's subtree when
+    /// their respective capabilities are granted. `None` refuses both, while
+    /// still recording attempts.
     fs_root: Option<PathBuf>,
+    /// The selected version-specific broker. Every response is copied into
+    /// generated WIT records before guest code sees it.
+    version_broker: Option<Arc<dyn VersionBroker>>,
     /// The current client chunk store, installed by the conductor before a guest
     /// callback. The guest never receives this handle: [`world_snapshot::Host`] copies a
     /// bounded result under its lock and drops the guard before returning.
     chunk_world: Option<ChunkWorld>,
-    /// The selected version-specific broker. Only owned descriptor/value data
-    /// is copied out by the import implementation below.
-    version_broker: Option<Arc<dyn VersionBroker>>,
     current_tick: u64,
     next_task_id: types::TaskId,
     scheduled_tasks: Vec<ScheduledTask>,
@@ -405,6 +464,31 @@ impl logging::Host for GuestState {
     }
 }
 
+impl version_broker::Host for GuestState {
+    fn get_descriptor(&mut self) -> version_broker::Descriptor {
+        let descriptor = self
+            .version_broker
+            .as_ref()
+            .expect("version broker is linked only when configured")
+            .descriptor();
+        version_broker::Descriptor {
+            family: descriptor.family().to_owned(),
+            protocol: descriptor.protocol(),
+            abi: descriptor.abi().to_owned(),
+        }
+    }
+
+    fn lookup(&mut self, key: String) -> Option<version_broker::Value> {
+        self.version_broker
+            .as_ref()
+            .and_then(|broker| broker.lookup(&key))
+            .map(|record| version_broker::Value {
+                key: record.key().to_owned(),
+                value: record.value().to_owned(),
+            })
+    }
+}
+
 impl filesystem::Host for GuestState {
     /// Record first, decide second.
     ///
@@ -441,17 +525,33 @@ impl filesystem::Host for GuestState {
 impl filesystem_write::Host for GuestState {
     /// Record first, decide second. A write is confined to the configured root
     /// and cannot create a missing parent directory, so a plugin cannot use this
-    /// capability to grow an arbitrary directory tree.
+    /// capability to grow an arbitrary directory tree. Non-empty writes are
+    /// bounded and replaced atomically; an empty write is the explicit delete
+    /// operation because the ABI predates a separate delete import.
     fn write_file(&mut self, path: String, contents: Vec<u8>) -> Result<(), String> {
         self.fs_writes.push((path.clone(), contents.clone()));
+        if contents.len() > MAX_PLUGIN_FILE_BYTES {
+            return Err(format!(
+                "{} is {} bytes; the per-file limit is {MAX_PLUGIN_FILE_BYTES}",
+                path,
+                contents.len()
+            ));
+        }
+        let target = self.filesystem_target(&path)?;
+        if contents.is_empty() {
+            remove_file_if_present(&target)
+        } else {
+            atomic_write(&target, &contents)
+        }
+    }
+}
+
+impl GuestState {
+    fn filesystem_target(&self, path: &str) -> Result<PathBuf, String> {
         let Some(root) = self.fs_root.as_ref() else {
             return Err("no filesystem root is configured for this plugin".to_owned());
         };
-
-        let root_resolved = root
-            .canonicalize()
-            .map_err(|e| format!("{}: {e}", root.display()))?;
-        let candidate = root_resolved.join(path.trim_start_matches('/'));
+        let candidate = root.join(path.trim_start_matches('/'));
         let parent = candidate.parent().ok_or_else(|| {
             format!(
                 "{} does not name a file inside the filesystem root",
@@ -461,7 +561,7 @@ impl filesystem_write::Host for GuestState {
         let parent_resolved = parent
             .canonicalize()
             .map_err(|e| format!("{}: {e}", parent.display()))?;
-        if !parent_resolved.starts_with(&root_resolved) {
+        if !parent_resolved.starts_with(root) {
             return Err(format!(
                 "{} is outside this plugin's filesystem root",
                 parent_resolved.display()
@@ -480,11 +580,14 @@ impl filesystem_write::Host for GuestState {
         {
             return Err(format!("{} is a symbolic link", target.display()));
         }
-        std::fs::write(&target, contents).map_err(|e| format!("{}: {e}", target.display()))
+        Ok(target)
     }
-}
 
-impl GuestState {
+    fn delete_file(&mut self, path: &str) -> Result<(), String> {
+        let target = self.filesystem_target(path)?;
+        remove_file_if_present(&target)
+    }
+
     fn schedule(
         &mut self,
         delay_ticks: u32,
@@ -559,32 +662,6 @@ impl world_snapshot::Host for GuestState {
             .into_iter()
             .map(|position| snapshot.block_state_at(position.x, position.y, position.z))
             .collect())
-    }
-}
-
-impl version_broker::Host for GuestState {
-    fn get_descriptor(&mut self) -> version_broker::Descriptor {
-        let descriptor = self
-            .version_broker
-            .as_ref()
-            .expect("version broker is linked only when configured")
-            .descriptor();
-        version_broker::Descriptor {
-            family: descriptor.family().to_owned(),
-            protocol: descriptor.protocol(),
-            abi: descriptor.abi().to_owned(),
-        }
-    }
-
-    fn lookup(&mut self, key: String) -> Option<version_broker::Value> {
-        self.version_broker
-            .as_ref()
-            .expect("version broker is linked only when configured")
-            .lookup(&key)
-            .map(|record| version_broker::Value {
-                key: record.key().to_owned(),
-                value: record.value().to_owned(),
-            })
     }
 }
 
@@ -735,6 +812,21 @@ impl LoadedPlugin {
     #[must_use]
     pub fn attempted_file_writes(&self) -> &[(String, Vec<u8>)] {
         &self.store.data().fs_writes
+    }
+
+    /// Delete one file in this plugin's persistent data directory. The WIT
+    /// filesystem-write interface predates a separate delete operation, so a
+    /// guest requests deletion by writing an empty list; embedders can use this
+    /// method when removing data during plugin lifecycle handling.
+    pub fn delete_file(&mut self, path: &str) -> Result<(), String> {
+        self.store.data_mut().delete_file(path)
+    }
+
+    /// Apply the same bounded, confined, atomic write used by the guest import.
+    /// This is useful to an embedding that needs to migrate or seed plugin data
+    /// while retaining the host's lifecycle guarantees.
+    pub fn write_file(&mut self, path: &str, contents: Vec<u8>) -> Result<(), String> {
+        filesystem_write::Host::write_file(self.store.data_mut(), path.to_owned(), contents)
     }
 
     /// Drive one tick: hand the guest this tick's events, take back its actions.
@@ -925,10 +1017,7 @@ impl fmt::Debug for PluginHost {
             .field("fs_root", &self.fs_root)
             .field(
                 "version_broker",
-                &self
-                    .version_broker
-                    .as_ref()
-                    .map(|broker| broker.descriptor()),
+                &self.version_broker.as_ref().map(|broker| broker.descriptor()),
             )
             .field("plugins", &self.plugins)
             .finish()
@@ -989,22 +1078,80 @@ impl PluginHost {
         self
     }
 
-    /// Confine granted filesystem reads and writes to `root`. Without this, a
-    /// plugin holding `fs:read` or `fs:write` still reads or writes nothing —
-    /// the capability is necessary and not sufficient.
+    /// Use `root` as the parent of one filesystem subtree per plugin. Without
+    /// this, a plugin holding `fs:read` or `fs:write` still reads or writes
+    /// nothing — the capability is necessary and not sufficient. The host
+    /// creates `<root>/<plugin-name>` on load after validating the name.
     #[must_use]
     pub fn with_filesystem_root(mut self, root: PathBuf) -> Self {
         self.fs_root = Some(root);
         self
     }
 
-    /// Configure the selected version-specific source for privileged broker
-    /// imports. A plugin still needs both the `version:broker` capability and
-    /// an exact `[version-lock]` manifest table before this source is linked.
+    /// Configure the version-specific source used by privileged broker
+    /// consumers. The source is retained as a trait object and only queried for
+    /// its copied descriptor at load time; no protocol-family type crosses this
+    /// host crate's boundary.
     #[must_use]
     pub fn with_version_broker(mut self, broker: Arc<dyn VersionBroker>) -> Self {
         self.version_broker = Some(broker);
         self
+    }
+
+    fn plugin_filesystem_root(
+        &self,
+        name: &str,
+        granted: &CapabilitySet,
+    ) -> Result<Option<PathBuf>, HostError> {
+        let Some(root) = self.fs_root.as_ref() else {
+            return Ok(None);
+        };
+        if !granted.contains(Capability::FsRead) && !granted.contains(Capability::FsWrite) {
+            return Ok(None);
+        }
+        if !valid_filesystem_name(name) {
+            return Err(HostError::InvalidFilesystemName {
+                name: name.to_owned(),
+            });
+        }
+
+        std::fs::create_dir_all(root).map_err(|error| HostError::Filesystem {
+            plugin: name.to_owned(),
+            message: format!("could not create {}: {error}", root.display()),
+        })?;
+        let root = root
+            .canonicalize()
+            .map_err(|error| HostError::Filesystem {
+                plugin: name.to_owned(),
+                message: format!("could not resolve {}: {error}", root.display()),
+            })?;
+        let plugin_root = root.join(name);
+        if std::fs::symlink_metadata(&plugin_root)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(HostError::Filesystem {
+                plugin: name.to_owned(),
+                message: format!("{} is a symbolic link", plugin_root.display()),
+            });
+        }
+        std::fs::create_dir_all(&plugin_root).map_err(|error| HostError::Filesystem {
+            plugin: name.to_owned(),
+            message: format!("could not create {}: {error}", plugin_root.display()),
+        })?;
+        let resolved = plugin_root
+            .canonicalize()
+            .map_err(|error| HostError::Filesystem {
+                plugin: name.to_owned(),
+                message: format!("could not resolve {}: {error}", plugin_root.display()),
+            })?;
+        if !resolved.starts_with(&root) {
+            return Err(HostError::Filesystem {
+                plugin: name.to_owned(),
+                message: format!("{} is outside {}", resolved.display(), root.display()),
+            });
+        }
+        Ok(Some(resolved))
     }
 
     #[must_use]
@@ -1133,7 +1280,7 @@ impl PluginHost {
         }
         if requested.contains(Capability::VersionBroker) {
             let Some(required) = version_lock else {
-                return Err(HostError::VersionBrokerLockMissing {
+                return Err(HostError::VersionBrokerUnavailable {
                     name: name.to_owned(),
                 });
             };
@@ -1171,6 +1318,7 @@ impl PluginHost {
                 name: name.to_owned(),
                 message: format!("{e:?}"),
             })?;
+        let plugin_fs_root = self.plugin_filesystem_root(name, &granted)?;
 
         let mut linker: Linker<GuestState> = Linker::new(&self.engine);
         // **This block is the capability gate.** Every `if` here is a security
@@ -1246,7 +1394,7 @@ impl PluginHost {
             fs_root: if granted.contains(Capability::FsRead)
                 || granted.contains(Capability::FsWrite)
             {
-                self.fs_root.clone()
+                plugin_fs_root
             } else {
                 None
             },
@@ -1384,7 +1532,7 @@ impl PluginHost {
     ) -> Result<usize, LoadError> {
         let module = manifest.resolved_module(manifest_path)?;
         let requested = manifest.requested_capabilities()?;
-        let version_lock = manifest
+        let required_version = manifest
             .version_lock
             .as_ref()
             .map(crate::manifest::VersionLock::descriptor);
@@ -1393,7 +1541,7 @@ impl PluginHost {
             &module,
             &requested,
             policy,
-            version_lock.as_ref(),
+            required_version.as_ref(),
         )?;
         let reported = &self.plugins[index].info.name;
         if *reported != manifest.name {

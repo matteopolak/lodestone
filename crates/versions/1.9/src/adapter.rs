@@ -10,7 +10,7 @@ use lodestone_data::mob_effects::{mob_effect_name_for, MobEffectId};
 use lodestone_model::{
     AdapterError, AnimationAction, BlockActionKind, BlockFace, BossAction, BossColor, BossOverlay,
     ChatKind, ChatMode, ChunkPos, ClientAction, ClientEvent, ClientSettings, CollisionRule,
-    ConnectionState, Difficulty, Directive, DisplaySlot, DisplayedSkinParts, EntityEquipment,
+    ConnectionState, ContainerClickType, Difficulty, Directive, DisplaySlot, DisplayedSkinParts, EntityEquipment,
     EntityInteraction, EntityMovement, EquipmentSlot, GameMode, Hand, Identifier, ItemStack,
     LoginProfile, MainHand, ObjectiveMode, ObjectiveRenderType, ParticleOptions, PlayerCommand,
     PlayerListEntry,
@@ -53,7 +53,7 @@ use crate::packets::settings::{BrandPayload, PlayerAbilities, ResourcePackReceiv
 use crate::packets::slot::Slot;
 use crate::packets::window::{
     CloseWindow, EnchantItem, HeldItemSlot, OpenWindow, ServerboundCloseWindow,
-    ServerboundHeldItemSlot, SetCreativeSlot, SetSlot, WindowItems,
+    ServerboundHeldItemSlot, SetCreativeSlot, SetSlot, WindowClick, WindowItems,
 };
 
 /// Protocol version of the newest release this family speaks (Minecraft
@@ -152,6 +152,8 @@ struct PacketIds {
     client_command: i32,
     /// `minecraft:close_window`, serverbound play.
     close_window: i32,
+    /// `minecraft:window_click`, serverbound play.
+    window_click: i32,
     /// `minecraft:custom_payload`, serverbound play.
     custom_payload: i32,
     /// `minecraft:enchant_item`, serverbound play.
@@ -209,6 +211,7 @@ macro_rules! packet_ids_from {
             chat: crate::$table::play::serverbound::CHAT,
             client_command: crate::$table::play::serverbound::CLIENT_COMMAND,
             close_window: crate::$table::play::serverbound::CLOSE_WINDOW,
+            window_click: crate::$table::play::serverbound::WINDOW_CLICK,
             custom_payload: crate::$table::play::serverbound::CUSTOM_PAYLOAD,
             enchant_item: crate::$table::play::serverbound::ENCHANT_ITEM,
             entity_action: crate::$table::play::serverbound::ENTITY_ACTION,
@@ -801,6 +804,18 @@ fn resolve_menu_type(inventory_type: &str, slot_count: u8) -> ResourceKey {
         // panicking on a future `inventory_type` this table has not seen.
         generic_rows().parse().expect("generic_9xN is always valid")
     })
+}
+
+const fn container_click_mode(click_type: ContainerClickType) -> i8 {
+    match click_type {
+        ContainerClickType::Pickup => 0,
+        ContainerClickType::QuickMove => 1,
+        ContainerClickType::Swap => 2,
+        ContainerClickType::Clone => 3,
+        ContainerClickType::Throw => 4,
+        ContainerClickType::QuickCraft => 5,
+        ContainerClickType::PickupAll => 6,
+    }
 }
 
 /// Maps a 1.8 numeric dimension to a canonical namespaced dimension identifier.
@@ -1817,10 +1832,9 @@ impl V340Adapter {
     }
 
     fn play_open_window(&self, _world: &mut dyn WorldSink, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
-        // `OpenWindow`'s codec already existed and was already tested
-        // (`tests/inventory.rs`, wire round trips only); nothing here
-        // ever called it, so no 1.12.2 container screen — a chest, a
-        // furnace, a crafting table — could ever open.
+        // The packet codec is also exercised by `tests/inventory.rs`; this
+        // handler is the production dispatch that turns its body into the
+        // canonical screen event.
         let body: OpenWindow = self.decode_body(payload)?;
         let menu_type = resolve_menu_type(&body.inventory_type, body.slot_count);
         return Ok(vec![Directive::Emit(ClientEvent::ScreenOpened {
@@ -3409,28 +3423,37 @@ impl VersionAdapter for V340Adapter {
                     self.encode_body(&body)?,
                 )))
             }
-            // Container clicks predate the modern `state_id` reconciliation.
-            // Faithfully encoding 1.12's `window_click` needs a client-tracked
-            // transaction id (the `action` counter, absent from the model which
-            // carries only the 1.17+ `state_id`; this adapter tracks other
-            // per-connection state, `pending_tab_complete`, but not this), an
-            // item registry (`ResourceKey` -> numeric id) for the clicked stack,
-            // and item metadata/damage that pre-1.13 slots carry but the model's
-            // `ItemStack { item, count }` cannot express. Refused loudly rather
-            // than encoded with wrong bytes that a live server rejects via a
-            // failed transaction (silently dropping the click).
-            //
-            // This is also why clientbound `TRANSACTION` has no decode arm: it
-            // exists solely to accept or reject a `window_click` this client
-            // cannot yet send, so nothing here could ever receive one — wiring a
-            // decode for it now would be an event with no producer that could
-            // trigger it. It becomes real work once `ContainerClick` above is.
-            ClientAction::ContainerClick { .. } => Err(AdapterError::Unsupported(
-                "protocol 340 ContainerClick needs a client-tracked transaction id (model carries \
-                 only the 1.17+ state_id), an item registry, and item metadata the model's \
-                 ItemStack cannot express"
-                    .to_owned(),
-            )),
+            // Container clicks predate the modern state-id reconciliation. The
+            // model's state id is reused as the legacy transaction number; the
+            // server derives the authoritative result from the click itself,
+            // so the legacy pre-click item field is deliberately empty rather
+            // than a guessed numeric id or metadata value.
+            ClientAction::ContainerClick {
+                window_id,
+                state_id,
+                slot,
+                button,
+                click_type,
+                ..
+            } => {
+                let body = WindowClick {
+                    window_id: u8::try_from(*window_id).map_err(|_| {
+                        AdapterError::Encode(format!("window id {window_id} overflows u8"))
+                    })?,
+                    slot: i16::try_from(*slot).map_err(|_| {
+                        AdapterError::Encode(format!("container slot {slot} overflows i16"))
+                    })?,
+                    button: i8::try_from(*button).map_err(|_| {
+                        AdapterError::Encode(format!("click button {button} overflows i8"))
+                    })?,
+                    action: i16::try_from(state_id.as_wire()).map_err(|_| {
+                        AdapterError::Encode(format!("container state {} overflows i16", state_id.as_wire()))
+                    })?,
+                    mode: container_click_mode(*click_type),
+                    item: Slot::Empty,
+                };
+                Ok(Some((self.ids().window_click, self.encode_body(&body)?)))
+            }
 
             // Genuinely absent in 1.12: there is no player-input packet (added
             // much later). `Stab` (off-hand attack) has no dedicated 1.12 packet

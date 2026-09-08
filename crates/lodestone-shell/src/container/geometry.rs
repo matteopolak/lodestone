@@ -1775,6 +1775,7 @@ mod effect_column_tests {
             ambient: true,
             show_particles: true,
             show_icon: true,
+            blend: true,
         });
         fx
     }

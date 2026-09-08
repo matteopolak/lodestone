@@ -1,11 +1,11 @@
-//! Independent direct step-7 controls for the Nether's scattered debris feature.
+//! Independent full-column controls for the Nether's scattered debris feature.
 //!
-//! The expected cells are from a separately captured feature trace starting at
-//! the post-ore terrain. The second test replaces only the configured body type
-//! with the standard ore body, so it exercises the same terrain, placement
-//! modifiers, and source index while proving that the scattered body is the
-//! path producing the traced cells. The sealed packet remains an end-to-end
-//! integration gate until source-spill lifecycle state is modeled here.
+//! The expected cells are from a separately captured sealed-column packet after
+//! the structure-bearing pre-decoration prefix and mixed source lifecycle. The
+//! second test replaces only the configured body type with the standard ore
+//! body, so it exercises the same terrain, placement modifiers, and source
+//! index while proving that the scattered body is the path producing the
+//! captured cells.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -158,6 +158,7 @@ fn external_cells() -> (usize, BTreeSet<(usize, i32, usize)>) {
     let mut seed = None;
     let mut chunk = None;
     let mut step = None;
+    let mut scope = None;
     let mut count = None;
     let mut cells = BTreeSet::new();
     for line in EXTERNAL.lines() {
@@ -170,6 +171,7 @@ fn external_cells() -> (usize, BTreeSet<(usize, i32, usize)>) {
                 chunk = Some((x, z));
             }
             Some("step") => step = Some(fields.next().expect("step value").parse().unwrap()),
+            Some("scope") => scope = Some(fields.next().expect("scope value").to_owned()),
             Some("count") => count = Some(fields.next().expect("count value").parse().unwrap()),
             Some("cell") => {
                 let x = fields.next().expect("cell x").parse().unwrap();
@@ -180,16 +182,25 @@ fn external_cells() -> (usize, BTreeSet<(usize, i32, usize)>) {
             _ => {}
         }
     }
-    assert_eq!(seed, Some(SEED), "direct trace seed must match the test input");
-    assert_eq!(chunk, Some((CHUNK_X, CHUNK_Z)), "direct trace chunk must match the test input");
-    assert_eq!(step, Some(7), "direct trace must cover Nether step 7");
+    assert_eq!(seed, Some(SEED), "external capture seed must match the test input");
+    assert_eq!(
+        chunk,
+        Some((CHUNK_X, CHUNK_Z)),
+        "external capture chunk must match the test input"
+    );
+    assert_eq!(step, Some(7), "external capture must cover Nether step 7");
+    assert_eq!(
+        scope.as_deref(),
+        Some("full-column"),
+        "external capture must include the structure prefix and source lifecycle"
+    );
     let count = count.expect("external count");
     assert_eq!(count, cells.len(), "external count must match its cells");
     (count, cells)
 }
 
 #[test]
-fn direct_step7_trace_cells_and_count_reach_production_nether() {
+fn full_column_capture_cells_and_count_reach_production_nether() {
     let (expected_count, expected_cells) = external_cells();
     let assets = ExternalAssets::new();
     let generator = NetherGenerator::new(SEED, &settings(&assets), &assets);
@@ -198,16 +209,16 @@ fn direct_step7_trace_cells_and_count_reach_production_nether() {
     assert_eq!(
         actual.len(),
         expected_count,
-        "ancient-debris count at chunk ({CHUNK_X},{CHUNK_Z}) differs from the direct step-7 trace"
+        "ancient-debris count at chunk ({CHUNK_X},{CHUNK_Z}) differs from the full-column external capture"
     );
     assert_eq!(
         actual, expected_cells,
-        "ancient-debris cells at chunk ({CHUNK_X},{CHUNK_Z}) differ from the direct step-7 trace"
+        "ancient-debris cells at chunk ({CHUNK_X},{CHUNK_Z}) differ from the full-column external capture"
     );
 }
 
 #[test]
-fn standard_ore_negative_control_does_not_match_scattered_trace() {
+fn standard_ore_negative_control_does_not_match_scattered_capture() {
     let (expected_count, expected_cells) = external_cells();
     let assets = ExternalAssets::new();
     let generator = NetherGenerator::new(
@@ -219,6 +230,6 @@ fn standard_ore_negative_control_does_not_match_scattered_trace() {
     assert_ne!(
         (actual.len(), actual),
         (expected_count, expected_cells),
-        "standard connected ore placement unexpectedly reproduced the scattered direct trace"
+        "standard connected ore placement unexpectedly reproduced the scattered full-column capture"
     );
 }

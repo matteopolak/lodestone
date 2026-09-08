@@ -10,7 +10,8 @@ Bukkit-class `World.spawnEntity(loc, type)`/`Entity.remove()`/free-modification 
   (`crates/lodestone-server/src/mobs/mod.rs`). A plugin embedding the server calls these directly —
   there is no dynamic plugin-loading mechanism yet, so "a native plugin" here means Rust code that
   depends on `lodestone-server` and holds an `IntegratedServer`, exactly the same relationship every
-  other consumer of that crate already has.
+  other consumer of that crate already has. `IntegratedServer::entity_api` adds the copied
+  `ServerEntityApi` observation/mutation boundary over the same `MobHandle` and `PlayerRegistry`.
 - **Client-side, local-only**: `lodestone_ecs::entity_spawn` (`crates/lodestone-ecs/src/entity_spawn.rs`)
   — `spawn_entity`/`despawn_entity` for a **local, non-networked** entity, plus `CustomEntityRegistry`
   for a plugin's own logical entity kind that disguises as a real vanilla one for rendering. This is
@@ -47,6 +48,13 @@ client's `apply_entity_removal` skipping an id held by `LocalPlayer`.
 **"Modify" needed no new API here either.** A plugin already holds the exact `MobHandle` a live mob's
 `SimMob` lives behind (`mobs.with(|sim| sim.get_mut(id))`), so healing, repositioning or re-equipping a
 spawned mob is ordinary use of an accessor that already shipped for combat.
+
+`ServerEntityApi` is the typed request boundary for operations that must not expose a lock guard:
+`observe` returns an owned identity/motion/health copy, while `mutate` accepts typed knockback,
+health, effect, teleport, and despawn operations. Mob knockback changes the snapshot consumed by
+the entity streamer. Player teleports and effects enter `PlayerRegistry`'s directed queue, whose
+owning connection emits the authoritative packet. Unsupported operations and unknown ids are
+reported explicitly instead of being silently applied to a different entity.
 
 `crates/lodestone-server/tests/native_plugin_spawns_and_despawns_a_mob.rs` is the real-consumer gate: it
 drives a real, running `IntegratedServer` through `spawn_mob`/`despawn_mob` only — never

@@ -115,6 +115,7 @@ fn texel(level: &lodestone_render::MipLevel, x: u32, y: u32) -> [u8; 4] {
 /// One disagreement between a gutter texel and the sprite edge it must
 /// replicate. Carries the level's own dimensions and both texels so a failure
 /// says *what* it found, not just that it found something.
+#[derive(Debug)]
 struct Mismatch {
     sprite: &'static str,
     requested_levels: u32,
@@ -123,21 +124,6 @@ struct Mismatch {
     side: &'static str,
     got: [u8; 4],
     want: [u8; 4],
-}
-
-impl std::fmt::Debug for Mismatch {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("Mismatch")
-            .field("sprite", &self.sprite)
-            .field("requested_levels", &self.requested_levels)
-            .field("level", &self.level)
-            .field("level_size", &self.level_size)
-            .field("side", &self.side)
-            .field("got", &self.got)
-            .field("want", &self.want)
-            .finish()
-    }
 }
 
 #[test]

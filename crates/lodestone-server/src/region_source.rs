@@ -690,7 +690,16 @@ impl ScheduledTickHandle {
     /// real vanilla worlds.
     fn saved_ticks_for(&self, cx: i32, cz: i32) -> (Vec<chunk_nbt::SavedTick>, Vec<chunk_nbt::SavedTick>) {
         let now = i64::try_from(self.game_tick()).unwrap_or(i64::MAX);
-        let convert = |tick: &crate::scheduled_tick::ScheduledTick<String>| chunk_nbt::SavedTick {
+        let convert_block = |tick: &crate::scheduled_tick::ScheduledTick<crate::scheduled_tick::ScheduledTickKind>| chunk_nbt::SavedTick {
+            pos: tick.pos,
+            kind: tick.kind.as_ref().to_owned(),
+            delay: i32::try_from(
+                i64::try_from(tick.trigger_tick).unwrap_or(i64::MAX) - now,
+            )
+            .unwrap_or(i32::MAX),
+            priority: tick.priority,
+        };
+        let convert_fluid = |tick: &crate::scheduled_tick::ScheduledTick<String>| chunk_nbt::SavedTick {
             pos: tick.pos,
             kind: tick.kind.clone(),
             delay: i32::try_from(
@@ -700,21 +709,21 @@ impl ScheduledTickHandle {
             priority: tick.priority,
         };
         self.with(|queues| {
-            let belongs_to_column = |tick: &crate::scheduled_tick::ScheduledTick<String>| {
-                (tick.pos.0.div_euclid(16), tick.pos.2.div_euclid(16)) == (cx, cz)
+            let belongs_to_column = |pos: (i32, i32, i32)| {
+                (pos.0.div_euclid(16), pos.2.div_euclid(16)) == (cx, cz)
             };
             (
                 queues
                     .block
                     .iter()
-                    .filter(|tick| belongs_to_column(tick))
-                    .map(convert)
+                    .filter(|tick| belongs_to_column(tick.pos))
+                    .map(convert_block)
                     .collect(),
                 queues
                     .fluid
                     .iter()
-                    .filter(|tick| belongs_to_column(tick))
-                    .map(convert)
+                    .filter(|tick| belongs_to_column(tick.pos))
+                    .map(convert_fluid)
                     .collect(),
             )
         })
@@ -775,7 +784,7 @@ impl ScheduledTickHandle {
             .chain(fluid.iter().map(|t| (t, true)))
             .map(|(saved, is_fluid)| crate::scheduled_tick::StagedTick {
                 pos: saved.pos,
-                kind: saved.kind.clone(),
+                kind: crate::scheduled_tick::ScheduledTickKind::from_name(saved.kind.clone()),
                 trigger_tick: (now + i64::from(saved.delay)).max(0) as u64,
                 priority: saved.priority,
                 fluid: is_fluid,

@@ -79,6 +79,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
+use lodestone_data::block_states::{self as canonical_states, StateId as CanonicalStateId};
 use lodestone_worldgen_core::hash::FastMap;
 
 /// A numeric handle for a canonical block-state string, valid only against the
@@ -140,6 +141,11 @@ struct Table {
     /// referential for a state that has no properties, so this is always a
     /// valid index and never an `Option`.
     base_of: Vec<u16>,
+    /// Local-state to canonical global-state binding. `None` is retained for
+    /// fixture/plugin names outside the built-in table; consumers treat those
+    /// states conservatively rather than pretending a default-state fallback
+    /// is an exact shape.
+    canonical_of: Vec<Option<CanonicalStateId>>,
 }
 
 /// Interns block-state strings to [`StateId`]s for one generator.
@@ -186,7 +192,33 @@ fn intern_locked(table: &mut Table, s: &str) -> u16 {
     table.ids.insert(leaked, id);
     // A property-less state is its own base.
     table.base_of.push(base_id.unwrap_or(id));
+    table.canonical_of.push(canonical_state_id(leaked));
     id
+}
+
+/// Resolves one local interner spelling into the canonical global state table.
+///
+/// This runs only on an interner miss. `block_states::state_id` intentionally
+/// accepts the generator's abbreviated state spelling and fills unspecified
+/// properties from that block's default state, which is the same boundary used
+/// by the server's generated facts. Unknown names remain unbound.
+fn canonical_state_id(state: &str) -> Option<CanonicalStateId> {
+    let id = canonical_states::state_id(state).and_then(CanonicalStateId::new)?;
+    let Some((_, raw_properties)) = state.split_once('[') else {
+        return Some(id);
+    };
+    let raw_properties = raw_properties.strip_suffix(']').unwrap_or(raw_properties);
+    let properties = canonical_states::properties(id.raw())?;
+    for pair in raw_properties.split(',').filter(|pair| !pair.is_empty()) {
+        let (key, value) = pair.split_once('=')?;
+        if !properties
+            .iter()
+            .any(|&(known_key, known_value)| known_key == key && known_value == value)
+        {
+            return None;
+        }
+    }
+    Some(id)
 }
 
 impl StateInterner {
@@ -243,6 +275,20 @@ impl StateInterner {
     pub fn name_of(&self, id: StateId) -> &'static str {
         crate::counters::bump_state_name_lookup();
         self.table.read().expect("state interner lock poisoned").names[id.index()]
+    }
+
+    /// The canonical global state id corresponding to `id`, if the local
+    /// spelling belongs to the built-in state table.
+    ///
+    /// The translation is populated when the local id is first interned, so
+    /// this accessor is a single read-only vector lookup and never resolves a
+    /// state string in a feature's candidate loop.
+    #[must_use]
+    pub fn canonical_id(&self, id: StateId) -> Option<CanonicalStateId> {
+        self.table
+            .read()
+            .expect("state interner lock poisoned")
+            .canonical_of[id.index()]
     }
 
     /// The id of `id`'s base name — `"minecraft:oak_log[axis=y]"` maps to the
@@ -318,6 +364,23 @@ mod tests {
         let interner = StateInterner::new();
         let leaves = interner.id_of("minecraft:oak_leaves[distance=3,waterlogged=false]");
         assert_eq!(interner.name_of(interner.base_of(leaves)), "minecraft:oak_leaves");
+    }
+
+    #[test]
+    fn built_in_states_bind_to_canonical_ids_once() {
+        let interner = StateInterner::new();
+        let stone = interner.id_of("minecraft:stone");
+        let slab = interner.id_of("minecraft:stone_slab[type=bottom,waterlogged=false]");
+        let invalid = interner.id_of("minecraft:stone[not_a_property=true]");
+        let unknown = interner.id_of("minecraft:lodestone_test_fixture");
+
+        assert_eq!(
+            interner.canonical_id(stone).map(CanonicalStateId::name),
+            Some("minecraft:stone")
+        );
+        assert!(interner.canonical_id(slab).is_some());
+        assert!(interner.canonical_id(invalid).is_none());
+        assert!(interner.canonical_id(unknown).is_none());
     }
 
     #[test]

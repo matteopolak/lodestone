@@ -50,7 +50,6 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 
-use serde::Deserialize;
 use serde_json::Value;
 
 use crate::math;
@@ -105,296 +104,6 @@ pub struct BlockPos {
     pub z: i32,
 }
 
-/// Strict JSON shape for the vertical anchors used by height providers.
-///
-/// These are deliberately external-tagged object variants rather than a map
-/// lookup.  A misspelled anchor or an object containing two anchors is then a
-/// parse error with serde's field path instead of silently selecting one key.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(untagged)]
-enum VerticalAnchorJson {
-    Absolute(AbsoluteAnchorJson),
-    AboveBottom(AboveBottomAnchorJson),
-    BelowTop(BelowTopAnchorJson),
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AbsoluteAnchorJson {
-    absolute: i32,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AboveBottomAnchorJson {
-    above_bottom: i32,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BelowTopAnchorJson {
-    below_top: i32,
-}
-
-impl From<VerticalAnchorJson> for VerticalAnchor {
-    fn from(value: VerticalAnchorJson) -> Self {
-        match value {
-            VerticalAnchorJson::Absolute(v) => Self::Absolute(v.absolute),
-            VerticalAnchorJson::AboveBottom(v) => Self::AboveBottom(v.above_bottom),
-            VerticalAnchorJson::BelowTop(v) => Self::BelowTop(v.below_top),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WeightedIntJson {
-    data: i32,
-    weight: i32,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "type", deny_unknown_fields)]
-enum IntProviderTaggedJson {
-    #[serde(rename = "minecraft:constant", alias = "constant")]
-    Constant { value: i32 },
-    #[serde(rename = "minecraft:uniform", alias = "uniform")]
-    Uniform {
-        min_inclusive: i32,
-        max_inclusive: i32,
-    },
-    #[serde(rename = "minecraft:clamped_normal", alias = "clamped_normal")]
-    ClampedNormal {
-        mean: f32,
-        deviation: f32,
-        min_inclusive: i32,
-        max_inclusive: i32,
-    },
-    #[serde(rename = "minecraft:weighted_list", alias = "weighted_list")]
-    WeightedList { distribution: Vec<WeightedIntJson> },
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct UntaggedConstantJson {
-    value: i32,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(untagged)]
-enum IntProviderJson {
-    Constant(i32),
-    UntaggedConstant(UntaggedConstantJson),
-    Tagged(IntProviderTaggedJson),
-}
-
-impl IntProviderJson {
-    fn into_provider(self) -> Result<IntProvider, String> {
-        match self {
-            Self::Constant(value) => Ok(IntProvider::Constant(value)),
-            Self::UntaggedConstant(value) => Ok(IntProvider::Constant(value.value)),
-            Self::Tagged(value) => match value {
-                IntProviderTaggedJson::Constant { value } => Ok(IntProvider::Constant(value)),
-                IntProviderTaggedJson::Uniform {
-                    min_inclusive,
-                    max_inclusive,
-                } => Ok(IntProvider::Uniform {
-                    min: min_inclusive,
-                    max: max_inclusive,
-                }),
-                IntProviderTaggedJson::ClampedNormal {
-                    mean,
-                    deviation,
-                    min_inclusive,
-                    max_inclusive,
-                } => Ok(IntProvider::ClampedNormal {
-                    mean,
-                    deviation,
-                    min: min_inclusive,
-                    max: max_inclusive,
-                }),
-                IntProviderTaggedJson::WeightedList { distribution } => Ok(
-                    IntProvider::WeightedList(
-                        distribution
-                            .into_iter()
-                            .map(|entry| (entry.data, entry.weight))
-                            .collect(),
-                    ),
-                ),
-            },
-        }
-    }
-}
-
-const fn default_one() -> i32 {
-    1
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "type", deny_unknown_fields)]
-enum HeightProviderJson {
-    #[serde(rename = "minecraft:uniform", alias = "uniform")]
-    Uniform {
-        min_inclusive: VerticalAnchorJson,
-        max_inclusive: VerticalAnchorJson,
-    },
-    #[serde(rename = "minecraft:trapezoid", alias = "trapezoid")]
-    Trapezoid {
-        min_inclusive: VerticalAnchorJson,
-        max_inclusive: VerticalAnchorJson,
-        #[serde(default)]
-        plateau: i32,
-    },
-    #[serde(rename = "minecraft:very_biased_to_bottom", alias = "very_biased_to_bottom")]
-    VeryBiasedToBottom {
-        min_inclusive: VerticalAnchorJson,
-        max_inclusive: VerticalAnchorJson,
-        #[serde(default = "default_one")]
-        inner: i32,
-    },
-}
-
-impl HeightProviderJson {
-    fn into_provider(self) -> Result<HeightProvider, String> {
-        Ok(match self {
-            Self::Uniform {
-                min_inclusive,
-                max_inclusive,
-            } => HeightProvider::Uniform {
-                min: min_inclusive.into(),
-                max: max_inclusive.into(),
-            },
-            Self::Trapezoid {
-                min_inclusive,
-                max_inclusive,
-                plateau,
-            } => HeightProvider::Trapezoid {
-                min: min_inclusive.into(),
-                max: max_inclusive.into(),
-                plateau,
-            },
-            Self::VeryBiasedToBottom {
-                min_inclusive,
-                max_inclusive,
-                inner,
-            } => HeightProvider::VeryBiasedToBottom {
-                min: min_inclusive.into(),
-                max: max_inclusive.into(),
-                inner,
-            },
-        })
-    }
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "type", deny_unknown_fields)]
-enum PlacementJson {
-    #[serde(rename = "minecraft:count", alias = "count")]
-    Count { count: IntProviderJson },
-    #[serde(rename = "minecraft:rarity_filter", alias = "rarity_filter")]
-    RarityFilter { chance: i32 },
-    #[serde(rename = "minecraft:in_square", alias = "in_square")]
-    InSquare {},
-    #[serde(rename = "minecraft:height_range", alias = "height_range")]
-    HeightRange { height: HeightProviderJson },
-    #[serde(rename = "minecraft:biome", alias = "biome")]
-    Biome {},
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PlacedFeatureJson {
-    #[serde(rename = "feature", default)]
-    _feature: Option<String>,
-    placement: Vec<PlacementJson>,
-}
-
-impl PlacementJson {
-    fn into_placement(self) -> Result<Placement, String> {
-        Ok(match self {
-            Self::Count { count } => Placement::Count(count.into_provider()?),
-            Self::RarityFilter { chance } => Placement::RarityFilter(chance),
-            Self::InSquare {} => Placement::InSquare,
-            Self::HeightRange { height } => Placement::HeightRange(height.into_provider()?),
-            Self::Biome {} => Placement::Biome,
-        })
-    }
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BlockStateJson {
-    #[serde(rename = "Name")]
-    name: String,
-    /// Block properties are intentionally open-ended: their keys and values
-    /// come from the versioned registry, not from the feature schema.
-    #[serde(rename = "Properties", default)]
-    properties: std::collections::BTreeMap<String, String>,
-}
-
-impl BlockStateJson {
-    fn canonical(self) -> String {
-        let mut out = self.name;
-        if !self.properties.is_empty() {
-            out.push('[');
-            for (index, (key, value)) in self.properties.into_iter().enumerate() {
-                if index != 0 {
-                    out.push(',');
-                }
-                out.push_str(&key);
-                out.push('=');
-                out.push_str(&value);
-            }
-            out.push(']');
-        }
-        out
-    }
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RuleTestJson {
-    predicate_type: String,
-    tag: Option<String>,
-    block: Option<String>,
-}
-
-impl RuleTestJson {
-    fn into_rule_test(self) -> Result<RuleTest, String> {
-        match self
-            .predicate_type
-            .strip_prefix("minecraft:")
-            .unwrap_or(&self.predicate_type)
-        {
-            "tag_match" => self
-                .tag
-                .map(RuleTest::TagMatch)
-                .ok_or_else(|| "tag_match rule test is missing 'tag'".into()),
-            "block_match" => self
-                .block
-                .map(RuleTest::BlockMatch)
-                .ok_or_else(|| "block_match rule test is missing 'block'".into()),
-            other => Err(format!("unsupported rule test type '{other}'")),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OreTargetJson {
-    state: BlockStateJson,
-    target: RuleTestJson,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OreConfigJson {
-    size: i32,
-    #[serde(default)]
-    discard_chance_on_air_exposure: f32,
-    targets: Vec<OreTargetJson>,
-}
-
 /// Vanilla's own vertical-anchor type.
 #[derive(Clone, Copy, Debug)]
 pub enum VerticalAnchor {
@@ -413,6 +122,31 @@ impl VerticalAnchor {
         }
     }
 
+    /// Non-panicking sibling of [`Self::parse`] — see
+    /// [`HeightProvider::try_parse`] for why the decoration engine needs one.
+    fn try_parse(v: &Value) -> Option<Self> {
+        if let Some(y) = v.get("absolute") {
+            Some(VerticalAnchor::Absolute(y.as_i64()? as i32))
+        } else if let Some(o) = v.get("above_bottom") {
+            Some(VerticalAnchor::AboveBottom(o.as_i64()? as i32))
+        } else if let Some(o) = v.get("below_top") {
+            Some(VerticalAnchor::BelowTop(o.as_i64()? as i32))
+        } else {
+            None
+        }
+    }
+
+    fn parse(v: &Value) -> Self {
+        if let Some(y) = v.get("absolute") {
+            VerticalAnchor::Absolute(y.as_i64().expect("absolute anchor") as i32)
+        } else if let Some(o) = v.get("above_bottom") {
+            VerticalAnchor::AboveBottom(o.as_i64().expect("above_bottom anchor") as i32)
+        } else if let Some(o) = v.get("below_top") {
+            VerticalAnchor::BelowTop(o.as_i64().expect("below_top anchor") as i32)
+        } else {
+            panic!("unknown vertical anchor: {v}");
+        }
+    }
 }
 
 /// Vanilla's own int-provider type (the subset features use).
@@ -426,6 +160,13 @@ impl VerticalAnchor {
 pub enum IntProvider {
     Constant(i32),
     Uniform { min: i32, max: i32 },
+    /// An inclusive clamp around another integer provider. The nested
+    /// provider is sampled first, then restricted to `[min, max]`.
+    Clamped {
+        source: Box<IntProvider>,
+        min: i32,
+        max: i32,
+    },
     /// Vanilla's own weighted-list int provider — a `WeightedList<Integer>`.
     /// `(value, weight)` pairs, in JSON declaration order (order doesn't
     /// affect the *distribution*, but does affect [`WeightedList::sample`]'s
@@ -465,12 +206,58 @@ pub enum IntProvider {
 }
 
 impl IntProvider {
+    fn parse(v: &Value) -> Self {
+        match v {
+            Value::Number(n) => IntProvider::Constant(n.as_i64().expect("int") as i32),
+            Value::Object(_) => {
+                let ty = v["type"].as_str().unwrap_or("minecraft:constant");
+                match ty.strip_prefix("minecraft:").unwrap_or(ty) {
+                    "constant" => {
+                        IntProvider::Constant(v["value"].as_i64().expect("constant value") as i32)
+                    }
+                    "uniform" => IntProvider::Uniform {
+                        min: v["min_inclusive"].as_i64().expect("min_inclusive") as i32,
+                        max: v["max_inclusive"].as_i64().expect("max_inclusive") as i32,
+                    },
+                    "clamped" => IntProvider::Clamped {
+                        source: Box::new(IntProvider::parse(&v["source"])),
+                        min: v["min_inclusive"].as_i64().expect("min_inclusive") as i32,
+                        max: v["max_inclusive"].as_i64().expect("max_inclusive") as i32,
+                    },
+                    "clamped_normal" => IntProvider::ClampedNormal {
+                        mean: v["mean"].as_f64().expect("mean") as f32,
+                        deviation: v["deviation"].as_f64().expect("deviation") as f32,
+                        min: v["min_inclusive"].as_i64().expect("min_inclusive") as i32,
+                        max: v["max_inclusive"].as_i64().expect("max_inclusive") as i32,
+                    },
+                    "weighted_list" => {
+                        let entries = v["distribution"]
+                            .as_array()
+                            .expect("weighted_list distribution")
+                            .iter()
+                            .map(|e| {
+                                (
+                                    e["data"].as_i64().expect("weighted_list data") as i32,
+                                    e["weight"].as_i64().expect("weighted_list weight") as i32,
+                                )
+                            })
+                            .collect();
+                        IntProvider::WeightedList(entries)
+                    }
+                    other => panic!("unsupported int provider: {other}"),
+                }
+            }
+            other => panic!("unexpected int provider json: {other}"),
+        }
+    }
+
     pub(crate) fn sample<R: RandomSource>(&self, random: &mut R) -> i32 {
         match self {
             IntProvider::Constant(v) => *v,
             IntProvider::Uniform { min, max } => {
                 math::random_between_inclusive(random, *min, *max)
             }
+            IntProvider::Clamped { source, min, max } => source.sample(random).clamp(*min, *max),
             // Vanilla's own weighted-list random pick: walk in declared order, subtracting a
             // `nextInt(totalWeight)` draw until it goes negative — the entry
             // it goes negative on is the pick. Matches
@@ -564,10 +351,38 @@ impl HeightProvider {
     /// `Unsupported` rather than taking down world generation for every biome.
     /// See `crate::feature::vegetation`'s module doc.
     pub(crate) fn try_parse(v: &Value) -> Option<Self> {
-        serde_json::from_value::<HeightProviderJson>(v.clone())
-            .ok()?
-            .into_provider()
-            .ok()
+        let ty = v["type"].as_str()?;
+        let min = VerticalAnchor::try_parse(&v["min_inclusive"])?;
+        let max = VerticalAnchor::try_parse(&v["max_inclusive"])?;
+        match ty.strip_prefix("minecraft:").unwrap_or(ty) {
+            "uniform" => Some(HeightProvider::Uniform { min, max }),
+            "trapezoid" => Some(HeightProvider::Trapezoid {
+                min,
+                max,
+                plateau: v["plateau"].as_i64().unwrap_or(0) as i32,
+            }),
+            "very_biased_to_bottom" => Some(HeightProvider::VeryBiasedToBottom {
+                min,
+                max,
+                inner: v["inner"].as_i64().unwrap_or(1) as i32,
+            }),
+            _ => None,
+        }
+    }
+
+    fn parse(v: &Value) -> Self {
+        let ty = v["type"].as_str().expect("height provider type");
+        let min = VerticalAnchor::parse(&v["min_inclusive"]);
+        let max = VerticalAnchor::parse(&v["max_inclusive"]);
+        match ty.strip_prefix("minecraft:").unwrap_or(ty) {
+            "uniform" => HeightProvider::Uniform { min, max },
+            "trapezoid" => HeightProvider::Trapezoid {
+                min,
+                max,
+                plateau: v["plateau"].as_i64().unwrap_or(0) as i32,
+            },
+            other => panic!("unsupported height provider: {other}"),
+        }
     }
 
     /// Mirrors vanilla's own uniform-height/trapezoid-height sample methods, including their
@@ -629,6 +444,20 @@ pub enum Placement {
 }
 
 impl Placement {
+    fn parse(v: &Value) -> Self {
+        let ty = v["type"].as_str().expect("placement type");
+        match ty.strip_prefix("minecraft:").unwrap_or(ty) {
+            "count" => Placement::Count(IntProvider::parse(&v["count"])),
+            "rarity_filter" => {
+                Placement::RarityFilter(v["chance"].as_i64().expect("rarity chance") as i32)
+            }
+            "in_square" => Placement::InSquare,
+            "height_range" => Placement::HeightRange(HeightProvider::parse(&v["height"])),
+            "biome" => Placement::Biome,
+            other => panic!("unsupported placement modifier: {other}"),
+        }
+    }
+
     /// Vanilla's own placement-modifier get-positions: emit the positions this modifier
     /// produces for one incoming position, drawing RNG exactly as vanilla does.
     ///
@@ -744,6 +573,14 @@ pub enum RuleTest {
 }
 
 impl RuleTest {
+    fn parse(v: &Value) -> Self {
+        let ty = v["predicate_type"].as_str().expect("predicate_type");
+        match ty.strip_prefix("minecraft:").unwrap_or(ty) {
+            "tag_match" => RuleTest::TagMatch(v["tag"].as_str().expect("tag").to_string()),
+            "block_match" => RuleTest::BlockMatch(v["block"].as_str().expect("block").to_string()),
+            other => panic!("unsupported rule test: {other}"),
+        }
+    }
 }
 
 /// One vanilla ore-configuration target-block-state: the block to place and the test the
@@ -826,23 +663,20 @@ pub fn canon_state(state: &Value) -> String {
 /// Parse an `OreConfiguration` from a `configured_feature` JSON's `config` object.
 #[must_use]
 pub fn parse_ore_config(config: &Value) -> OreConfig {
-    let parsed = serde_json::from_value::<OreConfigJson>(config.clone())
-        .unwrap_or_else(|error| panic!("configured_feature.config: {error}"));
-    let targets = parsed
-        .targets
-        .into_iter()
-        .enumerate()
-        .map(|(index, target)| OreTarget {
-            state: target.state.canonical(),
-            target: target
-                .target
-                .into_rule_test()
-                .unwrap_or_else(|error| panic!("configured_feature.config.targets[{index}].target: {error}")),
+    let targets = config["targets"]
+        .as_array()
+        .expect("ore targets")
+        .iter()
+        .map(|t| OreTarget {
+            state: canon_state(&t["state"]),
+            target: RuleTest::parse(&t["target"]),
         })
         .collect();
     OreConfig {
-        size: parsed.size,
-        discard_chance_on_air_exposure: parsed.discard_chance_on_air_exposure,
+        size: config["size"].as_i64().expect("ore size") as i32,
+        discard_chance_on_air_exposure: config["discard_chance_on_air_exposure"]
+            .as_f64()
+            .unwrap_or(0.0) as f32,
         targets,
     }
 }
@@ -850,17 +684,11 @@ pub fn parse_ore_config(config: &Value) -> OreConfig {
 /// Parse the ordered placement modifiers from a `placed_feature` JSON.
 #[must_use]
 pub fn parse_placements(placed: &Value) -> Vec<Placement> {
-    let parsed = serde_json::from_value::<PlacedFeatureJson>(placed.clone())
-        .unwrap_or_else(|error| panic!("placed_feature: {error}"));
-    let entries = parsed.placement;
-    entries
-        .into_iter()
-        .enumerate()
-        .map(|(index, placement)| {
-            placement
-                .into_placement()
-                .unwrap_or_else(|error| panic!("placed_feature.placement[{index}]: {error}"))
-        })
+    placed["placement"]
+        .as_array()
+        .expect("placement list")
+        .iter()
+        .map(Placement::parse)
         .collect()
 }
 
@@ -1798,8 +1626,8 @@ fn is_outside_build_height(y: i32, min_y: i32, height: i32) -> bool {
 /// How many targets [`TargetCache`] can hold a bitmask for. Vanilla's widest
 /// `UNDERGROUND_ORES` config has **two** (a `stone_ore_replaceables` target and
 /// a `deepslate_ore_replaceables` one), so this is 4× headroom; a config with
-/// more falls back to [`match_targets_by_name`] per candidate, which is exactly
-/// the code path that existed before this cache and therefore cannot diverge.
+/// more evaluates every target by name per candidate, preserving the complete
+/// target list when the compact cache cannot represent it.
 const MAX_CACHED_TARGETS: usize = 8;
 
 /// Slots in [`TargetCache`]'s direct-mapped table. A blob visits ~82 candidate
@@ -1924,19 +1752,23 @@ impl TargetCache {
 /// the `split('[')` base strip and the `in_tag` closure are all still exactly
 /// what they were. Neither test draws, so hoisting them out of the placement loop
 /// cannot move the RNG.
+#[inline]
+fn target_matches(base: &str, target: &OreTarget, input: &OreInput<'_>) -> bool {
+    ore_probe::bump_target_test(1);
+    match &target.target {
+        RuleTest::TagMatch(tag) => {
+            ore_probe::bump_target_test_tag(1);
+            (input.in_tag)(base, tag)
+        }
+        RuleTest::BlockMatch(block) => base == block.as_str(),
+    }
+}
+
 fn match_targets_by_name(name: &str, config: &OreConfig, input: &OreInput<'_>) -> u8 {
     let base = name.split('[').next().unwrap_or(name);
     let mut mask = 0u8;
     for (i, target) in config.targets.iter().enumerate().take(MAX_CACHED_TARGETS) {
-        ore_probe::bump_target_test(1);
-        let matches = match &target.target {
-            RuleTest::TagMatch(tag) => {
-                ore_probe::bump_target_test_tag(1);
-                (input.in_tag)(base, tag)
-            }
-            RuleTest::BlockMatch(block) => base == block.as_str(),
-        };
-        if matches {
+        if target_matches(base, target, input) {
             mask |= 1 << i;
         }
     }
@@ -1976,29 +1808,44 @@ fn try_place_ore<R: RandomSource>(
     {
         ore_probe::bump_region_read(1);
         let id = working.get_id(lx, y, lz);
-        let mut mask = if config.targets.len() <= MAX_CACHED_TARGETS {
-            cache.mask_for(id, config, input, working)
-        } else {
-            // Wider than the cache's mask. Recompute per candidate, which is the
-            // pre-§12.149 behaviour; `MAX_CACHED_TARGETS` documents why no real
-            // config reaches here.
-            match_targets_by_name(working.interner().name_of(id), config, input)
-        };
-        while mask != 0 {
-            let i = mask.trailing_zeros() as usize;
-            mask &= mask - 1;
-            // canPlaceOre: shouldSkipAirCheck (may draw a nextFloat) ? true
-            // : !isAdjacentToAir.
-            let place = should_skip_air_check(random, config.discard_chance_on_air_exposure)
-                || {
-                    ore_probe::bump_air_check(1);
-                    !is_adjacent_to_air(input, working, x, y, z)
-                };
-            if place {
-                chosen = Some(i);
-                break;
+        if config.targets.len() <= MAX_CACHED_TARGETS {
+            let mut mask = cache.mask_for(id, config, input, working);
+            while mask != 0 {
+                let i = mask.trailing_zeros() as usize;
+                mask &= mask - 1;
+                // canPlaceOre: shouldSkipAirCheck (may draw a nextFloat) ? true
+                // : !isAdjacentToAir.
+                let place = should_skip_air_check(random, config.discard_chance_on_air_exposure)
+                    || {
+                        ore_probe::bump_air_check(1);
+                        !is_adjacent_to_air(input, working, x, y, z)
+                    };
+                if place {
+                    chosen = Some(i);
+                    break;
+                }
+                // canPlaceOre returned false; vanilla continues to the next target.
             }
-            // canPlaceOre returned false; vanilla continues to the next target.
+        } else {
+            // A u8 mask cannot represent the full target list. Keep the same
+            // ascending target order and per-match air-check draws as the cached
+            // path, but evaluate every target directly.
+            let name = working.interner().name_of(id);
+            let base = name.split('[').next().unwrap_or(name);
+            for (i, target) in config.targets.iter().enumerate() {
+                if !target_matches(base, target, input) {
+                    continue;
+                }
+                let place = should_skip_air_check(random, config.discard_chance_on_air_exposure)
+                    || {
+                        ore_probe::bump_air_check(1);
+                        !is_adjacent_to_air(input, working, x, y, z)
+                    };
+                if place {
+                    chosen = Some(i);
+                    break;
+                }
+            }
         }
     }
     if let Some(i) = chosen {
@@ -2074,6 +1921,75 @@ mod tests {
     use crate::rng::{LegacyRandomSource, WorldgenRandom, XoroshiroRandomSource};
     use std::collections::HashSet;
     use std::sync::Arc;
+
+    #[test]
+    fn uncached_ore_targets_preserve_rules_after_eighth() {
+        let interner = Arc::new(StateInterner::new());
+        let stone = interner.id_of("minecraft:stone");
+        let grid = DenseBlockGrid::with_interner(Arc::clone(&interner), -16, 0, -16, 48, 8, 48, stone);
+        let mut view = RegionView::over_region_grid(&grid, 0, 8);
+        let heights = RegionHeights::unset();
+        let input = OreInput {
+            chunk_x: 0,
+            chunk_z: 0,
+            center_x: 0,
+            center_z: 0,
+            min_y: 0,
+            height: 8,
+            min_gen_y: 0,
+            gen_depth: 8,
+            read_min: REGION_MIN,
+            read_max: REGION_MAX,
+            ocean_floor_wg: &heights,
+            in_tag: &|_, _| false,
+            biome_allows: None,
+        };
+        let mut targets = Vec::with_capacity(MAX_CACHED_TARGETS + 1);
+        for _ in 0..MAX_CACHED_TARGETS {
+            targets.push(OreTarget {
+                state: "minecraft:coal_ore".to_string(),
+                target: RuleTest::BlockMatch("minecraft:dirt".to_string()),
+            });
+        }
+        targets.push(OreTarget {
+            state: "minecraft:gold_ore".to_string(),
+            target: RuleTest::BlockMatch("minecraft:stone".to_string()),
+        });
+        let config = OreConfig {
+            size: 1,
+            discard_chance_on_air_exposure: 0.0,
+            targets,
+        };
+        let mut random = XoroshiroRandomSource::new(0);
+        let mut cache = TargetCache::empty();
+        try_place_ore(&mut random, &config, &input, &mut view, 0, 1, 0, &mut cache);
+
+        assert_eq!(view.get(0, 1, 0), "minecraft:gold_ore");
+    }
+
+    #[test]
+    fn clamped_int_provider_clamps_nested_values_without_sampling_when_constant() {
+        let mut random = XoroshiroRandomSource::new(0);
+        let lower = IntProvider::Clamped {
+            source: Box::new(IntProvider::Constant(-9)),
+            min: 0,
+            max: 4,
+        };
+        let middle = IntProvider::Clamped {
+            source: Box::new(IntProvider::Constant(2)),
+            min: 0,
+            max: 4,
+        };
+        let upper = IntProvider::Clamped {
+            source: Box::new(IntProvider::Constant(9)),
+            min: 0,
+            max: 4,
+        };
+
+        assert_eq!(lower.sample(&mut random), 0);
+        assert_eq!(middle.sample(&mut random), 2);
+        assert_eq!(upper.sample(&mut random), 4);
+    }
 
     #[test]
     fn one_entry_ore_seam_keeps_the_callers_seed_and_sibling_streams_separate() {

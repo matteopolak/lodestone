@@ -49,7 +49,10 @@ use bevy_ecs::prelude::{
     Commands, Entity, IntoScheduleConfigs, MessageReader, Query, Res, ResMut, Resource, With,
 };
 use bevy_ecs::schedule::ApplyDeferred;
-use lodestone_command::StringArgument;
+use lodestone_command::{
+    ArgumentType, BoolArgument, ChoicesArgument, DoubleArgument, FloatArgument, IntegerArgument,
+    LongArgument, StringArgument, StringKind,
+};
 use lodestone_ecs::commands::{CommandOutcome, CommandRegistry, PluginCommand, PluginCommandsPlugin};
 use lodestone_ecs::events::{GameEvent, GameEventBusPlugin};
 use lodestone_ecs::player::{
@@ -63,6 +66,9 @@ use lodestone_ecs::{ChunkWorld, CorePlugin, GameTick, TickSet};
 
 use crate::abi;
 use crate::abi::{IntentAction, LoweredAction};
+use crate::bindings::lodestone::plugin::types::{
+    CommandArgument, CommandArgumentKind, CommandStringKind,
+};
 use crate::capability::Capability;
 use crate::host::{
     BlockMutationRefusal, BlockMutationStatus, CommandSpec, Event, PluginGrantPolicy, PluginHost,
@@ -313,13 +319,73 @@ fn run_wasm_command(
     }
 }
 
+/// Add static guest-provided completions without changing the version-free
+/// command parser's argument trait. The parser still owns tokenisation and
+/// filtering; this wrapper only supplies the candidates for one typed slot.
+struct SuggestedArgument {
+    inner: Arc<dyn ArgumentType>,
+    suggestions: Vec<String>,
+}
+
+impl std::fmt::Debug for SuggestedArgument {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SuggestedArgument")
+            .field("suggestions", &self.suggestions)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ArgumentType for SuggestedArgument {
+    fn parse(
+        &self,
+        reader: &mut lodestone_command::StringReader,
+    ) -> Result<lodestone_command::ParsedValue, lodestone_command::ParseError> {
+        self.inner.parse(reader)
+    }
+
+    fn suggest(&self, _partial: &str) -> Vec<String> {
+        self.suggestions.clone()
+    }
+}
+
+fn wasm_argument_type(argument: &CommandArgument) -> Result<Arc<dyn ArgumentType>, &'static str> {
+    let argument_type: Arc<dyn ArgumentType> = match &argument.kind {
+        CommandArgumentKind::Text(kind) => Arc::new(StringArgument {
+            kind: match kind {
+                CommandStringKind::Word => StringKind::Word,
+                CommandStringKind::Quotable => StringKind::Quotable,
+                CommandStringKind::Greedy => StringKind::Greedy,
+            },
+        }),
+        CommandArgumentKind::Integer => Arc::new(IntegerArgument::new()),
+        CommandArgumentKind::Long => Arc::new(LongArgument::new()),
+        CommandArgumentKind::Float => Arc::new(FloatArgument::new()),
+        CommandArgumentKind::Double => Arc::new(DoubleArgument::new()),
+        CommandArgumentKind::Boolean => Arc::new(BoolArgument),
+        CommandArgumentKind::Choices(choices) => {
+            if choices.is_empty() {
+                return Err("a choices argument must declare at least one value");
+            }
+            Arc::new(ChoicesArgument::fixed(choices.clone(), true))
+        }
+    };
+
+    if argument.suggestions.is_empty() {
+        Ok(argument_type)
+    } else {
+        Ok(Arc::new(SuggestedArgument {
+            inner: argument_type,
+            suggestions: argument.suggestions.clone(),
+        }))
+    }
+}
+
 /// Register the roots the loaded guests declared during `init`.
 ///
-/// The native registry owns parsing, alias rewriting, and permission checks. Each
-/// command gets one greedy tail so the guest receives the canonical whole line,
-/// but the host deliberately does not pretend that this is the native argument
-/// tree API: typed guest argument schemas and suggestions remain a later ABI
-/// extension.
+/// The native registry owns parsing, alias rewriting, permission checks, and
+/// suggestion filtering. An empty guest schema retains the original root-plus-
+/// greedy-tail compatibility path; a non-empty schema is copied into a typed
+/// sequential argument path and the final node invokes the guest.
 fn register_wasm_commands(
     registry: &mut CommandRegistry,
     broker: &Arc<Mutex<PluginHost>>,
@@ -342,20 +408,55 @@ fn register_wasm_commands(
         }
 
         let root = command.root();
-        let root_broker = Arc::clone(broker);
-        command.on_execute(root, move |invocation| {
-            run_wasm_command(&root_broker, plugin_index, invocation)
-        });
+        if spec.arguments.is_empty() {
+            let root_broker = Arc::clone(broker);
+            command.on_execute(root, move |invocation| {
+                run_wasm_command(&root_broker, plugin_index, invocation)
+            });
 
-        let tail = command.argument(
-            root,
-            "arguments",
-            Arc::new(StringArgument::greedy()),
-        );
-        let tail_broker = Arc::clone(broker);
-        command.on_execute(tail, move |invocation| {
-            run_wasm_command(&tail_broker, plugin_index, invocation)
-        });
+            let tail = command.argument(root, "arguments", Arc::new(StringArgument::greedy()));
+            let tail_broker = Arc::clone(broker);
+            command.on_execute(tail, move |invocation| {
+                run_wasm_command(&tail_broker, plugin_index, invocation)
+            });
+        } else {
+            let mut parent = root;
+            let mut invalid = None;
+            let mut argument_names = BTreeSet::new();
+            for (index, argument) in spec.arguments.iter().enumerate() {
+                if argument.name.is_empty()
+                    || argument.name.chars().any(char::is_whitespace)
+                {
+                    invalid = Some("an argument name must be one non-empty token");
+                    break;
+                }
+                if !argument_names.insert(argument.name.to_lowercase()) {
+                    invalid = Some("argument names must be unique");
+                    break;
+                }
+                if matches!(
+                    &argument.kind,
+                    CommandArgumentKind::Text(CommandStringKind::Greedy)
+                ) && index + 1 != spec.arguments.len()
+                {
+                    invalid = Some("a greedy string argument must be the final slot");
+                    break;
+                }
+                let Ok(argument_type) = wasm_argument_type(argument) else {
+                    invalid = Some("an argument type declaration is invalid");
+                    break;
+                };
+                parent = command.argument(parent, &argument.name, argument_type);
+            }
+            if let Some(reason) = invalid {
+                tracing::error!(plugin_index, command = %command_name, reason, "refused WASM command registration");
+                continue;
+            }
+            let typed_broker = Arc::clone(broker);
+            command.on_execute(parent, move |invocation| {
+                run_wasm_command(&typed_broker, plugin_index, invocation)
+            });
+        }
 
         match registry.register(command) {
             Ok(()) => roots.push(command_name.to_lowercase()),

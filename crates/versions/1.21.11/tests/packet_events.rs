@@ -1,4 +1,7 @@
-use lodestone_model::{ClientEvent, ConnectionState, Directive, VersionAdapter, WorldSink};
+use lodestone_model::{
+    ClientAction, ClientEvent, ConnectionState, ContainerClickType, ContainerStateId, Directive,
+    ItemStack, VersionAdapter, WorldSink,
+};
 use lodestone_world::{BiomePatch, BlockEntitySync, ChunkPos, ColumnPatch, LightPatch, LoadedChunk};
 use lodestone_v1_21_11::{packet_ids, V774Adapter};
 
@@ -73,101 +76,153 @@ fn packed_position(x: i64, y: i64, z: i64) -> [u8; 8] {
     ((x << 38) | ((z & 0x3ffffff) << 12) | (y & 0xfff)).to_be_bytes()
 }
 
+fn plain_slot(count: i32, item_id: i32) -> Vec<u8> {
+    let mut out = var_i32(count);
+    if count > 0 {
+        out.extend(var_i32(item_id));
+        out.extend([0, 0]);
+    }
+    out
+}
+
 #[test]
-fn chest_session_774_decodes_open_content_and_slot_updates() {
-    // `open_screen`: window 7, menu registry id 2 (generic_9x3), and an
-    // independently assembled anonymous-NBT literal title component.
-    let mut open = var_i32(7);
+fn container_session_packets_use_independent_774_literals() {
+    // open_screen: window 130 (a multi-byte VarInt), generic 9x3 menu id 2,
+    // and an anonymous-NBT string title.
+    let mut open = var_i32(130);
     open.extend(var_i32(2));
-    open.extend([0x0a, 0x08, 0, 4]);
-    open.extend(b"text");
-    open.extend([0, 5]);
+    open.extend([8, 0, 5]);
     open.extend(b"Chest");
-    open.push(0);
+    let events = packet(&V774Adapter::default(), packet_ids::play::clientbound::OPEN_SCREEN, &open);
     assert_eq!(
-        packet(&V774Adapter::default(), packet_ids::play::clientbound::OPEN_SCREEN, &open),
+        events,
         vec![Directive::Emit(ClientEvent::ScreenOpened {
-            window_id: 7,
+            window_id: 130,
             menu_type: "minecraft:generic_9x3".parse().unwrap(),
             title: lodestone_model::Text::literal("Chest"),
         })]
     );
 
-    // `container_set_content`: window 7, state 9, three slots (empty,
-    // stone x4, empty) and an empty carried item. A bare component patch is
-    // represented by two zero counts after the item id.
-    let mut content = var_i32(7);
-    content.extend(var_i32(9));
-    content.extend(var_i32(3));
-    content.push(0);
-    content.extend([4, 1, 0, 0]);
-    content.push(0);
-    content.push(0);
+    // container_set_content: window 130, state 17, two slots (empty and
+    // stone x3), then an empty carried stack.
+    let mut content = var_i32(130);
+    content.extend(var_i32(17));
+    content.extend(var_i32(2));
+    content.extend(plain_slot(0, 0));
+    content.extend(plain_slot(3, 1));
+    content.extend(plain_slot(0, 0));
     let events = packet(
         &V774Adapter::default(),
         packet_ids::play::clientbound::CONTAINER_SET_CONTENT,
         &content,
     );
-    let [Directive::Emit(ClientEvent::ContainerContent {
-        window_id,
-        state_id,
-        items,
-        carried_item,
-    })] = events.as_slice()
-    else {
-        panic!("expected container content event: {events:?}");
-    };
-    assert_eq!(*window_id, 7);
-    assert_eq!(*state_id, lodestone_model::ContainerStateId::new(9));
-    assert_eq!(items.len(), 3);
-    assert!(items[0].is_none());
-    assert_eq!(items[1].as_ref().map(|item| item.item.to_string()), Some("minecraft:stone".into()));
-    assert_eq!(items[1].as_ref().map(|item| item.count), Some(4));
-    assert!(items[2].is_none());
-    assert!(carried_item.is_none());
-
-    // `container_set_slot`: state 10, slot 1, and a now-empty slot.
-    let mut slot = var_i32(7);
-    slot.extend(var_i32(10));
-    slot.extend(1_i16.to_be_bytes());
-    slot.push(0);
     assert_eq!(
-        packet(&V774Adapter::default(), packet_ids::play::clientbound::CONTAINER_SET_SLOT, &slot),
+        events,
+        vec![Directive::Emit(ClientEvent::ContainerContent {
+            window_id: 130,
+            state_id: ContainerStateId::new(17),
+            items: vec![None, Some(ItemStack::new("minecraft:stone".parse().unwrap(), 3))],
+            carried_item: None,
+        })]
+    );
+
+    // container_set_slot: state 18, signed-short slot 37, empty stack.
+    let mut slot = var_i32(130);
+    slot.extend(var_i32(18));
+    slot.extend(37_i16.to_be_bytes());
+    slot.extend(plain_slot(0, 0));
+    let events = packet(
+        &V774Adapter::default(),
+        packet_ids::play::clientbound::CONTAINER_SET_SLOT,
+        &slot,
+    );
+    assert_eq!(
+        events,
         vec![Directive::Emit(ClientEvent::ContainerSlot {
-            window_id: 7,
-            state_id: lodestone_model::ContainerStateId::new(10),
-            slot: 1,
+            window_id: 130,
+            state_id: ContainerStateId::new(18),
+            slot: 37,
             item: None,
         })]
+    );
+
+    // container_set_data and container_close retain the varint window id and
+    // use big-endian signed shorts for the two property fields.
+    let mut data = var_i32(130);
+    data.extend(2_i16.to_be_bytes());
+    data.extend(300_i16.to_be_bytes());
+    assert_eq!(
+        packet(&V774Adapter::default(), packet_ids::play::clientbound::CONTAINER_SET_DATA, &data),
+        vec![Directive::Emit(ClientEvent::ContainerData {
+            window_id: 130,
+            property: 2,
+            value: 300,
+        })]
+    );
+    let close = var_i32(130);
+    assert_eq!(
+        packet(&V774Adapter::default(), packet_ids::play::clientbound::CONTAINER_CLOSE, &close),
+        vec![Directive::Emit(ClientEvent::ScreenClosed { window_id: 130 })]
     );
 }
 
 #[test]
-fn chest_session_774_rejects_unknown_menu_and_unbounded_content() {
-    let mut unknown_menu = var_i32(7);
-    unknown_menu.extend(var_i32(25));
-    unknown_menu.extend([0x0a, 0]);
-    let mut sink = Sink;
-    assert!(V774Adapter::default()
-        .handle_packet(
-            &mut sink,
-            ConnectionState::Play,
-            packet_ids::play::clientbound::OPEN_SCREEN,
-            &unknown_menu,
-        )
-        .is_err());
+fn container_click_round_trips_plain_stack_through_real_adapter_shape() {
+    let action = ClientAction::ContainerClick {
+        window_id: 130,
+        state_id: ContainerStateId::new(17),
+        slot: 37,
+        button: 0,
+        click_type: ContainerClickType::Pickup,
+        changed_slots: vec![
+            lodestone_model::ContainerSlotChange { slot: 37, item: None },
+            lodestone_model::ContainerSlotChange {
+                slot: 46,
+                item: Some(ItemStack::new("minecraft:stone".parse().unwrap(), 3)),
+            },
+        ],
+        carried_item: None,
+    };
+    let adapter = V774Adapter::default();
+    let (packet_id, payload) = adapter
+        .encode_action(ConnectionState::Play, &action)
+        .unwrap()
+        .unwrap();
+    assert_eq!(packet_id, packet_ids::play::serverbound::CONTAINER_CLICK);
+    assert_eq!(
+        payload,
+        vec![0x82, 0x01, 17, 0, 37, 0, 0, 2, 0, 37, 0, 0, 46, 1, 1, 3, 0, 0, 0]
+    );
+}
 
-    let mut huge = var_i32(7);
-    huge.extend(var_i32(1));
-    huge.extend(var_i32(1025));
-    assert!(V774Adapter::default()
-        .handle_packet(
-            &mut sink,
-            ConnectionState::Play,
-            packet_ids::play::clientbound::CONTAINER_SET_CONTENT,
-            &huge,
-        )
-        .is_err());
+#[test]
+fn entity_metadata_774_literal_surfaces_shared_flags_to_ingest() {
+    // Independent wire layout: entity id 300 as a VarInt, metadata index 0,
+    // byte serializer 0, a non-round flags value, and the list terminator.
+    let mut body = var_i32(300);
+    body.extend([0, 0, 0xa1, 0xff]);
+    let events = packet(
+        &V774Adapter::default(),
+        packet_ids::play::clientbound::SET_ENTITY_DATA,
+        &body,
+    );
+    let [Directive::Emit(ClientEvent::EntityMetadataUpdated {
+        entity_id,
+        metadata,
+    })] = events.as_slice()
+    else {
+        panic!("expected metadata event: {events:?}");
+    };
+    assert_eq!(*entity_id, 300);
+    assert_eq!(metadata.flags, Some(0xa1));
+    let event = ClientEvent::EntityMetadataUpdated {
+        entity_id: *entity_id,
+        metadata: metadata.clone(),
+    };
+    assert!(
+        lodestone_model::route(&event).ingest,
+        "the shared-flags event must be claimed by the client ingest route"
+    );
 }
 
 #[test]

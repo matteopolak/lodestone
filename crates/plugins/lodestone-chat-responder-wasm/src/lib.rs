@@ -28,10 +28,8 @@ wit_bindgen::generate!({
 });
 
 use lodestone::plugin::logging::{log, LogLevel};
-use lodestone::plugin::types::CommandSpec;
-#[cfg(feature = "version-broker")]
-use lodestone::plugin::version_broker::{get_descriptor, lookup};
-#[cfg(feature = "fs-write")]
+use lodestone::plugin::types::{CommandArgument, CommandArgumentKind, CommandSpec};
+#[cfg(any(feature = "fs-write", feature = "fs-delete"))]
 use lodestone::plugin::filesystem_write::write_file;
 #[cfg(any(feature = "inventory-click", feature = "inventory-click-invalid"))]
 use lodestone::plugin::types::{InventoryClick, InventoryClickButton};
@@ -104,20 +102,6 @@ struct ChatResponder;
 impl Guest for ChatResponder {
     fn init() -> PluginInfo {
         log(LogLevel::Info, "chat-responder starting up");
-        #[cfg(feature = "version-broker")]
-        {
-            let descriptor = get_descriptor();
-            let protocol = lookup("protocol")
-                .map(|record| record.value)
-                .unwrap_or_else(|| "missing".to_owned());
-            log(
-                LogLevel::Info,
-                &format!(
-                    "version broker family={} protocol={} abi={} selected-protocol={protocol}",
-                    descriptor.family, descriptor.protocol, descriptor.abi
-                ),
-            );
-        }
         #[cfg(feature = "scheduler")]
         {
             schedule_once(2, 11);
@@ -296,7 +280,10 @@ impl Guest for ChatResponder {
         #[cfg(feature = "fs-write")]
         return write_files();
 
-        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid", feature = "inventory", feature = "entity-observation", feature = "inventory-click", feature = "inventory-click-invalid", feature = "inventory-quick-move", feature = "inventory-quick-move-invalid", feature = "inventory-double-click", feature = "inventory-hotbar-swap", feature = "inventory-hotbar-swap-invalid", feature = "inventory-throw", feature = "inventory-throw-invalid", feature = "inventory-drop-cursor", feature = "drop-selected-item", feature = "swap-offhand", feature = "release-use-item", feature = "stab", feature = "respawn", feature = "disconnect", feature = "send-command", feature = "world-read", feature = "world-write", feature = "fs-write")))]
+        #[cfg(feature = "fs-delete")]
+        return delete_file();
+
+        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid", feature = "inventory", feature = "entity-observation", feature = "inventory-click", feature = "inventory-click-invalid", feature = "inventory-quick-move", feature = "inventory-quick-move-invalid", feature = "inventory-double-click", feature = "inventory-hotbar-swap", feature = "inventory-hotbar-swap-invalid", feature = "inventory-throw", feature = "inventory-throw-invalid", feature = "inventory-drop-cursor", feature = "drop-selected-item", feature = "swap-offhand", feature = "release-use-item", feature = "stab", feature = "respawn", feature = "disconnect", feature = "send-command", feature = "world-read", feature = "world-write", feature = "fs-write", feature = "fs-delete")))]
         return respond(events);
     }
 
@@ -382,6 +369,11 @@ impl Guest for ChatResponder {
             return CommandOutcome::Failure(format!("unexpected command input: {input}"));
         }
 
+        #[cfg(feature = "commands")]
+        if input == "wasm-typed safe 7" {
+            return CommandOutcome::Success(47);
+        }
+
         let _ = (input, context);
         CommandOutcome::Failure("unknown command".to_owned())
     }
@@ -414,6 +406,19 @@ fn write_files() -> Vec<Action> {
         "fs-write: outside={} inside={}",
         outside.is_ok(),
         inside.is_ok()
+    ))]
+}
+
+/// Exercise the ABI's deletion convention from guest code. The WIT vocabulary
+/// predates a separate delete import, so an empty write removes the named file.
+#[cfg(feature = "fs-delete")]
+fn delete_file() -> Vec<Action> {
+    let seeded = write_file("delete-me.txt", b"temporary-data");
+    let deleted = write_file("delete-me.txt", b"");
+    vec![Action::SendChat(format!(
+        "fs-delete: seeded={} deleted={}",
+        seeded.is_ok(),
+        deleted.is_ok()
     ))]
 }
 
@@ -519,6 +524,24 @@ fn command_specs() -> Vec<CommandSpec> {
             description: "Proves a guest-owned command reached the runtime host.".to_owned(),
             aliases: vec!["wp".to_owned()],
             permission: Some("wasm.command.use".to_owned()),
+            arguments: Vec::new(),
+        }, CommandSpec {
+            name: "wasm-typed".to_owned(),
+            description: "Proves a guest-owned typed command reached the runtime host.".to_owned(),
+            aliases: vec!["wt".to_owned()],
+            permission: Some("wasm.command.use".to_owned()),
+            arguments: vec![
+                CommandArgument {
+                    name: "mode".to_owned(),
+                    kind: CommandArgumentKind::Choices(vec!["fast".to_owned(), "safe".to_owned()]),
+                    suggestions: Vec::new(),
+                },
+                CommandArgument {
+                    name: "count".to_owned(),
+                    kind: CommandArgumentKind::Integer,
+                    suggestions: vec!["1".to_owned(), "7".to_owned(), "42".to_owned()],
+                },
+            ],
         }]
     }
 

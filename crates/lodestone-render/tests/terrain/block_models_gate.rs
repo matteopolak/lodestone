@@ -192,6 +192,65 @@ fn stained_glass_is_a_translucent_non_occluding_cube() {
     );
 }
 
+/// The real slime model carries both its visible outer shell and a nested
+/// six-face element. The nested faces are intentionally unculled in the asset;
+/// the renderer's mesher applies the same-material check to those faces by
+/// recognizing their measured interior geometry.
+#[test]
+#[ignore = "requires a fetched vanilla client.jar and generated/reports/blocks.json"]
+fn slime_bakes_six_unculled_nested_faces() {
+    let (models, _mgr, reg) = build_models();
+    let id = find_state(reg.as_ref(), "minecraft:slime_block", &[])
+        .expect("slime_block in registry");
+    let sm = models.state(state_id(id));
+    assert_eq!(
+        sm.quads.len(),
+        12,
+        "slime's outer cube plus nested cube should bake twelve faces"
+    );
+
+    let nested: Vec<_> = sm.quads.iter().filter(|q| q.cullface.is_none()).collect();
+    assert_eq!(
+        nested.len(),
+        6,
+        "the nested cube must contribute exactly six unculled faces"
+    );
+    let low = 3.0 / 16.0;
+    let high = 13.0 / 16.0;
+    for quad in nested {
+        let (fixed, negative) = match quad.direction {
+            lodestone_assets::Direction::West => (0usize, true),
+            lodestone_assets::Direction::East => (0, false),
+            lodestone_assets::Direction::Down => (1, true),
+            lodestone_assets::Direction::Up => (1, false),
+            lodestone_assets::Direction::North => (2, true),
+            lodestone_assets::Direction::South => (2, false),
+        };
+        let (a, b) = match fixed {
+            0 => (1usize, 2usize),
+            1 => (0, 2),
+            _ => (0, 1),
+        };
+        let plane = if negative { low } else { high };
+        let mut min = [f32::INFINITY; 3];
+        let mut max = [f32::NEG_INFINITY; 3];
+        for point in &quad.positions {
+            assert!(
+                (point[fixed] - plane).abs() < 1e-4,
+                "nested {:?} plane should be {plane}, got {}",
+                quad.direction,
+                point[fixed]
+            );
+            for axis in 0..3 {
+                min[axis] = min[axis].min(point[axis]);
+                max[axis] = max[axis].max(point[axis]);
+            }
+        }
+        assert!((min[a] - low).abs() < 1e-4 && (max[a] - high).abs() < 1e-4);
+        assert!((min[b] - low).abs() < 1e-4 && (max[b] - high).abs() < 1e-4);
+    }
+}
+
 #[test]
 #[ignore = "requires a fetched vanilla client.jar and generated/reports/blocks.json"]
 fn water_classifies_as_a_fluid_with_resolvable_sprites() {

@@ -88,17 +88,17 @@ fn one(packet_id: i32, payload: &[u8]) -> ClientEvent {
 #[test]
 fn recipe_book_add_preserves_unknown_positive_result_at_packet_boundary() {
     let payload: Vec<u8> = [
-        &[0x01u8][..], // one entry
-        &[0x04],       // display id
-        &[0x00],       // shapeless display
-        &[0x00],       // no ingredients
+        &[0x01u8][..],       // one entry
+        &[0x04],             // display id
+        &[0x00],             // shapeless display
+        &[0x00],             // no ingredients
         &item_display(UNKNOWN_ITEM),
-        &EMPTY_DISPLAY, // empty crafting station
-        &[0x00],        // absent group
-        &[0x03],        // category
-        &[0x00],        // no crafting requirements
-        &[0x03],        // notification and highlight
-        &[0x01],        // replace
+        &EMPTY_DISPLAY,      // empty crafting station
+        &[0x00],             // absent group
+        &[0x03],             // category
+        &[0x00],             // no crafting requirements
+        &[0x03],             // notification and highlight
+        &[0x01],             // replace
     ]
     .concat();
 
@@ -108,18 +108,15 @@ fn recipe_book_add_preserves_unknown_positive_result_at_packet_boundary() {
         panic!("wrong event");
     };
     assert!(replace);
-    assert_eq!(
-        entries[0].result_items,
-        vec![ItemId::protocol_local(UNKNOWN_ITEM as u32)]
-    );
+    assert_eq!(entries[0].result_items, vec![ItemId::protocol_local(UNKNOWN_ITEM as u32)]);
 }
 
 #[test]
 fn ghost_recipe_preserves_unknown_positive_result_at_packet_boundary() {
     let payload: Vec<u8> = [
-        &var_i32(3)[..],      // window id
-        &var_i32(3)[..],      // stonecutter display: input, result, station
-        &item_display(1)[..], // canonical input
+        &var_i32(3)[..],              // window id
+        &var_i32(3)[..],              // stonecutter display: input, result, station
+        &item_display(1)[..],         // canonical input
         &item_display(UNKNOWN_ITEM)[..],
         &EMPTY_DISPLAY[..],
     ]
@@ -130,10 +127,7 @@ fn ghost_recipe_preserves_unknown_positive_result_at_packet_boundary() {
     else {
         panic!("wrong event");
     };
-    assert_eq!(
-        result_items,
-        vec![ItemId::protocol_local(UNKNOWN_ITEM as u32)]
-    );
+    assert_eq!(result_items, vec![ItemId::protocol_local(UNKNOWN_ITEM as u32)]);
 }
 
 #[test]
@@ -145,8 +139,8 @@ fn update_recipes_preserves_unknown_positive_property_and_stonecutter_ids() {
         key,
         &[0x01],
         &var_i32(UNKNOWN_ITEM),
-        &[0x01], // one stonecutter row
-        &[0x02], // explicit holder set with one id
+        &[0x01],             // one stonecutter row
+        &[0x02],             // explicit holder set with one id
         &var_i32(UNKNOWN_ITEM),
         &item_display(UNKNOWN_ITEM),
     ]

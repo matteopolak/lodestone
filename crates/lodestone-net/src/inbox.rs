@@ -18,20 +18,147 @@ use std::collections::VecDeque;
 
 use tokio::io::ReadBuf;
 
+/// A bounded byte window used by transports that need explicit flow control.
+///
+/// The window is directional: a sender starts with no credit and receives
+/// credit as the peer drains bytes; a receiver starts with its full capacity
+/// and spends credit when bytes arrive. Keeping this accounting independent of
+/// the JavaScript transport makes the partial-write and over-credit rules
+/// testable on every target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ByteCreditWindow {
+    limit: usize,
+    available: usize,
+}
+
+impl ByteCreditWindow {
+    /// Creates an empty window. This is the sender side before the peer's
+    /// initial grant arrives.
+    pub(crate) const fn empty(limit: usize) -> Self {
+        Self { limit, available: 0 }
+    }
+
+    /// Creates a full window. This is the receiver side before any bytes have
+    /// arrived.
+    pub(crate) const fn full(limit: usize) -> Self {
+        Self { limit, available: limit }
+    }
+
+    /// Returns the currently spendable byte count.
+    pub(crate) const fn available(self) -> usize {
+        self.available
+    }
+
+    /// Spends up to `requested` bytes and returns the amount granted. A
+    /// partial grant is intentional: `AsyncWrite::poll_write` can then make
+    /// progress without ever exceeding the peer's receive window.
+    pub(crate) fn take(&mut self, requested: usize) -> usize {
+        let granted = requested.min(self.available);
+        self.available -= granted;
+        granted
+    }
+
+    /// Spends exactly `bytes`, rejecting a payload larger than the remaining
+    /// receive credit.
+    pub(crate) fn consume_exact(&mut self, bytes: usize) -> Result<(), CreditError> {
+        if bytes > self.available {
+            return Err(CreditError::Exceeded {
+                available: self.available,
+                requested: bytes,
+            });
+        }
+        self.available -= bytes;
+        Ok(())
+    }
+
+    /// Returns drained bytes to the window, rejecting a peer that grants more
+    /// than the configured capacity. This also detects duplicated credit
+    /// messages rather than allowing the sender to grow without bound.
+    pub(crate) fn release(&mut self, bytes: usize) -> Result<(), CreditError> {
+        let Some(available) = self.available.checked_add(bytes) else {
+            return Err(CreditError::Overflow {
+                available: self.available,
+                returned: bytes,
+                limit: self.limit,
+            });
+        };
+        if available > self.limit {
+            return Err(CreditError::Overflow {
+                available: self.available,
+                returned: bytes,
+                limit: self.limit,
+            });
+        }
+        self.available = available;
+        Ok(())
+    }
+}
+
+/// A malformed or out-of-window credit operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CreditError {
+    /// A payload consumed more credit than remained.
+    Exceeded { available: usize, requested: usize },
+    /// A credit grant would exceed the configured receive capacity.
+    Overflow { available: usize, returned: usize, limit: usize },
+}
+
+/// Details returned when a bounded inbox cannot accept a frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct InboxOverflow {
+    pub(crate) buffered: usize,
+    pub(crate) incoming: usize,
+    pub(crate) capacity: usize,
+}
+
 /// A FIFO byte buffer that concatenates received WebSocket frame payloads and
 /// serves them into arbitrarily-sized [`ReadBuf`] reads.
 ///
 /// Pushing frames of any size and reading in chunks of any size reproduces the
 /// original byte stream exactly, regardless of how the two are aligned.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct ByteInbox {
     buf: VecDeque<u8>,
+    /// `usize::MAX` is the legacy unbounded mode used by the WebSocket
+    /// adapters. The MessagePort adapter opts into an explicit finite limit.
+    capacity: usize,
+}
+
+impl Default for ByteInbox {
+    fn default() -> Self {
+        Self { buf: VecDeque::new(), capacity: usize::MAX }
+    }
 }
 
 impl ByteInbox {
+    /// Creates a FIFO with a finite byte capacity.
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self { buf: VecDeque::new(), capacity }
+    }
+
     /// Appends the bytes of one received binary frame.
+    #[cfg(any(test, feature = "ws-native", feature = "ws-web"))]
     pub(crate) fn push(&mut self, bytes: &[u8]) {
         self.buf.extend(bytes);
+    }
+
+    /// Appends a frame only if it fits in the configured capacity.
+    pub(crate) fn try_push(&mut self, bytes: &[u8]) -> Result<(), InboxOverflow> {
+        if bytes.len() > self.capacity.saturating_sub(self.buf.len()) {
+            return Err(InboxOverflow {
+                buffered: self.buf.len(),
+                incoming: bytes.len(),
+                capacity: self.capacity,
+            });
+        }
+        self.buf.extend(bytes);
+        Ok(())
+    }
+
+    /// Returns the number of bytes that can be accepted without exceeding the
+    /// configured capacity.
+    pub(crate) fn remaining_capacity(&self) -> usize {
+        self.capacity.saturating_sub(self.buf.len())
     }
 
     /// Returns the number of buffered, not-yet-served bytes. Test-only: the
@@ -186,5 +313,45 @@ mod tests {
         assert!(!inbox.is_empty(), "a closing transport must drain first");
         assert_eq!(drain_in_chunks(&mut inbox, 1), vec![0x02, 0x7f]);
         assert!(inbox.is_empty(), "only an empty inbox may yield EOF");
+    }
+
+    #[test]
+    fn bounded_inbox_rejects_overflow_without_dropping_buffered_bytes() {
+        let mut inbox = ByteInbox::with_capacity(4);
+        inbox.try_push(&[1, 2, 3]).unwrap();
+        assert_eq!(inbox.remaining_capacity(), 1);
+        assert_eq!(
+            inbox.try_push(&[4, 5]),
+            Err(InboxOverflow { buffered: 3, incoming: 2, capacity: 4 })
+        );
+        assert_eq!(drain_in_chunks(&mut inbox, 8), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn credit_window_grants_partial_writes_and_reopens_after_drain() {
+        let mut send = ByteCreditWindow::empty(4);
+        assert_eq!(send.take(7), 0);
+        send.release(4).unwrap();
+        assert_eq!(send.take(7), 4);
+        assert_eq!(send.available(), 0);
+        assert_eq!(send.take(1), 0);
+        send.release(2).unwrap();
+        assert_eq!(send.take(7), 2);
+        assert_eq!(send.available(), 0);
+    }
+
+    #[test]
+    fn credit_window_rejects_over_credit_and_over_consumption() {
+        let mut receiver = ByteCreditWindow::full(4);
+        receiver.consume_exact(3).unwrap();
+        assert_eq!(
+            receiver.consume_exact(2),
+            Err(CreditError::Exceeded { available: 1, requested: 2 })
+        );
+        receiver.release(3).unwrap();
+        assert_eq!(
+            receiver.release(2),
+            Err(CreditError::Overflow { available: 4, returned: 2, limit: 4 })
+        );
     }
 }

@@ -49,17 +49,11 @@
 //!
 //! # What is deliberately not modelled, and why
 //!
-//! * **Respiration and the water-breathing / conduit-power effects** (the
-//!   decrease step's respiration-bonus term, and the two effect checks that
-//!   gate the decrease and refill branches). Nothing in `lodestone-server`
-//!   or `lodestone-entity` models potion effects or enchantments at all yet
-//!   (`grep -rl "MobEffect\|Enchantment"` across both crates turns up
-//!   nothing but a doc-comment mention in `lodestone-entity::damage`), so
-//!   there is no attribute or effect state to read here.
-//!   `decrease_air_supply` below is the unconditional `-1` branch only. A
-//!   future enchantment/effect system is the natural place to wire this back
-//!   in — the seam is exactly `PlayerVitals::tick`'s `eye_in_water` boolean
-//!   plus a rate parameter, not a rewrite.
+//! * **Respiration.** Nothing here models the equipment-derived random
+//!   chance that can skip the normal `-1` decrease. Status effects are
+//!   different: [`crate::mob_effects::UnderwaterBreathing`] supplies the
+//!   effect-derived hold/refill rule to
+//!   [`PlayerVitals::tick_with_underwater_breathing`].
 //! * **Bubble columns.** The overworld generator this crate serves does not
 //!   place bubble columns (`docs/served-session-liveness.md` /
 //!   `worldgen_data`'s documented scope), so the guard can never actually
@@ -244,6 +238,10 @@ fn drown_damage_type() -> lodestone_data::damage_types::DamageType {
 /// `SetHealth { health: 20.0, .. }` fresh-spawn default.
 pub const MAX_HEALTH: f32 = 20.0;
 
+/// Upper bound of the player `minecraft:max_health` attribute. Health Boost
+/// must obey the same bound when a hostile effect amplifier reaches this server.
+pub const MAX_EFFECTIVE_HEALTH: f32 = 1024.0;
+
 /// The `yaw` field of the client's hurt-animation packet — the direction
 /// the **camera damage tilt** leans away from, in degrees, in the victim's own
 /// frame.
@@ -343,6 +341,9 @@ impl VitalsTick {
 pub struct PlayerVitals {
     air_supply: i32,
     health: f32,
+    /// Current `minecraft:max_health` after active status-effect modifiers.
+    /// Kept with `health` so every healing and hunger path shares one ceiling.
+    max_health: f32,
     /// The invulnerability-frame gate [`apply_damage`](Self::apply_damage)
     /// consults. Drowning uses its own 20-tick reset cadence, while fall damage
     /// bypasses this gate; each damage source keeps its distinct timing.
@@ -367,6 +368,7 @@ impl Default for PlayerVitals {
         Self {
             air_supply: MAX_AIR_SUPPLY,
             health: MAX_HEALTH,
+            max_health: MAX_HEALTH,
             hurt_cooldown: lodestone_entity::HurtCooldown::default(),
             food: crate::food::FoodData::default(),
         }
@@ -382,7 +384,7 @@ impl PlayerVitals {
         self.air_supply
     }
 
-    /// Current health (`0.0..=20.0`). `0.0` means dead; [`tick`](Self::tick)
+    /// Current health (`0.0..=max_health`). `0.0` means dead; [`tick`](Self::tick)
     /// becomes a no-op once this is reached (mirrors the liveness guard one
     /// level up from the air/drown rule — see this module's own doc comment
     /// for why death/respawn are out of scope beyond that).
@@ -391,20 +393,58 @@ impl PlayerVitals {
         self.health
     }
 
+    /// Current maximum health after active effects, in `1.0..=1024.0`.
+    #[must_use]
+    pub fn max_health(&self) -> f32 {
+        self.max_health
+    }
+
+    /// Replaces the active maximum-health attribute value.
+    ///
+    /// Returns `true` when either the ceiling or the clamped current health
+    /// changed. Removing Health Boost can therefore publish one coherent
+    /// attribute-and-health transition instead of leaving a stale extra row of
+    /// hearts or health above its new ceiling.
+    pub fn set_max_health(&mut self, max_health: f32) -> bool {
+        let max_health = max_health.clamp(1.0, MAX_EFFECTIVE_HEALTH);
+        let before = (self.health, self.max_health);
+        self.max_health = max_health;
+        self.health = self.health.min(max_health);
+        (self.health, self.max_health) != before
+    }
+
     /// Advances vitals by exactly one server tick, given whether the eye is
     /// currently submerged in water (the caller's job — see
     /// `crate::server`'s use of [`ChunkSource::block_state`](crate::ChunkSource)
     /// at the eye position). Mirrors the water-breath rule byte-for-byte
-    /// within this module's documented scope (no respiration/water-breathing,
-    /// no i-frames, no bubble columns).
+    /// within this module's documented scope (no respiration, no i-frames,
+    /// no bubble columns).
     pub fn tick(&mut self, eye_in_water: bool) -> VitalsTick {
+        self.tick_with_underwater_breathing(
+            eye_in_water,
+            crate::mob_effects::UnderwaterBreathing::None,
+        )
+    }
+
+    /// Advances air and drowning with the active effect set's underwater rule.
+    ///
+    /// The plain [`tick`](Self::tick) wrapper deliberately remains the
+    /// no-effect control used by callers and existing tests. Production callers
+    /// provide [`crate::mob_effects::ActiveEffects::underwater_breathing`] so
+    /// water breathing, conduit power, and nautilus breath retain their distinct
+    /// hold/refill behavior.
+    pub fn tick_with_underwater_breathing(
+        &mut self,
+        eye_in_water: bool,
+        underwater_breathing: crate::mob_effects::UnderwaterBreathing,
+    ) -> VitalsTick {
         if self.health <= 0.0 {
             return VitalsTick::default();
         }
 
         let mut out = VitalsTick::default();
 
-        if eye_in_water {
+        if eye_in_water && !underwater_breathing.prevents_depletion() {
             let before = self.air_supply;
             // The decrease step with no respiration bonus: the flat
             // `currentSupply - 1` branch, unconditionally (see module docs).
@@ -419,7 +459,9 @@ impl PlayerVitals {
                 self.health = (self.health - DROWN_DAMAGE).max(0.0);
                 out.damage = Some(DROWN_DAMAGE);
             }
-        } else if self.air_supply < MAX_AIR_SUPPLY {
+        } else if self.air_supply < MAX_AIR_SUPPLY
+            && (!eye_in_water || underwater_breathing.refills_air())
+        {
             let before = self.air_supply;
             self.air_supply = (self.air_supply + 4).min(MAX_AIR_SUPPLY);
             if self.air_supply != before {
@@ -565,14 +607,14 @@ impl PlayerVitals {
         Some(outcome.to_health)
     }
 
-    /// Heals, clamped at [`MAX_HEALTH`]. A dead entity is not healed (the
+    /// Heals, clamped at the active [`Self::max_health`] ceiling. A dead entity is not healed (the
     /// liveness guard), which is what stops a regeneration effect reviving a
     /// corpse.
     pub fn heal(&mut self, amount: f32) {
         if self.health <= 0.0 {
             return;
         }
-        self.health = (self.health + amount).min(MAX_HEALTH);
+        self.health = (self.health + amount).min(self.max_health);
     }
 
     /// `/kill`: a hit for the maximum representable amount, going straight
@@ -627,7 +669,8 @@ impl PlayerVitals {
     /// Both values are **clamped to their legal ranges** rather than trusted:
     /// they come off disk, and a `.dat` a user has edited (or one this code wrote
     /// before a range changed) must not put the connection into a state
-    /// [`tick`](Self::tick) cannot leave. `health` above [`MAX_HEALTH`] would make
+    /// [`tick`](Self::tick) cannot leave. `health` above the restored base
+    /// [`MAX_HEALTH`] would make
     /// the client's hearts overflow their bar; `air_supply` above
     /// [`MAX_AIR_SUPPLY`] would leave the bubble bar full forever, because the
     /// refill branch only ever assigns *up to* the maximum.
@@ -645,6 +688,7 @@ impl PlayerVitals {
         Self {
             air_supply: air_supply.clamp(-MAX_AIR_SUPPLY, MAX_AIR_SUPPLY),
             health: health.clamp(0.0, MAX_HEALTH),
+            max_health: MAX_HEALTH,
             hurt_cooldown: lodestone_entity::HurtCooldown::default(),
             food: crate::food::FoodData::default(),
         }
@@ -678,6 +722,16 @@ impl PlayerVitals {
         self.food.add_exhaustion(amount);
     }
 
+    /// Applies an instant Saturation tick to the authoritative food state.
+    ///
+    /// Returns whether the client-visible food or saturation values changed, so
+    /// the caller can avoid an otherwise redundant health packet at a full bar.
+    pub fn apply_saturation_effect(&mut self, food_points: i32) -> bool {
+        let before = self.food;
+        self.food.apply_saturation_effect(food_points);
+        self.food != before
+    }
+
     /// Advances hunger by one server tick and applies its health consequences —
     /// the food-tick step plus the heal/starve hit it makes on the way out.
     ///
@@ -695,9 +749,9 @@ impl PlayerVitals {
         if self.health <= 0.0 {
             return crate::food::FoodTick::default();
         }
-        let out = self.food.tick(difficulty, natural_regen, self.health, MAX_HEALTH);
+        let out = self.food.tick(difficulty, natural_regen, self.health, self.max_health);
         if let Some(heal) = out.heal {
-            self.health = (self.health + heal).min(MAX_HEALTH);
+            self.health = (self.health + heal).min(self.max_health);
         }
         if let Some(starve) = out.starve {
             // `hurtServer(damageSources().starve(), 1.0F)`. `minecraft:starve` is
@@ -721,6 +775,20 @@ mod tests {
         assert_eq!(v.health(), MAX_HEALTH);
     }
 
+    /// Health Boost's ceiling is live state, not a display-only number: healing
+    /// can use the raised space, and removal clamps the stored health back to
+    /// the restored ceiling.
+    #[test]
+    fn dynamic_max_health_controls_healing_and_clamps_on_removal() {
+        let mut v = PlayerVitals::restored(19.0, MAX_AIR_SUPPLY);
+        assert!(v.set_max_health(24.0));
+        v.heal(10.0);
+        assert_eq!(v.health(), 24.0, "healing must reach the boosted ceiling");
+        assert!(v.set_max_health(MAX_HEALTH));
+        assert_eq!(v.health(), MAX_HEALTH, "removal must clamp current health");
+        assert!(!v.set_max_health(MAX_HEALTH), "unchanged ceiling must not request a packet");
+    }
+
     /// **Control**: a dry tick (eye not in water) at full air must change
     /// nothing — no air event, no damage. This is the negative control that
     /// proves the "increase" branch does not fire spuriously when there is
@@ -732,6 +800,43 @@ mod tests {
         assert!(out.is_empty(), "expected no change, got {out:?}");
         assert_eq!(v.air_supply(), MAX_AIR_SUPPLY);
         assert_eq!(v.health(), MAX_HEALTH);
+    }
+
+    #[test]
+    fn underwater_effect_rules_distinguish_depletion_hold_and_refill() {
+        let mut ordinary = PlayerVitals::restored(MAX_HEALTH, 20);
+        assert_eq!(
+            ordinary.tick_with_underwater_breathing(
+                true,
+                crate::mob_effects::UnderwaterBreathing::None
+            ),
+            VitalsTick {
+                air_changed: Some(19),
+                damage: None,
+            }
+        );
+
+        let mut hold = PlayerVitals::restored(MAX_HEALTH, 20);
+        assert!(
+            hold.tick_with_underwater_breathing(
+                true,
+                crate::mob_effects::UnderwaterBreathing::Hold
+            )
+            .is_empty()
+        );
+        assert_eq!(hold.air_supply(), 20, "hold must not silently refill");
+
+        let mut refill = PlayerVitals::restored(MAX_HEALTH, 20);
+        assert_eq!(
+            refill.tick_with_underwater_breathing(
+                true,
+                crate::mob_effects::UnderwaterBreathing::Refill
+            ),
+            VitalsTick {
+                air_changed: Some(24),
+                damage: None,
+            }
+        );
     }
 
     /// The exact vanilla cadence: 300 ticks to empty from full, then exactly

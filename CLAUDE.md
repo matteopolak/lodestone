@@ -126,13 +126,14 @@ committed sha in an isolated worktree (`git worktree add --detach`; prefer `git 
 A worktree is right for verification and wrong for long work — its base goes stale fast enough to make
 the result unmergeable, and a green worktree proves nothing about `main`.
 
-**Machine hygiene.** `target/` reaches 100+ GB against a volume with ~30 GB usable, and every `Bash`
-call then fails before running. Measure the split before choosing what to delete (the `build` vs
-`incremental` ratio is not stable); `rm -rf target/debug` is the reclaim that works, and is safe when no
-cargo/rustc is running. Do not purge `target/` while another agent is mid-compile — its signature is a
-flood of `E0463 can't find crate` affecting every crate uniformly. Do not kill Bitwarden (it hosts the
-ssh-agent that authenticates GitHub). Idle cargo processes with zero `rustc` are **not** a wedged lock —
-sample the children (`ps -Ao pid,etime,%cpu,command | grep "[t]arget/debug"`), not the parents.
+**Machine hygiene.** Local Cargo policy uses one target directory at `~/.cargo/shared-target`, an
+eight-job queue, and `sccache`; do not pass `--target-dir` or export `CARGO_TARGET_DIR` for ordinary
+builds. A daily user LaunchAgent runs `cargo-sweep` only when no `cargo` or `rustc` process exists,
+removes artifacts older than 21 days, and caps the shared target at 40 GB. Do not purge that directory
+while another agent is mid-compile — its signature is a flood of `E0463 can't find crate` affecting
+every crate uniformly. Do not kill Bitwarden (it hosts the ssh-agent that authenticates GitHub). An
+idle cargo process with zero `rustc` can be waiting on the intentional shared-target queue; inspect its
+children before treating it as wedged.
 
 ---
 

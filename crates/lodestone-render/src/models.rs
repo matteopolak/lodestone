@@ -14,14 +14,16 @@
 //! coplanar unit faces, and merging them would be nonsense. Vanilla's answer is
 //! essentially "don't merge anything that isn't a full cube face"; in fact
 //! vanilla doesn't greedy-merge at all, it just emits each model quad and relies
-//! on `cullface` occlusion plus its render layers. **Our policy:**
+//! on `cullface` occlusion, targeted same-material checks and its render layers.
+//! **Our policy:**
 //!
 //! * A block whose baked model *is* a full opaque cube — recognised by the
 //!   geometry-derived predicate [`is_packed_cube`] — goes through the packed
 //!   12-byte [`mesh_greedy`](crate::mesh::mesh_greedy) path and *is* merged.
 //! * Every other block is meshed here, **per quad, never merged**: each
 //!   [`BakedQuad`] is emitted verbatim (translated to its block position) unless
-//!   its `cullface` neighbour fully occludes it.
+//!   its `cullface` neighbour fully occludes it, or a recognized axis-aligned
+//!   inset face has a matching half-transparent neighbour.
 //!
 //! **Verified against the tree (not assumed): today this policy's first bullet
 //! has zero production callers.** `lodestone-shell`'s live (`Vanilla`)
@@ -444,6 +446,83 @@ fn quad_is_on_face_boundary(q: &BakedQuad) -> bool {
     q.positions.iter().all(|p| (p[fixed] - plane).abs() <= EPS)
 }
 
+/// Whether an unculled quad is a complete axis-aligned rectangle strictly
+/// inside the block on its own facing plane.
+///
+/// Slime and honey models contain a second, nested cube. Its six faces omit
+/// `cullface` deliberately, so ordinary boundary-face culling cannot see the
+/// shared face when two identical blocks touch. The same-material hook can
+/// suppress those faces, but only after this geometry check: diagonal blades,
+/// portal panels and other unculled model geometry must remain visible even
+/// when a view reports that a neighbouring block has the same material.
+#[must_use]
+fn quad_is_inset_face(q: &BakedQuad) -> bool {
+    const EPS: f32 = 1e-4;
+    if q.cullface.is_some() {
+        return false;
+    }
+
+    let (fixed, _) = face_plane(q.direction);
+    let (a, b) = match fixed {
+        0 => (1usize, 2usize),
+        1 => (0, 2),
+        _ => (0, 1),
+    };
+    let plane = q.positions[0][fixed];
+    if !plane.is_finite() || plane <= EPS || plane >= 1.0 - EPS {
+        return false;
+    }
+
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    for p in &q.positions {
+        if !p.iter().all(|value| value.is_finite())
+            || (p[fixed] - plane).abs() > EPS
+        {
+            return false;
+        }
+        for axis in 0..3 {
+            min[axis] = min[axis].min(p[axis]);
+            max[axis] = max[axis].max(p[axis]);
+        }
+    }
+
+    // The face must fill a non-zero rectangle, but that rectangle must stay
+    // strictly inside the unit block. The corner mask rejects a sliver or an
+    // arbitrary four-point polygon that merely happens to share these bounds.
+    if max[a] - min[a] <= EPS
+        || max[b] - min[b] <= EPS
+        || min[a] <= EPS
+        || max[a] >= 1.0 - EPS
+        || min[b] <= EPS
+        || max[b] >= 1.0 - EPS
+    {
+        return false;
+    }
+    let mut corners = 0u8;
+    for p in &q.positions {
+        let ca = if (p[a] - min[a]).abs() <= EPS {
+            Some(0u8)
+        } else if (p[a] - max[a]).abs() <= EPS {
+            Some(1u8)
+        } else {
+            None
+        };
+        let cb = if (p[b] - min[b]).abs() <= EPS {
+            Some(0u8)
+        } else if (p[b] - max[b]).abs() <= EPS {
+            Some(1u8)
+        } else {
+            None
+        };
+        match (ca, cb) {
+            (Some(ca), Some(cb)) => corners |= 1 << (ca * 2 + cb),
+            _ => return false,
+        }
+    }
+    corners == 0b1111
+}
+
 /// Snaps a coordinate to `0` or `1` (returned as `0`/`1`), or `None` if it is
 /// not within epsilon of a unit-cube corner.
 fn snap01(v: f32) -> Option<u8> {
@@ -539,7 +618,9 @@ pub trait ModelSectionView {
     /// family answers `false` there (vanilla's `noOcclusion()`), which is
     /// exactly why their interior faces need this second, family-keyed check —
     /// without it, a wall of the same translucent block draws every interior
-    /// face and reads as a wireframe lattice.
+    /// face and reads as a wireframe lattice. The mesher also applies this hook
+    /// to the complete, axis-aligned inset faces emitted without `cullface` by
+    /// nested slime/honey models; arbitrary no-cull geometry remains untouched.
     ///
     /// Defaults to `false`, reproducing the pre-fix behaviour exactly for a
     /// view that has not opted in (every hermetic test/GUI-item view except
@@ -874,8 +955,9 @@ fn quad_corner_sample(
 }
 
 /// Mesh the non-cube geometry of a section, emitting each visible baked quad
-/// once, never merged. A quad is culled only when it carries a `cullface` and
-/// the neighbouring block in that direction fully occludes it.
+/// once, never merged. A boundary quad is culled when its `cullface` neighbour
+/// fully occludes it; a recognized inset face is additionally culled when its
+/// neighbouring block is the same half-transparent material.
 ///
 /// # Smooth lighting and ambient occlusion
 ///
@@ -912,7 +994,7 @@ pub fn mesh_models(view: &dyn ModelSectionView) -> ModelMesh {
 /// The split exists because the two meshes are drawn through different
 /// pipelines: the first (`Solid` + `Cutout`) is depth-written and uses a
 /// single alpha-test/discard shader; the second needs real alpha blending,
-/// no depth write and back-to-front ordering — see
+/// depth writes and back-to-front ordering — see
 /// `lodestone-shell`'s `gpu/frame.rs` translucent-block draw pass.
 ///
 /// The split is per **quad**, matching vanilla: its section-compiler class opens one
@@ -955,7 +1037,15 @@ pub fn mesh_models_layers(view: &dyn ModelSectionView) -> (ModelMesh, ModelMesh)
                 // the solid pass or it does not.
                 let force_opaque = view.force_opaque_at(x, y, z);
                 for quad in quads {
-                    if let Some(cf) = quad.cullface {
+                    // Most model faces opt into culling with `cullface`. The
+                    // nested cubes used by slime and honey are the deliberate
+                    // exception: their six inset faces are unculled in the
+                    // asset, so recognize only a complete interior rectangle
+                    // before applying the same-material hook to them.
+                    let face_to_check = quad
+                        .cullface
+                        .or_else(|| quad_is_inset_face(quad).then_some(quad.direction));
+                    if let Some(cf) = face_to_check {
                         let nrm = face_of_direction(cf).normal();
                         let (nx, ny, nz) = (
                             x as i32 + nrm[0],
@@ -968,7 +1058,12 @@ pub fn mesh_models_layers(view: &dyn ModelSectionView) -> (ModelMesh, ModelMesh)
                         // itself (`skips_rendering_against`) — see that
                         // method's doc for why occlusion alone cannot cull an
                         // ice/glass wall's interior faces.
-                        if view.occludes_at(nx, ny, nz)
+                        // An inset face is intentionally not an occlusion
+                        // boundary: only the exact same-material override may
+                        // remove it. Applying `occludes_at` to it would make a
+                        // different opaque neighbour erase nested geometry.
+                        let occluded = quad.cullface.is_some() && view.occludes_at(nx, ny, nz);
+                        if occluded
                             || view.skips_rendering_against(
                                 x as i32, y as i32, z as i32, nx, ny, nz,
                             )

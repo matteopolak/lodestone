@@ -2148,7 +2148,7 @@ pub struct WorldRegistries {
     pub native_storage: Option<std::sync::Arc<crate::world_storage::WorldStorage>>,
 }
 
-/// Generates every column in `coords` across scoped OS threads over `&source`,
+/// Generates every column in `coords` across the shared native Rayon pool over `&source`,
 /// returning them in the **same order as `coords`** regardless of which
 /// thread finished which column first.
 ///
@@ -2158,10 +2158,12 @@ pub struct WorldRegistries {
 /// and no shared RNG stream exists anywhere in
 /// `lodestone-worldgen`, so results are order-independent by construction —
 /// see `OverworldGenerator::column`'s own doc comment and
-/// `examples/bench_worldgen.rs`, which already shares a generator across
-/// `std::thread::scope` workers the same way. `ChunkSource: Send + Sync`
-/// (this trait's own bound, above) is what makes `&S` shareable across the
-/// scope in the first place.
+/// `examples/bench_worldgen.rs`, which already shares a generator across a
+/// worker pool the same way. `ChunkSource: Send + Sync` (this trait's own
+/// bound, above) is what makes `&S` shareable across the pool in the first
+/// place. The pool is intentionally reused across batches and connections;
+/// creating a fresh scoped thread set for every batch would multiply native
+/// workers when several players cross chunk boundaries together.
 ///
 /// Callers that care about the wire being independent of thread scheduling
 /// (i.e. every caller) must still encode/send the returned columns in the
@@ -2170,6 +2172,7 @@ pub struct WorldRegistries {
 /// `Vec` aligned index-for-index with `coords` rather than an unordered
 /// collection.
 #[must_use]
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn generate_columns_parallel<S: ChunkSource + ?Sized>(
     source: &S,
     coords: &[(i32, i32)],
@@ -2205,6 +2208,7 @@ pub(crate) fn generate_columns_parallel<S: ChunkSource + ?Sized>(
 /// [`generate_columns_parallel`] documents, and for the same reason: the wire byte
 /// sequence must not depend on which thread finished first.
 #[must_use]
+#[cfg(not(target_arch = "wasm32"))]
 fn map_columns_parallel<S, T, F>(source: &S, coords: &[(i32, i32)], f: F) -> Vec<T>
 where
     S: ChunkSource + ?Sized,
@@ -2218,30 +2222,17 @@ where
             .collect();
     }
 
-    let workers = std::thread::available_parallelism()
-        .map(std::num::NonZero::get)
-        .unwrap_or(4)
-        .max(1);
-    let batch = coords.len().div_ceil(workers).max(1);
+    use rayon::prelude::*;
 
-    std::thread::scope(|scope| {
-        let handles: Vec<_> = coords
-            .chunks(batch)
-            .map(|slice| {
-                let f = &f;
-                scope.spawn(move || {
-                    slice
-                        .iter()
-                        .map(|&(cx, cz)| f((cx, cz), source.column(cx, cz)))
-                        .collect::<Vec<_>>()
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .flat_map(|h| h.join().expect("worldgen worker thread panicked"))
-            .collect()
-    })
+    // Rayon owns one reusable pool for the process. This function is normally
+    // called from one Tokio blocking task per batch: creating an OS thread set
+    // here would oversubscribe the machine as soon as two connections generate
+    // at once. Indexed parallel collection retains coordinate order even when
+    // workers finish out of order.
+    coords
+        .par_iter()
+        .map(|&(cx, cz)| f((cx, cz), source.column(cx, cz)))
+        .collect()
 }
 
 /// [`map_columns_parallel`]'s single-threaded, **yielding** twin — the wasm32
@@ -2307,11 +2298,26 @@ where
     map_columns_yielding(source, coords, |_, column| column, yield_between).await
 }
 
+/// Browser-safe counterpart for the borrowed [`ChunkSource`] dispatch arm.
+///
+/// The shared production arm already enters [`generate_columns_offloaded`],
+/// whose wasm implementation uses this same yielding loop. Keeping this small
+/// wrapper here prevents a borrowed/test-shaped caller from accidentally
+/// reaching the native-only parallel function and trapping through
+/// `std::thread` on wasm32.
+#[cfg(target_arch = "wasm32")]
+pub(crate) async fn generate_columns_borrowed(
+    source: &dyn ChunkSource,
+    coords: &[(i32, i32)],
+) -> Vec<ChunkColumn> {
+    generate_columns_yielding(source, coords, yield_to_browser).await
+}
+
 /// The production `yield_between` for [`generate_columns_yielding`]/
 /// [`map_columns_yielding`] on wasm32: a real browser **macrotask**, not a
 /// microtask.
 ///
-/// `js_sys::Promise::new` resolved by `window.setTimeout(_, 0)` is load-bearing
+/// `js_sys::Promise::new` resolved by the active global's `setTimeout(_, 0)` is load-bearing
 /// in that choice. A microtask (e.g. `Promise::resolve().then(...)`) drains
 /// entirely within the *current* JS task — the browser does not get a chance to
 /// paint or service input between microtasks, only between tasks — so a future
@@ -2322,11 +2328,18 @@ where
 #[cfg(target_arch = "wasm32")]
 async fn yield_to_browser() {
     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
-        let window = web_sys::window()
-            .expect("no global `window`: this crate's wasm32 build only runs inside a browser tab");
-        window
-            .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 0)
-            .expect("window.setTimeout");
+        // The normal browser singleplayer path generates columns in a
+        // dedicated server worker. A worker has no `Window`, but its global
+        // still exposes the same macrotask timer API as a page.
+        use wasm_bindgen::{JsCast, JsValue};
+
+        let global = js_sys::global();
+        let set_timeout = js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout"))
+            .expect("browser global must expose setTimeout")
+            .unchecked_into::<js_sys::Function>();
+        set_timeout
+            .call2(&global, resolve.as_ref(), &JsValue::from(0_i32))
+            .expect("global.setTimeout");
     });
     let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
 }
@@ -2337,9 +2350,9 @@ async fn yield_to_browser() {
 /// # Why this exists when generation is already parallel
 ///
 /// [`generate_columns_parallel`] improves *throughput*: the batch is
-/// fanned out over scoped OS threads. It did nothing about *latency*, because
-/// its final `std::thread::scope` join blocks the calling thread until every
-/// worker finishes. Parallel is not the same as non-blocking, and the
+/// fanned out over a reusable Rayon pool. It does nothing about *latency*,
+/// because its blocking task still waits until every worker finishes. Parallel
+/// is not the same as non-blocking, and the
 /// distinction is total rather than academic here: the shell builds the
 /// server's runtime with `tokio::runtime::Builder::new_current_thread()`
 /// (`crates/lodestone-shell/src/net.rs`), so the connection task and
@@ -2379,20 +2392,12 @@ async fn yield_to_browser() {
 ///
 /// # wasm32
 ///
-/// `wasm32-unknown-unknown` has no blocking pool and does **not** call
-/// `generate_columns_parallel` straight through: that function's
-/// `coords.len() > 1` arm fans out
-/// over `std::thread::scope`, and a `Scope::spawn` on this target reaches
-/// `Builder::spawn`'s `Err` through an internal `.expect()` — measured,
-/// executed in a wasm VM: `unreachable`, i.e. it TRAPS, and with this crate's
-/// `panic = "abort"` release profile that is unrecoverable. `portal.rs`'s
-/// `create_portal` gates its own `generate_columns_parallel` call off on wasm32
-/// for the same constraint. This helper therefore
-/// wasm32 instead calls [`generate_columns_yielding`], which never enters
-/// `map_columns_parallel`'s multi-column branch (it generates one column at a
-/// time) and yields to the browser's own task queue between columns, avoiding
-/// both the trap and the "page not responding" hang caused by synchronous
-/// multi-column fan-out.
+/// `wasm32-unknown-unknown` has no blocking pool and does **not** call the
+/// native-only `generate_columns_parallel` path. This helper instead calls
+/// [`generate_columns_yielding`], which generates one column at a time and
+/// yields to the browser's own task queue between columns. That keeps the
+/// same source algorithm usable in a browser without linking a native worker
+/// backend or monopolising the tab with a synchronous multi-column burst.
 #[tracing::instrument(skip_all, fields(count = coords.len()))]
 pub(crate) async fn generate_columns_offloaded<S: ChunkSource + 'static + ?Sized>(
     source: Arc<S>,
@@ -2404,9 +2409,11 @@ pub(crate) async fn generate_columns_offloaded<S: ChunkSource + 'static + ?Sized
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        tokio::task::spawn_blocking(move || generate_columns_parallel(&*source, &coords))
+        crate::worldgen_dispatch::spawn(move || {
+            generate_columns_parallel(&*source, &coords)
+        })
             .await
-            .expect("worldgen blocking task panicked")
+            .expect("worldgen Rayon worker panicked")
     }
 }
 
@@ -2448,10 +2455,9 @@ pub(crate) async fn generate_and_encode_columns_offloaded<S: ChunkSource + 'stat
     // wasm32: `map_columns_yielding`, one column generated-and-encoded at a
     // time with a real browser yield between each — see
     // `generate_columns_offloaded`'s wasm32 doc for why this is not merely a
-    // latency nicety on this target. `map_columns_parallel`'s
-    // `coords.len() > 1` branch (native's own past shape here) TRAPS on
-    // wasm32 via `std::thread::scope`, so this is also what keeps the browser
-    // build from crashing on any batch bigger than one column.
+    // latency nicety on this target. The native parallel helper is not
+    // compiled into wasm, so this also keeps the browser build from reaching a
+    // native worker backend on any batch bigger than one column.
     #[cfg(target_arch = "wasm32")]
     {
         Some(
@@ -2475,15 +2481,17 @@ pub(crate) async fn generate_and_encode_columns_offloaded<S: ChunkSource + 'stat
     // function's own doc for the two properties this buys.
     #[cfg(not(target_arch = "wasm32"))]
     {
+        let source_for_worker = Arc::clone(&source);
+        let coords_for_worker = coords;
         let encode = move || {
-            map_columns_parallel(&*source, &coords, |(cx, cz), column| {
+            map_columns_parallel(&*source_for_worker, &coords_for_worker, |(cx, cz), column| {
                 encoder.try_encode_chunk_in_dimension(cx, cz, &column, dimension)
             })
         };
         Some(
-            tokio::task::spawn_blocking(encode)
+            crate::worldgen_dispatch::spawn(encode)
                 .await
-                .expect("worldgen blocking task panicked")
+                .expect("worldgen Rayon worker panicked")
                 .into_iter()
                 .collect(),
         )
@@ -2895,13 +2903,14 @@ impl ChunkSource for NetherChunkSource {
 /// exact light snapshots until a successful save, while this deterministic
 /// generator remains free to regenerate untouched terrain after eviction.
 ///
-/// **Constructed, but not reachable by a player.** `crate::integrated`'s
+/// **Reachable through the integrated server's portal path.** `crate::integrated`'s
 /// `with_nether` sibling factory has an `End` arm that builds one of these
 /// (mirroring the `Nether` arm), so `DimensionalSource::sibling(Dimension::End)`
-/// answers `Some`. A trip still requires an end-portal-frame ignition and a
-/// end-portal-frame ignition and no step-into-`end_portal` teleport. See
-/// `crate::dimension`'s module doc and `docs/nether-portals.md`'s "How to change
-/// it" for the exact remaining hops.
+/// answers `Some`. Completing an `end_portal_frame` ring calls the server's End
+/// arrival path, which repairs the fixed platform and starts the dragon fight
+/// once for this source. Returning from the End through the generated exit
+/// portal remains outside this chunk source's contract; see
+/// `crate::dimension`'s module doc for the dimension-level boundary.
 ///
 /// # The window height is 256, not the generator's 128
 ///
@@ -3493,8 +3502,8 @@ mod tests {
     ///
     /// # The negative control is the second arm, permanently
     ///
-    /// `generate_columns_parallel` stays in the tree (it is what
-    /// `SourceRef::Borrowed` still uses), so the inline control is measurable
+    /// `generate_columns_parallel` stays in the native tree (it is what
+    /// `SourceRef::Borrowed` uses there), so the inline control is measurable
     /// alongside the offloaded path. The control must record **zero** ticks.
     /// The measured comparison is:
     /// offloaded 20 ticks over 214 ms, blocking 0 ticks over 209 ms.
@@ -3663,10 +3672,9 @@ mod tests {
 
     /// [`generate_columns_yielding`]/[`map_columns_yielding`] are what
     /// `generate_columns_offloaded`/`generate_and_encode_columns_offloaded`'s
-    /// wasm32 branches call instead of `generate_columns_parallel` — whose
-    /// `coords.len() > 1` branch TRAPS on wasm32 via `std::thread::scope` (see
-    /// their doc comments; measured executing the equivalent
-    /// `std::thread::scope(|s| s.spawn(...))` in a wasm VM: `unreachable`).
+    /// wasm32 branches call instead of the native-only
+    /// `generate_columns_parallel` helper. The target split is what makes the
+    /// browser path structurally unable to enter a native worker backend.
     /// wasm32-only code cannot be exercised by a native `cargo test`, so this
     /// gate proves the one property that is target-independent by
     /// construction: **the yield closure runs exactly once per column,

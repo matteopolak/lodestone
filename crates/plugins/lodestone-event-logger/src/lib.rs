@@ -1,6 +1,7 @@
 //! A toy `EventPriority::Monitor` reader plugin: the first consumer of
 //! `lodestone_ecs`'s bevy `Message`-based plugin event bus (`RawPacket`/
-//! `GameEvent`), and a worked example of the monitor-priority read-only tier:
+//! `OutboundRawPacket`/`GameEvent`), and a worked example of the
+//! monitor-priority read-only tier:
 //! a handler guaranteed to run after every other priority, including
 //! cancellation, and structurally unable to mutate state.
 //!
@@ -78,8 +79,13 @@ use std::sync::{Arc, Mutex};
 use lodestone_ecs::app::{App, Plugin};
 use lodestone_ecs::ecs::message::MessageReader;
 use lodestone_ecs::ecs::schedule::IntoScheduleConfigs;
-use lodestone_ecs::{EventPriority, GameEvent, GameEventBusPlugin, GameTick};
+use lodestone_ecs::{
+    EventPriority, GameEvent, GameEventBusPlugin, GameTick, OutboundRawPacket,
+    OutboundRawPacketBusPlugin,
+};
 use lodestone_model::ClientEvent;
+
+const DEFAULT_OUTBOUND_LOG_CAPACITY: usize = 4096;
 
 /// A read handle onto the log an [`EventLoggerPlugin`] is filling. Clones
 /// share the same underlying `Vec` — this is a handle, not a snapshot.
@@ -171,5 +177,134 @@ impl Plugin for EventLoggerPlugin {
         };
         lodestone_ecs::assert_monitor_system_is_read_only(observe.clone());
         app.add_systems(GameTick, observe.in_set(EventPriority::Monitor));
+    }
+}
+
+/// A read handle onto bounded outbound packet observations collected by an
+/// [`OutboundPacketLoggerPlugin`]. The entries are the exact adapter output,
+/// including packet id and connection state, before transport framing.
+#[derive(Clone, Default, Debug)]
+pub struct OutboundPacketLog {
+    packets: Arc<Mutex<Vec<OutboundRawPacket>>>,
+}
+
+impl OutboundPacketLog {
+    /// A clone of every observation in arrival order.
+    #[must_use]
+    pub fn packets(&self) -> Vec<OutboundRawPacket> {
+        self.packets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Number of observations collected so far.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.packets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
+    /// Whether no packet has been observed yet.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// A production observer consumer for the native outbound raw-packet bus.
+///
+/// The plugin installs the bounded bus itself, then drains it at Monitor
+/// priority into an external handle. It cannot hold up or alter the driver's
+/// write path; the bus's configured limits decide what is retained.
+#[derive(Debug)]
+pub struct OutboundPacketLoggerPlugin {
+    log: Arc<Mutex<Vec<OutboundRawPacket>>>,
+    bus: OutboundRawPacketBusPlugin,
+    capacity: usize,
+}
+
+impl OutboundPacketLoggerPlugin {
+    /// Builds an observer with the default bounded bus policy.
+    #[must_use]
+    pub fn new() -> (Self, OutboundPacketLog) {
+        Self::with_bus(OutboundRawPacketBusPlugin::default())
+    }
+
+    /// Builds an observer with an explicit per-tick packet/byte policy.
+    #[must_use]
+    pub fn with_bus(bus: OutboundRawPacketBusPlugin) -> (Self, OutboundPacketLog) {
+        Self::with_bus_capacity(bus, DEFAULT_OUTBOUND_LOG_CAPACITY)
+    }
+
+    /// Builds an observer with explicit bus policy and retained-log capacity.
+    /// Packets beyond the retained-log bound are dropped by this consumer after
+    /// the bus has delivered them; the driver's wire packet is unaffected.
+    #[must_use]
+    pub fn with_bus_capacity(
+        bus: OutboundRawPacketBusPlugin,
+        capacity: usize,
+    ) -> (Self, OutboundPacketLog) {
+        let packets = Arc::new(Mutex::new(Vec::new()));
+        (
+            Self {
+                log: Arc::clone(&packets),
+                bus,
+                capacity,
+            },
+            OutboundPacketLog { packets },
+        )
+    }
+}
+
+impl Plugin for OutboundPacketLoggerPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins(self.bus);
+        let logged = Arc::clone(&self.log);
+        let capacity = self.capacity;
+        let observe = move |mut packets: MessageReader<OutboundRawPacket>| {
+            let mut log = logged
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for packet in packets.read() {
+                if log.len() < capacity {
+                    log.push(packet.clone());
+                }
+            }
+        };
+        lodestone_ecs::assert_monitor_system_is_read_only(observe.clone());
+        app.add_systems(GameTick, observe.in_set(EventPriority::Monitor));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OutboundPacketLoggerPlugin, OutboundPacketLog};
+    use lodestone_ecs::ecs::message::Messages;
+    use lodestone_ecs::{GameTick, OutboundRawPacket};
+    use lodestone_model::ConnectionState;
+
+    #[test]
+    fn outbound_logger_is_a_real_message_consumer() {
+        let (plugin, log): (_, OutboundPacketLog) = OutboundPacketLoggerPlugin::new();
+        let mut app = lodestone_ecs::app::App::new();
+        app.add_plugins(plugin);
+        app.world_mut().write_message(OutboundRawPacket {
+            state: ConnectionState::Play,
+            packet_id: 7,
+            payload: vec![0, 255],
+        });
+        assert_eq!(
+            app.world()
+                .resource::<Messages<OutboundRawPacket>>()
+                .len(),
+            1
+        );
+        app.world_mut().run_schedule(GameTick);
+
+        assert_eq!(log.len(), 1);
+        assert_eq!(log.packets()[0].payload, vec![0, 255]);
     }
 }

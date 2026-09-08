@@ -227,6 +227,7 @@ impl Sim {
                     // `World`, which we read via `NetClient::sections_and_light_at`
                     // (+ `world_dimensions` for geometry). `mark_column_dirty`
                     // meshes live columns through the vanilla classifier.
+                    self.join_trace.mark("received", x, z);
                     self.on_column_arrived(x, z);
                 }
                 NetUpdate::ChunkUnloaded { x, z } => {
@@ -557,6 +558,9 @@ impl Sim {
                             Rotation::new(self.player().yaw, self.player().pitch),
                         );
                     }
+                    // Close the net-side correction window only after the
+                    // authoritative pose is installed in the simulation.
+                    crate::net::note_teleport_applied();
                     // The `transfer` target's simulation-side hop, and the one
                     // that dates the window: the driver wrote
                     // `ACCEPT_TELEPORTATION` when the packet decoded, but the
@@ -918,40 +922,55 @@ impl Sim {
                         }
                     });
                 }
-                // Only the local player's effects are folded: they feed both the
-                // physics view ([`PlayerState::effects`]) and the display view
-                // ([`Sim::hud_effects`]). Entity-scoped effects are filtered here
-                // rather than in `net::forward`, keeping the wire event
-                // entity-agnostic.
+                // Every entity's effects are retained for status particles. The
+                // local player's copy additionally feeds physics and the HUD.
                 NetUpdate::EffectApplied {
                     entity_id,
                     effect,
                     amplifier,
                     duration_ticks,
                     ambient,
+                    show_particles,
                     show_icon,
+                    blend,
                 } => {
-                    if self.server_entity_id() == Some(entity_id) {
-                        let local = self.local;
-                        self.write(|w| {
+                    let local_entity = self.server_entity_id() == Some(entity_id);
+                    let local = self.local;
+                    self.write(|w| {
+                        let Ok(id) = lodestone_model::Identifier::new("minecraft", effect.as_str()) else {
+                            return;
+                        };
+                        if let Some(mut entity_effects) = w.get_resource_mut::<lodestone_ecs::EntityStatusEffects>() {
+                            entity_effects.apply(
+                                entity_id,
+                                lodestone_game::effect::StatusEffect {
+                                    id: id.clone(),
+                                    amplifier: u8::try_from(amplifier).unwrap_or(u8::MAX),
+                                    duration_ticks,
+                                    ambient,
+                                    show_particles,
+                                    show_icon,
+                                    blend,
+                                },
+                            );
+                        }
+                        if local_entity {
                             if let Some(mut state) = w.get_mut::<PhysicsState>(local) {
                                 state.0.effects.apply(&effect, amplifier);
                             }
-                            if let Ok(id) =
-                                lodestone_model::Identifier::new("minecraft", effect.as_str())
-                                && let Some(mut effects) = w.get_mut::<HudEffects>(local)
-                            {
+                            if let Some(mut effects) = w.get_mut::<HudEffects>(local) {
                                 effects.0.apply(lodestone_game::effect::StatusEffect {
                                     id,
                                     amplifier: u8::try_from(amplifier).unwrap_or(u8::MAX),
                                     duration_ticks,
                                     ambient,
-                                    show_particles: true,
+                                    show_particles,
                                     show_icon,
+                                    blend,
                                 });
                             }
-                        });
-                    }
+                        }
+                    });
                 }
                 // The camera's damage tilt (`GameRenderer.bobHurt`). Filtered to
                 // the local player here rather than in `net.rs`'s router, matching
@@ -969,20 +988,23 @@ impl Sim {
                     }
                 }
                 NetUpdate::EffectRemoved { entity_id, effect } => {
-                    if self.server_entity_id() == Some(entity_id) {
-                        let local = self.local;
-                        self.write(|w| {
-                            if let Some(mut state) = w.get_mut::<PhysicsState>(local) {
-                                state.0.effects.remove(&effect);
+                    let local_entity = self.server_entity_id() == Some(entity_id);
+                    let local = self.local;
+                    self.write(|w| {
+                        if let Ok(id) = lodestone_model::Identifier::new("minecraft", effect.as_str()) {
+                            if let Some(mut entity_effects) = w.get_resource_mut::<lodestone_ecs::EntityStatusEffects>() {
+                                entity_effects.remove(entity_id, &id);
                             }
-                            if let Ok(id) =
-                                lodestone_model::Identifier::new("minecraft", effect.as_str())
-                                && let Some(mut effects) = w.get_mut::<HudEffects>(local)
-                            {
-                                effects.0.remove(&id);
+                            if local_entity {
+                                if let Some(mut state) = w.get_mut::<PhysicsState>(local) {
+                                    state.0.effects.remove(&effect);
+                                }
+                                if let Some(mut effects) = w.get_mut::<HudEffects>(local) {
+                                    effects.0.remove(&id);
+                                }
                             }
-                        });
-                    }
+                        }
+                    });
                 }
                 // The tab-list and scoreboard arms are *deleted*, not moved:
                 // `lodestone_ecs::session`'s systems fold them inside the

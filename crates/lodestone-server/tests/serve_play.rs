@@ -4882,21 +4882,21 @@ async fn a_banned_uuid_is_refused_at_login_and_admitted_once_pardoned() {
 // Protocol encode must not run on the connection task (`ChunkEncoder`).
 // ---------------------------------------------------------------------------
 
-/// Set on any thread that has run [`ServerProtocol::decode`] — i.e. on the
-/// connection task's thread, and nowhere else.
-///
-/// This is the discriminator [`EncodeSiteProto`] is built on, and it is exact
-/// rather than heuristic. `decode` is only ever called from
-/// `serve_connection_inner`/`dispatch_play_packet`, both of which run on the
-/// connection task; the tests below run on `#[tokio::test]`'s **current-thread**
-/// runtime — the same flavour production builds
-/// (`crates/lodestone-shell/src/net.rs`'s `new_current_thread`) — so that task
-/// cannot migrate, and `tokio`'s blocking pool is a disjoint set of threads that
-/// never decodes anything.
-///
-/// Deliberately not a thread-id comparison: a thread id would have to be captured
-/// somewhere and compared somewhere else, and the capture site is exactly what a
-/// A flag set by `decode` itself directly identifies a connection thread.
+// Set on any thread that has run [`ServerProtocol::decode`] — i.e. on the
+// connection task's thread, and nowhere else.
+//
+// This is the discriminator [`EncodeSiteProto`] is built on, and it is exact
+// rather than heuristic. `decode` is only ever called from
+// `serve_connection_inner`/`dispatch_play_packet`, both of which run on the
+// connection task; the tests below run on `#[tokio::test]`'s **current-thread**
+// runtime — the same flavour production builds
+// (`crates/lodestone-shell/src/net.rs`'s `new_current_thread`) — so that task
+// cannot migrate, and `tokio`'s blocking pool is a disjoint set of threads that
+// never decodes anything.
+//
+// Deliberately not a thread-id comparison: a thread id would have to be captured
+// somewhere and compared somewhere else, and the capture site is exactly what a
+// A flag set by `decode` itself directly identifies a connection thread.
 thread_local! {
     static HAS_DECODED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }

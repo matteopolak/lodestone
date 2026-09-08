@@ -14,12 +14,26 @@
 mod support;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use lodestone_ecs::EventPriority;
 use lodestone_wasm_host::{
-    Action, CapabilitySet, ChatKind, ChatMessage, Event, LoadError, Manifest, ManifestError,
-    PluginHost, Priority, ReloadError,
+    Action, CapabilitySet, ChatKind, ChatMessage, Event, HostError, LoadError, Manifest,
+    ManifestError, PluginHost, Priority, ReloadError, VersionBroker, VersionBrokerDescriptor,
+    VersionBrokerRecord,
 };
+
+struct TestBroker(VersionBrokerDescriptor);
+
+impl VersionBroker for TestBroker {
+    fn descriptor(&self) -> VersionBrokerDescriptor {
+        self.0.clone()
+    }
+
+    fn lookup(&self, key: &str) -> Option<VersionBrokerRecord> {
+        (key == "control").then(|| VersionBrokerRecord::new(key, "copied"))
+    }
+}
 
 fn chat(text: &str) -> Event {
     Event::Chat(ChatMessage {
@@ -58,6 +72,16 @@ fn named_manifest(base: &str, name: &str) -> String {
     )
 }
 
+fn version_locked_manifest(base: &str, family: &str, protocol: i32, abi: &str) -> String {
+    format!(
+        "{}\n\n[version-lock]\nfamily = \"{family}\"\nprotocol = {protocol}\nabi = \"{abi}\"\n",
+        base.replace(
+            r#"capabilities = ["log", "observe:chat", "act:chat"]"#,
+            r#"capabilities = ["log", "observe:chat", "act:chat", "version:broker"]"#,
+        )
+    )
+}
+
 fn fresh_root(label: &str) -> PathBuf {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(label);
     let _ = std::fs::remove_dir_all(&root);
@@ -88,6 +112,63 @@ fn the_shipped_example_manifest_is_valid_and_asks_for_nothing_extra() {
         caps.missing_from(&CapabilitySet::default_policy()).is_empty(),
         "the shipped example must load under the default policy"
     );
+}
+
+#[test]
+fn a_matching_version_broker_identity_is_checked_during_manifest_loading() {
+    let wasm = support::build_example_plugin(&[]);
+    let base = std::fs::read_to_string(shipped_manifest_path()).expect("read");
+    let root = fresh_root("version-broker-match");
+    let manifest = version_locked_manifest(
+        base.as_str(),
+        "v26-2",
+        776,
+        "lodestone:version-broker@0.1",
+    );
+    let path = install(&root, "privileged", &manifest, "chat_responder.wasm", &wasm);
+    let broker = TestBroker(VersionBrokerDescriptor::new(
+        "v26-2",
+        776,
+        "lodestone:version-broker@0.1",
+    ));
+    let mut host = PluginHost::new(CapabilitySet::permissive())
+        .expect("engine")
+        .with_version_broker(Arc::new(broker));
+
+    host.load_manifest(&path)
+        .expect("matching broker identity must permit loading");
+    assert_eq!(host.plugins().len(), 1);
+}
+
+#[test]
+fn a_mismatched_version_broker_identity_is_rejected_before_module_loading() {
+    let wasm = support::build_example_plugin(&[]);
+    let base = std::fs::read_to_string(shipped_manifest_path()).expect("read");
+    let root = fresh_root("version-broker-mismatch");
+    let manifest = version_locked_manifest(
+        base.as_str(),
+        "v1-21-11",
+        774,
+        "lodestone:version-broker@0.2",
+    );
+    let path = install(&root, "privileged", &manifest, "chat_responder.wasm", &wasm);
+    let broker = TestBroker(VersionBrokerDescriptor::new(
+        "v26-2",
+        776,
+        "lodestone:version-broker@0.1",
+    ));
+    let mut host = PluginHost::new(CapabilitySet::permissive())
+        .expect("engine")
+        .with_version_broker(Arc::new(broker));
+
+    let error = host
+        .load_manifest(&path)
+        .expect_err("a neighbouring family must be refused");
+    assert!(matches!(error, LoadError::Host(HostError::VersionBrokerMismatch { .. })));
+    let text = error.to_string();
+    assert!(text.contains("requires WASM version broker family=v1-21-11 protocol=774"));
+    assert!(text.contains("host provides family=v26-2 protocol=776"));
+    assert!(host.is_empty());
 }
 
 /// The whole point of the tier, in one test: a directory of files on disk, none of
@@ -276,7 +357,7 @@ fn a_directory_with_one_broken_plugin_still_loads_the_good_one() {
     install(
         &root,
         "broken",
-        &base.replace(lodestone_wasm_host::ABI_WORLD, "lodestone:plugin@9.9.9"),
+        &base.replace("lodestone:plugin@0.27.0", "lodestone:plugin@9.9.9"),
         "chat_responder.wasm",
         &wasm,
     );
@@ -429,7 +510,7 @@ fn a_rejected_reload_keeps_the_previous_working_guest_alive() {
 
     std::fs::write(
         &manifest_path,
-        manifest.replace(lodestone_wasm_host::ABI_WORLD, "lodestone:plugin@9.9.9"),
+        manifest.replace("lodestone:plugin@0.27.0", "lodestone:plugin@9.9.9"),
     )
     .expect("make the replacement manifest invalid for this host");
     let error = host

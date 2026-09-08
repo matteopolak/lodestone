@@ -16,8 +16,6 @@ retry, and a newer mutation cannot be erased by an older save completion.
 
 Initial encoders may consume a retained snapshot verbatim. If no snapshot is available, the protocol computes a fallback from the supplied footprint; that fallback is not treated as evidence that a saved snapshot was settled. The raw-packet control in `crates/versions/26.2/tests/end_light_snapshot_admission.rs` compares two relative admissions with the same final footprint and requires identical packet bytes.
 
-The End fallback also reproduces the initial light engine's storage admission: any admitted non-air section allocates a contiguous vertical corridor from the lowest admitted non-air section through the upper one-section apron. This preserves explicit empty block-light layers and full sky layers between the admitted terrain sections; an all-air footprint still allocates no layers. Nether keeps its per-section adjacency rule because it has no sky layer.
-
 ## How to change it
 
 The dependency footprint is expressed by `RETAINED_LIGHT_NEIGHBOUR_OFFSETS` and the `ChunkSource::invalidate_retained_light_neighbourhood` forwarding seam. Add or change a retention layer only if it forwards that hook and clears its own snapshots. Keep controls relative to the edited column; do not add world coordinates or a dimension-wide light suppression rule.

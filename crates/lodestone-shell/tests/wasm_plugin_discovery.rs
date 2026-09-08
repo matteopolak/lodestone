@@ -7,6 +7,7 @@ use std::process::Command;
 
 use lodestone::config::Config;
 use lodestone::sim::Sim;
+use lodestone_ecs::commands::{CommandOutcome, CommandSource, dispatch};
 use lodestone_ecs::events::GameEvent;
 use lodestone_ecs::player::{ActionQueue, Egress, PlaceOutcome, PlaceStatus};
 use lodestone_ecs::GameTick;
@@ -305,6 +306,64 @@ fn a_malformed_persisted_policy_rejects_reload_without_unloading_the_active_gues
         app.world().resource::<WasmPlugins>().with_host(|host| host.plugins().len()),
         1,
         "a rejected policy reload must retain the active guest"
+    );
+}
+
+/// A successful shell reload removes the old guest-owned command roots before
+/// installing the replacement snapshot, then makes a fresh root usable again.
+/// The empty directory is the control: a reload that only replaced stores while
+/// retaining stale registry handlers would still dispatch `/wasm-ping` there.
+#[test]
+fn a_successful_directory_reload_unregisters_and_re_registers_guest_commands() {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("shipped-plugin-command-reload-{}", std::process::id()));
+    let initial = root.join("initial");
+    let empty = root.join("empty");
+    let replacement = root.join("replacement");
+    std::fs::create_dir_all(&empty).expect("create empty replacement directory");
+
+    let wasm = build_example_plugin(&["commands"]);
+    install_fixture(&initial, &wasm, "\"log\", \"commands:register\"");
+    let mut grants = PluginGrantPolicy::default();
+    grants.grant(
+        PluginIdentity::new("chat-responder/plugin.toml", "chat-responder"),
+        CapabilitySet::from_iter([Capability::RegisterCommands]),
+    );
+
+    let mut app = Sim::client_app();
+    lodestone::wasm_plugins::install_from_directory_with_grants(&mut app, &initial, &grants)
+        .expect("the initial WASM host must install");
+    assert_eq!(
+        dispatch(app.world_mut(), &CommandSource::console(), "/wasm-ping"),
+        Ok(CommandOutcome::Success(37)),
+        "the initial discovered guest must own its command root"
+    );
+
+    lodestone::wasm_plugins::reload_from_directory_with_grants(
+        &mut app,
+        &empty,
+        &PluginGrantPolicy::default(),
+    )
+    .expect("an empty replacement snapshot must commit");
+    assert!(
+        matches!(
+            dispatch(app.world_mut(), &CommandSource::console(), "/wasm-ping"),
+            Err(lodestone_ecs::commands::CommandDispatchError::UnknownCommand { .. })
+        ),
+        "reloading an empty snapshot must unregister the old guest root"
+    );
+
+    install_fixture(&replacement, &wasm, "\"log\", \"commands:register\"");
+    lodestone::wasm_plugins::reload_from_directory_with_grants(
+        &mut app,
+        &replacement,
+        &grants,
+    )
+    .expect("the replacement guest snapshot must commit");
+    assert_eq!(
+        dispatch(app.world_mut(), &CommandSource::console(), "/wp"),
+        Ok(CommandOutcome::Success(37)),
+        "the replacement guest must re-register its canonical root and alias"
     );
 }
 

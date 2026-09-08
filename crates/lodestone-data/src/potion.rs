@@ -54,6 +54,13 @@ impl PotionId {
         (usize::from(id) < POTION_NAMES.len()).then_some(Self(id))
     }
 
+    /// Resolves a canonical `minecraft:*` potion identifier to its typed id.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        let index = POTION_NAMES.iter().position(|candidate| *candidate == name)?;
+        u8::try_from(index).ok().map(Self)
+    }
+
     /// Returns this potion's wire registry id.
     #[must_use]
     pub const fn registry_id(self) -> i32 {
@@ -79,14 +86,11 @@ pub fn potion_name(id: PotionId) -> &'static str {
 /// Resolves a canonical `minecraft:*` potion identifier to its network registry id
 /// for protocol 776. The reverse of [`potion_name`].
 ///
-/// This raw output is retained for version-free model storage; validate it with
-/// [`PotionId::from_registry_id`] before passing it back to a built-in census lookup.
+/// This raw compatibility output is retained for version-free model storage. New
+/// typed consumers should use [`PotionId::from_name`] instead.
 #[must_use]
 pub fn potion_id(name: &str) -> Option<i32> {
-    POTION_NAMES
-        .iter()
-        .position(|candidate| *candidate == name)
-        .and_then(|index| i32::try_from(index).ok())
+    PotionId::from_name(name).map(PotionId::registry_id)
 }
 
 /// Forces alpha to `0xFF` (opaque).
@@ -450,6 +454,7 @@ mod tests {
         }
         assert_eq!(PotionId::from_registry_id(-1), None);
         assert_eq!(PotionId::from_registry_id(POTION_COUNT as i32), None);
+        assert_eq!(PotionId::from_name("minecraft:not_a_potion"), None);
         assert_eq!(potion_id("minecraft:not_a_potion"), None);
     }
 

@@ -468,16 +468,22 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 spill.position.0.div_euclid(16),
                 spill.position.2.div_euclid(16),
             );
-            let Some(column) = self.resident.get_mut(&destination) else {
-                continue;
-            };
-            column.set_block(
-                spill.position.0.rem_euclid(16),
-                spill.position.1,
-                spill.position.2.rem_euclid(16),
-                &spill.state,
-            );
-            self.overrides.insert(spill.position, spill.state);
+            // Keep every source write in the read-after-write map, including
+            // writes outside the admitted destination rectangle.  The
+            // materializer admits only the packet target's bounded halo, but
+            // a source on that halo's edge can spill one chunk farther.  That
+            // outside write is still part of the shared resident world: a
+            // later source can read it through its wider feature context even
+            // though the final packet never encodes that destination.
+            self.overrides.insert(spill.position, spill.state.clone());
+            if let Some(column) = self.resident.get_mut(&destination) {
+                column.set_block(
+                    spill.position.0.rem_euclid(16),
+                    spill.position.1,
+                    spill.position.2.rem_euclid(16),
+                    &spill.state,
+                );
+            }
         }
         for entity in result.block_entities {
             let (x, _y, z) = entity.position();
@@ -510,16 +516,15 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 spill.position.0.div_euclid(16),
                 spill.position.2.div_euclid(16),
             );
-            let Some(column) = self.resident.get_mut(&destination) else {
-                continue;
-            };
-            column.set_block(
-                spill.position.0.rem_euclid(16),
-                spill.position.1,
-                spill.position.2.rem_euclid(16),
-                &spill.state,
-            );
-            self.overrides.insert(spill.position, spill.state);
+            self.overrides.insert(spill.position, spill.state.clone());
+            if let Some(column) = self.resident.get_mut(&destination) {
+                column.set_block(
+                    spill.position.0.rem_euclid(16),
+                    spill.position.1,
+                    spill.position.2.rem_euclid(16),
+                    &spill.state,
+                );
+            }
         }
     }
 
@@ -547,6 +552,55 @@ mod tests {
 
     struct CountingSource {
         feature_calls: Rc<Cell<usize>>,
+    }
+
+    struct SpillSource {
+        expected_override: Rc<Cell<bool>>,
+        post_features: bool,
+    }
+
+    impl LifecycleWorldgenSource for SpillSource {
+        fn shaped_column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            ChunkColumn::new(0, 1)
+        }
+
+        fn feature_result(
+            &self,
+            source: ChunkPos,
+            overrides: &BTreeMap<AbsoluteCell, String>,
+        ) -> LifecycleFeatureResult {
+            if source == (0, 1) {
+                self.expected_override.set(
+                    overrides.get(&(16, 0, 0)).map(String::as_str) == Some("minecraft:stone"),
+                );
+            }
+            let spills = if source == (0, 0) && !self.post_features {
+                vec![LifecycleSpill {
+                    source,
+                    position: (16, 0, 0),
+                    state: "minecraft:stone".to_owned(),
+                }]
+            } else {
+                Vec::new()
+            };
+            LifecycleFeatureResult { spills, block_entities: Vec::new() }
+        }
+
+        fn post_features_spills(
+            &self,
+            source: ChunkPos,
+            _overrides: &BTreeMap<AbsoluteCell, String>,
+        ) -> Vec<LifecycleSpill> {
+            if source == (0, 0) && self.post_features {
+                vec![LifecycleSpill {
+                    source,
+                    position: (16, 0, 0),
+                    state: "minecraft:stone".to_owned(),
+                }]
+            } else {
+                Vec::new()
+            }
+        }
     }
 
     impl LifecycleWorldgenSource for CountingSource {
@@ -577,6 +631,41 @@ mod tests {
         materializer.complete((0, 0), LifecycleCompletion::Features, 10);
         assert_eq!(feature_calls.get(), 1);
         materializer.complete((0, 0), LifecycleCompletion::Features, 11);
+    }
+
+    #[test]
+    fn feature_spills_outside_the_admitted_rectangle_stay_visible_to_later_sources() {
+        let expected_override = Rc::new(Cell::new(false));
+        let mut materializer = LifecycleMaterializer::new(SpillSource {
+            expected_override: Rc::clone(&expected_override),
+            post_features: false,
+        });
+        materializer.admit((0, 0));
+        materializer.admit((0, 1));
+        materializer.complete((0, 0), LifecycleCompletion::Features, 0);
+        assert!(materializer.resident_column((1, 0)).is_none());
+        materializer.complete((0, 1), LifecycleCompletion::Features, 1);
+        assert!(
+            expected_override.get(),
+            "a later source must read a feature spill even when its destination is not resident"
+        );
+    }
+
+    #[test]
+    fn post_features_spills_outside_the_admitted_rectangle_stay_visible_to_later_sources() {
+        let expected_override = Rc::new(Cell::new(false));
+        let mut materializer = LifecycleMaterializer::new(SpillSource {
+            expected_override: Rc::clone(&expected_override),
+            post_features: true,
+        });
+        materializer.admit((0, 0));
+        materializer.admit((0, 1));
+        materializer.complete((0, 0), LifecycleCompletion::Features, 0);
+        materializer.complete((0, 1), LifecycleCompletion::Features, 1);
+        assert!(
+            expected_override.get(),
+            "a later source must read a post-FEATURES spill even when its destination is not resident"
+        );
     }
 
     #[test]

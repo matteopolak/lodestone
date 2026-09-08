@@ -132,6 +132,7 @@ pub use lodestone_model::{
     ClientAction, ClientEvent, CollisionRule, ConnectionState, DimensionId, DimensionTypeInfo,
     Directive, DisplaySlot, EntityAttributeSnapshot, GameMode, Hand, LevelEventData, LoginProfile,
     NumberFormat, ObjectiveMode,
-    ObjectiveRenderType, PlayerListEntry, Reported, ResourceKey, Rotation, ServerAddress,
+    ObjectiveRenderType, PlayerListEntry, PredictionSequence, Reported, ResourceKey, Rotation,
+    ServerAddress,
     TeamAction, TeamColor, TeamParameters, Text, Vec3, VersionAdapter, Visibility,
 };

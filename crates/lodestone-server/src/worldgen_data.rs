@@ -1176,11 +1176,11 @@ pub fn end_generator(seed: i64) -> lodestone_worldgen::end::EndGenerator {
 }
 
 /// Builds the bundled End [`ChunkSource`](crate::ChunkSource) for `seed` — the
-/// terrain a player who steps through a completed end-portal-frame ring would be
-/// served, once something *triggers* that trip. `crate::integrated`'s
-/// `with_nether` already constructs one of these on demand for
-/// `Dimension::End`; see `crate::dimension`'s module doc for what still has no
-/// caller.
+/// terrain served after the completed `end_portal_frame` ring sends a player to
+/// the fixed End arrival platform. `crate::integrated`'s `with_nether` factory
+/// constructs this source on demand for `Dimension::End`; the server's portal
+/// path consumes it during arrival, while return travel and fight persistence
+/// remain outside this pure worldgen factory.
 #[must_use]
 pub fn end_chunk_source(seed: i64) -> crate::chunk::EndChunkSource {
     crate::chunk::EndChunkSource::new(end_generator(seed))

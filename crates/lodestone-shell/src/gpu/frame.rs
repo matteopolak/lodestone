@@ -356,6 +356,22 @@ impl RenderState {
             &self.debug_lines_source.sample(camera.position),
         );
 
+        // The effect source supplies ids only; geometry is rebuilt from this
+        // frame's entity draws so interpolation, culling and entity removal
+        // cannot leave an outline at an old location. This is a separate
+        // renderer from F3 lines because the gameplay effect is unconditional.
+        let glow_ids = self.entity_glow_source.sample();
+        let glow_outline_vertices =
+            super::debug_lines::glowing_entity_outline_vertices(entities, &glow_ids);
+        let glow_outline_count = self.glow_outline.prepare(
+            device,
+            queue,
+            &view_proj,
+            (self.depth.width, self.depth.height),
+            super::debug_lines::VANILLA_LINE_WIDTH_PX,
+            &glow_outline_vertices,
+        );
+
         // Same constraint for the plugin-billboard pass: sample
         // and upload before the pass opens. Zero instances (the default,
         // until a caller installs `set_plugin_billboards_source`) is a cheap
@@ -437,7 +453,7 @@ impl RenderState {
         // full-bright. See `gpu/nametag.rs`'s `WorldTextLight` and
         // `docs/world-text-lighting.md`.
         let world_text_light =
-            super::nametag::WorldTextLight::new(self.sky_darken.value(), self.ambient_light.value());
+            super::nametag::WorldTextLight::new(self.sky_darken.value(), self.effective_ambient_light());
 
         // Nametag vertices, same "upload before the pass opens"
         // constraint as outline/debug-lines above. Reads the same
@@ -2078,6 +2094,11 @@ impl RenderState {
                 }
             }
 
+            // Entity-effect outlines share the world depth buffer, so an
+            // entity behind a wall remains occluded while the outline still
+            // reads over the entity and weather already drawn in this pass.
+            self.glow_outline.draw(&mut pass, glow_outline_count);
+
             if outline.is_some() {
                 self.outline.draw(&mut pass);
             }
@@ -2199,6 +2220,15 @@ impl RenderState {
                     } else if screen_effects.nausea_intensity > 0.0 {
                         fx.draw_confusion(queue, &mut encoder, view, screen_effects.nausea_intensity);
                         stats.confusion_overlay_drawn = true;
+                    }
+                    if screen_effects.vision_obscuration > 0.0 {
+                        fx.draw_vision_obscuration(
+                            queue,
+                            &mut encoder,
+                            view,
+                            screen_effects.vision_obscuration,
+                        );
+                        stats.vision_obscuration_drawn = true;
                     }
                 }
                 if screen_effects.border_warning_active() {

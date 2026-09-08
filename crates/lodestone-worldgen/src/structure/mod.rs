@@ -154,7 +154,6 @@ pub mod end_city;
 pub mod feature_placement;
 pub mod fortress;
 pub mod mansion;
-mod json;
 pub mod jigsaw;
 pub mod mineshaft;
 pub mod monument;
@@ -2791,13 +2790,7 @@ impl StructureRegistry {
                 }
             }
 
-            let mut placement = match Placement::parse(&document["placement"]) {
-                Ok(placement) => placement,
-                Err(why) => {
-                    unsupported.insert(set_id.clone(), why);
-                    continue;
-                }
-            };
+            let mut placement = Placement::parse(&document["placement"]);
             if let PlacementKind::ConcentricRings { preferred_biomes, .. } = &mut placement.kind {
                 let mut resolved: Vec<_> = resolve_biome_set(
                     resolver,

@@ -150,6 +150,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # `uuid`'s own v3 backend, so this adds a name rather than a build.
 md-5 = "0.10"
 uuid = { version = "1", features = ["v3", "v4", "js"] }
+url = "2.5"
 flate2 = "1"
 wasm-bindgen-futures = "0.4"
 syn = { version = "3", features = ["full", "extra-traits"] }

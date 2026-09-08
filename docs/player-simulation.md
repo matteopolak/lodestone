@@ -238,6 +238,21 @@ flight cancelling on landing). The toggle is a double-press-space edge in a
 is `inputYa * flyingSpeed * 3.0`, the raw non-sprint-doubled speed.
 Spectator noclip, vehicles and the one-tick takeoff hop are not modelled.
 
+### Local movement tracing
+
+The local-player physics trace is an opt-in diagnostic for reproducing server
+corrections around high-speed movement and corners. Set
+`LODESTONE_PHYSICS_TRACE=1` and enable `lodestone_physics=debug` in `RUST_LOG`.
+Each local tick gets a trace id and records its input/output pose and velocity;
+the collision sweep records axis order, every clipped shape, the resulting
+collision flags, and each auto-step candidate. The existing `net_join` target
+then supplies the timestamp-aligned impulse, correction, teleport
+acknowledgement, and outbound movement packet.
+
+The trace is scoped by the ECS local-player call, so an integrated server's
+mob and item movement does not flood the output. It is disabled in browser
+builds and has no effect unless the environment flag is set.
+
 ### Edge back-off
 
 The sneak-at-a-ledge rule is a **desync rule, not a feel rule**: the
@@ -290,9 +305,18 @@ Every player-position correction opens a transaction: the adapter surfaces the
 authoritative event, the shell applies its pose and velocity, and only then does
 the driver write the acknowledgement and an unconditional full movement echo
 with both contact flags clear. Ordinary movement compression is bypassed so the
-response always includes the resolved rotation. Movement actions carry a
-generation token; a pre-correction action is discarded at this boundary, while
-a post-correction action is kept without spatial rewriting.
+response always includes the resolved rotation. Between forwarding the event to
+the simulation and adopting it, the net action relay rewrites a `Move` to the
+newest fully absolute position target, with both contact flags clear. The rewrite
+happens both when the simulation queues the action and when the net loop drains
+it, because either side of that channel hop can overtake the correction. A
+relative position cannot be resolved on the net thread and is left to the
+simulation; relative yaw or pitch does not prevent an absolute position rewrite.
+After adoption, the relay closes its correction window and the driver generation
+token discards movement submitted before the correction while retaining movement
+submitted after it. This ordering prevents a stale pre-adoption pose from being
+assigned a post-adoption generation and reaching the server after its
+acknowledgement.
 
 A direct entity-velocity packet is a complete replacement rather than an
 additive impulse. The net thread first folds it into entity state, then mirrors
@@ -454,6 +478,7 @@ omitted entirely rather than built as geometry over nothing.
 | `MAX_AIR_SUPPLY` / `DROWN_DAMAGE` | `300` / `2.0` | drowning cadence and hit |
 | `TICKS_REQUIRED_TO_FREEZE` | `140` | powder-snow freeze threshold |
 | sprint trigger window | `7` ticks | double-tap-forward sprint window |
+| `LODESTONE_PHYSICS_TRACE` | unset | enables local collision diagnostics when set to `1`, `true`, `yes`, or `on` |
 
 Everything else here is a vanilla constant, not a runtime option.
 

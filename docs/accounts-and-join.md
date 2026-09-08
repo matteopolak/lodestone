@@ -28,6 +28,12 @@ network call, and critically the refresh token is not even read, since redemptio
 before falling back to redeeming the stored refresh token, and only a dead refresh token
 (`invalid_grant`) triggers an interactive device-code sign-in.
 
+The live `flow::ProfileSkin` keeps its URL as a structurally parsed `ProfileSkinUrl`; profile
+response strings are rejected as a skin when parsing fails. The wrapper retains the original URL
+spelling because the fetch allow-list distinguishes case rather than normalizing it. Account
+metadata and cached-session records remain string-based persistence boundaries, and the renderer's
+empty or synthetic skin keys remain separate from a real profile URL.
+
 **The browser build signs in with the same device-code flow, over the same Xbox Live -> XSTS
 -> Minecraft-services -> profile chain, on the same `reqwest::Client` type** — `lodestone-auth`'s
 `flow` module is not native-only; only `flow::PendingLogin::wait` (which blocks on

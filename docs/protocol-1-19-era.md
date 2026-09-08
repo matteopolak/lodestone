@@ -233,42 +233,12 @@ pre-Play forms remain ignored. The focused protocol test anchors the final
 legal value as literal bytes, then sends the adapter's selection action through
 the registry-selected protocol so the decoder cannot become an unconsumed
 island.
-Death and respawn complete the same hosted lifecycle. A health transition emits
-the split `death_combat_event` with a JSON component, while a literal
-`client_command` action `0` is consumed by the registry-selected host and emits
-the 762 `respawn` reset, position correction, full-health update, and air
-metadata refresh. `tests/server_protocol.rs` checks each body against
-independently written bytes and feeds the death body back through
-`V762Adapter`, so the server producer, client consumer, packet ids, and exact
-frame boundaries are covered together rather than as an isolated encoder.
 `tests/server_protocol.rs` checks the packet ids present in the real 1.19.4
 capture and decodes literal movement bodies with the production codecs,
 including trailing-byte and unknown-id negative controls. This is not
 real-client validation; a separately run 1.19.4 client remains the proof that
 the complete join registry and empty-light handling are accepted outside the
 in-process adapter.
-
-### Basic container sessions
-
-Protocol 762's hosted container path resolves the jar-backed `minecraft:menu`
-registry (the generic 9×3 chest shape is menu type id `2`). `open_window` carries the u8 window id, VarInt menu type and JSON title;
-`window_items` carries the VarInt state id, a VarInt-counted slot list and the
-carried slot; `set_slot` carries the signed window id, state id, slot index and
-slot. The reverse `window_click` packet carries the client state id, slot,
-button, VarInt click mode, changed-slot claims and carried slot. The literal
-fixtures in `tests/inventory.rs` keep these widths and the protocol-762
-diamond registry id independent of the codecs that consume them.
-
-`V762Adapter` translates those frames into the shared screen and container
-events, and encodes `ContainerClick` plus `ContainerClose` actions. The hosted
-protocol decodes clicks into `ServerBound::ContainerClicked`; the integrated
-server re-derives the requested transfer against its authoritative block
-entity and player inventory, persists the mutation, and sends full content when
-the client's claimed diff disagrees. `tests/server_integration.rs` joins the
-real in-memory server, opens a fixture chest, shift-moves a diamond with an
-intentionally incomplete claim, observes the corrective content, closes, and
-reopens to prove persistence. Only bare item stacks are currently representable
-on this protocol seam; component-bearing stacks fail loudly at the encoder.
 
 ### External-client acceptance
 

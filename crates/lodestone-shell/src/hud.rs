@@ -305,10 +305,12 @@ pub struct DebugStats {
     /// chunk-blackout signal, and a non-zero count is the section-read seam
     /// proving live world data is reaching the shell.
     pub live_columns: usize,
-    /// Live columns that failed to mesh (guard rejected or all-air centre on a
-    /// column the server reports loaded). Mirrors [`crate::sim::Sim`]'s
-    /// `mesh_drops` counter; shown next to `LIVE COLS` so a recurrence of the
-    /// silent-drop defect class is visible at a glance. Healthy sessions read `0`.
+    /// Live columns that failed a meshing guard (id spaces disagreed, or block
+    /// storage reported non-air data but no section snapshot was eligible).
+    /// Deliberately all-air columns are valid and are not counted. Mirrors
+    /// [`crate::sim::Sim`]'s `mesh_drops` counter; shown next to `LIVE COLS` so a
+    /// recurrence of the silent-drop defect class is visible at a glance.
+    /// Healthy sessions read `0`.
     pub mesh_drops: u64,
     /// Mesh sections **drawn this frame** (`RenderStats::sections_drawn`), i.e.
     /// post-cull — not the resident count, which is `RenderState::section_count`.
@@ -1426,8 +1428,14 @@ pub struct HudFrame<'a> {
     /// hermetic test that sets `health`/`food`/`xp` directly — draws exactly as it
     /// did before.
     pub can_hurt_player: bool,
-    /// Current player health in `0..=20`, `Some` only on a live survival server.
+    /// Current player health in `0..=1024`, `Some` only on a live survival server.
+    /// A player without a dynamic health attribute still has the normal 20-point
+    /// ceiling.
     pub health: Option<f32>,
+    /// Server-reported `minecraft:max_health`, if the local attribute snapshot
+    /// has named it. `None` is the normal 20-point ceiling before an attribute
+    /// packet, so legacy/offline HUDs retain their single row.
+    pub max_health: Option<f32>,
     /// Armour points in `0..=20` — vanilla's own get-armor-value accessor, which
     /// is `Mth.floor(getAttributeValue(Attributes.ARMOR))` and **not** a per-item
     /// table. `Some` once the local player carries a server-fed attribute snapshot;
@@ -1651,6 +1659,7 @@ impl<'a> HudFrame<'a> {
             boss_bars: &[],
             can_hurt_player: true,
             health: None,
+            max_health: None,
             armour: None,
             food: None,
             saturation: None,
@@ -1829,6 +1838,17 @@ pub fn heart_fill(i: usize, health: f32) -> Option<HeartFill> {
     } else {
         HeartFill::Full
     })
+}
+
+/// Number of ten-container rows required by the reported maximum health.
+///
+/// The default is one row before an attribute packet arrives. The clamp is the
+/// attribute's own legal `1..=1024` range, so malformed network data cannot
+/// make the HUD allocate an unbounded geometry row count.
+#[must_use]
+pub fn heart_rows(max_health: Option<f32>) -> usize {
+    let halves = max_health.unwrap_or(20.0).clamp(1.0, 1024.0).ceil() as usize;
+    (halves + 19) / 20
 }
 
 /// Vanilla's Chat Settings (plus one Accessibility-screen field it shares)
@@ -2275,19 +2295,6 @@ pub struct HudGeometry {
     /// caller inspects, and nothing outside the crate constructs a
     /// [`HudGeometry`].
     pub(crate) special: Vec<SpecialIconDraw>,
-    /// Dynamic skin-sheet faces for the tab-list overlay. The GPU owner groups
-    /// these by resolved URL and binds the packaged fallback when a fetch has
-    /// not completed yet.
-    pub(crate) tab_heads: Vec<TabHeadDraw>,
-}
-
-/// One tab-list face placement handed from the CPU HUD builder to the dynamic
-/// skin-sheet renderer.
-#[derive(Debug, Clone)]
-pub(crate) struct TabHeadDraw {
-    pub(crate) head: crate::tablist::TabListHead,
-    pub(crate) x: f32,
-    pub(crate) y: f32,
 }
 
 impl HudGeometry {
@@ -3106,6 +3113,7 @@ impl HudGeometry {
             // moment any of its two units is present (a deliberate simplification —
             // no half-pip art yet).
             let bars_y = vitals_line_base(b.h);
+            let health_rows = heart_rows(frame.max_health);
             // The armour row, one row above the hearts and on the same left anchor,
             // mirroring [`sprite_vitals`]'s placement so the jar-less fallback and
             // the real thing agree about which side and which line it is on. `pips`
@@ -3124,21 +3132,23 @@ impl HudGeometry {
                 b.pips(
                     armour as f32,
                     cx - row_w - 8.0,
-                    bars_y - pip - 2.0,
+                    bars_y - health_rows as f32 * VITALS_ROW_PITCH,
                     pip,
                     gap,
                     [0.72, 0.76, 0.82, 1.0],
                 );
             }
             if frame.can_hurt_player && let Some(hp) = frame.health {
-                b.pips(
-                    hp,
-                    cx - row_w - 8.0,
-                    bars_y,
-                    pip,
-                    gap,
-                    [0.86, 0.15, 0.16, 1.0],
-                );
+                for row in 0..health_rows {
+                    b.pips(
+                        (hp - row as f32 * 20.0).max(0.0),
+                        cx - row_w - 8.0,
+                        bars_y - row as f32 * VITALS_ROW_PITCH,
+                        pip,
+                        gap,
+                        [0.86, 0.15, 0.16, 1.0],
+                    );
+                }
             }
             if frame.can_hurt_player && let Some(food) = frame.food {
                 b.pips(
@@ -3616,13 +3626,6 @@ impl HudGeometry {
                 // inside a 9 px pitch, which is what leaves the 1 px gap between
                 // rows that makes the list read as a list.
                 b.rect_px(sx, sy, panel.slot_w, TAB_LINE_H - 1.0, TAB_ROW_FILL);
-                if players.show_head {
-                    b.tab_heads.push(TabHeadDraw {
-                        head: row.head.clone(),
-                        x: sx,
-                        y: sy,
-                    });
-                }
                 let name_x = if players.show_head { sx + TAB_HEAD_W } else { sx };
                 let ink = if row.spectator { TAB_INK_SPECTATOR } else { TAB_INK };
                 b.text_spans(&row.name, name_x, sy, tab_scale, [ink[0], ink[1], ink[2]], ink[3]);
@@ -3696,7 +3699,6 @@ impl HudGeometry {
             glint_verts: b.glint_verts,
             model_verts: b.model_verts,
             special: b.special,
-            tab_heads: b.tab_heads,
         }
     }
 }
@@ -4695,6 +4697,7 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
     // hearts landed on two different rows depending on the player's game mode and
     // on neither of vanilla's.
     let row_y = vitals_line_base(b.h);
+    let health_rows = heart_rows(frame.max_health);
 
     // The armour row, one 10px line **above** the hearts and sharing their left
     // anchor — vanilla's own armour-row x-coordinate stepping identically to the
@@ -4702,15 +4705,10 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
     // worth of pitch (times however many health rows there are) plus ten from the
     // baseline.
     //
-    // `numHealthRows` is `ceil((maxHealth + absorption) / 2 / 10)`, i.e. **1** for
-    // every player with vanilla's 20 max health and no absorption, which collapses
-    // that term to zero and leaves a flat `-10`. `HudFrame` carries neither max
-    // health nor absorption (see the hearts' own critical-jitter note right below,
-    // which narrows the same way), so this is a documented narrowing rather than a
-    // silent one: a player with a raised max health would get a second heart row in
-    // vanilla and push their armour row further up, and ours will not until those
-    // two fields exist. [`VITALS_ROW_PITCH`] is that 10, shared with the air row
-    // below so the two cannot drift apart.
+    // `numHealthRows` is `ceil(maxHealth / 2 / 10)` while absorption is absent.
+    // [`heart_rows`] obtains that number from the local attribute snapshot, so
+    // Health Boost moves armour above the complete heart stack. [`VITALS_ROW_PITCH`]
+    // is shared with the air row so the two cannot drift apart.
     //
     // Drawn *before* the hearts because vanilla's own armour extraction call precedes
     // its hearts extraction, and left as a separate `if` rather than folded into the
@@ -4720,7 +4718,7 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
         && let Some(armour) = frame.armour
         && armour > 0
     {
-        let armour_row_y = row_y - VITALS_ROW_PITCH;
+        let armour_row_y = row_y - health_rows as f32 * VITALS_ROW_PITCH;
         for i in 0..10 {
             let x = hx + i as f32 * step;
             b.sprite(
@@ -4751,38 +4749,32 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
         // this gates on health alone — a documented narrowing, not a silent
         // one.
         let critical = current <= 4;
-        for i in 0..10 {
-            let x = hx + i as f32 * step;
-            let y = if critical {
-                row_y + anim::heart_jitter(anim.tick, i)
-            } else {
-                row_y
-            };
-            b.sprite(container, x, y, icon, icon, white);
-            // The "ghost" of health about to be lost, forced onto the
-            // blinking sprite variant regardless of the fill state below —
-            // vanilla's `blink && halves < oldHealth`.
-            let halves = i * 2;
-            if anim.heart_blink && (halves as i32) < anim.display_health {
-                let half = (halves as i32 + 1) == anim.display_health;
-                let ghost = if half {
-                    "hud/heart/half_blinking"
+        for row in 0..health_rows {
+            let row_y = row_y - row as f32 * VITALS_ROW_PITCH;
+            for column in 0..10 {
+                let i = row * 10 + column;
+                let x = hx + column as f32 * step;
+                let y = if critical {
+                    row_y + anim::heart_jitter(anim.tick, i)
                 } else {
-                    "hud/heart/full_blinking"
+                    row_y
                 };
-                b.sprite(ghost, x, y, icon, icon, white);
-            }
-            // The fill, on vanilla's **integer** frontier rather than the raw
-            // float — see [`heart_fill`], which is where the `Mth.ceil` and the
-            // two integer comparisons live and where the live "0 hearts but still
-            // alive" report is written up. Extracted rather than inlined because
-            // the *composition* (ceil, then frontier) is the thing that was wrong
-            // and an unnamed composition has nothing to point a gate at: the ghost
-            // overlay directly above already used the integer `halves + 1 ==`
-            // shape while this row compared floats, and nothing could see that the
-            // two rows of one loop had come apart.
-            if let Some(fill) = heart_fill(i, hp) {
-                b.sprite(fill.sprite_id(), x, y, icon, icon, white);
+                b.sprite(container, x, y, icon, icon, white);
+                // The "ghost" of health about to be lost uses the same global
+                // container index as the fill, so it crosses row boundaries.
+                let halves = i * 2;
+                if anim.heart_blink && (halves as i32) < anim.display_health {
+                    let half = (halves as i32 + 1) == anim.display_health;
+                    let ghost = if half {
+                        "hud/heart/half_blinking"
+                    } else {
+                        "hud/heart/full_blinking"
+                    };
+                    b.sprite(ghost, x, y, icon, icon, white);
+                }
+                if let Some(fill) = heart_fill(i, hp) {
+                    b.sprite(fill.sprite_id(), x, y, icon, icon, white);
+                }
             }
         }
     }
@@ -4840,7 +4832,7 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
     // Mounted vehicles are not modelled (`HudFrame` carries no vehicle), so the
     // `rowOffset >= 1` branch has nothing to drive it — a documented narrowing.
     if frame.can_hurt_player && let Some((air, max_air, eye_in_water)) = frame.air {
-        let air_row_y = row_y - VITALS_ROW_PITCH;
+        let air_row_y = row_y - health_rows as f32 * VITALS_ROW_PITCH;
         // `wobble` is vanilla's `tickCount % 2 == 0` (a 0/1px jitter vanilla
         // applies to a fully-empty row's last bubble) — no per-frame tick
         // parity is piped into `HudFrame` yet, so this always reads `false`.
@@ -6149,7 +6141,6 @@ struct Builder<'a> {
     model_verts: Vec<ModelVertex>,
     /// Special-renderer (block-entity) icons; see [`HudGeometry::special`].
     special: Vec<SpecialIconDraw>,
-    tab_heads: Vec<TabHeadDraw>,
     gui: Option<&'a GuiAtlas>,
     items: Option<&'a ItemAtlas>,
     /// The baked model set, for items whose inventory icon is a 3-D mini-block
@@ -6181,7 +6172,6 @@ impl<'a> Builder<'a> {
             glint_verts: Vec::new(),
             model_verts: Vec::new(),
             special: Vec::new(),
-            tab_heads: Vec::new(),
             gui,
             items,
             models,
@@ -6599,7 +6589,6 @@ pub struct HudRenderer {
     debug_vertex_count: u32,
     debug_refresh: DebugGeometryRefresh,
     gui: Option<GuiHud>,
-    tab_heads: Option<item_icon::TabHeadRenderer>,
     /// The flat item atlas and the 3-D block-item pass, shared verbatim with the
     /// container screen. Both halves start detached.
     icons: IconRenderer,
@@ -6775,7 +6764,6 @@ impl HudRenderer {
             debug_vertex_count: 0,
             debug_refresh: DebugGeometryRefresh::default(),
             gui: None,
-            tab_heads: None,
             icons: IconRenderer::new(),
             font: VanillaFont::shared(),
             // Stamped with the generation the font above was resolved against,
@@ -6998,7 +6986,6 @@ impl HudRenderer {
             buffer: sp.buffer,
             capacity_floats: sp.capacity_floats,
         });
-        self.tab_heads = Some(item_icon::TabHeadRenderer::new(device, color_format));
     }
 
     /// Attach the flat item-sprite [`ItemAtlas`] so hotbar slots draw real item
@@ -7290,10 +7277,6 @@ impl HudRenderer {
             anim,
             false,
         );
-        let (logical_w, logical_h) = crate::menu::render::logical_canvas(gui_scale, width, height);
-        let head_batches = self.tab_heads.as_mut().map_or_else(Vec::new, |heads| {
-            heads.prepare(device, queue, &geo.tab_heads, logical_w, logical_h)
-        });
         // `geo.special` counts too. A hotbar holding nothing but a chest, with the
         // procedural frame suppressed, produces zero vertices in all four other
         // streams — bailing here would make the whole chest-icon chain
@@ -7303,7 +7286,6 @@ impl HudRenderer {
             && geo.item_verts.is_empty()
             && geo.model_verts.is_empty()
             && geo.special.is_empty()
-            && head_batches.is_empty()
             && self.debug_vertex_count == 0
         {
             return;
@@ -7351,6 +7333,7 @@ impl HudRenderer {
         // must be built for that same logical size, not the raw physical one,
         // or the model pass and the flat-sprite/colour passes it shares a
         // frame with would disagree about how big a "GUI pixel" is.
+        let (logical_w, logical_h) = crate::menu::render::logical_canvas(gui_scale, width, height);
         let (item_count, model_count) = self.icons.upload(
             device,
             queue,
@@ -7390,9 +7373,6 @@ impl HudRenderer {
                 pass.set_bind_group(0, &g.bind_group, &[]);
                 pass.set_vertex_buffer(0, g.buffer.slice(..));
                 pass.draw(0..sprite_count, 0..1);
-            }
-            if let Some(heads) = &self.tab_heads {
-                heads.draw(&mut pass, &head_batches);
             }
             self.icons.draw_sprites(&mut pass, item_count);
             // The glint over the icons it belongs to, in the same pass so it
@@ -10271,6 +10251,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn max_health_adds_a_second_heart_row_without_inferring_it_from_current_health() {
+        let stats = DebugStats::default();
+        let mut frame = HudFrame::new(&stats);
+        frame.crosshair = false;
+        frame.show_debug = false;
+        // A hurt Health-Boosted player is below 20 but still needs 20 heart
+        // containers. This distinguishes attribute-driven row count from a
+        // tempting `health > 20` branch.
+        frame.health = Some(19.0);
+        frame.max_health = Some(24.0);
+        let boosted = HudGeometry::build(&frame, 640, 480);
+
+        frame.max_health = Some(20.0);
+        let ordinary = HudGeometry::build(&frame, 640, 480);
+        assert_eq!(heart_rows(Some(24.0)), 2);
+        assert_eq!(heart_rows(Some(20.0)), 1);
+        assert_eq!(boosted.vertex_count() - ordinary.vertex_count(), 10 * 6);
+
+        // Malformed data cannot create an arbitrary number of rows.
+        assert_eq!(heart_rows(Some(f32::INFINITY)), 52);
+    }
+
     /// The discriminating input for the two readings of "hide the hearts in
     /// creative": vanilla's own is-survival check on its game-type enum is `SURVIVAL || ADVENTURE`, so **spectator**
     /// is the value where the mode-naming hypothesis (`mode == Creative`) and the real
@@ -10627,11 +10630,6 @@ mod tests {
                     name: crate::overlay::plain_spans(format!("P{i}")),
                     ping_sprite: "icon/ping_5",
                     spectator: false,
-                    head: crate::tablist::TabListHead {
-                        skin_url: None,
-                        fallback_sheet: "entity/player/slim/steve",
-                        show_hat: true,
-                    },
                 })
                 .collect(),
             header: Vec::new(),
@@ -10651,27 +10649,6 @@ mod tests {
         let with = HudGeometry::build(&frame, 640, 480).vertex_count();
         let without = HudGeometry::build(&HudFrame::new(&stats), 640, 480).vertex_count();
         assert!(with > without, "the tab overlay's plate + names add geometry");
-    }
-
-    #[test]
-    fn tab_heads_follow_slot_layout_and_preserve_skin_metadata() {
-        let stats = DebugStats::default();
-        let mut view = tab_view(2);
-        view.show_head = true;
-        let frame = HudFrame {
-            players: Some(&view),
-            ..HudFrame::new(&stats)
-        };
-        let geo = HudGeometry::build(&frame, 640, 480);
-
-        assert_eq!(geo.tab_heads.len(), 2);
-        assert_eq!(geo.tab_heads[0].x, geo.tab_heads[1].x);
-        assert_eq!(geo.tab_heads[1].y - geo.tab_heads[0].y, TAB_LINE_H);
-        assert_eq!(
-            geo.tab_heads[0].head.fallback_sheet,
-            "entity/player/slim/steve"
-        );
-        assert!(geo.tab_heads.iter().all(|draw| draw.head.show_hat));
     }
 
     /// **The column split, at the threshold.**
@@ -11400,8 +11377,8 @@ mod tests {
         // only chooses an ink colour, and there is no ink to colour.
         let view = TabListView {
             rows: vec![
-                TabListRow { name: Vec::new(), ping_sprite: "", spectator: false, head: crate::tablist::TabListHead { skin_url: None, fallback_sheet: "entity/player/slim/steve", show_hat: true } },
-                TabListRow { name: Vec::new(), ping_sprite: "", spectator: false, head: crate::tablist::TabListHead { skin_url: None, fallback_sheet: "entity/player/slim/steve", show_hat: true } },
+                TabListRow { name: Vec::new(), ping_sprite: "", spectator: false },
+                TabListRow { name: Vec::new(), ping_sprite: "", spectator: false },
             ],
             header: Vec::new(),
             footer: Vec::new(),

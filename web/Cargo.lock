@@ -2850,6 +2850,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tracing",
+ "url",
  "uuid",
  "web-sys",
 ]
@@ -3092,6 +3093,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
 ]
@@ -3284,6 +3286,7 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "lodestone-core",
+ "lodestone-data",
  "lodestone-time",
  "lodestone-worldgen-core",
  "serde_json",

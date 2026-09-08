@@ -27,7 +27,7 @@ biomes → noise → surface → carvers → features → initialize_light → l
 | # | reference stage | status | evidence |
 |---|---|---|---|
 | 1 | RNG / noise / density router (reference density-function and noise-router data) | **ported, bit-exact** | `rng_parity` 663/663, `noise_parity` 1224/1224, `region_parity` 34048/34048, interpolated `final_density` 98304/98304 — committed JVM dumps in `crates/lodestone-worldgen/tests/support/*_jvm.txt` |
-| 2 | biome assignment (per-status sampling and climate-parameter nearest-point search over the climate R-tree) | **partial: 2-D only** | `crates/lodestone-worldgen/src/biome.rs` module doc: one sample per horizontal quart at that quart's own surface height, broadcast down the column — the reference is per quart **cube**. Table: 7594 rows dumped from the authoritative bootstrap, brute-force search. Cave biomes (`dripstone_caves`, `lush_caves`, `deep_dark`) are unreachable underground |
+| 2 | biome assignment (per-status sampling and climate-parameter nearest-point search over the climate R-tree) | **ported + composed (3-D)** | `crates/lodestone-worldgen/src/overworld/biome_cells.rs` samples one climate point per quart-position cube, while `biome/mod.rs` supplies the indexed search. The served column and protocol encoder retain the per-section grid, and current authenticated parity diagnostics report zero biome-cell mismatches across Overworld, Nether and End targets. |
 | 3 | noise fill + real aquifer | **ported + composed** | `aquifer_parity`; composed harness: chunk (0,0) `postcarve` **0 real mismatches** (this plan's parity harness) |
 | 4 | surface rules, including badlands bands | **ported + composed** | `surface_parity`; the badlands band lookup is covered and the badlands fixture is included |
 | 5 | carvers (17×17 per-source-chunk biome) | **ported + composed** | `carver_parity`; same (0,0) zero-real-mismatch postcarve result |
@@ -37,7 +37,7 @@ biomes → noise → surface → carvers → features → initialize_light → l
 | 6d | `LOCAL_MODIFICATIONS` (`amethyst_geode` everywhere; `large_dripstone`; `iceberg_packed`/`iceberg_blue` in frozen oceans) | **absent** | same verification |
 | 6e | `UNDERGROUND_STRUCTURES` step *features* (`monster_room`, `monster_room_deep` everywhere; `fossil_upper`/`_lower` in swamp) | **absent** | these are features (dungeons/fossils), cheaper than real structures |
 | 6f | `SURFACE_STRUCTURES` step *features* (`blue_ice` in frozen oceans; `desert_well` etc.) | **absent** | |
-| 6g | `UNDERGROUND_DECORATION` (`dripstone_cluster`, `pointed_dripstone`, sculk...) | **absent** — and unreachable until 3-D biomes, since only cave biomes carry these | |
+| 6g | `UNDERGROUND_DECORATION` (`dripstone_cluster`, `pointed_dripstone`, sculk...) | **absent** — 3-D biomes are now wired, but these feature kinds remain unported | |
 | 6h | `FLUID_SPRINGS` (`spring_water`, `spring_lava`) | **absent** | in every biome's list |
 | 6i | `TOP_LAYER_MODIFICATION` (`freeze_top_layer` — snow layers + ice) | **ported + composed, bit-exact at 4 fixtures** | `top_layer_parity` (in `lodestone-server/src/worldgen_data.rs`) loads the authoritative post-vegetation field and requires the same writes at the same coordinates: snowy_plains 250 snow + 250 `snowy` flips, frozen_ocean 36 ice + 0 snow, windswept_hills 115 snow, desert 0. Plus 1,024 columns of `MOTION_BLOCKING` heightmap against the authoritative heightmap query. Four controls were run and observed. See [Overworld biome assignment and surface material](../worldgen-biomes.md) |
 | 7 | structures (`structure_starts`/`structure_references`, placement, jigsaw assembly, terrain adaptation) | **implemented and composed** | `lodestone-worldgen::structure` supplies salted placement, starts/references, templates, jigsaw, coded pieces, and the beardifier; `pre_ore_stage` consumes the result before fill. Durable residuals are the incomplete-generator ledger and broader structure-positive outside-oracle coverage, including a whole-chunk fixture, before claiming final parity near structures. |
@@ -64,7 +64,7 @@ independent, parallel now:          whole-chunk gate per stage
   performance benches (U9)
   version seam (U8)
 
-3-D biome sampling + climate R-tree port (U7)
+3-D biome sampling + climate R-tree port (U7)  ── CLOSED
   └─► UNDERGROUND_DECORATION / cave-biome vegetation (dripstone, lush-caves flora, sculk)
         └─► "full FEATURES-status parity" measurable
 
@@ -193,7 +193,7 @@ the unit states the exact patch for the orchestrator. Broker edits to `crates/lo
 | U4 geodes, dungeons, fossils, icebergs | `GeodeFeature`, `MonsterRoomFeature`, `FossilFeature`, `IcebergFeature` + oracle | `feature/geode.rs`, `feature/misc_structures.rs` (new) | same |
 | U5 vegetation gap burn-down | `multiface_growth` (every biome), fancy/giant trunk placers, `fallen_tree` | `feature/vegetation.rs`, `vegetation_parity.rs`, `VegetationOracle.java`, `KNOWN_VEGETATION_GAPS` | one agent only — all in one file |
 | U6 ocean vegetation | kelp, seagrass, sea_pickle, coral (3 kinds) | `feature/ocean.rs` (new) | same overworld.rs hook |
-| U7 3-D biomes | per-quart-cube climate sampling; a port of vanilla's own climate R-tree with its brute-force nearest-point search as its own in-tree control | `biome.rs`, `BiomeOracle.java` | perf gate from U9 before landing |
+| U7 3-D biomes | per-quart-cube climate sampling; a port of the climate R-tree with its brute-force nearest-point search as its own in-tree control | `overworld/biome.rs`, `overworld/biome_cells.rs`, `biome/mod.rs`, `BiomeOracle.java` | **closed** — indexed search and 3-D storage are in the production path |
 | U8 seam | §4 as written | `worldgen_data.rs`, `assets/worldgen/` move, v26-2 additions, registry field | `integrated.rs`/`server.rs` owners; lib.rs broker |
 | U9 benches | `StageTimes` extended past its current 4 fields (shape/fluid_heightmap/surface/intern — it predates carve/ore/vegetation entirely); persisted split; RD 8/16/32 sweep with peak RSS via `lodestone-allocbench`'s `/usr/bin/time -l` pattern | `benches/generation.rs`, `column_timed`/`StageTimes` in overworld.rs (small brokered touch) | — |
 | S1..Sn structures | salted placement, starts/references, templates, jigsaw, coded pieces, and terrain adaptation; retain and extend per-family gates | `crates/lodestone-worldgen/src/structure/` and `overworld/structures.rs` | incomplete-generator ledger and structure-positive outside-oracle coverage |
@@ -223,9 +223,9 @@ Predictions to verify (the *predict-then-measure* discipline, not direction-only
   absorbed. Note `freeze_top_layer` needs no 3×3 driver at all (it writes only within its own
   chunk), so it is the *cheapest* shape in this group; U3/U4/U6 do spill and should not inherit
   this figure.
-- 3-D biomes without an index: 16 → 1536 samples/chunk × 7594 rows ≈ **~96×** the biome stage.
-  That is why U7 carries the climate R-tree port and a perf gate, with vanilla's own
-  brute-force nearest-point search as the correctness control for the index.
+- 3-D biomes: 16 → 1536 samples/chunk × 7594 rows ≈ **~96×** the horizontal biome stage.
+  The climate R-tree keeps the indexed search from multiplying that work by the table length, with
+  a brute-force nearest-point search retained as the correctness control for the index.
 - The 3×3 drivers' 9× recompute is already amortized by `pre_ore_cache`/`post_ore_cache` (512-entry
   FIFO) for sweep-shaped access; the open cost item is release-profile confirmation plus the
   benches unit's peak-RSS story (each cache entry is a ~200 KiB grid; two caches ≈ up to ~200 MiB worst case —
@@ -240,8 +240,8 @@ Predictions to verify (the *predict-then-measure* discipline, not direction-only
 2. **The ore stage cannot be gate-closed to zero** until U1's 3×3 `postfeatures` oracle exists —
    today's residual (2237/98304 at (0,0)) is dominated by real spill the single-source oracle
    stage structurally cannot see.
-3. **Underground biome-dependent content is unmeasurable** until U7 — there is no 3-D biome for a
-   gate to compare.
+3. **Underground biome-dependent content is now measurable** because the served column carries 3-D
+   biome cells; the remaining limitation is the unported underground feature kinds listed in row 6g.
 4. **Wire parity ≠ block parity**: served chunks carry empty heightmaps and `Missing` light
    (`encode_column_body`, `crates/versions/26.2/src/server_protocol.rs`), and fluids lack the `level` property. Real gaps, tracked, not
    part of block-field parity numbers.

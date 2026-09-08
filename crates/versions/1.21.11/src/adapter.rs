@@ -41,7 +41,7 @@ use lodestone_data::mob_effects::{mob_effect_name_for, MobEffectId};
 use lodestone_model::{
     AdapterError, AnimationAction, BlockActionKind, BlockFace, ChatAckInfo, ChatKind, ChatMode,
     ChatSessionInfo, ChunkPos, ClientAction, ClientEvent, ClientSettings, ConnectionState,
-    ContainerClickType, Difficulty, Directive, DisplayedSkinParts, EntityAttributeModifier,
+    ContainerClickType, ContainerStateId, Difficulty, Directive, DisplayedSkinParts, EntityAttributeModifier,
     EntityAttributeSnapshot, EntityEquipment, EntityInteraction, EntityMetadataUpdate,
     EntityMovement, EquipmentSlot, GameMode, Hand, ItemStack, LoginProfile, MainHand,
     ParticleStatus, PlayerCommand, PlayerInput, PlayerListEntry, ProfileProperty, RecipeBookType,
@@ -94,8 +94,8 @@ use crate::packets::settings::{
 };
 use crate::packets::slot::Slot;
 use crate::packets::window::{
-    ChangedSlot, ContainerButtonClick, ContainerClick, ContainerClose, ContainerSetData,
-    HashedStack, ServerboundContainerClose, SetCarriedItem, SetCreativeModeSlot, SetHeldSlot,
+    ContainerButtonClick, ContainerClose, ContainerSetData, OpenScreen,
+    ServerboundContainerClose, SetCarriedItem, SetCreativeModeSlot, SetHeldSlot,
 };
 
 /// The protocol this family speaks, and the one a zero-argument [`adapter`]
@@ -824,45 +824,52 @@ fn slot_to_item_stack(slot: &Slot) -> Result<Option<ItemStack>, AdapterError> {
     Ok(Some(stack))
 }
 
-/// The protocol-774 `minecraft:menu` registry, in wire-id order. This
-/// registry is not sent during Configuration, so the open-screen packet must
-/// resolve its id against the era's fixed table rather than the canonical
-/// 26.2 data table.
-const MENU_NAMES_774: [&str; 25] = [
-    "minecraft:generic_9x1",
-    "minecraft:generic_9x2",
-    "minecraft:generic_9x3",
-    "minecraft:generic_9x4",
-    "minecraft:generic_9x5",
-    "minecraft:generic_9x6",
-    "minecraft:generic_3x3",
-    "minecraft:crafter_3x3",
-    "minecraft:anvil",
-    "minecraft:beacon",
-    "minecraft:blast_furnace",
-    "minecraft:brewing_stand",
-    "minecraft:crafting",
-    "minecraft:enchantment",
-    "minecraft:furnace",
-    "minecraft:grindstone",
-    "minecraft:hopper",
-    "minecraft:lectern",
-    "minecraft:loom",
-    "minecraft:merchant",
-    "minecraft:shulker_box",
-    "minecraft:smithing",
-    "minecraft:smoker",
-    "minecraft:cartography_table",
-    "minecraft:stonecutter",
+/// Menu ids are a built-in registry on this wire, not a synchronized entry.
+/// Keep the 774 ordering local so this adapter does not silently inherit a
+/// later protocol's registry insertions.
+const MENU_NAMES: &[&str] = &[
+    "minecraft:generic_9x1", "minecraft:generic_9x2", "minecraft:generic_9x3",
+    "minecraft:generic_9x4", "minecraft:generic_9x5", "minecraft:generic_9x6",
+    "minecraft:generic_3x3", "minecraft:crafter_3x3", "minecraft:anvil",
+    "minecraft:beacon", "minecraft:blast_furnace", "minecraft:brewing_stand",
+    "minecraft:crafting", "minecraft:enchantment", "minecraft:furnace",
+    "minecraft:grindstone", "minecraft:hopper", "minecraft:lectern", "minecraft:loom",
+    "minecraft:merchant", "minecraft:shulker_box", "minecraft:smithing",
+    "minecraft:smoker", "minecraft:cartography_table", "minecraft:stonecutter",
 ];
 
-fn menu_name_774(raw: i32) -> Result<lodestone_model::ResourceKey, AdapterError> {
-    let name = usize::try_from(raw)
-        .ok()
-        .and_then(|id| MENU_NAMES_774.get(id))
-        .ok_or_else(|| AdapterError::Decode(format!("unknown protocol-774 menu id {raw}")))?;
-    name.parse()
-        .map_err(|error| AdapterError::Decode(format!("invalid protocol-774 menu name {name}: {error}")))
+fn menu_name_for_wire_id(id: i32) -> Option<&'static str> {
+    MENU_NAMES.get(usize::try_from(id).ok()?).copied()
+}
+
+fn item_registry_id(name: &str) -> Option<i32> {
+    (0..1536).find(|id| {
+        crate::item_registry::item_from_wire_id(*id)
+            .is_some_and(|item| item.name() == name)
+    })
+}
+
+fn write_hashed_stack(writer: &mut Writer, item: Option<&ItemStack>) -> Result<(), AdapterError> {
+    let Some(item) = item else {
+        writer.bool(false);
+        return Ok(());
+    };
+    if item.count == 0 || item.components != Default::default() {
+        return Err(AdapterError::Unsupported(
+            "protocol-774 container clicks support only plain, non-empty item stacks".to_owned(),
+        ));
+    }
+    let id = item_registry_id(&item.item.to_string()).ok_or_else(|| {
+        AdapterError::Encode(format!("unknown protocol-774 item {}", item.item))
+    })?;
+    let count = i32::try_from(item.count)
+        .map_err(|_| AdapterError::Encode(format!("item count {} overflows i32", item.count)))?;
+    writer.bool(true);
+    writer.var_i32(id);
+    writer.var_i32(count);
+    writer.var_i32(0);
+    writer.var_i32(0);
+    Ok(())
 }
 
 /// Decodes a JSON disconnect reason into a [`Text`] tree, falling back to a
@@ -2222,59 +2229,51 @@ impl V774Adapter {
         })])
     }
 
-    /// `minecraft:open_screen`. The menu id is a fixed 774 registry entry,
-    /// while the title is an anonymous network-NBT text component.
+    /// `minecraft:open_screen`: a window id, built-in menu id and text title.
     fn handle_play_open_screen(
         adapter: &V774Adapter,
         _world: &mut dyn WorldSink,
         payload: &[u8],
     ) -> Result<Vec<Directive>, AdapterError> {
-        let body: crate::packets::window::OpenScreen = adapter.decode_body_exact(payload)?;
+        let body: OpenScreen = adapter.decode_body_exact(payload)?;
+        let menu = menu_name_for_wire_id(body.inventory_type).ok_or_else(|| {
+            AdapterError::Decode(format!("unknown protocol-774 menu id {}", body.inventory_type))
+        })?;
+        let menu_type = menu
+            .parse()
+            .map_err(|_| AdapterError::Decode(format!("invalid menu identifier {menu}")))?;
         Ok(vec![Directive::Emit(ClientEvent::ScreenOpened {
             window_id: body.window_id,
-            menu_type: menu_name_774(body.inventory_type)?,
+            menu_type,
             title: Text::from_nbt(&body.window_title.0),
         })])
     }
 
-    /// `minecraft:container_set_content`. A chest snapshot includes every
-    /// menu slot followed by the cursor stack, each using the component-shaped
-    /// 774 slot codec. The count is bounded before reserving so a malformed
-    /// frame cannot turn its declared length into an allocation request.
+    /// `minecraft:container_set_content`: full slot list followed by cursor.
     fn handle_play_container_set_content(
         adapter: &V774Adapter,
         _world: &mut dyn WorldSink,
         payload: &[u8],
     ) -> Result<Vec<Directive>, AdapterError> {
-        const MAX_CONTAINER_SLOTS: usize = 1024;
         let mut reader = Reader::new(payload);
         let window_id = reader.var_i32().map_err(dec_err)?;
-        let state_id = lodestone_model::ContainerStateId::from_wire(
-            reader.var_i32().map_err(dec_err)?,
-        );
-        let count = checked_count(
-            reader.var_i32().map_err(dec_err)?,
-            MAX_CONTAINER_SLOTS,
-            "container slot",
-        )?;
-        let mut items = Vec::with_capacity(count);
+        let state_id = ContainerStateId::from_wire(reader.var_i32().map_err(dec_err)?);
+        let count = checked_count(reader.var_i32().map_err(dec_err)?, 4096, "container slot")?;
+        let mut items = Vec::with_capacity(count.min(reader.remaining_bytes().len()));
         for _ in 0..count {
-            let slot = Slot::decode(&mut reader, adapter.ctx()).map_err(dec_err)?;
-            items.push(slot_to_item_stack(&slot)?);
+            items.push(slot_to_item_stack(&Slot::decode(&mut reader, adapter.ctx()).map_err(dec_err)?)?);
         }
-        let carried = Slot::decode(&mut reader, adapter.ctx()).map_err(dec_err)?;
+        let carried_item = slot_to_item_stack(&Slot::decode(&mut reader, adapter.ctx()).map_err(dec_err)?)?;
         reader.ensure_empty().map_err(dec_err)?;
         Ok(vec![Directive::Emit(ClientEvent::ContainerContent {
             window_id,
             state_id,
             items,
-            carried_item: slot_to_item_stack(&carried)?,
+            carried_item,
         })])
     }
 
-    /// `minecraft:container_set_slot`. The slot index is signed on the wire;
-    /// the version-free event retains it so the player-inventory sentinel and
-    /// menu-local indexes remain distinguishable to the session consumer.
+    /// `minecraft:container_set_slot`: one slot and its synchronization state.
     fn handle_play_container_set_slot(
         adapter: &V774Adapter,
         _world: &mut dyn WorldSink,
@@ -2282,17 +2281,15 @@ impl V774Adapter {
     ) -> Result<Vec<Directive>, AdapterError> {
         let mut reader = Reader::new(payload);
         let window_id = reader.var_i32().map_err(dec_err)?;
-        let state_id = lodestone_model::ContainerStateId::from_wire(
-            reader.var_i32().map_err(dec_err)?,
-        );
+        let state_id = ContainerStateId::from_wire(reader.var_i32().map_err(dec_err)?);
         let slot = i32::from(reader.i16().map_err(dec_err)?);
-        let item = Slot::decode(&mut reader, adapter.ctx()).map_err(dec_err)?;
+        let item = slot_to_item_stack(&Slot::decode(&mut reader, adapter.ctx()).map_err(dec_err)?)?;
         reader.ensure_empty().map_err(dec_err)?;
         Ok(vec![Directive::Emit(ClientEvent::ContainerSlot {
             window_id,
             state_id,
             slot,
-            item: slot_to_item_stack(&item)?,
+            item,
         })])
     }
 
@@ -3737,7 +3734,7 @@ impl VersionAdapter for V774Adapter {
                     cursor_z: cursor.z,
                     inside_block: *inside_block,
                     world_border_hit: false,
-                    sequence: sequence.as_wire(),
+                    sequence: *sequence,
                 };
                 Ok(Some((self.ids().use_item_on, self.encode_body(&body)?)))
             }
@@ -3856,12 +3853,9 @@ impl VersionAdapter for V774Adapter {
             }
             // The click shape is this era's exactly — a state id, the client's
             // own view of every slot the click changed, and the resulting
-            // cursor stack — so a click that moves nothing but empty slots
-            // encodes faithfully. A click carrying a real stack needs both a
-            // numeric item id and the *hashed* component form this era's
-            // serverbound stacks use, and is refused rather than guessed: a
-            // wrong hash is rejected by the server as a desync, and a wrong id
-            // is accepted and applied.
+            // cursor stack. Plain stacks are represented by their protocol
+            // item id/count; componentful predictions remain outside this
+            // bounded adapter path.
             ClientAction::ContainerClick {
                 window_id,
                 state_id,
@@ -3871,43 +3865,27 @@ impl VersionAdapter for V774Adapter {
                 changed_slots,
                 carried_item,
             } => {
-                if carried_item.is_some() || changed_slots.iter().any(|entry| entry.item.is_some())
-                {
-                    return Err(AdapterError::Unsupported(
-                        "this era's ContainerClick with a non-empty stack requires a \
-                         ResourceKey -> numeric item-id registry for protocol 774 plus the \
-                         hashed component form its serverbound stacks use, neither of which \
-                         exists yet"
-                            .to_owned(),
-                    ));
+                let mut payload = Writer::default();
+                payload.var_i32(*window_id);
+                payload.var_i32(state_id.as_wire());
+                payload.i16(i16::try_from(*slot).map_err(|_| {
+                    AdapterError::Encode(format!("container slot {slot} overflows i16"))
+                })?);
+                payload.i8(i8::try_from(*button).map_err(|_| {
+                    AdapterError::Encode(format!("click button {button} overflows i8"))
+                })?);
+                payload.var_i32(click_mode_value(*click_type));
+                payload.var_i32(i32::try_from(changed_slots.len()).map_err(|_| {
+                    AdapterError::Encode("too many changed slots in container click".to_owned())
+                })?);
+                for entry in changed_slots {
+                    payload.i16(i16::try_from(entry.slot).map_err(|_| {
+                        AdapterError::Encode(format!("changed slot {} overflows i16", entry.slot))
+                    })?);
+                    write_hashed_stack(&mut payload, entry.item.as_ref())?;
                 }
-                let body = ContainerClick {
-                    window_id: *window_id,
-                    state_id: state_id.as_wire(),
-                    slot: i16::try_from(*slot).map_err(|_| {
-                        AdapterError::Encode(format!("container slot {slot} overflows i16"))
-                    })?,
-                    button: i8::try_from(*button).map_err(|_| {
-                        AdapterError::Encode(format!("click button {button} overflows i8"))
-                    })?,
-                    mode: click_mode_value(*click_type),
-                    changed_slots: changed_slots
-                        .iter()
-                        .map(|entry| {
-                            Ok(ChangedSlot {
-                                location: i16::try_from(entry.slot).map_err(|_| {
-                                    AdapterError::Encode(format!(
-                                        "changed slot {} overflows i16",
-                                        entry.slot
-                                    ))
-                                })?,
-                                item: HashedStack,
-                            })
-                        })
-                        .collect::<Result<Vec<_>, AdapterError>>()?,
-                    cursor_item: HashedStack,
-                };
-                Ok(Some((self.ids().container_click, self.encode_body(&body)?)))
+                write_hashed_stack(&mut payload, carried_item.as_ref())?;
+                Ok(Some((self.ids().container_click, payload.into_vec())))
             }
             ClientAction::ContainerButtonClick {
                 window_id,

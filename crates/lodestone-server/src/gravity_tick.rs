@@ -143,7 +143,7 @@
 use lodestone_model::{BlockPos, Vec3};
 
 use crate::chunk::is_air_or_fluid;
-use crate::scheduled_tick::{ScheduledTick, ScheduledTickQueue, TickPriority};
+use crate::scheduled_tick::{ScheduledTick, ScheduledTickKind, ScheduledTickQueue, TickPriority};
 
 pub const SAND: &str = "minecraft:sand";
 pub const RED_SAND: &str = "minecraft:red_sand";
@@ -228,15 +228,15 @@ pub const DELAY_AFTER_PLACE: u64 = 2;
 /// `TickPriority::Normal` is the real default: a scheduled tick with no
 /// priority argument resolves to the normal priority.
 #[must_use]
-pub fn ticks_after_place(pos: BlockPos, state: &str) -> Vec<ScheduledTick<String>> {
+pub fn ticks_after_place(pos: BlockPos, state: &str) -> Vec<ScheduledTick<ScheduledTickKind>> {
     let base = state.split('[').next().unwrap_or(state);
     if !is_gravity_block(base) {
         return Vec::new();
     }
-    let mut pending: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+    let mut pending: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
     pending.schedule(
         (pos.x, pos.y, pos.z),
-        TICK_GRAVITY.to_owned(),
+        ScheduledTickKind::Gravity,
         DELAY_AFTER_PLACE,
         TickPriority::Normal,
     );

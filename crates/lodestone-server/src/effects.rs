@@ -45,6 +45,8 @@
 
 use lodestone_model::{BlockPos, SoundCategory, Vec3, Vec3f};
 
+use crate::block_entities::BlockEntityKind;
+
 /// One sound, particle burst or level event for a connection to be told about.
 ///
 /// Mirrors the three clientbound packets one-for-one (`sound`, `level_event`,
@@ -121,7 +123,7 @@ pub enum WorldEffect {
         /// The `minecraft:block_entity_type` registry key — **the entity's key,
         /// not the block's**. A `moving_piston` block carries a
         /// `minecraft:piston` block entity.
-        block_entity_type: String,
+        block_entity_type: BlockEntityKind,
         /// The `getUpdateTag` payload, as a nameless compound.
         nbt: lodestone_core::Nbt,
     },
@@ -174,6 +176,25 @@ pub const SOUND_BREWING_STAND_BREW: i32 = 1035;
 /// own conversion-finish routine fires this (`data` unused) the instant a
 /// cured zombie villager becomes a real villager.
 pub const SOUND_ZOMBIE_CONVERTED: i32 = 1027;
+
+/// The visible consequence of a Wind Charged death.
+///
+/// The burst is centred halfway up a standing player (`0.9` blocks above its
+/// feet) and uses the argument-less small-gust particle.  Keeping it a normal
+/// [`WorldEffect::Particles`] value routes it through the existing version
+/// encoder and shell emitter, rather than borrowing the damaging explosion
+/// lane for a visual-only event.
+#[must_use]
+pub fn wind_charged_death(pos: Vec3) -> WorldEffect {
+    WorldEffect::Particles {
+        particle: "minecraft:gust_emitter_small".to_owned(),
+        pos: Vec3::new(pos.x, pos.y + 0.9, pos.z),
+        offset: Vec3f::new(0.0, 0.0, 0.0),
+        max_speed: 0.0,
+        count: 0,
+        long_distance: false,
+    }
+}
 
 /// Strips any `[...]` property suffix, as every canonical-name comparison in
 /// this crate does.
@@ -523,6 +544,21 @@ mod tests {
         assert!(sound_exists("minecraft:block.wooden_door.open"));
         assert!(!sound_exists("minecraft:entity.zombie.not_a_sound"));
         assert!(!sound_exists("minecraft:block.oak_door.open"));
+    }
+
+    #[test]
+    fn wind_charged_death_uses_the_small_gust_at_the_player_midpoint() {
+        assert_eq!(
+            wind_charged_death(Vec3::new(4.0, 70.0, -3.0)),
+            WorldEffect::Particles {
+                particle: "minecraft:gust_emitter_small".to_owned(),
+                pos: Vec3::new(4.0, 70.9, -3.0),
+                offset: Vec3f::new(0.0, 0.0, 0.0),
+                max_speed: 0.0,
+                count: 0,
+                long_distance: false,
+            }
+        );
     }
 
     /// Each openable family lands on the name 26.2 really has — and the three

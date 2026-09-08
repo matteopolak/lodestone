@@ -72,6 +72,10 @@ pub struct ScreenEffects {
     /// section for that fix. **Not first-person-gated** — see
     /// [`Self::any_active`]'s doc.
     pub nausea_intensity: f32,
+    /// The local Blindness/Darkness presentation strength. This bounded
+    /// screen layer makes the status effect visible while fog-distance and
+    /// lightmap-specific treatment remain owned by their respective passes.
+    pub vision_obscuration: f32,
     /// Vanilla's `Entity.portalEffectIntensity`, `0.0..=1.0` —
     /// drives the portal overlay's alpha and (blended with
     /// [`Self::nausea_intensity`]) the same projection warp. Takes priority
@@ -136,7 +140,11 @@ impl ScreenEffects {
     /// — see that doc).
     #[must_use]
     pub fn camera_agnostic_group_active(&self) -> bool {
-        !self.spectator && (self.freeze_percent > 0.0 || self.nausea_intensity > 0.0 || self.portal_intensity > 0.0)
+        !self.spectator
+            && (self.freeze_percent > 0.0
+                || self.nausea_intensity > 0.0
+                || self.portal_intensity > 0.0
+                || self.vision_obscuration > 0.0)
     }
 
     /// Whether the world-border warning vignette should draw. Kept separate
@@ -281,6 +289,16 @@ mod tests {
     fn portal_activates_in_first_and_third_person() {
         let fx = ScreenEffects {
             portal_intensity: 0.3,
+            ..ScreenEffects::default()
+        };
+        assert!(fx.any_active(true));
+        assert!(fx.any_active(false));
+    }
+
+    #[test]
+    fn vision_obscuration_activates_in_first_and_third_person() {
+        let fx = ScreenEffects {
+            vision_obscuration: 0.5,
             ..ScreenEffects::default()
         };
         assert!(fx.any_active(true));

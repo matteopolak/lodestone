@@ -142,7 +142,7 @@ use crate::redstone_rail;
 use crate::redstone_torch;
 use crate::redstone_tripwire;
 use crate::redstone_wire;
-use crate::scheduled_tick::{ScheduledTickQueueAccess, TickPriority};
+use crate::scheduled_tick::{ScheduledTickKind, ScheduledTickQueueAccess, TickPriority};
 #[cfg(test)]
 use crate::scheduled_tick::ScheduledTickQueue;
 use lodestone_model::BlockPos;
@@ -610,7 +610,7 @@ impl RandomTickScheduler {
     /// schedule a delayed recheck — see that function's own doc comment.
     /// `tick::run_tick_loop` (the real caller) passes its own persistent
     /// `block_ticks` queue and `game_tick` counter; nothing here owns either.
-    pub fn tick_chunk<Q: ScheduledTickQueueAccess<String> + ?Sized>(
+    pub fn tick_chunk<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized>(
         &mut self,
         column: &mut crate::chunk::ChunkColumn,
         cx: i32,
@@ -711,7 +711,7 @@ impl RandomTickScheduler {
     /// `blockState.randomTick(...)` virtual call fanning out to whichever
     /// `Block` subclass is actually at that position.
     #[allow(clippy::too_many_arguments)]
-    fn tick_randomly_ticking_block<Q: ScheduledTickQueueAccess<String> + ?Sized>(
+    fn tick_randomly_ticking_block<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized>(
         &mut self,
         column: &mut crate::chunk::ChunkColumn,
         min_x: i32,
@@ -797,7 +797,7 @@ impl RandomTickScheduler {
     /// RNG draws for that probe have already happened either way, so the stream
     /// stays aligned.
     #[allow(clippy::too_many_arguments)]
-    fn tick_lava<Q: ScheduledTickQueueAccess<String> + ?Sized>(
+    fn tick_lava<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized>(
         &mut self,
         column: &mut crate::chunk::ChunkColumn,
         min_x: i32,
@@ -847,10 +847,10 @@ impl RandomTickScheduler {
                 to: new_state,
             });
             // Without this the fire is inert forever — see `crate::fire`.
-            if !block_ticks.has_scheduled((at.x, at.y, at.z), &crate::fire::TICK_FIRE.to_string()) {
+            if !block_ticks.has_scheduled((at.x, at.y, at.z), &ScheduledTickKind::Fire) {
                 block_ticks.schedule(
                     (at.x, at.y, at.z),
-                    crate::fire::TICK_FIRE.to_string(),
+                    ScheduledTickKind::Fire,
                     current_tick + crate::fire::TICK_DELAY_BASE,
                     TickPriority::Normal,
                 );
@@ -1356,7 +1356,7 @@ pub(crate) fn react_at_placement(
 /// entry point, which is the only way the placement half of a circuit can be
 /// compared against a real server tick for tick.
 #[allow(clippy::too_many_arguments)]
-pub fn react_at_placement_with_entities<Q: ScheduledTickQueueAccess<String> + ?Sized>(
+pub fn react_at_placement_with_entities<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized>(
     column: &mut crate::chunk::ChunkColumn,
     min_x: i32,
     min_z: i32,
@@ -1400,21 +1400,22 @@ pub fn react_at_placement_with_entities<Q: ScheduledTickQueueAccess<String> + ?S
             let placed_kind = if redstone::is_repeater(&state) {
                 let facing = redstone::diode_facing(&state);
                 redstone_diode::repeater_should_turn_on(&redstone::make_columns_lookup(&columns), pos, facing)
-                    .then_some(redstone::TICK_REPEATER)
+                    .then_some(ScheduledTickKind::Repeater)
             } else if redstone::is_comparator(&state) {
                 let facing = redstone::diode_facing(&state);
                 let input = redstone::input_signal(&redstone::make_columns_lookup(&columns), pos, facing);
                 let side = redstone::alternate_signal(&redstone::make_columns_lookup(&columns), pos, facing, false);
                 let subtract = redstone::comparator_mode_subtract(&state);
-                redstone_diode::comparator_should_turn_on(input, side, subtract).then_some(redstone::TICK_COMPARATOR)
+                redstone_diode::comparator_should_turn_on(input, side, subtract)
+                    .then_some(ScheduledTickKind::Comparator)
             } else {
                 None
             };
             if let Some(kind) = placed_kind {
-                if !block_ticks.has_scheduled((x, y, z), &kind.to_string()) {
+                if !block_ticks.has_scheduled((x, y, z), &kind) {
                     // `level.scheduleTick(pos, this, 1)` — the three-argument
                     // overload, so `TickPriority.NORMAL`.
-                    block_ticks.schedule((x, y, z), kind.to_string(), current_tick + 1, TickPriority::Normal);
+                    block_ticks.schedule((x, y, z), kind, current_tick + 1, TickPriority::Normal);
                 }
             }
             // `FireBlock::onPlace` schedules the fire's own first tick, and without
@@ -1482,11 +1483,14 @@ pub fn react_at_placement_with_entities<Q: ScheduledTickQueueAccess<String> + ?S
                     };
                     apply_tripwire_result(&columns, &result, &mut own);
                     if result.reschedule_recheck
-                        && !block_ticks.has_scheduled((hook_pos.x, hook_pos.y, hook_pos.z), &redstone_tripwire::TICK_TRIPWIRE_RECHECK.to_string())
+                        && !block_ticks.has_scheduled(
+                            (hook_pos.x, hook_pos.y, hook_pos.z),
+                            &ScheduledTickKind::TripwireRecheck,
+                        )
                     {
                         block_ticks.schedule(
                             (hook_pos.x, hook_pos.y, hook_pos.z),
-                            redstone_tripwire::TICK_TRIPWIRE_RECHECK.to_string(),
+                            ScheduledTickKind::TripwireRecheck,
                             current_tick + u64::from(redstone_tripwire::RECHECK_DELAY),
                             TickPriority::Normal,
                         );
@@ -1588,7 +1592,7 @@ pub(crate) fn run_tripwire_recheck(
 /// this unconditionally on every removed block without a guard of its own —
 /// the same shape [`redstone::is_tripwire_hook`]'s placement counterpart is
 /// gated on inline rather than by the caller.
-pub(crate) fn react_at_removal<Q: ScheduledTickQueueAccess<String> + ?Sized>(
+pub(crate) fn react_at_removal<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized>(
     column: &mut crate::chunk::ChunkColumn,
     min_x: i32,
     min_z: i32,
@@ -1628,12 +1632,12 @@ pub(crate) fn react_at_removal<Q: ScheduledTickQueueAccess<String> + ?Sized>(
         if result.reschedule_recheck
             && !block_ticks.has_scheduled(
                 (hook_pos.x, hook_pos.y, hook_pos.z),
-                &redstone_tripwire::TICK_TRIPWIRE_RECHECK.to_string(),
+                &ScheduledTickKind::TripwireRecheck,
             )
         {
             block_ticks.schedule(
                 (hook_pos.x, hook_pos.y, hook_pos.z),
-                redstone_tripwire::TICK_TRIPWIRE_RECHECK.to_string(),
+                ScheduledTickKind::TripwireRecheck,
                 current_tick + u64::from(redstone_tripwire::RECHECK_DELAY),
                 TickPriority::Normal,
             );
@@ -1931,7 +1935,7 @@ pub(crate) fn propagate_and_react_with_entities(
 /// the only remaining boundary, and it is the real one — a circuit does not
 /// propagate into a chunk nobody is simulating (see [`RedstoneColumns`]).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn propagate_and_react_with_entities_across_chunks<Q: ScheduledTickQueueAccess<String> + ?Sized>(
+pub(crate) fn propagate_and_react_with_entities_across_chunks<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized>(
     column: &mut crate::chunk::ChunkColumn,
     min_x: i32,
     min_z: i32,
@@ -1955,7 +1959,7 @@ pub(crate) fn propagate_and_react_with_entities_across_chunks<Q: ScheduledTickQu
 /// cross-chunk-capable depending only on which [`ChunkSource`] `columns`
 /// was built over.
 #[allow(clippy::too_many_arguments)]
-fn propagate_and_react_over<Q: ScheduledTickQueueAccess<String> + ?Sized>(
+fn propagate_and_react_over<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized>(
     columns: &RedstoneColumns<'_, '_>,
     x: i32,
     y: i32,
@@ -1998,7 +2002,7 @@ fn propagate_and_react_over<Q: ScheduledTickQueueAccess<String> + ?Sized>(
 /// One neighbour notification's worth of reaction dispatch — the body of
 /// [`propagate_and_react`]'s `notify` closure, named so the seven centres a
 /// dust change fans out from can share it.
-fn react_to_notification<Q: ScheduledTickQueueAccess<String> + ?Sized>(
+fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized>(
     columns: &RedstoneColumns<'_, '_>,
     n: Notification,
     block_ticks: &mut Q,
@@ -2073,7 +2077,7 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<String> + ?Sized>(
         if class == crate::redstone_graph::ReactionClass::Gravity {
             block_ticks.schedule(
                 (n.pos.x, n.pos.y, n.pos.z),
-                gravity_tick::TICK_GRAVITY.to_string(),
+                ScheduledTickKind::Gravity,
                 current_tick + gravity_tick::DELAY_AFTER_PLACE,
                 TickPriority::Normal,
             );
@@ -2129,13 +2133,13 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<String> + ?Sized>(
             crate::redstone_counters::bump_reaction(crate::redstone_counters::ReactionKind::Torch);
             let has_signal = redstone_torch::has_neighbor_signal(&redstone::make_columns_lookup(columns), n.pos, &state);
             if redstone_torch::should_schedule_check(&state, has_signal) {
-                if block_ticks.has_scheduled((n.pos.x, n.pos.y, n.pos.z), &redstone::TICK_TORCH.to_string()) {
+                if block_ticks.has_scheduled((n.pos.x, n.pos.y, n.pos.z), &ScheduledTickKind::Torch) {
                     crate::redstone_counters::bump_schedule_deduped();
                 } else {
                     crate::redstone_counters::bump_schedule_requested();
                     block_ticks.schedule(
                         (n.pos.x, n.pos.y, n.pos.z),
-                        redstone::TICK_TORCH.to_string(),
+                        ScheduledTickKind::Torch,
                         current_tick + 2,
                         TickPriority::Normal,
                     );
@@ -2156,7 +2160,7 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<String> + ?Sized>(
             let state_now = columns.raw_state(n.pos);
             let should_on = redstone_diode::repeater_should_turn_on(&redstone::make_columns_lookup(columns), n.pos, facing);
             if redstone_diode::should_schedule_repeater_check(&state_now, should_on) {
-                if block_ticks.has_scheduled((n.pos.x, n.pos.y, n.pos.z), &redstone::TICK_REPEATER.to_string()) {
+                if block_ticks.has_scheduled((n.pos.x, n.pos.y, n.pos.z), &ScheduledTickKind::Repeater) {
                     crate::redstone_counters::bump_schedule_deduped();
                 } else {
                     crate::redstone_counters::bump_schedule_requested();
@@ -2169,7 +2173,7 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<String> + ?Sized>(
                     let delay = redstone_diode::repeater_delay(&state_now);
                     block_ticks.schedule(
                         (n.pos.x, n.pos.y, n.pos.z),
-                        redstone::TICK_REPEATER.to_string(),
+                        ScheduledTickKind::Repeater,
                         current_tick + u64::from(delay),
                         priority,
                     );
@@ -2230,7 +2234,7 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<String> + ?Sized>(
                     let arm_pos = facing.relative(n.pos);
                     if let Some(pending) = block_ticks.take_matching(
                         (arm_pos.x, arm_pos.y, arm_pos.z),
-                        |kind: &String| crate::piston::is_finish_kind(kind),
+                        |kind: &ScheduledTickKind| crate::piston::is_finish_kind(kind),
                     ) {
                         if let Some(entity) = crate::piston::parse_finish_kind(&pending.kind) {
                             let write = crate::piston::interrupt(arm_pos, &entity);
@@ -2269,7 +2273,7 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<String> + ?Sized>(
                     let two_pos = crate::piston::relative_n(n.pos, facing, 2);
                     if let Some(pending) = block_ticks.take_matching(
                         (two_pos.x, two_pos.y, two_pos.z),
-                        |kind: &String| {
+                        |kind: &ScheduledTickKind| {
                             crate::piston::parse_finish_kind(kind)
                                 .is_some_and(|e| e.direction == facing && e.extending)
                         },
@@ -2370,7 +2374,7 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<String> + ?Sized>(
                     if let Some(entity) = &entity {
                         block_ticks.schedule(
                             (pos.x, pos.y, pos.z),
-                            crate::piston::finish_kind(entity),
+                            ScheduledTickKind::from_name(crate::piston::finish_kind(entity)),
                             current_tick + crate::piston::PISTON_MOVE_DELAY,
                             TickPriority::Normal,
                         );
@@ -2399,14 +2403,14 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<String> + ?Sized>(
             let input = redstone::input_signal(&redstone::make_columns_lookup(columns), n.pos, facing);
             let side = redstone::alternate_signal(&redstone::make_columns_lookup(columns), n.pos, facing, false);
             if redstone_diode::should_schedule_comparator_check(&state, input, side) {
-                if block_ticks.has_scheduled((n.pos.x, n.pos.y, n.pos.z), &redstone::TICK_COMPARATOR.to_string()) {
+                if block_ticks.has_scheduled((n.pos.x, n.pos.y, n.pos.z), &ScheduledTickKind::Comparator) {
                     crate::redstone_counters::bump_schedule_deduped();
                 } else {
                     crate::redstone_counters::bump_schedule_requested();
                     let priority = redstone_diode::comparator_schedule_priority(&redstone::make_columns_lookup(columns), n.pos, facing);
                     block_ticks.schedule(
                         (n.pos.x, n.pos.y, n.pos.z),
-                        redstone::TICK_COMPARATOR.to_string(),
+                        ScheduledTickKind::Comparator,
                         current_tick + 2,
                         priority,
                     );
@@ -2451,13 +2455,13 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<String> + ?Sized>(
             crate::redstone_counters::bump_reaction(crate::redstone_counters::ReactionKind::Observer);
             let watch = redstone_observer::watch_direction(&state);
             if n.from == watch && redstone_observer::should_start_signal(&state) {
-                if block_ticks.has_scheduled((n.pos.x, n.pos.y, n.pos.z), &redstone::TICK_OBSERVER.to_string()) {
+                if block_ticks.has_scheduled((n.pos.x, n.pos.y, n.pos.z), &ScheduledTickKind::Observer) {
                     crate::redstone_counters::bump_schedule_deduped();
                 } else {
                     crate::redstone_counters::bump_schedule_requested();
                     block_ticks.schedule(
                         (n.pos.x, n.pos.y, n.pos.z),
-                        redstone::TICK_OBSERVER.to_string(),
+                        ScheduledTickKind::Observer,
                         current_tick + 2,
                         TickPriority::Normal,
                     );
@@ -2586,11 +2590,14 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<String> + ?Sized>(
                     to: reaction.new_state,
                 });
                 if reaction.schedule_fire
-                    && !block_ticks.has_scheduled((n.pos.x, n.pos.y, n.pos.z), &redstone_dispenser::TICK_DISPENSER_FIRE.to_string())
+                    && !block_ticks.has_scheduled(
+                        (n.pos.x, n.pos.y, n.pos.z),
+                        &ScheduledTickKind::DispenserFire,
+                    )
                 {
                     block_ticks.schedule(
                         (n.pos.x, n.pos.y, n.pos.z),
-                        redstone_dispenser::TICK_DISPENSER_FIRE.to_string(),
+                        ScheduledTickKind::DispenserFire,
                         current_tick + u64::from(redstone_dispenser::TRIGGER_DURATION),
                         TickPriority::Normal,
                     );
@@ -2613,11 +2620,14 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<String> + ?Sized>(
                 redstone::best_neighbor_signal(&lookup, n.pos, false) > 0
             };
             if has_signal
-                && !block_ticks.has_scheduled((n.pos.x, n.pos.y, n.pos.z), &crate::mobs::tnt::TICK_TNT_PRIME.to_string())
+                && !block_ticks.has_scheduled(
+                    (n.pos.x, n.pos.y, n.pos.z),
+                    &ScheduledTickKind::TntPrime,
+                )
             {
                 block_ticks.schedule(
                     (n.pos.x, n.pos.y, n.pos.z),
-                    crate::mobs::tnt::TICK_TNT_PRIME.to_string(),
+                    ScheduledTickKind::TntPrime,
                     current_tick,
                     TickPriority::Normal,
                 );
@@ -2700,11 +2710,14 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<String> + ?Sized>(
                             });
                             data.condition_met = crate::command_block::mark_condition_met(conditional, predecessor_succeeded);
                             if !block_ticks
-                                .has_scheduled((n.pos.x, n.pos.y, n.pos.z), &crate::command_block::TICK_COMMAND_BLOCK.to_string())
+                                .has_scheduled(
+                                    (n.pos.x, n.pos.y, n.pos.z),
+                                    &ScheduledTickKind::CommandBlock,
+                                )
                             {
                                 block_ticks.schedule(
                                     (n.pos.x, n.pos.y, n.pos.z),
-                                    crate::command_block::TICK_COMMAND_BLOCK.to_string(),
+                                    ScheduledTickKind::CommandBlock,
                                     current_tick + 1,
                                     TickPriority::Normal,
                                 );
@@ -4726,7 +4739,7 @@ mod tests {
         assert_eq!(
             (
                 reference_scheduled[0].pos,
-                reference_scheduled[0].kind.as_str(),
+                reference_scheduled[0].kind.as_ref(),
                 reference_scheduled[0].trigger_tick,
             ),
             (
@@ -4784,7 +4797,7 @@ mod tests {
         assert_eq!(changed.len(), 2, "exactly the two hooks may be rewritten: {changed:?}");
         assert_eq!(scheduled.len(), 1, "exactly one recheck: {scheduled:?}");
         assert_eq!(
-            (scheduled[0].pos, scheduled[0].kind.as_str(), scheduled[0].trigger_tick),
+            (scheduled[0].pos, scheduled[0].kind.as_ref(), scheduled[0].trigger_tick),
             (
                 (SCANNING_X, SEAM_ROW_Y, SEAM_ROW_Z),
                 redstone_tripwire::TICK_TRIPWIRE_RECHECK,
@@ -4897,7 +4910,7 @@ mod tests {
         assert_eq!(
             reference_scheduled
                 .iter()
-                .map(|t| (t.pos, t.kind.as_str(), t.trigger_tick))
+                .map(|t| (t.pos, t.kind.as_ref(), t.trigger_tick))
                 .collect::<Vec<_>>(),
             vec![(
                 (13, SEAM_ROW_Y, SEAM_ROW_Z),
@@ -4926,7 +4939,7 @@ mod tests {
         assert_eq!(
             scheduled
                 .iter()
-                .map(|t| (t.pos, t.kind.as_str(), t.trigger_tick))
+                .map(|t| (t.pos, t.kind.as_ref(), t.trigger_tick))
                 .collect::<Vec<_>>(),
             vec![(
                 (16, SEAM_ROW_Y, SEAM_ROW_Z),

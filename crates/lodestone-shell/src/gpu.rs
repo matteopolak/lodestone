@@ -93,7 +93,7 @@ pub use sources::{
     CampfireSource,
     ConduitSource, CopperGolemStatueSource, DecoratedPotSource, EnchantingTableSource,
     EndGatewayBeamSource, EndGatewaySource, EndPortalSource,
-    EntityLightSource, HandSwingSource, ItemUseSource, ItemUseState, LecternSource, MainHandItem,
+    EffectLightSource, EntityGlowSource, EntityLightSource, HandSwingSource, ItemUseSource, ItemUseState, LecternSource, MainHandItem,
     MainHandSource, MapPicture, MapSource, MovingPistonSource, OutlineShapeSource, ShadowGroundSource,
     ShelfSource, ShulkerSource,
     SignSource, SkullSource, SkyDarkenSource, SpawnerSource, ThirdPersonBodySource,
@@ -306,6 +306,10 @@ pub struct RenderState {
     /// a source.
     debug_lines: DebugLineRenderer,
     debug_lines_source: DebugLinesSource,
+    /// Entity-effect outlines, kept separate from the developer F3 overlay so
+    /// an active gameplay effect remains visible when debug lines are disabled.
+    glow_outline: DebugLineRenderer,
+    entity_glow_source: EntityGlowSource,
     /// The fishing line — a **second** [`DebugLineRenderer`], not a second
     /// implementation of one.
     ///
@@ -454,6 +458,9 @@ pub struct RenderState {
     /// until the shell wires the current dimension in via
     /// [`RenderState::set_ambient_light_source`].
     ambient_light: AmbientLightSource,
+    /// This frame's local visual-effect light floor. It is folded with
+    /// [`Self::ambient_light`] only at the shared lightmap input.
+    effect_light: EffectLightSource,
     /// Where the local player's own third-person body comes from, if a
     /// caller has wired one in. Unset until the shell has both a
     /// third-person camera and a way to describe the local player's pose —

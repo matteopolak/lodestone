@@ -149,6 +149,10 @@ uuid = { workspace = true }
 # only — native behaviour is byte-for-byte unchanged.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
+# Native worldgen batches use Rayon’s process-wide reusable pool. Keeping this
+# target-gated is load-bearing: the browser uses the same generator serially,
+# with a macrotask yield between columns, and must not link a thread backend.
+rayon = { workspace = true }
 # World persistence (issue #437): the `.mca` region container and `level.dat`.
 # **Target-gated deliberately.** `lodestone-anvil`'s readers and writers are
 # `std::fs`-based, and this crate is one of the few that really does build for
@@ -195,14 +199,15 @@ tokio = { version = "1", default-features = false, features = [
     "sync",
     "time",
 ] }
+wasm-bindgen = { version = "0.2" }
 wasm-bindgen-futures = { workspace = true }
-# `crate::chunk::yield_to_browser`'s `js_sys::Promise::new` +
-# `window.setTimeout`: the real browser macrotask yield that lets column
+# `crate::chunk::yield_to_browser`'s `js_sys::Promise::new` + the active
+# browser global's `setTimeout`: the real browser macrotask yield that lets column
 # generation give the tab back to the event loop between columns instead of
 # generating a whole join/streaming batch inline. Same versions
-# `lodestone-shell`/`lodestone-net` already pin for wasm32 (`Window` is the
-# only feature this crate's own use needs; no direct `wasm-bindgen` call, so
-# unlike those two crates this one does not need that dependency itself).
+# `lodestone-shell`/`lodestone-net` already pin for wasm32. The timer calls
+# `setTimeout` through the active global so it works in both a page fallback and
+# the dedicated server worker.
 js-sys = "0.3"
 web-sys = { version = "0.3", features = ["Window"] }
 

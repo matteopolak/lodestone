@@ -13,6 +13,9 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+# `ResourceKey` is the validated internal type used by the plugin dimension
+# registration seam; the textual constant below is parsed once at ingress.
+lodestone-model = { workspace = true }
 # `lodestone_worldgen::generator::ChunkGenerator`, `DenseBlockGrid`, and the
 # structure template placement primitive this plugin's generator calls
 # directly. Path, not a workspace alias — matching how `lodestone-server`
@@ -33,7 +36,6 @@ lodestone-server = { path = "../../lodestone-server" }
 # loop" trap).
 lodestone-client = { workspace = true }
 lodestone-v26-2 = { workspace = true }
-lodestone-model = { workspace = true }
 # Resolves `"minecraft:stone"`-style canonical states to the numeric ids
 # `ClientHandle::block_at` reports, for the assertion side of the gate —
 # the same reason `lodestone-autopilot`'s dev-dependency on it exists.

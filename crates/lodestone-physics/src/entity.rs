@@ -245,6 +245,11 @@ pub fn move_entity_among_entities(
     ctx: MoveContext,
     entity_colliders: &[Aabb],
 ) {
+    let position_before = motion.position;
+    let velocity_before = motion.velocity;
+    let on_ground_before = motion.on_ground;
+    let horizontal_collision_before = motion.horizontal_collision;
+
     // The entity's own velocity at the top of vanilla's own move step.
     let delta = motion.velocity;
 
@@ -363,6 +368,23 @@ pub fn move_entity_among_entities(
     motion.velocity = motion
         .velocity
         .multiply_each(block_speed_factor, 1.0, block_speed_factor);
+
+    crate::trace::entity_move(
+        position_before,
+        velocity_before,
+        on_ground_before,
+        horizontal_collision_before,
+        bb,
+        move_delta,
+        resolved,
+        motion.position,
+        motion.velocity,
+        x_collision,
+        z_collision,
+        vertical_collision,
+        vertical_collision_below,
+        motion.on_ground,
+    );
 }
 
 /// [`move_entity`] with hard colliders selected from a mixed nearby-entity

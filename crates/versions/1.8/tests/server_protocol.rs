@@ -362,7 +362,7 @@ fn block_place_lifts_the_protocol_47_body_to_the_shared_placement_consumer() {
             face: BlockFace::East,
             cursor: Vec3f::new(0.25, 0.5, 0.75),
             hand: 0,
-            sequence: lodestone_model::PredictionSequence::INITIAL,
+            sequence: 0,
         }
     );
     assert_eq!(
@@ -402,7 +402,7 @@ fn adapter_emitted_block_place_reaches_the_hosted_placement_boundary() {
         face: BlockFace::North,
         cursor: Vec3f::new(0.5, 0.25, 0.75),
         inside_block: false,
-        sequence: lodestone_model::PredictionSequence::new(123),
+        sequence: 123,
     };
     let (packet_id, body) = V47Adapter::new()
         .encode_action(ConnectionState::Play, &action)
@@ -417,7 +417,7 @@ fn adapter_emitted_block_place_reaches_the_hosted_placement_boundary() {
             // The era's cursor is rounded to sixteenths by the adapter.
             cursor: Vec3f::new(0.5, 0.25, 0.6875),
             hand: 0,
-            sequence: lodestone_model::PredictionSequence::INITIAL,
+            sequence: 0,
         },
         "the real adapter frame must reach the shared server variant consumed by placement"
     );
@@ -529,6 +529,73 @@ fn client_settings_lift_the_protocol_47_view_distance() {
         protocol.decode(State::Play, play::serverbound::SETTINGS, &[5, b'e', b'n', b'_', b'u', b's', 6, 0, 1, 0x7f, 0]),
         ServerBound::Ignored,
         "a settings packet with a trailing byte must not resize the client view"
+    );
+}
+
+#[test]
+fn use_entity_lifts_protocol_47_forms_into_shared_consumers() {
+    let protocol = lodestone_registry::server_protocol_for_protocol(47)
+        .expect("protocol 47 must resolve to its hosted server protocol");
+
+    // Literal VarInt target 321 (`c1 02`) followed by the packet's mouse
+    // discriminator. These are serverbound bytes, not a round trip through
+    // the client adapter, so a shared field-order mistake cannot satisfy the
+    // assertion symmetrically.
+    let attack = [0xc1, 0x02, 1];
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::USE_ENTITY, &attack),
+        ServerBound::Attack { entity_id: 321 }
+    );
+
+    let interact = [0xc1, 0x02, 0];
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::USE_ENTITY, &interact),
+        ServerBound::InteractEntity {
+            entity_id: 321,
+            hand: 0,
+            using_secondary_action: false,
+        }
+    );
+
+    // Mouse 2 is the precise-hit form. The shared interaction consumer does
+    // not yet model the point, but the complete body still has to be read
+    // before the generic interaction is admitted.
+    let interact_at = [
+        0xc1, 0x02, 2,
+        0x3f, 0xa0, 0x00, 0x00, // x = 1.25
+        0x40, 0x20, 0x00, 0x00, // y = 2.5
+        0x40, 0x70, 0x00, 0x00, // z = 3.75
+    ];
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::USE_ENTITY, &interact_at),
+        ServerBound::InteractEntity {
+            entity_id: 321,
+            hand: 0,
+            using_secondary_action: false,
+        }
+    );
+
+    // Controls for every rejection arm: a truncated point, a trailing byte,
+    // an unknown discriminator, and the wrong connection state.
+    assert_eq!(
+        protocol.decode(
+            State::Play,
+            play::serverbound::USE_ENTITY,
+            &[0xc1, 0x02, 2, 0x3f, 0xa0],
+        ),
+        ServerBound::Ignored
+    );
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::USE_ENTITY, &[0xc1, 0x02, 0, 0]),
+        ServerBound::Ignored
+    );
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::USE_ENTITY, &[0xc1, 0x02, 3]),
+        ServerBound::Ignored
+    );
+    assert_eq!(
+        protocol.decode(State::Login, play::serverbound::USE_ENTITY, &attack),
+        ServerBound::Ignored
     );
 }
 

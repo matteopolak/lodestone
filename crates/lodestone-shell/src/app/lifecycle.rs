@@ -255,6 +255,7 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
                 if should_background_pace(&self.config) && self.nav.pause_on_lost_focus() {
                     self.ui.pause();
                 }
+                self.pending_pick = None;
                 self.set_grab(false);
                 if should_background_pace(&self.config) {
                     self.pacer.set_focused(false);
@@ -739,6 +740,7 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
                 // every click while paused (hover + activate the highlighted
                 // pause-menu row, including Back to Game via `MenuKey::Enter`).
                 if self.pointer_really_locked() {
+                    self.replay_pending_pick();
                     // `key.attack` mines (hold-to-mine on live; one-shot break on
                     // demo) and `key.use` uses/places against the targeted face.
                     // Both default to a mouse button — left and right
@@ -788,7 +790,17 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
                     // time gesture-backed, `request_pointer_lock()` call; it is a
                     // pure no-op on native, where `pointer_really_locked()` already
                     // agreed with `self.grabbed` and this branch is unreachable.
+                    if matches!(
+                        mouse_action_for(&self.keybinds(), button),
+                        Some(InputAction::PickItem)
+                    ) {
+                        self.pending_pick.get_or_insert(PendingPick {
+                            include_data: self.ctrl_held,
+                            requested_at: Instant::now(),
+                        });
+                    }
                     self.set_grab(true);
+                    self.replay_pending_pick();
                 }
             }
             // Scroll cycles the hotbar (down = right, like vanilla) only
@@ -918,8 +930,17 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => self.handle_keyboard_input(event),
-            WindowEvent::RedrawRequested => self.redraw(),
+            WindowEvent::RedrawRequested => {
+                self.redraw();
+                self.replay_pending_pick();
+            }
             _ => {}
+        }
+
+        // A menu transition releases gameplay input, so a pick captured just
+        // before opening it must not leak into the next world frame.
+        if !self.ui.is_playing() {
+            self.pending_pick = None;
         }
 
         // Clean shutdown path: any handler may latch a quit request.
@@ -995,6 +1016,7 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
                 self.reconcile_browser_pointer_lock_change();
             }
         }
+        self.replay_pending_pick();
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -1541,6 +1563,42 @@ impl WindowApp {
 /// Here that layer is the routing site: `handle_chat_key` is the text-entry and
 /// submit path, and these keys are handled before it sees them.
 impl WindowApp {
+    /// Dispatch one middle-click that arrived before pointer capture completed.
+    ///
+    /// Native capture reports synchronously, while browser capture can complete
+    /// on a later event-loop turn. Keeping the request here, rather than replaying
+    /// raw mouse events, gives both paths one-shot semantics and lets the current
+    /// ray target decide what the server receives.
+    pub(super) fn replay_pending_pick(&mut self) {
+        let Some(pending) = self.pending_pick else {
+            return;
+        };
+        if !self.ui.is_playing() {
+            self.pending_pick = None;
+            return;
+        }
+        if Instant::now().saturating_duration_since(pending.requested_at)
+            >= PENDING_PICK_TIMEOUT
+        {
+            self.pending_pick = None;
+            return;
+        }
+        if !self.pointer_really_locked() {
+            // A rejected native grab leaves `grabbed` false. Browser requests
+            // can leave it true until the DOM reports the eventual lock state,
+            // so those remain pending until the timeout above.
+            if !self.grabbed {
+                self.pending_pick = None;
+            }
+            return;
+        }
+        if self.sim.target().is_none() && self.sim.entity_target().is_none() {
+            return;
+        }
+        self.pending_pick = None;
+        self.sim.pick_block_or_entity(pending.include_data);
+    }
+
     /// Whether the pointer is **actually** captured, as opposed to `self.grabbed`,
     /// which only tracks whether we *asked* — see `browser_pointer_locked`'s doc for
     /// why the two can disagree on `wasm32`. Native's `CursorGrabMode::Locked`
@@ -1875,6 +1933,7 @@ impl WindowApp {
                     &weather.state(),
                 ))
             });
+            render.set_effect_light_source(self.sim.effect_light_source());
             // Same cell as `install_session_render_sources`, installed on this path
             // too for the reason that function's doc gives about duplicated
             // sources: a `--connect` launch that skipped it would black out mobs in
@@ -1952,6 +2011,7 @@ impl WindowApp {
         // is the one call that actually matters — the two above are just
         // keeping the three connect paths uniform.
         self.install_debug_lines_source();
+        self.install_entity_glow_source();
         // Same reasoning as the debug-line install immediately above, for the
         // billboard channel.
         self.install_plugin_billboards_source();

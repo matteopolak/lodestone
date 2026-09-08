@@ -56,6 +56,125 @@ use crate::composter::Composter;
 use crate::furnace::{Furnace, FurnaceKind};
 use crate::hopper::Hopper;
 
+/// The runtime key for a block-entity record.
+///
+/// Built-in keys get distinct variants so gameplay code can match them without
+/// spelling registry strings. [`Extension`] preserves a plugin or newer
+/// server's key losslessly; conversion to a string belongs at NBT and protocol
+/// boundaries. The key is intentionally independent of
+/// `lodestone_data::block_entity_types::BlockEntityType`, whose numeric value
+/// is version-specific and only valid for a particular wire registry.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum BlockEntityKind {
+    EndGateway,
+    Composter,
+    Furnace,
+    Smoker,
+    BlastFurnace,
+    Hopper,
+    BrewingStand,
+    Chest,
+    TrappedChest,
+    Barrel,
+    Dispenser,
+    Dropper,
+    CommandBlock,
+    MobSpawner,
+    Sign,
+    HangingSign,
+    Beacon,
+    Crafter,
+    /// A key not known by this build, including a plugin-defined key.
+    Extension(String),
+}
+
+impl BlockEntityKind {
+    /// Resolve a canonical registry key, preserving unknown keys as-is.
+    #[must_use]
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "minecraft:end_gateway" => Self::EndGateway,
+            "minecraft:composter" => Self::Composter,
+            "minecraft:furnace" => Self::Furnace,
+            "minecraft:smoker" => Self::Smoker,
+            "minecraft:blast_furnace" => Self::BlastFurnace,
+            "minecraft:hopper" => Self::Hopper,
+            "minecraft:brewing_stand" => Self::BrewingStand,
+            "minecraft:chest" => Self::Chest,
+            "minecraft:trapped_chest" => Self::TrappedChest,
+            "minecraft:barrel" => Self::Barrel,
+            "minecraft:dispenser" => Self::Dispenser,
+            "minecraft:dropper" => Self::Dropper,
+            "minecraft:command_block" => Self::CommandBlock,
+            "minecraft:mob_spawner" => Self::MobSpawner,
+            "minecraft:sign" => Self::Sign,
+            "minecraft:hanging_sign" => Self::HangingSign,
+            "minecraft:beacon" => Self::Beacon,
+            "minecraft:crafter" => Self::Crafter,
+            _ => Self::Extension(name.to_owned()),
+        }
+    }
+
+    /// Return the canonical registry spelling for this key.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        match self {
+            Self::EndGateway => "minecraft:end_gateway",
+            Self::Composter => "minecraft:composter",
+            Self::Furnace => "minecraft:furnace",
+            Self::Smoker => "minecraft:smoker",
+            Self::BlastFurnace => "minecraft:blast_furnace",
+            Self::Hopper => "minecraft:hopper",
+            Self::BrewingStand => "minecraft:brewing_stand",
+            Self::Chest => "minecraft:chest",
+            Self::TrappedChest => "minecraft:trapped_chest",
+            Self::Barrel => "minecraft:barrel",
+            Self::Dispenser => "minecraft:dispenser",
+            Self::Dropper => "minecraft:dropper",
+            Self::CommandBlock => "minecraft:command_block",
+            Self::MobSpawner => "minecraft:mob_spawner",
+            Self::Sign => "minecraft:sign",
+            Self::HangingSign => "minecraft:hanging_sign",
+            Self::Beacon => "minecraft:beacon",
+            Self::Crafter => "minecraft:crafter",
+            Self::Extension(name) => name,
+        }
+    }
+
+    /// Consume this key into its registry spelling.
+    #[must_use]
+    pub fn into_name(self) -> String {
+        match self {
+            Self::Extension(name) => name,
+            builtin => builtin.name().to_owned(),
+        }
+    }
+
+    /// Whether this key was not one of this build's known built-ins.
+    #[must_use]
+    pub fn is_extension(&self) -> bool {
+        matches!(self, Self::Extension(_))
+    }
+}
+
+impl From<&str> for BlockEntityKind {
+    fn from(name: &str) -> Self {
+        Self::from_name(name)
+    }
+}
+
+impl From<String> for BlockEntityKind {
+    fn from(name: String) -> Self {
+        Self::from_name(&name)
+    }
+}
+
+impl AsRef<str> for BlockEntityKind {
+    fn as_ref(&self) -> &str {
+        self.name()
+    }
+}
+
 /// One of the four block-entity kinds this crate simulates, at rest in the
 /// [`BlockEntityRegistry`].
 #[derive(Debug, Clone, PartialEq)]
@@ -382,6 +501,41 @@ impl BlockEntity {
             }
             BlockEntity::Beacon(_) => "minecraft:beacon",
             BlockEntity::Crafter { .. } => "minecraft:crafter",
+        }
+    }
+
+    /// Return this entity's typed runtime key.
+    ///
+    /// The existing [`Self::type_id`] accessor remains available for callers
+    /// writing NBT or protocol fields. New gameplay and policy code should
+    /// match this value instead, so an unknown `Container`/`Opaque` key stays
+    /// distinguishable from every built-in while still being preserved.
+    #[must_use]
+    pub fn kind(&self) -> BlockEntityKind {
+        match self {
+            BlockEntity::EndGateway { .. } => BlockEntityKind::EndGateway,
+            BlockEntity::Composter(_) => BlockEntityKind::Composter,
+            BlockEntity::Furnace(f) => match f.kind() {
+                FurnaceKind::Furnace => BlockEntityKind::Furnace,
+                FurnaceKind::Smoker => BlockEntityKind::Smoker,
+                FurnaceKind::BlastFurnace => BlockEntityKind::BlastFurnace,
+            },
+            BlockEntity::Hopper(_) => BlockEntityKind::Hopper,
+            BlockEntity::BrewingStand(_) => BlockEntityKind::BrewingStand,
+            BlockEntity::Container { id, .. } | BlockEntity::Opaque { id, .. } => {
+                BlockEntityKind::from_name(id)
+            }
+            BlockEntity::CommandBlock(_) => BlockEntityKind::CommandBlock,
+            BlockEntity::Spawner(_) => BlockEntityKind::MobSpawner,
+            BlockEntity::Sign(sign) => {
+                if sign.hanging {
+                    BlockEntityKind::HangingSign
+                } else {
+                    BlockEntityKind::Sign
+                }
+            }
+            BlockEntity::Beacon(_) => BlockEntityKind::Beacon,
+            BlockEntity::Crafter { .. } => BlockEntityKind::Crafter,
         }
     }
 
@@ -1127,7 +1281,6 @@ struct BlockEntityTickUpdate {
 struct BlockEntityTickCompletion {
     owner: BlockEntityTickOwner,
     serial: usize,
-    plan: u64,
     batch_count: usize,
     updates: Vec<BlockEntityTickUpdate>,
 }
@@ -1180,11 +1333,6 @@ pub fn merge_tick_effect_batches(
 #[derive(Debug, Default)]
 pub struct BlockEntityRegistry {
     entities: HashMap<BlockPos, BlockEntity>,
-    /// The latest non-hopper owner plan issued from this registry.
-    non_hopper_owner_plan: u64,
-    /// The newest non-hopper owner plan accepted by the central writer.
-    /// Keeping this separate rejects replayed region completions.
-    applied_non_hopper_owner_plan: u64,
 }
 
 impl BlockEntityRegistry {
@@ -1259,16 +1407,11 @@ impl BlockEntityRegistry {
     /// enough state to be advanced from this immutable copy.  The caller
     /// filters residency and dispatches these jobs after releasing the
     /// registry lock.
-    fn non_hopper_tick_jobs(&mut self) -> (u64, Vec<BlockEntityTickJob>) {
-        self.non_hopper_owner_plan = self
-            .non_hopper_owner_plan
-            .checked_add(1)
-            .expect("block-entity owner plan generation must not wrap");
-        let plan = self.non_hopper_owner_plan;
+    fn non_hopper_tick_jobs(&self) -> Vec<BlockEntityTickJob> {
         let positions = self.entities.iter().filter_map(|(pos, entity)| {
             (!matches!(entity, BlockEntity::Hopper(_))).then_some(*pos)
         });
-        let jobs = BlockEntityTickPlan::from_positions(positions)
+        BlockEntityTickPlan::from_positions(positions)
             .owner_batches()
             .into_iter()
             .map(|batch| BlockEntityTickJob {
@@ -1287,8 +1430,7 @@ impl BlockEntityRegistry {
                     })
                     .collect(),
             })
-            .collect();
-        (plan, jobs)
+            .collect()
     }
 
     fn non_hopper_count(&self) -> usize {
@@ -1309,24 +1451,7 @@ impl BlockEntityRegistry {
         &mut self,
         mut completions: Vec<BlockEntityTickCompletion>,
     ) -> Vec<BlockEntityTickEffectBatch> {
-        if completions.is_empty() {
-            // No owner means no worker result can mutate a live entity. Keep
-            // the empty-plan fast path used by hopper-only and empty worlds.
-            return Vec::new();
-        }
         let expected_count = completions.first().map_or(0, |batch| batch.batch_count);
-        let plan = completions
-            .first()
-            .map(|batch| batch.plan)
-            .expect("block-entity completion must contain a region plan");
-        assert_eq!(
-            plan, self.non_hopper_owner_plan,
-            "block-entity completion must belong to the latest tick-start plan"
-        );
-        assert!(
-            plan > self.applied_non_hopper_owner_plan,
-            "block-entity completion must not replay an already applied tick-start plan"
-        );
         assert_eq!(
             completions.len(),
             expected_count,
@@ -1362,7 +1487,7 @@ impl BlockEntityRegistry {
             );
         }
 
-        let effects = completions
+        completions
             .into_iter()
             .map(|completion| {
                 let mut effects = Vec::new();
@@ -1394,9 +1519,7 @@ impl BlockEntityRegistry {
                     effects,
                 }
             })
-            .collect();
-        self.applied_non_hopper_owner_plan = plan;
-        effects
+            .collect()
     }
 
     /// Advances only hoppers in the established owner order.
@@ -1642,7 +1765,7 @@ impl BlockEntityHandle {
         is_loaded: &dyn Fn(BlockPos) -> bool,
         workers: usize,
     ) -> Vec<BlockEntityTickEffectBatch> {
-        let (plan, mut jobs) = self.with(|registry| registry.non_hopper_tick_jobs());
+        let mut jobs = self.with(|registry| registry.non_hopper_tick_jobs());
         for job in &mut jobs {
             job.inputs.retain(|input| is_loaded(input.pos));
         }
@@ -1665,7 +1788,6 @@ impl BlockEntityHandle {
             BlockEntityTickCompletion {
                 owner: job.owner,
                 serial: job.serial,
-                plan,
                 batch_count,
                 updates,
             }
@@ -1773,6 +1895,45 @@ mod tests {
 
     fn stack(item: &str, count: u32) -> ItemStack {
         ItemStack::new(item.parse().expect("valid resource key"), count)
+    }
+
+    #[test]
+    fn block_entity_kind_round_trips_builtins_and_extensions() {
+        assert_eq!(
+            BlockEntityKind::from_name("minecraft:chest"),
+            BlockEntityKind::Chest
+        );
+        assert_eq!(
+            BlockEntityKind::Chest.into_name(),
+            "minecraft:chest".to_owned()
+        );
+
+        let plugin = "example:portable_storage";
+        let kind = BlockEntityKind::from_name(plugin);
+        assert!(kind.is_extension());
+        assert_eq!(kind.name(), plugin);
+        assert_eq!(kind.clone().into_name(), plugin);
+        assert_eq!(
+            BlockEntityKind::from_name(&kind.clone().into_name()),
+            kind
+        );
+    }
+
+    #[test]
+    fn unknown_container_key_is_exposed_as_an_extension() {
+        let entity = BlockEntity::container("example:portable_storage");
+        assert_eq!(
+            entity.kind(),
+            BlockEntityKind::Extension("example:portable_storage".to_owned())
+        );
+        assert_eq!(entity.type_id(), "example:portable_storage");
+
+        let opaque = BlockEntity::Opaque {
+            id: "example:portable_storage".to_owned(),
+            nbt: Nbt::Compound(Vec::new()),
+        };
+        assert_eq!(opaque.kind(), entity.kind());
+        assert_eq!(opaque.kind().into_name(), "example:portable_storage");
     }
 
     /// One item id per [`PlacedBlockEntity`] variant, so the frame the guard
@@ -2292,50 +2453,6 @@ mod tests {
             serial_effects,
             "central publication must restore plan order independently of owner completion order"
         );
-    }
-
-    fn empty_non_hopper_completions(
-        plan: u64,
-        jobs: Vec<BlockEntityTickJob>,
-    ) -> Vec<BlockEntityTickCompletion> {
-        let batch_count = jobs.len();
-        jobs.into_iter()
-            .map(|job| BlockEntityTickCompletion {
-                owner: job.owner,
-                serial: job.serial,
-                plan,
-                batch_count,
-                updates: Vec::new(),
-            })
-            .collect()
-    }
-
-    #[test]
-    #[should_panic(expected = "latest tick-start plan")]
-    fn non_hopper_region_completions_reject_a_previous_tick() {
-        let mut reg = BlockEntityRegistry::new();
-        reg.insert(
-            BlockPos::new(0, 70, 0),
-            BlockEntity::Furnace(Furnace::new(FurnaceKind::Furnace)),
-        );
-        let (stale_plan, stale_jobs) = reg.non_hopper_tick_jobs();
-        let stale = empty_non_hopper_completions(stale_plan, stale_jobs);
-        let (_current_plan, _current_jobs) = reg.non_hopper_tick_jobs();
-        reg.apply_non_hopper_tick_completions(stale);
-    }
-
-    #[test]
-    #[should_panic(expected = "already applied tick-start plan")]
-    fn non_hopper_region_completions_reject_replay() {
-        let mut reg = BlockEntityRegistry::new();
-        reg.insert(
-            BlockPos::new(0, 70, 0),
-            BlockEntity::Furnace(Furnace::new(FurnaceKind::Furnace)),
-        );
-        let (plan, jobs) = reg.non_hopper_tick_jobs();
-        let completions = empty_non_hopper_completions(plan, jobs);
-        reg.apply_non_hopper_tick_completions(completions.clone());
-        reg.apply_non_hopper_tick_completions(completions);
     }
 
     /// A furnace ticked through the registry behaves exactly like one ticked

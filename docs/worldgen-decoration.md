@@ -53,11 +53,21 @@ and use biome membership only when selecting which already-indexed features run.
 
 `UNDERGROUND_ORES` is dispatched through the same catalog rather than treated as an ore-only
 list. `select_ores` emits the configured ore entries, while `select_step6_disks` emits disk
-features to the existing `VegGrid` placement interpreter; both walks count every raw step entry
-so the feature seed index remains global. The disk placement data is still authoritative: its
+features to the existing `VegGrid` placement interpreter, and
+`select_step6_non_ore` emits the modeled underwater-magma entries; all three walks count every
+raw step entry so the feature seed index remains global. The disk placement data is still authoritative: its
 heightmap, water and biome modifiers run before the configured disk body, which preserves the
 count/radius/target behavior for sand, gravel and clay disks without duplicating a second disk
 implementation in the ore engine.
+
+Underwater magma uses the same step-6 interleave and its placement modifiers, then scans down from
+a water origin to the first non-water floor. Each candidate receives its probability draw before
+the body checks that the target is non-fluid and enclosed by a non-visible floor and four horizontal
+faces. Those five visibility checks use `lodestone-data`'s generated six-direction face-occlusion
+table; the worldgen interner binds each local state to its canonical state id when it is first
+interned, so the candidate loop performs only numeric lookups. States outside the canonical table
+remain visible, preventing an unmeasured shape from being treated as a closed enclosure. The
+direction mapping is explicit: below→up, north→south, south→north, west→east, east→west.
 
 Each synthetic 3x3 source pass resets the random wrapper's Gaussian cache before reseeding that source. This keeps cached paired draws local to one source, matching independent source wrappers; sharing the cache would leak a prior source's spare Gaussian into the next feature stream.
 
@@ -66,16 +76,21 @@ surface_water_depth_filter, noise_threshold_count, random_offset, block_predicat
 height_range, and the list fan-out `Positions::List`/`count_on_every_layer`/`fixed_placement` need)
 compose as a depth-first flat-map, exactly reproducing vanilla's `Stream` pipeline's draw order.
 Configured-feature bodies (`simple_block`, `tree`, `random_selector`/`simple_random_selector`,
-`speleothem`, `speleothem_cluster`, `geode`, and the vegetation-specific ones below) each reproduce their placement body's exact draw
+`underwater_magma`, `speleothem`, `speleothem_cluster`, `geode`, and the vegetation-specific ones below) each reproduce their placement body's exact draw
 sequence. An unmodelled feature type or placement modifier degrades to a silent, RNG-free no-op
 (`ConfiguredFeature::Unsupported`) rather than a panic — the census resolves every bundled biome's
 step list at generator construction time, including biomes nobody has tested yet, so a hard failure
 on one unmodelled type would break every biome's world generation, not just the untested one.
 The End-specific families sit outside this common interpreter but are production-connected through
 `EndGenerator`'s three-by-three decoration region: the fixed platform, outer islands, chorus plants,
-return gateways, and spike blocks. Their independent feature fixtures cover the platform, island,
-chorus, and gateway shapes; the whole-column End terrain fixture deliberately stops before later
-writers, so it is not evidence for decoration scheduling or cross-source order. Several rarer
+return gateways, and spike blocks. An `end_spike` configuration with a non-empty `spikes` list now
+keeps each explicit center, radius, height and cage flag; the empty list retains the seed-derived
+ten-spike fallback. Their independent feature fixtures cover the platform, island,
+chorus, and gateway shapes. The independent feature-order fixture also pins the global per-step
+indices: `end_gateway_return` is step-4 index 0 and `end_spike` is step-4 index 1, so
+`EndDecoration` derives each feature seed from the dimension-wide order rather than its local
+biome position. The whole-column End terrain fixture deliberately stops before later writers, so
+it is not evidence for decoration scheduling or cross-source order. Several rarer
 single-use types remain unmodelled and are tracked by name in
 `lodestone_server::worldgen_data::KNOWN_VEGETATION_GAPS`; update that set whenever a type lands so a
 regression (or a fixed gap that should be pruned) is loud rather than silent.
@@ -90,6 +105,26 @@ features and structure-pool feature elements must forward the same world seed ra
 substituting zero. The accepted lifecycle manifest is the composed output gate; feature-local tests
 cover parsing, protected blocks and boundary spill but are not substitutes for that packet digest.
 
+Fossils resolve two parallel structure-template arrays and two processor chains. One rotation draw
+and one shared index select the bone template and matching ore overlay; a ten-way vertical jitter
+then settles the transformed footprint against the ocean-floor heightmap. The eight transformed
+bounding-box corners admit a placement only when the configured empty-corner limit allows it. Both
+templates are applied through the live dense grid so processor reads see earlier writes and the
+overlay can replace the selected fossil's blocks without creating a second placement surface.
+
+Ice spikes use a dedicated configured-feature body rather than the generic block placer. The body
+settles an air candidate onto a snow block, consumes the height/width draws, writes the tapered
+packed-ice layers into air or the resolved replacement-tag closure, and then fills the narrow support
+pillar until protected terrain. The `ice_spike` entry is selected from the `ice_spikes` biome's
+surface-structure step, so the parser, catalog, dispatcher, and feature-local external fixture all
+cover the production path together.
+
+Large dripstone uses a dedicated cave-column body. It scans from an empty or water-filled origin to
+the nearest valid stone edges, caps the configured radius range by cave height, then grows and
+embeds paired tapered cones before writing their exposed sections as dripstone blocks. The
+`large_dripstone` entry is selected by `dripstone_caves`' underground-decoration step; constant-
+provider geometry and the bundled asset/catalog path are covered independently.
+
 Simple-block state providers include fixed, weighted, threshold-noise, noise and dual-noise forms.
 The two noise forms construct their deterministic fields from the bundled seed and octave data at
 selection time; dual noise first selects the fast-field frequency, then selects the output state.
@@ -99,13 +134,18 @@ their own resolved floor tags; mushrooms, lily pads, ceiling plants, carpets, le
 read their respective local support geometry. Full blocks (`melon`, `pumpkin`, `tuff`) and potent
 sulfur have no survival floor gate. The tag sets are resolved once and bound as state-id bitsets per
 decoration pass, so this fidelity does not reintroduce string-set work into each placement attempt.
+Nether forest roots, fungi and sprouts have their own support family: nylium and soul soil are valid
+for all three, mycelium is additionally valid for fungi, and warped roots follow the same support
+closure as sprouts. Ordinary vegetation keeps its narrower floor tag. Huge fungi use the generated
+source depth even when the Nether receiving window is wider, treat liquid cells as replaceable, and
+only roll their broad-stem variant for the natural (not planted) configuration.
 Block columns also accept weighted nested height providers and randomized integer state properties,
 which covers the hanging cave-vine records; bamboo uses the configured floor tag, stalk states and
-optional podzol disk. Environment scans evaluate the target predicate before advancing and retain
-the final target position after an allowed-search run ends. The `has_sturdy_face` predicate reads
-the resolver's exact upward- and downward-face support facts, so a ceiling scan does not terminate
-at its first air cell or consume a feature column at the wrong height. Compact fixtures without
-those facts retain the module's named non-air/non-fluid support approximation.
+optional podzol disk.
+The hanging-vine environment scan now evaluates its downward sturdy-face target against the
+resolved per-state support facts. Air candidates therefore continue upward until they reach a
+ceiling with the required face, while unsupported target directions retain the parser's safe
+permissive fallback.
 
 The single speleothem feature resolves its anchor-holder tag at construction, chooses an upward or
 downward point from the two adjacent anchor candidates, then writes its base patch before its one-
@@ -231,6 +271,10 @@ blob can carry stale set bits into a smaller one, which makes the placer skip a 
 place at — a dropped ore, not a slow one. RNG draw order and count are unaffected by any of the
 allocation work above; the surface stage (see `worldgen-biomes.md`), not the ore engine, is where
 worldgen's remaining string-classification cost actually lives.
+
+An ore configuration with more than eight replacement targets bypasses the compact target cache and
+evaluates every rule in declaration order. Later targets therefore remain reachable, and each matching
+target still receives its own air-exposure decision draw before the next rule is considered.
 
 `overworld_ore_ne_250_neg250_oracle.txt` preserves a packet-derived boundary
 control for that separation. Two independent frozen-world packet exports agree

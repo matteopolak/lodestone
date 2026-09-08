@@ -417,37 +417,30 @@ pub enum PoolAlias {
 impl PoolAlias {
     /// Parses one binding document, or returns why it cannot be modelled.
     pub fn parse(value: &Value) -> Result<Self, String> {
-        let document: super::json::PoolAliasDocument = serde_json::from_value(value.clone())
-            .map_err(|error| format!("pool alias: {error}"))?;
-        Self::from_document(document)
-    }
-
-    fn from_document(document: super::json::PoolAliasDocument) -> Result<Self, String> {
-        Ok(match document {
-            super::json::PoolAliasDocument::Direct { alias, target } => {
-                Self::Direct { alias, target }
-            }
-            super::json::PoolAliasDocument::Random { alias, targets } => Self::Random {
-                alias,
-                targets: targets
-                    .into_iter()
-                    .map(|entry| (entry.data, entry.weight))
-                    .collect(),
-            },
-            super::json::PoolAliasDocument::RandomGroup { groups } => Self::RandomGroup {
-                groups: groups
-                    .into_iter()
-                    .map(|entry| {
-                        let bindings = entry
-                            .data
-                            .into_iter()
-                            .map(Self::from_document)
-                            .collect::<Result<Vec<_>, _>>()?;
-                        Ok((bindings, entry.weight))
-                    })
-                    .collect::<Result<Vec<_>, String>>()?,
-            },
-        })
+        match value["type"].as_str().unwrap_or_default() {
+            "minecraft:direct" => Ok(Self::Direct {
+                alias: field_string(value, "alias")?,
+                target: field_string(value, "target")?,
+            }),
+            "minecraft:random" => Ok(Self::Random {
+                alias: field_string(value, "alias")?,
+                targets: parse_weighted(&value["targets"], |v| {
+                    v.as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| "pool alias target is not a string".to_string())
+                })?,
+            }),
+            "minecraft:random_group" => Ok(Self::RandomGroup {
+                groups: parse_weighted(&value["groups"], |v| {
+                    v.as_array()
+                        .ok_or_else(|| "pool alias group is not a list".to_string())?
+                        .iter()
+                        .map(Self::parse)
+                        .collect()
+                })?,
+            }),
+            other => Err(format!("pool_alias type '{other}'")),
+        }
     }
 
     /// `forEachResolved(random, consumer)` — the draws, in vanilla's order.
@@ -523,8 +516,14 @@ impl PoolAlias {
     }
 }
 
+fn field_string(value: &Value, key: &str) -> Result<String, String> {
+    value[key]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| format!("pool alias has no `{key}`"))
+}
+
 /// A `WeightedList` document: `[{"data": …, "weight": n}, …]`.
-#[allow(dead_code)]
 fn parse_weighted<T>(
     value: &Value,
     mut item: impl FnMut(&Value) -> Result<T, String>,
@@ -642,50 +641,61 @@ impl JigsawConfig {
     /// bundled data needs no such refusal today: `pool_aliases` used to be one and
     /// is now honoured (see [`PoolAlias`]), which is what closes `trial_chambers`.
     pub fn parse(value: &Value) -> Result<Self, String> {
-        let document: super::json::JigsawDocument = serde_json::from_value(value.clone())
-            .map_err(|error| format!("jigsaw structure: {error}"))?;
-        if !matches!(&document.kind, super::json::StructureType::Jigsaw) {
-            return Err("jigsaw structure: type is not minecraft:jigsaw".to_string());
+        let mut pool_aliases = Vec::new();
+        for binding in value["pool_aliases"].as_array().cloned().unwrap_or_default() {
+            pool_aliases.push(PoolAlias::parse(&binding)?);
         }
-        let start_pool = document.start_pool;
-        let start_height = height_from_document(document.start_height)?;
-        let project_start_to_heightmap = document.project_start_to_heightmap.map(|value| match value {
-            super::json::HeightmapDocument::WorldSurfaceWg => HeightmapKind::WorldSurfaceWg,
-            super::json::HeightmapDocument::OceanFloorWg => HeightmapKind::OceanFloorWg,
-        });
+        let start_pool = value["start_pool"]
+            .as_str()
+            .ok_or("jigsaw structure with no `start_pool`")?
+            .to_string();
+        let start_height = HeightProvider::parse(&value["start_height"])
+            .ok_or_else(|| format!("jigsaw `start_height` shape {}", value["start_height"]))?;
+        let project_start_to_heightmap = match value["project_start_to_heightmap"].as_str() {
+            None => None,
+            Some("WORLD_SURFACE_WG") => Some(HeightmapKind::WorldSurfaceWg),
+            Some("OCEAN_FLOOR_WG") => Some(HeightmapKind::OceanFloorWg),
+            Some(other) => return Err(format!("jigsaw `project_start_to_heightmap` '{other}'")),
+        };
         // `MaxDistance`'s codec is `either(FULL, HORIZONTAL)`, and the bare-int
         // branch sets vertical **equal to** horizontal rather than to the
         // dimension height — the full-object branch is the one that defaults
         // vertical to `Y_SIZE`.
-        let (max_horizontal, max_vertical) = match document.max_distance_from_center {
-            None => (80, 4064),
-            Some(super::json::IntOrObject::Int(value)) => (value, value),
-            Some(super::json::IntOrObject::Object { horizontal, vertical }) => {
-                (horizontal.unwrap_or(80), vertical.unwrap_or(4064))
+        let (max_horizontal, max_vertical) = match &value["max_distance_from_center"] {
+            Value::Number(n) => {
+                let v = n.as_i64().unwrap_or(80) as i32;
+                (v, v)
+            }
+            object => {
+                let h = object["horizontal"].as_i64().unwrap_or(80) as i32;
+                let v = object["vertical"].as_i64().unwrap_or(4064) as i32;
+                (h, v)
             }
         };
-        let (padding_bottom, padding_top) = match document.dimension_padding {
-            None => (0, 0),
-            Some(super::json::PaddingDocument::Int(value)) => (value, value),
-            Some(super::json::PaddingDocument::Object { bottom, top }) => (bottom, top),
+        let (padding_bottom, padding_top) = match &value["dimension_padding"] {
+            Value::Null => (0, 0),
+            Value::Number(n) => {
+                let v = n.as_i64().unwrap_or(0) as i32;
+                (v, v)
+            }
+            object => (
+                object["bottom"].as_i64().unwrap_or(0) as i32,
+                object["top"].as_i64().unwrap_or(0) as i32,
+            ),
         };
         Ok(Self {
             start_pool,
-            start_jigsaw_name: document.start_jigsaw_name,
-            max_depth: document.size,
+            start_jigsaw_name: value["start_jigsaw_name"].as_str().map(str::to_string),
+            max_depth: value["size"].as_i64().unwrap_or(0) as i32,
             start_height,
-            use_expansion_hack: document.use_expansion_hack,
+            use_expansion_hack: value["use_expansion_hack"].as_bool().unwrap_or(false),
             project_start_to_heightmap,
             max_horizontal,
             max_vertical,
-            waterlogging: !matches!(document.liquid_settings, Some(super::json::LiquidSettings::IgnoreWaterlogging)),
+            waterlogging: value["liquid_settings"].as_str() != Some("ignore_waterlogging"),
             padding_bottom,
             padding_top,
-            pool_aliases: document
-                .pool_aliases
-                .into_iter()
-                .map(PoolAlias::from_document)
-                .collect::<Result<Vec<_>, _>>()?,
+            pool_aliases,
         })
     }
 
@@ -708,52 +718,6 @@ impl JigsawConfig {
             binding.all_aliases(&mut out);
         }
         out
-    }
-}
-
-fn height_from_document(document: super::json::HeightDocument) -> Result<HeightProvider, String> {
-    fn anchor(value: super::json::AnchorDocument) -> Result<VerticalAnchor, String> {
-        let mut values = [
-            value.absolute.map(VerticalAnchor::Absolute),
-            value.above_bottom.map(VerticalAnchor::AboveBottom),
-            value.below_top.map(VerticalAnchor::BelowTop),
-        ]
-        .into_iter()
-        .flatten();
-        let Some(anchor) = values.next() else {
-            return Err("height anchor must contain absolute, above_bottom, or below_top".to_string());
-        };
-        if values.next().is_some() {
-            return Err("height anchor must contain exactly one coordinate".to_string());
-        }
-        Ok(anchor)
-    }
-
-    match document {
-        super::json::HeightDocument::Uniform(value) => {
-            if !matches!(value.kind, super::json::HeightKind::Uniform) {
-                return Err("uniform height provider has a non-uniform type".to_string());
-            }
-            Ok(HeightProvider::Uniform(
-                anchor(value.min_inclusive)?,
-                anchor(value.max_inclusive)?,
-            ))
-        }
-        super::json::HeightDocument::Constant(value) => {
-            if matches!(value.kind, Some(super::json::HeightKind::Uniform)) {
-                return Err("constant height provider has a uniform type".to_string());
-            }
-            let direct = super::json::AnchorDocument {
-                absolute: value.absolute,
-                above_bottom: value.above_bottom,
-                below_top: value.below_top,
-            };
-            let anchor = match value.value {
-                Some(value) => anchor(value),
-                None => anchor(direct),
-            }?;
-            Ok(HeightProvider::Constant(anchor))
-        }
     }
 }
 
@@ -1564,7 +1528,7 @@ mod tests {
     #[test]
     fn max_distance_from_center_parses_both_spellings() {
         let bare: Value = serde_json::from_str(
-            r#"{"type":"minecraft:jigsaw","biomes":"minecraft:plains","step":"surface_structures","start_pool":"minecraft:x","start_height":{"absolute":0},
+            r#"{"start_pool":"minecraft:x","start_height":{"absolute":0},
                 "size":6,"max_distance_from_center":80}"#,
         )
         .unwrap();
@@ -1572,7 +1536,7 @@ mod tests {
         assert_eq!((config.max_horizontal, config.max_vertical), (80, 80));
 
         let full: Value = serde_json::from_str(
-            r#"{"type":"minecraft:jigsaw","biomes":"minecraft:plains","step":"surface_structures","start_pool":"minecraft:x","start_height":{"absolute":0},
+            r#"{"start_pool":"minecraft:x","start_height":{"absolute":0},
                 "size":6,"max_distance_from_center":{"horizontal":116}}"#,
         )
         .unwrap();

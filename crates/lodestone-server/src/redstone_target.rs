@@ -48,13 +48,15 @@
 //!   target's `power` write is a plain set-block with no directional fan-out
 //!   beyond the standard one.
 
+use lodestone_model::BlockPos;
+
 use crate::redstone::{analog_power, base_name, with_property};
+use crate::scheduled_tick::{ScheduledTickKind, ScheduledTickQueueAccess};
 
 pub const TARGET: &str = "minecraft:target";
 
-/// `redstone:target` — the decay-to-zero scheduled tick's kind string, for
-/// `ScheduledTickQueue<String>`.
-pub const TICK_TARGET_DECAY: &str = "redstone:target_decay";
+/// The typed decay-to-zero scheduled-tick key.
+pub const TICK_TARGET_DECAY: ScheduledTickKind = ScheduledTickKind::TargetDecay;
 
 /// Vanilla's own three-axis type, narrowed to the values [`redstone_strength`] needs —
 /// which axis the hit **face** lies on, not which way the projectile was
@@ -104,6 +106,19 @@ pub fn activation_duration(is_arrow: bool) -> u32 {
     }
 }
 
+/// Read the target's pending-decay guard from the typed block queue.
+///
+/// Keeping this check beside the target reaction prevents callers from
+/// recreating the old string discriminator or accidentally checking a fluid
+/// or extension tick at the same position.
+#[must_use]
+pub fn has_pending_decay<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized>(
+    queue: &Q,
+    pos: BlockPos,
+) -> bool {
+    queue.has_scheduled((pos.x, pos.y, pos.z), &TICK_TARGET_DECAY)
+}
+
 /// What a projectile hit resolved to — the state to write and the decay tick
 /// to schedule after it, or `None` when vanilla's own guard suppresses the
 /// write entirely (a decay is already pending).
@@ -121,7 +136,7 @@ pub struct HitOutcome {
 ///
 /// `has_pending_decay` is vanilla's own "already has a scheduled block tick"
 /// read — the caller answers it from
-/// `ScheduledTickQueue::has_scheduled(pos, TICK_TARGET_DECAY)`. When true, the
+/// `has_pending_decay` over the typed `ScheduledTickQueueAccess` boundary. When true, the
 /// hit still counts for advancement/stat purposes (vanilla returns
 /// the redstone strength from the update-redstone-output rule either way) but the block's
 /// own `power` is left untouched and no new decay is scheduled — this
@@ -153,6 +168,33 @@ pub fn run_scheduled_tick(state: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scheduled_tick::{ScheduledTickQueue, TickPriority};
+
+    #[test]
+    fn pending_decay_detector_uses_the_typed_key() {
+        let pos = BlockPos::new(3, 70, -4);
+        let mut queue = ScheduledTickQueue::new();
+        assert!(!has_pending_decay(&queue, pos), "an empty queue is the negative control");
+
+        queue.schedule(
+            (pos.x, pos.y, pos.z),
+            ScheduledTickKind::Extension("redstone:target_decay".to_owned()),
+            10,
+            TickPriority::Normal,
+        );
+        assert!(
+            !has_pending_decay(&queue, pos),
+            "a string lookalike held as an extension must not satisfy the built-in detector"
+        );
+
+        queue.schedule(
+            (pos.x, pos.y, pos.z),
+            ScheduledTickKind::TargetDecay,
+            20,
+            TickPriority::Normal,
+        );
+        assert!(has_pending_decay(&queue, pos));
+    }
 
     /// A dead-centre hit on every face axis is distance `0`, so the formula's
     /// own `ceil(15 * 1.0)` gives the maximum, `15` — not a guessed round

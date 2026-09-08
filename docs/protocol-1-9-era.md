@@ -108,6 +108,16 @@ Literal controls pin all four tables and both body layouts, and in-memory 110 an
 a `UseItemOn` through their real family adapters to toggle a lever, proving the decoded action reaches
 the shared server's hand-use consumer and client block-update path.
 
+Entity clicks use one `use_entity` packet with three body shapes. Attack (`mouse = 1`) carries only
+the target id and reaches `ServerBound::Attack`; ordinary interaction (`mouse = 0`) carries a VarInt
+hand ordinal, and interact-at (`mouse = 2`) carries three big-endian `f32` hit coordinates followed
+by that hand ordinal. The shared interaction action has no point-bearing field or legacy sneak bit,
+so interact-at coordinates are consumed and validated before being dropped, while hand `0`/`1`
+remain main/off hand. Unknown mouse or hand values, incomplete coordinates, trailing bytes, and
+wrong-state packets are ignored. Literal protocol-340 bodies cover all three forms and both hand
+ordinals, and the in-memory control sends a real main-hand interaction to a pre-tamed wolf and
+observes the shared mob consumer toggle its sitting order.
+
 Unlike protocol 47, all four hosted 1.9-era tables put a teleport id on the
 clientbound position packet and accept a distinct `teleport_confirm` at
 serverbound id `0`. Their host decoders lift that reply to
@@ -117,6 +127,18 @@ the four movement shapes (`position`, `position_look`, `look`, and `flying`)
 using that table's own ids. In-memory controls cover every hosted protocol:
 the family adapter confirms the initial placement, moves across the chunk
 boundary, and observes the newly streamed `(1, 0)` column.
+
+The same four tables now carry the pre-flattening container session. The server
+opens a canonical `generic_9x3` menu as the old `minecraft:chest` window type,
+and sends its complete `window_items` snapshot. A decoded `window_click` reaches
+the shared authoritative click consumer; when the client's prediction differs,
+the consumer sends a full authoritative `window_items` correction (background
+container changes use `set_slot`). The click's legacy transaction number is
+accepted at the protocol boundary while the shared server derives the result
+from the slot, button, and mode rather than trusting the client's item claim.
+`server_protocol.rs` keeps literal open/content/slot/click bodies for all four
+packet-id tables, and `server_integration.rs` drives an actual chest through
+the family adapter and production server consumer.
 
 Dispatch is one `lodestone_core::dispatch::Table` per protocol, cached in a four-slot array of
 `OnceLock`s indexed the same way `ids_for` resolves a table. A handler or `IGNORED` entry may
@@ -190,13 +212,6 @@ spawn and an incremental `entity_metadata` packet. The canonical event is the pr
 to the ECS metadata consumer, which inserts `EntityFlags` and drives the existing render/simulation
 views. `crates/versions/1.9/tests/entity_metadata.rs` feeds literal packet bodies through each
 protocol's generated packet id and asserts that handoff, plus trailing-byte rejection.
-
-`crates/versions/1.9/tests/metadata_equipment_attributes_ecs.rs` is the broader ingress gate: one
-literal named-player spawn, metadata update, equipment update, and attribute update is selected
-through each of the four packet-id tables, then all emitted events are queued into the production
-`NetIngest` schedule. The assertions read `EntityFlags`, `Equipment`, and `Attributes` from the
-indexed ECS entity, and each deliberately non-default value has a distinct non-equality control so
-an empty or defaulted component cannot satisfy the test.
 
 The codec still decodes every known serializer and retains every decoded entry, but the semantic
 fold deliberately leaves class-specific indices, health, custom-name serializers, pose, and

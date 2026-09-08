@@ -1212,7 +1212,7 @@ fn client_actions_cover_modern_play_interactions_without_protocol_ids() {
             face: BlockFace::Up,
             cursor: Vec3f::new(0.5, 1.0, 0.25),
             inside_block: false,
-            sequence: PredictionSequence::new(42),
+            sequence: 42,
         },
         ClientAction::UseItem {
             hand: Hand::Off,
@@ -1275,9 +1275,9 @@ fn client_actions_cover_modern_play_interactions_without_protocol_ids() {
         ClientAction::BlockAction {
             action: BlockActionKind::StartDestroy,
             face: BlockFace::North,
-            sequence: 41,
+            sequence,
             ..
-        }
+        } if *sequence == 41
     ));
     assert!(matches!(
         &actions[7],
@@ -1285,8 +1285,7 @@ fn client_actions_cover_modern_play_interactions_without_protocol_ids() {
             sequence,
             cursor,
             ..
-        } if *sequence == PredictionSequence::new(42)
-            && *cursor == Vec3f::new(0.5, 1.0, 0.25)
+        } if *sequence == 42 && *cursor == Vec3f::new(0.5, 1.0, 0.25)
     ));
     assert!(matches!(
         &actions[11],

@@ -7,7 +7,7 @@ use lodestone_core::{Ctx, Reader, State, encode_body};
 use lodestone_data::block_states::{self, block_name, properties};
 use lodestone_model::{
     AnimationAction, BlockActionKind, BlockFace, BlockPos, ClientAction, ClientEvent,
-    ConnectionState, Directive, Hand, Vec3f, VersionAdapter,
+    ConnectionState, Directive, Hand, Reported, Text, Vec3f, VersionAdapter,
 };
 use lodestone_server::{
     ChunkColumn, ClientChannels, ServerBound, ServerDirective, ServerProtocol,
@@ -670,7 +670,7 @@ fn block_place_lifts_the_protocol_5_body_to_the_shared_placement_consumer() {
             face: BlockFace::East,
             cursor: Vec3f::new(0.25, 0.5, 0.75),
             hand: 0,
-            sequence: lodestone_model::PredictionSequence::INITIAL,
+            sequence: 0,
         }
     );
     assert_eq!(
@@ -710,7 +710,7 @@ fn adapter_emitted_block_place_reaches_the_hosted_placement_boundary() {
         face: BlockFace::North,
         cursor: Vec3f::new(0.5, 0.25, 0.75),
         inside_block: false,
-        sequence: lodestone_model::PredictionSequence::new(123),
+        sequence: 123,
     };
     let (packet_id, body) = V5Adapter::new()
         .encode_action(ConnectionState::Play, &action)
@@ -724,7 +724,7 @@ fn adapter_emitted_block_place_reaches_the_hosted_placement_boundary() {
             face: BlockFace::North,
             cursor: Vec3f::new(0.5, 0.25, 0.75),
             hand: 0,
-            sequence: lodestone_model::PredictionSequence::INITIAL,
+            sequence: 0,
         },
         "the adapter frame must reach the shared server variant consumed by placement"
     );
@@ -767,6 +767,160 @@ fn client_settings_lift_the_legacy_view_distance() {
         ServerBound::Ignored,
         "a settings packet with a trailing byte must not resize the client view"
     );
+}
+
+#[test]
+fn use_entity_lifts_protocol_5_mouse_ordinals_into_shared_consumers() {
+    let protocol = lodestone_registry::server_protocol_for_protocol(5)
+        .expect("protocol 5 must resolve to its hosted server protocol");
+
+    // Protocol 5's body is a fixed-width target id followed by a signed byte.
+    // These bytes are an independent wire fixture: target 0x01020304 makes a
+    // mistaken target width assumption visible, while the two mouse values
+    // exercise both canonical consumers.
+    let attack = [0x01, 0x02, 0x03, 0x04, 0];
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::USE_ENTITY, &attack),
+        ServerBound::Attack { entity_id: 0x0102_0304 }
+    );
+
+    let interact = [0x01, 0x02, 0x03, 0x04, 1];
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::USE_ENTITY, &interact),
+        ServerBound::InteractEntity {
+            entity_id: 0x0102_0304,
+            hand: 0,
+            using_secondary_action: false,
+        }
+    );
+
+    // Unknown mouse ordinals, trailing bytes, truncated bodies, and packets
+    // arriving before Play must not reach either shared consumer.
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::USE_ENTITY, &[0, 0, 0, 9, 2]),
+        ServerBound::Ignored
+    );
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::USE_ENTITY, &[0, 0, 0, 9]),
+        ServerBound::Ignored
+    );
+    assert_eq!(
+        protocol.decode(State::Play, play::serverbound::USE_ENTITY, &[0, 0, 0, 9, 1, 0]),
+        ServerBound::Ignored
+    );
+    assert_eq!(
+        protocol.decode(State::Login, play::serverbound::USE_ENTITY, &attack),
+        ServerBound::Ignored
+    );
+}
+
+#[test]
+fn entity_metadata_literal_fixture_reaches_ecs_ingest_fields() {
+    // Entity 42, then protocol-5 metadata headers `(type << 5) | index`:
+    // shared flags 33, air 300, health 5.0, custom name Xyzzy, and visible 1.
+    // The list terminator is 0x7f. These bytes are independent of the packet
+    // encoder and cover every field in the protocol-wide supported census.
+    let metadata = [
+        0, 0, 0, 42,
+        0x00, 0x21, // index 0, byte 33
+        0x21, 0x01, 0x2c, // index 1, short 300
+        0x66, 0x40, 0xa0, 0x00, 0x00, // index 6, float 5.0
+        0x8a, 0x05, b'X', b'y', b'z', b'z', b'y', // index 10, string
+        0x0b, 0x01, // index 11, byte 1
+        0x7f,
+    ];
+    let directives = V5Adapter::new()
+        .handle_packet(
+            &mut World::new(),
+            ConnectionState::Play,
+            play::clientbound::ENTITY_METADATA,
+            &metadata,
+        )
+        .expect("the literal metadata body must reach the adapter");
+    match directives.as_slice() {
+        [Directive::Emit(ClientEvent::EntityMetadataUpdated { entity_id, metadata })] => {
+            assert_eq!(*entity_id, 42);
+            assert_eq!(metadata.flags, Some(0x21));
+            assert_eq!(metadata.air_supply, Some(300));
+            assert_eq!(metadata.health, Some(5.0));
+            assert_eq!(
+                metadata.custom_name,
+                Reported::Reported(Some(Text::literal("Xyzzy")))
+            );
+            assert_eq!(metadata.custom_name_visible, Some(true));
+        }
+        other => panic!("unexpected metadata directives: {other:?}"),
+    }
+}
+
+#[test]
+fn entity_equipment_literal_fixture_reaches_ecs_ingest_slot() {
+    // Entity 42, helmet slot ordinal 4, and an iron-sword stack of count 2
+    // with damage 3. The final i16 is the protocol-5 no-NBT sentinel.
+    let equipment = [
+        0, 0, 0, 42,
+        0, 4,
+        1, 11, 2, 0, 3, 0xff, 0xff,
+    ];
+    let directives = V5Adapter::new()
+        .handle_packet(
+            &mut World::new(),
+            ConnectionState::Play,
+            play::clientbound::ENTITY_EQUIPMENT,
+            &equipment,
+        )
+        .expect("the literal equipment body must reach the adapter");
+    match directives.as_slice() {
+        [Directive::Emit(ClientEvent::EntityEquipmentUpdated {
+            entity_id,
+            equipment,
+        })] => {
+            assert_eq!(*entity_id, 42);
+            assert_eq!(equipment.len(), 1);
+            assert_eq!(equipment[0].slot, lodestone_model::EquipmentSlot::Head);
+            let item = equipment[0].item.as_ref().expect("equipment is populated");
+            assert_eq!(item.item.to_string(), "minecraft:iron_sword");
+            assert_eq!(item.count, 2);
+        }
+        other => panic!("unexpected equipment directives: {other:?}"),
+    }
+}
+
+#[test]
+fn update_attributes_literal_fixture_reaches_ecs_ingest_attribute() {
+    // Entity 42, one property (`generic.maxHealth`), base 20.0, and no
+    // modifiers. The fixed i32 count and f64 base are literal protocol-5
+    // fields; this does not round-trip through UpdateAttributes::encode.
+    let attributes = [
+        0, 0, 0, 42,
+        0, 0, 0, 1,
+        0x11,
+        b'g', b'e', b'n', b'e', b'r', b'i', b'c', b'.', b'm', b'a', b'x', b'H', b'e',
+        b'a', b'l', b't', b'h',
+        0x40, 0x34, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0, 0,
+    ];
+    let directives = V5Adapter::new()
+        .handle_packet(
+            &mut World::new(),
+            ConnectionState::Play,
+            play::clientbound::UPDATE_ATTRIBUTES,
+            &attributes,
+        )
+        .expect("the literal attribute body must reach the adapter");
+    match directives.as_slice() {
+        [Directive::Emit(ClientEvent::EntityAttributesUpdated {
+            entity_id,
+            attributes,
+        })] => {
+            assert_eq!(*entity_id, 42);
+            assert_eq!(attributes.len(), 1);
+            assert_eq!(attributes[0].attribute.to_string(), "minecraft:max_health");
+            assert_eq!(attributes[0].base, 20.0);
+            assert!(attributes[0].modifiers.is_empty());
+        }
+        other => panic!("unexpected attribute directives: {other:?}"),
+    }
 }
 
 #[test]

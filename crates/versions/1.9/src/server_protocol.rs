@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use lodestone_canonical::inverse;
 use lodestone_core::{Ctx, Decode, Encode, Reader, State, Writer, encode_body};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation, Vec3f};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ItemStack, Rotation, Vec3f};
 use lodestone_server::{
     ChunkColumn, ChunkEncodeError, HOTBAR_SIZE, ServerBound, ServerDirective, ServerProtocol,
 };
@@ -32,7 +32,10 @@ use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
 use crate::packets::position::{Position, pack_position};
 use crate::packets::settings::Settings;
-use crate::packets::window::ServerboundHeldItemSlot;
+use crate::packets::slot::Slot;
+use crate::packets::window::{
+    OpenWindow, ServerboundCloseWindow, ServerboundHeldItemSlot, SetSlot, WindowClick, WindowItems,
+};
 
 const CTX_340: Ctx = Ctx { version: PROTOCOL };
 const CTX_110: Ctx = Ctx {
@@ -76,6 +79,7 @@ struct ServerPacketIds {
     login_success: i32,
     block_dig: i32,
     block_place: i32,
+    use_entity: i32,
     arm_animation: i32,
     held_item_slot: i32,
     chat_serverbound: i32,
@@ -93,6 +97,11 @@ struct ServerPacketIds {
     block_change: i32,
     chat_clientbound: i32,
     animation_clientbound: i32,
+    open_window: i32,
+    window_items: i32,
+    set_slot: i32,
+    window_click: i32,
+    close_window: i32,
 }
 
 const IDS_340: ServerPacketIds = ServerPacketIds {
@@ -102,6 +111,7 @@ const IDS_340: ServerPacketIds = ServerPacketIds {
     login_success: login::clientbound::SUCCESS,
     block_dig: play::serverbound::BLOCK_DIG,
     block_place: play::serverbound::BLOCK_PLACE,
+    use_entity: play::serverbound::USE_ENTITY,
     arm_animation: play::serverbound::ARM_ANIMATION,
     held_item_slot: play::serverbound::HELD_ITEM_SLOT,
     chat_serverbound: play::serverbound::CHAT,
@@ -119,6 +129,11 @@ const IDS_340: ServerPacketIds = ServerPacketIds {
     block_change: play::clientbound::BLOCK_CHANGE,
     chat_clientbound: play::clientbound::CHAT,
     animation_clientbound: play::clientbound::ANIMATION,
+    open_window: play::clientbound::OPEN_WINDOW,
+    window_items: play::clientbound::WINDOW_ITEMS,
+    set_slot: play::clientbound::SET_SLOT,
+    window_click: play::serverbound::WINDOW_CLICK,
+    close_window: play::serverbound::CLOSE_WINDOW,
 };
 
 const IDS_316: ServerPacketIds = ServerPacketIds {
@@ -128,6 +143,7 @@ const IDS_316: ServerPacketIds = ServerPacketIds {
     login_success: crate::packet_ids_316::login::clientbound::SUCCESS,
     block_dig: crate::packet_ids_316::play::serverbound::BLOCK_DIG,
     block_place: crate::packet_ids_316::play::serverbound::BLOCK_PLACE,
+    use_entity: crate::packet_ids_316::play::serverbound::USE_ENTITY,
     arm_animation: crate::packet_ids_316::play::serverbound::ARM_ANIMATION,
     held_item_slot: crate::packet_ids_316::play::serverbound::HELD_ITEM_SLOT,
     chat_serverbound: crate::packet_ids_316::play::serverbound::CHAT,
@@ -145,6 +161,11 @@ const IDS_316: ServerPacketIds = ServerPacketIds {
     block_change: crate::packet_ids_316::play::clientbound::BLOCK_CHANGE,
     chat_clientbound: crate::packet_ids_316::play::clientbound::CHAT,
     animation_clientbound: crate::packet_ids_316::play::clientbound::ANIMATION,
+    open_window: crate::packet_ids_316::play::clientbound::OPEN_WINDOW,
+    window_items: crate::packet_ids_316::play::clientbound::WINDOW_ITEMS,
+    set_slot: crate::packet_ids_316::play::clientbound::SET_SLOT,
+    window_click: crate::packet_ids_316::play::serverbound::WINDOW_CLICK,
+    close_window: crate::packet_ids_316::play::serverbound::CLOSE_WINDOW,
 };
 
 const IDS_210: ServerPacketIds = ServerPacketIds {
@@ -154,6 +175,7 @@ const IDS_210: ServerPacketIds = ServerPacketIds {
     login_success: crate::packet_ids_210::login::clientbound::SUCCESS,
     block_dig: crate::packet_ids_210::play::serverbound::BLOCK_DIG,
     block_place: crate::packet_ids_210::play::serverbound::BLOCK_PLACE,
+    use_entity: crate::packet_ids_210::play::serverbound::USE_ENTITY,
     arm_animation: crate::packet_ids_210::play::serverbound::ARM_ANIMATION,
     held_item_slot: crate::packet_ids_210::play::serverbound::HELD_ITEM_SLOT,
     chat_serverbound: crate::packet_ids_210::play::serverbound::CHAT,
@@ -171,6 +193,11 @@ const IDS_210: ServerPacketIds = ServerPacketIds {
     block_change: crate::packet_ids_210::play::clientbound::BLOCK_CHANGE,
     chat_clientbound: crate::packet_ids_210::play::clientbound::CHAT,
     animation_clientbound: crate::packet_ids_210::play::clientbound::ANIMATION,
+    open_window: crate::packet_ids_210::play::clientbound::OPEN_WINDOW,
+    window_items: crate::packet_ids_210::play::clientbound::WINDOW_ITEMS,
+    set_slot: crate::packet_ids_210::play::clientbound::SET_SLOT,
+    window_click: crate::packet_ids_210::play::serverbound::WINDOW_CLICK,
+    close_window: crate::packet_ids_210::play::serverbound::CLOSE_WINDOW,
 };
 
 const IDS_110: ServerPacketIds = ServerPacketIds {
@@ -180,6 +207,7 @@ const IDS_110: ServerPacketIds = ServerPacketIds {
     login_success: crate::packet_ids_110::login::clientbound::SUCCESS,
     block_dig: crate::packet_ids_110::play::serverbound::BLOCK_DIG,
     block_place: crate::packet_ids_110::play::serverbound::BLOCK_PLACE,
+    use_entity: crate::packet_ids_110::play::serverbound::USE_ENTITY,
     arm_animation: crate::packet_ids_110::play::serverbound::ARM_ANIMATION,
     held_item_slot: crate::packet_ids_110::play::serverbound::HELD_ITEM_SLOT,
     chat_serverbound: crate::packet_ids_110::play::serverbound::CHAT,
@@ -197,6 +225,11 @@ const IDS_110: ServerPacketIds = ServerPacketIds {
     block_change: crate::packet_ids_110::play::clientbound::BLOCK_CHANGE,
     chat_clientbound: crate::packet_ids_110::play::clientbound::CHAT,
     animation_clientbound: crate::packet_ids_110::play::clientbound::ANIMATION,
+    open_window: crate::packet_ids_110::play::clientbound::OPEN_WINDOW,
+    window_items: crate::packet_ids_110::play::clientbound::WINDOW_ITEMS,
+    set_slot: crate::packet_ids_110::play::clientbound::SET_SLOT,
+    window_click: crate::packet_ids_110::play::serverbound::WINDOW_CLICK,
+    close_window: crate::packet_ids_110::play::serverbound::CLOSE_WINDOW,
 };
 
 fn send<T: Encode>(packet_id: i32, packet: &T, ctx: Ctx, protocol: i32) -> ServerDirective {
@@ -212,6 +245,115 @@ fn decode_full<T: Decode>(payload: &[u8], ctx: Ctx) -> Option<T> {
     let value = T::decode(&mut reader, ctx).ok()?;
     reader.ensure_empty().ok()?;
     Some(value)
+}
+
+/// Converts a canonical stack to the pre-flattening slot wire shape. Unknown
+/// keys cannot be represented in the fixed legacy registry; they are emitted
+/// as empty rather than guessed into another item id.
+fn encode_legacy_slot(item: Option<&ItemStack>) -> Slot {
+    let Some(item) = item.filter(|item| item.count > 0) else {
+        return Slot::Empty;
+    };
+    let Some((id, _)) = crate::generated_item_types::ITEM_TYPES
+        .iter()
+        .find(|(_, name)| *name == item.item.to_string())
+    else {
+        return Slot::Empty;
+    };
+    let Ok(id) = i16::try_from(*id) else {
+        return Slot::Empty;
+    };
+    let Ok(count) = i8::try_from(item.count) else {
+        return Slot::Empty;
+    };
+    Slot::Item {
+        id,
+        count,
+        damage: 0,
+        nbt: None,
+    }
+}
+
+/// Maps the canonical menu names used by the server to this era's window
+/// type strings and fixed container widths. Generic chest/dispenser menus are
+/// the only block-entity shapes needed by the hosted container acceptance
+/// boundary; the remaining names retain their canonical spelling where the
+/// old client knows the same type.
+fn legacy_window_shape(menu: &str) -> (&str, u8) {
+    match menu {
+        "minecraft:generic_9x3" => ("minecraft:chest", 27),
+        "minecraft:generic_3x3" => ("minecraft:dispenser", 9),
+        "minecraft:furnace" => ("minecraft:furnace", 3),
+        "minecraft:hopper" => ("minecraft:hopper", 5),
+        "minecraft:beacon" => ("minecraft:beacon", 1),
+        other => (other, 0),
+    }
+}
+
+fn encode_open_window(
+    ids: ServerPacketIds,
+    ctx: Ctx,
+    protocol: i32,
+    window_id: i32,
+    menu: &str,
+    title: &str,
+) -> ServerDirective {
+    let Ok(window_id) = u8::try_from(window_id) else {
+        return ServerDirective::None;
+    };
+    let (inventory_type, slot_count) = legacy_window_shape(menu);
+    send(
+        ids.open_window,
+        &OpenWindow {
+            window_id,
+            inventory_type: inventory_type.to_owned(),
+            window_title: legacy_text_component(title),
+            slot_count,
+            entity_id: None,
+        },
+        ctx,
+        protocol,
+    )
+}
+
+fn encode_window_items(
+    ids: ServerPacketIds,
+    ctx: Ctx,
+    protocol: i32,
+    window_id: i32,
+    items: &[Option<ItemStack>],
+) -> ServerDirective {
+    let Ok(window_id) = u8::try_from(window_id) else {
+        return ServerDirective::None;
+    };
+    let items = items
+        .iter()
+        .map(|item| encode_legacy_slot(item.as_ref()))
+        .collect();
+    send(ids.window_items, &WindowItems { window_id, items }, ctx, protocol)
+}
+
+fn encode_set_slot(
+    ids: ServerPacketIds,
+    ctx: Ctx,
+    protocol: i32,
+    window_id: i32,
+    slot: i32,
+    item: Option<&ItemStack>,
+) -> ServerDirective {
+    let (Ok(window_id), Ok(slot)) = (i8::try_from(window_id), i16::try_from(slot)) else {
+        return ServerDirective::None;
+    };
+    send(
+        ids.set_slot,
+        &SetSlot {
+            window_id,
+            slot,
+            item: encode_legacy_slot(item),
+        },
+        ctx,
+        protocol,
+    )
 }
 
 fn block_action(status: i32) -> Option<BlockActionKind> {
@@ -273,7 +415,7 @@ fn use_item_on(
         pos: BlockPos::from(location),
         face,
         cursor,
-        sequence: lodestone_model::PredictionSequence::INITIAL,
+        sequence: 0,
         hand,
     }
 }
@@ -626,6 +768,63 @@ fn decode_packet(
                     )
                 }
             }
+            // Protocol 340 keeps attack, ordinary interaction, and
+            // interact-at in one packet. The first two VarInts select the
+            // body shape: attack has no hand, ordinary interaction has a
+            // hand ordinal, and interact-at inserts three entity-local f32
+            // coordinates before that hand. The shared action has no
+            // point-bearing carrier or legacy sneak bit, so those values are
+            // fully consumed and the honest defaults are supplied below.
+            State::Play if packet_id == ids.use_entity => {
+                let mut reader = Reader::new(payload);
+                let (Ok(entity_id), Ok(mouse)) = (reader.var_i32(), reader.var_i32()) else {
+                    return ServerBound::Ignored;
+                };
+                match mouse {
+                    0 => {
+                        let Ok(hand) = reader.var_i32() else {
+                            return ServerBound::Ignored;
+                        };
+                        if !(0..=1).contains(&hand) || reader.ensure_empty().is_err() {
+                            ServerBound::Ignored
+                        } else {
+                            ServerBound::InteractEntity {
+                                entity_id,
+                                hand,
+                                using_secondary_action: false,
+                            }
+                        }
+                    }
+                    1 => {
+                        if reader.ensure_empty().is_err() {
+                            ServerBound::Ignored
+                        } else {
+                            ServerBound::Attack { entity_id }
+                        }
+                    }
+                    2 => {
+                        let coordinates = (reader.f32(), reader.f32(), reader.f32());
+                        let Ok(hand) = reader.var_i32() else {
+                            return ServerBound::Ignored;
+                        };
+                        if coordinates.0.is_err()
+                            || coordinates.1.is_err()
+                            || coordinates.2.is_err()
+                            || !(0..=1).contains(&hand)
+                            || reader.ensure_empty().is_err()
+                        {
+                            ServerBound::Ignored
+                        } else {
+                            ServerBound::InteractEntity {
+                                entity_id,
+                                hand,
+                                using_secondary_action: false,
+                            }
+                        }
+                    }
+                    _ => ServerBound::Ignored,
+                }
+            }
             State::Play if packet_id == ids.arm_animation => {
                 let Some(hand) = decode_full::<ServerboundArmAnimation>(payload, ctx)
                     .and_then(|packet| lodestone_model::Hand::from_wire_ordinal(packet.hand))
@@ -642,6 +841,45 @@ fn decode_packet(
                     return ServerBound::Ignored;
                 };
                 ServerBound::CarriedItemChanged { slot }
+            }
+            State::Play if packet_id == ids.window_click => {
+                let Some(WindowClick {
+                    window_id,
+                    slot,
+                    button,
+                    mode,
+                    item: _,
+                    ..
+                }) = decode_full(payload, ctx)
+                else {
+                    return ServerBound::Ignored;
+                };
+                if !(0..=6).contains(&mode) {
+                    return ServerBound::Ignored;
+                }
+                ServerBound::ContainerClicked {
+                    window_id: i32::from(window_id),
+                    // This era has an action/transaction number rather than
+                    // the modern state id; the shared consumer intentionally
+                    // derives the authoritative result instead of trusting it.
+                    state_id: 0,
+                    slot: i32::from(slot),
+                    button,
+                    click_type: i32::from(mode),
+                    changed_slots: Vec::new(),
+                    // The legacy packet carries the pre-click contents of the
+                    // clicked slot, not the post-click cursor prediction. It
+                    // therefore cannot populate the canonical carried claim.
+                    carried_item: None,
+                }
+            }
+            State::Play if packet_id == ids.close_window => {
+                decode_full::<ServerboundCloseWindow>(payload, ctx).map_or(
+                    ServerBound::Ignored,
+                    |close| ServerBound::ContainerClosed {
+                        window_id: i32::from(close.window_id),
+                    },
+                )
             }
             State::Play if packet_id == ids.chat_serverbound => {
                 decode_full::<ServerboundChat>(payload, ctx).map_or(ServerBound::Ignored, |chat| {
@@ -957,6 +1195,30 @@ macro_rules! impl_server_protocol {
                 encode_animate($protocol, $ids, $ctx, entity_id, action)
             }
 
+            fn encode_open_screen(&self, window_id: i32, menu: &str, title: &str) -> ServerDirective {
+                encode_open_window($ids, $ctx, $protocol, window_id, menu, title)
+            }
+
+            fn encode_container_content(
+                &self,
+                window_id: i32,
+                _state_id: i32,
+                items: &[Option<ItemStack>],
+                _carried: Option<&ItemStack>,
+            ) -> ServerDirective {
+                encode_window_items($ids, $ctx, $protocol, window_id, items)
+            }
+
+            fn encode_container_slot(
+                &self,
+                window_id: i32,
+                _state_id: i32,
+                slot: i32,
+                item: Option<&ItemStack>,
+            ) -> ServerDirective {
+                encode_set_slot($ids, $ctx, $protocol, window_id, slot, item)
+            }
+
             fn encode_block_update(
                 &self,
                 x: i32,
@@ -983,6 +1245,87 @@ impl_server_protocol!(V316ServerProtocol, PROTOCOL_1_11_2, IDS_316, CTX_316);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Independent wire controls transcribed from the packet shapes in
+    // `vendor/minecraft-data/data/pc/1.12/protocol.json`; the occupied slot
+    // bytes additionally use item id 1 from `items.json` in that same data
+    // release. These are deliberately not produced by this module's codecs.
+    const WINDOW_OPEN_BODY: &[u8] = b"\x07\x0fminecraft:chest\x10{\"text\":\"Chest\"}\x1b";
+    const WINDOW_ITEMS_BODY: &[u8] = b"\x07\x00\x02\xff\xff\x00\x01\x01\x00\x00\x00";
+    const SET_SLOT_BODY: &[u8] = b"\x07\x00\x24\x00\x01\x01\x00\x00\x00";
+    const WINDOW_CLICK_BODY: &[u8] = b"\x07\x00\x24\x00\x0c\x00\x00\x01\x01\x00\x00\x00";
+    const WINDOW_CLOSE_BODY: &[u8] = b"\x07";
+
+    fn payload(directive: ServerDirective) -> Vec<u8> {
+        let ServerDirective::Send { payload, .. } = directive else {
+            panic!("expected a packet directive");
+        };
+        payload
+    }
+
+    #[test]
+    fn hosted_pre_flatten_container_packets_match_literal_wire_fixtures() {
+        for (protocol, ids, ctx) in [
+            (PROTOCOL_1_9_4, IDS_110, CTX_110),
+            (PROTOCOL_1_10_2, IDS_210, CTX_210),
+            (PROTOCOL_1_11_2, IDS_316, CTX_316),
+            (PROTOCOL, IDS_340, CTX_340),
+        ] {
+            assert_eq!(
+                payload(encode_open_window(
+                    ids,
+                    ctx,
+                    protocol,
+                    7,
+                    "minecraft:generic_9x3",
+                    "Chest",
+                )),
+                WINDOW_OPEN_BODY,
+                "protocol {protocol} open_window body must match the literal fixture",
+            );
+            assert_eq!(
+                payload(encode_window_items(
+                    ids,
+                    ctx,
+                    protocol,
+                    7,
+                    &[None, Some(ItemStack::new("minecraft:stone".parse().unwrap(), 1))],
+                )),
+                WINDOW_ITEMS_BODY,
+                "protocol {protocol} window_items body must match the literal fixture",
+            );
+            assert_eq!(
+                payload(encode_set_slot(
+                    ids,
+                    ctx,
+                    protocol,
+                    7,
+                    36,
+                    Some(&ItemStack::new("minecraft:stone".parse().unwrap(), 1)),
+                )),
+                SET_SLOT_BODY,
+                "protocol {protocol} set_slot body must match the literal fixture",
+            );
+            assert_eq!(
+                decode_packet(protocol, ids, ctx, State::Play, ids.window_click, WINDOW_CLICK_BODY),
+                ServerBound::ContainerClicked {
+                    window_id: 7,
+                    state_id: 0,
+                    slot: 36,
+                    button: 0,
+                    click_type: 0,
+                    changed_slots: Vec::new(),
+                    carried_item: None,
+                },
+                "protocol {protocol} window_click body must decode through the server seam",
+            );
+            assert_eq!(
+                decode_packet(protocol, ids, ctx, State::Play, ids.close_window, WINDOW_CLOSE_BODY),
+                ServerBound::ContainerClosed { window_id: 7 },
+                "protocol {protocol} close_window body must decode through the server seam",
+            );
+        }
+    }
 
     // VarInt length 14 followed by `legacy "chat"\n`. This is deliberately
     // a literal wire body: encoding the packet here would let a matching

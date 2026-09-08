@@ -43,7 +43,7 @@ use std::time::{Duration, Instant};
 use lodestone::net::{NetClient, NetUpdate};
 use lodestone_client::{BlockPos, ChunkPos};
 use lodestone_server::region_source::RegionChunkSource;
-use lodestone_server::{ChunkSource, TickPriority};
+use lodestone_server::{ChunkSource, ScheduledTickKind, TickPriority};
 
 /// The owner's persisted `"render_distance": 32` plus the mesher's buffer ring,
 /// the arithmetic `app::session::tick_render_distance` applies. Matching his is
@@ -102,7 +102,7 @@ fn write_saved_world(dir: &Path) {
     scheduled.with(|queues| {
         assert!(queues.block.schedule(
             (5, 70, 5),
-            "minecraft:redstone_wire".to_owned(),
+            ScheduledTickKind::Extension("minecraft:redstone_wire".to_owned()),
             140,
             TickPriority::Normal,
         ));

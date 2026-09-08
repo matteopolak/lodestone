@@ -33,5 +33,3 @@ mod explode_particle_ids;
 mod move_minecart_along_track;
 #[path = "entity/movement_selection.rs"]
 mod movement_selection;
-#[path = "entity/modern_ecs.rs"]
-mod modern_ecs;

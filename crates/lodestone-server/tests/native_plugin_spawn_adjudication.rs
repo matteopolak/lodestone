@@ -125,20 +125,41 @@ fn decide_blocks(
     mut decisions: ResMut<ServerProposalDecisions>,
 ) {
     for proposal in proposals.read() {
-        let ServerProposalAction::SetResidentBlock { pos, .. } = &proposal.action else {
-            continue;
-        };
-        if pos.x == 1 {
-            decisions.decide(proposal.id(), 0, ProposalVerdict::Deny);
-        } else if pos.x == 2 {
-            decisions.decide(
-                proposal.id(),
-                0,
-                ProposalVerdict::Replace(ServerProposalAction::SetResidentBlock {
-                    pos: *pos,
-                    state: state("minecraft:diamond_block"),
-                }),
-            );
+        match &proposal.action {
+            ServerProposalAction::SetResidentBlock { pos, .. } if pos.x == 1 => {
+                decisions.decide(proposal.id(), 0, ProposalVerdict::Deny);
+            }
+            ServerProposalAction::SetResidentBlock { pos, .. } if pos.x == 2 => {
+                decisions.decide(
+                    proposal.id(),
+                    0,
+                    ProposalVerdict::Replace(ServerProposalAction::SetResidentBlock {
+                        pos: *pos,
+                        state: state("minecraft:diamond_block"),
+                    }),
+                );
+            }
+            ServerProposalAction::SetResidentBlockBatch { writes, notify_listeners }
+                if writes.first().is_some_and(|(pos, _)| pos.x == 3) =>
+            {
+                decisions.decide(proposal.id(), 0, ProposalVerdict::Deny);
+            }
+            ServerProposalAction::SetResidentBlockBatch { writes, notify_listeners }
+                if writes.first().is_some_and(|(pos, _)| pos.x == 4) =>
+            {
+                decisions.decide(
+                    proposal.id(),
+                    0,
+                    ProposalVerdict::Replace(ServerProposalAction::SetResidentBlockBatch {
+                        writes: writes
+                            .iter()
+                            .map(|(pos, _)| (*pos, state("minecraft:diamond_block")))
+                            .collect(),
+                        notify_listeners: *notify_listeners,
+                    }),
+                );
+            }
+            _ => {}
         }
     }
 }
@@ -268,6 +289,62 @@ async fn native_plugin_block_mutations_are_adjudicated_then_reach_the_authoritat
         server.resident_block_state_id(2, 4, 3),
         Some(state("minecraft:diamond_block")),
         "the resolved replacement, not the caller's requested state, must become authoritative"
+    );
+
+    let denied_batch = server
+        .set_resident_block_states_proposed(
+            vec![
+                (BlockPos::new(3, 4, 3), state("minecraft:gold_block")),
+                (BlockPos::new(5, 4, 3), state("minecraft:gold_block")),
+            ],
+            true,
+        )
+        .await;
+    assert_eq!(denied_batch, Err(BlockMutationRefusal::Denied));
+    assert_eq!(
+        server.resident_block_state_id(5, 4, 3),
+        Some(state("minecraft:air")),
+        "a denied batch must not partially mutate a later position"
+    );
+
+    let (resolved_batch, notify_listeners) = server
+        .set_resident_block_states_proposed(
+            vec![
+                (BlockPos::new(4, 4, 3), state("minecraft:gold_block")),
+                (BlockPos::new(5, 4, 3), state("minecraft:gold_block")),
+            ],
+            false,
+        )
+        .await
+        .expect("the replacement verdict must preserve the batch shape");
+    assert!(!notify_listeners);
+    assert_eq!(resolved_batch.len(), 2);
+    for (pos, _) in resolved_batch {
+        assert_eq!(
+            server.resident_block_state_id(pos.x, pos.y, pos.z),
+            Some(state("minecraft:diamond_block")),
+            "the resolved batch state must reach every authoritative position"
+        );
+    }
+
+    let unresident_batch = server
+        .set_resident_block_states_proposed(
+            vec![
+                (BlockPos::new(6, 4, 3), state("minecraft:gold_block")),
+                (BlockPos::new(16, 4, 3), state("minecraft:gold_block")),
+            ],
+            true,
+        )
+        .await;
+    assert_eq!(
+        unresident_batch,
+        Err(BlockMutationRefusal::ColumnNotResident),
+        "a batch must reject an unresident later position before mutating an earlier one"
+    );
+    assert_eq!(
+        server.resident_block_state_id(6, 4, 3),
+        Some(state("minecraft:air")),
+        "finite residency refusal must preserve batch atomicity"
     );
 
     assert_eq!(

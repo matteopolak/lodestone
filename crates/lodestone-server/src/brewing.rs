@@ -68,7 +68,7 @@
 //!   real slot-acceptance rule for slot 3 calls the same is-ingredient check
 //!   this module's [`is_ingredient`] performs — no separate allow-list.
 
-use lodestone_data::potion::{potion_id, potion_name, PotionId};
+use lodestone_data::potion::{potion_name, PotionId};
 
 /// The literal `400` from the real per-tick rule — see the module doc comment
 /// for why this is not derived from the unused `BREWING_TIME_SECONDS` constant.
@@ -107,8 +107,7 @@ impl Bottle {
     /// unknown name cannot enter the built-in brewing table as a valid bottle.
     #[must_use]
     pub fn from_potion_name(kind: BottleKind, potion: &str) -> Option<Self> {
-        potion_id(potion)
-            .and_then(PotionId::from_registry_id)
+        PotionId::from_name(potion)
             .map(|potion| Self::new(kind, potion))
     }
 }

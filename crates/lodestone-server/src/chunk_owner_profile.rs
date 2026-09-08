@@ -4,8 +4,8 @@
 use lodestone_model::{BlockPos, ItemStack, ResourceKey, Vec3};
 
 use crate::{
-    BlockEntity, ChunkColumn, ChunkSource, Furnace, FurnaceKind, IntegratedServer, ScheduledTickQueue,
-    TickPriority, TickStats,
+    BlockEntity, ChunkColumn, ChunkSource, Furnace, FurnaceKind, IntegratedServer, ScheduledTickKind,
+    ScheduledTickQueue, TickPriority, TickStats,
 };
 use crate::protocol::ServerProtocol;
 
@@ -137,15 +137,16 @@ fn seed_ambient_mobs(server: &IntegratedServer) {
 }
 
 fn seed_scheduled_ticks(server: &IntegratedServer) {
-    let mut pending = ScheduledTickQueue::new();
+    let mut block_pending: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
+    let mut fluid_pending: ScheduledTickQueue<String> = ScheduledTickQueue::new();
     for pos in owner_positions() {
-        assert!(pending.schedule(
+        assert!(block_pending.schedule(
             (pos.x + 1, pos.y, pos.z),
-            "redstone:repeater".to_owned(),
+            ScheduledTickKind::Repeater,
             1,
             TickPriority::Normal,
         ));
-        assert!(pending.schedule(
+        assert!(fluid_pending.schedule(
             (pos.x - 1, pos.y, pos.z),
             "lodestone:fluid".to_owned(),
             1,
@@ -155,7 +156,11 @@ fn seed_scheduled_ticks(server: &IntegratedServer) {
     server
         .block_ticks()
         .expect("the profile scene owns a scheduled-tick feed")
-        .request_scheduled_ticks(pending.drain_due(u64::MAX, usize::MAX));
+        .request_scheduled_ticks(block_pending.drain_due(u64::MAX, usize::MAX));
+    server
+        .block_ticks()
+        .expect("the profile scene owns a scheduled-tick feed")
+        .request_fluid_scheduled_ticks(fluid_pending.drain_due(u64::MAX, usize::MAX));
 }
 
 /// A fixed 4x2 owner field. Columns have a floor, one active furnace state,

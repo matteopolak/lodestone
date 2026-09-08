@@ -104,13 +104,13 @@ piece named) · **gap** (nothing) · **ceiling** (will not exist by design; stat
 | custom menu (`createInventory`) | **done**, local-only — `Menus::open_local`, one menu at a time | **gap** | **gap** — no open-to-remote-player path; `PlayerInventory` is a connection-task local |
 | inventory click veto | **done** — `SharedState::menu_click` asks before prediction and direct send | **gap** | **gap** |
 | custom items / recipes / station hooks | **done** — `CustomItemRegistry`, `RecipeRegistryExt::add_recipe` | **gap** | **done** — `CraftingStationHooks` (anvil, grindstone, smithing, loom, stonecutter) |
-| per-entity / per-chunk key-value data | partial — `EntityDataStore`/`ChunkDataStore` are in-memory by their own module doc | **gap** — `fs:read` only, no write | **gap** — `NbtStorageHandle` has no save path in `live_save`; nothing plugin-keyed is written to disk |
+| per-entity / per-chunk key-value data | partial — `EntityDataStore`/`ChunkDataStore` are in-memory by their own module doc | partial — the per-plugin `fs:read`/`fs:write` directory is durable and reload-safe, but there is no typed entity/chunk key-value ABI | **gap** — `NbtStorageHandle` has no save path in `live_save`; nothing plugin-keyed is written to disk |
 | plugin config file / data dir | **done** — `lodestone-plugin-support::{paths, config}` | partial — read-only | **done** for an embedding crate (plain `std`) |
 | database access | **done**, trivially (unrestricted `std`) | **ceiling** — no network import exists, by design | **done**, trivially |
-| inbound packet observation | **done** — decoded `GameEvent` plus opt-in `RawPacket` observation; `RawPacketBusPlugin` publishes the connection state, packet id, and exact payload before version-specific decoding | partial — 3 kinds | partial — a `ServerProtocol` decorator sees every `decode(state, id, payload)` call, version-locked |
+| inbound/outbound packet observation | **done (native)** — decoded `GameEvent` plus opt-in `RawPacket` and bounded `OutboundRawPacket` observation; the inbound bus publishes exact owned bytes before decoding, and the outbound bus publishes exact adapter output after decorators and before transport framing, with per-tick packet/byte drop counters | **gap** — WASM receives curated decoded events only; no raw-packet event or capability | partial — a `ServerProtocol` decorator sees every `decode(state, id, payload)` call, version-locked |
 | outbound packet mutation / cancel | partial — `EgressFilters` over `ClientAction` at the `ActionQueue` drain; five direct `send_action` paths bypass it (`egress_hook_coverage.rs`) | **gap** | partial — the same decorator sees every `Vec<ServerDirective>` it returns, so it can drop, rewrite, or **append** a `ServerDirective::Send`, version-locked |
 | raw byte injection | **ceiling** — decided observation-only, permanently | ceiling | reachable through the decorator, untested and unsandboxed |
-| the NMS-equivalent escape hatch | **done** — depend on a version crate (`packets`, `adapter` are `pub`), or on `lodestone-shell` for `Sim::ecs()` | **bounded** — the explicitly granted, exact-lock `version:broker` import returns copied records only; version types and arbitrary internals remain absent from the linker | **done** — embed `IntegratedServer` and hold the `ChunkSource`, `WorldStateHandle`, `PlayerRegistry`, `MobHandle`, `PluginChannelRegistry` it hands out |
+| the NMS-equivalent escape hatch | **done** — depend on a version crate (`packets`, `adapter` are `pub`), or on `lodestone-shell` for `Sim::ecs()` | **ceiling** — an import not in the WIT world is absent from the linker | **done** — embed `IntegratedServer` and hold the `ChunkSource`, `WorldStateHandle`, `PlayerRegistry`, `MobHandle`, `PluginChannelRegistry` it hands out |
 | hot reload | ceiling (no stable Rust ABI) | **done** — a `.wasm` file on disk, `PluginHost::load_file` | ceiling |
 | panic isolation | ceiling by decision — trusted code, fatal | **done** — trap/fuel/memory limits, three denial gates | ceiling |
 | registered in the shipped binary | **done** — `run_with_app` / `WindowApp::new_with_app` | **done, native windowed client** — `run_windowed_with_app` installs the conductor and calls `load_directory` for cwd-relative `plugins/`; absent and denied-plugin controls reach the real shell `Sim` | **done, compiled-in native** — `dedicated_server_app` feeds the application through `open_persistent_server` and `IntegratedServer::open_persistent_with_mobs_and_commands_and_server_app` into the persistent primary tick task; no runtime discovery |
@@ -321,20 +321,26 @@ packet — and whether the server's own item save path carries it through is unv
 "one opaque blob per key" property `docs/plugin-api.md` records, because a schema that consults a
 static field list is the shape that silently drops data elsewhere in the tree.
 
-WASM: `fs:read` exists and is enforced by the linker (an ungranted import is absent, so a guest
-referencing it fails to instantiate); there is no `fs:write`, so a guest cannot persist anything.
+WASM: `fs:read` and `fs:write` are enforced by the linker (an ungranted import is absent, so a guest
+referencing it fails to instantiate). The native host gives each granted plugin a confined persistent
+directory, bounds and atomically replaces non-empty files, and treats an empty write as deletion; a
+successful guest reload reuses that directory. This is plugin-scoped durable data, not yet typed
+entity/chunk records.
 
 ### Packet interception
 
-The decided shape is observation-only in both directions, permanently, on the client: inbound
-events apply inline under the world's write guard, so an interceptor wanting `&mut World` there is
-the reentrancy shape everything else makes unrepresentable, and outbound byte mutation only exists
-inside a version-typed adapter. `EgressFilters` is the outbound ceiling — `ClientAction`, never
-bytes — and it is bypassed by five direct `send_action` sites the coverage gate enumerates. Two
-archetypes stay out of reach for good: anti-cheat and a disguise visible to *other* players.
+The decided shared shape is observation-only, permanently, on the client: native inbound observation
+uses an opt-in `RawPacket` message containing an owned copy of the payload before adapter decoding,
+and native outbound observation uses a bounded `OutboundRawPacket` message containing the exact
+adapter/decorator output before transport framing. Inbound events apply inline under the world's write
+guard, so an interceptor wanting `&mut World` there is the reentrancy shape everything else makes
+unrepresentable. `EgressFilters` remains the outbound mutation ceiling — `ClientAction`, never bytes —
+and is bypassed by five direct `send_action` sites the coverage gate enumerates. The WASM tier likewise
+has no raw-packet event or capability. Two archetypes stay out of reach for good on the shared surface:
+anti-cheat and a disguise visible to *other* players.
 
-Two escape hatches change that picture at the cost of version-locking, and their trust boundaries are
-documented separately. On the client, `lodestone_client::ClientBuilder::new` takes a `Box<dyn VersionAdapter>`, and
+Two escape hatches change that picture at the cost of version-locking, and neither is documented as
+such. On the client, `lodestone_client::ClientBuilder::new` takes a `Box<dyn VersionAdapter>`, and
 a decorator implementing `VersionAdapter` around `V770Adapter` sees every `handle_packet` and every
 `encode_action` in both directions — a headless bot gets ProtocolLib-class visibility this way; the
 windowed shell builds its own adapter and offers no such seam. On the server, `IntegratedServer`
@@ -364,12 +370,8 @@ and whether it is honest about its cost.
   halves of the check an author can run: `assert_ecs_only_dependency_graph` (the static half:
   prove the manifest has no route) and `assert_schedule_completes_under_write_guard` (the runtime
   half: a watchdog that leaks a wedged thread on purpose rather than joining it).
-- **Client, WASM**: a bounded version broker is available only when the manifest requests
-  `version:broker`, declares an exact `[version-lock]`, and the operator grants it. The import
-  returns copied descriptor/key-value records from the selected registry adapter; it does not put
-  version types, packet bytes, registry handles, ECS borrows, sockets, callbacks, or arbitrary
-  calls in the linker. Everything else remains absent by construction; see
-  [`wasm-version-broker.md`](./wasm-version-broker.md).
+- **Client, WASM**: none, correctly. The tier's whole value is that an import not in the WIT world
+  is not in the linker.
 - **Server**: yes — embed `IntegratedServer` and you hold everything it hands out
   (`world_state`, `players`, `mobs`, `tickets`, `portals`, `save_now`, `level_dat`,
   `block_ticks`) plus the `ChunkSource` you built and the `ServerProtocol` you wrapped. What is
@@ -510,9 +512,10 @@ plan, not a sprint.
 11. **Both: a reentrancy ledger for the other lock classes** — `MobHandle`, `ChunkWorld`, the chunk
     edit cache — or a type-level shape for `MobHandle::with` that cannot nest. Both sides, native.
     Small to medium.
-12. **Client native: `RawPacket`**, inbound, observation-only, off by default. **Shipped** through
-    `RawPacketBusPlugin` and the driver's pre-decode publication point; focused unit and hermetic
-    driver tests preserve the exact state, id, and payload. Client, native.
+12. **Client native: raw packet observation**, inbound and outbound, observation-only, off by default.
+    **Shipped** through `RawPacketBusPlugin` and `OutboundRawPacketBusPlugin`; the driver's pre-decode
+    and post-encode publication points preserve exact state, id, and payload, while explicit per-tick
+    packet/byte bounds count dropped observer copies. Client, native.
 13. **Server: custom item data through save/load** — verify and, if missing, carry
     `custom_data` through `player_data::to_nbt`/`from_nbt`. Server, native. Small to medium.
 14. **Server: open a plugin menu on a remote player.** Needs the container-open packet family and

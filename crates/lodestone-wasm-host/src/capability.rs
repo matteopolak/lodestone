@@ -214,11 +214,8 @@ pub enum Capability {
     /// **Never in [`CapabilitySet::default_policy`].** The scheduler is exposed
     /// as an import so a guest that does not declare it fails to instantiate.
     ScheduleTasks,
-    /// Read copied, version-specific values from the selected protocol adapter.
-    ///
-    /// **Never in [`CapabilitySet::default_policy`].** The broker is an import
-    /// and is linked only after the manifest's exact version lock matches the
-    /// host's configured source.
+    /// Access the explicitly version-locked brokered registry/protocol data
+    /// surface. This is denied by default and exposes copied values only.
     VersionBroker,
 }
 
@@ -546,6 +543,10 @@ mod tests {
             "commands:register must not be granted by default"
         );
         assert!(
+            !policy.contains(Capability::VersionBroker),
+            "version:broker must not be granted by default"
+        );
+        assert!(
             !policy.contains(Capability::ActSelectSlot),
             "act:select-slot must not be granted by default"
         );
@@ -604,12 +605,8 @@ mod tests {
         assert!(CapabilitySet::permissive().contains(Capability::FsWrite));
         assert!(CapabilitySet::permissive().contains(Capability::ScheduleTasks));
         assert!(CapabilitySet::permissive().contains(Capability::ReadWorld));
-        assert!(
-            !policy.contains(Capability::VersionBroker),
-            "version:broker must not be granted by default"
-        );
-        assert!(CapabilitySet::permissive().contains(Capability::VersionBroker));
         assert!(CapabilitySet::permissive().contains(Capability::RegisterCommands));
+        assert!(CapabilitySet::permissive().contains(Capability::VersionBroker));
         assert!(CapabilitySet::permissive().contains(Capability::ActSelectSlot));
     }
 

@@ -324,6 +324,7 @@ impl Sim {
     pub(crate) fn on_column_arrived(&mut self, cx: i32, cz: i32) {
         self.mark_column_dirty(cx, cz);
         self.terrain_and_world(|store, terrain| terrain.mark_neighbours_dirty(store, cx, cz));
+        self.join_trace.mark("remesh_queued", cx, cz);
     }
 
     /// Handle a `ChunkLoaded` / [`NetUpdate::Chunk`] dirty-region signal: the

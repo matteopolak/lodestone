@@ -64,7 +64,7 @@
 //! - **Generation happens with the lock released.** A miss unlocks, calls
 //!   `source.column()`, then re-locks to insert. Holding the lock across an
 //!   ~909 ms generation would serialise
-//!   [`crate::chunk::generate_columns_parallel`]'s whole scoped fan-out and
+//!   [`crate::chunk::generate_columns_parallel`]'s whole worker-pool batch and
 //!   undo the duplicated work.
 //! - **An insert after that window never overwrites.** In the unlocked
 //!   interval another thread may have inserted, and its entry may carry a
@@ -2780,7 +2780,7 @@ mod tests {
     }
 
     /// A miss must not hold the cache lock, or `generate_columns_parallel`'s
-    /// scoped fan-out is serialised behind it and parallel generation is lost.
+    /// worker-pool batch is serialised behind it and parallel generation is lost.
     ///
     /// # Predicting the value, not the sign
     ///

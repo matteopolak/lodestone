@@ -195,7 +195,7 @@ impl WorldOracle for WaterloggingServerOracle {
                 TickPriority::Normal,
             );
             self.feed
-                .request_scheduled_ticks(pending.drain_due(u64::MAX, usize::MAX));
+                .request_fluid_scheduled_ticks(pending.drain_due(u64::MAX, usize::MAX));
         }
         Ok(())
     }

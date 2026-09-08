@@ -1497,7 +1497,7 @@ async fn finish_ms_token(
     let _ = tx.send(WorkerMsg::SignedIn(AccountProfile {
         profile_id: session.profile.id,
         username: session.profile.name.clone(),
-        skin_url: session.profile.skin.as_ref().map(|s| s.url.clone()),
+        skin_url: session.profile.skin.as_ref().map(|s| s.url.to_string()),
         last_used: now,
     }));
 }

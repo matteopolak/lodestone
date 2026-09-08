@@ -64,7 +64,9 @@ metadata codec is wired for spawn-time and incremental lists, but only the
 three entity-base fields whose index/serializer pair is universal here
 (flags, optional custom name and name visibility) are raised. Attribute names
 are textual on this wire; modifier UUIDs are retained losslessly as
-`minecraft:uuid/<uuid>` identifiers.
+`minecraft:uuid/<uuid>` identifiers. `tests/game_events.rs` supplies literal
+metadata and attribute bodies and asserts that both canonical events enter the
+existing ingest route.
 
 Protocol 404 now carries the basic container session through the production
 bridge. A canonical `generic_9x3` menu opens as a string-typed

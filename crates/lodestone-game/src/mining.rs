@@ -34,7 +34,9 @@
 //! the live dig gate (`tests/live_mining.rs`), not by transliteration.
 
 use lodestone_model::math::BlockPos;
-use lodestone_model::{BlockActionKind, BlockFace, ClientAction, ClientEvent, Hand};
+use lodestone_model::{
+    BlockActionKind, BlockFace, ClientAction, ClientEvent, Hand, PredictionSequence,
+};
 
 use crate::item::ItemStack;
 
@@ -234,15 +236,15 @@ struct Active {
 #[derive(Debug, Default)]
 pub struct Mining {
     state: Option<Active>,
-    /// Post-break cooldown (`destroyDelay`): after a survival block breaks,
-    /// ignores dig input for 5 ticks so a held button does not instantly chew
-    /// through the block behind it. Creative input never arms this delay: each
-    /// delivered press (or held-input tick) is an independent instant break.
+    /// Post-break cooldown (`destroyDelay`): creative breaks and progressive
+    /// survival finishes ignore held dig input for 5 ticks. A survival block
+    /// whose progress is already instant skips this cooldown, so a held button
+    /// can clear adjacent grass or flowers on consecutive ticks.
     delay: i32,
     /// Monotonic block-change prediction sequence. `START`/`STOP` carry a fresh
     /// value the server echoes when it acks or rolls back; `ABORT` carries `0`,
     /// matching vanilla's 3-argument packet constructor.
-    next_sequence: i32,
+    next_sequence: PredictionSequence,
     /// The block this machine decided was **destroyed** during the most recent
     /// [`start`](Self::start) / [`continue_`](Self::continue_) / [`stop`](Self::stop)
     /// call. Every entry point clears it first, so it describes that call only,
@@ -324,9 +326,9 @@ impl Mining {
         self.destroyed.take()
     }
 
-    fn take_sequence(&mut self) -> i32 {
+    fn take_sequence(&mut self) -> PredictionSequence {
         // Vanilla pre-increments, so the first prediction is sequence 1.
-        self.next_sequence += 1;
+        self.next_sequence = self.next_sequence.next();
         self.next_sequence
     }
 
@@ -359,7 +361,12 @@ impl Mining {
         let mut out = Vec::new();
         if self.state.is_none() || !self.same_target(pos, &tool) {
             if let Some(old) = &self.state {
-                out.push(block_action(BlockActionKind::AbortDestroy, old.target, face, 0));
+                out.push(block_action(
+                    BlockActionKind::AbortDestroy,
+                    old.target,
+                    face,
+                    PredictionSequence::INITIAL.as_wire(),
+                ));
             }
             let seq = self.take_sequence();
             // Vanilla's `instabuild` (creative) branch never reaches
@@ -383,21 +390,30 @@ impl Mining {
                 // destruction rather than on the `StopDestroy` packet a
                 // one-shot never sends.
                 //
-                // Survival's five-tick destroy delay is deliberately not
-                // applied to creative input. Creative has no click cooldown:
-                // the next delivered press or held-input tick must be able to
-                // enter this branch immediately.
+                // Creative arms the five-tick delay. Survival instant breaks
+                // deliberately do not: the next held-input tick must be able
+                // to enter this branch for the next zero-hardness block.
                 self.state = None;
                 self.destroyed = Some(pos);
-                self.delay = if inputs.creative { 0 } else { 5 };
-                out.push(block_action(BlockActionKind::StartDestroy, pos, face, seq));
+                self.delay = if inputs.creative { 5 } else { 0 };
+                out.push(block_action(
+                    BlockActionKind::StartDestroy,
+                    pos,
+                    face,
+                    seq.as_wire(),
+                ));
             } else {
                 self.state = Some(Active {
                     target: pos,
                     progress: 0.0,
                     tool,
                 });
-                out.push(block_action(BlockActionKind::StartDestroy, pos, face, seq));
+                out.push(block_action(
+                    BlockActionKind::StartDestroy,
+                    pos,
+                    face,
+                    seq.as_wire(),
+                ));
             }
         }
         // `startAttack` swings the arm unconditionally after the block branch.
@@ -445,7 +461,12 @@ impl Mining {
                 // STOP carries the block being finished and the face the input
                 // loop is aiming at (vanilla passes `continueDestroyBlock`'s
                 // `direction`).
-                out.push(block_action(BlockActionKind::StopDestroy, pos, face, seq));
+                out.push(block_action(
+                    BlockActionKind::StopDestroy,
+                    pos,
+                    face,
+                    seq.as_wire(),
+                ));
                 self.state = None;
                 self.delay = 5;
                 // Vanilla's `continueDestroyBlock` calls `this.destroyBlock(pos)`
@@ -475,7 +496,7 @@ impl Mining {
                 BlockActionKind::AbortDestroy,
                 active.target,
                 BlockFace::Down,
-                0,
+                PredictionSequence::INITIAL.as_wire(),
             )]
         } else {
             Vec::new()
@@ -491,7 +512,12 @@ fn same_item(a: &Option<ItemStack>, b: &Option<ItemStack>) -> bool {
     }
 }
 
-fn block_action(action: BlockActionKind, pos: BlockPos, face: BlockFace, sequence: i32) -> ClientAction {
+fn block_action(
+    action: BlockActionKind,
+    pos: BlockPos,
+    face: BlockFace,
+    sequence: i32,
+) -> ClientAction {
     ClientAction::BlockAction {
         action,
         pos,
@@ -560,26 +586,38 @@ impl BlockDestructionOverlays {
         }
     }
 
-    /// Remove every overlay owned by `entity_id`.
+    /// Remove the overlay owned by `entity_id`, if it still exists.
     ///
-    /// Entity ids can be reused after a despawn, so the renderer must not let
-    /// an old break stage survive an entity replacement or removal.
-    pub fn clear_entity(&mut self, entity_id: i32) {
+    /// A break-progress reset is normally sent before an entity disappears,
+    /// but the protocol does not guarantee that ordering. Entity removal and
+    /// id reuse therefore call this directly so a stale crack can never be
+    /// rendered for a later entity that happens to receive the same id.
+    pub fn clear_entity(&mut self, entity_id: i32) -> bool {
+        let before = self.entries.len();
         self.entries.retain(|overlay| overlay.entity_id != entity_id);
+        self.entries.len() != before
     }
 
-    /// Remove overlays whose block lies in `chunk`.
+    /// Remove all overlays whose block position belongs to chunk `(chunk_x,
+    /// chunk_z)`.
     ///
-    /// A chunk unload invalidates the block state needed to resolve crack
-    /// geometry. Dropping the overlay here keeps it from resurfacing if that
-    /// chunk is later reloaded with different contents.
-    pub fn clear_chunk(&mut self, chunk: lodestone_model::ChunkPos) {
+    /// `div_euclid` is intentional: block coordinates on the negative side of
+    /// the origin map to the same chunks as the wire's floor-based chunk
+    /// coordinate calculation (`-1` belongs to chunk `-1`, not `0`).
+    pub fn clear_chunk(&mut self, chunk_x: i32, chunk_z: i32) -> usize {
+        let before = self.entries.len();
         self.entries.retain(|overlay| {
-            overlay.pos.x.div_euclid(16) != chunk.x || overlay.pos.z.div_euclid(16) != chunk.z
+            overlay.pos.x.div_euclid(16) != chunk_x || overlay.pos.z.div_euclid(16) != chunk_z
         });
+        before - self.entries.len()
     }
 
-    /// Remove all overlays at session teardown.
+    /// Remove every active overlay.
+    ///
+    /// This is used at session boundaries and when the server reports a new
+    /// player-level instance. It is deliberately separate from `Default` so
+    /// lifecycle owners can clear an existing component without replacing the
+    /// component itself.
     pub fn clear(&mut self) {
         self.entries.clear();
     }
@@ -989,11 +1027,10 @@ mod tests {
         );
     }
 
-    /// Creative instant breaks have no post-break click delay. Both a second
-    /// press and the next held-input tick must reach the same one-shot branch;
-    /// the input cadence, rather than a mining cooldown, is the only limit.
+    /// Creative instant breaks arm the five-tick delay used by held input.
+    /// Held input waits for the delay before it can break another block.
     #[test]
-    fn creative_press_and_hold_can_break_again_immediately() {
+    fn creative_hold_obeys_the_five_tick_post_break_delay() {
         let mut m = Mining::new();
         let p = pos(0, 70, 0);
         let inputs = BreakInputs {
@@ -1006,50 +1043,45 @@ mod tests {
         assert_eq!(m.take_destroyed(), Some(p));
         assert!(is_start(&first[0], p));
 
-        let held = m.continue_(p, BlockFace::Up, &inputs, None);
-        assert_eq!(m.take_destroyed(), Some(p), "held creative input has no delay");
-        assert!(is_start(&held[0], p));
+        for tick in 0..5 {
+            let held = m.continue_(p, BlockFace::Up, &inputs, None);
+            assert_eq!(m.take_destroyed(), None, "creative delay tick {tick}");
+            assert!(
+                !held.iter().any(|action| is_start(action, p)),
+                "creative held input must not start another break during delay"
+            );
+        }
 
-        let pressed_again = m.start(p, BlockFace::Up, &inputs, None);
+        let held = m.continue_(p, BlockFace::Up, &inputs, None);
         assert_eq!(
             m.take_destroyed(),
             Some(p),
-            "a second creative press must not inherit a post-break cooldown"
+            "creative held input must resume after five delay ticks"
         );
-        assert!(is_start(&pressed_again[0], p));
+        assert!(is_start(&held[0], p));
     }
 
-    /// Holding the button through a survival instant break must not break a
-    /// second block on the very next tick. Before `Mining::start`'s
-    /// instant-break branch armed the same 5-tick survival cooldown
-    /// `continue_`'s progressive finish does, `state` was left `None` with no
-    /// delay, so the next `continue_` call (still `!same_target` since there is
-    /// no active dig) fell straight through to `start` again — a block
-    /// destroyed every single tick the button stayed down.
-    ///
-    /// Predicts the exact tick count rather than merely "eventually stops":
-    /// one destroy, then exactly five cooldown ticks reporting nothing, matching
-    /// the same `self.delay = 5` the progressive-finish path already used.
+    /// A held survival input can break another zero-hardness block on the very
+    /// next tick. Using two positions models a row of grass or flowers without
+    /// depending on the world-edit consumer; the second `continue_` must reach
+    /// the instant branch rather than a post-break cooldown.
     #[test]
-    fn holding_through_a_survival_instant_break_does_not_break_a_block_every_tick() {
+    fn holding_through_a_survival_instant_break_reaches_the_next_block_immediately() {
         let mut m = Mining::new();
-        let p = pos(0, 70, 0);
+        let first_pos = pos(0, 70, 0);
+        let next_pos = pos(1, 70, 0);
         let inputs = BreakInputs {
             hardness: 0.0,
             ..BreakInputs::default()
         };
 
-        m.start(p, BlockFace::Up, &inputs, None);
-        assert_eq!(m.take_destroyed(), Some(p), "the first tick must destroy the block");
+        let first = m.start(first_pos, BlockFace::Up, &inputs, None);
+        assert!(is_start(&first[0], first_pos));
+        assert_eq!(m.take_destroyed(), Some(first_pos));
 
-        for tick in 0..5 {
-            m.continue_(p, BlockFace::Up, &inputs, None);
-            assert_eq!(
-                m.take_destroyed(),
-                None,
-                "tick {tick} of the 5-tick cooldown must not destroy another block"
-            );
-        }
+        let next = m.continue_(next_pos, BlockFace::Up, &inputs, None);
+        assert!(is_start(&next[0], next_pos));
+        assert_eq!(m.take_destroyed(), Some(next_pos));
     }
 
     /// Both destroy paths report through the one latch, and nothing else does.
@@ -1244,6 +1276,51 @@ mod tests {
             progress: 10,
         });
         assert_eq!(o.iter().collect::<Vec<_>>(), vec![(b, 7)]);
+    }
+
+    #[test]
+    fn lifecycle_cleanup_removes_entity_chunk_and_session_scoped_entries() {
+        let mut o = BlockDestructionOverlays::new();
+        let same_entity = pos(3, 64, 3);
+        let negative_boundary = pos(-1, 64, -1);
+        let same_chunk = pos(15, 70, 0);
+        let other_chunk = pos(16, 70, 0);
+        o.apply(&ClientEvent::BlockDestruction {
+            entity_id: 7,
+            pos: same_entity,
+            progress: 3,
+        });
+        o.apply(&ClientEvent::BlockDestruction {
+            entity_id: 8,
+            pos: negative_boundary,
+            progress: 4,
+        });
+        o.apply(&ClientEvent::BlockDestruction {
+            entity_id: 9,
+            pos: same_chunk,
+            progress: 5,
+        });
+        o.apply(&ClientEvent::BlockDestruction {
+            entity_id: 10,
+            pos: other_chunk,
+            progress: 6,
+        });
+
+        assert!(o.clear_entity(7), "entity removal must clear its crack");
+        assert!(!o.clear_entity(7), "clearing an already removed entity is a no-op");
+        assert_eq!(o.stage_at(same_entity), None);
+
+        // The negative boundary cell above is in chunk (-1, -1), while the
+        // positive boundary cell is in chunk (0, 0). This proves the cleanup
+        // uses floor chunking rather than truncating division.
+        assert_eq!(o.clear_chunk(-1, -1), 1, "the negative chunk owns one overlay");
+        assert_eq!(o.clear_chunk(0, 0), 1, "the loaded chunk owns one overlay");
+        assert_eq!(o.stage_at(negative_boundary), None);
+        assert_eq!(o.stage_at(same_chunk), None);
+        assert_eq!(o.stage_at(other_chunk), Some(6));
+
+        o.clear();
+        assert!(o.is_empty(), "session teardown must clear every remaining crack");
     }
 
     #[test]

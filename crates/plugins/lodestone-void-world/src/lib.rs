@@ -24,6 +24,7 @@
 
 use std::sync::Arc;
 
+use lodestone_model::ResourceKey;
 use lodestone_server::ChunkSource;
 use lodestone_server::plugin_dimension::{DimensionProperties, DimensionRegistry, PluginDimension};
 use lodestone_server::structure_placement::place_structure_live;
@@ -35,6 +36,14 @@ use lodestone_worldgen::structure::template::{BlockState, PlaceOrigin, PlaceSett
 /// (see `docs/plugin-worldgen-api.md`'s naming convention: a plugin key is
 /// never `minecraft:`-prefixed, so it can never shadow a hosted dimension).
 pub const DIMENSION_KEY: &str = "voidworld:checkerboard";
+
+/// Parses this plugin's declared dimension key once at the registration seam.
+#[must_use]
+pub fn dimension_key() -> ResourceKey {
+    DIMENSION_KEY
+        .parse()
+        .expect("the reference plugin's dimension key must remain valid")
+}
 
 /// World Y of the checkerboard floor and the landmark structure's base.
 pub const FLOOR_Y: i32 = 0;
@@ -128,7 +137,7 @@ impl ChunkGenerator for CheckerboardVoidGenerator {
 pub fn register(registry: &DimensionRegistry) {
     let generator = Arc::new(CheckerboardVoidGenerator::new());
     registry.register(PluginDimension {
-        key: DIMENSION_KEY.to_string(),
+        key: dimension_key(),
         properties: DimensionProperties {
             min_y: generator.min_y(),
             height: generator.height(),
@@ -170,9 +179,10 @@ mod tests {
     #[test]
     fn registering_makes_the_dimension_reachable_by_key() {
         let registry = DimensionRegistry::new();
-        assert!(registry.get(DIMENSION_KEY).is_none(), "control: nothing registered yet");
+        let dimension_key = dimension_key();
+        assert!(registry.get(&dimension_key).is_none(), "control: nothing registered yet");
         register(&registry);
-        let entry = registry.get(DIMENSION_KEY).expect("register() must have inserted it");
+        let entry = registry.get(&dimension_key).expect("register() must have inserted it");
         assert_eq!(entry.properties.min_y, -64);
         assert_eq!(entry.properties.height, 128);
     }

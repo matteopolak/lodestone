@@ -13,7 +13,7 @@ use lodestone_model::command_tree::{CommandSuggestionsResponse, CommandTree};
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, CommandBlockMode, Difficulty, EntityAttributeSnapshot, GameMode, Hand,
     ItemStack, RecipeBookType, ResourceKey, ResourcePackResponseKind, Rotation, SoundCategory,
-    Text, Vec3, Vec3f, PredictionSequence,
+    Text, Vec3, Vec3f,
 };
 use uuid::Uuid;
 
@@ -320,6 +320,11 @@ pub struct ResourcePackPush {
 /// implementor. See DESIGN.md §12.116.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MetadataField {
+    /// The base-entity shared-flags byte. The producer owns its bits: this
+    /// generic wire field is valid for any entity type, so an unrelated
+    /// feature must not reuse it without preserving every bit it does not
+    /// own.
+    SharedFlags(u8),
     /// The real creeper's own swell-direction field — which way `swell` is currently moving
     /// (`-1`, `0`, or `1`). See [`crate::mobs::SimMob::snapshot`]'s own doc
     /// comment for why this is always included for a creeper, even at its
@@ -942,7 +947,7 @@ pub enum ServerBound {
         /// Client block-prediction sequence number (see
         /// [`BlockAction::sequence`](Self::BlockAction) for why it is
         /// decoded but not yet acted on).
-        sequence: PredictionSequence,
+        sequence: i32,
         /// `0` main hand, `1` off hand — vanilla's own interaction-hand enum ordinal.
         /// `crate::server`'s `apply_use_item_on` reads this to resolve which
         /// native inventory slot the spawn-egg/flint-and-steel/placement
@@ -2010,15 +2015,6 @@ pub trait ServerProtocol: Send + Sync {
         true
     }
 
-    /// Whether this wire family has a serverbound marker that tells the host
-    /// the client has finished loading the placement teleport. Families that
-    /// predate that packet are ready as soon as Play begins; keeping the
-    /// capability on the protocol seam prevents their movement and fall
-    /// simulation from being gated on an action they cannot encode.
-    fn has_player_loaded_packet(&self) -> bool {
-        false
-    }
-
     /// Emits the online-mode encryption request, mirroring
     /// `ClientboundHelloPacket`: an empty server-id string, the DER-encoded
     /// RSA public key, the verify-token challenge, and a fixed
@@ -2958,7 +2954,7 @@ pub trait ServerProtocol: Send + Sync {
                 pos,
                 block_entity_type,
                 nbt,
-            } => self.encode_block_entity_data(*pos, block_entity_type, nbt),
+            } => self.encode_block_entity_data(*pos, block_entity_type.name(), nbt),
             // This variant is not a packet — see its own doc
             // for why. `crate::server`'s world-effect drain intercepts it
             // before ever reaching this dispatcher in the one real consumer
@@ -3028,14 +3024,6 @@ pub trait ServerProtocol: Send + Sync {
     /// `encode_chunk` already crosses. The default emits nothing.
     fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
         let _ = (x, y, z, state);
-        ServerDirective::None
-    }
-
-    /// Encodes the highest client prediction sequence processed by the server.
-    /// A protocol without this acknowledgement leaves the client ledger
-    /// pending, so the default is deliberately empty for legacy families.
-    fn encode_block_changed_ack(&self, sequence: PredictionSequence) -> ServerDirective {
-        let _ = sequence;
         ServerDirective::None
     }
 
@@ -3679,10 +3667,6 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn has_configuration_phase(&self) -> bool {
         (**self).has_configuration_phase()
-    }
-
-    fn has_player_loaded_packet(&self) -> bool {
-        (**self).has_player_loaded_packet()
     }
 
     fn encode_encryption_request(

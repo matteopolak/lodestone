@@ -3,10 +3,8 @@
 
 use std::path::PathBuf;
 
-use lodestone_server::world_storage::{
-    Error, NativeDirtyChunkRecord, WorldStorage, WorldStorageBackend,
-};
-use lodestone_server::{ChunkColumn, ScheduledTickHandle, TickPriority};
+use lodestone_server::world_storage::{NativeDirtyChunkRecord, WorldStorage, WorldStorageBackend};
+use lodestone_server::{ChunkColumn, ScheduledTickHandle, ScheduledTickKind, TickPriority};
 
 fn tempdir(name: &str) -> PathBuf {
     let unique = std::time::SystemTime::now()
@@ -38,19 +36,19 @@ fn native_chunk_ticks_reopen_in_their_original_world_wide_order() {
         // retain this final scheduler tie-breaker.
         assert!(queues.block.schedule(
             (16, 4, 0),
-            "redstone:repeater".to_owned(),
+            ScheduledTickKind::Repeater,
             50,
             TickPriority::Normal,
         ));
         assert!(queues.block.schedule(
             (0, 4, 0),
-            "redstone:torch".to_owned(),
+            ScheduledTickKind::Torch,
             50,
             TickPriority::High,
         ));
         assert!(queues.block.schedule(
             (-16, 4, 0),
-            "redstone:observer".to_owned(),
+            ScheduledTickKind::Observer,
             50,
             TickPriority::Normal,
         ));
@@ -102,9 +100,9 @@ fn native_chunk_ticks_reopen_in_their_original_world_wide_order() {
     assert_eq!(
         block,
         vec![
-            ((0, 4, 0), "redstone:torch".to_owned(), 50, TickPriority::High),
-            ((16, 4, 0), "redstone:repeater".to_owned(), 50, TickPriority::Normal),
-            ((-16, 4, 0), "redstone:observer".to_owned(), 50, TickPriority::Normal),
+            ((0, 4, 0), ScheduledTickKind::Torch, 50, TickPriority::High),
+            ((16, 4, 0), ScheduledTickKind::Repeater, 50, TickPriority::Normal),
+            ((-16, 4, 0), ScheduledTickKind::Observer, 50, TickPriority::Normal),
         ],
         "priority must beat insertion order, then the stored world-wide order must beat reload order"
     );
@@ -123,8 +121,8 @@ fn native_chunk_ticks_reopen_in_their_original_world_wide_order() {
 }
 
 #[test]
-fn native_tick_save_refuses_a_custom_action_instead_of_losing_it() {
-    let directory = tempdir("reject-custom");
+fn native_tick_save_preserves_a_custom_action_instead_of_losing_it() {
+    let directory = tempdir("preserve-custom");
     let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
         directory: directory.clone(),
     })
@@ -135,17 +133,28 @@ fn native_tick_save_refuses_a_custom_action_instead_of_losing_it() {
     scheduled.with(|queues| {
         assert!(queues.block.schedule(
             (0, 4, 0),
-            "example:plugin_action".to_owned(),
+            ScheduledTickKind::Extension("example:plugin_action".to_owned()),
             20,
             TickPriority::Normal,
         ));
     });
-    assert!(matches!(
-        storage.write_dirty_chunk(NativeDirtyChunkRecord::new(
+    storage
+        .write_dirty_chunk(NativeDirtyChunkRecord::new(
             0, 0, &column, &light, &scheduled,
-        )),
-        Err(Error::Chunk(lodestone_server::world_storage::ChunkRecordError::UnsupportedScheduledTickKind(kind))) if kind == "example:plugin_action"
-    ));
+        ))
+        .expect("custom tick key must be retained by native storage");
     drop(storage);
+    let reopened = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+        directory: directory.clone(),
+    })
+    .expect("reopen native store");
+    let loaded = reopened
+        .load_chunk(0, 0, 0, 16)
+        .expect("load typed column")
+        .expect("stored typed column is present");
+    assert_eq!(
+        loaded.block_scheduled_ticks[0].kind,
+        ScheduledTickKind::Extension("example:plugin_action".to_owned())
+    );
     std::fs::remove_dir_all(directory).expect("remove native test segment");
 }

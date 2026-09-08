@@ -247,9 +247,10 @@ pub use item_render::{
     gui_item_pose, gui_ortho, node_transform_matrix,
 };
 pub use light::{
-    BLOCK_FACTOR, BLOCK_LIGHT_TINT, BRIGHTNESS_FACTOR, apply_brightness_option, brightness,
+    BLOCK_FACTOR, BLOCK_LIGHT_TINT, BRIGHTNESS_FACTOR, NIGHT_VISION_COLOR, ambient_with_effect_floor,
+    apply_brightness_option, brightness,
     light_color, light_color_from_levels, light_term, light_term_from_levels, not_gamma,
-    not_gamma_vec3, sky_light_color_from_darken,
+    night_vision_effect_floor, night_vision_intensity, not_gamma_vec3, sky_light_color_from_darken,
 };
 #[doc(no_inline)]
 pub use lodestone_assets::fluid::FluidState;
@@ -280,8 +281,8 @@ pub use models::{
 };
 pub use scene::{CullStats, FramePlan, WorldScene, section_of};
 pub use screen_effects::{
-    FIRE_TINT, ScreenEffectRenderer, ScreenOverlayVertex, UNDERWATER_TILE_COUNT,
-    UNDERWATER_TINT_ALPHA, border_warning_overlay_triangles,
+    FIRE_STRIP_TOP, FIRE_TILE_COUNT, FIRE_TINT, ScreenEffectRenderer, ScreenOverlayVertex,
+    UNDERWATER_TILE_COUNT, UNDERWATER_TINT_ALPHA, border_warning_overlay_triangles,
     fire_overlay_triangles, underwater_brightness, underwater_overlay_quad,
     underwater_overlay_triangles,
 };

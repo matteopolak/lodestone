@@ -27,8 +27,8 @@ pub enum MainButton {
     /// Mojang-hosted service with its own authenticated HTTP API, none of which
     /// exists here and none of which is on the roadmap.
     Realms,
-    /// The friends icon button. Present and
-    /// disabled: it needs a Microsoft-account social graph.
+    /// The friends icon button. Opens the credential-safe Friends surface;
+    /// account-backed relationship data is loaded after the screen opens.
     Friends,
     /// The language icon button opens the language selector directly from the
     /// title screen,
@@ -171,7 +171,7 @@ impl MainButton {
             // `quit_requested` latches into — stops the loop and leaves a dead
             // canvas rather than closing anything, and `window.close()` is
             // refused for any page the script did not itself open. So the row
-            // is present and greyed, exactly as `Realms` and `Friends` are:
+            // is present and greyed, exactly as `Realms` is:
             // the state vanilla itself ships for a feature that is unavailable
             // rather than absent.
             MainButton::Quit => can_exit_process,
@@ -261,8 +261,9 @@ pub enum PauseButton {
     /// Vanilla's `menu.sendFeedback` icon button. Present and disabled: same,
     /// an external Mojang link.
     Feedback,
-    /// Vanilla's friends icon button. Present and disabled, as on the title
-    /// screen: it needs a Microsoft-account social graph.
+    /// Vanilla's friends icon button. It opens the credential-safe Friends
+    /// surface; relationship data remains unavailable until an online account
+    /// and the service-backed Friends preference are ready.
     Friends,
     /// Vanilla's `menu.playerReporting` icon button — opens
     /// [`super::Screen::Social`], vanilla's

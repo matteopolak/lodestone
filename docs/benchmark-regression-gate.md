@@ -291,13 +291,59 @@ can make the population comparison vacuous. The fixture resets its source counte
 the recorded cold-load counts exclude asynchronous world installation; those counters may remain
 zero during the measured loop because the retaining store serves resident columns.
 
+The zero-mob flat arm is also the no-work control for the source counter: after setup it drives the
+same paused tick loop and must record zero cold columns. The generated arm is then the positive
+production-source control, so a counter that is permanently disconnected from the integrated path
+cannot make the generated assertion pass by reporting zero for both scenes.
+
+The retained 5x5 area is also a deterministic starvation control. It fits below the integrated
+cache floor, so both sweep points must observe zero source-level column generations across all 200
+driven ticks. The bench asserts that bound and records `cold_columns_during_ticks` in `columns`.
+Before the real fixture runs, the benchmark's control feeds one synthetic generation to the same
+predicate and requires rejection; this keeps a future uncached or repeatedly regenerated tick path
+from becoming a silent diagnostic-only change. This is a cache-retention count gate, not a claim
+that the flat fixture measures real terrain generation cost.
+
+The same target has a separate generated-world arm: it wraps the production overworld source,
+installs one generated column through the normal asynchronous setup, resets the counter, then drives
+48 paused ticks. It requires exactly one setup generation and zero generations during those ticks,
+and records `setup_column_generations`, `cold_columns_during_ticks`, and `overrun_count` for the
+scene `generated overworld world, mobs=0 area=1x1 view_radius=1`. This is intentionally bounded to
+one column and is a count/control scene, not a cross-machine duration baseline.
+
+All arms also require zero `TickClock` overruns and record `overrun_count` in `ticks`. This is a
+deterministic paused-clock backlog control: it catches a loop that fails to consume each advanced
+period, while deliberately making no claim about a host's wall-clock ability to sustain 20 Hz.
+
+### Keep-alive loop-stall wrapper
+
+`scripts/keepalive-benchmark.py` is the external connection-path companion. It invokes the existing
+paused-clock integration scenarios by exact name: one silent client must be disconnected after an
+unanswered challenge, while one responsive client must survive four challenge intervals. Each
+invocation must report exactly one passing test; a filtered-out or removed test is rejected rather
+than treated as success. The wrapper therefore emits the deterministic `scenarios`, `passed`, and
+`failed` counts without changing the production loop or duplicating its protocol fixture. Its
+reported `wall_ms` values are advisory local samples only and are not baseline candidates.
+
+Run it directly:
+
+```bash
+python3 scripts/keepalive-benchmark.py
+```
+
 ### Fixture limits
 
-Both sweep points use a flat, four-layer in-memory world with no terrain, redstone, block
-entities, or real chunk churn. It is a deterministic simulation-floor fixture, not a
-production-shaped cost sample. A generator-backed or region-backed source would fold column
-generation into the first cold access and needs its own scene definition before its duration can
-be compared. Do not infer a production tick cost from this fixture's wall-clock result.
+The two population sweep points use a flat, four-layer in-memory world with no terrain, redstone,
+block entities, or real chunk churn. They are a deterministic simulation-floor fixture, not a
+production-shaped cost sample. The generated arm is deliberately separate and bounded to one cold
+column so its source-retention assertion cannot be confused with a duration measurement. Do not
+infer a production tick cost from any fixture's wall-clock result.
+
+The generated arm and the keep-alive wrapper are intentionally separate controls: the former proves
+that the integrated tick loop does not repeatedly regenerate a retained generated column, while the
+latter drives the existing live connection scenarios. A single connection session that both streams
+new generated columns and services keep-alive challenges remains an end-to-end acceptance gap; it
+would require a protocol fixture or production instrumentation beyond this benchmark-only change.
 
 Not in the CI gated set: it builds `lodestone-server`, `lodestone-v26-2` and their graph
 for a job that would otherwise build only the render path. Run it directly:

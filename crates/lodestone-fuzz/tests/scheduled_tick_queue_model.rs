@@ -15,10 +15,7 @@
 
 use std::cell::Cell;
 
-use lodestone_server::{
-    ChunkScheduledTickQueue, PersistedScheduledTick, ScheduledTickHandle, TickPriority,
-};
-use lodestone_server::region_source::ScheduledTickQueues;
+use lodestone_server::{PersistedScheduledTick, ScheduledTickHandle, ScheduledTickKind, TickPriority};
 use proptest::collection;
 use proptest::prelude::*;
 use proptest::sample;
@@ -79,6 +76,17 @@ impl From<&lodestone_server::ScheduledTick<String>> for TickView {
         Self {
             pos: tick.pos,
             kind: tick.kind.clone(),
+            trigger_tick: tick.trigger_tick,
+            priority: tick.priority,
+        }
+    }
+}
+
+impl From<&lodestone_server::ScheduledTick<ScheduledTickKind>> for TickView {
+    fn from(tick: &lodestone_server::ScheduledTick<ScheduledTickKind>) -> Self {
+        Self {
+            pos: tick.pos,
+            kind: tick.kind.as_ref().to_owned(),
             trigger_tick: tick.trigger_tick,
             priority: tick.priority,
         }
@@ -211,7 +219,7 @@ impl ReferenceQueue {
             .filter(|entry| chunk_for(entry.pos) == (column_x, column_z))
             .map(|entry| PersistedScheduledTick {
                 pos: entry.pos,
-                kind: entry.kind.clone(),
+                kind: ScheduledTickKind::from_name(entry.kind.clone()),
                 trigger_tick: entry.trigger_tick,
                 priority: entry.priority,
                 insertion_order: entry.insertion_order,
@@ -315,26 +323,6 @@ fn sort_views(views: &mut [TickView]) {
     });
 }
 
-fn lane_queue_mut(
-    queues: &mut ScheduledTickQueues,
-    lane: Lane,
-) -> &mut ChunkScheduledTickQueue<String> {
-    match lane {
-        Lane::Block => &mut queues.block,
-        Lane::Fluid => &mut queues.fluid,
-    }
-}
-
-fn lane_queue(
-    queues: &ScheduledTickQueues,
-    lane: Lane,
-) -> &ChunkScheduledTickQueue<String> {
-    match lane {
-        Lane::Block => &queues.block,
-        Lane::Fluid => &queues.fluid,
-    }
-}
-
 fn apply_production(handle: &ScheduledTickHandle, op: QueueOp) -> Event {
     handle.with(|queues| match op {
         QueueOp::Schedule {
@@ -345,12 +333,20 @@ fn apply_production(handle: &ScheduledTickHandle, op: QueueOp) -> Event {
             priority,
         } => Event::Scheduled {
             lane,
-            accepted: lane_queue_mut(queues, lane).schedule(
-                POSITIONS[pos],
-                KINDS[kind].to_owned(),
-                trigger_tick,
-                priority,
-            ),
+            accepted: match lane {
+                Lane::Block => queues.block.schedule(
+                    POSITIONS[pos],
+                    ScheduledTickKind::from_name(KINDS[kind]),
+                    trigger_tick,
+                    priority,
+                ),
+                Lane::Fluid => queues.fluid.schedule(
+                    POSITIONS[pos],
+                    KINDS[kind].to_owned(),
+                    trigger_tick,
+                    priority,
+                ),
+            },
         },
         QueueOp::Drain {
             lane,
@@ -358,18 +354,35 @@ fn apply_production(handle: &ScheduledTickHandle, op: QueueOp) -> Event {
             max_to_process,
         } => Event::Drained {
             lane,
-            ticks: lane_queue_mut(queues, lane)
-                .drain_due(current_tick, max_to_process)
-                .iter()
-                .map(TickView::from)
-                .collect(),
+            ticks: match lane {
+                Lane::Block => queues
+                    .block
+                    .drain_due(current_tick, max_to_process)
+                    .iter()
+                    .map(TickView::from)
+                    .collect(),
+                Lane::Fluid => queues
+                    .fluid
+                    .drain_due(current_tick, max_to_process)
+                    .iter()
+                    .map(TickView::from)
+                    .collect(),
+            },
         },
         QueueOp::Cancel { lane, pos, kind } => Event::Cancelled {
             lane,
-            tick: lane_queue_mut(queues, lane)
-                .take_matching(POSITIONS[pos], |candidate| candidate == KINDS[kind])
-                .as_ref()
-                .map(TickView::from),
+            tick: match lane {
+                Lane::Block => queues
+                    .block
+                    .take_matching(POSITIONS[pos], |candidate| candidate.as_ref() == KINDS[kind])
+                    .as_ref()
+                    .map(TickView::from),
+                Lane::Fluid => queues
+                    .fluid
+                    .take_matching(POSITIONS[pos], |candidate| candidate == KINDS[kind])
+                    .as_ref()
+                    .map(TickView::from),
+            },
         },
     })
 }
@@ -380,10 +393,18 @@ fn assert_state_matches(
 ) -> Result<(), String> {
     for lane in LANES {
         let actual = handle.with(|queues| {
-            let queue = lane_queue(queues, lane);
-            let mut views = queue.iter().map(TickView::from).collect::<Vec<_>>();
-            sort_views(&mut views);
-            (queue.len(), queue.is_empty(), views)
+            match lane {
+                Lane::Block => {
+                    let mut views = queues.block.iter().map(TickView::from).collect::<Vec<_>>();
+                    sort_views(&mut views);
+                    (queues.block.len(), queues.block.is_empty(), views)
+                }
+                Lane::Fluid => {
+                    let mut views = queues.fluid.iter().map(TickView::from).collect::<Vec<_>>();
+                    sort_views(&mut views);
+                    (queues.fluid.len(), queues.fluid.is_empty(), views)
+                }
+            }
         });
         let reference = expected.queue(lane);
         if actual.0 != reference.entries.len()
@@ -400,7 +421,12 @@ fn assert_state_matches(
 
         for (pos_index, &pos) in POSITIONS.iter().enumerate() {
             for (kind_index, &kind) in KINDS.iter().enumerate() {
-                let actual_has = handle.with(|queues| lane_queue(queues, lane).has_scheduled(pos, &kind.to_owned()));
+                let actual_has = handle.with(|queues| match lane {
+                    Lane::Block => queues
+                        .block
+                        .has_scheduled(pos, &ScheduledTickKind::from_name(kind)),
+                    Lane::Fluid => queues.fluid.has_scheduled(pos, &kind.to_owned()),
+                });
                 let expected_has = reference
                     .entries
                     .iter()

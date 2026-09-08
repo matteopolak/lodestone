@@ -1,4 +1,4 @@
-//! One-target P06 comparator profile for the Nether source.
+//! One-target packet comparator profile for the Nether source.
 //!
 //! This is intentionally a read-only probe: it reports the source stages that
 //! run before the packet hash, then compares the nine-column neighbour-aware

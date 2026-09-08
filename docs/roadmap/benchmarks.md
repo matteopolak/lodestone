@@ -216,7 +216,14 @@ The benchmark infrastructure is in place, but its coverage is not complete:
   zero duration, so it cannot rank production phase cost; a real-time,
   production-shaped profile remains absent.
 - The server-tick fixture is an in-memory floor rather than a generator- or region-backed
-  production-shaped workload.
+  production-shaped workload. Its retained 5x5 area now has a deterministic zero-cold-column
+  count gate across the driven ticks, plus a paused-clock zero-overrun backlog control. These
+  catch retention/scheduler regressions without pretending to measure generator duration. A
+  separate bounded arm now wraps the production overworld source, asserts one setup generation and
+  zero generated columns during 48 paused ticks, and records those counts. The external keep-alive
+  wrapper exercises the existing silent/responsive connection controls and rejects filtered-out
+  test runs, while retaining wall-clock values as advisory only. A single live connection scene that
+  combines new generated-column streaming with keep-alive service remains future work.
 - The shared recorder is intentionally native-only and feature-gated because it writes
   local files and reads process metadata. Worldgen's counter-poisoning filter remains a
   local wrapper and must fail closed for unlisted units.

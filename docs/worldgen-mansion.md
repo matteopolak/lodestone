@@ -2,19 +2,19 @@
 
 ## What it is
 
-`structure::mansion` builds the template-piece list for the currently supported exterior of a woodland mansion. It is intentionally partial: the seeded plan, entrance, exterior walls, corridor floors, and roof layers place blocks; room dividers, doors, carpets, stairs, secret rooms, furnishings, and entity markers do not yet place.
+`structure::mansion` builds the complete template-piece list for a woodland mansion. The seeded plan, exterior shell, corridors, room dividers, doors, carpets, stairs, secret rooms, furnishings, and roof layers all reach the normal template placement stage; entity data markers remain a server-side consumer concern.
 
 ## How it works
 
-`mansion::generate` consumes the structure start's already-selected rotation and random stream. It builds an 11 by 11 seeded lower-floor topology, derives a shorter third-floor topology from it, and turns exposed cell edges into wall and roof template placements. Every returned `StructurePiece` has a `PiecePlacement`, so the normal structure-placement stage clips and writes the bundled template blocks into chunk grids.
+`mansion::generate` consumes the structure start's already-selected rotation and random stream. It builds an 11 by 11 seeded lower-floor topology, classifies each floor's one-cell, one-by-two-cell, and two-by-two-cell rooms, derives the shorter third-floor topology from the second-floor stairs room, and turns exposed cell edges into wall, carpet, divider, door, room, and roof template placements. Room variants and orientations are selected from the same stream as the topology. Every returned `StructurePiece` has a `PiecePlacement`, so the normal structure-placement stage clips and writes the bundled template blocks into chunk grids.
 
-The module returns `MansionAssembly` rather than a bare vector. Its `coverage()` is `ExteriorAndCorridors`; integrations must retain the `mansion:room_templates` ledger entry until the omitted room path is implemented. A missing required template returns `MissingTemplate` before any piece is emitted, preventing an incomplete asset bundle from looking like a valid empty or reduced mansion.
+The module returns `MansionAssembly` rather than a bare vector. Its `coverage()` is `CompleteTemplates`, so the registry treats the mansion structure as supported. A missing required template returns `MissingTemplate` before any piece is emitted, preventing an incomplete asset bundle from looking like a valid empty or reduced mansion.
 
 ## How to change it
 
-Extend the same grid-derived planner with the room-classification pass before adding room templates. Add every newly reachable template to `TEMPLATE_IDS`; the registry's eager template loading must call `mansion::template_ids()` or `generate` will return `MissingTemplate`.
+Keep the room classifier and piece-placement loops in lockstep with the grid flags: room ids identify shared walls, the origin and door flags choose the entrance side, and the stairs flag selects the third-floor connection. Add every newly reachable template to `TEMPLATE_IDS`; the registry's eager template loading must call `mansion::template_ids()` or `generate` will return `MissingTemplate`.
 
-Keep all output as `template_piece` records. Do not write blocks in the planner: the per-chunk structure placement stage owns clipping, block processors, and the block-entity handoff. When interiors land, remove or narrow the registry ledger entry in the same change and add a fixture that distinguishes an interior block from a shell-only control.
+Keep all output as `template_piece` records. Do not write blocks in the planner: the per-chunk structure placement stage owns clipping, block processors, and the block-entity handoff. When changing room selection or traversal, update the seeded piece-count and clipped-write fixture; those values are independent controls for RNG/order drift and template placement drift.
 
 ## Configuration
 

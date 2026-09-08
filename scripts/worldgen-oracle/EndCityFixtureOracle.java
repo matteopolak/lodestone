@@ -20,6 +20,8 @@ import net.minecraft.world.level.chunk.storage.RegionStorageInfo;
 
 public final class EndCityFixtureOracle {
     public static void main(String[] args) throws Exception {
+        String rawArgs = System.getenv().getOrDefault("ORACLE_ARGS", "").trim();
+        if (args.length == 0 && !rawArgs.isEmpty()) args = rawArgs.split("\\s+");
         if (args.length != 6) {
             throw new IllegalArgumentException("usage: EndCityFixtureOracle <region-dir> <rx> <rz> <chunk-x> <chunk-z> <structure-id>");
         }

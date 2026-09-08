@@ -1,6 +1,8 @@
 //! The scheduled-tick queue (the first half of scheduled block/fluid processing): the
 //! per-block and per-fluid tick machinery, collapsed to one generic
-//! [`ScheduledTickQueue<T>`] the tick loop instantiates twice.
+//! [`ScheduledTickQueue<T>`]. The live block queue uses
+//! [`ScheduledTickKind`]; the fluid queue remains string-keyed behind the
+//! explicit fluid boundary documented below.
 //!
 //! # Where this comes from in the real engine
 //!
@@ -56,6 +58,7 @@
 //! `priority`. [`ScheduledTickQueue::schedule`] mirrors this exactly.
 
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashSet};
+use std::borrow::Cow;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -82,6 +85,162 @@ pub enum TickPriority {
     Low,
     VeryLow,
     ExtremelyLow,
+}
+
+/// The identity of a scheduled block or fluid update.
+///
+/// Built-in identities are represented as zero-sized enum variants, so the
+/// scheduler does not repeatedly compare or clone discriminator strings.
+/// `Extension` is intentionally open-ended: a plugin may retain an identity
+/// that this build does not know how to execute, and storage can carry it
+/// without turning it into an unrelated built-in action. The string form is
+/// recovered only at an explicit persistence or legacy-queue boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ScheduledTickKind {
+    /// The built-in fluid update lane.
+    Fluid,
+    /// A redstone torch update.
+    Torch,
+    /// A repeater update.
+    Repeater,
+    /// A comparator update.
+    Comparator,
+    /// An observer update.
+    Observer,
+    /// A target decay update.
+    TargetDecay,
+    /// A tripwire recheck.
+    TripwireRecheck,
+    /// A piston extension/retraction update.
+    Piston,
+    /// A gravity settling update.
+    Gravity,
+    /// A fire spread update.
+    Fire,
+    /// A primed TNT update.
+    TntPrime,
+    /// A command-block update.
+    CommandBlock,
+    /// A button release update.
+    ButtonRelease,
+    /// A dispenser firing update.
+    DispenserFire,
+    /// A plugin-defined or otherwise not-yet-modeled identity.
+    Extension(String),
+}
+
+impl ScheduledTickKind {
+    /// Converts the established legacy discriminator into its typed key.
+    ///
+    /// This parser is deliberately lossless. Names not recognized by this
+    /// build become [`Self::Extension`] rather than being rejected or mapped
+    /// to a built-in action.
+    #[must_use]
+    pub fn from_name(name: impl Into<String>) -> Self {
+        let name = name.into();
+        match name.as_str() {
+            "lodestone:fluid" => Self::Fluid,
+            "redstone:torch" => Self::Torch,
+            "redstone:repeater" => Self::Repeater,
+            "redstone:comparator" => Self::Comparator,
+            "redstone:observer" => Self::Observer,
+            "redstone:target_decay" => Self::TargetDecay,
+            "redstone:tripwire_recheck" => Self::TripwireRecheck,
+            "redstone:piston" => Self::Piston,
+            "gravity" => Self::Gravity,
+            "lodestone:fire" => Self::Fire,
+            "redstone:tnt_prime" => Self::TntPrime,
+            "command:tick" => Self::CommandBlock,
+            "lodestone:button_release" => Self::ButtonRelease,
+            "redstone:dispenser_fire" => Self::DispenserFire,
+            _ => Self::Extension(name),
+        }
+    }
+
+    /// Returns the canonical legacy/storage name without allocating for a
+    /// built-in key.
+    #[must_use]
+    pub fn name(&self) -> Cow<'_, str> {
+        Cow::Borrowed(match self {
+            Self::Fluid => "lodestone:fluid",
+            Self::Torch => "redstone:torch",
+            Self::Repeater => "redstone:repeater",
+            Self::Comparator => "redstone:comparator",
+            Self::Observer => "redstone:observer",
+            Self::TargetDecay => "redstone:target_decay",
+            Self::TripwireRecheck => "redstone:tripwire_recheck",
+            Self::Piston => "redstone:piston",
+            Self::Gravity => "gravity",
+            Self::Fire => "lodestone:fire",
+            Self::TntPrime => "redstone:tnt_prime",
+            Self::CommandBlock => "command:tick",
+            Self::ButtonRelease => "lodestone:button_release",
+            Self::DispenserFire => "redstone:dispenser_fire",
+            Self::Extension(name) => return Cow::Borrowed(name),
+        })
+    }
+
+    /// Takes ownership of this key's canonical name at a legacy queue or
+    /// storage boundary.
+    #[must_use]
+    pub fn into_name(self) -> String {
+        match self {
+            Self::Extension(name) => name,
+            other => other.name().into_owned(),
+        }
+    }
+
+    /// Returns whether this is an open extension key rather than a built-in.
+    #[must_use]
+    pub fn is_extension(&self) -> bool {
+        matches!(self, Self::Extension(_))
+    }
+}
+
+impl AsRef<str> for ScheduledTickKind {
+    fn as_ref(&self) -> &str {
+        match self {
+            Self::Fluid => "lodestone:fluid",
+            Self::Torch => "redstone:torch",
+            Self::Repeater => "redstone:repeater",
+            Self::Comparator => "redstone:comparator",
+            Self::Observer => "redstone:observer",
+            Self::TargetDecay => "redstone:target_decay",
+            Self::TripwireRecheck => "redstone:tripwire_recheck",
+            Self::Piston => "redstone:piston",
+            Self::Gravity => "gravity",
+            Self::Fire => "lodestone:fire",
+            Self::TntPrime => "redstone:tnt_prime",
+            Self::CommandBlock => "command:tick",
+            Self::ButtonRelease => "lodestone:button_release",
+            Self::DispenserFire => "redstone:dispenser_fire",
+            Self::Extension(name) => name,
+        }
+    }
+}
+
+impl From<String> for ScheduledTickKind {
+    fn from(value: String) -> Self {
+        Self::from_name(value)
+    }
+}
+
+impl From<&str> for ScheduledTickKind {
+    fn from(value: &str) -> Self {
+        Self::from_name(value)
+    }
+}
+
+impl PartialEq<str> for ScheduledTickKind {
+    fn eq(&self, other: &str) -> bool {
+        self.name().as_ref() == other
+    }
+}
+
+impl PartialEq<&str> for ScheduledTickKind {
+    fn eq(&self, other: &&str) -> bool {
+        self.name().as_ref() == *other
+    }
 }
 
 impl Default for TickPriority {
@@ -122,7 +281,7 @@ pub struct ScheduledTick<T> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersistedScheduledTick {
     pub pos: (i32, i32, i32),
-    pub kind: String,
+    pub kind: ScheduledTickKind,
     pub trigger_tick: u64,
     pub priority: TickPriority,
     pub insertion_order: u64,
@@ -167,11 +326,10 @@ impl<T> Ord for HeapEntry<T> {
 /// model today, and what changes (nothing about the ordering contract) if a
 /// per-chunk registry is added later.
 ///
-/// `T` is the tick's payload — the block/fluid *kind* being ticked (this
-/// crate keys it by canonical block-state-name `String`, matching
-/// `ChunkColumn`'s own block representation; the real engine keys by the
-/// block/fluid
-/// registry object). `T: Eq + Hash + Clone` is required for the
+/// `T` is the tick's payload — the block/fluid *kind* being ticked. The live
+/// block queue uses [`ScheduledTickKind`], while the fluid implementation
+/// remains a `String` queue at its explicit compatibility boundary.
+/// `T: Eq + Hash + Clone` is required for the
 /// `(pos, kind)` dedup set — see [`schedule`](Self::schedule).
 #[derive(Debug)]
 pub struct ScheduledTickQueue<T> {
@@ -439,7 +597,7 @@ pub trait ScheduledTickQueueAccess<T> {
         &self,
         pos: (i32, i32, i32),
         matches: impl FnMut(&T) -> bool,
-    ) -> Option<&ScheduledTick<T>>;
+    ) -> Option<ScheduledTick<T>>;
 
     /// Removes the first pending tick at `pos` whose kind matches.
     fn take_matching(
@@ -480,8 +638,10 @@ impl<T: Eq + Hash + Clone> ScheduledTickQueueAccess<T> for ScheduledTickQueue<T>
         &self,
         pos: (i32, i32, i32),
         mut matches: impl FnMut(&T) -> bool,
-    ) -> Option<&ScheduledTick<T>> {
-        self.iter().find(|tick| tick.pos == pos && matches(&tick.kind))
+    ) -> Option<ScheduledTick<T>> {
+        self.iter()
+            .find(|tick| tick.pos == pos && matches(&tick.kind))
+            .cloned()
     }
 
     fn take_matching(
@@ -490,6 +650,66 @@ impl<T: Eq + Hash + Clone> ScheduledTickQueueAccess<T> for ScheduledTickQueue<T>
         matches: impl FnMut(&T) -> bool,
     ) -> Option<ScheduledTick<T>> {
         Self::take_matching(self, pos, matches)
+    }
+}
+
+/// Compatibility boundary for callers that still own a string-keyed fixture
+/// queue while the production block queue moves to [`ScheduledTickKind`]. The
+/// queue itself remains legacy, but the caller's scheduling surface is typed;
+/// conversion happens only at this explicitly named adapter.
+impl ScheduledTickQueueAccess<ScheduledTickKind> for ScheduledTickQueue<String> {
+    fn schedule(
+        &mut self,
+        pos: (i32, i32, i32),
+        kind: ScheduledTickKind,
+        trigger_tick: u64,
+        priority: TickPriority,
+    ) -> bool {
+        ScheduledTickQueue::schedule(self, pos, kind.into_name(), trigger_tick, priority)
+    }
+
+    fn has_scheduled(&self, pos: (i32, i32, i32), kind: &ScheduledTickKind) -> bool {
+        let name = kind.as_ref().to_owned();
+        ScheduledTickQueue::has_scheduled(self, pos, &name)
+    }
+
+    fn matching_at(
+        &self,
+        pos: (i32, i32, i32),
+        mut matches: impl FnMut(&ScheduledTickKind) -> bool,
+    ) -> Option<ScheduledTick<ScheduledTickKind>> {
+        self.iter()
+            .find(|tick| {
+                tick.pos == pos && {
+                    let kind = ScheduledTickKind::from_name(tick.kind.as_str());
+                    matches(&kind)
+                }
+            })
+            .map(|tick| ScheduledTick {
+                pos: tick.pos,
+                kind: ScheduledTickKind::from_name(tick.kind.as_str()),
+                trigger_tick: tick.trigger_tick,
+                priority: tick.priority,
+                sub_tick_order: tick.sub_tick_order,
+            })
+    }
+
+    fn take_matching(
+        &mut self,
+        pos: (i32, i32, i32),
+        mut matches: impl FnMut(&ScheduledTickKind) -> bool,
+    ) -> Option<ScheduledTick<ScheduledTickKind>> {
+        ScheduledTickQueue::take_matching(self, pos, |name| {
+            let kind = ScheduledTickKind::from_name(name.as_str());
+            matches(&kind)
+        })
+        .map(|tick| ScheduledTick {
+            pos: tick.pos,
+            kind: ScheduledTickKind::from_name(tick.kind.as_str()),
+            trigger_tick: tick.trigger_tick,
+            priority: tick.priority,
+            sub_tick_order: tick.sub_tick_order,
+        })
     }
 }
 
@@ -845,11 +1065,12 @@ impl<T: Eq + Hash + Clone> ScheduledTickQueueAccess<T> for ChunkScheduledTickQue
         &self,
         pos: (i32, i32, i32),
         mut matches: impl FnMut(&T) -> bool,
-    ) -> Option<&ScheduledTick<T>> {
+    ) -> Option<ScheduledTick<T>> {
         self.queues
             .get(&Self::chunk_for(pos))?
             .iter()
             .find(|tick| tick.pos == pos && matches(&tick.kind))
+            .cloned()
     }
 
     fn take_matching(
@@ -858,6 +1079,68 @@ impl<T: Eq + Hash + Clone> ScheduledTickQueueAccess<T> for ChunkScheduledTickQue
         matches: impl FnMut(&T) -> bool,
     ) -> Option<ScheduledTick<T>> {
         Self::take_matching(self, pos, matches)
+    }
+}
+
+/// The same typed block-key boundary for chunk queues retained by focused
+/// legacy fixtures. Production uses `ChunkScheduledTickQueue<ScheduledTickKind>`;
+/// this implementation keeps older `String` fixtures useful without making
+/// their representation the live queue's representation.
+impl ScheduledTickQueueAccess<ScheduledTickKind> for ChunkScheduledTickQueue<String> {
+    fn schedule(
+        &mut self,
+        pos: (i32, i32, i32),
+        kind: ScheduledTickKind,
+        trigger_tick: u64,
+        priority: TickPriority,
+    ) -> bool {
+        ChunkScheduledTickQueue::schedule(self, pos, kind.into_name(), trigger_tick, priority)
+    }
+
+    fn has_scheduled(&self, pos: (i32, i32, i32), kind: &ScheduledTickKind) -> bool {
+        let name = kind.as_ref().to_owned();
+        ChunkScheduledTickQueue::has_scheduled(self, pos, &name)
+    }
+
+    fn matching_at(
+        &self,
+        pos: (i32, i32, i32),
+        mut matches: impl FnMut(&ScheduledTickKind) -> bool,
+    ) -> Option<ScheduledTick<ScheduledTickKind>> {
+        self.queues
+            .get(&Self::chunk_for(pos))?
+            .iter()
+            .find(|tick| {
+                tick.pos == pos && {
+                    let kind = ScheduledTickKind::from_name(tick.kind.as_str());
+                    matches(&kind)
+                }
+            })
+            .map(|tick| ScheduledTick {
+                pos: tick.pos,
+                kind: ScheduledTickKind::from_name(tick.kind.as_str()),
+                trigger_tick: tick.trigger_tick,
+                priority: tick.priority,
+                sub_tick_order: tick.sub_tick_order,
+            })
+    }
+
+    fn take_matching(
+        &mut self,
+        pos: (i32, i32, i32),
+        mut matches: impl FnMut(&ScheduledTickKind) -> bool,
+    ) -> Option<ScheduledTick<ScheduledTickKind>> {
+        ChunkScheduledTickQueue::take_matching(self, pos, |name| {
+            let kind = ScheduledTickKind::from_name(name.as_str());
+            matches(&kind)
+        })
+        .map(|tick| ScheduledTick {
+            pos: tick.pos,
+            kind: ScheduledTickKind::from_name(tick.kind.as_str()),
+            trigger_tick: tick.trigger_tick,
+            priority: tick.priority,
+            sub_tick_order: tick.sub_tick_order,
+        })
     }
 }
 
@@ -918,7 +1201,7 @@ pub struct StagedTick {
     /// Block position, as `ScheduledTick::pos`.
     pub pos: (i32, i32, i32),
     /// The tick kind, as `ScheduledTick::kind`.
-    pub kind: String,
+    pub kind: ScheduledTickKind,
     /// Absolute trigger tick, already rebased onto the loading session's clock.
     pub trigger_tick: u64,
     /// As `ScheduledTick::priority`.
@@ -941,7 +1224,7 @@ pub struct ScheduledTickQueues {
     /// Reactions use [`ScheduledTickQueueAccess`] for their explicit hand-off
     /// back to this owner, preserving piston cancellation as well as ordinary
     /// redstone rescheduling across a column boundary.
-    pub block: ChunkScheduledTickQueue<String>,
+    pub block: ChunkScheduledTickQueue<ScheduledTickKind>,
     /// The real per-world fluid-tick queue.
     pub fluid: ChunkScheduledTickQueue<String>,
 }
@@ -988,24 +1271,26 @@ impl ScheduledTickHandle {
         };
         for tick in staged {
             if tick.fluid {
+                let kind = tick.kind.into_name();
                 if let Some(order) = tick.insertion_order {
                     guard
                         .fluid
-                        .restore(tick.pos, tick.kind, tick.trigger_tick, tick.priority, order);
+                        .restore(tick.pos, kind, tick.trigger_tick, tick.priority, order);
                 } else {
                     guard
                         .fluid
-                        .schedule(tick.pos, tick.kind, tick.trigger_tick, tick.priority);
+                        .schedule(tick.pos, kind, tick.trigger_tick, tick.priority);
                 }
             } else {
+                let kind = tick.kind;
                 if let Some(order) = tick.insertion_order {
                     guard
                         .block
-                        .restore(tick.pos, tick.kind, tick.trigger_tick, tick.priority, order);
+                        .restore(tick.pos, kind, tick.trigger_tick, tick.priority, order);
                 } else {
                     guard
                         .block
-                        .schedule(tick.pos, tick.kind, tick.trigger_tick, tick.priority);
+                        .schedule(tick.pos, kind, tick.trigger_tick, tick.priority);
                 }
             }
         }
@@ -1055,7 +1340,7 @@ impl ScheduledTickHandle {
         column_z: i32,
     ) -> (Vec<PersistedScheduledTick>, Vec<PersistedScheduledTick>) {
         self.with(|queues| {
-            let snapshot = |queue: &ChunkScheduledTickQueue<String>| {
+            let block_snapshot = |queue: &ChunkScheduledTickQueue<ScheduledTickKind>| {
                 let mut ticks: Vec<_> = queue
                     .iter()
                     .filter(|tick| {
@@ -1073,7 +1358,25 @@ impl ScheduledTickHandle {
                 ticks.sort_by_key(|tick| tick.insertion_order);
                 ticks
             };
-            (snapshot(&queues.block), snapshot(&queues.fluid))
+            let fluid_snapshot = |queue: &ChunkScheduledTickQueue<String>| {
+                let mut ticks: Vec<_> = queue
+                    .iter()
+                    .filter(|tick| {
+                        (tick.pos.0.div_euclid(16), tick.pos.2.div_euclid(16))
+                            == (column_x, column_z)
+                    })
+                    .map(|tick| PersistedScheduledTick {
+                        pos: tick.pos,
+                        kind: ScheduledTickKind::from_name(tick.kind.clone()),
+                        trigger_tick: tick.trigger_tick,
+                        priority: tick.priority,
+                        insertion_order: tick.sub_tick_order,
+                    })
+                    .collect();
+                ticks.sort_by_key(|tick| tick.insertion_order);
+                ticks
+            };
+            (block_snapshot(&queues.block), fluid_snapshot(&queues.fluid))
         })
     }
 
@@ -1128,6 +1431,58 @@ impl ScheduledTickHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_kind_round_trips_builtin_and_unknown_extension_names() {
+        let builtins = [
+            ("lodestone:fluid", ScheduledTickKind::Fluid),
+            ("redstone:repeater", ScheduledTickKind::Repeater),
+            ("redstone:piston", ScheduledTickKind::Piston),
+        ];
+        for (name, expected) in builtins {
+            let kind = ScheduledTickKind::from_name(name);
+            assert_eq!(kind, expected);
+            assert_eq!(kind.name().as_ref(), name);
+            assert!(!kind.is_extension());
+        }
+
+        let unknown = ScheduledTickKind::from_name("example:plugin_tick");
+        assert_eq!(unknown, ScheduledTickKind::Extension("example:plugin_tick".into()));
+        assert_eq!(unknown.name().as_ref(), "example:plugin_tick");
+        assert_eq!(unknown.clone().into_name(), "example:plugin_tick");
+        assert!(unknown.is_extension());
+    }
+
+    #[test]
+    fn production_handle_keeps_block_keys_typed_and_converts_only_fluid_records() {
+        let handle = ScheduledTickHandle::new();
+        let accepted = handle.stage_persisted(
+            vec![PersistedScheduledTick {
+                pos: (1, 64, 2),
+                kind: ScheduledTickKind::Extension("example:plugin_tick".into()),
+                trigger_tick: 7,
+                priority: TickPriority::Normal,
+                insertion_order: 0,
+            }],
+            vec![PersistedScheduledTick {
+                pos: (3, 64, 4),
+                kind: ScheduledTickKind::Fluid,
+                trigger_tick: 8,
+                priority: TickPriority::Low,
+                insertion_order: 1,
+            }],
+        );
+        assert_eq!(accepted, 2);
+        handle.with(|queues| {
+            let block = queues.block.iter().next().expect("typed block tick merged");
+            assert_eq!(block.kind, "example:plugin_tick");
+            let fluid = queues.fluid.iter().next().expect("typed fluid tick merged");
+            assert_eq!(fluid.kind, "lodestone:fluid");
+        });
+        let (block, fluid) = handle.snapshot_column(0, 0);
+        assert_eq!(block[0].kind, ScheduledTickKind::Extension("example:plugin_tick".into()));
+        assert_eq!(fluid[0].kind, ScheduledTickKind::Fluid);
+    }
 
     /// Predicted drain order for a hand-built set of five ticks spanning
     /// every tiebreaker `DRAIN_ORDER` defines: trigger tick first (so the

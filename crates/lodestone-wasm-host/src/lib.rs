@@ -43,11 +43,11 @@
 //! |---|---|
 //! | [`host`] | the embedding: engine, per-guest `Store` and scheduler, the gated `Linker`, fuel preemption |
 //! | [`capability`] | the capability vocabulary and the two enforcement mechanisms |
-//! | [`version_broker`] | the copied, privileged version identity and lookup contract |
+//! | [`version_broker`] | the by-value privileged version descriptor, copied records, and compatibility contract |
 //! | `wit/lodestone-plugin.wit` | the ABI surface — the WIT world, vendored as the single source of truth |
 //! | [`abi`] | the lift from `ClientEvent` and the lower to `ClientAction`, each capability-gated |
 //! | [`conductor`] | [`WasmHostPlugin`]: the one native system that drives every guest, writes protocol actions to `ActionQueue`, and routes copied intents to their existing ECS consumers |
-//! | [`manifest`] | `plugin.toml`: name, version, ABI world, priority, declared capabilities, and the optional exact broker lock |
+//! | [`manifest`] | `plugin.toml`: name, version, ABI world, priority, declared capabilities |
 //!
 //! # Why the ABI is the intent doctrine, not a new vocabulary
 //!
@@ -90,10 +90,8 @@
 //! # Configuration
 //!
 //! [`host::PluginHost::new`] takes the policy; [`capability::CapabilitySet::default_policy`]
-//! is the "denied unless granted" default. `with_fuel`, `with_memory_limit`,
-//! `with_filesystem_root`, and `with_version_broker` configure host resources.
-//! The broker remains unavailable unless an embedding supplies a source and a
-//! manifest declares the matching `[version-lock]`.
+//! is the "denied unless granted" default. `with_fuel`, `with_memory_limit` and
+//! `with_filesystem_root` are the three knobs.
 //!
 //! # Dependencies
 //!
@@ -131,7 +129,7 @@ pub use host::{
     ChatKind, ChatMessage, CommandAnchor, CommandContext,
     CommandEntity, CommandExecution, CommandOutcome, CommandPosition, CommandRotation, CommandSpec,
     DEFAULT_FUEL_PER_TICK, DEFAULT_FUEL_PER_VERDICT, DEFAULT_MEMORY_LIMIT,
-    MAX_BLOCK_SNAPSHOT_POSITIONS, EntityEquipment, EntityEquipmentChanged, EntityHealthChanged,
+    MAX_BLOCK_SNAPSHOT_POSITIONS, MAX_PLUGIN_FILE_BYTES, EntityEquipment, EntityEquipmentChanged, EntityHealthChanged,
     EntityIdentity, EntityMotion, EntityMoved, EntityRotation, EntitySpawned, EntityVelocity,
     EquipmentSlot, Event, Hand, Health,
     HostError, InventoryHotbarSwap, InventoryThrow, LoadError, LoadedPlugin, LogLevel, LookIntent, MovementIntent, PlaceIntent, PlaceOutcome,

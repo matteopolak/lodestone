@@ -75,6 +75,8 @@ than not offering it at all.
 So [`DimensionRegistry`] is a **separate, additive** mechanism, not a fourth `Dimension` variant:
 
 ```rust
+use lodestone_model::ResourceKey;
+
 pub struct DimensionProperties {
     pub min_y: i32, pub height: i32, pub logical_height: i32,
     pub coordinate_scale: f64,
@@ -84,18 +86,23 @@ pub struct DimensionProperties {
 }
 
 pub struct PluginDimension {
-    pub key: String,              // "myplugin:void" — never "minecraft:"-prefixed
+    pub key: ResourceKey,         // validated, namespaced plugin key
     pub properties: DimensionProperties,
     pub generator: Arc<dyn ChunkGenerator>,
 }
 
 impl DimensionRegistry {
     pub fn register(&self, dimension: PluginDimension) -> Option<Arc<PluginDimension>>;
-    pub fn get(&self, key: &str) -> Option<Arc<PluginDimension>>;
-    pub fn keys(&self) -> Vec<String>;
-    pub fn chunk_source(&self, key: &str) -> Option<Arc<dyn ChunkSource>>; // built and cached once per key
+    pub fn get(&self, key: &ResourceKey) -> Option<Arc<PluginDimension>>;
+    pub fn keys(&self) -> Vec<ResourceKey>;
+    pub fn chunk_source(&self, key: &ResourceKey) -> Option<Arc<dyn ChunkSource>>; // built and cached once per key
 }
 ```
+
+`ResourceKey` validates the namespace and path before a dimension enters the registry. A plugin may
+use any valid namespace, including one containing dots or hyphens, but malformed keys are rejected at
+the textual configuration boundary and cannot become registry entries. Packet, persistence, and other
+import/export representations can still lower a key with `key.to_string()` at their own boundaries.
 
 `DimensionRegistry` provides per-world generator selection and custom-dimension registration with
 **zero changes** to `crate::integrated`:
@@ -119,7 +126,7 @@ wrong height), not a compile error. Derive one from the other at the registratio
 ```rust
 let generator = Arc::new(CheckerboardVoidGenerator::new());
 registry.register(PluginDimension {
-    key: DIMENSION_KEY.to_string(),
+    key: DIMENSION_KEY.parse().expect("plugin key must be valid"),
     properties: DimensionProperties {
         min_y: generator.min_y(),
         height: generator.height(),

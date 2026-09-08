@@ -82,6 +82,9 @@ enum Hooks {
     /// Outbound: broadcast the message with a marker prefix instead of the
     /// real text.
     RewriteOutboundChat,
+    /// Outbound: add a caller-supplied marker before the wrapped protocol
+    /// encodes the message. This is used by the stack-order conformance test.
+    RewriteOutboundChatWithPrefix(&'static str),
     /// Outbound: append one extra clientbound directive to the join-time
     /// welcome batch, built from the wrapped protocol's own encoder.
     AppendWelcome,
@@ -91,6 +94,9 @@ enum Hooks {
     /// Inbound: decode a client's chat packet with its text rewritten before
     /// the server broadcasts it.
     RewriteInboundChat,
+    /// Inbound: add a caller-supplied marker after decoding the packet. This
+    /// is used by the stack-order conformance test.
+    RewriteInboundChatWithPrefix(&'static str),
 }
 
 /// The decorator itself. `ServerProtocol` declares seven methods with no
@@ -126,7 +132,7 @@ impl<P: ServerProtocol> ServerProtocol for Decorator<P> {
                     decoded
                 }
             }
-            Hooks::RewriteInboundChat => {
+            Hooks::RewriteInboundChat | Hooks::RewriteInboundChatWithPrefix(_) => {
                 if let ServerBound::Chat {
                     message,
                     timestamp_millis,
@@ -134,8 +140,13 @@ impl<P: ServerProtocol> ServerProtocol for Decorator<P> {
                     signature,
                 } = decoded
                 {
+                    let prefix = match self.hooks {
+                        Hooks::RewriteInboundChat => "rewritten inbound",
+                        Hooks::RewriteInboundChatWithPrefix(prefix) => prefix,
+                        _ => unreachable!(),
+                    };
                     ServerBound::Chat {
-                        message: format!("[rewritten inbound] {message}"),
+                        message: format!("[{prefix}] {message}"),
                         timestamp_millis,
                         salt,
                         signature,
@@ -178,6 +189,9 @@ impl<P: ServerProtocol> ServerProtocol for Decorator<P> {
             Hooks::RewriteOutboundChat => self
                 .inner
                 .encode_system_chat(&format!("[rewritten outbound] {message}")),
+            Hooks::RewriteOutboundChatWithPrefix(prefix) => self
+                .inner
+                .encode_system_chat(&format!("[{prefix}] {message}")),
             _ => self.inner.encode_system_chat(message),
         }
     }
@@ -226,6 +240,10 @@ async fn join(protocol: impl ServerProtocol + 'static, name: &str) -> (ClientHan
         .wait_for_spawn(Duration::from_secs(30))
         .await
         .expect("client never spawned");
+    let position = handle.position().expect("spawn wait supplied a position");
+    handle
+        .acknowledge_teleport_correction(position, handle.rotation())
+        .expect("client still connected");
     (handle, events, server)
 }
 
@@ -504,6 +522,71 @@ async fn decorator_rewrites_the_inbound_chat_before_the_server_broadcasts_it() {
             .iter()
             .any(|line| line == "<RewriteInbnd> hello from the inbound rewrite test"),
         "the player's original, unrewritten text must never be broadcast; saw {lines:?}"
+    );
+
+    handle.shutdown();
+    server.shutdown().await;
+}
+
+/// **Stack conformance, outbound.** A protocol decorator stack is nested
+/// outermost-first: the outer wrapper rewrites the message before delegating,
+/// then the inner wrapper rewrites that result. Distinct markers make the
+/// ordering and preservation of both mutations visible to the real client.
+#[tokio::test]
+async fn stacked_server_decorators_apply_outbound_mutations_inner_after_outer() {
+    let (mut handle, mut events, server) = join(
+        Decorator {
+            inner: Decorator {
+                inner: V770ServerProtocol,
+                hooks: Hooks::RewriteOutboundChatWithPrefix("inner"),
+            },
+            hooks: Hooks::RewriteOutboundChatWithPrefix("outer"),
+        },
+        "StackOutServer",
+    )
+    .await;
+
+    handle
+        .chat("hello from the outbound stack")
+        .expect("client still connected");
+
+    let lines = collect_chat_lines(&mut events, Duration::from_secs(5)).await;
+    assert_eq!(
+        lines,
+        vec!["[inner] [outer] <StackOutServer> hello from the outbound stack".to_string()],
+        "the inner decorator must see and preserve the outer decorator's mutation"
+    );
+
+    handle.shutdown();
+    server.shutdown().await;
+}
+
+/// **Stack conformance, inbound.** The decoded server-bound value flows
+/// through the nested wrappers in the same order: the inner decorator mutates
+/// first, then the outer decorator mutates that result before dispatch.
+#[tokio::test]
+async fn stacked_server_decorators_apply_inbound_mutations_inner_before_outer() {
+    let (mut handle, mut events, server) = join(
+        Decorator {
+            inner: Decorator {
+                inner: V770ServerProtocol,
+                hooks: Hooks::RewriteInboundChatWithPrefix("inner"),
+            },
+            hooks: Hooks::RewriteInboundChatWithPrefix("outer"),
+        },
+        "StackInServer",
+    )
+    .await;
+
+    handle
+        .chat("hello from the inbound stack")
+        .expect("client still connected");
+
+    let lines = collect_chat_lines(&mut events, Duration::from_secs(5)).await;
+    assert_eq!(
+        lines,
+        vec!["<StackInServer> [outer] [inner] hello from the inbound stack".to_string()],
+        "the outer decorator must see and preserve the inner decorator's mutation"
     );
 
     handle.shutdown();

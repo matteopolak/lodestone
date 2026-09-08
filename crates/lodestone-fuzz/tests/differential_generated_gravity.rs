@@ -22,7 +22,7 @@ use lodestone_fuzz::differential::{
     Action, DifferentialOutcome, Script, ScriptStep, WorldOracle, run_differential,
 };
 use lodestone_server::{
-    ChunkColumn, ChunkSource, IntegratedServer, ScheduledTickQueue, ServerBound,
+    ChunkColumn, ChunkSource, IntegratedServer, ScheduledTickKind, ScheduledTickQueue, ServerBound,
     ServerDirective, ServerProtocol, TickPriority,
 };
 use uuid::Uuid;
@@ -34,7 +34,6 @@ const SAND: &str = "minecraft:sand";
 const RED_SAND: &str = "minecraft:red_sand";
 const GRAVEL: &str = "minecraft:gravel";
 const STONE: &str = "minecraft:stone";
-const GRAVITY_TICK: &str = "gravity";
 const FALLING_POS: (i32, i32, i32) = (0, 2, 0);
 const LANDING_POS: (i32, i32, i32) = (0, 1, 0);
 const FLOOR_POS: (i32, i32, i32) = (0, 0, 0);
@@ -206,10 +205,10 @@ impl WorldOracle for GravityServerOracle {
         }
         self.source.set_block(pos.0, pos.1, pos.2, state);
         if matches!(state.as_str(), SAND | RED_SAND | GRAVEL) {
-            let mut pending = ScheduledTickQueue::new();
+            let mut pending: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
             pending.schedule(
                 *pos,
-                GRAVITY_TICK.to_owned(),
+                ScheduledTickKind::Gravity,
                 DELAY_AFTER_PLACE,
                 TickPriority::Normal,
             );

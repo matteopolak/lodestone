@@ -1,9 +1,11 @@
 #![cfg(feature = "jvm")]
 
 use std::fs;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::sync_channel;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use lodestone_jvm_bridge::adapter::{
@@ -454,8 +456,25 @@ fn plugin_child_reads_and_writes_resident_block_state_through_worker_ports() {
          long handle = lodestone.bridge.IsolatedPaperShim.currentBlockHandle(); \
          log(\"state=\" + fixture.intercepted.BlockValue.state(handle)); \
          int[] states = lodestone.bridge.IsolatedPaperShim.blockStateIds(new int[] { x, y, z, 5, -12, 91 }); \
+         if (states[0] != stateId || states[1] != 17) throw new AssertionError(\"unexpected initial batch state\"); \
          log(\"batch=\" + states[0] + \",\" + states[1]); \
-         log(\"written=\" + lodestone.bridge.IsolatedPaperShim.setBlockStateIdsWithFlags(new int[] { x, y, z, 1234, 5, -12, 91, 17 }, 0)); } }); } \
+         int scalar = lodestone.bridge.IsolatedPaperShim.setBlockStateId(x, y, z, 777); \
+         if (scalar != 777 || lodestone.bridge.IsolatedPaperShim.blockStateId(x, y, z) != 777) throw new AssertionError(\"scalar read-after-write failed\"); \
+         log(\"scalar-written=\" + scalar); \
+         int notified = lodestone.bridge.IsolatedPaperShim.setBlockStateIds(new int[] { x, y, z, 1234, 5, -12, 91, 17 }); \
+         int[] afterNotified = lodestone.bridge.IsolatedPaperShim.blockStateIds(new int[] { x, y, z, 5, -12, 91 }); \
+         if (notified != 2 || afterNotified[0] != 1234 || afterNotified[1] != 17) throw new AssertionError(\"notified batch read-after-write failed\"); \
+         log(\"notified-written=\" + notified); \
+         int silent = lodestone.bridge.IsolatedPaperShim.setBlockStateIdsWithFlags(new int[] { x, y, z, 4321 }, 0); \
+         int[] afterSilent = lodestone.bridge.IsolatedPaperShim.blockStateIds(new int[] { x, y, z }); \
+         if (silent != 1 || afterSilent[0] != 4321) throw new AssertionError(\"silent batch read-after-write failed\"); \
+         log(\"silent-written=\" + silent); \
+         try { fixture.intercepted.BlockValue.state(0L); throw new AssertionError(\"forged block handle resolved unexpectedly\"); } \
+         catch (RuntimeException expected) { if (!expected.getMessage().contains(\"referenced object no longer exists\")) throw expected; } \
+         try { lodestone.bridge.IsolatedPaperShim.blockStateIds(new int[] { 1000000, 7, 1000000 }); throw new AssertionError(\"unresident block became generated\"); } \
+         catch (RuntimeException expected) { if (!expected.getMessage().contains(\"fixture block unavailable\")) throw expected; } \
+         try { lodestone.bridge.IsolatedPaperShim.setBlockStateIdsWithFlags(new int[] { x, y, z, 19 }, 2); throw new AssertionError(\"unsupported update flag was accepted\"); } \
+         catch (RuntimeException expected) { if (!expected.getMessage().contains(\"does not support update flags 0x2\")) throw expected; } } }); } \
          public void onDisable() {} }",
     )
     .expect("plugin source");
@@ -477,6 +496,10 @@ fn plugin_child_reads_and_writes_resident_block_state_through_worker_ports() {
         .discover()
         .expect("discover stand-in lifecycle inputs");
     let callback_log = fixture.path().join("block-state.log");
+    let states = Arc::new(Mutex::new(BTreeMap::from([
+        ((-17, 64, 33), 422_u32),
+        ((5, -12, 91), 17_u32),
+    ])));
     let mut host = AdapterHost::start_with_setup(
         JvmConfig::new()
             .with_classpath(&adapter_classes)
@@ -510,31 +533,52 @@ fn plugin_child_reads_and_writes_resident_block_state_through_worker_ports() {
     host.dispatch_block_state_changed(change)
         .expect("dispatch resident block change");
     let completion_limit = Instant::now() + Duration::from_secs(5);
-    let mut observed_writes = None;
-    let mut observed_update_flags = None;
+    let mut observed_writes = Vec::new();
+    let mut observed_update_flags = Vec::new();
+    let mut scalar_writes = 0;
     let mut batch_requests = 0;
     loop {
+        let states_for_read = Arc::clone(&states);
         host.service_pending(1, |query| {
-            assert_eq!((query.x, query.y, query.z), (-17, 64, 33));
-            Ok(422)
+            states_for_read
+                .lock()
+                .expect("fixture state lock")
+                .get(&(query.x, query.y, query.z))
+                .copied()
+                .ok_or_else(|| format!("fixture block unavailable at ({},{},{})", query.x, query.y, query.z))
         });
+        let states_for_scalar_write = Arc::clone(&states);
+        host.service_pending_block_writes(1, |write| {
+            scalar_writes += 1;
+            states_for_scalar_write
+                .lock()
+                .expect("fixture state lock")
+                .insert((write.x, write.y, write.z), write.state_id);
+            Ok(())
+        });
+        let states_for_batch_read = Arc::clone(&states);
         host.service_pending_block_state_batches(1, |batch| {
             batch_requests += 1;
-            assert_eq!(
-                batch.positions,
-                vec![
-                    lodestone_jvm_bridge::adapter::BlockStateQuery { x: -17, y: 64, z: 33 },
-                    lodestone_jvm_bridge::adapter::BlockStateQuery { x: 5, y: -12, z: 91 },
-                ],
-            );
-            Ok(vec![422, 17])
+            let states = states_for_batch_read.lock().expect("fixture state lock");
+            batch
+                .positions
+                .iter()
+                .map(|position| {
+                    states
+                        .get(&(position.x, position.y, position.z))
+                        .copied()
+                        .ok_or_else(|| format!("fixture block unavailable at ({},{},{})", position.x, position.y, position.z))
+                })
+                .collect()
         });
+        let states_for_batch_write = Arc::clone(&states);
         host.service_pending_block_state_write_batches(1, |batch| {
-            assert!(
-                observed_update_flags.replace(batch.update_flags).is_none(),
-                "one batch-write policy expected",
-            );
-            assert!(observed_writes.replace(batch.writes).is_none(), "one batch write expected");
+            observed_update_flags.push(batch.update_flags);
+            observed_writes.push(batch.writes.clone());
+            let mut states = states_for_batch_write.lock().expect("fixture state lock");
+            for write in batch.writes {
+                states.insert((write.x, write.y, write.z), write.state_id);
+            }
             Ok(())
         });
         match host.poll().expect("resident block completion") {
@@ -552,22 +596,29 @@ fn plugin_child_reads_and_writes_resident_block_state_through_worker_ports() {
         }
         std::thread::yield_now();
     }
+    assert_eq!(scalar_writes, 1, "the scalar replacement must cross its dedicated host port once");
     assert_eq!(
         observed_writes,
-        Some(vec![
+        vec![
+            vec![
             BlockStateWrite { x: -17, y: 64, z: 33, state_id: 1234 },
             BlockStateWrite { x: 5, y: -12, z: 91, state_id: 17 },
-        ]),
+            ],
+            vec![BlockStateWrite { x: -17, y: 64, z: 33, state_id: 4321 }],
+        ],
     );
     assert_eq!(
         observed_update_flags,
-        Some(BlockUpdateFlags::NONE),
-        "the flagged JNI surface must carry its no-callback policy to the host",
+        vec![
+            BlockUpdateFlags::NOTIFY_RESIDENT_LISTENERS,
+            BlockUpdateFlags::NONE,
+        ],
+        "the Java write methods must carry their update policy to the host",
     );
-    assert_eq!(batch_requests, 1, "two Java block reads must use one host batch request");
+    assert_eq!(batch_requests, 3, "each Java region read must use one host batch request");
     assert_eq!(
         fs::read_to_string(callback_log).expect("block-state callback log"),
-        "state=422\nbatch=422,17\nwritten=2\n",
+        "state=422\nbatch=422,17\nscalar-written=777\nnotified-written=2\nsilent-written=1\n",
     );
 }
 

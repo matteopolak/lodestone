@@ -269,9 +269,9 @@ impl ModelPipeline {
 
     /// Build the pipeline for a specific [`RenderLayer`]. `Solid`/`Cutout` use
     /// an opaque target with depth writes and back-face culling; `Translucent`
-    /// enables alpha blending, disables depth writes, expects the caller to
-    /// have sorted quads back-to-front, and **keeps back-face culling on** —
-    /// see [`build`](Self::build)'s `cull_back_face` doc for why that is the
+    /// enables alpha blending, keeps depth writes and the nearer-or-equal
+    /// depth comparison, and **keeps back-face culling on** — see
+    /// [`build`](Self::build)'s `cull_back_face` doc for why that is the
     /// vanilla-faithful choice here and not, e.g., for
     /// [`for_fluid`](Self::for_fluid).
     #[must_use]
@@ -285,6 +285,7 @@ impl ModelPipeline {
             device,
             color_format,
             MODEL_WGSL,
+            translucent,
             translucent,
             true,
             true,
@@ -303,6 +304,7 @@ impl ModelPipeline {
             device,
             color_format,
             MODEL_WGSL,
+            false,
             false,
             true,
             true,
@@ -345,6 +347,7 @@ impl ModelPipeline {
             color_format,
             MODEL_WGSL,
             false,
+            false,
             true,
             cull_back_face,
             Some(ALPHA_CUTOUT_CUTOUT),
@@ -360,10 +363,14 @@ impl ModelPipeline {
     /// Drawn after opaque terrain so the sea floor already in the depth
     /// buffer shows through.
     ///
-    /// Back-face culling stays **off** here, unlike [`for_layer`](Self::for_layer)'s
-    /// `Translucent` — unverified against vanilla's own fluid geometry and
-    /// deliberately left unchanged rather than folded into the [`for_layer`]
-    /// fix below.
+    /// Back-face culling stays **on** here, as it does for
+    /// [`for_layer`](Self::for_layer)'s `Translucent` pipeline. The fluid baker
+    /// emits an explicit reverse-winding copy for each two-sided surface; with
+    /// culling disabled, both copies pass and a water surface is composited
+    /// twice. That turns the source alpha `180/255` into an effective
+    /// `1 - (1 - 180/255)^2`, making water look markedly too opaque from
+    /// outside. Culling keeps the two copies' roles distinct: one is visible
+    /// from each side, while only one contributes along a view ray.
     #[must_use]
     pub fn for_fluid(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
         // `None`: `fluid.wgsl` declares no `alpha_cutout` override (water is a
@@ -376,13 +383,17 @@ impl ModelPipeline {
             true,
             false,
             false,
+            true,
             None,
             wgpu::DepthBiasState::default(),
         )
     }
 
-    /// `cull_back_face` diverges from `translucent` on purpose — they used to
-    /// be the same flag, which was the bug.
+    /// `translucent_depth_write` diverges between model and fluid pipelines on
+    /// purpose: translucent block terrain writes depth, while fluid surfaces
+    /// keep writes off so terrain behind water remains visible. `cull_back_face`
+    /// also diverges from `translucent` on purpose — they used to be the same
+    /// flag, which was the bug.
     ///
     /// Vanilla's `RenderPipelines.TRANSLUCENT_TERRAIN`/`TRANSLUCENT_BLOCK`
     /// both build on `TERRAIN_SNIPPET`/`BLOCK_SNIPPET`, neither of which ever
@@ -404,9 +415,10 @@ impl ModelPipeline {
     /// real 26.2 model) bakes explicit `east` *and* `west` quads with no
     /// `cullface` on either, so single-sided culling still shows the swirl
     /// from both sides; it was never the disabled cull state doing that
-    /// work. `for_fluid` is deliberately left at its prior `cull_mode: None`
-    /// — fluid geometry's own two-sidedness (`docs/fluid-rendering.md`'s
-    /// `addBackFace`) was not audited here and this fix does not touch it.
+    /// work. `for_fluid` also keeps culling on, while retaining its explicit
+    /// reverse-winding copies for the opposite viewing direction. Its separate
+    /// fluid-specific depth mode remains no-write so terrain behind water stays
+    /// visible.
     ///
     /// `alpha_cutout` is the value bound to `model.wgsl`'s `alpha_cutout`
     /// pipeline-overridable constant — vanilla's per-pipeline
@@ -419,6 +431,7 @@ impl ModelPipeline {
         color_format: wgpu::TextureFormat,
         shader_src: &str,
         translucent: bool,
+        translucent_depth_write: bool,
         with_palette: bool,
         cull_back_face: bool,
         alpha_cutout: Option<f32>,
@@ -429,6 +442,7 @@ impl ModelPipeline {
             color_format,
             shader_src,
             translucent,
+            translucent_depth_write,
             with_palette,
             cull_back_face,
             alpha_cutout,
@@ -443,6 +457,7 @@ impl ModelPipeline {
         color_format: wgpu::TextureFormat,
         shader_src: &str,
         translucent: bool,
+        translucent_depth_write: bool,
         with_palette: bool,
         cull_back_face: bool,
         alpha_cutout: Option<f32>,
@@ -636,7 +651,9 @@ impl ModelPipeline {
             // switch is named for and the only form the pass will accept.
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: Some(depth.write && !translucent),
+                depth_write_enabled: Some(
+                    depth.write && (!translucent || translucent_depth_write),
+                ),
                 // Vanilla's terrain pipelines all inherit
                 // `DepthStencilState.DEFAULT = (GREATER_THAN_OR_EQUAL, true)`
                 // (26.2 `RenderPipelines.TERRAIN_SNIPPET` →
@@ -654,19 +671,20 @@ impl ModelPipeline {
                 // `grass_block` bakes 10 quads, 4 of which are tinted overlays
                 // coplanar with the base cube's sides.
                 //
-                // The translucent variant keeps the strict comparison
-                // deliberately, because we diverge from vanilla on the *other*
-                // field: vanilla's `TRANSLUCENT_TERRAIN` writes depth and we do
-                // not (`depth_write_enabled: !translucent`). Admitting ties
-                // without a depth write lets two coplanar translucent quads both
-                // blend, double-darkening a water surface — an artefact
-                // vanilla's depth write suppresses. Restore the tie-admitting
-                // comparison here if translucent depth writes are ever restored
-                // too.
-                depth_compare: Some(match (depth.compare, translucent) {
-                    (false, _) => wgpu::CompareFunction::Always,
-                    (true, true) => DEPTH_COMPARE_NEARER,
-                    (true, false) => DEPTH_COMPARE_NEARER_OR_EQUAL,
+                // Model translucent terrain writes depth, so it uses the same
+                // tie-admitting comparison as opaque terrain. Fluid keeps the
+                // strict comparison because it intentionally does not write
+                // depth: admitting ties would let coplanar water faces both
+                // blend and double-darken a surface.
+                depth_compare: Some(match (
+                    depth.compare,
+                    translucent,
+                    translucent_depth_write,
+                ) {
+                    (false, _, _) => wgpu::CompareFunction::Always,
+                    (true, true, true) => DEPTH_COMPARE_NEARER_OR_EQUAL,
+                    (true, true, false) => DEPTH_COMPARE_NEARER,
+                    (true, false, _) => DEPTH_COMPARE_NEARER_OR_EQUAL,
                 }),
                 stencil: wgpu::StencilState::default(),
                 // The bias is its **own** axis. It used to be dropped whenever

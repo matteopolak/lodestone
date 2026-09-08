@@ -95,6 +95,17 @@ could ever legitimately allocate, which marks a menu as having nothing to send o
 server-side plugin opening a menu to a *remote* player is out of scope here — it needs the real
 container-open packet family, which needs `lodestone-server`'s container protocol support first.
 
+### Plugin inventory/menu observations
+
+Native plugins observe the same decoded stream through `lodestone_ecs::events::GameEvent`. Calling
+`GameEvent::inventory_menu()` returns a borrowed `InventoryMenuEvent` for full window contents,
+single-slot and menu-property updates, open/close lifecycle (including mount inventories), cursor
+changes, selected-slot changes, and native player-inventory updates. Item references remain the full
+`lodestone_model::ItemStack`, including modeled data components and the `has_unmodeled` marker; no
+second item schema or plugin-owned inventory cache is introduced. The event bus is opt-in through
+`GameEventBusPlugin`, and the view cannot outlive the message being read, so observing a menu does not
+create a stale state writer or bypass the session's existing prediction and server reconciliation.
+
 ### Settings
 
 `Screen::Settings` — vanilla's `OptionsScreen` tree as a table plus arithmetic in

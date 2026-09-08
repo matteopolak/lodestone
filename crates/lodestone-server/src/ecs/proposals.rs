@@ -9,7 +9,7 @@ use bevy_ecs::message::{Message, MessageReader, MessageWriter};
 use bevy_ecs::prelude::{ResMut, Resource};
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use lodestone_data::block_states::StateId;
-use lodestone_model::{BlockPos, GameMode, ResourceKey, Vec3};
+use lodestone_model::{BlockFace, BlockPos, GameMode, Hand, ResourceKey, Vec3};
 use uuid::Uuid;
 
 use super::{TickSet, paper_events::PaperEventBus};
@@ -53,6 +53,24 @@ pub enum ServerProposalAction {
     /// requirement is intentional: a plugin proposal must not turn into an
     /// unbounded chunk load or generation request.
     SetResidentBlock { pos: BlockPos, state: StateId },
+    /// A player interaction against a block face, before the interaction's
+    /// world mutation or use result is applied.
+    PlayerInteract {
+        pos: BlockPos,
+        face: BlockFace,
+        hand: Hand,
+        using_secondary_action: bool,
+    },
+    /// Replace an ordered resident block batch atomically through
+    /// `IntegratedServer`.
+    ///
+    /// The boolean controls only the bridge's resident-change observer
+    /// notification. Every target and state is preflighted before the first
+    /// source mutation, and a batch is never decomposed into scalar proposals.
+    SetResidentBlockBatch {
+        writes: Vec<(BlockPos, StateId)>,
+        notify_listeners: bool,
+    },
 }
 
 /// A plugin's answer to a [`ServerProposal`].
@@ -130,6 +148,16 @@ impl ServerProposalHandle {
         self.submit(ServerProposalAction::DespawnMob { id }).await
     }
 
+    /// Submit one bounded resident-block mutation and await one
+    /// `Drain → Adjudicate → Apply` pass.
+    pub async fn set_resident_block(
+        &self,
+        pos: BlockPos,
+        state: StateId,
+    ) -> Result<ServerProposalAction, ProposalRefusal> {
+        self.submit(ServerProposalAction::SetResidentBlock { pos, state }).await
+    }
+
     /// Submit one connected-player game-mode change and await one
     /// `Drain → Adjudicate → Apply` pass.
     pub async fn set_player_game_mode(
@@ -140,14 +168,33 @@ impl ServerProposalHandle {
         self.submit(ServerProposalAction::SetPlayerGameMode { target, mode }).await
     }
 
-    /// Submit one bounded resident-block mutation and await one
-    /// `Drain → Adjudicate → Apply` pass.
-    pub async fn set_resident_block(
+    /// Submit a player interaction and await its adjudicated action.
+    pub async fn player_interact(
         &self,
         pos: BlockPos,
-        state: StateId,
+        face: BlockFace,
+        hand: Hand,
+        using_secondary_action: bool,
     ) -> Result<ServerProposalAction, ProposalRefusal> {
-        self.submit(ServerProposalAction::SetResidentBlock { pos, state }).await
+        self.submit(ServerProposalAction::PlayerInteract {
+            pos,
+            face,
+            hand,
+            using_secondary_action,
+        })
+        .await
+    }
+
+    /// Submit one ordered, atomically preflighted resident-block batch.
+    pub async fn set_resident_block_batch(
+        &self,
+        writes: Vec<(BlockPos, StateId)>,
+        notify_listeners: bool,
+    ) -> Result<ServerProposalAction, ProposalRefusal> {
+        self.submit(ServerProposalAction::SetResidentBlockBatch {
+            writes,
+            notify_listeners,
+        }).await
     }
 }
 

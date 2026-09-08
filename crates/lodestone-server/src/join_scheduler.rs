@@ -57,8 +57,10 @@
 //! # Only the `SourceRef::Shared` arm is scheduled, and that is not an oversight
 //!
 //! `SourceRef::Borrowed` (the transport tests) holds a source that is not
-//! `'static`, so it cannot be spawned at all: every batch on that arm is a
-//! `generate_columns_parallel` call that blocks until the whole batch finishes.
+//! `'static`, so it cannot be spawned at all on native: every batch on that arm
+//! is a `generate_columns_parallel` call that blocks until the whole batch
+//! finishes. The browser arm uses the same source algorithm through the
+//! yielding serial dispatcher instead.
 //! A window's entire payoff is overlapping generation with the *encode* of an
 //! already-finished column, and a blocking source has nothing to overlap. Worse,
 //! measured while building `join_scheduler_gates.rs`: the rings' cumulative sizes
@@ -97,10 +99,11 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::chunk::{ChunkColumn, ChunkGenerationStage, ChunkSource};
 use crate::protocol::{ChunkEncodeError, ChunkEncoder, ServerDirective};
-use crate::server::SourceRef;
+use crate::server::{JoinTrace, SourceRef};
 
 /// What one pipeline slot hands back: either the wire bytes, already encoded on
 /// the worker that generated the column, or the column itself for a caller with
@@ -570,6 +573,15 @@ pub fn generation_window_for(parallelism: usize) -> usize {
     parallelism.max(2)
 }
 
+/// Maximum time a deferred join stream waits for its ordered head before the
+/// connection loop gets another chance to poll the socket and timers.
+///
+/// The worker keeps running after the caller cancels the wait, and the head
+/// remains in the pipeline until it is emitted. Keeping the budget here beside
+/// the cancellation-safe pipeline makes the server loop and its control tests
+/// use one contract rather than two near-identical constants.
+pub(crate) const JOIN_STREAM_SERVICE_BUDGET: Duration = Duration::from_millis(25);
+
 /// A primed sliding window over a fixed coordinate order.
 ///
 /// [`next`](Self::next) tops the in-flight set up to the window, then awaits and
@@ -604,12 +616,16 @@ pub struct ColumnPipeline<S> {
     window: usize,
     /// Set once the head column has been emitted. Until then the window is 1.
     primed: bool,
+    /// Optional operator trace shared by the inline and deferred portions of a
+    /// join. `None` is the ordinary path; see [`JoinTrace`] for why this is
+    /// intentionally not a global logger or an always-on clock.
+    trace: Option<Arc<JoinTrace>>,
     /// Each entry is the coordinate paired with the worker generating it, so
     /// **emission order is the order columns were handed to the pool**, not the
     /// order they finish in. Pairing them here (rather than indexing a `coords`
     /// vector) is what lets the spawn order itself be dynamic.
     #[cfg(not(target_arch = "wasm32"))]
-    inflight: VecDeque<((i32, i32), tokio::task::JoinHandle<Result<ColumnPayload, ChunkEncodeError>>)>,
+    inflight: VecDeque<((i32, i32), tokio::sync::oneshot::Receiver<Result<ColumnPayload, ChunkEncodeError>>)>,
     #[cfg(target_arch = "wasm32")]
     inflight: VecDeque<((i32, i32), ColumnPayload)>,
 }
@@ -677,6 +693,7 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
             emitted: 0,
             window: window.max(1),
             primed: false,
+            trace: None,
             inflight: VecDeque::new(),
         }
     }
@@ -693,6 +710,14 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
     #[must_use]
     pub fn encoding_with(mut self, encoder: Option<Arc<dyn ChunkEncoder>>) -> Self {
         self.encoder = encoder;
+        self
+    }
+
+    /// Attach the opt-in join-stage trace to this pipeline. The trace is an
+    /// `Arc` because workers own it while the connection task records delivery.
+    #[must_use]
+    pub(crate) fn with_trace(mut self, trace: Option<Arc<JoinTrace>>) -> Self {
+        self.trace = trace;
         self
     }
 
@@ -846,14 +871,26 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
             // terrain: it receives ~40 KiB of finished frame instead of a
             // multi-hundred-KiB column plus 62 M instructions of work to do to it.
             let encoder = self.encoder.clone();
+            let trace = self.trace.clone();
             self.inflight.push_back((
                 (cx, cz),
-                tokio::task::spawn_blocking(move || {
+                crate::worldgen_dispatch::spawn(move || {
                     let column = source.column_at(cx, cz, stage);
+                    if let Some(trace) = trace.as_ref() {
+                        trace.mark("generated", cx, cz);
+                    }
                     match encoder {
-                        Some(encoder) => encoder
-                            .try_encode_chunk_in_dimension(cx, cz, &column, dimension)
-                            .map(ColumnPayload::Encoded),
+                        Some(encoder) => {
+                            let encoded = encoder
+                                .try_encode_chunk_in_dimension(cx, cz, &column, dimension)
+                                .map(ColumnPayload::Encoded);
+                            if encoded.is_ok() {
+                                if let Some(trace) = trace.as_ref() {
+                                    trace.mark("encoded", cx, cz);
+                                }
+                            }
+                            encoded
+                        }
                         None => Ok(ColumnPayload::Column(column)),
                     }
                 }),
@@ -864,7 +901,7 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
             .front_mut()
             .expect("the top-up above spawns at least one column while any remain");
         let pos = *pos;
-        let payload = handle.await.expect("worldgen join burst panicked")?;
+        let payload = handle.await.expect("worldgen Rayon worker panicked")?;
         self.inflight.pop_front();
         self.emitted += 1;
         self.primed = true;
@@ -881,6 +918,9 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
             return Ok(None);
         };
         let column = self.source.column_at(cx, cz, self.generation_stage_for((cx, cz)));
+        if let Some(trace) = self.trace.as_ref() {
+            trace.mark("generated", cx, cz);
+        }
         self.emitted += 1;
         self.primed = true;
         let _ = &self.inflight;
@@ -1041,9 +1081,10 @@ impl<S: ChunkSource + 'static> JoinChunkStream<S> {
     ///
     /// Both arms are safe to drop mid-`await`, which they must be to sit in a
     /// `select!`: [`ColumnPipeline::next`] documents its own, and the `Ringed`
-    /// arm's `generate` is `generate_columns_parallel` — synchronous work inside
-    /// an `async fn`, so it has no suspension point to be cancelled at, and the
-    /// ring is only popped once its columns are buffered.
+    /// arm's `generate` is the native `generate_columns_parallel` — synchronous
+    /// work inside an `async fn`, so it has no suspension point to be cancelled
+    /// at, and the ring is only popped once its columns are buffered. The wasm
+    /// arm yields between columns through the shared browser dispatcher.
     pub(crate) async fn next(
         &mut self,
         source: SourceRef<'_, S>,
@@ -1422,6 +1463,127 @@ mod tests {
         );
     }
 
+    /// Multiple connections must share the native dispatch budget. The old
+    /// shape gave every pipeline its own `spawn_blocking` window, so two or
+    /// more simultaneous joins could run twice the core count (and the seed
+    /// batch could add a nested fan-out on top). The source also gives each
+    /// coordinate deterministic content; the digest check makes this a
+    /// concurrency test rather than only a thread-count test.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_pipelines_share_a_core_budget_and_preserve_content_digest() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        struct DispatchProbe {
+            active: AtomicUsize,
+            max_active: AtomicUsize,
+        }
+
+        impl DispatchProbe {
+            fn digest_for(coords: &[(i32, i32)]) -> u64 {
+                let mut digest = DefaultHasher::new();
+                for &(cx, cz) in coords {
+                    cx.hash(&mut digest);
+                    cz.hash(&mut digest);
+                    let state = if (cx as i64 * 31 + cz as i64 * 17) & 1 == 0 {
+                        "minecraft:stone"
+                    } else {
+                        "minecraft:dirt"
+                    };
+                    state.hash(&mut digest);
+                }
+                digest.finish()
+            }
+        }
+
+        impl ChunkSource for DispatchProbe {
+            fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+                let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+                self.max_active.fetch_max(active, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(2));
+                let state = if (cx as i64 * 31 + cz as i64 * 17) & 1 == 0 {
+                    "minecraft:stone"
+                } else {
+                    "minecraft:dirt"
+                };
+                let mut column = ChunkColumn::new(0, 16);
+                column.set_block(0, 0, 0, state);
+                self.active.fetch_sub(1, Ordering::SeqCst);
+                column
+            }
+
+            fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+                "minecraft:air".to_string()
+            }
+
+            fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+                crate::chunk::DEFAULT_BIOME.to_string()
+            }
+
+            fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        }
+
+        let parallelism = crate::worldgen_dispatch::parallelism();
+        let pipeline_count = parallelism.max(2);
+        let source = Arc::new(DispatchProbe {
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+        });
+        let mut expected_coords = Vec::with_capacity(pipeline_count * 4);
+        let mut tasks = Vec::with_capacity(pipeline_count);
+
+        for pipeline_id in 0..pipeline_count {
+            let coords: Vec<(i32, i32)> = (0..4)
+                .map(|offset| {
+                    let x = (pipeline_id * 4 + offset) as i32;
+                    (x, -x - 1)
+                })
+                .collect();
+            expected_coords.extend(coords.iter().copied());
+            let source = Arc::clone(&source);
+            tasks.push(tokio::spawn(async move {
+                let mut pipeline = ColumnPipeline::with_window(source, coords.clone(), 2);
+                let mut observed = Vec::with_capacity(coords.len());
+                while let Some((position, payload)) = pipeline
+                    .next()
+                    .await
+                    .expect("the deterministic probe cannot encode-fail")
+                {
+                    let column = payload
+                        .column()
+                        .expect("the probe pipeline has no off-task encoder");
+                    observed.push((position, column.block_state(0, 0, 0).to_string()));
+                }
+                observed
+            }));
+        }
+
+        let mut observed_coords = Vec::with_capacity(expected_coords.len());
+        let mut observed_digest = DefaultHasher::new();
+        for task in tasks {
+            for ((cx, cz), state) in task.await.expect("pipeline task must not panic") {
+                observed_coords.push((cx, cz));
+                cx.hash(&mut observed_digest);
+                cz.hash(&mut observed_digest);
+                state.hash(&mut observed_digest);
+            }
+        }
+
+        assert_eq!(observed_coords, expected_coords, "dispatch changed wire order");
+        assert_eq!(
+            observed_digest.finish(),
+            DispatchProbe::digest_for(&expected_coords),
+            "concurrent dispatch changed generated content"
+        );
+        assert!(
+            source.max_active.load(Ordering::SeqCst) <= parallelism,
+            "native dispatch exceeded its core budget: observed {}, budget {}",
+            source.max_active.load(Ordering::SeqCst),
+            parallelism
+        );
+    }
+
     /// Emission order is the input order even when every column finishes in
     /// exactly the opposite order.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1532,6 +1694,49 @@ mod tests {
             "after priming, more columns must be in flight than have been emitted — \
              otherwise this is the serial shape and the barrier was not removed"
         );
+    }
+
+    /// A cold ordered head must be interruptible by the connection loop without
+    /// dropping its worker result. The short packet timer is the service witness:
+    /// it wins while the head is still sleeping, then the same pipeline emits the
+    /// head and its successor in order after the cancellation.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_slow_head_yields_to_socket_service_without_losing_order() {
+        let coords = vec![(0, 0), (1, 0)];
+        let completed = Arc::new(AtomicUsize::new(0));
+        let source = Arc::new(SkewedSource {
+            coords: coords.clone(),
+            delays: vec![Duration::from_millis(120), Duration::ZERO],
+            completed: Arc::clone(&completed),
+        });
+        let mut pipeline = ColumnPipeline::with_window(source, coords.clone(), 2);
+
+        let mut packet_service = Box::pin(tokio::time::sleep(Duration::from_millis(1)));
+        let mut head_wait = Box::pin(tokio::time::timeout(
+            JOIN_STREAM_SERVICE_BUDGET,
+            pipeline.next(),
+        ));
+        tokio::select! {
+            () = &mut packet_service => {}
+            result = &mut head_wait => {
+                panic!("the cold head completed before the service budget: {result:?}");
+            }
+        }
+        drop(head_wait);
+
+        let (first, _) = pipeline
+            .next()
+            .await
+            .expect("the cancelled head must remain available")
+            .expect("the first column must still emit");
+        assert_eq!(first, coords[0]);
+        let (second, _) = pipeline
+            .next()
+            .await
+            .expect("the second column must still encode")
+            .expect("the second column must still emit");
+        assert_eq!(second, coords[1]);
+        assert_eq!(completed.load(Ordering::SeqCst), coords.len());
     }
 
     /// With a [`ChunkEncoder`] attached the pipeline yields **bytes**, not

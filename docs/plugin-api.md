@@ -149,11 +149,6 @@ this is a permanent ceiling, not a gap). Texture/model *substitution* is separat
 resource-pack override stack and server-push resource packs swap textures with no rendering work at all,
 the same way a real Bukkit/Paper plugin does it too.
 
-The WASM tier has one deliberately narrower exception: a plugin granted `version:broker` may request
-an exact `[version-lock]` identity and receive copied descriptor/key-value records from the selected
-registry adapter. It still receives no version types, packet bytes, registry handles, ECS borrows,
-sockets, callbacks, or arbitrary host calls; see [`wasm-version-broker.md`](./wasm-version-broker.md).
-
 ### Reading and writing state
 
 | kind | examples | notes |
@@ -198,18 +193,23 @@ a system with any mutable `World` access fails to register in that tier, checked
 per-system access metadata before scheduling (a `Monitor` system queuing a deferred `Commands` mutation
 is the one known gap this check cannot see).
 
-Raw wire-level packet observation does not exist yet; a plugin needing an undecoded packet type still
-has no route but a direct version-crate dependency, at the cost of version-locking. **Decided:** the
-packet-interception shape is observation-only, permanently, in both directions — a mutate/cancel/
-inject-at-the-wire trait was considered and rejected, since inbound events apply inline under the
-world's write guard (an interceptor needing `&mut World` there reintroduces a reentrancy hazard this
-architecture makes unrepresentable elsewhere) and outbound mutation only exists inside a version-typed
-adapter. Real-time anti-cheat and a disguise visible to *other* players both need outbound byte mutation
-and stay out of reach; everything else (protection, economy, minigames, HUD mods, a client-side-only
-disguise) is served by `ActionVetoes`/`EgressFilters` instead — see [`packet-wiring.md`](./packet-wiring.md).
-This ceiling is scoped to the shared, version-free crates a native plugin ordinarily depends on. A
-plugin willing to depend on a version crate directly and pay for version-locking has a real escape
-hatch outside this ceiling — see [`plugin-packet-decorators.md`](./plugin-packet-decorators.md).
+The native client has opt-in raw-packet observation in both directions: `RawPacketBusPlugin` publishes
+the connection state, packet id, and owned payload before version-specific decoding, while
+`OutboundRawPacketBusPlugin` publishes the exact encoded body after the adapter (and any decorator)
+returns it, before transport framing. The outbound bus has explicit per-tick packet and byte bounds;
+when full it drops only the observer copy and still writes the original packet, with counters exposed
+through `OutboundRawPacketBus`. Both streams are observation-only; they cannot replace, cancel, reorder,
+or inject transport data, and they do not retain the connection's buffer. The WASM tier receives
+curated decoded events rather than raw packets. **Decided:** any
+shared packet-observation surface remains observation-only — a mutate/cancel/inject-at-the-wire trait
+was rejected because inbound events apply inline under the world's write guard (an interceptor needing
+`&mut World` there reintroduces a reentrancy hazard this architecture makes unrepresentable elsewhere)
+and outbound mutation only exists inside a version-typed adapter. Real-time anti-cheat and a disguise
+visible to *other* players therefore stay out of reach of the shared, version-free surface; everything
+else (protection, economy, minigames, HUD mods, a client-side-only disguise) is served by
+`ActionVetoes`/`EgressFilters` instead — see [`packet-wiring.md`](./packet-wiring.md). A plugin willing
+to depend on a version crate directly and pay for version-locking has a real escape hatch outside this
+ceiling — see [`plugin-packet-decorators.md`](./plugin-packet-decorators.md).
 
 ### Cross-plugin custom messages and channels
 
@@ -302,6 +302,22 @@ back by a new occupant) — wiring that would require this crate to depend on th
 inverting the plugin→engine dependency direction every plugin crate is checked against; a plugin that
 cares removes its own entries on observing a despawn via `GameEvent`.
 
+The native WASM host's optional filesystem capability is the current durable client-side seam. When an
+embedding calls `PluginHost::with_filesystem_root(parent)`, each loaded plugin gets a validated ASCII
+name-based directory at `<parent>/<plugin-name>`, reused by a successful directory reload. Non-empty
+guest writes are limited to `lodestone_wasm_host::MAX_PLUGIN_FILE_BYTES` (1 MiB), written through a
+temporary file and renamed after syncing; an empty write means delete, and a missing delete succeeds.
+Reads and writes cannot follow a plugin-root or target symlink, cannot escape the plugin directory, and
+cannot create missing subdirectories. The shipped native shell uses
+`<lodestone-auth-data>/plugins` as this parent, while browser builds do not instantiate the native
+WASM host. The host's `LoadedPlugin::write_file` and `delete_file` helpers apply the same guarantees to
+embedding lifecycle code.
+
+There is no automatic eviction of the native support crate's entity entries on despawn (a despawned id
+can be reused, so a stale entry could be read back by a new occupant). A durable entity-scoped tier
+must key data by a stable identity plus lifecycle generation and clear it on despawn/reconnect; a plugin
+that uses the current in-memory store must remove its own entries on observing a despawn via `GameEvent`.
+
 ### Bulk world edits
 
 `lodestone_world::World` has the block read/write pair a WorldEdit-class plugin needs:
@@ -355,12 +371,6 @@ capability (e.g. `observe:chat`, `act:chat`) is enforced by the host's own condu
 never lifted to an ungranted guest and its actions are refused, counted, and logged, which means the manifest is a
 *declaration*, not the enforcement, and anything genuinely dangerous (filesystem, network, subprocess)
 must be modelled as an import rather than trusted as data-flow.
-
-`version:broker` is another import-column capability, but it is additionally version-locked: the
-manifest must carry an exact `[version-lock]` family/protocol/broker-ABI triple, and the embedding must
-configure a matching source before the module is read. The interface returns only copied typed WIT
-records from a finite provider vocabulary; it is not a route to protocol objects or arbitrary host
-internals. See [`wasm-version-broker.md`](wasm-version-broker.md).
 
 `on-verdict(context)` is the synchronous cancellation half. It receives one copy-only typed context
 for each existing action veto and returns only `allow` or `deny`. The conductor brokers it into
@@ -456,18 +466,20 @@ absent.
 
 **WASM tier:** `PluginHost::new(policy)` takes a `CapabilitySet` (`default_policy()` withholds
 `fs:read`, `schedule:tasks`, `commands:register`, `act:look`, `act:movement`, `act:place`, and
-`observe:place`, plus the privileged `version:broker`); `with_fuel(n)` bounds each guest's per-host-tick instruction budget —
+`observe:place`); `with_fuel(n)` bounds each guest's per-host-tick instruction budget —
 fuel rather than
 epoch-based preemption, since an epoch deadline needs a watchdog and a host without one has a deadline
-that never trips; `with_memory_limit(n)` bounds linear memory; `with_filesystem_root(p)` is required in
-addition to `fs:read`, or a granted plugin still reads nothing. Each plugin is one subdirectory with its
-own `plugin.toml` declaring capabilities, subscribed event kinds, and load-order priority. A plain
+that never trips; `with_memory_limit(n)` bounds linear memory; `with_filesystem_root(p)` configures the
+parent of each plugin's isolated persistent directory and is required in addition to `fs:read`/`fs:write`,
+or a granted plugin still reads or writes nothing. Each plugin is one subdirectory with its own
+`plugin.toml` declaring capabilities, subscribed event kinds, and load-order priority. A plain
 `cargo build` producing a core wasm module is enough — the host sniffs the preamble and encodes it into
 a component itself, so no extra tool is required on a plugin author's `PATH`.
 
-The shipped native windowed client uses `DEFAULT_PLUGIN_DIR`, the cwd-relative `plugins/` directory.
-It does not create that directory: absence means an empty plugin set. Each invalid, ABI-mismatched, or
-capability-denied child is logged and excluded without blocking valid siblings. Embedders and tests can
+The shipped native windowed client uses `DEFAULT_PLUGIN_DIR`, the cwd-relative `plugins/` directory for
+modules and manifests, and the account data directory's `plugins/` child for persistent plugin data. It
+does not create the module directory: absence means an empty plugin set. Each invalid, ABI-mismatched,
+or capability-denied child is logged and excluded without blocking valid siblings. Embedders and tests can
 call `lodestone_shell::wasm_plugins::install_from_directory` with an explicit path before handing the
 `App` to `Sim::from_app` or `run_with_app`. If the caller already installed `WasmHostPlugin`, that host
 and its policy remain authoritative; the shell does not add a second loader.

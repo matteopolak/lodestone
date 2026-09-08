@@ -1,108 +1,49 @@
-//! The `transfer` tracing target: a wire-side trace of every event that can
-//! rubberband a player across a server switch.
+//! The `transfer` tracing target records the ordering around a server-issued
+//! player-position correction and a backend switch.
 //!
 //! # What it is
 //!
-//! One `tracing` target, `transfer`, carrying a monotonically sequenced record
-//! of the four things that decide whether the server accepts our claimed
-//! position after it has moved us:
+//! The sequence counter lets logs from the driver task and the simulation
+//! thread be read in causal order. The shell emits the correction-side records:
+//! the event entering the simulation channel, movement being queued, and the
+//! corrected pose being adopted. This module emits the connection-side records
+//! for configuration, transfer, and login boundaries.
 //!
-//! | line | emitted by | says |
-//! |---|---|---|
-//! | `xfer: PLAYER_POSITION` | [`super::player`]'s `handle_player_position` | a teleport arrived, with its id, target and `relatives` mask, and that `ACCEPT_TELEPORTATION` is going out with the same id |
-//! | `xfer: move packet` | [`super::V770Adapter::select_move_packet`] | an outbound `move_player_*` reached the wire, the position it claims, and how far that is from the last teleport target we accepted |
-//! | `xfer: state` | [`super::connection`] | `START_CONFIGURATION` / `FINISH_CONFIGURATION` / `TRANSFER`, each labelled with the `path` it belongs to |
-//! | `xfer: LOGIN` | [`super::chunk`] | a join packet, with its **ordinal on this connection** — the single field that says which path is in play |
+//! A correction is handled by ordering, not by estimating whether two positions
+//! are "close enough": the shell records a fully absolute position target when
+//! it forwards the event, rewrites stale movement claims while that target is
+//! in flight, and closes the window after the simulation adopts it. A packet
+//! whose mask contains only relative yaw and pitch (decimal `24`) still carries
+//! an absolute x/y/z target. A relative x, y, or z component stays unresolved
+//! until the simulation can apply it against its current pose.
 //!
-//! # Two paths, and they are not the same thing
+//! The adapter's movement selector remains responsible only for choosing the
+//! packet shape and its ordinary dirty tracking. It does not compare movement
+//! against a remembered teleport or rewrite based on distance, elapsed time, or
+//! a movement-history guess. That keeps a deliberate long move indistinguishable
+//! from any other valid movement to this layer.
 //!
-//! "Being moved to another server" has two mechanisms with almost nothing in
-//! common, and every line here carries a `path` field naming which one fired:
-//!
-//! * **`path = "reconnect"`** — the `minecraft:transfer` packet. The server
-//!   asks the client to disconnect and dial a *new address*. Everything
-//!   per-connection is rebuilt, this adapter included, so a fresh adapter's
-//!   `login_ordinal` is `1` again.
-//! * **`path = "backend-swap"`** — a Velocity/BungeeCord proxy keeping **one**
-//!   socket and swapping the backend behind it. No `TRANSFER` packet is ever
-//!   sent: the client sees `START_CONFIGURATION`, a configuration round, and
-//!   then a **second `LOGIN`** on the connection it already had. Every piece of
-//!   per-connection state that a reconnect would rebuild is instead carried
-//!   over, which is why `login_ordinal > 1` is the field to grep for first.
-//!
-//! A log with no `TRANSFER` line and a `login_ordinal` of `2` is a backend
-//! swap, and settles which of the two the player is actually exercising.
-//!
-//! The shell emits its own `transfer` lines for the frames either side of the
-//! wire (`crate`-external: `lodestone_shell`'s `net.rs`, `sim/net_apply.rs` and
-//! `sim/step.rs`), so one filter shows the whole chain.
-//!
-//! To collect it:
+//! To collect the trace:
 //!
 //! ```text
 //! RUST_LOG=info,transfer=debug cargo run --release -p lodestone-shell --bin lodestone
 //! ```
 //!
-//! # How it works
-//!
-//! Every line carries `seq`, from [`next_seq`] — a single process-wide counter,
-//! so lines are strictly ordered even when the driver task and the shell's
-//! frame thread interleave, and a gap in it is a line the subscriber dropped
-//! rather than an event that did not happen. Wall-clock timestamps cannot do
-//! that job here: the window this instrument exists to resolve is a fraction of
-//! one frame.
-//!
-//! # The question it answers
-//!
-//! Vanilla's client applies a teleport, sends `ACCEPT_TELEPORTATION` and sends a
-//! `move_player_pos_rot` at the *new* pose, all in one call on one thread
-//! (`vanilla's own client packet listener's own handle move player` — transcribed in
-//! `docs/transfer-tracing.md`).
-//! Ours cannot: the accept is written by the driver the instant the packet
-//! decodes, while the pose only reaches the simulation a channel hop and a frame
-//! later, and the simulation queues an outbound `Move` every tick from whatever
-//! pose it currently holds. A `Move` built before the teleport was applied but
-//! written after the accept therefore claims a pre-teleport position at a moment
-//! the server has already cleared `awaitingPositionFromClient` — which is the
-//! one input `vanilla's own server game packet listener impl's own handle move player` answers with
-//! *"moved wrongly!"* and a corrective teleport.
-//!
-//! [`super::V770Adapter::select_move_packet`] therefore reports
-//! `moves_since_teleport` and `dist_from_teleport` on every outbound movement
-//! packet, and **rewrites** the *first* move after a teleport onto that
-//! teleport's target when the claim carries both halves of staleness's
-//! signature: more than [`STALE_MOVE_BLOCKS`] from the target, *and* still
-//! within that distance of the pose this adapter last sent — which is the
-//! pre-teleport pose an overtaken claim was built from. The second half is
-//! what separates a stale claim from a caller's own deliberate long move; a
-//! headless caller's first move after a join placement is routinely far from
-//! that placement and has nothing to do with the pose before it, and
-//! rewriting it leaves the server believing the player never moved.
-//! The adapter warns as it rewrites. This mutex is the last point in the client that can:
-//! the confirmation is recorded under it, and by the time the driver reaches
-//! the queued movement action the shell has no way to touch it any more. The
-//! `warn` line is still the hypothesis stated in the log — if it appears, the
-//! race happened on that run — but it now names a claim that was replaced
-//! rather than one that reached the server.
-//!
-//! The shell keeps its own two rewrites (`net.rs`: `NetClient::send_action` and
-//! the net loop's drain) for the same window one and two queues earlier. They
-//! are not redundant with this one: each closes an ordering the next one down
-//! cannot see, and every one of them is idempotent, because they all write the
-//! same pose.
-//!
 //! # How to change it
 //!
-//! The distance verdict needs an absolute target to measure against, so
-//! [`AcceptedTeleport`] is only recorded for a teleport whose `relatives` mask
-//! is empty — the transfer/respawn/anti-cheat-correction shape. A relative
-//! teleport still logs its own line (with the mask) but leaves the previous
-//! target in place rather than inventing one this crate cannot resolve: the
-//! adapter holds no player position of its own.
+//! Keep every message prefixed `xfer:`. Add connection-boundary records beside
+//! the state transition that emits them, and add correction records in
+//! `crates/lodestone-shell/src/net.rs`, `sim/net_apply.rs`, or `sim/step.rs`
+//! where the corresponding state transition occurs. Do not add a distance or
+//! timing threshold to decide whether a movement claim is stale; the correction
+//! window already has an explicit forwarded/adopted boundary.
 //!
-//! Keep every message prefixed `xfer:`. The shell's default subscriber is built
-//! with `.with_target(false)`, so the target name does not reach the output and
-//! the prefix is the only thing a `grep` of a user-supplied log can key on.
+//! # Configuration and dependencies
+//!
+//! The target is enabled by the normal `tracing` subscriber; no feature or
+//! environment variable is required beyond the optional `RUST_LOG` filter above.
+//! [`next_seq`] is the only state in this module. The ordering-window state is
+//! owned by the shell and is shared with its `NetClient` action relay.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

@@ -447,14 +447,17 @@ impl<T: Transport> Driver<T> {
     ) -> SessionOutcome {
         let outcome = self.run_session(actions, corrections, shutdown).await;
         if let SessionOutcome::Failed(error) = &outcome {
+            let event = ClientEvent::SessionFailed {
+                reason: error.cause_chain(),
+            };
+            // This event is emitted here rather than through `emit`, because
+            // `run_session` has already stopped. Fold it before forwarding so
+            // renderer-owned lifecycle state is cleared on failures as well as
+            // on server-sent disconnects.
+            self.read_model.apply(&event);
             // `let _`: a consumer that has already dropped its receiver is not
             // an error, and there is nothing left to do about it either way.
-            let _ = self
-                .events
-                .send(ClientEvent::SessionFailed {
-                    reason: error.cause_chain(),
-                })
-                .await;
+            let _ = self.events.send(event).await;
         }
         outcome
     }
@@ -804,7 +807,7 @@ impl<T: Transport> Driver<T> {
                         transaction.response = Some((packet_id, payload));
                         continue;
                     }
-                    if let Err(error) = self.conn.write_packet(packet_id, &payload).await {
+                    if let Err(error) = self.write_observed_packet(packet_id, &payload).await {
                         return Step::Stop(Box::new(SessionOutcome::Failed(
                             ClientError::Transport(error),
                         )));
@@ -874,12 +877,14 @@ impl<T: Transport> Driver<T> {
                 }
                 Directive::Disconnect(reason) => {
                     tracing::debug!(reason = %reason.to_plain_string(), "server disconnect");
-                    let _ = self
-                        .events
-                        .send(ClientEvent::Disconnect {
-                            reason: reason.clone(),
-                        })
-                        .await;
+                    let event = ClientEvent::Disconnect {
+                        reason: reason.clone(),
+                    };
+                    // A terminal directive is forwarded directly because the
+                    // session loop stops here; still fold it before sending so
+                    // the shared renderer state cannot outlive the session.
+                    self.read_model.apply(&event);
+                    let _ = self.events.send(event).await;
                     return Step::Stop(Box::new(SessionOutcome::ServerDisconnected { reason }));
                 }
                 Directive::BeginEncryption {
@@ -1049,7 +1054,7 @@ impl<T: Transport> Driver<T> {
         };
 
         // Cleartext: written before the cipher is enabled below.
-        if let Err(error) = self.conn.write_packet(packet_id, &payload).await {
+        if let Err(error) = self.write_observed_packet(packet_id, &payload).await {
             return Step::Stop(Box::new(SessionOutcome::Failed(ClientError::Transport(
                 error,
             ))));
@@ -1582,7 +1587,7 @@ impl<T: Transport> Driver<T> {
                             "client writing keep-alive response"
                         );
                     }
-                    if let Err(error) = self.conn.write_packet(packet_id, &payload).await {
+                    if let Err(error) = self.write_observed_packet(packet_id, &payload).await {
                         return Step::Stop(Box::new(SessionOutcome::Failed(
                             ClientError::Transport(error),
                         )));
@@ -1609,7 +1614,7 @@ impl<T: Transport> Driver<T> {
         if let Some(action) = teleport_echo {
             match self.adapter.encode_correction_echo(self.state, &action) {
                 Ok(Some((packet_id, payload))) => {
-                    if let Err(error) = self.conn.write_packet(packet_id, &payload).await {
+                    if let Err(error) = self.write_observed_packet(packet_id, &payload).await {
                         return Step::Stop(Box::new(SessionOutcome::Failed(
                             ClientError::Transport(error),
                         )));
@@ -1696,8 +1701,7 @@ impl<T: Transport> Driver<T> {
                     "correction completion without a deferred protocol response".to_owned(),
                 ))
             })?;
-        self.conn
-            .write_packet(packet_id, &payload)
+        self.write_observed_packet(packet_id, &payload)
             .await
             .map_err(ClientError::Transport)?;
         let action = ClientAction::Move {
@@ -1713,8 +1717,7 @@ impl<T: Transport> Driver<T> {
         else {
             return Ok(());
         };
-        self.conn
-            .write_packet(packet_id, &payload)
+        self.write_observed_packet(packet_id, &payload)
             .await
             .map_err(ClientError::Transport)?;
         self.read_model.set_local_movement(pos, rotation, false);
@@ -1782,7 +1785,7 @@ impl<T: Transport> Driver<T> {
                         "outbound player input encoded"
                     );
                 }
-                if let Err(error) = self.conn.write_packet(packet_id, &payload).await {
+                if let Err(error) = self.write_observed_packet(packet_id, &payload).await {
                     tracing::warn!(%error, "failed to write client action");
                 }
             }
@@ -1858,7 +1861,7 @@ impl<T: Transport> Driver<T> {
     async fn write_auto_action(&mut self, action: ClientAction) -> Step {
         match self.adapter.encode_action(self.state, &action) {
             Ok(Some((packet_id, payload))) => {
-                if let Err(error) = self.conn.write_packet(packet_id, &payload).await {
+                if let Err(error) = self.write_observed_packet(packet_id, &payload).await {
                     return Step::Stop(Box::new(SessionOutcome::Failed(ClientError::Transport(
                         error,
                     ))));
@@ -1875,13 +1878,27 @@ impl<T: Transport> Driver<T> {
         Step::Continue
     }
 
+    /// Publishes the exact adapter output to the optional native observer
+    /// before handing the same bytes to transport framing. Admission is
+    /// bounded by the caller's bus policy and never delays or suppresses the
+    /// packet itself.
+    async fn write_observed_packet(
+        &mut self,
+        packet_id: i32,
+        payload: &[u8],
+    ) -> lodestone_net::Result<()> {
+        self.read_model
+            .record_outbound_raw_packet(self.state, packet_id, payload);
+        self.conn.write_packet(packet_id, payload).await
+    }
+
     /// Best-effort protocol disconnect on local shutdown.
     async fn graceful_local_close(&mut self) {
         if let Ok(Some((packet_id, payload))) = self
             .adapter
             .encode_action(self.state, &ClientAction::Disconnect)
         {
-            let _ = self.conn.write_packet(packet_id, &payload).await;
+            let _ = self.write_observed_packet(packet_id, &payload).await;
         }
     }
 }

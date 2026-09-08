@@ -81,7 +81,10 @@
 
 use bevy_app::{App, Plugin};
 use bevy_ecs::component::Component;
-use bevy_ecs::prelude::{Query, Res, With};
+use std::collections::HashMap;
+
+use bevy_ecs::prelude::{Query, Res, ResMut, With};
+use bevy_ecs::resource::Resource;
 use bevy_ecs::schedule::{IntoScheduleConfigs, SystemSet};
 use bevy_ecs::world::World;
 use lodestone_model::{
@@ -973,7 +976,8 @@ pub fn apply_menus(batch: Res<IngestBatch>, mut menus: Query<&mut SessionMenus>)
     }
 }
 
-/// `IngestSet::Apply`: `BlockDestruction` → [`SessionBlockDestruction`].
+/// `IngestSet::Apply`: block-destruction progress and lifecycle resets →
+/// [`SessionBlockDestruction`].
 pub fn apply_block_destruction(
     batch: Res<IngestBatch>,
     mut overlays: Query<&mut SessionBlockDestruction>,
@@ -981,12 +985,16 @@ pub fn apply_block_destruction(
     for event in batch.events() {
         for mut set in &mut overlays {
             match event {
-                ClientEvent::BlockDestruction { .. } => {
-                    let _ = set.0.apply(event);
-                }
+                // Login and respawn replace the client-level view from the
+                // renderer's perspective. No progress packet is required to
+                // clear a crack from the old view.
+                ClientEvent::Login { .. } | ClientEvent::Respawned { .. } => set.0.clear(),
+                // Entity lifecycle packets use the same event batch as the
+                // progress packet, but are folded by the entity plugin. Keep
+                // this cleanup in the sole overlay writer so arrival order is
+                // preserved when a spawn/removal and progress update share a
+                // batch.
                 ClientEvent::EntitySpawned { entity_id, .. } => {
-                    // A server may reuse an id after a despawn. The new
-                    // entity must not inherit the old entity's crack stage.
                     set.0.clear_entity(*entity_id);
                 }
                 ClientEvent::EntityRemoved { entity_ids } => {
@@ -994,11 +1002,9 @@ pub fn apply_block_destruction(
                         set.0.clear_entity(*entity_id);
                     }
                 }
-                ClientEvent::ChunkUnloaded { pos } => set.0.clear_chunk(*pos),
-                ClientEvent::Disconnect { .. } | ClientEvent::SessionFailed { .. } => {
-                    set.0.clear();
+                _ => {
+                    let _ = set.0.apply(event);
                 }
-                _ => {}
             }
         }
     }
@@ -1597,6 +1603,53 @@ pub struct HeldItemOverlay(pub lodestone_game::player_state::HeldItemHighlight);
 #[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
 pub struct HudEffects(pub lodestone_game::effect::ActiveEffects);
 
+/// Active effects keyed by server entity id for non-HUD consumers.
+///
+/// The local player's [`HudEffects`] remains the HUD's single source of truth.
+/// This resource retains the same wire state for every entity, including the
+/// local player, so effect-particle extraction can neither drop remote mobs
+/// nor require a second packet-specific particle path.
+#[derive(Resource, Debug, Clone, Default, PartialEq, Eq)]
+pub struct EntityStatusEffects(HashMap<i32, lodestone_game::effect::ActiveEffects>);
+
+impl EntityStatusEffects {
+    /// Applies or refreshes an effect for `entity_id`.
+    pub fn apply(&mut self, entity_id: i32, effect: lodestone_game::effect::StatusEffect) {
+        self.0.entry(entity_id).or_default().apply(effect);
+    }
+
+    /// Removes one effect, dropping an entity entry that became empty.
+    pub fn remove(&mut self, entity_id: i32, id: &Identifier) {
+        if let Some(effects) = self.0.get_mut(&entity_id) {
+            effects.remove(id);
+            if effects.is_empty() {
+                self.0.remove(&entity_id);
+            }
+        }
+    }
+
+    /// Effects currently retained for `entity_id`.
+    #[must_use]
+    pub fn get(&self, entity_id: i32) -> Option<&lodestone_game::effect::ActiveEffects> {
+        self.0.get(&entity_id)
+    }
+
+    /// Discards state for entities no longer retained by the live entity index.
+    pub fn retain_entity_ids(&mut self, mut retain: impl FnMut(i32) -> bool) {
+        self.0.retain(|id, _| retain(*id));
+    }
+
+    /// Removes all tracked entity effects at a session boundary.
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    /// Every entity's active effects, keyed by server entity id.
+    pub fn iter(&self) -> impl Iterator<Item = (i32, &lodestone_game::effect::ActiveEffects)> {
+        self.0.iter().map(|(id, effects)| (*id, effects))
+    }
+}
+
 /// Respawns observed this session — the diagnostic the live death gate reads to
 /// confirm the client actually recovered rather than merely never dying.
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1692,6 +1745,14 @@ pub fn tick_hud_overlays(
     }
 }
 
+/// Ages the non-HUD effect set on the same 20 Hz clock as [`tick_hud_overlays`].
+pub fn tick_entity_status_effects(mut effects: ResMut<EntityStatusEffects>) {
+    for effects in effects.0.values_mut() {
+        effects.tick(1);
+    }
+    effects.0.retain(|_, effects| !effects.is_empty());
+}
+
 /// Insert the driver-half session/HUD component set onto `entity`.
 ///
 /// Called by both the spawn and the reset path in the driver, so a component
@@ -1728,7 +1789,11 @@ impl Plugin for SessionHudPlugin {
         if !app.is_plugin_added::<crate::CorePlugin>() {
             app.add_plugins(crate::CorePlugin);
         }
-        app.add_systems(GameTick, tick_hud_overlays.in_set(TickSet::Animate));
+        app.init_resource::<EntityStatusEffects>();
+        app.add_systems(
+            GameTick,
+            (tick_hud_overlays, tick_entity_status_effects).in_set(TickSet::Animate),
+        );
     }
 }
 
@@ -1776,6 +1841,18 @@ mod tests {
         app.world_mut()
             .resource_mut::<crate::ingest::IngestQueue>()
             .push(event);
+        app.world_mut().run_schedule(NetIngest);
+    }
+
+    fn fold_batch(app: &mut App, events: impl IntoIterator<Item = ClientEvent>) {
+        {
+            let mut queue = app
+                .world_mut()
+                .resource_mut::<crate::ingest::IngestQueue>();
+            for event in events {
+                queue.push(event);
+            }
+        }
         app.world_mut().run_schedule(NetIngest);
     }
 
@@ -3069,106 +3146,128 @@ mod tests {
                 .stage_at(p),
             None
         );
-    }
 
-    #[test]
-    fn block_destruction_lifecycle_clears_replacements_removals_unloads_and_disconnects() {
-        let (mut app, entity) = session_app();
-        let first = lodestone_model::math::BlockPos::new(-1, 64, -1);
-        let second = lodestone_model::math::BlockPos::new(16, 64, 0);
-
-        fold(
+        // Entity lifecycle packets can share a batch with progress. They must
+        // clear through this same writer, while preserving the batch's event
+        // order so a later progress packet for a newly spawned id survives.
+        fold_batch(
             &mut app,
-            ClientEvent::BlockDestruction {
-                entity_id: 7,
-                pos: first,
-                progress: 4,
-            },
+            [
+                ClientEvent::BlockDestruction {
+                    entity_id: 8,
+                    pos: p,
+                    progress: 2,
+                },
+                ClientEvent::EntitySpawned {
+                    entity_id: 8,
+                    uuid: None,
+                    entity_type: "minecraft:item".parse().expect("valid entity type"),
+                    pos: lodestone_model::Vec3::new(0.0, 64.0, 0.0),
+                    rotation: lodestone_model::Rotation::new(0.0, 0.0),
+                    velocity: None,
+                },
+                ClientEvent::BlockDestruction {
+                    entity_id: 8,
+                    pos: p,
+                    progress: 7,
+                },
+            ],
         );
+        assert_eq!(
+            app.world()
+                .get::<SessionBlockDestruction>(entity)
+                .unwrap()
+                .0
+                .stage_at(p),
+            Some(7),
+            "progress after an id replacement must survive in the same batch"
+        );
+
+        let removed = lodestone_model::math::BlockPos::new(4, 64, 3);
+        fold_batch(
+            &mut app,
+            [
+                ClientEvent::BlockDestruction {
+                    entity_id: 9,
+                    pos: removed,
+                    progress: 2,
+                },
+                ClientEvent::EntityRemoved {
+                    entity_ids: vec![9],
+                },
+            ],
+        );
+        assert_eq!(
+            app.world()
+                .get::<SessionBlockDestruction>(entity)
+                .unwrap()
+                .0
+                .stage_at(removed),
+            None,
+            "entity removal must clear progress without a reset packet"
+        );
+        assert_eq!(
+            app.world()
+                .get::<SessionBlockDestruction>(entity)
+                .unwrap()
+                .0
+                .stage_at(p),
+            Some(7),
+            "an unrelated entity's progress must survive the removal"
+        );
+
+        // A new login/respawn view must not retain progress from the previous
+        // player-level instance when no explicit reset packet accompanies it.
         fold(
             &mut app,
             ClientEvent::BlockDestruction {
                 entity_id: 8,
-                pos: second,
-                progress: 5,
-            },
-        );
-
-        // A replacement with the same server id must not inherit the old
-        // entity's stage.
-        fold(
-            &mut app,
-            ClientEvent::EntitySpawned {
-                entity_id: 7,
-                uuid: None,
-                entity_type: "minecraft:zombie".parse().expect("valid entity key"),
-                pos: lodestone_model::Vec3::default(),
-                rotation: lodestone_model::Rotation::default(),
-                velocity: None,
-            },
-        );
-        let overlays = &app
-            .world()
-            .get::<SessionBlockDestruction>(entity)
-            .expect("session overlay component")
-            .0;
-        assert_eq!(overlays.stage_at(first), None);
-        assert_eq!(overlays.stage_at(second), Some(5));
-
-        fold(
-            &mut app,
-            ClientEvent::EntityRemoved {
-                entity_ids: vec![8],
-            },
-        );
-        assert!(app
-            .world()
-            .get::<SessionBlockDestruction>(entity)
-            .expect("session overlay component")
-            .0
-            .is_empty());
-
-        fold(
-            &mut app,
-            ClientEvent::BlockDestruction {
-                entity_id: 9,
-                pos: second,
-                progress: 3,
-            },
-        );
-        fold(
-            &mut app,
-            ClientEvent::ChunkUnloaded {
-                pos: lodestone_model::ChunkPos::new(1, 0),
-            },
-        );
-        assert!(app
-            .world()
-            .get::<SessionBlockDestruction>(entity)
-            .expect("session overlay component")
-            .0
-            .is_empty());
-
-        fold(
-            &mut app,
-            ClientEvent::BlockDestruction {
-                entity_id: 10,
-                pos: first,
+                pos: p,
                 progress: 2,
             },
         );
         fold(
             &mut app,
-            ClientEvent::Disconnect {
-                reason: lodestone_model::Text::literal("closed"),
+            ClientEvent::Login {
+                entity_id: 11,
+                game_mode: GameMode::Creative,
+                dimension: dim("overworld"),
             },
         );
-        assert!(app
-            .world()
-            .get::<SessionBlockDestruction>(entity)
-            .expect("session overlay component")
-            .0
-            .is_empty());
+        assert!(
+            app.world()
+                .get::<SessionBlockDestruction>(entity)
+                .unwrap()
+                .0
+                .is_empty(),
+            "login must clear progress from the previous player-level view"
+        );
+
+        fold(
+            &mut app,
+            ClientEvent::BlockDestruction {
+                entity_id: 8,
+                pos: p,
+                progress: 2,
+            },
+        );
+        fold(
+            &mut app,
+            ClientEvent::Respawned {
+                dimension: dim("the_nether"),
+                game_mode: GameMode::Survival,
+                previous_game_mode: None,
+                last_death_location: None,
+            },
+        );
+        assert!(
+            app.world()
+                .get::<SessionBlockDestruction>(entity)
+                .unwrap()
+                .0
+                .is_empty(),
+            "respawn must clear progress from the previous player-level view"
+        );
     }
 
     #[test]

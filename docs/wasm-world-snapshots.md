@@ -40,6 +40,14 @@ finishes before its authoritative source write. The result returns to the same
 plugin as a later `resident-block-mutation-outcome` event with one of the finite
 WIT status values. The normal server block feed still updates the client replica.
 
+The cross-tier authority gate in
+`lodestone-wasm-host/tests/authoritative_world_mutation.rs` builds the guest
+separately, drives the real conductor, and feeds its copied request to a running
+integrated server with a native adjudicator installed. The adjudicator replaces
+the requested state and the test reads that replacement back from the retained
+source, so the test covers the shared authoritative lifecycle rather than merely
+checking that both tiers can produce similarly shaped records.
+
 ## How to change it
 
 To change either vocabulary, update `wit/lodestone-plugin.wit`, the ABI lowerer,

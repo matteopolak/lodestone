@@ -1599,7 +1599,11 @@ async fn a_tick_the_loop_schedules_is_visible_in_the_handle_the_save_path_reads(
     let published = drive_with_handle(Arc::clone(&world), &feed, &scheduled, 3).await;
 
     let pending: Vec<((i32, i32, i32), String, u64)> = scheduled.with(|queues| {
-        queues.block.iter().map(|t| (t.pos, t.kind.clone(), t.trigger_tick)).collect()
+        queues
+            .block
+            .iter()
+            .map(|t| (t.pos, t.kind.name().into_owned(), t.trigger_tick))
+            .collect()
     });
     assert_eq!(
         pending.len(),
@@ -1653,7 +1657,7 @@ async fn a_tick_pre_loaded_into_the_handle_is_drained_by_the_loop_at_its_own_tri
     scheduled.with(|queues| {
         queues.block.schedule(
             (DIODE_X, Y, ROW_Z),
-            redstone::TICK_REPEATER.to_owned(),
+            crate::scheduled_tick::ScheduledTickKind::Repeater,
             LOADED_TRIGGER,
             crate::scheduled_tick::TickPriority::Normal,
         );

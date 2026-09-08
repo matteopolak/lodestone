@@ -4,8 +4,10 @@
 //! discovery mechanism. The supplied class declares `static void onTick(long)`,
 //! `static void onBlockStateChanged(int, int, int, int)`,
 //! `static void onPlayerJoined(long)`, `static void onPlayerDisconnected(long)`,
-//! and `static native int blockStateId(int, int, int)`. Native requests cross
-//! the world port; the worker never receives world state. The resident
+//! and `static native int blockStateId(int, int, int)`. It may additionally
+//! declare any exact member from the generated player census; those optional
+//! natives are registered only when declared. Native requests cross the world
+//! or player ports; the worker never receives server state. The resident
 //! block-change listener may also receive a value-only player identity as an
 //! opaque handle for the duration of its callback. A host must service the
 //! port and poll completion, and must not dispatch another callback until idle.
@@ -1787,6 +1789,42 @@ impl AdapterHost {
     }
 }
 
+/// Registers the generated player surface when an adapter class opts into its
+/// exact declarations. Ordinary lifecycle adapters only need block reads, so
+/// absent player methods remain unsupported rather than becoming a required
+/// compatibility contract. A declaration with the wrong descriptor is treated
+/// as absent; the generated census remains the source of supported names.
+fn register_optional_player_surface(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    class_name: &str,
+) -> Result<(), AdapterError> {
+    for entry in crate::native_surface::paper_player_surface_census() {
+        let method = entry.method;
+        let name = JNIString::new(method.name);
+        let descriptor = jni::signature::RuntimeMethodSignature::from_str(method.descriptor)
+            .map_err(|error| AdapterError::new(format!(
+                "{class_name}.{}{}: invalid generated descriptor: {error}",
+                method.name, method.descriptor,
+            )))?;
+        if env.get_static_method_id(class, name, descriptor.method_signature()).is_ok() {
+            crate::native_surface::register_method(env, class, method).map_err(|error| {
+                java_error(
+                    env,
+                    &format!("{class_name}.{}{}", method.name, method.descriptor),
+                    error,
+                )
+            })?;
+        } else if env.exception_check() {
+            // Optional declarations are probed one at a time. Clear the JVM's
+            // NoSuchMethodError so a class that opts into only part of the
+            // bounded player surface can still load.
+            env.exception_clear();
+        }
+    }
+    Ok(())
+}
+
 /// A bounded, actionable adapter failure; never a default block-state result.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdapterError(String);
@@ -1874,6 +1912,7 @@ fn run_java<S>(
             let adapter_identity = lifecycle_identity(class_name, "adapter", class_name);
             register_block_query(env, &class, "blockStateId", "(III)I")
                 .map_err(|error| java_error(env, &format!("{class_name}.blockStateId(III)I"), error))?;
+            register_optional_player_surface(env, &class, class_name)?;
             env.get_static_method_id(&class, jni_str!("onTick"), jni_sig!("(J)V"))
                 .map_err(|error| java_error(env, &format!("{class_name}.onTick(J)V"), error))?;
             env.get_static_method_id(&class, jni_str!("onBlockStateChanged"), jni_sig!("(IIII)V"))

@@ -107,12 +107,14 @@ impl TntTickOwner {
 
 /// One completed primed-explosive owner batch.
 ///
-/// The count and serial slots originate at tick start. The central consumer
-/// checks them before changing live motion, fuse, or detonation state, so an
-/// incomplete or duplicate completion fails before it can reorder a blast.
+/// The plan generation, count, and serial slots originate at tick start. The
+/// central consumer checks them before changing live motion, fuse, or detonation
+/// state, so stale, incomplete, or duplicate completion fails before it can
+/// reorder a blast.
 #[derive(Debug, Clone)]
 pub(crate) struct TntTickOwnerBatch {
     owner: TntTickOwner,
+    plan: u64,
     expected_batch_count: usize,
     effects: Vec<TntTickEffect>,
 }
@@ -133,6 +135,14 @@ struct TntTickEffect {
     detonation: Option<Vec3>,
 }
 
+#[derive(Debug, Clone)]
+struct TntTickInput {
+    owner: TntTickOwner,
+    serial: usize,
+    id: i32,
+    tnt: TrackedTnt,
+}
+
 /// `PrimedTnt.DEFAULT_FUSE_TIME` — the fuse a fresh ignition starts at, in
 /// ticks (`80` = 4 real-time seconds).
 pub const DEFAULT_FUSE_TIME: i32 = 80;
@@ -140,6 +150,11 @@ pub const DEFAULT_FUSE_TIME: i32 = 80;
 /// `PrimedTnt.DEFAULT_EXPLOSION_POWER` — the blast radius handed to
 /// `Level::explode`, the TNT analogue of `mobs::mod::CREEPER_EXPLOSION_RADIUS`.
 pub const EXPLOSION_POWER: f32 = 4.0;
+
+/// Dense-scene cutoff measured by `measure_dense_tnt_owner_workers`: four
+/// native lanes amortize their hand-off at 128 live explosives. Browser builds
+/// retain the serial arm because their executor has no native worker lanes.
+const TNT_OWNER_PARALLEL_THRESHOLD: usize = 128;
 
 /// `PrimedTnt.getDefaultGravity` override — `0.04`, the same per-tick downward
 /// acceleration `FallingBlockEntity` uses (`crate::gravity_tick`'s own `0.04`),
@@ -309,7 +324,7 @@ impl<'w> MobSim<'w> {
     /// [`MobSim::take_detonations`]'s existing driver-side drain already turns
     /// into destroyed blocks, drops and an `EXPLODE` packet — see this
     /// module's own doc comment for why that needs no TNT-specific call site.
-    pub fn tick_tnt(&mut self, block_state: &dyn Fn(i32, i32, i32) -> String) {
+    pub fn tick_tnt(&mut self, block_state: &(dyn Fn(i32, i32, i32) -> String + Sync)) {
         let batches = self.tick_tnt_owner_batches(block_state);
         self.apply_tnt_tick_owner_batches(batches);
     }
@@ -323,14 +338,35 @@ impl<'w> MobSim<'w> {
     /// detonation. This preserves the existing serial behavior while making the
     /// ownership boundary explicit.
     pub(crate) fn tick_tnt_owner_batches(
-        &self,
-        block_state: &dyn Fn(i32, i32, i32) -> String,
+        &mut self,
+        block_state: &(dyn Fn(i32, i32, i32) -> String + Sync),
     ) -> Vec<TntTickOwnerBatch> {
-        let view = TntCollision { block_state };
-        let profile = PhysicsProfile::default();
+        self.tnt_owner_plan = self
+            .tnt_owner_plan
+            .checked_add(1)
+            .expect("primed-explosive owner plan generation must not wrap");
+        #[cfg(not(target_arch = "wasm32"))]
+        let workers = if self.tnt.len() >= TNT_OWNER_PARALLEL_THRESHOLD {
+            std::thread::available_parallelism()
+                .map(std::num::NonZero::get)
+                .unwrap_or(1)
+                .min(4)
+        } else {
+            1
+        };
+        #[cfg(target_arch = "wasm32")]
+        let workers = 1;
+        self.tick_tnt_owner_batches_with_workers(block_state, workers)
+    }
+
+    fn tick_tnt_owner_batches_with_workers(
+        &self,
+        block_state: &(dyn Fn(i32, i32, i32) -> String + Sync),
+        worker_count: usize,
+    ) -> Vec<TntTickOwnerBatch> {
         let mut ids: Vec<i32> = self.tnt.keys().copied().collect();
         ids.sort_unstable();
-        let mut batches = Vec::<TntTickOwnerBatch>::new();
+        let mut jobs = Vec::<(TntTickOwner, Vec<TntTickInput>)>::new();
         for (serial, id) in ids.into_iter().enumerate() {
             let tnt = self
                 .tnt
@@ -338,24 +374,49 @@ impl<'w> MobSim<'w> {
                 .cloned()
                 .expect("a tick-start TNT id must remain live while planning");
             let owner = TntTickOwner::for_position(tnt.motion.position);
-            let (tnt, detonation) = ticked_tnt(tnt, &view, &profile);
-            let effect = TntTickEffect {
+            let input = TntTickInput {
                 owner,
                 serial,
                 id,
                 tnt,
-                detonation,
             };
-            if let Some(batch) = batches.iter_mut().find(|batch| batch.owner == owner) {
-                batch.effects.push(effect);
+            if let Some((_, inputs)) = jobs
+                .iter_mut()
+                .find(|(candidate, _)| *candidate == owner)
+            {
+                inputs.push(input);
             } else {
-                batches.push(TntTickOwnerBatch {
-                    owner,
-                    expected_batch_count: 0,
-                    effects: vec![effect],
-                });
+                jobs.push((owner, vec![input]));
             }
         }
+        let plan = self.tnt_owner_plan;
+        let mut batches = crate::tick_region::run_bounded_owner_jobs(
+            jobs,
+            worker_count,
+            &|(owner, inputs)| {
+                let view = TntCollision { block_state };
+                let profile = PhysicsProfile::default();
+                let effects = inputs
+                    .into_iter()
+                    .map(|input| {
+                        let (tnt, detonation) = ticked_tnt(input.tnt, &view, &profile);
+                        TntTickEffect {
+                            owner: input.owner,
+                            serial: input.serial,
+                            id: input.id,
+                            tnt,
+                            detonation,
+                        }
+                    })
+                    .collect();
+                TntTickOwnerBatch {
+                    owner,
+                    plan,
+                    expected_batch_count: 0,
+                    effects,
+                }
+            },
+        );
         let batch_count = batches.len();
         for batch in &mut batches {
             batch.expected_batch_count = batch_count;
@@ -373,6 +434,15 @@ impl<'w> MobSim<'w> {
         if batches.is_empty() {
             return;
         }
+        let plan = batches[0].plan;
+        assert_eq!(
+            plan, self.tnt_owner_plan,
+            "primed-explosive owner completion must name the latest tick-start plan"
+        );
+        assert!(
+            plan > self.applied_tnt_owner_plan,
+            "primed-explosive owner completion may not replay an applied plan"
+        );
         let effects = merge_tnt_tick_owner_batches(batches);
         assert_eq!(
             effects.len(),
@@ -405,6 +475,7 @@ impl<'w> MobSim<'w> {
                 radius: EXPLOSION_POWER,
             });
         }
+        self.applied_tnt_owner_plan = plan;
     }
 }
 
@@ -541,6 +612,16 @@ mod tests {
         sim
     }
 
+    fn dense_tnt_owner_fixture(count: usize) -> MobSim<'static> {
+        let mut sim = sim();
+        for serial in 0..count {
+            let x = [-0.5, 16.5, 32.5, 48.5][serial % 4];
+            let z = f64::from((serial / 4 % 8) as u8) + 0.5;
+            sim.spawn_tnt(Vec3::new(x, 64.0, z), DEFAULT_FUSE_TIME);
+        }
+        sim
+    }
+
     #[test]
     fn tnt_owner_batches_restore_detonation_order_after_reversed_completion() {
         let mut serial_sim = owner_batch_fixture();
@@ -587,6 +668,42 @@ mod tests {
     }
 
     #[test]
+    fn tnt_owner_batches_match_between_one_and_four_lanes() {
+        let mut serial = owner_batch_fixture();
+        serial.tnt_owner_plan = 1;
+        let serial_batches = serial.tick_tnt_owner_batches_with_workers(&floor(), 1);
+        serial.apply_tnt_tick_owner_batches(serial_batches);
+
+        let mut lanes = owner_batch_fixture();
+        lanes.tnt_owner_plan = 1;
+        let lane_batches = lanes.tick_tnt_owner_batches_with_workers(&floor(), 4);
+        lanes.apply_tnt_tick_owner_batches(lane_batches);
+
+        assert_eq!(lanes.take_detonations(), serial.take_detonations());
+        assert_eq!(lanes.tnt_count(), serial.tnt_count());
+        assert_eq!(lanes.snapshots(), serial.snapshots());
+    }
+
+    #[test]
+    #[should_panic(expected = "latest tick-start plan")]
+    fn tnt_owner_batches_reject_a_stale_plan() {
+        let mut sim = owner_batch_fixture();
+        let stale = sim.tick_tnt_owner_batches(&floor());
+        let _current = sim.tick_tnt_owner_batches(&floor());
+        sim.apply_tnt_tick_owner_batches(stale);
+    }
+
+    #[test]
+    #[should_panic(expected = "may not replay an applied plan")]
+    fn tnt_owner_batches_reject_a_replayed_plan() {
+        let mut sim = owner_batch_fixture();
+        let batches = sim.tick_tnt_owner_batches(&floor());
+        let replay = batches.clone();
+        sim.apply_tnt_tick_owner_batches(batches);
+        sim.apply_tnt_tick_owner_batches(replay);
+    }
+
+    #[test]
     #[should_panic(expected = "every tick-start owner batch exactly once")]
     fn tnt_owner_batch_merge_rejects_a_missing_owner() {
         let mut batches = owner_batch_fixture().tick_tnt_owner_batches(&floor());
@@ -600,6 +717,31 @@ mod tests {
         let mut batches = owner_batch_fixture().tick_tnt_owner_batches(&floor());
         batches[1] = batches[0].clone();
         let _ = merge_tnt_tick_owner_batches(batches);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "focused TNT worker measurement; run explicitly before choosing a production cutoff"]
+    fn measure_dense_tnt_owner_workers() {
+        use std::time::Instant;
+
+        for count in [128, 256, 512, 1_024, 2_048] {
+            let serial = dense_tnt_owner_fixture(count);
+            let parallel = dense_tnt_owner_fixture(count);
+
+            let started = Instant::now();
+            let _ = serial.tick_tnt_owner_batches_with_workers(&floor(), 1);
+            let serial_ms = started.elapsed().as_secs_f64() * 1_000.0;
+
+            let started = Instant::now();
+            let _ = parallel.tick_tnt_owner_batches_with_workers(&floor(), 4);
+            let parallel_ms = started.elapsed().as_secs_f64() * 1_000.0;
+
+            println!(
+                "dense_tnt owners=4 tnt={count} serial_ms={serial_ms:.3} parallel_ms={parallel_ms:.3} speedup={:.3}",
+                serial_ms / parallel_ms
+            );
+        }
     }
 
     /// The fuse and launch velocity, taken from the record rather than

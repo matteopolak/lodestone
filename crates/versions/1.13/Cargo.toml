@@ -22,7 +22,6 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-lodestone-ecs = { workspace = true }
 lodestone-client = { workspace = true }
 lodestone-net = { workspace = true }
 lodestone-registry = { path = "../../lodestone-registry", features = ["v1-13"] }

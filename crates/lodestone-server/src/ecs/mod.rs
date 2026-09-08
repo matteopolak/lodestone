@@ -105,8 +105,8 @@ mod scheduler;
 
 pub use plugin::{ServerCorePlugin, ServerTick, ServerTickWitness, advance_server_tick};
 pub use paper_events::{
-    PaperEvent, PaperEventBus, PaperEventFailure, PaperEventKind, PaperEventPriority,
-    PaperEventRegistrationError,
+    PaperEvent, PaperEventBus, PaperEventFailure, PaperEventFailureReason, PaperEventKind,
+    PaperEventPriority, PaperEventRegistrationError,
 };
 pub use proposals::{
     DespawnProposalRefusal, ProposalRefusal, ProposalVerdict, ServerProposal,

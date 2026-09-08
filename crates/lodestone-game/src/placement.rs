@@ -40,8 +40,9 @@
 //!
 //! Placement is predicted then reconciled, the same seam as [`crate::reconcile`]
 //! for containers. [`Placement::use_on`] stamps every placement with the modern
-//! block-prediction `sequence` and records it pending; the client optimistically
-//! shows the block immediately. The server echoes the sequence in a
+//! typed block-prediction [`PredictionSequence`] and records it pending; the
+//! client optimistically shows the block immediately. The server echoes the
+//! sequence in a
 //! block-changed-ack and, for an *accepted* placement, has already broadcast the
 //! authoritative block update; for a *rejected* one (spawn protection, illegal
 //! support, an occupied space) it never does, so the optimistic block must snap
@@ -574,7 +575,7 @@ impl Placement {
     pub fn acknowledge(&mut self, sequence: PredictionSequence) -> Vec<PlacePrediction> {
         let mut settled = Vec::new();
         self.pending.retain(|p| {
-            if p.sequence.is_at_or_before(sequence) {
+            if p.sequence.is_acknowledged_by(sequence) {
                 settled.push(p.clone());
                 false
             } else {
@@ -791,6 +792,33 @@ mod tests {
         };
         assert_eq!(seq(&d1), PredictionSequence::new(1), "first prediction is sequence 1");
         assert_eq!(seq(&d2), PredictionSequence::new(2), "sequence pre-increments per use");
+    }
+
+    #[test]
+    fn acknowledgement_settles_predictions_across_wire_sign_wrap() {
+        let world = FakeWorld {
+            replaceable: vec![
+                BlockPos::new(0, 65, 0),
+                BlockPos::new(1, 65, 0),
+            ],
+            ..FakeWorld::default()
+        };
+        let mut m = Placement::new();
+        m.next_sequence = PredictionSequence::new(i32::MAX as u32 - 1);
+        assert!(matches!(
+            m.use_on(&ctx(BlockPos::new(0, 64, 0), BlockFace::Up), &world),
+            UseOnDecision::Place { .. }
+        ));
+        assert!(matches!(
+            m.use_on(&ctx(BlockPos::new(1, 64, 0), BlockFace::Up), &world),
+            UseOnDecision::Place { .. }
+        ));
+        assert_eq!(m.pending()[0].sequence.as_wire(), i32::MAX);
+        assert_eq!(m.pending()[1].sequence.as_wire(), i32::MIN);
+
+        let settled = m.acknowledge(PredictionSequence::from_wire(i32::MIN));
+        assert_eq!(settled.len(), 2, "an ack after rollover settles both predictions");
+        assert!(m.pending().is_empty());
     }
 
     #[test]

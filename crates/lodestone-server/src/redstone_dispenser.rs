@@ -108,7 +108,7 @@ use lodestone_model::{BlockPos, Vec3};
 use crate::chunk::ChunkSource;
 use crate::neighbor_update::Direction;
 use crate::redstone::{
-    base_name, direction_from_str, direction_to_str, get_bool_property, get_str_property, with_property, WorldState,
+    base_name, direction_from_str, get_bool_property, get_str_property, with_property, WorldState,
 };
 
 pub const DISPENSER: &str = "minecraft:dispenser";

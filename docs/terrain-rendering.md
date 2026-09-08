@@ -159,20 +159,6 @@ paths only need to provide the current texture view. There is no runtime configu
 This path depends on `GpuAtlas` for the resident texture and on `CrackResolver` for the
 stage UV rectangle and block-shaped overlay geometry.
 
-### Historical block-destruction overlays
-
-Remote break-progress packets fold into `SessionBlockDestruction`, keyed by breaking
-entity. `Sim::crack_targets` resolves each active position through the loaded world and
-passes the resulting state id and stage to the same nearest-sampled crack pipeline as the
-local mining target; an unloaded position is omitted rather than rendered with fabricated
-geometry. A stage outside `0..=9` clears the entity's overlay.
-
-The session fold also clears overlays when an entity id is replaced or removed, when its
-chunk unloads, and on disconnect/session failure. If this lifecycle changes, update
-`BlockDestructionOverlays`, `apply_block_destruction`, and the routing table together;
-otherwise stale cracks can survive a reused id or reloaded chunk. The protocol adapters
-must preserve the raw progress byte so each family can keep its own reset sentinel.
-
 ### Translucency: culling and depth
 
 Two independent rules govern an interior face between two translucent blocks of the
@@ -184,6 +170,26 @@ identical translucent blocks would otherwise show. Separately, the translucent
 terrain pipeline keeps ordinary back-face culling **on**, matching vanilla — with it
 off, a solid cube's far face drew too, double-compositing the same partial alpha
 along one view ray.
+
+Slime and honey add one geometry detail to that identity check: their models contain
+an outer boundary cube plus six unculled, axis-aligned faces for a smaller nested cube.
+An isolated block keeps all six nested faces; when an identical neighbour touches it,
+the shared nested pair is suppressed along with the outer boundary pair. The check is
+limited to complete rectangles strictly inside the block, so diagonal blades, portal
+panels and other intentionally unculled model geometry remain visible.
+
+The translucent block-model pipeline also writes its depth and uses the
+nearer-or-equal comparison. A nearer edge or sheet therefore rejects a farther
+translucent face when that face arrives later, while same-depth model overlays
+still retain the equality rule. The normal translucent draw order remains
+significant for two visible layers: farther surfaces must arrive first so their
+colour is blended behind nearer surfaces. Fluids are separate: alpha-blended
+water keeps depth writes off so the sea floor remains visible, and relies on its
+explicit reverse-winding copy plus back-to-front section order.
+The GPU regression scenes
+`translucent_model_backface_cull_gate::a_far_ice_surface_cannot_paint_over_a_nearer_surface_submitted_first`
+and `ice_alpha_transmits_outside_background_for_isolated_and_connected_layers`
+keep the depth-order and material-transmission checks independent.
 
 Depth precision for a thin overlay (a filled map over its wall, a sign's glowing
 outline over its ink) comes from the projection, not a bias. This renderer's depth is
@@ -279,11 +285,15 @@ whole boundary square *and* that quad's own sprite is opaque. One block needs a 
 on top of that rule (`powder_snow`, whose model draws its own interior on thin
 shells and would otherwise wrongly occlude blocks behind it).
 
-Known, documented gaps: back-face culling is disabled on the fluid pipeline **and**
-`bake_fluid` still emits vanilla's reversed-winding back-face copies (which exist
-*because* vanilla's pipeline culls back faces) — with both true at once every open
-fluid side face blends twice, at `1-(1-a)²` instead of `a`, reading more opaque than
-vanilla's. The fix is restoring back-face culling, not removing the baked copies.
+The fluid pipeline keeps back-face culling **on**, and `bake_fluid` emits the
+reversed-winding back-face copies required for a surface to remain visible from
+the opposite side. These are complementary: culling selects the one copy facing
+the camera, while the explicit reverse copy supplies the opposite viewing
+direction. Disabling culling would make both copies blend along one view ray,
+turning source alpha `a` into `1-(1-a)²` and making water look too opaque from
+outside. `fluid_gate::reverse_copy_is_not_a_second_layer` keeps that distinction
+under a GPU gate, including contrasting bright and dark backgrounds and a
+separate two-layer control.
 Partial-occluder culling (a `dirt_path`/farmland/slab bank against a fluid side face)
 is closed for the scoped single-box, full-footprint case; the general multi-box case
 (stairs, fences, walls) needs real voxel-shape slice-and-compare and remains

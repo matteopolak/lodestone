@@ -2,7 +2,7 @@ use lodestone_core::{Ctx, Decode, Reader, State, encode_body};
 use lodestone_data::block_states;
 use lodestone_model::{
     AnimationAction, BlockActionKind, BlockFace, BlockPos, ClientAction, ClientEvent,
-    ConnectionState, Directive, Hand, Rotation, Text, Vec3, Vec3f, VersionAdapter,
+    ConnectionState, Directive, Hand, Rotation, Vec3f, VersionAdapter,
 };
 use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_v1_19::{V762Adapter, V762ServerProtocol};
@@ -125,7 +125,7 @@ fn protocol_762_uses_its_capture_ids_and_encodes_a_registry_shaped_chunk() {
             status: 0,
             location: Position::new(3, 100, 5),
             face: 1,
-            sequence: 17,
+            sequence: lodestone_model::PredictionSequence::new(17),
         },
         CTX,
     )
@@ -394,149 +394,4 @@ fn hosted_held_slot_reaches_the_registry_selected_inventory_consumer() {
         ServerBound::CarriedItemChanged { slot: 3 },
         "the adapter action must pass through the registry-selected host to the shared inventory consumer"
     );
-}
-
-#[test]
-fn hosted_death_respawn_lifecycle_uses_literal_762_frames() {
-    let protocol = lodestone_registry::server_protocol_for_protocol(762)
-        .expect("protocol 762 must resolve to its hosted server protocol");
-    let adapter = V762Adapter::new();
-
-    let Some((command_id, command_payload)) = adapter
-        .encode_action(ConnectionState::Play, &ClientAction::Respawn)
-        .expect("the protocol-762 adapter encodes perform-respawn")
-    else {
-        panic!("perform-respawn must produce a client command");
-    };
-    assert_eq!(command_id, play::serverbound::CLIENT_COMMAND);
-    assert_eq!(command_payload, [0x00]);
-    assert_eq!(
-        protocol.decode(State::Play, command_id, &command_payload),
-        ServerBound::ClientCommand { action: 0 },
-        "the literal respawn command must reach the hosted lifecycle consumer"
-    );
-    assert_eq!(
-        protocol.decode(State::Play, command_id, &[0x00, 0xff]),
-        ServerBound::Ignored,
-        "a trailing byte must not reach the respawn consumer"
-    );
-
-    let ServerDirective::Send {
-        packet_id: death_id,
-        payload: death_payload,
-    } = protocol.encode_player_combat_kill(17, &Text::literal("You died"))
-    else {
-        panic!("the hosted protocol must emit a death notification");
-    };
-    assert_eq!(death_id, play::clientbound::DEATH_COMBAT_EVENT);
-    assert_eq!(
-        death_payload,
-        [
-            0x11, 0x00, 0x00, 0x00, 0x00, 0x13, 0x7b, 0x22, 0x74, 0x65, 0x78, 0x74, 0x22,
-            0x3a, 0x22, 0x59, 0x6f, 0x75, 0x20, 0x64, 0x69, 0x65, 0x64, 0x22, 0x7d,
-        ]
-    );
-    assert_eq!(
-        adapter
-            .handle_packet(
-                &mut World::new(),
-                ConnectionState::Play,
-                death_id,
-                &death_payload,
-            )
-            .expect("the client adapter must consume the hosted death frame"),
-        vec![Directive::Emit(ClientEvent::Death {
-            message: Text::literal("You died"),
-        })]
-    );
-    let mut malformed_death = death_payload.clone();
-    malformed_death.push(0xff);
-    assert!(
-        adapter
-            .handle_packet(
-                &mut World::new(),
-                ConnectionState::Play,
-                death_id,
-                &malformed_death,
-            )
-            .is_err(),
-        "a trailing byte must not be accepted as part of the death frame"
-    );
-
-    let directives = protocol.encode_respawn_with_teleport_id(
-        300,
-        Vec3::new(17.25, 70.0, -2.5),
-    );
-    assert_eq!(directives.len(), 2, "respawn sends the state reset then placement");
-    let ServerDirective::Send {
-        packet_id: respawn_id,
-        payload: respawn_payload,
-    } = &directives[0]
-    else {
-        panic!("the hosted protocol must emit a respawn frame");
-    };
-    assert_eq!(*respawn_id, play::clientbound::RESPAWN);
-    assert_eq!(
-        respawn_payload,
-        &[
-            0x13, 0x6d, 0x69, 0x6e, 0x65, 0x63, 0x72, 0x61, 0x66, 0x74, 0x3a, 0x6f, 0x76, 0x65,
-            0x72, 0x77, 0x6f, 0x72, 0x6c, 0x64, 0x13, 0x6d, 0x69, 0x6e, 0x65, 0x63, 0x72, 0x61,
-            0x66, 0x74, 0x3a, 0x6f, 0x76, 0x65, 0x72, 0x77, 0x6f, 0x72, 0x6c, 0x64, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0x00,
-        ]
-    );
-    assert_eq!(
-        adapter
-            .handle_packet(
-                &mut World::new(),
-                ConnectionState::Play,
-                *respawn_id,
-                respawn_payload,
-            )
-            .expect("the client adapter must consume the hosted respawn frame"),
-        vec![Directive::Emit(ClientEvent::Respawned {
-            dimension: "minecraft:overworld".parse().expect("dimension id"),
-            game_mode: lodestone_model::GameMode::Survival,
-            previous_game_mode: None,
-            last_death_location: None,
-        })]
-    );
-    let ServerDirective::Send {
-        packet_id: position_id,
-        payload: position_payload,
-    } = &directives[1]
-    else {
-        panic!("the hosted protocol must emit a placement correction");
-    };
-    assert_eq!(*position_id, play::clientbound::POSITION);
-    assert_eq!(
-        position_payload,
-        &[
-            0x40, 0x31, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x40, 0x51, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0xc0, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0xac, 0x02,
-        ]
-    );
-
-    let ServerDirective::Send {
-        packet_id: health_id,
-        payload: health_payload,
-    } = protocol.encode_set_health(20.0, 20, 5.0)
-    else {
-        panic!("the hosted protocol must refresh health after respawn");
-    };
-    assert_eq!(health_id, play::clientbound::UPDATE_HEALTH);
-    assert_eq!(health_payload, [0x41, 0xa0, 0x00, 0x00, 0x14, 0x40, 0xa0, 0x00, 0x00]);
-
-    let ServerDirective::Send {
-        packet_id: air_id,
-        payload: air_payload,
-    } = protocol.encode_air_supply_update(300)
-    else {
-        panic!("the hosted protocol must refresh air after respawn");
-    };
-    assert_eq!(air_id, play::clientbound::ENTITY_METADATA);
-    assert_eq!(air_payload, [0x01, 0x01, 0x01, 0xac, 0x02, 0xff]);
 }

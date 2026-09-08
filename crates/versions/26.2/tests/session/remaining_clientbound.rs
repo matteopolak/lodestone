@@ -39,10 +39,6 @@ use lodestone_world::{
 };
 use lodestone_v26_2::packet_ids::play;
 
-fn item(raw: i32) -> ItemId {
-    ItemId::canonical(raw as u32)
-}
-
 /// A [`WorldSink`] that ignores everything — none of these packets is terrain.
 #[derive(Default)]
 struct NullSink;
@@ -102,6 +98,10 @@ fn one(packet_id: i32, payload: &[u8]) -> ClientEvent {
 
 fn key(name: &str) -> lodestone_model::Identifier {
     name.parse().expect("test key parses")
+}
+
+fn item(raw: i32) -> ItemId {
+    ItemId::canonical(raw as u32)
 }
 
 // ---- award_stats -----------------------------------------------------------
