@@ -861,6 +861,51 @@ impl std::fmt::Display for BlockMutationRefusal {
     }
 }
 
+/// Why a proposed player game-mode change did not reach the target connection.
+///
+/// Every arm is finite and machine-readable. The proposal is resolved before
+/// this handle queues a directed effect, so a caller never receives a
+/// tick-owned ECS value or an unbounded player handle.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayerGameModeRefusal {
+    /// A native server plugin denied the proposal.
+    Denied,
+    /// The primary tick task did not answer inside the bounded wait.
+    TimedOut,
+    /// No primary tick task is available, or its bounded ingress is full.
+    Unavailable,
+    /// A plugin replaced the request with an action this entry point does not own.
+    MismatchedAction,
+    /// The target was not connected when the authoritative effect was queued.
+    UnknownPlayer,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl From<crate::ecs::ProposalRefusal> for PlayerGameModeRefusal {
+    fn from(value: crate::ecs::ProposalRefusal) -> Self {
+        match value {
+            crate::ecs::ProposalRefusal::Denied => Self::Denied,
+            crate::ecs::ProposalRefusal::TimedOut => Self::TimedOut,
+            crate::ecs::ProposalRefusal::Unavailable => Self::Unavailable,
+            crate::ecs::ProposalRefusal::MismatchedAction => Self::MismatchedAction,
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Display for PlayerGameModeRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Denied => "the player game-mode change was denied by a server plugin",
+            Self::TimedOut => "the primary tick task did not answer the player game-mode change in time",
+            Self::Unavailable => "the authoritative player game-mode lifecycle is unavailable",
+            Self::MismatchedAction => "a server plugin replaced the player game-mode change with another action",
+            Self::UnknownPlayer => "the target player is not connected",
+        })
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn canonical_block_state(state: lodestone_data::block_states::StateId) -> String {
     let mut canonical = state.name().to_string();
@@ -3647,6 +3692,45 @@ impl IntegratedServer {
             block_ticks.publish(pos.x, pos.y, pos.z, canonical);
         }
         Ok(())
+    }
+
+    /// Submits one connected-player game-mode change to native-plugin
+    /// adjudication, then queues the resolved mode through the target player's
+    /// ordinary connection effect path.
+    ///
+    /// The proposal wait completes before [`PlayerRegistry::push_effect`] is
+    /// called, so adjudicator systems cannot run while the registry is locked
+    /// and no callback can retain an ECS guard. The target connection later
+    /// applies [`crate::commands::Effect::SetGameMode`], updating its local
+    /// state and emitting the mode/abilities directives through the selected
+    /// [`ServerProtocol`]. A target that leaves between adjudication and queue
+    /// insertion is reported as [`PlayerGameModeRefusal::UnknownPlayer`].
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub async fn set_player_game_mode_proposed(
+        &self,
+        target: uuid::Uuid,
+        mode: lodestone_model::GameMode,
+    ) -> Result<(), PlayerGameModeRefusal> {
+        let proposals = self
+            .spawn_proposals
+            .as_ref()
+            .ok_or(PlayerGameModeRefusal::Unavailable)?;
+        let crate::ecs::ServerProposalAction::SetPlayerGameMode { target, mode } = proposals
+            .set_player_game_mode(target, mode)
+            .await
+            .map_err(PlayerGameModeRefusal::from)?
+        else {
+            return Err(PlayerGameModeRefusal::MismatchedAction);
+        };
+        let players = self
+            .players()
+            .ok_or(PlayerGameModeRefusal::Unavailable)?;
+        if players.push_effect(target, crate::commands::Effect::SetGameMode(mode)) {
+            Ok(())
+        } else {
+            Err(PlayerGameModeRefusal::UnknownPlayer)
+        }
     }
 
     /// This world's shared player registry, for a host that wants RCON or an

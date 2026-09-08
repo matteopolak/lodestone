@@ -9,7 +9,8 @@ use bevy_ecs::message::{Message, MessageReader, MessageWriter};
 use bevy_ecs::prelude::{ResMut, Resource};
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use lodestone_data::block_states::StateId;
-use lodestone_model::{BlockPos, ResourceKey, Vec3};
+use lodestone_model::{BlockPos, GameMode, ResourceKey, Vec3};
+use uuid::Uuid;
 
 use super::{TickSet, paper_events::PaperEventBus};
 
@@ -42,6 +43,9 @@ pub enum ServerProposalAction {
     },
     /// Remove this exact live mob id through `IntegratedServer`.
     DespawnMob { id: i32 },
+    /// Change one connected player's game mode through their authoritative
+    /// connection, after native plugins have had a chance to allow or deny it.
+    SetPlayerGameMode { target: Uuid, mode: GameMode },
     /// Replace one already-resident block through `IntegratedServer`.
     ///
     /// The state id is validated at the boundary by [`StateId`], so an
@@ -124,6 +128,16 @@ impl ServerProposalHandle {
     /// Submit a despawn and await one `Drain → Adjudicate → Apply` pass.
     pub async fn despawn_mob(&self, id: i32) -> Result<ServerProposalAction, DespawnProposalRefusal> {
         self.submit(ServerProposalAction::DespawnMob { id }).await
+    }
+
+    /// Submit one connected-player game-mode change and await one
+    /// `Drain → Adjudicate → Apply` pass.
+    pub async fn set_player_game_mode(
+        &self,
+        target: Uuid,
+        mode: GameMode,
+    ) -> Result<ServerProposalAction, ProposalRefusal> {
+        self.submit(ServerProposalAction::SetPlayerGameMode { target, mode }).await
     }
 
     /// Submit one bounded resident-block mutation and await one

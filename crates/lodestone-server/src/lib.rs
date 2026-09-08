@@ -592,6 +592,8 @@ pub use hopper::{
 };
 pub use integrated::{BlockMutationRefusal, IntegratedServer};
 #[cfg(not(target_arch = "wasm32"))]
+pub use integrated::PlayerGameModeRefusal;
+#[cfg(not(target_arch = "wasm32"))]
 pub use integrated::{LanConfig, LanDiscovery, PublishConfig};
 #[cfg(not(target_arch = "wasm32"))]
 pub use properties::{ServerProperties, parse_seed};
