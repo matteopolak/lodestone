@@ -5,7 +5,7 @@
 //! position, and modifier widths independently from the decoder.
 
 use lodestone_model::{
-    ClientEvent, ConnectionState, Directive, EquipmentSlot, VersionAdapter,
+    route, ClientEvent, ConnectionState, Directive, EquipmentSlot, VersionAdapter,
 };
 use lodestone_v1_20_6::{PROTOCOL_1_20_6, adapter_for, packet_ids};
 use lodestone_world::{ChunkColumn, ColumnLight, Heightmaps, LoadedChunk, PaletteKind, World};
@@ -102,6 +102,35 @@ fn entity_attributes_resolve_registry_id_and_uuid_modifier() {
     );
     assert_eq!(attribute.modifiers[0].amount, -0.5);
     assert_eq!(attribute.modifiers[0].operation, 2);
+    let event = ClientEvent::EntityAttributesUpdated {
+        entity_id: *entity_id,
+        attributes: attributes.clone(),
+    };
+    assert!(route(&event).ingest, "attributes must enter the ECS fold");
+}
+
+#[test]
+fn entity_metadata_shared_flags_reach_the_ingest_route() {
+    // Entity 300, metadata index 0, byte serializer 0, a non-round signed
+    // flags value, and the list terminator. This is a literal 766 body rather
+    // than an encode/decode round trip.
+    let directives = decode(
+        packet_ids::play::clientbound::ENTITY_METADATA,
+        &hex("ac020000a1ff"),
+    );
+    let [Directive::Emit(event)] = directives.as_slice() else {
+        panic!("expected one metadata event, got {directives:?}");
+    };
+    let ClientEvent::EntityMetadataUpdated {
+        entity_id,
+        metadata,
+    } = event
+    else {
+        panic!("expected EntityMetadataUpdated, got {event:?}");
+    };
+    assert_eq!(*entity_id, 300);
+    assert_eq!(metadata.flags, Some(0xa1));
+    assert!(route(event).ingest, "metadata must enter the ECS fold");
 }
 
 #[test]

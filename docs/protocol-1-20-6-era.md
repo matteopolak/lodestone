@@ -250,8 +250,10 @@ prefixes to form the model's canonical attribute keys before the existing attrib
 consumer merges them. Block events
 preserve their packed position, both opaque bytes, and canonical block key; the
 shell's established event stream feeds chest lids, bells, gateways, and spawners.
-`tests/packet_parity.rs` supplies independent literal bodies for all three
-paths, including a continued equipment list and a non-square packed position.
+`tests/packet_parity.rs` supplies independent literal bodies for the metadata,
+equipment, attribute, and block-event paths, including a continued equipment
+list and a non-square packed position; the metadata and attribute fixtures
+assert that their events enter the existing ingest route.
 
 ## How to change it
 
