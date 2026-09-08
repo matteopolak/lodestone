@@ -33,6 +33,7 @@ const MAX_RAW_DIAGNOSTIC_EXAMPLES: usize = 32;
 const MAX_RAW_DIAGNOSTIC_GROUPS: usize = 64;
 const PERSISTED_WORLD_ROOT_ENV: &str = "LODESTONE_LARGE_PARITY_FROZEN_WORLD_ROOT";
 const PERSISTED_BATCH_SIZE_ENV: &str = "LODESTONE_LARGE_PARITY_PERSISTED_BATCH_SIZE";
+const PERSISTED_ONLY_ENV: &str = "LODESTONE_LARGE_PARITY_PERSISTED_ONLY";
 const PERSISTED_BATCH_SIZE: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1933,6 +1934,12 @@ fn parity_manifest_streams_before_rust_comparison() {
             generated_after - generated_before,
             persisted_mismatches.len(),
         );
+        if std::env::var_os(PERSISTED_ONLY_ENV).is_some() {
+            eprintln!(
+                "large persisted-world import/encoder parity: {PERSISTED_ONLY_ENV}=1; stopping before generated replay",
+            );
+            return;
+        }
     }
     let mut digest_mismatches = Vec::new();
     let mut raw_mismatches = Vec::new();
