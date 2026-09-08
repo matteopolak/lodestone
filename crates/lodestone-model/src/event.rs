@@ -5,7 +5,7 @@ use crate::{
     command_tree::{CommandSuggestionEntry, CommandTree},
     common::{Difficulty, GameMode},
     ids::{DimensionId, Identifier, ResourceKey},
-    item::ItemStack,
+    item::{ItemId, ItemStack},
     math::{BlockPos, ChunkPos, Quat, Rotation, SectionPos, Vec3, Vec3f},
     prediction::PredictionSequence,
     text::{Text, TextColor},
@@ -3561,8 +3561,9 @@ pub enum ClientEvent {
     GhostRecipeShown {
         /// The container the ghost belongs to.
         window_id: i32,
-        /// Item ids the ghost's result slot can display.
-        result_items: Vec<i32>,
+        /// Item ids the ghost's result slot can display, retaining registry
+        /// provenance when a synchronized registry contains dynamic entries.
+        result_items: Vec<ItemId>,
     },
     /// The server's recipe *property sets* changed
     /// (the update recipes packet).
@@ -3571,14 +3572,14 @@ pub enum ClientEvent {
     /// sets vanilla's screens use to grey out an input (fuel, smithing template,
     /// and so on), plus the stonecutter's own input→result list.
     RecipePropertySetsUpdated {
-        /// `(property set key, valid item registry ids)`.
-        item_sets: Vec<(Identifier, Vec<i32>)>,
-        /// One entry per stonecutter recipe: `(input item registry ids, result
-        /// item registry ids)`. The input is the ingredient a stonecutter's
+        /// `(property set key, valid item ids with registry provenance)`.
+        item_sets: Vec<(Identifier, Vec<ItemId>)>,
+        /// One entry per stonecutter recipe: `(input item ids, result item
+        /// ids)`, each retaining registry provenance. The input is the ingredient a stonecutter's
         /// input slot must hold for this entry's results to be offered; without
         /// it a consumer cannot compute the subset of results reachable from
         /// whatever the slot currently holds.
-        stonecutter_results: Vec<(Vec<i32>, Vec<i32>)>,
+        stonecutter_results: Vec<(Vec<ItemId>, Vec<ItemId>)>,
     },
     /// A villager or wandering trader opened its trade list
     /// (the merchant offers packet).
@@ -3606,15 +3607,16 @@ pub struct RecipeBookEntry {
     /// [`crate::ClientAction::PlaceRecipe`] both use. **Not** a recipe
     /// `Identifier`: 26.x replaced the name with a per-session index.
     pub display_id: i32,
-    /// Item ids the recipe's result slot can display. Usually one; a display can
+    /// Item ids the recipe's result slot can display, retaining registry
+    /// provenance. Usually one; a display can
     /// legitimately offer several (a `composite`, or a tag-driven slot).
-    pub result_items: Vec<i32>,
+    pub result_items: Vec<ItemId>,
     /// Item ids the display's trailing crafting-station/furnace slot-display
     /// can show — the small corner icon a recipe-unlock toast draws (a crafting
     /// table, furnace, etc.). Every `RecipeDisplay` variant carries this as its
     /// final `SlotDisplay`. Usually one entry; empty for a display whose station
     /// slot is itself `empty` or unresolved.
-    pub station_items: Vec<i32>,
+    pub station_items: Vec<ItemId>,
     /// The recipe-book group this entry shares a stacked button with, or `None`
     /// when the entry stands alone.
     ///

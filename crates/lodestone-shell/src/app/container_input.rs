@@ -894,10 +894,14 @@ fn furnace_input_property_key(menu: &Menu) -> Option<lodestone_model::Identifier
 /// This is deliberately a shell-boundary conversion: recipe sync keeps wire
 /// registry ids, while `ItemStack` in `lodestone-game` keeps identifiers.
 /// Malformed ids are ignored rather than becoming invented item identities.
-fn furnace_input_items(item_ids: &[i32]) -> Vec<lodestone_model::Identifier> {
+fn furnace_input_items(item_ids: &[lodestone_model::ItemId]) -> Vec<lodestone_model::Identifier> {
     item_ids
         .iter()
-        .filter_map(|&item_id| u16::try_from(item_id).ok().and_then(Item::from_registry_id))
+        .filter_map(|item_id| {
+            u16::try_from(item_id.canonical_raw()?)
+                .ok()
+                .and_then(Item::from_registry_id)
+        })
         .filter_map(|item| item.name().parse().ok())
         .collect()
 }
@@ -915,7 +919,10 @@ mod tests {
         // protocol item id 931 as `minecraft:raw_iron` independently of this resolver.
         const RAW_IRON: i32 = 931;
         recipe_sync.apply(&ClientEvent::RecipePropertySetsUpdated {
-            item_sets: vec![(("minecraft:furnace_input").parse().unwrap(), vec![RAW_IRON])],
+            item_sets: vec![(
+                ("minecraft:furnace_input").parse().unwrap(),
+                vec![lodestone_model::ItemId::canonical(RAW_IRON as u32)],
+            )],
             stonecutter_results: Vec::new(),
         });
 
@@ -954,7 +961,13 @@ mod tests {
         ] {
             let mut recipe_sync = RecipeBookSync::new();
             recipe_sync.apply(&ClientEvent::RecipePropertySetsUpdated {
-                item_sets: vec![(property_key.parse().unwrap(), vec![RAW_IRON, IRON_INGOT])],
+                item_sets: vec![(
+                    property_key.parse().unwrap(),
+                    vec![
+                        lodestone_model::ItemId::canonical(RAW_IRON as u32),
+                        lodestone_model::ItemId::canonical(IRON_INGOT as u32),
+                    ],
+                )],
                 stonecutter_results: Vec::new(),
             });
 

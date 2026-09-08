@@ -2,6 +2,55 @@ use crate::event::{EquipmentSlot, ProfileProperty};
 use crate::ids::ResourceKey;
 use crate::text::Text;
 
+/// An item-registry id with the numbering source attached.
+///
+/// Recipe displays and property sets are synchronized values. Their numeric
+/// ids normally line up with this build's generated item census, but a server
+/// may append dynamic entries (or a future protocol may renumber the registry).
+/// Keeping the source on the value lets a protocol adapter preserve those ids
+/// without allowing a consumer to interpret an unrelated number as a built-in
+/// item merely because it falls in range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ItemId {
+    /// An id validated against this build's canonical item registry numbering.
+    Canonical(u32),
+    /// An id owned by the protocol/session registry and not resolved here.
+    ProtocolLocal(u32),
+}
+
+impl ItemId {
+    /// Tags a validated id from the canonical item registry.
+    #[must_use]
+    pub const fn canonical(raw: u32) -> Self {
+        Self::Canonical(raw)
+    }
+
+    /// Preserves an id from a protocol or synchronized dynamic registry.
+    #[must_use]
+    pub const fn protocol_local(raw: u32) -> Self {
+        Self::ProtocolLocal(raw)
+    }
+
+    /// Returns the original numeric registry id.
+    #[must_use]
+    pub const fn raw(self) -> u32 {
+        match self {
+            Self::Canonical(raw) | Self::ProtocolLocal(raw) => raw,
+        }
+    }
+
+    /// Returns the numeric id only when this value is canonical for this build.
+    ///
+    /// This is the consumer boundary before indexing a generated item table.
+    #[must_use]
+    pub const fn canonical_raw(self) -> Option<u32> {
+        match self {
+            Self::Canonical(raw) => Some(raw),
+            Self::ProtocolLocal(_) => None,
+        }
+    }
+}
+
 /// A canonical item stack.
 ///
 /// Carries the stable item key, count, and the subset of the item's data
@@ -1139,5 +1188,29 @@ impl DamageReduction {
     #[must_use]
     pub fn factor(&self) -> f32 {
         f32::from_bits(self.factor_bits)
+    }
+}
+
+#[cfg(test)]
+mod item_id_tests {
+    use super::ItemId;
+
+    #[test]
+    fn raw_id_and_source_are_preserved_independently() {
+        let canonical = ItemId::canonical(17);
+        let local = ItemId::protocol_local(17);
+
+        assert_eq!(canonical.raw(), 17);
+        assert_eq!(local.raw(), 17);
+        assert_eq!(canonical.canonical_raw(), Some(17));
+        assert_eq!(local.canonical_raw(), None);
+        assert_ne!(canonical, local);
+    }
+
+    #[test]
+    fn the_full_unsigned_wire_domain_can_be_retained() {
+        let local = ItemId::protocol_local(u32::MAX);
+        assert_eq!(local.raw(), u32::MAX);
+        assert_eq!(local.canonical_raw(), None);
     }
 }
