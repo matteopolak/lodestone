@@ -108,6 +108,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use lodestone_core::Nbt;
+use lodestone_model::ResourceKey;
 use uuid::Uuid;
 
 /// A single node in the advancement tree — id, parent, and completion shape.
@@ -156,6 +157,8 @@ impl Advancement {
 /// Why an advancement tree could not be built.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AdvancementError {
+    #[error("advancement `{0}` has an invalid resource key")]
+    InvalidId(String),
     #[error("advancement `{0}` is defined twice")]
     DuplicateId(String),
     #[error("advancement `{0}` has no requirements (an empty advancement is never done)")]
@@ -459,12 +462,12 @@ impl PlayerStatistics {
 pub struct PlayerAdvancementState {
     /// Progress per advancement id. Created lazily as triggers fire and fully
     /// populated by `initial_update` / `from_nbt`.
-    progress: BTreeMap<String, AdvancementProgress>,
+    progress: BTreeMap<ResourceKey, AdvancementProgress>,
     /// Advancement ids whose progress changed since the last flush.
-    progress_changed: BTreeSet<String>,
+    progress_changed: BTreeSet<ResourceKey>,
     /// The currently-visible set, cached between flushes so `flush_dirty`
     /// only emits the *delta* (vanilla keeps the same changed-visibility set).
-    visible: BTreeSet<String>,
+    visible: BTreeSet<ResourceKey>,
     /// True until the first `update_advancements` has been sent; the first
     /// flush then sends the whole tree with `reset` true.
     first_packet_pending: bool,
@@ -476,7 +479,7 @@ pub struct PlayerAdvancementState {
 }
 
 impl PlayerAdvancementState {
-    fn is_done(&self, id: &str) -> bool {
+    fn is_done(&self, id: &ResourceKey) -> bool {
         self.progress.get(id).is_some_and(AdvancementProgress::is_done)
     }
 
@@ -485,7 +488,7 @@ impl PlayerAdvancementState {
     /// a lazily-created progress knows its completion shape.
     pub fn grant(
         &mut self,
-        id: &str,
+        id: &ResourceKey,
         requirements: &[Vec<String>],
         criterion: &str,
         obtained_millis: i64,
@@ -493,11 +496,11 @@ impl PlayerAdvancementState {
         let was_done = self.is_done(id);
         let progress = self
             .progress
-            .entry(id.to_string())
+            .entry(id.clone())
             .or_insert_with(|| AdvancementProgress::new(requirements.to_vec()));
         let changed = progress.grant(criterion, obtained_millis);
         if changed {
-            self.progress_changed.insert(id.to_string());
+            self.progress_changed.insert(id.clone());
         }
         let is_done = progress.is_done();
         GrantOutcome {
@@ -510,18 +513,18 @@ impl PlayerAdvancementState {
     /// Revoke one criterion, recording the change for the next flush.
     pub fn revoke(
         &mut self,
-        id: &str,
+        id: &ResourceKey,
         requirements: &[Vec<String>],
         criterion: &str,
     ) -> GrantOutcome {
         let was_done = self.is_done(id);
         let progress = self
             .progress
-            .entry(id.to_string())
+            .entry(id.clone())
             .or_insert_with(|| AdvancementProgress::new(requirements.to_vec()));
         let changed = progress.revoke(criterion);
         if changed {
-            self.progress_changed.insert(id.to_string());
+            self.progress_changed.insert(id.clone());
         }
         let is_done = progress.is_done();
         GrantOutcome {
@@ -533,8 +536,8 @@ impl PlayerAdvancementState {
 
     /// The current visible set for a fresh tree, computed with the depth-2
     /// evaluator over current completion.
-    fn recompute_visible(&mut self, tree: &BTreeMap<String, Advancement>) {
-        let is_done = |id: &str| self.is_done(id);
+    fn recompute_visible(&mut self, tree: &BTreeMap<ResourceKey, Advancement>) {
+        let is_done = |id: &ResourceKey| self.is_done(id);
         let visible = visible_ids(tree, &is_done);
         self.visible = visible;
     }
@@ -556,7 +559,7 @@ impl PlayerAdvancementState {
                 .filter_map(|(name, obtained)| obtained.map(|millis| (name.clone(), Nbt::Long(millis))))
                 .collect();
             entries.push((
-                id.clone(),
+                id.to_string(),
                 Nbt::Compound(vec![
                     ("criteria".to_string(), Nbt::Compound(criteria)),
                     ("done".to_string(), Nbt::Byte(progress.is_done() as i8)),
@@ -570,12 +573,15 @@ impl PlayerAdvancementState {
     /// advancements present in `tree` are restored (vanilla warns and skips
     /// unknown ids — here a datapack change simply drops them); each restored
     /// advancement is marked dirty so the next flush re-broadcasts it.
-    pub fn from_nbt(&mut self, tree: &BTreeMap<String, Advancement>, root: &Nbt) {
+    pub fn from_nbt(&mut self, tree: &BTreeMap<ResourceKey, Advancement>, root: &Nbt) {
         let Nbt::Compound(fields) = root else {
             return;
         };
         for (id, value) in fields {
-            let Some(adv) = tree.get(id) else {
+            let Ok(key) = id.parse::<ResourceKey>() else {
+                continue;
+            };
+            let Some(adv) = tree.get(&key) else {
                 continue;
             };
             let mut progress = AdvancementProgress::new(adv.requirements.clone());
@@ -594,8 +600,8 @@ impl PlayerAdvancementState {
                 }
             }
             if progress.has_progress() {
-                self.progress.insert(id.clone(), progress);
-                self.progress_changed.insert(id.clone());
+                self.progress.insert(key.clone(), progress);
+                self.progress_changed.insert(key);
             }
         }
     }
@@ -612,7 +618,7 @@ pub struct PlayerProgress {
 /// player. Holds the advancement tree (shared) and per-uuid progress.
 #[derive(Debug, Clone)]
 pub struct AdvancementManager {
-    tree: BTreeMap<String, Advancement>,
+    tree: BTreeMap<ResourceKey, Advancement>,
     players: BTreeMap<Uuid, PlayerProgress>,
 }
 
@@ -622,10 +628,14 @@ impl AdvancementManager {
     pub fn new(tree: Vec<Advancement>) -> Result<Self, AdvancementError> {
         let mut map = BTreeMap::new();
         for adv in tree {
-            if map.contains_key(&adv.id) {
+            let key = adv
+                .id
+                .parse::<ResourceKey>()
+                .map_err(|_| AdvancementError::InvalidId(adv.id.clone()))?;
+            if map.contains_key(&key) {
                 return Err(AdvancementError::DuplicateId(adv.id));
             }
-            map.insert(adv.id.clone(), adv);
+            map.insert(key, adv);
         }
         for adv in map.values() {
             if adv.requirements.is_empty() {
@@ -635,7 +645,10 @@ impl AdvancementManager {
                 return Err(AdvancementError::EmptyRequirementGroup(adv.id.clone()));
             }
             if let Some(parent) = &adv.parent {
-                if !map.contains_key(parent) {
+                let parent_key = parent
+                    .parse::<ResourceKey>()
+                    .map_err(|_| AdvancementError::InvalidId(parent.clone()))?;
+                if !map.contains_key(&parent_key) {
                     return Err(AdvancementError::UnknownParent(adv.id.clone(), parent.clone()));
                 }
             }
@@ -800,13 +813,14 @@ impl AdvancementManager {
     }
 
     /// The advancement tree, by id.
-    pub fn tree(&self) -> &BTreeMap<String, Advancement> {
+    pub fn tree(&self) -> &BTreeMap<ResourceKey, Advancement> {
         &self.tree
     }
 
     /// Look up one advancement.
     pub fn advancement(&self, id: &str) -> Option<&Advancement> {
-        self.tree.get(id)
+        let key = id.parse().ok()?;
+        self.tree.get(&key)
     }
 
     /// Grant one criterion for a player. Unknown advancement or criterion is a
@@ -818,32 +832,41 @@ impl AdvancementManager {
         criterion: &str,
         obtained_millis: i64,
     ) -> GrantOutcome {
-        let Some(adv) = self.tree.get(advancement) else {
+        let Ok(key) = advancement.parse::<ResourceKey>() else {
+            return GrantOutcome::default();
+        };
+        let Some(adv) = self.tree.get(&key) else {
             return GrantOutcome::default();
         };
         let requirements = adv.requirements.clone();
         let state = self.players.entry(player).or_default();
         state
             .advancements
-            .grant(advancement, &requirements, criterion, obtained_millis)
+            .grant(&key, &requirements, criterion, obtained_millis)
     }
 
     /// Revoke one criterion for a player. Unknown advancement or criterion is
     /// a no-op.
     pub fn revoke_criterion(&mut self, player: Uuid, advancement: &str, criterion: &str) -> GrantOutcome {
-        let Some(adv) = self.tree.get(advancement) else {
+        let Ok(key) = advancement.parse::<ResourceKey>() else {
+            return GrantOutcome::default();
+        };
+        let Some(adv) = self.tree.get(&key) else {
             return GrantOutcome::default();
         };
         let requirements = adv.requirements.clone();
         let state = self.players.entry(player).or_default();
-        state.advancements.revoke(advancement, &requirements, criterion)
+        state.advancements.revoke(&key, &requirements, criterion)
     }
 
     /// Whether a player has completed an advancement.
     pub fn is_done(&self, player: Uuid, advancement: &str) -> bool {
+        let Ok(key) = advancement.parse::<ResourceKey>() else {
+            return false;
+        };
         self.players
             .get(&player)
-            .is_some_and(|p| p.advancements.is_done(advancement))
+            .is_some_and(|p| p.advancements.is_done(&key))
     }
 
     /// Records the player's current advancement-screen selection and returns
@@ -886,7 +909,7 @@ impl AdvancementManager {
     /// advancement's current progress, and visibility pre-computed. Call once
     /// on join (vanilla's own pending-first-packet path). Returns a packet to send.
     pub fn initial_update(&mut self, player: Uuid, show_advancements: bool) -> AdvancementUpdate {
-        let tree_ids: Vec<String> = self.tree.keys().cloned().collect();
+        let tree_ids: Vec<ResourceKey> = self.tree.keys().cloned().collect();
         let added: Vec<Advancement> = self.tree.values().cloned().collect();
         let state = self.players.entry(player).or_default();
         let mut progress = Vec::with_capacity(tree_ids.len());
@@ -897,7 +920,7 @@ impl AdvancementManager {
                 .progress
                 .entry(id.clone())
                 .or_insert_with(|| AdvancementProgress::new(requirements));
-            progress.push(AdvancementProgressUpdate::new(id.clone(), p));
+            progress.push(AdvancementProgressUpdate::new(id.to_string(), p));
         }
         state.advancements.visible = tree_ids.into_iter().collect();
         state.advancements.progress_changed.clear();
@@ -939,18 +962,18 @@ impl AdvancementManager {
         let mut removed = Vec::new();
         for id in &old_visible {
             if !target.contains(id) {
-                removed.push(id.clone());
+                removed.push(id.to_string());
             }
         }
         state.advancements.visible = target;
 
-        let changed: Vec<String> = state.advancements.progress_changed.iter().cloned().collect();
+        let changed: Vec<ResourceKey> = state.advancements.progress_changed.iter().cloned().collect();
         state.advancements.progress_changed.clear();
         let mut progress = Vec::new();
         for id in changed {
             if state.advancements.visible.contains(&id) {
                 if let Some(p) = state.advancements.progress.get(&id) {
-                    progress.push(AdvancementProgressUpdate::new(id, p));
+                    progress.push(AdvancementProgressUpdate::new(id.to_string(), p));
                 }
             }
         }
@@ -1005,31 +1028,34 @@ impl AdvancementManager {
 /// re-shows the chain up to it; a node whose done ancestor is further away than
 /// a grandparent stays hidden.
 pub fn visible_ids(
-    tree: &BTreeMap<String, Advancement>,
-    is_done: &dyn Fn(&str) -> bool,
-) -> BTreeSet<String> {
-    let mut children: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    tree: &BTreeMap<ResourceKey, Advancement>,
+    is_done: &dyn Fn(&ResourceKey) -> bool,
+) -> BTreeSet<ResourceKey> {
+    let mut children: BTreeMap<ResourceKey, Vec<ResourceKey>> = BTreeMap::new();
     for adv in tree.values() {
-        if let Some(parent) = adv.parent.as_deref() {
-            children.entry(parent).or_default().push(&adv.id);
+        let (Some(parent), Ok(id)) = (adv.parent.as_deref(), adv.id.parse::<ResourceKey>()) else {
+            continue;
+        };
+        if let Ok(parent) = parent.parse::<ResourceKey>() {
+            children.entry(parent).or_default().push(id);
         }
     }
     let mut visible = BTreeSet::new();
     let mut ancestors = Vec::new();
-    for adv in tree.values() {
+    for (id, adv) in tree {
         if adv.parent.is_none() {
-            walk(&adv.id, &children, is_done, &mut ancestors, &mut visible);
+            walk(id, &children, is_done, &mut ancestors, &mut visible);
         }
     }
     visible
 }
 
 fn walk(
-    id: &str,
-    children: &BTreeMap<&str, Vec<&str>>,
-    is_done: &dyn Fn(&str) -> bool,
+    id: &ResourceKey,
+    children: &BTreeMap<ResourceKey, Vec<ResourceKey>>,
+    is_done: &dyn Fn(&ResourceKey) -> bool,
     ancestors: &mut Vec<bool>,
-    visible: &mut BTreeSet<String>,
+    visible: &mut BTreeSet<ResourceKey>,
 ) -> bool {
     let self_done = is_done(id);
     ancestors.push(self_done);
@@ -1053,7 +1079,7 @@ fn walk(
     ancestors.pop();
     let subtree_done = self_done || descendant_done;
     if subtree_done || ancestor_done {
-        visible.insert(id.to_string());
+        visible.insert(id.clone());
     }
     subtree_done
 }
@@ -1145,6 +1171,26 @@ mod tests {
             Advancement::new("child", vec![vec!["y".to_string()]], false).with_parent("root"),
         ]);
         assert!(manager.is_ok());
+    }
+
+    #[test]
+    fn internal_tree_keys_accept_custom_namespaces_and_reject_malformed_ids() {
+        let mut manager = AdvancementManager::new(vec![Advancement::new(
+            "example.plugin:welcome",
+            vec![vec!["joined".to_string()]],
+            false,
+        )])
+        .expect("a valid custom namespace must be accepted");
+        assert!(manager.advancement("example.plugin:welcome").is_some());
+        let update = manager.initial_update(Uuid::new_v4(), true);
+        assert_eq!(update.added[0].id, "example.plugin:welcome");
+
+        let malformed = AdvancementManager::new(vec![Advancement::new(
+            "example.plugin:bad id",
+            vec![vec!["joined".to_string()]],
+            false,
+        )]);
+        assert!(matches!(malformed, Err(AdvancementError::InvalidId(_))));
     }
 
     #[test]
@@ -1333,13 +1379,19 @@ mod tests {
     #[test]
     fn completion_of_a_child_reveals_its_chain() {
         let tree = story_tree();
-        let done = |id: &str| id == "minecraft:story/mine_stone";
-        let visible = visible_ids(&BTreeMap::from_iter(tree.into_iter().map(|a| (a.id.clone(), a))), &done);
+        let done = |id: &ResourceKey| id.to_string() == "minecraft:story/mine_stone";
+        let visible = visible_ids(
+            &BTreeMap::from_iter(tree.into_iter().map(|a| {
+                let key = a.id.parse::<ResourceKey>().expect("test id must be valid");
+                (key, a)
+            })),
+            &done,
+        );
         // mine_stone is done -> itself shown; root is an ancestor -> shown;
         // obtain_armor is unrelated and not done -> hidden.
-        assert!(visible.contains("minecraft:story/mine_stone"));
-        assert!(visible.contains("minecraft:story/root"));
-        assert!(!visible.contains("minecraft:story/obtain_armor"));
+        assert!(visible.contains(&"minecraft:story/mine_stone".parse().unwrap()));
+        assert!(visible.contains(&"minecraft:story/root".parse().unwrap()));
+        assert!(!visible.contains(&"minecraft:story/obtain_armor".parse().unwrap()));
     }
 
     #[test]
