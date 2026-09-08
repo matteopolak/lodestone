@@ -11,7 +11,7 @@ use std::time::Duration;
 use lodestone_client::{
     ChunkPos, ClientBuilder, ClientEvent, ClientHandle, EventStream, LoginProfile, ServerAddress,
 };
-use lodestone_model::{Rotation, Vec3};
+use lodestone_model::{GameMode, Rotation, Vec3};
 use lodestone_server::dimension::Dimension;
 use lodestone_server::{
     BlockEntity, BlockEntityHandle, ChunkColumn, ChunkSource, ChunkEncodeError, MobHandle,
@@ -46,8 +46,44 @@ impl ServerProtocol for FixtureProtocol {
         self.0.begin_configuration()
     }
 
+    fn encode_registry_data(&self) -> Vec<ServerDirective> {
+        self.0.encode_registry_data()
+    }
+
     fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective> {
         self.0.begin_play(view_radius)
+    }
+
+    fn begin_play_at(&self, view_radius: i32, spawn: Vec3, mode: GameMode) -> Vec<ServerDirective> {
+        self.0.begin_play_at(view_radius, spawn, mode)
+    }
+
+    fn uses_teleport_acknowledgements(&self) -> bool {
+        self.0.uses_teleport_acknowledgements()
+    }
+
+    fn begin_play_at_with_teleport_id(
+        &self,
+        view_radius: i32,
+        spawn: Vec3,
+        mode: GameMode,
+        teleport_id: i32,
+    ) -> Vec<ServerDirective> {
+        self.0
+            .begin_play_at_with_teleport_id(view_radius, spawn, mode, teleport_id)
+    }
+
+    fn encode_teleport_with_id(
+        &self,
+        teleport_id: i32,
+        x: f64,
+        y: f64,
+        z: f64,
+        yaw: f32,
+        pitch: f32,
+    ) -> ServerDirective {
+        self.0
+            .encode_teleport_with_id(teleport_id, x, y, z, yaw, pitch)
     }
 
     fn begin_chunk_batch(&self) -> ServerDirective {
