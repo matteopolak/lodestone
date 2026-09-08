@@ -32,11 +32,6 @@ use std::time::{Duration, Instant};
 use lodestone::net::{NetClient, NetUpdate};
 use lodestone_client::{BlockPos, ChunkPos};
 
-/// `V770ServerProtocol::begin_play`'s hardcoded spawn column, which is why
-/// chunk `(0, 0)` is the one always streamed first.
-const SPAWN_X: i32 = 8;
-const SPAWN_Z: i32 = 8;
-
 /// Comfortably above the overworld ceiling, so a read here is air in every
 /// world — used to learn the wire id of air without a registry.
 const DEFINITELY_AIR_Y: i32 = 310;
@@ -121,16 +116,21 @@ fn pump_until(net: &NetClient, what: &str, mut ready: impl FnMut(&NetClient) -> 
 /// A loaded chunk that is *entirely air* is the observable form of an empty-world
 /// failure from here, and a count of arriving chunks cannot tell the two apart.
 fn assert_spawn_column_has_terrain(net: &NetClient, radius: i32) {
+    let spawn = net
+        .server_position()
+        .expect("the integrated join must publish the server placement position");
+    let spawn_x = spawn.x.floor() as i32;
+    let spawn_z = spawn.z.floor() as i32;
     let air = net
-        .block_at(BlockPos::new(SPAWN_X, DEFINITELY_AIR_Y, SPAWN_Z))
+        .block_at(BlockPos::new(spawn_x, DEFINITELY_AIR_Y, spawn_z))
         .expect("a loaded chunk must answer for a y inside the world");
 
     let surface = (SEARCH_BOTTOM..=SEARCH_TOP)
         .rev()
-        .find(|&y| net.block_at(BlockPos::new(SPAWN_X, y, SPAWN_Z)).is_some_and(|id| id != air));
+        .find(|&y| net.block_at(BlockPos::new(spawn_x, y, spawn_z)).is_some_and(|id| id != air));
 
     let solid = (SEARCH_BOTTOM..=SEARCH_TOP)
-        .filter(|&y| net.block_at(BlockPos::new(SPAWN_X, y, SPAWN_Z)).is_some_and(|id| id != air))
+        .filter(|&y| net.block_at(BlockPos::new(spawn_x, y, spawn_z)).is_some_and(|id| id != air))
         .count();
 
     assert!(
@@ -139,8 +139,55 @@ fn assert_spawn_column_has_terrain(net: &NetClient, radius: i32) {
          (air id {air}) — this is the empty-world symptom, not a delivery failure"
     );
     println!(
-        "view_radius {radius}: spawn column surface y={surface:?}, {solid} non-air blocks, air id {air}"
+        "view_radius {radius}: spawn column ({spawn_x}, {spawn_z}) surface y={surface:?}, "
+            "{solid} non-air blocks, air id {air}"
     );
+}
+
+/// Checks the position the integrated server actually sent, not a second
+/// spawn calculation in the test. The expected shape facts come from the
+/// versioned collision census: the support has a full upward face, while the
+/// two cells occupied by the player's 1.8-block body have no collision or
+/// fluid. The half-block horizontal coordinates are part of the same external
+/// contract; placing at an integer corner would make the body straddle four
+/// columns and can put it inside a neighbouring wall.
+fn assert_spawn_position_is_terrain_safe(net: &NetClient) {
+    let pos = net
+        .server_position()
+        .expect("the integrated join must publish the server placement position");
+    let is_block_center = |coordinate: f64| {
+        (coordinate - coordinate.floor() - 0.5).abs() < f64::EPSILON
+    };
+    assert!(is_block_center(pos.x), "spawn x is not block-centred: {pos:?}");
+    assert!(is_block_center(pos.z), "spawn z is not block-centred: {pos:?}");
+
+    let feet = BlockPos::new(pos.x.floor() as i32, pos.y.floor() as i32, pos.z.floor() as i32);
+    let state_at = |label: &str, cell: BlockPos| {
+        let id = net
+            .block_at(cell)
+            .unwrap_or_else(|| panic!("spawn {pos:?}: {label} cell {cell:?} is not loaded"));
+        let state = lodestone_data::block_states::StateId::new(id)
+            .unwrap_or_else(|| panic!("spawn {pos:?}: {label} has invalid state id {id}"));
+        (id, state)
+    };
+    let (_, support) = state_at("support", BlockPos { y: feet.y - 1, ..feet });
+    let (_, feet_state) = state_at("feet", feet);
+    let (_, head) = state_at("head", BlockPos { y: feet.y + 1, ..feet });
+
+    assert!(
+        lodestone_data::snow_support::face_full_up(support),
+        "spawn {pos:?}: support cell {feet:?} is not a full upward surface"
+    );
+    for (label, state) in [("feet", feet_state), ("head", head)] {
+        assert!(
+            !lodestone_data::snow_support::has_fluid_state(state),
+            "spawn {pos:?}: {label} cell contains fluid"
+        );
+        assert!(
+            lodestone_data::collision_shapes::collision_boxes(state).is_empty(),
+            "spawn {pos:?}: {label} cell still has collision boxes"
+        );
+    }
 }
 
 #[test]
@@ -150,9 +197,15 @@ fn a_singleplayer_world_arrives_with_terrain_at_the_shared_small_radius() {
         return;
     };
     pump_until(&net, "the spawn chunk", |net| {
-        net.is_chunk_loaded(ChunkPos { x: 0, z: 0 })
+        net.server_position().is_some_and(|pos| {
+            net.is_chunk_loaded(ChunkPos {
+                x: (pos.x.floor() as i32).div_euclid(16),
+                z: (pos.z.floor() as i32).div_euclid(16),
+            })
+        })
     });
     assert_spawn_column_has_terrain(&net, SMALL_VIEW_RADIUS);
+    assert_spawn_position_is_terrain_safe(&net);
 }
 
 #[test]

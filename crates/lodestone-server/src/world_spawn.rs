@@ -46,18 +46,37 @@ use lodestone_model::{BlockPos, Vec3};
 
 use crate::chunk::{ChunkColumn, ChunkSource, is_air_or_fluid};
 
+type SpawnAabb = lodestone_data::collision_shapes::Aabb;
+
 /// The world's spawn point — vanilla's `LevelData.RespawnData` for the
 /// overworld: a position plus the yaw/pitch a player is teleported with. The
 /// initial world spawn has both rotations zero (`setInitialSpawn` passes
 /// `0.0F, 0.0F`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct WorldSpawn {
-    /// World-space feet position, in blocks.
+    /// World-space block-aligned anchor, in blocks.
+    ///
+    /// The saved level-data form is an integer block position. A player is
+    /// placed at that block's bottom centre through
+    /// [`player_position_for_spawn_anchor`], keeping the persisted anchor and
+    /// the entity's feet position distinct.
     pub pos: Vec3,
     /// Spawn yaw in degrees.
     pub yaw: f32,
     /// Spawn pitch in degrees.
     pub pitch: f32,
+}
+
+/// Converts a persisted world-spawn block anchor into the feet position used
+/// by the player entity and its initial teleport.
+///
+/// The external spawn contract stores a [`BlockPos`] but places the player at
+/// the block's horizontal centre. Keeping the conversion at this seam avoids
+/// probing one column while placing the player on a block boundary, where the
+/// player's 0.6-block body can overlap a neighbouring column.
+#[must_use]
+pub(crate) fn player_position_for_spawn_anchor(anchor: Vec3) -> Vec3 {
+    Vec3::new(anchor.x.floor() + 0.5, anchor.y.floor(), anchor.z.floor() + 0.5)
 }
 
 /// A player's per-player respawn point — the bed they last slept in, the
@@ -108,7 +127,8 @@ const GENERATOR_SPAWN_HEIGHT: i32 = 64;
 ///    lake) aborts the candidate — the real search stops on the first
 ///    non-empty fluid state and reports no valid position for the column.
 /// 3. The first solid block from the top is the surface; return one block
-///    above it, the feet position.
+///    above it, the feet position. The body-clearance gate is applied by
+///    [`spawn_pos_in_column`] after this surface candidate is found.
 /// 4. A column with no solid block at all (air/void world) is `None`.
 ///
 /// The two tests reproduce the real predicates exactly, and are **not**
@@ -151,6 +171,120 @@ fn get_level_respawn_pos(column: &ChunkColumn, lx: i32, lz: i32) -> Option<i32> 
         }
     }
     None
+}
+
+/// The authoritative collision boxes for a state string, or `None` when the
+/// built-in census cannot identify the state.
+///
+/// Unknown states are deliberately distinct from known empty shapes. A custom
+/// block or a state introduced by a data pack may be solid, so treating an
+/// unrecognised value as an empty shape would put a player into it. The spawn
+/// search fails closed instead.
+fn spawn_collision_boxes(state: &str) -> Option<&'static [SpawnAabb]> {
+    let id = spawn_state_id(state)?;
+    let id = lodestone_data::block_states::StateId::new(id)?;
+    Some(lodestone_data::collision_shapes::collision_boxes(id))
+}
+
+/// Whether the player's standing body fits at an integer column position.
+///
+/// The position is the block centre at `(lx + 0.5, y, lz + 0.5)`, with the
+/// measured player dimensions of `0.6` blocks wide and `1.8` blocks tall. The
+/// general source-based helper below performs the same test for saved positions
+/// that may have fractional coordinates.
+fn spawn_position_is_clear_in_column(
+    column: &ChunkColumn,
+    lx: i32,
+    lz: i32,
+    y: i32,
+) -> bool {
+    spawn_aabb_is_clear(
+        |x, block_y, z| column.block_state(x, block_y, z).to_owned(),
+        Vec3::new(
+            f64::from(lx) + 0.5,
+            f64::from(y),
+            f64::from(lz) + 0.5,
+        ),
+    )
+}
+
+/// Whether a player-sized body at `pos` overlaps a known block collider or a
+/// fluid cell.
+///
+/// This is the same geometric question used by the server's authoritative
+/// player-placement check: collision boxes are translated from block-local
+/// coordinates into world coordinates and compared with strict AABB overlap,
+/// while any fluid in the body footprint rejects the position even when that
+/// fluid has no collision boxes. A missing state in the census is fail-closed.
+fn spawn_aabb_is_clear(
+    mut state_at: impl FnMut(i32, i32, i32) -> String,
+    pos: Vec3,
+) -> bool {
+    const HALF_WIDTH: f64 = 0.3;
+    const HEIGHT: f64 = 1.8;
+
+    if !pos.x.is_finite() || !pos.y.is_finite() || !pos.z.is_finite() {
+        return false;
+    }
+
+    let min_x = pos.x - HALF_WIDTH;
+    let max_x = pos.x + HALF_WIDTH;
+    let min_y = pos.y;
+    let max_y = pos.y + HEIGHT;
+    let min_z = pos.z - HALF_WIDTH;
+    let max_z = pos.z + HALF_WIDTH;
+
+    let x0 = min_x.floor() as i32;
+    let x1 = max_x.ceil() as i32;
+    let y0 = min_y.floor() as i32;
+    let y1 = max_y.ceil() as i32;
+    let z0 = min_z.floor() as i32;
+    let z1 = max_z.ceil() as i32;
+
+    for x in x0..x1 {
+        for block_y in y0..y1 {
+            for z in z0..z1 {
+                let state = state_at(x, block_y, z);
+                if spawn_has_fluid_state(&state) {
+                    return false;
+                }
+                let Some(boxes) = spawn_collision_boxes(&state) else {
+                    return false;
+                };
+                for block in boxes {
+                    let block_min_x = f64::from(x) + f64::from(block.min[0]);
+                    let block_max_x = f64::from(x) + f64::from(block.max[0]);
+                    let block_min_y = f64::from(block_y) + f64::from(block.min[1]);
+                    let block_max_y = f64::from(block_y) + f64::from(block.max[1]);
+                    let block_min_z = f64::from(z) + f64::from(block.min[2]);
+                    let block_max_z = f64::from(z) + f64::from(block.max[2]);
+                    if min_x < block_max_x
+                        && max_x > block_min_x
+                        && min_y < block_max_y
+                        && max_y > block_min_y
+                        && min_z < block_max_z
+                        && max_z > block_min_z
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Checks a world-space position against a source's live block states.
+///
+/// `pub(crate)` lets the integrated join path validate a restored player
+/// position without duplicating the AABB/liquid logic used by the fresh-spawn
+/// search. The source is queried only for the cells touched by the player's
+/// body, not for a whole chunk.
+pub(crate) fn is_spawn_position_clear<S: ChunkSource + ?Sized>(
+    source: &S,
+    pos: Vec3,
+) -> bool {
+    spawn_aabb_is_clear(|x, y, z| source.block_state(x, y, z), pos)
 }
 
 /// The two lookup tables joining a block-state *string* to a census state id:
@@ -267,7 +401,14 @@ fn spawn_pos_in_column(column: &ChunkColumn, cx: i32, cz: i32) -> Option<BlockPo
     for lx in 0..16 {
         for lz in 0..16 {
             if let Some(y) = get_level_respawn_pos(column, lx, lz) {
-                return Some(BlockPos::new(cx * 16 + lx, y, cz * 16 + lz));
+                // The surface finder and the body-clearance predicate are
+                // separate in the external implementation: a column's first
+                // surface is the only candidate, and an obstructed body moves
+                // on to the next column rather than searching for a lower
+                // surface in this one.
+                if spawn_position_is_clear_in_column(column, lx, lz, y) {
+                    return Some(BlockPos::new(cx * 16 + lx, y, cz * 16 + lz));
+                }
             }
         }
     }
@@ -277,6 +418,37 @@ fn spawn_pos_in_column(column: &ChunkColumn, cx: i32, cz: i32) -> Option<BlockPo
 /// [`spawn_pos_in_column`] for a chunk that is not yet in hand.
 fn get_spawn_pos_in_chunk<S: ChunkSource + ?Sized>(source: &S, cx: i32, cz: i32) -> Option<BlockPos> {
     spawn_pos_in_column(&source.column(cx, cz), cx, cz)
+}
+
+/// Finds a clear fallback height in the origin column.
+///
+/// The generator's preferred fallback remains the first choice so an
+/// all-ocean world keeps its open-water spawn. If that height is blocked by
+/// terrain, fluid, or an unknown state, the search climbs to the first height
+/// where the complete player body fits. The top sentinel is one row above the
+/// column, whose out-of-range state is air, so even a fully solid column gets
+/// a finite, collision-free answer.
+fn fallback_spawn_y(column: &ChunkColumn, lx: i32, lz: i32, preferred: i32) -> i32 {
+    if spawn_position_is_clear_in_column(column, lx, lz, preferred) {
+        return preferred;
+    }
+
+    let top = column.min_y.saturating_add(column.height);
+    if preferred < top {
+        for y in preferred.saturating_add(1)..=top {
+            if spawn_position_is_clear_in_column(column, lx, lz, y) {
+                return y;
+            }
+        }
+    }
+    if preferred > column.min_y {
+        for y in (column.min_y..preferred).rev() {
+            if spawn_position_is_clear_in_column(column, lx, lz, y) {
+                return y;
+            }
+        }
+    }
+    top
 }
 
 /// The 121 chunk offsets the initial-spawn spiral visits, in vanilla order.
@@ -322,10 +494,10 @@ fn spiral_chunk_offsets() -> Vec<(i32, i32)> {
 /// land instead of spawning the player under water).
 ///
 /// Returns the first valid spawn position in spiral order, or — when every
-/// chunk in the box is invalid (a full-ocean box) — `(8, `[`GENERATOR_SPAWN_HEIGHT`]`, 8)`,
-/// which is vanilla's own pre-seed (`setInitialSpawn` calls `levelData.setSpawn`
-/// with `offset(8, height, 8)` before the loop and the loop only overrides it
-/// with a *valid* find).
+/// chunk in the box is invalid (a full-ocean box) — the origin anchor at the
+/// generator's preferred fallback height. The preferred height is retained
+/// when its complete player body is clear; a blocked preferred height climbs
+/// to the first clear row instead of placing the player inside terrain.
 ///
 /// # Column generations, because this is on the join critical path
 ///
@@ -373,6 +545,7 @@ pub(crate) fn find_initial_spawn<S: ChunkSource + ?Sized>(source: &S) -> WorldSp
         }
     }
 
+    let fallback_y = fallback_spawn_y(&origin, 8, 8, fallback_y);
     WorldSpawn {
         pos: Vec3::new(8.0, fallback_y as f64, 8.0),
         yaw: 0.0,
@@ -698,6 +871,120 @@ mod tests {
 
         let void = ChunkColumn::new(0, 128);
         assert_eq!(get_level_respawn_pos(&void, 0, 0), None, "no solid block at all");
+    }
+
+    /// The full-body clearance gate has one positive and three negative
+    /// controls. A cave above solid ground is usable; a solid cell, fluid, or
+    /// a partial collider in the body footprint is not.
+    #[test]
+    fn spawn_body_clearance_rejects_solid_fluid_and_partial_colliders() {
+        let mut column = land_column(10);
+        assert!(
+            spawn_position_is_clear_in_column(&column, 0, 0, 11),
+            "the open cave above the stone surface is a valid player body"
+        );
+        assert!(
+            !spawn_position_is_clear_in_column(&column, 0, 0, 10),
+            "a body whose feet cell is solid must be rejected"
+        );
+
+        column.set_block(0, 11, 0, "minecraft:water");
+        assert!(
+            !spawn_position_is_clear_in_column(&column, 0, 0, 11),
+            "fluid is unsafe even though water has no collision boxes"
+        );
+
+        column.set_block(0, 11, 0, "minecraft:oak_slab[type=bottom,waterlogged=false]");
+        let slab = spawn_collision_boxes(
+            "minecraft:oak_slab[type=bottom,waterlogged=false]",
+        )
+        .expect("the collision census must know the slab state");
+        assert!(!slab.is_empty(), "the partial-collider premise must hold");
+        assert!(
+            !spawn_position_is_clear_in_column(&column, 0, 0, 11),
+            "a slab in the player's body footprint must be rejected"
+        );
+        for x in 0..16 {
+            for z in 0..16 {
+                column.set_block(x, 11, z, "minecraft:oak_slab[type=bottom,waterlogged=false]");
+            }
+        }
+        assert_eq!(
+            get_level_respawn_pos(&column, 0, 0),
+            Some(11),
+            "the surface finder still reports the first full support below the slab"
+        );
+        assert_eq!(
+            spawn_pos_in_column(&column, 0, 0),
+            None,
+            "the body gate must reject this column instead of accepting the blocked surface"
+        );
+    }
+
+    /// Unknown states are not silently treated as air by the body check. This
+    /// is the fail-closed control for custom/data-pack blocks that are outside
+    /// the built-in collision census.
+    #[test]
+    fn spawn_body_clearance_rejects_an_unknown_state() {
+        assert!(
+            !spawn_aabb_is_clear(
+                |_, _, _| "minecraft:custom_unlisted_block".to_owned(),
+                Vec3::new(0.5, 11.0, 0.5),
+            ),
+            "an unknown state must not be assumed empty"
+        );
+    }
+
+    #[test]
+    fn fallback_climbs_above_a_blocked_preferred_height() {
+        let mut column = ChunkColumn::new(0, 16);
+        for x in 0..16 {
+            for z in 0..16 {
+                for y in 0..16 {
+                    column.set_block(x, y, z, "minecraft:stone");
+                }
+            }
+        }
+        let fallback = fallback_spawn_y(&column, 8, 8, 8);
+        assert_eq!(fallback, 16, "the first clear row is the one above this solid column");
+        assert!(spawn_position_is_clear_in_column(&column, 8, 8, fallback));
+    }
+
+    #[test]
+    fn player_spawn_anchor_is_sent_at_the_block_bottom_center() {
+        assert_eq!(
+            player_position_for_spawn_anchor(Vec3::new(-3.0, 64.0, 7.0)),
+            Vec3::new(-2.5, 64.0, 7.5),
+            "an integer block anchor must become the external bottom-centre position"
+        );
+        assert_eq!(
+            player_position_for_spawn_anchor(Vec3::new(2.75, 64.9, -1.25)),
+            Vec3::new(2.5, 64.0, -1.5),
+            "explicit spawn coordinates are normalised to their containing block"
+        );
+    }
+
+    /// A spawn anchor must be converted before the player is placed. At the
+    /// integer corner the player's body reaches into the diagonal neighbour;
+    /// at the block centre the same terrain is clear. This is the causal
+    /// distinction behind an apparently underground join at a chunk edge.
+    #[test]
+    fn centered_spawn_avoids_a_neighboring_column_wall() {
+        let mut neighbour = land_column(10);
+        neighbour.set_block(15, 11, 15, "minecraft:stone");
+        let mut columns = std::collections::HashMap::new();
+        columns.insert((0, 0), land_column(10));
+        columns.insert((-1, -1), neighbour);
+        let source = MapSource { columns };
+
+        assert!(
+            is_spawn_position_clear(&source, Vec3::new(0.5, 11.0, 0.5)),
+            "the selected origin cell is clear when the player is centred"
+        );
+        assert!(
+            !is_spawn_position_clear(&source, Vec3::new(0.0, 11.0, 0.0)),
+            "the old integer-corner placement overlaps the diagonal wall"
+        );
     }
 
     /// **The spawn-in-the-air defect, as a magnitude gate.** A plains column with
@@ -1030,6 +1317,10 @@ mod tests {
             !spawn_face_full_up(&source.block_state(8, spawn.pos.y as i32, 8)),
             "the fallback must not place the player inside a collidable block"
         );
+        assert!(
+            is_spawn_position_clear(&source, player_position_for_spawn_anchor(spawn.pos)),
+            "the complete fallback player body must be clear of this ocean column"
+        );
     }
 
     /// **The world-species gate.** Every hermetic fixture above is a column this
@@ -1062,7 +1353,12 @@ mod tests {
         for seed in [0_i64, 42, 1234, -195764831] {
             let source = crate::worldgen_data::overworld_chunk_source(seed);
             let spawn = find_initial_spawn(&source);
-            let (sx, sy, sz) = (spawn.pos.x as i32, spawn.pos.y as i32, spawn.pos.z as i32);
+            let player_pos = player_position_for_spawn_anchor(spawn.pos);
+            let (sx, sy, sz) = (
+                player_pos.x.floor() as i32,
+                player_pos.y.floor() as i32,
+                player_pos.z.floor() as i32,
+            );
 
             let feet = source.block_state(sx, sy, sz);
             let head = source.block_state(sx, sy + 1, sz);
@@ -1081,6 +1377,10 @@ mod tests {
                 !spawn_face_full_up(&head),
                 "seed {seed}: spawn head at ({sx}, {}, {sz}) is inside {head}",
                 sy + 1
+            );
+            assert!(
+                is_spawn_position_clear(&source, player_pos),
+                "seed {seed}: the complete player body at {player_pos:?} overlaps terrain"
             );
 
             if spawn_face_full_up(&support) {
