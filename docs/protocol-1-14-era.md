@@ -269,6 +269,14 @@ consumed by the ECS entity-equipment ingest path; block events are forwarded
 into the shell's chest, bell, spawner, and gateway event trackers, so both
 signals reach a visible production consumer.
 
+`crates/versions/1.14/tests/metadata_equipment_attributes_ecs.rs` exercises that complete
+consumer path with literal packet bodies for all three protocol tables. The 498/578 cases cover
+the single-slot equipment shape and dotted attribute keys; the 754 case additionally carries a
+continued second equipment record and a namespaced attribute key. Every decoded event is queued
+into the production `NetIngest` schedule, and the assertions read the indexed entity's
+`EntityFlags`, `Equipment`, and `Attributes` components with non-default controls that distinguish
+an absent or truncated update from the expected value.
+
 ### External-client acceptance
 
 The opt-in release-client gate covers all three hosted rows in this era: protocol 498 (1.14.4),
