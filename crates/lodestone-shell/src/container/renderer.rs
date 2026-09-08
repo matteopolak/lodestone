@@ -15,6 +15,7 @@ use super::background::ContainerBackground;
 use super::frame::ContainerFrame;
 use super::geometry::ContainerGeometry;
 use super::player_preview::PlayerPreview;
+use super::profile::{ContainerProfile, Stage, Workload};
 use super::{BG_FLOATS_PER_VERTEX, CONTAINER_BG_WGSL, CONTAINER_WGSL, FLOATS_PER_VERTEX};
 
 /// GPU renderer for the container overlay.
@@ -49,6 +50,10 @@ pub struct ContainerRenderer {
     /// [`background`](Self::background) and `gpu/entities.rs`'s armour sheets
     /// behave. See [`super::player_preview`].
     player_preview: Option<PlayerPreview>,
+    /// One-shot, opt-in first-draw timings. The steady-state frame profiler
+    /// cannot expose a one-time container-open cost, so this stays local to the
+    /// production container consumer and records the stages that actually run.
+    profile: ContainerProfile,
 }
 
 /// The GPU half of [`ContainerBackground`]: its own tiny textured pipeline,
@@ -142,6 +147,7 @@ impl ContainerRenderer {
             font_generation: crate::resources::pack_generation(),
             background: None,
             player_preview: None,
+            profile: ContainerProfile::default(),
         }
     }
 
@@ -413,8 +419,17 @@ impl ContainerRenderer {
         );
     }
 
-    /// Drop the special-renderer icon pass so the next frame rebuilds it against
-    /// the current pack stack — the reload-time counterpart of
+    /// Build the block-entity icon pass during renderer bring-up rather than
+    /// on the first frame containing a chest, banner, shield or head. This is
+    /// intentionally called from the loading phase, while resource decoding
+    /// and GPU uploads are already expected, so opening a container performs no
+    /// one-time model/sheet/pattern-atlas construction.
+    pub fn prewarm_special_icons(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        self.icons.prewarm_special(device, queue);
+    }
+
+    /// Drop the special-renderer icon pass so bring-up or the next frame rebuilds
+    /// it against the current pack stack — the reload-time counterpart of
     /// [`Self::attach_items`]/[`Self::attach_item_models`], and the sibling of
     /// `HudRenderer::reload_special_icons`. Both screens keep their own
     /// `IconRenderer`, so a reload has to reach both. See
@@ -425,8 +440,9 @@ impl ContainerRenderer {
     }
 
     /// How many block-entity sheets the special-renderer icon pass has loaded —
-    /// `0` until the first frame containing one (the pass is built lazily) and
-    /// `0` forever on a jar-less run. The container sibling of
+    /// `0` until the bring-up prewarm succeeds (or until a special frame builds
+    /// it after a reload), and `0` forever on a jar-less run. The container
+    /// sibling of
     /// `HudRenderer::special_icon_sheets`, and it exists for the same reason:
     /// a pixel count alone cannot tell "the pass was rebuilt" from "the pass was
     /// never dropped", and a reload gate needs exactly that distinction.
@@ -578,12 +594,16 @@ impl ContainerRenderer {
         height: u32,
         between_strata: impl FnOnce(),
     ) {
+        self.profile.begin("menu");
         // Only ask for model geometry when there is somewhere to draw it.
         let want_models = self.icons.models_attached() && depth.is_some();
         let item_atlas = self.icons.item_atlas();
         // Before the font is read: a pack that landed since the last frame has
         // to reach this frame's glyphs.
         crate::hud::vanilla_font::refresh_shared_font(&mut self.font, &mut self.font_generation);
+        if let Some(font) = self.font.as_deref() {
+            self.profile.set_font_ink_runs_before(font.ink_run_count());
+        }
         let geo = ContainerGeometry::build_inner(
             frame,
             width,
@@ -596,6 +616,10 @@ impl ContainerRenderer {
             self.font.as_deref(),
             self.background.as_ref().map(|bg| bg.data.as_ref()),
         );
+        if let Some(menu) = frame.menu {
+            self.profile.set_slots(menu.slot_count());
+        }
+        self.profile.mark(Stage::GeometryBuild);
         self.render_geometry_scaled_between_strata(
             device,
             queue,
@@ -657,6 +681,7 @@ impl ContainerRenderer {
         height: u32,
         between_strata: impl FnOnce(),
     ) {
+        self.profile.begin("prebuilt");
         // The preview is built before login, so resolve its skin from the live
         // account UUID here. The retained cache makes this idempotent across
         // frames and lets a renderer rebuilt by a pack reload rehydrate the
@@ -667,6 +692,7 @@ impl ContainerRenderer {
         ) {
             preview.maybe_skin_for_uuid(device, queue, uuid);
         }
+        self.profile.mark(Stage::PlayerPreview);
         // `geo.special` counts too — see the same guard in
         // `HudRenderer::render_with_item_models`. A frame whose only content is a
         // chest icon must not be discarded before it reaches `upload`.
@@ -685,6 +711,7 @@ impl ContainerRenderer {
             // (no menu, nothing attached) would otherwise silently swallow it,
             // and "the recipe book vanishes on some frames" is a worse bug than
             // the one this hook exists to fix.
+            self.profile.cancel();
             between_strata();
             return;
         }
@@ -775,6 +802,7 @@ impl ContainerRenderer {
             combined.extend_from_slice(&geo.mid_item_verts);
             std::borrow::Cow::Owned(combined)
         };
+        let special_pass_before = self.icons.special_sheet_count() > 0;
         let (item_count, model_count) = self.icons.upload(
             device,
             queue,
@@ -797,6 +825,7 @@ impl ContainerRenderer {
         let glint_count =
             self.icons
                 .upload_glint(device, queue, &glint_upload, "container-glint-verts");
+        self.profile.mark(Stage::IconUpload);
 
         let vertex_count = geo.vertex_count() as u32;
         let chrome_count = (geo.chrome_vertex_count as u32).min(vertex_count);
@@ -1032,7 +1061,9 @@ impl ContainerRenderer {
         // encoder finished at the end of this function could not, because the
         // overlay's own submit would already have landed.
         queue.submit(std::iter::once(encoder.finish()));
+        self.profile.mark(Stage::SlotSubmit);
         between_strata();
+        self.profile.mark(Stage::BetweenStrata);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("container-carried"),
         });
@@ -1082,5 +1113,29 @@ impl ContainerRenderer {
             }
         }
         queue.submit(std::iter::once(encoder.finish()));
+        self.profile.mark(Stage::CarriedSubmit);
+        let player_preview_attached =
+            geo.player_avatar.is_some() && self.player_preview.is_some();
+        let item_atlas_attached = self.icons.item_atlas().is_some();
+        let item_models_attached = self.icons.models_attached();
+        let special_pass_after = self.icons.special_sheet_count() > 0;
+        let font_ink_runs_after = self
+            .font
+            .as_deref()
+            .map_or(0, VanillaFont::ink_run_count);
+        self.profile.finish(Workload {
+            slots: 0,
+            colour_vertices: geo.verts.len() / FLOATS_PER_VERTEX,
+            sprite_vertices: geo.item_verts.len() / crate::hud::SPRITE_FLOATS_PER_VERTEX,
+            model_vertices: geo.model_verts.len(),
+            special_icons: geo.special.len(),
+            background_vertices: geo.bg_verts.len() / BG_FLOATS_PER_VERTEX,
+            player_preview: player_preview_attached,
+            item_atlas: item_atlas_attached,
+            item_models: item_models_attached,
+            special_pass_before,
+            special_pass_after,
+            font_ink_runs_after,
+        });
     }
 }
