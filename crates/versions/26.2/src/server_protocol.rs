@@ -67,7 +67,7 @@ use lodestone_model::command_tree::{
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, Difficulty, EntityAttributeSnapshot, GameMode,
     ItemComponents, ItemStack, RecipeBookType, ResourceKey, ResourcePackResponseKind, Rotation,
-    SoundCategory, Text, TextContent, Vec3, Vec3f, WrittenBookContent, PredictionSequence,
+    SoundCategory, Text, TextContent, Vec3, Vec3f, WrittenBookContent,
 };
 use lodestone_server::{
     Abilities, ChunkColumn as ServerChunkColumn, ChunkEncoder, ColumnLightSettlement,
@@ -284,6 +284,7 @@ const METADATA_IDX_EXPERIENCE_ORB_VALUE: u8 = 8;
 /// `lodestone_server::MetadataField::TamableFlags`.
 const METADATA_IDX_TAMABLE_FLAGS: u8 = 18;
 const METADATA_SER_BYTE: i32 = 0;
+const METADATA_IDX_SHARED_FLAGS: u8 = 0;
 
 /// the abstract-horse class's own flags accessor's metadata index — **also 18**, also `BYTE`.
 ///
@@ -1370,13 +1371,6 @@ fn encode_block_update_body(x: i32, y: i32, z: i32, state_id: u32) -> Vec<u8> {
     let mut w = Writer::default();
     w.i64(pack_block_pos(x, y, z));
     w.var_i32(state_id as i32);
-    w.into_vec()
-}
-
-/// Encodes the one-field prediction acknowledgement body.
-fn encode_block_changed_ack_body(sequence: PredictionSequence) -> Vec<u8> {
-    let mut w = Writer::default();
-    w.var_i32(sequence.as_wire());
     w.into_vec()
 }
 
@@ -3982,7 +3976,7 @@ impl ServerProtocol for V770ServerProtocol {
                             y: use_item.cursor_y,
                             z: use_item.cursor_z,
                         },
-                        sequence: PredictionSequence::from_wire(use_item.sequence),
+                        sequence: use_item.sequence,
                         // Same malformed-input convention as `USE_ITEM`'s hand just
                         // above: anything outside `0..=1` degrades to main hand
                         // rather than dropping the packet.
@@ -5772,13 +5766,6 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
-    fn encode_block_changed_ack(&self, sequence: PredictionSequence) -> ServerDirective {
-        ServerDirective::Send {
-            packet_id: play::clientbound::BLOCK_CHANGED_ACK,
-            payload: encode_block_changed_ack_body(sequence),
-        }
-    }
-
     /// `ClientboundBlockEntityDataPacket`: a packed `BlockPos` i64, the
     /// `BLOCK_ENTITY_TYPE` registry id as a VarInt, then the nameless network-NBT
     /// update tag — the identical shape this crate's own `BLOCK_ENTITY_DATA`
@@ -5891,6 +5878,11 @@ impl ServerProtocol for V770ServerProtocol {
             // `_ =>` arm — a new field must be encoded or fail to compile, which
             // is the only thing that stops the next one becoming an island.
             match field {
+                MetadataField::SharedFlags(flags) => {
+                    w.u8(METADATA_IDX_SHARED_FLAGS);
+                    w.var_i32(METADATA_SER_BYTE);
+                    w.i8(*flags as i8);
+                }
                 MetadataField::CreeperSwellDir(v) => {
                     w.u8(METADATA_IDX_CREEPER_SWELL_DIR);
                     w.var_i32(METADATA_SER_INT);
@@ -7112,6 +7104,7 @@ impl ServerProtocol for V770ServerProtocol {
 mod block_edit_tests {
     use super::*;
     use lodestone_core::State;
+    use lodestone_model::PredictionSequence;
 
     fn encode<T: Encode>(packet: &T) -> Vec<u8> {
         let mut w = Writer::default();
@@ -7409,18 +7402,10 @@ mod block_edit_tests {
     }
 
     #[test]
-    fn encode_prediction_ack_preserves_wrap_and_invalid_payload_is_dropped() {
+    fn decode_use_item_on_rejects_truncated_payload() {
         let proto = V770ServerProtocol;
-        let ServerDirective::Send { packet_id, payload } =
-            proto.encode_block_changed_ack(PredictionSequence::from_wire(i32::MIN))
-        else {
-            panic!("prediction acknowledgement must be encoded");
-        };
-        assert_eq!(packet_id, play::clientbound::BLOCK_CHANGED_ACK);
-        assert_eq!(payload, vec![0x80, 0x80, 0x80, 0x80, 0x08]);
-
-        // A truncated VarInt is invalid packet input, not sequence zero. The
-        // decoder must reject it before it reaches the server consumer.
+        // A truncated packet is invalid input, not sequence zero. The decoder
+        // must reject it before it reaches the server consumer.
         assert_eq!(
             proto.decode(State::Play, play::serverbound::USE_ITEM_ON, &[0x00]),
             ServerBound::Ignored
