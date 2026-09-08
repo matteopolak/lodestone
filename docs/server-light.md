@@ -79,7 +79,10 @@ stored with the retained light in chunk NBT and is cleared with the light on any
 block mutation. Version-specific initial-chunk encoders consume retained light
 only after the centre reaches `CentreSettled`; dependency snapshots remain
 available as seeds for the next admission and are never serialized as though
-their own centre admission had completed.
+their own centre admission had completed. A later footprint may read a
+`CentreSettled` column as a dependency, but its dependency result cannot
+downgrade that authoritative centre snapshot; a block mutation clears the
+status before any replacement is allowed.
 
 The initial chunk encoder consumes a `CentreSettled` retained snapshot verbatim. An independent sealed-
 world capture showed that a persisted End section mask can differ from the first in-memory settlement,
