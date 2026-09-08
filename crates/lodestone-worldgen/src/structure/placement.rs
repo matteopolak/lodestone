@@ -42,13 +42,6 @@ pub enum SpreadType {
 }
 
 impl SpreadType {
-    fn parse(value: &Value) -> Self {
-        match value.as_str() {
-            Some("triangular") => Self::Triangular,
-            _ => Self::Linear,
-        }
-    }
-
     fn evaluate(self, random: &mut WorldgenRandom<LegacyRandomSource>, limit: i32) -> i32 {
         match self {
             Self::Linear => random.next_int_bounded(limit),
@@ -80,15 +73,6 @@ pub enum FrequencyReduction {
 }
 
 impl FrequencyReduction {
-    fn parse(value: &Value) -> Self {
-        match value.as_str() {
-            Some("legacy_type_1") => Self::LegacyType1,
-            Some("legacy_type_2") => Self::LegacyType2,
-            Some("legacy_type_3") => Self::LegacyType3,
-            _ => Self::Default,
-        }
-    }
-
     /// Vanilla's own hardcoded "highly arbitrary" random salt.
     const ARBITRARY_SALT: i32 = 10_387_320;
 
@@ -194,58 +178,64 @@ pub enum PlacementKind {
 
 impl Placement {
     /// Parses one structure set's `placement` object.
-    #[must_use]
-    pub fn parse(value: &Value) -> Self {
-        let locate_offset = value["locate_offset"]
-            .as_array()
-            .and_then(|a| {
-                Some([
-                    a.first()?.as_i64()? as i32,
-                    a.get(1)?.as_i64()? as i32,
-                    a.get(2)?.as_i64()? as i32,
-                ])
-            })
-            .unwrap_or([0, 0, 0]);
-        let exclusion_zone = value["exclusion_zone"].as_object().and_then(|z| {
-            Some(ExclusionZone {
-                other_set: z.get("other_set")?.as_str()?.to_string(),
-                chunk_count: z.get("chunk_count")?.as_i64()? as i32,
-            })
-        });
-        let kind = match value["type"].as_str().unwrap_or_default() {
-            "minecraft:random_spread" | "random_spread" => PlacementKind::RandomSpread {
-                spacing: value["spacing"].as_i64().unwrap_or(1) as i32,
-                separation: value["separation"].as_i64().unwrap_or(0) as i32,
-                spread_type: SpreadType::parse(&value["spread_type"]),
-            },
-            "minecraft:concentric_rings" | "concentric_rings" => {
-                PlacementKind::ConcentricRings {
-                    distance: value["distance"].as_i64().unwrap_or(0) as i32,
-                    spread: value["spread"].as_i64().unwrap_or(1) as i32,
-                    count: value["count"].as_i64().unwrap_or(1) as i32,
-                    // Left as the raw reference; `StructureRegistry` resolves it
-                    // through `Resolver::biome_tag` because only it has the
-                    // resolver.
-                    preferred_biomes: match &value["preferred_biomes"] {
-                        Value::String(s) => vec![s.clone()],
-                        Value::Array(a) => a
-                            .iter()
-                            .filter_map(|e| e.as_str().map(str::to_owned))
-                            .collect(),
-                        _ => Vec::new(),
+    pub fn parse(value: &Value) -> Result<Self, String> {
+        let document: super::json::PlacementDocument = serde_json::from_value(value.clone())
+            .map_err(|error| format!("structure placement: {error}"))?;
+        let (locate_offset, frequency_reduction, frequency, salt, exclusion_zone, kind) =
+            match document {
+                super::json::PlacementDocument::RandomSpread {
+                    locate_offset,
+                    frequency_reduction_method,
+                    frequency,
+                    salt,
+                    exclusion_zone,
+                    spacing,
+                    separation,
+                    spread_type,
+                } => (
+                    locate_offset.unwrap_or([0, 0, 0]),
+                    frequency_from_json(frequency_reduction_method),
+                    frequency,
+                    salt,
+                    exclusion_zone.map(exclusion_from_json),
+                    PlacementKind::RandomSpread {
+                        spacing,
+                        separation,
+                        spread_type: spread_from_json(spread_type),
                     },
-                }
-            }
-            other => PlacementKind::Unsupported(other.to_string()),
-        };
-        Self {
+                ),
+                super::json::PlacementDocument::ConcentricRings {
+                    locate_offset,
+                    frequency_reduction_method,
+                    frequency,
+                    salt,
+                    exclusion_zone,
+                    distance,
+                    spread,
+                    count,
+                    preferred_biomes,
+                } => (
+                    locate_offset.unwrap_or([0, 0, 0]),
+                    frequency_from_json(frequency_reduction_method),
+                    frequency,
+                    salt,
+                    exclusion_zone.map(exclusion_from_json),
+                    PlacementKind::ConcentricRings {
+                        distance,
+                        spread,
+                        count,
+                        preferred_biomes: preferred_biomes.into_vec(),
+                    },
+                ),
+            };
+        Ok(Self {
             locate_offset,
-            frequency_reduction: FrequencyReduction::parse(&value["frequency_reduction_method"]),
-            frequency: value["frequency"].as_f64().unwrap_or(1.0) as f32,
-            salt: value["salt"].as_i64().unwrap_or(0) as i32,
+            frequency_reduction,
+            frequency,
+            salt,
             exclusion_zone,
             kind,
-        }
+        })
     }
 
     /// Vanilla's own random-spread-placement potential-structure-chunk lookup — the one
@@ -299,6 +289,29 @@ impl Placement {
             Some((x, z)) => x == source_x && z == source_z,
             None => false,
         }
+    }
+}
+
+fn exclusion_from_json(value: super::json::ExclusionZone) -> ExclusionZone {
+    ExclusionZone {
+        other_set: value.other_set,
+        chunk_count: value.chunk_count,
+    }
+}
+
+fn frequency_from_json(value: super::json::FrequencyReduction) -> FrequencyReduction {
+    match value {
+        super::json::FrequencyReduction::Default => FrequencyReduction::Default,
+        super::json::FrequencyReduction::LegacyType1 => FrequencyReduction::LegacyType1,
+        super::json::FrequencyReduction::LegacyType2 => FrequencyReduction::LegacyType2,
+        super::json::FrequencyReduction::LegacyType3 => FrequencyReduction::LegacyType3,
+    }
+}
+
+fn spread_from_json(value: super::json::SpreadType) -> SpreadType {
+    match value {
+        super::json::SpreadType::Linear => SpreadType::Linear,
+        super::json::SpreadType::Triangular => SpreadType::Triangular,
     }
 }
 
@@ -395,7 +408,7 @@ mod tests {
             "salt": 165_745_295,
             "separation": 4,
             "spacing": 24
-        }));
+        })).unwrap();
         assert_eq!(p.salt, 165_745_295);
         assert_eq!(p.frequency, 1.0);
         assert_eq!(p.frequency_reduction, FrequencyReduction::Default);
@@ -422,7 +435,7 @@ mod tests {
         let p = Placement::parse(&serde_json::json!({
             "type": "minecraft:random_spread", "salt": 165_745_295,
             "separation": 4, "spacing": 24
-        }));
+        })).unwrap();
         let seed = -195_764_831i64;
         let a = p.potential_structure_chunk(seed, 5, 7).unwrap();
         for (x, z) in [(0, 0), (23, 23), (12, 3)] {
@@ -444,7 +457,7 @@ mod tests {
             "type": "minecraft:random_spread", "frequency": 0.004,
             "frequency_reduction_method": "legacy_type_3", "salt": 0,
             "separation": 0, "spacing": 1
-        }));
+        })).unwrap();
         let seed = -195_764_831i64;
         let hits = (0..200).flat_map(|x| (0..200).map(move |z| (x, z)))
             .filter(|&(x, z)| p.passes_frequency(seed, x, z))
