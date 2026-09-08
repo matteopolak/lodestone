@@ -6,6 +6,8 @@
 //! resolve to an adapter that claims it. The exact full set is asserted when
 //! the workspace test is run with all family features.
 
+use std::collections::BTreeSet;
+
 const EXPECTED_PROTOCOLS: &[i32] = &[
     5, 47, 110, 210, 316, 340, 404, 498, 578, 754, 756, 758, 762, 766, 774, 776,
 ];
@@ -45,6 +47,20 @@ fn compiled_family_census_has_unique_resolvable_protocol_rows() {
         );
     }
 
+    let families = lodestone_registry::compiled_families();
+    let family_set: BTreeSet<_> = families.iter().copied().collect();
+    assert_eq!(
+        family_set.len(),
+        families.len(),
+        "a family may appear only once in the compiled registry"
+    );
+    assert!(
+        families
+            .iter()
+            .all(|family| EXPECTED_FAMILIES.contains(family)),
+        "registry exposed a family outside the checked-in family census: {families:?}"
+    );
+
     if cfg!(all(
         feature = "v1-7",
         feature = "v1-8",
@@ -58,6 +74,7 @@ fn compiled_family_census_has_unique_resolvable_protocol_rows() {
         feature = "v26-2"
     )) {
         assert_eq!(protocols, EXPECTED_PROTOCOLS);
-        assert_eq!(lodestone_registry::compiled_families(), EXPECTED_FAMILIES);
+        let expected_family_set: BTreeSet<_> = EXPECTED_FAMILIES.iter().copied().collect();
+        assert_eq!(family_set, expected_family_set);
     }
 }

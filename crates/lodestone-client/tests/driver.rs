@@ -1165,6 +1165,84 @@ async fn position_correction_is_immediately_echoed_with_relative_fields_resolved
     drop(handle);
 }
 
+/// A placement correction can share one transport read with the first chunk
+/// packet. The driver must hold that buffered packet until the simulation
+/// adopts the authoritative pose, then resume decoding it; waiting for a
+/// second socket read or dropping the frame leaves a joined client with no
+/// terrain despite a successful teleport.
+#[tokio::test]
+async fn buffered_chunk_after_teleport_is_processed_after_pose_acknowledgement() {
+    const TELEPORT_PKT: i32 = 0x60;
+    const CHUNK_PKT: i32 = 0x61;
+    const ACCEPT_ID: i32 = 0x62;
+    const MOVE_ID: i32 = 0x63;
+    let teleport = ClientEvent::TeleportPlayer {
+        pos: Vec3::new(8.0, 64.0, -3.0),
+        rotation: Rotation::new(25.0, -7.0),
+        flags: TeleportFlags::default(),
+        velocity: None,
+    };
+    let adapter = FakeAdapter::new()
+        .move_to(MOVE_ID)
+        .chunks_on(ConnectionState::Handshaking, CHUNK_PKT, &[(0, 0)])
+        .on(
+            ConnectionState::Handshaking,
+            TELEPORT_PKT,
+            vec![
+                Directive::AwaitTeleportCorrection,
+                Directive::Emit(teleport.clone()),
+                send(ACCEPT_ID, &[7]),
+            ],
+        );
+    let (handle, mut events, peer) = start(adapter, KeepAlivePolicy::Manual);
+
+    // Queue both length-prefixed frames in one transport write before waiting
+    // for the first event. The two one-byte packet ids make the raw framing
+    // explicit: each frame is `[length = 1, packet id]`. This is the shape
+    // that exposed the deferred-correction stall in the hosted matrix.
+    let mut raw_peer = peer.into_inner();
+    raw_peer
+        .write_all(&[1, TELEPORT_PKT as u8, 1, CHUNK_PKT as u8])
+        .await
+        .unwrap();
+    let mut peer = Connection::new(raw_peer);
+
+    assert_eq!(events.recv().await, Some(teleport));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), events.recv())
+            .await
+            .is_err(),
+        "the chunk must remain buffered until its teleport pose is adopted"
+    );
+
+    let position = handle
+        .position()
+        .expect("the teleport event must update the shared position");
+    handle
+        .acknowledge_teleport_correction(position, handle.rotation())
+        .unwrap();
+
+    let (id, payload) = peer.read_packet().await.unwrap().unwrap();
+    assert_eq!(id, ACCEPT_ID);
+    assert_eq!(payload, &[7]);
+    let (id, payload) = peer.read_packet().await.unwrap().unwrap();
+    assert_eq!(id, MOVE_ID);
+    let f64_at = |offset: usize| {
+        f64::from_be_bytes(payload[offset..offset + 8].try_into().unwrap())
+    };
+    assert_eq!((f64_at(0), f64_at(8), f64_at(16)), (8.0, 64.0, -3.0));
+
+    assert_eq!(
+        events.recv().await,
+        Some(ClientEvent::ChunkLoaded {
+            pos: lodestone_model::ChunkPos { x: 0, z: 0 },
+        })
+    );
+    assert!(handle.is_chunk_loaded(lodestone_client::ChunkPos::new(0, 0)));
+
+    drop(handle);
+}
+
 /// The signal fires exactly once per load-epoch and re-arms on respawn. The
 /// server re-seeds the load timer whenever it respawns us, so a client that only
 /// sent `player_loaded` at join would have its post-respawn movement ignored.
