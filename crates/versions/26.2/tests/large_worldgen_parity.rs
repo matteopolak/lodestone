@@ -609,6 +609,22 @@ fn is_partial_lifecycle_manifest(header: &support::large_parity_manifest::Header
         && i64::from(header.cz1) - i64::from(header.cz0) == 15
 }
 
+fn raw_packet_targets(
+    header: &support::large_parity_manifest::Header,
+    limit: u64,
+) -> Vec<ChunkPos> {
+    let width = u64::try_from(i64::from(header.cx1) - i64::from(header.cx0) + 1)
+        .expect("authenticated manifest coordinate width fits u64");
+    (0..limit)
+        .map(|index| {
+            (
+                header.cx0 + i32::try_from(index % width).expect("raw target x offset fits i32"),
+                header.cz0 + i32::try_from(index / width).expect("raw target z offset fits i32"),
+            )
+        })
+        .collect()
+}
+
 #[test]
 fn lifecycle_target_selection_rejects_ambiguous_single_target_requests() {
     assert_eq!(
@@ -1115,17 +1131,32 @@ fn parity_manifest_streams_before_rust_comparison() {
             Dimension::End => panic!("partial lifecycle capture is only available for Overworld and Nether"),
         }
     } else {
+        let width = u64::try_from(i64::from(h.cx1) - i64::from(h.cx0) + 1)
+            .expect("authenticated manifest coordinate width fits u64");
+        let prepared_raw_targets = if raw_packet && dimension == Dimension::Nether {
+            Some(raw_packet_targets(&h, limit))
+        } else {
+            None
+        };
         let source: Box<dyn ChunkSource> = match dimension {
             // A frozen external world is a retained, settled lifecycle result.
             // Keep the comparator on the server's retained-source path rather than
             // regenerating an isolated column for every packet request.
             Dimension::Overworld => Box::new(retained_chunk_source_for_view_radius(overworld_chunk_source(42), 8)),
-            Dimension::Nether => Box::new(retained_chunk_source_for_view_radius(nether_chunk_source(42), 8)),
+            Dimension::Nether => {
+                let source = nether_chunk_source(42);
+                if let Some(targets) = prepared_raw_targets.as_deref() {
+                    let capacity = source.generator().prepare_packet_replay(targets);
+                    eprintln!(
+                        "large raw-packet parity: prepared Nether immutable prefix for {} targets (capacity={capacity})",
+                        targets.len(),
+                    );
+                }
+                Box::new(retained_chunk_source_for_view_radius(source, 8))
+            }
             Dimension::End => Box::new(retained_chunk_source_for_view_radius(end_chunk_source(42), 8)),
         };
         let column_for = |cx, cz| -> ChunkColumn { source.column(cx, cz) };
-        let width = u64::try_from(i64::from(h.cx1) - i64::from(h.cx0) + 1)
-            .expect("authenticated manifest coordinate width fits u64");
         let mut expected_digest = [0u8; 32];
         for index in 0..limit {
             let (expected_prefix, expected_full) = if raw_packet {
@@ -1348,6 +1379,34 @@ fn lifecycle_packet_payload<S: LifecycleWorldgenSource>(
     }
 }
 
+fn nether_packet_payload<S: ChunkSource>(source: &S, target: ChunkPos) -> Vec<u8> {
+    let column = source.column(target.0, target.1);
+    let mut neighbours = Vec::with_capacity(8);
+    for dz in -1..=1 {
+        for dx in -1..=1 {
+            if (dx, dz) != (0, 0) {
+                neighbours.push((dx, dz, source.column(target.0 + dx, target.1 + dz)));
+            }
+        }
+    }
+    let directive = V770ServerProtocol
+        .try_encode_chunk_with_neighbours_in_dimension(
+            target.0,
+            target.1,
+            &column,
+            &neighbours,
+            ServerDimension::Nether,
+        )
+        .expect("production neighbour-aware chunk encoder");
+    match directive {
+        ServerDirective::Send { packet_id, payload } => {
+            assert_eq!(packet_id, lodestone_v26_2::packet_ids::play::clientbound::LEVEL_CHUNK_WITH_LIGHT);
+            payload
+        }
+        other => panic!("production chunk encoder returned {other:?} at {target:?}"),
+    }
+}
+
 /// Full replay remains the acceptance authority; this checks the static
 /// target optimisation against its raw packet bytes at the audited corner.
 #[test]
@@ -1374,6 +1433,29 @@ fn nether_target_index_7_full_and_pruned_packet_bytes_match() {
     let capture = LifecycleCapture::load(header.dimension, &header, Path::new(&path));
     assert_eq!(capture.target_order.get(7), Some(&(-1, -8)), "authenticated target order changed for index 7");
     assert_full_and_pruned_lifecycle_packet_bytes(Path::new(&path), (-1, -8), false);
+}
+
+/// Cache retention is an optimisation only: the exact packet bytes must be
+/// unchanged when the packet closure is retained instead of demand-evicted.
+#[test]
+#[ignore = "long-running raw-byte identity control; see docs/worldgen-large-parity.md"]
+fn nether_packet_replay_cache_preserves_raw_packet_bytes() {
+    let target = (0, 0);
+    let baseline_source = nether_chunk_source(42);
+    let baseline = nether_packet_payload(&baseline_source, target);
+    assert_eq!(baseline_source.generator().pre_decoration_computations(), 217);
+    assert_eq!(baseline_source.generator().pre_decoration_evictions(), 6);
+
+    let prepared_source = nether_chunk_source(42);
+    let capacity = prepared_source.generator().prepare_packet_replay(&[target]);
+    assert_eq!(capacity, 49, "one packet's 3x3 targets have a 7x7 prefix closure");
+    let prepared = nether_packet_payload(&prepared_source, target);
+
+    assert_eq!(baseline, prepared, "immutable-stage retention must not alter packet bytes");
+    assert_eq!(prepared_source.generator().pre_decoration_computations(), 49);
+    assert_eq!(prepared_source.generator().pre_decoration_evictions(), 0);
+    assert!(baseline_source.generator().pre_decoration_computations() > capacity);
+    assert!(baseline_source.generator().pre_decoration_evictions() > 0);
 }
 
 fn assert_full_and_pruned_lifecycle_packet_bytes(path: &Path, target: ChunkPos, audit_corner_counts: bool) {

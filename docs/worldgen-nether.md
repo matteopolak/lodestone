@@ -14,6 +14,15 @@ coordinate. It then drives the shared 3×3 feature writers: neighbouring source
 chunks can place blocks into the served chunk, exactly as a feature near a
 border requires.
 
+The prefix values are immutable for a fixed seed and coordinate. Normal
+generation keeps a 32-entry demand-ordered memo to bound resident memory, while
+large packet replay calls `NetherGenerator::prepare_packet_replay` with its
+target coordinates. That helper derives the full target-plus-neighbour closure
+from the 5×5 prefix read radius, so a bounded scan does not evict a prefix that
+the next packet needs. The `pre_decoration_computations` and
+`pre_decoration_evictions` counters make the closure and any thrashing visible
+without changing generation decisions.
+
 Biome carvers are normalized by `compose::build_biome_carvers` before that
 prefix runs. A biome document may declare one carver id directly or an ordered
 array; both forms become the same ordered carver list. Treating the direct form
@@ -55,6 +64,12 @@ single-element list and preserve array order exactly. The source chunk and list
 index seed each carver, so dropping or reordering an entry changes the whole
 17×17 carve neighbourhood.
 
+When adding another replay consumer, pass its complete target coordinate list
+to the preparation helper rather than choosing a fixed cache size. If the
+consumer reads beyond the packet's 3×3 neighbours, expose a separate
+coordinate-derived closure helper and add a byte-identity control against the
+unprepared source before enabling the larger memo.
+
 ## Configuration
 
 There are no runtime flags. `noise_settings/nether.json` selects
@@ -62,6 +77,11 @@ There are no runtime flags. `noise_settings/nether.json` selects
 `crates/lodestone-server/assets/worldgen/biome/` select placed features and the
 configured/placed-feature documents provide their bodies and placement
 modifiers.
+
+The read-only one-target profile is an opt-in developer probe. Run
+`cargo run -p lodestone-v26-2 --example nether_packet_profile` to see the
+prefix, full-column, packet and cache-counter timings without starting the
+game.
 
 ## Dependencies
 
