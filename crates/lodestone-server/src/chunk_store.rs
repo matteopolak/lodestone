@@ -1555,7 +1555,10 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
                 .expect("the centre snapshot is always requested")
                 .column
                 .clone();
-            if current.retained_light().is_some() {
+            if current
+                .retained_light()
+                .is_some_and(lodestone_world::ColumnLight::has_nonzero_values)
+            {
                 return Ok(current);
             }
         }
@@ -1582,7 +1585,11 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
                 centre,
                 neighbour_offsets,
             )?;
-            if !replace_existing && centre_column.retained_light().is_some() {
+            if !replace_existing
+                && centre_column
+                    .retained_light()
+                    .is_some_and(lodestone_world::ColumnLight::has_nonzero_values)
+            {
                 drop(lease);
                 return Ok(centre_column);
             }
@@ -1613,7 +1620,11 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
             centre,
             neighbour_offsets,
         )?;
-        if !replace_existing && centre_column.retained_light().is_some() {
+        if !replace_existing
+            && centre_column
+                .retained_light()
+                .is_some_and(lodestone_world::ColumnLight::has_nonzero_values)
+        {
             return Ok(centre_column);
         }
         let Some(settlement) = compute(&centre_column, &neighbours) else {
@@ -3032,6 +3043,85 @@ mod tests {
                 .retained_light(),
             Some(&unrelated_light)
         );
+    }
+
+    /// An allocated-zero dependency is storage, not a settled centre result.
+    /// The next admission at that coordinate must still run its solver and may
+    /// replace the zero layer with populated light.
+    #[test]
+    fn allocated_zero_dependency_can_become_populated_on_later_admission() {
+        let offsets = vec![
+            (-1, -1),
+            (0, -1),
+            (1, -1),
+            (-1, 0),
+            (1, 0),
+            (-1, 1),
+            (0, 1),
+            (1, 1),
+        ];
+        let store = ChunkStore::with_capacity(CountingSource::new(), 32);
+        let centre = store.column(0, 0);
+        let mut centre_light = lodestone_world::ColumnLight::new(centre.section_count());
+        *centre_light.sky_mut(0) = lodestone_world::LightData::Uniform(4);
+        let mut zero_dependency = lodestone_world::ColumnLight::new(centre.section_count());
+        for section in 0..zero_dependency.light_section_count() {
+            *zero_dependency.sky_mut(section) = lodestone_world::LightData::Uniform(0);
+            *zero_dependency.block_mut(section) = lodestone_world::LightData::Uniform(0);
+        }
+        let zero_for_first = zero_dependency.clone();
+        let mut first_compute = |_: &ChunkColumn, _: &[(i32, i32, ChunkColumn)]| {
+            ColumnLightSettlement::with_neighbours(
+                centre_light.clone(),
+                [(1, 0, zero_for_first.clone())],
+            )
+        };
+        store
+            .settle_resident_column_lights_with_neighbours(
+                0,
+                0,
+                &centre,
+                &offsets,
+                false,
+                false,
+                true,
+                &mut first_compute,
+            )
+            .expect("the first footprint admission must retain its dependency");
+        let retained_zero = store
+            .resident_column(1, 0)
+            .expect("the east dependency remains available")
+            .retained_light()
+            .cloned()
+            .expect("the dependency layer was allocated");
+        assert!(!retained_zero.has_nonzero_values());
+
+        let east = store
+            .resident_column(1, 0)
+            .expect("the allocated dependency is resident");
+        let mut populated_compute_calls = 0;
+        let mut populated_compute = |column: &ChunkColumn, _: &[(i32, i32, ChunkColumn)]| {
+            populated_compute_calls += 1;
+            let mut populated = lodestone_world::ColumnLight::new(column.section_count());
+            *populated.sky_mut(0) = lodestone_world::LightData::Uniform(9);
+            Some(ColumnLightSettlement::centre(populated))
+        };
+        let settled = store
+            .settle_resident_column_lights_with_neighbours(
+                1,
+                0,
+                &east,
+                &offsets,
+                false,
+                false,
+                true,
+                &mut populated_compute,
+            )
+            .expect("the later centre admission must replace allocated zero");
+        assert_eq!(populated_compute_calls, 1);
+        assert!(settled
+            .retained_light()
+            .is_some_and(lodestone_world::ColumnLight::has_nonzero_values));
     }
 
     /// A retained light refresh and a block mutation for one coordinate must
