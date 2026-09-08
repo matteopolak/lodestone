@@ -1049,3 +1049,19 @@ pub fn apply_carvers<O: CarveObserver>(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn carve_block_paths_do_not_reconstruct_state_strings() {
+        let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/carver/mod.rs"));
+        let start = source.find("fn carve_block(").expect("carve_block must exist");
+        let end = source[start..]
+            .find("fn carve_ellipsoid<")
+            .map(|offset| start + offset)
+            .expect("carve block methods must precede the ellipsoid loop");
+        let block_paths = &source[start..end];
+        assert!(!block_paths.contains(".to_string()"), "carve block paths must stay numeric");
+        assert!(!block_paths.contains("base_name"), "carve block paths must not parse state names");
+    }
+}
