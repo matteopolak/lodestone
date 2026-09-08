@@ -233,6 +233,14 @@ pre-Play forms remain ignored. The focused protocol test anchors the final
 legal value as literal bytes, then sends the adapter's selection action through
 the registry-selected protocol so the decoder cannot become an unconsumed
 island.
+Death and respawn complete the same hosted lifecycle. A health transition emits
+the split `death_combat_event` with a JSON component, while a literal
+`client_command` action `0` is consumed by the registry-selected host and emits
+the 762 `respawn` reset, position correction, full-health update, and air
+metadata refresh. `tests/server_protocol.rs` checks each body against
+independently written bytes and feeds the death body back through
+`V762Adapter`, so the server producer, client consumer, packet ids, and exact
+frame boundaries are covered together rather than as an isolated encoder.
 `tests/server_protocol.rs` checks the packet ids present in the real 1.19.4
 capture and decodes literal movement bodies with the production codecs,
 including trailing-byte and unknown-id negative controls. This is not
