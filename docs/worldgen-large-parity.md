@@ -19,10 +19,12 @@ whose light layer has not been admitted remains an opaque seam; its terrain is
 not allowed to leak an emission or propagation result into an earlier centre.
 After a centre is settled, missing queued dependencies receive their own
 retained light and allocation records. When a dependency-initialized column
-later becomes the centre, its retained values and allocation metadata are
-promoted unchanged into the centre result; the shared admission still computes
-and retains any newly touched dependencies. Only the resulting centre snapshot
-becomes eligible for the fast path. The deterministic materialization-order
+later becomes the centre, its retained block-light values are applied to the
+new centre computation without copying the dependency's storage masks. The
+new centre keeps its own `Missing` versus allocated representation, including
+explicit zero layers, while the shared admission still computes and retains any
+newly touched dependencies. Only the resulting centre snapshot becomes
+eligible for the fast path. The deterministic materialization-order
 control in `large_worldgen_parity.rs` guards this bootstrap-to-retained
 transition.
 

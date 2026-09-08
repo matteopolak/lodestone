@@ -224,7 +224,7 @@ fn plural_admission_commits_center_and_dependency_readiness_atomically() {
 }
 
 #[test]
-fn dependency_centre_admission_promotes_exact_snapshot_and_initializes_new_dependency() {
+fn dependency_centre_admission_preserves_values_and_center_storage_shape() {
     let shape = ChunkShape::nether_or_end_1_21();
     let section_count = shape.section_count;
     let light_section_count = section_count + 2;
@@ -311,9 +311,22 @@ fn dependency_centre_admission_promotes_exact_snapshot_and_initializes_new_depen
             },
         )
         .expect("Nether dependency centre admission");
-    assert_eq!(settled.retained_light(), Some(&retained));
     assert_eq!(settled.retained_light_status(), Some(RetainedLightStatus::CentreSettled));
-    assert_eq!(settled.retained_light().and_then(|light| light.storage()), Some(&storage));
+    let settled_light = settled
+        .retained_light()
+        .expect("the centre receives a settled light snapshot");
+    assert_eq!(settled_light.block(6), retained.block(6));
+    assert_eq!(
+        settled_light.sky(1),
+        &LightData::Missing,
+        "the centre keeps its normalized Nether sky representation"
+    );
+    let settled_storage = settled_light
+        .storage()
+        .expect("the centre receives its own storage classification");
+    assert!(settled_storage.is_allocated(6));
+    assert!(!settled_storage.is_allocated(1));
+    assert_ne!(settled_storage, &storage);
 
     let dependency = source
         .resident_column(1, 0)

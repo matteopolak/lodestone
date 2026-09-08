@@ -3135,6 +3135,46 @@ fn retain_zero_block_light_for_storage(light: &mut ColumnLight, stored: &[bool])
     }
 }
 
+/// Replaces the numeric block-light values in a freshly computed centre while
+/// retaining that centre's `Missing`/allocated representation. A dependency
+/// snapshot can carry the light-engine values from an earlier admission, but
+/// its raw storage metadata is for the dependency's footprint and must not be
+/// copied into the centre packet. In particular, a missing retained layer is
+/// represented as zero inside an already allocated computed layer, while an
+/// unallocated computed layer remains `Missing`.
+fn merge_retained_nether_block_values(
+    computed: &ColumnLight,
+    retained: &ColumnLight,
+) -> ColumnLight {
+    debug_assert_eq!(computed.light_section_count(), retained.light_section_count());
+    let mut merged = computed.clone();
+    for section in 0..computed.light_section_count() {
+        let computed_layer = computed.block(section);
+        let retained_layer = retained.block(section);
+        let replacement = match computed_layer {
+            LightData::Missing => LightData::Missing,
+            LightData::Uniform(_) => match retained_layer {
+                LightData::Missing => LightData::Uniform(0),
+                LightData::Uniform(value) => LightData::Uniform(*value),
+                LightData::Values(values) => match values.uniform_value() {
+                    Some(value) => LightData::Uniform(value),
+                    None => LightData::Values(values.clone()),
+                },
+            },
+            LightData::Values(_) => {
+                let values = match retained_layer {
+                    LightData::Missing => NibbleArray::filled(0),
+                    LightData::Uniform(value) => NibbleArray::filled(*value),
+                    LightData::Values(values) => values.clone(),
+                };
+                LightData::Values(values)
+            }
+        };
+        *merged.block_mut(section) = replacement;
+    }
+    merged
+}
+
 /// Applies only the dimension-specific representation rules for an initial
 /// chunk packet. A later `light_update` has prior client state to clear and is
 /// intentionally left in the fully explicit representation returned by the
@@ -3449,9 +3489,10 @@ fn compute_served_initial_lights_with_neighbours_and_storage(
     }
     if let Some(retained) = retained_nether_centre {
         // A dependency snapshot was already settled by an earlier footprint.
-        // Promote that exact value when this column becomes the centre; only
+        // Promote its numeric block-light values when this column becomes the
+        // centre, while retaining this admission's centre storage shape. Only
         // newly touched dependencies receive the fresh shared-admission result.
-        lights[4] = retained;
+        lights[4] = merge_retained_nether_block_values(&lights[4], &retained);
     }
     lights
 }
