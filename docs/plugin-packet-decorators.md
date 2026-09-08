@@ -24,7 +24,13 @@ the trait wrapper: the wrapper supplies packet behaviour, while the descriptor
 prevents that behaviour from being attached to a different wire or registry
 shape. It is an unstable, native-only prerequisite; it does not grant a plugin
 raw pointers, ECS access, sockets, or arbitrary host calls, and it does not yet
-provide the windowed shell's plugin-registration path.
+provide the windowed shell's plugin-registration path. A host that already has
+an `App` registration seam can implement `VersionLockedPlugin` and use
+`register_version_locked_plugin`: it validates the plugin's declared descriptor
+first and invokes the registration callback only on success. The controls in
+`crates/lodestone-registry/tests/native_plugin_registration.rs` run this gate
+against the composed `lodestone_app::client_app()` path, including a control
+that proves a mismatch never runs the plugin's build callback.
 
 ## How it works
 
@@ -142,7 +148,9 @@ what supplies the version-specific implementation.
   `Directive`, `ClientAction`, `ClientEvent`) plus the same version crate for the concrete adapter
   constructor (`lodestone_v26_2::adapter()`/`V770Adapter`).
 - Native load-time identity: `lodestone-registry::plugin::VersionDescriptor`
-  and `VersionCompatibilityError` for the exact family/protocol/ABI check.
+  and `VersionCompatibilityError` for the exact family/protocol/ABI check;
+  `VersionLockedPlugin` declares a plugin's requirement and
+  `register_version_locked_plugin` is the callback-shaped registration gate.
 - A decorator can still name its concrete version crate directly, which is the
   version-locking cost, not a registry lookup. A host-managed loader may
   additionally depend on `lodestone-registry` for the descriptor check without

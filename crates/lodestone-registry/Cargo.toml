@@ -78,3 +78,8 @@ lodestone-core = { workspace = true }
 lodestone-data = { workspace = true }
 tokio = { workspace = true }
 uuid = { workspace = true }
+# The host-registration controls exercise the same externally consumable
+# `client_app()` seam as a native plugin, rather than a hand-built `App`.
+lodestone-app = { workspace = true }
+bevy_app = { workspace = true }
+bevy_ecs = { workspace = true }
