@@ -65,7 +65,10 @@ hoppers remain serial because their vertical mutable container relation has no
 cross-owner hand-off yet. `tick::apply_block_entity_effect_batches` is the
 sole world writer: it validates the complete tick-start batch set, restores its
 serial slots after independent completion, then applies and publishes furnace
-changes in the established order. The ambient entity-effect phase uses the
+changes in the established order. Each non-hopper region completion carries
+the registry's monotonically increasing tick plan, and the registry rejects a
+completion from an older plan or a plan it already accepted before touching a
+live entity. The ambient entity-effect phase uses the
 same shape: `MobSim::take_ambient_sound_effect_batches` groups each emitted
 effect under `EntityTickOwner::Chunk`, and
 `tick::apply_entity_effect_batches` is the only publisher to the connection
@@ -177,6 +180,10 @@ are retained so completeness is checkable. The validated
 `MobSim::apply_entity_push_owner_batches` central writer restores the original
 mob-vector slots before applying any impulse, so reversing owner completion
 cannot change the accumulated velocities or silently omit an unaffected mob.
+Each owner batch also carries the monotonically increasing push plan. The
+central writer rejects a completion from a different tick-start snapshot
+or from a plan it already applied, before mutating any velocity; this closes
+the delayed-worker case that owner and slot checks alone cannot distinguish.
 At 128 or more mobs on native targets, the planning half uses
 `run_bounded_owner_jobs` with at most four lanes and never more lanes than
 source owners. Each lane receives only immutable positions, widths, player
@@ -317,7 +324,16 @@ Keep entity-push pair discovery global unless a replacement defines an
 explicit cross-owner neighbour exchange. Owners may compute from the shared
 tick-start snapshot, but only `apply_entity_push_owner_batches` may mutate live
 velocities. Preserve one completion per mob, including zero impulses, and keep
-the reversed, missing, and duplicate owner controls when changing this seam.
+the reversed, missing, duplicate, previous-tick, and replayed completion
+controls when changing this seam. The `plan` identity is part of the owner
+batch, not inferred from entity ids or the current owner set.
+
+Block-entity region completions follow the same rule. `BlockEntityRegistry`
+advances its plan before snapshotting non-hopper jobs, stamps every completion
+with that plan, and validates both freshness and single application at the
+central registry commit. Keep the previous-tick and replay controls alongside
+the existing missing/duplicate owner controls; matching positions and values
+alone are not sufficient evidence that a worker result belongs to this tick.
 Do not pass `MobSim`, a registry lock, or mutable impulse storage into
 `run_bounded_owner_jobs`; the executor is safe because jobs own their source
 serials and share only immutable census slices. Keep the 128-entity threshold
