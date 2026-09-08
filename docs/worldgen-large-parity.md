@@ -32,9 +32,17 @@ never substitutes an all-air column for missing light storage or resets the
 layer map at a batch boundary. The authenticated controls cover an empty
 dependency footprint and a later admission with retained northwest, north,
 west, and centre layers plus an allocated-zero east layer.
-The comparator replays those admissions through `ChunkSource`'s production
-settlement API and the protocol's nine-snapshot hook, then exports from the
-same retained source; the test does not maintain a parallel light-storage map.
+The comparator replays those admissions through the production
+`encode_chunk_with_source` seam, then exports from the same source; the test
+does not maintain a parallel light-storage map. The generated End raw arm
+explicitly flushes the `RegionChunkSource` through its `WorldSaveHandle`, drops
+that source, reopens a fresh `RegionChunkSource`, preloads each target's full
+three-by-three batch, and encodes through the same seam again. Its diagnostics
+are labelled generated save/reopen parity and remain separate from the frozen
+world import diagnostic below. The focused persistence control saves a centre
+and its eight dependencies and requires the reopened source to report zero
+generated columns and at least one disk load; it does not add a retention layer
+to the test.
 
 End raw comparisons bound this replay to the requested export prefix. Export
 records are x-fastest/z, while admissions are tile-z/tile-x/z/x; for each

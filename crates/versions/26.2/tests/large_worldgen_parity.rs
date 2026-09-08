@@ -1014,8 +1014,39 @@ fn compare_end_raw_from_persisted_world(
     mismatches
 }
 
-fn compare_end_raw_after_materialization<R: Read, A: Read>(
+fn encode_end_packet_with_source(
     source: &dyn ChunkSource,
+    cx: i32,
+    cz: i32,
+    column: &ChunkColumn,
+    phase: &str,
+) -> Vec<u8> {
+    let directive = lodestone_server::encode_chunk_with_source(
+        &V770ServerProtocol,
+        source,
+        cx,
+        cz,
+        column,
+    )
+    .unwrap_or_else(|error| panic!("{phase} End production source-aware encoder at ({cx},{cz}): {error}"));
+    match directive {
+        ServerDirective::Send { packet_id, payload } => {
+            assert_eq!(
+                packet_id,
+                lodestone_v26_2::packet_ids::play::clientbound::LEVEL_CHUNK_WITH_LIGHT,
+            );
+            payload
+        }
+        other => panic!("{phase} End production source-aware encoder returned {other:?} at ({cx},{cz})"),
+    }
+}
+
+/// Materializes generated End columns through the live source-aware encoder,
+/// flushes the source's real Anvil save handle, then compares a fresh reopen.
+/// This deliberately leaves retention to `RegionChunkSource`: the parity arm
+/// must exercise the same persistence owner that production uses.
+fn compare_end_raw_after_generated_save_reopen<R: Read, A: Read>(
+    world_dir: &Path,
     expected: &mut R,
     expected_audit: &mut A,
     h: &ManifestHeader,
@@ -1038,6 +1069,14 @@ fn compare_end_raw_after_materialization<R: Read, A: Read>(
         records.push(((cx, cz), prefix, full, index));
     }
 
+    let source = RegionChunkSource::new(
+        end_chunk_source(42),
+        world_dir,
+        server_dimension,
+        0,
+        256,
+    )
+    .unwrap_or_else(|error| panic!("open generated End persistence source {}: {error}", world_dir.display()));
     let admissions = end_materialization_positions(h);
     let admission_limit = materialization_prefix_for_export_prefix(
         &admissions,
@@ -1046,110 +1085,127 @@ fn compare_end_raw_after_materialization<R: Read, A: Read>(
         usize::try_from(limit).expect("export prefix fits usize"),
     );
     eprintln!(
-        "large raw-packet parity: replaying {admission_limit}/{} End materialization admissions before {} export records",
+        "large generated save/reopen parity: replaying {admission_limit}/{} End materialization admissions before {} export records",
         admissions.len(),
         limit,
     );
     for (admission_index, &(cx, cz)) in admissions.iter().take(admission_limit).enumerate() {
-        let fallback = source
-            .resident_column(cx, cz)
-            .unwrap_or_else(|| source.column(cx, cz));
-        let mut compute = |centre: &ChunkColumn, neighbours: &[(i32, i32, ChunkColumn)]| {
-            V770ServerProtocol.compute_initial_column_lights_with_neighbours_in_dimension(
-                centre,
-                neighbours,
-                server_dimension,
-            )
-        };
-        let _centre = source
-            .settle_resident_column_lights_with_neighbours(
-                cx,
-                cz,
-                &fallback,
-                &END_LIGHT_NEIGHBOUR_OFFSETS,
-                false,
-                false,
-                true,
-                &mut compute,
-            )
-            .unwrap_or_else(|error| panic!("stored End light computation at ({cx},{cz}): {error:?}"));
+        let column = source.column(cx, cz);
+        let _ = encode_end_packet_with_source(
+            &source,
+            cx,
+            cz,
+            &column,
+            "generated materialization",
+        );
         if (admission_index + 1) % 256 == 0 || admission_index + 1 == admission_limit {
             eprintln!(
-                "large raw-packet parity: materialized {}/{} End admissions",
+                "large generated save/reopen parity: materialized {}/{} End admissions",
                 admission_index + 1,
                 admissions.len(),
             );
         }
     }
 
+    let save_handle: lodestone_server::region_source::WorldSaveHandle = source.save_handle();
+    let written = save_handle
+        .save()
+        .unwrap_or_else(|error| panic!("save generated End materialization through WorldSaveHandle: {error}"));
+    assert!(written > 0, "generated End materialization must write its settled centres");
+    drop(save_handle);
+    drop(source);
+
+    let reopened = RegionChunkSource::new(
+        end_chunk_source(42),
+        world_dir,
+        server_dimension,
+        0,
+        256,
+    )
+    .unwrap_or_else(|error| panic!("reopen generated End persistence source {}: {error}", world_dir.display()));
+
     let mut mismatches = Vec::new();
-    for &((cx, cz), expected_prefix, expected_full, index) in &records {
-        let settled = source.column(cx, cz);
-        assert!(
-            settled.retained_light().is_some(),
-            "materialization did not retain End light at ({cx},{cz})"
-        );
-        let mut neighbours = Vec::with_capacity(8);
-        for dz in -1..=1 {
-            for dx in -1..=1 {
-                if (dx, dz) != (0, 0) {
-                    neighbours.push((dx, dz, source.column(cx + dx, cz + dz)));
+    for (batch_start, batch_end) in persisted_batch_ranges(
+        records.len(),
+        persisted_batch_size(),
+    ) {
+        let batch = &records[batch_start..batch_end];
+        let mut halo = BTreeSet::new();
+        for &((cx, cz), _, _, _) in batch {
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    halo.insert((cx + dx, cz + dz));
                 }
             }
         }
-        let directive = V770ServerProtocol
-            .try_encode_chunk_with_neighbours_in_dimension(
+        for &(cx, cz) in &halo {
+            let _ = reopened.column(cx, cz);
+        }
+        for &((cx, cz), expected_prefix, expected_full, index) in batch {
+            let column = reopened.column(cx, cz);
+            let payload = encode_end_packet_with_source(
+                &reopened,
                 cx,
                 cz,
-                &settled,
-                &neighbours,
-                server_dimension,
-            )
-            .expect("production neighbour-aware chunk encoder");
-        let payload = match directive {
-            ServerDirective::Send { packet_id, payload } => {
-                assert_eq!(
-                    packet_id,
-                    lodestone_v26_2::packet_ids::play::clientbound::LEVEL_CHUNK_WITH_LIGHT
-                );
-                payload
+                &column,
+                "generated save/reopen capture",
+            );
+            let actual_full = raw_packet_full_digest(&payload);
+            let actual_prefix = [actual_full[0], actual_full[1]];
+            if actual_prefix != expected_prefix || actual_full != expected_full {
+                let mismatch = RawPacketMismatch {
+                    target: (cx, cz),
+                    index,
+                    expected_prefix,
+                    actual_prefix,
+                    expected_full,
+                    actual_full,
+                    payload_bytes: payload.len(),
+                };
+                if !scan_all {
+                    panic!(
+                        "large generated save/reopen End raw-packet parity mismatch at ({cx},{cz}) after {index} export records: expected prefix {}, actual prefix {}, expected full SHA-256 {}, actual full SHA-256 {}, collision={}, payload bytes={}",
+                        hex(&mismatch.expected_prefix),
+                        hex(&mismatch.actual_prefix),
+                        hex(&mismatch.expected_full),
+                        hex(&mismatch.actual_full),
+                        mismatch.collision(),
+                        mismatch.payload_bytes,
+                    );
+                }
+                mismatches.push(mismatch);
             }
-            other => panic!("production chunk encoder returned {other:?} at ({cx},{cz})"),
-        };
-        let actual_full = raw_packet_full_digest(&payload);
-        let actual_prefix = [actual_full[0], actual_full[1]];
-        if actual_prefix != expected_prefix || actual_full != expected_full {
-            let mismatch = RawPacketMismatch {
-                target: (cx, cz),
-                index,
-                expected_prefix,
-                actual_prefix,
-                expected_full,
-                actual_full,
-                payload_bytes: payload.len(),
-            };
-            if !scan_all {
-                panic!(
-                    "large End raw-packet parity mismatch at ({cx},{cz}) after {index} export records: expected prefix {}, actual prefix {}, expected full SHA-256 {}, actual full SHA-256 {}, collision={}, payload bytes={}",
-                    hex(&mismatch.expected_prefix),
-                    hex(&mismatch.actual_prefix),
-                    hex(&mismatch.expected_full),
-                    hex(&mismatch.actual_full),
-                    mismatch.collision(),
-                    mismatch.payload_bytes,
-                );
+            if let Some(reference_path) = reference_packets.get(&(cx, cz)) {
+                let reference_packet = std::fs::read(reference_path)
+                    .unwrap_or_else(|error| panic!("read {}: {error}", reference_path.display()));
+                component_reports.push((
+                    (cx, cz),
+                    packet_component_difference(&reference_packet, &payload, Dimension::End),
+                ));
             }
-            mismatches.push(mismatch);
         }
-        if let Some(reference_path) = reference_packets.get(&(cx, cz)) {
-            let reference_packet = std::fs::read(reference_path)
-                .unwrap_or_else(|error| panic!("read {}: {error}", reference_path.display()));
-            component_reports.push((
-                (cx, cz),
-                packet_component_difference(&reference_packet, &payload, Dimension::End),
-            ));
-        }
+        eprintln!(
+            "large generated save/reopen parity: compared {}..{} of {} targets (batch size {})",
+            batch_start,
+            batch_end,
+            records.len(),
+            persisted_batch_size(),
+        );
     }
+    let generated_delta = reopened
+        .stats()
+        .generated
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let loaded_from_disk = reopened
+        .stats()
+        .loaded_from_disk
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(generated_delta, 0, "generated save/reopen parity fell back to generated columns");
+    assert!(loaded_from_disk > 0, "generated save/reopen parity loaded no columns from disk");
+    eprintln!(
+        "large generated save/reopen parity: loaded_from_disk_delta={loaded_from_disk} generated_delta={generated_delta} packet_mismatches={}",
+        mismatches.len(),
+    );
     mismatches
 }
 
@@ -1174,6 +1230,74 @@ fn persisted_end_export_mapping_is_x_fastest_and_batch_generic() {
         persisted_batch_ranges(1051, PERSISTED_BATCH_SIZE),
         vec![(0, 256), (256, 512), (512, 768), (768, 1024), (1024, 1051)],
     );
+}
+
+#[test]
+fn generated_end_save_reopen_loads_centre_and_eight_dependencies() {
+    let world_dir = std::env::temp_dir().join(format!(
+        "lodestone-end-save-reopen-control-{}",
+        std::process::id(),
+    ));
+    let _ = std::fs::remove_dir_all(&world_dir);
+    let source = RegionChunkSource::new(
+        end_chunk_source(42),
+        &world_dir,
+        ServerDimension::End,
+        0,
+        256,
+    )
+    .expect("open generated End persistence control source");
+    for cz in -1..=1 {
+        for cx in -1..=1 {
+            let column = source.column(cx, cz);
+            let _ = encode_end_packet_with_source(
+                &source,
+                cx,
+                cz,
+                &column,
+                "generated persistence control",
+            );
+        }
+    }
+    let save_handle: lodestone_server::region_source::WorldSaveHandle = source.save_handle();
+    assert!(
+        save_handle
+            .save()
+            .expect("save generated End persistence control")
+            >= 9,
+        "centre and eight dependencies must be written",
+    );
+    drop(save_handle);
+    drop(source);
+
+    let reopened = RegionChunkSource::new(
+        end_chunk_source(42),
+        &world_dir,
+        ServerDimension::End,
+        0,
+        256,
+    )
+    .expect("reopen generated End persistence control source");
+    for cz in -1..=1 {
+        for cx in -1..=1 {
+            let _ = reopened.column(cx, cz);
+        }
+    }
+    let generated_delta = reopened
+        .stats()
+        .generated
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let loaded_from_disk = reopened
+        .stats()
+        .loaded_from_disk
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(generated_delta, 0, "reopened centre and dependencies must not regenerate");
+    assert!(loaded_from_disk > 0, "reopened centre and dependencies must load from disk");
+    eprintln!(
+        "focused generated End save/reopen persistence: loaded_from_disk_delta={loaded_from_disk} generated_delta={generated_delta}",
+    );
+    drop(reopened);
+    let _ = std::fs::remove_dir_all(world_dir);
 }
 
 #[test]
@@ -1862,6 +1986,25 @@ fn parity_manifest_streams_before_rust_comparison() {
             let _ = std::fs::remove_dir_all(&dir);
             dir
         });
+        if raw_packet && dimension == Dimension::End {
+            let mut audit = expected_audit
+                .take()
+                .expect("v6 End raw-packet comparison has an audit reader");
+            let dir = end_persistence_dir
+                .as_deref()
+                .expect("End raw replay must have a persistence directory");
+            raw_mismatches.extend(compare_end_raw_after_generated_save_reopen(
+                dir,
+                &mut expected,
+                &mut audit,
+                &h,
+                server_dimension,
+                limit,
+                scan_all,
+                &reference_packets,
+                &mut component_reports,
+            ));
+        } else {
         let source: Box<dyn ChunkSource> = match dimension {
             // A frozen external world is a retained, settled lifecycle result.
             // Keep the comparator on the server's retained-source path rather than
@@ -1892,26 +2035,10 @@ fn parity_manifest_streams_before_rust_comparison() {
                 .unwrap_or_else(|error| {
                     panic!("open temporary End persistence source {}: {error}", dir.display())
                 });
-                Box::new(retained_chunk_source_for_view_radius(persistent, 8))
+                Box::new(persistent)
             }
         };
         let column_for = |cx, cz| -> ChunkColumn { source.column(cx, cz) };
-        if raw_packet && dimension == Dimension::End {
-            let mut audit = expected_audit
-                .take()
-                .expect("v6 End raw-packet comparison has an audit reader");
-            raw_mismatches.extend(compare_end_raw_after_materialization(
-                source.as_ref(),
-                &mut expected,
-                &mut audit,
-                &h,
-                server_dimension,
-                limit,
-                scan_all,
-                &reference_packets,
-                &mut component_reports,
-            ));
-        } else {
         let mut expected_digest = [0u8; 32];
         for index in 0..limit {
             let (expected_prefix, expected_full) = if raw_packet {
@@ -2042,8 +2169,8 @@ fn parity_manifest_streams_before_rust_comparison() {
                 );
             }
         }
-        }
         drop(source);
+        }
         if let Some(dir) = end_persistence_dir {
             let _ = std::fs::remove_dir_all(dir);
         }
