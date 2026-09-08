@@ -1,0 +1,18 @@
+{
+  "scenario": "live-water-source-four-way-spread",
+  "settle_ticks": 5,
+  "region": [
+    { "pos": [32001, 0, 32000], "candidates": ["minecraft:water", "minecraft:air"] },
+    { "pos": [31999, 0, 32000], "candidates": ["minecraft:water", "minecraft:air"] },
+    { "pos": [32000, 0, 32001], "candidates": ["minecraft:water", "minecraft:air"] },
+    { "pos": [32000, 0, 31999], "candidates": ["minecraft:water", "minecraft:air"] }
+  ],
+  "steps": [
+    { "tick": 0, "action": { "kind": "set_block", "pos": [32001, -1, 32000], "state": "minecraft:stone" } },
+    { "tick": 0, "action": { "kind": "set_block", "pos": [31999, -1, 32000], "state": "minecraft:stone" } },
+    { "tick": 0, "action": { "kind": "set_block", "pos": [32000, -1, 32001], "state": "minecraft:stone" } },
+    { "tick": 0, "action": { "kind": "set_block", "pos": [32000, -1, 31999], "state": "minecraft:stone" } },
+    { "tick": 0, "action": { "kind": "set_block", "pos": [32000, -1, 32000], "state": "minecraft:stone" } },
+    { "tick": 0, "action": { "kind": "set_block", "pos": [32000, 0, 32000], "state": "minecraft:water[level=0]" } }
+  ]
+}
