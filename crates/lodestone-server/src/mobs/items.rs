@@ -43,6 +43,7 @@ impl<'w> MobSim<'w> {
                 uuid: Uuid::new_v4(),
                 item,
                 motion: ItemMotion::new(position, velocity),
+                owner: super::ItemTickOwner::for_position(position),
             },
         );
         id
@@ -53,6 +54,7 @@ impl<'w> MobSim<'w> {
     /// Returns whether an item was actually tracked under `id`.
     pub fn remove_item(&mut self, id: i32) -> bool {
         self.item_state.remove(&id);
+        self.item_handoff.forget_entity(id);
         self.items.remove(id).is_some()
     }
 
@@ -181,6 +183,7 @@ impl<'w> MobSim<'w> {
                     // lifecycle registry has already forgotten, and the client
                     // sees a permanent ghost item that never despawns.
                     self.item_state.remove(&from_id);
+                    self.item_handoff.forget_entity(from_id);
                 }
             }
         }
