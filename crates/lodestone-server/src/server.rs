@@ -2413,19 +2413,18 @@ fn live_publish_player(
     live_save.publish(store.cloned(), uuid, data);
 }
 
-/// Turns one [`ColumnPayload`](crate::join_scheduler::ColumnPayload) into the
-/// directive to write, whichever arm it is on.
+/// Encodes one complete chunk through the production source-aware initial-
+/// chunk path.
 ///
-/// This is the join path's *only* remaining branch on where encode happened, and
-/// it is deliberately a total function rather than two call sites: the
-/// [`Encoded`](crate::join_scheduler::ColumnPayload::Encoded) arm carries bytes a
-/// blocking worker already produced (the win — see
-/// [`crate::protocol::ChunkEncoder`]), while the
-/// [`Column`](crate::join_scheduler::ColumnPayload::Column) arm is the
-/// pre-existing shape for a protocol with no off-task encoder and for the
-/// non-`'static` [`SourceRef::Borrowed`] arm. Both produce the same bytes, so no
-/// caller has to know which one it is on.
-fn encode_chunk_with_source<P: ServerProtocol>(
+/// Protocols that retain initial column light use the source's required
+/// settled footprint (the complete three-by-three footprint when cross-column
+/// light is enabled) before encoding; protocols without that lifecycle use
+/// their ordinary dimension-aware encoder.
+/// The supplied `column` is the caller's fallback when the source has no
+/// resident centre copy. This is the same seam used by the live join path and
+/// by persistence parity harnesses, so callers must provide the source that
+/// owns the world lifecycle rather than a detached generator.
+pub fn encode_chunk_with_source<P: ServerProtocol>(
     proto: &P,
     source: &dyn ChunkSource,
     cx: i32,
@@ -2470,6 +2469,17 @@ fn encode_chunk_with_source<P: ServerProtocol>(
             &mut compute,
         ) {
             Ok(centre) => {
+                // A persisted centre may already carry a settled light
+                // snapshot, so the source transaction can return before the
+                // compute callback captures its neighbours. The packet still
+                // needs that complete footprint; load it for encoding without
+                // replacing the retained centre snapshot.
+                if captured_neighbours.is_empty() && !neighbour_offsets.is_empty() {
+                    captured_neighbours = neighbour_offsets
+                        .iter()
+                        .map(|&(dx, dz)| (dx, dz, source.column(cx + dx, cz + dz)))
+                        .collect();
+                }
                 return proto.try_encode_chunk_with_neighbours_in_dimension(
                     cx,
                     cz,
@@ -2479,6 +2489,12 @@ fn encode_chunk_with_source<P: ServerProtocol>(
                 );
             }
             Err(ColumnLightSettlementError::NoLight) => {
+                if captured_neighbours.is_empty() && !neighbour_offsets.is_empty() {
+                    captured_neighbours = neighbour_offsets
+                        .iter()
+                        .map(|&(dx, dz)| (dx, dz, source.column(cx + dx, cz + dz)))
+                        .collect();
+                }
                 return proto.try_encode_chunk_with_neighbours_in_dimension(
                     cx,
                     cz,
