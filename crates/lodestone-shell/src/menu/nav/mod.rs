@@ -4786,6 +4786,9 @@ impl MenuNav {
     /// presentation choices; the app owns forwarding each intent to its
     /// private worker or profile-keyed store.
     fn key_friends(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        if self.friends.handle_key(key) {
+            return MenuAction::None;
+        }
         match key {
             MenuKey::Up => self.friends.step(false),
             MenuKey::Down | MenuKey::Tab => self.friends.step(true),
