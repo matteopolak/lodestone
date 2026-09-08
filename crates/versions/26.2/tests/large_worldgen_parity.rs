@@ -13,6 +13,7 @@ use lodestone_server::dimension::Dimension as ServerDimension;
 use lodestone_server::region_source::RegionChunkSource;
 use lodestone_v26_2::V770ServerProtocol;
 use lodestone_v26_2::packets::chunk::{ChunkShape, LevelChunkWithLight};
+use lodestone_world::{ColumnLight, LightData};
 use lodestone_worldgen_parity::lifecycle::{
     LifecycleCompletion, LifecycleMaterializer, LifecycleReplayEvent, LifecycleReplayPlan,
     LifecycleWorldgenSource,
@@ -34,6 +35,8 @@ const MAX_RAW_DIAGNOSTIC_GROUPS: usize = 64;
 const PERSISTED_WORLD_ROOT_ENV: &str = "LODESTONE_LARGE_PARITY_FROZEN_WORLD_ROOT";
 const PERSISTED_BATCH_SIZE_ENV: &str = "LODESTONE_LARGE_PARITY_PERSISTED_BATCH_SIZE";
 const PERSISTED_ONLY_ENV: &str = "LODESTONE_LARGE_PARITY_PERSISTED_ONLY";
+const TRACE_COLUMN_ENV: &str = "LODESTONE_LARGE_PARITY_TRACE_COLUMN";
+const TRACE_OUT_ENV: &str = "LODESTONE_LARGE_PARITY_TRACE_OUT";
 const PERSISTED_BATCH_SIZE: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1042,6 +1045,136 @@ fn encode_end_packet_with_source(
     }
 }
 
+fn trace_column_from_env() -> Option<ChunkPos> {
+    let Some(raw) = std::env::var_os(TRACE_COLUMN_ENV) else {
+        return None;
+    };
+    let raw = raw.to_string_lossy();
+    let (cx, cz) = raw
+        .split_once(',')
+        .unwrap_or_else(|| panic!("{TRACE_COLUMN_ENV} must be formatted as cx,cz, got {raw:?}"));
+    let cx = cx
+        .trim()
+        .parse::<i32>()
+        .unwrap_or_else(|error| panic!("invalid trace x coordinate {cx:?}: {error}"));
+    let cz = cz
+        .trim()
+        .parse::<i32>()
+        .unwrap_or_else(|error| panic!("invalid trace z coordinate {cz:?}: {error}"));
+    Some((cx, cz))
+}
+
+fn non_air_sections(column: &ChunkColumn) -> Vec<usize> {
+    let air_id = lodestone_data::block_states::air_state_id();
+    (0..column.section_count())
+        .filter(|&section| {
+            let base_y = column.min_y + (section * 16) as i32;
+            (0..16).any(|y| {
+                (0..16).any(|z| {
+                    (0..16).any(|x| column.block_state_id(x, base_y + y, z) != air_id)
+                })
+            })
+        })
+        .collect()
+}
+
+fn light_mask(light: Option<&ColumnLight>, sky: bool, empty: bool) -> Vec<usize> {
+    let Some(light) = light else {
+        return Vec::new();
+    };
+    (0..light.light_section_count())
+        .filter(|&section| {
+            let data = if sky {
+                light.sky(section)
+            } else {
+                light.block(section)
+            };
+            if empty {
+                matches!(data, LightData::Uniform(0))
+            } else {
+                !matches!(data, LightData::Missing)
+            }
+        })
+        .collect()
+}
+
+fn retained_trace(
+    light: Option<&ColumnLight>,
+    status: Option<lodestone_server::RetainedLightStatus>,
+) -> String {
+    format!(
+        "retained={} status={status:?} sky_present={:?} sky_empty={:?} block_present={:?} block_empty={:?}",
+        light.is_some(),
+        light_mask(light, true, false),
+        light_mask(light, true, true),
+        light_mask(light, false, false),
+        light_mask(light, false, true),
+    )
+}
+
+struct EndTrace {
+    target: ChunkPos,
+    output: Option<PathBuf>,
+    lines: Vec<String>,
+    first_creation_recorded: bool,
+}
+
+impl EndTrace {
+    fn from_env() -> Option<Self> {
+        trace_column_from_env().map(|target| Self {
+            target,
+            output: std::env::var_os(TRACE_OUT_ENV).map(PathBuf::from),
+            lines: vec![format!(
+                "trace_schema=lodestone-end-generated-admission-v1 target={target:?}"
+            )],
+            first_creation_recorded: false,
+        })
+    }
+
+    fn includes(&self, cx: i32, cz: i32) -> bool {
+        (self.target.0 - cx).abs() <= 1 && (self.target.1 - cz).abs() <= 1
+    }
+
+    fn record(
+        &mut self,
+        admission_index: usize,
+        centre: ChunkPos,
+        pre: &ChunkColumn,
+        post: &ChunkColumn,
+        footprint: &[(ChunkPos, Vec<usize>)],
+    ) {
+        let slot = (self.target.0 - centre.0, self.target.1 - centre.1);
+        let pre_light = pre.retained_light();
+        let post_light = post.retained_light();
+        self.lines.push(format!(
+            "admission_index={admission_index} centre={centre:?} target={:?} target_slot={slot:?} pre_{} post_{} target_non_air_sections={:?} footprint_non_air_sections={footprint:?}",
+            self.target,
+            retained_trace(pre_light, pre.retained_light_status()),
+            retained_trace(post_light, post.retained_light_status()),
+            non_air_sections(post),
+        ));
+        if !self.first_creation_recorded && pre_light.is_none() && post_light.is_some() {
+            self.first_creation_recorded = true;
+            self.lines.push(format!(
+                "first_target_snapshot_transition=admission_index:{admission_index} centre:{centre:?} target:{:?} target_slot:{slot:?} pre_{} post_{}",
+                self.target,
+                retained_trace(pre_light, pre.retained_light_status()),
+                retained_trace(post_light, post.retained_light_status()),
+            ));
+        }
+    }
+
+    fn finish(self) {
+        let contents = format!("{}\n", self.lines.join("\n"));
+        if let Some(path) = self.output {
+            std::fs::write(&path, contents)
+                .unwrap_or_else(|error| panic!("write End admission trace {}: {error}", path.display()));
+        } else {
+            eprintln!("{contents}");
+        }
+    }
+}
+
 /// Materializes generated End columns through the live source-aware encoder,
 /// flushes the source's real Anvil save handle, then compares a fresh reopen.
 /// This deliberately leaves retention to `RegionChunkSource`: the parity arm
@@ -1090,8 +1223,24 @@ fn compare_end_raw_after_generated_save_reopen<R: Read, A: Read>(
         admissions.len(),
         limit,
     );
+    let mut trace = EndTrace::from_env();
     for (admission_index, &(cx, cz)) in admissions.iter().take(admission_limit).enumerate() {
         let column = source.column(cx, cz);
+        let mut trace_pre = None;
+        let mut trace_footprint = Vec::new();
+        if trace.as_ref().is_some_and(|trace| trace.includes(cx, cz)) {
+            let target = trace.as_ref().expect("trace configuration").target;
+            trace_pre = Some(source.column(target.0, target.1));
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    let position = (cx + dx, cz + dz);
+                    trace_footprint.push((
+                        position,
+                        non_air_sections(&source.column(position.0, position.1)),
+                    ));
+                }
+            }
+        }
         let _ = encode_end_packet_with_source(
             &source,
             cx,
@@ -1099,6 +1248,14 @@ fn compare_end_raw_after_generated_save_reopen<R: Read, A: Read>(
             &column,
             "generated materialization",
         );
+        if let Some(pre) = trace_pre.as_ref() {
+            let target = trace.as_ref().expect("trace configuration").target;
+            let post = source.column(target.0, target.1);
+            trace
+                .as_mut()
+                .expect("trace configuration")
+                .record(admission_index, (cx, cz), pre, &post, &trace_footprint);
+        }
         if (admission_index + 1) % 256 == 0 || admission_index + 1 == admission_limit {
             eprintln!(
                 "large generated save/reopen parity: materialized {}/{} End admissions",
@@ -1106,6 +1263,9 @@ fn compare_end_raw_after_generated_save_reopen<R: Read, A: Read>(
                 admissions.len(),
             );
         }
+    }
+    if let Some(trace) = trace.take() {
+        trace.finish();
     }
 
     let save_handle: lodestone_server::region_source::WorldSaveHandle = source.save_handle();
