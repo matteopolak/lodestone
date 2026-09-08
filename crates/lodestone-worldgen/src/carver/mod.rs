@@ -23,6 +23,7 @@ use std::collections::{HashMap, HashSet};
 
 use lodestone_worldgen_core::hash::FastSet;
 
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::aquifer::{AquiferSystem, BlockKind};
@@ -73,17 +74,6 @@ impl VerticalAnchor {
         }
     }
 
-    fn parse(v: &Value) -> Self {
-        if let Some(y) = v.get("absolute") {
-            VerticalAnchor::Absolute(y.as_i64().expect("absolute") as i32)
-        } else if let Some(o) = v.get("above_bottom") {
-            VerticalAnchor::AboveBottom(o.as_i64().expect("above_bottom") as i32)
-        } else if let Some(o) = v.get("below_top") {
-            VerticalAnchor::BelowTop(o.as_i64().expect("below_top") as i32)
-        } else {
-            panic!("unrecognised vertical anchor: {v}");
-        }
-    }
 }
 
 /// Vanilla's own float-provider type. Only the variants used by
@@ -111,24 +101,6 @@ impl FloatProvider {
         }
     }
 
-    fn parse(v: &Value) -> Self {
-        if let Some(n) = v.as_f64() {
-            return FloatProvider::Constant(n as f32);
-        }
-        match v["type"].as_str().expect("float provider type") {
-            "minecraft:constant" => FloatProvider::Constant(v["value"].as_f64().unwrap() as f32),
-            "minecraft:uniform" => FloatProvider::Uniform {
-                min: v["min_inclusive"].as_f64().unwrap() as f32,
-                max: v["max_exclusive"].as_f64().unwrap() as f32,
-            },
-            "minecraft:trapezoid" => FloatProvider::Trapezoid {
-                min: v["min"].as_f64().unwrap() as f32,
-                max: v["max"].as_f64().unwrap() as f32,
-                plateau: v["plateau"].as_f64().unwrap() as f32,
-            },
-            other => panic!("unsupported float provider: {other}"),
-        }
-    }
 }
 
 /// `UniformHeight` — the only `HeightProvider` the overworld carvers use.
@@ -150,17 +122,206 @@ impl HeightProvider {
         }
     }
 
-    fn parse(v: &Value) -> Self {
-        assert_eq!(
-            v["type"].as_str(),
-            Some("minecraft:uniform"),
-            "only uniform height providers supported"
-        );
-        HeightProvider {
-            min: VerticalAnchor::parse(&v["min_inclusive"]),
-            max: VerticalAnchor::parse(&v["max_inclusive"]),
+}
+
+/// The debug block-state record is part of the configured-carver schema even
+/// though the production carver intentionally does not emit debug blocks. The
+/// property map is genuinely dynamic: its keys depend on the named block's
+/// state schema, so it is the one map in this typed boundary that remains a
+/// map rather than an untyped JSON value.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDebugBlockState {
+    #[serde(rename = "Name")]
+    _name: String,
+    #[serde(rename = "Properties", default)]
+    _properties: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDebugSettings {
+    #[serde(rename = "air_state")]
+    _air_state: RawDebugBlockState,
+    #[serde(rename = "barrier_state")]
+    _barrier_state: RawDebugBlockState,
+    #[serde(rename = "lava_state")]
+    _lava_state: RawDebugBlockState,
+    #[serde(rename = "water_state")]
+    _water_state: RawDebugBlockState,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAbsoluteAnchor {
+    absolute: i32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAboveBottomAnchor {
+    above_bottom: i32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawBelowTopAnchor {
+    below_top: i32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawVerticalAnchor {
+    Absolute(RawAbsoluteAnchor),
+    AboveBottom(RawAboveBottomAnchor),
+    BelowTop(RawBelowTopAnchor),
+}
+
+impl From<RawVerticalAnchor> for VerticalAnchor {
+    fn from(anchor: RawVerticalAnchor) -> Self {
+        match anchor {
+            RawVerticalAnchor::Absolute(value) => Self::Absolute(value.absolute),
+            RawVerticalAnchor::AboveBottom(value) => Self::AboveBottom(value.above_bottom),
+            RawVerticalAnchor::BelowTop(value) => Self::BelowTop(value.below_top),
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawUniformFloatProvider {
+    min_inclusive: f32,
+    max_exclusive: f32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTrapezoidFloatProvider {
+    min: f32,
+    max: f32,
+    plateau: f32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawConstantFloatProvider {
+    value: f32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+enum RawTaggedFloatProvider {
+    #[serde(rename = "minecraft:constant")]
+    Constant(RawConstantFloatProvider),
+    #[serde(rename = "minecraft:uniform")]
+    Uniform(RawUniformFloatProvider),
+    #[serde(rename = "minecraft:trapezoid")]
+    Trapezoid(RawTrapezoidFloatProvider),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawFloatProvider {
+    Constant(f32),
+    Tagged(RawTaggedFloatProvider),
+}
+
+impl From<RawFloatProvider> for FloatProvider {
+    fn from(provider: RawFloatProvider) -> Self {
+        match provider {
+            RawFloatProvider::Constant(value) => Self::Constant(value),
+            RawFloatProvider::Tagged(RawTaggedFloatProvider::Constant(value)) => {
+                Self::Constant(value.value)
+            }
+            RawFloatProvider::Tagged(RawTaggedFloatProvider::Uniform(value)) => Self::Uniform {
+                min: value.min_inclusive,
+                max: value.max_exclusive,
+            },
+            RawFloatProvider::Tagged(RawTaggedFloatProvider::Trapezoid(value)) => Self::Trapezoid {
+                min: value.min,
+                max: value.max,
+                plateau: value.plateau,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawUniformHeightProvider {
+    min_inclusive: RawVerticalAnchor,
+    max_inclusive: RawVerticalAnchor,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+enum RawHeightProvider {
+    #[serde(rename = "minecraft:uniform")]
+    Uniform(RawUniformHeightProvider),
+}
+
+impl From<RawHeightProvider> for HeightProvider {
+    fn from(provider: RawHeightProvider) -> Self {
+        match provider {
+            RawHeightProvider::Uniform(value) => Self {
+                min: value.min_inclusive.into(),
+                max: value.max_inclusive.into(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCanyonShape {
+    distance_factor: RawFloatProvider,
+    thickness: RawFloatProvider,
+    width_smoothness: i32,
+    horizontal_radius_factor: RawFloatProvider,
+    vertical_radius_default_factor: f32,
+    vertical_radius_center_factor: f32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCaveConfig {
+    #[serde(default)]
+    debug_settings: Option<RawDebugSettings>,
+    floor_level: RawFloatProvider,
+    horizontal_radius_multiplier: RawFloatProvider,
+    lava_level: RawVerticalAnchor,
+    probability: f32,
+    replaceable: String,
+    vertical_radius_multiplier: RawFloatProvider,
+    y: RawHeightProvider,
+    #[serde(rename = "yScale")]
+    y_scale: RawFloatProvider,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCanyonConfig {
+    #[serde(default)]
+    debug_settings: Option<RawDebugSettings>,
+    lava_level: RawVerticalAnchor,
+    probability: f32,
+    replaceable: String,
+    shape: RawCanyonShape,
+    vertical_rotation: RawFloatProvider,
+    y: RawHeightProvider,
+    #[serde(rename = "yScale")]
+    y_scale: RawFloatProvider,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", content = "config", deny_unknown_fields)]
+enum RawCarverDocument {
+    #[serde(rename = "minecraft:cave")]
+    Cave(RawCaveConfig),
+    #[serde(rename = "minecraft:nether_cave")]
+    NetherCave(RawCaveConfig),
+    #[serde(rename = "minecraft:canyon")]
+    Canyon(RawCanyonConfig),
 }
 
 /// Cave carver configuration (`CaveCarverConfiguration`).
@@ -219,46 +380,28 @@ impl CarverConfig {
     /// Parse a `worldgen/configured_carver/*.json` document.
     #[must_use]
     pub fn parse(doc: &Value) -> Self {
-        let kind = doc["type"].as_str().expect("carver type");
-        let c = &doc["config"];
-        let lava_level = VerticalAnchor::parse(&c["lava_level"]);
-        match kind {
-            "minecraft:cave" | "minecraft:nether_cave" => CarverConfig::Cave(CaveConfig {
-                probability: c["probability"].as_f64().unwrap() as f32,
-                y: HeightProvider::parse(&c["y"]),
-                y_scale: FloatProvider::parse(&c["yScale"]),
-                horizontal_radius_multiplier: FloatProvider::parse(
-                    &c["horizontal_radius_multiplier"],
-                ),
-                vertical_radius_multiplier: FloatProvider::parse(&c["vertical_radius_multiplier"]),
-                floor_level: FloatProvider::parse(&c["floor_level"]),
-                lava_level,
-                nether: kind == "minecraft:nether_cave",
-            }),
-            "minecraft:canyon" => {
-                let shape = &c["shape"];
-                CarverConfig::Canyon(CanyonConfig {
-                    probability: c["probability"].as_f64().unwrap() as f32,
-                    y: HeightProvider::parse(&c["y"]),
-                    vertical_rotation: FloatProvider::parse(&c["vertical_rotation"]),
-                    y_scale: FloatProvider::parse(&c["yScale"]),
-                    lava_level,
-                    distance_factor: FloatProvider::parse(&shape["distance_factor"]),
-                    thickness: FloatProvider::parse(&shape["thickness"]),
-                    width_smoothness: shape["width_smoothness"].as_i64().unwrap() as i32,
-                    horizontal_radius_factor: FloatProvider::parse(
-                        &shape["horizontal_radius_factor"],
-                    ),
-                    vertical_radius_default_factor: shape["vertical_radius_default_factor"]
-                        .as_f64()
-                        .unwrap() as f32,
-                    vertical_radius_center_factor: shape["vertical_radius_center_factor"]
-                        .as_f64()
-                        .unwrap() as f32,
-                })
-            }
-            other => panic!("unsupported carver type: {other}"),
-        }
+        Self::try_parse(doc).unwrap_or_else(|error| panic!("invalid configured carver: {error}"))
+    }
+
+    /// Parse a configured-carver document while preserving serde's field path
+    /// in the error. This is the checked boundary used by external fixture
+    /// controls and by callers that load untrusted or user-selected assets.
+    pub fn try_parse(
+        doc: &Value,
+    ) -> Result<Self, serde_path_to_error::Error<serde_json::Error>> {
+        let raw: RawCarverDocument = serde_path_to_error::deserialize(doc.clone())?;
+        Ok(raw.into())
+    }
+
+    /// Parse the UTF-8 JSON representation directly. Keeping this entry point
+    /// avoids an intermediate `Value` for disk readers that own the file
+    /// contents, while `try_parse` keeps compatibility with the resolver seam.
+    pub fn parse_json(
+        json: &str,
+    ) -> Result<Self, serde_path_to_error::Error<serde_json::Error>> {
+        let mut deserializer = serde_json::Deserializer::from_str(json);
+        let raw: RawCarverDocument = serde_path_to_error::deserialize(&mut deserializer)?;
+        Ok(raw.into())
     }
 
     fn probability(&self) -> f32 {
@@ -272,6 +415,84 @@ impl CarverConfig {
         match self {
             CarverConfig::Cave(c) => c.lava_level,
             CarverConfig::Canyon(c) => c.lava_level,
+        }
+    }
+}
+
+impl From<RawCarverDocument> for CarverConfig {
+    fn from(document: RawCarverDocument) -> Self {
+        match document {
+            RawCarverDocument::Cave(config) => Self::Cave(config.into_cave(false)),
+            RawCarverDocument::NetherCave(config) => Self::Cave(config.into_cave(true)),
+            RawCarverDocument::Canyon(config) => Self::Canyon(config.into()),
+        }
+    }
+}
+
+impl RawCaveConfig {
+    fn into_cave(self, nether: bool) -> CaveConfig {
+        // These fields are intentionally decoded even though the carver stage
+        // does not use debug rendering or the replaceable tag directly. A
+        // strict schema must reject malformed values in fields the source
+        // document declares, rather than silently accepting a partial config.
+        let Self {
+            debug_settings,
+            floor_level,
+            horizontal_radius_multiplier,
+            lava_level,
+            probability,
+            replaceable,
+            vertical_radius_multiplier,
+            y,
+            y_scale,
+        } = self;
+        let _ = (debug_settings, replaceable);
+        CaveConfig {
+            probability,
+            y: y.into(),
+            y_scale: y_scale.into(),
+            horizontal_radius_multiplier: horizontal_radius_multiplier.into(),
+            vertical_radius_multiplier: vertical_radius_multiplier.into(),
+            floor_level: floor_level.into(),
+            lava_level: lava_level.into(),
+            nether,
+        }
+    }
+}
+
+impl From<RawCanyonConfig> for CanyonConfig {
+    fn from(config: RawCanyonConfig) -> Self {
+        let RawCanyonConfig {
+            debug_settings,
+            lava_level,
+            probability,
+            replaceable,
+            shape,
+            vertical_rotation,
+            y,
+            y_scale,
+        } = config;
+        let _ = (debug_settings, replaceable);
+        let RawCanyonShape {
+            distance_factor,
+            thickness,
+            width_smoothness,
+            horizontal_radius_factor,
+            vertical_radius_default_factor,
+            vertical_radius_center_factor,
+        } = shape;
+        Self {
+            probability,
+            y: y.into(),
+            vertical_rotation: vertical_rotation.into(),
+            y_scale: y_scale.into(),
+            lava_level: lava_level.into(),
+            distance_factor: distance_factor.into(),
+            thickness: thickness.into(),
+            width_smoothness,
+            horizontal_radius_factor: horizontal_radius_factor.into(),
+            vertical_radius_default_factor,
+            vertical_radius_center_factor,
         }
     }
 }

@@ -45,6 +45,28 @@ away: generated source must not retain the build script's old absolute path. Add
 files under the relevant `crates/lodestone-server/assets/` directory; the build script tracks those
 directories and regenerates the corresponding table automatically.
 
+### Typed configured-carver data
+
+Configured carver documents are decoded at the worldgen boundary into the
+discriminated `CarverConfig` enum. `CarverConfig::parse_json` is the direct
+disk/string entry point and `CarverConfig::try_parse` is the compatibility
+adapter for the resolver's transport value; both use the same serde schema.
+The `type` discriminator selects cave, Nether-cave, or canyon, while nested
+float providers and vertical anchors use typed enums. Every known object is
+`deny_unknown_fields`, so a typo cannot silently select a default or alter the
+random draw sequence. The only retained map is block-state `Properties`,
+whose keys genuinely vary with the named block; the carver stage does not use
+that map, but decoding it keeps the input contract complete. Errors are wrapped
+with `serde_path_to_error`, so malformed external data identifies the config
+path that failed.
+
+The resolver still transports heterogeneous registry documents as
+`serde_json::Value`; that is an intentional seam for the remaining registry
+families, not permission to inspect known carver fields by string. A new
+configured-carver field must be added to the raw serde struct and covered by a
+valid asset plus malformed, unknown-field, and unknown-discriminator controls
+in `crates/lodestone-worldgen/tests/carver_config_schema.rs`.
+
 ### The density/noise engine
 
 A density function graph (`Density`, compiled by `engine::graph::Program`) is vanilla's

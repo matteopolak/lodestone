@@ -197,6 +197,7 @@ sha2 = "0.10"
 num-bigint = "0.4"
 base64 = "0.23"
 serde = { version = "1", features = ["derive"] }
+serde_path_to_error = "0.1"
 # HTTP client for the MS OAuth / Xbox / XSTS / Minecraft-services chain and the
 # session-server join. rustls avoids a system OpenSSL dependency.
 #

@@ -40,6 +40,8 @@ default = []
 gen-counters = ["lodestone-worldgen-core/gen-counters"]
 
 [dependencies]
+serde = { workspace = true }
+serde_path_to_error = { workspace = true }
 # Canonical 26.2 block-state and face-occlusion facts. The local interner
 # resolves each state into this global table once, leaving feature candidate
 # loops on numeric ids instead of parsing state text.

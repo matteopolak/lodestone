@@ -689,7 +689,8 @@ mod tests {
                     "horizontal_radius_multiplier": 1.0,
                     "vertical_radius_multiplier": 1.0,
                     "floor_level": 0.0,
-                    "lava_level": {"absolute": -54}
+                    "lava_level": {"absolute": -54},
+                    "replaceable": "#minecraft:overworld_carver_replaceables"
                 }
             })
         };
@@ -737,7 +738,8 @@ mod tests {
                     "horizontal_radius_multiplier": 1.0,
                     "vertical_radius_multiplier": 1.0,
                     "floor_level": -0.7,
-                    "lava_level": {"absolute": 10}
+                    "lava_level": {"absolute": 10},
+                    "replaceable": "#minecraft:nether_carver_replaceables"
                 }
             }),
         );

@@ -3358,6 +3358,9 @@ dependencies = [
 name = "lodestone-registry"
 version = "0.1.0"
 dependencies = [
+ "bevy_app",
+ "bevy_ecs",
+ "lodestone-app",
  "lodestone-client",
  "lodestone-core",
  "lodestone-data",
@@ -3927,13 +3930,16 @@ dependencies = [
  "criterion",
  "flate2",
  "lodestone-core",
+ "lodestone-data",
  "lodestone-server",
  "lodestone-testsupport",
  "lodestone-time",
  "lodestone-worldgen-core",
  "lodestone-worldgen-parity",
  "memory-stats",
+ "serde",
  "serde_json",
+ "serde_path_to_error",
  "sha2",
 ]
 
@@ -6016,6 +6022,17 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "serde_path_to_error"
+version = "0.1.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10a9ff822e371bb5403e391ecd83e182e0e77ba7f6fe0160b795797109d1b457"
+dependencies = [
+ "itoa",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
