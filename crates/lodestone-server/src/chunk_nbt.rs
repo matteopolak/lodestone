@@ -2392,7 +2392,7 @@ mod retained_light_tests {
         let error = column_from_nbt(&nbt, 0, 16)
             .expect_err("a lifecycle marker without retained light must fail closed");
         assert!(
-            matches!(error, Error::BadField { field } if field == "LodestoneLightStatus"),
+            matches!(error, Error::BadField { ref field } if field == "LodestoneLightStatus"),
             "unexpected lifecycle-marker error: {error:?}"
         );
     }
