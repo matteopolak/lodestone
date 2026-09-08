@@ -34,11 +34,13 @@ struct CountingAllocator;
 
 static COUNT_ALLOCATIONS: AtomicBool = AtomicBool::new(false);
 static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+static ALLOCATED_BYTES: AtomicU64 = AtomicU64::new(0);
 
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if COUNT_ALLOCATIONS.load(Ordering::Relaxed) {
             ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+            ALLOCATED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
         }
         // SAFETY: the system allocator receives the original layout unchanged.
         unsafe { System.alloc(layout) }
@@ -418,8 +420,9 @@ fn run_pass(generator: &Generator, mode: Mode, coords: &[(i32, i32)]) -> Pass {
     }
 }
 
-fn count_allocations(generator: &Generator, mode: Mode, sample: &[(i32, i32)]) -> u64 {
+fn count_allocations(generator: &Generator, mode: Mode, sample: &[(i32, i32)]) -> (u64, u64) {
     ALLOCATIONS.store(0, Ordering::Relaxed);
+    ALLOCATED_BYTES.store(0, Ordering::Relaxed);
     COUNT_ALLOCATIONS.store(true, Ordering::Relaxed);
     let digest = sample
         .iter()
@@ -427,7 +430,7 @@ fn count_allocations(generator: &Generator, mode: Mode, sample: &[(i32, i32)]) -
         .fold(0u64, |digest, value| digest.rotate_left(7) ^ value);
     COUNT_ALLOCATIONS.store(false, Ordering::Relaxed);
     black_box(digest);
-    ALLOCATIONS.load(Ordering::Relaxed)
+    (ALLOCATIONS.load(Ordering::Relaxed), ALLOCATED_BYTES.load(Ordering::Relaxed))
 }
 
 fn allocation_sample(
@@ -436,7 +439,7 @@ fn allocation_sample(
     warm_generator: &Generator,
     mode: Mode,
     coords: &[(i32, i32)],
-) -> (u64, u64) {
+) -> ((u64, u64), (u64, u64)) {
     let sample_len = coords.len().min(16);
     let sample = &coords[..sample_len];
     // The cold count uses a fresh generator so the timing pass above cannot
@@ -475,11 +478,19 @@ fn cpu_seconds() -> Option<f64> {
     None
 }
 
-fn print_result(dimension: DimensionName, mode: Mode, cold: &Pass, warm: &Pass, allocs: (u64, u64)) {
-    let cold_allocs = allocs.0 as f64 / cold.chunks.min(16) as f64;
-    let warm_allocs = allocs.1 as f64 / warm.chunks.min(16) as f64;
+fn print_result(
+    dimension: DimensionName,
+    mode: Mode,
+    cold: &Pass,
+    warm: &Pass,
+    allocs: ((u64, u64), (u64, u64)),
+) {
+    let cold_allocs = allocs.0.0 as f64 / cold.chunks.min(16) as f64;
+    let warm_allocs = allocs.1.0 as f64 / warm.chunks.min(16) as f64;
+    let cold_bytes = allocs.0.1 as f64 / cold.chunks.min(16) as f64;
+    let warm_bytes = allocs.1.1 as f64 / warm.chunks.min(16) as f64;
     println!(
-        "{:<10} {:<9} cold {:>8.2} chunks/s warm {:>8.2} chunks/s cpu cold={} warm={} rss-growth cold={} warm={} allocs/chunk sample16 cold={cold_allocs:.1} warm={warm_allocs:.1} digest={:#x} content_digest={}",
+        "{:<10} {:<9} cold {:>8.2} chunks/s warm {:>8.2} chunks/s cpu cold={} warm={} rss-growth cold={} warm={} allocs/chunk sample16 cold={cold_allocs:.1} warm={warm_allocs:.1} bytes/chunk cold={cold_bytes:.0} warm={warm_bytes:.0} digest={:#x} content_digest={}",
         dimension.label(),
         mode.label(),
         cold.chunks as f64 / cold.seconds,
