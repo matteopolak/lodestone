@@ -7,10 +7,12 @@
 //! become the observable result.
 
 use lodestone_ecs::app::App;
-use lodestone_ecs::entity::{Attributes, CustomName, CustomNameVisible, EntityFlags, EntityIndex};
+use lodestone_ecs::entity::{
+    Attributes, CustomName, CustomNameVisible, EntityFlags, EntityIndex, Equipment,
+};
 use lodestone_ecs::ingest::{IngestPlugin, IngestQueue};
 use lodestone_ecs::NetIngest;
-use lodestone_model::{ConnectionState, Directive, VersionAdapter};
+use lodestone_model::{ClientEvent, ConnectionState, Directive, VersionAdapter};
 use lodestone_v1_13::packet_ids::play::clientbound;
 use lodestone_v1_13::{adapter_for, PROTOCOL_1_13_2};
 use lodestone_world::World;
@@ -57,14 +59,19 @@ const UPDATE_ATTRIBUTES: &[u8] = &[
     0x01,
 ];
 
+/// Entity 17's head slot with two protocol-404 iron helmets. The item id is
+/// the literal 1.13 registry id, followed by count and an absent NBT tag.
+const ENTITY_EQUIPMENT: &[u8] = &[0x11, 0x05, 0x01, 0x8b, 0x04, 0x02, 0x00];
+
 #[test]
-fn literal_protocol_404_metadata_and_attributes_reach_ecs_components() {
+fn literal_protocol_404_metadata_equipment_and_attributes_reach_ecs_components() {
     let adapter = adapter_for(PROTOCOL_1_13_2);
     let mut packet_world = World::new();
     let mut events = Vec::new();
 
     for (packet_id, payload) in [
         (clientbound::SPAWN_ENTITY_LIVING, SPAWN_WITH_METADATA),
+        (clientbound::ENTITY_EQUIPMENT, ENTITY_EQUIPMENT),
         (clientbound::ENTITY_UPDATE_ATTRIBUTES, UPDATE_ATTRIBUTES),
     ] {
         let directives = adapter
@@ -110,6 +117,18 @@ fn literal_protocol_404_metadata_and_attributes_reach_ecs_components() {
         Some(true)
     );
 
+    let equipment = entity
+        .get::<Equipment>()
+        .expect("adapter equipment event must reach the ECS equipment component");
+    let helmet = equipment
+        .0
+        .iter()
+        .find(|update| update.slot == lodestone_model::EquipmentSlot::Head)
+        .expect("literal head update must be retained");
+    let item = helmet.item.as_ref().expect("head item must be present");
+    assert_eq!(item.item.to_string(), "minecraft:iron_helmet");
+    assert_eq!(item.count, 2);
+
     let attributes = entity
         .get::<Attributes>()
         .expect("adapter attribute event must reach the ECS attribute component");
@@ -124,4 +143,64 @@ fn literal_protocol_404_metadata_and_attributes_reach_ecs_components() {
     );
     assert_eq!(attribute.modifiers[0].amount, 0.25);
     assert_eq!(attribute.modifiers[0].operation, 1);
+}
+
+#[test]
+fn literal_protocol_404_wrong_values_change_observed_components() {
+    let mut equipment = ENTITY_EQUIPMENT.to_vec();
+    equipment[5] = 0x03;
+    let adapter = adapter_for(PROTOCOL_1_13_2);
+    let mut packet_world = World::new();
+    let events: Vec<ClientEvent> = [
+        (clientbound::SPAWN_ENTITY_LIVING, SPAWN_WITH_METADATA),
+        (clientbound::ENTITY_EQUIPMENT, equipment.as_slice()),
+    ]
+    .into_iter()
+    .flat_map(|(packet_id, payload)| {
+        adapter
+            .handle_packet(&mut packet_world, ConnectionState::Play, packet_id, payload)
+            .expect("wrong item count remains a valid packet")
+            .into_iter()
+            .filter_map(|directive| match directive {
+                Directive::Emit(event) => Some(event),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    })
+    .collect();
+    let mut app = App::new();
+    app.add_plugins(IngestPlugin);
+    {
+        let mut queue = app.world_mut().resource_mut::<IngestQueue>();
+        for event in events {
+            queue.push(event);
+        }
+    }
+    app.world_mut().run_schedule(NetIngest);
+    let entity = app
+        .world()
+        .resource::<EntityIndex>()
+        .get(ENTITY_ID)
+        .expect("entity");
+    let entity = app.world().get_entity(entity).expect("entity exists");
+    let helmet = entity
+        .get::<Equipment>()
+        .expect("equipment")
+        .0
+        .iter()
+        .find(|update| update.slot == lodestone_model::EquipmentSlot::Head)
+        .and_then(|update| update.item.as_ref())
+        .expect("helmet");
+    assert_ne!(helmet.count, 2);
+}
+
+#[test]
+fn literal_protocol_404_truncated_equipment_is_rejected_before_ingest() {
+    let result = adapter_for(PROTOCOL_1_13_2).handle_packet(
+        &mut World::new(),
+        ConnectionState::Play,
+        clientbound::ENTITY_EQUIPMENT,
+        &ENTITY_EQUIPMENT[..ENTITY_EQUIPMENT.len() - 1],
+    );
+    assert!(result.is_err(), "a truncated slot NBT marker must be rejected");
 }

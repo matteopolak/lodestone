@@ -539,9 +539,9 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   impulses, primed TNT, and the block-destroying half of an explosion.
 - [Protocol 1.13 entity ingest](./protocol-1-13-entity-ingest.md) — Protocol 404
   still carries initial entity metadata on living-entity and player spawn packets,
-  while attribute updates use textual names and UUID modifiers. This document records
-  the independent fixture boundary that proves those packets reach the ECS entity
-  components.
+  while equipment and attribute updates use the flattened item registry, textual
+  attribute names, and UUID modifiers. This document records the independent fixture
+  boundary that proves those packets reach the ECS entity components.
 - [The 1.13 era crate: one family, one protocol, two breaks](./protocol-1-13-era.md) —
   `crates/versions/1.13` (package `lodestone-v1-13`) serves Minecraft 1.13.2 —
   protocol **404** — from one adapter, one generated packet-id table, one generated
@@ -599,11 +599,19 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   packet-id table, one generated block-state table, one generated entity registry, and
   this era's own chunk, velocity, chat and tab-list codecs. The same feature registers
   `V774ServerProtocol` for hosting protocol 774.
+- [Protocol 1.7 entity ingest](./protocol-1-7-entity-ingest.md) — This document
+  records the protocol-5 fixture boundary for entity metadata, equipment, and
+  attributes. It proves that the oldest supported family reaches the production ECS
+  components rather than stopping at decoded events.
 - [Protocol 5 era (Minecraft 1.7.6-1.7.10)](./protocol-1-7-era.md) —
   `lodestone-v1-7` is the client protocol crate for **protocol 5**, spoken by
   Minecraft 1.7.6 through 1.7.10 — the bottom of the version ladder and the only era
   that shares almost nothing with its neighbour. It provides both the joining adapter
   and `V5ServerProtocol`; the registry selects the latter only for protocol 5.
+- [Protocol 1.8 entity ingest](./protocol-1-8-entity-ingest.md) — This document
+  records the protocol-47 fixture boundary for entity metadata, equipment, and
+  attributes. It proves that the 1.8 family reaches the production ECS components
+  despite its fixed-point entity coordinates and pre-flattening slot format.
 - [Protocol 47 hosting](./protocol-1-8-era.md) — `crates/versions/1.8` can host
   protocol 47 alongside its existing joining adapter. The registry resolves protocol
   47 to `V47ServerProtocol`; neighboring protocol numbers remain unhosted.
