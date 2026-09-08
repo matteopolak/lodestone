@@ -39,6 +39,7 @@ use super::options::{self, LiveOption};
 use super::{advancements, render, server_links, social};
 use super::{Screen, SessionKind, UiState};
 use crate::config::{MAX_MANUAL_GUI_SCALE, Options};
+use crate::friends_preferences::{FriendsLocalPreferences, FriendsPreferencesStore};
 use lodestone_auth::Entitlement;
 
 mod buttons;
@@ -78,6 +79,11 @@ pub struct MenuNav {
     options_path: std::path::PathBuf,
     /// The last options-save error, surfaced on the settings screen.
     options_save_error: Option<String>,
+    /// Account-scoped Friends notification and presence preferences.
+    friends_preferences: FriendsPreferencesStore,
+    /// The last Friends preference-store write failure, surfaced on Friends'
+    /// Settings tab rather than silently reverting to an old account value.
+    friends_preferences_save_error: Option<String>,
     /// The account list + sign-in flow. See
     /// [`crate::menu::accounts`].
     accounts: crate::menu::accounts::AccountsNav,
@@ -348,10 +354,12 @@ impl MenuNav {
         Self::with_paths(path, options_path, profiles_path)
     }
 
-    /// Loads the server list from `path`, the options from `options_path` and
-    /// account metadata from `profiles_path`. Missing or corrupt is an empty
-    /// list / the default options / no known accounts respectively, never an
-    /// error — a corrupt file must not stop the game from launching.
+    /// Loads the server list from `path`, the options from `options_path`,
+    /// account metadata from `profiles_path`, and local Friends choices from a
+    /// `friends.json` beside `options_path`. Missing or corrupt is an empty
+    /// list / the default options / no known accounts / private Friends
+    /// defaults respectively, never an error — a corrupt file must not stop
+    /// the game from launching.
     #[must_use]
     pub fn with_paths(
         path: std::path::PathBuf,
@@ -375,6 +383,10 @@ impl MenuNav {
             .parent()
             .map(|d| d.join(crate::saves::SAVES_DIR))
             .unwrap_or_else(|| std::path::PathBuf::from(crate::saves::SAVES_DIR));
+        let friends_preferences_path = options_path
+            .parent()
+            .map(|d| d.join("friends.json"))
+            .unwrap_or_else(|| std::path::PathBuf::from("friends.json"));
         Self {
             main: 0,
             ownership: 0,
@@ -388,6 +400,8 @@ impl MenuNav {
             options: Options::load_from(&options_path),
             options_path,
             options_save_error: None,
+            friends_preferences: FriendsPreferencesStore::load_from(friends_preferences_path),
+            friends_preferences_save_error: None,
             accounts: crate::menu::accounts::AccountsNav::with_path(profiles_path),
             // Empty on construction, deliberately: `MenuNav::new()` runs at
             // startup and in hundreds of tests, and enumerating the filesystem
@@ -838,12 +852,64 @@ impl MenuNav {
     /// Replace Friends' credential-free presentation state. The app is the
     /// only source: menu code cannot reach a session, token, or service.
     pub fn refresh_friends_view(&mut self, view: crate::friends_runtime::FriendsView) {
+        let changed_account = self
+            .friends
+            .view()
+            .account
+            .as_ref()
+            .map(|account| account.profile_id)
+            != view.account.as_ref().map(|account| account.profile_id);
+        if changed_account {
+            self.friends_preferences_save_error = None;
+        }
+        let local_preferences = view
+            .account
+            .as_ref()
+            .map(|account| self.friends_preferences.get(account.profile_id))
+            .unwrap_or_default();
         self.friends.refresh(view);
+        self.friends.set_local_preferences(local_preferences);
+        self.friends
+            .set_local_preferences_save_error(self.friends_preferences_save_error.clone());
     }
 
     #[must_use]
     pub fn friends(&self) -> &crate::menu::friends::FriendsNav {
         &self.friends
+    }
+
+    /// Read the selected profile's local Friends choices for the app/runtime
+    /// boundary. No service credentials or response data cross this accessor.
+    #[must_use]
+    pub fn friends_local_preferences(&self, profile_id: uuid::Uuid) -> FriendsLocalPreferences {
+        self.friends_preferences.get(profile_id)
+    }
+
+    /// Persist a local Friends change emitted by the menu. A stale intent from
+    /// another profile is ignored, which closes the account-switch boundary
+    /// before the runtime receives the next frame's activity projection.
+    pub fn set_friends_local_preferences(
+        &mut self,
+        profile_id: uuid::Uuid,
+        preferences: FriendsLocalPreferences,
+    ) {
+        let current_profile = self
+            .friends
+            .view()
+            .account
+            .as_ref()
+            .map(|account| account.profile_id);
+        if current_profile != Some(profile_id) {
+            return;
+        }
+        self.friends.set_local_preferences(preferences);
+        self.friends_preferences_save_error = self
+            .friends_preferences
+            .set(profile_id, preferences)
+            .err()
+            .map(|error| error.to_string());
+        self.friends
+            .set_local_preferences_save_error(self.friends_preferences_save_error.clone());
     }
 
     /// Drain user gestures for the app to forward to its private Friends worker.
@@ -3787,6 +3853,11 @@ impl MenuNav {
                 ui.close_settings();
                 MenuAction::None
             }
+            SettingsOutcome::OpenFriendsSettings => {
+                self.friends.open_settings();
+                ui.open_friends_from_settings();
+                MenuAction::None
+            }
             SettingsOutcome::Cycle(LiveOption::GuiScale) => {
                 self.cycle_gui_scale(1);
                 MenuAction::None
@@ -4710,9 +4781,10 @@ impl MenuNav {
         }
     }
 
-    /// Friends is a credential-free menu consumer. It only queues a refresh or
-    /// an already-supported relationship change; the app owns forwarding those
-    /// intents to the private service worker.
+    /// Friends is a credential-free menu consumer. It queues refreshes,
+    /// relationship changes, service preference replacements, and local
+    /// presentation choices; the app owns forwarding each intent to its
+    /// private worker or profile-keyed store.
     fn key_friends(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         match key {
             MenuKey::Up => self.friends.step(false),

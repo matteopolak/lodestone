@@ -12,6 +12,7 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use super::WindowApp;
+use crate::friends_preferences::FriendsLocalPreferences;
 use crate::friends_runtime::{
     FriendsAccount, FriendsClock, FriendsNotification, FriendsNotificationFeed, FriendsOperation,
     FriendsResponse, FriendsRuntime, FriendsView, SystemFriendsClock,
@@ -21,11 +22,14 @@ use lodestone_auth::friends::{
 };
 
 /// The app-owned presentation of the Friends runtime. `WindowApp` calls
-/// [`Self::sync`] once per frame; only changes in account or activity become
-/// worker messages, and only the most recent credential-free view is retained.
+/// [`Self::sync`] once per frame; only changes in account or projected activity
+/// become worker messages, while the local notification choice gates HUD output
+/// and only the most recent credential-free view is retained.
 pub(super) struct FriendsApp {
     account: Option<FriendsAccount>,
     activity: Option<PresenceStatus>,
+    local_preferences: FriendsLocalPreferences,
+    in_world: bool,
     overlay_open: bool,
     view: FriendsView,
     notifications: FriendsNotificationFeed,
@@ -111,6 +115,8 @@ impl FriendsApp {
         Self {
             account: None,
             activity: None,
+            local_preferences: FriendsLocalPreferences::default(),
+            in_world: false,
             overlay_open: false,
             view: FriendsView::default(),
             notifications: FriendsNotificationFeed::default(),
@@ -125,7 +131,15 @@ impl FriendsApp {
     /// Reconciles the one account the account switcher selected and the current
     /// game activity. These values are edge-triggered because polling account
     /// storage or publishing presence on every redraw would both be needless.
-    pub(super) fn sync(&mut self, account: Option<FriendsAccount>, activity: PresenceStatus) {
+    pub(super) fn sync(
+        &mut self,
+        account: Option<FriendsAccount>,
+        activity: PresenceStatus,
+        local_preferences: FriendsLocalPreferences,
+        in_world: bool,
+    ) {
+        self.local_preferences = local_preferences;
+        self.in_world = in_world;
         if self.account != account {
             self.account = account.clone();
             // Do not leave an old account visible while its worker is accepting
@@ -136,8 +150,12 @@ impl FriendsApp {
             };
             self.notifications.clear();
             self.toasts.clear();
+            // `Select` resets the coordinator's desired presence, so the same
+            // activity must be sent again for a newly selected profile.
+            self.activity = None;
             self.worker.submit(FriendsCommand::Select(self.account.clone()));
         }
+        let activity = local_preferences.presence_visibility.apply(activity);
         if self.activity != Some(activity) {
             self.activity = Some(activity);
             self.worker.submit(FriendsCommand::Activity(activity));
@@ -176,6 +194,8 @@ impl FriendsApp {
         self.worker.shutdown();
         self.account = None;
         self.activity = None;
+        self.local_preferences = FriendsLocalPreferences::default();
+        self.in_world = false;
         self.view = FriendsView::default();
         self.notifications.clear();
         self.toasts.clear();
@@ -185,6 +205,10 @@ impl FriendsApp {
     /// The caller owns that slot's cross-feature priority; a Friends change
     /// remains queued instead of expiring behind a recipe or advancement toast.
     pub(super) fn toast(&mut self, now_ms: u64, slot_available: bool) -> Option<FriendsToast> {
+        if self.in_world && !self.local_preferences.in_game_notifications {
+            self.toasts.clear();
+            return None;
+        }
         slot_available.then(|| self.toasts.current(now_ms)).flatten()
     }
 
@@ -203,8 +227,10 @@ impl FriendsApp {
                 self.toasts.clear();
             } else {
                 for notification in self.notifications.update(&view) {
-                    let (key, toast) = toast_for(notification);
-                    self.toasts.push(key, toast);
+                    if !self.in_world || self.local_preferences.in_game_notifications {
+                        let (key, toast) = toast_for(notification);
+                        self.toasts.push(key, toast);
+                    }
                 }
             }
             self.view = view;
@@ -259,12 +285,31 @@ impl WindowApp {
                 crate::menu::friends::FriendsIntent::SetPreferences(preferences) => {
                     self.friends.set_preferences(preferences);
                 }
+                crate::menu::friends::FriendsIntent::SetLocalPreferences {
+                    profile_id,
+                    preferences,
+                } => {
+                    self.nav
+                        .set_friends_local_preferences(profile_id, preferences);
+                }
             }
         }
+        let local_preferences = account
+            .as_ref()
+            .map(|account| self.nav.friends_local_preferences(account.profile_id))
+            .unwrap_or_default();
+        let in_world = self.ui.kind().is_some()
+            && (self.ui.screen().in_session()
+                || self.ui.friends_in_world()
+                || self.ui.settings_in_world());
         self.friends
             .set_overlay_open(self.ui.screen() == crate::menu::Screen::Friends);
-        self.friends
-            .sync(account, friends_activity(&self.ui, self.sim.session_phase()));
+        self.friends.sync(
+            account,
+            friends_activity(&self.ui, self.sim.session_phase()),
+            local_preferences,
+            in_world,
+        );
         self.nav.refresh_friends_view(self.friends_view().clone());
     }
 
@@ -704,6 +749,49 @@ mod tests {
             })
         );
         assert!(app.toast(5_100, true).is_none());
+        app.shutdown();
+    }
+
+    #[test]
+    fn in_world_notifications_are_suppressed_until_the_local_toggle_is_on() {
+        let mut app = FriendsApp::new();
+        app.account = Some(account());
+        app.in_world = true;
+        app.apply_view(enabled_view(FriendsSnapshot::default()));
+        app.apply_view(enabled_view(FriendsSnapshot {
+            incoming: vec![profile(2, "Alex")],
+            ..FriendsSnapshot::default()
+        }));
+        assert!(app.toast(100, true).is_none());
+
+        app.local_preferences.in_game_notifications = true;
+        app.apply_view(enabled_view(FriendsSnapshot {
+            incoming: vec![profile(3, "Blair")],
+            ..FriendsSnapshot::default()
+        }));
+        assert_eq!(
+            app.toast(200, true),
+            Some(FriendsToast {
+                message: "Blair sent you a friend request".to_owned(),
+            })
+        );
+        app.shutdown();
+    }
+
+    #[test]
+    fn sync_projects_presence_visibility_before_publishing_activity() {
+        let mut app = FriendsApp::new();
+        app.sync(
+            Some(account()),
+            PresenceStatus::Server,
+            FriendsLocalPreferences {
+                presence_visibility:
+                    crate::friends_preferences::FriendsPresenceVisibility::Hidden,
+                ..FriendsLocalPreferences::default()
+            },
+            false,
+        );
+        assert_eq!(app.activity, Some(PresenceStatus::Offline));
         app.shutdown();
     }
 
