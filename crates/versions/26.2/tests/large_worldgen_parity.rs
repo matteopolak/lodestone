@@ -1196,6 +1196,14 @@ fn java_and_rust_raw_packet_digests_agree() {
 #[test]
 #[ignore = "requires a one-chunk Java v7 light-free export; see docs/worldgen-large-parity.md"]
 fn java_and_rust_light_free_records_agree() {
+    const EXTERNAL_UPPER_SPILL: &str = include_str!("fixtures/nether_p07_upper_spill_external.txt");
+    assert!(EXTERNAL_UPPER_SPILL.contains("target_chunk=-14,-25"));
+    assert!(EXTERNAL_UPPER_SPILL.contains("source_chunk=-14,-26"));
+    assert!(EXTERNAL_UPPER_SPILL.contains("world_position=-216,128,-400"));
+    assert!(EXTERNAL_UPPER_SPILL.contains("state=minecraft:brown_mushroom"));
+    assert!(EXTERNAL_UPPER_SPILL.contains("heightmap_id=1"));
+    assert!(EXTERNAL_UPPER_SPILL.contains("heightmap_local=8,0"));
+    assert!(EXTERNAL_UPPER_SPILL.contains("heightmap_first_available=129"));
     let record_path = std::env::var("LODESTONE_LARGE_PARITY_CROSS_LANGUAGE_RECORD")
         .expect("set LODESTONE_LARGE_PARITY_CROSS_LANGUAGE_RECORD to Java's light-free record");
     let manifest_path = std::env::var("LODESTONE_LARGE_PARITY_CROSS_LANGUAGE_MANIFEST")
@@ -1230,7 +1238,8 @@ fn java_and_rust_light_free_records_agree() {
         Dimension::Nether => Box::new(nether_chunk_source(42)),
         Dimension::End => Box::new(end_chunk_source(42)),
     };
-    let rust_record = light_free_record(&source.column(header.cx0, header.cz0), header.cx0, header.cz0, header.dimension);
+    let column = source.column(header.cx0, header.cz0);
+    let rust_record = light_free_record(&column, header.cx0, header.cz0, header.dimension);
     if rust_record != java_record {
         let first = rust_record.iter().zip(&java_record).position(|(left, right)| left != right).unwrap_or(rust_record.len().min(java_record.len()));
         panic!("light-free content bytes differ at offset {first}: Java length {}, Rust length {}, Java byte {:?}, Rust byte {:?}", java_record.len(), rust_record.len(), java_record.get(first), rust_record.get(first));

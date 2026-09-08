@@ -506,7 +506,7 @@ impl ChunkColumn {
     }
 
     /// Adopts a [`lodestone_worldgen::nether::NetherColumn`], padded up to
-    /// `window_height` rows of air.
+    /// `window_height` rows of air plus upper-window decoration writes.
     ///
     /// # Why there is a separate constructor, and why it pads
     ///
@@ -524,10 +524,10 @@ impl ChunkColumn {
     /// frames a chunk against the **dimension**, not against whatever the
     /// generator felt like producing: a client that resolved `the_nether`'s
     /// registry entry reads exactly 16 sections, so serving an 8-section column
-    /// is a decode failure, not a short world. The rows above 128 are genuinely
-    /// air in vanilla — 127 is the bedrock roof and `logical_height` is what stops
-    /// anything being built above it — so the padding is the truth rather than a
-    /// stand-in.
+    /// is a decode failure, not a short world. The rows above 128 are normally
+    /// air — 127 is the bedrock roof — but mushrooms can spill into the
+    /// resident upper window; those writes cross this boundary explicitly and
+    /// all other padding remains air.
     ///
     /// Biomes come across at the generator's own resolution: this dimension's
     /// climate is y-invariant (see `lodestone_worldgen::nether`'s module doc), so
@@ -538,6 +538,7 @@ impl ChunkColumn {
         column: lodestone_worldgen::nether::NetherColumn,
         window_height: i32,
     ) -> Self {
+        let decoration_spills = column.decoration_spills().to_vec();
         let (min_y, generated_height, palette, blocks, biome_quarts) = column.into_raw();
         Self::from_raw_window(
             min_y,
@@ -546,6 +547,7 @@ impl ChunkColumn {
             palette,
             &blocks,
             biome_quarts,
+            &decoration_spills,
         )
     }
 
@@ -566,6 +568,7 @@ impl ChunkColumn {
         palette: Vec<String>,
         blocks: &[u16],
         biome_quarts: [String; 16],
+        decoration_spills: &[(i32, i32, i32, String)],
     ) -> Self {
         assert!(window_height >= generated_height, "window cannot truncate the generated column");
         let mut column = Self::new(min_y, window_height);
@@ -587,6 +590,11 @@ impl ChunkColumn {
                     }
                     column.blocks.set(lx as i32, ly as i32, lz as i32, id);
                 }
+            }
+        }
+        for &(x, y, z, ref state) in decoration_spills {
+            if (min_y..min_y + window_height).contains(&y) {
+                column.set_block(x.rem_euclid(16), y, z.rem_euclid(16), state);
             }
         }
         column.biome_quarts = biome_quarts;
@@ -637,6 +645,7 @@ impl ChunkColumn {
             palette,
             &blocks,
             biome_quarts.map(str::to_string),
+            &[],
         );
         if !gateways.is_empty() {
             let mut entities = out.block_entities().to_vec();

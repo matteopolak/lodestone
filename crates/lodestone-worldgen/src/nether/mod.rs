@@ -156,6 +156,10 @@ pub struct NetherColumn {
     /// for this dimension, see the module doc's 2-D section.
     biome_quarts: [String; 16],
     placement_loot: Vec<CodedLoot>,
+    /// Decoration writes in the dimension's upper 128 rows. The noise carrier
+    /// remains 128 rows tall, but vegetation runs against the full 256-row
+    /// resident window and may spill into the served chunk above that carrier.
+    decoration_spills: Vec<(i32, i32, i32, String)>,
 }
 
 type PreDecorationResult = (
@@ -266,6 +270,14 @@ impl NetherColumn {
     #[must_use]
     pub fn placement_loot(&self) -> &[CodedLoot] {
         &self.placement_loot
+    }
+
+    /// Decoration writes in the served chunk's upper resident rows. Positions
+    /// are absolute world coordinates; the server boundary filters them to its
+    /// local column before applying them to the padded window.
+    #[must_use]
+    pub fn decoration_spills(&self) -> &[(i32, i32, i32, String)] {
+        &self.decoration_spills
     }
 
     /// The biome covering local column `(lx, lz)`.
@@ -1060,7 +1072,12 @@ impl NetherGenerator {
     #[must_use]
     pub fn column(&self, cx: i32, cz: i32) -> NetherColumn {
         let pre = self.pre_decoration_stage(cx, cz);
-        let world = self.mixed_step7_stage(cx, cz, (*pre.0).clone(), &pre.1);
+        let (world, decoration_spills) = self.mixed_step7_stage_with_spills(
+            cx,
+            cz,
+            (*pre.0).clone(),
+            &pre.1,
+        );
 
         let (palette, blocks) = world.into_palette_and_blocks();
         NetherColumn {
@@ -1070,6 +1087,7 @@ impl NetherGenerator {
             blocks,
             biome_quarts: pre.2.clone(),
             placement_loot: pre.3.clone(),
+            decoration_spills,
         }
     }
 
@@ -1091,6 +1109,7 @@ impl NetherGenerator {
             blocks,
             biome_quarts: pre.2.clone(),
             placement_loot: pre.3.clone(),
+            decoration_spills: Vec::new(),
         }
     }
 
@@ -1126,21 +1145,25 @@ impl NetherGenerator {
         .1
     }
 
-    /// Runs the Nether's mixed decoration steps in raw source/index order.
-    /// Ore and non-ore placement use different read/write adapters, so each
-    /// completed entry is copied across the one explicit synchronization
-    /// boundary before its successor can inspect the field.
-    fn mixed_step7_stage(
+    fn mixed_step7_stage_with_spills(
         &self,
         cx: i32,
         cz: i32,
         center_world: crate::dense_grid::DenseBlockGrid,
         center_heights: &[i32; 256],
-    ) -> crate::dense_grid::DenseBlockGrid {
-        self.mixed_step7_stage_selected(cx, cz, center_world, center_heights, None, &[]).0
+    ) -> (crate::dense_grid::DenseBlockGrid, Vec<(i32, i32, i32, String)>) {
+        let (world, _, spills) = self.mixed_step7_stage_selected(
+            cx,
+            cz,
+            center_world,
+            center_heights,
+            None,
+            &[],
+        );
+        (world, spills)
     }
 
-    /// [`Self::mixed_step7_stage`] with an optional source filter for the
+    /// [`Self::mixed_step7_stage_with_spills`] with an optional source filter for the
     /// parity materializer. The single raw dispatcher below remains the only
     /// placement/RNG implementation for both paths.
     fn mixed_step7_stage_selected(
@@ -1151,7 +1174,11 @@ impl NetherGenerator {
         center_heights: &[i32; 256],
         selected_source: Option<(i32, i32)>,
         overrides: &[(i32, i32, i32, String)],
-    ) -> (crate::dense_grid::DenseBlockGrid, Vec<ParityDecorationSpill>) {
+    ) -> (
+        crate::dense_grid::DenseBlockGrid,
+        Vec<ParityDecorationSpill>,
+        Vec<(i32, i32, i32, String)>,
+    ) {
         let mut nearby: [Option<Arc<PreDecorationResult>>; 25] =
             std::array::from_fn(|_| None);
         let mut nearby_biomes: [Option<Arc<crate::overworld::BiomeCells>>; 25] =
@@ -1426,13 +1453,21 @@ impl NetherGenerator {
             }
         }}
         let mut world = center_world;
+        let mut decoration_spills = Vec::new();
         for (x, y, z, state) in grid.dirty_cell_ids() {
-            // `world` is the canonical 128-row terrain carrier.  The widened
-            // vegetation grid intentionally keeps upper-half writes only in
-            // the lifecycle spill stream; never let a future dense-carrier
-            // resize turn those writes into packet terrain here.
             if (self.min_y..self.min_y + self.height).contains(&y) {
                 world.set_id(x, y, z, state);
+            } else if selected_source.is_none()
+                && (cx * 16..cx * 16 + 16).contains(&x)
+                && (cz * 16..cz * 16 + 16).contains(&z)
+                && (self.min_y..self.min_y + DECORATION_WINDOW_HEIGHT).contains(&y)
+            {
+                decoration_spills.push((
+                    x,
+                    y,
+                    z,
+                    self.interner.name_of(state).to_owned(),
+                ));
             }
         }
         let mut final_spills = BTreeMap::new();
@@ -1447,7 +1482,7 @@ impl NetherGenerator {
                 }
             }
         }
-        (world, final_spills.into_values().collect())
+        (world, final_spills.into_values().collect(), decoration_spills)
     }
 
     /// The complete prefix decorations read: terrain through structure pieces.

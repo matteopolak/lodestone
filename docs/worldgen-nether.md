@@ -14,6 +14,13 @@ coordinate. It then drives the shared 3×3 feature writers: neighbouring source
 chunks can place blocks into the served chunk, exactly as a feature near a
 border requires.
 
+The noise carrier is 128 rows tall, but Nether vegetal decoration evaluates the
+dimension's 256-row resident window. A border source can therefore place a
+mushroom in the served chunk at or above y=128. `NetherColumn::decoration_spills`
+keeps those upper-window writes separate from the compact terrain carrier, and
+`ChunkColumn::from_nether` applies them after padding; otherwise the generated
+heightmap would report air one block below the external result.
+
 The prefix values are immutable for a fixed seed and coordinate. Normal
 generation keeps a 32-entry demand-ordered memo to bound resident memory, while
 large packet replay calls `NetherGenerator::prepare_packet_replay` with its
