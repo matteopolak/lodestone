@@ -302,11 +302,12 @@ impl EndColumn {
 /// A composed, reusable End generator. Build once per seed; call
 /// [`column`](Self::column) per chunk.
 ///
-/// **Demand-ordered and order-independent.** Nothing memoises across chunks and no
-/// stage reads a neighbouring chunk's product — there is no carver here, so not even
-/// the Nether's 17×17 re-derivation — so `column` is a pure function of
-/// `(seed, cx, cz)` and columns may be requested in any order, on any thread,
-/// without changing a byte.
+/// **Demand-ordered and order-independent.** No terrain stage reads a neighbouring
+/// chunk's product — there is no carver here, so not even the Nether's 17×17
+/// re-derivation — and the bounded structure-start memo only caches pure
+/// `(seed, cx, cz)` values. Columns may therefore be requested in any order, on
+/// any thread, without changing a byte; eviction or a concurrent cache miss can
+/// only repeat that same pure calculation.
 #[allow(missing_debug_implementations)]
 pub struct EndGenerator {
     seed: i64,
