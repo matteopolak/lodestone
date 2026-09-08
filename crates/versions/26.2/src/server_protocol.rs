@@ -3661,6 +3661,10 @@ impl ChunkEncoder for V770ServerProtocol {
 const COMPRESSION_THRESHOLD: i32 = 256;
 
 impl ServerProtocol for V770ServerProtocol {
+    fn has_player_loaded_packet(&self) -> bool {
+        true
+    }
+
     fn decode(&self, state: lodestone_core::State, packet_id: i32, payload: &[u8]) -> ServerBound {
         use lodestone_core::State;
 

@@ -33,6 +33,16 @@ partial fix — and it cannot be half-fixed by treating a lone start action as s
 is indistinguishable on the wire from an ordinary survival player who taps and moves on, and would
 reopen the instant-break exploit this validation exists to close.
 
+### Protocol-specific load readiness
+
+The server only gates movement-dependent simulation on a client-loaded marker for
+wire families that can actually send that marker. Older hosted families enter Play
+already ready because their packet tables have no such action; newer families arm
+the gate after join and respawn and clear it only when the marker arrives. The
+protocol seam owns this capability, so a family without the packet cannot leave
+fall damage and movement permanently disabled, and a respawn applies the same rule
+as the initial join.
+
 ### Server-authoritative inventory and container clicks
 
 The server keeps its own model of a player's inventory (the same native slot numbering the client's

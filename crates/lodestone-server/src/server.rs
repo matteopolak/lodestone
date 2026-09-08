@@ -8482,7 +8482,7 @@ where
     match action {
         0 if vitals.health() <= 0.0 => {
             vitals.respawn();
-            *client_loaded = false;
+            *client_loaded = !proto.has_player_loaded_packet();
             // Prefer a usable bed position and fall back to the world spawn when
             // the bed is broken or obstructed.
             let target = respawn
@@ -13493,7 +13493,7 @@ where
     let mut teleport_acknowledgements = initial_teleport_id.map(TeleportAcknowledgements::after_initial);
     let mut player_pos: Option<(f64, f64, f64)> = None;
     let mut client_movement = ClientMovement::default();
-    let mut client_loaded = false;
+    let mut client_loaded = !proto.has_player_loaded_packet();
     let mut abilities = Abilities::for_mode(game_mode);
     // The rotation is stored alongside `player_pos` — see `dispatch_play_packet`'s own
     // parameter comment. Restore the native locator's bounded rotation when
@@ -16222,7 +16222,7 @@ where
     // remains driven by inbound `PlayerMoved` packets.
     let mut player_pos: Option<(f64, f64, f64)> = None;
     let mut client_movement = ClientMovement::default();
-    let mut client_loaded = false;
+    let mut client_loaded = !proto.has_player_loaded_packet();
     let mut abilities = Abilities::for_mode(game_mode);
     // The rotation is stored alongside `player_pos` — see `dispatch_play_packet`'s own
     // parameter comment.
