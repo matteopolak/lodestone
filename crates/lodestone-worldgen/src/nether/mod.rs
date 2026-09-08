@@ -346,7 +346,7 @@ pub struct NetherGenerator {
     /// Biome membership for each placed feature's biome modifier.  Nether
     /// climate is y-invariant, so the mixed dispatcher can resolve an exact
     /// candidate position from the resident chunk's horizontal quart data.
-    feature_biomes: HashMap<String, HashSet<String>>,
+    feature_biomes: Arc<HashMap<String, HashSet<String>>>,
     ore_tag_map: HashMap<String, HashSet<String>>,
     veg_tags: crate::feature::vegetation::VegTags,
     /// The Nether's structure engine, or `None` for a resolver that supplies no
@@ -1242,7 +1242,7 @@ impl NetherGenerator {
         let grid_sources = &nearby;
         let grid_biomes = &nearby_biomes;
         let grid_feature_biomes = self.feature_biomes.clone();
-        let mut grid = crate::feature::vegetation::VegGrid::with_sources_and_biomes(
+        let mut grid = crate::feature::vegetation::VegGrid::with_sources_and_biomes_shared(
             Arc::clone(&self.interner), self.min_y, DECORATION_WINDOW_HEIGHT, cx * 16, cz * 16,
             crate::feature::REGION_MIN - crate::feature::VEG_PADDING,
             crate::feature::REGION_MAX + crate::feature::VEG_PADDING,

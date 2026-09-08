@@ -109,7 +109,7 @@ pub(super) struct MixedReplayContext {
     wide_pre: [Option<Arc<super::PreOreResult>>; crate::feature::region_view::WIDE_SLOTS],
     centre_biomes: Arc<super::biome_cells::BiomeCells>,
     ocean_floor_wg: crate::feature::RegionHeights,
-    feature_biomes: HashMap<String, HashSet<String>>,
+    feature_biomes: Arc<HashMap<String, HashSet<String>>>,
     source_ores: BTreeMap<(i32, i32), Vec<PlacedOre>>,
     source_features:
         BTreeMap<(i32, i32), Vec<(i32, usize, crate::feature::vegetation::PlacedRef)>>,
@@ -1060,7 +1060,7 @@ impl OverworldGenerator {
         let centre_grid = Arc::new(center_world.clone());
         let grid_sources = &wide_pre;
         let grid_biomes = &wide_pre;
-        let mut grid = crate::feature::vegetation::VegGrid::with_sources_and_biomes(
+        let mut grid = crate::feature::vegetation::VegGrid::with_sources_and_biomes_shared(
             Arc::clone(&self.interner),
             self.min_y,
             self.height,
