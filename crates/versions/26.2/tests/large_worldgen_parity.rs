@@ -2,7 +2,7 @@
 //! a full 501² run is an external oracle job, not a regular unit test.
 mod support { pub mod large_parity_manifest; }
 
-use std::{collections::{BTreeMap, BTreeSet}, fs::File, io::{BufReader, Read, Seek, SeekFrom}, path::{Path, PathBuf}, time::Instant};
+use std::{collections::{BTreeMap, BTreeSet}, fs::File, io::{BufReader, Cursor, Read, Seek, SeekFrom}, path::{Path, PathBuf}, time::Instant};
 use lodestone_core::{Reader, Writer};
 use lodestone_server::{
     ChunkColumn, ChunkSource, ServerDirective, ServerProtocol,
@@ -18,11 +18,15 @@ use lodestone_worldgen_parity::lifecycle::{
 };
 use support::large_parity_manifest::{
     Dimension, HEADER_BYTES, PACKET_AUDIT_RECORD_BYTES, RAW_PACKET_HASH_BYTES,
-    canonical_nbt, payload_digest_from_header,
+    LIGHT_FREE_AUDIT_RECORD_BYTES,
+    canonical_nbt, payload_digest_from_header, sha256,
+    light_free_record,
     raw_packet_full_digest, read_header, read_packet_audit_header,
+    read_light_free_audit_header,
     semantic_digest, semantic_digest_for_dimension, semantic_digest_v5_for_dimension,
     semantic_record, semantic_record_for_dimension, semantic_record_v5_for_dimension,
-    validate_packet_audit_header, verify_payload, verify_manifest_payload,
+    validate_light_free_audit_header, validate_packet_audit_header,
+    verify_light_free_audit_pair, verify_payload, verify_manifest_payload,
     verify_raw_packet_audit_pair,
 };
 
@@ -30,6 +34,9 @@ type ChunkPos = (i32, i32);
 
 const MAX_RAW_DIAGNOSTIC_EXAMPLES: usize = 32;
 const MAX_RAW_DIAGNOSTIC_GROUPS: usize = 64;
+/// Keep the Nether immutable replay closure bounded while preserving the
+/// manifest's z-major, x-fastest target order.
+const NETHER_PACKET_REPLAY_WINDOW_ROWS: u64 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RawPacketMismatch {
@@ -520,6 +527,11 @@ fn load_raw_packet_audit(
     (path, header)
 }
 
+enum ManifestAuditHeader {
+    Raw(support::large_parity_manifest::PacketAuditHeader),
+    LightFree(support::large_parity_manifest::LightFreeAuditHeader),
+}
+
 fn verify_raw_packet_audit_files(
     manifest: &Path,
     raw_header: &[u8; HEADER_BYTES],
@@ -539,6 +551,55 @@ fn verify_raw_packet_audit_files(
         audit_header.payload_digest,
     )
     .unwrap_or_else(|error| panic!("v6 manifest/packet-audit payload authentication failed: {error}"));
+}
+
+fn light_free_audit_path(manifest: &Path) -> PathBuf {
+    if let Some(path) = std::env::var_os("LODESTONE_LARGE_PARITY_LIGHT_FREE_AUDIT") {
+        return PathBuf::from(path);
+    }
+    let mut path = manifest.as_os_str().to_os_string();
+    path.push(".light-free-audit");
+    PathBuf::from(path)
+}
+
+fn load_light_free_audit(
+    manifest: &Path,
+    main_header: &support::large_parity_manifest::Header,
+) -> (PathBuf, support::large_parity_manifest::LightFreeAuditHeader) {
+    let path = light_free_audit_path(manifest);
+    let mut file = File::open(&path)
+        .unwrap_or_else(|error| panic!("open v7 light-free audit sidecar {}: {error}", path.display()));
+    let mut raw = [0u8; HEADER_BYTES];
+    file.read_exact(&mut raw)
+        .unwrap_or_else(|error| panic!("read v7 light-free audit sidecar {} header: {error}", path.display()));
+    let header = read_light_free_audit_header(&raw[..]).unwrap_or_else(|error| {
+        panic!("invalid v7 light-free audit sidecar {}: {error}", path.display())
+    });
+    validate_light_free_audit_header(main_header, &header).unwrap_or_else(|error| {
+        panic!("v7 light-free audit sidecar {} does not match manifest: {error}", path.display())
+    });
+    (path, header)
+}
+
+fn verify_light_free_audit_files(
+    manifest: &Path,
+    raw_header: &[u8; HEADER_BYTES],
+    main_header: &support::large_parity_manifest::Header,
+    audit_path: &Path,
+    audit_header: &support::large_parity_manifest::LightFreeAuditHeader,
+) {
+    let mut main = File::open(manifest).unwrap_or_else(|error| panic!("reopen v7 manifest {}: {error}", manifest.display()));
+    main.seek(SeekFrom::Start(HEADER_BYTES as u64)).unwrap_or_else(|error| panic!("seek v7 manifest payload: {error}"));
+    let mut audit = File::open(audit_path).unwrap_or_else(|error| panic!("reopen light-free audit sidecar {}: {error}", audit_path.display()));
+    audit.seek(SeekFrom::Start(HEADER_BYTES as u64)).unwrap_or_else(|error| panic!("seek light-free audit payload: {error}"));
+    verify_light_free_audit_pair(
+        BufReader::new(main),
+        BufReader::new(audit),
+        main_header.count,
+        payload_digest_from_header(raw_header),
+        audit_header.payload_digest,
+    )
+    .unwrap_or_else(|error| panic!("v7 manifest/light-free audit payload authentication failed: {error}"));
 }
 
 fn optional_usize_env(name: &str) -> Result<Option<usize>, String> {
@@ -602,26 +663,40 @@ fn parity_batch_limit(
 }
 
 fn is_partial_lifecycle_manifest(header: &support::large_parity_manifest::Header) -> bool {
-    header.semantic_version != 6
+    header.semantic_version != 6 && header.semantic_version != 7
         && header.dimension != Dimension::End
         && header.count == 256
         && i64::from(header.cx1) - i64::from(header.cx0) == 15
         && i64::from(header.cz1) - i64::from(header.cz0) == 15
 }
 
-fn raw_packet_targets(
+fn raw_packet_target(
     header: &support::large_parity_manifest::Header,
-    limit: u64,
+    index: u64,
+    width: u64,
+) -> ChunkPos {
+    (
+        header.cx0 + i32::try_from(index % width).expect("raw target x offset fits i32"),
+        header.cz0 + i32::try_from(index / width).expect("raw target z offset fits i32"),
+    )
+}
+
+fn nether_packet_replay_window_end(index: u64, width: u64, limit: u64) -> u64 {
+    let window_size = width
+        .checked_mul(NETHER_PACKET_REPLAY_WINDOW_ROWS)
+        .expect("Nether replay window size fits u64");
+    let window_start = (index / window_size) * window_size;
+    (window_start + window_size).min(limit)
+}
+
+fn raw_packet_targets_for_window(
+    header: &support::large_parity_manifest::Header,
+    start: u64,
+    end: u64,
+    width: u64,
 ) -> Vec<ChunkPos> {
-    let width = u64::try_from(i64::from(header.cx1) - i64::from(header.cx0) + 1)
-        .expect("authenticated manifest coordinate width fits u64");
-    (0..limit)
-        .map(|index| {
-            (
-                header.cx0 + i32::try_from(index % width).expect("raw target x offset fits i32"),
-                header.cz0 + i32::try_from(index / width).expect("raw target z offset fits i32"),
-            )
-        })
+    (start..end)
+        .map(|index| raw_packet_target(header, index, width))
         .collect()
 }
 
@@ -635,6 +710,96 @@ const INITIAL_ADMISSION_NEIGHBOUR_OFFSETS: [(i32, i32); 4] =
 
 fn initial_admission_neighbour_offsets() -> &'static [(i32, i32)] {
     &INITIAL_ADMISSION_NEIGHBOUR_OFFSETS
+}
+
+/// Later packet admissions adopt cardinal source columns before encoding the
+/// initial light snapshot. The first admission is the bootstrap with no
+/// adopted neighbours.
+const INITIAL_CARDINAL_NEIGHBOUR_OFFSETS: [(i32, i32); 4] =
+    [(-1, 0), (0, -1), (1, 0), (0, 1)];
+
+fn nether_packet_replay_capacity_bound(width: u64, rows: u64) -> usize {
+    let halo = 1_u64
+        .checked_add(
+            u64::try_from(lodestone_worldgen::feature::region_view::WIDE_RADIUS)
+                .expect("Nether replay radius fits u64"),
+        )
+        .expect("Nether replay halo fits u64");
+    usize::try_from(
+        width
+            .checked_add(halo * 2)
+            .expect("Nether replay width fits u64")
+            .checked_mul(
+                rows.checked_add(halo * 2)
+                    .expect("Nether replay height fits u64"),
+            )
+            .expect("Nether replay closure fits u64"),
+    )
+    .expect("Nether replay closure fits usize")
+}
+
+#[test]
+fn nether_packet_replay_windows_preserve_order_and_retention_bound() {
+    let header = support::large_parity_manifest::Header {
+        semantic_version: 6,
+        cx0: -500,
+        cx1: 500,
+        cz0: -500,
+        cz1: 500,
+        count: 1_002_001,
+        frozen_world: [0; 32],
+        dimension: Dimension::Nether,
+        record_width: RAW_PACKET_HASH_BYTES as u16,
+        kind: 2,
+    };
+    let width = 1_001;
+    let first_end = nether_packet_replay_window_end(0, width, header.count);
+    let second_end = nether_packet_replay_window_end(first_end, width, header.count);
+    let first = raw_packet_targets_for_window(&header, 0, first_end, width);
+    let second = raw_packet_targets_for_window(&header, first_end, second_end, width);
+
+    assert_eq!(first.len(), width as usize);
+    assert_eq!(second.len(), width as usize);
+    assert_eq!(first[0], (-500, -500));
+    assert_eq!(first[width as usize - 1], (500, -500));
+    assert_eq!(second[0], (-500, -499));
+    assert_eq!(
+        first
+            .iter()
+            .chain(second.iter())
+            .copied()
+            .collect::<Vec<_>>(),
+        (0..second_end)
+            .map(|index| raw_packet_target(&header, index, width))
+            .collect::<Vec<_>>(),
+        "windowing must not reorder or skip manifest targets",
+    );
+
+    let window_capacity = nether_packet_replay_capacity_bound(width, NETHER_PACKET_REPLAY_WINDOW_ROWS);
+    let full_capacity = nether_packet_replay_capacity_bound(width, width);
+    assert_eq!(window_capacity, 7_049, "the 1001-wide one-row closure is bounded");
+    assert!(window_capacity < full_capacity / 100, "retention must not scale with the full grid");
+}
+
+#[test]
+fn nether_packet_replay_generator_capacity_is_row_bounded() {
+    let source = nether_chunk_source(42);
+    let targets = (-500..=500).map(|x| (x, -500)).collect::<Vec<_>>();
+    let capacity = source.generator().prepare_packet_replay(&targets);
+    assert_eq!(
+        capacity,
+        nether_packet_replay_capacity_bound(1_001, NETHER_PACKET_REPLAY_WINDOW_ROWS),
+        "the generator must retain one row's target-plus-halo closure only",
+    );
+    source.generator().reset_packet_replay();
+}
+
+fn initial_light_admission_neighbour_offsets(record_index: u64) -> &'static [(i32, i32)] {
+    if record_index == 0 {
+        &[]
+    } else {
+        &INITIAL_CARDINAL_NEIGHBOUR_OFFSETS
+    }
 }
 
 /// Replays one initial admission's saved-light boundary. The packet still
@@ -1103,6 +1268,63 @@ fn java_and_rust_raw_packet_digests_agree() {
     assert_eq!([actual_full[0], actual_full[1]], expected_prefix, "Rust raw prefix must match Java manifest");
 }
 
+/// Cross-language control for P07. Both sides serialize the generated column
+/// directly; neither constructs a light-bearing packet or settles light.
+#[test]
+#[ignore = "requires a one-chunk Java v7 light-free export; see docs/worldgen-large-parity.md"]
+fn java_and_rust_light_free_records_agree() {
+    const EXTERNAL_UPPER_SPILL: &str = include_str!("fixtures/nether_p07_upper_spill_external.txt");
+    assert!(EXTERNAL_UPPER_SPILL.contains("target_chunk=-14,-25"));
+    assert!(EXTERNAL_UPPER_SPILL.contains("source_chunk=-14,-26"));
+    assert!(EXTERNAL_UPPER_SPILL.contains("world_position=-216,128,-400"));
+    assert!(EXTERNAL_UPPER_SPILL.contains("state=minecraft:brown_mushroom"));
+    assert!(EXTERNAL_UPPER_SPILL.contains("heightmap_id=1"));
+    assert!(EXTERNAL_UPPER_SPILL.contains("heightmap_local=8,0"));
+    assert!(EXTERNAL_UPPER_SPILL.contains("heightmap_first_available=129"));
+    let record_path = std::env::var("LODESTONE_LARGE_PARITY_CROSS_LANGUAGE_RECORD")
+        .expect("set LODESTONE_LARGE_PARITY_CROSS_LANGUAGE_RECORD to Java's light-free record");
+    let manifest_path = std::env::var("LODESTONE_LARGE_PARITY_CROSS_LANGUAGE_MANIFEST")
+        .expect("set LODESTONE_LARGE_PARITY_CROSS_LANGUAGE_MANIFEST to Java's one-chunk v7 manifest");
+    let audit_path = std::env::var("LODESTONE_LARGE_PARITY_CROSS_LANGUAGE_LIGHT_FREE_AUDIT")
+        .unwrap_or_else(|_| format!("{manifest_path}.light-free-audit"));
+    let java_record = std::fs::read(&record_path).expect("read Java light-free record");
+    let manifest_bytes = std::fs::read(&manifest_path).expect("read Java v7 manifest");
+    assert!(manifest_bytes.len() >= HEADER_BYTES + RAW_PACKET_HASH_BYTES);
+    let mut raw_header = [0u8; HEADER_BYTES]; raw_header.copy_from_slice(&manifest_bytes[..HEADER_BYTES]);
+    let header = read_header(&raw_header[..]).expect("validate Java v7 manifest header");
+    assert_eq!(header.semantic_version, 7, "light-free control requires P07");
+    assert_eq!(header.count, 1, "light-free control must use exactly one chunk");
+    let expected_prefix: [u8; RAW_PACKET_HASH_BYTES] = manifest_bytes[HEADER_BYTES..HEADER_BYTES + RAW_PACKET_HASH_BYTES].try_into().unwrap();
+    let audit_bytes = std::fs::read(&audit_path).expect("read Java v7 light-free audit sidecar");
+    assert!(audit_bytes.len() >= HEADER_BYTES + LIGHT_FREE_AUDIT_RECORD_BYTES);
+    let mut audit_raw_header = [0u8; HEADER_BYTES]; audit_raw_header.copy_from_slice(&audit_bytes[..HEADER_BYTES]);
+    let audit = read_light_free_audit_header(&audit_raw_header[..]).expect("validate Java v7 light-free audit header");
+    validate_light_free_audit_header(&header, &audit).expect("sidecar identity must match manifest");
+    let expected_full: [u8; LIGHT_FREE_AUDIT_RECORD_BYTES] = audit_bytes[HEADER_BYTES..HEADER_BYTES + LIGHT_FREE_AUDIT_RECORD_BYTES].try_into().unwrap();
+    verify_light_free_audit_pair(
+        Cursor::new(expected_prefix),
+        Cursor::new(expected_full),
+        1,
+        payload_digest_from_header(&raw_header),
+        audit.payload_digest,
+    ).expect("Java manifest and light-free sidecar must authenticate together");
+    assert_eq!(sha256(&java_record), expected_full, "Java sidecar must authenticate Java light-free bytes");
+
+    let source: Box<dyn ChunkSource> = match header.dimension {
+        Dimension::Overworld => Box::new(overworld_chunk_source(42)),
+        Dimension::Nether => Box::new(nether_chunk_source(42)),
+        Dimension::End => Box::new(end_chunk_source(42)),
+    };
+    let column = source.column(header.cx0, header.cz0);
+    let rust_record = light_free_record(&column, header.cx0, header.cz0, header.dimension);
+    if rust_record != java_record {
+        let first = rust_record.iter().zip(&java_record).position(|(left, right)| left != right).unwrap_or(rust_record.len().min(java_record.len()));
+        panic!("light-free content bytes differ at offset {first}: Java length {}, Rust length {}, Java byte {:?}, Rust byte {:?}", java_record.len(), rust_record.len(), java_record.get(first), rust_record.get(first));
+    }
+    assert_eq!(sha256(&rust_record), expected_full, "Rust light-free digest must match Java sidecar");
+    assert_eq!([expected_full[0], expected_full[1]], expected_prefix, "Rust light-free prefix must match Java manifest");
+}
+
 /// Reads any authenticated frozen-world shard strictly sequentially and uses
 /// only one full semantic digest at a time.
 #[test]
@@ -1112,8 +1334,9 @@ fn parity_manifest_streams_before_rust_comparison() {
     let mut raw_header = [0; HEADER_BYTES]; let mut f = File::open(&path).expect("open manifest"); f.read_exact(&mut raw_header).expect("read header");
     let h = read_header(&raw_header[..]).expect("valid parity shard header");
     let raw_packet = h.semantic_version == 6;
+    let light_free = h.semantic_version == 7;
     if std::env::var_os("LODESTONE_LARGE_PARITY_REQUIRE_FULL_GRID").is_some() {
-        let (grid_min, grid_max, grid_count) = if raw_packet {
+        let (grid_min, grid_max, grid_count) = if raw_packet || light_free {
             (
                 support::large_parity_manifest::RAW_GRID_MIN,
                 support::large_parity_manifest::RAW_GRID_MAX,
@@ -1131,18 +1354,19 @@ fn parity_manifest_streams_before_rust_comparison() {
         ));
     }
     let audit = if raw_packet {
-        Some(load_raw_packet_audit(Path::new(&path), &h))
+        let (path, header) = load_raw_packet_audit(Path::new(&path), &h);
+        Some((path, ManifestAuditHeader::Raw(header)))
+    } else if light_free {
+        let (path, header) = load_light_free_audit(Path::new(&path), &h);
+        Some((path, ManifestAuditHeader::LightFree(header)))
     } else {
         None
     };
     if let Some((audit_path, audit_header)) = &audit {
-        verify_raw_packet_audit_files(
-            Path::new(&path),
-            &raw_header,
-            &h,
-            audit_path,
-            audit_header,
-        );
+        match audit_header {
+            ManifestAuditHeader::Raw(header) => verify_raw_packet_audit_files(Path::new(&path), &raw_header, &h, audit_path, header),
+            ManifestAuditHeader::LightFree(header) => verify_light_free_audit_files(Path::new(&path), &raw_header, &h, audit_path, header),
+        }
     } else {
         let mut payload_file = File::open(&path).expect("reopen manifest");
         payload_file.seek(SeekFrom::Start(HEADER_BYTES as u64)).expect("seek payload");
@@ -1179,7 +1403,7 @@ fn parity_manifest_streams_before_rust_comparison() {
     let scan_all = std::env::var_os("LODESTONE_LARGE_PARITY_SCAN_ALL").is_some();
     let target_index = optional_usize_env("LODESTONE_LARGE_PARITY_TARGET_INDEX")
         .unwrap_or_else(|error| panic!("invalid lifecycle target selection: {error}"));
-    if raw_packet && target_index.is_some() {
+    if (raw_packet || light_free) && target_index.is_some() {
         panic!("LODESTONE_LARGE_PARITY_TARGET_INDEX is only supported for semantic lifecycle manifests");
     }
     let batch_size = optional_u64_env("LODESTONE_LARGE_PARITY_BATCH_SIZE")
@@ -1189,10 +1413,10 @@ fn parity_manifest_streams_before_rust_comparison() {
     if batch_size.is_some() {
         eprintln!(
             "large {} parity: authenticated scan-all batch selected ({limit} targets)",
-            if raw_packet { "raw-packet" } else { "semantic" },
+            if raw_packet { "raw-packet" } else if light_free { "light-free" } else { "semantic" },
         );
     }
-    let reference_packets = if scan_all {
+    let reference_packets = if scan_all && !light_free {
         load_reference_packets(dimension, h.cx0, h.cx1, h.cz0, h.cz1, limit)
     } else {
         BTreeMap::new()
@@ -1243,32 +1467,91 @@ fn parity_manifest_streams_before_rust_comparison() {
     } else {
         let width = u64::try_from(i64::from(h.cx1) - i64::from(h.cx0) + 1)
             .expect("authenticated manifest coordinate width fits u64");
-        let prepared_raw_targets = if raw_packet && dimension == Dimension::Nether {
-            Some(raw_packet_targets(&h, limit))
+        let source: Box<dyn ChunkSource> = if light_free {
+            match dimension {
+                Dimension::Overworld => Box::new(overworld_chunk_source(42)),
+                Dimension::Nether => Box::new(nether_chunk_source(42)),
+                Dimension::End => Box::new(end_chunk_source(42)),
+            }
         } else {
-            None
-        };
-        let source: Box<dyn ChunkSource> = match dimension {
+            match dimension {
             // A frozen external world is a retained, settled lifecycle result.
             // Keep the comparator on the server's retained-source path rather than
             // regenerating an isolated column for every packet request.
             Dimension::Overworld => Box::new(retained_chunk_source_for_view_radius(overworld_chunk_source(42), 8)),
             Dimension::Nether => {
-                let source = nether_chunk_source(42);
-                if let Some(targets) = prepared_raw_targets.as_deref() {
-                    let capacity = source.generator().prepare_packet_replay(targets);
-                    eprintln!(
-                        "large raw-packet parity: prepared Nether immutable prefix for {} targets (capacity={capacity})",
-                        targets.len(),
-                    );
-                }
-                Box::new(retained_chunk_source_for_view_radius(source, 8))
+                Box::new(retained_chunk_source_for_view_radius(nether_chunk_source(42), 8))
             }
             Dimension::End => Box::new(retained_chunk_source_for_view_radius(end_chunk_source(42), 8)),
+            }
         };
         let column_for = |cx, cz| -> ChunkColumn { source.column(cx, cz) };
         let mut expected_digest = [0u8; 32];
+        let mut nether_replay_window_end = 0;
         for index in 0..limit {
+            if light_free {
+                let mut expected_prefix = [0u8; RAW_PACKET_HASH_BYTES];
+                expected.read_exact(&mut expected_prefix).expect("manifest light-free hash prefix");
+                let mut expected_full = [0u8; LIGHT_FREE_AUDIT_RECORD_BYTES];
+                expected_audit
+                    .as_mut()
+                    .expect("v7 light-free comparison has an audit reader")
+                    .read_exact(&mut expected_full)
+                    .expect("light-free audit full content digest");
+                let (cx, cz) = raw_packet_target(&h, index, width);
+                let column = column_for(cx, cz);
+                let record = light_free_record(&column, cx, cz, dimension);
+                let actual_full = sha256(&record);
+                let actual_prefix = [actual_full[0], actual_full[1]];
+                if actual_prefix != expected_prefix || actual_full != expected_full {
+                    let mismatch = RawPacketMismatch {
+                        target: (cx, cz),
+                        index,
+                        expected_prefix,
+                        actual_prefix,
+                        expected_full,
+                        actual_full,
+                        payload_bytes: record.len(),
+                    };
+                    if !scan_all {
+                        panic!(
+                            "large light-free parity mismatch at ({cx},{cz}) after {index} matching chunks: expected prefix {}, actual prefix {}, expected full SHA-256 {}, actual full SHA-256 {}, collision={}",
+                            hex(&mismatch.expected_prefix),
+                            hex(&mismatch.actual_prefix),
+                            hex(&mismatch.expected_full),
+                            hex(&mismatch.actual_full),
+                            mismatch.collision(),
+                        );
+                    }
+                    raw_mismatches.push(mismatch);
+                }
+                if (index + 1) % 256 == 0 || index + 1 == limit {
+                    eprintln!("large light-free parity: compared {}/{} chunks (batch boundary at ({cx},{cz}))", index + 1, limit);
+                }
+                continue;
+            }
+            if raw_packet && dimension == Dimension::Nether && index >= nether_replay_window_end {
+                let window_end = nether_packet_replay_window_end(index, width, limit);
+                let targets = raw_packet_targets_for_window(&h, index, window_end, width);
+                let capacity = source
+                    .prepare_packet_replay(&targets)
+                    .expect("Nether source exposes the packet replay seam");
+                let bound = nether_packet_replay_capacity_bound(
+                    width,
+                    NETHER_PACKET_REPLAY_WINDOW_ROWS,
+                );
+                assert!(
+                    capacity <= bound,
+                    "Nether replay cache capacity {capacity} exceeds window bound {bound}"
+                );
+                eprintln!(
+                    "large raw-packet parity: prepared Nether immutable window {}..{} ({} targets, capacity={capacity})",
+                    index,
+                    window_end,
+                    targets.len(),
+                );
+                nether_replay_window_end = window_end;
+            }
             let (expected_prefix, expected_full) = if raw_packet {
                 let mut prefix = [0u8; RAW_PACKET_HASH_BYTES];
                 expected.read_exact(&mut prefix).expect("manifest raw packet hash prefix");
@@ -1283,8 +1566,7 @@ fn parity_manifest_streams_before_rust_comparison() {
                 expected.read_exact(&mut expected_digest).expect("manifest semantic digest");
                 (None, None)
             };
-            let cx = h.cx0 + (index % width) as i32;
-            let cz = h.cz0 + (index / width) as i32;
+            let (cx, cz) = raw_packet_target(&h, index, width);
             let column = column_for(cx, cz);
             let admitted_offsets = initial_admission_neighbour_offsets();
             let admitted_neighbours = admitted_offsets
@@ -1382,6 +1664,12 @@ fn parity_manifest_streams_before_rust_comparison() {
                     .unwrap_or_else(|error| panic!("read {}: {error}", reference_path.display()));
                 let report = packet_component_difference(&reference_packet, &payload, dimension);
                 component_reports.push(((cx, cz), report));
+            }
+            if raw_packet
+                && dimension == Dimension::Nether
+                && index + 1 == nether_replay_window_end
+            {
+                source.reset_packet_replay();
             }
             if (index + 1) % 256 == 0 || index + 1 == limit {
                 eprintln!(
@@ -1655,6 +1943,42 @@ fn nether_packet_replay_cache_preserves_raw_packet_bytes() {
     assert_eq!(prepared_source.generator().pre_decoration_evictions(), 0);
     assert!(baseline_source.generator().pre_decoration_computations() > capacity);
     assert!(baseline_source.generator().pre_decoration_evictions() > 0);
+}
+
+/// Independent seam control for the row-window implementation: packet bytes
+/// and their full digests must match one-shot preparation when a row boundary
+/// releases and rebuilds the immutable pre-decoration cache.
+#[test]
+#[ignore = "long-running raw-byte identity control; see docs/worldgen-large-parity.md"]
+fn nether_packet_replay_window_seam_preserves_raw_packet_bytes_and_digests() {
+    let targets = [(0, 0), (1, 0), (0, 1), (1, 1)];
+    let one_shot_source = nether_chunk_source(42);
+    one_shot_source.generator().prepare_packet_replay(&targets);
+    let one_shot = targets
+        .iter()
+        .map(|&target| nether_packet_payload(&one_shot_source, target))
+        .collect::<Vec<_>>();
+
+    let windowed_source = nether_chunk_source(42);
+    let first_row = [targets[0], targets[1]];
+    windowed_source.generator().prepare_packet_replay(&first_row);
+    let mut windowed = first_row
+        .iter()
+        .map(|&target| nether_packet_payload(&windowed_source, target))
+        .collect::<Vec<_>>();
+    windowed_source.generator().reset_packet_replay();
+    let second_row = [targets[2], targets[3]];
+    windowed_source.generator().prepare_packet_replay(&second_row);
+    windowed.extend(
+        second_row
+            .iter()
+            .map(|&target| nether_packet_payload(&windowed_source, target)),
+    );
+
+    assert_eq!(one_shot, windowed, "row-window preparation changed packet bytes");
+    let one_shot_digests = one_shot.iter().map(|payload| raw_packet_full_digest(payload)).collect::<Vec<_>>();
+    let windowed_digests = windowed.iter().map(|payload| raw_packet_full_digest(payload)).collect::<Vec<_>>();
+    assert_eq!(one_shot_digests, windowed_digests, "row-window preparation changed packet digests");
 }
 
 fn assert_full_and_pruned_lifecycle_packet_bytes(path: &Path, target: ChunkPos, audit_corner_counts: bool) {

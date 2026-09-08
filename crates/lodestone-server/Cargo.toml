@@ -149,9 +149,8 @@ uuid = { workspace = true }
 # only — native behaviour is byte-for-byte unchanged.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
-# Native worldgen batches use Rayon’s process-wide reusable pool. Keeping this
-# target-gated is load-bearing: the browser uses the same generator serially,
-# with a macrotask yield between columns, and must not link a thread backend.
+# Native world-generation jobs share Rayon’s persistent work-stealing pool;
+# browser builds keep the yielding serial path and never link its thread backend.
 rayon = { workspace = true }
 # World persistence (issue #437): the `.mca` region container and `level.dat`.
 # **Target-gated deliberately.** `lodestone-anvil`'s readers and writers are
@@ -256,6 +255,8 @@ lodestone-testsupport = { workspace = true, features = ["bench-record"] }
 # bench pulls no new code into any non-bench build. Dev-only, so it never
 # reaches this crate's wasm32 surface.
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+libc = "0.2"
+rayon.workspace = true
 tempfile = "3"
 
 # What a server tick costs and how it scales with the population being ticked

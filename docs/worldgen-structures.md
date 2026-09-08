@@ -59,6 +59,27 @@ and that same complete registry position before writing pieces. The 17×17 sourc
 the persistence and retention order; a stable tie-break keeps starts of one structure in that walk's
 order while putting different structure types in the order their decoration lifecycle consumes.
 
+`EndGenerator` memoises each pure `(seed, origin-chunk)` start calculation behind a bounded cache.
+End-city placement enumerates only the random-spread placement cells that can produce an origin in
+its 33×33 window, rather than probing every coordinate in that window. Registries containing a
+context-dependent ring placement fall back to the complete rectangular walk, preserving the same
+candidate superset. Sharing the cached `Arc` still avoids rebuilding the same piece tree while
+preserving start and piece order. The cache is cleared at its ceiling; eviction can repeat work but
+cannot change bytes, because a start depends only on its seed, origin and resolver data. The memo is
+protected for concurrent generators; cold misses compute outside the lock, so unrelated origins can
+proceed in parallel. `end_gen` also compares sequential and concurrent raw columns, including palette
+order. On the release End fixture this reduced a cold 8×8 sweep from 125 to 132 chunks/s with one
+worker and from 481 to 554 chunks/s with eight workers; all worker counts produced the same SHA-256
+content digest.
+
+Structure JSON crosses a strict serde boundary in `structure::json`: placement
+records, jigsaw configurations, pool aliases, and template-pool elements use
+closed discriminated enums and deny unknown fields. Wrong primitive types and
+unknown variants become path-prefixed load errors instead of silently taking a
+default. Processor lists and placed-feature bodies remain explicit string-or-
+inline unions because those registry payloads have their own polymorphic
+schemas; they are handed to their existing parsers unchanged.
+
 Mineshaft starts eagerly retain their complete tree and bounding boxes, because the vertical shift
 depends on the finished tree. Their block-writing walk is replayed for the decorating chunk instead:
 the liquid-shell refusal is clipped to that chunk before the piece writes. This matters at a chunk

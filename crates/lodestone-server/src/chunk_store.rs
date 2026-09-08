@@ -1713,6 +1713,14 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         cache.capacity = cache.capacity.max(want);
     }
 
+    fn prepare_packet_replay(&self, targets: &[(i32, i32)]) -> Option<usize> {
+        self.source.prepare_packet_replay(targets)
+    }
+
+    fn reset_packet_replay(&self) {
+        self.source.reset_packet_replay();
+    }
+
     /// Persists a retained mutation through the inner source, then leaves the
     /// matching cache entry current.
     ///
