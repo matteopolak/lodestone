@@ -364,6 +364,27 @@ pub struct ChunkColumn {
     /// an initial packet consume the same state that storage and later
     /// resident reads see.
     retained_light: Option<lodestone_world::ColumnLight>,
+    /// Lifecycle stage of the retained light snapshot.
+    ///
+    /// A dependency may have allocated and populated light storage without
+    /// ever completing its own centre admission. This metadata is therefore
+    /// separate from the light values and survives explicit-zero snapshots.
+    retained_light_status: Option<RetainedLightStatus>,
+}
+
+/// Lifecycle stage attached to a retained column-light snapshot.
+///
+/// `DependencyInitialized` means the light engine allocated this column while
+/// settling a neighbouring centre; it must still run the centre admission when
+/// this column is later requested as a centre. `CentreSettled` means the
+/// column's own initial admission completed and is the only stage eligible for
+/// the retained-light fast path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetainedLightStatus {
+    /// Storage was initialized as part of another centre's footprint.
+    DependencyInitialized,
+    /// This column's own initial light admission completed.
+    CentreSettled,
 }
 
 impl ChunkColumn {
@@ -408,6 +429,7 @@ impl ChunkColumn {
             motion_blocking: None,
             generation_spawns: Vec::new(),
             retained_light: None,
+            retained_light_status: None,
         }
     }
 
@@ -488,6 +510,7 @@ impl ChunkColumn {
             motion_blocking,
             generation_spawns,
             retained_light: None,
+            retained_light_status: None,
         };
         column.add_generated_block_entities(&generated_block_entities);
         column.recalc_ticking_counts();
@@ -768,6 +791,12 @@ impl ChunkColumn {
         self.retained_light.as_ref()
     }
 
+    /// Returns the lifecycle stage of the retained light snapshot, if any.
+    #[must_use]
+    pub fn retained_light_status(&self) -> Option<RetainedLightStatus> {
+        self.retained_light_status
+    }
+
     /// Installs a complete light snapshot for this column.
     ///
     /// The snapshot spans the column's block sections plus the one-section
@@ -775,7 +804,17 @@ impl ChunkColumn {
     /// encoder should validate that shape before storing it; the encoder also
     /// validates it before consuming a retained value.
     pub fn set_retained_light(&mut self, light: lodestone_world::ColumnLight) {
+        self.set_retained_light_with_status(light, RetainedLightStatus::CentreSettled);
+    }
+
+    /// Installs a retained light snapshot with its explicit admission stage.
+    pub fn set_retained_light_with_status(
+        &mut self,
+        light: lodestone_world::ColumnLight,
+        status: RetainedLightStatus,
+    ) {
         self.retained_light = Some(light);
+        self.retained_light_status = Some(status);
     }
 
     /// Drops the retained light snapshot after a block mutation.
@@ -784,6 +823,7 @@ impl ChunkColumn {
     /// snapshot instead of serving a value computed for the old block grid.
     pub fn clear_retained_light(&mut self) {
         self.retained_light = None;
+        self.retained_light_status = None;
     }
 
     /// Takes this column's pending `SPAWN`-stage creature candidates, leaving
@@ -1689,9 +1729,7 @@ pub trait ChunkSource: Send + Sync {
             .or_else(|| (!resident_only).then(|| fallback.clone()))
             .ok_or(ColumnLightSettlementError::MissingFootprint)?;
         if !replace_existing
-            && current
-                .retained_light()
-                .is_some_and(lodestone_world::ColumnLight::has_nonzero_values)
+            && current.retained_light_status() == Some(RetainedLightStatus::CentreSettled)
         {
             return Ok(current);
         }
