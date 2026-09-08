@@ -142,7 +142,13 @@ fn assert_spawn_column_has_terrain(net: &NetClient, radius: i32) {
         concat!(
             "view_radius {radius}: spawn column ({spawn_x}, {spawn_z}) surface y={surface:?}, ",
             "{solid} non-air blocks, air id {air}"
-        )
+        ),
+        radius = radius,
+        spawn_x = spawn_x,
+        spawn_z = spawn_z,
+        surface = surface,
+        solid = solid,
+        air = air,
     );
 }
 
