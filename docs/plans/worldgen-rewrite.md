@@ -69,6 +69,11 @@ Measured or directly cited defects, not adjectives. Cites are to the tree at `43
   48×384×48 `RegionGrid` string-by-string — ~2.8M get/set pairs per `column()` **even when every
   cache hits** — and `stitch_veg_region` (since removed) calls `state.to_string()` per cell:
   ~885k heap allocations per column, warm. The reference decorates in place and copies nothing.
+  The carver's repeated replaceability, grass, dirt and carve-output decisions now use the
+  grid's interned `StateId`/base-id tables. Tag names and fixed outputs are resolved once at the
+  stage boundary; no state-string allocation or comparison occurs in the 17×17 source-carver
+  block loop. The remaining string-facing vegetation accessors are compatibility shims and are
+  tracked separately under U8 rather than being silently treated as numeric hot-path code.
 - **D3 — per-chunk reconstruction of per-seed state.** `build_aquifer` (`overworld/fill.rs`)
   deep-clones **eight full density trees** per chunk and rebuilds fresh slot caches; nothing is
   pooled or reused across chunks (fresh `Vec`s, grids, palettes, sparse-diff `HashMap`s per call).
