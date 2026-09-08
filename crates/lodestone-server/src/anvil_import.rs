@@ -570,6 +570,12 @@ fn prepare_chunk(
         column.set_motion_blocking(heights);
     }
     let light = light_from_nbt(chunk, min_y, column.section_count())?;
+    // Native records are final-only. The Anvil input may carry a retained
+    // dependency snapshot from an earlier source admission, but this import
+    // boundary has no admission context and stores `light` separately as the
+    // canonical native payload. Drop the attached lifecycle marker so the two
+    // representations cannot disagree on reload.
+    column.clear_retained_light();
     Ok(PreparedChunk {
         column_x,
         column_z,

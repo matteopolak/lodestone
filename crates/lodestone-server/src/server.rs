@@ -2436,7 +2436,8 @@ fn encode_chunk_with_source<P: ServerProtocol>(
         .dimension()
         .unwrap_or(crate::dimension::Dimension::Overworld);
     if !proto.retains_initial_column_light() {
-        return proto.try_encode_chunk_in_dimension(cx, cz, column, dimension);
+        let packet_column = column_for_initial_encode(column);
+        return proto.try_encode_chunk_in_dimension(cx, cz, &packet_column, dimension);
     }
     // The initial packet must be based on a complete, settled 3×3 footprint.
     // Prefer the source's current centre copy because another admission may
@@ -2470,19 +2471,21 @@ fn encode_chunk_with_source<P: ServerProtocol>(
             &mut compute,
         ) {
             Ok(centre) => {
+                let packet_column = column_for_initial_encode(&centre);
                 return proto.try_encode_chunk_with_neighbours_in_dimension(
                     cx,
                     cz,
-                    &centre,
+                    &packet_column,
                     &captured_neighbours,
                     dimension,
                 );
             }
             Err(ColumnLightSettlementError::NoLight) => {
+                let packet_column = column_for_initial_encode(&fallback);
                 return proto.try_encode_chunk_with_neighbours_in_dimension(
                     cx,
                     cz,
-                    &fallback,
+                    &packet_column,
                     &captured_neighbours,
                     dimension,
                 );
@@ -2508,6 +2511,18 @@ fn encode_chunk_with_source<P: ServerProtocol>(
         }
     }
     unreachable!("the bounded initial-light settlement loop always returns")
+}
+
+/// Gives a direct initial-packet encoder only a centre-settled retained light
+/// snapshot. The source settlement path is the authority for promoting a
+/// dependency-initialized column; a `NoLight` result must not let a direct
+/// encoder mistake that intermediate storage for the final centre answer.
+fn column_for_initial_encode(column: &ChunkColumn) -> ChunkColumn {
+    let mut column = column.clone();
+    if column.retained_light().is_some() && column.centre_settled_light().is_none() {
+        column.clear_retained_light();
+    }
+    column
 }
 
 const LIGHT_SETTLEMENT_OPTIMISTIC_RETRIES: usize = 3;
@@ -4110,7 +4125,9 @@ where
                             (join_cx, join_cz),
                             crate::join_scheduler::DEFAULT_FULL_GENERATION_RADIUS,
                         )
-                        .encoding_with(if proto.uses_cross_column_light() {
+                        .encoding_with(if proto.uses_cross_column_light()
+                            || proto.retains_initial_column_light()
+                        {
                             None
                         } else {
                             proto.chunk_encoder()
@@ -5836,7 +5853,7 @@ where
                 exclusive,
                 &mut compute,
             ) {
-                Ok(column) => break 'settle (column.clone(), column.retained_light().cloned()),
+                Ok(column) => break 'settle (column.clone(), column.centre_settled_light().cloned()),
                 Err(ColumnLightSettlementError::NoLight)
                 | Err(ColumnLightSettlementError::MissingFootprint) => {
                     break 'settle (fallback, None)
@@ -5879,7 +5896,8 @@ where
     // module uses — the batch accounting counts these directives, so a bare
     // `encode_chunk` outside one leaves the client's accounting short.
     apply(conn, state, proto.begin_chunk_batch()).await?;
-    let directive = match proto.try_encode_chunk_in_dimension(cx, cz, &column, dimension) {
+    let packet_column = column_for_initial_encode(&column);
+    let directive = match proto.try_encode_chunk_in_dimension(cx, cz, &packet_column, dimension) {
         Ok(directive) => directive,
         Err(error) => return return_chunk_encode_error(conn, proto, state, Some(0), error).await,
     };
@@ -5965,7 +5983,7 @@ where
                 exclusive,
                 &mut compute,
             ) {
-                Ok(column) => break 'settle (column.clone(), column.retained_light().cloned()),
+                Ok(column) => break 'settle (column.clone(), column.centre_settled_light().cloned()),
                 Err(ColumnLightSettlementError::MissingFootprint) => return Ok(()),
                 Err(ColumnLightSettlementError::NoLight) => break 'settle (fallback, None),
                 Err(ColumnLightSettlementError::Conflict) if !exclusive => {
@@ -6000,7 +6018,8 @@ where
     // The lightweight path is optional per protocol family. The already-cloned
     // centre column keeps the compatible full-column fallback non-generating.
     apply(conn, state, proto.begin_chunk_batch()).await?;
-    let directive = match proto.try_encode_chunk_in_dimension(cx, cz, &column, dimension) {
+    let packet_column = column_for_initial_encode(&column);
+    let directive = match proto.try_encode_chunk_in_dimension(cx, cz, &packet_column, dimension) {
         Ok(directive) => directive,
         Err(error) => return return_chunk_encode_error(conn, proto, state, Some(0), error).await,
     };
@@ -16973,7 +16992,7 @@ mod tests {
     /// centre cache entry.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn retained_dependency_light_survives_later_full_serialization() {
+    fn retained_dependency_requires_later_centre_admission() {
         let world_dir = tempfile::tempdir().expect("create dependency retained-light world");
         let region = crate::region_source::RegionChunkSource::new(
             OneColumnSource,
@@ -17013,22 +17032,50 @@ mod tests {
             .cloned()
             .expect("the source batch must retain the dependency snapshot");
         assert_eq!(retained_dependency, dependency_light);
+        assert_eq!(
+            source
+                .column(1, 0)
+                .retained_light_status(),
+            Some(crate::chunk::RetainedLightStatus::DependencyInitialized)
+        );
 
-        let mut expected = lodestone_core::Writer::default();
-        dependency_light.encode(&mut expected);
         let later_column = source.column(1, 0);
         let later = encode_chunk_with_source(&protocol, &source, 1, 0, &later_column)
-            .expect("serialize the retained dependency as a later full column");
+            .expect("admit the retained dependency as the later centre");
         let payload = match later {
             ServerDirective::Send { payload, .. } => payload,
-            other => panic!("later dependency encode emitted {other:?}"),
+            other => panic!("later centre encode emitted {other:?}"),
         };
+        let settled = source
+            .column(1, 0)
+            .centre_settled_light()
+            .cloned()
+            .expect("later centre admission must promote the snapshot");
+        let mut expected = lodestone_core::Writer::default();
+        settled.encode(&mut expected);
         assert_eq!(payload, expected.as_slice());
         assert_eq!(
             computes.load(Ordering::Acquire),
-            1,
-            "later full serialization must consume the retained snapshot verbatim"
+            2,
+            "later centre admission must not consume dependency storage as final"
         );
+    }
+
+    #[test]
+    fn unsettled_retained_light_is_removed_before_a_full_column_fallback() {
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_retained_light_with_status(
+            lodestone_world::ColumnLight::new(column.section_count()),
+            crate::chunk::RetainedLightStatus::DependencyInitialized,
+        );
+
+        let packet_column = column_for_initial_encode(&column);
+
+        assert!(
+            packet_column.retained_light().is_none(),
+            "a dependency snapshot must not reach a full-column encoder"
+        );
+        assert_eq!(packet_column.retained_light_status(), None);
     }
 
     /// A legacy family that does not consume retained snapshots must keep the
