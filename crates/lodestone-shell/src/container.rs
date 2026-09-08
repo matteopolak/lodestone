@@ -71,6 +71,7 @@ pub mod merchant;
 /// cursor) — see `docs/inventory-player-preview.md`. The pose arithmetic lives in
 /// `lodestone_render::gui_entity`; this is the GPU half.
 mod player_preview;
+mod profile;
 mod recipe_book;
 mod renderer;
 /// The stonecutter's recipe-selection scroll list — see its own module doc.

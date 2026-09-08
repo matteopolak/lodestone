@@ -1805,6 +1805,13 @@ impl WindowApp {
             );
         }
 
+        // The special icon pass owns block-entity meshes, sheets and pattern
+        // masks. Build it while renderer bring-up is still the loading phase;
+        // otherwise the first inventory/chest frame containing one of those
+        // items would perform all of that synchronous work inside redraw.
+        hud.prewarm_special_icons(gpu.device(), gpu.queue());
+        container.prewarm_special_icons(gpu.device(), gpu.queue());
+
         // Upload whatever has already meshed; the rest streams in per frame.
         for meshed in self.sim.drain_meshes() {
             render.upload_section(gpu.device(), gpu.queue(), meshed.key, &meshed.mesh);

@@ -7067,6 +7067,13 @@ impl HudRenderer {
         );
     }
 
+    /// Build the block-entity icon pass during renderer bring-up, so the first
+    /// hotbar or container frame containing a special item does not decode
+    /// sheets and pattern masks on the frame thread.
+    pub fn prewarm_special_icons(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        self.icons.prewarm_special(device, queue);
+    }
+
     /// The flat item atlas attached by [`Self::attach_items`], if any.
     ///
     /// Exists so a caller building geometry that draws item icons — the
@@ -7080,8 +7087,8 @@ impl HudRenderer {
     }
 
     /// How many block-entity sheets the **special-renderer** icon pass has
-    /// loaded — `0` until the first frame containing a chest (the pass is built
-    /// lazily) and `0` forever on a jar-less run.
+    /// loaded — `0` until bring-up prewarming succeeds (or until a special
+    /// frame builds it after a reload), and `0` forever on a jar-less run.
     ///
     /// Exists for the pixel gate, and it is not ornamental: a coverage-only
     /// assertion cannot tell "no chest in any slot" from "no pack, so a chest
@@ -7093,8 +7100,8 @@ impl HudRenderer {
         self.icons.special_sheet_count()
     }
 
-    /// Drop the special-renderer icon pass so the next frame rebuilds it against
-    /// the current pack stack — the reload-time counterpart of
+    /// Drop the special-renderer icon pass so bring-up or the next frame rebuilds
+    /// it against the current pack stack — the reload-time counterpart of
     /// [`Self::attach_items`]/[`Self::attach_item_models`], which belongs in the
     /// same reload block they do. See `item_icon::IconRenderer::reload_special`
     /// for why this pass needs a *rebuild* where those two need a re-attach.
