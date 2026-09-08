@@ -2471,6 +2471,8 @@ impl IntegratedServer {
             .flat_map(|cz| cx_range.clone().map(move |cx| (cx, cz)))
             .collect();
         let seed_source = Arc::clone(&source);
+        let seed_ready_source = Arc::clone(&source);
+        let seed_players = player_registry.clone();
         let mob_handle = MobHandle::default();
         let seed_mobs = mob_handle.clone();
         // A third clone, for the handle this constructor returns, so
@@ -2489,6 +2491,19 @@ impl IntegratedServer {
         #[cfg(not(target_arch = "wasm32"))]
         let seed_generation_spawns = generation_spawns.clone();
         let seed_task = spawn_tick_task(&shutdown, async move {
+            // Do not compete with the first join for the cold generator. The
+            // connection owns the same store and must get its spawn column and
+            // initial view onto the wire before background mob seeding starts.
+            // Waiting for the player and the requested seed area to be resident
+            // makes this a pure cache read in the normal singleplayer path;
+            // worlds opened without a client still exit through `shutdown`.
+            while seed_players.is_empty()
+                || !seed_coords.iter().all(|&(cx, cz)| {
+                    seed_ready_source.is_column_resident(cx, cz)
+                })
+            {
+                tokio::time::sleep(crate::tick::TICK_PERIOD).await;
+            }
             let t_seed = lodestone_time::Instant::now();
             tracing::info!(
                 "mob seed task: generating {} columns for mob_area",

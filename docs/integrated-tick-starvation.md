@@ -10,9 +10,20 @@ The integrated server shares a 20 Hz world-tick task with the live chunk cache. 
 
 The shared `run_tick_loop_with_weather_impl` records the three phase durations for every tick as before. When tracing is enabled, it emits a structured event only for a phase lasting at least one 50 ms tick period, including the tick number, phase name, follow-area size, and resident-column count. Native and `wasm32` use the same tick-loop implementation; the environment-variable switch is intentionally native-only.
 
+Integrated mob seeding follows the same boundary: its background task waits for a
+player to join and for its requested seed area to be resident before reading the
+columns. This keeps the cold generator work owned by the join stream until the
+initial terrain is on the wire; seeding then reuses the retained columns instead
+of competing with the first spawn search.
+
 ## How to change it
 
 New periodic tick work must use a resident-only accessor when it reads a bounded `ChunkSource`. Do not add a cold `ChunkSource::column` call to the tick task: generation holds a per-coordinate write gate until the column is complete, so the join stream and the world clock can block one another. Preserve the retry behavior when a column is absent, and keep changes in the shared tick-loop body so native and browser scheduling remain behaviorally aligned.
+
+The mob seed handoff must remain behind the player/residency gate. If the seed
+area is expanded, ensure the join view can populate it; otherwise move the
+additional population work to a later, explicitly scheduled pass rather than
+starting another cold generation burst during login.
 
 The resident-only natural-spawn view is deliberately all-or-nothing. This gives the spawner one stable terrain view rather than a mixture of newly generated and missing columns. A moved or stale area retries on a later tick after streaming has populated the cache.
 
