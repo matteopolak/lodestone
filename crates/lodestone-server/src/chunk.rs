@@ -2989,7 +2989,6 @@ impl EndChunkSource {
             .generator
             .structure_starts(cx, cz)
             .into_iter()
-            .map(std::sync::Arc::new)
             .collect::<Vec<_>>();
         let references = self.generator.structure_references(cx, cz);
 
@@ -3006,8 +3005,7 @@ impl EndChunkSource {
             referenced_starts.extend(
                 self.generator
                     .structure_starts(origin_x, origin_z)
-                    .into_iter()
-                    .map(std::sync::Arc::new),
+                    .into_iter(),
             );
         }
         let chests = crate::structure_loot::chests_for_chunk(
