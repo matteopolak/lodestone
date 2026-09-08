@@ -12,6 +12,20 @@ surface targets. `crates/versions/26.2/tests/server/server_protocol_decorator_es
 proof, one test per verb per direction, each with a control showing the undecorated protocol's own
 behaviour first.
 
+### The explicit native version lock
+
+`lodestone_registry::plugin::VersionDescriptor` is the identity that a
+version-specific native plugin carries beside its decorator. It records the
+family label, negotiated protocol, and privileged native ABI. The host's
+selected descriptor must pass `VersionDescriptor::validate` before the plugin
+is loaded; equality is exact and a failure reports both the required and
+selected family, protocol, and ABI. This check is deliberately separate from
+the trait wrapper: the wrapper supplies packet behaviour, while the descriptor
+prevents that behaviour from being attached to a different wire or registry
+shape. It is an unstable, native-only prerequisite; it does not grant a plugin
+raw pointers, ECS access, sockets, or arbitrary host calls, and it does not yet
+provide the windowed shell's plugin-registration path.
+
 ## How it works
 
 ### Why a plain wrapper struct works at all
@@ -112,9 +126,12 @@ bot built this way gets ProtocolLib-class visibility with no server-side change 
 
 ## Configuration
 
-None of its own. A decorator is a plain Rust generic/trait-object wrapper — no manifest, no feature
-flag, no environment variable. The only "opt-in" is the `Cargo.toml` edge onto a concrete version
-crate, which is also what makes it version-locked.
+The decorator remains a plain Rust generic/trait-object wrapper — no manifest,
+feature flag, or environment variable. A native plugin that participates in a
+host-managed load path also declares a `VersionDescriptor` and validates it
+against the selected host descriptor before construction. The `Cargo.toml`
+edge onto the concrete version crate remains the compile-time opt-in and is
+what supplies the version-specific implementation.
 
 ## Dependencies
 
@@ -124,8 +141,12 @@ crate, which is also what makes it version-locked.
 - Client side: `lodestone-client` (`ClientBuilder`) and `lodestone-model` (`VersionAdapter`,
   `Directive`, `ClientAction`, `ClientEvent`) plus the same version crate for the concrete adapter
   constructor (`lodestone_v26_2::adapter()`/`V770Adapter`).
-- Neither depends on `lodestone-registry`: a decorator names its concrete version crate directly,
-  which is the version-locking cost, not a registry lookup.
+- Native load-time identity: `lodestone-registry::plugin::VersionDescriptor`
+  and `VersionCompatibilityError` for the exact family/protocol/ABI check.
+- A decorator can still name its concrete version crate directly, which is the
+  version-locking cost, not a registry lookup. A host-managed loader may
+  additionally depend on `lodestone-registry` for the descriptor check without
+  changing the decorator's version-specific implementation.
 
 ## See also
 
