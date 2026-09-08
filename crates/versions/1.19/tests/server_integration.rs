@@ -1,4 +1,3 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -62,7 +61,6 @@ fn adapter_block_use_reaches_protocol_762_host_consumer() {
 struct FixtureSource {
     column: Mutex<ChunkColumn>,
     chest: Option<(BlockPos, BlockEntity)>,
-    expose_chest: AtomicBool,
 }
 
 impl FixtureSource {
@@ -72,7 +70,6 @@ impl FixtureSource {
         Self {
             column: Mutex::new(column),
             chest: None,
-            expose_chest: AtomicBool::new(false),
         }
     }
 
@@ -95,24 +92,17 @@ impl FixtureSource {
                     slots,
                 },
             )),
-            expose_chest: AtomicBool::new(false),
         }
     }
 }
 
 impl ChunkSource for FixtureSource {
     fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
-        let mut column = self
+        self
             .column
             .lock()
             .expect("fixture column lock poisoned")
-            .clone();
-        if self.expose_chest.load(Ordering::Acquire) {
-            if let Some((pos, entity)) = &self.chest {
-                column.set_block_entities(vec![(*pos, entity.clone())]);
-            }
-        }
-        column
+            .clone()
     }
 
     fn block_state(&self, x: i32, y: i32, z: i32) -> String {
@@ -325,7 +315,6 @@ async fn joined_protocol_762_chest_moves_a_slot_and_corrects_prediction() {
         .wait_for_chunk(lodestone_client::ChunkPos::new(0, 0), Duration::from_secs(10))
         .await
         .expect("protocol-762 chunk arrives");
-    source.expose_chest.store(true, Ordering::Release);
     handle
         .send_action(ClientAction::UseItemOn {
             hand: Hand::Main,
