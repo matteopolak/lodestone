@@ -10,7 +10,10 @@ use lodestone_auth::friends::{
 };
 
 use crate::friends_preferences::FriendsLocalPreferences;
-use crate::friends_runtime::{FriendsError, FriendsView, FriendsViewState};
+use crate::friends_runtime::{FriendsError, FriendsMutationSuccess, FriendsView, FriendsViewState};
+use crate::menu::edit_box::EditBox;
+use crate::menu::focus::KeyEvent;
+use crate::menu::nav::MenuKey;
 
 use super::options::{self, Placement};
 use super::render::{Align, MenuFrame, MenuLabel, MenuNotice, MenuRow, Origin, Slot, TabEntryView};
@@ -64,15 +67,17 @@ enum Control {
     ToggleRequests,
     ToggleInGameNotifications,
     CycleVisibility,
+    AddFriendField,
     Entry(usize),
     Refresh,
+    AddFriend,
     Primary,
     Secondary,
     Done,
 }
 
 /// Navigation state whose data boundary is [`FriendsView`].
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct FriendsNav {
     view: FriendsView,
     tab: FriendsTab,
@@ -84,10 +89,36 @@ pub struct FriendsNav {
     /// the selected account changes.
     local_preferences: FriendsLocalPreferences,
     local_preferences_save_error: Option<String>,
+    /// Persistent profile-name input; the frame carries a clone so its caret
+    /// and horizontal scroll survive the per-frame menu rebuild.
+    add_friend: EditBox,
+    input_error: Option<FriendsError>,
     /// A second click must not replace the first desired value before the worker
     /// has accepted it. The confirmed value still comes only from `FriendsView`.
     preferences_pending: bool,
     preferences_save_started: bool,
+}
+
+impl Default for FriendsNav {
+    fn default() -> Self {
+        let mut add_friend = EditBox::new(0.0, 0.0, ROW_W, 20.0, "Profile name");
+        add_friend.set_max_length(16);
+        add_friend.hint = Some("Profile name".to_owned());
+        add_friend.widget.focused = true;
+        Self {
+            view: FriendsView::default(),
+            tab: FriendsTab::Friends,
+            selected: 0,
+            scroll: 0.0,
+            intents: Vec::new(),
+            local_preferences: FriendsLocalPreferences::default(),
+            local_preferences_save_error: None,
+            add_friend,
+            input_error: None,
+            preferences_pending: false,
+            preferences_save_started: false,
+        }
+    }
 }
 
 impl Default for FriendsTab {
@@ -153,6 +184,14 @@ impl FriendsNav {
         self.tab = FriendsTab::Friends;
         self.selected = 0;
         self.scroll = 0.0;
+        self.add_friend.set_value("");
+        self.add_friend.widget.focused = true;
+        self.input_error = None;
+    }
+
+    #[must_use]
+    pub fn add_friend_input(&self) -> &str {
+        self.add_friend.value()
     }
 
     /// Land on the account-scoped Settings tab when the Online options page
@@ -182,6 +221,7 @@ impl FriendsNav {
         } else {
             (self.selected + controls.len() - 1) % controls.len()
         };
+        self.sync_add_friend_focus();
         self.scroll_to_selected();
     }
 
@@ -200,6 +240,24 @@ impl FriendsNav {
         };
         self.hover_row(row);
         self.activate(control)
+    }
+
+    /// Handles text entry before ordinary Friends navigation. Enter submits
+    /// the field; editing keys stay in the persistent [`EditBox`].
+    pub fn handle_key(&mut self, key: MenuKey) -> bool {
+        if self.tab != FriendsTab::Friends || !self.add_friend.widget.focused {
+            return false;
+        }
+        match key {
+            MenuKey::Char(ch) => self.add_friend.handle_char(ch),
+            MenuKey::Enter => {
+                self.queue_add_friend();
+                true
+            }
+            MenuKey::Edit(event) => self.add_friend.handle_key(event),
+            other => KeyEvent::from_menu_key(other)
+                .is_some_and(|event| self.add_friend.handle_key(event)),
+        }
     }
 
     pub fn enter(&mut self) -> bool {
@@ -236,10 +294,16 @@ impl FriendsNav {
     fn controls(&self) -> Vec<Control> {
         let mut controls = vec![Control::Tab(FriendsTab::Friends), Control::Tab(FriendsTab::Pending)];
         controls.push(Control::Tab(FriendsTab::Settings));
+        if self.add_friend_control_visible() {
+            controls.push(Control::AddFriendField);
+        }
         controls.extend(self.preference_controls());
         controls.extend((0..self.entries().len()).map(Control::Entry));
         if self.view.account.is_some() {
             controls.push(Control::Refresh);
+            if self.tab == FriendsTab::Friends {
+                controls.push(Control::AddFriend);
+            }
         }
         if self.selected_entry().is_some() {
             controls.push(Control::Primary);
@@ -254,6 +318,9 @@ impl FriendsNav {
     fn visible_controls(&self) -> Vec<Control> {
         let mut controls = vec![Control::Tab(FriendsTab::Friends), Control::Tab(FriendsTab::Pending)];
         controls.push(Control::Tab(FriendsTab::Settings));
+        if self.add_friend_control_visible() {
+            controls.push(Control::AddFriendField);
+        }
         controls.extend(self.preference_controls());
         let entries = self.entries();
         if let Some(list) = list_spec(entries.len(), self.scroll)
@@ -263,6 +330,9 @@ impl FriendsNav {
         }
         if self.view.account.is_some() {
             controls.push(Control::Refresh);
+            if self.tab == FriendsTab::Friends {
+                controls.push(Control::AddFriend);
+            }
         }
         if self.selected_entry().is_some() {
             controls.push(Control::Primary);
@@ -279,8 +349,23 @@ impl FriendsNav {
         // selected, so use their fixed count rather than re-entering `controls`.
         let index = self
             .selected
-            .checked_sub(TAB_LABELS.len() + self.preference_controls().len())?;
+            .checked_sub(TAB_LABELS.len() + self.add_friend_control_count() + self.preference_controls().len())?;
         self.entries().into_iter().nth(index)
+    }
+
+    fn add_friend_control_visible(&self) -> bool {
+        self.tab == FriendsTab::Friends && self.view.account.is_some()
+    }
+
+    fn add_friend_control_count(&self) -> usize {
+        usize::from(self.add_friend_control_visible())
+    }
+
+    fn sync_add_friend_focus(&mut self) {
+        self.add_friend.widget.focused = self
+            .controls()
+            .get(self.selected)
+            .is_some_and(|control| *control == Control::AddFriendField);
     }
 
     fn preference_controls(&self) -> Vec<Control> {
@@ -323,11 +408,17 @@ impl FriendsNav {
     }
 
     fn activate(&mut self, control: Control) -> bool {
+        if control != Control::AddFriendField {
+            self.add_friend.widget.focused = false;
+        }
         match control {
             Control::Tab(tab) => {
                 self.tab = tab;
                 self.selected = 0;
                 self.scroll = 0.0;
+                if tab == FriendsTab::Friends && self.view.account.is_some() {
+                    self.add_friend.widget.focused = true;
+                }
                 false
             }
             Control::ToggleFriends => self.queue_preferences(|preferences| {
@@ -344,9 +435,17 @@ impl FriendsNav {
             Control::CycleVisibility => self.queue_local_preferences(|preferences| {
                 preferences.presence_visibility = preferences.presence_visibility.next();
             }),
+            Control::AddFriendField => {
+                self.add_friend.widget.focused = true;
+                false
+            }
             Control::Entry(_) => false,
             Control::Refresh if self.view.account.is_some() => {
                 self.intents.push(FriendsIntent::Refresh);
+                false
+            }
+            Control::AddFriend if self.view.account.is_some() => {
+                self.queue_add_friend();
                 false
             }
             Control::Primary => self.queue_selected(false),
@@ -366,6 +465,17 @@ impl FriendsNav {
         };
         self.intents.push(FriendsIntent::Mutate(mutation));
         false
+    }
+
+    fn queue_add_friend(&mut self) {
+        let name = self.add_friend.value().trim();
+        if name.is_empty() {
+            self.input_error = Some(FriendsError::InvalidInput);
+            return;
+        }
+        self.input_error = None;
+        self.intents
+            .push(FriendsIntent::Mutate(FriendMutation::SendByName(name.to_owned())));
     }
 
     fn queue_preferences(&mut self, change: impl FnOnce(&mut FriendsPreferences)) -> bool {
@@ -479,13 +589,43 @@ pub fn frame(nav: &FriendsNav) -> MenuFrame<'static> {
     let entries = nav.entries();
     let mut rows = Vec::new();
     for tab in [FriendsTab::Friends, FriendsTab::Pending, FriendsTab::Settings] {
+        let pending_count = nav
+            .view
+            .snapshot
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.incoming.len() + snapshot.outgoing.len());
+        let label = if tab == FriendsTab::Pending && pending_count > 0 {
+            format!("{} ({pending_count})", TAB_LABELS[tab.index()])
+        } else {
+            TAB_LABELS[tab.index()].to_owned()
+        };
         rows.push(MenuRow {
-            label: TAB_LABELS[tab.index()].to_owned(),
+            label,
             enabled: true,
             tab: Some(TabEntryView {
                 index: tab.index(),
                 count: TAB_LABELS.len(),
                 selected: tab == nav.tab,
+            }),
+            ..Default::default()
+        });
+    }
+
+    if nav.add_friend_control_visible() {
+        rows.push(MenuRow {
+            label: nav.add_friend.value().to_owned(),
+            detail: "Profile name".to_owned(),
+            enabled: true,
+            field: true,
+            edit: Some(nav.add_friend.clone()),
+            slot: Some(Slot {
+                origin: Origin::ScreenTop,
+                dx: -ROW_W * 0.5,
+                // The tab strip and account label occupy the top band; this
+                // field sits in the remaining gap above the relationship list.
+                dy: HEADER_H - 24.0,
+                w: ROW_W,
+                h: 20.0,
             }),
             ..Default::default()
         });
@@ -556,6 +696,9 @@ pub fn frame(nav: &FriendsNav) -> MenuFrame<'static> {
     let mut footer = Vec::new();
     if nav.view.account.is_some() {
         footer.push("Refresh");
+        if nav.tab == FriendsTab::Friends {
+            footer.push("Send Request");
+        }
     }
     if let Some(label) = nav.primary_label() {
         footer.push(label);
@@ -682,11 +825,15 @@ fn notice(nav: &FriendsNav) -> Option<MenuNotice> {
         });
     }
     let view = &nav.view;
-    let text = match view.error {
+    let text = match nav.input_error.or(view.error) {
         Some(FriendsError::Unauthorized | FriendsError::SignedOut) => "Sign in again to use Friends.",
         Some(FriendsError::PrivacyDenied) => "Friends is unavailable for this account.",
         Some(FriendsError::RateLimited) => "Friends is temporarily rate limited.",
-        Some(_) => "Friends could not be updated. Try again later.",
+        Some(FriendsError::UnknownProfile) => "That profile could not be found.",
+        Some(FriendsError::Unavailable) => "Friends service is unavailable right now.",
+        Some(FriendsError::InvalidInput) => "Enter a valid profile name.",
+        Some(FriendsError::MalformedResponse) => "Friends service returned an invalid response.",
+        Some(FriendsError::Rejected) => "The friend request was rejected.",
         None => match view.state {
             FriendsViewState::Disabled if view.account.is_none() => "Select an online account to use Friends.",
             FriendsViewState::Resolving | FriendsViewState::FetchingAttributes | FriendsViewState::FetchingFriends => {
@@ -694,7 +841,14 @@ fn notice(nav: &FriendsNav) -> Option<MenuNotice> {
             }
             FriendsViewState::SavingPreferences => "Saving Friends settings...",
             FriendsViewState::Backoff => "Friends will retry automatically.",
-            _ => return None,
+            _ => match view.mutation_success {
+                Some(FriendsMutationSuccess::RequestSent(_)) => "Friend request sent.",
+                Some(FriendsMutationSuccess::Accepted(_)) => "Friend request accepted.",
+                Some(FriendsMutationSuccess::Declined(_)) => "Friend request declined.",
+                Some(FriendsMutationSuccess::Cancelled(_)) => "Friend request cancelled.",
+                Some(FriendsMutationSuccess::Removed(_)) => "Friend removed.",
+                None => return None,
+            },
         },
     };
     Some(MenuNotice {
@@ -748,6 +902,50 @@ mod tests {
         nav.selected = nav.controls().iter().position(|control| *control == Control::Entry(1)).unwrap();
         nav.activate(Control::Primary);
         assert_eq!(nav.take_intents(), vec![FriendsIntent::Mutate(FriendMutation::Cancel(Uuid::from_u128(2)))]);
+    }
+
+    #[test]
+    fn profile_name_field_emits_send_by_name_and_pending_tab_shows_count() {
+        let mut nav = FriendsNav::default();
+        nav.refresh(ready(FriendsSnapshot {
+            incoming: vec![profile(1, "Alice")],
+            outgoing: vec![profile(2, "Bob")],
+            ..FriendsSnapshot::default()
+        }));
+        for ch in "Dinnerbone".chars() {
+            assert!(nav.handle_key(MenuKey::Char(ch)));
+        }
+        assert!(nav.handle_key(MenuKey::Enter));
+        assert_eq!(
+            nav.take_intents(),
+            vec![FriendsIntent::Mutate(FriendMutation::SendByName("Dinnerbone".to_owned()))]
+        );
+        let pending = frame(&nav);
+        assert_eq!(pending.rows[1].label, "Pending (2)");
+        nav.activate(Control::Tab(FriendsTab::Pending));
+        assert_eq!(frame(&nav).rows[1].label, "Pending (2)");
+    }
+
+    #[test]
+    fn mutation_feedback_keeps_success_and_service_errors_distinct() {
+        let mut nav = FriendsNav::default();
+        let mut view = ready(FriendsSnapshot::default());
+        view.mutation_success = Some(FriendsMutationSuccess::RequestSent("Alex".to_owned()));
+        nav.refresh(view);
+        assert_eq!(notice(&nav).expect("success notice").text, "Friend request sent.");
+
+        for (error, text) in [
+            (FriendsError::UnknownProfile, "That profile could not be found."),
+            (FriendsError::Unavailable, "Friends service is unavailable right now."),
+            (FriendsError::InvalidInput, "Enter a valid profile name."),
+            (FriendsError::MalformedResponse, "Friends service returned an invalid response."),
+            (FriendsError::Rejected, "The friend request was rejected."),
+        ] {
+            let mut failed = ready(FriendsSnapshot::default());
+            failed.error = Some(error);
+            nav.refresh(failed);
+            assert_eq!(notice(&nav).expect("error notice").text, text);
+        }
     }
 
     #[test]
