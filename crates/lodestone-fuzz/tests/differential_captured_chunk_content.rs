@@ -18,7 +18,7 @@ use lodestone_v26_2::{
     packets::chunk::{ChunkShape, LevelChunkWithLight},
 };
 use serde::{Deserialize, Serialize};
-use lodestone_world::{Heightmaps, LightData, PalettedContainer};
+use lodestone_world::{height_bits, Heightmaps, LightData, PalettedContainer};
 use tokio::io::DuplexStream;
 use tokio::runtime::{Builder, Runtime};
 use uuid::Uuid;
@@ -291,6 +291,64 @@ fn fixture(name: &str) -> Capture {
     .expect("parse captured chunk content fixture")
 }
 
+/// Independently unpacks the typed-list heightmap prefix from a captured
+/// packet. The production decoder is intentionally not used here: checking
+/// the same bytes through `Heightmaps::decode` would allow an encoder/decoder
+/// agreement on the wrong long layout to pass.
+fn wire_heightmaps(payload: &[u8], shape: &ChunkShape) -> Result<Vec<(u32, Vec<u32>)>, String> {
+    let mut raw = Reader::new(payload);
+    raw.i32().map_err(|error| format!("chunk x: {error}"))?;
+    raw.i32().map_err(|error| format!("chunk z: {error}"))?;
+    let count = raw
+        .var_i32()
+        .map_err(|error| format!("heightmap count: {error}"))?;
+    if count < 0 {
+        return Err(format!("negative heightmap count: {count}"));
+    }
+    let bits = height_bits(shape.world_height);
+    if bits == 0 {
+        return Err("heightmap width is zero".into());
+    }
+    let per_long = 64 / bits as usize;
+    let expected_longs = (256 + per_long - 1) / per_long;
+    let mask = (1u64 << bits) - 1;
+    let mut maps = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let type_id = raw
+            .var_i32()
+            .map_err(|error| format!("heightmap key: {error}"))?;
+        if type_id < 0 {
+            return Err(format!("negative heightmap key: {type_id}"));
+        }
+        let long_count = raw
+            .var_i32()
+            .map_err(|error| format!("heightmap long count: {error}"))?;
+        if long_count < 0 || long_count as usize != expected_longs {
+            return Err(format!(
+                "heightmap {type_id} long count: expected {expected_longs}, got {long_count}"
+            ));
+        }
+        let mut longs = Vec::with_capacity(expected_longs);
+        for _ in 0..expected_longs {
+            longs.push(
+                raw.i64()
+                    .map_err(|error| format!("heightmap {type_id} long: {error}"))?
+                    as u64,
+            );
+        }
+        let values = (0..256)
+            .map(|index| {
+                let long = longs[index / per_long];
+                let shift = (index % per_long) * bits as usize;
+                (long >> shift) & mask
+            })
+            .map(|value| value as u32)
+            .collect();
+        maps.push((type_id as u32, values));
+    }
+    Ok(maps)
+}
+
 fn wire_fluid_counts(payload: &[u8], shape: &ChunkShape) -> Result<Vec<u16>, String> {
     let mut raw = Reader::new(payload);
     raw.i32().map_err(|error| format!("chunk x: {error}"))?;
@@ -382,6 +440,25 @@ fn captured_chunk_content_reaches_public_client_state() {
 fn external_chunk_fixture_preserves_wire_counters_and_light() {
     let capture = captured_fixture();
     let shape = ChunkShape::overworld_1_21();
+
+    let maps = wire_heightmaps(&capture.packet.payload, &shape)
+        .expect("read external heightmaps from raw packet");
+    let mut ids: Vec<_> = maps.iter().map(|(id, _)| *id).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, [1, 4, 5], "external packet heightmap keys");
+    let motion = maps
+        .iter()
+        .find_map(|(id, values)| (*id == 4).then_some(values))
+        .expect("external packet MOTION_BLOCKING map");
+    for height in &capture.motion_blocking_tops {
+        let index = height.pos[0] as usize + height.pos[1] as usize * 16;
+        let actual = motion[index] as i32 + shape.min_y;
+        assert_eq!(
+            actual, height.top_y,
+            "raw MOTION_BLOCKING top at {:?}",
+            height.pos
+        );
+    }
 
     let mut raw = Reader::new(&capture.packet.payload);
     assert_eq!(raw.i32().expect("chunk x"), capture.chunk[0]);

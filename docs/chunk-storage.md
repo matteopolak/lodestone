@@ -64,24 +64,19 @@ later biome ids even when the generated biome names are correct.
 
 ### The `MOTION_BLOCKING` heightmap
 
-The generator computes a real per-column `MOTION_BLOCKING` heightmap (the height of the first block
-from the top that blocks motion or carries a fluid) as the final step of generation, and the server
-carries it across to the encoder rather than sending an empty, well-framed-but-zero-entry heightmap
-as it used to. The wire encoder now sends the three client-visible maps (`WORLD_SURFACE`,
-`MOTION_BLOCKING`, and `MOTION_BLOCKING_NO_LEAVES`) using their explicit registry ids 1, 4, and
-5. A column with no such block anywhere reports height zero (the world's own minimum),
-which is deliberately different from "no heightmap at all" — an absent heightmap tells a real client
-nothing and it computes its own, while a wrong one sent as real data is trusted outright, so sending
-a knowingly-wrong map is worse than sending none. For that reason a column with no generator-derived
-facts available (a freshly constructed, non-generated, or loaded-from-disk column) still sends the
-empty case rather than a guessed one.
+World generation may compute and retain a per-column `MOTION_BLOCKING` snapshot for its own
+consumers, but packet encoding does not trust that snapshot. At serve time the encoder scans the
+current source column and sends the three client-visible maps (`WORLD_SURFACE`, `MOTION_BLOCKING`,
+and `MOTION_BLOCKING_NO_LEAVES`) using their explicit registry ids 1, 4, and 5. Every map uses the
+first block from the top that satisfies its predicate, stored relative to the dimension minimum.
+A column with no matching block anywhere reports height zero (the world's own minimum), which is
+deliberately different from "no heightmap at all" — an absent heightmap tells a real client
+nothing and it computes its own, while a wrong one sent as real data is trusted outright.
 
-This is a **snapshot taken once, at generation time**, not a maintained live value — a later block
-edit does not update it, matching this crate's choice not to persist heightmaps at all and to rely
-on a real client re-deriving them after any edit, the same way vanilla re-derives them on load. The
-no-leaves predicate excludes the generated leaf states explicitly; it is not inferred by
-subtracting the ordinary motion-blocking answer. Each map is derived from the current source column
-that feeds the packet, so imported and edited columns do not inherit a stale generation snapshot.
+Because the scan uses the same resolved state ids that populate the packet sections, freshly
+constructed, generated, imported, loaded, and player-edited columns all produce heightmaps that
+describe the bytes actually sent. The no-leaves predicate excludes leaf states explicitly; it is
+not inferred by subtracting the ordinary motion-blocking answer.
 
 Fluid-bearing states are counted in the section prefix, including waterlogged blocks. The counter
 is read from the exact palette written after it, while the packet retains each fluid state's level
