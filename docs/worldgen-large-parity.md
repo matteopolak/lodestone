@@ -58,7 +58,8 @@ For a persisted-world import/encoder diagnostic, set
 `LODESTONE_LARGE_PARITY_FROZEN_WORLD_ROOT` to a writable copy of the validated
 sealed End world. The gate recomputes the oracle tree digest, checks the
 dimension-specific freeze stamp and authenticated manifest identity, then
-opens one fresh `RegionChunkSource` over the persisted Anvil columns. It reads
+opens one fresh `RegionChunkSource` over the sealed root's `world/` persisted
+Anvil columns. It reads
 the x-fastest/z export prefix in batches of 256 by default (override with
 `LODESTONE_LARGE_PARITY_PERSISTED_BATCH_SIZE`), requires zero generated-column
 fallbacks, and encodes each retained centre through the production V770 End
