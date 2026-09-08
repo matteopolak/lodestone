@@ -78,8 +78,9 @@ use crate::packets::position::Position;
 use crate::packets::settings::{BrandPayload, PlayerAbilities, ResourcePackReceive, Settings};
 use crate::packets::slot::Slot;
 use crate::packets::window::{
-    ChangedSlot, CloseWindow, CraftProgressBar, EnchantItem, HeldItemSlot, ServerboundCloseWindow,
-    ServerboundHeldItemSlot, SetCreativeSlot, WindowClick,
+    ChangedSlot, CloseWindow, CraftProgressBar, EnchantItem, HeldItemSlot, OpenWindow,
+    ServerboundCloseWindow, ServerboundHeldItemSlot, SetCreativeSlot, SetSlot, WindowClick,
+    WindowItems,
 };
 
 /// The protocol this family speaks, and the one a zero-argument [`adapter`]
@@ -853,6 +854,75 @@ const fn click_mode_value(click_type: ContainerClickType) -> i32 {
         ContainerClickType::QuickCraft => 5,
         ContainerClickType::PickupAll => 6,
     }
+}
+
+fn slot_to_item_stack(slot: &Slot) -> Result<Option<ItemStack>, AdapterError> {
+    let Slot::Item { id, count, components, removed } = slot else {
+        return Ok(None);
+    };
+    let name = registry::item_name(*id)
+        .ok_or_else(|| AdapterError::Decode(format!("unknown protocol-766 item registry id {id}")))?;
+    let key: ResourceKey = name
+        .parse()
+        .map_err(|_| AdapterError::Decode(format!("invalid protocol-766 item key {name}")))?;
+    let count = u32::try_from(*count)
+        .map_err(|_| AdapterError::Decode(format!("invalid protocol-766 item count {count}")))?;
+    let mut item = ItemStack::new(key, count);
+    item.components.has_unmodeled = !components.is_empty() || !removed.is_empty();
+    Ok(Some(item))
+}
+
+fn item_stack_to_slot(item: Option<&ItemStack>) -> Result<Slot, AdapterError> {
+    let Some(item) = item else {
+        return Ok(Slot::Empty);
+    };
+    if item.components != Default::default() {
+        return Err(AdapterError::Unsupported(
+            "protocol-766 container packets cannot encode item components".to_owned(),
+        ));
+    }
+    let name = item.item.to_string();
+    let id = crate::generated_registry::ITEMS
+        .iter()
+        .find_map(|&(id, candidate)| (candidate == name).then_some(id))
+        .ok_or_else(|| AdapterError::Encode(format!("unknown item registry key {name}")))?;
+    let count = i8::try_from(item.count)
+        .map_err(|_| AdapterError::Encode(format!("item count {} overflows i8", item.count)))?;
+    if count <= 0 {
+        return Err(AdapterError::Encode(format!("item count {count} is not positive")));
+    }
+    Ok(Slot::Item { id, count, components: Vec::new(), removed: Vec::new() })
+}
+
+fn menu_type(id: i32) -> Option<ResourceKey> {
+    Some(match id {
+        0 => "minecraft:generic_9x1",
+        1 => "minecraft:generic_9x2",
+        2 => "minecraft:generic_9x3",
+        3 => "minecraft:generic_9x4",
+        4 => "minecraft:generic_9x5",
+        5 => "minecraft:generic_9x6",
+        6 => "minecraft:generic_3x3",
+        7 => "minecraft:crafter_3x3",
+        8 => "minecraft:anvil",
+        9 => "minecraft:beacon",
+        10 => "minecraft:blast_furnace",
+        11 => "minecraft:brewing_stand",
+        12 => "minecraft:crafting",
+        13 => "minecraft:enchantment",
+        14 => "minecraft:furnace",
+        15 => "minecraft:grindstone",
+        16 => "minecraft:hopper",
+        17 => "minecraft:lectern",
+        18 => "minecraft:loom",
+        19 => "minecraft:merchant",
+        20 => "minecraft:shulker_box",
+        21 => "minecraft:smithing",
+        22 => "minecraft:smoker",
+        23 => "minecraft:cartography_table",
+        24 => "minecraft:stonecutter",
+        _ => return None,
+    }.parse().ok()?)
 }
 
 /// The ability flag bit set when the player is invulnerable.
@@ -2280,6 +2350,74 @@ impl V766Adapter {
         })])
     }
 
+    /// `minecraft:open_window` — resolve the protocol-local menu holder id
+    /// before exposing the screen to the version-free menu renderer.
+    fn handle_play_open_window(
+        adapter: &V766Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: OpenWindow = adapter.decode_body_exact(payload)?;
+        let menu_type = menu_type(body.inventory_type).ok_or_else(|| {
+            AdapterError::Decode(format!("unknown protocol-766 menu id {}", body.inventory_type))
+        })?;
+        Ok(vec![Directive::Emit(ClientEvent::ScreenOpened {
+            window_id: body.window_id,
+            menu_type,
+            title: Text::from_nbt(&body.window_title.0),
+        })])
+    }
+
+    /// `minecraft:window_items` — convert every component-shaped wire slot
+    /// into the canonical item stack consumed by the client inventory view.
+    fn handle_play_window_items(
+        adapter: &V766Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: WindowItems = adapter.decode_body_exact(payload)?;
+        let items = body
+            .items
+            .iter()
+            .map(slot_to_item_stack)
+            .collect::<Result<Vec<_>, AdapterError>>()?;
+        let carried_item = slot_to_item_stack(&body.carried_item)?;
+        Ok(vec![Directive::Emit(ClientEvent::ContainerContent {
+            window_id: i32::from(body.window_id),
+            state_id: lodestone_model::ContainerStateId::new(u32::try_from(body.state_id).map_err(|_| {
+                AdapterError::Decode(format!("negative container state id {}", body.state_id))
+            })?),
+            items,
+            carried_item,
+        })])
+    }
+
+    /// `minecraft:set_slot` — window zero is the player's inventory, while
+    /// every other id addresses the currently open menu.
+    fn handle_play_set_slot(
+        adapter: &V766Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: SetSlot = adapter.decode_body_exact(payload)?;
+        let item = slot_to_item_stack(&body.item)?;
+        let state_id = lodestone_model::ContainerStateId::new(u32::try_from(body.state_id).map_err(|_| {
+            AdapterError::Decode(format!("negative container state id {}", body.state_id))
+        })?);
+        if body.window_id == 0 {
+            return Ok(vec![Directive::Emit(ClientEvent::InventorySlotChanged {
+                slot: i32::from(body.slot),
+                item,
+            })]);
+        }
+        Ok(vec![Directive::Emit(ClientEvent::ContainerSlot {
+            window_id: i32::from(body.window_id),
+            state_id,
+            slot: i32::from(body.slot),
+            item,
+        })])
+    }
+
     /// `minecraft:craft_progress_bar`.
     fn handle_play_craft_progress_bar(
         adapter: &V766Adapter,
@@ -2923,6 +3061,27 @@ static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = 
         ),
     ),
     (
+        "minecraft:open_window",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_open_window,
+        ),
+    ),
+    (
+        "minecraft:window_items",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_window_items,
+        ),
+    ),
+    (
+        "minecraft:set_slot",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_set_slot,
+        ),
+    ),
+    (
         "minecraft:close_window",
         lodestone_core::dispatch::Handler::new(
             lodestone_core::ProtocolRange::ALL,
@@ -3077,14 +3236,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
         "the command tree has no consumer for this era",
     ),
     lodestone_core::dispatch::IGNORED::new(
-        "minecraft:window_items",
-        "an item stack at this protocol names its item by a numeric id, and no 766 item-id registry exists to resolve one into a canonical key",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:set_slot",
-        "same missing 766 item-id registry as window_items",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
         "minecraft:cookie_request",
         "server cookies have no store in this client",
     ),
@@ -3139,10 +3290,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:open_book",
         "the book screen has no surface for this era",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:open_window",
-        "the screen carries a menu type id, and resolving it needs the same 766 registry window_items lacks",
     ),
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:ping_response",
@@ -3538,8 +3685,11 @@ impl VersionAdapter for V766Adapter {
             }
 
             ClientAction::ContainerClose { window_id } => {
+                let window_id = u8::try_from(*window_id).map_err(|_| {
+                    AdapterError::Encode(format!("window id {window_id} overflows u8"))
+                })?;
                 let body = ServerboundCloseWindow {
-                    window_id: *window_id as u8,
+                    window_id,
                 };
                 Ok(Some((self.ids().close_window, self.encode_body(&body)?)))
             }
@@ -3567,10 +3717,9 @@ impl VersionAdapter for V766Adapter {
             }
             // The model's click shape is this era's exactly — a state id, the
             // client's own view of every slot the click changed, and the
-            // resulting cursor stack — so a click that moves nothing but
-            // empty slots encodes faithfully. A click carrying a real stack
-            // still needs the numeric item id, which is refused rather than
-            // guessed: a wrong id is accepted by the server and applied.
+            // resulting cursor stack. Item keys are translated through this
+            // protocol's own registry table; guessing an id would let a
+            // correction packet silently become a different item.
             ClientAction::ContainerClick {
                 window_id,
                 state_id,
@@ -3580,17 +3729,11 @@ impl VersionAdapter for V766Adapter {
                 changed_slots,
                 carried_item,
             } => {
-                if carried_item.is_some() || changed_slots.iter().any(|entry| entry.item.is_some())
-                {
-                    return Err(AdapterError::Unsupported(
-                        "this era's ContainerClick with a non-empty stack requires a \
-                         ResourceKey -> numeric item-id registry for protocol 766, which does \
-                         not exist yet"
-                            .to_owned(),
-                    ));
-                }
+                let window_id = u8::try_from(*window_id).map_err(|_| {
+                    AdapterError::Encode(format!("window id {window_id} overflows u8"))
+                })?;
                 let body = WindowClick {
-                    window_id: *window_id as u8,
+                    window_id,
                     state_id: state_id.as_wire(),
                     slot: i16::try_from(*slot).map_err(|_| {
                         AdapterError::Encode(format!("container slot {slot} overflows i16"))
@@ -3609,11 +3752,11 @@ impl VersionAdapter for V766Adapter {
                                         entry.slot
                                     ))
                                 })?,
-                                item: Slot::Empty,
+                                item: item_stack_to_slot(entry.item.as_ref())?,
                             })
                         })
                         .collect::<Result<Vec<_>, AdapterError>>()?,
-                    cursor_item: Slot::Empty,
+                    cursor_item: item_stack_to_slot(carried_item.as_ref())?,
                 };
                 Ok(Some((self.ids().window_click, self.encode_body(&body)?)))
             }
