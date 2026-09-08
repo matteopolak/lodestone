@@ -17,7 +17,7 @@ use lodestone_model::{
 };
 use uuid::Uuid;
 
-use crate::chunk::ChunkColumn;
+use crate::chunk::{ChunkColumn, ColumnLightSettlement};
 use crate::dimension::Dimension;
 
 /// The `EntityEvent` constants this crate sends through
@@ -2337,6 +2337,24 @@ pub trait ServerProtocol: Send + Sync {
         self.compute_column_light_with_neighbours_in_dimension(column, neighbours, dimension)
     }
 
+    /// Computes every retained light snapshot produced by one admitted
+    /// footprint. The default wraps the historical centre-only result, keeping
+    /// existing protocol families on their one-column settlement path until a
+    /// version adapter opts into [`ColumnLightSettlement`].
+    fn compute_initial_column_lights_with_neighbours_in_dimension(
+        &self,
+        column: &ChunkColumn,
+        neighbours: &[(i32, i32, ChunkColumn)],
+        dimension: Dimension,
+    ) -> Option<ColumnLightSettlement> {
+        self.compute_initial_column_light_with_neighbours_in_dimension(
+            column,
+            neighbours,
+            dimension,
+        )
+        .map(ColumnLightSettlement::centre)
+    }
+
     /// The same encoder as [`encode_chunk`](Self::encode_chunk), detached from
     /// `&self` so it can be **moved into the blocking worker that generated the
     /// column** — see [`ChunkEncoder`] for the measurement that made this
@@ -3831,6 +3849,19 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         dimension: Dimension,
     ) -> Option<lodestone_world::ColumnLight> {
         (**self).compute_initial_column_light_with_neighbours_in_dimension(
+            column,
+            neighbours,
+            dimension,
+        )
+    }
+
+    fn compute_initial_column_lights_with_neighbours_in_dimension(
+        &self,
+        column: &ChunkColumn,
+        neighbours: &[(i32, i32, ChunkColumn)],
+        dimension: Dimension,
+    ) -> Option<ColumnLightSettlement> {
+        (**self).compute_initial_column_lights_with_neighbours_in_dimension(
             column,
             neighbours,
             dimension,

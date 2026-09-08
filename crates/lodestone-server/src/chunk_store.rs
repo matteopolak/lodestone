@@ -221,7 +221,9 @@ use std::collections::hash_map::Entry as MapEntry;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 
-use crate::chunk::{ChunkColumn, ColumnLightSettlementError, ChunkSource};
+use crate::chunk::{
+    ChunkColumn, ColumnLightSettlement, ColumnLightSettlementError, ChunkSource,
+};
 use crate::chunk_lifecycle::{ChunkLifecycleHandoff, ChunkLifecyclePlan};
 use crate::ticket::{TicketDelta, TicketStoreHandle};
 #[cfg(test)]
@@ -1301,6 +1303,29 @@ impl<S: ChunkSource> ChunkStore<S> {
             .invalidate_retained_light_neighbourhood(cx, cz);
     }
 
+    /// Replaces every cached column in one footprint, then forwards the same
+    /// complete batch to the wrapped source. The caller owns all coordinate
+    /// gates, so no block mutation can observe a partially committed light
+    /// admission between these two retention layers.
+    fn store_resident_columns_inner(&self, columns: &[(i32, i32, ChunkColumn)]) -> bool {
+        let cached = {
+            let mut guard = self.lock();
+            let cache = &mut *guard;
+            let stamp = cache.next_stamp();
+            let mut cached = false;
+            for &(cx, cz, ref column) in columns {
+                if let Some(entry) = cache.columns.get_mut(&(cx, cz)) {
+                    entry.column = column.clone();
+                    entry.last_used = stamp;
+                    cached = true;
+                }
+            }
+            cached
+        };
+        let stored = self.source.store_resident_columns(columns);
+        cached || stored
+    }
+
     fn light_coordinates(
         cx: i32,
         cz: i32,
@@ -1380,6 +1405,43 @@ impl<S: ChunkSource> ChunkStore<S> {
             .collect::<Result<Vec<_>, _>>()?;
         Ok((centre_column, neighbours))
     }
+
+    fn settled_columns(
+        snapshot: &ChunkWriteSnapshot,
+        centre: (i32, i32),
+        neighbour_offsets: &[(i32, i32)],
+        settlement: &ColumnLightSettlement,
+    ) -> Result<(Vec<(i32, i32, ChunkColumn)>, ChunkColumn), ColumnLightSettlementError> {
+        let mut updates = Vec::new();
+        let mut settled_centre = None;
+        for (offset, light) in settlement.iter() {
+            if offset != (0, 0) && !neighbour_offsets.contains(&offset) {
+                return Err(ColumnLightSettlementError::MissingFootprint);
+            }
+            let coordinate = (centre.0 + offset.0, centre.1 + offset.1);
+            let observation = snapshot
+                .observations
+                .iter()
+                .find(|observation| observation.chunk == coordinate)
+                .ok_or(ColumnLightSettlementError::MissingFootprint)?;
+            let mut column = observation.column.clone();
+            column.set_retained_light(light.clone());
+            if offset == (0, 0) {
+                settled_centre = Some(column.clone());
+            }
+            updates.push((coordinate.0, coordinate.1, column));
+        }
+        let settled_centre = settled_centre
+            .or_else(|| {
+                snapshot
+                    .observations
+                    .iter()
+                    .find(|observation| observation.chunk == centre)
+                    .map(|observation| observation.column.clone())
+            })
+            .ok_or(ColumnLightSettlementError::MissingFootprint)?;
+        Ok((updates, settled_centre))
+    }
 }
 
 impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
@@ -1414,6 +1476,17 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         drop(lease);
     }
 
+    fn store_resident_columns(&self, columns: &[(i32, i32, ChunkColumn)]) -> bool {
+        let coordinates = columns
+            .iter()
+            .map(|&(cx, cz, _)| (cx, cz))
+            .collect::<Vec<_>>();
+        let lease = self.write_gates.acquire_many(&coordinates, true);
+        let stored = self.store_resident_columns_inner(columns);
+        drop(lease);
+        stored
+    }
+
     /// Captures the complete light footprint, computes outside the cache lock,
     /// then commits only when every captured coordinate revision is still
     /// current. The exclusive path is the bounded final attempt: all
@@ -1432,6 +1505,41 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
             &ChunkColumn,
             &[(i32, i32, ChunkColumn)],
         ) -> Option<lodestone_world::ColumnLight>,
+    ) -> Result<ChunkColumn, ColumnLightSettlementError> {
+        let mut compute_batch = |centre: &ChunkColumn,
+                                 neighbours: &[(i32, i32, ChunkColumn)]| {
+            compute(centre, neighbours).map(ColumnLightSettlement::centre)
+        };
+        self.settle_resident_column_lights_with_neighbours(
+            cx,
+            cz,
+            fallback,
+            neighbour_offsets,
+            resident_only,
+            replace_existing,
+            exclusive,
+            &mut compute_batch,
+        )
+    }
+
+    /// Captures a complete light footprint, computes outside the cache lock,
+    /// then commits every returned snapshot only when every captured coordinate
+    /// revision is still current. The exclusive path holds every dependency
+    /// gate through compute and commit, giving the bounded retry loop a
+    /// guaranteed-progress final attempt.
+    fn settle_resident_column_lights_with_neighbours(
+        &self,
+        cx: i32,
+        cz: i32,
+        fallback: &ChunkColumn,
+        neighbour_offsets: &[(i32, i32)],
+        resident_only: bool,
+        replace_existing: bool,
+        exclusive: bool,
+        compute: &mut dyn FnMut(
+            &ChunkColumn,
+            &[(i32, i32, ChunkColumn)],
+        ) -> Option<ColumnLightSettlement>,
     ) -> Result<ChunkColumn, ColumnLightSettlementError> {
         let centre = (cx, cz);
         if !replace_existing {
@@ -1478,13 +1586,17 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
                 drop(lease);
                 return Ok(centre_column);
             }
-            let Some(light) = compute(&centre_column, &neighbours) else {
+            let Some(settlement) = compute(&centre_column, &neighbours) else {
                 drop(lease);
                 return Err(ColumnLightSettlementError::NoLight);
             };
-            let mut settled = centre_column;
-            settled.set_retained_light(light);
-            let _ = self.store_resident_column_inner(cx, cz, &settled);
+            let (updates, settled) = Self::settled_columns(
+                &snapshot,
+                centre,
+                neighbour_offsets,
+                &settlement,
+            )?;
+            let _ = self.store_resident_columns_inner(&updates);
             lease.bump_revision = true;
             drop(lease);
             return Ok(settled);
@@ -1504,13 +1616,17 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         if !replace_existing && centre_column.retained_light().is_some() {
             return Ok(centre_column);
         }
-        let Some(light) = compute(&centre_column, &neighbours) else {
+        let Some(settlement) = compute(&centre_column, &neighbours) else {
             return Err(ColumnLightSettlementError::NoLight);
         };
-        let mut settled = centre_column;
-        settled.set_retained_light(light);
+        let (updates, settled) = Self::settled_columns(
+            &snapshot,
+            centre,
+            neighbour_offsets,
+            &settlement,
+        )?;
         self.write_gates
-            .try_commit(snapshot, || self.store_resident_column_inner(cx, cz, &settled))
+            .try_commit(snapshot, || self.store_resident_columns_inner(&updates))
             .map(|_| settled)
             .map_err(|()| ColumnLightSettlementError::Conflict)
     }
