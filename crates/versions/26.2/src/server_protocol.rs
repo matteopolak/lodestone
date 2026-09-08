@@ -2703,7 +2703,7 @@ fn encode_column_body(
                 &synthesized
             }
         };
-        section_blob.i16(section.non_air_count() as i16);
+        section_blob.i16(packet_non_empty_block_count(section) as i16);
         section_blob.i16(fluid_count(section) as i16);
         section.block_states().encode(&mut section_blob);
         section.biomes().encode(&mut section_blob);
@@ -2806,6 +2806,25 @@ fn fluid_count(section: &ChunkSection) -> u16 {
                 .is_some_and(lodestone_data::snow_support::has_fluid_state)
         })
         .count() as u16
+}
+
+/// Counts the states the protocol considers non-empty for its section header.
+/// The world section deliberately has one version-neutral default-air count;
+/// this wire field additionally excludes cave air and void air, whose payload
+/// states must still be retained in an otherwise air-only section.
+fn packet_non_empty_block_count(section: &ChunkSection) -> u16 {
+    (0..section.block_states().entry_count())
+        .filter(|&index| is_non_air_state_id(section.block_states().get(index)))
+        .count() as u16
+}
+
+fn is_non_air_state_id(id: u32) -> bool {
+    lodestone_data::block_states::StateId::new(id).is_some_and(|state| {
+        !matches!(
+            state.block(),
+            Block::Air | Block::CaveAir | Block::VoidAir
+        )
+    })
 }
 
 /// Writes the chunk packet's block-entity array: a VarInt count
@@ -7522,6 +7541,81 @@ mod block_edit_tests {
                 "fluid level at ({x}, {z})"
             );
         }
+    }
+
+    #[test]
+    fn encode_chunk_excludes_all_three_air_variants_from_header_count() {
+        use crate::packets::chunk::LevelChunkWithLight;
+
+        let shape = ChunkShape::overworld_1_21();
+        let mut source = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
+        let entries = [
+            (0, "minecraft:air"),
+            (1, "minecraft:cave_air"),
+            (2, "minecraft:void_air"),
+            (3, "minecraft:stone"),
+            (4, "minecraft:water[level=7]"),
+        ];
+        for (x, state) in entries {
+            source.set_block(x as i32, shape.min_y, 0, state);
+        }
+
+        let ServerDirective::Send { payload, .. } =
+            ServerProtocol::encode_chunk(&V770ServerProtocol, 0, 0, &source)
+        else {
+            panic!("expected Send");
+        };
+        let mut header = Reader::new(&payload);
+        header.i32().expect("chunk x");
+        header.i32().expect("chunk z");
+        Heightmaps::decode(shape.world_height, &mut header).expect("heightmaps");
+        let blob_len = header.var_i32().expect("section blob length") as usize;
+        let mut blob = header.take_reader(blob_len).expect("section blob");
+        assert_eq!(blob.i16().expect("non-empty block count"), 2);
+        assert_eq!(blob.i16().expect("fluid count"), 1);
+
+        let mut decoded_reader = Reader::new(&payload);
+        let decoded = LevelChunkWithLight::decode(&mut decoded_reader, &shape).expect("decode chunk");
+        decoded_reader.ensure_empty().expect("no trailing bytes");
+        for (x, state) in entries {
+            assert_eq!(
+                decoded.column.get_block(x, shape.min_y, 0),
+                resolve_state_id(state),
+                "decoded state at x={x}"
+            );
+        }
+    }
+
+    #[test]
+    fn encode_chunk_retains_cave_air_payload_when_header_count_is_zero() {
+        use crate::packets::chunk::LevelChunkWithLight;
+
+        let shape = ChunkShape::overworld_1_21();
+        let mut source = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
+        source.set_block(0, shape.min_y, 0, "minecraft:cave_air");
+
+        let ServerDirective::Send { payload, .. } =
+            ServerProtocol::encode_chunk(&V770ServerProtocol, 0, 0, &source)
+        else {
+            panic!("expected Send");
+        };
+        let mut header = Reader::new(&payload);
+        header.i32().expect("chunk x");
+        header.i32().expect("chunk z");
+        Heightmaps::decode(shape.world_height, &mut header).expect("heightmaps");
+        let blob_len = header.var_i32().expect("section blob length") as usize;
+        let mut blob = header.take_reader(blob_len).expect("section blob");
+        assert_eq!(blob.i16().expect("non-empty block count"), 0);
+        assert_eq!(blob.i16().expect("fluid count"), 0);
+
+        let mut decoded_reader = Reader::new(&payload);
+        let decoded = LevelChunkWithLight::decode(&mut decoded_reader, &shape).expect("decode chunk");
+        decoded_reader.ensure_empty().expect("no trailing bytes");
+        assert!(decoded.column.section(0).is_some(), "cave-air payload must be retained");
+        assert_eq!(
+            decoded.column.get_block(0, shape.min_y, 0),
+            resolve_state_id("minecraft:cave_air")
+        );
     }
 
     /// The three sent heightmaps do not share one predicate: a top leaf and
