@@ -406,6 +406,10 @@ impl V774ServerProtocol {
 }
 
 impl ServerProtocol for V774ServerProtocol {
+    fn has_player_loaded_packet(&self) -> bool {
+        true
+    }
+
     fn decode(&self, state: State, packet_id: i32, payload: &[u8]) -> ServerBound {
         match state {
             State::Handshaking if packet_id == handshaking::serverbound::INTENTION => {

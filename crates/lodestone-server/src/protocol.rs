@@ -2010,6 +2010,15 @@ pub trait ServerProtocol: Send + Sync {
         true
     }
 
+    /// Whether this wire family has a serverbound marker that tells the host
+    /// the client has finished loading the placement teleport. Families that
+    /// predate that packet are ready as soon as Play begins; keeping the
+    /// capability on the protocol seam prevents their movement and fall
+    /// simulation from being gated on an action they cannot encode.
+    fn has_player_loaded_packet(&self) -> bool {
+        false
+    }
+
     /// Emits the online-mode encryption request, mirroring
     /// `ClientboundHelloPacket`: an empty server-id string, the DER-encoded
     /// RSA public key, the verify-token challenge, and a fixed
@@ -3670,6 +3679,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn has_configuration_phase(&self) -> bool {
         (**self).has_configuration_phase()
+    }
+
+    fn has_player_loaded_packet(&self) -> bool {
+        (**self).has_player_loaded_packet()
     }
 
     fn encode_encryption_request(

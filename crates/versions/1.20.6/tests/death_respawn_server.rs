@@ -116,7 +116,7 @@ async fn hosted_client_survives_a_lethal_fall_and_respawns_at_world_spawn() {
         },
         Box::new(adapter_for(PROTOCOL_1_20_6)),
     )
-    .player_loaded_policy(PlayerLoadedPolicy::Automatic)
+    .player_loaded_policy(PlayerLoadedPolicy::Manual)
     .respawn_policy(RespawnPolicy::Manual)
     .connect_with(client_io);
 
