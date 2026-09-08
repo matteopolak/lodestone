@@ -1004,13 +1004,13 @@ impl FaviconCache {
 /// game is paused, which is exactly the regression [`super::Screen::Paused`]'s
 /// own doc comment warns against.
 ///
-/// [`Screen::Connecting`] is **included**: it is the full-frame
-/// loading screen, with a flat dark backdrop and no rows to interact with, and
-/// nothing behind it worth rendering — no chunk packets arrive until after
-/// login, so the Clear pass that replaces the frame costs nothing. The
-/// *post-login* terrain stream is a different screen ([`Screen::Playing`]) and
-/// stays on the world path as an overlay in `app::redraw` (see its loading
-/// block), for the same reason `Paused`/`Death` do.
+/// [`Screen::Connecting`] is **included**: it is the full-frame loading screen,
+/// with no rows to interact with. During a singleplayer join the app enriches
+/// this frame with the declared view square and its real resident-column
+/// statuses, so the first generated columns can be visible before login is
+/// folded into the shell. The *post-login* terrain stream stays on the world
+/// path as an overlay in `app::redraw` (see its loading block), for the same
+/// reason `Paused`/`Death` do.
 ///
 /// **This function does not have the one exception `frame_for` does.**
 /// `Screen::Settings` stays in the set unconditionally, because every caller

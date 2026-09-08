@@ -13,8 +13,9 @@
 //!   symptom (a dead player held on the death screen sending no chunks,
 //!   `PERFORM_RESPAWN` decoded and discarded, LAN hosting with no tick loop).
 //!   A screen that names its step turns those into "stuck at *this* step".
-//! * [`TerrainProgress`] — the loaded-column count against the count the server
-//!   is going to send, which is what the progress bar is derived from.
+//! * [`TerrainProgress`] — the session-scoped high-water count of loaded
+//!   columns against the count the server is going to send, which is what the
+//!   progress bar is derived from.
 //!
 //! # The rule this module exists to enforce
 //!
@@ -35,7 +36,8 @@
 //!   pre-computed percentage, so a caller cannot round a partial load up to
 //!   "done", and [`TerrainProgress::fraction`] is clamped **below** 1.0 for
 //!   exactly that reason — the screen closes when [`is_level_ready`] says so,
-//!   never because a bar filled.
+//!   never because a bar filled. [`TerrainProgressTracker`] keeps the numerator
+//!   monotonic while the join's resident set changes underneath it.
 //!
 //! # The dismissal condition
 //!
@@ -138,8 +140,8 @@ impl ConnectPhase {
 ///
 /// `expected` is the count the server is actually going to send — the view
 /// square `(2 * view_radius + 1)^2`, the same square `join_view_rings`
-/// partitions — not a guess and not a running maximum. `loaded` is the client's
-/// own loaded-column count.
+/// partitions — not a guess. `loaded` is the client's high-water count of real
+/// resident columns observed within that square.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerrainProgress {
     /// Columns the client has applied.
@@ -179,6 +181,53 @@ impl TerrainProgress {
     #[must_use]
     pub fn detail(self) -> String {
         format!("{} / {} chunks", self.loaded, self.expected)
+    }
+}
+
+/// The session-scoped accumulator behind [`TerrainProgress`].
+///
+/// A client can unload a column while the initial stream is still draining
+/// (for example when the server recentres its view). Reading the resident
+/// count directly would make the loading bar move backwards even though the
+/// client has already observed that work. The tracker keeps the largest real
+/// observation for the current join and exposes it against the declared view
+/// square. It is reset when a new server session starts, and its observation
+/// can be cleared independently when a connected session changes dimension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TerrainProgressTracker {
+    expected: Option<usize>,
+    loaded: usize,
+}
+
+impl TerrainProgressTracker {
+    /// Declare the view square this join is expected to receive.
+    pub fn set_expected(&mut self, expected: usize) {
+        self.expected = Some(expected);
+    }
+
+    /// Record a real resident-column observation without allowing regressions.
+    pub fn observe(&mut self, loaded: usize) {
+        self.loaded = self.loaded.max(loaded);
+    }
+
+    /// Forget the current dimension's observations while retaining its
+    /// declared denominator.
+    pub fn reset_observed(&mut self) {
+        self.loaded = 0;
+    }
+
+    /// Return the current progress snapshot, if a denominator was declared.
+    #[must_use]
+    pub fn snapshot(self) -> Option<TerrainProgress> {
+        self.expected.map(|expected| TerrainProgress {
+            loaded: self.loaded.min(expected),
+            expected,
+        })
+    }
+
+    /// Forget the prior join's observations and denominator.
+    pub fn reset(&mut self) {
+        *self = Self::default();
     }
 }
 
@@ -529,8 +578,8 @@ mod tests {
 
     use super::{
         AssetWait, CLIENT_WAIT_TIMEOUT, ChunkCellStatus, ConnectPhase, MAX_FRACTION,
-        TerrainChunkGrid, TerrainProgress, TerrainWait, WorldWait, assets_ready, is_level_ready,
-        world_wait,
+        TerrainChunkGrid, TerrainProgress, TerrainProgressTracker, TerrainWait, WorldWait,
+        assets_ready, is_level_ready, world_wait,
     };
 
     /// The state a healthy join is in the instant the terrain phase starts: alive,
@@ -895,5 +944,45 @@ mod tests {
         // Only the terrain wait has a real denominator to draw a bar from.
         assert!(WorldWait::Terrain.has_terrain_progress());
         assert!(!WorldWait::ApplyingPack.has_terrain_progress());
+    }
+
+    /// The loading count is a high-water mark for one join: a later unload
+    /// cannot make the visible numerator regress, while reset starts the next
+    /// session at zero. The observed values deliberately move in both
+    /// directions so a direct resident-count implementation fails.
+    #[test]
+    fn terrain_progress_tracker_is_monotonic_until_reset() {
+        let mut tracker = TerrainProgressTracker::default();
+        tracker.set_expected(TerrainProgress::expected_for_radius(1));
+        tracker.observe(3);
+        assert_eq!(tracker.snapshot().map(|p| p.loaded), Some(3));
+        tracker.observe(1);
+        assert_eq!(tracker.snapshot().map(|p| p.loaded), Some(3));
+        tracker.observe(9);
+        assert_eq!(tracker.snapshot().map(|p| p.loaded), Some(9));
+        tracker.observe(20);
+        assert_eq!(
+            tracker.snapshot(),
+            Some(TerrainProgress {
+                loaded: 9,
+                expected: 9,
+            }),
+            "the numerator is bounded by the declared square"
+        );
+
+        tracker.reset_observed();
+        assert_eq!(
+            tracker.snapshot(),
+            Some(TerrainProgress {
+                loaded: 0,
+                expected: 9,
+            }),
+            "a dimension change keeps the denominator but starts its count over"
+        );
+
+        tracker.reset();
+        assert_eq!(tracker.snapshot(), None, "a new session has no denominator yet");
+        tracker.set_expected(4);
+        assert_eq!(tracker.snapshot().map(|p| p.loaded), Some(0));
     }
 }

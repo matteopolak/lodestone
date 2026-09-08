@@ -28,6 +28,24 @@ pub(super) fn shortcut_modifier_held(modifiers: ModifiersState, is_macos: bool) 
     }
 }
 
+/// Build the connection screen from the current phase and any real terrain
+/// observations. Kept pure so the production handoff can be checked without a
+/// window or GPU: the returned frame is the same one `draw_menu` submits.
+#[must_use]
+pub(super) fn connection_loading_frame(
+    phase: crate::menu::loading::ConnectPhase,
+    progress: Option<crate::menu::loading::TerrainProgress>,
+    grid: Option<crate::menu::loading::TerrainChunkGrid>,
+) -> crate::menu::render::MenuFrame<'static> {
+    let label = phase.label();
+    match progress {
+        Some(progress) => crate::menu::render::loading_frame_with_progress_and_grid(
+            label, progress, grid,
+        ),
+        None => crate::menu::render::loading_frame(label),
+    }
+}
+
 impl WindowApp {
     /// Translate one winit key event into a [`MenuKey`], or `None` if the menu
     /// has no use for it.
@@ -613,6 +631,33 @@ impl WindowApp {
         Some(((lx - (rx + half)) / travel).clamp(0.0, 1.0))
     }
 
+    /// Build the loading frame while a singleplayer connection is still on the
+    /// full-frame `Connecting` screen. The integrated server can prepare the
+    /// first columns before the login event reaches the shell, so waiting for
+    /// `Screen::Playing` would skip the only visible frame in a fast join.
+    ///
+    /// This is the production consumer for the real `Sim` observations: the
+    /// frame goes through `MenuRenderer::render` below, where its bar and grid
+    /// become pixels. Multiplayer leaves the optional progress absent because
+    /// it has no trustworthy server-declared denominator.
+    fn connecting_loading_frame(&mut self) -> crate::menu::render::MenuFrame<'static> {
+        // A fast integrated server may have populated the client store before
+        // the first simulation tick. Sample once here so the submitted frame
+        // reflects that real work instead of an avoidable zero.
+        self.sim.observe_terrain_progress();
+        let mut frame = connection_loading_frame(
+            self.sim.connect_phase(),
+            self.sim.terrain_progress(),
+            self.sim.terrain_chunk_grid(),
+        );
+        // `frame_for` normally stamps these canvas-wide facts after dispatch.
+        // Connecting is the one data-bearing path that builds its frame here,
+        // so keep GUI scale, panorama speed, list chrome, and cursor behavior
+        // identical to every other menu screen.
+        crate::menu::render::stamp_canvas_facts(&mut frame, &self.ui, &self.nav);
+        frame
+    }
+
     /// Draw one menu screen. Returns `false` when the current screen is not a
     /// menu, so the caller falls through to the world path.
     pub(super) fn draw_menu(&mut self) -> bool {
@@ -626,22 +671,28 @@ impl WindowApp {
         // waiting for the player to press another key. `handle_chat_key` pumps
         // too, which is what covers a driver that never renders.
         self.pump_command_suggestions();
-        // `frame_for` is the authority on which screens this renderer owns — it
-        // covers the three menu screens *and* the error screen. Asking it,
-        // rather than re-deriving the set here, is what keeps the two from
-        // drifting apart into a screen that is drawn twice or not at all.
-        let Some(frame) = crate::menu::render::frame_for(
-            &self.ui,
-            &self.nav,
-            &self.statuses,
-            &mut self.favicons,
-        ) else {
-            return false;
+        // `frame_for` is the authority on which ordinary menu screens this
+        // renderer owns — it covers the menu and error screens. `Connecting`
+        // is the one data-bearing exception: its frame is enriched here from
+        // the live `Sim`, while it remains the same full-frame screen.
+        let frame = if self.ui.is_connecting() {
+            self.connecting_loading_frame()
+        } else {
+            let Some(frame) = crate::menu::render::frame_for(
+                &self.ui,
+                &self.nav,
+                &self.statuses,
+                &mut self.favicons,
+            ) else {
+                return false;
+            };
+            frame
         };
-        // Menu music. `frame_for` returning `Some` *is* the "a menu screen is up"
-        // predicate — the same expression that decides this function draws at all —
-        // so the music cannot drift out of step with the screen, which asking a
-        // second source would allow. Placed before the GPU guard below on purpose:
+        // Menu music. The frame above is either the ordinary `frame_for` result
+        // or the connection-loading frame, and both cases mean "a menu screen
+        // is up". Keeping the music after that shared choice prevents it from
+        // drifting out of step with what this function draws. Placed before the
+        // GPU guard below on purpose:
         // vanilla's title-screen music plays while the window is still coming up,
         // and gating it on a live swapchain would make music depend on rendering.
         //

@@ -1058,6 +1058,12 @@ impl Sim {
             }
         }
 
+        // The world is authoritative for residency, while the progress bar
+        // owns a session-local high-water mark so unloads cannot make it move
+        // backwards. Sample after applying center/radius updates so this frame
+        // counts the same square the grid draws.
+        self.observe_terrain_progress();
+
         // Start this frame's pickup animations — **inside `poll_net`,
         // ahead of `fold_entities`, and that ordering is the whole trick.**
         // `handleTakeItemEntity` removes the item entity in the same breath as it

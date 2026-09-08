@@ -495,14 +495,13 @@ pub struct Sim {
     /// session task, so it can never advance on a timer. Read by
     /// `WindowApp::drive_ui_from_session`.
     connect_phase: crate::menu::loading::ConnectPhase,
-    /// Columns the initial view will contain, `None` until a session declares
-    /// its view radius (`Sim::set_view_radius`). The progress bar's denominator;
-    /// `None` means "no denominator, so no bar" rather than a guessed one.
-    expected_view_columns: Option<usize>,
-    /// The raw view radius `Sim::set_view_radius` was called with — the same
-    /// value `expected_view_columns` was squared from, kept alongside it
-    /// because the chunk-status grid needs a side length, not an
-    /// area. `None` under the same condition `expected_view_columns` is.
+    /// The initial view's real loaded-column observations. The tracker keeps a
+    /// session-local high-water mark so an unload/recenter cannot make the
+    /// loading bar regress while the initial stream is still settling.
+    terrain_progress: crate::menu::loading::TerrainProgressTracker,
+    /// The raw view radius `Sim::set_view_radius` was called with — kept
+    /// alongside the tracker because the chunk-status grid needs a side
+    /// length, not an area. `None` until the launcher or server declares one.
     expected_view_radius: Option<u32>,
     /// When the terrain-streaming phase began, for
     /// [`crate::menu::loading::CLIENT_WAIT_TIMEOUT`].
