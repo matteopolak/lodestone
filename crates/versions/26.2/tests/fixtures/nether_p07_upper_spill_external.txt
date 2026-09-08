@@ -1,0 +1,9 @@
+# Independent Java P07 export, seed 42, the_nether.
+# Target chunk (-14,-25), source decoration chunk (-14,-26).
+target_chunk=-14,-25
+source_chunk=-14,-26
+world_position=-216,128,-400
+state=minecraft:brown_mushroom
+heightmap_id=1
+heightmap_local=8,0
+heightmap_first_available=129
