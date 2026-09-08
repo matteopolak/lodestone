@@ -1878,19 +1878,26 @@ fn parity_manifest_streams_before_rust_comparison() {
             "large persisted-world import/encoder parity: opening validated End root {} (diagnostic only; generated replay remains acceptance authority)",
             root.display(),
         );
+        let world = root.join("world");
+        assert!(
+            world.is_dir(),
+            "persisted End parity root {} is missing its world directory",
+            root.display(),
+        );
         let persisted = RegionChunkSource::new(
             end_chunk_source(42),
-            &root,
+            &world,
             ServerDimension::End,
             0,
             256,
         )
         .unwrap_or_else(|error| panic!("open validated persisted End root {}: {error}", root.display()));
-        let generated_before = persisted
+        let persisted_save = persisted.save_handle();
+        let generated_before = persisted_save
             .stats()
             .generated
             .load(std::sync::atomic::Ordering::Relaxed);
-        let loaded_before = persisted
+        let loaded_before = persisted_save
             .stats()
             .loaded_from_disk
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -1903,11 +1910,11 @@ fn parity_manifest_streams_before_rust_comparison() {
             &reference_packets,
             persisted_batch_size(),
         );
-        let generated_after = persisted
+        let generated_after = persisted_save
             .stats()
             .generated
             .load(std::sync::atomic::Ordering::Relaxed);
-        let loaded_after = persisted
+        let loaded_after = persisted_save
             .stats()
             .loaded_from_disk
             .load(std::sync::atomic::Ordering::Relaxed);
