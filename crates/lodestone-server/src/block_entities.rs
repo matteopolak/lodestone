@@ -1127,6 +1127,7 @@ struct BlockEntityTickUpdate {
 struct BlockEntityTickCompletion {
     owner: BlockEntityTickOwner,
     serial: usize,
+    plan: u64,
     batch_count: usize,
     updates: Vec<BlockEntityTickUpdate>,
 }
@@ -1179,6 +1180,11 @@ pub fn merge_tick_effect_batches(
 #[derive(Debug, Default)]
 pub struct BlockEntityRegistry {
     entities: HashMap<BlockPos, BlockEntity>,
+    /// The latest non-hopper owner plan issued from this registry.
+    non_hopper_owner_plan: u64,
+    /// The newest non-hopper owner plan accepted by the central writer.
+    /// Keeping this separate rejects replayed region completions.
+    applied_non_hopper_owner_plan: u64,
 }
 
 impl BlockEntityRegistry {
@@ -1253,11 +1259,16 @@ impl BlockEntityRegistry {
     /// enough state to be advanced from this immutable copy.  The caller
     /// filters residency and dispatches these jobs after releasing the
     /// registry lock.
-    fn non_hopper_tick_jobs(&self) -> Vec<BlockEntityTickJob> {
+    fn non_hopper_tick_jobs(&mut self) -> (u64, Vec<BlockEntityTickJob>) {
+        self.non_hopper_owner_plan = self
+            .non_hopper_owner_plan
+            .checked_add(1)
+            .expect("block-entity owner plan generation must not wrap");
+        let plan = self.non_hopper_owner_plan;
         let positions = self.entities.iter().filter_map(|(pos, entity)| {
             (!matches!(entity, BlockEntity::Hopper(_))).then_some(*pos)
         });
-        BlockEntityTickPlan::from_positions(positions)
+        let jobs = BlockEntityTickPlan::from_positions(positions)
             .owner_batches()
             .into_iter()
             .map(|batch| BlockEntityTickJob {
@@ -1276,7 +1287,8 @@ impl BlockEntityRegistry {
                     })
                     .collect(),
             })
-            .collect()
+            .collect();
+        (plan, jobs)
     }
 
     fn non_hopper_count(&self) -> usize {
@@ -1297,7 +1309,24 @@ impl BlockEntityRegistry {
         &mut self,
         mut completions: Vec<BlockEntityTickCompletion>,
     ) -> Vec<BlockEntityTickEffectBatch> {
+        if completions.is_empty() {
+            // No owner means no worker result can mutate a live entity. Keep
+            // the empty-plan fast path used by hopper-only and empty worlds.
+            return Vec::new();
+        }
         let expected_count = completions.first().map_or(0, |batch| batch.batch_count);
+        let plan = completions
+            .first()
+            .map(|batch| batch.plan)
+            .expect("block-entity completion must contain a region plan");
+        assert_eq!(
+            plan, self.non_hopper_owner_plan,
+            "block-entity completion must belong to the latest tick-start plan"
+        );
+        assert!(
+            plan > self.applied_non_hopper_owner_plan,
+            "block-entity completion must not replay an already applied tick-start plan"
+        );
         assert_eq!(
             completions.len(),
             expected_count,
@@ -1333,7 +1362,7 @@ impl BlockEntityRegistry {
             );
         }
 
-        completions
+        let effects = completions
             .into_iter()
             .map(|completion| {
                 let mut effects = Vec::new();
@@ -1365,7 +1394,9 @@ impl BlockEntityRegistry {
                     effects,
                 }
             })
-            .collect()
+            .collect();
+        self.applied_non_hopper_owner_plan = plan;
+        effects
     }
 
     /// Advances only hoppers in the established owner order.
@@ -1611,7 +1642,7 @@ impl BlockEntityHandle {
         is_loaded: &dyn Fn(BlockPos) -> bool,
         workers: usize,
     ) -> Vec<BlockEntityTickEffectBatch> {
-        let mut jobs = self.with(|registry| registry.non_hopper_tick_jobs());
+        let (plan, mut jobs) = self.with(|registry| registry.non_hopper_tick_jobs());
         for job in &mut jobs {
             job.inputs.retain(|input| is_loaded(input.pos));
         }
@@ -1634,6 +1665,7 @@ impl BlockEntityHandle {
             BlockEntityTickCompletion {
                 owner: job.owner,
                 serial: job.serial,
+                plan,
                 batch_count,
                 updates,
             }
@@ -2260,6 +2292,50 @@ mod tests {
             serial_effects,
             "central publication must restore plan order independently of owner completion order"
         );
+    }
+
+    fn empty_non_hopper_completions(
+        plan: u64,
+        jobs: Vec<BlockEntityTickJob>,
+    ) -> Vec<BlockEntityTickCompletion> {
+        let batch_count = jobs.len();
+        jobs.into_iter()
+            .map(|job| BlockEntityTickCompletion {
+                owner: job.owner,
+                serial: job.serial,
+                plan,
+                batch_count,
+                updates: Vec::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    #[should_panic(expected = "latest tick-start plan")]
+    fn non_hopper_region_completions_reject_a_previous_tick() {
+        let mut reg = BlockEntityRegistry::new();
+        reg.insert(
+            BlockPos::new(0, 70, 0),
+            BlockEntity::Furnace(Furnace::new(FurnaceKind::Furnace)),
+        );
+        let (stale_plan, stale_jobs) = reg.non_hopper_tick_jobs();
+        let stale = empty_non_hopper_completions(stale_plan, stale_jobs);
+        let (_current_plan, _current_jobs) = reg.non_hopper_tick_jobs();
+        reg.apply_non_hopper_tick_completions(stale);
+    }
+
+    #[test]
+    #[should_panic(expected = "already applied tick-start plan")]
+    fn non_hopper_region_completions_reject_replay() {
+        let mut reg = BlockEntityRegistry::new();
+        reg.insert(
+            BlockPos::new(0, 70, 0),
+            BlockEntity::Furnace(Furnace::new(FurnaceKind::Furnace)),
+        );
+        let (plan, jobs) = reg.non_hopper_tick_jobs();
+        let completions = empty_non_hopper_completions(plan, jobs);
+        reg.apply_non_hopper_tick_completions(completions.clone());
+        reg.apply_non_hopper_tick_completions(completions);
     }
 
     /// A furnace ticked through the registry behaves exactly like one ticked

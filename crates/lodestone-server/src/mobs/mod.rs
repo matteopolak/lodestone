@@ -141,6 +141,7 @@ pub struct EntityTickEffectBatch {
 #[derive(Debug, Clone)]
 pub(crate) struct EntityPushOwnerBatch {
     owner: EntityTickOwner,
+    plan: u64,
     expected_batch_count: usize,
     effects: Vec<EntityPushEffect>,
 }
@@ -272,10 +273,12 @@ fn merge_entity_push_owner_batches(
         .first()
         .map(|batch| batch.expected_batch_count)
         .expect("entity-push completion must contain every tick-start owner batch");
+    let plan = batches[0].plan;
     let mut owners = std::collections::HashSet::new();
     for batch in &batches {
         assert_eq!(
-            batch.expected_batch_count, expected_batch_count,
+            (batch.plan, batch.expected_batch_count),
+            (plan, expected_batch_count),
             "entity-push completions must originate from one tick-start plan"
         );
         assert!(
@@ -3521,6 +3524,11 @@ pub struct MobSim<'w> {
     /// Keeping this separate from [`leash_owner_plan`](Self::leash_owner_plan)
     /// rejects replayed completions even when they contain only `Keep` effects.
     applied_leash_owner_plan: u64,
+    /// The latest entity-push owner plan issued from this simulation.
+    entity_push_owner_plan: u64,
+    /// The newest entity-push owner plan already applied by the central writer.
+    /// Keeping this separate rejects replayed completions.
+    applied_entity_push_owner_plan: u64,
     /// Cells the last tick's item-settling pass asked [`LiveBlockCollision`] for —
     /// see [`items_settled_probe_count`](Self::items_settled_probe_count).
     item_probe_count: u64,
@@ -4265,6 +4273,8 @@ impl<'w> MobSim<'w> {
             applied_burn_owner_plan: 0,
             leash_owner_plan: 0,
             applied_leash_owner_plan: 0,
+            entity_push_owner_plan: 0,
+            applied_entity_push_owner_plan: 0,
             item_probe_count: 0,
             pending_detonations: Vec::new(),
             pending_grazes: Vec::new(),
@@ -6430,7 +6440,11 @@ impl<'w> MobSim<'w> {
     /// Computes one deferred impulse for every tick-start mob and groups the
     /// results by source chunk. Cross-owner pairs are read-only here; no mob
     /// receives an impulse until the central apply step validates the plan.
-    pub(crate) fn tick_entity_push_owner_batches(&self) -> Vec<EntityPushOwnerBatch> {
+    pub(crate) fn tick_entity_push_owner_batches(&mut self) -> Vec<EntityPushOwnerBatch> {
+        self.entity_push_owner_plan = self
+            .entity_push_owner_plan
+            .checked_add(1)
+            .expect("entity-push owner plan generation must not wrap");
         #[cfg(not(target_arch = "wasm32"))]
         let workers = if self.mobs.len() >= 128 {
             std::thread::available_parallelism()
@@ -6469,7 +6483,16 @@ impl<'w> MobSim<'w> {
                 jobs.push((owner, vec![serial]));
             }
         }
-        let players = &self.players;
+        // Keep the worker closure independent of `MobSim`: the live sim owns
+        // non-`Sync` goal objects, while pushing needs only the immutable
+        // player positions. Copy that small census before dispatching lanes.
+        let player_positions: Vec<Vec3> = self
+            .players
+            .iter()
+            .map(|player| player.perception.position)
+            .collect();
+        let players = &player_positions;
+        let plan = self.entity_push_owner_plan;
         let mut batches = crate::tick_region::run_bounded_owner_jobs(jobs, worker_count, &|(owner, serials)| {
             let effects = serials
                 .into_iter()
@@ -6498,7 +6521,7 @@ impl<'w> MobSim<'w> {
                     for player in players {
                         let touch = (widths[serial] + PLAYER_WIDTH) / 2.0;
                         if let Some((mob_impulse, _)) =
-                            push_impulse(positions[serial], player.perception.position, touch)
+                            push_impulse(positions[serial], *player, touch)
                         {
                             impulse.x += mob_impulse.x;
                             impulse.z += mob_impulse.z;
@@ -6514,6 +6537,7 @@ impl<'w> MobSim<'w> {
                 .collect();
             EntityPushOwnerBatch {
                 owner,
+                plan,
                 expected_batch_count: 0,
                 effects,
             }
@@ -6534,6 +6558,15 @@ impl<'w> MobSim<'w> {
             );
             return;
         }
+        let plan = batches[0].plan;
+        assert_eq!(
+            plan, self.entity_push_owner_plan,
+            "entity-push completion must belong to the latest tick-start plan"
+        );
+        assert!(
+            plan > self.applied_entity_push_owner_plan,
+            "entity-push completion must not replay an already applied tick-start plan"
+        );
         let effects = merge_entity_push_owner_batches(batches);
         assert_eq!(
             effects.len(),
@@ -6551,6 +6584,7 @@ impl<'w> MobSim<'w> {
                 mob.apply_knockback(effect.impulse);
             }
         }
+        self.applied_entity_push_owner_plan = plan;
     }
 
     /// Advances every mob's burn counter one tick and applies the damage it
@@ -12025,9 +12059,28 @@ mod follow_range_tests {
             .collect();
 
         let mut parallel = dense_push_owner_fixture(160);
+        parallel.entity_push_owner_plan = 1;
         let parallel_batches = parallel.tick_entity_push_owner_batches_with_workers(4);
         parallel.apply_entity_push_owner_batches(parallel_batches);
         assert_eq!(mob_velocities(&parallel), expected);
+    }
+
+    #[test]
+    #[should_panic(expected = "latest tick-start plan")]
+    fn entity_push_owner_batches_reject_stale_plan_completions() {
+        let mut sim = push_owner_fixture();
+        let stale = sim.tick_entity_push_owner_batches();
+        let _current = sim.tick_entity_push_owner_batches();
+        sim.apply_entity_push_owner_batches(stale);
+    }
+
+    #[test]
+    #[should_panic(expected = "already applied tick-start plan")]
+    fn entity_push_owner_batches_reject_replayed_completions() {
+        let mut sim = push_owner_fixture();
+        let batches = sim.tick_entity_push_owner_batches();
+        sim.apply_entity_push_owner_batches(batches.clone());
+        sim.apply_entity_push_owner_batches(batches);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
