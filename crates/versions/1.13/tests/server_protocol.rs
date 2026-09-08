@@ -327,6 +327,91 @@ fn block_place_lifts_the_literal_protocol_404_body() {
 }
 
 #[test]
+fn use_entity_decodes_literal_404_attack_interact_and_interact_at_bodies() {
+    let protocol = V404ServerProtocol;
+    let packet_id = play::serverbound::USE_ENTITY;
+
+    // External protocol-404 wire fixture: target 321 (VarInt c1 02), then
+    // action 1 (attack). Attack has no hand, location, or trailing flag.
+    assert_eq!(
+        protocol.decode(State::Play, packet_id, &[0xc1, 0x02, 0x01]),
+        ServerBound::Attack { entity_id: 321 },
+    );
+
+    // External protocol-404 wire fixtures for plain interaction. The final
+    // VarInt is the hand ordinal: 0 is main hand and 1 is off hand.
+    for (hand, body) in [
+        (0, [0xc1, 0x02, 0x00, 0x00]),
+        (1, [0xc1, 0x02, 0x00, 0x01]),
+    ] {
+        assert_eq!(
+            protocol.decode(State::Play, packet_id, &body),
+            ServerBound::InteractEntity {
+                entity_id: 321,
+                hand,
+                using_secondary_action: false,
+            },
+            "plain interaction hand {hand} must retain its protocol ordinal",
+        );
+    }
+
+    // External protocol-404 wire fixture for interact-at: target 321, action
+    // 2, hit point (0.25, 0.75, -0.5), then off hand. The server currently has
+    // no part-specific mob model, but all three floats must still be consumed
+    // before the hand and complete-frame check can succeed.
+    const INTERACT_AT: [u8; 16] = [
+        0xc1, 0x02, 0x02, // target, interact-at
+        0x3e, 0x80, 0x00, 0x00, // x = 0.25
+        0x3f, 0x40, 0x00, 0x00, // y = 0.75
+        0xbf, 0x00, 0x00, 0x00, // z = -0.5
+        0x01, // off hand
+    ];
+    assert_eq!(
+        protocol.decode(State::Play, packet_id, &INTERACT_AT),
+        ServerBound::InteractEntity {
+            entity_id: 321,
+            hand: 1,
+            using_secondary_action: false,
+        },
+    );
+}
+
+#[test]
+fn use_entity_rejects_invalid_404_forms_and_non_play_state() {
+    let protocol = V404ServerProtocol;
+    let packet_id = play::serverbound::USE_ENTITY;
+    let attack = [0xc1, 0x02, 0x01];
+
+    for (label, body) in [
+        ("truncated target", &[0xc1][..]),
+        ("truncated action", &[0xc1, 0x02][..]),
+        ("plain interaction without hand", &[0xc1, 0x02, 0x00][..]),
+        ("interact-at without coordinates", &[0xc1, 0x02, 0x02][..]),
+        ("unknown action", &[0xc1, 0x02, 0x03][..]),
+        ("plain interaction invalid hand", &[0xc1, 0x02, 0x00, 0x02][..]),
+        (
+            "interact-at invalid hand",
+            &[
+                0xc1, 0x02, 0x02, 0x3e, 0x80, 0x00, 0x00, 0x3f, 0x40, 0x00, 0x00, 0xbf,
+                0x00, 0x00, 0x00, 0x02,
+            ][..],
+        ),
+        ("attack with trailing byte", &[0xc1, 0x02, 0x01, 0x00][..]),
+    ] {
+        assert_eq!(
+            protocol.decode(State::Play, packet_id, body),
+            ServerBound::Ignored,
+            "{label} must not reach an interaction consumer",
+        );
+    }
+    assert_eq!(
+        protocol.decode(State::Configuration, packet_id, &attack),
+        ServerBound::Ignored,
+        "use_entity must remain Play-only",
+    );
+}
+
+#[test]
 fn registry_selected_arm_animation_connects_protocol_404_to_the_shared_swing_broadcast() {
     let protocol = lodestone_registry::server_protocol_for_protocol(404)
         .expect("protocol 404 must resolve to its hosted server protocol");

@@ -146,6 +146,19 @@ pre-1.14 position layout cannot be mistaken for the later layout, while the
 registry-selected adapter-to-host control proves a client action reaches the
 shared placement consumer and cannot bypass the Play-state gate.
 
+Entity interaction now crosses the hosted boundary as well. Protocol 404 keeps
+attack, plain interaction, and precise interaction-at in one `use_entity`
+packet: the first two VarInts identify the target and action, plain interaction
+adds a hand ordinal, and interaction-at adds three hit coordinates before its
+hand. The server consumes the complete action-specific body, accepts only main
+and off-hand ordinals, and lifts both right-click forms to the shared mob
+interaction consumer; the current model deliberately drops the hit coordinates
+because it has no part-specific target. A protocol-404 in-memory integration
+control sends a real client attack and a real client interaction, observes the
+live mob mutation, and receives the passenger update produced by a successful
+mount. Malformed action, hand, truncated, trailing, and non-Play frames remain
+ignored rather than reaching the consumer.
+
 The packed `position` row is the widest single difference from the era above:
 fifteen of the twenty-eight packets whose shape changes between 1.13.2 and
 1.14.4 change *only* because they carry a position. That is why

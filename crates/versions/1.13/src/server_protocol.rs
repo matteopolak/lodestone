@@ -55,6 +55,66 @@ fn decode_full<T: Decode>(payload: &[u8]) -> Option<T> {
     Some(value)
 }
 
+/// Lifts protocol 404's three `use_entity` wire forms into the shared server
+/// interaction inputs. The first two VarInts select the target and action;
+/// attack has no fields after them, plain interaction appends a hand, and
+/// interact-at appends three hit coordinates followed by a hand. The precise
+/// coordinates are consumed and validated even though the current server
+/// interaction model has no part-specific target, so a transposed or trailing
+/// field cannot reach the mob consumer.
+fn entity_use(payload: &[u8]) -> ServerBound {
+    let mut reader = Reader::new(payload);
+    let Ok(target) = reader.var_i32() else {
+        return ServerBound::Ignored;
+    };
+    let Ok(mouse) = reader.var_i32() else {
+        return ServerBound::Ignored;
+    };
+    match mouse {
+        1 if reader.ensure_empty().is_ok() => ServerBound::Attack { entity_id: target },
+        0 => {
+            let Ok(hand) = reader.var_i32() else {
+                return ServerBound::Ignored;
+            };
+            if lodestone_model::Hand::from_wire_ordinal(hand).is_none()
+                || reader.ensure_empty().is_err()
+            {
+                return ServerBound::Ignored;
+            }
+            ServerBound::InteractEntity {
+                entity_id: target,
+                hand,
+                using_secondary_action: false,
+            }
+        }
+        2 => {
+            let Ok(_x) = reader.f32() else {
+                return ServerBound::Ignored;
+            };
+            let Ok(_y) = reader.f32() else {
+                return ServerBound::Ignored;
+            };
+            let Ok(_z) = reader.f32() else {
+                return ServerBound::Ignored;
+            };
+            let Ok(hand) = reader.var_i32() else {
+                return ServerBound::Ignored;
+            };
+            if lodestone_model::Hand::from_wire_ordinal(hand).is_none()
+                || reader.ensure_empty().is_err()
+            {
+                return ServerBound::Ignored;
+            }
+            ServerBound::InteractEntity {
+                entity_id: target,
+                hand,
+                using_secondary_action: false,
+            }
+        }
+        _ => ServerBound::Ignored,
+    }
+}
+
 /// Wraps server-provided plain text in the JSON component carried by this
 /// era's ordinary chat packet.
 fn legacy_text_component(message: &str) -> String {
@@ -343,6 +403,12 @@ impl ServerProtocol for V404ServerProtocol {
                     }
                 })
             }
+            // Protocol 404 keeps attack and both right-click forms in one
+            // `use_entity` packet. Dispatch on its action VarInt before
+            // decoding the action-specific tail; accepting one fixed struct
+            // here would either reject valid interact-at frames or reinterpret
+            // their hit coordinates as a hand.
+            State::Play if packet_id == play::serverbound::USE_ENTITY => entity_use(payload),
             // `arm_animation` is a one-field packet, but it is a visible
             // multiplayer action: the shared host appends it to its broadcast
             // feed and every other connection renders the matching clientbound
@@ -446,6 +512,22 @@ impl ServerProtocol for V404ServerProtocol {
         payload.u8(action);
         ServerDirective::Send {
             packet_id: play::clientbound::ANIMATION,
+            payload: payload.into_vec(),
+        }
+    }
+
+    /// Protocol 404's passenger update is a VarInt vehicle id followed by a
+    /// VarInt count and that many VarInt passenger ids. This is the visible
+    /// result of mounting through the shared `MobSim::interact` consumer.
+    fn encode_set_passengers(&self, vehicle_id: i32, passenger_ids: &[i32]) -> ServerDirective {
+        let mut payload = Writer::default();
+        payload.var_i32(vehicle_id);
+        payload.var_i32(i32::try_from(passenger_ids.len()).unwrap_or(i32::MAX));
+        for &passenger_id in passenger_ids {
+            payload.var_i32(passenger_id);
+        }
+        ServerDirective::Send {
+            packet_id: play::clientbound::SET_PASSENGERS,
             payload: payload.into_vec(),
         }
     }
