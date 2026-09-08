@@ -9,6 +9,7 @@ use lodestone_auth::friends::{
     FriendMutation, FriendProfile, FriendsPreferences, FriendsSnapshot, PresenceStatus,
 };
 
+use crate::friends_preferences::FriendsLocalPreferences;
 use crate::friends_runtime::{FriendsError, FriendsView, FriendsViewState};
 
 use super::options::{self, Placement};
@@ -47,6 +48,13 @@ pub enum FriendsIntent {
     /// The app forwards this value to its private Friends worker; it never
     /// exposes a session to the menu.
     SetPreferences(FriendsPreferences),
+    /// Replace the client-only preferences for the selected profile. The
+    /// profile id is carried so an intent queued before an account switch can
+    /// never be applied to the newly selected account.
+    SetLocalPreferences {
+        profile_id: uuid::Uuid,
+        preferences: FriendsLocalPreferences,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +62,8 @@ enum Control {
     Tab(FriendsTab),
     ToggleFriends,
     ToggleRequests,
+    ToggleInGameNotifications,
+    CycleVisibility,
     Entry(usize),
     Refresh,
     Primary,
@@ -69,6 +79,11 @@ pub struct FriendsNav {
     selected: usize,
     scroll: f32,
     intents: Vec<FriendsIntent>,
+    /// Client-only choices, loaded by `MenuNav` for the selected profile. These
+    /// are optimistic after a click and are replaced from the store whenever
+    /// the selected account changes.
+    local_preferences: FriendsLocalPreferences,
+    local_preferences_save_error: Option<String>,
     /// A second click must not replace the first desired value before the worker
     /// has accepted it. The confirmed value still comes only from `FriendsView`.
     preferences_pending: bool,
@@ -100,6 +115,20 @@ impl FriendsNav {
         self.clamp();
     }
 
+    /// Replace the account-scoped client preferences shown by the Settings tab.
+    /// `MenuNav` calls this after refreshing the credential-free service view so
+    /// the two account boundaries move together in one frame.
+    pub fn set_local_preferences(&mut self, preferences: FriendsLocalPreferences) {
+        self.local_preferences = preferences;
+        self.clamp();
+    }
+
+    /// Surface a failed eager write without making the service view carry local
+    /// storage concerns.
+    pub fn set_local_preferences_save_error(&mut self, error: Option<String>) {
+        self.local_preferences_save_error = error;
+    }
+
     #[must_use]
     pub fn view(&self) -> &FriendsView {
         &self.view
@@ -115,8 +144,22 @@ impl FriendsNav {
         self.scroll
     }
 
+    #[must_use]
+    pub fn local_preferences(&self) -> FriendsLocalPreferences {
+        self.local_preferences
+    }
+
     pub fn reset(&mut self) {
         self.tab = FriendsTab::Friends;
+        self.selected = 0;
+        self.scroll = 0.0;
+    }
+
+    /// Land on the account-scoped Settings tab when the Online options page
+    /// points at Friends. The service view itself is preserved so the account's
+    /// confirmed rows remain visible while the title or pause stack changes.
+    pub fn open_settings(&mut self) {
+        self.tab = FriendsTab::Settings;
         self.selected = 0;
         self.scroll = 0.0;
     }
@@ -241,11 +284,19 @@ impl FriendsNav {
     }
 
     fn preference_controls(&self) -> Vec<Control> {
-        if self.tab == FriendsTab::Settings && self.view.preferences.is_some() {
-            vec![Control::ToggleFriends, Control::ToggleRequests]
-        } else {
-            Vec::new()
+        if self.tab != FriendsTab::Settings {
+            return Vec::new();
         }
+        let mut controls = Vec::new();
+        if self.view.preferences.is_some() {
+            controls.push(Control::ToggleFriends);
+            controls.push(Control::ToggleRequests);
+        }
+        if self.view.account.is_some() {
+            controls.push(Control::ToggleInGameNotifications);
+            controls.push(Control::CycleVisibility);
+        }
+        controls
     }
 
     fn preferences_editable(&self) -> bool {
@@ -253,6 +304,10 @@ impl FriendsNav {
             && self.view.preferences.is_some()
             && !self.preferences_pending
             && matches!(self.view.state, FriendsViewState::Disabled | FriendsViewState::Ready)
+    }
+
+    fn local_preferences_editable(&self) -> bool {
+        self.view.account.is_some()
     }
 
     fn primary_label(&self) -> Option<&'static str> {
@@ -283,6 +338,12 @@ impl FriendsNav {
                     preferences.allow_requests = !preferences.allow_requests;
                 })
             }
+            Control::ToggleInGameNotifications => self.queue_local_preferences(|preferences| {
+                preferences.in_game_notifications = !preferences.in_game_notifications;
+            }),
+            Control::CycleVisibility => self.queue_local_preferences(|preferences| {
+                preferences.presence_visibility = preferences.presence_visibility.next();
+            }),
             Control::Entry(_) => false,
             Control::Refresh if self.view.account.is_some() => {
                 self.intents.push(FriendsIntent::Refresh);
@@ -318,6 +379,23 @@ impl FriendsNav {
         self.preferences_pending = true;
         self.preferences_save_started = false;
         self.intents.push(FriendsIntent::SetPreferences(preferences));
+        false
+    }
+
+    fn queue_local_preferences(
+        &mut self,
+        change: impl FnOnce(&mut FriendsLocalPreferences),
+    ) -> bool {
+        let Some(profile_id) = self.view.account.as_ref().map(|account| account.profile_id) else {
+            return false;
+        };
+        let mut preferences = self.local_preferences;
+        change(&mut preferences);
+        self.local_preferences = preferences;
+        self.intents.push(FriendsIntent::SetLocalPreferences {
+            profile_id,
+            preferences,
+        });
         false
     }
 
@@ -413,6 +491,7 @@ pub fn frame(nav: &FriendsNav) -> MenuFrame<'static> {
         });
     }
 
+    let service_rows = if nav.view.preferences.is_some() { 2.0 } else { 0.0 };
     if nav.tab == FriendsTab::Settings {
         if let Some(preferences) = nav.view.preferences {
             rows.push(preference_row(
@@ -424,6 +503,24 @@ pub fn frame(nav: &FriendsNav) -> MenuFrame<'static> {
                 format!("Allow Friend Requests: {}", on_off(preferences.allow_requests)),
                 HEADER_H + 16.0 + ROW_H + 4.0,
                 nav.preferences_editable() && preferences.enabled,
+            ));
+        }
+        if nav.view.account.is_some() {
+            rows.push(preference_row(
+                format!(
+                    "In-Game Notification: {}",
+                    on_off(nav.local_preferences.in_game_notifications)
+                ),
+                HEADER_H + 16.0 + (ROW_H + 4.0) * service_rows,
+                nav.local_preferences_editable(),
+            ));
+            rows.push(preference_row(
+                format!(
+                    "Visibility: {}",
+                    nav.local_preferences.presence_visibility.label()
+                ),
+                HEADER_H + 16.0 + (ROW_H + 4.0) * (service_rows + 1.0),
+                nav.local_preferences_editable(),
             ));
         }
     }
@@ -490,19 +587,22 @@ pub fn frame(nav: &FriendsNav) -> MenuFrame<'static> {
     if nav.tab == FriendsTab::Settings && nav.view.preferences.is_some() {
         labels.push(MenuLabel {
             text: if nav.view.preferences.is_some_and(|preferences| preferences.enabled) {
-                "Presence is shared while Friends is enabled.".to_owned()
+                format!(
+                    "Presence visibility: {}.",
+                    nav.local_preferences.presence_visibility.label()
+                )
             } else {
                 "Presence is not shared while Friends is disabled.".to_owned()
             },
             origin: Origin::ScreenTop,
             dx: 0.0,
-            dy: HEADER_H + 16.0 + (ROW_H + 4.0) * 2.0 + 12.0,
+            dy: HEADER_H + 16.0 + (ROW_H + 4.0) * (service_rows + 2.0) + 12.0,
             align: Align::Centre,
             colour: widget::ACTIVE_LABEL,
             scale: 1.0,
         });
     }
-    let notice = notice(nav.view());
+    let notice = notice(nav);
     if nav.tab != FriendsTab::Settings && entries.is_empty() && notice.is_none() {
         labels.push(MenuLabel {
             text: if nav.tab == FriendsTab::Friends {
@@ -568,7 +668,20 @@ fn footer_row(label: &str, index: u8, count: u8) -> MenuRow {
     }
 }
 
-fn notice(view: &FriendsView) -> Option<MenuNotice> {
+fn notice(nav: &FriendsNav) -> Option<MenuNotice> {
+    if let Some(error) = nav.local_preferences_save_error.as_deref() {
+        return Some(MenuNotice {
+            text: format!("Could not save Friends settings: {error}"),
+            spans: Vec::new(),
+            origin: Origin::ScreenTop,
+            dx: -140.0,
+            dy: HEADER_H + 18.0,
+            w: 280.0,
+            bottom: FOOTER_H + 10.0,
+            colour: widget::ACTIVE_LABEL,
+        });
+    }
+    let view = &nav.view;
     let text = match view.error {
         Some(FriendsError::Unauthorized | FriendsError::SignedOut) => "Sign in again to use Friends.",
         Some(FriendsError::PrivacyDenied) => "Friends is unavailable for this account.",
@@ -599,6 +712,7 @@ fn notice(view: &FriendsView) -> Option<MenuNotice> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::friends_preferences::FriendsPresenceVisibility;
     use uuid::Uuid;
 
     fn profile(id: u128, name: &str) -> FriendProfile {
@@ -679,6 +793,49 @@ mod tests {
             .rows
             .iter()
             .any(|row| row.label == "Friends: On" && !row.enabled));
+    }
+
+    #[test]
+    fn local_settings_are_profile_scoped_and_emit_the_projected_value() {
+        let mut nav = FriendsNav::default();
+        nav.refresh(ready(FriendsSnapshot::default()));
+        nav.activate(Control::Tab(FriendsTab::Settings));
+        assert!(frame(&nav)
+            .rows
+            .iter()
+            .any(|row| row.label == "In-Game Notification: Off" && row.enabled));
+        assert!(frame(&nav)
+            .rows
+            .iter()
+            .any(|row| row.label == "Visibility: Full" && row.enabled));
+
+        assert!(!nav.click_row(5), "the fifth visible row is the local notification toggle");
+        assert_eq!(
+            nav.take_intents(),
+            vec![FriendsIntent::SetLocalPreferences {
+                profile_id: Uuid::from_u128(99),
+                preferences: FriendsLocalPreferences {
+                    in_game_notifications: true,
+                    presence_visibility: FriendsPresenceVisibility::Full,
+                },
+            }]
+        );
+
+        assert!(!nav.click_row(6), "the sixth visible row is the visibility cycle");
+        assert_eq!(
+            nav.take_intents(),
+            vec![FriendsIntent::SetLocalPreferences {
+                profile_id: Uuid::from_u128(99),
+                preferences: FriendsLocalPreferences {
+                    in_game_notifications: true,
+                    presence_visibility: FriendsPresenceVisibility::Limited,
+                },
+            }]
+        );
+        assert!(frame(&nav)
+            .rows
+            .iter()
+            .any(|row| row.label == "Visibility: Limited"));
     }
 
     #[test]

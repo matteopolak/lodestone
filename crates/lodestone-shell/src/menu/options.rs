@@ -24,8 +24,8 @@
 //!
 //! There is no disabled widget type in vanilla and none here — see
 //! [`super::widget`]'s module docs. [`Cell::is_live`] is what decides it, and
-//! it answers `false` for **100 or 101 of the 143** controls this module
-//! renders. The 43-or-42 live ones break down as:
+//! it answers `false` for **60 or 61 of the 143** controls this module
+//! renders. The 83-or-82 live ones break down as:
 //!
 //! - **25 option rows**, driving **22** distinct [`LiveOption`]s — three of them
 //!   (`textBackgroundOpacity`, `chatOpacity`, `chatLineSpacing`) are placed on
@@ -37,9 +37,10 @@
 //!   `discreteMouseScroll` plus the four remaining Controls rows
 //!   (`toggleAttack`/`toggleUse`/`autoJump`/`sprintWindow`).
 //! - **9 `Done` buttons**, one per page, always live.
-//! - **13 or 12 working nav buttons** — the swing is the root's Online button:
+//! - **17 or 16 working nav buttons** — four Online rows open Friends settings;
+//!   the swing is still the root's Online button:
 //!   live outside a world, the inactive World Options placeholder inside one
-//!   (see [`online_cell`]), which is the whole of the 43-vs-42 difference.
+//!   (see [`online_cell`]), which is the whole of the 83-vs-82 difference.
 //!
 //! **These numbers are asserted, not maintained by hand** —
 //! `the_disabled_majority_is_the_point_and_it_is_measured` and
@@ -858,6 +859,9 @@ pub struct OptionSpec {
 pub enum Action {
     /// The footer's `Done`, and Escape's equivalent: leave this page.
     Done,
+    /// Open the credential-free Friends settings screen. The caller preserves
+    /// whether Options came from the title or an in-world pause menu.
+    OpenFriendsSettings,
     /// A control that is present because vanilla has it and inactive because
     /// this client cannot do it — the accessibility guide's external link
     /// and Credits & Attribution.
@@ -942,7 +946,7 @@ impl Cell {
         match self {
             Cell::Option(spec) => spec.live.is_some(),
             Cell::Nav { page, .. } => page.is_some(),
-            Cell::Act { act, .. } => act == Action::Done,
+            Cell::Act { act, .. } => matches!(act, Action::Done | Action::OpenFriendsSettings),
         }
     }
 
@@ -2136,6 +2140,13 @@ const fn unsupported(label: &'static str) -> Cell {
     }
 }
 
+const fn friends_settings(label: &'static str) -> Cell {
+    Cell::Act {
+        label,
+        act: Action::OpenFriendsSettings,
+    }
+}
+
 /// The root's second header button — vanilla's `inWorld` fork
 ///. Outside a world it is a live link to
 /// [`SettingsPage::Online`]; inside one it is `WorldOptionsScreen`, which this
@@ -2609,11 +2620,9 @@ static SKIN: &[Entry] = &[
     pair(cycle("modelPart.hat", "Hat"), cycle("mainHand", "Main Hand")),
 ];
 
-/// `OnlineOptionsScreen.addOptions`, in its
-/// own call order. Every control here is decorative — see
-/// [`SettingsPage::Online`]'s doc for why — so every accessor uses [`cycle`],
-/// never [`live_cycle`], and the Xbox link uses [`unsupported`] exactly like
-/// the Accessibility Guide and Credits buttons on other pages.
+/// Online Options' controls, in their own call order. Friends rows are live
+/// links into the account-scoped Friends Settings tab; the remaining rows are
+/// decorative and use [`cycle`] or [`unsupported`] as appropriate.
 ///
 /// `friendsList`/`allowFriendRequests` are not vanilla's own options class `OptionInstance`s
 /// at all — vanilla backs them with `PlayerSocialManager` state instead
@@ -2628,12 +2637,12 @@ static SKIN: &[Entry] = &[
 static ONLINE: &[Entry] = &[
     head("Friends List"), // options.online.friends.header
     pair(
-        cycle("friendsList", "Friends List"), // options.friendsList
-        cycle("allowFriendRequests", "Allow Requests"), // options.allowFriendRequests
+        friends_settings("Friends List..."), // options.friendsList
+        friends_settings("Allow Requests..."), // options.allowFriendRequests
     ),
     pair(
-        cycle("inGameNotification", "In-Game Notification"),
-        cycle("sharePresence", "Visibility"), // options.sharePresence
+        friends_settings("In-Game Notification..."),
+        friends_settings("Visibility..."), // options.sharePresence
     ),
     big(unsupported("Xbox Settings...")), // options.online.xboxSettings
     head("Servers"),                      // options.online.servers.header
@@ -2678,7 +2687,7 @@ static ROOT_GRID: &[Cell] = &[
 /// |---|---|
 /// | `Language` | A searchable list backed by [`super::language`]. |
 /// | `KeyBinds` | A key-binding list backed by [`super::key_binds`]. |
-/// | `Online` | An inactive root header button; no page is opened. |
+/// | `Online` | An options page whose Friends rows open account-scoped settings. |
 /// | `Telemetry` | A static information page backed by [`super::telemetry`]. |
 /// | `ResourcePacks` | Two filesystem-backed lists with transfer, reorder, metadata and thumbnail support, backed by [`super::packs`]. |
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2702,14 +2711,11 @@ pub enum SettingsPage {
     Accessibility,
     /// `SkinCustomizationScreen`.
     Skin,
-    /// `OnlineOptionsScreen` — friends list,
-    /// requests, in-game notifications, presence visibility, an external Xbox
-    /// Settings link, server-listing opt-out and Realms news/invites. All
-    /// seven are **decorative**: this client has no `PlayerSocialManager`, no
-    /// Realms client and no Xbox link to send any of them to, so every control
-    /// on the page is `unsupported`/`cycle` with `live: None` — see the
-    /// [`ONLINE`] table. Only the page's own existence and its Done button are
-    /// wired.
+    /// Online Options — the four Friends rows open the account-scoped Friends
+    /// Settings tab, where service-backed availability/request controls and
+    /// client-only notification/visibility controls are kept together. The
+    /// Xbox, server-listing and Realms rows remain decorative because this
+    /// client has no corresponding consumer. See the [`ONLINE`] table.
     ///
     /// Reached from the root's second header button when
     /// [`super::UiState::settings_in_world`] is `false` — vanilla's own fork
@@ -3485,6 +3491,8 @@ pub enum SettingsOutcome {
     /// Leave the settings tree entirely — the root page's Done, or Escape from
     /// it. [`super::UiState::close_settings`] is what that means.
     Close,
+    /// Open Friends' account-scoped settings from one of the Online rows.
+    OpenFriendsSettings,
     /// Cycle this live option and persist it. [`super::nav::MenuNav`] owns the
     /// [`crate::config::Options`] and the file, so it does the mutation.
     Cycle(LiveOption),
@@ -3936,6 +3944,10 @@ impl SettingsNav {
             Cell::Act {
                 act: Action::Done, ..
             } => self.back(),
+            Cell::Act {
+                act: Action::OpenFriendsSettings,
+                ..
+            } => SettingsOutcome::OpenFriendsSettings,
             Cell::Act {
                 act: Action::Unsupported,
                 ..
@@ -4429,13 +4441,14 @@ mod tests {
         // cutoutLeaves, plus mipmapLevels, entityShadows, weatherRadius,
         // attackIndicator, particles and biomeBlendRadius, are each placed
         // once)
-        // + 9 Done buttons (one per page, always live) + 13 working nav buttons
+        // + 9 Done buttons (one per page, always live) + 17 working nav buttons
         // (Skin/Sound/Video/Controls/Chat/Accessibility/**Language**/
         // **Telemetry**/**Resource Packs** from the root grid,
         // Accessibility -> Controls, Controls -> Mouse, Controls -> Key Binds,
-        // and the root's own Online button, live outside a world).
+        // the root's own Online button, and four Online -> Friends Settings
+        // rows, live outside a world).
         // A change that adds or removes a live row anywhere must say so here.
-        assert_eq!(live.len(), 79, "outside a world: {live:?}");
+        assert_eq!(live.len(), 83, "outside a world: {live:?}");
     }
 
     /// The companion to [`the_disabled_majority_is_the_point_and_it_is_measured`]:
@@ -4469,8 +4482,8 @@ mod tests {
         // and
         // `menuBackgroundBlurriness`, which is **two** rows (Video and
         // Accessibility) for one option.
-        assert_eq!(outside.len(), 79);
-        assert_eq!(inside.len(), 78, "one fewer: the root's Online button");
+        assert_eq!(outside.len(), 83);
+        assert_eq!(inside.len(), 82, "one fewer: the root's Online button");
         assert!(
             outside.contains(&nav("Online...", SettingsPage::Online)),
             "outside a world the root links to Online"
@@ -6274,6 +6287,32 @@ mod tests {
         let mut nav = SettingsNav::new();
         nav.cursor = all_controls(SettingsPage::Root, false).len() - 1;
         assert_eq!(nav.enter(), SettingsOutcome::Close);
+    }
+
+    #[test]
+    fn friends_rows_open_the_account_settings_surface() {
+        let mut nav = SettingsNav::new();
+        nav.page = SettingsPage::Online;
+
+        let rows = all_controls(SettingsPage::Online, false);
+        let friends_rows: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, cell)| {
+                matches!(cell, Cell::Act { act: Action::OpenFriendsSettings, .. })
+                    .then_some(index)
+            })
+            .collect();
+        assert_eq!(friends_rows.len(), 4, "the four Friends rows are live");
+
+        for row in friends_rows {
+            nav.cursor = row;
+            assert_eq!(
+                nav.enter(),
+                SettingsOutcome::OpenFriendsSettings,
+                "Friends row {row} opens its account-scoped settings"
+            );
+        }
     }
 
     #[test]
