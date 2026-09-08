@@ -50,12 +50,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use lodestone_worldgen_core::rng::{
-    LegacyRandomSource, RandomSource, WorldgenRandom, XoroshiroRandomSource, get_seed,
+    RandomSource, WorldgenRandom, XoroshiroRandomSource,
 };
 
 use crate::aquifer::{AquiferSystem, BlockKind};
 use crate::structure::{
-    HeightmapKind, PieceRefinement, StartContext, StructureKind, StructureStart, VerticalPlacement,
+    CodedBlock, HeightmapKind, PieceRefinement, StartContext, StructureKind, StructureStart,
+    VerticalPlacement,
 };
 
 use super::OverworldGenerator;
@@ -135,6 +136,27 @@ fn order_structure_entries<'a>(
             .feature_placement_key(&start.structure)
             .unwrap_or((i32::MAX, usize::MAX))
     });
+}
+
+/// Writes a coded piece's ordered block list into the receiving chunk.
+///
+/// Chest facing is the one state that depends on the receiving grid rather than
+/// on the eager start-time list. Reorienting immediately before the chest write
+/// preserves the coded walk's last-write-wins order and leaves its loot vector —
+/// including every already-spent roll seed — untouched.
+fn place_coded_blocks(
+    world: &mut crate::dense_grid::DenseBlockGrid,
+    blocks: &[CodedBlock],
+    solid_render: &dyn Fn(&str) -> bool,
+) {
+    for block in blocks {
+        if block.state.starts_with("minecraft:chest[") {
+            let state = crate::structure::fortress::chest_state(world, block.pos, solid_render);
+            world.set(block.pos[0], block.pos[1], block.pos[2], &state);
+        } else {
+            world.set(block.pos[0], block.pos[1], block.pos[2], &block.state);
+        }
+    }
 }
 
 /// Chebyshev chunk radius `structure_refs` reads `structure_starts` over —
@@ -327,13 +349,9 @@ fn place_buried_treasure_chest(world: &mut crate::dense_grid::DenseBlockGrid, or
                     world.set(rel[0], rel[1], rel[2], &soft);
                 }
             }
-            // `StructurePiece.reorient` picks the facing from the four
-            // horizontal neighbours' render-solidity *as just written above*;
-            // every one of them is now solid by construction (each was either
-            // already solid or just filled), so vanilla's own fallback branch
-            // always fires here and lands on a fixed facing — see
-            // `coded:chest_reorient` on the ledger, the same simplification
-            // every other coded chest in this crate already makes.
+            // The four neighbours are now solid by construction (each was either
+            // already solid or just filled), so the receiving-grid reorientation
+            // fallback lands on north here.
             world.set(x, y, z, "minecraft:chest[facing=north,type=single,waterlogged=false]");
             return;
         }
@@ -367,17 +385,16 @@ fn is_stone_family(name: &str) -> bool {
 /// optional overgrowth. It runs against a fully surfaced chunk, after the
 /// template itself wrote its frame.
 ///
-/// The reference uses one mutable decoration stream per decorating chunk. This
-/// engine cannot make a structure's neighbouring chunks depend on whichever
-/// chunk happened to generate first, so every local choice is instead forked
-/// from the world seed and its block position. Each chunk can then regenerate
-/// the whole portal pass and clip writes to itself without a seam at a border.
-/// The registry keeps that intentional random-stream deviation visible.
+/// The reference receives the decorating chunk's mutable `surface_structures`
+/// stream. The caller resets that stream once for each portal registry entry and
+/// shares it across the starts of that entry, so this pass consumes the same
+/// sequence as the surrounding structure lifecycle while the grid still clips
+/// writes to the receiving chunk.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn place_ruined_portal_terrain(
+pub(crate) fn place_ruined_portal_terrain<R: RandomSource>(
     world: &mut crate::dense_grid::DenseBlockGrid,
     box_: crate::structure::BoundingBox,
-    seed: i64,
+    random: &mut R,
     placement: VerticalPlacement,
     cold: bool,
     overgrown: bool,
@@ -390,8 +407,7 @@ pub(crate) fn place_ruined_portal_terrain(
         box_.min[2] + (box_.max[2] - box_.min[2] + 1) / 2,
     ];
     let average_width = (box_.max[0] - box_.min[0] + 1 + box_.max[2] - box_.min[2] + 1) / 2;
-    let mut radius_random = portal_random(seed, centre, 0);
-    let distance_adjustment = radius_random.next_int_bounded((8 - average_width / 2).max(1));
+    let distance_adjustment = random.next_int_bounded((8 - average_width / 2).max(1));
     const CHANCE_BY_DISTANCE: [f32; 14] = [
         1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.9, 0.9, 0.8, 0.7, 0.6, 0.4, 0.2,
     ];
@@ -403,7 +419,7 @@ pub(crate) fn place_ruined_portal_terrain(
             let Some(&chance) = CHANCE_BY_DISTANCE.get(adjusted) else {
                 continue;
             };
-            if portal_float(seed, [x, box_.min[1], z], 1) >= chance {
+            if random.next_double() >= f64::from(chance) {
                 continue;
             }
             let Some(surface) = portal_surface_y(world, x, z, placement) else {
@@ -415,17 +431,17 @@ pub(crate) fn place_ruined_portal_terrain(
             {
                 continue;
             }
-            place_portal_netherrack_or_magma(world, seed, [x, y, z], cold, 2);
+            place_portal_netherrack_or_magma(world, random, [x, y, z], cold);
             if overgrown {
-                maybe_add_portal_leaves(world, seed, [x, y, z], 3);
+                maybe_add_portal_leaves(world, random, [x, y, z]);
             }
-            add_portal_drip_column(world, seed, [x, y - 1, z], cold, 4);
+            add_portal_drip_column(world, random, [x, y - 1, z], cold);
         }
     }
     for x in (box_.min[0] + 1)..box_.max[0] {
         for z in (box_.min[2] + 1)..box_.max[2] {
             if base_name(world.get(x, box_.min[1], z)) == "minecraft:netherrack" {
-                add_portal_drip_column(world, seed, [x, box_.min[1] - 1, z], cold, 5);
+                add_portal_drip_column(world, random, [x, box_.min[1] - 1, z], cold);
             }
         }
     }
@@ -434,23 +450,15 @@ pub(crate) fn place_ruined_portal_terrain(
             for y in box_.min[1]..=box_.max[1] {
                 for z in box_.min[2]..=box_.max[2] {
                     if vines {
-                        maybe_add_portal_vine(world, seed, [x, y, z], 6);
+                        maybe_add_portal_vine(world, random, [x, y, z]);
                     }
                     if overgrown {
-                        maybe_add_portal_leaves(world, seed, [x, y, z], 7);
+                        maybe_add_portal_leaves(world, random, [x, y, z]);
                     }
                 }
             }
         }
     }
-}
-
-fn portal_random(seed: i64, pos: [i32; 3], salt: i64) -> LegacyRandomSource {
-    LegacyRandomSource::new(seed ^ get_seed(pos[0], pos[1], pos[2]) ^ salt)
-}
-
-fn portal_float(seed: i64, pos: [i32; 3], salt: i64) -> f32 {
-    portal_random(seed, pos, salt).next_float()
 }
 
 fn portal_surface_y(
@@ -482,14 +490,13 @@ fn portal_replaceable(
         && (placement == VerticalPlacement::InNether || name != "minecraft:lava")
 }
 
-fn place_portal_netherrack_or_magma(
+fn place_portal_netherrack_or_magma<R: RandomSource>(
     world: &mut crate::dense_grid::DenseBlockGrid,
-    seed: i64,
+    random: &mut R,
     pos: [i32; 3],
     cold: bool,
-    salt: i64,
 ) {
-    let state = if !cold && portal_float(seed, pos, salt) < 0.07 {
+    let state = if !cold && random.next_float() < 0.07 {
         "minecraft:magma_block"
     } else {
         "minecraft:netherrack"
@@ -497,30 +504,28 @@ fn place_portal_netherrack_or_magma(
     world.set(pos[0], pos[1], pos[2], state);
 }
 
-fn add_portal_drip_column(
+fn add_portal_drip_column<R: RandomSource>(
     world: &mut crate::dense_grid::DenseBlockGrid,
-    seed: i64,
+    random: &mut R,
     mut pos: [i32; 3],
     cold: bool,
-    salt: i64,
 ) {
-    place_portal_netherrack_or_magma(world, seed, pos, cold, salt);
-    for remaining in 0..8 {
-        if portal_float(seed, pos, salt + 1 + i64::from(remaining)) >= 0.5 {
+    place_portal_netherrack_or_magma(world, random, pos, cold);
+    for _ in 0..8 {
+        if random.next_float() >= 0.5 {
             break;
         }
         pos[1] -= 1;
-        place_portal_netherrack_or_magma(world, seed, pos, cold, salt + 10 + i64::from(remaining));
+        place_portal_netherrack_or_magma(world, random, pos, cold);
     }
 }
 
-fn maybe_add_portal_leaves(
+fn maybe_add_portal_leaves<R: RandomSource>(
     world: &mut crate::dense_grid::DenseBlockGrid,
-    seed: i64,
+    random: &mut R,
     pos: [i32; 3],
-    salt: i64,
 ) {
-    if portal_float(seed, pos, salt) < 0.5
+    if random.next_float() < 0.5
         && base_name(world.get(pos[0], pos[1], pos[2])) == "minecraft:netherrack"
         && base_name(world.get(pos[0], pos[1] + 1, pos[2])) == "minecraft:air"
     {
@@ -533,17 +538,15 @@ fn maybe_add_portal_leaves(
     }
 }
 
-fn maybe_add_portal_vine(
+fn maybe_add_portal_vine<R: RandomSource>(
     world: &mut crate::dense_grid::DenseBlockGrid,
-    seed: i64,
+    random: &mut R,
     pos: [i32; 3],
-    salt: i64,
 ) {
     let state = base_name(world.get(pos[0], pos[1], pos[2]));
     if matches!(state, "minecraft:air" | "minecraft:water" | "minecraft:lava" | "minecraft:vine") {
         return;
     }
-    let mut random = portal_random(seed, pos, salt);
     let (dx, dz, vine) = match random.next_int_bounded(4) {
         0 => (0, -1, "minecraft:vine[east=false,north=false,south=true,up=false,west=false]"),
         1 => (1, 0, "minecraft:vine[east=false,north=false,south=false,up=false,west=true]"),
@@ -725,10 +728,10 @@ impl OverworldGenerator {
     /// [`DenseBlockGrid::set`](crate::dense_grid::DenseBlockGrid::set) ignores a
     /// write outside it, so a piece that straddles a border writes its own half
     /// here and the other half when the neighbour generates — vanilla's
-    /// `placeSettings.setBoundingBox(chunkBB)` for free. That is only sound
-    /// because every piece's position is fixed at *start* time and every
-    /// processor draw is position-seeded; see
-    /// [`StructureKind::generate_pieces`](crate::structure::StructureKind).
+    /// `placeSettings.setBoundingBox(chunkBB)` for free. Template processor
+    /// draws remain position-seeded; the ruined-portal refinement instead uses
+    /// its target chunk's shared `surface_structures` stream, reset per portal
+    /// registry entry and consumed in the same start order.
     pub(super) fn structure_place_stage(
         &self,
         cx: i32,
@@ -751,6 +754,9 @@ impl OverworldGenerator {
             generator: self,
             aquifers: RefCell::new(HashMap::new()),
         };
+        let solid_render = |state: &str| {
+            self.veg_tags.simple_block_support.solid_render.test(state)
+        };
         let structure_refs = self.structure_refs_stage(cx, cz);
         let mut structure_entries = structure_refs.entries.iter().collect::<Vec<_>>();
         order_structure_entries(registry, &mut structure_entries);
@@ -761,6 +767,7 @@ impl OverworldGenerator {
             String,
             WorldgenRandom<XoroshiroRandomSource>,
         > = HashMap::new();
+        let mut portal_randoms: HashMap<String, WorldgenRandom<XoroshiroRandomSource>> = HashMap::new();
         for (_, _, start) in structure_entries {
             if !start.pieces_complete {
                 continue;
@@ -814,9 +821,7 @@ impl OverworldGenerator {
                 // A coded piece writes a pre-resolved block list; a template piece
                 // writes its template. Both are clipped by the grid.
                 if let Some(blocks) = &piece.blocks {
-                    for block in blocks.iter() {
-                        world.set(block.pos[0], block.pos[1], block.pos[2], &block.state);
-                    }
+                    place_coded_blocks(&mut world, blocks, &solid_render);
                 }
                 if let Some(placement) = &piece.placement {
                     let origin = crate::structure::template::PlaceOrigin {
@@ -874,16 +879,27 @@ impl OverworldGenerator {
                         overgrown,
                         vines,
                         features_cannot_replace,
-                    }) => place_ruined_portal_terrain(
-                        &mut world,
-                        piece.bounding_box,
-                        seed,
-                        *placement,
-                        *cold,
-                        *overgrown,
-                        *vines,
-                        features_cannot_replace,
-                    ),
+                    }) => {
+                        let Some((step, index)) = registry.feature_placement_key(&start.structure) else {
+                            continue;
+                        };
+                        let random = portal_randoms.entry(start.structure.clone()).or_insert_with(|| {
+                            let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+                            let decoration_seed = random.set_decoration_seed(seed, bx, bz);
+                            random.set_feature_seed(decoration_seed, index as i32, step);
+                            random
+                        });
+                        place_ruined_portal_terrain(
+                            &mut world,
+                            piece.bounding_box,
+                            random,
+                            *placement,
+                            *cold,
+                            *overgrown,
+                            *vines,
+                            features_cannot_replace,
+                        );
+                    }
                     None => {}
                 }
             }
@@ -980,7 +996,115 @@ impl OverworldGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
+
+    use lodestone_worldgen_core::rng::{get_seed, LegacyRandomSource};
+
+    fn portal_fixture_world() -> crate::dense_grid::DenseBlockGrid {
+        let mut map = HashMap::new();
+        for x in 0..64 {
+            for y in 0..=59 {
+                for z in 0..64 {
+                    map.insert((x, y, z), "minecraft:stone".to_string());
+                }
+            }
+        }
+        map.insert((30, 60, 30), "minecraft:netherrack".to_string());
+        crate::dense_grid::DenseBlockGrid::from_hashmap(0, 0, 0, 64, 65, 64, &map)
+    }
+
+    fn portal_fixture_hash(world: &crate::dense_grid::DenseBlockGrid) -> String {
+        use sha2::{Digest as _, Sha256};
+
+        let mut digest = Sha256::new();
+        for y in 0..=64 {
+            for x in 0..64 {
+                for z in 0..64 {
+                    if world.get(x, y, z) == "minecraft:netherrack" {
+                        digest.update(
+                            format!("{x},{y},{z}=minecraft:netherrack\n").as_bytes(),
+                        );
+                    }
+                }
+            }
+        }
+        format!("{:x}", digest.finalize())
+    }
+
+    fn portal_stream(
+        world_seed: i64,
+        chunk_x: i32,
+        chunk_z: i32,
+    ) -> WorldgenRandom<XoroshiroRandomSource> {
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        let decoration_seed = random.set_decoration_seed(world_seed, chunk_x * 16, chunk_z * 16);
+        random.set_feature_seed(decoration_seed, 8, 4);
+        random
+    }
+
+    #[test]
+    fn ruined_portal_terrain_stream_matches_external_fixture_and_rejects_positional_control() {
+        const EXTERNAL: &str =
+            include_str!("../../tests/support/coded_ruined_portal_terrain_external.txt");
+        let mut cases = Vec::new();
+        for line in EXTERNAL.lines().filter(|line| !line.is_empty() && !line.starts_with('#')) {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            assert_eq!(fields.len(), 6, "portal fixture fields: {line}");
+            assert_eq!(fields[0], "case", "portal fixture row: {line}");
+            let world_seed = fields[1]
+                .parse::<i64>()
+                .unwrap_or_else(|error| panic!("invalid portal fixture seed {}: {error}", fields[1]));
+            let chunk_x = fields[2]
+                .parse::<i32>()
+                .unwrap_or_else(|error| panic!("invalid portal fixture chunk {}: {error}", fields[2]));
+            let chunk_z = fields[3]
+                .parse::<i32>()
+                .unwrap_or_else(|error| panic!("invalid portal fixture chunk {}: {error}", fields[3]));
+            let distance = fields[4]
+                .parse::<i32>()
+                .unwrap_or_else(|error| panic!("invalid portal fixture distance {}: {error}", fields[4]));
+            cases.push((world_seed, chunk_x, chunk_z, distance, fields[5].to_string()));
+        }
+        assert_eq!(cases.len(), 4, "external portal fixture case count");
+
+        let box_ = crate::structure::BoundingBox {
+            min: [29, 60, 29],
+            max: [33, 63, 33],
+        };
+        let mut hashes = Vec::new();
+        for (world_seed, chunk_x, chunk_z, expected_distance, expected_hash) in &cases {
+            let mut probe = portal_stream(*world_seed, *chunk_x, *chunk_z);
+            assert_eq!(
+                probe.next_int_bounded(6),
+                *expected_distance,
+                "external distance draw for ({chunk_x},{chunk_z})"
+            );
+
+            let mut world = portal_fixture_world();
+            let mut random = portal_stream(*world_seed, *chunk_x, *chunk_z);
+            place_ruined_portal_terrain(
+                &mut world,
+                box_,
+                &mut random,
+                VerticalPlacement::OnLandSurface,
+                true,
+                false,
+                false,
+                &HashSet::new(),
+            );
+            let actual_hash = portal_fixture_hash(&world);
+            assert_eq!(actual_hash, *expected_hash, "external portal case {world_seed} ({chunk_x},{chunk_z})");
+            hashes.push(actual_hash);
+        }
+
+        assert_ne!(hashes[0], hashes[1], "same portal geometry must follow target chunk stream");
+        assert_ne!(hashes[0], hashes[2], "chunk-Z stream change must be observable");
+
+        let centre = [31, 62, 31];
+        let old_distance = LegacyRandomSource::new(42 ^ get_seed(centre[0], centre[1], centre[2]))
+            .next_int_bounded(6);
+        assert_ne!(old_distance, cases[1].3, "the positional control must reject the target-chunk fixture");
+    }
 
     /// A column with `depth` blocks of sand over stone, air above — the shape
     /// that makes the walk actually walk (a beach/ocean-floor surface rule
@@ -997,6 +1121,68 @@ mod tests {
             map.insert((8, y, 8), "minecraft:sand".to_string());
         }
         crate::dense_grid::DenseBlockGrid::from_hashmap(0, -64, 0, 16, 384, 16, &map)
+    }
+
+    /// The expected facing values come from the independent four-neighbour
+    /// direction table in the fixture, not from the production helper. The
+    /// final row repeats the asymmetric east-neighbour case with solid cells
+    /// above and below; those cells must not affect a horizontal reorientation.
+    #[test]
+    fn coded_chest_reorientation_matches_external_asymmetric_fixture() {
+        const EXTERNAL: &str =
+            include_str!("../../tests/support/coded_chest_reorient_external.txt");
+        let mut east_face = None;
+        let mut east_vertical_control = None;
+        for line in EXTERNAL.lines().filter(|line| !line.is_empty() && !line.starts_with('#')) {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            assert_eq!(fields.len(), 8, "fixture fields: {line}");
+            let pos = [1, 65, 1];
+            let horizontal = [
+                (0, -1, fields[1]),
+                (1, 0, fields[2]),
+                (0, 1, fields[3]),
+                (-1, 0, fields[4]),
+            ];
+            let mut world = crate::dense_grid::DenseBlockGrid::new(
+                0,
+                64,
+                0,
+                3,
+                3,
+                3,
+                "minecraft:air",
+            );
+            for (dx, dz, state) in horizontal {
+                world.set(pos[0] + dx, pos[1], pos[2] + dz, state);
+            }
+            world.set(pos[0], pos[1] + 1, pos[2], fields[5]);
+            world.set(pos[0], pos[1] - 1, pos[2], fields[6]);
+            let solid_render = |state: &str| state == "minecraft:stone";
+            place_coded_blocks(
+                &mut world,
+                &[CodedBlock {
+                    pos,
+                    state: "minecraft:chest[facing=north,type=single,waterlogged=false]".to_string(),
+                }],
+                &solid_render,
+            );
+            let actual = world.get(pos[0], pos[1], pos[2]).to_string();
+            let expected = format!(
+                "minecraft:chest[facing={},type=single,waterlogged=false]",
+                fields[7]
+            );
+            assert_eq!(actual, expected, "fixture case {}", fields[0]);
+            match fields[0] {
+                "single_east" => east_face = Some(actual),
+                "single_east_vertical_control" => east_vertical_control = Some(actual),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            east_face.as_deref(),
+            Some("minecraft:chest[facing=west,type=single,waterlogged=false]")
+        );
+        assert_eq!(east_face, east_vertical_control);
     }
 
     /// The chest lands exactly one block above the first **stone-family**
@@ -1085,10 +1271,11 @@ mod tests {
         map.insert((5, 59, 5), "minecraft:obsidian".to_string());
         let mut world = crate::dense_grid::DenseBlockGrid::from_hashmap(0, -4, 0, 16, 96, 16, &map);
         let protected = std::collections::HashSet::new();
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(41));
         place_ruined_portal_terrain(
             &mut world,
             box_,
-            41,
+            &mut random,
             VerticalPlacement::OnLandSurface,
             true,
             false,
