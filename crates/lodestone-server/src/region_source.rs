@@ -574,6 +574,12 @@ struct WorldState {
     edits: Mutex<HashMap<(i32, i32), ChunkColumn>>,
     /// Chunks changed since the last successful save.
     dirty: Mutex<HashSet<(i32, i32)>>,
+    /// On-disk light snapshots invalidated by a block mutation. The value is
+    /// an epoch so a save can retire only the invalidations it actually
+    /// observed; a newer neighbouring mutation must survive that save's
+    /// cleanup even when it lands while the region worker is writing.
+    invalidated_light: Mutex<HashMap<(i32, i32), u64>>,
+    next_light_invalidation: AtomicU64,
     /// Chunks the cache above has evicted. An entry stays here from queueing
     /// through its durable acknowledgement and until the authoritative edit is
     /// actually released. See [`WorldSaveHandle::save`]'s unload sweep.
@@ -937,6 +943,8 @@ impl<S: ChunkSource> RegionChunkSource<S> {
                 height,
                 edits: Mutex::new(HashMap::new()),
                 dirty: Mutex::new(HashSet::new()),
+                invalidated_light: Mutex::new(HashMap::new()),
+                next_light_invalidation: AtomicU64::new(0),
                 pending_unload: Mutex::new(DurableUnloadLedger::default()),
                 block_entities: BlockEntityHandle::default(),
                 scheduled: ScheduledTickHandle::default(),
@@ -1003,6 +1011,14 @@ impl<S: ChunkSource> RegionChunkSource<S> {
             .lock()
             .expect("world edit lock poisoned")
             .len()
+    }
+
+    fn light_is_invalidated(&self, coordinate: (i32, i32)) -> bool {
+        self.state
+            .invalidated_light
+            .lock()
+            .expect("world light-invalidation lock poisoned")
+            .contains_key(&coordinate)
     }
 
     /// A cheap handle that can save the world from any thread.
@@ -1164,6 +1180,31 @@ struct LoadedChunk {
     holds_block_entities: bool,
 }
 
+/// Reads only the persisted column payload needed by a save worker's light
+/// invalidation pass. Unlike [`RegionChunkSource::load`], this has no live
+/// registry or scheduled-tick side effects: a blocking save must not restore
+/// gameplay state merely to clear derived light bytes.
+fn load_column_for_light(
+    state: &WorldState,
+    region: &RegionFile,
+    cx: i32,
+    cz: i32,
+) -> Option<ChunkColumn> {
+    let (_, _, local_x, local_z) = region_and_local(cx, cz);
+    let raw = region
+        .read_chunk_nbt_bytes_resolving_external(
+            local_x,
+            local_z,
+            cx,
+            cz,
+            &state.region_dir,
+        )
+        .ok()??;
+    let mut reader = Reader::new(&raw);
+    let (_, nbt) = read_named_nbt(&mut reader).ok()?;
+    chunk_nbt::column_from_nbt(&nbt, state.min_y, state.height).ok()
+}
+
 impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
     /// The one implementor that answers `Some`: this source *is* the world on
     /// disk, so these are the registries whose contents a save writes.
@@ -1192,6 +1233,7 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
         cz: i32,
         stage: crate::chunk::ChunkGenerationStage,
     ) -> ChunkColumn {
+        let coordinate = (cx, cz);
         {
             let edits = self.state.edits.lock().expect("world edit lock poisoned");
             if let Some(edited) = edits.get(&(cx, cz)) {
@@ -1203,6 +1245,28 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
                 .stats
                 .loaded_from_disk
                 .fetch_add(1, Ordering::Relaxed);
+            let mut loaded_column = loaded.column;
+            if self.light_is_invalidated(coordinate)
+                && loaded_column.retained_light().is_some()
+            {
+                // The block mutation may have happened after this column was
+                // last saved, so the bytes read from disk are no longer a
+                // valid admission snapshot. Keep the cleared copy authoritative
+                // until the save path writes it back.
+                loaded_column.clear_retained_light();
+                let mut edits = self.state.edits.lock().expect("world edit lock poisoned");
+                if let Some(edited) = edits.get(&coordinate) {
+                    return edited.clone();
+                }
+                edits.insert(coordinate, loaded_column.clone());
+                drop(edits);
+                self.state
+                    .dirty
+                    .lock()
+                    .expect("world dirty lock poisoned")
+                    .insert(coordinate);
+                return loaded_column;
+            }
             // **A chunk that holds block entities is retained in `edits` from
             // the moment it loads**, which is the one exception to "only
             // `set_block` populates the edit map".
@@ -1216,9 +1280,9 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
             // contents straight back over the new ones, silently.
             if loaded.holds_block_entities {
                 let mut edits = self.state.edits.lock().expect("world edit lock poisoned");
-                edits.entry((cx, cz)).or_insert_with(|| loaded.column.clone());
+                edits.entry(coordinate).or_insert_with(|| loaded_column.clone());
             }
-            return loaded.column;
+            return loaded_column;
         }
         self.state.stats.generated.fetch_add(1, Ordering::Relaxed);
         self.inner.column_at(cx, cz, stage)
@@ -1253,6 +1317,12 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
+
+        // This source can also be used without the outer cache in tests and
+        // persistence tools. Keep its saved snapshots correct at that direct
+        // mutation boundary as well; the normal `ChunkStore` path may call
+        // this a second time after its cache layer has already invalidated.
+        self.invalidate_retained_light_neighbourhood(cx, cz);
 
         // Seeded from `self.column`, which consults disk. Deliberately NOT
         // forwarded to `self.inner`: see the module doc — forwarding would
@@ -1305,6 +1375,42 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
             .expect("world dirty lock poisoned")
             .insert((cx, cz));
         true
+    }
+
+    /// Clears saved light snapshots whose 3x3 dependency footprint contains a
+    /// changed column. The light bytes are derived state, but once a snapshot
+    /// has been retained they are part of the exact initial packet and must not
+    /// survive a neighbouring block mutation.
+    fn invalidate_retained_light_neighbourhood(&self, cx: i32, cz: i32) {
+        // Keep a tombstone even when the saved column is not resident in the
+        // edit map. A retained light snapshot may already be on disk after a
+        // prior save; the next load must not resurrect it after this edit.
+        // `invalidated_light` is taken first everywhere this new state is
+        // involved, followed by `edits` and `dirty`, matching the existing
+        // mutation/save lock order for the latter two.
+        let epoch = self
+            .state
+            .next_light_invalidation
+            .fetch_add(1, Ordering::AcqRel);
+        let mut invalidated = self
+            .state
+            .invalidated_light
+            .lock()
+            .expect("world light-invalidation lock poisoned");
+        let mut edits = self.state.edits.lock().expect("world edit lock poisoned");
+        let mut dirty = self.state.dirty.lock().expect("world dirty lock poisoned");
+        for snapshot_cz in cz - 1..=cz + 1 {
+            for snapshot_cx in cx - 1..=cx + 1 {
+                let coordinate = (snapshot_cx, snapshot_cz);
+                invalidated.insert(coordinate, epoch);
+                if let Some(column) = edits.get_mut(&coordinate) {
+                    if column.retained_light().is_some() {
+                        column.clear_retained_light();
+                        dirty.insert(coordinate);
+                    }
+                }
+            }
+        }
     }
 
     /// The cache above has evicted this column, so the save path may release
@@ -1625,10 +1731,21 @@ impl WorldSaveHandle {
         // A token remains queued while this save is in flight. A later unload
         // of the same coordinate supersedes this snapshot and is rejected as
         // stale below, leaving the current token for the next save.
-        let mut pending: HashSet<(i32, i32)> = {
+        let dirty_at_start: HashSet<(i32, i32)> = {
             let mut dirty = self.state.dirty.lock().expect("world dirty lock poisoned");
             dirty.drain().collect()
         };
+        let observed_light_invalidations = self
+            .state
+            .invalidated_light
+            .lock()
+            .expect("world light-invalidation lock poisoned")
+            .clone();
+        let mut pending = dirty_at_start.clone();
+        // A saved snapshot can be outside the edit map after an earlier
+        // successful save. Include those tombstones so the region worker can
+        // clear the corresponding on-disk light without generating a column.
+        pending.extend(observed_light_invalidations.keys().copied());
         // **Every chunk holding a block entity is written on every save**, on
         // top of the dirty set.
         //
@@ -1672,12 +1789,15 @@ impl WorldSaveHandle {
             // shared state it does read is independently synchronised, and
             // each worker has a distinct temp-file name for its owner.
             let results = std::thread::scope(|scope| {
+                let observed_light_invalidations = &observed_light_invalidations;
                 let workers = batch
                     .iter()
                     .map(|assignment| {
                         let (rx, rz) = assignment.owner.region;
                         let chunks = &assignment.chunks;
-                        scope.spawn(move || self.save_region(rx, rz, chunks))
+                        scope.spawn(move || {
+                            self.save_region(rx, rz, chunks, observed_light_invalidations)
+                        })
                     })
                     .collect::<Vec<_>>();
                 workers
@@ -1701,11 +1821,22 @@ impl WorldSaveHandle {
                             .fetch_add(1, Ordering::Relaxed);
                     }
                     Err(err) => {
+                        // Only the dirty set drained at save start needs to be
+                        // requeued here. Light-only tombstones stay in their
+                        // separate map for retry, and container/tick owners
+                        // are rediscovered on the next save. Re-dirtying every
+                        // assignment would turn an invalidation-only control
+                        // into a fake terrain edit.
+                        let retry = assignment
+                            .chunks
+                            .iter()
+                            .copied()
+                            .filter(|coordinate| dirty_at_start.contains(coordinate));
                         self.state
                             .dirty
                             .lock()
                             .expect("world dirty lock poisoned")
-                            .extend(assignment.chunks);
+                            .extend(retry);
                         if first_error.is_none() {
                             first_error = Some(err);
                         }
@@ -1717,6 +1848,18 @@ impl WorldSaveHandle {
             // The durable token snapshot stays queued until every owner has
             // written successfully; a retry gets a fresh snapshot.
             return Err(err);
+        }
+        {
+            let mut invalidated = self
+                .state
+                .invalidated_light
+                .lock()
+                .expect("world light-invalidation lock poisoned");
+            for (&coordinate, &epoch) in &observed_light_invalidations {
+                if invalidated.get(&coordinate) == Some(&epoch) {
+                    invalidated.remove(&coordinate);
+                }
+            }
         }
         self.state
             .stats
@@ -1831,7 +1974,13 @@ impl WorldSaveHandle {
     }
 
     /// Rewrites one region file, carrying untouched chunks across verbatim.
-    fn save_region(&self, rx: i32, rz: i32, chunks: &[(i32, i32)]) -> Result<usize, Error> {
+    fn save_region(
+        &self,
+        rx: i32,
+        rz: i32,
+        chunks: &[(i32, i32)],
+        observed_light_invalidations: &HashMap<(i32, i32), u64>,
+    ) -> Result<usize, Error> {
         let path = self.state.region_dir.join(format!("r.{rx}.{rz}.mca"));
         let existing = std::fs::read(&path).ok().and_then(|b| {
             // A file we cannot parse is treated as absent rather than fatal,
@@ -1840,7 +1989,51 @@ impl WorldSaveHandle {
             RegionFile::parse(&b).ok()
         });
 
-        let dirty: HashSet<(i32, i32)> = chunks.iter().copied().collect();
+        // A light invalidation may name a saved column that is no longer in
+        // the edit map. Read only those existing disk columns here, in the
+        // blocking save worker, and clear their retained light before writing
+        // them back. Missing columns and columns without retained light stay
+        // untouched and keep their original compressed bytes below.
+        let mut cleared_disk_columns = HashMap::new();
+        for &coordinate in chunks {
+            if !observed_light_invalidations.contains_key(&coordinate) {
+                continue;
+            }
+            let already_edited = self
+                .state
+                .edits
+                .lock()
+                .expect("world edit lock poisoned")
+                .contains_key(&coordinate);
+            if already_edited {
+                continue;
+            }
+            if let Some(region) = &existing
+                && let Some(mut column) =
+                    load_column_for_light(&self.state, region, coordinate.0, coordinate.1)
+                && column.retained_light().is_some()
+            {
+                column.clear_retained_light();
+                cleared_disk_columns.insert(coordinate, column);
+            }
+        }
+
+        // A pending owner without a replacement column must still carry its
+        // original bytes across. In particular, an invalidation tombstone for
+        // an absent/non-light column must not make a save erase that slot.
+        let mut rewritten = cleared_disk_columns
+            .keys()
+            .copied()
+            .collect::<HashSet<_>>();
+        {
+            let edits = self.state.edits.lock().expect("world edit lock poisoned");
+            rewritten.extend(
+                chunks
+                    .iter()
+                    .copied()
+                    .filter(|coordinate| edits.contains_key(coordinate)),
+            );
+        }
         let mut entries: Vec<ChunkToWrite> = Vec::new();
 
         // Untouched chunks first, as their original compressed bytes: no
@@ -1851,7 +2044,7 @@ impl WorldSaveHandle {
                 for local_x in 0..32u8 {
                     let cx = rx * 32 + i32::from(local_x);
                     let cz = rz * 32 + i32::from(local_z);
-                    if dirty.contains(&(cx, cz)) {
+                    if rewritten.contains(&(cx, cz)) {
                         continue;
                     }
                     let timestamp = region
@@ -1914,35 +2107,40 @@ impl WorldSaveHandle {
             .iter()
             .map(|&(cx, cz)| ((cx, cz), self.extras_for(cx, cz)))
             .collect();
-        {
-            let edits = self.state.edits.lock().expect("world edit lock poisoned");
-            for &(cx, cz) in chunks {
-                let Some(column) = edits.get(&(cx, cz)) else {
-                    continue;
-                };
-                let empty = ChunkExtras::default();
-                let extras = extras_by_chunk.get(&(cx, cz)).unwrap_or(&empty);
-                self.state
-                    .stats
-                    .block_entities_written
-                    .fetch_add(extras.block_entities.len() as u64, Ordering::Relaxed);
-                self.state.stats.scheduled_ticks_written.fetch_add(
-                    (extras.block_ticks.len() + extras.fluid_ticks.len()) as u64,
-                    Ordering::Relaxed,
-                );
-                let nbt = chunk_nbt::column_to_nbt_with(cx, cz, column, extras);
-                let mut writer = Writer::default();
-                write_named_nbt(&mut writer, "", &nbt).map_err(Error::Nbt)?;
-                let compressed = SCHEME.compress(&writer.into_vec()).map_err(Error::Anvil)?;
-                entries.push(ChunkToWrite {
-                    chunk_x: cx,
-                    chunk_z: cz,
-                    compressed,
-                    scheme: SCHEME,
-                    timestamp,
-                });
-                count += 1;
-            }
+        for &(cx, cz) in chunks {
+            let column = self
+                .state
+                .edits
+                .lock()
+                .expect("world edit lock poisoned")
+                .get(&(cx, cz))
+                .cloned()
+                .or_else(|| cleared_disk_columns.remove(&(cx, cz)));
+            let Some(column) = column else {
+                continue;
+            };
+            let empty = ChunkExtras::default();
+            let extras = extras_by_chunk.get(&(cx, cz)).unwrap_or(&empty);
+            self.state
+                .stats
+                .block_entities_written
+                .fetch_add(extras.block_entities.len() as u64, Ordering::Relaxed);
+            self.state.stats.scheduled_ticks_written.fetch_add(
+                (extras.block_ticks.len() + extras.fluid_ticks.len()) as u64,
+                Ordering::Relaxed,
+            );
+            let nbt = chunk_nbt::column_to_nbt_with(cx, cz, &column, extras);
+            let mut writer = Writer::default();
+            write_named_nbt(&mut writer, "", &nbt).map_err(Error::Nbt)?;
+            let compressed = SCHEME.compress(&writer.into_vec()).map_err(Error::Anvil)?;
+            entries.push(ChunkToWrite {
+                chunk_x: cx,
+                chunk_z: cz,
+                compressed,
+                scheme: SCHEME,
+                timestamp,
+            });
+            count += 1;
         }
 
         // `build_region` allocates sectors first-fit in the order given, so
@@ -2256,6 +2454,87 @@ mod tests {
         fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
             // No storage; edits are discarded by design for this fixture.
         }
+    }
+
+    /// A direct persistence-layer mutation invalidates every saved light
+    /// snapshot whose relative footprint includes the changed column, while a
+    /// centre outside that radius remains reusable.
+    #[test]
+    fn direct_mutation_invalidates_saved_light_neighbourhood() {
+        let dir = tempdir("saved-light-invalidation");
+        let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT)
+            .expect("open world");
+
+        for (cx, cz) in [(-1, -1), (0, 0), (1, 0), (1, 1)] {
+            let mut column = source.column(cx, cz);
+            let mut light = lodestone_world::ColumnLight::new(column.section_count());
+            *light.sky_mut(0) = lodestone_world::LightData::Uniform(1);
+            column.set_retained_light(light);
+            assert!(source.store_resident_column(cx, cz, &column));
+        }
+        let mut unrelated = source.column(2, 0);
+        let mut unrelated_light = lodestone_world::ColumnLight::new(unrelated.section_count());
+        *unrelated_light.sky_mut(0) = lodestone_world::LightData::Uniform(9);
+        unrelated.set_retained_light(unrelated_light.clone());
+        assert!(source.store_resident_column(2, 0, &unrelated));
+
+        // The edit is at a relative local position in (0,0), so all four
+        // saved centres above depend on the changed column; (2,0) is two
+        // chunks away and is outside the dependency footprint.
+        source.set_block(1, 70, 1, MARKER);
+        for coordinate in [(-1, -1), (0, 0), (1, 0), (1, 1)] {
+            assert_eq!(
+                source.column(coordinate.0, coordinate.1).retained_light(),
+                None,
+                "saved light at relative centre {coordinate:?} must be invalidated"
+            );
+        }
+        assert_eq!(
+            source.column(2, 0).retained_light(),
+            Some(&unrelated_light),
+            "a saved centre outside the dependency radius remains reusable"
+        );
+    }
+
+    /// A saved snapshot that is not resident when a neighbouring edit lands
+    /// must be cleared from the region file as well as from later in-memory
+    /// loads. This is the restart-shaped control for the on-disk admission
+    /// boundary.
+    #[test]
+    fn neighbouring_mutation_clears_saved_light_after_reload() {
+        let dir = tempdir("saved-light-reload");
+        {
+            let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT)
+                .expect("open world");
+            for coordinate in [(0, 0), (1, 0)] {
+                let mut column = source.column(coordinate.0, coordinate.1);
+                let mut light = lodestone_world::ColumnLight::new(column.section_count());
+                *light.sky_mut(0) = lodestone_world::LightData::Uniform(1);
+                column.set_retained_light(light);
+                assert!(source.store_resident_column(coordinate.0, coordinate.1, &column));
+            }
+            source.save_handle().save().expect("seed saved snapshots");
+        }
+
+        let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT)
+            .expect("reopen world");
+        // The east saved snapshot is deliberately not loaded before this
+        // mutation. The save worker must discover and clear it from disk.
+        source.set_block(1, 70, 1, MARKER);
+        source.save_handle().save().expect("save invalidated snapshots");
+
+        let reopened = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT)
+            .expect("reopen after mutation");
+        assert_eq!(
+            reopened.column(0, 0).retained_light(),
+            None,
+            "the edited centre cannot retain its pre-mutation light"
+        );
+        assert_eq!(
+            reopened.column(1, 0).retained_light(),
+            None,
+            "the unloaded neighbouring snapshot must be cleared on disk"
+        );
     }
 
     /// A Nether world and an End world must land in **different**

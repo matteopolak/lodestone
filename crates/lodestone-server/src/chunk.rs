@@ -1510,6 +1510,18 @@ pub trait ChunkSource: Send + Sync {
         false
     }
 
+    /// Invalidates retained light snapshots whose dependency footprint includes
+    /// the changed column `(cx, cz)`.
+    ///
+    /// A block mutation changes the light answer in its own column and in the
+    /// adjacent columns used by the cross-column light encoder. A source that
+    /// retains complete columns must clear those snapshots before the next
+    /// admission fence; otherwise an initial packet can consume a value from a
+    /// pre-mutation footprint. The default is correct for sources that do not
+    /// retain light. Cache and persistence wrappers forward this hook so every
+    /// retention layer applies the same lifecycle rule.
+    fn invalidate_retained_light_neighbourhood(&self, _cx: i32, _cz: i32) {}
+
     /// Computes and installs a retained light snapshot from one stable column
     /// view. The callback runs without a source or cache lock held. A source
     /// with a versioned cache may reject the result when a concurrent block
@@ -1850,6 +1862,10 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
         (**self).store_resident_column(cx, cz, column)
     }
 
+    fn invalidate_retained_light_neighbourhood(&self, cx: i32, cz: i32) {
+        (**self).invalidate_retained_light_neighbourhood(cx, cz);
+    }
+
     fn settle_resident_column_light(
         &self,
         cx: i32,
@@ -1975,6 +1991,10 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
 
     fn store_resident_column(&self, cx: i32, cz: i32, column: &ChunkColumn) -> bool {
         (**self).store_resident_column(cx, cz, column)
+    }
+
+    fn invalidate_retained_light_neighbourhood(&self, cx: i32, cz: i32) {
+        (**self).invalidate_retained_light_neighbourhood(cx, cz);
     }
 
     fn settle_resident_column_light(

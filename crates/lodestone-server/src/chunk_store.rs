@@ -333,6 +333,21 @@ pub const CONCURRENT_TICK_RADIUS: i32 = 3;
 /// behavior; adding to this constant cannot bound an ever-growing registry.
 pub const CONCURRENT_SCAN_COLUMNS: usize = view_columns(CONCURRENT_TICK_RADIUS) + 1;
 
+/// Relative chunk coordinates whose retained light can depend on a block
+/// mutation. The cross-column light footprint is one chunk in each horizontal
+/// direction, so a mutation invalidates the complete 3x3 neighbourhood rather
+/// than relying on a target coordinate or an admission order.
+const RETAINED_LIGHT_NEIGHBOUR_OFFSETS: [(i32, i32); 8] = [
+    (-1, -1),
+    (0, -1),
+    (1, -1),
+    (-1, 0),
+    (1, 0),
+    (-1, 1),
+    (0, 1),
+    (1, 1),
+];
+
 /// The largest view radius whose whole square this store promises to hold
 /// resident, and therefore where [`capacity_for_view_radius`] stops growing.
 ///
@@ -1265,6 +1280,27 @@ impl<S: ChunkSource> ChunkStore<S> {
         cached || stored
     }
 
+    /// Clears retained light in this cache and in every wrapped persistence
+    /// layer while the caller owns the footprint gates. The gate keeps a
+    /// concurrent settlement from observing the old snapshot after the block
+    /// write has been accepted.
+    fn invalidate_retained_light_neighbourhood_while_held(
+        &self,
+        cx: i32,
+        cz: i32,
+        coordinates: &[(i32, i32)],
+    ) {
+        let mut guard = self.lock();
+        for &coordinate in coordinates {
+            if let Some(entry) = guard.columns.get_mut(&coordinate) {
+                entry.column.clear_retained_light();
+            }
+        }
+        drop(guard);
+        self.source
+            .invalidate_retained_light_neighbourhood(cx, cz);
+    }
+
     fn light_coordinates(
         cx: i32,
         cz: i32,
@@ -1369,6 +1405,13 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
     fn store_resident_column(&self, cx: i32, cz: i32, column: &ChunkColumn) -> bool {
         self.write_gates
             .with((cx, cz), || self.store_resident_column_inner(cx, cz, column))
+    }
+
+    fn invalidate_retained_light_neighbourhood(&self, cx: i32, cz: i32) {
+        let coordinates = Self::light_coordinates(cx, cz, &RETAINED_LIGHT_NEIGHBOUR_OFFSETS);
+        let lease = self.write_gates.acquire_many(&coordinates, true);
+        self.invalidate_retained_light_neighbourhood_while_held(cx, cz, &coordinates);
+        drop(lease);
     }
 
     /// Captures the complete light footprint, computes outside the cache lock,
@@ -1684,38 +1727,50 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         let cz = z.div_euclid(16);
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
-        self.write_gates.with((cx, cz), || {
-            let retained = {
-                let mut guard = self.lock();
-                let cache = &mut *guard;
-                let stamp = cache.next_stamp();
-                if let Some(entry) = cache.columns.get_mut(&(cx, cz)) {
-                    // A `y` outside the column's vertical extent is a no-op rather
-                    // than an index panic. `ChunkColumn::set_block` indexes
-                    // unguarded, and the inner source's own `set_block` may have
-                    // accepted the edit (or rejected it its own way) without this
-                    // retained column being able to hold it — so the store guards its
-                    // own update rather than relying on the source to reject
-                    // out-of-range `y`.
-                    if y >= entry.column.min_y && y < entry.column.min_y + entry.column.height {
-                        entry.column.set_block(lx, y, lz, name);
-                        entry.last_used = stamp;
-                        Some(entry.column.clone())
-                    } else {
-                        None
-                    }
+        let coordinates = Self::light_coordinates(cx, cz, &RETAINED_LIGHT_NEIGHBOUR_OFFSETS);
+        // A mutation invalidates every retained snapshot that could have read
+        // the changed column. Holding the whole footprint prevents a settlement
+        // on an adjacent centre from racing the invalidation.
+        let lease = self.write_gates.acquire_many(&coordinates, true);
+        let retained = {
+            let mut guard = self.lock();
+            let cache = &mut *guard;
+            let stamp = cache.next_stamp();
+            if let Some(entry) = cache.columns.get_mut(&(cx, cz)) {
+                // A `y` outside the column's vertical extent is a no-op rather
+                // than an index panic. `ChunkColumn::set_block` indexes
+                // unguarded, and the inner source's own `set_block` may have
+                // accepted the edit (or rejected it its own way) without this
+                // retained column being able to hold it — so the store guards its
+                // own update rather than relying on the source to reject
+                // out-of-range `y`.
+                if y >= entry.column.min_y && y < entry.column.min_y + entry.column.height {
+                    entry.column.set_block(lx, y, lz, name);
+                    entry.last_used = stamp;
+                    Some(entry.column.clone())
                 } else {
                     None
                 }
-            };
-            if retained
-                .as_ref()
-                .is_some_and(|column| self.source.store_resident_column(cx, cz, column))
-            {
-                return;
+            } else {
+                None
             }
-            self.source.set_block(x, y, z, name);
+        };
+        self.invalidate_retained_light_neighbourhood_while_held(cx, cz, &coordinates);
+        let retained = retained.map(|mut column| {
+            // The clone was taken immediately after the block write, before
+            // the cache-wide invalidation. Do not forward the old retained
+            // light to a wrapped source: the mutation makes that snapshot
+            // stale even for the edited centre itself.
+            column.clear_retained_light();
+            column
         });
+        if !retained
+            .as_ref()
+            .is_some_and(|column| self.source.store_resident_column(cx, cz, column))
+        {
+            self.source.set_block(x, y, z, name);
+        }
+        drop(lease);
     }
 
     /// Forwarded for the same reason `world_registries`/`dimension` above are:
@@ -2812,6 +2867,55 @@ mod tests {
             per_column * 8
         );
         assert_eq!(store.generated(), 8, "each distinct column generated once");
+    }
+
+    /// A mutation invalidates snapshots for every relative centre whose light
+    /// footprint could have read that column, while leaving unrelated snapshots
+    /// available for reuse.
+    #[test]
+    fn neighbouring_block_mutation_invalidates_only_the_light_footprint() {
+        let store = ChunkStore::with_capacity(CountingSource::new(), 32);
+        let mut footprint = vec![(0, 0)];
+        footprint.extend(
+            RETAINED_LIGHT_NEIGHBOUR_OFFSETS
+                .iter()
+                .map(|&(dx, dz)| (dx, dz)),
+        );
+        for &(cx, cz) in &footprint {
+            let mut column = store.column(cx, cz);
+            let mut light = lodestone_world::ColumnLight::new(column.section_count());
+            *light.sky_mut(0) = lodestone_world::LightData::Uniform(1);
+            column.set_retained_light(light);
+            assert!(store.store_resident_column(cx, cz, &column));
+        }
+
+        // The edited block is in the relative centre. Every retained centre
+        // in the 3x3 footprint must now be recomputed, while a centre two
+        // chunks away is outside the dependency radius.
+        store.set_block(1, 0, 1, "minecraft:gold_block");
+        for &(cx, cz) in &footprint {
+            assert_eq!(
+                store
+                    .resident_column(cx, cz)
+                    .expect("the retained footprint remains resident")
+                    .retained_light(),
+                None,
+                "retained light at relative centre ({cx},{cz}) must be invalidated"
+            );
+        }
+        let mut unrelated = store.column(2, 0);
+        let mut unrelated_light = lodestone_world::ColumnLight::new(unrelated.section_count());
+        *unrelated_light.sky_mut(0) = lodestone_world::LightData::Uniform(9);
+        unrelated.set_retained_light(unrelated_light.clone());
+        assert!(store.store_resident_column(2, 0, &unrelated));
+        store.set_block(1, 0, 1, "minecraft:iron_block");
+        assert_eq!(
+            store
+                .resident_column(2, 0)
+                .expect("the unrelated centre remains resident")
+                .retained_light(),
+            Some(&unrelated_light)
+        );
     }
 
     /// A retained light refresh and a block mutation for one coordinate must
