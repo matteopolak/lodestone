@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "jdk": {
+    "java_home": "/opt/jdk-25",
+    "version": "25.0.3+9"
+  },
+  "paper": {
+    "jar": "/operator/cache/paper-26.2-121.jar",
+    "sha256": "replace-with-the-operator-supplied-sha256",
+    "version": "26.2",
+    "build": 121
+  },
+  "plugins": [
+    {
+      "name": "operator-protection-plugin",
+      "domain": "world-editing",
+      "jar": "/operator/plugins/protection-plugin.jar",
+      "sha256": "replace-with-the-plugin-sha256",
+      "entrypoint": "example.protection.Plugin",
+      "unmodified": true
+    }
+  ],
+  "scenario": "scenario-block-break-cancel.json",
+  "commands": {
+    "paper": ["{java}", "-jar", "{paper_jar}", "--nogui"],
+    "lodestone": null
+  }
+}

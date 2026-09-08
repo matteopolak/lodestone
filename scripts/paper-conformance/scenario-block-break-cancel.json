@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "id": "block-break-cancel",
+  "seed": 730,
+  "world": {
+    "name": "paper-conformance",
+    "spawn": [0, 65, 0],
+    "target": {
+      "position": [1, 64, 0],
+      "block": "minecraft:stone"
+    }
+  },
+  "actions": [
+    {
+      "kind": "break_block",
+      "position": [1, 64, 0],
+      "expected": "cancelled"
+    }
+  ],
+  "controls": {
+    "listener_registered": {
+      "listener": "BlockBreakEvent",
+      "expected": "cancelled"
+    },
+    "no_listener": {
+      "listener": "absent",
+      "expected": "completed"
+    }
+  }
+}
