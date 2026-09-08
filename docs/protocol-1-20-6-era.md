@@ -146,6 +146,25 @@ tell them apart; surfacing one anyway would put an arrow's crit bit where a
 player's using-item bit belongs. The whole entry list is still decoded, so an
 unmodelled serializer fails rather than desynchronising.
 
+### Basic container sessions
+
+The hosted protocol-766 seam covers the complete generic chest control loop:
+the server emits `open_window` with the protocol's menu-registry id, then
+`window_items`/`set_slot` with component-shaped slots; the client resolves
+those ids through the era-local item and menu tables and folds them into its
+canonical menu state. A client `window_click` carries its state id, changed
+slot predictions, and cursor prediction, but the host decodes those fields
+into `ServerBound::ContainerClicked` and the shared server derives the move
+from its authoritative inventories. A mismatching prediction receives a full
+content correction before `close_window` ends the session.
+
+The focused literal controls live in `tests/container.rs`; the integrated
+test in `tests/container_integration.rs` opens a live fixture chest, sends a
+deliberately false quick-move prediction, observes the authoritative move and
+correction, and closes the window. The implementation currently encodes bare
+item stacks; stacks carrying component patches are rejected rather than
+silently losing their component data.
+
 ### Chunk-batch pacing
 
 `chunk_batch_finished` must be answered with `chunk_batch_received` carrying a
@@ -245,14 +264,13 @@ The block-state and entity-type tables are generated from the jar's own reports
 and pinned by an FNV-1a content hash on the committed dump, with a `#[ignore]`d
 drift guard that regenerates under `LODESTONE_REGEN=1`.
 
-`cargo xtask connectedness` reports this family at **67/122 clientbound
-decoded, 66/122 emitting, 0 decoded-but-stranded, 31/58 serverbound encoded**.
-The 58 that decode nothing are enumerated in `adapter::IGNORED` with a reason
+`cargo xtask connectedness` reports this family at **70/122 clientbound
+decoded, 69/122 emitting, 0 decoded-but-stranded, 32/58 serverbound encoded**.
+The 55 that decode nothing are enumerated in `adapter::IGNORED` with a reason
 each, so the dispatch table refuses to build if a packet is dropped by
 omission. The commonest reason is a missing 766 registry table — item ids, sound
 ids and attribute ids all name registry entries this crate cannot yet resolve
-into canonical keys, which still keeps `window_items`, `set_slot`, `open_window`,
-and the sound packets out.
+into canonical keys, which still keeps the sound packets out.
 
 `entity_equipment`, `entity_update_attributes`, and `block_action` use the
 generated `generated_registry` table. `tests/registry_mappings.rs` renders its

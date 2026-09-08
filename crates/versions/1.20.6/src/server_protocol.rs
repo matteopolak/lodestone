@@ -7,7 +7,7 @@
 use lodestone_core::{
     Ctx, Decode, Encode, Nbt, Reader, State, Writer, encode_body, write_network_nbt,
 };
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation, Text, Vec3, Vec3f};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ItemStack, Rotation, Text, Vec3, Vec3f};
 use lodestone_server::{ChunkColumn, ChunkEncodeError, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_world::{Heightmap, LongArrayFraming, PaletteKind, PalettedContainer};
 use uuid::Uuid;
@@ -25,6 +25,8 @@ use crate::packets::game::{
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
 use crate::packets::position::{Position, pack_position};
+use crate::packets::slot::Slot;
+use crate::packets::window::{OpenWindow, ServerboundCloseWindow, SetSlot, WindowClick, WindowItems};
 
 const CTX: Ctx = Ctx {
     version: PROTOCOL_1_20_6,
@@ -52,6 +54,67 @@ fn decode_full<T: Decode>(payload: &[u8]) -> Option<T> {
     let value = T::decode(&mut reader, CTX).ok()?;
     reader.ensure_empty().ok()?;
     Some(value)
+}
+
+fn item_id(item: &lodestone_model::ResourceKey) -> Option<i32> {
+    let name = item.to_string();
+    crate::generated_registry::ITEMS
+        .iter()
+        .find_map(|&(id, candidate)| (candidate == name).then_some(id))
+}
+
+fn encode_slot(item: Option<&ItemStack>) -> Result<Slot, String> {
+    let Some(item) = item else { return Ok(Slot::Empty) };
+    if item.components != Default::default() {
+        return Err(format!("protocol-766 cannot encode item components for {}", item.item));
+    }
+    let id = item_id(&item.item).ok_or_else(|| format!("unknown protocol-766 item {}", item.item))?;
+    let count = i8::try_from(item.count).map_err(|_| format!("item count {} overflows i8", item.count))?;
+    if count <= 0 {
+        return Err(format!("item count {count} is not positive"));
+    }
+    Ok(Slot::Item { id, count, components: Vec::new(), removed: Vec::new() })
+}
+
+fn decode_slot(item: Slot) -> Option<ItemStack> {
+    let Slot::Item { id, count, components, removed } = item else { return None };
+    let name = crate::registry::item_name(id)?;
+    let key = name.parse().ok()?;
+    let count = u32::try_from(count).ok()?;
+    let mut stack = ItemStack::new(key, count);
+    stack.components.has_unmodeled = !components.is_empty() || !removed.is_empty();
+    Some(stack)
+}
+
+fn menu_id(menu: &str) -> Option<i32> {
+    Some(match menu {
+        "minecraft:generic_9x1" => 0,
+        "minecraft:generic_9x2" => 1,
+        "minecraft:generic_9x3" => 2,
+        "minecraft:generic_9x4" => 3,
+        "minecraft:generic_9x5" => 4,
+        "minecraft:generic_9x6" => 5,
+        "minecraft:generic_3x3" => 6,
+        "minecraft:crafter_3x3" => 7,
+        "minecraft:anvil" => 8,
+        "minecraft:beacon" => 9,
+        "minecraft:blast_furnace" => 10,
+        "minecraft:brewing_stand" => 11,
+        "minecraft:crafting" => 12,
+        "minecraft:enchantment" => 13,
+        "minecraft:furnace" => 14,
+        "minecraft:grindstone" => 15,
+        "minecraft:hopper" => 16,
+        "minecraft:lectern" => 17,
+        "minecraft:loom" => 18,
+        "minecraft:merchant" => 19,
+        "minecraft:shulker_box" => 20,
+        "minecraft:smithing" => 21,
+        "minecraft:smoker" => 22,
+        "minecraft:cartography_table" => 23,
+        "minecraft:stonecutter" => 24,
+        _ => return None,
+    })
 }
 
 fn block_action(status: i32) -> Option<BlockActionKind> {
@@ -454,6 +517,30 @@ impl ServerProtocol for V766ServerProtocol {
                     }
                 })
             }
+            State::Play if packet_id == play::serverbound::CLOSE_WINDOW => {
+                decode_full::<ServerboundCloseWindow>(payload).map_or(ServerBound::Ignored, |close| {
+                    ServerBound::ContainerClosed { window_id: i32::from(close.window_id) }
+                })
+            }
+            State::Play if packet_id == play::serverbound::WINDOW_CLICK => {
+                let Some(click) = decode_full::<WindowClick>(payload) else {
+                    return ServerBound::Ignored;
+                };
+                let changed_slots = click
+                    .changed_slots
+                    .into_iter()
+                    .map(|entry| (i32::from(entry.location), decode_slot(entry.item)))
+                    .collect();
+                ServerBound::ContainerClicked {
+                    window_id: i32::from(click.window_id),
+                    state_id: click.state_id,
+                    slot: i32::from(click.slot),
+                    button: click.button,
+                    click_type: click.mode,
+                    changed_slots,
+                    carried_item: decode_slot(click.cursor_item),
+                }
+            }
             State::Play if packet_id == play::serverbound::CHAT_MESSAGE => {
                 decode_full::<ChatMessage>(payload).map_or(ServerBound::Ignored, |message| {
                     ServerBound::Chat {
@@ -656,6 +743,20 @@ impl ServerProtocol for V766ServerProtocol {
         )
     }
 
+    fn encode_open_screen(&self, window_id: i32, menu: &str, title: &str) -> ServerDirective {
+        let inventory_type = menu_id(menu).unwrap_or_else(|| panic!("unsupported protocol-766 menu {menu}"));
+        send(
+            play::clientbound::OPEN_WINDOW,
+            &OpenWindow {
+                window_id,
+                inventory_type,
+                window_title: NetworkNbt(Nbt::Compound(vec![
+                    ("text".to_owned(), Nbt::String(title.to_owned())),
+                ])),
+            },
+        )
+    }
+
     fn encode_player_combat_kill(&self, player_entity_id: i32, message: &Text) -> ServerDirective {
         let mut payload = Writer::default();
         payload.var_i32(player_entity_id);
@@ -698,6 +799,48 @@ impl ServerProtocol for V766ServerProtocol {
                 },
             ),
         ]
+    }
+
+    fn encode_container_content(
+        &self,
+        window_id: i32,
+        state_id: i32,
+        items: &[Option<ItemStack>],
+        carried: Option<&ItemStack>,
+    ) -> ServerDirective {
+        let items = items
+            .iter()
+            .map(|item| encode_slot(item.as_ref()).unwrap_or_else(|error| panic!("{error}")))
+            .collect();
+        let carried_item = encode_slot(carried).unwrap_or_else(|error| panic!("{error}"));
+        send(
+            play::clientbound::WINDOW_ITEMS,
+            &WindowItems {
+                window_id: u8::try_from(window_id).expect("protocol-766 window id fits u8"),
+                state_id,
+                items,
+                carried_item,
+            },
+        )
+    }
+
+    fn encode_container_slot(
+        &self,
+        window_id: i32,
+        state_id: i32,
+        slot: i32,
+        item: Option<&ItemStack>,
+    ) -> ServerDirective {
+        let item = encode_slot(item).unwrap_or_else(|error| panic!("{error}"));
+        send(
+            play::clientbound::SET_SLOT,
+            &SetSlot {
+                window_id: u8::try_from(window_id).expect("protocol-766 window id fits u8"),
+                state_id,
+                slot: i16::try_from(slot).expect("protocol-766 slot fits i16"),
+                item,
+            },
+        )
     }
 
     fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
