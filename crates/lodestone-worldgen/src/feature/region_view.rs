@@ -543,6 +543,10 @@ pub struct RegionView<'a> {
     /// [`lodestone_worldgen_core::hash::fast`], and the doc on that method,
     /// which was already written to defend against exactly this.
     overlay: Overlay,
+    /// Reused ordering buffer for the mixed ore/vegetation bridge. The bridge
+    /// consumes the ordered values before the next call, so retaining this
+    /// capacity avoids rebuilding a large tuple vector for every ore entry.
+    scan_order: Vec<(i32, i32, i32, StateId)>,
     interner: Arc<StateInterner>,
 }
 
@@ -582,6 +586,7 @@ impl<'a> RegionView<'a> {
             min_y,
             height,
             overlay: Overlay::default(),
+            scan_order: Vec::new(),
             interner,
         }
     }
@@ -615,6 +620,7 @@ impl<'a> RegionView<'a> {
             min_y,
             height,
             overlay: Overlay::default(),
+            scan_order: Vec::new(),
             interner,
         }
     }
@@ -640,6 +646,7 @@ impl<'a> RegionView<'a> {
             min_y,
             height,
             overlay: Overlay::default(),
+            scan_order: Vec::new(),
             interner: Arc::clone(grid.interner()),
         }
     }
@@ -784,6 +791,25 @@ impl<'a> RegionView<'a> {
             .collect();
         out.sort_unstable_by_key(|&(lx, y, lz, _)| (lx, lz, y));
         out
+    }
+
+    /// Visits every overlay write in deterministic `(x, z, y)` order using a
+    /// buffer retained by this view. Mixed ore/vegetation dispatch consumes the
+    /// values before the next call, so retaining capacity removes repeated
+    /// large temporary vectors without changing the ordering contract.
+    pub fn with_writes_in_scan_order<R>(
+        &mut self,
+        f: impl FnOnce(&[(i32, i32, i32, StateId)]) -> R,
+    ) -> R {
+        self.scan_order.clear();
+        self.scan_order.extend(
+            self.overlay
+                .iter()
+                .map(|(&(lx, y, lz), &id)| (lx, y, lz, id)),
+        );
+        self.scan_order
+            .sort_unstable_by_key(|&(lx, y, lz, _)| (lx, lz, y));
+        f(&self.scan_order)
     }
 
     /// Every write that landed in the **centre** chunk's own 16×16 columns, in

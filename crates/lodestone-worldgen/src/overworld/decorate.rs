@@ -120,6 +120,7 @@ pub(super) struct MixedReplayContext {
 /// configured feature bodies write through the absolute-coordinate `VegGrid`.
 /// Keeping this boundary explicit is what lets the next raw entry observe the
 /// resident state regardless of which adapter placed the previous entry.
+#[cfg(test)]
 fn synchronize_mixed_entry(
     writer: MixedEntryWriter,
     grid: &mut crate::feature::vegetation::VegGrid,
@@ -128,6 +129,29 @@ fn synchronize_mixed_entry(
     centre_z: i32,
     grid_cursor: &mut usize,
     ore_transferred: &mut HashMap<(i32, i32, i32), crate::interner::StateId>,
+) -> MixedSync {
+    let mut changed = Vec::new();
+    synchronize_mixed_entry_reusing(
+        writer,
+        grid,
+        ore_view,
+        centre_x,
+        centre_z,
+        grid_cursor,
+        ore_transferred,
+        &mut changed,
+    )
+}
+
+fn synchronize_mixed_entry_reusing(
+    writer: MixedEntryWriter,
+    grid: &mut crate::feature::vegetation::VegGrid,
+    ore_view: &mut crate::feature::region_view::RegionView<'_>,
+    centre_x: i32,
+    centre_z: i32,
+    grid_cursor: &mut usize,
+    ore_transferred: &mut HashMap<(i32, i32, i32), crate::interner::StateId>,
+    changed: &mut Vec<(i32, i32, i32, crate::interner::StateId)>,
 ) -> MixedSync {
     match writer {
         MixedEntryWriter::Decoration => {
@@ -157,15 +181,17 @@ fn synchronize_mixed_entry(
             sync
         }
         MixedEntryWriter::Ore => {
-            let mut changed = Vec::new();
-            for (lx, y, lz, state) in ore_view.writes_in_scan_order() {
-                let x = centre_x * 16 + lx;
-                let z = centre_z * 16 + lz;
-                if ore_transferred.insert((x, y, z), state) != Some(state) {
-                    changed.push((x, y, z, state));
+            changed.clear();
+            ore_view.with_writes_in_scan_order(|writes| {
+                for &(lx, y, lz, state) in writes {
+                    let x = centre_x * 16 + lx;
+                    let z = centre_z * 16 + lz;
+                    if ore_transferred.insert((x, y, z), state) != Some(state) {
+                            changed.push((x, y, z, state));
+                    }
                 }
-            }
-            for (x, y, z, state) in &changed {
+            });
+            for (x, y, z, state) in changed.iter() {
                 assert!(
                     grid.set_id_if_in_bounds(*x, *y, *z, *state),
                     "mixed ore entry wrote outside the decoration footprint at ({x},{y},{z})",
@@ -548,15 +574,23 @@ impl OverworldGenerator {
         // sequence is unchanged as long as the written cells are visited in the
         // same order. See `RegionView::centre_writes_in_scan_order`.
         let parity_spills = selected_source.map_or_else(Vec::new, |source| {
-            view.writes_in_scan_order()
-                .into_iter()
-                .filter(|&(lx, y, lz, state)| seeded.get(&(lx, y, lz)).copied() != Some(state))
-                .map(|(lx, y, lz, state)| ParityOreSpill {
-                    source,
-                    position: (cx * 16 + lx, y, cz * 16 + lz),
-                    state: self.interner.name_of(state).to_owned(),
-                })
-                .collect()
+            let mut spills = Vec::new();
+            view.with_writes_in_scan_order(|writes| {
+                spills.extend(
+                    writes
+                        .iter()
+                        .copied()
+                        .filter(|&(lx, y, lz, state)| {
+                            seeded.get(&(lx, y, lz)).copied() != Some(state)
+                        })
+                        .map(|(lx, y, lz, state)| ParityOreSpill {
+                            source,
+                            position: (cx * 16 + lx, y, cz * 16 + lz),
+                            state: self.interner.name_of(state).to_owned(),
+                        }),
+                );
+            });
+            spills
         });
         let writes = view.centre_writes_in_scan_order();
         // Releases the view's borrow of `center_world` and of `wide_pre`.
@@ -1112,6 +1146,7 @@ impl OverworldGenerator {
 
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
         let mut grid_cursor = 0usize;
+        let mut changed_scratch = Vec::new();
         for dx in -1..=1_i32 {
             for dz in -1..=1_i32 {
                 let source_x = cx + dx;
@@ -1170,7 +1205,7 @@ impl OverworldGenerator {
                                 &mut grid,
                                 &self.veg_tags,
                             );
-                            synchronize_mixed_entry(
+                            synchronize_mixed_entry_reusing(
                                 MixedEntryWriter::Decoration,
                                 &mut grid,
                                 &mut ore_view,
@@ -1178,6 +1213,7 @@ impl OverworldGenerator {
                                 cz,
                                 &mut grid_cursor,
                                 &mut ore_transferred,
+                                &mut changed_scratch,
                             );
                             decoration_at = entry_at + 1;
                         } else if let Some(ore) = next_ore.filter(|ore| ore.index == index) {
@@ -1204,7 +1240,7 @@ impl OverworldGenerator {
                                 ore,
                                 &mut ore_view,
                             );
-                            synchronize_mixed_entry(
+                            synchronize_mixed_entry_reusing(
                                 MixedEntryWriter::Ore,
                                 &mut grid,
                                 &mut ore_view,
@@ -1212,6 +1248,7 @@ impl OverworldGenerator {
                                 cz,
                                 &mut grid_cursor,
                                 &mut ore_transferred,
+                                &mut changed_scratch,
                             );
                             ore_at += 1;
                         }
