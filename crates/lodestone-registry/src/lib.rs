@@ -50,6 +50,9 @@ pub(crate) mod generated_version_table;
 
 pub mod version_table;
 
+/// The explicit, version-locked contract for native plugin adapters.
+pub mod plugin;
+
 /// A compiled-in protocol version family.
 ///
 /// # The multi-protocol seam
