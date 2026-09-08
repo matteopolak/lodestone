@@ -122,7 +122,9 @@ every referenced configured/placed feature is bundled. `EndGenerator` reads the 
 from `the_end` and applies its 5×5, four-row block shape after materialization. The independent
 `EndPlatformOracle.java` fixture covers those 100 writes. The generator constructs a three-by-three
 decoration region before serving its centre, so outer-island, chorus, and spike writers from
-neighbouring source chunks compose into the served column. A spike is selected only by the chunk
+neighbouring source chunks compose into the served column. Chorus plant connection state resolves
+the bundled `supports_chorus_plant` block tag for its downward connection; this matters on End stone,
+which is a valid support even though it is not itself another chorus block. A spike is selected only by the chunk
 holding its centre; its circular block footprint is then clipped by each served column, while its
 crystal remains a gameplay entity. Return gateways carry their block position, exit, and
 exact-teleport flag through `EndColumn::gateways`; `ChunkColumn::from_end` turns that sidecar into a

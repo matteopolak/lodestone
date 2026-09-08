@@ -63,6 +63,7 @@ pub(crate) struct EndDecoration {
     outer_island_index: Option<usize>,
     chorus: bool,
     chorus_index: Option<usize>,
+    chorus_supports: HashSet<String>,
     gateway_return: Option<GatewayConfig>,
     gateway_index: Option<usize>,
     /// `None` means the End biome has no spike feature. An empty list means
@@ -74,6 +75,13 @@ pub(crate) struct EndDecoration {
 
 impl EndDecoration {
     pub(crate) fn from_resolver(resolver: &dyn Resolver) -> Self {
+        let mut chorus_supports = HashSet::new();
+        crate::compose::resolve_block_tag(
+            resolver,
+            "minecraft:supports_chorus_plant",
+            &mut chorus_supports,
+            &mut HashSet::new(),
+        );
         let document = resolver.biome_document(THE_END);
         let platform_entries = document
             .get("features")
@@ -137,6 +145,7 @@ impl EndDecoration {
             outer_island_index,
             chorus: chorus_index.is_some(),
             chorus_index,
+            chorus_supports,
             gateway_return: gateway_config_in_step(resolver, END_HIGHLANDS, 4),
             gateway_index,
             spikes: spike_config_in_step(resolver, THE_END, 4),
@@ -262,7 +271,7 @@ impl EndDecoration {
                         let z = source_z * 16 + random.next_int_bounded(16);
                         let y = surface_y(world, x, z);
                         if world.get(x, y, z) == "minecraft:air" && world.get(x, y - 1, z) == "minecraft:end_stone" {
-                            grow_chorus(world, &mut random, (x, y, z), (x, y, z), 0);
+                        grow_chorus(world, &mut random, (x, y, z), (x, y, z), 0, &self.chorus_supports);
                         }
                     }
                 }
@@ -277,11 +286,14 @@ fn is_chorus(state: &str) -> bool {
     state.starts_with("minecraft:chorus_plant") || state.starts_with("minecraft:chorus_flower")
 }
 
-fn chorus_plant_state(world: &DenseBlockGrid, pos: (i32, i32, i32)) -> String {
+fn chorus_plant_state(world: &DenseBlockGrid, pos: (i32, i32, i32), supports: &HashSet<String>) -> String {
     let chorus_at = |x, y, z| is_chorus(world.get(x, y, z));
+    let down = world.get(pos.0, pos.1 - 1, pos.2);
+    let down_connected = chorus_at(pos.0, pos.1 - 1, pos.2)
+        || supports.contains(down.split('[').next().unwrap_or(down));
     format!(
         "minecraft:chorus_plant[down={},east={},north={},south={},up={},west={}]",
-        chorus_at(pos.0, pos.1 - 1, pos.2),
+        down_connected,
         chorus_at(pos.0 + 1, pos.1, pos.2),
         chorus_at(pos.0, pos.1, pos.2 - 1),
         chorus_at(pos.0, pos.1, pos.2 + 1),
@@ -290,8 +302,8 @@ fn chorus_plant_state(world: &DenseBlockGrid, pos: (i32, i32, i32)) -> String {
     )
 }
 
-fn set_chorus_plant(world: &mut DenseBlockGrid, pos: (i32, i32, i32)) {
-    world.set(pos.0, pos.1, pos.2, &chorus_plant_state(world, pos));
+fn set_chorus_plant(world: &mut DenseBlockGrid, pos: (i32, i32, i32), supports: &HashSet<String>) {
+    world.set(pos.0, pos.1, pos.2, &chorus_plant_state(world, pos, supports));
 }
 
 fn horizontally_empty(world: &DenseBlockGrid, pos: (i32, i32, i32), ignore: Option<(i32, i32)>) -> bool {
@@ -306,14 +318,15 @@ fn grow_chorus<R: RandomSource>(
     current: (i32, i32, i32),
     start: (i32, i32, i32),
     depth: i32,
+    supports: &HashSet<String>,
 ) {
-    set_chorus_plant(world, current);
+    set_chorus_plant(world, current, supports);
     let height = random.next_int_bounded(4) + 1 + i32::from(depth == 0);
     for i in 0..height {
         let target = (current.0, current.1 + i + 1, current.2);
         if !horizontally_empty(world, target, None) { return; }
-        set_chorus_plant(world, target);
-        set_chorus_plant(world, (target.0, target.1 - 1, target.2));
+        set_chorus_plant(world, target, supports);
+        set_chorus_plant(world, (target.0, target.1 - 1, target.2), supports);
     }
     let mut branched = false;
     if depth < 4 {
@@ -328,9 +341,9 @@ fn grow_chorus<R: RandomSource>(
                 && horizontally_empty(world, target, Some((-dx, -dz)))
             {
                 branched = true;
-                set_chorus_plant(world, target);
-                set_chorus_plant(world, (target.0 - dx, target.1, target.2 - dz));
-                grow_chorus(world, random, target, start, depth + 1);
+                set_chorus_plant(world, target, supports);
+                set_chorus_plant(world, (target.0 - dx, target.1, target.2 - dz), supports);
+                grow_chorus(world, random, target, start, depth + 1, supports);
             }
         }
     }
@@ -703,11 +716,26 @@ mod tests {
     }
 
     #[test]
+    fn chorus_plant_uses_the_resolved_support_tag_only_for_down() {
+        let mut world = DenseBlockGrid::new(-1, 0, -1, 3, 3, 3, "minecraft:air");
+        world.set(0, 0, 0, "minecraft:end_stone");
+        let supports = HashSet::from(["minecraft:end_stone".to_owned()]);
+        assert_eq!(
+            chorus_plant_state(&world, (0, 1, 0), &supports),
+            "minecraft:chorus_plant[down=true,east=false,north=false,south=false,up=false,west=false]",
+        );
+        assert_eq!(
+            chorus_plant_state(&world, (0, 1, 0), &HashSet::new()),
+            "minecraft:chorus_plant[down=false,east=false,north=false,south=false,up=false,west=false]",
+        );
+    }
+
+    #[test]
     fn chorus_shape_matches_the_independent_feature_fixture() {
         let mut world = DenseBlockGrid::new(-32, 0, -32, 64, 128, 64, "minecraft:air");
         world.set(0, 64, 0, "minecraft:end_stone");
         let mut random = LegacyRandomSource::new(12_345);
-        grow_chorus(&mut world, &mut random, (0, 65, 0), (0, 65, 0), 0);
+        grow_chorus(&mut world, &mut random, (0, 65, 0), (0, 65, 0), 0, &HashSet::new());
 
         let mut writes = 0usize;
         for line in include_str!("../../tests/support/end_decoration_jvm.txt").lines() {
