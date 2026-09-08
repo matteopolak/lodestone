@@ -22,18 +22,24 @@ const MAGIC: &[u8; 8] = b"LWP26P03";
 const MAGIC_V4: &[u8; 8] = b"LWP26P04";
 const MAGIC_V5: &[u8; 8] = b"LWP26P05";
 const MAGIC_V6: &[u8; 8] = b"LWP26P06";
+const MAGIC_V7: &[u8; 8] = b"LWP26P07";
 const PACKET_AUDIT_MAGIC: &[u8; 8] = b"LWP26A06";
+const LIGHT_FREE_AUDIT_MAGIC: &[u8; 8] = b"LWP26A07";
 const DOMAIN: &[u8] = b"lodestone.worldgen.large-parity.manifest/v3/semantic";
 const DOMAIN_V4: &[u8] = b"lodestone.worldgen.large-parity.manifest/v4/semantic";
 const DOMAIN_V5: &[u8] = b"lodestone.worldgen.large-parity.manifest/v5/semantic";
 const DOMAIN_V6: &[u8] = b"lodestone.worldgen.large-parity.manifest/v6/raw-packet";
+const DOMAIN_V7: &[u8] = b"lodestone.worldgen.large-parity.manifest/v7/light-free";
 const PACKET_AUDIT_DOMAIN: &[u8] = b"lodestone.worldgen.large-parity.packet-audit/v6/raw-packet";
+const LIGHT_FREE_AUDIT_DOMAIN: &[u8] = b"lodestone.worldgen.large-parity.audit/v7/light-free";
 const RECORD_DOMAIN: &[u8] = b"lodestone.worldgen.large-parity.chunk/v3/semantic";
 const RECORD_DOMAIN_V4: &[u8] = b"lodestone.worldgen.large-parity.chunk/v4/semantic";
 const RECORD_DOMAIN_V5: &[u8] = b"lodestone.worldgen.large-parity.chunk/v5/semantic";
+const RECORD_DOMAIN_V7: &[u8] = b"lodestone.worldgen.large-parity.chunk/v7/light-free";
 const DIGEST_BYTES: u64 = 32;
 pub const RAW_PACKET_HASH_BYTES: usize = 2;
 pub const PACKET_AUDIT_RECORD_BYTES: usize = DIGEST_BYTES as usize;
+pub const LIGHT_FREE_AUDIT_RECORD_BYTES: usize = DIGEST_BYTES as usize;
 const MANIFEST_KIND: u16 = 2;
 const PACKET_AUDIT_KIND: u16 = 3;
 
@@ -107,6 +113,24 @@ pub struct PacketAuditHeader {
     pub payload_digest: [u8; 32],
 }
 
+/// Authenticated full-digest sidecar for the v7 light-free content manifest.
+/// Its distinct magic and schema keep it from being accepted as a v6 packet
+/// audit or as a second main payload.
+#[derive(Debug, Clone, Copy)]
+pub struct LightFreeAuditHeader {
+    pub semantic_version: u16,
+    pub cx0: i32,
+    pub cx1: i32,
+    pub cz0: i32,
+    pub cz1: i32,
+    pub count: u64,
+    pub frozen_world: [u8; 32],
+    pub dimension: Dimension,
+    pub record_width: u16,
+    pub kind: u16,
+    pub payload_digest: [u8; 32],
+}
+
 fn invalid(message: &'static str) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, message) }
 fn be_i32(b: &[u8]) -> i32 { i32::from_be_bytes(b.try_into().expect("fixed-width header field")) }
 fn be_u64(b: &[u8]) -> u64 { u64::from_be_bytes(b.try_into().expect("fixed-width header field")) }
@@ -118,8 +142,8 @@ fn checked_record_count(cx0: i32, cx1: i32, cz0: i32, cz1: i32) -> Option<u64> {
     u64::try_from(width).ok()?.checked_mul(u64::try_from(height).ok()?)
 }
 
-/// Reads a legacy or v6 header. A v2 file is rejected explicitly: its hashes describe
-/// non-canonical packet bytes and cannot be upgraded without re-exporting.
+/// Reads a legacy or v6/v7 header. A v2 file is rejected explicitly: its hashes
+/// describe non-canonical packet bytes and cannot be upgraded without re-exporting.
 pub fn read_header(mut r: impl Read) -> io::Result<Header> {
     let mut b = [0; HEADER_BYTES]; r.read_exact(&mut b)?;
     if &b[..8] == b"LWP26P02" { return Err(invalid("v2 raw-packet manifest is rejected; regenerate frozen-world semantic v3")); }
@@ -130,20 +154,22 @@ pub fn read_header(mut r: impl Read) -> io::Result<Header> {
     let valid_v4 = magic == MAGIC_V4 && version == 4 && schema == 4;
     let valid_v5 = magic == MAGIC_V5 && version == 5 && schema == 5;
     let valid_v6 = magic == MAGIC_V6 && version == 6 && schema == 6;
+    let valid_v7 = magic == MAGIC_V7 && version == 7 && schema == 7;
     let record_width = u16::from_be_bytes(b[68..70].try_into().unwrap());
-    let expected_width = if valid_v6 { RAW_PACKET_HASH_BYTES as u16 } else { DIGEST_BYTES as u16 };
-    if !(valid_v3 || valid_v4 || valid_v5 || valid_v6) || u16::from_be_bytes(b[10..12].try_into().unwrap()) != HEADER_BYTES as u16 || u16::from_be_bytes(b[12..14].try_into().unwrap()) != MANIFEST_KIND || u32::from_be_bytes(b[16..20].try_into().unwrap()) != 776 || i64::from_be_bytes(b[20..28].try_into().unwrap()) != 42 || record_width != expected_width || u16::from_be_bytes(b[70..72].try_into().unwrap()) != 0 {
+    let expected_width = if valid_v6 || valid_v7 { RAW_PACKET_HASH_BYTES as u16 } else { DIGEST_BYTES as u16 };
+    if !(valid_v3 || valid_v4 || valid_v5 || valid_v6 || valid_v7) || u16::from_be_bytes(b[10..12].try_into().unwrap()) != HEADER_BYTES as u16 || u16::from_be_bytes(b[12..14].try_into().unwrap()) != MANIFEST_KIND || u32::from_be_bytes(b[16..20].try_into().unwrap()) != 776 || i64::from_be_bytes(b[20..28].try_into().unwrap()) != 42 || record_width != expected_width || u16::from_be_bytes(b[70..72].try_into().unwrap()) != 0 {
         return Err(invalid("unsupported large-parity header"));
     }
     if valid_v3 && b[72..104] != sha256(DOMAIN) { return Err(invalid("large-parity semantic schema digest differs")); }
     if valid_v4 && b[72..104] != sha256(DOMAIN_V4) { return Err(invalid("large-parity dimension schema digest differs")); }
     if valid_v5 && b[72..104] != sha256(DOMAIN_V5) { return Err(invalid("large-parity normalized-light schema digest differs")); }
     if valid_v6 && b[72..104] != sha256(DOMAIN_V6) { return Err(invalid("large-parity raw-packet schema digest differs")); }
+    if valid_v7 && b[72..104] != sha256(DOMAIN_V7) { return Err(invalid("large-parity light-free schema digest differs")); }
     let frozen_world: [u8; 32] = b[104..136].try_into().unwrap();
     if frozen_world == [0; 32] { return Err(invalid("large-parity manifest has no frozen-world identity")); }
     let dimension = if valid_v3 { Dimension::Overworld } else { Dimension::from_digest(b[168..200].try_into().unwrap())? };
-    if (valid_v4 || valid_v5 || valid_v6) && b[168..200] == [0; 32] { return Err(invalid("large-parity dimension manifest has no dimension identity")); }
-    let (grid_min, grid_max) = if valid_v6 { (RAW_GRID_MIN, RAW_GRID_MAX) } else { (GRID_MIN, GRID_MAX) };
+    if (valid_v4 || valid_v5 || valid_v6 || valid_v7) && b[168..200] == [0; 32] { return Err(invalid("large-parity dimension manifest has no dimension identity")); }
+    let (grid_min, grid_max) = if valid_v6 || valid_v7 { (RAW_GRID_MIN, RAW_GRID_MAX) } else { (GRID_MIN, GRID_MAX) };
     if (be_i32(&b[28..32]), be_i32(&b[32..36]), be_i32(&b[36..40]), be_i32(&b[40..44])) != (grid_min, grid_max, grid_min, grid_max) { return Err(invalid("manifest global bounds differ")); }
     let h = Header { semantic_version: version, cx0: be_i32(&b[44..48]), cx1: be_i32(&b[48..52]), cz0: be_i32(&b[52..56]), cz1: be_i32(&b[56..60]), count: be_u64(&b[60..68]), frozen_world, dimension, record_width, kind: u16::from_be_bytes(b[12..14].try_into().unwrap()) };
     let expected = checked_record_count(h.cx0, h.cx1, h.cz0, h.cz1).ok_or_else(|| invalid("invalid large-parity shard bounds"))?;
@@ -238,6 +264,92 @@ pub fn validate_packet_audit_header(main: &Header, audit: &PacketAuditHeader) ->
     Ok(())
 }
 
+/// Reads and authenticates the v7 full-digest sidecar header.
+pub fn read_light_free_audit_header(mut r: impl Read) -> io::Result<LightFreeAuditHeader> {
+    let mut b = [0; HEADER_BYTES]; r.read_exact(&mut b)?;
+    let magic = &b[..8];
+    let version = u16::from_be_bytes(b[8..10].try_into().unwrap());
+    let kind = u16::from_be_bytes(b[12..14].try_into().unwrap());
+    let schema = u16::from_be_bytes(b[14..16].try_into().unwrap());
+    let record_width = u16::from_be_bytes(b[68..70].try_into().unwrap());
+    if magic != LIGHT_FREE_AUDIT_MAGIC
+        || version != 7
+        || u16::from_be_bytes(b[10..12].try_into().unwrap()) != HEADER_BYTES as u16
+        || kind != PACKET_AUDIT_KIND
+        || schema != 7
+        || u32::from_be_bytes(b[16..20].try_into().unwrap()) != 776
+        || i64::from_be_bytes(b[20..28].try_into().unwrap()) != 42
+        || record_width != LIGHT_FREE_AUDIT_RECORD_BYTES as u16
+        || u16::from_be_bytes(b[70..72].try_into().unwrap()) != 0
+    {
+        return Err(invalid("unsupported large-parity light-free audit header"));
+    }
+    if b[72..104] != sha256(LIGHT_FREE_AUDIT_DOMAIN) {
+        return Err(invalid("large-parity light-free audit schema digest differs"));
+    }
+    let frozen_world: [u8; 32] = b[104..136].try_into().unwrap();
+    if frozen_world == [0; 32] {
+        return Err(invalid("large-parity light-free audit has no frozen-world identity"));
+    }
+    let dimension_digest: [u8; 32] = b[168..200].try_into().unwrap();
+    if dimension_digest == [0; 32] {
+        return Err(invalid("large-parity light-free audit has no dimension identity"));
+    }
+    let dimension = Dimension::from_digest(dimension_digest)
+        .map_err(|_| invalid("large-parity light-free audit has an unknown dimension identity"))?;
+    if (be_i32(&b[28..32]), be_i32(&b[32..36]), be_i32(&b[36..40]), be_i32(&b[40..44]))
+        != (RAW_GRID_MIN, RAW_GRID_MAX, RAW_GRID_MIN, RAW_GRID_MAX)
+    {
+        return Err(invalid("light-free audit global bounds differ"));
+    }
+    let header = LightFreeAuditHeader {
+        semantic_version: version,
+        cx0: be_i32(&b[44..48]),
+        cx1: be_i32(&b[48..52]),
+        cz0: be_i32(&b[52..56]),
+        cz1: be_i32(&b[56..60]),
+        count: be_u64(&b[60..68]),
+        frozen_world,
+        dimension,
+        record_width,
+        kind,
+        payload_digest: b[136..168].try_into().unwrap(),
+    };
+    let expected = checked_record_count(header.cx0, header.cx1, header.cz0, header.cz1)
+        .ok_or_else(|| invalid("invalid light-free audit shard bounds"))?;
+    if !(header.cx0 >= RAW_GRID_MIN
+        && header.cx1 <= RAW_GRID_MAX
+        && header.cz0 >= RAW_GRID_MIN
+        && header.cz1 <= RAW_GRID_MAX
+        && header.count == expected)
+    {
+        return Err(invalid("invalid light-free audit shard bounds"));
+    }
+    Ok(header)
+}
+
+/// Checks that a v7 sidecar is the full-digest companion for its two-byte main
+/// manifest and carries the same shard, frozen-world, and dimension identity.
+pub fn validate_light_free_audit_header(main: &Header, audit: &LightFreeAuditHeader) -> io::Result<()> {
+    if main.semantic_version != 7
+        || main.kind != MANIFEST_KIND
+        || main.record_width != RAW_PACKET_HASH_BYTES as u16
+        || audit.semantic_version != 7
+        || audit.kind != PACKET_AUDIT_KIND
+        || audit.record_width != LIGHT_FREE_AUDIT_RECORD_BYTES as u16
+        || audit.cx0 != main.cx0
+        || audit.cx1 != main.cx1
+        || audit.cz0 != main.cz0
+        || audit.cz1 != main.cz1
+        || audit.count != main.count
+        || audit.frozen_world != main.frozen_world
+        || audit.dimension != main.dimension
+    {
+        return Err(invalid("light-free audit sidecar identity differs from v7 manifest"));
+    }
+    Ok(())
+}
+
 /// Streams full 32-byte semantic digests through SHA-256 before comparison.
 pub fn verify_payload(mut r: impl Read, count: u64, expected: [u8; 32]) -> io::Result<()> {
     verify_payload_with_width(&mut r, count, DIGEST_BYTES as u16, expected)
@@ -299,6 +411,39 @@ pub fn verify_raw_packet_audit_pair(
     if audit_sha.finish() != audit_expected {
         return Err(invalid("packet-audit sidecar checksum differs"));
     }
+    Ok(())
+}
+
+/// Authenticates the v7 full-digest content sidecar in lockstep and proves
+/// every full digest has the two-byte prefix stored in the main manifest.
+pub fn verify_light_free_audit_pair(
+    mut main: impl Read,
+    mut audit: impl Read,
+    count: u64,
+    main_expected: [u8; 32],
+    audit_expected: [u8; 32],
+) -> io::Result<()> {
+    let mut main_sha = Sha256::new();
+    let mut audit_sha = Sha256::new();
+    let mut prefix = [0u8; RAW_PACKET_HASH_BYTES];
+    let mut full = [0u8; LIGHT_FREE_AUDIT_RECORD_BYTES];
+    for index in 0..count {
+        main.read_exact(&mut prefix)?;
+        audit.read_exact(&mut full)?;
+        main_sha.update(&prefix);
+        audit_sha.update(&full);
+        if full[..RAW_PACKET_HASH_BYTES] != prefix {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("light-free audit prefix differs from v7 manifest at record {index}"),
+            ));
+        }
+    }
+    let mut trailing = [0u8; 1];
+    if main.read(&mut trailing)? != 0 { return Err(invalid("v7 light-free manifest has trailing bytes")); }
+    if audit.read(&mut trailing)? != 0 { return Err(invalid("light-free audit sidecar has trailing bytes")); }
+    if main_sha.finish() != main_expected { return Err(invalid("v7 light-free manifest checksum differs")); }
+    if audit_sha.finish() != audit_expected { return Err(invalid("light-free audit sidecar checksum differs")); }
     Ok(())
 }
 
@@ -412,6 +557,86 @@ pub fn semantic_record_v5_for_dimension(packet: &LevelChunkWithLight, dimension:
 
 pub fn semantic_digest_v5_for_dimension(packet: &LevelChunkWithLight, dimension: Dimension) -> [u8; 32] {
     sha256(&semantic_record_v5_for_dimension(packet, dimension))
+}
+
+/// Produces the v7 content-only record directly from a generated server
+/// column. No packet shape, light container, or light settlement is involved.
+/// The byte order mirrors the independent Java exporter: domain/coordinates/
+/// dimension, the three client heightmaps, then section-major Y/Z/X state
+/// cells and 4×4×4 biome cells, followed by canonical block entities.
+pub fn light_free_record(
+    column: &lodestone_server::ChunkColumn,
+    cx: i32,
+    cz: i32,
+    dimension: Dimension,
+) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.bytes(RECORD_DOMAIN_V7);
+    w.i32(cx);
+    w.i32(cz);
+    w.bytes(dimension.name().as_bytes());
+
+    let predicates = [1, 4, 5];
+    w.i32(predicates.len() as i32);
+    for type_id in predicates {
+        w.i32(type_id as i32);
+        for z in 0..16i32 {
+            for x in 0..16i32 {
+                let height = (column.min_y..column.min_y + column.height)
+                    .rev()
+                    .find(|&y| lodestone_v26_2::server_protocol::client_heightmap_includes(type_id, column.resolved_block_state_id(x, y, z)))
+                    .map_or(column.min_y, |y| y + 1);
+                w.i32(height);
+            }
+        }
+    }
+
+    let biome_ids = column
+        .biome_cell_palette()
+        .iter()
+        .map(|name| lodestone_v26_2::server_protocol::biome_registry_id(name))
+        .collect::<Vec<_>>();
+    w.i32(column.section_count() as i32);
+    for section in 0..column.section_count() {
+        let base_y = column.min_y + (section * 16) as i32;
+        for y in 0..16i32 {
+            for z in 0..16i32 {
+                for x in 0..16i32 {
+                    w.u32(column.block_state_id(x, base_y + y, z));
+                }
+            }
+        }
+        for y in 0..4usize {
+            for z in 0..4usize {
+                for x in 0..4usize {
+                    let index = column.biome_cell_index(x, section * 4 + y, z) as usize;
+                    w.u32(biome_ids[index]);
+                }
+            }
+        }
+    }
+
+    let mut entities = column.block_entities().to_vec();
+    entities.sort_unstable_by_key(|(pos, entity)| {
+        (
+            pos.x.rem_euclid(16),
+            pos.y,
+            pos.z.rem_euclid(16),
+            lodestone_data::block_entity_types::block_entity_type_id(entity.type_id())
+                .map_or(u32::MAX, |id| id.raw()),
+        )
+    });
+    w.i32(entities.len() as i32);
+    for (pos, entity) in entities {
+        w.u8(pos.x.rem_euclid(16) as u8);
+        w.i16(pos.y as i16);
+        w.u8(pos.z.rem_euclid(16) as u8);
+        let type_id = lodestone_data::block_entity_types::block_entity_type_id(entity.type_id())
+            .unwrap_or_else(|| panic!("unknown generated block entity type {}", entity.type_id()));
+        w.u32(type_id.raw());
+        canonical_nbt(&mut w, &lodestone_server::chunk_nbt::block_entity_update_nbt(pos, &entity));
+    }
+    w.as_slice().to_vec()
 }
 
 fn canonical_light(w: &mut Writer, light: &lodestone_world::ColumnLight, sky: bool) {
@@ -544,6 +769,56 @@ mod tests {
         let mut wrong = header;
         wrong[104..136].fill(0);
         assert!(read_header(&wrong[..]).is_err(), "zero frozen-world identity must fail closed");
+    }
+
+    #[test]
+    fn v7_light_free_header_and_full_digest_sidecar_are_authenticated() {
+        let full = sha256(b"light-free content record");
+        let prefix = [full[0], full[1]];
+        let frozen = [0x5a; 32];
+        let mut main = [0u8; HEADER_BYTES];
+        main[..8].copy_from_slice(MAGIC_V7);
+        main[8..10].copy_from_slice(&7u16.to_be_bytes());
+        main[10..12].copy_from_slice(&(HEADER_BYTES as u16).to_be_bytes());
+        main[12..14].copy_from_slice(&MANIFEST_KIND.to_be_bytes());
+        main[14..16].copy_from_slice(&7u16.to_be_bytes());
+        main[16..20].copy_from_slice(&776u32.to_be_bytes());
+        main[20..28].copy_from_slice(&42i64.to_be_bytes());
+        for (offset, value) in [(28, RAW_GRID_MIN), (32, RAW_GRID_MAX), (36, RAW_GRID_MIN), (40, RAW_GRID_MAX), (44, 0), (48, 0), (52, 0), (56, 0)] {
+            main[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
+        }
+        main[60..68].copy_from_slice(&1u64.to_be_bytes());
+        main[68..70].copy_from_slice(&(RAW_PACKET_HASH_BYTES as u16).to_be_bytes());
+        main[72..104].copy_from_slice(&sha256(DOMAIN_V7));
+        main[104..136].copy_from_slice(&frozen);
+        main[136..168].copy_from_slice(&sha256(&prefix));
+        main[168..200].copy_from_slice(&Dimension::Overworld.digest());
+        let parsed = read_header(&main[..]).expect("v7 light-free header");
+        assert_eq!((parsed.semantic_version, parsed.record_width, parsed.dimension), (7, 2, Dimension::Overworld));
+
+        let mut audit = [0u8; HEADER_BYTES];
+        audit[..8].copy_from_slice(LIGHT_FREE_AUDIT_MAGIC);
+        audit[8..10].copy_from_slice(&7u16.to_be_bytes());
+        audit[10..12].copy_from_slice(&(HEADER_BYTES as u16).to_be_bytes());
+        audit[12..14].copy_from_slice(&PACKET_AUDIT_KIND.to_be_bytes());
+        audit[14..16].copy_from_slice(&7u16.to_be_bytes());
+        audit[16..20].copy_from_slice(&776u32.to_be_bytes());
+        audit[20..28].copy_from_slice(&42i64.to_be_bytes());
+        for (offset, value) in [(28, RAW_GRID_MIN), (32, RAW_GRID_MAX), (36, RAW_GRID_MIN), (40, RAW_GRID_MAX), (44, 0), (48, 0), (52, 0), (56, 0)] {
+            audit[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
+        }
+        audit[60..68].copy_from_slice(&1u64.to_be_bytes());
+        audit[68..70].copy_from_slice(&(LIGHT_FREE_AUDIT_RECORD_BYTES as u16).to_be_bytes());
+        audit[72..104].copy_from_slice(&sha256(LIGHT_FREE_AUDIT_DOMAIN));
+        audit[104..136].copy_from_slice(&frozen);
+        audit[136..168].copy_from_slice(&sha256(&full));
+        audit[168..200].copy_from_slice(&Dimension::Overworld.digest());
+        let parsed_audit = read_light_free_audit_header(&audit[..]).expect("v7 light-free audit header");
+        validate_light_free_audit_header(&parsed, &parsed_audit).expect("v7 sidecar identity");
+        verify_light_free_audit_pair(Cursor::new(prefix), Cursor::new(full), 1, sha256(&prefix), sha256(&full)).expect("v7 prefix/full pair");
+        let mut wrong_prefix = prefix;
+        wrong_prefix[0] ^= 1;
+        assert!(verify_light_free_audit_pair(Cursor::new(wrong_prefix), Cursor::new(full), 1, sha256(&wrong_prefix), sha256(&full)).is_err(), "v7 prefix collision control must fail");
     }
 
     fn test_v6_header(

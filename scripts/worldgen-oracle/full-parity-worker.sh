@@ -34,6 +34,13 @@ fi
 here="$(cd "$(dirname "$0")" && pwd)"
 grid_min=-500
 grid_max=500
+light_free=0
+case "${LODESTONE_ORACLE_FORMAT:-}" in
+  v7|light-free) light_free=1 ;;
+  "") if [ "${LODESTONE_ORACLE_LIGHT_FREE:-0}" = 1 ]; then light_free=1; fi ;;
+  v6|raw-packet) ;;
+  *) echo "LODESTONE_ORACLE_FORMAT must be v6 or v7" >&2; exit 2 ;;
+esac
 
 if [[ "$dimension" == end && "${LODESTONE_ORACLE_END_BOUNDED:-0}" == 1 ]]; then
   slot=0
@@ -46,7 +53,9 @@ if [[ "$dimension" == end && "${LODESTONE_ORACLE_END_BOUNDED:-0}" == 1 ]]; then
       z_hi="$grid_max"
     fi
     output_rel="${shard_dir}/end/shard-z${z_lo}-${z_hi}.lwp"
-    "$here/large-parity.sh" --mode export --dimension end \
+    export_command=( "$here/large-parity.sh" --mode export --dimension end )
+    if [ "$light_free" -eq 1 ]; then export_command+=( --light-free ); fi
+    "${export_command[@]}" \
       --out "${output_prefix}/${output_rel}" \
       --cx "$grid_min" "$grid_max" --cz "$z_lo" "$z_hi" --resume
   done
@@ -65,6 +74,9 @@ for (( x_lo = grid_min; x_lo <= grid_max; x_lo += 32, slot += 1 )); do
   export_command=( "$here/large-parity.sh" --mode export )
   if [ "$dimension" != overworld ]; then
     export_command+=( --dimension "$dimension" )
+  fi
+  if [ "$light_free" -eq 1 ]; then
+    export_command+=( --light-free )
   fi
   output_rel="${shard_dir}/shard-x${x_lo}-${x_hi}.lwp"
   if [ "$dimension" != overworld ]; then

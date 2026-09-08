@@ -173,6 +173,18 @@ pub fn block_tag_contains(tag: &str, block: Block) -> bool {
     tag_contains(tag, block.registry_id())
 }
 
+/// Whether the generated built-in block tag contains `block`, without reading
+/// the process-wide network override table. Content identities such as
+/// heightmaps use this boundary so a prior remote session cannot change a
+/// local worldgen comparison.
+#[must_use]
+pub fn builtin_block_tag_contains(tag: &str, block: Block) -> bool {
+    generated::BLOCK_TAGS
+        .binary_search_by_key(&tag, |&(name, _)| name)
+        .ok()
+        .is_some_and(|index| generated::BLOCK_TAGS[index].1.binary_search(&block.registry_id()).is_ok())
+}
+
 /// The built-in `minecraft:tool` prototype of `item` (for example
 /// `minecraft:diamond_pickaxe`), or `None` for an item that has none.
 ///
