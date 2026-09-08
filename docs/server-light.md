@@ -44,12 +44,18 @@ allocated by the centre plus its loaded 3x3 footprint. Every non-air block secti
 layer and the immediately adjacent section nodes, so a non-emitting block in a neighbouring column can
 extend the explicit Empty mask by one section. This is an exact, potentially sparse mask: unallocated
 sections remain Missing even when a higher section is allocated. Its later light updates retain
-explicit zero sky and block values for the normal clear operation. The End has sky light, and its
+explicit zero sky and block values for the normal clear operation. A Nether initial packet retains
+block light emitted by the centre column, while neighbour contributions wait for the later seam-aware
+update; this keeps the initial packet at the persisted-column lifecycle boundary without changing the
+3x3 storage mask. The End has sky light, and its
 initial packet consumes the exact `ColumnLight` snapshot captured by the source's settlement
-transaction. A generated source without a retained snapshot uses a bounded fallback: it keeps the
-complete computed sky result, then removes both light layers from sections that the centre plus loaded
-3x3 footprint would not allocate. This preserves the lower-apron omission and full-sky run seen in
-the first small-batch capture while leaving persisted snapshots untouched. The Overworld keeps the
+transaction. A generated source without a retained snapshot requests the complete computed sky first,
+then derives the padded-tail cutoff from the highest non-air block section in the supplied footprint,
+retaining the terrain section and one full section above it. This sky rule is independent of the
+block-light storage mask. Its initial block layer admits centre and cardinal-neighbour sources while
+deferring diagonal-neighbour sources until a later seam-aware update; the storage mask still reflects
+the complete loaded 3x3 footprint. This preserves the lower-apron omission and terrain-dependent
+full-sky run while leaving persisted snapshots untouched. The Overworld keeps the
 one-section sky form and elides uniform zero block light in an initial chunk. `ChunkSource::dimension`
 carries that choice to the protocol's dimension-aware initial-encoding and light-computation hooks. An
 unlabelled source uses the Overworld as the compatibility default; a dimension wrapper must always
@@ -78,6 +84,14 @@ The typed native record path stores the same `ColumnLight` beside terrain and re
 decoded `ChunkColumn` on reopen, so a caller can feed that record directly back to the serving source.
 Persisted columns remain authoritative after eviction and restart; admission and ticket policy remain
 the responsibility of the source/cache lifecycle that owns the column.
+
+The coordinate-free controls in `crates/versions/26.2/tests/overworld_light_lifecycle.rs` make the
+initial wire distinction independently observable. They build the same synthetic column with 29
+non-air cells, then compare an attached snapshot against an unsettled generated fallback. The retained
+packet's raw suffix contains the exact high sky present bit and explicit zero block empty bit from the
+snapshot; the fallback keeps only its compact sky run and elides uniform-zero block sections. The tests
+parse the non-light prefix separately, so an unrelated terrain mismatch cannot masquerade as a light
+settlement failure.
 
 `ChunkStore` uses a per-coordinate revision/CAS check from snapshot through commit, while keeping both the
 global cache mutex and the coordinate gates out of the expensive optimistic light computation. A block
@@ -123,7 +137,9 @@ a later initial send cannot mistake derived light for current state.
 For an opted-in protocol, initial chunk encoding assembles the centre and its eight neighbours in a
 fixed relative-coordinate order, then settles the centre's retained snapshot through the validated
 read/compute/commit fence. The order is only a deterministic admission/assembly rule; the light
-result is not allowed to depend on direction, coordinate, or holder ordinal. A missing neighbour is
+result is not allowed to depend on direction, coordinate, or holder ordinal. The Nether initial
+fallback keeps the centre block-light layer and defers neighbour propagation until a light update;
+persisted snapshots remain authoritative. A missing neighbour is
 resolved through the source's normal column path so the fence has a complete 3×3 input; the snapshot
 is stored before the initial packet is written. Protocols that do not opt into retained initial light
 keep their one-column encoder and do not pay for adjacent reads. The detached worker encoder remains
