@@ -4698,7 +4698,7 @@ mod route_tests {
     use super::{
         ClientEvent, Difficulty, LevelEventData, PackedMessageSignature, Route, Uuid, route,
     };
-    use crate::{LookAnchor, Vec3, ids::Identifier, math::BlockPos};
+    use crate::{LookAnchor, PredictionSequence, Vec3, ids::Identifier, math::BlockPos};
 
     /// **The guard that protects the guard.**
     ///
