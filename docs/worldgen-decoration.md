@@ -101,7 +101,11 @@ sulfur have no survival floor gate. The tag sets are resolved once and bound as 
 decoration pass, so this fidelity does not reintroduce string-set work into each placement attempt.
 Block columns also accept weighted nested height providers and randomized integer state properties,
 which covers the hanging cave-vine records; bamboo uses the configured floor tag, stalk states and
-optional podzol disk.
+optional podzol disk. Environment scans evaluate the target predicate before advancing and retain
+the final target position after an allowed-search run ends. The `has_sturdy_face` predicate reads
+the resolver's exact upward- and downward-face support facts, so a ceiling scan does not terminate
+at its first air cell or consume a feature column at the wrong height. Compact fixtures without
+those facts retain the module's named non-air/non-fluid support approximation.
 
 The single speleothem feature resolves its anchor-holder tag at construction, chooses an upward or
 downward point from the two adjacent anchor candidates, then writes its base patch before its one-

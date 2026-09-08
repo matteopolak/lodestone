@@ -111,6 +111,14 @@ pub enum BlockPredicate {
         fluids: Vec<String>,
         offset: (i32, i32, i32),
     },
+    /// Tests the requested face of the block at `offset`. The bundled
+    /// placement data currently uses the downward face to find a ceiling for
+    /// hanging vegetation; the resolver supplies exact center-support facts
+    /// for that face and full upward-face facts for the opposite direction.
+    HasSturdyFace {
+        direction: SturdyFaceDirection,
+        offset: (i32, i32, i32),
+    },
     /// Approximates every `would_survive` check this module reaches as
     /// the vegetation block's own may-place-on rule — see module doc. The default for any
     /// `would_survive` whose tested state isn't one of the two special-cased
@@ -130,6 +138,12 @@ pub enum BlockPredicate {
     /// same `all_of`, so modelling it twice would be redundant, not more
     /// correct.
     WouldSurviveSugarCane,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum SturdyFaceDirection {
+    Up,
+    Down,
 }
 
 pub(super) fn parse_predicate_list(v: &Value) -> Vec<BlockPredicate> {
@@ -228,6 +242,17 @@ impl BlockPredicate {
                 },
                 offset: parse_offset(&v["offset"]),
             },
+            "has_sturdy_face" => match v["direction"].as_str() {
+                Some("up") => BlockPredicate::HasSturdyFace {
+                    direction: SturdyFaceDirection::Up,
+                    offset: parse_offset(&v["offset"]),
+                },
+                Some("down") => BlockPredicate::HasSturdyFace {
+                    direction: SturdyFaceDirection::Down,
+                    offset: parse_offset(&v["offset"]),
+                },
+                _ => BlockPredicate::True,
+            },
             "would_survive" => match v["state"]["Name"].as_str().unwrap_or("") {
                 "minecraft:cactus" => BlockPredicate::WouldSurviveCactus,
                 "minecraft:sugar_cane" => BlockPredicate::WouldSurviveSugarCane,
@@ -291,6 +316,21 @@ pub(super)     fn test(&self, grid: &VegGrid, tags: &VegTags, pos: BlockPos) -> 
                 fluids.iter().any(|f| {
                     fluid_tag_of(f).is_some_and(|tag| tags.has(grid.interner(), tag, id))
                 })
+            }
+            BlockPredicate::HasSturdyFace { direction, offset } => {
+                let (dx, dy, dz) = *offset;
+                let state = grid.get_id(pos.x + dx, pos.y + dy, pos.z + dz);
+                let name = grid.interner().name_of(state);
+                let facts = match direction {
+                    SturdyFaceDirection::Up => &tags.simple_block_support.sturdy_up,
+                    SturdyFaceDirection::Down => &tags.simple_block_support.center_support_down,
+                };
+                if !facts.is_empty() {
+                    facts.test(name)
+                } else {
+                    let base = super::base_id(name);
+                    !is_air(base) && !is_fluid(base) && blocks_motion(base)
+                }
             }
             BlockPredicate::WouldSurviveOnSupportsVegetation => {
                 tag_at(grid, tags, Tag::SupportsVegetation, pos.x, pos.y - 1, pos.z)
@@ -2562,8 +2602,20 @@ pub fn collect_unsupported(placed: &PlacedRef) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BlockPredicate, ConfiguredFeature};
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::Arc,
+    };
+
+    use super::{
+        BlockPredicate, ConfiguredFeature, Positions, SimpleBlockSupport, SturdyFaceDirection,
+        VegPlacement, VegTags,
+    };
+    use super::super::grid::VegGrid;
     use crate::density::{NoiseParams, Resolver};
+    use crate::feature::BlockPos;
+    use crate::feature::top_layer::StatePredicate;
+    use crate::rng::XoroshiroRandomSource;
     use serde_json::Value;
 
     #[test]
@@ -2577,6 +2629,87 @@ mod tests {
             BlockPredicate::MatchingFluid { fluids, offset: (0, 0, 0) }
                 if fluids == vec!["minecraft:water"]
         ));
+    }
+
+    #[test]
+    fn sturdy_face_predicate_reads_the_requested_support_fact() {
+        let predicate = BlockPredicate::parse(&serde_json::json!({
+            "type": "minecraft:has_sturdy_face",
+            "direction": "down"
+        }));
+        assert!(matches!(
+            predicate,
+            BlockPredicate::HasSturdyFace {
+                direction: SturdyFaceDirection::Down,
+                offset: (0, 0, 0)
+            }
+        ));
+
+        let mut tags = VegTags::default();
+        tags.simple_block_support = SimpleBlockSupport {
+            center_support_down: StatePredicate::new(
+                HashSet::from(["minecraft:stone".to_owned()]),
+                HashMap::new(),
+            ),
+            ..SimpleBlockSupport::default()
+        };
+        let mut grid = VegGrid::with_footprint_interned(
+            Arc::new(crate::interner::StateInterner::new()),
+            0,
+            16,
+            0,
+            0,
+            0,
+            16,
+        );
+        grid.seed(0, 0, 0, "minecraft:stone".to_owned());
+        assert!(predicate.test(&grid, &tags, BlockPos { x: 0, y: 0, z: 0 }));
+        assert!(!predicate.test(&grid, &tags, BlockPos { x: 0, y: 1, z: 0 }));
+    }
+
+    #[test]
+    fn environment_scan_stops_at_the_first_supported_ceiling() {
+        let placement = VegPlacement::try_parse(&serde_json::json!({
+            "type": "minecraft:environment_scan",
+            "direction_of_search": "up",
+            "target_condition": {
+                "type": "minecraft:has_sturdy_face",
+                "direction": "down"
+            },
+            "allowed_search_condition": {
+                "type": "minecraft:matching_block_tag",
+                "tag": "minecraft:air"
+            },
+            "max_steps": 12
+        }))
+        .expect("the bundled ceiling scan must parse");
+        let mut tags = VegTags::default();
+        tags.simple_block_support = SimpleBlockSupport {
+            center_support_down: StatePredicate::new(
+                HashSet::from(["minecraft:stone".to_owned()]),
+                HashMap::new(),
+            ),
+            ..SimpleBlockSupport::default()
+        };
+        let mut grid = VegGrid::with_footprint_interned(
+            Arc::new(crate::interner::StateInterner::new()),
+            0,
+            16,
+            0,
+            0,
+            0,
+            16,
+        );
+        grid.seed(0, 2, 0, "minecraft:stone".to_owned());
+        let mut random = XoroshiroRandomSource::new(0);
+        let positions = placement.get_positions(
+            &mut random,
+            BlockPos { x: 0, y: 0, z: 0 },
+            &grid,
+            &tags,
+            Some("minecraft:cave_vines"),
+        );
+        assert_eq!(positions, Positions::One(BlockPos { x: 0, y: 2, z: 0 }));
     }
 
     #[test]
