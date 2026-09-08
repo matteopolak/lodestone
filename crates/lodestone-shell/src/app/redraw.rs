@@ -1721,6 +1721,12 @@ impl WindowApp {
         // Rows, header and footer together — the whole `PlayerTabOverlay` frame.
         // Read only while the overlay is up, because it is a world clone.
         let tab_view = self.tab_held.then(|| self.sim.tab_list_view());
+        // Tab-list heads use the same asynchronous, URL-keyed cache as world
+        // player skins. Start requests during frame gather; the HUD only pulls
+        // already-decoded sheets, so a slow profile host can never stall draw.
+        crate::remote_skins::request_all(tab_view.iter().flat_map(|view| {
+            view.rows.iter().filter_map(|row| row.head.skin_url.as_deref())
+        }));
         let health = self.sim.health();
         let food = self.sim.food();
         // Vanilla's `canHurtPlayer()` — the single gate `extractPlayerHealth` sits

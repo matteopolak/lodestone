@@ -2275,6 +2275,19 @@ pub struct HudGeometry {
     /// caller inspects, and nothing outside the crate constructs a
     /// [`HudGeometry`].
     pub(crate) special: Vec<SpecialIconDraw>,
+    /// Dynamic skin-sheet faces for the tab-list overlay. The GPU owner groups
+    /// these by resolved URL and binds the packaged fallback when a fetch has
+    /// not completed yet.
+    pub(crate) tab_heads: Vec<TabHeadDraw>,
+}
+
+/// One tab-list face placement handed from the CPU HUD builder to the dynamic
+/// skin-sheet renderer.
+#[derive(Debug, Clone)]
+pub(crate) struct TabHeadDraw {
+    pub(crate) head: crate::tablist::TabListHead,
+    pub(crate) x: f32,
+    pub(crate) y: f32,
 }
 
 impl HudGeometry {
@@ -3603,6 +3616,13 @@ impl HudGeometry {
                 // inside a 9 px pitch, which is what leaves the 1 px gap between
                 // rows that makes the list read as a list.
                 b.rect_px(sx, sy, panel.slot_w, TAB_LINE_H - 1.0, TAB_ROW_FILL);
+                if players.show_head {
+                    b.tab_heads.push(TabHeadDraw {
+                        head: row.head.clone(),
+                        x: sx,
+                        y: sy,
+                    });
+                }
                 let name_x = if players.show_head { sx + TAB_HEAD_W } else { sx };
                 let ink = if row.spectator { TAB_INK_SPECTATOR } else { TAB_INK };
                 b.text_spans(&row.name, name_x, sy, tab_scale, [ink[0], ink[1], ink[2]], ink[3]);
@@ -3676,6 +3696,7 @@ impl HudGeometry {
             glint_verts: b.glint_verts,
             model_verts: b.model_verts,
             special: b.special,
+            tab_heads: b.tab_heads,
         }
     }
 }
@@ -6128,6 +6149,7 @@ struct Builder<'a> {
     model_verts: Vec<ModelVertex>,
     /// Special-renderer (block-entity) icons; see [`HudGeometry::special`].
     special: Vec<SpecialIconDraw>,
+    tab_heads: Vec<TabHeadDraw>,
     gui: Option<&'a GuiAtlas>,
     items: Option<&'a ItemAtlas>,
     /// The baked model set, for items whose inventory icon is a 3-D mini-block
@@ -6159,6 +6181,7 @@ impl<'a> Builder<'a> {
             glint_verts: Vec::new(),
             model_verts: Vec::new(),
             special: Vec::new(),
+            tab_heads: Vec::new(),
             gui,
             items,
             models,
@@ -6576,6 +6599,7 @@ pub struct HudRenderer {
     debug_vertex_count: u32,
     debug_refresh: DebugGeometryRefresh,
     gui: Option<GuiHud>,
+    tab_heads: Option<item_icon::TabHeadRenderer>,
     /// The flat item atlas and the 3-D block-item pass, shared verbatim with the
     /// container screen. Both halves start detached.
     icons: IconRenderer,
@@ -6751,6 +6775,7 @@ impl HudRenderer {
             debug_vertex_count: 0,
             debug_refresh: DebugGeometryRefresh::default(),
             gui: None,
+            tab_heads: None,
             icons: IconRenderer::new(),
             font: VanillaFont::shared(),
             // Stamped with the generation the font above was resolved against,
@@ -6973,6 +6998,7 @@ impl HudRenderer {
             buffer: sp.buffer,
             capacity_floats: sp.capacity_floats,
         });
+        self.tab_heads = Some(item_icon::TabHeadRenderer::new(device, color_format));
     }
 
     /// Attach the flat item-sprite [`ItemAtlas`] so hotbar slots draw real item
@@ -7264,6 +7290,10 @@ impl HudRenderer {
             anim,
             false,
         );
+        let (logical_w, logical_h) = crate::menu::render::logical_canvas(gui_scale, width, height);
+        let head_batches = self.tab_heads.as_mut().map_or_else(Vec::new, |heads| {
+            heads.prepare(device, queue, &geo.tab_heads, logical_w, logical_h)
+        });
         // `geo.special` counts too. A hotbar holding nothing but a chest, with the
         // procedural frame suppressed, produces zero vertices in all four other
         // streams — bailing here would make the whole chest-icon chain
@@ -7273,6 +7303,7 @@ impl HudRenderer {
             && geo.item_verts.is_empty()
             && geo.model_verts.is_empty()
             && geo.special.is_empty()
+            && head_batches.is_empty()
             && self.debug_vertex_count == 0
         {
             return;
@@ -7320,7 +7351,6 @@ impl HudRenderer {
         // must be built for that same logical size, not the raw physical one,
         // or the model pass and the flat-sprite/colour passes it shares a
         // frame with would disagree about how big a "GUI pixel" is.
-        let (logical_w, logical_h) = crate::menu::render::logical_canvas(gui_scale, width, height);
         let (item_count, model_count) = self.icons.upload(
             device,
             queue,
@@ -7360,6 +7390,9 @@ impl HudRenderer {
                 pass.set_bind_group(0, &g.bind_group, &[]);
                 pass.set_vertex_buffer(0, g.buffer.slice(..));
                 pass.draw(0..sprite_count, 0..1);
+            }
+            if let Some(heads) = &self.tab_heads {
+                heads.draw(&mut pass, &head_batches);
             }
             self.icons.draw_sprites(&mut pass, item_count);
             // The glint over the icons it belongs to, in the same pass so it
@@ -10594,6 +10627,11 @@ mod tests {
                     name: crate::overlay::plain_spans(format!("P{i}")),
                     ping_sprite: "icon/ping_5",
                     spectator: false,
+                    head: crate::tablist::TabListHead {
+                        skin_url: None,
+                        fallback_sheet: "entity/player/slim/steve",
+                        show_hat: true,
+                    },
                 })
                 .collect(),
             header: Vec::new(),
@@ -10613,6 +10651,27 @@ mod tests {
         let with = HudGeometry::build(&frame, 640, 480).vertex_count();
         let without = HudGeometry::build(&HudFrame::new(&stats), 640, 480).vertex_count();
         assert!(with > without, "the tab overlay's plate + names add geometry");
+    }
+
+    #[test]
+    fn tab_heads_follow_slot_layout_and_preserve_skin_metadata() {
+        let stats = DebugStats::default();
+        let mut view = tab_view(2);
+        view.show_head = true;
+        let frame = HudFrame {
+            players: Some(&view),
+            ..HudFrame::new(&stats)
+        };
+        let geo = HudGeometry::build(&frame, 640, 480);
+
+        assert_eq!(geo.tab_heads.len(), 2);
+        assert_eq!(geo.tab_heads[0].x, geo.tab_heads[1].x);
+        assert_eq!(geo.tab_heads[1].y - geo.tab_heads[0].y, TAB_LINE_H);
+        assert_eq!(
+            geo.tab_heads[0].head.fallback_sheet,
+            "entity/player/slim/steve"
+        );
+        assert!(geo.tab_heads.iter().all(|draw| draw.head.show_hat));
     }
 
     /// **The column split, at the threshold.**
@@ -11341,8 +11400,8 @@ mod tests {
         // only chooses an ink colour, and there is no ink to colour.
         let view = TabListView {
             rows: vec![
-                TabListRow { name: Vec::new(), ping_sprite: "", spectator: false },
-                TabListRow { name: Vec::new(), ping_sprite: "", spectator: false },
+                TabListRow { name: Vec::new(), ping_sprite: "", spectator: false, head: crate::tablist::TabListHead { skin_url: None, fallback_sheet: "entity/player/slim/steve", show_hat: true } },
+                TabListRow { name: Vec::new(), ping_sprite: "", spectator: false, head: crate::tablist::TabListHead { skin_url: None, fallback_sheet: "entity/player/slim/steve", show_hat: true } },
             ],
             header: Vec::new(),
             footer: Vec::new(),

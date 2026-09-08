@@ -532,6 +532,11 @@ fn hex_surfaces_with(coloured: bool) -> Vec<(&'static str, u32, HudGeometry)> {
             name: plain_spans("row"),
             ping_sprite: ping_sprite(10),
             spectator: false,
+            head: crate::tablist::TabListHead {
+                skin_url: None,
+                fallback_sheet: "entity/player/slim/steve",
+                show_hat: true,
+            },
         }],
         header: vec![hex(4)],
         footer: vec![hex(5)],
