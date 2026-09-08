@@ -1358,6 +1358,38 @@ fn build_entity_pipeline(
     instance_layout: wgpu::VertexBufferLayout<'_>,
     write_mask: wgpu::ColorWrites,
 ) -> wgpu::RenderPipeline {
+    build_entity_pipeline_with_cull(
+        device,
+        color_format,
+        camera_layout,
+        texture_layout,
+        label,
+        depth_compare,
+        blend,
+        depth_write,
+        vertex_entry,
+        fragment_entry,
+        instance_layout,
+        write_mask,
+        None,
+    )
+}
+
+fn build_entity_pipeline_with_cull(
+    device: &wgpu::Device,
+    color_format: wgpu::TextureFormat,
+    camera_layout: &wgpu::BindGroupLayout,
+    texture_layout: &wgpu::BindGroupLayout,
+    label: &str,
+    depth_compare: wgpu::CompareFunction,
+    blend: Option<wgpu::BlendState>,
+    depth_write: bool,
+    vertex_entry: &str,
+    fragment_entry: &str,
+    instance_layout: wgpu::VertexBufferLayout<'_>,
+    write_mask: wgpu::ColorWrites,
+    cull_mode: Option<wgpu::Face>,
+) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(&format!("{label}-shader")),
         source: wgpu::ShaderSource::Wgsl(ENTITY_WGSL.into()),
@@ -1389,10 +1421,12 @@ fn build_entity_pipeline(
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
             front_face: wgpu::FrontFace::Ccw,
-            // Double-sided for now: robust visibility while per-model winding
-            // parity is pixel-verified. See the module docs. Vanilla's armour
-            // render type is `armorCutoutNoCull`, i.e. also double-sided.
-            cull_mode: None,
+            // Most entity families remain double-sided because their render
+            // contract explicitly needs no culling. Player skin geometry is
+            // the exception: its boxes are wound outward by
+            // `push_part_quads`, so dropping back faces prevents an inner
+            // surface from painting a seam at a silhouette or joint.
+            cull_mode,
             ..Default::default()
         },
         depth_stencil: Some(wgpu::DepthStencilState {
@@ -1576,7 +1610,7 @@ impl EntityPipeline {
     ) -> wgpu::RenderPipeline {
         let contract = player_skin_pipeline_contract();
         debug_assert!(contract.blends);
-        build_entity_pipeline(
+        build_entity_pipeline_with_cull(
             device,
             color_format,
             &self.camera_layout,
@@ -1589,6 +1623,7 @@ impl EntityPipeline {
             "fs_main_player_skin",
             EntityInstanceRaw::instance_layout(),
             wgpu::ColorWrites::ALL,
+            contract.cull_mode,
         )
     }
 
@@ -2238,6 +2273,7 @@ struct PlayerSkinPipelineContract {
     blends: bool,
     depth_writes: bool,
     depth_compare: wgpu::CompareFunction,
+    cull_mode: Option<wgpu::Face>,
 }
 
 const fn player_skin_pipeline_contract() -> PlayerSkinPipelineContract {
@@ -2248,6 +2284,7 @@ const fn player_skin_pipeline_contract() -> PlayerSkinPipelineContract {
         // It inherits the default entity depth-stencil state.
         depth_writes: true,
         depth_compare: DEPTH_COMPARE_NEARER_OR_EQUAL,
+        cull_mode: Some(wgpu::Face::Back),
     }
 }
 
@@ -2267,6 +2304,7 @@ mod tests {
         assert!(contract.blends);
         assert!(contract.depth_writes);
         assert_eq!(contract.depth_compare, DEPTH_COMPARE_NEARER_OR_EQUAL);
+        assert_eq!(contract.cull_mode, Some(wgpu::Face::Back));
         assert!(
             ENTITY_WGSL.contains("fn fs_main_player_skin")
                 && ENTITY_WGSL.contains("if (tex_col.a < 0.1)"),
