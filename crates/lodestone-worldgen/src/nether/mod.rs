@@ -642,6 +642,7 @@ fn synchronize_mixed_entry(
     terrain_min_y: i32,
     terrain_height: i32,
     grid_cursor: &mut usize,
+    ore_cursor: &mut usize,
     ore_transferred: &mut HashMap<(i32, i32, i32), StateId>,
 ) -> MixedSync {
     let mut changed = Vec::new();
@@ -654,6 +655,7 @@ fn synchronize_mixed_entry(
         terrain_min_y,
         terrain_height,
         grid_cursor,
+        ore_cursor,
         ore_transferred,
         &mut changed,
     )
@@ -668,6 +670,7 @@ fn synchronize_mixed_entry_reusing(
     terrain_min_y: i32,
     terrain_height: i32,
     grid_cursor: &mut usize,
+    ore_cursor: &mut usize,
     ore_transferred: &mut HashMap<(i32, i32, i32), StateId>,
     changed: &mut Vec<(i32, i32, i32, StateId)>,
 ) -> MixedSync {
@@ -709,7 +712,8 @@ fn synchronize_mixed_entry_reusing(
         }
         MixedEntryWriter::Ore => {
             changed.clear();
-            ore_view.with_writes_in_scan_order(|writes| {
+            let end = ore_view.write_log_len();
+            ore_view.with_write_log_since_scan_order(*ore_cursor, |writes| {
                 for &(lx, y, lz, state) in writes {
                     let x = centre_x * 16 + lx;
                     let z = centre_z * 16 + lz;
@@ -718,6 +722,7 @@ fn synchronize_mixed_entry_reusing(
                     }
                 }
             });
+            *ore_cursor = end;
             for (x, y, z, state) in changed.iter() {
                 assert!(
                     grid.set_id_if_in_bounds(*x, *y, *z, *state),
@@ -1330,6 +1335,7 @@ impl NetherGenerator {
         let mut decoration_rng = decoration_random();
         let mut ore_random = decoration_random();
         let mut grid_cursor = 0usize;
+        let mut ore_cursor = 0usize;
         let mut changed_scratch = Vec::new();
         for dx in -1..=1_i32 { for dz in -1..=1_i32 {
             let source_x = cx + dx;
@@ -1374,6 +1380,7 @@ impl NetherGenerator {
                             self.min_y,
                             self.height,
                             &mut grid_cursor,
+                            &mut ore_cursor,
                             &mut ore_transferred,
                             &mut changed_scratch,
                         );
@@ -1409,6 +1416,7 @@ impl NetherGenerator {
                             self.min_y,
                             self.height,
                             &mut grid_cursor,
+                            &mut ore_cursor,
                             &mut ore_transferred,
                             &mut changed_scratch,
                         );
@@ -2769,6 +2777,7 @@ mod tests {
             |_, _| Some(Arc::clone(&source)),
         );
         let mut grid_cursor = 0;
+        let mut ore_cursor = 0;
         let mut ore_transferred = HashMap::new();
 
         assert!(grid.set_id_if_in_bounds(1, 1, 1, basalt));
@@ -2782,6 +2791,7 @@ mod tests {
                 0,
                 8,
                 &mut grid_cursor,
+                &mut ore_cursor,
                 &mut ore_transferred,
             ).projected,
             1
@@ -2797,6 +2807,7 @@ mod tests {
                 0,
                 8,
                 &mut grid_cursor,
+                &mut ore_cursor,
                 &mut ore_transferred,
             ).projected,
             0,
@@ -2814,12 +2825,18 @@ mod tests {
                 0,
                 8,
                 &mut grid_cursor,
+                &mut ore_cursor,
                 &mut ore_transferred,
             ).projected,
             1,
             "only the new ore cell crosses back into the decoration grid"
         );
         assert_eq!(grid.get_id(2, 1, 2), blackstone);
+        // A cell can be touched several times inside a later entry. The
+        // bridge must inspect the final overlay value, not replay an
+        // intermediate state that the complete overlay scan never exposed.
+        assert!(ore_view.set_id(2, 1, 2, basalt));
+        assert!(ore_view.set_id(2, 1, 2, blackstone));
         assert_eq!(
             synchronize_mixed_entry(
                 MixedEntryWriter::Ore,
@@ -2830,11 +2847,30 @@ mod tests {
                 0,
                 8,
                 &mut grid_cursor,
+                &mut ore_cursor,
                 &mut ore_transferred,
             ).projected,
             0,
             "control: unchanged ore overlay cells are not replayed"
         );
+        assert!(ore_view.set_id(2, 1, 2, basalt));
+        assert_eq!(
+            synchronize_mixed_entry(
+                MixedEntryWriter::Ore,
+                &mut grid,
+                &mut ore_view,
+                0,
+                0,
+                0,
+                8,
+                &mut grid_cursor,
+                &mut ore_cursor,
+                &mut ore_transferred,
+            ).projected,
+            1,
+            "a final overwrite with a new state crosses the bridge once"
+        );
+        assert_eq!(grid.get_id(2, 1, 2), basalt);
     }
 
     #[test]
@@ -2868,6 +2904,7 @@ mod tests {
             |_, _| Some(Arc::clone(&source)),
         );
         let mut grid_cursor = 0;
+        let mut ore_cursor = 0;
         let mut ore_transferred = HashMap::new();
         assert!(ore_view.set_id(-16, 4, -16, blackstone));
 
@@ -2881,6 +2918,7 @@ mod tests {
                 0,
                 8,
                 &mut grid_cursor,
+                &mut ore_cursor,
                 &mut ore_transferred,
             ).projected,
             1,
@@ -2920,6 +2958,7 @@ mod tests {
             |_, _| Some(Arc::clone(&source)),
         );
         let mut grid_cursor = 0;
+        let mut ore_cursor = 0;
         let mut ore_transferred = HashMap::new();
         assert!(grid.set_id_if_in_bounds(-17, 1, 0, basalt));
 
@@ -2932,6 +2971,7 @@ mod tests {
             0,
             8,
             &mut grid_cursor,
+            &mut ore_cursor,
             &mut ore_transferred,
         );
         assert_eq!(sync.projected, 0);
@@ -2967,6 +3007,7 @@ mod tests {
             |_, _| Some(Arc::clone(&source)),
         );
         let mut grid_cursor = 0;
+        let mut ore_cursor = 0;
         let mut ore_transferred = HashMap::new();
         assert!(grid.set_id_if_in_bounds(1, 128, 1, brown));
 
@@ -2979,6 +3020,7 @@ mod tests {
             0,
             128,
             &mut grid_cursor,
+            &mut ore_cursor,
             &mut ore_transferred,
         );
         assert_eq!(sync.projected, 0);

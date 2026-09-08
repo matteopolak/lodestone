@@ -128,6 +128,7 @@ fn synchronize_mixed_entry(
     centre_x: i32,
     centre_z: i32,
     grid_cursor: &mut usize,
+    ore_cursor: &mut usize,
     ore_transferred: &mut HashMap<(i32, i32, i32), crate::interner::StateId>,
 ) -> MixedSync {
     let mut changed = Vec::new();
@@ -138,6 +139,7 @@ fn synchronize_mixed_entry(
         centre_x,
         centre_z,
         grid_cursor,
+        ore_cursor,
         ore_transferred,
         &mut changed,
     )
@@ -150,6 +152,7 @@ fn synchronize_mixed_entry_reusing(
     centre_x: i32,
     centre_z: i32,
     grid_cursor: &mut usize,
+    ore_cursor: &mut usize,
     ore_transferred: &mut HashMap<(i32, i32, i32), crate::interner::StateId>,
     changed: &mut Vec<(i32, i32, i32, crate::interner::StateId)>,
 ) -> MixedSync {
@@ -182,7 +185,8 @@ fn synchronize_mixed_entry_reusing(
         }
         MixedEntryWriter::Ore => {
             changed.clear();
-            ore_view.with_writes_in_scan_order(|writes| {
+            let end = ore_view.write_log_len();
+            ore_view.with_write_log_since_scan_order(*ore_cursor, |writes| {
                 for &(lx, y, lz, state) in writes {
                     let x = centre_x * 16 + lx;
                     let z = centre_z * 16 + lz;
@@ -191,6 +195,7 @@ fn synchronize_mixed_entry_reusing(
                     }
                 }
             });
+            *ore_cursor = end;
             for (x, y, z, state) in changed.iter() {
                 assert!(
                     grid.set_id_if_in_bounds(*x, *y, *z, *state),
@@ -1146,6 +1151,7 @@ impl OverworldGenerator {
 
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
         let mut grid_cursor = 0usize;
+        let mut ore_cursor = 0usize;
         let mut changed_scratch = Vec::new();
         for dx in -1..=1_i32 {
             for dz in -1..=1_i32 {
@@ -1212,6 +1218,7 @@ impl OverworldGenerator {
                                 cx,
                                 cz,
                                 &mut grid_cursor,
+                                &mut ore_cursor,
                                 &mut ore_transferred,
                                 &mut changed_scratch,
                             );
@@ -1247,6 +1254,7 @@ impl OverworldGenerator {
                                 cx,
                                 cz,
                                 &mut grid_cursor,
+                                &mut ore_cursor,
                                 &mut ore_transferred,
                                 &mut changed_scratch,
                             );
@@ -1430,6 +1438,7 @@ mod tests {
         assert!(grid.set_id_if_in_bounds(1, 1, 1, basalt));
 
         let mut grid_cursor = 0usize;
+        let mut ore_cursor = 0usize;
         let mut transferred = std::collections::HashMap::new();
         let sync = synchronize_mixed_entry(
             MixedEntryWriter::Decoration,
@@ -1438,6 +1447,7 @@ mod tests {
             0,
             0,
             &mut grid_cursor,
+            &mut ore_cursor,
             &mut transferred,
         );
         assert_eq!(sync.projected, 1);
@@ -1450,6 +1460,7 @@ mod tests {
                 0,
                 0,
                 &mut grid_cursor,
+                &mut ore_cursor,
                 &mut transferred,
             )
             .projected,
@@ -1464,6 +1475,7 @@ mod tests {
             0,
             0,
             &mut grid_cursor,
+            &mut ore_cursor,
             &mut transferred,
         );
         assert_eq!(sync.projected, 1);
@@ -1476,6 +1488,7 @@ mod tests {
                 0,
                 0,
                 &mut grid_cursor,
+                &mut ore_cursor,
                 &mut transferred,
             )
             .projected,
