@@ -98,11 +98,14 @@ standable surface. The standability test matters more than it looks: testing "is
 block" is the wrong question, since real generated surface cover (short grass, flowers, snow
 layers) has no collision at all and would wrongly fail that test, while some things that *do* look
 walkable are correctly treated as solid because vanilla itself would let a player stand there
-(including a treetop, which is a genuine vanilla spawn outcome, not a bug to route around). A world
-whose spawn search area is entirely unsuitable (for instance, entirely ocean) falls back to a fixed
-height a couple of blocks above sea level rather than to a hardcoded low value that would place a
-player underground or inside bedrock. A per-player bed respawn point is stored and consulted
-separately, falling back to the world spawn whenever the recorded bed is gone.
+(including a treetop, which is a genuine reference-game spawn outcome, not a bug to route around). A
+candidate is accepted only when the complete 0.6-by-1.8 player body has no collision-box or fluid
+overlap; the player is then placed at the selected block's horizontal centre so the body does not
+straddle neighbouring columns. A world whose spawn search area is entirely unsuitable (for
+instance, entirely ocean) keeps its preferred height a couple of blocks above sea level when that
+body is clear, otherwise climbs to the first clear height instead of putting the player underground
+or inside bedrock. A per-player bed respawn point is stored and consulted separately, falling back
+to the world spawn whenever the recorded bed is gone.
 
 ### Player save data
 

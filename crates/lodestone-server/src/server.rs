@@ -3953,13 +3953,36 @@ where
                 // next autosave writes it. See
                 // `WorldStateHandle::world_spawn`.
                 let spawn = match world.world_spawn() {
-                    Some(stored) => stored,
+                    Some(stored)
+                        if crate::world_spawn::is_spawn_position_clear(
+                            source.get(),
+                            crate::world_spawn::player_position_for_spawn_anchor(stored.pos),
+                        ) =>
+                    {
+                        stored
+                    }
+                    Some(stored) => {
+                        tracing::warn!(
+                            position = ?stored.pos,
+                            "stored world spawn is obstructed; searching for a clear replacement"
+                        );
+                        let found = find_initial_spawn(source.get());
+                        world.set_world_spawn(found);
+                        found
+                    }
                     None => {
                         let found = find_initial_spawn(source.get());
                         world.set_world_spawn(found);
                         found
                     }
                 };
+                // Level data stores the world spawn as a block anchor. The
+                // entity must enter at that block's bottom centre, matching
+                // the collision probe used while selecting the anchor; using
+                // the integer corner lets the 0.6-wide body overlap a
+                // neighbouring column and can place it inside terrain.
+                let spawn_position =
+                    crate::world_spawn::player_position_for_spawn_anchor(spawn.pos);
 
                 // keep the world spawn's own chunks loaded
                 // independent of where any particular player is standing —
@@ -4025,7 +4048,7 @@ where
                         .encode_dimension_change_with_teleport_id(
                             1,
                             dimension.key(),
-                            spawn.pos,
+                            spawn_position,
                             game_mode,
                         )
                         .is_empty();
@@ -4045,13 +4068,32 @@ where
                 #[cfg(not(target_arch = "wasm32"))]
                 let join_pos = {
                     let anvil_pos =
-                        join_position_for_saved_player(saved_player.as_ref(), spawn.pos);
-                    native_player
+                        join_position_for_saved_player(saved_player.as_ref(), spawn_position);
+                    let candidate = native_player
                         .as_ref()
-                        .map_or(anvil_pos, |native| native.join_position(anvil_pos))
+                        .map_or(anvil_pos, |native| native.join_position(anvil_pos));
+                    // A restored Overworld position may have been written by
+                    // an older session before terrain clearance was enforced.
+                    // Re-read the live source before trusting it; a saved
+                    // position inside a wall falls back to the verified world
+                    // spawn. A locator restored into a sibling dimension is
+                    // deliberately skipped because its source is not the home
+                    // Overworld terrain.
+                    if restored_dimension_source.is_none()
+                        && !crate::world_spawn::is_spawn_position_clear(source.get(), candidate)
+                    {
+                        tracing::warn!(
+                            position = ?candidate,
+                            fallback = ?spawn_position,
+                            "saved player position is obstructed; using the world spawn"
+                        );
+                        spawn_position
+                    } else {
+                        candidate
+                    }
                 };
                 #[cfg(target_arch = "wasm32")]
-                let join_pos = spawn.pos;
+                let join_pos = spawn_position;
                 // Vanilla's own player-game-type field, restored — a player who typed
                 // `/gamemode survival` and quit comes back in survival. Shadowed
                 // rather than assigned so a world with no save keeps the mode the
@@ -4551,7 +4593,7 @@ where
                     player_ticket_guard,
                     view,
                     username,
-                    spawn.pos,
+                    spawn_position,
                     chunks_sent,
                     join_stream,
                     join_trace,
