@@ -36,6 +36,35 @@ disable automatic bench discovery, so the recorder modules are not runnable benc
 targets. This count is a registry of Cargo targets, not proof that every production
 workload is represented.
 
+### Worldgen parallel scaling
+
+`crates/lodestone-server/tests/join_parallel_efficiency.rs` contains a separate
+ignored `core/rayon` arm for the direct world-generation path. It builds one
+persistent fixed-size Rayon pool per arm at 1/2/4/8 workers and dispatches the
+same 64 distinct chunks through one immutable dimension enum for Overworld,
+Nether, and End. The independent lattice and adjacent neighbourhood scenes are
+both measured. This is intentionally distinct from the parent test's production
+`ColumnPipeline` sweep: the core arm measures work stealing in generation, while
+the production arm measures Tokio scheduling and ordered emission.
+
+Each arm reports wall time, process CPU time, total chunks/s, chunks/s per worker,
+linear efficiency, allocation count and bytes, and the complete content digest.
+The indexed Rayon collection preserves input order, and every 1/2/4/8 digest must
+match the serial digest. A same-non-air-count cell mutation control proves the
+detector notices content changes. The report marks nested parallelism disabled;
+workers are not allowed to create another pool. Run the gate in release mode:
+
+```text
+cargo test --release -p lodestone-server --test join_parallel_efficiency \
+  -- --ignored --nocapture core_worldgen_scales_without_nested_parallelism_and_preserves_content
+```
+
+Set `LODESTONE_CORE_SCENE=independent` or `adjacent` to iterate one scene; the
+default is `all`. These are machine measurements rather than portable timing
+thresholds. The output is expected to flag any dimension-specific dependency
+convoy or failure to approach the target of 100 chunks/s per worker rather than
+turning either into a passing assertion.
+
 ## Harness design
 
 - **Criterion** is the common runner. Each benchmark declaration sets `harness = false`
