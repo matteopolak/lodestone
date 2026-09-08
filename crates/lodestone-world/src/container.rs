@@ -486,12 +486,72 @@ impl PalettedContainer {
                 w.var_i32(*v as i32);
             }
             Storage::Indirect { palette, data } => {
-                w.u8(data.bits() as u8);
-                w.var_i32(palette.len() as i32);
-                for &entry in palette {
-                    w.var_i32(entry as i32);
+                // Generation and block edits can leave values in the palette
+                // after their last cell was overwritten.  The packet format
+                // is produced from the final cells, so retain only entries
+                // that the packed indices actually use.  Apart from matching
+                // the canonical wire representation, this also avoids
+                // emitting an indirect two-entry container for a uniform
+                // section whose old value is now unreachable.
+                let mut remap = vec![u32::MAX; palette.len()];
+                let mut compact_palette = Vec::with_capacity(palette.len());
+                for index in 0..self.kind.entry_count {
+                    let old = data.get(index) as usize;
+                    if remap[old] == u32::MAX {
+                        remap[old] = compact_palette.len() as u32;
+                        compact_palette.push(palette[old]);
+                    }
                 }
-                write_longs(self.kind.framing, data, w);
+                let already_canonical = compact_palette.len() == palette.len()
+                    && remap
+                        .iter()
+                        .enumerate()
+                        .all(|(old, &new)| new == old as u32)
+                    && matches!(
+                        self.kind.config_for_palette_size(palette.len()),
+                        Config::Indirect(bits) if bits == data.bits()
+                    );
+                if already_canonical {
+                    w.u8(data.bits() as u8);
+                    w.var_i32(palette.len() as i32);
+                    for &entry in palette {
+                        w.var_i32(entry as i32);
+                    }
+                    write_longs(self.kind.framing, data, w);
+                    return;
+                }
+
+                match self.kind.config_for_palette_size(compact_palette.len()) {
+                    Config::Single => {
+                        debug_assert_eq!(compact_palette.len(), 1);
+                        w.u8(0);
+                        w.var_i32(compact_palette[0] as i32);
+                    }
+                    Config::Indirect(bits) => {
+                        let ids: Vec<u32> = (0..self.kind.entry_count)
+                            .map(|index| remap[data.get(index) as usize])
+                            .collect();
+                        let compact_data = PackedArray::from_values(bits, &ids);
+                        w.u8(bits as u8);
+                        w.var_i32(compact_palette.len() as i32);
+                        for entry in compact_palette {
+                            w.var_i32(entry as i32);
+                        }
+                        write_longs(self.kind.framing, &compact_data, w);
+                    }
+                    Config::Direct(bits) => {
+                        // An indirect storage cannot normally reach this arm,
+                        // but keeping the fallback makes the encoder robust if
+                        // a future palette configuration raises its indirect
+                        // threshold after a container has been built.
+                        let values: Vec<u32> = (0..self.kind.entry_count)
+                            .map(|index| palette[data.get(index) as usize])
+                            .collect();
+                        let compact_data = PackedArray::from_values(bits, &values);
+                        w.u8(bits as u8);
+                        write_longs(self.kind.framing, &compact_data, w);
+                    }
+                }
             }
             Storage::Direct(data) => {
                 w.u8(data.bits() as u8);
@@ -797,6 +857,115 @@ mod tests {
         }
         assert!(matches!(c.storage, Storage::Indirect { .. }));
         assert_round_trip(kind, &c);
+    }
+
+    #[test]
+    fn wire_encode_compacts_unreachable_palette_entries() {
+        let kind = PaletteKind::block_states();
+        let mut c = PalettedContainer::new(kind, 0);
+        for index in 0..kind.entry_count() {
+            c.set(index, 42);
+        }
+        assert!(matches!(c.storage, Storage::Indirect { .. }));
+        assert_eq!(c.palette_len(), 2, "the edit history leaves air unreachable");
+
+        let mut w = Writer::default();
+        c.encode(&mut w);
+        let bytes = w.into_vec();
+        assert_eq!(bytes, [0, 42]);
+
+        let decoded = decode_bytes(kind, &bytes).expect("compact wire form");
+        assert!(decoded.is_single());
+        assert_eq!(decoded.single_value(), Some(42));
+    }
+
+    #[test]
+    fn wire_encode_compacts_biome_palette_after_reverting_an_edit() {
+        let kind = PaletteKind::biomes();
+        let mut c = PalettedContainer::new(kind, 34);
+        c.set(0, 0);
+        c.set(0, 34);
+
+        let mut w = Writer::default();
+        c.encode(&mut w);
+        assert_eq!(w.as_slice(), &[0, 34]);
+    }
+
+    #[test]
+    fn wire_encode_compacts_unused_leading_and_middle_entries_and_remaps_ids() {
+        let kind = PaletteKind::block_states();
+        // Deliberately model an edit history whose palette contains an unused
+        // leading entry (0) and an unused middle entry (9).  The packed ids
+        // use only palette entries 1 and 3, in an order opposite to the old
+        // palette, so encoding must remove dead values, discover the canonical
+        // order from cells, and remap ids without changing any decoded value.
+        let values: Vec<u32> = (0..kind.entry_count())
+            .map(|index| if index % 2 == 0 { 7 } else { 11 })
+            .collect();
+        let ids: Vec<u32> = (0..kind.entry_count())
+            .map(|index| if index % 2 == 0 { 3 } else { 1 })
+            .collect();
+        let c = PalettedContainer {
+            kind,
+            storage: Storage::Indirect {
+                palette: vec![0, 11, 9, 7],
+                data: PackedArray::from_values(4, &ids),
+            },
+        };
+
+        let mut w = Writer::default();
+        c.encode(&mut w);
+        let decoded = decode_bytes(kind, w.as_slice()).expect("compact wire form");
+        assert_eq!(decoded.palette_len(), 2);
+        assert_eq!(decoded.bits_per_entry(), 4);
+        assert!(matches!(
+            decoded.storage,
+            Storage::Indirect { ref palette, .. } if palette == &vec![7, 11]
+        ));
+        for (index, expected) in values.iter().enumerate() {
+            assert_eq!(decoded.get(index), *expected, "entry {index}");
+        }
+    }
+
+    #[test]
+    fn wire_encode_collapses_uniform_biome_after_dead_palette_entry() {
+        let kind = PaletteKind::biomes();
+        let c = PalettedContainer {
+            kind,
+            storage: Storage::Indirect {
+                palette: vec![0, 34],
+                data: PackedArray::from_values(1, &vec![1; kind.entry_count()]),
+            },
+        };
+
+        let mut w = Writer::default();
+        c.encode(&mut w);
+        let decoded = decode_bytes(kind, w.as_slice()).expect("single-value wire form");
+        assert_eq!(decoded.single_value(), Some(34));
+        assert_eq!(decoded.bits_per_entry(), 0);
+        assert_eq!(decoded.palette_len(), 1);
+        for index in 0..kind.entry_count() {
+            assert_eq!(decoded.get(index), 34, "biome entry {index}");
+        }
+    }
+
+    #[test]
+    fn wire_encode_reorders_palette_by_final_cell_order() {
+        let kind = PaletteKind::block_states();
+        let mut edited = PalettedContainer::new(kind, 6997);
+        edited.set(1, 0);
+        edited.set(0, 135);
+
+        let mut expected_values = vec![6997; kind.entry_count()];
+        expected_values[0] = 135;
+        expected_values[1] = 0;
+        let expected = PalettedContainer::from_values(kind, &expected_values);
+
+        let mut actual_bytes = Writer::default();
+        edited.encode(&mut actual_bytes);
+        let mut expected_bytes = Writer::default();
+        expected.encode(&mut expected_bytes);
+        assert_eq!(actual_bytes.as_slice(), expected_bytes.as_slice());
     }
 
     #[test]
