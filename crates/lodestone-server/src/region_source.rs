@@ -559,6 +559,10 @@ struct WorldState {
     /// `<world>/dimensions/minecraft/<dimension>/region` — see
     /// [`RegionChunkSource::new`]'s `dimension` parameter.
     region_dir: PathBuf,
+    /// The typed dimension label used by source-aware packet encoders. Keeping
+    /// it beside the persistence state prevents a bare region source from
+    /// silently falling back to the overworld wire rules.
+    dimension: Dimension,
     /// `<world>/players/data`, or `None` if it could not be created (a
     /// non-persistable player store). Handed out through [`ChunkSource::world_registries`].
     player_data: Option<crate::player_data::PlayerDataStore>,
@@ -937,6 +941,7 @@ impl<S: ChunkSource> RegionChunkSource<S> {
             inner: Arc::new(inner),
             state: Arc::new(WorldState {
                 region_dir,
+                dimension,
                 player_data,
                 native_storage: Mutex::new(None),
                 min_y,
@@ -1221,6 +1226,10 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
                 .expect("native storage lock poisoned")
                 .clone(),
         })
+    }
+
+    fn dimension(&self) -> Option<Dimension> {
+        Some(self.state.dimension)
     }
 
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
@@ -2569,6 +2578,10 @@ mod tests {
         assert!(dir.join("dimensions/minecraft/overworld/region").is_dir());
         assert!(dir.join("dimensions/minecraft/the_nether/region").is_dir());
         assert!(dir.join("dimensions/minecraft/the_end/region").is_dir());
+        assert_eq!(overworld.dimension(), Some(Dimension::Overworld));
+        assert_eq!(nether.dimension(), Some(Dimension::Nether));
+        assert_eq!(end.dimension(), Some(Dimension::End));
+        assert_eq!(Flat.dimension(), None, "an unlabelled in-memory source stays unlabelled");
 
         // A block set into one dimension's edit map must not appear as an
         // edit in another's — the collision this test exists to rule out.
