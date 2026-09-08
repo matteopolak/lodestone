@@ -2,11 +2,13 @@ use lodestone_core::{Ctx, Decode, Reader, State, encode_body};
 use lodestone_data::block_states;
 use lodestone_model::{
     AnimationAction, BlockFace, BlockPos, ClientAction, ClientEvent, ConnectionState, Directive,
-    Hand, Rotation, Vec3f, VersionAdapter,
+    Hand, ItemStack, Rotation, Vec3f, VersionAdapter,
 };
 use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_v1_17::{V756ServerProtocol, V758ServerProtocol};
 use lodestone_v1_17::packet_ids::handshaking;
+use lodestone_v1_17::packet_ids::play as play_756;
+use lodestone_v1_17::packet_ids_758::play as play_758;
 use lodestone_v1_17::packets::chunk::{ChunkShape, MapChunk};
 use lodestone_v1_17::packets::game::JoinGame;
 use lodestone_v1_17::packets::handshake::SetProtocol;
@@ -14,6 +16,119 @@ use lodestone_world::World;
 
 const CTX: Ctx = Ctx { version: 756 };
 const CTX_758: Ctx = Ctx { version: 758 };
+
+const OPEN_WINDOW_BODY: [u8; 19] = [
+    2, 2, 16, b'{', b'"', b't', b'e', b'x', b't', b'"', b':', b'"', b'C', b'h', b'e', b's', b't', b'"', b'}',
+];
+const WINDOW_ITEMS_BODY: [u8; 9] = [2, 7, 2, 0, 1, 22, 3, 0, 0];
+const SET_SLOT_BODY: [u8; 8] = [2, 8, 0, 5, 1, 22, 1, 0];
+const CURSOR_SLOT_BODY: [u8; 8] = [0xff, 8, 0xff, 0xff, 1, 22, 1, 0];
+const WINDOW_CLICK_BODY: [u8; 14] = [2, 8, 0, 0, 0, 0, 1, 0, 0, 0, 1, 22, 3, 0];
+const CLOSE_WINDOW_BODY: [u8; 1] = [2];
+
+fn bare_stack(name: &str, count: u32) -> ItemStack {
+    ItemStack::new(name.parse().expect("fixture item key"), count)
+}
+
+fn adapter_event(protocol: i32, packet_id: i32, payload: &[u8]) -> ClientEvent {
+    let adapter = lodestone_v1_17::adapter_for(protocol);
+    let mut world = World::new();
+    let directives = adapter
+        .handle_packet(&mut world, ConnectionState::Play, packet_id, payload)
+        .unwrap_or_else(|error| panic!("literal container packet protocol {protocol} id {packet_id} decodes: {error:?}"));
+    let [Directive::Emit(event)] = directives.as_slice() else {
+        panic!("expected one event, got {directives:?}");
+    };
+    event.clone()
+}
+
+#[test]
+fn hosted_756_and_758_container_packets_use_the_literal_stateful_shapes() {
+    for &(protocol, open_id, items_id, slot_id, click_id, close_client_id, close_server_id) in &[
+        (756, play_756::clientbound::OPEN_WINDOW, play_756::clientbound::WINDOW_ITEMS, play_756::clientbound::SET_SLOT, play_756::serverbound::WINDOW_CLICK, play_756::clientbound::CLOSE_WINDOW, play_756::serverbound::CLOSE_WINDOW),
+        (758, play_758::clientbound::OPEN_WINDOW, play_758::clientbound::WINDOW_ITEMS, play_758::clientbound::SET_SLOT, play_758::serverbound::WINDOW_CLICK, play_758::clientbound::CLOSE_WINDOW, play_758::serverbound::CLOSE_WINDOW),
+    ] {
+        let protocol_host = lodestone_registry::server_protocol_for_protocol(protocol).expect("hosted protocol");
+        let open = protocol_host.encode_open_screen(2, "minecraft:generic_9x3", "Chest");
+        assert!(matches!(open, ServerDirective::Send { packet_id, payload } if packet_id == open_id && payload == OPEN_WINDOW_BODY));
+        assert_eq!(
+            adapter_event(protocol, open_id, &OPEN_WINDOW_BODY),
+            ClientEvent::ScreenOpened {
+                window_id: 2,
+                menu_type: "minecraft:generic_9x3".parse().unwrap(),
+                title: lodestone_model::Text::from_json(r#"{"text":"Chest"}"#),
+            }
+        );
+
+        let items = [None, Some(bare_stack("minecraft:oak_planks", 3))];
+        let content = protocol_host.encode_container_content(2, 7, &items, None);
+        assert!(matches!(content, ServerDirective::Send { packet_id, payload } if packet_id == items_id && payload == WINDOW_ITEMS_BODY));
+        assert_eq!(
+            adapter_event(protocol, items_id, &WINDOW_ITEMS_BODY),
+            ClientEvent::ContainerContent {
+                window_id: 2,
+                state_id: lodestone_model::ContainerStateId::from_wire(7),
+                items: vec![None, Some(bare_stack("minecraft:oak_planks", 3))],
+                carried_item: None,
+            }
+        );
+
+        let slot = protocol_host.encode_container_slot(2, 8, 5, Some(&bare_stack("minecraft:oak_planks", 1)));
+        assert!(matches!(slot, ServerDirective::Send { packet_id, payload } if packet_id == slot_id && payload == SET_SLOT_BODY));
+        assert_eq!(
+            adapter_event(protocol, slot_id, &SET_SLOT_BODY),
+            ClientEvent::ContainerSlot {
+                window_id: 2,
+                state_id: lodestone_model::ContainerStateId::from_wire(8),
+                slot: 5,
+                item: Some(bare_stack("minecraft:oak_planks", 1)),
+            }
+        );
+        let cursor = protocol_host.encode_container_slot(-1, 8, -1, Some(&bare_stack("minecraft:oak_planks", 1)));
+        assert!(matches!(cursor, ServerDirective::Send { packet_id, payload } if packet_id == slot_id && payload == CURSOR_SLOT_BODY));
+        assert_eq!(
+            adapter_event(protocol, slot_id, &CURSOR_SLOT_BODY),
+            ClientEvent::CursorItemChanged { item: Some(bare_stack("minecraft:oak_planks", 1)) }
+        );
+
+        let click = ClientAction::ContainerClick {
+            window_id: 2,
+            state_id: lodestone_model::ContainerStateId::from_wire(8),
+            slot: 0,
+            button: 0,
+            click_type: lodestone_model::ContainerClickType::Pickup,
+            changed_slots: vec![lodestone_model::ContainerSlotChange { slot: 0, item: None }],
+            carried_item: Some(bare_stack("minecraft:oak_planks", 3)),
+        };
+        let (encoded_id, encoded_body) = lodestone_v1_17::adapter_for(protocol)
+            .encode_action(ConnectionState::Play, &click)
+            .expect("container click encodes")
+            .expect("container click has a packet");
+        assert_eq!(encoded_id, click_id);
+        assert_eq!(encoded_body, WINDOW_CLICK_BODY);
+        assert_eq!(
+            protocol_host.decode(State::Play, click_id, &WINDOW_CLICK_BODY),
+            ServerBound::ContainerClicked {
+                window_id: 2,
+                state_id: 8,
+                slot: 0,
+                button: 0,
+                click_type: 0,
+                changed_slots: vec![(0, None)],
+                carried_item: Some(bare_stack("minecraft:oak_planks", 3)),
+            }
+        );
+
+        assert_eq!(
+            protocol_host.decode(State::Play, close_server_id, &CLOSE_WINDOW_BODY),
+            ServerBound::ContainerClosed { window_id: 2 }
+        );
+        assert_eq!(
+            adapter_event(protocol, close_client_id, &CLOSE_WINDOW_BODY),
+            ClientEvent::ScreenClosed { window_id: 2 }
+        );
+    }
+}
 
 /// These are literal Play packet bodies for the four legacy movement forms.
 /// The values deliberately have negative and fractional components so swapping

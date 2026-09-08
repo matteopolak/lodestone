@@ -48,15 +48,20 @@ pub struct OpenWindow {
 
 /// Clientbound `window_items` — the full contents of a window.
 ///
-/// The item array is prefixed by a signed `i16` count (not the modern varint).
+/// The item array is prefixed by a VarInt count and followed by the carried slot.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:window_items", state = Play, bound = Client)]
 pub struct WindowItems {
     /// Window handle id.
     pub window_id: u8,
+    /// Container synchronization state id.
+    #[mc(varint)]
+    pub state_id: i32,
     /// Every slot in the window, in slot order.
-    #[mc(len = "i16")]
+    #[mc(len = "varint")]
     pub items: Vec<Slot>,
+    /// Item carried by the cursor.
+    pub carried_item: Slot,
 }
 
 /// Clientbound `set_slot` — updates a single slot.
@@ -65,6 +70,9 @@ pub struct WindowItems {
 pub struct SetSlot {
     /// Window handle id (`-1` = cursor, `0` = player inventory).
     pub window_id: i8,
+    /// Container synchronization state id.
+    #[mc(varint)]
+    pub state_id: i32,
     /// Slot index.
     pub slot: i16,
     /// New slot contents.
@@ -77,15 +85,29 @@ pub struct SetSlot {
 pub struct WindowClick {
     /// Window handle id.
     pub window_id: u8,
+    /// Container synchronization state id.
+    #[mc(varint)]
+    pub state_id: i32,
     /// Clicked slot index.
     pub slot: i16,
     /// Mouse button used.
-    pub button: i8,
-    /// Transaction id (echoed by the server in a confirm packet).
-    pub action: i16,
+    pub mouse_button: i8,
     /// Click mode (normal, shift, number key, …).
-    pub mode: i8,
-    /// The item that was in the clicked slot (for the server to verify).
+    #[mc(varint)]
+    pub mode: i32,
+    /// Client's predicted changes, in menu slot order.
+    #[mc(len = "varint")]
+    pub changed_slots: Vec<WindowClickSlot>,
+    /// The item carried by the cursor after the click.
+    pub cursor_item: Slot,
+}
+
+/// One slot claim embedded in a 1.17+ container click.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+pub struct WindowClickSlot {
+    /// Menu slot index.
+    pub location: i16,
+    /// Client's predicted item for this slot.
     pub item: Slot,
 }
 

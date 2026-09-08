@@ -9,6 +9,7 @@ use lodestone_data::mob_effects::{mob_effect_name_for, MobEffectId};
 use lodestone_model::{
     AdapterError, AnimationAction, BlockActionKind, BlockFace, BlockStateRef, BossAction, BossColor, BossOverlay,
     ChatKind, ChatMode, ChunkPos, ClientAction, ClientEvent, ClientSettings, CollisionRule,
+    ContainerClickType, ContainerSlotChange, ContainerStateId,
     ConnectionState, Difficulty, Directive, DisplaySlot, DisplayedSkinParts, EntityInteraction,
     EntityAttributeModifier, EntityAttributeSnapshot, EntityEquipment, EntityMetadataUpdate,
     EntityMovement, EquipmentSlot, GameMode, Hand, ItemComponents, ItemStack, LevelEventData,
@@ -50,7 +51,7 @@ use crate::packets::settings::{BrandPayload, PlayerAbilities, ResourcePackReceiv
 use crate::packets::slot::Slot;
 use crate::packets::window::{
     CloseWindow, EnchantItem, HeldItemSlot, ServerboundCloseWindow, ServerboundHeldItemSlot,
-    SetCreativeSlot,
+    OpenWindow, SetCreativeSlot, SetSlot, WindowClick, WindowItems,
 };
 
 /// Protocol version of the newest release this family speaks (Minecraft
@@ -135,6 +136,8 @@ struct PacketIds {
     client_command: i32,
     /// `minecraft:close_window`, serverbound play.
     close_window: i32,
+    /// `minecraft:window_click`, serverbound play.
+    window_click: i32,
     /// `minecraft:custom_payload`, serverbound play.
     custom_payload: i32,
     /// `minecraft:enchant_item`, serverbound play.
@@ -194,6 +197,7 @@ macro_rules! packet_ids_from {
             chat: crate::$table::play::serverbound::CHAT,
             client_command: crate::$table::play::serverbound::CLIENT_COMMAND,
             close_window: crate::$table::play::serverbound::CLOSE_WINDOW,
+            window_click: crate::$table::play::serverbound::WINDOW_CLICK,
             custom_payload: crate::$table::play::serverbound::CUSTOM_PAYLOAD,
             enchant_item: crate::$table::play::serverbound::ENCHANT_ITEM,
             entity_action: crate::$table::play::serverbound::ENTITY_ACTION,
@@ -612,6 +616,60 @@ fn decode_single_json_text(payload: &[u8]) -> Result<Text, AdapterError> {
     let json = reader.string(32_767).map_err(dec_err)?;
     reader.ensure_empty().map_err(dec_err)?;
     Ok(Text::from_json(&json))
+}
+
+/// Converts the era's flattened, legacy-NBT slot into the version-free item
+/// model. The model intentionally has no opaque legacy-NBT field, so such a
+/// stack is rejected rather than silently losing its data.
+fn decode_container_slot(protocol: i32, slot: Slot) -> Result<Option<ItemStack>, AdapterError> {
+    let Slot::Item { id, count, nbt } = slot else {
+        return Ok(None);
+    };
+    if nbt.is_some() {
+        return Err(AdapterError::Unsupported(format!(
+            "protocol-{protocol} container item {id} carries legacy NBT"
+        )));
+    }
+    let count = u32::try_from(count)
+        .map_err(|_| AdapterError::Decode(format!("negative container item count {count}")))?;
+    if count == 0 {
+        return Err(AdapterError::Decode("zero container item count".to_owned()));
+    }
+    let item = registry::item(protocol, id).ok_or_else(|| {
+        AdapterError::Decode(format!("unknown protocol-{protocol} item registry id {id}"))
+    })?;
+    Ok(Some(ItemStack { item, count, components: ItemComponents::default() }))
+}
+
+/// Converts a model stack to the pre-component slot used by protocols 756 and
+/// 758. Container actions can only echo bare stacks in this era: all modeled
+/// modern components are refused instead of being dropped from the wire.
+fn encode_container_slot(protocol: i32, item: Option<&ItemStack>) -> Result<Slot, AdapterError> {
+    let Some(item) = item else {
+        return Ok(Slot::Empty);
+    };
+    if item.components != ItemComponents::default() {
+        return Err(AdapterError::Unsupported(format!(
+            "protocol-{protocol} container item {} has unsupported components",
+            item.item
+        )));
+    }
+    let id = registry::item_id(protocol, &item.item).ok_or_else(|| {
+        AdapterError::Unsupported(format!(
+            "protocol-{protocol} has no numeric item id for {}",
+            item.item
+        ))
+    })?;
+    let count = i8::try_from(item.count).map_err(|_| {
+        AdapterError::Encode(format!("container item count {} does not fit i8", item.count))
+    })?;
+    if count <= 0 {
+        return Err(AdapterError::Encode(format!(
+            "container item count {} must be positive",
+            item.count
+        )));
+    }
+    Ok(Slot::Item { id, count, nbt: None })
 }
 
 /// Maps the 1.8 clientbound chat `position` byte to a canonical [`ChatKind`].
@@ -1988,6 +2046,70 @@ impl V756Adapter {
         })])
     }
 
+    /// `minecraft:open_window`: the menu registry id and JSON title are
+    /// resolved at the packet boundary so the shell receives the same
+    /// canonical menu key for both releases in this era.
+    fn handle_play_open_window(
+        adapter: &V756Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: OpenWindow = adapter.decode_body_exact(payload)?;
+        let menu_type = registry::menu(adapter.protocol, body.inventory_type).ok_or_else(|| {
+            AdapterError::Decode(format!(
+                "unknown protocol-{} menu registry id {}",
+                adapter.protocol, body.inventory_type
+            ))
+        })?;
+        Ok(vec![Directive::Emit(ClientEvent::ScreenOpened {
+            window_id: body.window_id,
+            menu_type,
+            title: Text::from_json(&body.window_title),
+        })])
+    }
+
+    /// `minecraft:window_items`: a complete state-id-tagged menu snapshot,
+    /// including the cursor stack after the slot array.
+    fn handle_play_window_items(
+        adapter: &V756Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: WindowItems = adapter.decode_body_exact(payload)?;
+        let items = body
+            .items
+            .into_iter()
+            .map(|slot| decode_container_slot(adapter.protocol, slot))
+            .collect::<Result<Vec<_>, _>>()?;
+        let carried_item = decode_container_slot(adapter.protocol, body.carried_item)?;
+        Ok(vec![Directive::Emit(ClientEvent::ContainerContent {
+            window_id: i32::from(body.window_id),
+            state_id: ContainerStateId::from_wire(body.state_id),
+            items,
+            carried_item,
+        })])
+    }
+
+    /// `minecraft:set_slot`: a state-tagged single-slot update. Window `-1`
+    /// is the cursor, while all other window ids update a menu slot.
+    fn handle_play_set_slot(
+        adapter: &V756Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let body: SetSlot = adapter.decode_body_exact(payload)?;
+        let item = decode_container_slot(adapter.protocol, body.item)?;
+        if body.window_id == -1 {
+            return Ok(vec![Directive::Emit(ClientEvent::CursorItemChanged { item })]);
+        }
+        Ok(vec![Directive::Emit(ClientEvent::ContainerSlot {
+            window_id: i32::from(body.window_id),
+            state_id: ContainerStateId::from_wire(body.state_id),
+            slot: i32::from(body.slot),
+            item,
+        })])
+    }
+
     /// `minecraft:craft_progress_bar`. No synchronization state id, so it
     /// maps directly onto the same `ContainerData` 26.2's
     /// `minecraft:container_set_data` produces.
@@ -3008,6 +3130,27 @@ static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = 
         ),
     ),
     (
+        "minecraft:open_window",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V756Adapter::handle_play_open_window,
+        ),
+    ),
+    (
+        "minecraft:window_items",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V756Adapter::handle_play_window_items,
+        ),
+    ),
+    (
+        "minecraft:set_slot",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V756Adapter::handle_play_set_slot,
+        ),
+    ),
+    (
         "minecraft:craft_progress_bar",
         lodestone_core::dispatch::Handler::new(
             lodestone_core::ProtocolRange::ALL,
@@ -3193,11 +3336,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
         "v26-2 has this; backport (PING -- 1.17 renamed the inventory-transaction ack and \
          dropped its window/action fields for a bare i32 id)",
     ),
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:window_items",
-        "v26-2 has this; backport (CONTAINER_SET_CONTENT)",
-    ),
-    lodestone_core::dispatch::IGNORED::new("minecraft:set_slot", "v26-2 has this; backport (CONTAINER_SET_SLOT)"),
     lodestone_core::dispatch::IGNORED::new("minecraft:set_cooldown", "v26-2 has this; backport (COOLDOWN)"),
     lodestone_core::dispatch::IGNORED::new("minecraft:custom_payload", "v26-2 has this; backport (CUSTOM_PAYLOAD)"),
     lodestone_core::dispatch::IGNORED::new(
@@ -3215,7 +3353,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
     lodestone_core::dispatch::IGNORED::new("minecraft:map", "v26-2 has this; backport (MAP_ITEM_DATA)"),
     lodestone_core::dispatch::IGNORED::new("minecraft:trade_list", "v26-2 has this; backport (MERCHANT_OFFERS)"),
     lodestone_core::dispatch::IGNORED::new("minecraft:open_book", "v26-2 has this; backport (OPEN_BOOK)"),
-    lodestone_core::dispatch::IGNORED::new("minecraft:open_window", "v26-2 has this; backport (OPEN_SCREEN)"),
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:craft_recipe_response",
         "v26-2 has this; backport (PLACE_GHOST_RECIPE)",
@@ -3603,8 +3740,8 @@ impl VersionAdapter for V756Adapter {
             }
 
             // Inventory. Close/select ride on plain packets. Clearing a creative
-            // slot sends an empty slot; a non-empty creative slot needs an item
-            // registry (ResourceKey -> numeric id) that no crate has yet.
+            // slot sends an empty slot; a non-empty creative slot needs a
+            // separate creative-slot wire mapping and remains unsupported.
             ClientAction::ContainerClose { window_id } => {
                 let body = ServerboundCloseWindow {
                     window_id: *window_id as u8,
@@ -3621,8 +3758,8 @@ impl VersionAdapter for V756Adapter {
             ClientAction::SetCreativeModeSlot { slot, item } => {
                 if item.is_some() {
                     return Err(AdapterError::Unsupported(
-                        "this era's SetCreativeModeSlot with an item requires a ResourceKey -> \
-                         numeric item-id registry that is not yet available"
+                        "this era's SetCreativeModeSlot with an item is outside the hosted \
+                         container-session wire coverage"
                             .to_owned(),
                     ));
                 }
@@ -3635,27 +3772,61 @@ impl VersionAdapter for V756Adapter {
                     self.encode_body(&body)?,
                 )))
             }
-            // Container clicks predate the modern `state_id` reconciliation.
-            // Faithfully encoding 1.16's `window_click` needs a client-tracked
-            // transaction id (the `action` counter, absent from the model which
-            // carries only the 1.17+ `state_id`; this adapter is stateless) and
-            // an item registry (`ResourceKey` -> numeric id) for the clicked
-            // stack. 1.16 slots are flattened, so unlike v1-8/v1-9 there is no
-            // item-metadata gap — but the transaction id and registry alone are
-            // enough to make an encoded click be rejected by a live server (via a
-            // failed transaction) rather than silently applied. Refused loudly.
-            //
-            // This is also why clientbound `TRANSACTION` has no decode arm: it
-            // exists solely to accept or reject a `window_click` this client
-            // cannot yet send, so nothing here could ever receive one — wiring a
-            // decode for it now would be an event with no producer that could
-            // trigger it. It becomes real work once `ContainerClick` above is.
-            ClientAction::ContainerClick { .. } => Err(AdapterError::Unsupported(
-                "this era's ContainerClick needs a client-tracked transaction id (model carries \
-                 only the 1.17+ state_id) and an item registry; refused rather than sending bytes \
-                 a live server rejects via a failed transaction"
-                    .to_owned(),
-            )),
+            // Container clicks use the era's state id and changed-slot
+            // predictions; the server owns reconciliation when they differ.
+            ClientAction::ContainerClick {
+                window_id,
+                state_id,
+                slot,
+                button,
+                click_type,
+                changed_slots,
+                carried_item,
+            } => {
+                let window_id = u8::try_from(*window_id).map_err(|_| {
+                    AdapterError::Encode(format!("window id {window_id} overflows u8"))
+                })?;
+                let slot = i16::try_from(*slot).map_err(|_| {
+                    AdapterError::Encode(format!("container slot {slot} overflows i16"))
+                })?;
+                let mouse_button = i8::try_from(*button).map_err(|_| {
+                    AdapterError::Encode(format!("container button {button} overflows i8"))
+                })?;
+                let mode = match click_type {
+                    ContainerClickType::Pickup => 0,
+                    ContainerClickType::QuickMove => 1,
+                    ContainerClickType::Swap => 2,
+                    ContainerClickType::Clone => 3,
+                    ContainerClickType::Throw => 4,
+                    ContainerClickType::QuickCraft => 5,
+                    ContainerClickType::PickupAll => 6,
+                };
+                let changed_slots = changed_slots
+                    .iter()
+                    .map(|change: &ContainerSlotChange| {
+                        let location = i16::try_from(change.slot).map_err(|_| {
+                            AdapterError::Encode(format!(
+                                "changed container slot {} overflows i16",
+                                change.slot
+                            ))
+                        })?;
+                        Ok(crate::packets::window::WindowClickSlot {
+                            location,
+                            item: encode_container_slot(self.protocol, change.item.as_ref())?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, AdapterError>>()?;
+                let body = WindowClick {
+                    window_id,
+                    state_id: state_id.as_wire(),
+                    slot,
+                    mouse_button,
+                    mode,
+                    changed_slots,
+                    cursor_item: encode_container_slot(self.protocol, carried_item.as_ref())?,
+                };
+                Ok(Some((self.ids().window_click, self.encode_body(&body)?)))
+            }
 
             // Genuinely absent in 1.16: there is no player-input packet (added
             // much later). `Stab` (off-hand attack) has no dedicated 1.16 packet
