@@ -70,7 +70,8 @@ use lodestone_model::{
     SoundCategory, Text, TextContent, Vec3, Vec3f, WrittenBookContent, PredictionSequence,
 };
 use lodestone_server::{
-    Abilities, ChunkColumn as ServerChunkColumn, ChunkEncoder, EntitySnapshot, HOTBAR_SIZE,
+    Abilities, ChunkColumn as ServerChunkColumn, ChunkEncoder, ColumnLightSettlement,
+    EntitySnapshot, HOTBAR_SIZE,
     MOTION_BLOCKING_HEIGHTMAP_TYPE_ID, MerchantOfferOut, MetadataField, PlayerListing,
     ResourcePackPush, ServerBound, ServerDirective, ServerProtocol, WorldBorder, WorldgenScope,
 };
@@ -90,6 +91,7 @@ use lodestone_world::{
     ChunkColumn as WorldChunkColumn, ChunkSection, ColumnLight, Heightmap, Heightmaps,
     LightData, LightProperties, Neighbourhood, compute_column_light,
     compute_column_light_for_initial_chunk, compute_column_light_with_neighbours,
+    compute_column_lights_with_neighbours_and_storage,
     compute_column_light_with_neighbours_for_initial_chunk,
 };
 use lodestone_data::block::Block;
@@ -3222,6 +3224,87 @@ fn compute_served_initial_light_with_neighbours(
     light
 }
 
+fn compute_served_initial_lights_with_neighbours_and_storage(
+    center: &WorldChunkColumn,
+    shape: &ChunkShape,
+    neighbours: &[(i32, i32, ServerChunkColumn)],
+    stored: &[Option<&ColumnLight>; 9],
+    dimension: Dimension,
+) -> [ColumnLight; 9] {
+    let neighbour_columns = neighbours
+        .iter()
+        .map(|(_, _, neighbour)| build_world_column(shape, neighbour))
+        .collect::<Vec<_>>();
+    let mut neighbourhood = Neighbourhood::new(center);
+    for ((dx, dz, _), neighbour) in neighbours.iter().zip(&neighbour_columns) {
+        if (*dx, *dz) != (0, 0) {
+            neighbourhood = neighbourhood.with(*dx, *dz, neighbour);
+        }
+    }
+    let retained_storage = stored.iter().flatten().any(|light| {
+        (0..light.light_section_count()).any(|section| {
+            light_data_has_nonzero(light.sky(section))
+        })
+    });
+    let mut lights = compute_column_lights_with_neighbours_and_storage(
+        &neighbourhood,
+        &V770LightProps {
+            has_skylight: dimension.has_skylight(),
+        },
+        stored,
+        initial_full_sky_sections(dimension),
+    );
+    let storage_neighbours = if retained_storage {
+        neighbours
+            .iter()
+            .zip(&neighbour_columns)
+            .filter(|((dx, dz, _), _)| {
+                let slot = ((*dz + 1) * 3 + (*dx + 1)) as usize;
+                stored[slot].is_some_and(|light| {
+                    (0..light.light_section_count()).any(|section| {
+                        light_data_has_nonzero(light.sky(section))
+                    })
+                })
+            })
+            .map(|(_, column)| column.clone())
+            .collect::<Vec<_>>()
+    } else {
+        neighbour_columns.clone()
+    };
+    let block_light_storage = match dimension {
+        Dimension::End => Some(initial_end_light_storage_sections(center, &storage_neighbours)),
+        Dimension::Nether => Some(initial_block_light_storage_sections(center, &storage_neighbours)),
+        Dimension::Overworld => None,
+    };
+    // Only the centre snapshot is serialized by this admission. The other
+    // eight snapshots are retained light-engine state, so keep their raw
+    // layers intact instead of applying the centre packet's sparse mask to
+    // unrelated columns.
+    normalize_initial_chunk_light(
+        &mut lights[4],
+        dimension,
+        block_light_storage.as_deref(),
+    );
+    lights
+}
+
+fn light_data_has_nonzero(data: &LightData) -> bool {
+    match data {
+        LightData::Missing | LightData::Uniform(0) => false,
+        LightData::Uniform(_) => true,
+        LightData::Values(array) => array.as_bytes().iter().any(|byte| *byte != 0),
+    }
+}
+
+fn empty_light_storage_like(light: &ColumnLight) -> ColumnLight {
+    let mut empty = ColumnLight::new(light.light_section_count());
+    for section in 0..empty.light_section_count() {
+        *empty.sky_mut(section) = LightData::Uniform(0);
+        *empty.block_mut(section) = LightData::Uniform(0);
+    }
+    empty
+}
+
 /// Server-side implementation of the protocol-776 (Minecraft 26.2) wire
 /// format, driving `lodestone-server`'s [`ServerProtocol`] seam.
 ///
@@ -3232,6 +3315,24 @@ fn compute_served_initial_light_with_neighbours(
 /// need to thread shape through here the same way the adapter does.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct V770ServerProtocol;
+
+impl V770ServerProtocol {
+    /// Computes and returns all nine retained light snapshots produced by one
+    /// shared three-by-three admission. The array uses row-major offset slots.
+    pub fn compute_initial_column_lights_with_neighbours_and_storage_in_dimension(
+        &self,
+        column: &lodestone_server::ChunkColumn,
+        neighbours: &[(i32, i32, lodestone_server::ChunkColumn)],
+        stored: &[Option<&lodestone_world::ColumnLight>; 9],
+        dimension: Dimension,
+    ) -> Option<[lodestone_world::ColumnLight; 9]> {
+        let shape = shape_for_column(column);
+        let center = build_world_column(&shape, column);
+        Some(compute_served_initial_lights_with_neighbours_and_storage(
+            &center, &shape, neighbours, stored, dimension,
+        ))
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Configuration-phase `registry_data` payloads
@@ -5303,6 +5404,39 @@ impl ServerProtocol for V770ServerProtocol {
             neighbours,
             dimension,
         ))
+    }
+
+    fn compute_initial_column_lights_with_neighbours_in_dimension(
+        &self,
+        column: &ServerChunkColumn,
+        neighbours: &[(i32, i32, ServerChunkColumn)],
+        dimension: Dimension,
+    ) -> Option<ColumnLightSettlement> {
+        let mut stored: [Option<&ColumnLight>; 9] = [None; 9];
+        stored[4] = column.retained_light();
+        for &(dx, dz, ref neighbour) in neighbours {
+            let slot = ((dz + 1) * 3 + (dx + 1)) as usize;
+            if slot < stored.len() {
+                stored[slot] = neighbour.retained_light();
+            }
+        }
+        let mut lights = self
+            .compute_initial_column_lights_with_neighbours_and_storage_in_dimension(
+                column,
+                neighbours,
+                &stored,
+                dimension,
+            )?;
+        for slot in 0..lights.len() {
+            if slot != 4 && stored[slot].is_none() {
+                lights[slot] = empty_light_storage_like(&lights[slot]);
+            }
+        }
+        let dependency_lights = neighbours.iter().map(|&(dx, dz, _)| {
+            let slot = ((dz + 1) * 3 + (dx + 1)) as usize;
+            (dx, dz, lights[slot].clone())
+        });
+        ColumnLightSettlement::with_neighbours(lights[4].clone(), dependency_lights)
     }
 
     fn compute_column_light_with_neighbours(

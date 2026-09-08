@@ -17,7 +17,7 @@ use lodestone_worldgen_parity::lifecycle::{
     LifecycleWorldgenSource,
 };
 use support::large_parity_manifest::{
-    Dimension, HEADER_BYTES, PACKET_AUDIT_RECORD_BYTES, RAW_PACKET_HASH_BYTES,
+    Dimension, Header as ManifestHeader, HEADER_BYTES, PACKET_AUDIT_RECORD_BYTES, RAW_PACKET_HASH_BYTES,
     canonical_nbt, payload_digest_from_header,
     raw_packet_full_digest, read_header, read_packet_audit_header,
     semantic_digest, semantic_digest_for_dimension, semantic_digest_v5_for_dimension,
@@ -631,6 +631,16 @@ fn raw_packet_targets(
 /// to the encoder for packet construction.
 const INITIAL_CARDINAL_NEIGHBOUR_OFFSETS: [(i32, i32); 4] =
     [(-1, 0), (0, -1), (1, 0), (0, 1)];
+const END_LIGHT_NEIGHBOUR_OFFSETS: [(i32, i32); 8] = [
+    (-1, -1),
+    (0, -1),
+    (1, -1),
+    (-1, 0),
+    (1, 0),
+    (-1, 1),
+    (0, 1),
+    (1, 1),
+];
 
 fn initial_light_admission_neighbour_offsets(record_index: u64) -> &'static [(i32, i32)] {
     if record_index == 0 {
@@ -657,6 +667,166 @@ fn initial_light_snapshot_for_admission(
         settled.set_retained_light(light);
     }
     settled
+}
+
+/// Replays the serial materializer order used to seal the raw-packet world.
+///
+/// The frozen-world export order is x-fastest/z, but the light-engine state was
+/// produced tile-z/tile-x/z/x. Keeping those orders separate is essential: an
+/// export prefix is not an admission prefix.
+fn end_materialization_positions(h: &ManifestHeader) -> Vec<ChunkPos> {
+    const TILE_SIDE: i32 = 16;
+    let min_x = h.cx0 - 1;
+    let max_x = h.cx1 + 1;
+    let min_z = h.cz0 - 1;
+    let max_z = h.cz1 + 1;
+    let tiles_x = (max_x - min_x) / TILE_SIDE + 1;
+    let tiles_z = (max_z - min_z) / TILE_SIDE + 1;
+    let mut positions = Vec::new();
+    for tile_z in 0..tiles_z {
+        let z0 = min_z + tile_z * TILE_SIDE;
+        for tile_x in 0..tiles_x {
+            let x0 = min_x + tile_x * TILE_SIDE;
+            for cz in z0..=max_z.min(z0 + TILE_SIDE - 1) {
+                for cx in x0..=max_x.min(x0 + TILE_SIDE - 1) {
+                    positions.push((cx, cz));
+                }
+            }
+        }
+    }
+    positions
+}
+
+fn compare_end_raw_after_materialization<R: Read, A: Read>(
+    source: &dyn ChunkSource,
+    expected: &mut R,
+    expected_audit: &mut A,
+    h: &ManifestHeader,
+    server_dimension: ServerDimension,
+    limit: u64,
+    scan_all: bool,
+    reference_packets: &BTreeMap<ChunkPos, PathBuf>,
+    component_reports: &mut Vec<(ChunkPos, PacketComponentReport)>,
+) -> Vec<RawPacketMismatch> {
+    let width = u64::try_from(i64::from(h.cx1) - i64::from(h.cx0) + 1)
+        .expect("authenticated manifest coordinate width fits u64");
+    let mut records = Vec::with_capacity(usize::try_from(limit).expect("parity prefix fits memory"));
+    for index in 0..limit {
+        let mut prefix = [0u8; RAW_PACKET_HASH_BYTES];
+        expected.read_exact(&mut prefix).expect("manifest raw packet hash prefix");
+        let mut full = [0u8; PACKET_AUDIT_RECORD_BYTES];
+        expected_audit.read_exact(&mut full).expect("packet-audit full packet digest");
+        let cx = h.cx0 + (index % width) as i32;
+        let cz = h.cz0 + (index / width) as i32;
+        records.push(((cx, cz), prefix, full, index));
+    }
+
+    let admissions = end_materialization_positions(h);
+    eprintln!(
+        "large raw-packet parity: replaying {} End materialization admissions before export",
+        admissions.len(),
+    );
+    for (admission_index, &(cx, cz)) in admissions.iter().enumerate() {
+        let fallback = source
+            .resident_column(cx, cz)
+            .unwrap_or_else(|| source.column(cx, cz));
+        let mut compute = |centre: &ChunkColumn, neighbours: &[(i32, i32, ChunkColumn)]| {
+            V770ServerProtocol.compute_initial_column_lights_with_neighbours_in_dimension(
+                centre,
+                neighbours,
+                server_dimension,
+            )
+        };
+        let _centre = source
+            .settle_resident_column_lights_with_neighbours(
+                cx,
+                cz,
+                &fallback,
+                &END_LIGHT_NEIGHBOUR_OFFSETS,
+                false,
+                false,
+                true,
+                &mut compute,
+            )
+            .unwrap_or_else(|error| panic!("stored End light computation at ({cx},{cz}): {error:?}"));
+        if (admission_index + 1) % 256 == 0 || admission_index + 1 == admissions.len() {
+            eprintln!(
+                "large raw-packet parity: materialized {}/{} End admissions",
+                admission_index + 1,
+                admissions.len(),
+            );
+        }
+    }
+
+    let mut mismatches = Vec::new();
+    for &((cx, cz), expected_prefix, expected_full, index) in &records {
+        let settled = source.column(cx, cz);
+        assert!(
+            settled.retained_light().is_some(),
+            "materialization did not retain End light at ({cx},{cz})"
+        );
+        let mut neighbours = Vec::with_capacity(8);
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                if (dx, dz) != (0, 0) {
+                    neighbours.push((dx, dz, source.column(cx + dx, cz + dz)));
+                }
+            }
+        }
+        let directive = V770ServerProtocol
+            .try_encode_chunk_with_neighbours_in_dimension(
+                cx,
+                cz,
+                &settled,
+                &neighbours,
+                server_dimension,
+            )
+            .expect("production neighbour-aware chunk encoder");
+        let payload = match directive {
+            ServerDirective::Send { packet_id, payload } => {
+                assert_eq!(
+                    packet_id,
+                    lodestone_v26_2::packet_ids::play::clientbound::LEVEL_CHUNK_WITH_LIGHT
+                );
+                payload
+            }
+            other => panic!("production chunk encoder returned {other:?} at ({cx},{cz})"),
+        };
+        let actual_full = raw_packet_full_digest(&payload);
+        let actual_prefix = [actual_full[0], actual_full[1]];
+        if actual_prefix != expected_prefix || actual_full != expected_full {
+            let mismatch = RawPacketMismatch {
+                target: (cx, cz),
+                index,
+                expected_prefix,
+                actual_prefix,
+                expected_full,
+                actual_full,
+                payload_bytes: payload.len(),
+            };
+            if !scan_all {
+                panic!(
+                    "large End raw-packet parity mismatch at ({cx},{cz}) after {index} export records: expected prefix {}, actual prefix {}, expected full SHA-256 {}, actual full SHA-256 {}, collision={}, payload bytes={}",
+                    hex(&mismatch.expected_prefix),
+                    hex(&mismatch.actual_prefix),
+                    hex(&mismatch.expected_full),
+                    hex(&mismatch.actual_full),
+                    mismatch.collision(),
+                    mismatch.payload_bytes,
+                );
+            }
+            mismatches.push(mismatch);
+        }
+        if let Some(reference_path) = reference_packets.get(&(cx, cz)) {
+            let reference_packet = std::fs::read(reference_path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", reference_path.display()));
+            component_reports.push((
+                (cx, cz),
+                packet_component_difference(&reference_packet, &payload, Dimension::End),
+            ));
+        }
+    }
+    mismatches
 }
 
 #[test]
@@ -1204,6 +1374,22 @@ fn parity_manifest_streams_before_rust_comparison() {
             Dimension::End => Box::new(retained_chunk_source_for_view_radius(end_chunk_source(42), 8)),
         };
         let column_for = |cx, cz| -> ChunkColumn { source.column(cx, cz) };
+        if raw_packet && dimension == Dimension::End {
+            let mut audit = expected_audit
+                .take()
+                .expect("v6 End raw-packet comparison has an audit reader");
+            raw_mismatches.extend(compare_end_raw_after_materialization(
+                source.as_ref(),
+                &mut expected,
+                &mut audit,
+                &h,
+                server_dimension,
+                limit,
+                scan_all,
+                &reference_packets,
+                &mut component_reports,
+            ));
+        } else {
         let mut expected_digest = [0u8; 32];
         for index in 0..limit {
             let (expected_prefix, expected_full) = if raw_packet {
@@ -1223,6 +1409,14 @@ fn parity_manifest_streams_before_rust_comparison() {
             let cx = h.cx0 + (index % width) as i32;
             let cz = h.cz0 + (index / width) as i32;
             let column = column_for(cx, cz);
+            let mut neighbours = Vec::with_capacity(8);
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    if (dx, dz) != (0, 0) {
+                        neighbours.push((dx, dz, column_for(cx + dx, cz + dz)));
+                    }
+                }
+            }
             let settled_column = if raw_packet && dimension == Dimension::Nether {
                 let admitted_neighbour_offsets =
                     initial_light_admission_neighbour_offsets(index);
@@ -1239,14 +1433,6 @@ fn parity_manifest_streams_before_rust_comparison() {
             } else {
                 column.clone()
             };
-            let mut neighbours = Vec::with_capacity(8);
-            for dz in -1..=1 {
-                for dx in -1..=1 {
-                    if (dx, dz) != (0, 0) {
-                        neighbours.push((dx, dz, column_for(cx + dx, cz + dz)));
-                    }
-                }
-            }
             let directive = V770ServerProtocol
                 .try_encode_chunk_with_neighbours_in_dimension(
                     cx,
@@ -1333,6 +1519,7 @@ fn parity_manifest_streams_before_rust_comparison() {
                     limit,
                 );
             }
+        }
         }
     }
     if limit < h.count {

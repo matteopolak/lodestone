@@ -320,6 +320,21 @@ impl ColumnLight {
         self.sky.len()
     }
 
+    /// Returns whether any stored sky or block layer contains a non-zero
+    /// value. A present but zero-valued column is an allocated light-engine
+    /// layer and must not be mistaken for a settled centre snapshot.
+    #[must_use]
+    pub fn has_nonzero_values(&self) -> bool {
+        self.sky
+            .iter()
+            .chain(&self.block)
+            .any(|data| match data {
+                LightData::Missing | LightData::Uniform(0) => false,
+                LightData::Uniform(_) => true,
+                LightData::Values(values) => values.as_bytes().iter().any(|byte| *byte != 0),
+            })
+    }
+
     /// Sky light for light section `i` (`0` is below the world).
     #[must_use]
     pub fn sky(&self, i: usize) -> &LightData {
