@@ -134,7 +134,7 @@ pub struct VegGrid {
     /// Top-level placed-feature id to eligible biome ids. This is deliberately
     /// keyed by the placed feature, rather than its configured body: a selector
     /// branch can share a body while carrying a different placement contract.
-    feature_biomes: HashMap<String, HashSet<String>>,
+    feature_biomes: Arc<HashMap<String, HashSet<String>>>,
     /// Resolves this grid's [`StateId`]s. Shared with the generator's dense
     /// grids, which is what lets `stitch_veg_region` move ids across without a
     /// string round-trip — ids from a different interner are meaningless here
@@ -233,7 +233,7 @@ impl VegGrid {
             blocks: Overlay::default(),
             sources: std::array::from_fn(|_| None),
             biome_sources: None,
-            feature_biomes: HashMap::new(),
+            feature_biomes: Arc::new(HashMap::new()),
             interner,
             dirty: WriteLog::default(),
             origin_x,
@@ -322,6 +322,37 @@ impl VegGrid {
         source_at: impl Fn(i32, i32) -> Option<Arc<DenseBlockGrid>>,
         biome_at: impl Fn(i32, i32) -> Option<Arc<BiomeCells>>,
         feature_biomes: HashMap<String, HashSet<String>>,
+    ) -> Self {
+        Self::with_sources_and_biomes_shared(
+            interner,
+            min_y,
+            height,
+            origin_x,
+            origin_z,
+            local_lo,
+            local_hi,
+            source_at,
+            biome_at,
+            Arc::new(feature_biomes),
+        )
+    }
+
+    /// Shared-map form used by production generators. The feature admission
+    /// map is immutable for a generator lifetime; cloning its `Arc` avoids
+    /// rebuilding every feature and biome string for each served column.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_sources_and_biomes_shared(
+        interner: Arc<StateInterner>,
+        min_y: i32,
+        height: i32,
+        origin_x: i32,
+        origin_z: i32,
+        local_lo: i32,
+        local_hi: i32,
+        source_at: impl Fn(i32, i32) -> Option<Arc<DenseBlockGrid>>,
+        biome_at: impl Fn(i32, i32) -> Option<Arc<BiomeCells>>,
+        feature_biomes: Arc<HashMap<String, HashSet<String>>>,
     ) -> Self {
         let mut grid = Self::with_sources(
             interner, min_y, height, origin_x, origin_z, local_lo, local_hi, source_at,
