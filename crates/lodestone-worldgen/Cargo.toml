@@ -40,6 +40,10 @@ default = []
 gen-counters = ["lodestone-worldgen-core/gen-counters"]
 
 [dependencies]
+# Canonical 26.2 block-state and face-occlusion facts. The local interner
+# resolves each state into this global table once, leaving feature candidate
+# loops on numeric ids instead of parsing state text.
+lodestone-data = { workspace = true }
 # The workspace's one portable clock seam — see `lodestone_time`'s crate docs. It is
 # here because `Instant::now()` and `SystemTime::now()` COMPILE for wasm32 and then
 # TRAP at runtime (measured, executed in a wasm VM: `RuntimeError: unreachable`), and
