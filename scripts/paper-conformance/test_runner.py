@@ -10,6 +10,8 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import subprocess
+import sys
 import tempfile
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -41,6 +43,20 @@ def fixture(root: Path) -> Path:
     plugin = root / "plugin.jar"
     paper.write_bytes(b"operator supplied Paper fixture")
     plugin.write_bytes(b"operator supplied unmodified plugin fixture")
+    java = root / "bin" / "java"
+    java.parent.mkdir(exist_ok=True)
+    java.write_text(
+        "#!" + sys.executable + "\n"
+        "import json\n"
+        "print(json.dumps({\"schema\": 1, \"kind\": \"observation\", "
+        "\"backend\": \"paper\", \"scenario\": \"block-break-cancel\", "
+        "\"status\": \"complete\", \"evidence_kind\": \"synthetic\", "
+        "\"source\": \"operator-test-paper-driver\", \"observations\": "
+        "[{\"id\": \"listener-present\", \"outcome\": \"cancelled\"}, "
+        "{\"id\": \"no-listener\", \"outcome\": \"completed\"}]}))\n",
+        encoding="utf-8",
+    )
+    java.chmod(0o755)
     scenario = root / "scenario.json"
     scenario.write_text(
         json.dumps(
@@ -82,6 +98,18 @@ def fixture(root: Path) -> Path:
                         "unmodified": True,
                     }
                 ],
+                "driver": {
+                    "plugin": "operator-protection-plugin",
+                    "entrypoint": "example.protection.Plugin",
+                    "protocol": "paper-observation-v1",
+                    "controls": ["listener-present", "no-listener"],
+                    "requires_real_block_break": True,
+                    "build": {
+                        "jdk_release": 25,
+                        "paper_api": "{paper_jar}",
+                        "network": False,
+                    },
+                },
                 "scenario": "scenario.json",
                 "commands": {"paper": ["{java}", "-jar", "{paper_jar}"], "lodestone": None},
             }
@@ -108,10 +136,77 @@ def synthetic_observation(backend: str, *, no_listener: str = "completed") -> di
 
 
 def main() -> int:
+    driver_source = Path(__file__).with_name("driver") / "src/io/lodestone/conformance/PaperConformancePlugin.java"
+    driver_build = Path(__file__).with_name("driver") / "build.sh"
+    source_text = driver_source.read_text(encoding="utf-8")
+    build_text = driver_build.read_text(encoding="utf-8")
+    check(
+        "driver source uses real break listener",
+        all(
+            marker in source_text
+            for marker in (
+                "BlockBreakEvent",
+                "event.setCancelled(true)",
+                "HandlerList.unregisterAll(this)",
+                "target.getType() != Material.AIR",
+            )
+        ),
+    )
+    check(
+        "driver build is offline and pinned",
+        "--release 25" in build_text
+        and "-cp \"$paper_jar\"" in build_text
+        and all(command not in build_text for command in ("curl", "wget", "mvn", "gradle")),
+    )
+    check("driver build recipe is valid shell", subprocess.run(["sh", "-n", str(driver_build)]).returncode == 0)
     with tempfile.TemporaryDirectory(prefix="paper-conformance-test-") as directory:
         contract_path = fixture(Path(directory))
         contract = runner.load_contract(contract_path)
         check("operator contract validates", contract["paper"]["build"] == 121)
+
+        external = runner._normalize_observation(
+            {
+                "schema": 1,
+                "kind": "observation",
+                "backend": "paper",
+                "scenario": "block-break-cancel",
+                "status": "complete",
+                "evidence_kind": "external",
+                "source": "operator-paper-driver",
+                "observations": [
+                    {"id": "listener-present", "outcome": "cancelled"},
+                    {"id": "no-listener", "outcome": "completed"},
+                ],
+            },
+            backend="paper",
+            scenario_id="block-break-cancel",
+            allow_synthetic=False,
+        )
+        check("external Paper observation shape validates", external["backend"] == "paper")
+
+        bad_hash = json.loads(contract_path.read_text(encoding="utf-8"))
+        bad_hash["paper"]["sha256"] = "0" * 64
+        contract_path.write_text(json.dumps(bad_hash), encoding="utf-8")
+        try:
+            runner.load_contract(contract_path)
+        except runner.ContractError as error:
+            check("Paper hash is verified before launch", "does not match" in str(error))
+        else:
+            check("Paper hash is verified before launch", False, "validation unexpectedly passed")
+        fixture(Path(directory))
+        contract = runner.load_contract(contract_path)
+
+        bad_driver = json.loads(contract_path.read_text(encoding="utf-8"))
+        del bad_driver["driver"]
+        contract_path.write_text(json.dumps(bad_driver), encoding="utf-8")
+        try:
+            runner.load_contract(contract_path)
+        except runner.ContractError as error:
+            check("driver contract is mandatory", "driver must identify" in str(error))
+        else:
+            check("driver contract is mandatory", False, "validation unexpectedly passed")
+        fixture(Path(directory))
+        contract = runner.load_contract(contract_path)
 
         records = runner.blocked_records(contract)
         check("negative control is present", records[1]["id"] == "no-listener")
@@ -153,6 +248,13 @@ def main() -> int:
         check("run exits blocked", exit_code == 2)
         check("run names the missing seam", "lodestone-paper-event-dispatch" in stderr.getvalue())
         check("run emits NDJSON", len(stdout.getvalue().splitlines()) == 4)
+
+        try:
+            runner.run_paper_backend(contract)
+        except runner.ContractError as error:
+            check("synthetic Paper process output is rejected", "synthetic" in str(error))
+        else:
+            check("synthetic Paper process output is rejected", False, "synthetic output unexpectedly passed")
 
         paper_evidence = synthetic_observation("paper")
         lodestone_evidence = synthetic_observation("lodestone")

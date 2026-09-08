@@ -2,15 +2,15 @@
 
 ## What it is
 
-The Paper plugin conformance harness defines reproducible, operator-supplied fixtures for comparing one unmodified plugin scenario on Paper and Lodestone. Its current runner validates the contract and emits an explicit blocked result; it does not claim compatibility while Lodestone lacks the required plugin lifecycle, event dispatch, and shared scenario driver.
+The Paper plugin conformance harness defines reproducible, operator-supplied fixtures for comparing one unmodified plugin scenario on Paper and Lodestone. Its runner validates and can execute the operator Paper driver, while refusing to claim compatibility until the Lodestone side has the required plugin lifecycle, event dispatch, and shared scenario driver.
 
 ## How it works
 
-`runner.py` reads a versioned JSON contract. The contract names a pinned JDK, an operator-provided Paper jar and digest, one or more unmodified plugin jars with their digests and capability domains, a deterministic scenario file, and argv arrays for the two backends. Paths are resolved relative to the contract, hashes are checked before evidence is produced, and shell command strings are rejected. The `lodestone-server` `paper-conformance-observation` example now exercises the production proposal-backed event path and emits a Lodestone observation record.
+`runner.py` reads a versioned JSON contract. The contract names a pinned JDK, an operator-provided Paper jar and digest, one or more unmodified plugin jars with their digests and capability domains, an explicitly declared conformance-driver plugin, a deterministic scenario file, and argv arrays for the two backends. Paths are resolved relative to the contract, hashes are checked before evidence is produced, and shell command strings are rejected. The `lodestone-server` `paper-conformance-observation` example now exercises the production proposal-backed event path and emits a Lodestone observation record.
 
 The initial scenario is `block-break-cancel`: one fixed-seed world and one block-break action. The listener-present case expects cancellation. The required no-listener negative control expects the same break to complete. A negative control is evidence only when both backends run the same scenario; it is never reported as passing by this scaffold.
 
-`validate` prints the normalized contract. `run` writes four deterministic NDJSON records: validated contract identity, blocked no-listener control, named Lodestone prerequisites, and a Paper `not_run` record. `run` exits 2 while any prerequisite is missing. It intentionally does not start Paper one-sided, because that would produce non-differential evidence.
+`validate` prints the normalized contract. `paper` stages verified plugin copies in an ephemeral server directory, expands the pinned-JDK/Paper argv placeholders, launches the operator command directly, and captures exactly one structured observation after the command has run both controls. It requires the Paper process to terminate within `execution.timeout_seconds`; a timeout, non-zero exit, missing observation, or changed artifact is an error. `run` writes four deterministic NDJSON records: validated contract identity, blocked no-listener control, named Lodestone prerequisites, and a Paper `not_run` record. `run` exits 2 while any prerequisite is missing. It intentionally does not start Paper one-sided, because that would produce non-differential evidence.
 
 `compare` consumes one complete observation record from each backend and emits one comparison record. It requires the two fixed controls, compares each outcome with the other backend and the scenario expectation, and reports every mismatch with its control id and reason. Blocked, incomplete, malformed, or synthetic observations are rejected. Synthetic observations are accepted only by the test-facing comparison function; the CLI never enables that mode. The Lodestone example's `external` record is accepted by the CLI because it came from production server code, but it covers the resident block proposal path; it is not evidence of a loaded Paper plugin or player packet path.
 
@@ -32,6 +32,9 @@ python3 scripts/paper-conformance/runner.py validate \
 python3 scripts/paper-conformance/runner.py run \
   --contract /operator/paper-conformance/contract.json \
   --output /operator/paper-conformance/results.ndjson
+python3 scripts/paper-conformance/runner.py paper \
+  --contract /operator/paper-conformance/contract.json \
+  --output /operator/paper-conformance/paper.ndjson
 python3 scripts/paper-conformance/runner.py compare \
   --contract /operator/paper-conformance/contract.json \
   --paper-results /operator/paper-conformance/paper.ndjson \
@@ -42,8 +45,23 @@ cargo run -p lodestone-server --example paper-conformance-observation \
 
 `jdk.version`, `paper.version`, and `paper.build` are provenance fields. `paper.jar`, every plugin `jar`, and their SHA-256 values are mandatory. Plugin domains are `world-editing`, `permissions-economy`, or `server-api`; `unmodified` must be `true`. `commands.paper` is an argv array. `commands.lodestone` may be `null` while the core runtime seam is absent, but `run` still fails with the named Lodestone prerequisites.
 
+`driver.plugin` and `driver.entrypoint` identify exactly the operator plugin responsible for the run and must match one declared plugin. Its `protocol` is `paper-observation-v1`, its ordered controls are `listener-present` and `no-listener`, and `requires_real_block_break` must be true. The driver must register the listener through the real Paper event path, cause a real player block break, remove or disable the listener, cause the negative-control break, and print one observation record only after both results are known. Constructing an event object without a server/player break is not acceptable evidence. The repository's minimal source contract is `driver/src/io/lodestone/conformance/PaperConformancePlugin.java`; it is compiled only by the operator and is not bundled as a jar.
+
+Build that source against the operator's already materialized Paper jar with the pinned JDK; no dependency resolver or network is involved:
+
+```sh
+JAVA_HOME=/operator/jdk-25 \
+  sh scripts/paper-conformance/driver/build.sh \
+  /operator/cache/paper-26.2-121.jar \
+  /operator/plugins/lodestone-paper-conformance.jar
+```
+
+Record the SHA-256 printed by the recipe as the plugin's `sha256` in the operator contract, set its `entrypoint` to `io.lodestone.conformance.PaperConformancePlugin`, and set `driver.plugin` to the same plugin name. The driver waits for an operator-controlled real player to break the fixed target twice; the Paper command must therefore provide a client or operator procedure that performs those two breaks before the process exits.
+
+`commands.paper` must contain `{java}` and `{paper_jar}`. The runner expands those to the selected JDK's `bin/java` and the verified Paper jar. `{plugin_dir}`, `{scenario}`, and `{workdir}` are also available. Shell wrappers are rejected. `execution.timeout_seconds` defaults to 60 and bounds the complete Paper command; the command must arrange for its plugin/driver to run both controls and exit.
+
 Backend observation files are NDJSON with exactly one `kind: "observation"` record. The record must identify its `backend`, the contract scenario, a `source`, `status: "complete"`, and two outcomes: `listener-present` must be `cancelled` and `no-listener` must be `completed`. Production observations must use `evidence_kind: "external"`; `evidence_kind: "synthetic"` is reserved for independent tests.
 
 ## Dependencies
 
-The runner uses only the Python standard library and does not invoke Cargo. Paper, a supported JDK, and maintained plugin jars remain operator-supplied and outside the repository. The current Lodestone production bridge provides class loading and narrow resident-world callbacks, not the plugin lifecycle or event surface required by this acceptance harness.
+The runner uses only the Python standard library. Paper, a supported JDK, and maintained plugin jars remain operator-supplied and outside the repository. The Paper backend uses direct `subprocess.Popen` with `shell=False` and an ephemeral working directory; it never modifies the operator artifacts. The current Lodestone production bridge provides class loading and narrow resident-world callbacks, not the plugin lifecycle or event surface required by this acceptance harness.

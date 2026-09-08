@@ -13,8 +13,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -39,6 +43,7 @@ EXPECTED_OBSERVATIONS = (
     ("listener-present", "cancelled"),
     ("no-listener", "completed"),
 )
+DRIVER_PROTOCOL = "paper-observation-v1"
 
 SECRET_KEY = re.compile(
     r"(?:password|passphrase|token|secret|api[_-]?key|authorization|cookie|private[_-]?key)",
@@ -47,6 +52,8 @@ SECRET_KEY = re.compile(
 SECRET_ASSIGNMENT = re.compile(
     r"(?i)(\b(?:password|passphrase|token|secret|api[_-]?key|authorization|cookie)\b\s*[=:]\s*)[^\s,;]+"
 )
+COMMAND_PLACEHOLDERS = frozenset({"java", "paper_jar", "plugin_dir", "scenario", "workdir"})
+COMMAND_PLACEHOLDER = re.compile(r"\{([^{}]+)\}")
 
 
 class ContractError(ValueError):
@@ -100,6 +107,10 @@ def _command(value: Any, *, field: str, allow_missing: bool = False) -> list[str
         raise ContractError(f"{field} must be a non-empty argv array; shell strings are not allowed")
     if any("{output}" in item for item in value):
         raise ContractError(f"{field} may not interpolate {{output}}; stdout is captured by the runner")
+    for item in value:
+        unknown = [name for name in COMMAND_PLACEHOLDER.findall(item) if name not in COMMAND_PLACEHOLDERS]
+        if unknown:
+            raise ContractError(f"{field} contains unknown placeholders: {sorted(set(unknown))}")
     shell_names = {"sh", "bash", "zsh", "fish", "cmd", "cmd.exe", "powershell", "pwsh"}
     executable = Path(value[0]).name.lower()
     if executable in shell_names or any(item in {"-c", "/c", "-command"} for item in value[1:]):
@@ -155,6 +166,8 @@ def load_contract(path: Path) -> dict[str, Any]:
     if not isinstance(paper, dict):
         raise ContractError("paper must be an object")
     paper_path = _path(paper.get("jar"), field="paper.jar", base=base)
+    if paper_path.suffix.lower() != ".jar":
+        raise ContractError(f"paper.jar must name a .jar artifact: {paper_path}")
     paper_hash = _sha(paper_path, paper.get("sha256"), field="paper.sha256")
     if not isinstance(paper.get("version"), str) or not paper["version"]:
         raise ContractError("paper.version must identify the supported Paper release")
@@ -180,6 +193,8 @@ def load_contract(path: Path) -> dict[str, Any]:
         if plugin.get("unmodified") is not True:
             raise ContractError(f"{field}.unmodified must be true")
         jar = _path(plugin.get("jar"), field=f"{field}.jar", base=base)
+        if jar.suffix.lower() != ".jar":
+            raise ContractError(f"{field}.jar must name a .jar artifact: {jar}")
         plugin_hash = _sha(jar, plugin.get("sha256"), field=f"{field}.sha256")
         entrypoint = plugin.get("entrypoint")
         if not isinstance(entrypoint, str) or not entrypoint or "/" in entrypoint:
@@ -195,6 +210,34 @@ def load_contract(path: Path) -> dict[str, Any]:
             }
         )
 
+    driver = raw.get("driver")
+    if not isinstance(driver, dict):
+        raise ContractError("driver must identify the operator-supplied conformance plugin")
+    driver_plugin = driver.get("plugin")
+    if not isinstance(driver_plugin, str) or not driver_plugin or driver_plugin not in names:
+        raise ContractError("driver.plugin must name one of the declared plugin names")
+    driver_entrypoint = driver.get("entrypoint")
+    declared_entrypoint = next(
+        plugin["entrypoint"] for plugin in normalized_plugins if plugin["name"] == driver_plugin
+    )
+    if driver_entrypoint != declared_entrypoint:
+        raise ContractError("driver.entrypoint must match the selected plugin entrypoint")
+    if driver.get("protocol") != DRIVER_PROTOCOL:
+        raise ContractError(f"driver.protocol must be {DRIVER_PROTOCOL!r}")
+    if driver.get("controls") != [identifier for identifier, _ in EXPECTED_OBSERVATIONS]:
+        raise ContractError("driver.controls must contain listener-present and no-listener in order")
+    if driver.get("requires_real_block_break") is not True:
+        raise ContractError("driver.requires_real_block_break must be true")
+    build = driver.get("build")
+    if not isinstance(build, dict):
+        raise ContractError("driver.build must describe the offline operator build")
+    if build.get("jdk_release") != 25:
+        raise ContractError("driver.build.jdk_release must be 25")
+    if build.get("paper_api") != "{paper_jar}":
+        raise ContractError("driver.build.paper_api must be {paper_jar}")
+    if build.get("network") is not False:
+        raise ContractError("driver.build.network must be false")
+
     scenario = _path(raw.get("scenario"), field="scenario", base=base)
     scenario_value = _scenario(scenario)
     commands = raw.get("commands")
@@ -204,6 +247,16 @@ def load_contract(path: Path) -> dict[str, Any]:
     lodestone_command = _command(
         commands.get("lodestone"), field="commands.lodestone", allow_missing=True
     )
+    if "{java}" not in paper_command:
+        raise ContractError("commands.paper must use the pinned JDK through the {java} placeholder")
+    if "{paper_jar}" not in paper_command:
+        raise ContractError("commands.paper must launch the verified Paper jar through {paper_jar}")
+    execution = raw.get("execution", {})
+    if not isinstance(execution, dict):
+        raise ContractError("execution must be an object")
+    timeout_seconds = execution.get("timeout_seconds", 60)
+    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or timeout_seconds < 1:
+        raise ContractError("execution.timeout_seconds must be a positive integer")
 
     return {
         "schema": SCHEMA,
@@ -215,8 +268,21 @@ def load_contract(path: Path) -> dict[str, Any]:
             "build": paper["build"],
         },
         "plugins": normalized_plugins,
+        "driver": {
+            "plugin": driver_plugin,
+            "entrypoint": declared_entrypoint,
+            "protocol": DRIVER_PROTOCOL,
+            "controls": [identifier for identifier, _ in EXPECTED_OBSERVATIONS],
+            "requires_real_block_break": True,
+            "build": {
+                "jdk_release": 25,
+                "paper_api": "{paper_jar}",
+                "network": False,
+            },
+        },
         "scenario": {"path": str(scenario), "sha256": sha256(scenario), **scenario_value},
         "commands": {"paper": paper_command, "lodestone": lodestone_command},
+        "execution": {"timeout_seconds": timeout_seconds},
     }
 
 
@@ -275,31 +341,10 @@ def blocked_records(contract: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def _load_observation(
-    path: Path, *, backend: str, scenario_id: str, allow_synthetic: bool
+def _normalize_observation(
+    observation: dict[str, Any], *, backend: str, scenario_id: str, allow_synthetic: bool
 ) -> dict[str, Any]:
-    """Load one complete backend observation from an NDJSON file."""
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError as error:
-        raise ContractError(f"cannot read {backend} results: {path}: {error}") from error
-    records: list[dict[str, Any]] = []
-    for line_number, line in enumerate(lines, start=1):
-        if not line.strip():
-            continue
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError as error:
-            raise ContractError(f"{backend} results line {line_number} is not valid JSON: {error}") from error
-        if not isinstance(value, dict):
-            raise ContractError(f"{backend} results line {line_number} must be an object")
-        if value.get("kind") == "observation":
-            records.append(value)
-    if len(records) != 1 or len([line for line in lines if line.strip()]) != 1:
-        raise ContractError(
-            f"{backend} results must contain exactly one observation record and no auxiliary records"
-        )
-    observation = records[0]
+    """Validate one parsed backend observation and retain only comparison fields."""
     if observation.get("schema") != SCHEMA:
         raise ContractError(f"{backend} observation.schema must be {SCHEMA}")
     if observation.get("backend") != backend:
@@ -347,6 +392,58 @@ def _load_observation(
         "source": observation["source"],
         "observations": normalized,
     }
+
+
+def _load_observation(
+    path: Path, *, backend: str, scenario_id: str, allow_synthetic: bool
+) -> dict[str, Any]:
+    """Load one complete backend observation from an NDJSON file."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as error:
+        raise ContractError(f"cannot read {backend} results: {path}: {error}") from error
+    records: list[dict[str, Any]] = []
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise ContractError(f"{backend} results line {line_number} is not valid JSON: {error}") from error
+        if not isinstance(value, dict):
+            raise ContractError(f"{backend} results line {line_number} must be an object")
+        if value.get("kind") == "observation":
+            records.append(value)
+    if len(records) != 1 or len([line for line in lines if line.strip()]) != 1:
+        raise ContractError(
+            f"{backend} results must contain exactly one observation record and no auxiliary records"
+        )
+    return _normalize_observation(
+        records[0], backend=backend, scenario_id=scenario_id, allow_synthetic=allow_synthetic
+    )
+
+
+def _observation_from_stdout(
+    stdout: str, *, backend: str, scenario_id: str
+) -> dict[str, Any]:
+    """Extract the sole structured observation from a process's mixed log output."""
+    records: list[dict[str, Any]] = []
+    for line_number, line in enumerate(stdout.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            # Paper's ordinary human-readable startup logs are not evidence;
+            # the structured observation line is the only accepted payload.
+            continue
+        if isinstance(value, dict) and value.get("kind") == "observation":
+            records.append(value)
+    if len(records) != 1:
+        raise ContractError(f"Paper process must emit exactly one structured observation record")
+    return _normalize_observation(
+        records[0], backend=backend, scenario_id=scenario_id, allow_synthetic=False
+    )
 
 
 def compare_evidence(
@@ -424,6 +521,94 @@ def compare_evidence(
     }
 
 
+def _expand_paper_command(contract: dict[str, Any], workdir: Path, plugin_dir: Path) -> list[str]:
+    java = Path(contract["jdk"]["java_home"]) / "bin" / "java"
+    if not java.is_file() or not os.access(java, os.X_OK):
+        raise ContractError(f"jdk.java_home has no executable bin/java: {java}")
+    replacements = {
+        "{java}": str(java),
+        "{paper_jar}": contract["paper"]["jar"],
+        "{plugin_dir}": str(plugin_dir),
+        "{scenario}": contract["scenario"]["path"],
+        "{workdir}": str(workdir),
+    }
+    expanded = []
+    for item in contract["commands"]["paper"]:
+        for token, replacement in replacements.items():
+            item = item.replace(token, replacement)
+        expanded.append(item)
+    return expanded
+
+
+def _stage_paper_fixtures(contract: dict[str, Any], plugin_dir: Path) -> None:
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    names: set[str] = set()
+    for plugin in contract["plugins"]:
+        source = Path(plugin["jar"])
+        destination_name = source.name
+        if destination_name in names:
+            raise ContractError(f"plugins contain duplicate jar filename: {destination_name}")
+        names.add(destination_name)
+        destination = plugin_dir / destination_name
+        shutil.copy2(source, destination)
+        observed = sha256(destination)
+        if observed != plugin["sha256"]:
+            raise ContractError(f"staged plugin hash changed for {plugin['name']}: {observed}")
+
+
+def run_paper_backend(contract: dict[str, Any]) -> dict[str, Any]:
+    """Launch the operator's Paper command and capture its external observation.
+
+    The command must terminate after running both controls and print exactly
+    one structured observation record. Human-readable Paper logs are ignored;
+    malformed JSON or a missing observation is not evidence.
+    """
+    with tempfile.TemporaryDirectory(prefix="lodestone-paper-conformance-") as directory:
+        workdir = Path(directory)
+        plugin_dir = workdir / "plugins"
+        _stage_paper_fixtures(contract, plugin_dir)
+        command = _expand_paper_command(contract, workdir, plugin_dir)
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=workdir,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                shell=False,
+            )
+        except OSError as error:
+            raise ContractError(f"cannot launch Paper command {command[0]!r}: {error}") from error
+        try:
+            stdout, stderr = process.communicate(
+                timeout=contract["execution"]["timeout_seconds"]
+            )
+        except subprocess.TimeoutExpired as error:
+            process.kill()
+            stdout, stderr = process.communicate()
+            detail = redact(stderr[-4000:])
+            raise ContractError(
+                f"Paper command exceeded execution.timeout_seconds={contract['execution']['timeout_seconds']}; "
+                f"stderr={detail!r}"
+            ) from error
+        if process.returncode != 0:
+            detail = redact(stderr[-4000:])
+            raise ContractError(f"Paper command exited {process.returncode}; stderr={detail!r}")
+        record = _observation_from_stdout(
+            stdout, backend="paper", scenario_id=contract["scenario"]["id"]
+        )
+        if sha256(Path(contract["paper"]["jar"])) != contract["paper"]["sha256"]:
+            raise ContractError("operator Paper jar changed during execution")
+        for plugin in contract["plugins"]:
+            source = Path(plugin["jar"])
+            if sha256(source) != plugin["sha256"]:
+                raise ContractError(f"operator plugin changed during execution: {plugin['name']}")
+        return record
+
+
 def write_records(records: list[dict[str, Any]], output: TextIO) -> None:
     for record in records:
         output.write(canonical_json(record) + "\n")
@@ -431,7 +616,7 @@ def write_records(records: list[dict[str, Any]], output: TextIO) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("validate", "run", "compare"))
+    parser.add_argument("command", choices=("validate", "paper", "run", "compare"))
     parser.add_argument("--contract", type=Path, required=True)
     parser.add_argument("--output", type=Path, help="NDJSON destination; defaults to stdout")
     parser.add_argument("--paper-results", type=Path)
@@ -445,6 +630,20 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "validate":
         print(canonical_json(contract))
+        return 0
+
+    if args.command == "paper":
+        try:
+            observation = run_paper_backend(contract)
+        except ContractError as error:
+            print(f"paper-error: {error}", file=sys.stderr)
+            return 2
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            with args.output.open("w", encoding="utf-8") as destination:
+                write_records([observation], destination)
+        else:
+            write_records([observation], sys.stdout)
         return 0
 
     if args.command == "compare":
