@@ -29,6 +29,12 @@ break phases and six faces so an observed chunk block can produce an observed up
 integration test connects the family adapter to a registry-selected server transport, verifies a
 known dandelion appears, breaks it, and observes the replacement air state.
 
+The clientbound `block_break_animation` packet is decoded from its literal entity id, packed
+position, and raw stage byte into `ClientEvent::BlockDestruction`. The shared session fold
+preserves visible stages and clears reset stages; it also drops overlays when an entity is
+replaced or removed, when a chunk unloads, or when the session ends. The crack renderer uses
+the loaded block state only to resolve geometry and keeps stage texels nearest-sampled.
+
 `V47ServerProtocol` also participates in the shared connection watchdog: it encodes a clientbound
 keep-alive and consumes its serverbound echo as `ServerBound::KeepAlive`. Protocol 47 carries the
 id as a signed VarInt, unlike protocol 5's fixed `i32` and later fixed `i64` forms. The hosted

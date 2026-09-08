@@ -4190,7 +4190,6 @@ pub fn route(event: &ClientEvent) -> Route {
         // ---- per-entity ECS state -------------------------------------------
         ClientEvent::EntityMoved { .. }
         | ClientEvent::EntityTeleported { .. }
-        | ClientEvent::EntityRemoved { .. }
         | ClientEvent::EntityHeadRotation { .. }
         | ClientEvent::EntityMetadataUpdated { .. }
         | ClientEvent::EntityAttributesUpdated { .. }
@@ -4258,13 +4257,22 @@ pub fn route(event: &ClientEvent) -> Route {
             session: true,
             ..Route::NOWHERE
         },
-        // `ingest` spawns the entity; the shell arm is guarded on
-        // `lightning_bolt` and only counts flashes, so every other spawn
-        // legitimately reaches `forward`'s catch-all.
+        // `ingest` spawns the entity; the session arm clears any old crack
+        // overlay before a reused id can receive a new stage. The shell arm is
+        // guarded on `lightning_bolt` and only counts flashes, so every other
+        // spawn legitimately reaches `forward`'s catch-all.
         ClientEvent::EntitySpawned { .. } => Route {
             ingest: true,
+            session: true,
             shell: true,
             shell_conditional: true,
+            ..Route::NOWHERE
+        },
+        // SessionBlockDestruction clears a reused id before the replacement
+        // entity can receive a new break stage.
+        ClientEvent::EntityRemoved { .. } => Route {
+            ingest: true,
+            session: true,
             ..Route::NOWHERE
         },
         ClientEvent::PlayerProfileNamed { .. } => INGEST,
@@ -4317,17 +4325,14 @@ pub fn route(event: &ClientEvent) -> Route {
 
         // ---- the shell's own stream ------------------------------------------
         ClientEvent::Disconnect { .. }
-        // `SessionFailed` is `Disconnect`'s client-side twin and takes the same
-        // route, established from the consumer rather than from the shape: the
-        // only thing in the tree that ends a session is
-        // `SessionPhase::Ended`, and the only writer of that is
-        // `lodestone_shell::sim::Sim::set_phase`, called from `poll_net`'s
-        // `NetUpdate` arms. Nothing in `lodestone_ecs::session` folds a `Phase`
-        // from a `ClientEvent` at all, so a `session` route here would compile,
-        // test green, and reach no screen — and a terminal session failure is
-        // not per-entity state either, which rules out `ingest`.
-        | ClientEvent::SessionFailed { .. }
-        | ClientEvent::Particles { .. }
+        // Both terminal events also reach the session fold so its remote crack
+        // overlays are cleared before a later session reuses the same world.
+        | ClientEvent::SessionFailed { .. } => Route {
+            session: true,
+            shell: true,
+            ..Route::NOWHERE
+        },
+        ClientEvent::Particles { .. }
         | ClientEvent::Sound { .. }
         | ClientEvent::EntitySound { .. }
         | ClientEvent::MobEffectApplied { .. }
@@ -4408,6 +4413,7 @@ pub fn route(event: &ClientEvent) -> Route {
         // §2 warns about: a routing claim that is accurate about one consumer and
         // silently wrong about another, which nothing about it looks stale.
         ClientEvent::ChunkUnloaded { .. } => Route {
+            session: true,
             shell: true,
             client: true,
             ..Route::NOWHERE
