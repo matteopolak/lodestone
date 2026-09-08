@@ -159,6 +159,20 @@ paths only need to provide the current texture view. There is no runtime configu
 This path depends on `GpuAtlas` for the resident texture and on `CrackResolver` for the
 stage UV rectangle and block-shaped overlay geometry.
 
+### Historical block-destruction overlays
+
+Remote break-progress packets fold into `SessionBlockDestruction`, keyed by breaking
+entity. `Sim::crack_targets` resolves each active position through the loaded world and
+passes the resulting state id and stage to the same nearest-sampled crack pipeline as the
+local mining target; an unloaded position is omitted rather than rendered with fabricated
+geometry. A stage outside `0..=9` clears the entity's overlay.
+
+The session fold also clears overlays when an entity id is replaced or removed, when its
+chunk unloads, and on disconnect/session failure. If this lifecycle changes, update
+`BlockDestructionOverlays`, `apply_block_destruction`, and the routing table together;
+otherwise stale cracks can survive a reused id or reloaded chunk. The protocol adapters
+must preserve the raw progress byte so each family can keep its own reset sentinel.
+
 ### Translucency: culling and depth
 
 Two independent rules govern an interior face between two translucent blocks of the

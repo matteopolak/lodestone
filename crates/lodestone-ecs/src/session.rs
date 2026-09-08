@@ -980,7 +980,26 @@ pub fn apply_block_destruction(
 ) {
     for event in batch.events() {
         for mut set in &mut overlays {
-            let _ = set.0.apply(event);
+            match event {
+                ClientEvent::BlockDestruction { .. } => {
+                    let _ = set.0.apply(event);
+                }
+                ClientEvent::EntitySpawned { entity_id, .. } => {
+                    // A server may reuse an id after a despawn. The new
+                    // entity must not inherit the old entity's crack stage.
+                    set.0.clear_entity(*entity_id);
+                }
+                ClientEvent::EntityRemoved { entity_ids } => {
+                    for entity_id in entity_ids {
+                        set.0.clear_entity(*entity_id);
+                    }
+                }
+                ClientEvent::ChunkUnloaded { pos } => set.0.clear_chunk(*pos),
+                ClientEvent::Disconnect { .. } | ClientEvent::SessionFailed { .. } => {
+                    set.0.clear();
+                }
+                _ => {}
+            }
         }
     }
 }
@@ -3050,6 +3069,106 @@ mod tests {
                 .stage_at(p),
             None
         );
+    }
+
+    #[test]
+    fn block_destruction_lifecycle_clears_replacements_removals_unloads_and_disconnects() {
+        let (mut app, entity) = session_app();
+        let first = lodestone_model::math::BlockPos::new(-1, 64, -1);
+        let second = lodestone_model::math::BlockPos::new(16, 64, 0);
+
+        fold(
+            &mut app,
+            ClientEvent::BlockDestruction {
+                entity_id: 7,
+                pos: first,
+                progress: 4,
+            },
+        );
+        fold(
+            &mut app,
+            ClientEvent::BlockDestruction {
+                entity_id: 8,
+                pos: second,
+                progress: 5,
+            },
+        );
+
+        // A replacement with the same server id must not inherit the old
+        // entity's stage.
+        fold(
+            &mut app,
+            ClientEvent::EntitySpawned {
+                entity_id: 7,
+                uuid: None,
+                entity_type: "minecraft:zombie".parse().expect("valid entity key"),
+                pos: lodestone_model::Vec3::default(),
+                rotation: lodestone_model::Rotation::default(),
+                velocity: None,
+            },
+        );
+        let overlays = &app
+            .world()
+            .get::<SessionBlockDestruction>(entity)
+            .expect("session overlay component")
+            .0;
+        assert_eq!(overlays.stage_at(first), None);
+        assert_eq!(overlays.stage_at(second), Some(5));
+
+        fold(
+            &mut app,
+            ClientEvent::EntityRemoved {
+                entity_ids: vec![8],
+            },
+        );
+        assert!(app
+            .world()
+            .get::<SessionBlockDestruction>(entity)
+            .expect("session overlay component")
+            .0
+            .is_empty());
+
+        fold(
+            &mut app,
+            ClientEvent::BlockDestruction {
+                entity_id: 9,
+                pos: second,
+                progress: 3,
+            },
+        );
+        fold(
+            &mut app,
+            ClientEvent::ChunkUnloaded {
+                pos: lodestone_model::ChunkPos::new(1, 0),
+            },
+        );
+        assert!(app
+            .world()
+            .get::<SessionBlockDestruction>(entity)
+            .expect("session overlay component")
+            .0
+            .is_empty());
+
+        fold(
+            &mut app,
+            ClientEvent::BlockDestruction {
+                entity_id: 10,
+                pos: first,
+                progress: 2,
+            },
+        );
+        fold(
+            &mut app,
+            ClientEvent::Disconnect {
+                reason: lodestone_model::Text::literal("closed"),
+            },
+        );
+        assert!(app
+            .world()
+            .get::<SessionBlockDestruction>(entity)
+            .expect("session overlay component")
+            .0
+            .is_empty());
     }
 
     #[test]

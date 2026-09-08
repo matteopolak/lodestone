@@ -560,6 +560,30 @@ impl BlockDestructionOverlays {
         }
     }
 
+    /// Remove every overlay owned by `entity_id`.
+    ///
+    /// Entity ids can be reused after a despawn, so the renderer must not let
+    /// an old break stage survive an entity replacement or removal.
+    pub fn clear_entity(&mut self, entity_id: i32) {
+        self.entries.retain(|overlay| overlay.entity_id != entity_id);
+    }
+
+    /// Remove overlays whose block lies in `chunk`.
+    ///
+    /// A chunk unload invalidates the block state needed to resolve crack
+    /// geometry. Dropping the overlay here keeps it from resurfacing if that
+    /// chunk is later reloaded with different contents.
+    pub fn clear_chunk(&mut self, chunk: lodestone_model::ChunkPos) {
+        self.entries.retain(|overlay| {
+            overlay.pos.x.div_euclid(16) != chunk.x || overlay.pos.z.div_euclid(16) != chunk.z
+        });
+    }
+
+    /// Remove all overlays at session teardown.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
     /// The highest crack stage currently shown at `pos`, if any. Multiple
     /// players breaking the same block show the most-broken stage, matching
     /// vanilla's per-position `max`.

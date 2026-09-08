@@ -41,6 +41,11 @@ The decoder in `packets::chunk::LevelChunkWithLight` consumes both section
 counters for alignment, bounds the length-prefixed section blob, and applies
 the decoded heightmaps and light through `V770Adapter`'s world sink.
 
+The clientbound `block_destruction` record preserves its entity id, packed block position,
+and raw progress in `ClientEvent::BlockDestruction`. `SessionBlockDestruction` clears reset
+stages and invalidates remote crack entries on entity replacement/removal, chunk unload, and
+disconnect before `Sim::crack_targets` resolves loaded block geometry for the renderer.
+
 ## How to change it
 
 Keep `encode_column_body` and `LevelChunkWithLight::decode` in matching wire
