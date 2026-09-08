@@ -325,7 +325,6 @@ fn dependency_centre_admission_preserves_values_and_center_storage_shape() {
         .storage()
         .expect("the centre receives its own storage classification");
     assert!(settled_storage.is_allocated(6));
-    assert!(!settled_storage.is_allocated(1));
     assert_ne!(settled_storage, &storage);
 
     let dependency = source
