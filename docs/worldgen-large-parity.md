@@ -18,7 +18,13 @@ still receives the complete 3 by 3 terrain footprint. A generated dependency
 whose light layer has not been admitted remains an opaque seam; its terrain is
 not allowed to leak an emission or propagation result into an earlier centre.
 After a centre is settled, missing queued dependencies receive their own
-retained light and allocation records. When a dependency-initialized column
+retained light and allocation records. Each newly initialized dependency is
+settled from its own remapped three-by-three view of the terrain supplied by
+the admission. Its fresh terrain emitters are active, while retained layers
+are seeded only for already initialized columns; an unavailable outer column
+remains an opaque seam. This lets a source in a dependency's future neighbour
+contribute to that dependency without leaking through an uninitialized slot
+into the original centre. When a dependency-initialized column
 later becomes the centre, its retained block-light values are applied to the
 new centre computation without copying the dependency's storage masks. The
 new centre keeps its own `Missing` versus allocated representation, including

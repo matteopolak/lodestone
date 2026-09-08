@@ -3460,7 +3460,6 @@ fn compute_served_initial_lights_with_neighbours_and_storage(
     if dimension == Dimension::Nether {
         let storage = initial_nether_light_storage(center, &storage_neighbours);
         lights[4].set_storage(storage.clone());
-        let all_neighbours = neighbour_columns.clone();
         for (slot, light) in lights.iter_mut().enumerate() {
             if slot == 4 {
                 continue;
@@ -3471,20 +3470,24 @@ fn compute_served_initial_lights_with_neighbours_and_storage(
                     continue;
                 }
             }
-            let selected = neighbours
+            let (target_dx, target_dz, selected) = neighbours
                 .iter()
                 .zip(&neighbour_columns)
                 .find(|((dx, dz, _), _)| {
                     ((*dz + 1) * 3 + (*dx + 1)) as usize == slot
                 })
-                .map(|(_, column)| column)
+                .map(|((dx, dz, _), column)| (*dx, *dz, column))
                 .expect("every non-centre Nether light slot has a footprint column");
-            let storage = initial_nether_light_storage_for_column(
+            *light = compute_nether_dependency_light(
                 selected,
+                target_dx,
+                target_dz,
                 center,
-                &all_neighbours,
+                neighbours,
+                &neighbour_columns,
+                stored,
+                statuses,
             );
-            light.set_storage(storage);
         }
     }
     if let Some(retained) = retained_nether_centre {
@@ -3502,6 +3505,86 @@ fn retained_light_is_initialized(status: RetainedLightStatus) -> bool {
         status,
         RetainedLightStatus::DependencyInitialized | RetainedLightStatus::CentreSettled
     )
+}
+
+/// Settles a newly initialized Nether dependency from the part of the current
+/// admission footprint that is visible from that dependency's own centre.
+///
+/// The shared centre flood deliberately activates only its centre terrain: an
+/// uninitialized dependency must not illuminate that packet. A dependency is a
+/// different admission boundary, however. Its local 3×3 footprint activates
+/// every supplied terrain source, including a source in a future neighbour
+/// that is diagonal to the original centre. Retained layers are still used as
+/// seeds only for columns that were already initialized; missing columns stay
+/// opaque seams. The selected dependency receives storage masks for this
+/// remapped footprint rather than the original centre's footprint.
+fn compute_nether_dependency_light(
+    target: &WorldChunkColumn,
+    target_dx: i32,
+    target_dz: i32,
+    center: &WorldChunkColumn,
+    neighbours: &[(i32, i32, ServerChunkColumn)],
+    neighbour_columns: &[WorldChunkColumn],
+    stored: &[Option<&ColumnLight>; 9],
+    statuses: &[Option<RetainedLightStatus>; 9],
+) -> ColumnLight {
+    let mut neighbourhood = Neighbourhood::new(target);
+    let mut storage_neighbours = Vec::new();
+
+    let center_dx = -target_dx;
+    let center_dz = -target_dz;
+    if (-1..=1).contains(&center_dx)
+        && (-1..=1).contains(&center_dz)
+        && (center_dx, center_dz) != (0, 0)
+    {
+        neighbourhood = neighbourhood.with(center_dx, center_dz, center);
+        storage_neighbours.push(center.clone());
+    }
+    for ((source_dx, source_dz, _), column) in neighbours.iter().zip(neighbour_columns) {
+        let local_dx = *source_dx - target_dx;
+        let local_dz = *source_dz - target_dz;
+        if (-1..=1).contains(&local_dx)
+            && (-1..=1).contains(&local_dz)
+            && (local_dx, local_dz) != (0, 0)
+        {
+            neighbourhood = neighbourhood.with(local_dx, local_dz, column);
+            storage_neighbours.push(column.clone());
+        }
+    }
+
+    let section_min_y = target.min_y();
+    let mut light = compute_column_light_with_neighbours_seeded(
+        &neighbourhood,
+        &V770LightProps { has_skylight: false },
+        initial_full_sky_sections(Dimension::Nether),
+        |local_dx, local_dz, x, y, z| {
+            let source_dx = target_dx + local_dx;
+            let source_dz = target_dz + local_dz;
+            if !(-1..=1).contains(&source_dx) || !(-1..=1).contains(&source_dz) {
+                return 0;
+            }
+            let slot = ((source_dz + 1) * 3 + (source_dx + 1)) as usize;
+            if !statuses[slot].is_some_and(retained_light_is_initialized) {
+                return 0;
+            }
+            let section = usize::try_from((y - section_min_y).div_euclid(16) + 1)
+                .expect("Nether light section index");
+            stored[slot]
+                .and_then(|light| {
+                    light
+                        .block(section)
+                        .get(NibbleArray::index(x, y.rem_euclid(16) as usize, z))
+                })
+                .unwrap_or(0)
+        },
+        |_local_dx, _local_dz| true,
+    );
+    light.set_storage(initial_nether_light_storage_for_column(
+        target,
+        target,
+        &storage_neighbours,
+    ));
+    light
 }
 
 fn light_data_has_nonzero(data: &LightData) -> bool {
