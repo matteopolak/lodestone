@@ -67,7 +67,7 @@ use lodestone_model::command_tree::{
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, Difficulty, EntityAttributeSnapshot, GameMode,
     ItemComponents, ItemStack, RecipeBookType, ResourceKey, ResourcePackResponseKind, Rotation,
-    SoundCategory, Text, TextContent, Vec3, Vec3f, WrittenBookContent, PredictionSequence,
+    SoundCategory, Text, TextContent, Vec3, Vec3f, WrittenBookContent,
 };
 use lodestone_server::{
     Abilities, ChunkColumn as ServerChunkColumn, ChunkEncoder, EntitySnapshot, HOTBAR_SIZE,
@@ -177,6 +177,7 @@ const LOCAL_PLAYER_ENTITY_ID: i32 = 1;
 /// friends above are already in, and for the same reason: nothing on the
 /// server side has ever needed to *write* a metadata list before this.
 const METADATA_IDX_AIR_SUPPLY: u8 = 1;
+const METADATA_IDX_SHARED_FLAGS: u8 = 0;
 const METADATA_SER_INT: i32 = 1;
 /// Sentinel terminating a metadata list (mirrors `metadata.rs`'s private
 /// `EOF_MARKER`).
@@ -544,11 +545,10 @@ fn sound_event_registry_id(name: &str) -> Option<SoundEventId> {
 /// The `minecraft:particle_type` registry id for `name`, or `None`
 /// for an unknown one.
 ///
-/// Named "simple" as a warning rather than a filter: this crate has no census of
-/// *which* particle types carry option bytes, so the id it returns is only safe
-/// to send for an argument-less `SimpleParticleType`. Every producer in
-/// `lodestone_server::effects` is one; a future option-carrying particle needs
-/// the options written too, not just this id.
+/// The generated particle census distinguishes argument-less particle types
+/// from entries whose codec has trailing options.  Returning `None` for the
+/// latter prevents an otherwise well-formed packet header from truncating the
+/// next packet at the client boundary.
 fn simple_particle_registry_id(
     name: &str,
 ) -> Option<lodestone_data::particle_types::ParticleTypeId> {
@@ -567,6 +567,7 @@ fn simple_particle_registry_id(
         })
         .get(name)
         .copied()
+        .filter(|id| lodestone_data::particle_types::is_simple_particle_type(*id))
 }
 
 /// Resolves a biome id string ([`ServerChunkColumn::biome_state`]'s
@@ -1361,13 +1362,6 @@ fn encode_block_update_body(x: i32, y: i32, z: i32, state_id: u32) -> Vec<u8> {
     let mut w = Writer::default();
     w.i64(pack_block_pos(x, y, z));
     w.var_i32(state_id as i32);
-    w.into_vec()
-}
-
-/// Encodes the one-field prediction acknowledgement body.
-fn encode_block_changed_ack_body(sequence: PredictionSequence) -> Vec<u8> {
-    let mut w = Writer::default();
-    w.var_i32(sequence.as_wire());
     w.into_vec()
 }
 
@@ -2703,7 +2697,7 @@ fn encode_column_body(
                 &synthesized
             }
         };
-        section_blob.i16(section.non_air_count() as i16);
+        section_blob.i16(packet_non_empty_block_count(section) as i16);
         section_blob.i16(fluid_count(section) as i16);
         section.block_states().encode(&mut section_blob);
         section.biomes().encode(&mut section_blob);
@@ -2806,6 +2800,25 @@ fn fluid_count(section: &ChunkSection) -> u16 {
                 .is_some_and(lodestone_data::snow_support::has_fluid_state)
         })
         .count() as u16
+}
+
+/// Counts the states the protocol considers non-empty for its section header.
+/// The world section deliberately has one version-neutral default-air count;
+/// this wire field additionally excludes cave air and void air, whose payload
+/// states must still be retained in an otherwise air-only section.
+fn packet_non_empty_block_count(section: &ChunkSection) -> u16 {
+    (0..section.block_states().entry_count())
+        .filter(|&index| is_non_air_state_id(section.block_states().get(index)))
+        .count() as u16
+}
+
+fn is_non_air_state_id(id: u32) -> bool {
+    lodestone_data::block_states::StateId::new(id).is_some_and(|state| {
+        !matches!(
+            state.block(),
+            Block::Air | Block::CaveAir | Block::VoidAir
+        )
+    })
 }
 
 /// Writes the chunk packet's block-entity array: a VarInt count
@@ -2939,15 +2952,55 @@ fn compute_served_light(column: &WorldChunkColumn, dimension: Dimension) -> Colu
 /// The initial chunk light packet is deliberately framed separately from a
 /// later light update. The Overworld's compact form retains one full-sky
 /// section above terrain. A freshly generated End fallback has no settled
-/// storage snapshot yet, so it keeps the complete computed sky result and
-/// applies the same sparse section-allocation rule as the light engine. The
-/// production server normally supplies the exact snapshot captured at its
-/// light fence, which remains authoritative. The Nether has no sky, so its
-/// value is immaterial there.
+/// storage snapshot yet, so it retains one computed full-sky section above the
+/// highest terrain in the loaded footprint; block-light sparsity is normalized
+/// independently. The production server normally supplies the exact snapshot
+/// captured at its light fence, which remains authoritative. The Nether has no
+/// sky, so its value is immaterial there.
 const fn initial_full_sky_sections(dimension: Dimension) -> usize {
     match dimension {
+        // End's generated fallback is trimmed against the highest non-air
+        // section in the loaded footprint below. Request the complete computed
+        // sky first so a high neighbour can extend the admitted tail; the
+        // fixed-budget helper cannot see neighbours and would trim too early.
         Dimension::End => usize::MAX,
         Dimension::Overworld | Dimension::Nether => 1,
+    }
+}
+
+/// End terrain is generated for 128 rows and then padded to the dimension's
+/// 256-row serving window. A generated initial packet therefore retains one
+/// full sky section immediately above the highest non-air terrain in the
+/// loaded 3x3 footprint and omits the padded tail. This is derived from block
+/// occupancy, not block-light storage, so an explicit zero block section cannot
+/// erase independently computed sky. Retained snapshots bypass this fallback
+/// and remain authoritative.
+fn trim_end_generated_sky_tail(
+    light: &mut ColumnLight,
+    center: &WorldChunkColumn,
+    neighbours: &[WorldChunkColumn],
+) {
+    let highest_non_air_light_section = std::iter::once(center)
+        .chain(neighbours.iter())
+        // The lower light apron is section zero, so a non-air block section is
+        // represented by the following light section.
+        .flat_map(|column| {
+            (0..column.section_count()).filter_map(|block_section| {
+                column
+                    .section(block_section)
+                    .is_some_and(|section| !section.is_air_only())
+                    .then_some(block_section + 1)
+            })
+        })
+        .max();
+
+    // An all-air generated End column has no admitted full section beyond its
+    // lower apron. Otherwise retain exactly the first full section above the
+    // highest terrain seen by the light computation.
+    let first_elided = highest_non_air_light_section
+        .map_or(1, |highest| highest.saturating_add(2));
+    for section in first_elided..light.light_section_count() {
+        *light.sky_mut(section) = LightData::Missing;
     }
 }
 
@@ -3026,16 +3079,18 @@ fn normalize_initial_chunk_light(
         }
         // A retained End snapshot bypasses this fallback and is consumed
         // verbatim by the encoder. For a generated column, mirror the sparse
-        // storage mask so an unallocated lower apron is not mistaken for a
-        // computed light value. This is only a representation rule: retained
-        // snapshots remain authoritative and are never normalized here.
+        // **block** storage mask so an unallocated lower apron is not mistaken
+        // for a computed block-light value. Sky storage is independent: the
+        // light engine can retain a full-sky section even when no block-light
+        // section was allocated there, and the initial End packet must carry
+        // that computed daylight state. Retained snapshots remain authoritative
+        // and are never normalized here.
         Dimension::End => {
             let storage = block_light_storage
                 .expect("End initial light normalization needs storage allocation");
             debug_assert_eq!(storage.len(), light.light_section_count());
             for (section, &is_stored) in storage.iter().enumerate() {
                 if !is_stored {
-                    *light.sky_mut(section) = LightData::Missing;
                     *light.block_mut(section) = LightData::Missing;
                 }
             }
@@ -3051,10 +3106,43 @@ fn compute_served_initial_light(column: &WorldChunkColumn, dimension: Dimension)
         },
         initial_full_sky_sections(dimension),
     );
+    if dimension == Dimension::End {
+        trim_end_generated_sky_tail(&mut light, column, &[]);
+    }
     let block_light_storage = (dimension == Dimension::Nether || dimension == Dimension::End)
         .then(|| initial_block_light_storage_sections(column, &[]));
     normalize_initial_chunk_light(&mut light, dimension, block_light_storage.as_deref());
     light
+}
+
+/// The initial End packet has a deliberately asymmetric admission boundary:
+/// sky light may already be settled across a chunk seam, while block-light
+/// sources in diagonal neighbouring columns wait for the later light update
+/// pass. The centre and four cardinal neighbours are admitted into the initial
+/// block layer. The packet still uses the shared storage mask, so callers
+/// compute the full footprint first and then replace only its block layer with
+/// the centre-plus-cardinal result. This preserves the initial packet's
+/// lifecycle boundary while leaving regular block-light propagation intact for
+/// updates.
+fn retain_end_initial_block_light_from_cardinal_neighbours(
+    light: &mut ColumnLight,
+    center: &WorldChunkColumn,
+    neighbours: &[(i32, i32, WorldChunkColumn)],
+) {
+    let mut cardinal_neighbourhood = Neighbourhood::new(center);
+    for (dx, dz, neighbour) in neighbours {
+        if dx.abs() + dz.abs() == 1 {
+            cardinal_neighbourhood = cardinal_neighbourhood.with(*dx, *dz, neighbour);
+        }
+    }
+    let cardinal_light = compute_column_light_with_neighbours_for_initial_chunk(
+        &cardinal_neighbourhood,
+        &V770LightProps { has_skylight: true },
+        initial_full_sky_sections(Dimension::End),
+    );
+    for section in 0..light.light_section_count() {
+        *light.block_mut(section) = cardinal_light.block(section).clone();
+    }
 }
 
 /// Initial chunk packets omit block-light sections whose computed values are
@@ -3126,6 +3214,39 @@ fn compute_served_initial_light_with_neighbours(
         },
         initial_full_sky_sections(dimension),
     );
+    if dimension == Dimension::Nether {
+        // The initial no-skylight packet admits centre and cardinal block-light
+        // sources. Diagonal sources wait for the later light-update pass. Keep
+        // the all-neighbour computation above because its storage footprint is
+        // still needed by the packet representation below.
+        let mut cardinal_neighbourhood = Neighbourhood::new(center);
+        for ((dx, dz, _), neighbour) in neighbours.iter().zip(&neighbour_columns) {
+            if dx.abs() + dz.abs() == 1 {
+                cardinal_neighbourhood = cardinal_neighbourhood.with(*dx, *dz, neighbour);
+            }
+        }
+        let cardinal_light = compute_column_light_with_neighbours_for_initial_chunk(
+            &cardinal_neighbourhood,
+            &V770LightProps { has_skylight: false },
+            initial_full_sky_sections(dimension),
+        );
+        for section in 0..light.light_section_count() {
+            *light.block_mut(section) = cardinal_light.block(section).clone();
+        }
+    }
+    if dimension == Dimension::End {
+        let initial_neighbours = neighbours
+            .iter()
+            .zip(&neighbour_columns)
+            .map(|((dx, dz, _), neighbour)| (*dx, *dz, neighbour.clone()))
+            .collect::<Vec<_>>();
+        retain_end_initial_block_light_from_cardinal_neighbours(
+            &mut light,
+            center,
+            &initial_neighbours,
+        );
+        trim_end_generated_sky_tail(&mut light, center, &neighbour_columns);
+    }
     let block_light_storage = (dimension == Dimension::Nether || dimension == Dimension::End)
         .then(|| initial_block_light_storage_sections(center, &neighbour_columns));
     normalize_initial_chunk_light(&mut light, dimension, block_light_storage.as_deref());
@@ -3768,7 +3889,7 @@ impl ServerProtocol for V770ServerProtocol {
                             y: use_item.cursor_y,
                             z: use_item.cursor_z,
                         },
-                        sequence: PredictionSequence::from_wire(use_item.sequence),
+                        sequence: use_item.sequence,
                         // Same malformed-input convention as `USE_ITEM`'s hand just
                         // above: anything outside `0..=1` degrades to main hand
                         // rather than dropping the packet.
@@ -5501,13 +5622,6 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
-    fn encode_block_changed_ack(&self, sequence: PredictionSequence) -> ServerDirective {
-        ServerDirective::Send {
-            packet_id: play::clientbound::BLOCK_CHANGED_ACK,
-            payload: encode_block_changed_ack_body(sequence),
-        }
-    }
-
     /// `ClientboundBlockEntityDataPacket`: a packed `BlockPos` i64, the
     /// `BLOCK_ENTITY_TYPE` registry id as a VarInt, then the nameless network-NBT
     /// update tag — the identical shape this crate's own `BLOCK_ENTITY_DATA`
@@ -5620,6 +5734,11 @@ impl ServerProtocol for V770ServerProtocol {
             // `_ =>` arm — a new field must be encoded or fail to compile, which
             // is the only thing that stops the next one becoming an island.
             match field {
+                MetadataField::SharedFlags(flags) => {
+                    w.u8(METADATA_IDX_SHARED_FLAGS);
+                    w.var_i32(METADATA_SER_BYTE);
+                    w.i8(*flags as i8);
+                }
                 MetadataField::CreeperSwellDir(v) => {
                     w.u8(METADATA_IDX_CREEPER_SWELL_DIR);
                     w.var_i32(METADATA_SER_INT);
@@ -6257,7 +6376,12 @@ impl ServerProtocol for V770ServerProtocol {
         send(
             play::clientbound::SET_HEALTH,
             &SetHealth {
-                health: health.clamp(0.0, 20.0),
+                // The local health value is bounded by the server-side
+                // `minecraft:max_health` attribute (whose registry cap is
+                // 1024), not permanently by the normal 20-point player base.
+                // Health Boost therefore reaches the HUD through the ordinary
+                // health frame after its matching attribute update.
+                health: health.clamp(0.0, 1024.0),
                 // Clamped here rather than trusted: the wire field is the HUD's
                 // haunch count, and a value outside `0..=20` draws an overflowing
                 // bar. `food` used to be a hardcoded `20` and `saturation` a
@@ -7106,7 +7230,7 @@ mod block_edit_tests {
                     y: 1.0,
                     z: 0.5,
                 },
-                sequence: PredictionSequence::from_wire(7),
+                sequence: 7,
                 hand: 0,
             }
         );
@@ -7135,25 +7259,6 @@ mod block_edit_tests {
             panic!("expected UseItemOn, got {decoded:?}");
         };
         assert_eq!(hand, 1);
-    }
-
-    #[test]
-    fn encode_prediction_ack_preserves_wrap_and_invalid_payload_is_dropped() {
-        let proto = V770ServerProtocol;
-        let ServerDirective::Send { packet_id, payload } =
-            proto.encode_block_changed_ack(PredictionSequence::from_wire(i32::MIN))
-        else {
-            panic!("prediction acknowledgement must be encoded");
-        };
-        assert_eq!(packet_id, play::clientbound::BLOCK_CHANGED_ACK);
-        assert_eq!(payload, vec![0x80, 0x80, 0x80, 0x80, 0x08]);
-
-        // A truncated VarInt is invalid packet input, not sequence zero. The
-        // decoder must reject it before it reaches the server consumer.
-        assert_eq!(
-            proto.decode(State::Play, play::serverbound::USE_ITEM_ON, &[0x00]),
-            ServerBound::Ignored
-        );
     }
 
     /// Same malformed-input convention as `USE_ITEM`'s own hand field: `hand`
@@ -7504,6 +7609,81 @@ mod block_edit_tests {
         }
     }
 
+    #[test]
+    fn encode_chunk_excludes_all_three_air_variants_from_header_count() {
+        use crate::packets::chunk::LevelChunkWithLight;
+
+        let shape = ChunkShape::overworld_1_21();
+        let mut source = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
+        let entries = [
+            (0, "minecraft:air"),
+            (1, "minecraft:cave_air"),
+            (2, "minecraft:void_air"),
+            (3, "minecraft:stone"),
+            (4, "minecraft:water[level=7]"),
+        ];
+        for (x, state) in entries {
+            source.set_block(x as i32, shape.min_y, 0, state);
+        }
+
+        let ServerDirective::Send { payload, .. } =
+            ServerProtocol::encode_chunk(&V770ServerProtocol, 0, 0, &source)
+        else {
+            panic!("expected Send");
+        };
+        let mut header = Reader::new(&payload);
+        header.i32().expect("chunk x");
+        header.i32().expect("chunk z");
+        Heightmaps::decode(shape.world_height, &mut header).expect("heightmaps");
+        let blob_len = header.var_i32().expect("section blob length") as usize;
+        let mut blob = header.take_reader(blob_len).expect("section blob");
+        assert_eq!(blob.i16().expect("non-empty block count"), 2);
+        assert_eq!(blob.i16().expect("fluid count"), 1);
+
+        let mut decoded_reader = Reader::new(&payload);
+        let decoded = LevelChunkWithLight::decode(&mut decoded_reader, &shape).expect("decode chunk");
+        decoded_reader.ensure_empty().expect("no trailing bytes");
+        for (x, state) in entries {
+            assert_eq!(
+                decoded.column.get_block(x, shape.min_y, 0),
+                resolve_state_id(state),
+                "decoded state at x={x}"
+            );
+        }
+    }
+
+    #[test]
+    fn encode_chunk_retains_cave_air_payload_when_header_count_is_zero() {
+        use crate::packets::chunk::LevelChunkWithLight;
+
+        let shape = ChunkShape::overworld_1_21();
+        let mut source = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
+        source.set_block(0, shape.min_y, 0, "minecraft:cave_air");
+
+        let ServerDirective::Send { payload, .. } =
+            ServerProtocol::encode_chunk(&V770ServerProtocol, 0, 0, &source)
+        else {
+            panic!("expected Send");
+        };
+        let mut header = Reader::new(&payload);
+        header.i32().expect("chunk x");
+        header.i32().expect("chunk z");
+        Heightmaps::decode(shape.world_height, &mut header).expect("heightmaps");
+        let blob_len = header.var_i32().expect("section blob length") as usize;
+        let mut blob = header.take_reader(blob_len).expect("section blob");
+        assert_eq!(blob.i16().expect("non-empty block count"), 0);
+        assert_eq!(blob.i16().expect("fluid count"), 0);
+
+        let mut decoded_reader = Reader::new(&payload);
+        let decoded = LevelChunkWithLight::decode(&mut decoded_reader, &shape).expect("decode chunk");
+        decoded_reader.ensure_empty().expect("no trailing bytes");
+        assert!(decoded.column.section(0).is_some(), "cave-air payload must be retained");
+        assert_eq!(
+            decoded.column.get_block(0, shape.min_y, 0),
+            resolve_state_id("minecraft:cave_air")
+        );
+    }
+
     /// The three sent heightmaps do not share one predicate: a top leaf and
     /// water distinguish the visible surface, motion-blocking, and no-leaves
     /// maps.
@@ -7788,11 +7968,10 @@ mod block_edit_tests {
     }
 
     /// A generated End column has no persisted settlement snapshot in this
-    /// direct source control. Its initial fallback must nevertheless use the
-    /// sparse storage shape: the lower apron stays absent, the two full sky
-    /// sections above the island remain present, and the next section is
-    /// omitted. This is the negative control for accidentally applying the
-    /// Overworld one-section trim to End columns.
+    /// direct source control. Its initial fallback must nevertheless keep the
+    /// computed lower sky sections, retain the terrain section plus one full
+    /// section above it, and omit only the padded tail. Block-light zeros
+    /// follow the independent sparse storage shape.
     #[test]
     fn end_generated_initial_fallback_keeps_storage_shape_without_snapshot() {
         use crate::packets::chunk::LevelChunkWithLight;
@@ -7833,14 +8012,72 @@ mod block_edit_tests {
         let packet = LevelChunkWithLight::decode(&mut reader, &shape)
             .expect("decode generated End initial chunk");
         reader.ensure_empty().expect("no End packet trailing bytes");
-
-        assert_eq!(packet.light.sky(0), &LightData::Missing);
-        assert_eq!(packet.light.sky(5), &LightData::Uniform(15));
-        assert_eq!(packet.light.sky(6), &LightData::Uniform(15));
-        assert_eq!(packet.light.sky(7), &LightData::Missing);
+        for section in 0..5 {
+            assert!(
+                !matches!(packet.light.sky(section), LightData::Missing),
+                "computed End sky section {section} must not be coupled to block storage"
+            );
+        }
+        for section in 5..=6 {
+            assert_eq!(
+                packet.light.sky(section),
+                &LightData::Uniform(15),
+                "the full End sky section immediately above the terrain remains present"
+            );
+        }
+        for section in 7..18 {
+            assert_eq!(
+                packet.light.sky(section),
+                &LightData::Missing,
+                "the redundant full-sky tail is omitted at section {section}"
+            );
+        }
         assert_eq!(packet.light.block(0), &LightData::Missing);
-        assert_eq!(packet.light.block(6), &LightData::Uniform(0));
-        assert_eq!(packet.light.block(7), &LightData::Missing);
+        for section in 1..=6 {
+            assert_eq!(
+                packet.light.block(section),
+                &LightData::Uniform(0),
+                "allocated End block section {section} keeps its explicit zero"
+            );
+        }
+        for section in 7..18 {
+            assert_eq!(
+                packet.light.block(section),
+                &LightData::Missing,
+                "unallocated End block section {section} remains absent"
+            );
+        }
+    }
+
+    /// The generated End sky tail follows the highest terrain in the supplied
+    /// footprint rather than a fixed section budget. A low centre column must
+    /// elide below the old fixed cap, while a high neighbouring column must
+    /// retain a section that the same cap would have dropped.
+    #[test]
+    fn end_generated_sky_tail_uses_highest_terrain_not_fixed_cap() {
+        let shape = ChunkShape::nether_or_end_1_21();
+        let mut low_server = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
+        low_server.set_block(0, 15, 0, "minecraft:end_stone");
+        let low = build_world_column(&shape, &low_server);
+
+        let mut low_light = ColumnLight::new(shape.section_count);
+        for section in 0..low_light.light_section_count() {
+            *low_light.sky_mut(section) = LightData::Uniform(15);
+        }
+        trim_end_generated_sky_tail(&mut low_light, &low, &[]);
+        assert_eq!(low_light.sky(2), &LightData::Uniform(15));
+        assert_eq!(low_light.sky(3), &LightData::Missing);
+
+        let mut high_server = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
+        high_server.set_block(0, 127, 0, "minecraft:end_stone");
+        let high = build_world_column(&shape, &high_server);
+        let mut high_light = ColumnLight::new(shape.section_count);
+        for section in 0..high_light.light_section_count() {
+            *high_light.sky_mut(section) = LightData::Uniform(15);
+        }
+        trim_end_generated_sky_tail(&mut high_light, &low, &[high.clone()]);
+        assert_eq!(high_light.sky(9), &LightData::Uniform(15));
+        assert_eq!(high_light.sky(10), &LightData::Missing);
     }
 
     /// End's initial path must actually consume the supplied east column. The
@@ -7902,6 +8139,213 @@ mod block_edit_tests {
         assert_eq!(with_east.section_light(0).sky_at(15, 15, 8), 14);
         assert_eq!(with_all.section_light(0).sky_at(15, 15, 8), 14);
         assert_eq!(without_east.section_light(0).sky_at(15, 15, 8), 7);
+    }
+
+    /// Detects the lifecycle boundary that a generated fallback must not hide:
+    /// a saved snapshot captured before an east seam was admitted remains
+    /// authoritative even when the encoder is later handed that neighbour.
+    /// The generated fallback still sees the seam, and a subsequent update
+    /// still propagates through it, so the control distinguishes snapshot
+    /// admission from a global suppression of cross-column sky light.
+    #[test]
+    fn end_initial_light_detector_separates_saved_snapshot_from_seam_fallback() {
+        use crate::packets::chunk::LevelChunkWithLight;
+
+        let shape = ChunkShape::nether_or_end_1_21();
+        let mut center = ServerChunkColumn::new(0, 256);
+        for z in 0..16 {
+            for x in 0..16 {
+                center.set_block(x, 0, z, "minecraft:end_stone");
+            }
+        }
+        let east = ServerChunkColumn::new(0, 256);
+        let proto = V770ServerProtocol;
+
+        let isolated = proto
+            .compute_initial_column_light_with_neighbours_in_dimension(
+                &center,
+                &[],
+                Dimension::End,
+            )
+            .expect("isolated initial End snapshot");
+        let generated_with_east = proto
+            .compute_initial_column_light_with_neighbours_in_dimension(
+                &center,
+                &[(1, 0, east.clone())],
+                Dimension::End,
+            )
+            .expect("generated initial End fallback with east seam");
+        let seam_cell = |light: &ColumnLight| light.section_light(0).sky_at(15, 15, 8);
+        assert_eq!(seam_cell(&isolated), 0, "negative control: no admitted seam source");
+        assert_eq!(seam_cell(&generated_with_east), 14, "east seam source reaches the apron");
+
+        let mut persisted_column = center.clone();
+        persisted_column.set_retained_light(isolated.clone());
+        let ServerDirective::Send { payload, .. } = proto
+            .try_encode_chunk_with_neighbours_in_dimension(
+                0,
+                0,
+                &persisted_column,
+                &[(1, 0, east)],
+                Dimension::End,
+            )
+            .expect("initial End packet from retained snapshot")
+        else {
+            panic!("initial End packet must send");
+        };
+        let mut reader = Reader::new(&payload);
+        let retained_packet = LevelChunkWithLight::decode(&mut reader, &shape)
+            .expect("decode retained End packet");
+        reader.ensure_empty().expect("no retained packet trailing bytes");
+        assert_eq!(
+            seam_cell(&retained_packet.light),
+            0,
+            "the persisted snapshot must not be recomputed from a later neighbour"
+        );
+        assert_ne!(
+            seam_cell(&retained_packet.light),
+            seam_cell(&generated_with_east),
+            "detector must observe the saved-versus-fallback lifecycle difference"
+        );
+
+        let later_update = proto
+            .compute_column_light_with_neighbours_in_dimension(
+                &center,
+                &[(1, 0, ServerChunkColumn::new(0, 256))],
+                Dimension::End,
+            )
+            .expect("later seam-aware End update");
+        assert_eq!(
+            seam_cell(&later_update),
+            14,
+            "later updates must still propagate the admitted east seam source"
+        );
+    }
+
+    /// The old End normalizer coupled the sky mask to block-light allocation.
+    /// This control applies that old rule to three deliberately unallocated
+    /// sections and observes exactly three full 4096-cell sky layers vanish;
+    /// the production rule below keeps those computed sky layers intact.
+    #[test]
+    fn end_old_coupled_normalization_loses_exactly_the_unallocated_sky_layers() {
+        let mut expected = ColumnLight::new(16);
+        for section in 0..expected.light_section_count() {
+            *expected.sky_mut(section) = LightData::Uniform(15);
+            *expected.block_mut(section) = LightData::Uniform(0);
+        }
+        let mut storage = vec![true; expected.light_section_count()];
+        for section in 6..=8 {
+            storage[section] = false;
+        }
+
+        // Negative control: this is the coupling that caused the End sky
+        // values to disappear whenever a block-light section was sparse.
+        let mut coupled = expected.clone();
+        for (section, &is_stored) in storage.iter().enumerate() {
+            if !is_stored {
+                *coupled.sky_mut(section) = LightData::Missing;
+                *coupled.block_mut(section) = LightData::Missing;
+            }
+        }
+        let cleared_sky_sections = (0..coupled.light_section_count())
+            .filter(|&section| matches!(coupled.sky(section), LightData::Missing))
+            .count();
+        assert_eq!(cleared_sky_sections, 3);
+        assert_eq!(cleared_sky_sections * 4096, 12_288);
+
+        normalize_initial_chunk_light(&mut expected, Dimension::End, Some(&storage));
+        for section in 0..expected.light_section_count() {
+            assert_eq!(
+                expected.sky(section),
+                &LightData::Uniform(15),
+                "sky section {section} is independent of block storage"
+            );
+            assert_eq!(
+                expected.block(section),
+                if storage[section] {
+                    &LightData::Uniform(0)
+                } else {
+                    &LightData::Missing
+                },
+                "block section {section} still follows the sparse mask"
+            );
+        }
+    }
+
+    /// Initial End block light has a lifecycle boundary: centre and cardinal
+    /// emitters survive the initial packet, while an emitter that exists only
+    /// in a diagonal neighbour waits for the later seam-aware light update.
+    /// This keeps the initial packet stable when a diagonal feature settles
+    /// after the centre is admitted, without weakening real propagation for
+    /// updates.
+    #[test]
+    fn end_initial_block_light_admits_center_and_cardinal_sources_before_diagonal_sources() {
+        let shape = ChunkShape::nether_or_end_1_21();
+        let proto = V770ServerProtocol;
+
+        let mut center_source = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
+        center_source.set_block(8, 64, 8, "minecraft:glowstone");
+        let center_initial = proto
+            .compute_initial_column_light_with_neighbours_in_dimension(
+                &center_source,
+                &[],
+                Dimension::End,
+            )
+            .expect("initial End light with a centre source");
+        assert_eq!(
+            center_initial.section_light(5).block_at(8, 0, 8),
+            15,
+            "a centre-column emitter survives initial End light admission"
+        );
+
+        let center = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
+        let mut east = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
+        east.set_block(0, 64, 8, "minecraft:glowstone");
+        let cardinal_initial = proto
+            .compute_initial_column_light_with_neighbours_in_dimension(
+                &center,
+                &[(1, 0, east.clone())],
+                Dimension::End,
+            )
+            .expect("initial End light with a cardinal neighbour source");
+        assert_eq!(
+            cardinal_initial.section_light(5).block_at(15, 0, 8),
+            14,
+            "a cardinal-neighbour emitter survives initial End block-light admission"
+        );
+
+        let mut north_east = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
+        north_east.set_block(0, 64, 0, "minecraft:glowstone");
+        let diagonal_initial = proto
+            .compute_initial_column_light_with_neighbours_in_dimension(
+                &center,
+                &[(1, 1, north_east.clone())],
+                Dimension::End,
+            )
+            .expect("initial End light with a diagonal neighbour source");
+        assert_eq!(
+            diagonal_initial.section_light(5).block_at(15, 0, 15),
+            0,
+            "a diagonal-neighbour emitter is not admitted into initial End block light"
+        );
+        assert_eq!(
+            diagonal_initial.block(5),
+            &LightData::Uniform(0),
+            "the diagonal neighbour still contributes the allocated zero section mask"
+        );
+
+        let update = proto
+            .compute_column_light_with_neighbours_in_dimension(
+                &center,
+                &[(1, 0, east)],
+                Dimension::End,
+            )
+            .expect("later End light update with a cardinal neighbour source");
+        assert_eq!(
+            update.section_light(5).block_at(15, 0, 8),
+            14,
+            "later seam-aware light updates admit the cardinal-neighbour source"
+        );
     }
 
     /// Initial End packets consume the exact light snapshot retained at the
@@ -8232,7 +8676,9 @@ mod block_edit_tests {
         // proves `encode_world_effect` routes the new variant instead of dropping it.
         let effect = lodestone_server::effects::WorldEffect::BlockEntityData {
             pos,
-            block_entity_type: lodestone_server::piston::PISTON_BLOCK_ENTITY.to_string(),
+            block_entity_type: lodestone_server::BlockEntityKind::from_name(
+                lodestone_server::piston::PISTON_BLOCK_ENTITY,
+            ),
             nbt: entity.update_tag(),
         };
         let ServerDirective::Send {
@@ -8351,10 +8797,9 @@ mod world_admin_tests {
             decoded,
             ServerBound::DifficultyChanged {
                 difficulty: Difficulty::Hard
-            }
-        );
-    }
-
+                }
+            );
+        }
     /// Control for [`decode_change_difficulty`]: an ordinal outside `0..=3`
     /// must drop the packet (`ServerBound::Ignored`), not alias to some other
     /// difficulty — see [`difficulty_from_ordinal`]'s own doc comment for why
@@ -9565,8 +10010,9 @@ mod index_eighteen_tests {
     use lodestone_server::{MetadataField, ServerDirective, ServerProtocol};
 
     use super::{
-        METADATA_IDX_CREEPER_IGNITED, METADATA_IDX_HORSE_FLAGS, METADATA_IDX_TAMABLE_FLAGS,
-        METADATA_SER_BOOLEAN, METADATA_SER_BYTE, V770ServerProtocol,
+        METADATA_EOF, METADATA_IDX_CREEPER_IGNITED, METADATA_IDX_HORSE_FLAGS,
+        METADATA_IDX_SHARED_FLAGS, METADATA_IDX_TAMABLE_FLAGS, METADATA_SER_BOOLEAN,
+        METADATA_SER_BYTE, V770ServerProtocol,
     };
 
     /// `EntityDataIndexOracle`'s output, committed so this gate does not need a JVM.
@@ -9753,6 +10199,23 @@ mod index_eighteen_tests {
         assert_eq!(r.u8().expect("terminator"), 0xFF);
         assert!(r.ensure_empty().is_ok(), "no trailing bytes");
         byte
+    }
+
+    #[test]
+    fn shared_flags_use_the_base_entity_byte_layout() {
+        let proto = V770ServerProtocol;
+        let ServerDirective::Send { payload, .. } =
+            proto.encode_set_entity_data(11, &[MetadataField::SharedFlags(0x20)])
+        else {
+            panic!("shared flags must encode");
+        };
+        let mut reader = Reader::new(&payload);
+        assert_eq!(reader.var_i32().expect("entity id"), 11);
+        assert_eq!(reader.u8().expect("metadata index"), METADATA_IDX_SHARED_FLAGS);
+        assert_eq!(reader.var_i32().expect("serializer"), METADATA_SER_BYTE);
+        assert_eq!(reader.i8().expect("shared flags") as u8, 0x20);
+        assert_eq!(reader.u8().expect("terminator"), METADATA_EOF);
+        assert!(reader.ensure_empty().is_ok());
     }
 }
 
@@ -10667,5 +11130,87 @@ mod sniffer_state_tests {
         assert_eq!(r.var_i32().expect("state ordinal"), 5);
         assert_eq!(r.u8().expect("terminator"), 0xFF);
         assert!(r.ensure_empty().is_ok(), "no trailing bytes");
+    }
+}
+
+#[cfg(test)]
+mod health_boost_wire_tests {
+    use lodestone_core::Reader;
+    use lodestone_server::{ServerDirective, ServerProtocol};
+
+    use super::{V770ServerProtocol, play};
+
+    #[test]
+    fn set_health_preserves_health_boost_values_but_bounds_hostile_values() {
+        let packet = V770ServerProtocol.encode_set_health(24.0, 20, 5.0);
+        let ServerDirective::Send { packet_id, payload } = packet else {
+            panic!("set-health encoder must send a packet");
+        };
+        assert_eq!(packet_id, play::clientbound::SET_HEALTH);
+        let mut reader = Reader::new(&payload);
+        assert_eq!(reader.f32().expect("health"), 24.0);
+        assert_eq!(reader.var_i32().expect("food"), 20);
+        assert_eq!(reader.f32().expect("saturation"), 5.0);
+        reader.ensure_empty().expect("complete set-health payload");
+
+        let ServerDirective::Send { payload, .. } = V770ServerProtocol.encode_set_health(5000.0, 20, 5.0) else {
+            panic!("set-health encoder must send a packet");
+        };
+        let mut reader = Reader::new(&payload);
+        assert_eq!(reader.f32().expect("bounded health"), 1024.0);
+    }
+}
+
+#[cfg(test)]
+mod wind_charged_wire_tests {
+    use lodestone_core::Reader;
+    use lodestone_model::{Vec3, Vec3f};
+    use lodestone_server::{ServerDirective, ServerProtocol, effects::WorldEffect};
+
+    use super::{V770ServerProtocol, play};
+
+    #[test]
+    fn small_gust_particle_uses_the_real_level_particle_wire_shape() {
+        let effect = WorldEffect::Particles {
+            particle: "minecraft:gust_emitter_small".to_owned(),
+            pos: Vec3::new(4.0, 70.9, -3.0),
+            offset: Vec3f::new(0.0, 0.0, 0.0),
+            max_speed: 0.0,
+            count: 0,
+            long_distance: false,
+        };
+        let ServerDirective::Send { packet_id, payload } =
+            V770ServerProtocol.encode_world_effect(&effect)
+        else {
+            panic!("small gust must be sent as a particle packet");
+        };
+        assert_eq!(packet_id, play::clientbound::LEVEL_PARTICLES);
+
+        let mut reader = Reader::new(&payload);
+        assert!(!reader.bool().expect("override limiter"));
+        assert!(!reader.bool().expect("always show"));
+        assert_eq!(reader.f64().expect("x"), 4.0);
+        assert_eq!(reader.f64().expect("midpoint y"), 70.9);
+        assert_eq!(reader.f64().expect("z"), -3.0);
+        assert_eq!(reader.f32().expect("offset x"), 0.0);
+        assert_eq!(reader.f32().expect("offset y"), 0.0);
+        assert_eq!(reader.f32().expect("offset z"), 0.0);
+        assert_eq!(reader.f32().expect("speed"), 0.0);
+        assert_eq!(reader.i32().expect("count"), 0);
+        assert_eq!(reader.var_i32().expect("particle registry id"), 34);
+        reader.ensure_empty().expect("small particles have no option payload");
+    }
+
+    #[test]
+    fn parameterised_particle_cannot_be_sent_without_its_required_options() {
+        let effect = WorldEffect::Particles {
+            particle: "minecraft:dust".to_owned(),
+            pos: Vec3::new(0.0, 0.0, 0.0),
+            offset: Vec3f::new(0.0, 0.0, 0.0),
+            max_speed: 0.0,
+            count: 1,
+            long_distance: false,
+        };
+        assert_eq!(V770ServerProtocol.encode_world_effect(&effect), ServerDirective::None);
     }
 }
