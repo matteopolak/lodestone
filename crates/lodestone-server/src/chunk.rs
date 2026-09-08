@@ -2448,6 +2448,7 @@ pub(crate) async fn generate_columns_offloaded<S: ChunkSource + 'static + ?Sized
             generate_columns_parallel(&*source, &coords)
         })
             .await
+            .await
             .expect("worldgen Rayon worker panicked")
     }
 }
@@ -2524,6 +2525,7 @@ pub(crate) async fn generate_and_encode_columns_offloaded<S: ChunkSource + 'stat
         };
         Some(
             crate::worldgen_dispatch::spawn(encode)
+                .await
                 .await
                 .expect("worldgen Rayon worker panicked")
                 .into_iter()
