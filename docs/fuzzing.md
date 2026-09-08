@@ -271,6 +271,14 @@ What exists:
   self-check. The fixture retains the recorder command and real-server
   provenance next to its expected state.
 
+  `tests/differential_fixed_redstone_production.rs` applies the same seam to a
+  three-probe redstone trace: the externally measured signal arrives at the
+  immediate probe on the first elapsed tick, at the delayed probe on replay
+  tick 9, and at the far probe on replay tick 13. Those post-tick labels are
+  intentionally distinct from the pre-advance labels used by the standalone
+  model gate. `tick_corpus_26_2_redstone.json` carries the measured state at
+  every bounded tick, and its corruption control targets the delayed arrival.
+
   `tests/differential_fixed_water_production.rs` adds a delayed fluid case:
   `tick_corpus_26_2_water_spread.json` records a real 26.2 source spreading to
   four floored neighbours. The externally captured neighbours stay air for
