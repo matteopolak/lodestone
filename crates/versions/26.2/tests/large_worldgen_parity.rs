@@ -1193,11 +1193,12 @@ fn compare_end_raw_after_generated_save_reopen<R: Read, A: Read>(
             persisted_batch_size(),
         );
     }
-    let generated_delta = reopened
+    let reopened_save: lodestone_server::region_source::WorldSaveHandle = reopened.save_handle();
+    let generated_delta = reopened_save
         .stats()
         .generated
         .load(std::sync::atomic::Ordering::Relaxed);
-    let loaded_from_disk = reopened
+    let loaded_from_disk = reopened_save
         .stats()
         .loaded_from_disk
         .load(std::sync::atomic::Ordering::Relaxed);
@@ -1284,11 +1285,12 @@ fn generated_end_save_reopen_loads_centre_and_eight_dependencies() {
             let _ = reopened.column(cx, cz);
         }
     }
-    let generated_delta = reopened
+    let reopened_save: lodestone_server::region_source::WorldSaveHandle = reopened.save_handle();
+    let generated_delta = reopened_save
         .stats()
         .generated
         .load(std::sync::atomic::Ordering::Relaxed);
-    let loaded_from_disk = reopened
+    let loaded_from_disk = reopened_save
         .stats()
         .loaded_from_disk
         .load(std::sync::atomic::Ordering::Relaxed);
