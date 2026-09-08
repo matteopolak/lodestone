@@ -79,14 +79,6 @@ pub enum Projection {
 }
 
 impl Projection {
-    fn parse(value: &Value) -> Option<Self> {
-        match value.as_str() {
-            Some("rigid") => Some(Self::Rigid),
-            Some("terrain_matching") => Some(Self::TerrainMatching),
-            _ => None,
-        }
-    }
-
     /// True for `RIGID` — the flag `JigsawPlacement` branches on in five places.
     #[must_use]
     pub fn is_rigid(self) -> bool {
@@ -494,15 +486,13 @@ impl PoolStore {
                 }
                 return Err(format!("template pool '{id}' not bundled"));
             }
-            let fallback = document["fallback"]
-                .as_str()
-                .unwrap_or("minecraft:empty")
-                .to_string();
+            let typed: super::json::TemplatePoolDocument = serde_json::from_value(document)
+                .map_err(|error| format!("template pool '{id}': {error}"))?;
+            let fallback = typed.fallback;
             let mut expanded: Vec<Arc<PoolElement>> = Vec::new();
-            let entries = document["elements"].as_array().cloned().unwrap_or_default();
-            for entry in &entries {
-                let element = self.parse_element(resolver, templates, &entry["element"])?;
-                let weight = entry["weight"].as_i64().unwrap_or(1).max(0);
+            for entry in typed.elements {
+                let element = self.parse_element(resolver, templates, entry.element)?;
+                let weight = i64::from(entry.weight).max(0);
                 let element = Arc::new(element);
                 for _ in 0..weight {
                     expanded.push(Arc::clone(&element));
@@ -528,34 +518,32 @@ impl PoolStore {
         &mut self,
         resolver: &dyn Resolver,
         templates: &mut TemplateStore,
-        value: &Value,
+        value: super::json::PoolElementDocument,
     ) -> Result<PoolElement, String> {
-        let element_type = value["element_type"].as_str().unwrap_or_default();
-        match element_type {
-            "minecraft:empty_pool_element" => Ok(PoolElement::Empty),
-            "minecraft:feature_pool_element" => {
-                let projection = Projection::parse(&value["projection"])
-                    .ok_or_else(|| format!("element projection '{}'", value["projection"]))?;
-                let placed = value
-                    .get("feature")
-                    .filter(|feature| !feature.is_null())
-                    .map(|feature| {
-                        Arc::new(crate::feature::vegetation::resolve_placed_feature_ref(
-                            resolver, feature,
-                        ))
-                    });
+        match value {
+            super::json::PoolElementDocument::Empty => Ok(PoolElement::Empty),
+            super::json::PoolElementDocument::Feature { projection, feature } => {
+                let projection = projection_from_json(projection);
+                let feature_value = feature_value(feature);
+                let placed = Some(Arc::new(
+                    crate::feature::vegetation::resolve_placed_feature_ref(
+                        resolver,
+                        &feature_value,
+                    ),
+                ));
                 Ok(PoolElement::Feature {
-                    feature: value["feature"].as_str().unwrap_or("<inline>").to_string(),
+                    feature: feature_value
+                        .as_str()
+                        .map_or_else(|| "<inline>".to_string(), str::to_string),
                     placed,
                     projection,
                 })
             }
-            "minecraft:list_pool_element" => {
-                let projection = Projection::parse(&value["projection"])
-                    .ok_or_else(|| format!("element projection '{}'", value["projection"]))?;
-                let mut elements = Vec::new();
-                for sub in value["elements"].as_array().cloned().unwrap_or_default() {
-                    elements.push(self.parse_element(resolver, templates, &sub)?);
+            super::json::PoolElementDocument::List { projection, elements: documents } => {
+                let projection = projection_from_json(projection);
+                let mut elements = Vec::with_capacity(documents.len());
+                for sub in documents {
+                    elements.push(self.parse_element(resolver, templates, sub)?);
                 }
                 if elements.is_empty() {
                     return Err("list_pool_element with no elements".to_string());
@@ -574,14 +562,37 @@ impl PoolStore {
                     projection,
                 })
             }
-            "minecraft:single_pool_element" | "minecraft:legacy_single_pool_element" => {
-                let legacy = element_type == "minecraft:legacy_single_pool_element";
-                let projection = Projection::parse(&value["projection"])
-                    .ok_or_else(|| format!("element projection '{}'", value["projection"]))?;
-                let template = value["location"]
-                    .as_str()
-                    .ok_or("single pool element with no `location`")?
-                    .to_string();
+            super::json::PoolElementDocument::Single {
+                projection,
+                location,
+                processors,
+                override_liquid_settings,
+            } => {
+                self.parse_single_element(resolver, templates, false, projection, location, processors, override_liquid_settings)
+            }
+            super::json::PoolElementDocument::LegacySingle {
+                projection,
+                location,
+                processors,
+                override_liquid_settings,
+            } => {
+                self.parse_single_element(resolver, templates, true, projection, location, processors, override_liquid_settings)
+            }
+        }
+    }
+
+    fn parse_single_element(
+        &mut self,
+        resolver: &dyn Resolver,
+        templates: &mut TemplateStore,
+        legacy: bool,
+        projection: super::json::ProjectionDocument,
+        location: String,
+        processors: super::json::ProcessorDocument,
+        override_liquid_settings: Option<super::json::LiquidSettings>,
+    ) -> Result<PoolElement, String> {
+        let projection = projection_from_json(projection);
+        let template = location;
                 // Two failure modes with two different answers, and collapsing
                 // them loses one of the two things this can tell you:
                 //
@@ -608,11 +619,12 @@ impl PoolStore {
                         Arc::new(StructureTemplate::empty())
                     }
                 };
-                let processors = self.processors(resolver, &value["processors"])?;
-                let override_waterlogging = match value["override_liquid_settings"].as_str() {
-                    Some("apply_waterlogging") => Some(true),
-                    Some("ignore_waterlogging") => Some(false),
-                    _ => None,
+                let processor_value = processor_value(processors);
+                let processors = self.processors(resolver, &processor_value)?;
+                let override_waterlogging = match override_liquid_settings {
+                    Some(super::json::LiquidSettings::ApplyWaterlogging) => Some(true),
+                    Some(super::json::LiquidSettings::IgnoreWaterlogging) => Some(false),
+                    None => None,
                 };
                 Ok(PoolElement::Single {
                     template,
@@ -622,9 +634,6 @@ impl PoolStore {
                     projection,
                     override_waterlogging,
                 })
-            }
-            other => Err(format!("pool element_type '{other}'")),
-        }
     }
 
     /// An element's `processors` field: either a reference to one of the 40
@@ -779,6 +788,27 @@ impl PoolStore {
         let out = Arc::new(out);
         self.block_tags.insert(key, Arc::clone(&out));
         out
+    }
+}
+
+fn projection_from_json(value: super::json::ProjectionDocument) -> Projection {
+    match value {
+        super::json::ProjectionDocument::Rigid => Projection::Rigid,
+        super::json::ProjectionDocument::TerrainMatching => Projection::TerrainMatching,
+    }
+}
+
+fn processor_value(value: super::json::ProcessorDocument) -> Value {
+    match value {
+        super::json::ProcessorDocument::Reference(value) => Value::String(value),
+        super::json::ProcessorDocument::Inline(value) => value,
+    }
+}
+
+fn feature_value(value: super::json::FeatureDocument) -> Value {
+    match value {
+        super::json::FeatureDocument::Reference(value) => Value::String(value),
+        super::json::FeatureDocument::Inline(value) => value,
     }
 }
 

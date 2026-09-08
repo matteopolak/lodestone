@@ -53,6 +53,14 @@ and that same complete registry position before writing pieces. The 17×17 sourc
 the persistence and retention order; a stable tie-break keeps starts of one structure in that walk's
 order while putting different structure types in the order their decoration lifecycle consumes.
 
+Structure JSON crosses a strict serde boundary in `structure::json`: placement
+records, jigsaw configurations, pool aliases, and template-pool elements use
+closed discriminated enums and deny unknown fields. Wrong primitive types and
+unknown variants become path-prefixed load errors instead of silently taking a
+default. Processor lists and placed-feature bodies remain explicit string-or-
+inline unions because those registry payloads have their own polymorphic
+schemas; they are handed to their existing parsers unchanged.
+
 Mineshaft starts eagerly retain their complete tree and bounding boxes, because the vertical shift
 depends on the finished tree. Their block-writing walk is replayed for the decorating chunk instead:
 the liquid-shell refusal is clipped to that chunk before the piece writes. This matters at a chunk
