@@ -3435,6 +3435,7 @@ dependencies = [
  "criterion",
  "flate2",
  "js-sys",
+ "libc",
  "lodestone-anvil",
  "lodestone-auth",
  "lodestone-client",
