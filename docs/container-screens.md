@@ -44,8 +44,13 @@ The panel background is real vanilla art — `ContainerBackground` stitches the 
 `GuiScaling`-driven sprites, and are not part of `GuiAtlas`). With no background attached, a flat
 programmatic fill and per-slot wells draw instead, and the title label switches ink color to stay
 legible against whichever surface is behind it. The full-canvas dim gradient behind any open container
-panel matches vanilla's `isInGameUi()` full-canvas gradient (distinct from the pause menu's tiled
-background) and always draws, independent of whether real background art is attached.
+panel matches the in-game screen's full-canvas gradient (distinct from the pause menu's tiled
+background) and always draws, independent of whether real background art is attached. Its source
+colour is true black with straight alpha (`192/255` at the top and `208/255` at the bottom), and
+`ContainerRenderer` uses `ALPHA_BLENDING` to composite it over the existing frame. Keeping RGB at zero
+matters for caves and other dark scenes: a near-black tint can raise destination bytes below its RGB
+value. The creative and advancements geometry producers use the same shared values, so every screen
+that reaches the container renderer gets the same guarantee.
 
 A server-supplied potion stack keeps all four player-visible values from
 `minecraft:potion_contents`: the mixed ARGB used by item tinting, the optional potion registry

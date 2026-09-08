@@ -5,6 +5,8 @@
 
 #[path = "containers/container_background_pixels.rs"]
 mod container_background_pixels;
+#[path = "containers/container_backdrop_tint_pixels.rs"]
+mod container_backdrop_tint_pixels;
 #[path = "containers/container_cursor_pixels.rs"]
 mod container_cursor_pixels;
 #[path = "containers/container_drag_preview_pixels.rs"]

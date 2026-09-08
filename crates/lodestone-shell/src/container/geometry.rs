@@ -332,8 +332,9 @@ impl ContainerGeometry {
         // `Screen::extractBackground` to `extractTransparentBackground`
         // — a full-canvas vertical **gradient**, not the
         // pause menu's tiled dirt texture (that is the `else` branch, for
-        // `isInGameUi() == false` screens). `-1072689136`/`-804253680` decoded:
-        // ARGB (192,16,16,16) top to (208,16,16,16) bottom.
+        // `isInGameUi() == false` screens). The straight-alpha source is black,
+        // with alpha 192/255 at the top and 208/255 at the bottom, so even a
+        // nearly black world pixel cannot be lifted by the backdrop.
         //
         // This is what dims the HUD hotbar for free: the HUD draws unconditionally
         // behind any world-following screen (that fix's `hud_follows_world`),
@@ -345,8 +346,8 @@ impl ContainerGeometry {
             0.0,
             w,
             h,
-            [16.0 / 255.0, 16.0 / 255.0, 16.0 / 255.0, 192.0 / 255.0],
-            [16.0 / 255.0, 16.0 / 255.0, 16.0 / 255.0, 208.0 / 255.0],
+            super::BACKDROP_DIM_TOP,
+            super::BACKDROP_DIM_BOTTOM,
         );
         let dim_floats = b.verts.len();
 

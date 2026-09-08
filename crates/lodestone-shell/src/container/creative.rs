@@ -727,15 +727,15 @@ pub fn creative_geometry(
     let (w, h) = crate::menu::render::logical_canvas(gui_scale, width, height);
     let mut b = Builder::new(w, h, font);
 
-    // The same full-canvas dim every container screen draws, in its own leading
-    // pass — see `ContainerGeometry::dim_vertex_count`.
+    // The same full-canvas black straight-alpha dim every container screen
+    // draws, in its own leading pass — see `ContainerGeometry::dim_vertex_count`.
     b.gradient_rect_px(
         0.0,
         0.0,
         w,
         h,
-        [16.0 / 255.0, 16.0 / 255.0, 16.0 / 255.0, 192.0 / 255.0],
-        [16.0 / 255.0, 16.0 / 255.0, 16.0 / 255.0, 208.0 / 255.0],
+        super::BACKDROP_DIM_TOP,
+        super::BACKDROP_DIM_BOTTOM,
     );
     let dim_floats = b.verts.len();
 
