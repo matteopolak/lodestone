@@ -91,6 +91,11 @@ decoded `ChunkColumn` on reopen, so a caller can feed that record directly back 
 Persisted columns remain authoritative after eviction and restart; admission and ticket policy remain
 the responsibility of the source/cache lifecycle that owns the column.
 
+The bounded cache must therefore sit above a persistence-capable source whenever retained light is
+part of the serving contract. The focused `RegionChunkSource` control exercises a plural admission,
+evicts and reloads both footprint members, then mutates the centre and verifies that invalidation
+clears both restored snapshots; a bare generator is intentionally not an equivalent substitute.
+
 The coordinate-free controls in `crates/versions/26.2/tests/overworld_light_lifecycle.rs` make the
 initial wire distinction independently observable. They build the same synthetic column with 29
 non-air cells, then compare an attached snapshot against an unsettled generated fallback. The retained

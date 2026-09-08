@@ -2586,6 +2586,72 @@ mod tests {
         dir
     }
 
+    /// A plural light admission must remain authoritative after the bounded
+    /// cache evicts every member of its footprint and the persistence layer
+    /// reloads them from disk. A block mutation then invalidates both the
+    /// centre and dependency snapshots rather than resurrecting stale light.
+    #[test]
+    fn plural_light_survives_cache_eviction_reload_and_mutation_invalidation() {
+        let dir = tempdir("plural-light-eviction");
+        let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT)
+            .expect("open persistent source");
+        let save = source.save_handle();
+        let store = ChunkStore::with_capacity(source, 1);
+        let centre = store.column(0, 0);
+        let mut centre_light = lodestone_world::ColumnLight::new(centre.section_count());
+        *centre_light.sky_mut(0) = lodestone_world::LightData::Uniform(7);
+        let mut east_light = lodestone_world::ColumnLight::new(centre.section_count());
+        *east_light.sky_mut(0) = lodestone_world::LightData::Uniform(3);
+        let offsets = [(1, 0)];
+        let mut compute = |_: &ChunkColumn, _: &[(i32, i32, ChunkColumn)]| {
+            crate::chunk::ColumnLightSettlement::with_neighbours(
+                centre_light.clone(),
+                [(1, 0, east_light.clone())],
+            )
+        };
+
+        store
+            .settle_resident_column_lights_with_neighbours(
+                0,
+                0,
+                &centre,
+                &offsets,
+                false,
+                false,
+                true,
+                &mut compute,
+            )
+            .expect("persistent plural admission");
+        assert_eq!(
+            save.save().expect("write plural light snapshots"),
+            2,
+            "the centre and dependency snapshots must be written together"
+        );
+
+        // Cycle both footprint members through a capacity-one store, then save
+        // the unload hand-offs so the next reads genuinely come from disk.
+        let _ = store.column(4, 0);
+        let _ = store.column(1, 0);
+        let _ = store.column(5, 0);
+        save.save().expect("release evicted persisted snapshots");
+        let reloaded_centre = store.column(0, 0);
+        let reloaded_east = store.column(1, 0);
+        assert_eq!(reloaded_centre.retained_light(), Some(&centre_light));
+        assert_eq!(reloaded_east.retained_light(), Some(&east_light));
+
+        store.set_block(1, 60, 1, MARKER);
+        assert_eq!(
+            store.column(0, 0).retained_light(),
+            None,
+            "a centre mutation must clear its reloaded snapshot"
+        );
+        assert_eq!(
+            store.column(1, 0).retained_light(),
+            None,
+            "a centre mutation must clear its reloaded dependency snapshot"
+        );
+    }
+
     /// **The unload gate**, over the real composition: a [`ChunkStore`] above a
     /// [`RegionChunkSource`], which is exactly what
     /// `IntegratedServer::open_persistent_with_mobs` builds. Only the capacity
