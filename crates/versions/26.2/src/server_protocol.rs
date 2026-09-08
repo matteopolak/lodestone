@@ -8276,8 +8276,8 @@ mod block_edit_tests {
     fn end_initial_dependency_layers_use_admitted_storage_shape() {
         let center = ServerChunkColumn::new(0, 256);
         let mut neighbour = ServerChunkColumn::new(0, 256);
-        neighbour.set_block(8, 16, 8, "minecraft:end_stone");
-        neighbour.set_block(8, 32, 8, "minecraft:end_stone");
+        neighbour.set_block(8, 16, 8, "minecraft:stone");
+        neighbour.set_block(8, 32, 8, "minecraft:stone");
         let proto = V770ServerProtocol;
 
         let all_air = proto
@@ -8287,34 +8287,45 @@ mod block_edit_tests {
                 Dimension::End,
             )
             .expect("fresh End settlement");
-        let centre_light = all_air.centre_light();
-        for section in 0..centre_light.light_section_count() {
-            let expected = (1..=4).contains(&section);
+        let shape = shape_for_column(&center);
+        let centre_world = build_world_column(&shape, &center);
+        let neighbour_world = build_world_column(&shape, &neighbour);
+        let storage = initial_end_light_storage_sections(&centre_world, &[neighbour_world]);
+        assert!(storage[1..=4].iter().all(|&stored| stored));
+        let mut expected_lights = proto
+            .compute_initial_column_lights_with_neighbours_and_storage_in_dimension(
+                &center,
+                &[(1, 0, neighbour.clone())],
+                &[None; 9],
+                Dimension::End,
+            )
+            .expect("raw End settlement");
+        normalize_initial_chunk_light(
+            &mut expected_lights[4],
+            Dimension::End,
+            Some(&storage),
+        );
+        normalize_initial_chunk_light(
+            &mut expected_lights[5],
+            Dimension::End,
+            Some(&storage),
+        );
+        let expected = ColumnLightSettlement::with_neighbours(
+            expected_lights[4].clone(),
+            [(1, 0, expected_lights[5].clone())],
+        )
+        .expect("expected centre and dependency settlement");
+        assert_eq!(all_air, expected);
+        for section in 0..expected_lights[4].light_section_count() {
+            let expected_stored = (1..=4).contains(&section);
             assert_eq!(
-                !matches!(centre_light.sky(section), LightData::Missing),
-                expected,
+                !matches!(expected_lights[4].sky(section), LightData::Missing),
+                expected_stored,
                 "centre sky storage at section {section}"
             );
             assert_eq!(
-                !matches!(centre_light.block(section), LightData::Missing),
-                expected,
-                "centre block storage at section {section}"
-            );
-        }
-        let dependency = all_air
-            .iter()
-            .find_map(|((dx, dz), light)| (*dx == 1 && *dz == 0).then_some(light))
-            .expect("east dependency snapshot");
-        for section in 0..dependency.light_section_count() {
-            let expected = (1..=4).contains(&section);
-            assert_eq!(
-                !matches!(dependency.sky(section), LightData::Missing),
-                expected,
-                "dependency sky storage at section {section}"
-            );
-            assert_eq!(
-                !matches!(dependency.block(section), LightData::Missing),
-                expected,
+                !matches!(expected_lights[5].block(section), LightData::Missing),
+                expected_stored,
                 "dependency block storage at section {section}"
             );
         }
@@ -8331,11 +8342,25 @@ mod block_edit_tests {
                 Dimension::End,
             )
             .expect("fresh all-air settlement");
-        for (_, light) in empty_footprint.iter() {
-            for section in 0..light.light_section_count() {
-                assert!(matches!(light.sky(section), LightData::Missing));
-                assert!(matches!(light.block(section), LightData::Missing));
-            }
+        let empty = ColumnLight::new(shape.section_count);
+        let expected_empty = ColumnLightSettlement::with_neighbours(
+            empty.clone(),
+            [
+                (-1, -1, empty.clone()),
+                (0, -1, empty.clone()),
+                (1, -1, empty.clone()),
+                (-1, 0, empty.clone()),
+                (1, 0, empty.clone()),
+                (-1, 1, empty.clone()),
+                (0, 1, empty.clone()),
+                (1, 1, empty),
+            ],
+        )
+        .expect("expected all-air settlement");
+        assert_eq!(empty_footprint, expected_empty);
+        for section in 0..shape.section_count + 2 {
+            assert!(matches!(expected_empty.centre_light().sky(section), LightData::Missing));
+            assert!(matches!(expected_empty.centre_light().block(section), LightData::Missing));
         }
     }
 
