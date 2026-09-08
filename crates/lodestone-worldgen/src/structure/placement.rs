@@ -317,12 +317,14 @@ impl Placement {
 /// **xoroshiro** (vanilla's own default random-source constructor), not the legacy LCG every other
 /// placement decision uses.
 ///
-/// # Not verified against vanilla output
+/// # External check
 ///
-/// The oracle world at `.cache/mc/survival` contains no stronghold (the nearest
-/// ring sits ~1,280 blocks outside its generated area), so this function is
-/// gated by its record definition only. Do not report stronghold placement as
-/// verified until the oracle world is extended.
+/// `tests/support/stronghold_ring_external.txt` captures the first candidate
+/// from the bundled JVM's xoroshiro source with every search cell preferred;
+/// the registry test consumes that coordinate through the production start
+/// path. The oracle world at
+/// `.cache/mc/survival` contains no stronghold (the nearest ring sits ~1,280
+/// blocks outside its generated area), so full world-save parity remains open.
 pub fn ring_positions<F>(
     concentric_rings_seed: i64,
     distance: i32,
@@ -350,8 +352,10 @@ where
         let dist = 4.0 * f64::from(distance)
             + f64::from(distance) * f64::from(circle) * 6.0
             + (random.next_double() - 0.5) * f64::from(distance) * 2.5;
-        let initial_x = (angle.cos() * dist).round() as i32;
-        let initial_z = (angle.sin() * dist).round() as i32;
+        // The source rounds with floor(value + 0.5), which differs from Rust's
+        // half-away-from-zero `round` for a negative half-tie.
+        let initial_x = (angle.cos() * dist + 0.5).floor() as i32;
+        let initial_z = (angle.sin() * dist + 0.5).floor() as i32;
         // Vanilla's own fork for xoroshiro is
         // a fresh xoroshiro source built directly from two raw draws — the raw
         // `(lo, hi)` constructor with no seed upgrade, hence `from_128bit`
