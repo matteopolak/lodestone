@@ -149,6 +149,9 @@ uuid = { workspace = true }
 # only — native behaviour is byte-for-byte unchanged.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
+# Native world-generation jobs share Rayon’s persistent work-stealing pool;
+# browser builds keep the yielding serial path and never link its thread backend.
+rayon = { workspace = true }
 # World persistence (issue #437): the `.mca` region container and `level.dat`.
 # **Target-gated deliberately.** `lodestone-anvil`'s readers and writers are
 # `std::fs`-based, and this crate is one of the few that really does build for

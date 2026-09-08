@@ -3454,6 +3454,7 @@ dependencies = [
  "lodestone-v26-2",
  "lodestone-world",
  "lodestone-worldgen",
+ "rayon",
  "reqwest",
  "rsa",
  "serde",

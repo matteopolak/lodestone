@@ -514,6 +514,7 @@ pub mod ticket;
 pub mod villager_trade;
 mod vitals;
 mod weather;
+mod worldgen_dispatch;
 /// Lightning: per-chunk strike-target selection during a thunderstorm, the
 /// `LightningBolt` life-cycle and its entity-facing effects (`docs/lightning.md`).
 /// Public because spawning the bolt as a real entity and applying an effect
