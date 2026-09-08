@@ -7,7 +7,7 @@
 use lodestone_core::{
     Ctx, Decode, Encode, Nbt, NbtTag, Reader, State, Writer, encode_body, write_named_nbt,
 };
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation, Vec3f};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation, Text, Vec3, Vec3f};
 use lodestone_server::{ChunkColumn, ChunkEncodeError, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_world::{Heightmap, LongArrayFraming, PaletteKind, PalettedContainer};
 use uuid::Uuid;
@@ -16,9 +16,12 @@ use crate::PROTOCOL_1_19_4;
 use crate::canonical::wire_state_for_762;
 use crate::packet_ids::{handshaking, login, play};
 use crate::packets::game::{
-    BlockDig, BlockPlace, ClientboundPositionLook, JoinGame, ServerboundFlying, ServerboundLook,
-    ServerboundArmAnimation, ServerboundPosition, ServerboundPositionLook,
+    BlockDig, BlockPlace, ClientCommand, ClientboundPositionLook, JoinGame, Respawn,
+    ServerboundFlying, ServerboundLook, ServerboundArmAnimation, ServerboundPosition,
+    ServerboundPositionLook, UpdateHealth,
 };
+use crate::packets::entity::EntityMetadataPacket;
+use crate::packets::metadata::{EntityMetadata, MetadataEntry, MetadataValue};
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
 use crate::packets::position::{Position, pack_position};
@@ -34,6 +37,8 @@ const SECTION_EDGE: i32 = 16;
 const SECTION_COUNT: usize = 24;
 const SECTION_BLOCKS: usize = 4096;
 const PLAINS_BIOME_ID: i32 = 0;
+const LOCAL_PLAYER_ENTITY_ID: i32 = 1;
+const METADATA_IDX_AIR_SUPPLY: u8 = 1;
 
 /// Server implementation for protocol 762.
 #[derive(Clone, Copy, Debug, Default)]
@@ -246,6 +251,34 @@ impl V762ServerProtocol {
     }
 }
 
+fn text_to_json(text: &Text) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    match &text.content {
+        lodestone_model::TextContent::Literal(literal) => {
+            object.insert("text".to_owned(), serde_json::Value::String(literal.clone()));
+        }
+        lodestone_model::TextContent::Translate { key, with, fallback } => {
+            object.insert("translate".to_owned(), serde_json::Value::String(key.clone()));
+            if let Some(fallback) = fallback {
+                object.insert("fallback".to_owned(), serde_json::Value::String(fallback.clone()));
+            }
+            if !with.is_empty() {
+                object.insert(
+                    "with".to_owned(),
+                    serde_json::Value::Array(with.iter().map(text_to_json).collect()),
+                );
+            }
+        }
+    }
+    if !text.extra.is_empty() {
+        object.insert(
+            "extra".to_owned(),
+            serde_json::Value::Array(text.extra.iter().map(text_to_json).collect()),
+        );
+    }
+    serde_json::Value::Object(object)
+}
+
 impl ServerProtocol for V762ServerProtocol {
     fn decode(&self, state: State, packet_id: i32, payload: &[u8]) -> ServerBound {
         match state {
@@ -266,6 +299,11 @@ impl ServerProtocol for V762ServerProtocol {
                         username: start.username,
                         uuid: Uuid::nil(),
                     }
+                })
+            }
+            State::Play if packet_id == play::serverbound::CLIENT_COMMAND => {
+                decode_full::<ClientCommand>(payload).map_or(ServerBound::Ignored, |command| {
+                    ServerBound::ClientCommand { action: command.action }
                 })
             }
             State::Play if packet_id == play::serverbound::BLOCK_DIG => {
@@ -495,6 +533,102 @@ impl ServerProtocol for V762ServerProtocol {
 
     fn end_chunk_batch(&self, _batch_size: i32) -> ServerDirective {
         ServerDirective::None
+    }
+
+    fn encode_player_combat_kill(
+        &self,
+        player_entity_id: i32,
+        message: &Text,
+    ) -> ServerDirective {
+        let mut payload = Writer::default();
+        payload.var_i32(player_entity_id);
+        payload.i32(0);
+        payload.string(&text_to_json(message).to_string());
+        ServerDirective::Send {
+            packet_id: play::clientbound::DEATH_COMBAT_EVENT,
+            payload: payload.into_vec(),
+        }
+    }
+
+    fn encode_respawn(&self, spawn: Vec3) -> Vec<ServerDirective> {
+        self.encode_respawn_with_teleport_id(0, spawn)
+    }
+
+    fn encode_respawn_with_teleport_id(
+        &self,
+        teleport_id: i32,
+        spawn: Vec3,
+    ) -> Vec<ServerDirective> {
+        vec![
+            send(
+                play::clientbound::RESPAWN,
+                &Respawn {
+                    world_type: "minecraft:overworld".to_owned(),
+                    world_name: "minecraft:overworld".to_owned(),
+                    hashed_seed: 0,
+                    game_mode: 0,
+                    previous_game_mode: u8::MAX,
+                    is_debug: false,
+                    is_flat: false,
+                    copy_metadata: false,
+                    has_death_location: false,
+                    death_dimension: None,
+                    death_location: None,
+                },
+            ),
+            self.encode_teleport_with_id(teleport_id, spawn.x, spawn.y, spawn.z, 0.0, 0.0),
+        ]
+    }
+
+    fn encode_teleport(&self, x: f64, y: f64, z: f64, yaw: f32, pitch: f32) -> ServerDirective {
+        self.encode_teleport_with_id(0, x, y, z, yaw, pitch)
+    }
+
+    fn encode_teleport_with_id(
+        &self,
+        teleport_id: i32,
+        x: f64,
+        y: f64,
+        z: f64,
+        yaw: f32,
+        pitch: f32,
+    ) -> ServerDirective {
+        send(
+            play::clientbound::POSITION,
+            &ClientboundPositionLook {
+                x,
+                y,
+                z,
+                yaw,
+                pitch,
+                flags: 0,
+                teleport_id,
+            },
+        )
+    }
+
+    fn encode_set_health(&self, health: f32, food: i32, saturation: f32) -> ServerDirective {
+        send(
+            play::clientbound::UPDATE_HEALTH,
+            &UpdateHealth {
+                health,
+                food,
+                food_saturation: saturation,
+            },
+        )
+    }
+
+    fn encode_air_supply_update(&self, air: i32) -> ServerDirective {
+        send(
+            play::clientbound::ENTITY_METADATA,
+            &EntityMetadataPacket {
+                entity_id: LOCAL_PLAYER_ENTITY_ID,
+                metadata: EntityMetadata(vec![MetadataEntry {
+                    key: METADATA_IDX_AIR_SUPPLY,
+                    value: MetadataValue::VarInt(air),
+                }]),
+            },
+        )
     }
 
     fn encode_animate(&self, entity_id: i32, action: u8) -> ServerDirective {
