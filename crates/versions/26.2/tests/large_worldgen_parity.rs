@@ -5,12 +5,12 @@ mod support { pub mod large_parity_manifest; }
 use std::{collections::{BTreeMap, BTreeSet}, fs::File, io::{BufReader, Read, Seek, SeekFrom}, path::{Path, PathBuf}, time::Instant};
 use lodestone_core::{Reader, Writer};
 use lodestone_server::{
-    ChunkColumn, ChunkSource, ServerDirective, ServerProtocol,
+    ChunkColumn, ChunkSource, RetainedLightStatus, ServerDirective, ServerProtocol,
     end_chunk_source,
     nether_chunk_source, overworld_chunk_source, retained_chunk_source_for_view_radius,
 };
-use lodestone_server::dimension::Dimension as ServerDimension;
 use lodestone_server::region_source::RegionChunkSource;
+use lodestone_server::dimension::Dimension as ServerDimension;
 use lodestone_v26_2::V770ServerProtocol;
 use lodestone_v26_2::packets::chunk::{ChunkShape, LevelChunkWithLight};
 use lodestone_worldgen_parity::lifecycle::{
@@ -610,13 +610,14 @@ fn is_partial_lifecycle_manifest(header: &support::large_parity_manifest::Header
         && i64::from(header.cz1) - i64::from(header.cz0) == 15
 }
 
-fn raw_packet_targets(
+fn raw_packet_targets_range(
     header: &support::large_parity_manifest::Header,
-    limit: u64,
+    start: u64,
+    end: u64,
 ) -> Vec<ChunkPos> {
     let width = u64::try_from(i64::from(header.cx1) - i64::from(header.cx0) + 1)
         .expect("authenticated manifest coordinate width fits u64");
-    (0..limit)
+    (start..end)
         .map(|index| {
             (
                 header.cx0 + i32::try_from(index % width).expect("raw target x offset fits i32"),
@@ -626,12 +627,6 @@ fn raw_packet_targets(
         .collect()
 }
 
-/// The first packet is the bootstrap admission and has no previously adopted
-/// neighbour light. Later admissions adopt the cardinal source columns before
-/// their initial packet is encoded; the full 3x3 footprint is still supplied
-/// to the encoder for packet construction.
-const INITIAL_CARDINAL_NEIGHBOUR_OFFSETS: [(i32, i32); 4] =
-    [(-1, 0), (0, -1), (1, 0), (0, 1)];
 const END_LIGHT_NEIGHBOUR_OFFSETS: [(i32, i32); 8] = [
     (-1, -1),
     (0, -1),
@@ -643,31 +638,163 @@ const END_LIGHT_NEIGHBOUR_OFFSETS: [(i32, i32); 8] = [
     (1, 1),
 ];
 
-fn initial_light_admission_neighbour_offsets(record_index: u64) -> &'static [(i32, i32)] {
-    if record_index == 0 {
-        &[]
-    } else {
-        &INITIAL_CARDINAL_NEIGHBOUR_OFFSETS
+/// A radius-zero admission sees the complete immediate 3x3 footprint. Keep
+/// this order explicit because the serial light lifecycle is part of the raw
+/// packet contract; it is not an export batching knob.
+const PACKET_LIGHT_NEIGHBOUR_OFFSETS: [(i32, i32); 8] = [
+    (-1, -1),
+    (0, -1),
+    (1, -1),
+    (-1, 0),
+    (1, 0),
+    (-1, 1),
+    (0, 1),
+    (1, 1),
+];
+
+/// Builds the production persistent source used by the Nether raw-packet
+/// comparator. The bounded cache is still the serving layer, while the region
+/// source below it owns settled light after an admission is evicted. This is
+/// deliberately a fresh directory per process: the comparator must never
+/// consume a stale world or make the checked-in generator depend on one.
+#[cfg(not(target_arch = "wasm32"))]
+fn nether_parity_source(seed: i64, root: &Path) -> Box<dyn ChunkSource> {
+    let persistent = RegionChunkSource::new(
+        nether_chunk_source(seed),
+        root,
+        ServerDimension::Nether,
+        ServerDimension::Nether.min_y(),
+        ServerDimension::Nether.height(),
+    )
+    .unwrap_or_else(|error| panic!("open Nether parity source at {}: {error}", root.display()));
+    Box::new(retained_chunk_source_for_view_radius(persistent, 8))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn nether_parity_source(seed: i64, _root: &Path) -> Box<dyn ChunkSource> {
+    Box::new(retained_chunk_source_for_view_radius(nether_chunk_source(seed), 8))
+}
+
+/// Serially admits one Nether centre through the production source lifecycle.
+///
+/// The source owns both generated terrain and retained light. Each admission
+/// captures the complete 3×3 footprint, calls the version adapter's plural
+/// initial-light hook, and commits the centre plus dependency snapshots through
+/// one `ChunkSource` transaction. This wrapper only keeps the admission order;
+/// it deliberately has no parallel terrain or light map of its own.
+struct NetherSerialLightStore<'a> {
+    source: &'a dyn ChunkSource,
+}
+
+impl<'a> NetherSerialLightStore<'a> {
+    fn new(source: &'a dyn ChunkSource) -> Self {
+        Self { source }
+    }
+
+    fn admit(&self, center: ChunkPos) {
+        let fallback = self
+            .source
+            .resident_column(center.0, center.1)
+            .unwrap_or_else(|| self.source.column(center.0, center.1));
+        let mut compute = |column: &ChunkColumn,
+                           neighbours: &[(i32, i32, ChunkColumn)]| {
+            V770ServerProtocol
+                .compute_initial_column_lights_with_neighbours_in_dimension(
+                    column,
+                    neighbours,
+                    ServerDimension::Nether,
+                )
+        };
+        self.source
+            .settle_resident_column_lights_with_neighbours(
+                center.0,
+                center.1,
+                &fallback,
+                &PACKET_LIGHT_NEIGHBOUR_OFFSETS,
+                false,
+                false,
+                true,
+                &mut compute,
+            )
+            .unwrap_or_else(|error| {
+                panic!("production Nether light admission failed at {center:?}: {error:?}")
+            });
+    }
+
+    fn materialize_until(&self, order: &[ChunkPos], targets: &BTreeSet<ChunkPos>) {
+        for &center in order {
+            self.admit(center);
+            if targets.iter().all(|target| self.is_centre_settled(*target)) {
+                return;
+            }
+        }
+        assert!(
+            targets.iter().all(|target| self.is_centre_settled(*target)),
+            "serial materialization order ended before every requested target was retained",
+        );
+    }
+
+    fn is_centre_settled(&self, target: ChunkPos) -> bool {
+        self.source
+            .resident_column(target.0, target.1)
+            .is_some_and(|column| {
+                column.retained_light_status() == Some(RetainedLightStatus::CentreSettled)
+            })
+    }
+
+    fn packet_inputs(
+        &self,
+        target: ChunkPos,
+    ) -> (ChunkColumn, Vec<(i32, i32, ChunkColumn)>) {
+        let column = self
+            .source
+            .resident_column(target.0, target.1)
+            .unwrap_or_else(|| self.source.column(target.0, target.1));
+        assert!(
+            column.retained_light_status() == Some(RetainedLightStatus::CentreSettled),
+            "target {target:?} must have a settled production light snapshot",
+        );
+        let neighbours = PACKET_LIGHT_NEIGHBOUR_OFFSETS
+            .iter()
+            .map(|&(dx, dz)| {
+                let column = self
+                    .source
+                    .resident_column(target.0 + dx, target.1 + dz)
+                    .unwrap_or_else(|| self.source.column(target.0 + dx, target.1 + dz));
+                (dx, dz, column)
+            })
+            .collect();
+        (column, neighbours)
     }
 }
 
-fn initial_light_snapshot_for_admission(
-    proto: &V770ServerProtocol,
-    centre: &ChunkColumn,
-    admitted_neighbours: &[(i32, i32, ChunkColumn)],
-    dimension: ServerDimension,
-) -> ChunkColumn {
-    let mut settled = centre.clone();
-    if proto.retains_initial_column_light()
-        && let Some(light) = proto.compute_initial_column_light_with_neighbours_in_dimension(
-            centre,
-            admitted_neighbours,
-            dimension,
-        )
-    {
-        settled.set_retained_light(light);
+fn nether_materialization_order(
+    header: &support::large_parity_manifest::Header,
+) -> Vec<ChunkPos> {
+    // The target rectangle is the admission sequence. Its one-chunk halo is
+    // generated as dependency terrain by each centre admission, but halo
+    // columns are not themselves admitted as centres before the first packet.
+    let min_x = header.cx0;
+    let max_x = header.cx1;
+    let min_z = header.cz0;
+    let max_z = header.cz1;
+    let tiles_x = usize::try_from((max_x - min_x).div_euclid(16) + 1)
+        .expect("Nether materialization tile width");
+    let tiles_z = usize::try_from((max_z - min_z).div_euclid(16) + 1)
+        .expect("Nether materialization tile height");
+    let mut order = Vec::with_capacity(((max_x - min_x + 1) * (max_z - min_z + 1)) as usize);
+    for tile_z in 0..tiles_z {
+        for tile_x in 0..tiles_x {
+            let x0 = min_x + tile_x as i32 * 16;
+            let z0 = min_z + tile_z as i32 * 16;
+            for z in z0..=max_z.min(z0 + 15) {
+                for x in x0..=max_x.min(x0 + 15) {
+                    order.push((x, z));
+                }
+            }
+        }
     }
-    settled
+    order
 }
 
 /// Replays the serial materializer order used to seal the raw-packet world.
@@ -902,15 +1029,48 @@ fn lifecycle_target_selection_rejects_ambiguous_single_target_requests() {
 }
 
 #[test]
-fn initial_light_admission_has_bootstrap_then_cardinal_sources() {
-    assert!(initial_light_admission_neighbour_offsets(0).is_empty());
+fn packet_light_admission_uses_a_serial_3x3_footprint() {
+    assert_eq!(PACKET_LIGHT_NEIGHBOUR_OFFSETS.len(), 8);
+}
+
+#[test]
+fn nether_materialization_order_keeps_halo_as_dependency_terrain() {
+    let header = support::large_parity_manifest::Header {
+        semantic_version: 6,
+        cx0: -25,
+        cx1: 25,
+        cz0: -25,
+        cz1: 25,
+        count: 2_601,
+        frozen_world: [0; 32],
+        dimension: Dimension::Nether,
+        record_width: RAW_PACKET_HASH_BYTES as u16,
+        kind: 2,
+    };
+    let order = nether_materialization_order(&header);
+    assert_eq!(order.len(), 51 * 51);
     assert_eq!(
-        initial_light_admission_neighbour_offsets(1),
-        INITIAL_CARDINAL_NEIGHBOUR_OFFSETS.as_slice(),
-    );
-    assert_eq!(
-        initial_light_admission_neighbour_offsets(31),
-        INITIAL_CARDINAL_NEIGHBOUR_OFFSETS.as_slice(),
+        &order[..18],
+        &[
+            (-25, -25),
+            (-24, -25),
+            (-23, -25),
+            (-22, -25),
+            (-21, -25),
+            (-20, -25),
+            (-19, -25),
+            (-18, -25),
+            (-17, -25),
+            (-16, -25),
+            (-15, -25),
+            (-14, -25),
+            (-13, -25),
+            (-12, -25),
+            (-11, -25),
+            (-10, -25),
+            (-25, -24),
+            (-24, -24),
+        ]
     );
 }
 
@@ -1480,14 +1640,17 @@ fn parity_manifest_streams_before_rust_comparison() {
     } else {
         let width = u64::try_from(i64::from(h.cx1) - i64::from(h.cx0) + 1)
             .expect("authenticated manifest coordinate width fits u64");
-        let prepared_raw_targets = if raw_packet && dimension == Dimension::Nether {
-            Some(raw_packet_targets(&h, limit))
-        } else {
-            None
-        };
         let end_persistence_dir = (dimension == Dimension::End).then(|| {
             let dir = std::env::temp_dir().join(format!(
                 "lodestone-end-large-parity-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            dir
+        });
+        let nether_persistence_dir = (raw_packet && dimension == Dimension::Nether).then(|| {
+            let dir = std::env::temp_dir().join(format!(
+                "lodestone-nether-large-parity-{}",
                 std::process::id()
             ));
             let _ = std::fs::remove_dir_all(&dir);
@@ -1498,17 +1661,13 @@ fn parity_manifest_streams_before_rust_comparison() {
             // Keep the comparator on the server's retained-source path rather than
             // regenerating an isolated column for every packet request.
             Dimension::Overworld => Box::new(retained_chunk_source_for_view_radius(overworld_chunk_source(42), 8)),
-            Dimension::Nether => {
-                let source = nether_chunk_source(42);
-                if let Some(targets) = prepared_raw_targets.as_deref() {
-                    let capacity = source.generator().prepare_packet_replay(targets);
-                    eprintln!(
-                        "large raw-packet parity: prepared Nether immutable prefix for {} targets (capacity={capacity})",
-                        targets.len(),
-                    );
-                }
-                Box::new(retained_chunk_source_for_view_radius(source, 8))
-            }
+            Dimension::Nether if raw_packet => nether_parity_source(
+                42,
+                nether_persistence_dir
+                    .as_deref()
+                    .expect("Nether raw replay must have a persistence directory"),
+            ),
+            Dimension::Nether => Box::new(retained_chunk_source_for_view_radius(nether_chunk_source(42), 8)),
             Dimension::End => {
                 let dir = end_persistence_dir
                     .as_deref()
@@ -1527,6 +1686,21 @@ fn parity_manifest_streams_before_rust_comparison() {
             }
         };
         let column_for = |cx, cz| -> ChunkColumn { source.column(cx, cz) };
+        let mut nether_light = if raw_packet && dimension == Dimension::Nether {
+            let targets = raw_packet_targets_range(&h, 0, limit)
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+            let order = nether_materialization_order(&h);
+            let mut store = NetherSerialLightStore::new(&*source);
+            store.materialize_until(&order, &targets);
+            eprintln!(
+                "large raw-packet parity: settled serial Nether admissions for {} targets through the production source",
+                targets.len(),
+            );
+            Some(store)
+        } else {
+            None
+        };
         if raw_packet && dimension == Dimension::End {
             let mut audit = expected_audit
                 .take()
@@ -1561,30 +1735,19 @@ fn parity_manifest_streams_before_rust_comparison() {
             };
             let cx = h.cx0 + (index % width) as i32;
             let cz = h.cz0 + (index / width) as i32;
-            let column = column_for(cx, cz);
-            let mut neighbours = Vec::with_capacity(8);
-            for dz in -1..=1 {
-                for dx in -1..=1 {
-                    if (dx, dz) != (0, 0) {
-                        neighbours.push((dx, dz, column_for(cx + dx, cz + dz)));
+            let (settled_column, neighbours) = if let Some(store) = nether_light.as_mut() {
+                store.packet_inputs((cx, cz))
+            } else {
+                let column = column_for(cx, cz);
+                let mut neighbours = Vec::with_capacity(8);
+                for dz in -1..=1 {
+                    for dx in -1..=1 {
+                        if (dx, dz) != (0, 0) {
+                            neighbours.push((dx, dz, column_for(cx + dx, cz + dz)));
+                        }
                     }
                 }
-            }
-            let settled_column = if raw_packet && dimension == Dimension::Nether {
-                let admitted_neighbour_offsets =
-                    initial_light_admission_neighbour_offsets(index);
-                let admitted_neighbours = admitted_neighbour_offsets
-                    .iter()
-                    .map(|&(dx, dz)| (dx, dz, column_for(cx + dx, cz + dz)))
-                    .collect::<Vec<_>>();
-                initial_light_snapshot_for_admission(
-                    &V770ServerProtocol,
-                    &column,
-                    &admitted_neighbours,
-                    server_dimension,
-                )
-            } else {
-                column.clone()
+                (column, neighbours)
             };
             let directive = V770ServerProtocol
                 .try_encode_chunk_with_neighbours_in_dimension(
@@ -1674,8 +1837,12 @@ fn parity_manifest_streams_before_rust_comparison() {
             }
         }
         }
+        drop(nether_light);
         drop(source);
         if let Some(dir) = end_persistence_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        if let Some(dir) = nether_persistence_dir {
             let _ = std::fs::remove_dir_all(dir);
         }
     }
