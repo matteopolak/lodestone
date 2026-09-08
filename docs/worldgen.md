@@ -148,6 +148,20 @@ neighbourhood (carve's 17×17, ore/vegetation's 3×3) is served through the stag
 stage after decoration operates on the same per-chunk `DenseBlockGrid`, addressed by interned `StateId`s
 rather than block-state strings.
 
+### Vegetation leaf-distance post-processing
+
+After a tree writes its roots, trunk, foliage and decorators, `place_tree` runs the leaf-distance pass
+over the bounding box of those writes. The pass seeds bucket zero from the trunk positions and walks
+only log and distance-carrying leaf states. Its per-distance worklists preserve source position-set
+hashing, resize and iteration order. Positions are marked filled when popped, so stale entries remain
+observable and can rewrite a leaf after an earlier, smaller distance; this is intentionally not a
+shortest-path queue with a visited-on-enqueue set.
+
+When changing this pass, start with the focused external-value control in `feature/vegetation/tree.rs`
+before running a large parity comparison. Keep the `VegTags` membership checks and `StateId` rewrite
+path on the hot loop; block-state strings are only used when constructing test fixtures. The `bbox`
+must continue to include every write from the one tree, while only trunk positions seed propagation.
+
 ### Memoisation: the staged store
 
 `overworld/store.rs`'s `StagedStore` gives every `(chunk, stage)` pair a `OnceLock`-backed slot inside

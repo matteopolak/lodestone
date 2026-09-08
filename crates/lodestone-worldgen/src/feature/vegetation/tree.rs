@@ -1526,46 +1526,30 @@ pub(super) fn simulate_roots<R: RandomSource>(
 }
 
 /// The leaf-decay-distance update pass — the real post-processing pass a
-/// faithful implementation runs
-/// after a tree's trunk, foliage AND decorators have all been placed: a
-/// multi-source BFS from every position in `trunk_positions` (bucket 0),
-/// lowering every reachable `distance`-carrying block's `distance` property
-/// to the true shortest distance-to-a-log, capped at 7 (never written past
-/// that cap, matching the leaves block's own decay-distance cap). This is why every
-/// configured leaves state's own JSON-literal `distance` (always `7`, the
-/// "fresh, undecayed" default) is not what a real reference client ever actually
-/// serves near a trunk — before this function existed, this engine placed
-/// every leaf at the JSON's literal `distance=7` and never corrected it, a
-/// real, measured mismatch found by the savanna oracle fixtures
-/// (real oak/acacia canopies are NOT reachable at plains' ~5%-per-chunk tree
-/// rate with the two originally-committed fixtures, which is why this
-/// gap was invisible until now — see this module's own parity test's doc
-/// comment "A real bug in the oracle itself" for the reason trees were
-/// never actually exercised before).
+/// faithful implementation runs after a tree's trunk, foliage and decorators
+/// have been placed: a worklist from every position in `trunk_positions`
+/// (bucket 0) propagates the reachable `distance`-carrying block states,
+/// capped at 7. The bucket worklist's write order is part of the generated
+/// state: a block can be written at a smaller distance and then rewritten by
+/// a stale entry from a later bucket.
 ///
-/// **Not a literal line-for-line port of the bucket/queue mechanics** — a
-/// faithful implementation keeps its check-buckets as `Set`s and only guards re-adding
-/// a position via a separately-tracked voxel-shape "filled" bitset
-/// checked at *dequeue* time (a fill call)/*enqueue* time
-/// (a fullness check). A first attempt at translating that literally with
-/// per-bucket `VecDeque`s and no cross-bucket dedup **hung indefinitely**:
-/// a log's neighbour (a leaf) enqueues the log's own position back into
-/// bucket 0 every time it is visited (the log always answers distance `0`,
-/// so `min(smallest+1, 0)` is always `0`), and with no de-duplication nothing
-/// ever stops that log from being re-popped and re-expanding the exact same
-/// leaf forever. This function instead tracks one `visited: HashSet` and
-/// marks a position the moment it is *enqueued* (not when it is later
-/// popped) — a standard, well-known equivalent formulation of a uniform
-/// (all-edge-weight-`1`) multi-source BFS via a bucket queue: the first
-/// discovery of any position, under a discipline that always drains the
-/// current-nearest bucket completely before advancing, **is** its true
-/// shortest distance, so marking on first discovery cannot produce a
-/// different final value than marking on completion — it only prevents the
-/// redundant re-enqueues that made the literal port hang. This changes
-/// nothing about *which* `distance` value ultimately gets written to any
-/// cell, only how many times an already-settled cell gets looked at again.
-/// No RNG is consumed anywhere in this function (a pure grid post-process),
-/// so none of this affects the decoration RNG stream either way.
+/// **The bucket mechanics are intentional** — each check bucket is a set, and
+/// re-adding a position is guarded by a separately tracked filled set checked
+/// at pop time (a fill operation) and before expansion. The queue is not a
+/// shortest-path worklist: the source algorithm keeps one set per distance bucket and
+/// only marks a position full when it is popped. A leaf can therefore be
+/// queued at distance 2, written, and then be queued again at distance 3 by a
+/// different distance-2 neighbour before the queue drains. The later stale
+/// entry is observable because it writes the block state again; the focused
+/// external control below captures exactly that case. A single visited set
+/// marked at enqueue time is a mathematically shorter BFS, but it changes the
+/// generated block state and is not an equivalent implementation here.
+///
+/// The filled set still prevents the infinite log-to-leaf requeue that would
+/// result from allowing a position to be scheduled after it has already been
+/// popped. No RNG is consumed anywhere in this function (a pure grid
+/// post-process), so the queue's duplicate entries do not affect the
+/// decoration RNG stream.
 ///
 /// `#minecraft:prevents_nearby_leaf_decay` is, in the real registry, defined
 /// as exactly `["#minecraft:logs"]` (`prevents_nearby_leaf_decay.json`) —
@@ -1601,26 +1585,28 @@ pub(super) fn update_leaf_distances(
         (min_x..=max_x).contains(&x) && (min_y..=max_y).contains(&y) && (min_z..=max_z).contains(&z)
     };
 
-    // Unit 8: the bucket queue and the visited set are reused thread-local
+    // Unit 8: the bucket queue and the filled set are reused thread-local
     // scratch, not eight fresh allocations per tree. `BFS.take()` (rather than a
     // borrow held across the body) keeps a hypothetical nested call correct — it
     // would get fresh, allocating buffers instead of a `RefCell` panic.
     let mut scratch = BFS.take();
-    let Bfs { buckets, visited } = &mut scratch;
-    buckets.resize_with(MAX_DISTANCE as usize, VecDeque::new);
+    let Bfs { buckets, filled, seeds } = &mut scratch;
+    buckets.resize_with(MAX_DISTANCE as usize, SourcePositionSet::default);
     for bucket in buckets.iter_mut() {
-        bucket.clear();
+        bucket.reset();
     }
-    visited.clear();
+    filled.clear();
     // Every trunk position is, by construction, inside `bbox` (the caller
     // derives `bbox` to encapsulate them) — matching a faithful implementation, where
     // the bounds are built FROM the trunk positions, so a log is trivially always its own
     // bbox member. No `inside` check needed here.
+    seeds.reset();
     for p in trunk_positions {
         let key = (p.x, p.y, p.z);
-        if visited.insert(key) {
-            buckets[0].push_back(key);
-        }
+        seeds.insert(key);
+    }
+    while let Some(key) = seeds.pop_first() {
+        buckets[0].insert(key);
     }
 
     let mut smallest: i32 = 0;
@@ -1630,7 +1616,7 @@ pub(super) fn update_leaf_distances(
                 BFS.set(scratch);
                 return;
             }
-            let Some((x, y, z)) = buckets[smallest as usize].pop_front() else {
+            let Some((x, y, z)) = buckets[smallest as usize].pop_first() else {
                 break;
             };
             if smallest != 0 {
@@ -1648,10 +1634,15 @@ pub(super) fn update_leaf_distances(
                     grid.set_id_if_in_bounds(x, y, z, new_state);
                 }
             }
+            // The reference shape is filled before expanding neighbours. This
+            // prevents the current position from re-enqueuing itself while
+            // still allowing positions already queued in another bucket to
+            // remain as stale entries.
+            filled.insert((x, y, z));
             for (dx, dy, dz) in NEIGHBOR_OFFSETS {
                 let (nx, ny, nz) = (x + dx, y + dy, z + dz);
                 let neighbor_key = (nx, ny, nz);
-                if visited.contains(&neighbor_key) {
+                if filled.contains(&neighbor_key) {
                     continue;
                 }
                 // The real `bounds.isInside(neighborPos)` gate — see this
@@ -1669,8 +1660,7 @@ pub(super) fn update_leaf_distances(
                 if let Some(current_distance) = current_distance {
                     let new_distance = (smallest + 1).min(current_distance);
                     if new_distance < MAX_DISTANCE {
-                        visited.insert(neighbor_key);
-                        buckets[new_distance as usize].push_back(neighbor_key);
+                        buckets[new_distance as usize].insert(neighbor_key);
                         smallest = smallest.min(new_distance);
                     }
                 }
@@ -1680,25 +1670,102 @@ pub(super) fn update_leaf_distances(
     }
 }
 
-/// [`update_leaf_distances`]' reusable bucket queue and visited set.
-struct Bfs {
+/// The set implementation used by the external generator's block-position
+/// worklists. Its hash and resize rules are deliberately kept local to this
+/// post-process: unlike the engine's `FastSet`, iteration order is part of the
+/// generated state because a stale entry can rewrite a leaf after its first
+/// visit.
+#[derive(Debug, Default)]
+struct SourcePositionSet {
     buckets: Vec<VecDeque<(i32, i32, i32)>>,
+    len: usize,
+    first_bucket: usize,
+}
+
+impl SourcePositionSet {
+    fn reset(&mut self) {
+        self.buckets.clear();
+        self.len = 0;
+        self.first_bucket = 0;
+    }
+
+    fn hash(position: (i32, i32, i32)) -> usize {
+        let (x, y, z) = position;
+        let raw = y
+            .wrapping_add(z.wrapping_mul(31))
+            .wrapping_mul(31)
+            .wrapping_add(x);
+        let mixed = (raw as u32) ^ ((raw as u32) >> 16);
+        mixed as usize
+    }
+
+    fn resize(&mut self, capacity: usize) {
+        let old = std::mem::take(&mut self.buckets);
+        let mut next = vec![VecDeque::new(); capacity];
+        for bucket in old {
+            for position in bucket {
+                let index = Self::hash(position) & (capacity - 1);
+                next[index].push_back(position);
+            }
+        }
+        self.buckets = next;
+        self.first_bucket = self
+            .buckets
+            .iter()
+            .position(|bucket| !bucket.is_empty())
+            .unwrap_or(capacity);
+    }
+
+    fn insert(&mut self, position: (i32, i32, i32)) {
+        if self.buckets.is_empty() {
+            self.resize(16);
+        }
+        let index = Self::hash(position) & (self.buckets.len() - 1);
+        if self.buckets[index].iter().any(|entry| *entry == position) {
+            return;
+        }
+        self.buckets[index].push_back(position);
+        self.len += 1;
+        self.first_bucket = self.first_bucket.min(index);
+        if self.len > self.buckets.len() * 3 / 4 {
+            self.resize(self.buckets.len() * 2);
+        }
+    }
+
+    fn pop_first(&mut self) -> Option<(i32, i32, i32)> {
+        while self.first_bucket < self.buckets.len() {
+            if let Some(position) = self.buckets[self.first_bucket].pop_front() {
+                self.len -= 1;
+                return Some(position);
+            }
+            self.first_bucket += 1;
+        }
+        None
+    }
+}
+
+/// [`update_leaf_distances`]' reusable bucket queue and filled set.
+struct Bfs {
+    buckets: Vec<SourcePositionSet>,
     /// [`FastSet`], not the default hasher — the third of the vegetation maps U17
     /// measured at 0.8% of all worldgen CPU and left for this file's owner.
     ///
-    /// Order-safe, and the argument is stronger here than "never iterated": the BFS
-    /// **traversal** order comes entirely from `buckets`, and this set only ever
-    /// answers membership (`clear`, `insert`, `contains` — no `iter`, no `drain`).
-    /// So the leaf `distance` values this function assigns cannot depend on the
-    /// hasher, which is what matters, because those values reach the wire.
-    visited: FastSet<(i32, i32, i32)>,
+    /// The set of positions popped from a bucket. Bucket iteration order is
+    /// observable because stale entries can rewrite a leaf later, so each
+    /// bucket uses the same deterministic hash and resize rules as the source
+    /// set implementation. This set only answers membership.
+    filled: FastSet<(i32, i32, i32)>,
+    /// Temporary set for reproducing the source log-set iteration order before
+    /// its positions are copied into bucket zero.
+    seeds: SourcePositionSet,
 }
 
 impl Default for Bfs {
     fn default() -> Self {
         Self {
             buckets: Vec::new(),
-            visited: FastSet::default(),
+            filled: FastSet::default(),
+            seeds: SourcePositionSet::default(),
         }
     }
 }
@@ -2589,4 +2656,65 @@ pub(super) fn try_place_leaf<R: RandomSource>(
     foliage_positions.insert((pos.x, pos.y, pos.z));
     *placed_any = true;
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// External-value control for the leaf update at `(-120, 73, -126)` in
+    /// source chunk `(-8, -8)`. The captured tree has logs at
+    /// `(-120, 73, -124)` and `(-119, 73, -124)`, with leaves at
+    /// `(-120, 73, -125)`, `(-120, 73, -126)`, `(-119, 73, -125)`, and
+    /// `(-119, 73, -126)`. The external packet records distance `3` for the
+    /// target even though the first path reaches it at distance `2`.
+    ///
+    /// That value is a control for the update queue's stale entries: a leaf
+    /// can be queued at distance 2, processed, and then queued again at 3 by
+    /// a different distance-2 leaf before the queue drains. A visited-on-
+    /// enqueue shortest-path BFS incorrectly freezes the first value at 2.
+    #[test]
+    fn external_leaf_distance_control_keeps_stale_queue_write() {
+        let mut grid = VegGrid::with_footprint(70, 8, -120, -126, 0, 4);
+        let logs = [
+            BlockPos { x: -120, y: 73, z: -124 },
+            BlockPos { x: -119, y: 73, z: -124 },
+        ];
+        let leaves = [
+            BlockPos { x: -120, y: 73, z: -125 },
+            BlockPos { x: -120, y: 73, z: -126 },
+            BlockPos { x: -119, y: 73, z: -125 },
+            BlockPos { x: -119, y: 73, z: -126 },
+        ];
+        for pos in logs {
+            grid.seed(
+                pos.x,
+                pos.y,
+                pos.z,
+                "minecraft:dark_oak_log[axis=y]".to_owned(),
+            );
+        }
+        for pos in leaves {
+            grid.seed(
+                pos.x,
+                pos.y,
+                pos.z,
+                "minecraft:dark_oak_leaves[distance=7,persistent=false,waterlogged=false]"
+                    .to_owned(),
+            );
+        }
+
+        update_leaf_distances(
+            &mut grid,
+            &VegTags::default(),
+            &logs,
+            (-120, 73, -126, -119, 73, -124),
+        );
+
+        assert!(
+            grid.get(-120, 73, -126).contains("distance=3"),
+            "external leaf-distance control expected distance=3, got {}",
+            grid.get(-120, 73, -126)
+        );
+    }
 }
