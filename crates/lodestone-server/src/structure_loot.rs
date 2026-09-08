@@ -2,7 +2,7 @@
 //!
 //! # What it is
 //!
-//! Shipwrecks, ocean ruins and igloos generate for real (`lodestone-worldgen`'s
+//! Shipwrecks, ocean ruins, igloos and End cities generate for real (`lodestone-worldgen`'s
 //! `structure` S2 unit), and every one of them arrived with an *empty* chest —
 //! or, for an ocean ruin, no chest at all. This module is vanilla's
 //! `TemplateStructurePiece.postProcess` data-marker pass plus the three
@@ -86,6 +86,8 @@
 //!   the chest position itself, and the chest does not exist until we place it.
 //!   Getting this off by one puts loot in a block of air above the chest, where
 //!   nothing can reach it and no test that only counts rolls would notice.
+//! * **End-city chest markers use that same one-block-below placement**, while
+//!   sentry and display markers are entity work and must not create containers.
 //! * A marker whose loot table is not bundled yields an **empty** chest, not a
 //!   missing one — the same "no such table" tolerance
 //!   [`crate::block_drops::drop_block_loot`] has.
@@ -165,6 +167,9 @@ fn marker_loot_table(structure: &str, marker: &str, big: bool) -> Option<&'stati
         (_, "treasure_chest") => Some("minecraft:chests/shipwreck_treasure"),
         (_, "supply_chest") => Some("minecraft:chests/shipwreck_supply"),
         ("minecraft:igloo", "chest") => Some("minecraft:chests/igloo_chest"),
+        ("minecraft:end_city", marker) if marker.starts_with("Chest") => {
+            Some("minecraft:chests/end_city_treasure")
+        }
         ("minecraft:ocean_ruin_cold" | "minecraft:ocean_ruin_warm", "chest") => Some(if big {
             "minecraft:chests/underwater_ruin_big"
         } else {
@@ -574,6 +579,7 @@ fn int_triple(value: &Nbt) -> Option<[i32; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block_entities::BlockEntityKind;
 
     /// The markers really are in vanilla's own shipwreck template, with the
     /// three metadata strings `ShipwreckPieces.MARKERS_TO_LOOT` keys on.
@@ -769,7 +775,157 @@ mod tests {
         assert!(data_markers(top).is_empty());
     }
 
-    /// The six structure-chest tables are bundled and roll real items.
+    /// An external End-city capture drives the marker pass through the same
+    /// structure-loot consumer used by generated End columns. The capture
+    /// exercises a rotated floor piece crossing into the receiving chunk.
+    #[test]
+    fn end_city_marker_chest_reaches_the_structure_loot_consumer() {
+        use lodestone_worldgen::structure::{
+            PiecePlacement, StructurePiece, StructureStart, TerrainAdjustment,
+        };
+        use lodestone_worldgen::structure::template::{Mirror, PlaceSettings, Rotation, StructureTemplate};
+        use std::sync::Arc;
+
+        let fixture = include_str!("../tests/support/end_city_loot_jvm.txt");
+        let city = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("city "))
+            .expect("fixture has one city origin")
+            .split_whitespace()
+            .map(|value| value.parse::<i32>().expect("city chunk coordinate"))
+            .collect::<Vec<_>>();
+        assert_eq!(city.len(), 2, "city fixture has origin chunk x/z");
+
+        let piece = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("piece "))
+            .expect("fixture has one chest-bearing piece")
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        assert_eq!(piece.len(), 5, "piece fixture has name, origin and rotation");
+        let piece_position = [
+            piece[1].parse::<i32>().expect("piece x"),
+            piece[2].parse::<i32>().expect("piece y"),
+            piece[3].parse::<i32>().expect("piece z"),
+        ];
+        let rotation = match piece[4] {
+            "none" => Rotation::None,
+            "cw90" => Rotation::Cw90,
+            "cw180" => Rotation::Cw180,
+            "ccw90" => Rotation::Ccw90,
+            other => panic!("unknown fixture rotation {other}"),
+        };
+
+        let marker = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("marker "))
+            .expect("fixture has one chest marker")
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        assert_eq!(marker.len(), 4, "marker fixture has position and metadata");
+        let marker_position = [
+            marker[0].parse::<i32>().expect("marker x"),
+            marker[1].parse::<i32>().expect("marker y"),
+            marker[2].parse::<i32>().expect("marker z"),
+        ];
+        assert_eq!(marker[3], "Chest", "the native marker selects a chest");
+
+        let chest = fixture
+            .lines()
+            .find_map(|line| line.strip_prefix("chest "))
+            .expect("fixture has one native chest")
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        assert_eq!(chest.len(), 7, "chest fixture has receiving chunk, position, table and seed");
+        let receiving_chunk = [
+            chest[0].parse::<i32>().expect("receiving chunk x"),
+            chest[1].parse::<i32>().expect("receiving chunk z"),
+        ];
+        let chest_position = BlockPos::new(
+            chest[2].parse::<i32>().expect("chest x"),
+            chest[3].parse::<i32>().expect("chest y"),
+            chest[4].parse::<i32>().expect("chest z"),
+        );
+        let expected_table = chest[5];
+        assert_eq!(expected_table, "minecraft:chests/end_city_treasure");
+        let _: i64 = chest[6].parse().expect("native loot seed");
+        assert_eq!(
+            marker_loot_table("minecraft:end_city", marker[3], false),
+            Some(expected_table),
+            "the End-city marker must name the externally captured table"
+        );
+        assert_eq!(
+            marker_loot_table("minecraft:end_city", "Sentry", false),
+            None,
+            "entity markers are not containers"
+        );
+
+        let template_id = format!("minecraft:end_city/{}", piece[0]);
+        let template_bytes = crate::worldgen_data::embedded_structure_template(&template_id)
+            .expect("fixture piece is bundled");
+        let template = Arc::new(StructureTemplate::parse(template_bytes).expect("template decodes"));
+        let settings = PlaceSettings {
+            rotation,
+            mirror: Mirror::None,
+            pivot: [0, 0, 0],
+            processors: Vec::new(),
+            waterlogging: false,
+        };
+        let bounding_box = template.bounding_box(piece_position, &settings);
+        let placement = Arc::new(PiecePlacement {
+            template: Arc::clone(&template),
+            position: piece_position,
+            settings,
+        });
+        let structure_piece = StructurePiece {
+            id: "minecraft:ecp".to_owned(),
+            bounding_box,
+            orientation: Some(2),
+            gen_depth: 0,
+            template: Some(template_id),
+            placement: Some(placement),
+            extra_placements: Vec::new(),
+            blocks: None,
+            loot: Vec::new(),
+            beard: None,
+            refine: None,
+        };
+        let start = Arc::new(StructureStart {
+            structure: "minecraft:end_city".to_owned(),
+            chunk_x: city[0],
+            chunk_z: city[1],
+            references: 0,
+            bounding_box,
+            pieces: vec![structure_piece],
+            terrain_adaptation: TerrainAdjustment::None,
+            pieces_complete: true,
+        });
+        let table_key: ResourceKey = expected_table.parse().expect("fixture table key");
+        let raw_table = include_str!("../assets/loot_table/chests/end_city_treasure.json");
+        let parsed_table = crate::loot::LootTable::from_json(&table_key, raw_table)
+            .unwrap_or_else(|error| panic!("captured table must parse: {error:?}"));
+        assert!(
+            parsed_table.unsupported_features().iter().all(|feature| {
+                crate::loot::DECORATION_ONLY_UNSUPPORTED.contains(&feature.as_str())
+            }),
+            "captured table has non-decoration unsupported features: {:?}",
+            parsed_table.unsupported_features()
+        );
+        let tables = crate::loot::LootTableSet::load_bundled();
+        assert!(tables.get(&table_key).is_some(), "captured table is bundled");
+        let chests = chests_for_chunk(&[start], receiving_chunk[0], receiving_chunk[1], &tables);
+        assert_eq!(chests.len(), 1, "the receiving chunk gets exactly the captured End-city chest");
+        assert_eq!(chests[0].pos, chest_position);
+        assert!(chests[0].block.is_none(), "the template already supplies the chest block");
+        assert_eq!(chests[0].entity.kind(), BlockEntityKind::Chest);
+        assert!(
+            chests[0].entity.container_slots().iter().any(Option::is_some),
+            "the End-city treasure table must roll at least one stack"
+        );
+        assert_eq!(marker_position, [6, 6, 2], "fixture preserves the marker local position");
+    }
+
+    /// The seven structure-chest tables are bundled and roll real items.
     ///
     /// The expected values come from vanilla's own `igloo_chest.json`, not from
     /// our roller: two pools, `rolls: uniform 2..8` and `rolls: 1`, no `empty`
@@ -785,6 +941,7 @@ mod tests {
             "minecraft:chests/shipwreck_supply",
             "minecraft:chests/shipwreck_treasure",
             "minecraft:chests/igloo_chest",
+            "minecraft:chests/end_city_treasure",
             "minecraft:chests/underwater_ruin_small",
             "minecraft:chests/underwater_ruin_big",
         ] {
@@ -831,7 +988,7 @@ mod tests {
             for dz in -2..=2 {
                 let column = source.column(-21 + dx, -6 + dz);
                 for (pos, entity) in column.block_entities() {
-                    if entity.type_id() != "minecraft:chest" {
+                    if entity.kind() != BlockEntityKind::Chest {
                         continue;
                     }
                     chests += 1;
@@ -925,7 +1082,7 @@ mod tests {
                 .iter()
                 .find_map(|(found, entity)| (*found == pos).then_some(entity))
                 .unwrap_or_else(|| panic!("placement loot did not reach the column at {pos:?}"));
-            assert_eq!(entity.type_id(), "minecraft:chest");
+            assert_eq!(entity.kind(), BlockEntityKind::Chest);
             assert!(
                 entity.container_slots().iter().any(Option::is_some),
                 "the exact placement seed must roll a nonempty external chest at {pos:?}",
