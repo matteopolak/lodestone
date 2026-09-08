@@ -154,6 +154,24 @@ to its floor, so a client that ignores the packet loads the world at a trickle
 with nothing logged anywhere. The rate this client asks for is a request, not a
 measurement.
 
+### Death and respawn lifecycle
+
+Protocol 766 uses a split death notification: a VarInt player id, a signed
+killer id, and a JSON text component. `V766Adapter` turns that frame into the
+model `Death` event, while `V766ServerProtocol` emits it when the authoritative
+player vitals cross zero. The client already has a `Respawn` action; the server
+decoder must construct `ServerBound::ClientCommand { action: 0 }` from its
+single-VarInt body so the shared player lifecycle can consume it.
+
+The production consumer accepts that command only while dead. It sends a
+respawn state frame with `data_kept = 0`, an absolute position correction at the
+stored world spawn, then full health and air. The state frame precedes the
+position and health updates because the client clears its death state from the
+respawn event. Inventory is not passed through this reset and therefore remains
+the authoritative per-player value. `tests/death_respawn_server.rs` covers the
+literal adapter fixture, registry-selected command routing, encoder ids/shapes,
+and a bounded in-memory lethal-fall → manual-respawn → movement cycle.
+
 ### Two disconnect shapes at one protocol
 
 The login-state disconnect carries a **JSON string**; the configuration- and
