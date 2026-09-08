@@ -280,8 +280,8 @@ pub use models::{
 };
 pub use scene::{CullStats, FramePlan, WorldScene, section_of};
 pub use screen_effects::{
-    FIRE_STRIP_TOP, FIRE_TILE_COUNT, FIRE_TINT, ScreenEffectRenderer, ScreenOverlayVertex,
-    UNDERWATER_TILE_COUNT, UNDERWATER_TINT_ALPHA, border_warning_overlay_triangles,
+    FIRE_TINT, ScreenEffectRenderer, ScreenOverlayVertex, UNDERWATER_TILE_COUNT,
+    UNDERWATER_TINT_ALPHA, border_warning_overlay_triangles,
     fire_overlay_triangles, underwater_brightness, underwater_overlay_quad,
     underwater_overlay_triangles,
 };
