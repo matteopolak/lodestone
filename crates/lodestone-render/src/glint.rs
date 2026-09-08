@@ -472,6 +472,7 @@ pub const fn glint_blend() -> wgpu::BlendState {
 
 /// The glint pass pipeline: two bind groups, `ModelVertex`'s own vertex layout,
 /// depth-`EQUAL` with no write, and [`glint_blend`].
+#[derive(Debug)]
 pub struct GlintPipeline {
     /// The render pipeline.
     pub pipeline: wgpu::RenderPipeline,

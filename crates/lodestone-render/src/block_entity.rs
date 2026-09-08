@@ -2181,9 +2181,13 @@ pub fn shelf_slot_matrix(
 /// showing — `copper_golem_pose` on the block state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CopperGolemPose {
+    /// The statue stands upright.
     Standing,
+    /// The statue sits.
     Sitting,
+    /// The statue runs.
     Running,
+    /// The statue uses the star pose.
     Star,
 }
 
@@ -2215,9 +2219,13 @@ pub const COPPER_GOLEM_POSES: &[CopperGolemPose] = &[
 /// key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CopperGolemOxidation {
+    /// The unweathered copper appearance.
     Unaffected,
+    /// The first weathered appearance.
     Exposed,
+    /// The second weathered appearance.
     Weathered,
+    /// The fully weathered appearance.
     Oxidized,
 }
 
