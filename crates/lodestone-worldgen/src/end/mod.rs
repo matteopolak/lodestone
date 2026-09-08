@@ -544,22 +544,19 @@ impl EndGenerator {
         }
         let (min_x, min_z) = (cx * 16, cz * 16);
         let mut references = BTreeMap::new();
-        for start_x in cx - REFERENCE_RADIUS..=cx + REFERENCE_RADIUS {
-            for start_z in cz - REFERENCE_RADIUS..=cz + REFERENCE_RADIUS {
-                for start in self.structure_starts_stage(start_x, start_z).iter() {
-                    if !start.pieces_complete
-                        || !start.bounding_box.intersects_xz(min_x, min_z, min_x + 15, min_z + 15)
-                    {
-                        continue;
-                    }
-                    let packed =
-                        (i64::from(start_z as u32) << 32) | i64::from(start_x as u32);
-                    let entries = references
-                        .entry(start.structure.clone())
-                        .or_insert_with(Vec::new);
-                    if !entries.contains(&packed) {
-                        entries.push(packed);
-                    }
+        for (start_x, start_z) in self.structure_origin_candidates(cx, cz, REFERENCE_RADIUS) {
+            for start in self.structure_starts_stage(start_x, start_z).iter() {
+                if !start.pieces_complete
+                    || !start.bounding_box.intersects_xz(min_x, min_z, min_x + 15, min_z + 15)
+                {
+                    continue;
+                }
+                let packed = (i64::from(start_z as u32) << 32) | i64::from(start_x as u32);
+                let entries = references
+                    .entry(start.structure.clone())
+                    .or_insert_with(Vec::new);
+                if !entries.contains(&packed) {
+                    entries.push(packed);
                 }
             }
         }
@@ -616,75 +613,90 @@ impl EndGenerator {
             String,
             crate::rng::WorldgenRandom<crate::rng::LegacyRandomSource>,
         > = HashMap::new();
-        for start_x in cx - START_SCAN_RADIUS..=cx + START_SCAN_RADIUS {
-            for start_z in cz - START_SCAN_RADIUS..=cz + START_SCAN_RADIUS {
-                for start in self.structure_starts_stage(start_x, start_z).iter() {
-                    if !start.pieces_complete {
+        for (start_x, start_z) in self.structure_origin_candidates(cx, cz, START_SCAN_RADIUS) {
+            for start in self.structure_starts_stage(start_x, start_z).iter() {
+                if !start.pieces_complete {
+                    continue;
+                }
+                let reference = crate::structure::jigsaw::reference_position(&start.pieces);
+                for piece in &start.pieces {
+                    if !piece.bounding_box.intersects_xz(min_x, min_z, min_x + 15, min_z + 15) {
                         continue;
                     }
-                    let reference = crate::structure::jigsaw::reference_position(&start.pieces);
-                    for piece in &start.pieces {
-                        if !piece.bounding_box.intersects_xz(min_x, min_z, min_x + 15, min_z + 15) {
-                            continue;
+                    if let Some(blocks) = &piece.blocks {
+                        for block in blocks.iter() {
+                            world.set(block.pos[0], block.pos[1], block.pos[2], &block.state);
                         }
-                        if let Some(blocks) = &piece.blocks {
-                            for block in blocks.iter() {
-                                world.set(block.pos[0], block.pos[1], block.pos[2], &block.state);
-                            }
-                        }
-                        if let Some(placement) = &piece.placement {
+                    }
+                    if let Some(placement) = &piece.placement {
+                        let origin = crate::structure::template::PlaceOrigin {
+                            position: placement.position,
+                            reference,
+                            seed: registry.seed(),
+                        };
+                        placement.template.place(origin, &placement.settings, &mut world);
+                        for extra in &piece.extra_placements {
                             let origin = crate::structure::template::PlaceOrigin {
-                                position: placement.position,
+                                position: extra.position,
                                 reference,
                                 seed: registry.seed(),
                             };
-                            placement.template.place(origin, &placement.settings, &mut world);
-                            for extra in &piece.extra_placements {
-                                let origin = crate::structure::template::PlaceOrigin {
-                                    position: extra.position,
-                                    reference,
-                                    seed: registry.seed(),
-                                };
-                                extra.template.place(origin, &extra.settings, &mut world);
-                            }
+                            extra.template.place(origin, &extra.settings, &mut world);
                         }
-                        match piece.refine.as_ref() {
-                            Some(crate::structure::PieceRefinement::FeaturePlacements { placements }) => {
-                                let Some((step, index)) = registry.feature_placement_key(&start.structure) else {
-                                    continue;
-                                };
-                                let random = feature_randoms.entry(start.structure.clone()).or_insert_with(|| {
-                                    let mut random = crate::rng::WorldgenRandom::new(
-                                        crate::rng::LegacyRandomSource::new(0),
-                                    );
-                                    let decoration_seed = random.set_decoration_seed(
-                                        registry.seed(),
-                                        min_x,
-                                        min_z,
-                                    );
-                                    random.set_feature_seed(decoration_seed, index as i32, step);
-                                    random
-                                });
-                                crate::structure::feature_placement::place_feature_pool_elements(
-                                    random,
-                                    registry.seed(),
-                                    placements,
-                                    &mut world,
-                                    &self.veg_tags,
+                    }
+                    match piece.refine.as_ref() {
+                        Some(crate::structure::PieceRefinement::FeaturePlacements { placements }) => {
+                            let Some((step, index)) = registry.feature_placement_key(&start.structure) else {
+                                continue;
+                            };
+                            let random = feature_randoms.entry(start.structure.clone()).or_insert_with(|| {
+                                let mut random = crate::rng::WorldgenRandom::new(
+                                    crate::rng::LegacyRandomSource::new(0),
                                 );
-                            }
-                            Some(crate::structure::PieceRefinement::StrongholdBlocks { writes }) => {
-                                crate::structure::stronghold::place_post_surface_blocks(&mut world, writes);
-                            }
-                            Some(crate::structure::PieceRefinement::BuriedTreasureChest)
-                            | Some(crate::structure::PieceRefinement::RuinedPortalTerrain { .. })
-                            | None => {}
+                                let decoration_seed = random.set_decoration_seed(
+                                    registry.seed(),
+                                    min_x,
+                                    min_z,
+                                );
+                                random.set_feature_seed(decoration_seed, index as i32, step);
+                                random
+                            });
+                            crate::structure::feature_placement::place_feature_pool_elements(
+                                random,
+                                registry.seed(),
+                                placements,
+                                &mut world,
+                                &self.veg_tags,
+                            );
                         }
+                        Some(crate::structure::PieceRefinement::StrongholdBlocks { writes }) => {
+                            crate::structure::stronghold::place_post_surface_blocks(&mut world, writes);
+                        }
+                        Some(crate::structure::PieceRefinement::BuriedTreasureChest)
+                        | Some(crate::structure::PieceRefinement::RuinedPortalTerrain { .. })
+                        | None => {}
                     }
                 }
             }
         }
         world
+    }
+
+    fn structure_origin_candidates(&self, cx: i32, cz: i32, radius: i32) -> Vec<(i32, i32)> {
+        let min_x = cx - radius;
+        let max_x = cx + radius;
+        let min_z = cz - radius;
+        let max_z = cz + radius;
+        let Some(registry) = &self.structures else {
+            return Vec::new();
+        };
+        registry
+            .random_spread_origins_in(min_x, max_x, min_z, max_z)
+            .unwrap_or_else(|| {
+                (min_x..=max_x)
+                    .flat_map(|start_x| (min_z..=max_z).map(move |start_z| (start_x, start_z)))
+                    .collect()
+            })
     }
 
     fn decoration_region(&self, cx: i32, cz: i32) -> (DenseBlockGrid, Vec<decorate::EndGateway>) {
