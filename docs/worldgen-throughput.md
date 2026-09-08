@@ -8,7 +8,7 @@
 
 The executable builds one production generator per dimension and seed, walks a row-major `N × N` chunk grid, and reports cold and warm passes. Cold starts with a fresh generator; warm repeats the same grid after the first pass so memoized stage work is visible. Overworld and Nether use `column_shaped`; End uses its pre-surface `shape_field`; all decorated paths call the public `column` method.
 
-Each pass reports chunks per second, process CPU utilization when the host exposes `getrusage`, and sampled resident-set growth. A separate 16-chunk allocation pass uses a benchmark-local counting allocator, so allocation counts do not distort the wall-clock throughput numbers. A rolling digest and non-air count keep generation work observable.
+Each pass reports chunks per second, process CPU utilization when the host exposes `getrusage`, and sampled resident-set growth. A separate 16-chunk allocation pass uses a benchmark-local counting allocator, so allocation counts do not distort the wall-clock throughput numbers. The legacy rolling digest over non-air counts remains in the output for historical comparison, while an out-of-band SHA-256 content digest hashes every canonical block-state string, exposed biome cell, and generated block-entity sidecar (or the dimension's equivalent loot/gateway sidecar). The content pass is outside both the timed loop and allocation-counted closure, and cold/warm digests must agree.
 
 Run a 256-chunk sweep in release mode:
 
@@ -20,7 +20,7 @@ Use `32` for 1,024 chunks, or select one dimension with `overworld`, `nether`, o
 
 ## How to change it
 
-Keep the coordinate order, seed, and grid size in the command when comparing runs. Add a new dimension by extending `DimensionName`, `Generator::new`, and `Generator::generate`. If a new generator has no shaped API, expose a base-terrain seam that does not run decoration rather than approximating shaped work by changing resolver data. Keep allocation counting separate from timed passes because the allocator hook changes the hot path.
+Keep the coordinate order, seed, and grid size in the command when comparing runs. Add a new dimension by extending `DimensionName`, `Generator::new`, `Generator::generate`, and the content-digest match arms. If a new generator has no shaped API, expose a base-terrain seam that does not run decoration rather than approximating shaped work by changing resolver data. Keep allocation counting and content hashing separate from timed passes because both observers change the hot path. When a shaped seam does not expose biomes or entities, the digest records zero sidecar entries rather than silently generating a different mode for verification.
 
 The executable is intentionally not a server benchmark: do not add region-file I/O, light propagation, chunk packet encoding, or network scheduling to it. Those costs belong to their own measurements and would make the world-generation number ambiguous.
 
