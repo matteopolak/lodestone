@@ -2622,6 +2622,10 @@ mod tests {
                 &mut compute,
             )
             .expect("persistent plural admission");
+        // The footprint capture may have left a dependency as the only cache
+        // resident; touch the centre explicitly so both members get a real
+        // unload hand-off below.
+        let _ = store.column(0, 0);
         assert_eq!(
             save.save().expect("write plural light snapshots"),
             2,
