@@ -1106,7 +1106,9 @@ impl WindowApp {
                 else {
                     continue;
                 };
-                for (display_id, recipe) in sync.unlocked_producing(item_reg_id) {
+                for (display_id, recipe) in sync.unlocked_producing(
+                    lodestone_model::ItemId::canonical(item_reg_id as u32),
+                ) {
                     if !recipe.highlight {
                         continue;
                     }

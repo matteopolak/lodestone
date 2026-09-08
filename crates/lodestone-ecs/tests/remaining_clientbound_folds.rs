@@ -38,10 +38,14 @@ use lodestone_model::event::{
     ServerLink, ServerLinkKind, StatAward, TrackedWaypoint, WaypointId, WaypointOperation,
     WaypointPosition,
 };
-use lodestone_model::{BlockPos, ChunkPos, RegistrySet};
+use lodestone_model::{BlockPos, ChunkPos, ItemId, RegistrySet};
 
 fn key(name: &str) -> lodestone_model::Identifier {
     name.parse().expect("test key parses")
+}
+
+fn item(raw: i32) -> ItemId {
+    ItemId::protocol_local(raw as u32)
 }
 
 /// Builds the production session `World` and returns `(app, session entity)`.
@@ -153,8 +157,8 @@ fn every_new_event() -> Vec<ClientEvent> {
         ClientEvent::RecipeBookAdded {
             entries: vec![RecipeBookEntry {
                 display_id: 4,
-                result_items: vec![12],
-                station_items: vec![58],
+                result_items: vec![item(12)],
+                station_items: vec![item(58)],
                 group: Some(2),
                 category: 1,
                 crafting_requirements: Some(vec![RegistrySet::Ids(vec![12])]),
@@ -165,11 +169,11 @@ fn every_new_event() -> Vec<ClientEvent> {
         },
         ClientEvent::GhostRecipeShown {
             window_id: 2,
-            result_items: vec![12],
+            result_items: vec![item(12)],
         },
         ClientEvent::RecipePropertySetsUpdated {
-            item_sets: vec![(key("minecraft:furnace_input"), vec![1, 2])],
-            stonecutter_results: vec![(vec![1], vec![3])],
+            item_sets: vec![(key("minecraft:furnace_input"), vec![item(1), item(2)])],
+            stonecutter_results: vec![(vec![item(1)], vec![item(3)])],
         },
         ClientEvent::MerchantOffersReceived {
             window_id: 5,
@@ -291,7 +295,7 @@ fn every_new_event_reaches_its_session_component() {
     assert_eq!(book.property_set_count(), 1);
     assert_eq!(book.stonecutter_results().len(), 1);
     // The join a panel needs, since a RecipeDisplayId carries no recipe name.
-    assert_eq!(book.unlocked_producing(12).count(), 1);
+    assert_eq!(book.unlocked_producing(item(12)).count(), 1);
     // The book's grouping, tab and reveal gate reach the store, not just the
     // result ids: a fold that pattern-matched only the ids it already used
     // would drop these three without any packet failing to decode.
@@ -324,8 +328,8 @@ fn a_removed_recipe_leaves_has_data_set() {
             ClientEvent::RecipeBookAdded {
                 entries: vec![RecipeBookEntry {
                     display_id: 7,
-                    result_items: vec![1],
-                    station_items: vec![61],
+                    result_items: vec![item(1)],
+                    station_items: vec![item(61)],
                     group: None,
                     category: 0,
                     crafting_requirements: None,

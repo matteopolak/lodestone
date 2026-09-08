@@ -1908,7 +1908,10 @@ impl Sim {
     /// results) would make ordinary container interaction scale with unrelated
     /// session data.
     #[must_use]
-    pub fn recipe_property_set(&self, key: &lodestone_model::Identifier) -> Option<Vec<i32>> {
+    pub fn recipe_property_set(
+        &self,
+        key: &lodestone_model::Identifier,
+    ) -> Option<Vec<lodestone_model::ItemId>> {
         self.read(|w| {
             w.get::<lodestone_ecs::session::SessionRecipeBook>(self.local)
                 .expect("the local player always carries SessionRecipeBook")

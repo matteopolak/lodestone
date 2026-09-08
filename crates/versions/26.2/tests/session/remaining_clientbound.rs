@@ -31,11 +31,17 @@ use lodestone_model::event::{
     WaypointOperation, WaypointPosition,
 };
 use lodestone_core::Nbt;
-use lodestone_model::{BlockPos, ChunkPos as ModelChunkPos, ConnectionState, Directive, VersionAdapter};
+use lodestone_model::{
+    BlockPos, ChunkPos as ModelChunkPos, ConnectionState, Directive, ItemId, VersionAdapter,
+};
 use lodestone_world::{
     BiomePatch, BlockEntitySync, ChunkPos, ColumnPatch, LightPatch, LoadedChunk, WorldSink,
 };
 use lodestone_v26_2::packet_ids::play;
+
+fn item(raw: i32) -> ItemId {
+    ItemId::canonical(raw as u32)
+}
 
 /// A [`WorldSink`] that ignores everything — none of these packets is terrain.
 #[derive(Default)]
@@ -647,7 +653,7 @@ fn recipe_book_add_reaches_the_replace_flag_past_the_entry_list() {
     assert_eq!(entries[0].display_id, 4);
     assert_eq!(
         entries[0].result_items,
-        vec![12],
+        vec![item(12)],
         "the *result* slot's item, not an ingredient's -- shapeless puts the \
          result after the ingredient list"
     );
@@ -685,7 +691,7 @@ fn a_shapeless_displays_result_is_after_its_ingredients() {
     assert!(!replace);
     assert_eq!(
         entries[0].result_items,
-        vec![12],
+        vec![item(12)],
         "picked an ingredient instead of the result"
     );
     assert!(!entries[0].notification);
@@ -720,7 +726,7 @@ fn a_shaped_display_consumes_its_width_and_height() {
     };
     assert!(replace);
     assert_eq!(entries[0].display_id, 9);
-    assert_eq!(entries[0].result_items, vec![21]);
+    assert_eq!(entries[0].result_items, vec![item(21)]);
 }
 
 /// A `composite` result collects every nested display's item, and nesting is what
@@ -748,7 +754,7 @@ fn a_composite_result_collects_every_nested_item() {
     else {
         panic!("wrong event");
     };
-    assert_eq!(entries[0].result_items, vec![7, 8]);
+    assert_eq!(entries[0].result_items, vec![item(7), item(8)]);
 }
 
 /// An unmodeled `SlotDisplay` id must abandon the packet, not emit a half-read
@@ -805,7 +811,7 @@ fn place_ghost_recipe_carries_the_window_and_the_result() {
         panic!("wrong event");
     };
     assert_eq!(window_id, 3);
-    assert_eq!(result_items, vec![44]);
+    assert_eq!(result_items, vec![item(44)]);
 }
 
 /// `update_recipes`' first field is cleanly decodable; the second needs a
@@ -839,10 +845,10 @@ fn update_recipes_decodes_property_sets_then_the_stonecutter_list() {
     };
     assert_eq!(item_sets.len(), 1);
     assert_eq!(item_sets[0].0, key("minecraft:furnace_input"));
-    assert_eq!(item_sets[0].1, vec![5, 6]);
+    assert_eq!(item_sets[0].1, vec![item(5), item(6)]);
     assert_eq!(stonecutter_results.len(), 2);
-    assert_eq!(stonecutter_results[0].0, vec![3], "the explicit-id ingredient");
-    assert_eq!(stonecutter_results[0].1, vec![9]);
+    assert_eq!(stonecutter_results[0].0, vec![item(3)], "the explicit-id ingredient");
+    assert_eq!(stonecutter_results[0].1, vec![item(9)]);
     assert!(
         stonecutter_results[1].0.is_empty(),
         "a tag-form ingredient yields no explicit item id"

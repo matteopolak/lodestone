@@ -46,8 +46,8 @@ fn recipe_snapshot_reuses_the_cache_until_the_source_revision_moves() {
         lodestone_client::ClientEvent::RecipeBookAdded {
             entries: vec![lodestone_model::event::RecipeBookEntry {
                 display_id: 7,
-                result_items: vec![10],
-                station_items: vec![11],
+                result_items: vec![lodestone_model::ItemId::protocol_local(10)],
+                station_items: vec![lodestone_model::ItemId::protocol_local(11)],
                 group: None,
                 category: 0,
                 crafting_requirements: None,

@@ -36,9 +36,11 @@
 //!
 //! ## How to change it
 //!
-//! Result items are registry ids, deliberately unresolved: mapping an id to a name
-//! needs `lodestone-data`, and a store in this crate has no business reaching for
-//! it when the caller already holds an item table.
+//! Result items use [`lodestone_model::ItemId`] rather than bare integers. The
+//! source tag preserves a synchronized dynamic id, while a built-in consumer
+//! can require `ItemId::Canonical` before indexing its item table. Mapping an
+//! id to a name still needs `lodestone-data`, and this store has no business
+//! reaching for it when the caller already owns the appropriate item table.
 //!
 //! ## Dependencies
 //!
@@ -47,17 +49,17 @@
 use std::collections::BTreeMap;
 
 use lodestone_model::event::{ClientEvent, RecipeBookEntry};
-use lodestone_model::{Identifier, RegistrySet};
+use lodestone_model::{Identifier, ItemId, RegistrySet};
 
 /// One recipe the server has unlocked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnownRecipe {
-    /// Item registry ids the result slot can display.
-    pub result_items: Vec<i32>,
-    /// Item registry ids the recipe's station (corner icon — crafting table,
+    /// Item ids the result slot can display, retaining registry provenance.
+    pub result_items: Vec<ItemId>,
+    /// Item ids the recipe's station (corner icon — crafting table,
     /// furnace, etc.) can display. See
     /// [`lodestone_model::event::RecipeBookEntry::station_items`].
-    pub station_items: Vec<i32>,
+    pub station_items: Vec<ItemId>,
     /// The book group this recipe cycles within, or `None` when it stands
     /// alone. See [`lodestone_model::event::RecipeBookEntry::group`].
     pub group: Option<i32>,
@@ -78,8 +80,9 @@ pub struct KnownRecipe {
 pub struct GhostRecipe {
     /// The container the ghost belongs to.
     pub window_id: i32,
-    /// Item registry ids the ghost's result slot can display.
-    pub result_items: Vec<i32>,
+    /// Item ids the ghost's result slot can display, retaining registry
+    /// provenance.
+    pub result_items: Vec<ItemId>,
 }
 
 /// The server's recipe-book state for this session.
@@ -87,8 +90,8 @@ pub struct GhostRecipe {
 pub struct RecipeBookSync {
     known: BTreeMap<i32, KnownRecipe>,
     ghost: Option<GhostRecipe>,
-    property_sets: BTreeMap<Identifier, Vec<i32>>,
-    stonecutter_results: Vec<(Vec<i32>, Vec<i32>)>,
+    property_sets: BTreeMap<Identifier, Vec<ItemId>>,
+    stonecutter_results: Vec<(Vec<ItemId>, Vec<ItemId>)>,
     /// Whether any `recipe_book_add` has arrived. Distinct from `known.is_empty()`
     /// for [`crate::recipe::RecipeUnlockState`]'s reason: an add followed by a
     /// remove empties `known` again, and without this flag a consumer could not
@@ -140,7 +143,7 @@ impl RecipeBookSync {
 
     /// The valid-item set for a property key, e.g. `minecraft:furnace_input`.
     #[must_use]
-    pub fn property_set(&self, key: &Identifier) -> Option<&[i32]> {
+    pub fn property_set(&self, key: &Identifier) -> Option<&[ItemId]> {
         self.property_sets.get(key).map(Vec::as_slice)
     }
 
@@ -152,14 +155,17 @@ impl RecipeBookSync {
 
     /// Per-stonecutter-recipe `(input item ids, result item ids)`.
     #[must_use]
-    pub fn stonecutter_results(&self) -> &[(Vec<i32>, Vec<i32>)] {
+    pub fn stonecutter_results(&self) -> &[(Vec<ItemId>, Vec<ItemId>)] {
         &self.stonecutter_results
     }
 
     /// Result item ids reachable from a stonecutter whose input slot holds
     /// `input_item_id` — the subset a stonecutter screen actually shows, as
     /// opposed to every entry the server ever sent.
-    pub fn stonecutter_results_for(&self, input_item_id: i32) -> impl Iterator<Item = &[i32]> {
+    pub fn stonecutter_results_for(
+        &self,
+        input_item_id: ItemId,
+    ) -> impl Iterator<Item = &[ItemId]> {
         self.stonecutter_results
             .iter()
             .filter(move |(input, _)| input.contains(&input_item_id))
@@ -168,7 +174,10 @@ impl RecipeBookSync {
 
     /// Every unlocked recipe whose result includes `item_id` — the join a recipe
     /// panel needs, given that a `RecipeDisplayId` carries no name.
-    pub fn unlocked_producing(&self, item_id: i32) -> impl Iterator<Item = (i32, &KnownRecipe)> {
+    pub fn unlocked_producing(
+        &self,
+        item_id: ItemId,
+    ) -> impl Iterator<Item = (i32, &KnownRecipe)> {
         self.known
             .iter()
             .filter(move |(_, recipe)| recipe.result_items.contains(&item_id))
@@ -247,13 +256,17 @@ impl RecipeBookSync {
 #[cfg(test)]
 mod tests {
     use super::RecipeBookSync;
-    use lodestone_model::RegistrySet;
+    use lodestone_model::{ItemId, RegistrySet};
     use lodestone_model::event::{ClientEvent, RecipeBookEntry};
+
+    fn item(raw: i32) -> ItemId {
+        ItemId::protocol_local(raw as u32)
+    }
 
     fn entry(display_id: i32, result: i32) -> RecipeBookEntry {
         RecipeBookEntry {
             display_id,
-            result_items: vec![result],
+            result_items: vec![item(result)],
             station_items: Vec::new(),
             group: None,
             category: 0,
@@ -324,7 +337,7 @@ mod tests {
             },
             ClientEvent::GhostRecipeShown {
                 window_id: 4,
-                result_items: vec![10],
+                result_items: vec![item(10)],
             },
             ClientEvent::RecipePropertySetsUpdated {
                 item_sets: Vec::new(),
@@ -348,9 +361,12 @@ mod tests {
             entries: vec![entry(1, 10), entry(2, 20), entry(3, 10)],
             replace: true,
         });
-        let producing: Vec<i32> = store.unlocked_producing(10).map(|(id, _)| id).collect();
+        let producing: Vec<i32> = store
+            .unlocked_producing(item(10))
+            .map(|(id, _)| id)
+            .collect();
         assert_eq!(producing, vec![1, 3]);
-        assert_eq!(store.unlocked_producing(99).count(), 0);
+        assert_eq!(store.unlocked_producing(item(99)).count(), 0);
     }
 
     /// The station item id must survive the fold — this is what a recipe-unlock
@@ -362,8 +378,8 @@ mod tests {
         store.apply(&ClientEvent::RecipeBookAdded {
             entries: vec![RecipeBookEntry {
                 display_id: 1,
-                result_items: vec![10],
-                station_items: vec![99],
+                result_items: vec![item(10)],
+                station_items: vec![item(99)],
                 group: Some(5),
                 category: 2,
                 crafting_requirements: Some(vec![RegistrySet::Tag(
@@ -375,8 +391,8 @@ mod tests {
             replace: true,
         });
         let recipe = store.known().get(&1).expect("entry 1 is known");
-        assert_eq!(recipe.result_items, vec![10]);
-        assert_eq!(recipe.station_items, vec![99]);
+        assert_eq!(recipe.result_items, vec![item(10)]);
+        assert_eq!(recipe.station_items, vec![item(99)]);
         assert_eq!(recipe.group, Some(5));
         assert_eq!(recipe.category, 2);
         assert_eq!(
@@ -387,23 +403,51 @@ mod tests {
         );
     }
 
+    /// Recipe synchronization must compare both the numeric id and its
+    /// numbering source. A dynamic id may reuse a number that is meaningful in
+    /// this build's canonical census, but it is not the same item.
+    #[test]
+    fn dynamic_item_ids_remain_opaque_to_canonical_lookups() {
+        let mut store = RecipeBookSync::new();
+        let dynamic = ItemId::protocol_local(10);
+        store.apply(&ClientEvent::RecipeBookAdded {
+            entries: vec![RecipeBookEntry {
+                display_id: 1,
+                result_items: vec![dynamic],
+                station_items: Vec::new(),
+                group: None,
+                category: 0,
+                crafting_requirements: None,
+                notification: false,
+                highlight: false,
+            }],
+            replace: true,
+        });
+
+        assert_eq!(store.unlocked_producing(dynamic).count(), 1);
+        assert_eq!(store.unlocked_producing(ItemId::canonical(10)).count(), 0);
+    }
+
     #[test]
     fn property_sets_replace_wholesale() {
         let mut store = RecipeBookSync::new();
         let key: lodestone_model::Identifier = "minecraft:furnace_input".parse().unwrap();
         store.apply(&ClientEvent::RecipePropertySetsUpdated {
-            item_sets: vec![(key.clone(), vec![1, 2, 3])],
-            stonecutter_results: vec![(vec![4], vec![7])],
+            item_sets: vec![(key.clone(), vec![item(1), item(2), item(3)])],
+            stonecutter_results: vec![(vec![item(4)], vec![item(7)])],
         });
-        assert_eq!(store.property_set(&key), Some(&[1, 2, 3][..]));
+        assert_eq!(
+            store.property_set(&key),
+            Some(&[item(1), item(2), item(3)][..])
+        );
         assert_eq!(store.stonecutter_results().len(), 1);
         assert_eq!(
-            store.stonecutter_results_for(4).collect::<Vec<_>>(),
-            vec![&[7][..]],
+            store.stonecutter_results_for(item(4)).collect::<Vec<_>>(),
+            vec![&[item(7)][..]],
             "a result must be reachable through the input it is keyed by"
         );
         assert_eq!(
-            store.stonecutter_results_for(99).count(),
+            store.stonecutter_results_for(item(99)).count(),
             0,
             "an input nothing was keyed by must not spuriously match"
         );
@@ -421,7 +465,7 @@ mod tests {
         let mut store = RecipeBookSync::new();
         store.apply(&ClientEvent::GhostRecipeShown {
             window_id: 3,
-            result_items: vec![5],
+            result_items: vec![item(5)],
         });
         assert_eq!(store.ghost().map(|g| g.window_id), Some(3));
     }

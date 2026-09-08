@@ -7,7 +7,8 @@ use lodestone_data::block::Block;
 // here rather than widening that shared glob for one type this file alone
 // needs.
 use lodestone_model::{
-    AttackRange, BlocksAttacks, ConsumeEffect, DamageReduction, MobEffectInstance, RegistrySet,
+    AttackRange, BlocksAttacks, ConsumeEffect, DamageReduction, ItemId, MobEffectInstance,
+    RegistrySet,
 };
 
 /// Maximum nesting this module will walk through sender-chosen structure.
@@ -94,6 +95,28 @@ impl Depth {
 /// preserve them; this adapter only turns known built-ins into item names.
 fn item_from_wire_id(raw: i32) -> Option<Item> {
     u16::try_from(raw).ok().and_then(Item::from_registry_id)
+}
+
+/// Preserves one item id carried by a synchronized recipe structure while
+/// classifying ids that are safe for this build's generated item census.
+///
+/// The recipe registry can contain server-defined entries. An unknown positive
+/// id is therefore not an error and must not be coerced to air or discarded;
+/// it remains `ProtocolLocal` until a matching dynamic registry is available.
+/// Negative values are malformed registry ids and are rejected before either
+/// domain is constructed.
+fn recipe_item_id_from_wire(raw: i32) -> Result<ItemId, AdapterError> {
+    let raw = u32::try_from(raw)
+        .map_err(|_| AdapterError::Decode("negative item registry id".to_owned()))?;
+    let canonical = u16::try_from(raw)
+        .ok()
+        .and_then(Item::from_registry_id)
+        .is_some();
+    Ok(if canonical {
+        ItemId::canonical(raw)
+    } else {
+        ItemId::protocol_local(raw)
+    })
 }
 
 impl V770Adapter {
@@ -2426,8 +2449,9 @@ mod slot_display {
 /// following field.
 #[derive(Debug, Default)]
 struct SlotDisplayItems {
-    /// Item registry ids this display can show, in encounter order.
-    items: Vec<i32>,
+    /// Item ids this display can show, in encounter order, retaining registry
+    /// provenance for dynamic entries.
+    items: Vec<ItemId>,
     /// Whether the walk consumed the display exactly.
     complete: bool,
 }
@@ -2475,20 +2499,22 @@ fn read_slot_display(
     match kind {
         slot_display::EMPTY | slot_display::ANY_FUEL => {}
         slot_display::ITEM => {
-            items.push(reader.var_i32().map_err(dec_err)?);
+            let raw = reader.var_i32().map_err(dec_err)?;
+            items.push(recipe_item_id_from_wire(raw)?);
         }
         slot_display::ITEM_STACK => {
             // `vanilla's own item stack template's own stream codec`: item id, count, then a
             // `DataComponentPatch` — which is exactly what `read_component_patch`
             // walks, including its bail-out on an unmodeled component type.
             let item_id = reader.var_i32().map_err(dec_err)?;
+            let item_ref = recipe_item_id_from_wire(item_id)?;
             let _count = reader.var_i32().map_err(dec_err)?;
             let item = item_from_wire_id(item_id).unwrap_or(Item::Air);
             let (_components, complete) = read_component_patch(reader, item.name(), depth)?;
             if !complete {
                 return Ok(SlotDisplayItems::incomplete());
             }
-            items.push(item_id);
+            items.push(item_ref);
         }
         slot_display::TAG => {
             // vanilla's tag-key stream codec is one `Identifier` string. The tag's *members*
@@ -2584,14 +2610,17 @@ fn read_slot_display(
 ///
 /// Variant ids are vanilla's own recipe-display registration order:
 /// shapeless, shaped, furnace, stonecutter, smithing.
-fn read_recipe_display(reader: &mut Reader<'_>) -> Result<Option<(Vec<i32>, Vec<i32>)>, AdapterError> {
+fn read_recipe_display(
+    reader: &mut Reader<'_>,
+) -> Result<Option<(Vec<ItemId>, Vec<ItemId>)>, AdapterError> {
     let kind = reader.var_i32().map_err(dec_err)?;
     // Each variant is a fixed sequence of `SlotDisplay`s plus, for two of them,
     // some scalars. `result_index` is which of the walked displays is the result,
     // and `station_last` is true for every variant because `craftingStation` is
     // always the final `SlotDisplay`.
-    let mut walked: Vec<Vec<i32>> = Vec::new();
-    let walk = |reader: &mut Reader<'_>, walked: &mut Vec<Vec<i32>>| -> Result<bool, AdapterError> {
+    let mut walked: Vec<Vec<ItemId>> = Vec::new();
+    let walk =
+        |reader: &mut Reader<'_>, walked: &mut Vec<Vec<ItemId>>| -> Result<bool, AdapterError> {
         let display = read_slot_display(reader, Depth::ROOT)?;
         if !display.complete {
             return Ok(false);
@@ -2914,7 +2943,8 @@ fn decode_update_recipes(payload: &[u8]) -> Result<Vec<Directive>, AdapterError>
             .map_err(|_| AdapterError::Decode(format!("invalid property item count {item_count}")))?;
         let mut items = Vec::with_capacity(item_count.min(4096));
         for _ in 0..item_count {
-            items.push(reader.var_i32().map_err(dec_err)?);
+            let raw = reader.var_i32().map_err(dec_err)?;
+            items.push(recipe_item_id_from_wire(raw)?);
         }
         item_sets.push((parse_key(&key, "recipe property set")?, items));
     }
@@ -2933,7 +2963,12 @@ fn decode_update_recipes(payload: &[u8]) -> Result<Vec<Directive>, AdapterError>
         // ingredient reaches it as an empty list — the one place in this module
         // where a registry set is narrowed rather than kept whole, because
         // widening the event reaches consumers outside this crate.
-        let input = read_registry_set(&mut reader)?.explicit_ids().to_vec();
+        let input = read_registry_set(&mut reader)?
+            .explicit_ids()
+            .iter()
+            .copied()
+            .map(recipe_item_id_from_wire)
+            .collect::<Result<Vec<_>, _>>()?;
         let display = read_slot_display(&mut reader, Depth::ROOT)?;
         if !display.complete {
             // Emit what was decoded before the unmodeled entry rather than the
@@ -3462,6 +3497,58 @@ fn decode_update_advancements(payload: &[u8]) -> Result<Vec<Directive>, AdapterE
 fn read_count(reader: &mut Reader<'_>, what: &str) -> Result<usize, AdapterError> {
     let count = reader.var_i32().map_err(dec_err)?;
     usize::try_from(count).map_err(|_| AdapterError::Decode(format!("invalid {what} count {count}")))
+}
+
+#[cfg(test)]
+mod recipe_item_id_boundary {
+    use super::{Depth, Item, ItemId, Reader, read_slot_display, recipe_item_id_from_wire};
+
+    fn var_i32(mut value: i32) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let mut byte = (value as u8) & 0x7f;
+            value >>= 7;
+            if (value != 0) && (value != -1 || (byte & 0x40) == 0) {
+                byte |= 0x80;
+            }
+            out.push(byte);
+            if value == 0 || value == -1 && (byte & 0x40) != 0 {
+                return out;
+            }
+        }
+    }
+
+    #[test]
+    fn known_registry_ids_are_tagged_only_after_census_validation() {
+        let id = recipe_item_id_from_wire(0).expect("registry id zero is valid");
+        assert_eq!(id, ItemId::canonical(0));
+        assert!(Item::from_registry_id(0).is_some());
+    }
+
+    #[test]
+    fn unknown_positive_registry_ids_are_preserved_as_protocol_local() {
+        let raw = i32::MAX;
+        let id = recipe_item_id_from_wire(raw).expect("dynamic ids are preserved");
+        assert_eq!(id, ItemId::protocol_local(raw as u32));
+        assert_eq!(id.raw(), raw as u32);
+        assert_eq!(id.canonical_raw(), None);
+    }
+
+    #[test]
+    fn negative_registry_ids_are_rejected_before_domain_conversion() {
+        assert!(recipe_item_id_from_wire(-1).is_err());
+    }
+
+    #[test]
+    fn slot_display_ingress_keeps_an_unknown_item_id() {
+        let raw = i32::MAX;
+        let payload = [var_i32(4), var_i32(raw)].concat();
+        let mut reader = Reader::new(&payload);
+        let display = read_slot_display(&mut reader, Depth::ROOT)
+            .expect("the item slot-display payload is readable");
+        assert!(display.complete);
+        assert_eq!(display.items, vec![ItemId::protocol_local(raw as u32)]);
+    }
 }
 
 #[cfg(test)]

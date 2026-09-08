@@ -13,7 +13,7 @@ numeric: public functions with state_id, block_state, effect_id, item_id, entity
 text: public String fields whose names end in url, dimension, potion, effect, state, kind, mode, key, or id
 ```
 
-The snapshot contains **88 numeric APIs** and **62 text fields**, **150 sites total**. Every row is assigned either a migration family or an intentional boundary category. The scanner is a discovery guard, not a claim that every integer or string in the repository needs a wrapper.
+The snapshot contains **86 numeric APIs** and **62 text fields**, **148 sites total**. Every row is assigned either a migration family or an intentional boundary category. The scanner is a discovery guard, not a claim that every integer or string in the repository needs a wrapper.
 
 | disposition | sites |
 |---|---:|
@@ -29,10 +29,9 @@ The snapshot contains **88 numeric APIs** and **62 text fields**, **150 sites to
 | `inventory-menu-slot` | 32 |
 | `potion-and-state-value` | 11 |
 | `prediction-sequence` | 2 |
-| `recipe-item-id` | 2 |
 | `typed-discriminator` | 5 |
 
-Migration families are `prediction-sequence`, `recipe-item-id`, `entity-network-id`, `inventory-menu-slot`, `potion-and-state-value`, `typed-discriminator`, and `dimension-resource-url`.
+Migration families are `prediction-sequence`, `entity-network-id`, `inventory-menu-slot`, `potion-and-state-value`, `typed-discriminator`, and `dimension-resource-url`.
 
 Intentional categories retain primitives because the representation is the interface: bytes/integers at wire boundaries, strings in storage/import formats, external identity strings, cache or ring-buffer indices, observability labels, secrets, and user-authored or format-defined text.
 
@@ -100,8 +99,6 @@ Intentional categories retain primitives because the representation is the inter
 | `crates/lodestone-game/src/click.rs:     pub fn double(slot: usize) -> Self {` | `inventory-menu-slot` |
 | `crates/lodestone-game/src/placement.rs:     pub fn acknowledge(&mut self, sequence: i32) -> Vec<PlacePrediction> {` | `prediction-sequence` |
 | `crates/lodestone-game/src/reconcile.rs:     pub fn to_action(&self, window_id: i32) -> ClientAction {` | `inventory-menu-slot` |
-| `crates/lodestone-game/src/recipe_sync.rs:     pub fn stonecutter_results_for(&self, input_item_id: i32) -> impl Iterator<Item = &[i32]> {` | `recipe-item-id` |
-| `crates/lodestone-game/src/recipe_sync.rs:     pub fn unlocked_producing(&self, item_id: i32) -> impl Iterator<Item = (i32, &KnownRecipe)> {` | `recipe-item-id` |
 | `crates/versions/26.2/src/packets/metadata.rs: pub fn write_update_attributes(w: &mut Writer, entity_id: i32, attributes: &[EntityAttributeSnapshot]) {` | `intentional-wire-boundary` |
 | `crates/lodestone-shell/src/entities.rs: pub fn begin_item_pickup(world: &mut World, item_entity_id: i32, collector_id: i32) -> bool {` | `entity-network-id` |
 | `crates/lodestone-shell/src/entities.rs:     pub fn set_item_stack(&mut self, entity_id: i32, item: ResourceLocation) {` | `entity-network-id` |

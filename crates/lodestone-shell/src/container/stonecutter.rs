@@ -44,7 +44,7 @@ use lodestone_game::item::ItemStack;
 use lodestone_game::menu::{Menu, SpecialLayout};
 use lodestone_game::recipe_sync::RecipeBookSync;
 use lodestone_data::item::Item;
-use lodestone_model::Identifier;
+use lodestone_model::{Identifier, ItemId};
 
 use super::layout::Rect;
 
@@ -70,9 +70,11 @@ const VISIBLE_COUNT: i32 = COLUMNS * VISIBLE_ROWS;
 /// `ghost_result_stack` both already keep. `None` when no candidate resolves,
 /// which draws nothing rather than a guessed icon.
 #[must_use]
-pub fn server_result_stack(result_items: &[i32]) -> Option<ItemStack> {
+pub fn server_result_stack(result_items: &[ItemId]) -> Option<ItemStack> {
     result_items.iter().find_map(|&id| {
-        let item = u16::try_from(id).ok().and_then(Item::from_registry_id)?;
+        let item = u16::try_from(id.canonical_raw()?)
+            .ok()
+            .and_then(Item::from_registry_id)?;
         let identifier: Identifier = item.name().parse().ok()?;
         Some(ItemStack::new(identifier, 1))
     })
@@ -93,7 +95,7 @@ pub fn server_results_for_menu(menu: &Menu, sync: &RecipeBookSync) -> Vec<Option
         return Vec::new();
     };
     let Some(input_item_id) = Item::from_name(&input.item().to_string())
-        .map(|item| i32::from(item.registry_id()))
+        .map(|item| ItemId::canonical(u32::from(item.registry_id())))
     else {
         return Vec::new();
     };
@@ -237,7 +239,7 @@ mod tests {
     /// always returns `None`.
     #[test]
     fn server_result_stack_resolves_the_first_nameable_candidate() {
-        let stone_slab = i32::from(Item::StoneSlab.registry_id());
+        let stone_slab = ItemId::canonical(u32::from(Item::StoneSlab.registry_id()));
         let stack =
             server_result_stack(&[stone_slab]).expect("a real id must resolve");
         assert_eq!(stack.item().to_string(), "minecraft:stone_slab");
@@ -249,7 +251,7 @@ mod tests {
     /// a guessed icon.
     #[test]
     fn server_result_stack_is_none_for_an_id_outside_the_table() {
-        assert!(server_result_stack(&[i32::MAX]).is_none());
+        assert!(server_result_stack(&[ItemId::protocol_local(i32::MAX as u32)]).is_none());
     }
 
     /// A tag-shaped display can offer several candidate ids for the same
@@ -257,16 +259,20 @@ mod tests {
     /// `app/recipe_panel.rs`'s `ghost_result_stack`.
     #[test]
     fn server_result_stack_skips_an_unresolvable_leading_candidate() {
-        let stone_slab = i32::from(Item::StoneSlab.registry_id());
-        let stack = server_result_stack(&[i32::MAX, stone_slab]).expect("the second id must resolve");
+        let stone_slab = ItemId::canonical(u32::from(Item::StoneSlab.registry_id()));
+        let stack = server_result_stack(&[
+            ItemId::protocol_local(i32::MAX as u32),
+            stone_slab,
+        ])
+        .expect("the second id must resolve");
         assert_eq!(stack.item().to_string(), "minecraft:stone_slab");
     }
 
     #[test]
     fn server_results_for_menu_preserves_server_indices_across_unresolvable_entries() {
-        let stone = i32::from(Item::Stone.registry_id());
-        let stone_slab = i32::from(Item::StoneSlab.registry_id());
-        let stone_stairs = i32::from(Item::StoneStairs.registry_id());
+        let stone = ItemId::canonical(u32::from(Item::Stone.registry_id()));
+        let stone_slab = ItemId::canonical(u32::from(Item::StoneSlab.registry_id()));
+        let stone_stairs = ItemId::canonical(u32::from(Item::StoneStairs.registry_id()));
         let mut menu = Menu::stonecutter();
         menu.set_slot_item(
             INPUT_SLOT,
@@ -277,7 +283,10 @@ mod tests {
             item_sets: Vec::new(),
             stonecutter_results: vec![
                 (vec![stone], vec![stone_slab]),
-                (vec![stone], vec![i32::MAX]),
+                (
+                    vec![stone],
+                    vec![ItemId::protocol_local(i32::MAX as u32)],
+                ),
                 (vec![stone], vec![stone_stairs]),
             ],
         });

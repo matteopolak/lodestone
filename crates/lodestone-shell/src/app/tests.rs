@@ -147,8 +147,9 @@ fn open_test_stonecutter(
     use lodestone_client::ClientEvent;
 
     const WINDOW_ID: i32 = 17;
-    let stone_id = i32::from(Item::Stone.registry_id());
-    let slab_id = i32::from(Item::StoneSlab.registry_id());
+    let stone_id = lodestone_model::ItemId::canonical(u32::from(Item::Stone.registry_id()));
+    let slab_id =
+        lodestone_model::ItemId::canonical(u32::from(Item::StoneSlab.registry_id()));
     let ingest = |event| {
         app.sim
             .net()
@@ -3921,8 +3922,9 @@ fn drive_ui_from_session_toasts_a_newly_unlocked_recipe_but_not_the_join_time_se
     use lodestone_client::ClientEvent;
     use lodestone_model::event::RecipeBookEntry;
 
-    let torch = i32::from(Item::Torch.registry_id());
-    let crafting_table = i32::from(Item::CraftingTable.registry_id());
+    let torch = lodestone_model::ItemId::canonical(u32::from(Item::Torch.registry_id()));
+    let crafting_table =
+        lodestone_model::ItemId::canonical(u32::from(Item::CraftingTable.registry_id()));
 
     let mut app = WindowApp::new(Config {
         mode: Mode::Headless,
@@ -3997,8 +3999,9 @@ fn a_non_notifying_unlock_never_toasts() {
     use lodestone_client::ClientEvent;
     use lodestone_model::event::RecipeBookEntry;
 
-    let torch = i32::from(Item::Torch.registry_id());
-    let crafting_table = i32::from(Item::CraftingTable.registry_id());
+    let torch = lodestone_model::ItemId::canonical(u32::from(Item::Torch.registry_id()));
+    let crafting_table =
+        lodestone_model::ItemId::canonical(u32::from(Item::CraftingTable.registry_id()));
 
     let mut app = WindowApp::new(Config {
         mode: Mode::Headless,
@@ -4078,8 +4081,9 @@ fn drive_ui_from_session_reports_a_visible_highlighted_recipe_as_seen_exactly_on
         )),
     );
 
-    let torch = i32::from(Item::Torch.registry_id());
-    let crafting_table = i32::from(Item::CraftingTable.registry_id());
+    let torch = lodestone_model::ItemId::canonical(u32::from(Item::Torch.registry_id()));
+    let crafting_table =
+        lodestone_model::ItemId::canonical(u32::from(Item::CraftingTable.registry_id()));
 
     let mut app = WindowApp::new(Config {
         mode: Mode::Headless,
@@ -4160,8 +4164,9 @@ fn a_highlighted_recipe_is_not_reported_while_the_panel_is_closed() {
         )),
     );
 
-    let torch = i32::from(Item::Torch.registry_id());
-    let crafting_table = i32::from(Item::CraftingTable.registry_id());
+    let torch = lodestone_model::ItemId::canonical(u32::from(Item::Torch.registry_id()));
+    let crafting_table =
+        lodestone_model::ItemId::canonical(u32::from(Item::CraftingTable.registry_id()));
 
     let mut app = WindowApp::new(Config {
         mode: Mode::Headless,
