@@ -4,7 +4,10 @@
 //! expectation from the Rust-side oracle.  The live capture script is the
 //! producer; this module only validates and consumes its JSON.
 
-use lodestone_fuzz::differential::{Action, OracleFailure, Side, WorldOracle};
+use lodestone_fuzz::differential::{
+    Action, BlockStateProbe, BlockStateRegion, FixedActionReplay, FixedReplayError, OracleFailure,
+    Script, ScriptStep, Side, WorldOracle,
+};
 use serde::Deserialize;
 
 pub const FORMAT_VERSION: u32 = 1;
@@ -76,6 +79,49 @@ impl TickCorpus {
 
     pub fn scenario(&self) -> &str {
         &self.scenario
+    }
+
+    /// Converts the externally captured script and probe alphabet into the
+    /// shared fixed-replay runner. The runner then applies the same actions to
+    /// both a production oracle and a recorded-observation oracle before each
+    /// exact tick, so the expected values never come from the production side.
+    pub fn fixed_replay(&self, seed: u64) -> Result<FixedActionReplay, FixedReplayError> {
+        let script = Script::new(
+            self.steps
+                .iter()
+                .map(|step| ScriptStep {
+                    tick: step.tick,
+                    action: match &step.action {
+                        SetBlock::SetBlock { pos, state } => Action::SetBlock {
+                            pos: *pos,
+                            state: state.clone(),
+                        },
+                    },
+                })
+                .collect(),
+        );
+        let region = BlockStateRegion::new(
+            self.region
+                .iter()
+                .map(|probe| BlockStateProbe {
+                    pos: probe.pos,
+                    candidates: probe.candidates.clone(),
+                })
+                .collect(),
+        )?;
+        FixedActionReplay::new(seed, script, region, self.settle_ticks)
+    }
+
+    /// Creates the right-hand oracle for a replay against captured Java
+    /// observations. It intentionally has no world model: its state is only
+    /// the externally recorded value for the tick and probe being compared.
+    pub fn recorded_oracle(&self) -> RecordedOracle {
+        RecordedOracle {
+            region: self.region.clone(),
+            observations: self.observations.clone(),
+            completed_ticks: 0,
+            corrupt_tick: None,
+        }
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -203,6 +249,59 @@ impl TickCorpus {
             }
         }
         CorpusOutcome::Agreed
+    }
+}
+
+/// A fixed, externally observed oracle used to exercise the production-side
+/// differential path without requiring a live server during every test run.
+/// `corrupt_tick` exists solely as a detector control: it turns one recorded
+/// state into a missing candidate so an always-`Agreed` harness cannot pass.
+pub struct RecordedOracle {
+    region: Vec<Probe>,
+    observations: Vec<Observation>,
+    completed_ticks: usize,
+    corrupt_tick: Option<u64>,
+}
+
+impl RecordedOracle {
+    #[must_use]
+    pub fn corrupt_at(mut self, tick: u64) -> Self {
+        self.corrupt_tick = Some(tick);
+        self
+    }
+}
+
+impl WorldOracle for RecordedOracle {
+    type Error = std::convert::Infallible;
+
+    fn apply(&mut self, _action: &Action) -> Result<(), Self::Error> {
+        // Actions are already represented in the capture's observation
+        // sequence. Replaying them here would create a second, Rust-derived
+        // expectation rather than consuming the external observation.
+        Ok(())
+    }
+
+    fn advance_tick(&mut self) -> Result<(), Self::Error> {
+        self.completed_ticks += 1;
+        Ok(())
+    }
+
+    fn block_state(
+        &mut self,
+        pos: (i32, i32, i32),
+        candidates: &[String],
+    ) -> Result<Option<String>, Self::Error> {
+        let observation = &self.observations[self.completed_ticks - 1];
+        let index = self
+            .region
+            .iter()
+            .position(|probe| probe.pos == pos)
+            .expect("replay probe must come from the validated corpus");
+        let expected = observation.states[index].clone();
+        if self.corrupt_tick == Some((self.completed_ticks - 1) as u64) {
+            return Ok(None);
+        }
+        Ok(expected.filter(|state| candidates.contains(state)))
     }
 }
 
