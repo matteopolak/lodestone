@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Compile & run a worldgen JVM oracle against the real 26.2 server classes,
-# in an ephemeral temurin:25-jdk container. Prints the oracle's stdout.
+# in an ephemeral temurin:25-jdk container. Frozen exports get a fresh
+# disposable clone of the sealed root; prints the oracle's stdout.
 #   usage: run.sh <OracleClassName> [args...]
 #
 # Runtime: Apple `container` — see docs/oracle-runtimes.md. The `:ro`
@@ -25,6 +26,14 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 container system start >/dev/null 2>&1 || true
 WORLD_MOUNTS=()
 WORLD_ENV=()
+FROZEN_CLONE=""
+cleanup_frozen_clone() {
+  if [ -n "$FROZEN_CLONE" ] && [ -d "$FROZEN_CLONE" ]; then
+    chmod -R u+w "$FROZEN_CLONE" 2>/dev/null || true
+    rm -rf "$FROZEN_CLONE"
+  fi
+}
+trap cleanup_frozen_clone EXIT
 if [ -n "${LODESTONE_ORACLE_WORLD_ROOT:-}" ]; then
   if [ ! -d "$LODESTONE_ORACLE_WORLD_ROOT" ]; then
     echo "LODESTONE_ORACLE_WORLD_ROOT must name an existing writable directory" >&2
@@ -46,6 +55,22 @@ if [ -n "${LODESTONE_ORACLE_FROZEN_WORLD_ROOT:-}" ]; then
   fi
   WORLD_MOUNTS+=( -v "$LODESTONE_ORACLE_FROZEN_WORLD_ROOT:/frozen:ro" )
   WORLD_ENV+=( -e ORACLE_FROZEN_WORLD_ROOT=/frozen )
+  oracle_dimension="${LODESTONE_ORACLE_DIMENSION:-overworld}"
+  raw_packet=0
+  for arg in "$@"; do
+    case "$arg" in
+      --raw-packet|--format-v6) raw_packet=1 ;;
+    esac
+  done
+  if [ "$raw_packet" -eq 1 ]; then
+    freeze_stamp="lodestone-large-parity-materialization-v6-${oracle_dimension}.freeze.sha256"
+  else
+    freeze_stamp="lodestone-large-parity-materialization-v2-${oracle_dimension}.freeze.sha256"
+  fi
+  frozen_cache="${LODESTONE_ORACLE_FROZEN_CACHE_ROOT:-${LODESTONE_ORACLE_FROZEN_WORLD_ROOT}.oracle-cache}"
+  FROZEN_CLONE="$("$HERE/frozen-world-clone.sh" clone "$LODESTONE_ORACLE_FROZEN_WORLD_ROOT" "$frozen_cache" "$freeze_stamp")"
+  WORLD_MOUNTS+=( -v "$FROZEN_CLONE:/frozen-work" )
+  WORLD_ENV+=( -e ORACLE_FROZEN_WORK_ROOT=/frozen-work )
 fi
 if [ -n "${LODESTONE_ORACLE_OUTPUT_ROOT:-}" ]; then
   if [ ! -d "$LODESTONE_ORACLE_OUTPUT_ROOT" ]; then
