@@ -59,6 +59,14 @@
 //! first save — the same class of defect as re-saving a world and erasing its
 //! cave biomes. Preserve first, model later.
 //!
+//! Item components use the same fail-closed rule at the inventory boundary.
+//! This schema currently converts only `minecraft:custom_data`; an item with
+//! another component, or malformed custom data, is marked through
+//! [`ItemComponents::has_unmodeled`](lodestone_model::ItemComponents::has_unmodeled)
+//! and a later save refuses before the file writer can replace the previous
+//! player file. This keeps an incomplete item from looking like a valid,
+//! losslessly serializable stack.
+//!
 //! # How to change it, and the gotchas
 //!
 //! - **Adding a modelled field means removing it from the preserved set**, or
@@ -276,7 +284,8 @@ impl PlayerData {
     /// # Errors
     ///
     /// [`lodestone_anvil::Error::Nbt`] when an inventory item's custom-data
-    /// bytes are not one complete compound-shaped network-NBT value.
+    /// bytes are not one complete compound-shaped network-NBT value, or when
+    /// a stack contains an item component this schema does not model.
     #[must_use]
     pub fn to_nbt(&self) -> Result<Nbt, lodestone_anvil::Error> {
         let mut fields = vec![
@@ -551,7 +560,9 @@ fn game_type_from_value(value: i32) -> Option<GameMode> {
 /// empties omitted — the sparse persistent form (a real file with 12 items has
 /// 12 entries, not 41). The only component currently converted is the
 /// top-level `minecraft:custom_data` compound; its model bytes are validated
-/// as complete network NBT before this function returns.
+/// as complete network NBT before this function returns. Any other component
+/// marks the stack incomplete on read, and [`item_to_nbt`] refuses that stack
+/// before a save can replace the previous player file.
 fn inventory_to_nbt(slots: &[Option<ItemStack>]) -> Result<Nbt, lodestone_anvil::Error> {
     let elements = slots
         .iter()
@@ -568,6 +579,11 @@ fn inventory_to_nbt(slots: &[Option<ItemStack>]) -> Result<Nbt, lodestone_anvil:
 }
 
 fn item_to_nbt(index: usize, stack: &ItemStack) -> Result<Nbt, lodestone_anvil::Error> {
+    if stack.components.has_unmodeled {
+        return Err(lodestone_anvil::Error::Nbt(lodestone_core::Error::Custom(
+            format!("inventory slot {index} contains unmodeled item components"),
+        )));
+    }
     let mut fields = vec![
         ("Slot".to_owned(), Nbt::Byte(index as i8)),
         ("id".to_owned(), Nbt::String(stack.item.to_string())),
@@ -646,10 +662,22 @@ fn inventory_from_nbt(nbt: Option<&Nbt>) -> Vec<Option<ItemStack>> {
         };
         let mut stack = ItemStack::new(key, count);
         if let Some(components) = field(entry, "components") {
-            if let Some(custom_data) = field(components, "minecraft:custom_data")
-                .and_then(custom_data_to_network)
-            {
-                stack.components.custom_data = Some(custom_data);
+            match components {
+                Nbt::Compound(fields) => {
+                    for (name, value) in fields {
+                        if name == "minecraft:custom_data" {
+                            match custom_data_to_network(value) {
+                                Some(custom_data) => {
+                                    stack.components.custom_data = Some(custom_data)
+                                }
+                                None => stack.components.has_unmodeled = true,
+                            }
+                        } else {
+                            stack.components.has_unmodeled = true;
+                        }
+                    }
+                }
+                _ => stack.components.has_unmodeled = true,
             }
         }
         out[slot] = Some(stack);

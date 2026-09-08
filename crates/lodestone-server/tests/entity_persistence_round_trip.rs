@@ -686,6 +686,67 @@ fn player_item_custom_data_uses_the_persistent_component_shape() {
     );
 }
 
+/// A persistent item component that this schema does not model must remain
+/// visibly incomplete after decoding. The fixture is hand-authored bytes,
+/// independent of `PlayerData::to_nbt`, so the assertion cannot be satisfied
+/// by matching two symmetric mistakes.
+#[test]
+fn player_unknown_component_refuses_save_before_replacing_previous_file() {
+    use lodestone_core::{Reader, read_named_nbt};
+    use lodestone_server::player_data::{PlayerData, PlayerDataStore};
+
+    let compact: String = include_str!("support/player_unknown_component.nbt.hex")
+        .split_whitespace()
+        .collect();
+    assert_eq!(compact.len() % 2, 0, "fixture must contain complete bytes");
+    let bytes = compact
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            u8::from_str_radix(std::str::from_utf8(pair).expect("fixture is ASCII hex"), 16)
+                .expect("fixture contains hexadecimal bytes")
+        })
+        .collect::<Vec<_>>();
+    let mut reader = Reader::new(&bytes);
+    let (root_name, root) = read_named_nbt(&mut reader).expect("independent NBT fixture decodes");
+    assert!(root_name.is_empty(), "player data uses an empty root name");
+    reader.ensure_empty().expect("fixture has no trailing bytes");
+
+    let data = PlayerData::from_nbt(&root).expect("fixture uses the supported data version");
+    let stack = data.inventory[7]
+        .as_ref()
+        .expect("fixture contains one inventory item");
+    assert_eq!(stack.item.to_string(), "minecraft:compass");
+    assert_eq!(stack.count, 3);
+    assert!(
+        stack.components.has_unmodeled,
+        "an unsupported component must not decode as a complete stack"
+    );
+    let error = data.to_nbt().expect_err("an incomplete stack must refuse save");
+    assert!(
+        error
+            .to_string()
+            .contains("inventory slot 7 contains unmodeled item components"),
+        "refusal must identify the lossy inventory slot: {error}"
+    );
+
+    let dir = tempdir("player-unknown-component");
+    let store = PlayerDataStore::new(&dir).expect("player store");
+    let uuid = Uuid::new_v4();
+    store
+        .write(uuid, &PlayerData::default())
+        .expect("write a valid previous player file");
+    let path = store.path_for(uuid);
+    let previous = std::fs::read(&path).expect("read previous player file");
+    assert!(
+        store.write(uuid, &data).is_err(),
+        "store must refuse before replacing the previous file"
+    );
+    let after = std::fs::read(&path).expect("read preserved player file");
+    assert_eq!(after, previous, "a refused save must preserve the previous bytes");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A malformed component value does not discard the rest of its inventory
 /// entry. The item identity and count remain usable while custom data is
 /// absent.
