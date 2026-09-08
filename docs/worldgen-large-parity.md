@@ -34,6 +34,26 @@ The P06 raw-packet format is an independent opt-in path: pass `--raw-packet` (or
 
 `large-parity-manifest.py merge` uses bounded external storage: it streams and authenticates one shard at a time, writes records into a fixed-size memory-mapped slot file, and tracks coverage with one bit per target coordinate. The final payload is read back in z-major rows with x-fastest records, so shard argument order cannot affect output bytes. A duplicate coordinate remains an overlap error and any unset coverage bit remains a gap error; payload checksums, frozen-world identities, dimensions, and schema digests are checked before the merged file is emitted. This keeps the P06 1,002,001-record merge independent of Python dictionary size while retaining the exact v3-v6 output format.
 
+For the complete three-dimension run, use `scripts/worldgen-oracle/full-grid-p06.py`. It requires three distinct absolute world roots (`--overworld-root`, `--nether-root`, and `--end-root`) and one absolute output root (`--output-root`); every path must be outside the repository. The coordinator creates a small state file in the output root before starting, then runs the v6 materializer, two read-only export passes, a complete shard merge, duplicate-read acceptance, and the Rust comparator for each dimension in Overworld, Nether, End order. End uses 501 two-row shards and is always exported serially, even when `--workers` is greater than one. A rerun reuses the state file and each `--resume` shard; it never replaces an incompatible state file, world provenance, partial shard, merged manifest, or accepted manifest.
+
+The coordinator performs disk, RAM, and batch-size preflight before invoking an oracle. The default floors are 8 GiB free disk and 4 GiB RAM; `--min-free-bytes`, `--min-ram-bytes`, and `--batch-size` make the operator's chosen limits explicit. The dry plan is useful for review and CI command-construction tests: it prints every materialization, export, merge, duplicate-read, validation, and comparator command without starting Java or Cargo.
+
+Example (all generated state stays under `/private/tmp`):
+
+```text
+scripts/worldgen-oracle/full-grid-p06.py \
+  --overworld-root /private/tmp/lodestone-p06-overworld \
+  --nether-root /private/tmp/lodestone-p06-nether \
+  --end-root /private/tmp/lodestone-p06-end \
+  --output-root /private/tmp/lodestone-p06-outputs \
+  --batch-size 256
+```
+
+Use `scripts/worldgen-oracle/tests/test-full-grid-p06.sh` and
+`python3 -m unittest discover -s scripts/worldgen-oracle/tests -p 'test_full_grid_p06.py'`
+for command construction and refusal controls. They use a dry plan and never run
+the external oracle or the Rust comparator.
+
 For a Nether P06 comparison, the Rust gate prepares the immutable pre-decoration
 cache from the selected target prefix before wrapping it in the retained source.
 The packet's 3×3 light neighbourhood expands the generator's 5×5 prefix read
