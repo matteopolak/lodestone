@@ -250,6 +250,12 @@ public final class LargeParityOracle {
 
     static Path copyReadOnlyWorld() throws Exception {
         String raw = System.getenv("ORACLE_FROZEN_WORLD_ROOT"); if (raw == null || raw.isBlank()) throw new IllegalStateException("export requires LODESTONE_ORACLE_FROZEN_WORLD_ROOT; source must be mounted read-only");
+        String prepared = System.getenv("ORACLE_FROZEN_WORK_ROOT");
+        if (prepared != null && !prepared.isBlank()) {
+            Path work = Path.of(prepared);
+            if (!Files.isDirectory(work)) throw new IllegalStateException("prepared frozen-world clone is missing: " + work);
+            return work;
+        }
         Path source = Path.of(raw); Path copy = Path.of("/work/frozen-world-copy");
         try (var paths = Files.walk(source)) { for (Path from : paths.sorted().toList()) { Path to = copy.resolve(source.relativize(from).toString()); if (Files.isDirectory(from)) Files.createDirectories(to); else Files.copy(from, to, StandardCopyOption.COPY_ATTRIBUTES); } }
         return copy;
@@ -328,9 +334,10 @@ public final class LargeParityOracle {
         return offsets;
     }
     static void determinismSelftest(Args a, Path frozenRoot) throws Exception {
-        frozenDigest(frozenRoot, a);
+        byte[] frozen = frozenDigest(frozenRoot, a);
         Path copy = copyReadOnlyWorld();
-        runServer(copy, true, a, (server, level) -> {
+        if (!Arrays.equals(frozen, frozenDigest(copy, a))) throw new IllegalStateException("prepared frozen-world clone differs from its sealed source");
+        try { runServer(copy, true, a, (server, level) -> {
             int cx = determinismCoordinate("ORACLE_DETERMINISM_X"), cz = determinismCoordinate("ORACLE_DETERMINISM_Z");
             ChunkPos pos = new ChunkPos(cx, cz);
             CompletableFuture<?> future = server.submit(() -> level.getChunkSource().addTicketAndLoadWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, 0)).join();
@@ -350,7 +357,10 @@ public final class LargeParityOracle {
             } finally {
                 server.submit(() -> level.getChunkSource().removeTicketWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, 0)).join();
             }
-        });
+            });
+        } finally {
+            if (!Arrays.equals(frozen, frozenDigest(frozenRoot, a))) throw new IllegalStateException("sealed frozen-world source changed during determinism selftest");
+        }
     }
 
     static void writeUtf8(DataOutputStream out, String value) throws Exception { byte[] b = value.getBytes(StandardCharsets.UTF_8); out.writeInt(b.length); out.write(b); }
@@ -665,18 +675,23 @@ public final class LargeParityOracle {
         } finally { server.halt(true); stem.close(); access.close(); }
     }
     static void export(Args a, Path frozenRoot) throws Exception {
-        diagnosticPacketOut = a.packetOut; diagnosticRecordOut = a.recordOut; byte[] frozen = frozenDigest(frozenRoot, a); Path copy = copyReadOnlyWorld(); long count = (long)(a.hiX - a.loX + 1) * (a.hiZ - a.loZ + 1); File out = new File(a.out); long done = a.resume ? resumeRecords(out, a, count, frozen) : 0;
+        diagnosticPacketOut = a.packetOut; diagnosticRecordOut = a.recordOut; byte[] frozen = frozenDigest(frozenRoot, a); Path copy = copyReadOnlyWorld();
+        if (!Arrays.equals(frozen, frozenDigest(copy, a))) throw new IllegalStateException("prepared frozen-world clone differs from its sealed source");
+        long count = (long)(a.hiX - a.loX + 1) * (a.hiZ - a.loZ + 1); File out = new File(a.out); long done = a.resume ? resumeRecords(out, a, count, frozen) : 0;
         File packetAudit = a.v6() ? new File(a.packetAuditOut == null ? a.out + ".packet-audit" : a.packetAuditOut) : null;
         if (a.v6() && a.resume && done > 0) { long auditDone = resumePacketAudits(packetAudit, a, count, frozen); if (auditDone != done) throw new IllegalStateException("packet audit sidecar is not aligned with manifest records: " + packetAudit); }
         if (done == count) { System.err.println("[large-parity " + formatLabel(a) + "] authenticated shard already complete: " + out); return; } if (out.getParentFile() != null) out.getParentFile().mkdirs();
         if (packetAudit != null && packetAudit.getParentFile() != null) packetAudit.getParentFile().mkdirs();
-        runServer(copy, true, a, (server, level) -> { MessageDigest payload = sha256(), packetPayload = sha256(); try (RandomAccessFile file = new RandomAccessFile(out, "rw"); RandomAccessFile audit = packetAudit == null ? null : new RandomAccessFile(packetAudit, "rw")) {
+        try { runServer(copy, true, a, (server, level) -> { MessageDigest payload = sha256(), packetPayload = sha256(); try (RandomAccessFile file = new RandomAccessFile(out, "rw"); RandomAccessFile audit = packetAudit == null ? null : new RandomAccessFile(packetAudit, "rw")) {
             if (done == 0) { file.setLength(HEADER_BYTES); file.seek(0); file.write(header(a, count, frozen, new byte[32])); file.seek(HEADER_BYTES); if (audit != null) { audit.setLength(HEADER_BYTES); audit.seek(0); audit.write(packetAuditHeader(a, count, frozen, new byte[32])); audit.seek(HEADER_BYTES); } }
             else { file.seek(HEADER_BYTES); byte[] prefix = new byte[8192]; long left = done * a.recordWidth(); while (left != 0) { int n = file.read(prefix, 0, (int)Math.min(left, prefix.length)); if (n < 0) throw new IllegalStateException("partial shard ended before prefix"); payload.update(prefix, 0, n); left -= n; } file.seek(HEADER_BYTES + done * a.recordWidth()); if (audit != null) { audit.seek(HEADER_BYTES); left = done * DIGEST_BYTES; while (left != 0) { int n = audit.read(prefix, 0, (int)Math.min(left, prefix.length)); if (n < 0) throw new IllegalStateException("partial packet audit ended before prefix"); packetPayload.update(prefix, 0, n); left -= n; } audit.seek(HEADER_BYTES + done * DIGEST_BYTES); } }
             int width = a.hiX - a.loX + 1, batch = Math.max(1, Integer.parseInt(System.getenv().getOrDefault("LODESTONE_ORACLE_BATCH", "256"))); long start = System.nanoTime();
             for (long at = done; at < count; at += batch) { long end = Math.min(count, at + batch); List<ChunkPos> positions = new ArrayList<>(); for (long i = at; i < end; i++) positions.add(new ChunkPos(a.loX + (int)(i % width), a.loZ + (int)(i / width))); List<byte[]> hashes = new ArrayList<>(), audits = a.v6() ? new ArrayList<>() : null; loadBatch(server, level, a, positions, true, hashes, audits); for (int i = 0; i < hashes.size(); i++) { file.write(hashes.get(i)); payload.update(hashes.get(i)); if (audit != null) { audit.write(audits.get(i)); packetPayload.update(audits.get(i)); } } double rate = (end - done) / ((System.nanoTime() - start) / 1_000_000_000.0); ChunkPos last = positions.get(positions.size()-1); System.err.printf("[large-parity] %s chunks=%d/%d rate=%.1f chunks/s coord=(%d,%d)%n", a.dimension, end, count, rate, last.x(), last.z()); }
             file.seek(0); file.write(header(a, count, frozen, payload.digest())); if (audit != null) { audit.seek(0); audit.write(packetAuditHeader(a, count, frozen, packetPayload.digest())); }
-        } });
+            } });
+        } finally {
+            if (!Arrays.equals(frozen, frozenDigest(frozenRoot, a))) throw new IllegalStateException("sealed frozen-world source changed during export");
+        }
     }
     public static void main(String[] ignored) throws Exception {
         verifySingleWorldgenWorker(); verifyCanonicalLightContract(); Args a = args(); if (a.help) { usage(); return; } if (a.provenanceSelftest) { provenanceSelftest(); return; }
