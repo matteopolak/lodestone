@@ -488,6 +488,11 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
         self.primary.store_resident_column(cx, cz, column)
     }
 
+    fn invalidate_retained_light_neighbourhood(&self, cx: i32, cz: i32) {
+        self.primary
+            .invalidate_retained_light_neighbourhood(cx, cz);
+    }
+
     fn settle_resident_column_light(
         &self,
         cx: i32,
