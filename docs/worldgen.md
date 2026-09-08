@@ -167,11 +167,6 @@ CPU. A steady-state warm column spends roughly a quarter of its time in the dens
 shift with scene and biome, so re-measure locally (`benches/generation.rs`) rather than trusting a
 recorded split.
 
-The numeric noise core packs each octave's already-derived input and value factors beside its
-optional octave state. Sampling therefore walks one compact level table without recomputing the
-factor chain or indexing a parallel amplitude vector; the noise value accumulation order is
-unchanged, so this is a CPU/locality optimization rather than a world-content change.
-
 ## How to change it
 
 - **Never share a commit between a pure file move and a logic change.** A "just relocating this"

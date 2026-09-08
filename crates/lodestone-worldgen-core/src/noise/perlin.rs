@@ -19,15 +19,10 @@ pub fn wrap(x: f64) -> f64 {
 /// A stack of improved-noise octaves with per-octave amplitudes.
 #[derive(Debug, Clone)]
 pub struct PerlinNoise {
-    levels: Vec<Octave>,
-}
-
-#[derive(Debug, Clone)]
-struct Octave {
-    noise: Option<ImprovedNoise>,
-    amplitude: f64,
-    input_factor: f64,
-    value_factor: f64,
+    noise_levels: Vec<Option<ImprovedNoise>>,
+    amplitudes: Vec<f64>,
+    lowest_freq_value_factor: f64,
+    lowest_freq_input_factor: f64,
 }
 
 impl PerlinNoise {
@@ -39,9 +34,9 @@ impl PerlinNoise {
     /// (`[a] ++ [b, c]` against `[a, b] ++ [c]`), and a `None` octave writes a
     /// discriminant word so an absent level cannot alias a present one.
     pub fn write_signature(&self, out: &mut Vec<u64>) {
-        out.push(self.levels.len() as u64);
-        for level in &self.levels {
-            match &level.noise {
+        out.push(self.noise_levels.len() as u64);
+        for level in &self.noise_levels {
+            match level {
                 Some(n) => {
                     out.push(1);
                     n.write_signature(out);
@@ -49,11 +44,10 @@ impl PerlinNoise {
                 None => out.push(0),
             }
         }
-        for level in &self.levels {
-            out.push(level.amplitude.to_bits());
-            out.push(level.input_factor.to_bits());
-            out.push(level.value_factor.to_bits());
-        }
+        out.push(self.amplitudes.len() as u64);
+        out.extend(self.amplitudes.iter().map(|a| a.to_bits()));
+        out.push(self.lowest_freq_value_factor.to_bits());
+        out.push(self.lowest_freq_input_factor.to_bits());
     }
 
     /// Builds from an explicit `(first_octave, amplitudes)` pair — the
@@ -110,7 +104,7 @@ impl PerlinNoise {
     /// `getOctaveNoise(i)` = `noiseLevels[len - 1 - i]`.
     #[must_use]
     pub fn get_octave_noise(&self, i: usize) -> Option<&ImprovedNoise> {
-        self.levels[self.levels.len() - 1 - i].noise.as_ref()
+        self.noise_levels[self.noise_levels.len() - 1 - i].as_ref()
     }
 
     fn new_legacy<R: RandomSource>(
@@ -146,12 +140,12 @@ impl PerlinNoise {
         let lowest_freq_value_factor =
             crate::math::exp2_exact(octaves as i32 - 1)
                 / (crate::math::exp2_exact(octaves as i32) - 1.0);
-        Self::pack(
+        Self {
             noise_levels,
             amplitudes,
-            lowest_freq_input_factor,
             lowest_freq_value_factor,
-        )
+            lowest_freq_input_factor,
+        }
     }
 
     fn new<R: RandomSource>(random: &mut R, first_octave: i32, amplitudes: Vec<f64>) -> Self {
@@ -172,47 +166,27 @@ impl PerlinNoise {
         let lowest_freq_value_factor =
             crate::math::exp2_exact(octaves as i32 - 1)
                 / (crate::math::exp2_exact(octaves as i32) - 1.0);
-        Self::pack(
+        Self {
             noise_levels,
             amplitudes,
-            lowest_freq_input_factor,
             lowest_freq_value_factor,
-        )
-    }
-
-    fn pack(
-        noise_levels: Vec<Option<ImprovedNoise>>,
-        amplitudes: Vec<f64>,
-        mut input_factor: f64,
-        mut value_factor: f64,
-    ) -> Self {
-        let mut levels = Vec::with_capacity(amplitudes.len());
-        for (noise, amplitude) in noise_levels.into_iter().zip(amplitudes) {
-            levels.push(Octave {
-                noise,
-                amplitude,
-                input_factor,
-                value_factor,
-            });
-            input_factor *= 2.0;
-            value_factor /= 2.0;
+            lowest_freq_input_factor,
         }
-        Self { levels }
     }
 
     /// Samples the octave stack at `(x, y, z)`.
     #[must_use]
     pub fn get_value(&self, x: f64, y: f64, z: f64) -> f64 {
         let mut value = 0.0;
-        for level in &self.levels {
-            if let Some(noise) = &level.noise {
-                let noise_val = noise.noise(
-                    wrap(x * level.input_factor),
-                    wrap(y * level.input_factor),
-                    wrap(z * level.input_factor),
-                );
-                value += level.amplitude * noise_val * level.value_factor;
+        let mut factor = self.lowest_freq_input_factor;
+        let mut value_factor = self.lowest_freq_value_factor;
+        for (i, level) in self.noise_levels.iter().enumerate() {
+            if let Some(noise) = level {
+                let noise_val = noise.noise(wrap(x * factor), wrap(y * factor), wrap(z * factor));
+                value += self.amplitudes[i] * noise_val * value_factor;
             }
+            factor *= 2.0;
+            value_factor /= 2.0;
         }
         value
     }
