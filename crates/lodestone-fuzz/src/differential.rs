@@ -1299,7 +1299,10 @@ pub mod redstone {
 
     use lodestone_model::BlockPos;
     use lodestone_server::block_tick_reaction::run_due_block_tick;
-    use lodestone_server::{ChunkColumn, ChunkSource, ScheduledTickQueue, react_at_placement_with_entities};
+    use lodestone_server::{
+        ChunkColumn, ChunkSource, ScheduledTickKind, ScheduledTickQueue,
+        react_at_placement_with_entities,
+    };
 
     use super::{Action, WorldOracle, state_matches};
 
@@ -1498,7 +1501,7 @@ pub mod redstone {
                     cx * 16,
                     cz * 16,
                     &self.rig,
-                    &due.kind,
+                    &ScheduledTickKind::from_name(due.kind.clone()),
                     BlockPos::new(x, y, z),
                     &state,
                     &mut self.queue,
