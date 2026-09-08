@@ -22,15 +22,52 @@ The P06 raw-packet format is an independent opt-in path: pass `--raw-packet` (or
 
 The comparator replays the initial-light admission boundary before it asks the packet codec for bytes. Materialization admits rows in z-major/x-major order, so a target's first saved snapshot sees only its north row and west cell; the packet may still carry all eight terrain neighbours after that snapshot is fixed. This keeps a future east or south column from changing an already-saved initial fallback, while later live relight remains free to use the complete footprint. The same relative rule is used for one-record diagnostics and bounded prefixes, so the control never depends on a particular world coordinate.
 
-For a Nether P06 comparison, the Rust gate prepares the immutable pre-decoration
-cache from the selected target prefix before wrapping it in the retained source.
-The packet's 3×3 light neighbourhood expands the generator's 5×5 prefix read
-closure by one chunk on each side. Thus a 51×51 target shard derives a 57×57
-prefix capacity (3,249 entries); a bounded pilot derives the smaller rectangle
-it actually visits. Preparation changes retention only. The worldgen counter
-control reports prefix computations and whole-cache evictions, and the ignored
-raw-byte control compares a fresh unprepared source with the prepared source
-before this path is used for an external packet comparison.
+P07 is the light-free content path: pass `--light-free` (or `--format v7`) to export the same 1001 by 1001 `-500..=500` grid with two-byte main records and a required `.light-free-audit` sidecar of full 32-byte SHA-256 records. Its explicit schema is domain/coordinates/dimension, the three client heightmaps (registry ids `1`, `4`, and `5`), section block-state ids and biome ids, and sorted canonical block entities. It never constructs a packet, settles light, or includes light bytes. The sidecar is authenticated in lockstep with the main payload and binds the same seed, dimension, frozen-world identity, geometry, schema, and x-fastest ordering. P07 export accepts either a P07 seal or an existing authenticated P06 frozen-root seal, so the active 1001² content pass reuses the already materialized P06 root rather than requiring another world-generation pass. `full-parity-worker.sh` selects it with `LODESTONE_ORACLE_FORMAT=v7` (or `LODESTONE_ORACLE_LIGHT_FREE=1`); resume, merge, duplicate-read `accept`, and independent-root `reproducible` retain bounded streaming and mmap coverage checks. The P06 full-packet path remains unchanged for the later light comparison.
+
+The external P07 controls are `python3 scripts/worldgen-oracle/large-parity-manifest.py selftest`, the ignored `java_and_rust_light_free_records_agree` one-chunk cross-language test, and `scripts/worldgen-oracle/light-free-read-control.sh`. The last control runs two fresh read-only exports from the same sealed P06/P07 root, compares both main and sidecar files, validates them, and hashes the source tree before and after to prove that a light-free read does not mutate the frozen root. A small export can be produced without packet diagnostics:
+
+```text
+LODESTONE_ORACLE_FROZEN_WORLD_ROOT=/absolute/path/to/p06-root \
+LODESTONE_ORACLE_OUTPUT_ROOT=/private/tmp/light-free-pilot \
+  scripts/worldgen-oracle/large-parity.sh --mode export --light-free \
+  --out /oracle-out/pilot.lwp --cx 0 0 --cz 0 0
+```
+
+`large-parity-manifest.py merge` uses bounded external storage: it streams and authenticates one shard at a time, writes records into a fixed-size memory-mapped slot file, and tracks coverage with one bit per target coordinate. The final payload is read back in z-major rows with x-fastest records, so shard argument order cannot affect output bytes. A duplicate coordinate remains an overlap error and any unset coverage bit remains a gap error; payload checksums, frozen-world identities, dimensions, and schema digests are checked before the merged file is emitted. This keeps the P06 1,002,001-record merge independent of Python dictionary size while retaining the exact v3-v6 output format.
+
+For the complete three-dimension run, use `scripts/worldgen-oracle/full-grid-p06.py`. It requires three distinct absolute world roots (`--overworld-root`, `--nether-root`, and `--end-root`) and one absolute output root (`--output-root`); every path must be outside the repository. The coordinator creates a small state file in the output root before starting, then runs the v6 materializer, two read-only export passes, a complete shard merge, duplicate-read acceptance, and the Rust comparator for each dimension in Overworld, Nether, End order. End uses 501 two-row shards and is always exported serially, even when `--workers` is greater than one. A rerun reuses the state file and each `--resume` shard; it never replaces an incompatible state file, world provenance, partial shard, merged manifest, or accepted manifest.
+
+The coordinator performs disk, RAM, and batch-size preflight before invoking an oracle. The default floors are 8 GiB free disk and 4 GiB RAM; `--min-free-bytes`, `--min-ram-bytes`, and `--batch-size` make the operator's chosen limits explicit. The dry plan is useful for review and CI command-construction tests: it prints every materialization, export, merge, duplicate-read, validation, and comparator command without starting Java or Cargo.
+
+Example (all generated state stays under `/private/tmp`):
+
+```text
+scripts/worldgen-oracle/full-grid-p06.py \
+  --overworld-root /private/tmp/lodestone-p06-overworld \
+  --nether-root /private/tmp/lodestone-p06-nether \
+  --end-root /private/tmp/lodestone-p06-end \
+  --output-root /private/tmp/lodestone-p06-outputs \
+  --batch-size 256
+```
+
+Use `scripts/worldgen-oracle/tests/test-full-grid-p06.sh` and
+`python3 -m unittest discover -s scripts/worldgen-oracle/tests -p 'test_full_grid_p06.py'`
+for command construction and refusal controls. They use a dry plan and never run
+the external oracle or the Rust comparator.
+
+For a Nether P06 comparison, the Rust gate partitions the selected z-major,
+x-fastest target prefix into deterministic one-row windows before wrapping the
+source in its retained cache. Each window prepares only its target row plus the
+packet-light halo and the wider immutable prefix read closure, compares every
+record in manifest order, then calls `ChunkSource::reset_packet_replay` before
+the next row. A full-width row therefore retains at most `1007 × 7 = 7,049`
+pre-decoration entries rather than a `1007 × 1007` full-grid closure. This
+changes retention only: target/admission order, generated bytes and the default
+first-mismatch stop are unchanged. The pure window planner control proves that
+the first two rows concatenate to the original target stream and that the
+retention bound is independent of full-grid height. The ignored raw-byte seam
+control compares one-shot preparation with preparation/reset across a row
+boundary, including full packet digests.
 
 The section-header non-empty count is a wire field, not the version-neutral
 column occupancy count. `packet_non_empty_block_count` excludes `air`,
@@ -195,7 +232,7 @@ The lifecycle gate uses `LODESTONE_LARGE_PARITY_LIFECYCLE_CAPTURE` for one expli
 
 The manifest tools accept `validate`, `merge`, `reproducible`, `accept`, and `selftest`. `reproducible` is the independent-root gate: it requires both manifests to cover the complete grid and have equal schema, dimension, and payload while deliberately allowing different frozen-world identities; for P06 it also requires equal authenticated packet-audit payloads. Use it on the two complete merged materializations before `accept`. `accept` is the final read-only export gate: it requires two complete byte-identical exports from one frozen-world identity and carries the P06 sidecar beside the accepted manifest. `validate` never treats `.packet-audit` as a standalone manifest: it derives the sidecar from each v6 main path, rejects missing or malformed sidecars, and has controls for sidecar checksum tampering and record misalignment. `selftest` covers full-grid merge ordering, independent-root payload equality plus bit-flip/incomplete/schema negatives, duplicate-read acceptance, payload tampering, missing/tampered/misaligned P06 sidecars, different-world and different-dimension merge/accept refusal, schema rejection, and v2 rejection. Existing v3 overworld and v4 dimension exports continue to validate and merge byte-for-byte. End exports now select v5 automatically and must be kept separate from v4 shards; accepted v4 artifacts are not regenerated by this migration. The `batch-parity.sh` wrapper is an authenticated 2,000-plus target export path; it does not upgrade legacy raw fingerprints.
 
-Dimension roots are independent worlds and must never share a materialization directory. Start a Nether or End materialization with an empty writable root (the command resumes clean epochs until its dimension-specific seal appears):
+P07 uses `--light-free` or `--format v7`; `LODESTONE_ORACLE_FORMAT=v7` and `LODESTONE_ORACLE_LIGHT_FREE=1` select it for sharded workers. Its export accepts a matching v7 seal or the v6 seal for the same dimension, while an optional v7 materialization uses the separate v7 construction contract. `LODESTONE_LARGE_PARITY_LIGHT_FREE_AUDIT` selects a comparator sidecar path; otherwise the manifest's `.light-free-audit` suffix is required. Dimension roots are independent worlds and must never share a materialization directory. Start a Nether or End materialization with an empty writable root (the command resumes clean epochs until its dimension-specific seal appears):
 
 ```text
 mkdir -p /private/tmp/lodestone-nether-501-seed42
@@ -222,3 +259,5 @@ LODESTONE_ORACLE_DIMENSION=nether \
 ## Dependencies
 
 The exporter uses the locally cached compiled 26.2 server and assets under `.cache/mc/26.2`, through the container runtime wrapper. The Python validator uses only the standard library. The Rust comparator uses the production protocol decoder and a small test-only SHA-256 implementation.
+
+`LODESTONE_ORACLE_FROZEN_CACHE_ROOT` optionally selects a persistent cache outside the sealed source (the default is `<sealed-root>.oracle-cache`). The launcher copies the sealed root into a read-only seed once, then creates a fresh writable APFS clone for each JVM. Each clone is removed when that JVM exits, including an interrupted export, so server lock, region, and cache writes cannot cross shards. On hosts without APFS clone support the launcher uses a normal copy for correctness and reports no clone-level I/O saving. The Java exporter authenticates the clone against the source seal before opening the server and re-authenticates the sealed source after the read; a stale seed or a source mutation fails closed. Run `scripts/worldgen-oracle/frozen-world-clone.sh selftest` for the independent source-before/after, read-A/read-B isolation, and interrupted-read cleanup controls. For the 501 serial End P06 shards, this changes the root transfer from 501 full copies to one full seed plus 501 metadata-only clones (approximately `(501 - 1) / 501`, or 99.8%, of root-byte copy I/O avoided before server writes).

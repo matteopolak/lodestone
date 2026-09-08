@@ -122,8 +122,8 @@ fn resolve_state_id_legacy(state: &str) -> u32 {
 /// distinct entry resolved by [`resolve_state_id_legacy`].
 ///
 /// See this module's docs before touching it. Verbatim, on purpose — the biome
-/// half is unchanged from the current version because the change did not touch
-/// it.
+/// half uses the same production resolver as the current version so the
+/// identity control isolates block-state lookup changes.
 fn build_world_column_legacy(shape: &ChunkShape, source: &ServerChunkColumn) -> WorldChunkColumn {
     let mut column = WorldChunkColumn::new(
         shape.min_y,
@@ -139,7 +139,7 @@ fn build_world_column_legacy(shape: &ChunkShape, source: &ServerChunkColumn) -> 
     let biome_palette_ids: Vec<u32> = source
         .biome_cell_palette()
         .iter()
-        .map(|name| super::resolve_biome_id(name))
+        .map(|name| super::biome_registry_id(name))
         .collect();
 
     for section_index in 0..shape.section_count {

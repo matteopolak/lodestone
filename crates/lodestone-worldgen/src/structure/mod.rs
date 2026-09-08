@@ -3405,6 +3405,62 @@ impl StructureRegistry {
         out
     }
 
+    /// Returns the possible random-spread origins in an inclusive chunk box.
+    ///
+    /// A random-spread set has at most one origin per placement cell.  Walking
+    /// those cells is therefore a much smaller candidate set than asking
+    /// `starts_at` about every chunk in a wide placement window.  The method
+    /// returns `None` when a concentric-ring set is present because its
+    /// context-dependent ring list cannot be inverted from placement data
+    /// alone; callers should use the complete rectangular walk in that case.
+    #[must_use]
+    pub fn random_spread_origins_in(
+        &self,
+        min_x: i32,
+        max_x: i32,
+        min_z: i32,
+        max_z: i32,
+    ) -> Option<Vec<(i32, i32)>> {
+        if min_x > max_x || min_z > max_z {
+            return Some(Vec::new());
+        }
+        let mut origins = Vec::new();
+        for set in &self.sets {
+            let PlacementKind::RandomSpread { spacing, .. } = &set.placement.kind else {
+                if matches!(&set.placement.kind, PlacementKind::Unsupported(_)) {
+                    continue;
+                }
+                return None;
+            };
+            let spacing = *spacing;
+            if spacing <= 0 {
+                return None;
+            }
+            let min_cell_x = min_x.div_euclid(spacing) - 1;
+            let max_cell_x = max_x.div_euclid(spacing) + 1;
+            let min_cell_z = min_z.div_euclid(spacing) - 1;
+            let max_cell_z = max_z.div_euclid(spacing) + 1;
+            for cell_x in min_cell_x..=max_cell_x {
+                for cell_z in min_cell_z..=max_cell_z {
+                    let Some(origin) = set
+                        .placement
+                        .potential_structure_chunk(self.seed, cell_x * spacing, cell_z * spacing)
+                    else {
+                        return None;
+                    };
+                    if (min_x..=max_x).contains(&origin.0)
+                        && (min_z..=max_z).contains(&origin.1)
+                    {
+                        origins.push(origin);
+                    }
+                }
+            }
+        }
+        origins.sort_unstable();
+        origins.dedup();
+        Some(origins)
+    }
+
     /// Attempts to start one structure at one chunk: the
     /// generation point, then the biome filter, then validity.
     fn try_start(
@@ -3690,6 +3746,73 @@ mod tests {
             }
         }
         assert!(registry.starts_at(0, 0, &NoWorld).is_empty());
+    }
+
+    #[test]
+    fn random_spread_origin_index_matches_every_placement_chunk() {
+        let set = StructureSetDef {
+            id: "minecraft:end_cities".to_owned(),
+            placement: Placement::parse(&serde_json::json!({
+                "type": "minecraft:random_spread",
+                "salt": 10387313,
+                "separation": 11,
+                "spacing": 20,
+                "spread_type": "triangular"
+            }))
+            .unwrap(),
+            entries: Vec::new(),
+        };
+        let registry = StructureRegistry {
+            seed: -195_764_831,
+            sets: vec![set],
+            ring_positions: OnceLock::new(),
+            set_index: HashMap::new(),
+            structures: HashMap::new(),
+            structure_order: Vec::new(),
+            templates: TemplateStore::default(),
+            pools: PoolStore::default(),
+            unsupported: BTreeMap::new(),
+        };
+        let expected = (-25..=25)
+            .flat_map(|x| (-25..=25).map(move |z| (x, z)))
+            .filter(|&(x, z)| {
+                registry.sets[0]
+                    .placement
+                    .is_placement_chunk(registry.seed, x, z)
+            })
+            .collect::<Vec<_>>();
+        let actual = registry
+            .random_spread_origins_in(-25, 25, -25, 25)
+            .expect("random-spread registry should have an index");
+        assert_eq!(actual, expected, "cell enumeration changed membership or order");
+    }
+
+    #[test]
+    fn random_spread_origin_index_defers_to_the_ring_walk() {
+        let set = StructureSetDef {
+            id: "minecraft:strongholds".to_owned(),
+            placement: Placement::parse(&serde_json::json!({
+                "type": "minecraft:concentric_rings",
+                "distance": 32,
+                "spread": 3,
+                "count": 8,
+                "preferred_biomes": []
+            }))
+            .unwrap(),
+            entries: Vec::new(),
+        };
+        let registry = StructureRegistry {
+            seed: 42,
+            sets: vec![set],
+            ring_positions: OnceLock::new(),
+            set_index: HashMap::new(),
+            structures: HashMap::new(),
+            structure_order: Vec::new(),
+            templates: TemplateStore::default(),
+            pools: PoolStore::default(),
+            unsupported: BTreeMap::new(),
+        };
+        assert!(registry.random_spread_origins_in(-64, 64, -64, 64).is_none());
     }
 
     /// The JVM fixture pins the first-ring candidate and its preferred-biome

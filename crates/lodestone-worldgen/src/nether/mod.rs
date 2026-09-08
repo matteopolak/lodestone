@@ -156,6 +156,10 @@ pub struct NetherColumn {
     /// for this dimension, see the module doc's 2-D section.
     biome_quarts: [String; 16],
     placement_loot: Vec<CodedLoot>,
+    /// Decoration writes in the dimension's upper 128 rows. The noise carrier
+    /// remains 128 rows tall, but vegetation runs against the full 256-row
+    /// resident window and may spill into the served chunk above that carrier.
+    decoration_spills: Vec<(i32, i32, i32, String)>,
 }
 
 type PreDecorationResult = (
@@ -268,6 +272,14 @@ impl NetherColumn {
         &self.placement_loot
     }
 
+    /// Decoration writes in the served chunk's upper resident rows. Positions
+    /// are absolute world coordinates; the server boundary filters them to its
+    /// local column before applying them to the padded window.
+    #[must_use]
+    pub fn decoration_spills(&self) -> &[(i32, i32, i32, String)] {
+        &self.decoration_spills
+    }
+
     /// The biome covering local column `(lx, lz)`.
     #[must_use]
     pub fn biome_at(&self, lx: usize, lz: usize) -> &str {
@@ -346,7 +358,7 @@ pub struct NetherGenerator {
     /// Biome membership for each placed feature's biome modifier.  Nether
     /// climate is y-invariant, so the mixed dispatcher can resolve an exact
     /// candidate position from the resident chunk's horizontal quart data.
-    feature_biomes: HashMap<String, HashSet<String>>,
+    feature_biomes: Arc<HashMap<String, HashSet<String>>>,
     ore_tag_map: HashMap<String, HashSet<String>>,
     veg_tags: crate::feature::vegetation::VegTags,
     /// The Nether's structure engine, or `None` for a resolver that supplies no
@@ -632,6 +644,7 @@ struct MixedSync {
 /// state. The padded decoration footprint deliberately retains spill beyond
 /// the ore reader's 3×3 window; only the representable intersection is
 /// projected, and every coordinate in that intersection must land.
+#[cfg(test)]
 fn synchronize_mixed_entry(
     writer: MixedEntryWriter,
     grid: &mut crate::feature::vegetation::VegGrid,
@@ -641,7 +654,37 @@ fn synchronize_mixed_entry(
     terrain_min_y: i32,
     terrain_height: i32,
     grid_cursor: &mut usize,
+    ore_cursor: &mut usize,
     ore_transferred: &mut HashMap<(i32, i32, i32), StateId>,
+) -> MixedSync {
+    let mut changed = Vec::new();
+    synchronize_mixed_entry_reusing(
+        writer,
+        grid,
+        ore_view,
+        centre_x,
+        centre_z,
+        terrain_min_y,
+        terrain_height,
+        grid_cursor,
+        ore_cursor,
+        ore_transferred,
+        &mut changed,
+    )
+}
+
+fn synchronize_mixed_entry_reusing(
+    writer: MixedEntryWriter,
+    grid: &mut crate::feature::vegetation::VegGrid,
+    ore_view: &mut crate::feature::region_view::RegionView<'_>,
+    centre_x: i32,
+    centre_z: i32,
+    terrain_min_y: i32,
+    terrain_height: i32,
+    grid_cursor: &mut usize,
+    ore_cursor: &mut usize,
+    ore_transferred: &mut HashMap<(i32, i32, i32), StateId>,
+    changed: &mut Vec<(i32, i32, i32, StateId)>,
 ) -> MixedSync {
     match writer {
         MixedEntryWriter::Decoration => {
@@ -680,15 +723,19 @@ fn synchronize_mixed_entry(
             sync
         }
         MixedEntryWriter::Ore => {
-            let mut changed = Vec::new();
-            for (lx, y, lz, state) in ore_view.writes_in_scan_order() {
-                let x = centre_x * 16 + lx;
-                let z = centre_z * 16 + lz;
-                if ore_transferred.insert((x, y, z), state) != Some(state) {
-                    changed.push((x, y, z, state));
+            changed.clear();
+            let end = ore_view.write_log_len();
+            ore_view.with_write_log_since_scan_order(*ore_cursor, |writes| {
+                for &(lx, y, lz, state) in writes {
+                    let x = centre_x * 16 + lx;
+                    let z = centre_z * 16 + lz;
+                    if ore_transferred.insert((x, y, z), state) != Some(state) {
+                        changed.push((x, y, z, state));
+                    }
                 }
-            }
-            for (x, y, z, state) in &changed {
+            });
+            *ore_cursor = end;
+            for (x, y, z, state) in changed.iter() {
                 assert!(
                     grid.set_id_if_in_bounds(*x, *y, *z, *state),
                     "mixed ore entry wrote outside the decoration footprint at ({x},{y},{z})"
@@ -981,6 +1028,23 @@ impl NetherGenerator {
         )
     }
 
+    /// Releases the immutable pre-decoration state retained by a packet
+    /// replay and restores the ordinary demand-ordered cache bound.
+    ///
+    /// A large raw-packet sweep calls this after each bounded spatial window;
+    /// clearing the memo is part of the replay boundary, not an eviction that
+    /// changes generation order or bytes.
+    pub fn reset_packet_replay(&self) {
+        self.pre_decoration
+            .lock()
+            .expect("nether pre-decoration memo poisoned")
+            .clear();
+        self.pre_decoration_capacity
+            .store(DECORATION_MEMO_CEILING, Ordering::Relaxed);
+        self.pre_decoration_computations.store(0, Ordering::Relaxed);
+        self.pre_decoration_evictions.store(0, Ordering::Relaxed);
+    }
+
     fn prepare_immutable_stage_cache(&self, admissions: &[(i32, i32)], radius: i32) -> usize {
         let capacity = pre_decoration_capacity(admissions, radius);
         self.pre_decoration_capacity.store(capacity, Ordering::Relaxed);
@@ -1008,7 +1072,12 @@ impl NetherGenerator {
     #[must_use]
     pub fn column(&self, cx: i32, cz: i32) -> NetherColumn {
         let pre = self.pre_decoration_stage(cx, cz);
-        let world = self.mixed_step7_stage(cx, cz, (*pre.0).clone(), &pre.1);
+        let (world, decoration_spills) = self.mixed_step7_stage_with_spills(
+            cx,
+            cz,
+            (*pre.0).clone(),
+            &pre.1,
+        );
 
         let (palette, blocks) = world.into_palette_and_blocks();
         NetherColumn {
@@ -1018,6 +1087,7 @@ impl NetherGenerator {
             blocks,
             biome_quarts: pre.2.clone(),
             placement_loot: pre.3.clone(),
+            decoration_spills,
         }
     }
 
@@ -1039,6 +1109,7 @@ impl NetherGenerator {
             blocks,
             biome_quarts: pre.2.clone(),
             placement_loot: pre.3.clone(),
+            decoration_spills: Vec::new(),
         }
     }
 
@@ -1074,21 +1145,25 @@ impl NetherGenerator {
         .1
     }
 
-    /// Runs the Nether's mixed decoration steps in raw source/index order.
-    /// Ore and non-ore placement use different read/write adapters, so each
-    /// completed entry is copied across the one explicit synchronization
-    /// boundary before its successor can inspect the field.
-    fn mixed_step7_stage(
+    fn mixed_step7_stage_with_spills(
         &self,
         cx: i32,
         cz: i32,
         center_world: crate::dense_grid::DenseBlockGrid,
         center_heights: &[i32; 256],
-    ) -> crate::dense_grid::DenseBlockGrid {
-        self.mixed_step7_stage_selected(cx, cz, center_world, center_heights, None, &[]).0
+    ) -> (crate::dense_grid::DenseBlockGrid, Vec<(i32, i32, i32, String)>) {
+        let (world, _, spills) = self.mixed_step7_stage_selected(
+            cx,
+            cz,
+            center_world,
+            center_heights,
+            None,
+            &[],
+        );
+        (world, spills)
     }
 
-    /// [`Self::mixed_step7_stage`] with an optional source filter for the
+    /// [`Self::mixed_step7_stage_with_spills`] with an optional source filter for the
     /// parity materializer. The single raw dispatcher below remains the only
     /// placement/RNG implementation for both paths.
     fn mixed_step7_stage_selected(
@@ -1099,7 +1174,11 @@ impl NetherGenerator {
         center_heights: &[i32; 256],
         selected_source: Option<(i32, i32)>,
         overrides: &[(i32, i32, i32, String)],
-    ) -> (crate::dense_grid::DenseBlockGrid, Vec<ParityDecorationSpill>) {
+    ) -> (
+        crate::dense_grid::DenseBlockGrid,
+        Vec<ParityDecorationSpill>,
+        Vec<(i32, i32, i32, String)>,
+    ) {
         let mut nearby: [Option<Arc<PreDecorationResult>>; 25] =
             std::array::from_fn(|_| None);
         let mut nearby_biomes: [Option<Arc<crate::overworld::BiomeCells>>; 25] =
@@ -1225,7 +1304,7 @@ impl NetherGenerator {
         let grid_sources = &nearby;
         let grid_biomes = &nearby_biomes;
         let grid_feature_biomes = self.feature_biomes.clone();
-        let mut grid = crate::feature::vegetation::VegGrid::with_sources_and_biomes(
+        let mut grid = crate::feature::vegetation::VegGrid::with_sources_and_biomes_shared(
             Arc::clone(&self.interner), self.min_y, DECORATION_WINDOW_HEIGHT, cx * 16, cz * 16,
             crate::feature::REGION_MIN - crate::feature::VEG_PADDING,
             crate::feature::REGION_MAX + crate::feature::VEG_PADDING,
@@ -1283,6 +1362,8 @@ impl NetherGenerator {
         let mut decoration_rng = decoration_random();
         let mut ore_random = decoration_random();
         let mut grid_cursor = 0usize;
+        let mut ore_cursor = 0usize;
+        let mut changed_scratch = Vec::new();
         for dx in -1..=1_i32 { for dz in -1..=1_i32 {
             let source_x = cx + dx;
             let source_z = cz + dz;
@@ -1317,7 +1398,7 @@ impl NetherGenerator {
                         .filter(|(_, (_, found, _))| *found == index)
                     {
                         crate::feature::vegetation::apply_decoration_entry_at_world_seed(&mut decoration_rng, self.seed, decoration_seed, origin, step, *found, placed, &mut grid, &self.veg_tags);
-                        synchronize_mixed_entry(
+                        synchronize_mixed_entry_reusing(
                             MixedEntryWriter::Decoration,
                             &mut grid,
                             &mut ore_view,
@@ -1326,7 +1407,9 @@ impl NetherGenerator {
                             self.min_y,
                             self.height,
                             &mut grid_cursor,
+                            &mut ore_cursor,
                             &mut ore_transferred,
+                            &mut changed_scratch,
                         );
                         decoration_at = entry_at + 1;
                     } else if let Some(ore) = next_ore.filter(|ore| ore.index() == index) {
@@ -1351,7 +1434,7 @@ impl NetherGenerator {
                                 );
                             }
                         }
-                        synchronize_mixed_entry(
+                        synchronize_mixed_entry_reusing(
                             MixedEntryWriter::Ore,
                             &mut grid,
                             &mut ore_view,
@@ -1360,7 +1443,9 @@ impl NetherGenerator {
                             self.min_y,
                             self.height,
                             &mut grid_cursor,
+                            &mut ore_cursor,
                             &mut ore_transferred,
+                            &mut changed_scratch,
                         );
                         ore_at += 1;
                     }
@@ -1368,13 +1453,21 @@ impl NetherGenerator {
             }
         }}
         let mut world = center_world;
+        let mut decoration_spills = Vec::new();
         for (x, y, z, state) in grid.dirty_cell_ids() {
-            // `world` is the canonical 128-row terrain carrier.  The widened
-            // vegetation grid intentionally keeps upper-half writes only in
-            // the lifecycle spill stream; never let a future dense-carrier
-            // resize turn those writes into packet terrain here.
             if (self.min_y..self.min_y + self.height).contains(&y) {
                 world.set_id(x, y, z, state);
+            } else if selected_source.is_none()
+                && (cx * 16..cx * 16 + 16).contains(&x)
+                && (cz * 16..cz * 16 + 16).contains(&z)
+                && (self.min_y..self.min_y + DECORATION_WINDOW_HEIGHT).contains(&y)
+            {
+                decoration_spills.push((
+                    x,
+                    y,
+                    z,
+                    self.interner.name_of(state).to_owned(),
+                ));
             }
         }
         let mut final_spills = BTreeMap::new();
@@ -1389,7 +1482,7 @@ impl NetherGenerator {
                 }
             }
         }
-        (world, final_spills.into_values().collect())
+        (world, final_spills.into_values().collect(), decoration_spills)
     }
 
     /// The complete prefix decorations read: terrain through structure pieces.
@@ -2719,6 +2812,7 @@ mod tests {
             |_, _| Some(Arc::clone(&source)),
         );
         let mut grid_cursor = 0;
+        let mut ore_cursor = 0;
         let mut ore_transferred = HashMap::new();
 
         assert!(grid.set_id_if_in_bounds(1, 1, 1, basalt));
@@ -2732,6 +2826,7 @@ mod tests {
                 0,
                 8,
                 &mut grid_cursor,
+                &mut ore_cursor,
                 &mut ore_transferred,
             ).projected,
             1
@@ -2747,6 +2842,7 @@ mod tests {
                 0,
                 8,
                 &mut grid_cursor,
+                &mut ore_cursor,
                 &mut ore_transferred,
             ).projected,
             0,
@@ -2764,12 +2860,18 @@ mod tests {
                 0,
                 8,
                 &mut grid_cursor,
+                &mut ore_cursor,
                 &mut ore_transferred,
             ).projected,
             1,
             "only the new ore cell crosses back into the decoration grid"
         );
         assert_eq!(grid.get_id(2, 1, 2), blackstone);
+        // A cell can be touched several times inside a later entry. The
+        // bridge must inspect the final overlay value, not replay an
+        // intermediate state that the complete overlay scan never exposed.
+        assert!(ore_view.set_id(2, 1, 2, basalt));
+        assert!(ore_view.set_id(2, 1, 2, blackstone));
         assert_eq!(
             synchronize_mixed_entry(
                 MixedEntryWriter::Ore,
@@ -2780,11 +2882,30 @@ mod tests {
                 0,
                 8,
                 &mut grid_cursor,
+                &mut ore_cursor,
                 &mut ore_transferred,
             ).projected,
             0,
             "control: unchanged ore overlay cells are not replayed"
         );
+        assert!(ore_view.set_id(2, 1, 2, basalt));
+        assert_eq!(
+            synchronize_mixed_entry(
+                MixedEntryWriter::Ore,
+                &mut grid,
+                &mut ore_view,
+                0,
+                0,
+                0,
+                8,
+                &mut grid_cursor,
+                &mut ore_cursor,
+                &mut ore_transferred,
+            ).projected,
+            1,
+            "a final overwrite with a new state crosses the bridge once"
+        );
+        assert_eq!(grid.get_id(2, 1, 2), basalt);
     }
 
     #[test]
@@ -2818,6 +2939,7 @@ mod tests {
             |_, _| Some(Arc::clone(&source)),
         );
         let mut grid_cursor = 0;
+        let mut ore_cursor = 0;
         let mut ore_transferred = HashMap::new();
         assert!(ore_view.set_id(-16, 4, -16, blackstone));
 
@@ -2831,6 +2953,7 @@ mod tests {
                 0,
                 8,
                 &mut grid_cursor,
+                &mut ore_cursor,
                 &mut ore_transferred,
             ).projected,
             1,
@@ -2870,6 +2993,7 @@ mod tests {
             |_, _| Some(Arc::clone(&source)),
         );
         let mut grid_cursor = 0;
+        let mut ore_cursor = 0;
         let mut ore_transferred = HashMap::new();
         assert!(grid.set_id_if_in_bounds(-17, 1, 0, basalt));
 
@@ -2882,6 +3006,7 @@ mod tests {
             0,
             8,
             &mut grid_cursor,
+            &mut ore_cursor,
             &mut ore_transferred,
         );
         assert_eq!(sync.projected, 0);
@@ -2917,6 +3042,7 @@ mod tests {
             |_, _| Some(Arc::clone(&source)),
         );
         let mut grid_cursor = 0;
+        let mut ore_cursor = 0;
         let mut ore_transferred = HashMap::new();
         assert!(grid.set_id_if_in_bounds(1, 128, 1, brown));
 
@@ -2929,6 +3055,7 @@ mod tests {
             0,
             128,
             &mut grid_cursor,
+            &mut ore_cursor,
             &mut ore_transferred,
         );
         assert_eq!(sync.projected, 0);

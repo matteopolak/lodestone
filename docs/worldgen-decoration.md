@@ -51,6 +51,12 @@ documents instead gives index 104, a deliberately retained failing-control
 value. The catalog must therefore use the biome source's possible-biome order
 and use biome membership only when selecting which already-indexed features run.
 
+The catalog also materializes each placed feature's eligible-biome map once and
+shares it by `Arc` with replay contexts and vegetation grids. This map is immutable
+after generator construction; rebuilding its `String` keys and sets for every
+served chunk changes no admission or RNG decision and only adds avoidable heap
+traffic.
+
 `UNDERGROUND_ORES` is dispatched through the same catalog rather than treated as an ore-only
 list. `select_ores` emits the configured ore entries, while `select_step6_disks` emits disk
 features to the existing `VegGrid` placement interpreter, and

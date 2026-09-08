@@ -506,7 +506,7 @@ impl ChunkColumn {
     }
 
     /// Adopts a [`lodestone_worldgen::nether::NetherColumn`], padded up to
-    /// `window_height` rows of air.
+    /// `window_height` rows of air plus upper-window decoration writes.
     ///
     /// # Why there is a separate constructor, and why it pads
     ///
@@ -524,10 +524,10 @@ impl ChunkColumn {
     /// frames a chunk against the **dimension**, not against whatever the
     /// generator felt like producing: a client that resolved `the_nether`'s
     /// registry entry reads exactly 16 sections, so serving an 8-section column
-    /// is a decode failure, not a short world. The rows above 128 are genuinely
-    /// air in vanilla — 127 is the bedrock roof and `logical_height` is what stops
-    /// anything being built above it — so the padding is the truth rather than a
-    /// stand-in.
+    /// is a decode failure, not a short world. The rows above 128 are normally
+    /// air — 127 is the bedrock roof — but mushrooms can spill into the
+    /// resident upper window; those writes cross this boundary explicitly and
+    /// all other padding remains air.
     ///
     /// Biomes come across at the generator's own resolution: this dimension's
     /// climate is y-invariant (see `lodestone_worldgen::nether`'s module doc), so
@@ -538,6 +538,7 @@ impl ChunkColumn {
         column: lodestone_worldgen::nether::NetherColumn,
         window_height: i32,
     ) -> Self {
+        let decoration_spills = column.decoration_spills().to_vec();
         let (min_y, generated_height, palette, blocks, biome_quarts) = column.into_raw();
         Self::from_raw_window(
             min_y,
@@ -546,6 +547,7 @@ impl ChunkColumn {
             palette,
             &blocks,
             biome_quarts,
+            &decoration_spills,
         )
     }
 
@@ -566,6 +568,7 @@ impl ChunkColumn {
         palette: Vec<String>,
         blocks: &[u16],
         biome_quarts: [String; 16],
+        decoration_spills: &[(i32, i32, i32, String)],
     ) -> Self {
         assert!(window_height >= generated_height, "window cannot truncate the generated column");
         let mut column = Self::new(min_y, window_height);
@@ -587,6 +590,11 @@ impl ChunkColumn {
                     }
                     column.blocks.set(lx as i32, ly as i32, lz as i32, id);
                 }
+            }
+        }
+        for &(x, y, z, ref state) in decoration_spills {
+            if (min_y..min_y + window_height).contains(&y) {
+                column.set_block(x.rem_euclid(16), y, z.rem_euclid(16), state);
             }
         }
         column.biome_quarts = biome_quarts;
@@ -637,6 +645,7 @@ impl ChunkColumn {
             palette,
             &blocks,
             biome_quarts.map(str::to_string),
+            &[],
         );
         if !gateways.is_empty() {
             let mut entities = out.block_entities().to_vec();
@@ -1728,6 +1737,18 @@ pub trait ChunkSource: Send + Sync {
         let _ = view_radius;
     }
 
+    /// Prepares an immutable packet-replay cache for the supplied target
+    /// coordinates and returns its bounded capacity, when the source supports
+    /// that diagnostic seam. Wrappers must forward this method so a retained
+    /// source prepares the generator that actually serves columns.
+    fn prepare_packet_replay(&self, _targets: &[(i32, i32)]) -> Option<usize> {
+        None
+    }
+
+    /// Releases immutable packet-replay state prepared by
+    /// [`ChunkSource::prepare_packet_replay`].
+    fn reset_packet_replay(&self) {}
+
     /// The live-world registries this source persists, when it persists any.
     ///
     /// A source backed by a world directory owns the *one* block-entity registry
@@ -1939,6 +1960,14 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
         (**self).set_retention_radius(view_radius);
     }
 
+    fn prepare_packet_replay(&self, targets: &[(i32, i32)]) -> Option<usize> {
+        (**self).prepare_packet_replay(targets)
+    }
+
+    fn reset_packet_replay(&self) {
+        (**self).reset_packet_replay();
+    }
+
     fn world_registries(&self) -> Option<WorldRegistries> {
         (**self).world_registries()
     }
@@ -2070,6 +2099,14 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
         (**self).set_retention_radius(view_radius);
     }
 
+    fn prepare_packet_replay(&self, targets: &[(i32, i32)]) -> Option<usize> {
+        (**self).prepare_packet_replay(targets)
+    }
+
+    fn reset_packet_replay(&self) {
+        (**self).reset_packet_replay();
+    }
+
     fn world_registries(&self) -> Option<WorldRegistries> {
         (**self).world_registries()
     }
@@ -2148,7 +2185,8 @@ pub struct WorldRegistries {
     pub native_storage: Option<std::sync::Arc<crate::world_storage::WorldStorage>>,
 }
 
-/// Generates every column in `coords` across the shared native Rayon pool over `&source`,
+/// Generates every column in `coords` across the shared native Rayon pool over
+/// `&source`,
 /// returning them in the **same order as `coords`** regardless of which
 /// thread finished which column first.
 ///
@@ -2159,11 +2197,11 @@ pub struct WorldRegistries {
 /// `lodestone-worldgen`, so results are order-independent by construction —
 /// see `OverworldGenerator::column`'s own doc comment and
 /// `examples/bench_worldgen.rs`, which already shares a generator across a
-/// worker pool the same way. `ChunkSource: Send + Sync` (this trait's own
-/// bound, above) is what makes `&S` shareable across the pool in the first
-/// place. The pool is intentionally reused across batches and connections;
-/// creating a fresh scoped thread set for every batch would multiply native
-/// workers when several players cross chunk boundaries together.
+/// reusable worker pool the same way. `ChunkSource: Send + Sync` (this trait's
+/// own bound, above) is what makes `&S` shareable across the pool in the first
+/// place. Reusing one pool is load-bearing: a fresh scoped thread set per
+/// batch would multiply native workers when players cross chunk boundaries
+/// together.
 ///
 /// Callers that care about the wire being independent of thread scheduling
 /// (i.e. every caller) must still encode/send the returned columns in the
@@ -2222,15 +2260,24 @@ where
             .collect();
     }
 
-    use rayon::prelude::*;
+    // Indexed parallel collection retains coordinate order while Rayon reuses
+    // the process-wide pool for every native batch and connection.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use rayon::prelude::*;
 
-    // Rayon owns one reusable pool for the process. This function is normally
-    // called from one Tokio blocking task per batch: creating an OS thread set
-    // here would oversubscribe the machine as soon as two connections generate
-    // at once. Indexed parallel collection retains coordinate order even when
-    // workers finish out of order.
+        return coords
+            .par_iter()
+            .map(|&(cx, cz)| f((cx, cz), source.column(cx, cz)))
+            .collect();
+    }
+
+    // Browser builds deliberately keep the yielding caller above this helper;
+    // this fallback also keeps the generic function available to wasm tests
+    // without linking Rayon into the browser target.
+    #[cfg(target_arch = "wasm32")]
     coords
-        .par_iter()
+        .iter()
         .map(|&(cx, cz)| f((cx, cz), source.column(cx, cz)))
         .collect()
 }
@@ -2349,9 +2396,9 @@ async fn yield_to_browser() {
 ///
 /// # Why this exists when generation is already parallel
 ///
-/// [`generate_columns_parallel`] improves *throughput*: the batch is
-/// fanned out over a reusable Rayon pool. It does nothing about *latency*,
-/// because its blocking task still waits until every worker finishes. Parallel
+/// [`generate_columns_parallel`] improves *throughput*: the batch is fanned out
+/// over the shared Rayon pool. It did nothing about *latency* when called
+/// inline, because waiting for every worker still blocks the caller. Parallel
 /// is not the same as non-blocking, and the
 /// distinction is total rather than academic here: the shell builds the
 /// server's runtime with `tokio::runtime::Builder::new_current_thread()`
@@ -2360,31 +2407,17 @@ async fn yield_to_browser() {
 /// *every* task in the process — the world tick included — so an inline
 /// chunk-boundary generation can drop one or more 50 ms ticks.
 ///
-/// # Why `spawn_blocking` and not `block_in_place`
+/// # Why a Rayon handoff and not `spawn_blocking`
 ///
-/// [`tokio::task::block_in_place`] needs no signature change and is the
-/// obvious-looking fix. It **panics** on a current-thread runtime —
-/// `can call blocking only when running on the multi-threaded runtime` —
-/// which is exactly the runtime production builds, so it would panic in
-/// singleplayer rather than merely fail a test. Measured, on a
-/// `new_current_thread` runtime:
-///
-/// | call | result |
-/// |---|---|
-/// | `block_in_place` | panics |
-/// | `spawn_blocking` | `Ok` |
-/// | 10 ms timer ticks during a 300 ms `spawn_blocking` | **25** |
-/// | 10 ms timer ticks during a 300 ms inline block | **0** |
-///
-/// `spawn_blocking` is correct on a current-thread runtime because the
-/// blocking pool is a separate set of threads from the core thread, and it
-/// stays correct on a multi-thread runtime as well, so the behavior is
-/// independent of the runtime's thread count.
+/// A Rayon job is correct on both current-thread and multi-thread Tokio
+/// runtimes: generation runs on the shared native pool and the caller awaits a
+/// oneshot result, so no runtime worker is blocked and no second blocking pool
+/// is created per connection.
 ///
 /// # Why `Arc<S>` rather than `&S`
 ///
-/// `spawn_blocking` requires a `'static` closure, so the source cannot be
-/// borrowed across it. Callers thread the shared handle they already hold
+/// The dispatched closure requires a `'static` lifetime, so the source cannot
+/// be borrowed across it. Callers thread the shared handle they already hold
 /// (`crate::integrated` builds `Arc::new(source)` for exactly this reason);
 /// `crate::server::SourceRef` is the wrapper that lets a borrow-shaped
 /// caller keep the old blocking path without duplicating any of
@@ -2392,12 +2425,14 @@ async fn yield_to_browser() {
 ///
 /// # wasm32
 ///
-/// `wasm32-unknown-unknown` has no blocking pool and does **not** call the
-/// native-only `generate_columns_parallel` path. This helper instead calls
-/// [`generate_columns_yielding`], which generates one column at a time and
-/// yields to the browser's own task queue between columns. That keeps the
-/// same source algorithm usable in a browser without linking a native worker
-/// backend or monopolising the tab with a synchronous multi-column burst.
+/// `wasm32-unknown-unknown` has no native Rayon pool and does **not** call
+/// `generate_columns_parallel` straight through. `portal.rs`'s `create_portal`
+/// gates its own call off on wasm32 for the same constraint. This helper therefore
+/// wasm32 instead calls [`generate_columns_yielding`], which never enters
+/// `map_columns_parallel`'s multi-column branch (it generates one column at a
+/// time) and yields to the browser's own task queue between columns, avoiding
+/// both the trap and the "page not responding" hang caused by synchronous
+/// multi-column fan-out.
 #[tracing::instrument(skip_all, fields(count = coords.len()))]
 pub(crate) async fn generate_columns_offloaded<S: ChunkSource + 'static + ?Sized>(
     source: Arc<S>,
@@ -2455,9 +2490,8 @@ pub(crate) async fn generate_and_encode_columns_offloaded<S: ChunkSource + 'stat
     // wasm32: `map_columns_yielding`, one column generated-and-encoded at a
     // time with a real browser yield between each — see
     // `generate_columns_offloaded`'s wasm32 doc for why this is not merely a
-    // latency nicety on this target. The native parallel helper is not
-    // compiled into wasm, so this also keeps the browser build from reaching a
-    // native worker backend on any batch bigger than one column.
+    // latency nicety on this target. The native Rayon branch is not compiled
+    // into the browser build, so this path cannot create native workers there.
     #[cfg(target_arch = "wasm32")]
     {
         Some(
@@ -2867,6 +2901,14 @@ impl ChunkSource for NetherChunkSource {
         self.generate(cx, cz)
     }
 
+    fn prepare_packet_replay(&self, targets: &[(i32, i32)]) -> Option<usize> {
+        Some(self.generator.prepare_packet_replay(targets))
+    }
+
+    fn reset_packet_replay(&self) {
+        self.generator.reset_packet_replay();
+    }
+
     fn block_state(&self, x: i32, y: i32, z: i32) -> String {
         let cx = x.div_euclid(16);
         let cz = z.div_euclid(16);
@@ -2962,7 +3004,6 @@ impl EndChunkSource {
             .generator
             .structure_starts(cx, cz)
             .into_iter()
-            .map(std::sync::Arc::new)
             .collect::<Vec<_>>();
         let references = self.generator.structure_references(cx, cz);
 
@@ -2979,8 +3020,7 @@ impl EndChunkSource {
             referenced_starts.extend(
                 self.generator
                     .structure_starts(origin_x, origin_z)
-                    .into_iter()
-                    .map(std::sync::Arc::new),
+                    .into_iter(),
             );
         }
         let chests = crate::structure_loot::chests_for_chunk(
@@ -3614,7 +3654,7 @@ mod tests {
             "the timer task ran {offloaded_ticks} times during a {offloaded_elapsed:?} \
              offloaded generation burst; expected at least {floor} (≈{expected} periods of \
              {GATE_TICK_PERIOD:?}). A count near 0 means generation is still blocking the \
-             runtime — i.e. `spawn_blocking` is not being reached"
+             runtime — i.e. the Rayon handoff is not being reached"
         );
 
         // The control. If this is ever non-zero, `generate_columns_parallel`
@@ -3670,11 +3710,137 @@ mod tests {
         );
     }
 
+    /// Two production batch calls must share the Rayon pool rather than each
+    /// creating a Tokio blocking task that fans out another `P` scoped threads.
+    /// The source records both simultaneous occupancy and worker identities;
+    /// either exceeding the pool size would expose nested/per-batch thread
+    /// creation. The returned digest and order are checked at the same time so
+    /// the regression cannot be reduced to a thread-count-only fixture.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn concurrent_offloaded_batches_share_rayon_workers_and_content() {
+        use std::collections::{HashSet, hash_map::DefaultHasher};
+        use std::hash::{Hash, Hasher};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+
+        struct BatchProbe {
+            active: AtomicUsize,
+            max_active: AtomicUsize,
+            workers: Mutex<HashSet<std::thread::ThreadId>>,
+        }
+
+        impl ChunkSource for BatchProbe {
+            fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+                let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+                self.max_active.fetch_max(active, Ordering::SeqCst);
+                self.workers
+                    .lock()
+                    .expect("batch worker log poisoned")
+                    .insert(std::thread::current().id());
+                std::thread::sleep(std::time::Duration::from_millis(3));
+                let mut column = ChunkColumn::new(0, 16);
+                let state = if (cx as i64 * 31 + cz as i64 * 17) & 1 == 0 {
+                    "minecraft:stone"
+                } else {
+                    "minecraft:dirt"
+                };
+                column.set_block(0, 0, 0, state);
+                self.active.fetch_sub(1, Ordering::SeqCst);
+                column
+            }
+
+            fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+                "minecraft:air".to_string()
+            }
+
+            fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+                crate::chunk::DEFAULT_BIOME.to_string()
+            }
+
+            fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        }
+
+        fn coords(offset: i32, count: usize) -> Vec<(i32, i32)> {
+            (0..count)
+                .map(|i| {
+                    let x = offset + i as i32;
+                    (x, -x - 1)
+                })
+                .collect()
+        }
+
+        fn digest(columns: &[ChunkColumn], coords: &[(i32, i32)]) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            for (&(cx, cz), column) in coords.iter().zip(columns) {
+                cx.hash(&mut hasher);
+                cz.hash(&mut hasher);
+                column.block_state(0, 0, 0).hash(&mut hasher);
+            }
+            hasher.finish()
+        }
+
+        let workers = rayon::current_num_threads().max(1);
+        let first_coords = coords(0, workers * 3);
+        let second_coords = coords(10_000, workers * 3);
+        let source = Arc::new(BatchProbe {
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+            workers: Mutex::new(HashSet::new()),
+        });
+        let (first, second) = tokio::join!(
+            generate_columns_offloaded(Arc::clone(&source), first_coords.clone()),
+            generate_columns_offloaded(Arc::clone(&source), second_coords.clone()),
+        );
+
+        assert_eq!(first.len(), first_coords.len());
+        assert_eq!(second.len(), second_coords.len());
+        assert_eq!(
+            digest(&first, &first_coords),
+            digest_serial(&first_coords),
+            "the first batch changed generated content or order"
+        );
+        assert_eq!(
+            digest(&second, &second_coords),
+            digest_serial(&second_coords),
+            "the second batch changed generated content or order"
+        );
+        let max_active = source.max_active.load(Ordering::SeqCst);
+        let unique_workers = source
+            .workers
+            .lock()
+            .expect("batch worker log poisoned")
+            .len();
+        assert!(
+            max_active <= workers,
+            "concurrent batches exceeded the shared Rayon pool: {max_active} active, {workers} workers"
+        );
+        assert!(
+            unique_workers <= workers,
+            "batch dispatch created per-batch workers: observed {unique_workers}, pool has {workers}"
+        );
+
+        fn digest_serial(coords: &[(i32, i32)]) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            for &(cx, cz) in coords {
+                cx.hash(&mut hasher);
+                cz.hash(&mut hasher);
+                let state = if (cx as i64 * 31 + cz as i64 * 17) & 1 == 0 {
+                    "minecraft:stone"
+                } else {
+                    "minecraft:dirt"
+                };
+                state.hash(&mut hasher);
+            }
+            hasher.finish()
+        }
+    }
+
     /// [`generate_columns_yielding`]/[`map_columns_yielding`] are what
     /// `generate_columns_offloaded`/`generate_and_encode_columns_offloaded`'s
-    /// wasm32 branches call instead of the native-only
-    /// `generate_columns_parallel` helper. The target split is what makes the
-    /// browser path structurally unable to enter a native worker backend.
+    /// wasm32 branches call instead of the native Rayon branch of
+    /// `generate_columns_parallel`; native worker dispatch is not compiled
+    /// into the browser target.
     /// wasm32-only code cannot be exercised by a native `cargo test`, so this
     /// gate proves the one property that is target-independent by
     /// construction: **the yield closure runs exactly once per column,

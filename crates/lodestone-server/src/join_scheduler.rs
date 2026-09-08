@@ -591,7 +591,7 @@ pub(crate) const JOIN_STREAM_SERVICE_BUDGET: Duration = Duration::from_millis(25
 ///
 /// # wasm32
 ///
-/// There is no blocking pool, so the window is forced to 1 and columns are
+/// There is no native worker pool, so the window is forced to 1 and columns are
 /// generated inline — the unchanged behaviour of a target that never had a second
 /// thread. Same as `crate::chunk::generate_columns_offloaded`'s `cfg`.
 pub struct ColumnPipeline<S> {
@@ -767,7 +767,7 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
     ///
     /// A newly visible strip contains `2r + 1` columns (`33` at
     /// `view_radius = 16`). Enqueuing it here lets the connection task keep
-    /// reading and writing while the blocking pool generates the strip; one
+    /// reading and writing while the shared native pool generates the strip; one
     /// await covers only the first strip segment.
     ///
     /// Enqueueing into the live pipeline gives the strip the same primed window
@@ -807,7 +807,7 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
     ///
     /// **In-flight columns are not cancelled.** They have already been spawned, there
     /// are at most [`window`](Self::window) of them, and reaching into the pool to
-    /// abandon a `JoinHandle` would lose the column for a player who walks back into
+    /// abandon its queued result would lose the column for a player who walks back into
     /// it. So the guarantee is "a forgotten column is not *newly started*", not "no
     /// forgotten column is ever sent".
     pub(crate) fn cancel(&mut self, dropped: &std::collections::HashSet<(i32, i32)>) -> usize {
@@ -846,7 +846,7 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
     /// column is in hand, so a cancelled `next` leaves the pipeline exactly as it
     /// found it and the next call re-awaits the same worker. Popping first — as
     /// this did while it was only ever driven to completion — would have dropped
-    /// the `JoinHandle` on cancellation and silently lost that column from the
+    /// the queued result on cancellation and silently lost that column from the
     /// wire.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn next(&mut self) -> Result<Option<((i32, i32), ColumnPayload)>, ChunkEncodeError> {
@@ -872,29 +872,31 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
             // multi-hundred-KiB column plus 62 M instructions of work to do to it.
             let encoder = self.encoder.clone();
             let trace = self.trace.clone();
-            self.inflight.push_back((
-                (cx, cz),
-                crate::worldgen_dispatch::spawn(move || {
-                    let column = source.column_at(cx, cz, stage);
-                    if let Some(trace) = trace.as_ref() {
-                        trace.mark("generated", cx, cz);
-                    }
-                    match encoder {
-                        Some(encoder) => {
-                            let encoded = encoder
-                                .try_encode_chunk_in_dimension(cx, cz, &column, dimension)
-                                .map(ColumnPayload::Encoded);
-                            if encoded.is_ok() {
-                                if let Some(trace) = trace.as_ref() {
-                                    trace.mark("encoded", cx, cz);
-                                }
+            // This await is only global-pool admission: it does not await the
+            // column. Once admitted, `spawn` has no suspension point before its
+            // receiver is stored, so cancellation cannot lose an in-flight result.
+            let result = crate::worldgen_dispatch::spawn(move || {
+                let column = source.column_at(cx, cz, stage);
+                if let Some(trace) = trace.as_ref() {
+                    trace.mark("generated", cx, cz);
+                }
+                match encoder {
+                    Some(encoder) => {
+                        let encoded = encoder
+                            .try_encode_chunk_in_dimension(cx, cz, &column, dimension)
+                            .map(ColumnPayload::Encoded);
+                        if encoded.is_ok() {
+                            if let Some(trace) = trace.as_ref() {
+                                trace.mark("encoded", cx, cz);
                             }
-                            encoded
                         }
-                        None => Ok(ColumnPayload::Column(column)),
+                        encoded
                     }
-                }),
-            ));
+                    None => Ok(ColumnPayload::Column(column)),
+                }
+            })
+            .await;
+            self.inflight.push_back(((cx, cz), result));
         }
         let (pos, handle) = self
             .inflight
@@ -908,7 +910,7 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
         Ok(Some((pos, payload)))
     }
 
-    /// wasm32: no blocking pool, so this is the serial path. See the struct doc.
+    /// wasm32: no native worker pool, so this is the serial path. See the struct doc.
     #[cfg(target_arch = "wasm32")]
     pub async fn next(&mut self) -> Result<Option<((i32, i32), ColumnPayload)>, ChunkEncodeError> {
         if self.remaining() == 0 {
@@ -1463,12 +1465,11 @@ mod tests {
         );
     }
 
-    /// Multiple connections must share the native dispatch budget. The old
-    /// shape gave every pipeline its own `spawn_blocking` window, so two or
-    /// more simultaneous joins could run twice the core count (and the seed
-    /// batch could add a nested fan-out on top). The source also gives each
-    /// coordinate deterministic content; the digest check makes this a
-    /// concurrency test rather than only a thread-count test.
+    /// Multiple connections share the reusable Rayon pool. The old shape gave
+    /// every pipeline its own Tokio blocking-pool window, so simultaneous joins
+    /// could exceed the core count. The source also gives each coordinate
+    /// deterministic content; the digest check makes this a concurrency test
+    /// rather than only a worker-count test.
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_pipelines_share_a_core_budget_and_preserve_content_digest() {

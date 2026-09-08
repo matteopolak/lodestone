@@ -841,6 +841,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   the End's non-multi-noise biome source. All bundled 26.2 data for both dimensions is
   complete; the remaining gaps are structure families and gameplay such as the dragon
   fight rather than missing terrain or a disconnected dimension source.
+- [Integrated world-generation dispatch](./worldgen-dispatch.md) — The integrated
+  server generates chunk columns on native workers while keeping the async connection
+  and tick tasks serviceable. One reusable Rayon pool is shared by join streams, view
+  batches, and background seed work.
 - [World-generation dungeons](./worldgen-dungeons.md) — The `monster_room`
   configured feature places an underground cobblestone room, up to two deferred-loot
   chests, and one monster spawner during Overworld decoration. Generated block
@@ -890,6 +894,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   adaptation-bearing structure. Built in phases (S1 placement, S2 templates, S3
   beardifier, S4 jigsaw, S5+ coded pieces, mineshaft, and per-structure closures
   since), on top of a bundled, byte-verified copy of vanilla's structure data.
+- [World-generation throughput](./worldgen-throughput.md) —
+  `crates/lodestone-worldgen/examples/throughput.rs` measures the three bundled
+  dimensions at the world-generation boundary. It compares each dimension's shaped
+  terrain prefix with its fully decorated column over a deterministic grid, without
+  persistence, lighting, or packet encoding.
 - [Worldgen engine overview](./worldgen.md) — `crates/lodestone-worldgen` (engine)
   and `crates/lodestone-worldgen-core` (numeric leaf crate) are a version-free port of
   vanilla Minecraft 26.2's world generator: a density-function/noise-router

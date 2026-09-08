@@ -1,0 +1,35 @@
+# World-generation throughput
+
+## What it is
+
+`crates/lodestone-worldgen/examples/throughput.rs` measures the three bundled dimensions at the world-generation boundary. It compares each dimension's shaped terrain prefix with its fully decorated column over a deterministic grid, without persistence, lighting, or packet encoding.
+
+## How it works
+
+The executable builds one production generator per dimension and seed, walks a row-major `N × N` chunk grid, and reports cold and warm passes. Cold starts with a fresh generator; warm repeats the same grid after the first pass so memoized stage work is visible. Overworld and Nether use `column_shaped`; End uses its pre-surface `shape_field`; all decorated paths call the public `column` method.
+
+Each pass reports chunks per second, process CPU utilization when the host exposes `getrusage`, and sampled resident-set growth. A separate 16-chunk allocation pass uses a benchmark-local counting allocator, so allocation counts do not distort the wall-clock throughput numbers. The legacy rolling digest over non-air counts remains in the output for historical comparison, while an out-of-band SHA-256 content digest hashes every canonical block-state string, exposed biome cell, and generated block-entity sidecar (or the dimension's equivalent loot/gateway sidecar). The content pass is outside both the timed loop and allocation-counted closure, and cold/warm digests must agree.
+
+The mixed ore/vegetation bridge reuses its ordered overlay and changed-cell buffers for the lifetime of one feature stage. The buffers are cleared before reuse, while the deterministic coordinate sort and overwrite filtering remain unchanged; this removes cumulative temporary-vector traffic without changing generated content. Ore replay also keeps a cursor into the ordered write log: each entry sorts only writes appended since the previous entry, resolves every repeated key to its final overlay value, and lets the existing transfer map retain last-write semantics. Seeded read context is not logged because it is already present in that transfer map. The benchmark prints both allocation count and allocated bytes per sampled chunk, making cumulative-vector regressions visible even when allocation counts are similar.
+
+Run a 256-chunk sweep in release mode:
+
+```text
+cargo run --release -p lodestone-worldgen --example throughput -- 42 16 all
+```
+
+Use `32` for 1,024 chunks, or select one dimension with `overworld`, `nether`, or `end` as the third argument. The optional fourth argument selects `shaped` or `decorated`; this is useful for a focused sampling profile. Profile the selected release binary with `samply record` to identify hot functions.
+
+## How to change it
+
+Keep the coordinate order, seed, and grid size in the command when comparing runs. Add a new dimension by extending `DimensionName`, `Generator::new`, `Generator::generate`, and the content-digest match arms. If a new generator has no shaped API, expose a base-terrain seam that does not run decoration rather than approximating shaped work by changing resolver data. Keep allocation counting and content hashing separate from timed passes because both observers change the hot path. When a shaped seam does not expose biomes or entities, the digest records zero sidecar entries rather than silently generating a different mode for verification.
+
+The executable is intentionally not a server benchmark: do not add region-file I/O, light propagation, chunk packet encoding, or network scheduling to it. Those costs belong to their own measurements and would make the world-generation number ambiguous.
+
+## Configuration
+
+The positional arguments are `seed`, `grid-side`, `all|overworld|nether|end`, and `all|shaped|decorated`; defaults are `42`, `16`, `all`, and `all`. Release mode is required for representative throughput. The sample allocation count is capped at 16 chunks per mode so a full-grid run remains practical.
+
+## Dependencies
+
+The example uses the production constructors in `lodestone-server::worldgen_data`, the three generators in `lodestone-worldgen`, `memory-stats` for resident-set sampling, and `libc`'s process resource counter on Unix. It does not depend on persistence, lighting, packet, or transport modules.

@@ -9,6 +9,7 @@
 //! unaffected by this module existing.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 use serde_json::Value;
 
@@ -113,6 +114,10 @@ pub struct DecorationCatalog {
     ordered: Vec<(i32, String)>,
     members: HashMap<String, HashSet<(i32, String)>>,
     placed: HashMap<String, crate::feature::vegetation::PlacedRef>,
+    /// Immutable feature-to-biome admission map shared by every replay context.
+    /// Building this map per served column cloned thousands of strings and sets
+    /// even though the catalog is generator-scoped and never changes.
+    feature_biomes: Arc<HashMap<String, HashSet<String>>>,
 }
 
 impl DecorationCatalog {
@@ -277,14 +282,20 @@ impl DecorationCatalog {
     /// [`crate::feature::vegetation::VegGrid`] uses this with its 3-D biome
     /// cells when a placement pipeline reaches the `biome` modifier.
     #[must_use]
-    pub fn feature_biomes(&self) -> HashMap<String, HashSet<String>> {
+    pub fn feature_biomes(&self) -> Arc<HashMap<String, HashSet<String>>> {
+        Arc::clone(&self.feature_biomes)
+    }
+
+    fn build_feature_biomes(
+        members: &HashMap<String, HashSet<(i32, String)>>,
+    ) -> Arc<HashMap<String, HashSet<String>>> {
         let mut out = HashMap::<String, HashSet<String>>::new();
-        for (biome, entries) in &self.members {
+        for (biome, entries) in members {
             for (_, feature) in entries {
                 out.entry(feature.clone()).or_default().insert(biome.clone());
             }
         }
-        out
+        Arc::new(out)
     }
 }
 
@@ -390,6 +401,7 @@ pub fn build_decoration_catalog(
         visit(node, &edges, &mut discovered, &mut visiting, &mut reverse);
     }
     reverse.reverse();
+    let feature_biomes = DecorationCatalog::build_feature_biomes(&members);
     DecorationCatalog {
         ordered: reverse
             .into_iter()
@@ -397,6 +409,7 @@ pub fn build_decoration_catalog(
             .collect(),
         members,
         placed,
+        feature_biomes,
     }
 }
 

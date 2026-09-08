@@ -3437,6 +3437,7 @@ dependencies = [
  "criterion",
  "flate2",
  "js-sys",
+ "libc",
  "lodestone-anvil",
  "lodestone-auth",
  "lodestone-client",
@@ -3938,6 +3939,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "flate2",
+ "libc",
  "lodestone-core",
  "lodestone-data",
  "lodestone-server",

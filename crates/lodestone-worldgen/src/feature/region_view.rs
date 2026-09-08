@@ -327,6 +327,10 @@ mod scratch {
         pub(crate) fn iter(&self) -> impl Iterator<Item = &Key> {
             self.entries().iter()
         }
+
+        pub(crate) fn iter_from(&self, cursor: usize) -> impl Iterator<Item = &Key> {
+            self.entries().iter().skip(cursor)
+        }
     }
 
     impl Drop for WriteLog {
@@ -543,6 +547,13 @@ pub struct RegionView<'a> {
     /// [`lodestone_worldgen_core::hash::fast`], and the doc on that method,
     /// which was already written to defend against exactly this.
     overlay: Overlay,
+    /// Reused ordering buffer for the mixed ore/vegetation bridge. The bridge
+    /// consumes the ordered values before the next call, so retaining this
+    /// capacity avoids rebuilding a large tuple vector for every ore entry.
+    scan_order: Vec<(i32, i32, i32, StateId)>,
+    /// Ordered `set_id` events. Mixed replay consumes this as a delta after
+    /// each entry; seeded read context is intentionally not recorded.
+    write_log: WriteLog,
     interner: Arc<StateInterner>,
 }
 
@@ -582,6 +593,8 @@ impl<'a> RegionView<'a> {
             min_y,
             height,
             overlay: Overlay::default(),
+            scan_order: Vec::new(),
+            write_log: WriteLog::default(),
             interner,
         }
     }
@@ -615,6 +628,8 @@ impl<'a> RegionView<'a> {
             min_y,
             height,
             overlay: Overlay::default(),
+            scan_order: Vec::new(),
+            write_log: WriteLog::default(),
             interner,
         }
     }
@@ -640,6 +655,8 @@ impl<'a> RegionView<'a> {
             min_y,
             height,
             overlay: Overlay::default(),
+            scan_order: Vec::new(),
+            write_log: WriteLog::default(),
             interner: Arc::clone(grid.interner()),
         }
     }
@@ -734,6 +751,7 @@ impl<'a> RegionView<'a> {
             return false;
         }
         self.overlay.insert((lx, y, lz), state);
+        self.write_log.push((lx, y, lz));
         true
     }
 
@@ -768,6 +786,31 @@ impl<'a> RegionView<'a> {
         self.overlay.len()
     }
 
+    /// Number of write events, including repeated overwrites of one cell.
+    #[must_use]
+    pub fn write_log_len(&self) -> usize {
+        self.write_log.len()
+    }
+
+    /// Visits only the final values for cells touched since `cursor`, in the
+    /// same `(x, z, y)` order as a complete overlay scan. Duplicate log events
+    /// are retained and are filtered by the transfer map, which avoids a
+    /// second per-entry deduplication map while preserving last-write wins.
+    pub fn with_write_log_since_scan_order<R>(
+        &mut self,
+        cursor: usize,
+        f: impl FnOnce(&[(i32, i32, i32, StateId)]) -> R,
+    ) -> R {
+        self.scan_order.clear();
+        let overlay = &self.overlay;
+        self.scan_order.extend(self.write_log.iter_from(cursor).filter_map(
+            |&(lx, y, lz)| overlay.get(&(lx, y, lz)).map(|id| (lx, y, lz, id)),
+        ));
+        self.scan_order
+            .sort_unstable_by_key(|&(lx, y, lz, _)| (lx, lz, y));
+        f(&self.scan_order)
+    }
+
     /// Every write held by this view's overlay, in deterministic `(x, z, y)`
     /// order.
     ///
@@ -784,6 +827,25 @@ impl<'a> RegionView<'a> {
             .collect();
         out.sort_unstable_by_key(|&(lx, y, lz, _)| (lx, lz, y));
         out
+    }
+
+    /// Visits every overlay write in deterministic `(x, z, y)` order using a
+    /// buffer retained by this view. Mixed ore/vegetation dispatch consumes the
+    /// values before the next call, so retaining capacity removes repeated
+    /// large temporary vectors without changing the ordering contract.
+    pub fn with_writes_in_scan_order<R>(
+        &mut self,
+        f: impl FnOnce(&[(i32, i32, i32, StateId)]) -> R,
+    ) -> R {
+        self.scan_order.clear();
+        self.scan_order.extend(
+            self.overlay
+                .iter()
+                .map(|(&(lx, y, lz), &id)| (lx, y, lz, id)),
+        );
+        self.scan_order
+            .sort_unstable_by_key(|&(lx, y, lz, _)| (lx, lz, y));
+        f(&self.scan_order)
     }
 
     /// Every write that landed in the **centre** chunk's own 16×16 columns, in

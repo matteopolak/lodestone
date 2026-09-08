@@ -30,15 +30,17 @@ esac
 dimension="${LODESTONE_ORACLE_DIMENSION:-overworld}"
 dimension_arg_explicit=0
 raw_packet=0
+light_free=0
 for (( i = 0; i < ${#ARGS[@]}; i++ )); do
   case "${ARGS[$i]}" in
     --raw-packet|--format-v6) raw_packet=1 ;;
+    --light-free|--format-v7) light_free=1 ;;
     --format)
-      if [ $((i + 1)) -ge ${#ARGS[@]} ] || [ "${ARGS[$((i + 1))]}" != v6 ]; then
-        echo "--format accepts only v6 for raw packet materialization" >&2
+      if [ $((i + 1)) -ge ${#ARGS[@]} ] || { [ "${ARGS[$((i + 1))]}" != v6 ] && [ "${ARGS[$((i + 1))]}" != v7 ]; }; then
+        echo "--format accepts v6 (raw packet) or v7 (light-free) for materialization" >&2
         exit 2
       fi
-      raw_packet=1
+      if [ "${ARGS[$((i + 1))]}" = v6 ]; then raw_packet=1; else light_free=1; fi
       i=$((i + 1))
       ;;
   esac
@@ -52,13 +54,19 @@ case "$dimension" in
   overworld|nether|end) ;;
   *) echo "LODESTONE_ORACLE_DIMENSION must be overworld, nether, or end" >&2; exit 2 ;;
 esac
+if [ "$raw_packet" -eq 1 ] && [ "$light_free" -eq 1 ]; then
+  echo "--raw-packet and --light-free select different explicit formats" >&2
+  exit 2
+fi
 # Keep the Java invocation self-describing. This matters when callers select a
 # non-overworld only through the environment: the mode script must not silently
 # run an overworld materialization while waiting for a Nether/End seal.
 if [ "$dimension_arg_explicit" -eq 0 ] && [ "$dimension" != overworld ]; then
   ARGS+=( --dimension "$dimension" )
 fi
-if [ "$raw_packet" -eq 1 ]; then
+if [ "$light_free" -eq 1 ]; then
+  freeze_stamp="lodestone-large-parity-materialization-v7-${dimension}.freeze.sha256"
+elif [ "$raw_packet" -eq 1 ]; then
   freeze_stamp="lodestone-large-parity-materialization-v6-${dimension}.freeze.sha256"
 else
   freeze_stamp="lodestone-large-parity-materialization-v2-${dimension}.freeze.sha256"
