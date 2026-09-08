@@ -7,7 +7,7 @@
 use lodestone_core::{
     Ctx, Decode, Encode, Nbt, Reader, State, Writer, encode_body, write_network_nbt,
 };
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation, Vec3f};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation, Text, Vec3, Vec3f};
 use lodestone_server::{ChunkColumn, ChunkEncodeError, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_world::{Heightmap, LongArrayFraming, PaletteKind, PalettedContainer};
 use uuid::Uuid;
@@ -18,8 +18,9 @@ use crate::packets::chat::{ChatMessage, SystemChat};
 use crate::packets::common::NetworkNbt;
 use crate::packets::configuration::RegistryData;
 use crate::packets::game::{
-    BlockDig, BlockPlace, ChunkBatchFinished, ChunkBatchStart, ClientboundPositionLook, JoinGame,
-    ServerboundFlying, ServerboundLook, ServerboundPosition, ServerboundPositionLook, SpawnInfo,
+    BlockDig, BlockPlace, ChunkBatchFinished, ChunkBatchStart, ClientCommand,
+    ClientboundPositionLook, JoinGame, ServerboundFlying, ServerboundLook, ServerboundPosition,
+    ServerboundPositionLook, SpawnInfo, UpdateHealth,
 };
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
@@ -71,6 +72,44 @@ fn block_face(face: i8) -> Option<BlockFace> {
         4 => Some(BlockFace::West),
         5 => Some(BlockFace::East),
         _ => None,
+    }
+}
+
+fn json_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\u{08}' => escaped.push_str("\\b"),
+            '\u{0c}' => escaped.push_str("\\f"),
+            character if character.is_control() => {
+                use std::fmt::Write as _;
+                write!(escaped, "\\u{:04x}", character as u32)
+                    .expect("writing into a String cannot fail");
+            }
+            character => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+fn respawn_info() -> SpawnInfo {
+    SpawnInfo {
+        dimension: registry_index("minecraft:dimension_type", "minecraft:overworld"),
+        world_name: "minecraft:overworld".to_owned(),
+        hashed_seed: 0,
+        game_mode: 0,
+        previous_game_mode: 255,
+        is_debug: false,
+        is_flat: true,
+        has_death_location: false,
+        death_dimension: None,
+        death_location: None,
+        portal_cooldown: 0,
     }
 }
 
@@ -408,6 +447,13 @@ impl ServerProtocol for V766ServerProtocol {
                         desired_chunks_per_tick: ack.chunks_per_tick,
                     })
             }
+            State::Play if packet_id == play::serverbound::CLIENT_COMMAND => {
+                decode_full::<ClientCommand>(payload).map_or(ServerBound::Ignored, |command| {
+                    ServerBound::ClientCommand {
+                        action: command.action,
+                    }
+                })
+            }
             State::Play if packet_id == play::serverbound::CHAT_MESSAGE => {
                 decode_full::<ChatMessage>(payload).map_or(ServerBound::Ignored, |message| {
                     ServerBound::Chat {
@@ -597,6 +643,61 @@ impl ServerProtocol for V766ServerProtocol {
                 is_action_bar: false,
             },
         )
+    }
+
+    fn encode_set_health(&self, health: f32, food: i32, saturation: f32) -> ServerDirective {
+        send(
+            play::clientbound::UPDATE_HEALTH,
+            &UpdateHealth {
+                health: health.clamp(0.0, 20.0),
+                food: food.clamp(0, 20),
+                food_saturation: saturation.clamp(0.0, 20.0),
+            },
+        )
+    }
+
+    fn encode_player_combat_kill(&self, player_entity_id: i32, message: &Text) -> ServerDirective {
+        let mut payload = Writer::default();
+        payload.var_i32(player_entity_id);
+        // No killer entity is retained by the server's player-vitals model.
+        payload.i32(-1);
+        payload.string(&format!("{{\"text\":\"{}\"}}", json_string(&message.to_plain_string())));
+        ServerDirective::Send {
+            packet_id: play::clientbound::DEATH_COMBAT_EVENT,
+            payload: payload.into_vec(),
+        }
+    }
+
+    fn encode_respawn(&self, spawn: Vec3) -> Vec<ServerDirective> {
+        self.encode_respawn_with_teleport_id(0, spawn)
+    }
+
+    fn encode_respawn_with_teleport_id(
+        &self,
+        teleport_id: i32,
+        spawn: Vec3,
+    ) -> Vec<ServerDirective> {
+        vec![
+            send(
+                play::clientbound::RESPAWN,
+                &crate::packets::game::Respawn {
+                    world_state: respawn_info(),
+                    data_kept: 0,
+                },
+            ),
+            send(
+                play::clientbound::POSITION,
+                &ClientboundPositionLook {
+                    x: spawn.x,
+                    y: spawn.y,
+                    z: spawn.z,
+                    yaw: 0.0,
+                    pitch: 0.0,
+                    flags: 0,
+                    teleport_id,
+                },
+            ),
+        ]
     }
 
     fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {

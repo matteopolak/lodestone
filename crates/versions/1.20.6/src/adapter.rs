@@ -2033,6 +2033,24 @@ impl V766Adapter {
         })])
     }
 
+    /// `minecraft:death_combat_event`, the split death notification. The
+    /// player and killer ids are routing metadata; the JSON component is the
+    /// part consumed by the client lifecycle and death screen.
+    fn handle_play_death_combat_event(
+        _adapter: &V766Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let mut reader = Reader::new(payload);
+        reader.var_i32().map_err(dec_err)?;
+        reader.i32().map_err(dec_err)?;
+        let message = reader.string(32_767).map_err(dec_err)?;
+        reader.ensure_empty().map_err(dec_err)?;
+        Ok(vec![Directive::Emit(ClientEvent::Death {
+            message: Text::from_json(&message),
+        })])
+    }
+
     /// `minecraft:spawn_position`. Carries no dimension field, so the level
     /// name comes from the adapter's own record of the most recent join or
     /// respawn.
@@ -2834,6 +2852,13 @@ static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = 
         ),
     ),
     (
+        "minecraft:death_combat_event",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_death_combat_event,
+        ),
+    ),
+    (
         "minecraft:spawn_position",
         lodestone_core::dispatch::Handler::new(
             lodestone_core::ProtocolRange::ALL,
@@ -3133,10 +3158,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:enter_combat_event",
         "combat timers have no surface for this era",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:death_combat_event",
-        "the death screen is driven by health rather than this packet in this client",
     ),
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:face_player",
