@@ -26,6 +26,7 @@ use lodestone_worldgen_core::hash::FastSet;
 use serde_json::Value;
 
 use crate::aquifer::{AquiferSystem, BlockKind};
+use crate::interner::StateId;
 use crate::math;
 use crate::rng::RandomSource;
 
@@ -342,12 +343,19 @@ impl CarveGrid {
         CarveGrid { dense }
     }
 
-    fn get(&self, x: i32, y: i32, z: i32) -> &str {
-        self.dense.get(x, y, z)
+    #[inline]
+    fn get_base_id(&self, x: i32, y: i32, z: i32) -> StateId {
+        self.dense.get_base_id(x, y, z)
     }
 
-    fn set(&mut self, x: i32, y: i32, z: i32, state: &str) {
-        self.dense.set(x, y, z, state);
+    #[inline]
+    fn interner(&self) -> &std::sync::Arc<crate::interner::StateInterner> {
+        self.dense.interner()
+    }
+
+    #[inline]
+    fn set_id(&mut self, x: i32, y: i32, z: i32, state: StateId) {
+        self.dense.set_id(x, y, z, state);
     }
 
     /// Test-adapter destructor (see struct doc).
@@ -364,15 +372,11 @@ impl CarveGrid {
     }
 }
 
-fn base_name(state: &str) -> &str {
-    state.split('[').next().unwrap_or(state)
-}
-
 /// Mutable per-carve state threaded through the carve tree.
 struct CarveEnv<'a> {
     grid: &'a mut CarveGrid,
     aquifer: &'a AquiferSystem,
-    replaceable: &'a HashSet<String>,
+    replaceable: &'a HashSet<StateId>,
     top_material: &'a dyn Fn(i32, i32, i32, bool) -> Option<String>,
     /// Cells this carve pass has already written.
     ///
@@ -390,23 +394,31 @@ struct CarveEnv<'a> {
     /// overrides vanilla's own block-carve wholesale. Set per carver in [`apply_carvers`]
     /// rather than per env, because a biome's list can in principle mix types.
     nether: bool,
+    air: StateId,
+    water: StateId,
+    lava: StateId,
+    cave_air: StateId,
+    grass_block: StateId,
+    mycelium: StateId,
+    dirt: StateId,
 }
 
 impl CarveEnv<'_> {
-    fn can_replace(&self, state: &str) -> bool {
-        self.replaceable.contains(base_name(state))
+    #[inline]
+    fn can_replace(&self, x: i32, y: i32, z: i32) -> bool {
+        self.replaceable.contains(&self.grid.get_base_id(x, y, z))
     }
 
     /// `WorldCarver.getCarveState` for `density == 0.0`: lava below `lava_level`,
     /// otherwise the aquifer's substance (air/water/lava). Never `None` here.
-    fn carve_state(&self, x: i32, y: i32, z: i32) -> Option<&'static str> {
+    fn carve_state(&self, x: i32, y: i32, z: i32) -> Option<StateId> {
         if y <= self.lava_level_y {
-            return Some(LAVA);
+            return Some(self.lava);
         }
         match self.aquifer.carve_substance(x, y, z) {
-            Some(BlockKind::Air) => Some(AIR),
-            Some(BlockKind::Water) => Some(WATER),
-            Some(BlockKind::Lava) => Some(LAVA),
+            Some(BlockKind::Air) => Some(self.air),
+            Some(BlockKind::Water) => Some(self.water),
+            Some(BlockKind::Lava) => Some(self.lava),
             Some(BlockKind::Stone) | None => None,
         }
     }
@@ -419,26 +431,25 @@ impl CarveEnv<'_> {
         if self.nether {
             return self.carve_block_nether(x, y, z);
         }
-        let block = self.grid.get(x, y, z).to_string();
-        let base = base_name(&block);
-        if base == "minecraft:grass_block" || base == "minecraft:mycelium" {
+        let base = self.grid.get_base_id(x, y, z);
+        if base == self.grass_block || base == self.mycelium {
             *has_grass = true;
         }
-        if !self.can_replace(&block) {
+        if !self.can_replace(x, y, z) {
             return false;
         }
         let state = match self.carve_state(x, y, z) {
             None => return false,
             Some(state) => state,
         };
-        self.grid.set(x, y, z, state);
+        self.grid.set_id(x, y, z, state);
 
         if *has_grass {
-            let below = self.grid.get(x, y - 1, z).to_string();
-            if base_name(&below) == "minecraft:dirt" {
-                let under_fluid = state != AIR;
+            if self.grid.get_base_id(x, y - 1, z) == self.dirt {
+                let under_fluid = state != self.air;
                 if let Some(top) = (self.top_material)(x, y - 1, z, under_fluid) {
-                    self.grid.set(x, y - 1, z, &top);
+                    let top = self.grid.interner().id_of(&top);
+                    self.grid.set_id(x, y - 1, z, top);
                 }
             }
         }
@@ -463,12 +474,11 @@ impl CarveEnv<'_> {
     /// of [`CarveEnv::carve_state`]'s inputs are read on this path, which is what
     /// makes a *disabled* aquifer harmless here.
     fn carve_block_nether(&mut self, x: i32, y: i32, z: i32) -> bool {
-        let block = self.grid.get(x, y, z).to_string();
-        if !self.can_replace(&block) {
+        if !self.can_replace(x, y, z) {
             return false;
         }
-        let state = if y <= self.min_gen_y + 31 { LAVA } else { CAVE_AIR };
-        self.grid.set(x, y, z, state);
+        let state = if y <= self.min_gen_y + 31 { self.lava } else { self.cave_air };
+        self.grid.set_id(x, y, z, state);
         true
     }
 }
@@ -979,10 +989,26 @@ pub fn apply_carvers<O: CarveObserver>(
     // it before every carver. Seed with 0 for determinism.
     let mut random = crate::rng::WorldgenRandom::new(crate::rng::LegacyRandomSource::new(0));
 
+    // Resolve the tag's base names once at the stage boundary. The carve loop
+    // compares compact numeric ids and never allocates or parses a state
+    // string for its replaceability/grass/dirt checks.
+    let replaceable_ids: HashSet<StateId> = replaceable
+        .iter()
+        .map(|name| grid.interner().id_of(name))
+        .collect();
+    let interner = grid.interner();
+    let air = interner.id_of(AIR);
+    let lava = interner.id_of(LAVA);
+    let cave_air = interner.id_of(CAVE_AIR);
+    let water = interner.id_of(WATER);
+    let grass_block = interner.id_of("minecraft:grass_block");
+    let mycelium = interner.id_of("minecraft:mycelium");
+    let dirt = interner.id_of("minecraft:dirt");
+
     let mut env = CarveEnv {
         grid,
         aquifer,
-        replaceable,
+        replaceable: &replaceable_ids,
         top_material,
         mask: FastSet::default(),
         min_gen_y,
@@ -991,6 +1017,13 @@ pub fn apply_carvers<O: CarveObserver>(
         center_z: chunk_z,
         lava_level_y: 0,
         nether: false,
+        air,
+        water,
+        lava,
+        cave_air,
+        grass_block,
+        mycelium,
+        dirt,
     };
 
     for dx in -NEIGHBOURHOOD_RANGE..=NEIGHBOURHOOD_RANGE {

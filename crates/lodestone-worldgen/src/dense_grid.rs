@@ -96,6 +96,11 @@ pub struct DenseBlockGrid {
     /// makes this a plain `Copy` shadow rather than a second set of owned
     /// `String`s.
     palette_names: Vec<&'static str>,
+    /// The base-name id for each local palette entry. Keeping this beside the
+    /// palette makes base-name predicates allocation- and lock-free: the
+    /// interner's public `base_of` accessor takes a read lock and is therefore
+    /// a boundary-time helper, not something a per-cell loop should call.
+    palette_bases: Vec<StateId>,
     /// Reverse lookup for [`Self::palette`] — **not** an ordered structure, and
     /// never iterated (see U17's note on [`FastMap`]). `palette` is the thing
     /// whose order reaches the wire, and it is a `Vec` appended in first-write
@@ -149,6 +154,7 @@ impl DenseBlockGrid {
         index_of.insert(default, 0u16);
         let cells = (size_x.max(0) as usize) * (size_y.max(0) as usize) * (size_z.max(0) as usize);
         let default_name = interner.name_of(default);
+        let default_base = interner.base_of(default);
         Self {
             min_x,
             min_y,
@@ -159,6 +165,7 @@ impl DenseBlockGrid {
             interner,
             palette: vec![default],
             palette_names: vec![default_name],
+            palette_bases: vec![default_base],
             index_of,
             blocks: vec![0u16; cells],
         }
@@ -191,6 +198,16 @@ impl DenseBlockGrid {
     pub fn get_id(&self, x: i32, y: i32, z: i32) -> StateId {
         match self.index(x, y, z) {
             Some(i) => self.palette[self.blocks[i] as usize],
+            None => StateId::AIR,
+        }
+    }
+
+    /// Base-name id at `(x, y, z)`, with [`StateId::AIR`] outside the box.
+    /// This is the numeric counterpart of stripping a state string at `'['`.
+    #[must_use]
+    pub fn get_base_id(&self, x: i32, y: i32, z: i32) -> StateId {
+        match self.index(x, y, z) {
+            Some(i) => self.palette_bases[self.blocks[i] as usize],
             None => StateId::AIR,
         }
     }
@@ -235,6 +252,7 @@ impl DenseBlockGrid {
             // state this grid has not seen before (~76 per chunk). Kept in
             // lock-step with `palette` so the two are always the same length.
             self.palette_names.push(self.interner.name_of(state));
+            self.palette_bases.push(self.interner.base_of(state));
             self.index_of.insert(state, id);
             id
         };
@@ -466,6 +484,18 @@ mod tests {
     fn get_id_is_air_outside_the_box() {
         let g = DenseBlockGrid::new(0, 0, 0, 2, 2, 2, "minecraft:air");
         assert_eq!(g.get_id(100, 100, 100), StateId::AIR);
+    }
+
+    #[test]
+    fn base_id_tracks_property_states_without_string_parsing() {
+        let mut g = DenseBlockGrid::new(0, 0, 0, 2, 1, 1, "minecraft:air");
+        let bare = g.interner().id_of("minecraft:oak_log");
+        g.set(0, 0, 0, "minecraft:oak_log[axis=y]");
+        g.set_id(1, 0, 0, bare);
+
+        assert_eq!(g.get_base_id(0, 0, 0), bare);
+        assert_eq!(g.get_base_id(1, 0, 0), bare);
+        assert_eq!(g.get_base_id(100, 100, 100), StateId::AIR);
     }
 
     #[test]
