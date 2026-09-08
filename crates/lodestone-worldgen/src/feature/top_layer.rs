@@ -104,6 +104,7 @@
 use std::collections::{HashMap, HashSet};
 
 use lodestone_worldgen_core::hash::{FastMap, FastSet};
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::dense_grid::DenseBlockGrid;
@@ -249,6 +250,38 @@ pub struct StatePredicate {
     by_state: FastMap<String, bool>,
 }
 
+/// The resolver's compact state-fact column. The state keys are intentionally
+/// dynamic because they are versioned registry data; the surrounding shape is
+/// fixed and rejects misspelled columns.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StatePredicateJson {
+    #[serde(default)]
+    default: Vec<String>,
+    #[serde(default)]
+    states: std::collections::BTreeMap<String, bool>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SnowSupportJson {
+    blocks_motion: Option<StatePredicateJson>,
+    has_fluid_state: Option<StatePredicateJson>,
+    water_source: Option<StatePredicateJson>,
+    face_full_up: Option<StatePredicateJson>,
+    snowy_property: Option<StatePredicateJson>,
+    /// The resolver document also carries this column for vegetation's block
+    /// survival facts. It is accepted here but not consumed by top-layer.
+    #[serde(rename = "solid")]
+    _solid: Option<StatePredicateJson>,
+}
+
+impl From<StatePredicateJson> for StatePredicate {
+    fn from(value: StatePredicateJson) -> Self {
+        Self::new(value.default.into_iter().collect(), value.states.into_iter().collect())
+    }
+}
+
 impl StatePredicate {
     /// Builds from the two halves. `by_state` must list **every** disagreeing
     /// state; a partial list is silently wrong, which is why it is produced by a
@@ -298,30 +331,9 @@ impl StatePredicate {
         if value.is_null() {
             return Self::default();
         }
-        let by_block_default = value
-            .get("default")
-            .and_then(Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .map(|v| v.as_str().expect("default entry is a string").to_owned())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let by_state = value
-            .get("states")
-            .and_then(Value::as_object)
-            .map(|o| {
-                o.iter()
-                    .map(|(k, v)| {
-                        (
-                            k.clone(),
-                            v.as_bool().expect("states entry is a boolean"),
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        Self::new(by_block_default, by_state)
+        serde_json::from_value::<StatePredicateJson>(value.clone())
+            .unwrap_or_else(|error| panic!("state predicate: {error}"))
+            .into()
     }
 }
 
@@ -334,12 +346,21 @@ impl SnowSupport {
         cannot_support_snow_layer: HashSet<String>,
         support_override_snow_layer: HashSet<String>,
     ) -> Self {
+        if facts.is_null() {
+            return Self {
+                cannot_support_snow_layer,
+                support_override_snow_layer,
+                ..Self::default()
+            };
+        }
+        let parsed = serde_json::from_value::<SnowSupportJson>(facts.clone())
+            .unwrap_or_else(|error| panic!("block_freeze_facts: {error}"));
         Self {
-            blocks_motion: StatePredicate::parse(&facts["blocks_motion"]),
-            has_fluid_state: StatePredicate::parse(&facts["has_fluid_state"]),
-            water_source: StatePredicate::parse(&facts["water_source"]),
-            face_full_up: StatePredicate::parse(&facts["face_full_up"]),
-            snowy_property: StatePredicate::parse(&facts["snowy_property"]),
+            blocks_motion: parsed.blocks_motion.unwrap_or_default().into(),
+            has_fluid_state: parsed.has_fluid_state.unwrap_or_default().into(),
+            water_source: parsed.water_source.unwrap_or_default().into(),
+            face_full_up: parsed.face_full_up.unwrap_or_default().into(),
+            snowy_property: parsed.snowy_property.unwrap_or_default().into(),
             cannot_support_snow_layer,
             support_override_snow_layer,
         }

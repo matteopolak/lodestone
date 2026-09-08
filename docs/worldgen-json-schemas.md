@@ -21,3 +21,15 @@ The schemas apply to `density_function/*` documents and the `surface_rule`, `def
 ## Dependencies
 
 The schemas use `serde`, `serde_json`, and `serde_path_to_error`. Runtime construction still uses the existing resolver, noise, random-source, block interner, and canonical block-state table interfaces.
+
+## Feature schema boundaries
+
+The worldgen feature interpreters use strict serde schemas at the configured-feature, placed-feature, ore, and top-layer fact boundaries. This catches malformed records and unknown fields before feature code walks them while leaving versioned block-property and tag payloads open.
+
+Ore configurations deserialize into closed records for sizes, targets, rule-test discriminators, and block states. Placement modifiers use a closed field envelope with explicit conversion for count, rarity, square, height, and biome modifiers; height anchors and integer providers reject unknown shapes and report their serde path. Top-layer fact documents similarly validate their fixed predicate columns while keeping state ids as dynamic map keys.
+
+Vegetation records validate the placed-feature envelope and modifier field names, plus the fixed top-level fields for trees, geodes, empty dungeon configurations, and multiface growth. Their provider, state, and holder-set payloads remain dynamic where registry data defines the keys. Unsupported vegetation kinds continue to degrade to an explicit unsupported feature rather than aborting generation.
+
+Add a field to the schema next to the parser that consumes it, and decide whether omission is part of the data format before adding `#[serde(default)]`. Keep `#[serde(deny_unknown_fields)]` on closed records. For a new discriminator, add a conversion arm and an external malformed/unknown control in `crates/lodestone-worldgen/tests/typed_feature_json.rs`; do not turn a provider or block-property map into a fixed list unless the registry format guarantees that list.
+
+The feature schemas are compiled into `lodestone-worldgen`; no runtime flag changes validation. A malformed production vegetation record is represented as `ConfiguredFeature::Unsupported` with a schema diagnostic, while malformed ore and placed-ore records retain their existing embedded-data panic contract with a path-bearing message. The boundary uses `serde` derive and `serde_json`; feature behavior still depends on the worldgen-core RNG/math, the version-free resolver, and registry-provided block states and tags.

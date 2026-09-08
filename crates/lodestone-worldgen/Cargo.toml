@@ -56,7 +56,10 @@ lodestone-data = { workspace = true }
 lodestone-time = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
+<<<<<<< HEAD
 serde_path_to_error = { workspace = true }
+=======
+>>>>>>> 90f60e7b (feat(worldgen): validate feature JSON schemas)
 sha2 = { workspace = true }
 # The numeric core (hash, math, rng, noise, density, counters) — Unit 16's leaf
 # extraction. Re-exported wholesale from `src/lib.rs` under the original module
