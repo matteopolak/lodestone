@@ -3737,7 +3737,7 @@ impl VersionAdapter for V774Adapter {
                     cursor_z: cursor.z,
                     inside_block: *inside_block,
                     world_border_hit: false,
-                    sequence: *sequence,
+                    sequence: sequence.as_wire(),
                 };
                 Ok(Some((self.ids().use_item_on, self.encode_body(&body)?)))
             }
