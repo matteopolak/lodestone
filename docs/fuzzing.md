@@ -263,6 +263,14 @@ What exists:
   an RCON round trip that straddles a tick is a rejected capture, never a
   silently relabelled observation.
 
+  `tests/differential_fixed_production.rs` runs that reviewed capture through
+  `FixedActionReplay`: the left side is the production fluid model and the
+  right side is a read-only oracle backed only by the recorded observations.
+  Its deliberate corruption control must report the first elapsed tick and
+  probe, so this remains a differential target rather than a production-model
+  self-check. The fixture retains the recorder command and real-server
+  provenance next to its expected state.
+
 - [`Action`]/[`ScriptStep`]/[`Script`] — the shared action-sequence type used
   by both hand-written live scripts and the hermetic generator.
 - [`WorldOracle`] — the trait a "side" of the comparison implements:
