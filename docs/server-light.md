@@ -76,12 +76,16 @@ centre, while `CentreSettled` records completion of that column's own initial
 admission. The fast path checks this stage rather than inspecting light values,
 so a populated dependency still receives its centre admission. The stage is
 stored with the retained light in chunk NBT and is cleared with the light on any
-block mutation.
+block mutation. Version-specific initial-chunk encoders consume retained light
+only after the centre reaches `CentreSettled`; dependency snapshots remain
+available as seeds for the next admission and are never serialized as though
+their own centre admission had completed.
 
-The initial chunk encoder consumes a retained snapshot verbatim. An independent sealed-world capture
-showed that a persisted End section mask can differ from the first in-memory settlement, so a reload
-must serve what storage restored rather than recomputing from the current terrain or a neighbour
-subset. That capture is external evidence for the storage contract; it does not claim that this
+The initial chunk encoder consumes a `CentreSettled` retained snapshot verbatim. An independent sealed-
+world capture showed that a persisted End section mask can differ from the first in-memory settlement,
+so a reload must serve what storage restored rather than recomputing from the current terrain or a
+neighbour subset. A `DependencyInitialized` snapshot instead remains input to the next centre
+admission. That capture is external evidence for the storage contract; it does not claim that this
 repository drives the capture's scheduler or loading-ticket sequence in a production test.
 
 `column_to_nbt` writes the retained snapshot's sky and block arrays, including the light-only sections
