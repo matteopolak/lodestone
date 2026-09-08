@@ -54,12 +54,17 @@ the persistence and retention order; a stable tie-break keeps starts of one stru
 order while putting different structure types in the order their decoration lifecycle consumes.
 
 `EndGenerator` memoises each pure `(seed, origin-chunk)` start calculation behind a bounded cache.
-End-city placement scans a 33×33 origin window for each of the nine source chunks used to serve one
-column, so sharing the cached `Arc` avoids rebuilding the same piece tree while preserving start and
-piece order. The cache is cleared at its ceiling; eviction can repeat work but cannot change bytes,
-because a start depends only on its seed, origin and resolver data. The memo is protected for
-concurrent generators; cold misses compute outside the lock, so unrelated origins can proceed in
-parallel. `end_gen` also compares sequential and concurrent raw columns, including palette order.
+End-city placement enumerates only the random-spread placement cells that can produce an origin in
+its 33×33 window, rather than probing every coordinate in that window. Registries containing a
+context-dependent ring placement fall back to the complete rectangular walk, preserving the same
+candidate superset. Sharing the cached `Arc` still avoids rebuilding the same piece tree while
+preserving start and piece order. The cache is cleared at its ceiling; eviction can repeat work but
+cannot change bytes, because a start depends only on its seed, origin and resolver data. The memo is
+protected for concurrent generators; cold misses compute outside the lock, so unrelated origins can
+proceed in parallel. `end_gen` also compares sequential and concurrent raw columns, including palette
+order. On the release End fixture this reduced a cold 8×8 sweep from 125 to 132 chunks/s with one
+worker and from 481 to 554 chunks/s with eight workers; all worker counts produced the same SHA-256
+content digest.
 
 Structure JSON crosses a strict serde boundary in `structure::json`: placement
 records, jigsaw configurations, pool aliases, and template-pool elements use
