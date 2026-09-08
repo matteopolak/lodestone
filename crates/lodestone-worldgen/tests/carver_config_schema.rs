@@ -62,3 +62,12 @@ fn unknown_carver_discriminator_is_rejected() {
     .expect_err("unknown carver kinds must not degrade to a default");
     assert!(error.to_string().contains("minecraft:spiral"), "error: {error}");
 }
+
+#[test]
+fn malformed_provider_discriminator_is_rejected() {
+    let error = CarverConfig::parse_json(include_str!(
+        "support/configured_carver_invalid/mismatched_provider.json"
+    ))
+    .expect_err("a uniform provider cannot use a scalar-only shape");
+    assert!(error.to_string().contains("config.floor_level"), "error: {error}");
+}
