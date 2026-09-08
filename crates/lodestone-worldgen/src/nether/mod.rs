@@ -1882,8 +1882,9 @@ impl NetherGenerator {
     /// Clipping is the grid, not a box: [`crate::dense_grid::DenseBlockGrid::set`]
     /// ignores a write outside this chunk's 16×16 columns, so a piece that straddles
     /// a border writes its own half here and the other half when the neighbour
-    /// generates. That is only sound because every piece's position is fixed at
-    /// *start* time and every processor draw is position-seeded.
+    /// generates. Template processor draws remain position-seeded; a ruined
+    /// portal's terrain refinement consumes its target chunk's shared
+    /// `surface_structures` stream, reset per portal registry entry.
     fn structure_place_stage(
         &self,
         cx: i32,
@@ -1901,6 +1902,10 @@ impl NetherGenerator {
             crate::rng::WorldgenRandom<crate::rng::LegacyRandomSource>,
         > = HashMap::new();
         let mut structure_randoms: HashMap<
+            String,
+            crate::rng::WorldgenRandom<crate::rng::XoroshiroRandomSource>,
+        > = HashMap::new();
+        let mut portal_randoms: HashMap<
             String,
             crate::rng::WorldgenRandom<crate::rng::XoroshiroRandomSource>,
         > = HashMap::new();
@@ -2001,16 +2006,29 @@ impl NetherGenerator {
                         overgrown,
                         vines,
                         features_cannot_replace,
-                    }) => crate::overworld::structures::place_ruined_portal_terrain(
-                        &mut world,
-                        piece.bounding_box,
-                        seed,
-                        *placement,
-                        *cold,
-                        *overgrown,
-                        *vines,
-                        features_cannot_replace,
-                    ),
+                    }) => {
+                        let Some((step, index)) = registry.feature_placement_key(&start.structure) else {
+                            continue;
+                        };
+                        let random = portal_randoms.entry(start.structure.clone()).or_insert_with(|| {
+                            let mut random = crate::rng::WorldgenRandom::new(
+                                crate::rng::XoroshiroRandomSource::new(0),
+                            );
+                            let decoration_seed = random.set_decoration_seed(seed, bx, bz);
+                            random.set_feature_seed(decoration_seed, index as i32, step);
+                            random
+                        });
+                        crate::overworld::structures::place_ruined_portal_terrain(
+                            &mut world,
+                            piece.bounding_box,
+                            random,
+                            *placement,
+                            *cold,
+                            *overgrown,
+                            *vines,
+                            features_cannot_replace,
+                        );
+                    }
                     Some(PieceRefinement::StrongholdBlocks { writes }) => {
                         crate::structure::stronghold::place_post_surface_blocks(&mut world, writes);
                     }

@@ -881,7 +881,12 @@ fn base_name(state: &str) -> &str {
     state.split_once('[').map_or(state, |(base, _)| base)
 }
 
-fn chest_state(
+/// Reorients one chest against the receiving chunk's already-written grid.
+///
+/// Kept here as the shared state rule for fortress and coded-piece placement:
+/// both consumers must inspect the same four horizontal neighbours and must not
+/// spend a placement-random draw while choosing the facing.
+pub(crate) fn chest_state(
     world: &DenseBlockGrid,
     pos: [i32; 3],
     solid_render: &dyn Fn(&str) -> bool,
