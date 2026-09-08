@@ -92,6 +92,9 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 # once per process, and with no output parsing. Already in the lockfile via
 # `lodestone-shell`. Dev-only.
 memory-stats = "1"
+# Release-only throughput example: process CPU time for utilization alongside
+# wall-clock generation time. Dev-only; no production dependency edge.
+libc = "0.2"
 # **Dev-only, and only so `benches/generation.rs` can measure the EMBEDDED
 # production worldgen data** — `lodestone_server::overworld_generator`, the exact
 # generator the integrated server serves. This reverses an earlier decision

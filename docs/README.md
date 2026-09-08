@@ -929,6 +929,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   adaptation-bearing structure. Built in phases (S1 placement, S2 templates, S3
   beardifier, S4 jigsaw, S5+ coded pieces, mineshaft, and per-structure closures
   since), on top of a bundled, byte-verified copy of vanilla's structure data.
+- [World-generation throughput](./worldgen-throughput.md) —
+  `crates/lodestone-worldgen/examples/throughput.rs` measures the three bundled
+  dimensions at the world-generation boundary. It compares each dimension's shaped
+  terrain prefix with its fully decorated column over a deterministic grid, without
+  persistence, lighting, or packet encoding.
 - [Worldgen engine overview](./worldgen.md) — `crates/lodestone-worldgen` (engine)
   and `crates/lodestone-worldgen-core` (numeric leaf crate) are a version-free port of
   vanilla Minecraft 26.2's world generator: a density-function/noise-router
