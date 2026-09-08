@@ -1223,18 +1223,22 @@ fn parity_manifest_streams_before_rust_comparison() {
             let cx = h.cx0 + (index % width) as i32;
             let cz = h.cz0 + (index / width) as i32;
             let column = column_for(cx, cz);
-            let admitted_neighbour_offsets =
-                initial_light_admission_neighbour_offsets(index);
-            let admitted_neighbours = admitted_neighbour_offsets
-                .iter()
-                .map(|&(dx, dz)| (dx, dz, column_for(cx + dx, cz + dz)))
-                .collect::<Vec<_>>();
-            let settled_column = initial_light_snapshot_for_admission(
-                &V770ServerProtocol,
-                &column,
-                &admitted_neighbours,
-                server_dimension,
-            );
+            let settled_column = if raw_packet && dimension == Dimension::Nether {
+                let admitted_neighbour_offsets =
+                    initial_light_admission_neighbour_offsets(index);
+                let admitted_neighbours = admitted_neighbour_offsets
+                    .iter()
+                    .map(|&(dx, dz)| (dx, dz, column_for(cx + dx, cz + dz)))
+                    .collect::<Vec<_>>();
+                initial_light_snapshot_for_admission(
+                    &V770ServerProtocol,
+                    &column,
+                    &admitted_neighbours,
+                    server_dimension,
+                )
+            } else {
+                column.clone()
+            };
             let mut neighbours = Vec::with_capacity(8);
             for dz in -1..=1 {
                 for dx in -1..=1 {
