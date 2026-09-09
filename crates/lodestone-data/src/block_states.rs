@@ -43,6 +43,8 @@
 //! directly.
 
 use std::collections::BTreeMap;
+use std::fmt;
+use std::ops::Deref;
 
 use lodestone_model::{BlockStateRegistry, Identifier, ResolvedBlockState};
 
@@ -176,6 +178,163 @@ impl StateId {
     pub fn from_state_str(state: &str) -> Option<Self> {
         state_id(state).and_then(Self::new)
     }
+}
+
+/// A block-state value that has crossed the text boundary without losing its
+/// domain or extension status.
+///
+/// Built-in states carry a validated [`StateId`]. Values supplied by a plugin
+/// or data pack remain an explicit extension value instead of being coerced to
+/// a built-in default. The original spelling is retained for both variants so
+/// callers can hand the value to a storage or wire boundary without changing
+/// abbreviated property sets that were already accepted there.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum BlockStateValue {
+    /// A state present in this build's generated 26.2 census.
+    Builtin { id: StateId, text: Box<str> },
+    /// A state outside the generated census, retained for an extensible input.
+    Extension(Box<str>),
+}
+
+impl BlockStateValue {
+    /// Parses one canonical or abbreviated state spelling.
+    ///
+    /// A spelling is classified as [`Self::Builtin`] only when every property
+    /// named by the input exists on the resolved built-in state. This extra
+    /// check matters because [`StateId::from_state_str`] intentionally has a
+    /// forgiving default-state fallback for lookup callers; a typed value must
+    /// not turn an invalid or synthetic property into an unrelated built-in.
+    #[must_use]
+    pub fn parse(text: &str) -> Self {
+        match exact_state_id(text) {
+            Some(id) => Self::Builtin { id, text: text.into() },
+            None => Self::Extension(text.into()),
+        }
+    }
+
+    /// Creates a value from a validated built-in id, using its full canonical
+    /// spelling for the serialized boundary.
+    #[must_use]
+    pub fn from_id(id: StateId) -> Self {
+        Self::Builtin {
+            id,
+            text: id.canonical_state().into_boxed_str(),
+        }
+    }
+
+    /// Returns the validated built-in id, or `None` for an extension value.
+    #[must_use]
+    pub fn state_id(&self) -> Option<StateId> {
+        match self {
+            Self::Builtin { id, .. } => Some(*id),
+            Self::Extension(_) => None,
+        }
+    }
+
+    /// Returns the spelling retained at the text boundary.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Builtin { text, .. } | Self::Extension(text) => text,
+        }
+    }
+
+    /// Consumes the value and returns its retained boundary spelling.
+    #[must_use]
+    pub fn into_string(self) -> String {
+        match self {
+            Self::Builtin { text, .. } | Self::Extension(text) => text.into(),
+        }
+    }
+
+    /// Whether this value resolved to the generated built-in state table.
+    #[must_use]
+    pub fn is_builtin(&self) -> bool {
+        self.state_id().is_some()
+    }
+}
+
+impl From<StateId> for BlockStateValue {
+    fn from(id: StateId) -> Self {
+        Self::from_id(id)
+    }
+}
+
+impl From<&str> for BlockStateValue {
+    fn from(text: &str) -> Self {
+        Self::parse(text)
+    }
+}
+
+impl From<String> for BlockStateValue {
+    fn from(text: String) -> Self {
+        Self::parse(&text)
+    }
+}
+
+impl AsRef<str> for BlockStateValue {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Deref for BlockStateValue {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for BlockStateValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl PartialEq<str> for BlockStateValue {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for BlockStateValue {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<String> for BlockStateValue {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other
+    }
+}
+
+/// Resolves only a state whose named properties are all part of the generated
+/// state domain. Missing properties are valid shorthand and are filled by the
+/// same default-state lookup used by [`StateId::from_state_str`].
+fn exact_state_id(state: &str) -> Option<StateId> {
+    let id = StateId::from_state_str(state)?;
+    let Some((name, raw_properties)) = state.split_once('[') else {
+        return Some(id);
+    };
+    let raw_properties = raw_properties.strip_suffix(']')?;
+    if raw_properties.is_empty() {
+        return None;
+    }
+
+    let mut seen = Vec::new();
+    for pair in raw_properties.split(',') {
+        let (key, value) = pair.split_once('=')?;
+        if key.is_empty() || value.is_empty() || seen.iter().any(|known| known == &key) {
+            return None;
+        }
+        if !id.properties().iter().any(|&(known, allowed)| known == key && allowed == value) {
+            return None;
+        }
+        seen.push(key);
+    }
+    (name == id.name()).then_some(id)
 }
 
 /// The interned block identifier for `id` (for example `minecraft:oak_stairs`),
@@ -646,6 +805,39 @@ mod tests {
     #[test]
     fn state_id_returns_none_for_an_unknown_block() {
         assert_eq!(state_id("minecraft:not_a_real_block"), None);
+    }
+
+    #[test]
+    fn block_state_value_keeps_a_typed_partial_state_and_its_boundary_spelling() {
+        let value = BlockStateValue::parse("minecraft:target[power=12]");
+        assert_eq!(value.state_id(), StateId::from_state_str("minecraft:target[power=12]"));
+        assert_eq!(value.as_str(), "minecraft:target[power=12]");
+        assert_eq!(value.to_string(), "minecraft:target[power=12]");
+        assert!(value.is_builtin());
+    }
+
+    #[test]
+    fn block_state_value_preserves_an_extension_instead_of_defaulting_it() {
+        let value = BlockStateValue::parse("example:custom_block[variant=blue]");
+        assert_eq!(value.state_id(), None);
+        assert_eq!(value.as_str(), "example:custom_block[variant=blue]");
+        assert!(!value.is_builtin());
+    }
+
+    #[test]
+    fn block_state_value_rejects_a_synthetic_or_malformed_property() {
+        let synthetic = BlockStateValue::parse("minecraft:comparator[output=9]");
+        assert_eq!(synthetic.state_id(), None);
+        let malformed = BlockStateValue::parse("minecraft:stone[not-a-property]");
+        assert_eq!(malformed.state_id(), None);
+    }
+
+    #[test]
+    fn block_state_value_from_id_uses_the_full_canonical_spelling() {
+        let id = StateId::from_state_str("minecraft:redstone_wire[power=7]").expect("known state");
+        let value = BlockStateValue::from_id(id);
+        assert_eq!(value.state_id(), Some(id));
+        assert_eq!(value.as_str(), id.canonical_state());
     }
 }
 

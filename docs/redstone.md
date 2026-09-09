@@ -13,6 +13,23 @@ closure.
 
 ## How it works
 
+### Typed state values at the simulation boundary
+
+Redstone decisions retain a `lodestone_data::block_states::BlockStateValue`
+until they cross a text-facing event or storage boundary. A value resolved from
+the generated state table carries its `StateId` projection and its original
+spelling; an unknown or invalid extension remains explicit text instead of
+being silently coerced to a default state. The strict property check is
+important because the general state lookup intentionally accepts a forgiving
+default for callers that only need an ID.
+
+Placement results, gravity hand-offs, and neighbour reactions use this typed
+value internally. Event feeds and world writes convert it back to text only at
+their existing boundary, preserving abbreviated property sets and extension
+values. NBT, schematic, datapack, and import/export formats remain textual
+interfaces, with their existing lossy-import diagnostics responsible for
+values that cannot be represented by the built-in table.
+
 ### The signal model
 
 This crate has no collision-shape system, so a redstone **conductor** is

@@ -49,6 +49,7 @@
 //!   beyond the standard one.
 
 use lodestone_model::BlockPos;
+use lodestone_data::block_states::BlockStateValue;
 
 use crate::redstone::{analog_power, base_name, with_property};
 use crate::scheduled_tick::{ScheduledTickKind, ScheduledTickQueueAccess};
@@ -124,7 +125,7 @@ pub fn has_pending_decay<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
 /// write entirely (a decay is already pending).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HitOutcome {
-    pub new_state: String,
+    pub new_state: BlockStateValue,
     pub delay: u32,
 }
 
@@ -148,7 +149,7 @@ pub fn apply_hit(state: &str, strength: u8, is_arrow: bool, has_pending_decay: b
         return None;
     }
     Some(HitOutcome {
-        new_state: with_property(state, "power", &strength.to_string()),
+        new_state: BlockStateValue::parse(&with_property(state, "power", &strength.to_string())),
         delay: activation_duration(is_arrow),
     })
 }

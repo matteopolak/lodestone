@@ -103,6 +103,7 @@
 //!   model sound effects for yet.
 
 use lodestone_data::collision_shapes;
+use lodestone_data::block_states::BlockStateValue;
 use lodestone_model::{BlockPos, Vec3};
 
 use crate::chunk::ChunkSource;
@@ -183,7 +184,7 @@ pub fn triggered(state: &str) -> bool {
 /// The result of a neighbour notification reaching a dispenser or dropper.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NeighborReaction {
-    pub new_state: String,
+    pub new_state: BlockStateValue,
     /// `true` only on the rising edge — vanilla schedules the 4-tick fire
     /// tick exactly once per `false -> true` transition, never on the way
     /// back down and never while already `true`.
@@ -204,12 +205,12 @@ pub fn on_neighbor_changed(state: &str, should_trigger: bool) -> Option<Neighbor
     let is_triggered = triggered(state);
     if should_trigger && !is_triggered {
         Some(NeighborReaction {
-            new_state: with_property(state, "triggered", "true"),
+            new_state: BlockStateValue::parse(&with_property(state, "triggered", "true")),
             schedule_fire: true,
         })
     } else if !should_trigger && is_triggered {
         Some(NeighborReaction {
-            new_state: with_property(state, "triggered", "false"),
+            new_state: BlockStateValue::parse(&with_property(state, "triggered", "false")),
             schedule_fire: false,
         })
     } else {

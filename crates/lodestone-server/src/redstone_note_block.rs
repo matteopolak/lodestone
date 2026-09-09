@@ -30,6 +30,8 @@
 //!   `hand_use::hand_use`. That path updates the pitch but does not post a
 //!   vibration; only redstone-triggered pulses reach vibration listeners.
 
+use lodestone_data::block_states::BlockStateValue;
+
 use crate::redstone::{base_name, get_bool_property, get_u32_property, with_property};
 
 pub const NOTE_BLOCK: &str = "minecraft:note_block";
@@ -211,7 +213,7 @@ pub fn instrument_for_note_block(above: &str, below: &str) -> Instrument {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NeighborReaction {
     /// The state to write — `POWERED` flipped to match `has_signal`.
-    pub new_state: String,
+    pub new_state: BlockStateValue,
     /// Vanilla's own `playNote` gate: fire only on the
     /// *rising* edge, and only when the instrument works standing on its own
     /// (a mob head) or the cell directly above is air. A note block buried
@@ -240,7 +242,11 @@ pub fn on_neighbor_changed(state: &str, has_signal: bool, above_is_air: bool) ->
     let instrument = instrument_property(state);
     let play_pulse = has_signal && (instrument.works_above_note_block() || above_is_air);
     Some(NeighborReaction {
-        new_state: with_property(state, "powered", if has_signal { "true" } else { "false" }),
+        new_state: BlockStateValue::parse(&with_property(
+            state,
+            "powered",
+            if has_signal { "true" } else { "false" },
+        )),
         play_pulse,
     })
 }
