@@ -1234,6 +1234,48 @@ fn resolve_resident_player_inventory_item_key(
     }
 }
 
+/// Resolves the count of one native inventory slot through the same copied
+/// snapshot as [`resolve_resident_player_inventory_item_key`]. Empty slots
+/// return zero; a partial stack is refused rather than exposing a count that
+/// could be mistaken for a complete Java item.
+fn resolve_resident_player_inventory_item_count(
+    bits: i64,
+    native_slot: jint,
+) -> Result<jint, AdapterError> {
+    let operation = "playerHandleNativeItemCount";
+    if native_slot < 0 {
+        return Err(AdapterError::new(format!(
+            "{operation}: native slot {native_slot} is negative"
+        )));
+    }
+    let player = resolve_resident_player_handle(bits, operation)?;
+    let port = PLAYER_INVENTORY_PORT.with(|slot| slot.borrow().clone()).ok_or_else(|| {
+        AdapterError::new(format!("{operation} requires the adapter worker thread"))
+    })?;
+    let slot = port
+        .request(PlayerInventorySlotQuery {
+            uuid: player.uuid(),
+            native_slot,
+        })
+        .map_err(|error| AdapterError::new(format!("{operation}: {error}")))?
+        .map_err(|error| AdapterError::new(format!("{operation}: {error}")))?;
+    match slot {
+        Some(slot) if slot.unmodeled => Err(AdapterError::new(format!(
+            "{operation}: native slot {native_slot} has unmodeled item components; refusing a lossy item projection"
+        ))),
+        Some(slot) if slot.count == 0 => Err(AdapterError::new(format!(
+            "{operation}: host returned zero count for occupied native slot {native_slot}"
+        ))),
+        Some(slot) => i32::try_from(slot.count).map_err(|_| {
+            AdapterError::new(format!(
+                "{operation}: native slot {native_slot} count {} exceeds Java integer range",
+                slot.count
+            ))
+        }),
+        None => Ok(0),
+    }
+}
+
 /// Reports whether a live player handle's copied profile is in the worker's
 /// reconciled lifecycle map.
 ///
@@ -2809,6 +2851,28 @@ pub(crate) fn register_player_handle_native_item_key_query(
 }
 
 #[allow(unsafe_code)]
+pub(crate) fn register_player_handle_native_item_count_query(
+    env: &mut Env<'_>,
+    class: &JClass<'_>,
+    method_name: &str,
+    descriptor: &str,
+) -> jni::errors::Result<()> {
+    // SAFETY: the validated static native accepts a generation-checked player
+    // handle and native slot, then returns a copied bounded count. It never
+    // exposes a connection or item object.
+    unsafe {
+        let name = JNIString::new(method_name);
+        let signature = JNIString::new(descriptor);
+        let method = NativeMethod::from_raw_parts(
+            &name,
+            &signature,
+            native_player_handle_native_item_count as *mut c_void,
+        );
+        env.register_native_methods(class, &[method])
+    }
+}
+
+#[allow(unsafe_code)]
 pub(crate) fn register_active_player_count_query(
     env: &mut Env<'_>,
     class: &JClass<'_>,
@@ -3342,6 +3406,20 @@ extern "system" fn native_player_handle_native_item_key<'local>(
                 .map_err(|error| AdapterError::new(format!("playerHandleNativeItemKey: {error}"))),
             None => Ok(std::ptr::null_mut()),
         }
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+extern "system" fn native_player_handle_native_item_count<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    bits: jlong,
+    native_slot: jint,
+) -> jint {
+    env.with_env(|_env| {
+        let _depth = CallbackDepthGuard::enter()
+            .map_err(|error| AdapterError::new(error.to_string()))?;
+        resolve_resident_player_inventory_item_count(bits, native_slot)
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }
@@ -5163,7 +5241,7 @@ mod tests {
     }
 
     #[test]
-    fn player_inventory_key_projection_refuses_partial_components_before_returning() {
+    fn player_inventory_key_and_count_projections_refuse_partial_components() {
         let identity = lifecycle_identity("alpha", "one", "alpha.Main");
         let player = PlayerIdentity::new([7; 16], "Alice");
         let (port, servicer) = channel(Duration::from_secs(1));
@@ -5177,18 +5255,21 @@ mod tests {
             let key = resolve_resident_player_inventory_item_key(handle.to_bits(), 7);
             let empty = resolve_resident_player_inventory_item_key(handle.to_bits(), 8);
             let partial = resolve_resident_player_inventory_item_key(handle.to_bits(), 9);
+            let count = resolve_resident_player_inventory_item_count(handle.to_bits(), 7);
+            let empty_count = resolve_resident_player_inventory_item_count(handle.to_bits(), 8);
+            let partial_count = resolve_resident_player_inventory_item_count(handle.to_bits(), 9);
             let negative = resolve_resident_player_inventory_item_key(handle.to_bits(), -1);
             assert_eq!(release_resident_handles(&identity), 1);
             let stale = resolve_resident_player_inventory_item_key(handle.to_bits(), 7);
             PLAYER_INVENTORY_PORT.with(|slot| *slot.borrow_mut() = None);
             RESIDENT_OBJECT_HANDLES.with(|slot| *slot.borrow_mut() = None);
             sender
-                .send((key, empty, partial, negative, stale))
+                .send((key, empty, partial, count, empty_count, partial_count, negative, stale))
                 .expect("inventory results");
         });
         let limit = Instant::now() + Duration::from_secs(1);
         let mut requests = 0;
-        while requests < 3 {
+        while requests < 6 {
             requests += servicer.service_all_pending(1, |query| {
                 assert_eq!(query.uuid, [7; 16]);
                 match query.native_slot {
@@ -5206,14 +5287,23 @@ mod tests {
                     slot => Err(format!("unexpected native slot {slot}")),
                 }
             });
-            if requests < 3 {
+            if requests < 6 {
                 assert!(Instant::now() < limit, "worker did not request an inventory slot");
                 std::thread::yield_now();
             }
         }
-        let (key, empty, partial, negative, stale) = receiver.recv().expect("inventory results");
+        let (key, empty, partial, count, empty_count, partial_count, negative, stale) =
+            receiver.recv().expect("inventory results");
         assert_eq!(key, Ok(Some("minecraft:diamond".to_owned())));
         assert_eq!(empty, Ok(None));
+        assert_eq!(count, Ok(13));
+        assert_eq!(empty_count, Ok(0));
+        assert_eq!(
+            partial_count,
+            Err(AdapterError::new(
+                "playerHandleNativeItemCount: native slot 9 has unmodeled item components; refusing a lossy item projection",
+            )),
+        );
         assert_eq!(
             partial,
             Err(AdapterError::new(

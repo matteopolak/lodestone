@@ -37,9 +37,12 @@ generation-checked player handle, sends only the copied UUID and native slot
 through a bounded host port, and returns a key string or `null` for a real
 empty slot. It intentionally does not return a Java item object. If the host
 reports an unmodeled component, the call throws before returning a partial
-projection. Count-changing JNI operations remain unexposed until their
-connection-task handoff can apply the same pre-mutation refusal and container
-resynchronization.
+projection. `playerHandleNativeItemCount(long, int)` uses that same port and
+returns the copied count, with zero reserved for a real empty slot. It throws
+for an unmodeled component or a host-reported occupied stack with zero count;
+the integer conversion also refuses counts outside Java's signed range.
+Count-changing JNI operations remain unexposed until their connection-task
+handoff can apply the same pre-mutation refusal and container resynchronization.
 
 ## How to change it
 

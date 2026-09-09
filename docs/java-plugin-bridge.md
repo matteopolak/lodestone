@@ -929,9 +929,12 @@ value-only player roster into generation-checked handles: `playerHandleName(long
 never hands a server object, connection, ECS entity, or world guard to Java.
 `playerHandleNativeItemKey(long, int)` follows the same boundary for a copied
 native inventory slot: it returns the item key, or `null` for an empty slot.
+`playerHandleNativeItemCount(long, int)` returns its copied count, using zero
+only for a real empty slot.
 The host rejects a stack with unmodeled components before returning a partial
-projection, and the surface deliberately has no Java item-object or mutation
-operation until their serialization and connection-task handoff are modeled.
+projection (for either read), and the surface deliberately has no Java
+item-object or mutation operation until their serialization and connection-task
+handoff are modeled.
 The generated player census is also an opt-in contract for the direct
 `AdapterHost` class: an adapter may declare any exact subset of those static
 native methods, and the worker registers only declarations with the matching
