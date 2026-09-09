@@ -12,9 +12,10 @@ use std::str::FromStr;
 use lodestone_ecs::commands::{
     CommandAnchor, CommandExecutionContext, CommandOutcome, CommandSource, dispatch, suggest,
 };
-use lodestone_ecs::permissions::PermissionSubject;
+use lodestone_ecs::permissions::{PermissionDefault, PermissionSubject, Permissions};
 use lodestone_model::{ResourceKey, Rotation, Vec3};
 use lodestone_wasm_host::{Capability, CapabilitySet, PluginHost, WasmHostPlugin};
+use uuid::Uuid;
 
 fn command_capabilities() -> CapabilitySet {
     CapabilitySet::from_iter([Capability::Log, Capability::RegisterCommands])
@@ -117,6 +118,42 @@ fn a_guest_typed_schema_parses_and_suggests_through_the_real_registry() {
     assert!(
         dispatch(app.world_mut(), &source, "/wasm-typed safe nope").is_err(),
         "an integer argument must reject non-integer input before guest invocation"
+    );
+}
+
+#[test]
+fn a_guest_command_permission_gates_typed_dispatch_and_suggestions() {
+    let mut app = client_app_with_guest(true);
+    let source = CommandSource::player(Uuid::from_u128(0x734), "Player");
+
+    app.world_mut()
+        .resource_mut::<Permissions>()
+        .declare("wasm.command.use", PermissionDefault::False);
+
+    assert!(
+        suggest(app.world(), &source, "/wasm").is_empty(),
+        "a player without the declared command permission must not see guest roots"
+    );
+    let denied = dispatch(app.world_mut(), &source, "/wt safe 7")
+        .expect_err("the native registry must reject the typed guest command first");
+    assert!(
+        denied.is_permission_denied(),
+        "guest command denial must remain a permission parse error, got {denied:?}"
+    );
+
+    app.world_mut()
+        .resource_mut::<Permissions>()
+        .grant(Uuid::from_u128(0x734), "wasm.command.use");
+
+    assert_eq!(
+        suggest(app.world(), &source, "/wasm"),
+        vec!["wasm-ping".to_owned(), "wasm-typed".to_owned()],
+        "granting the node must reveal both guest command roots"
+    );
+    assert_eq!(
+        dispatch(app.world_mut(), &source, "/wt safe 7"),
+        Ok(CommandOutcome::Success(47)),
+        "the same typed input must reach the separately-built guest after the grant"
     );
 }
 
