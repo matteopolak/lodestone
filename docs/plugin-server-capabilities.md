@@ -27,6 +27,25 @@ for the remainder of that tick and throughout the next. A reader that misses tha
 message; messages are not a durable queue. Each reader cursor sees a retained message at most once.
 Scheduler callbacks run after maintenance, so their messages have the same lifetime as system writes.
 
+### Native world snapshots
+
+`ecs::ServerWorldSnapshot` is the native plugin counterpart to the WASM block
+snapshot import. The production integrated-server constructor inserts it into
+the tick-owned `World` with the exact `Arc<dyn ChunkSource>` that serves the
+connected clients. A plugin reads at most
+`MAX_WORLD_SNAPSHOT_POSITIONS` (128) copied `StateId` values per call through
+`read_blocks` or `read_block`; it never receives a source guard, ECS handle, or
+generation callback. The resident-only source boundary returns `None` for a
+cold, contended, or out-of-range cell, so a plugin system cannot turn an
+observation into synchronous chunk generation.
+
+This is intentionally observation-only. Mutations still enter through
+`ServerProposalHandle::set_resident_block` (or the checked
+`IntegratedServer` wrapper), pass `Drain → Adjudicate → Apply`, and report a
+finite refusal when policy, residency, or the primary tick owner rejects them.
+The snapshot and mutation paths therefore share one authoritative source while
+keeping reads bounded and writes single-owner.
+
 Do not install another aging system for a type registered with `add_message`; that would shorten its
 delivery window. Merely inserting `Messages<T>` as a resource does not register its maintenance.
 `ServerProposal` is the built-in gameplay proposal vocabulary. `SpawnMob` carries an entity key
@@ -58,6 +77,33 @@ last and is read-only by enforcement: any event mutation is rolled back and reco
 `PaperEventBus`, and does not prevent later listeners from running. The bus intentionally leaves
 proposal variants without a registered event kind to their existing consumers until those actions
 acquire an event owner.
+
+#### Finite event census and acceptance boundary
+
+The following is the complete `PaperEventKind` census in this revision. It describes this server's
+proposal-backed vocabulary; it is not a claim that the variants are drop-in replacements for every
+Bukkit event or that they have already been differentially run against Paper.
+
+| kind | proposal owner | status |
+|---|---|---|
+| `EntitySpawn` | `ServerProposalAction::SpawnMob` | supported; allow, deny, replacement, ordered mutation, and monitor observation are covered by the server test suite |
+| `EntityDespawn` | `ServerProposalAction::DespawnMob` | supported; allow, deny, replacement, ordered mutation, and monitor observation are covered by the server test suite |
+| `ResidentBlockChange` | `ServerProposalAction::SetResidentBlock` | supported for one resident-state proposal; it is not a claim to implement every block-break/place event |
+| `PlayerInteract` | `ServerProposalAction::PlayerInteract` | supported for a value-only block-face interaction proposal; it has no player wrapper or inventory mutation surface |
+| `InventoryClick` | none | explicitly unsupported; registration returns `PaperEventRegistrationError::Unsupported` |
+
+There is no server-lifecycle event kind and no event owner for inventory clicks, game-mode changes,
+natural-spawn candidates, or block-write batches. Those actions remain on their existing proposal
+or direct paths and do not half-fire through this bus. The block census test also proves that a
+lower-priority listener's state replacement is visible to a later cancelling listener and to the
+read-only monitor before the proposal resolves.
+
+This bounded slice closes the local ordering, cancellation, mutation-visibility, monitor, panic,
+and explicit-unsupported controls. The acceptance gaps remain: representative inventory and
+server-event comparisons against a real Paper runtime are not present, the current JVM runner does
+not share a production event-driving path with Lodestone, and corrective client output has not been
+proven for every event owner. The conformance scaffold therefore must continue to report those
+gaps instead of treating this census as issue completion.
 
 ### Native tick scheduling
 

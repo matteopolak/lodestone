@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use bevy_app::{App, Plugin};
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockFace, BlockPos, Hand, ResourceKey, Vec3};
 use lodestone_server::ecs::{
     GameTick, PaperEvent, PaperEventBus, PaperEventFailureReason, PaperEventKind,
@@ -13,6 +14,20 @@ use lodestone_server::ecs::{
 
 fn key(value: &str) -> ResourceKey {
     value.parse().expect("test resource key")
+}
+
+fn state(value: &str) -> StateId {
+    StateId::from_state_str(value).expect("test block state")
+}
+
+fn assert_census_status(kind: PaperEventKind) {
+    match kind {
+        PaperEventKind::EntitySpawn
+        | PaperEventKind::EntityDespawn
+        | PaperEventKind::ResidentBlockChange
+        | PaperEventKind::PlayerInteract => assert!(kind.supported()),
+        PaperEventKind::InventoryClick => assert!(!kind.supported()),
+    }
 }
 
 struct StagedSpawn {
@@ -305,6 +320,100 @@ fn player_interact_handle_reaches_the_production_proposal_queue() {
 }
 
 #[test]
+fn resident_block_change_later_listeners_see_mutation_before_cancellation() {
+    let stone = state("minecraft:stone");
+    let air = state("minecraft:air");
+    let target = BlockPos::new(4, 64, 6);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let server = ServerApp::bootstrap_with(|app| {
+        app.add_plugins(StagedSpawn {
+            listeners: Arc::new({
+                let seen = Arc::clone(&seen);
+                move |events| {
+                    let seen = Arc::clone(&seen);
+                    events
+                        .register(
+                            PaperEventKind::ResidentBlockChange,
+                            PaperEventPriority::Low,
+                            "replace-block",
+                            move |event| {
+                                let PaperEvent::ResidentBlockChange { pos, state, .. } = event
+                                else {
+                                    unreachable!("event kind was filtered at registration");
+                                };
+                                assert_eq!(*pos, target);
+                                assert_eq!(*state, stone);
+                                *state = air;
+                                seen.lock().expect("block listener lock").push("replace");
+                            },
+                        )
+                        .expect("resident block change is supported");
+
+                    let seen = Arc::clone(&seen);
+                    events
+                        .register(
+                            PaperEventKind::ResidentBlockChange,
+                            PaperEventPriority::High,
+                            "cancel-block",
+                            move |event| {
+                                let PaperEvent::ResidentBlockChange { pos, state, .. } = event
+                                else {
+                                    unreachable!("event kind was filtered at registration");
+                                };
+                                assert_eq!(*pos, target);
+                                assert_eq!(*state, air);
+                                event.cancel();
+                                seen.lock().expect("block listener lock").push("cancel");
+                            },
+                        )
+                        .expect("resident block change is supported");
+
+                    let seen = Arc::clone(&seen);
+                    events
+                        .register(
+                            PaperEventKind::ResidentBlockChange,
+                            PaperEventPriority::Monitor,
+                            "observe-block",
+                            move |event| {
+                                let PaperEvent::ResidentBlockChange { pos, state, .. } = event
+                                else {
+                                    unreachable!("event kind was filtered at registration");
+                                };
+                                assert_eq!(*pos, target);
+                                assert_eq!(*state, air);
+                                assert!(event.is_cancelled());
+                                seen.lock().expect("block monitor lock").push("monitor");
+                            },
+                        )
+                        .expect("resident block change is supported");
+                }
+            }),
+            action: Some(ServerProposalAction::SetResidentBlock {
+                pos: target,
+                state: stone,
+            }),
+        });
+    });
+    let mut world = server.into_world();
+    world.run_schedule(GameTick);
+
+    let outcome = world
+        .resource_mut::<ServerProposalQueue>()
+        .take_resolutions()
+        .pop()
+        .expect("staged block proposal resolution")
+        .outcome;
+    assert!(matches!(
+        outcome,
+        Err(lodestone_server::ecs::ProposalRefusal::Denied)
+    ));
+    assert_eq!(
+        *seen.lock().expect("block listener observations lock"),
+        vec!["replace", "cancel", "monitor"]
+    );
+}
+
+#[test]
 fn entity_despawn_runs_every_priority_and_refuses_monitor_mutation() {
     let order = Arc::new(Mutex::new(Vec::new()));
     let server = ServerApp::bootstrap_with(|app| {
@@ -423,6 +532,16 @@ fn entity_despawn_handle_reaches_the_production_proposal_queue() {
 
 #[test]
 fn unsupported_event_registration_fails_explicitly() {
+    for kind in [
+        PaperEventKind::EntitySpawn,
+        PaperEventKind::EntityDespawn,
+        PaperEventKind::ResidentBlockChange,
+        PaperEventKind::PlayerInteract,
+        PaperEventKind::InventoryClick,
+    ] {
+        assert_census_status(kind);
+    }
+
     let mut events = PaperEventBus::default();
     let error = events
         .register(
