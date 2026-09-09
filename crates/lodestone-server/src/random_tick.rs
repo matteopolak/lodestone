@@ -1157,7 +1157,7 @@ fn fire_state_in_column(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GravitySettle {
     /// The state that leaves the world and rides the entity.
-    pub state: String,
+    pub state: lodestone_data::block_states::BlockStateValue,
     /// Where the entity will come to rest —
     /// [`gravity_tick::find_landing_y`]'s answer against the world as it is now.
     pub landing_y: i32,
@@ -1216,7 +1216,10 @@ pub(crate) fn settle_gravity_at(
         // scan must move at least one step) — defensive, not reachable.
         return None;
     }
-    Some(GravitySettle { state, landing_y })
+    Some(GravitySettle {
+        state: lodestone_data::block_states::BlockStateValue::parse(&state),
+        landing_y,
+    })
 }
 
 /// The real default redstone-wire evaluator's power-strength update set, in
@@ -2539,7 +2542,7 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
                 events.push(RandomTickEvent {
                     pos: (n.pos.x, n.pos.y, n.pos.z),
                     from: state.to_string(),
-                    to: reaction.new_state,
+                    to: reaction.new_state.to_string(),
                 });
             }
             return Vec::new();
@@ -2587,7 +2590,7 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
                 events.push(RandomTickEvent {
                     pos: (n.pos.x, n.pos.y, n.pos.z),
                     from: state.to_string(),
-                    to: reaction.new_state,
+                    to: reaction.new_state.to_string(),
                 });
                 if reaction.schedule_fire
                     && !block_ticks.has_scheduled(
@@ -3569,7 +3572,7 @@ mod tests {
         assert_eq!(
             settle_gravity_at(&column, 0, 0, 9, 5, 5),
             Some(GravitySettle {
-                state: "minecraft:sand".to_string(),
+                state: lodestone_data::block_states::BlockStateValue::parse("minecraft:sand"),
                 landing_y: 0,
             }),
             "control failed: the unsupported arm must be `Some`, or the `None` above \

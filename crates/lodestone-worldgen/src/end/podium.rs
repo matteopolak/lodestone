@@ -11,15 +11,16 @@
 //! structure (along with the obsidian pillars in `spikes.rs`) as "not here,
 //! and it is not terrain" — this is that piece.
 
+use lodestone_data::block_states::BlockStateValue;
+
 /// One block this feature writes, in absolute coordinates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PodiumBlock {
     pub x: i32,
     pub y: i32,
     pub z: i32,
-    /// A full block-state string, e.g. `"minecraft:bedrock"` or
-    /// `"minecraft:wall_torch[facing=north]"`.
-    pub state: String,
+    /// A parsed block-state value, retained in its original boundary spelling.
+    pub state: BlockStateValue,
 }
 
 /// The four horizontal directions a wall torch can face, matching vanilla's
@@ -79,7 +80,7 @@ fn closer_than(dx: i32, dy: i32, dz: i32, distance: f64) -> bool {
 pub fn end_podium(origin_x: i32, origin_y: i32, origin_z: i32, active: bool) -> Vec<PodiumBlock> {
     let mut writes = Vec::new();
     let push = |writes: &mut Vec<PodiumBlock>, x: i32, y: i32, z: i32, state: &str| {
-        writes.push(PodiumBlock { x, y, z, state: state.to_string() });
+        writes.push(PodiumBlock { x, y, z, state: BlockStateValue::parse(state) });
     };
 
     for dx in -4..=4 {

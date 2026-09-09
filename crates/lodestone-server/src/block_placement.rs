@@ -42,7 +42,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use lodestone_data::block_states;
+use lodestone_data::block_states::{self, BlockStateValue};
 use lodestone_model::{BlockFace, BlockPos, Vec3f};
 
 use crate::neighbor_update::Direction;
@@ -69,15 +69,25 @@ pub(crate) struct PlaceContext {
 /// partner's re-typing).
 #[derive(Debug, Clone)]
 pub(crate) struct Placement {
-    pub state: String,
-    pub extra: Vec<(BlockPos, String)>,
+    pub state: BlockStateValue,
+    pub extra: Vec<(BlockPos, BlockStateValue)>,
 }
 
 impl Placement {
     fn just(state: String) -> Self {
         Self {
-            state,
+            state: BlockStateValue::parse(&state),
             extra: Vec::new(),
+        }
+    }
+
+    fn with_extra(state: String, extra: Vec<(BlockPos, String)>) -> Self {
+        Self {
+            state: BlockStateValue::parse(&state),
+            extra: extra
+                .into_iter()
+                .map(|(pos, state)| (pos, BlockStateValue::parse(&state)))
+                .collect(),
         }
     }
 }
@@ -156,13 +166,13 @@ where
 
     if shape.bed_part {
         let facing = horizontal_look(ctx)?;
-        return Some(Placement {
-            state: format!("{block}[facing={},part=foot]", direction_to_str(facing)),
-            extra: vec![(
+        return Some(Placement::with_extra(
+            format!("{block}[facing={},part=foot]", direction_to_str(facing)),
+            vec![(
                 facing.relative(ctx.target),
                 format!("{block}[facing={},part=head]", direction_to_str(facing)),
             )],
-        });
+        ));
     }
 
     if shape.attach_face {
@@ -431,13 +441,13 @@ where
     let facing = horizontal_look(ctx)?;
     let hinge = door_hinge(ctx, facing, block_at);
     let facing = direction_to_str(facing);
-    Some(Placement {
-        state: format!("{block}[facing={facing},half=lower,hinge={hinge}]"),
-        extra: vec![(
+    Some(Placement::with_extra(
+        format!("{block}[facing={facing},half=lower,hinge={hinge}]"),
+        vec![(
             Direction::Up.relative(ctx.target),
             format!("{block}[facing={facing},half=upper,hinge={hinge}]"),
         )],
-    })
+    ))
 }
 
 /// `DoorBlock.getHinge`: a door pairs with an adjacent door, then
@@ -514,10 +524,10 @@ where
     if let Some(p) = partner_pos {
         extra.push((p, format!("{block}[facing={facing_str},type={partner_kind}]")));
     }
-    Some(Placement {
-        state: format!("{block}[facing={facing_str},type={kind}]"),
+    Some(Placement::with_extra(
+        format!("{block}[facing={facing_str},type={kind}]"),
         extra,
-    })
+    ))
 }
 
 /// The upper/lower-half decision every `Half`-bearing block shares —
@@ -750,6 +760,7 @@ mod tests {
         placement(block, &ctx(face, cursor_y, yaw), air)
             .unwrap_or_else(|| panic!("no convention for {block}"))
             .state
+            .into_string()
     }
 
     /// The three conventions that differ from each other, at one yaw: looking
@@ -888,7 +899,7 @@ mod tests {
             bed.extra,
             vec![(
                 BlockPos::new(0, 64, -1),
-                "minecraft:red_bed[facing=north,part=head]".to_string()
+                BlockStateValue::parse("minecraft:red_bed[facing=north,part=head]")
             )]
         );
     }
@@ -911,7 +922,7 @@ mod tests {
         assert_eq!(placed.state, "minecraft:chest[facing=south,type=left]");
         assert_eq!(
             placed.extra,
-            vec![(west, "minecraft:chest[facing=south,type=right]".to_string())]
+            vec![(west, BlockStateValue::parse("minecraft:chest[facing=south,type=right]"))]
         );
     }
 

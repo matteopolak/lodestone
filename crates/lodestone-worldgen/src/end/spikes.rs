@@ -13,6 +13,7 @@
 use crate::rng::{LegacyRandomSource, RandomSource};
 
 use super::podium::PodiumBlock;
+use lodestone_data::block_states::BlockStateValue;
 
 /// The number of spikes ringing the island.
 pub const SPIKE_COUNT: usize = 10;
@@ -113,9 +114,9 @@ pub fn end_spike_blocks(spike: &EndSpike, min_y: i32) -> Vec<PodiumBlock> {
                 let x = spike.center_x + dx;
                 let z = spike.center_z + dz;
                 if horizontal_sq <= radius_sq_plus_one && y < spike.height {
-                    writes.push(PodiumBlock { x, y, z, state: "minecraft:obsidian".to_string() });
+                    writes.push(PodiumBlock { x, y, z, state: BlockStateValue::parse("minecraft:obsidian") });
                 } else if y > 65 {
-                    writes.push(PodiumBlock { x, y, z, state: "minecraft:air".to_string() });
+                    writes.push(PodiumBlock { x, y, z, state: BlockStateValue::parse("minecraft:air") });
                 }
             }
         }
@@ -141,9 +142,9 @@ pub fn end_spike_blocks(spike: &EndSpike, min_y: i32) -> Vec<PodiumBlock> {
                         x: spike.center_x + dx,
                         y: spike.height + dy,
                         z: spike.center_z + dz,
-                        state: format!(
+                        state: BlockStateValue::parse(&format!(
                             "minecraft:iron_bars[north={north},south={south},west={west},east={east}]"
-                        ),
+                        )),
                     });
                 }
             }
@@ -153,11 +154,21 @@ pub fn end_spike_blocks(spike: &EndSpike, min_y: i32) -> Vec<PodiumBlock> {
     let crystal_x = spike.center_x;
     let crystal_y = spike.height + 1;
     let crystal_z = spike.center_z;
-    writes.push(PodiumBlock { x: crystal_x, y: crystal_y - 1, z: crystal_z, state: "minecraft:bedrock".to_string() });
+    writes.push(PodiumBlock {
+        x: crystal_x,
+        y: crystal_y - 1,
+        z: crystal_z,
+        state: BlockStateValue::parse("minecraft:bedrock"),
+    });
     // The block below is always the bedrock just written above (never soul
     // sand/soil), so vanilla's `FireBlock.getState` soul-fire branch never
     // fires here — plain fire is the only reachable outcome.
-    writes.push(PodiumBlock { x: crystal_x, y: crystal_y, z: crystal_z, state: "minecraft:fire".to_string() });
+    writes.push(PodiumBlock {
+        x: crystal_x,
+        y: crystal_y,
+        z: crystal_z,
+        state: BlockStateValue::parse("minecraft:fire"),
+    });
 
     writes
 }
