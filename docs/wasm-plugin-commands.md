@@ -17,6 +17,12 @@ The native registry has already rewritten aliases and checked the declared permi
 crosses the boundary. It deliberately carries no `World`, ECS handle, UUID, or callback, so dispatching
 while the native command sink holds the client world write guard cannot re-enter that guard.
 
+The production integration gate in `lodestone-wasm-host/tests/command_registration.rs` exercises this
+permission boundary with a separately-built guest: a non-op player sees neither declared root in
+completion and cannot dispatch the typed alias, while granting the declared node reveals both roots and
+delivers the typed result through the same client registry. This keeps permission pruning and dispatch
+in the native registry rather than duplicating policy inside the guest.
+
 The shell's explicit directory reload path stages every guest and its command declarations before it
 commits. On success it unregisters only the roots previously owned by the WASM conductor, swaps the
 guest stores, and registers the replacement declarations. A failed reload leaves both the old stores
