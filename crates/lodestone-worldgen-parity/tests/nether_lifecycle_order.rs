@@ -156,3 +156,36 @@ fn resident_completion_order_is_observable_in_full_and_split_dispatchers() {
         "reversing the two source completions must retain the first accepted replacement",
     );
 }
+
+#[test]
+fn later_source_reads_the_prior_sources_resident_replacement() {
+    const TARGET: (i32, i32) = (93, 90);
+    const PRIOR_SOURCE: (i32, i32) = (92, 90);
+    const LATER_SOURCE: (i32, i32) = (94, 90);
+    const WORLD: (i32, i32, i32) = (1503, 23, 1441);
+
+    let mut materializer = LifecycleMaterializer::new(nether_chunk_source(42));
+    for x in 91..=95 {
+        for z in 88..=92 {
+            materializer.admit((x, z));
+        }
+    }
+    materializer.complete(PRIOR_SOURCE, LifecycleCompletion::Features, 0);
+    let before = materializer
+        .resident_column(TARGET)
+        .expect("target was admitted before prior completion")
+        .block_state(WORLD.0.rem_euclid(16), WORLD.1, WORLD.2.rem_euclid(16))
+        .to_owned();
+    materializer.complete(LATER_SOURCE, LifecycleCompletion::Features, 1);
+    let after = materializer
+        .resident_column(TARGET)
+        .expect("target remains resident after later completion")
+        .block_state(WORLD.0.rem_euclid(16), WORLD.1, WORLD.2.rem_euclid(16));
+
+    assert_eq!(before, "minecraft:basalt", "the control source must install basalt first");
+    assert_eq!(
+        after,
+        "minecraft:basalt",
+        "the later blackstone blob must read and preserve the resident basalt replacement",
+    );
+}

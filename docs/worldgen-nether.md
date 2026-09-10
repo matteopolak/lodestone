@@ -52,6 +52,12 @@ The streaming replay retains admitted columns and completed source bodies
 across successive target rows; each target adds only its new halo and its
 not-yet-completed 3×3 sources. A target therefore observes the authenticated
 earlier prefix rather than a freshly regenerated halo.
+Each source completion builds its placement views from those live resident
+columns, including writes committed by prior completions. The sparse transition
+overlay remains the commit ledger, but it is not a substitute for the resident
+read view: neighborhood predicates such as blob replacement must see retained
+basalt, structure, and vegetation states regardless of frame batch size or
+immutable-cache worker count.
 
 Live streaming can initially retain a shaped target while the join worker is
 filling the view. Before packet encoding, the source's admission hook upgrades
