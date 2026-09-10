@@ -83,6 +83,11 @@
 //! encoder arm for it was reachable only from outside the tree via
 //! `ClientHandle::send_action` (see `docs/plugin-channels.md`).
 //!
+//! Outbound admission is bounded per channel: the default is 64 messages, 256 KiB
+//! total encoded body bytes, and 64 KiB per body per tick. A channel can provide
+//! smaller explicit limits through `add_outbound_plugin_channel_with_limits`; a
+//! rejected body is counted and never enters `ActionQueue`.
+//!
 //! # A type registered for both directions echoes inbound back out
 //!
 //! Both halves fold the *same* `Messages<T>`. If a type implements both
@@ -115,7 +120,7 @@ use crate::events::{GameEvent, GameEventBusPlugin};
 use crate::player::ActionQueue;
 use crate::plugin_message::PluginMessageAppExt;
 use crate::schedules::GameTick;
-use crate::sets::EventPriority;
+use crate::sets::{EventPriority, TickSet};
 
 /// A plugin-defined `custom_payload` channel: which channel to listen on, and
 /// how to turn its raw bytes into `Self`.
@@ -211,6 +216,47 @@ impl<T: PluginChannel> PluginChannelState<T> {
     }
 }
 
+/// Per-tick bounds for one typed outbound custom-payload channel.
+///
+/// These limits apply after [`OutboundPluginChannel::encode`] returns and before
+/// the bytes enter [`ActionQueue`]. A rejected payload never becomes a
+/// [`ClientAction::SendCustomPayload`]; the normal driver/network path remains
+/// the only producer of transport output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutboundPluginChannelLimits {
+    /// Maximum messages admitted between `GameTick` aging points.
+    pub max_messages_per_tick: usize,
+    /// Maximum total encoded bytes admitted between aging points.
+    pub max_payload_bytes_per_tick: usize,
+    /// Maximum encoded body size for one message.
+    pub max_payload_bytes_per_message: usize,
+}
+
+impl Default for OutboundPluginChannelLimits {
+    fn default() -> Self {
+        Self {
+            max_messages_per_tick: 64,
+            max_payload_bytes_per_tick: 256 * 1024,
+            max_payload_bytes_per_message: 64 * 1024,
+        }
+    }
+}
+
+/// Counters for one typed outbound channel. Counters remain cumulative until
+/// [`OutboundPluginChannelState::reset_stats`] is called; only the admission
+/// window resets automatically at the end of each game tick.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OutboundPluginChannelStats {
+    /// Messages admitted to the action queue.
+    pub queued_messages: u64,
+    /// Encoded bytes admitted to the action queue.
+    pub queued_payload_bytes: u64,
+    /// Messages rejected by a configured bound.
+    pub dropped_messages: u64,
+    /// Encoded bytes discarded because a message was rejected.
+    pub dropped_payload_bytes: u64,
+}
+
 /// Per-outbound-channel dispatch state, and the resource to assert in a test —
 /// the outbound analogue of [`PluginChannelState`].
 ///
@@ -220,7 +266,10 @@ impl<T: PluginChannel> PluginChannelState<T> {
 #[derive(Resource, Debug)]
 pub struct OutboundPluginChannelState<T: OutboundPluginChannel> {
     key: ResourceKey,
-    sent: u64,
+    limits: OutboundPluginChannelLimits,
+    window_messages: usize,
+    window_payload_bytes: usize,
+    stats: OutboundPluginChannelStats,
     _marker: PhantomData<fn() -> T>,
 }
 
@@ -231,10 +280,58 @@ impl<T: OutboundPluginChannel> OutboundPluginChannelState<T> {
         &self.key
     }
 
-    /// How many payloads were queued for the wire.
+    /// The configured per-tick and per-message bounds.
+    #[must_use]
+    pub fn limits(&self) -> OutboundPluginChannelLimits {
+        self.limits
+    }
+
+    /// How many payloads were queued for the wire since the last reset.
     #[must_use]
     pub fn sent(&self) -> u64 {
-        self.sent
+        self.stats.queued_messages
+    }
+
+    /// Current cumulative admission counters.
+    #[must_use]
+    pub fn stats(&self) -> OutboundPluginChannelStats {
+        self.stats
+    }
+
+    /// Clear cumulative counters without changing the current tick window.
+    pub fn reset_stats(&mut self) {
+        self.stats = OutboundPluginChannelStats::default();
+    }
+
+    fn reset_window(&mut self) {
+        self.window_messages = 0;
+        self.window_payload_bytes = 0;
+    }
+
+    fn try_reserve(&mut self, payload_bytes: usize) -> bool {
+        let message_ok = payload_bytes <= self.limits.max_payload_bytes_per_message;
+        let count_ok = self.window_messages < self.limits.max_messages_per_tick;
+        let bytes_ok = self
+            .window_payload_bytes
+            .checked_add(payload_bytes)
+            .is_some_and(|total| total <= self.limits.max_payload_bytes_per_tick);
+        if message_ok && count_ok && bytes_ok {
+            self.window_messages += 1;
+            self.window_payload_bytes += payload_bytes;
+            self.stats.queued_messages = self.stats.queued_messages.saturating_add(1);
+            self.stats.queued_payload_bytes = self
+                .stats
+                .queued_payload_bytes
+                .saturating_add(payload_bytes as u64);
+            true
+        } else {
+            self.stats.dropped_messages = self.stats.dropped_messages.saturating_add(1);
+            self.stats.dropped_payload_bytes = self
+                .stats
+                .dropped_payload_bytes
+                .saturating_add(payload_bytes as u64);
+            false
+        }
     }
 }
 
@@ -295,11 +392,25 @@ impl<T: PluginChannel> Plugin for PluginChannelPlugin<T> {
 /// bevy plugin twice panics, and two plugins sharing one channel type is the
 /// normal case.
 #[derive(Debug)]
-pub struct OutboundPluginChannelPlugin<T: OutboundPluginChannel>(PhantomData<fn() -> T>);
+pub struct OutboundPluginChannelPlugin<T: OutboundPluginChannel> {
+    limits: OutboundPluginChannelLimits,
+    _marker: PhantomData<fn() -> T>,
+}
 
 impl<T: OutboundPluginChannel> Default for OutboundPluginChannelPlugin<T> {
     fn default() -> Self {
-        Self(PhantomData)
+        Self::with_limits(OutboundPluginChannelLimits::default())
+    }
+}
+
+impl<T: OutboundPluginChannel> OutboundPluginChannelPlugin<T> {
+    /// Register an outbound channel with explicit admission limits.
+    #[must_use]
+    pub const fn with_limits(limits: OutboundPluginChannelLimits) -> Self {
+        Self {
+            limits,
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -335,13 +446,17 @@ impl<T: OutboundPluginChannel> Plugin for OutboundPluginChannelPlugin<T> {
         app.add_plugin_message::<T>();
         app.insert_resource(OutboundPluginChannelState::<T> {
             key,
-            sent: 0,
+            limits: self.limits,
+            window_messages: 0,
+            window_payload_bytes: 0,
+            stats: OutboundPluginChannelStats::default(),
             _marker: PhantomData,
         });
         app.add_systems(
             GameTick,
             dispatch_plugin_channel_outbound::<T>.after(EventPriority::Monitor),
         );
+        app.add_systems(GameTick, age_outbound_plugin_channel::<T>.in_set(TickSet::Send));
     }
 }
 
@@ -389,12 +504,22 @@ pub fn dispatch_plugin_channel_outbound<T: OutboundPluginChannel>(
     mut state: ResMut<OutboundPluginChannelState<T>>,
 ) {
     for message in inbox.read() {
-        queue.0.push(ClientAction::SendCustomPayload {
-            channel: state.key.clone(),
-            data: T::encode(message),
-        });
-        state.sent += 1;
+        let data = T::encode(message);
+        if state.try_reserve(data.len()) {
+            queue.0.push(ClientAction::SendCustomPayload {
+                channel: state.key.clone(),
+                data,
+            });
+        }
     }
+}
+
+/// Reopens the typed channel's admission window after the action queue has had
+/// this tick's chance to consume it.
+fn age_outbound_plugin_channel<T: OutboundPluginChannel>(
+    mut state: ResMut<OutboundPluginChannelState<T>>,
+) {
+    state.reset_window();
 }
 
 /// The idempotent registration call a plugin uses.
@@ -419,6 +544,13 @@ pub trait PluginChannelAppExt {
     /// A type registered here is only ever sent when the plugin itself writes
     /// it.
     fn add_outbound_plugin_channel<T: OutboundPluginChannel>(&mut self) -> &mut Self;
+
+    /// Declares an outbound channel with explicit per-tick and per-message
+    /// bounds. The first registration wins; later calls remain idempotent.
+    fn add_outbound_plugin_channel_with_limits<T: OutboundPluginChannel>(
+        &mut self,
+        limits: OutboundPluginChannelLimits,
+    ) -> &mut Self;
 }
 
 impl PluginChannelAppExt for App {
@@ -435,6 +567,16 @@ impl PluginChannelAppExt for App {
         }
         self
     }
+
+    fn add_outbound_plugin_channel_with_limits<T: OutboundPluginChannel>(
+        &mut self,
+        limits: OutboundPluginChannelLimits,
+    ) -> &mut Self {
+        if !self.is_plugin_added::<OutboundPluginChannelPlugin<T>>() {
+            self.add_plugins(OutboundPluginChannelPlugin::<T>::with_limits(limits));
+        }
+        self
+    }
 }
 
 #[cfg(test)]
@@ -445,8 +587,9 @@ mod tests {
     use lodestone_model::{ClientAction, ClientEvent, ResourceKey};
 
     use super::{
-        OutboundPluginChannel, OutboundPluginChannelPlugin, OutboundPluginChannelState,
-        PluginChannel, PluginChannelAppExt, PluginChannelPlugin, PluginChannelState,
+        OutboundPluginChannel, OutboundPluginChannelLimits, OutboundPluginChannelPlugin,
+        OutboundPluginChannelState, PluginChannel, PluginChannelAppExt, PluginChannelPlugin,
+        PluginChannelState,
     };
     use crate::events::{GameEvent, GameEventBus};
     use crate::player::ActionQueue;
@@ -720,6 +863,81 @@ mod tests {
                 .resource::<OutboundPluginChannelState<Ping>>()
                 .sent(),
             1
+        );
+    }
+
+    /// Bounds apply at the typed-channel/action-queue boundary: a plugin may
+    /// write many messages, but only admitted encoded bodies become protocol
+    /// actions. The rejected body is dropped before it can accumulate in the
+    /// queue, and the counters make the refusal observable.
+    #[test]
+    fn an_outbound_channel_drops_oversized_and_burst_payloads() {
+        let mut app = App::new();
+        app.add_plugins(OutboundPluginChannelPlugin::<Beacon>::with_limits(
+            OutboundPluginChannelLimits {
+                max_messages_per_tick: 1,
+                max_payload_bytes_per_tick: 4,
+                max_payload_bytes_per_message: 3,
+            },
+        ));
+        app.world_mut()
+            .write_message(Beacon("abc".to_owned()));
+        app.world_mut()
+            .write_message(Beacon("def".to_owned()));
+        app.world_mut()
+            .write_message(Beacon("wxyz".to_owned()));
+        app.world_mut().run_schedule(GameTick);
+
+        let queue = &app.world().resource::<ActionQueue>().0;
+        assert_eq!(queue.len(), 1, "only one bounded message reaches egress");
+        let ClientAction::SendCustomPayload { data, .. } = &queue[0] else {
+            panic!("expected the admitted typed payload");
+        };
+        assert_eq!(data, b"abc");
+        let stats = app
+            .world()
+            .resource::<OutboundPluginChannelState<Beacon>>()
+            .stats();
+        assert_eq!(stats.queued_messages, 1);
+        assert_eq!(stats.queued_payload_bytes, 3);
+        assert_eq!(stats.dropped_messages, 2);
+        assert_eq!(stats.dropped_payload_bytes, 7);
+    }
+
+    /// The admission window is per tick, not a one-time lifetime quota. This
+    /// also proves the typed channel remains connected to the normal game-tick
+    /// egress path after a bounded drop.
+    #[test]
+    fn an_outbound_channel_reopens_its_window_each_tick() {
+        let mut app = App::new();
+        app.add_outbound_plugin_channel_with_limits::<Beacon>(OutboundPluginChannelLimits {
+            max_messages_per_tick: 1,
+            max_payload_bytes_per_tick: 4,
+            max_payload_bytes_per_message: 4,
+        });
+        app.world_mut()
+            .write_message(Beacon("one".to_owned()));
+        app.world_mut().run_schedule(GameTick);
+        app.world_mut()
+            .write_message(Beacon("two".to_owned()));
+        app.world_mut().run_schedule(GameTick);
+
+        let queue = &app.world().resource::<ActionQueue>().0;
+        assert_eq!(queue.len(), 2);
+        let payloads: Vec<&[u8]> = queue
+            .iter()
+            .map(|action| match action {
+                ClientAction::SendCustomPayload { data, .. } => data.as_slice(),
+                other => panic!("expected typed custom payload, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(payloads, [b"one".as_slice(), b"two".as_slice()]);
+        assert_eq!(
+            app.world()
+                .resource::<OutboundPluginChannelState<Beacon>>()
+                .stats()
+                .queued_messages,
+            2
         );
     }
 
