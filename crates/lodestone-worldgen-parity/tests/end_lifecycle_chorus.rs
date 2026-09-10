@@ -1,18 +1,25 @@
 //! End lifecycle replay keeps a source's decoration context source-centred.
 
-use lodestone_server::end_chunk_source;
+use lodestone_server::{end_chunk_source, ChunkSource};
 use lodestone_worldgen_parity::lifecycle::{
     LifecycleCompletion, LifecycleMaterializer, LifecycleReplayEvent, LifecycleReplayPlan,
 };
 
 const SEED: i64 = 42;
 const TARGET: (i32, i32) = (128, 130);
+const BANNER_TARGET: (i32, i32) = (283, 81);
 const CHORUS_SOURCE: (i32, i32) = (128, 131);
 const FOCUS_LOCAL: (i32, i32, i32) = (4, 67, 15);
 
 fn source_window() -> Vec<(i32, i32)> {
     (TARGET.0 - 1..=TARGET.0 + 1)
         .flat_map(|x| (TARGET.1 - 1..=TARGET.1 + 1).map(move |z| (x, z)))
+        .collect()
+}
+
+fn banner_source_window() -> Vec<(i32, i32)> {
+    (BANNER_TARGET.0 - 1..=BANNER_TARGET.0 + 1)
+        .flat_map(|x| (BANNER_TARGET.1 - 1..=BANNER_TARGET.1 + 1).map(move |z| (x, z)))
         .collect()
 }
 
@@ -71,4 +78,41 @@ fn withholding_the_chorus_source_is_a_live_negative_control() {
 
     assert!(complete_focus.starts_with("minecraft:chorus_plant["));
     assert_eq!(withheld_focus, "minecraft:air");
+}
+
+#[test]
+fn end_lifecycle_packet_snapshot_omits_structure_sidecars() {
+    let admissions = banner_source_window();
+    let source = end_chunk_source(SEED);
+    let direct = source.column(BANNER_TARGET.0, BANNER_TARGET.1);
+    assert_eq!(
+        direct
+            .block_entities()
+            .iter()
+            .filter(|(_, entity)| entity.type_id() == "minecraft:banner")
+            .count(),
+        4,
+        "the direct End source retains the four patterned banner sidecars"
+    );
+
+    let mut materializer = LifecycleMaterializer::new(source);
+    let events = admissions
+        .iter()
+        .enumerate()
+        .map(|(sequence, &source)| LifecycleReplayEvent {
+            source,
+            stage: LifecycleCompletion::Features,
+            sequence: sequence as u64,
+            resident_transitions: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    let plan = LifecycleReplayPlan::for_target(BANNER_TARGET, &admissions, &events)
+        .expect("the complete End lifecycle wavefront must be authenticated");
+    materializer.replay_plan(&plan);
+
+    let snapshot = materializer.snapshot_for_packet(BANNER_TARGET);
+    assert!(
+        snapshot.block_entities().is_empty(),
+        "the external End lifecycle packet boundary carries no structure sidecars"
+    );
 }

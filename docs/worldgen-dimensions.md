@@ -155,9 +155,10 @@ the served `ChunkColumn`; it resolves referenced origins again for template-owne
 before the column reaches packet encoding or region persistence. This source attachment is separate
 from block placement so a city can remain visible while its save metadata and container sidecars are
 still checked independently. Patterned black banners are template block states with a separate
-component payload, so the attachment also materializes their missing banner records; lifecycle replay
-invokes the same source-sidecar hook after FEATURES instead of dropping those records at the shaped
-column boundary.
+component payload, so a direct source column also materializes their missing banner records. End
+lifecycle replay keeps those structure records in its resident save-sidecar state, but its detached
+packet snapshot filters structure-owned records at the authenticated status boundary; the external
+lifecycle stream therefore carries the banner blocks without emitting banner entities.
 The End's retained motion-blocking heightmap is taken from the final served
 column, after intersecting city pieces and the three-by-three decoration pass.
 This is the same content boundary as the three client heightmaps: a later

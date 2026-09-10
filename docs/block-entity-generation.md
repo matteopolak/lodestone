@@ -23,12 +23,14 @@ template placement can report a banner entity before attachment survival turns
 the unsupported banner into air. `ChunkColumn::from_end` validates those events
 against the completed block field, and `ChunkColumn::reconcile_generated_block_entity_states`
 performs the same strict state-owner check after source sidecars and later
-feature writes. This keeps generated records for replaced blocks out of both
-ordinary End columns and detached lifecycle packets while leaving unclaimed
-plugin extension records on the general reconciliation path. A surviving wall
-banner therefore retains its template payload as a sidecar; an orphaned event
-does not become an entity merely because placement reported it before the final
-state pass.
+feature writes. This keeps generated records for replaced blocks out of ordinary
+End columns and leaves unclaimed plugin extension records on the general
+reconciliation path. A surviving wall banner therefore retains its template
+payload in a direct End source column; the End lifecycle packet boundary
+intentionally filters those structure-owned records, so its external packet
+can carry the banner block without a banner entity. An orphaned event does not
+become an entity merely because placement reported it before the final state
+pass.
 
 ## How to change it
 
