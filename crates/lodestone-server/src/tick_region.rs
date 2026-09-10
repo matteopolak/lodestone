@@ -29,6 +29,7 @@ where
     R: Send,
     F: Fn(T) -> R + Sync,
 {
+    assert!(worker_count > 0, "owner worker count must be positive");
     let lane_count = worker_count.max(1).min(jobs.len().max(1));
     let mut lanes: Vec<Vec<(usize, T)>> = (0..lane_count).map(|_| Vec::new()).collect();
     for (index, job) in jobs.into_iter().enumerate() {
@@ -57,10 +58,11 @@ where
 /// See the native implementation: wasm keeps submission order without trying
 /// to manufacture native worker threads.
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn run_bounded_owner_jobs<T, R, F>(jobs: Vec<T>, _worker_count: usize, work: &F) -> Vec<R>
+pub(crate) fn run_bounded_owner_jobs<T, R, F>(jobs: Vec<T>, worker_count: usize, work: &F) -> Vec<R>
 where
     F: Fn(T) -> R,
 {
+    assert!(worker_count > 0, "owner worker count must be positive");
     jobs.into_iter().map(work).collect()
 }
 
@@ -303,6 +305,12 @@ mod tests {
             2,
             "the two disjoint owners must execute on separate bounded lanes"
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "owner worker count must be positive")]
+    fn bounded_owner_jobs_rejects_a_zero_lane_bound() {
+        let _ = run_bounded_owner_jobs(vec![(-1_i32, 0_i32)], 0, &|job| job);
     }
 
     #[test]
