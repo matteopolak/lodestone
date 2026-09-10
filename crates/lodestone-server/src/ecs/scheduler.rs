@@ -332,6 +332,20 @@ impl AsyncCompletion {
 /// they must not block or remove the scheduler resource. Recursive dispatch
 /// fails immediately instead of advancing the clock inside a callback.
 pub fn run_server_tasks(world: &mut World) {
+    // A host may catch a plugin panic around a schedule run (for example to
+    // report the plugin and continue serving other work). Reset the latch
+    // before rethrowing so that recovery does not turn every later tick into a
+    // misleading recursive-dispatch panic.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_server_tasks_inner(world);
+    }));
+    if let Err(payload) = result {
+        world.resource_mut::<ServerTaskScheduler>().dispatching = false;
+        std::panic::resume_unwind(payload);
+    }
+}
+
+fn run_server_tasks_inner(world: &mut World) {
     let due = {
         let mut tasks = world.resource_mut::<ServerTaskScheduler>();
         assert!(!tasks.dispatching, "server scheduler cannot run recursively");
@@ -350,7 +364,15 @@ pub fn run_server_tasks(world: &mut World) {
         let callback = world.resource_mut::<ServerTaskScheduler>()
             .tasks.get_mut(&id).and_then(|task| task.callback.take());
         let Some(mut callback) = callback else { continue; };
-        callback(world, id);
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            callback(world, id);
+        })) {
+            // The deadline was already removed above. Remove the task too, so
+            // a recovered host cannot retain a once-task with no callback or a
+            // repeating task that can never be re-armed.
+            world.resource_mut::<ServerTaskScheduler>().tasks.remove(&id);
+            std::panic::resume_unwind(payload);
+        }
         let mut tasks = world.resource_mut::<ServerTaskScheduler>();
         let tick = tasks.tick;
         let Some(task) = tasks.tasks.get_mut(&id) else { continue; };
@@ -500,6 +522,29 @@ mod tests {
             run_server_tasks(world);
         });
         world.run_schedule(GameTick);
+    }
+
+    #[test]
+    fn a_recovered_callback_panic_does_not_poison_later_ticks() {
+        let mut world = world();
+        let failed = world
+            .resource_mut::<ServerTaskScheduler>()
+            .schedule_once(1, |_, _| panic!("intentional callback failure"));
+        world
+            .resource_mut::<ServerTaskScheduler>()
+            .schedule_once(2, |world, _| world.resource_mut::<Calls>().0.push(2));
+
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            world.run_schedule(GameTick);
+        }));
+        std::panic::set_hook(previous);
+        assert!(panic.is_err(), "the callback panic must still reach the host");
+        assert!(!world.resource_mut::<ServerTaskScheduler>().cancel(failed));
+
+        world.run_schedule(GameTick);
+        assert_eq!(world.resource::<Calls>().0, [2]);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
