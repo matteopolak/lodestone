@@ -149,6 +149,14 @@ impl Heightmaps {
             .map(|(_, m)| m)
     }
 
+    /// Returns the heightmap for `type_id` for incremental column maintenance.
+    pub fn get_mut(&mut self, type_id: u32) -> Option<&mut Heightmap> {
+        self.maps
+            .iter_mut()
+            .find(|(id, _)| *id == type_id)
+            .map(|(_, m)| m)
+    }
+
     /// Iterates `(type_id, heightmap)` pairs in insertion order.
     pub fn iter(&self) -> impl Iterator<Item = (u32, &Heightmap)> + '_ {
         self.maps.iter().map(|(id, m)| (*id, m))
