@@ -1,6 +1,7 @@
 use crate::event::{EquipmentSlot, ProfileProperty};
 use crate::ids::ResourceKey;
 use crate::text::Text;
+use bon::bon;
 
 /// An item-registry id with the numbering source attached.
 ///
@@ -620,12 +621,31 @@ pub struct ItemProfile {
     pub properties: Vec<ProfileProperty>,
 }
 
-/// The melee reach a `minecraft:attack_range` component grants: minimum and
-/// maximum reach, the creative-mode alternates of each, a hitbox margin and a
-/// mob-wielded scale factor — six independent floats, in that wire order.
+/// The melee reach an attack-range component grants: minimum and maximum
+/// reach, the creative-mode alternates of each, a hitbox margin and a mob-
+/// wielded scale factor — six independent floats, in that wire order.
 ///
 /// Stored as raw IEEE-754 bits, the same convention [`ItemTool::default_mining_speed`]
 /// documents, so [`ItemComponents`] keeps its `Eq` impl (`f32` is not `Eq`).
+///
+/// The generated builder gives each required field a named setter. Prefer it
+/// when assembling a value from several same-typed floats: field names make a
+/// transposition visible, while missing or unknown fields are compile-time
+/// errors at the call site:
+///
+/// ```
+/// use lodestone_model::AttackRange;
+///
+/// let range = AttackRange::builder()
+///     .min_reach(2.0)
+///     .max_reach(3.0)
+///     .min_creative_reach(4.0)
+///     .max_creative_reach(5.0)
+///     .hitbox_margin(0.25)
+///     .mob_factor(1.5)
+///     .build();
+/// assert_eq!(range.max_reach(), 3.0);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AttackRange {
     min_reach_bits: u32,
@@ -636,9 +656,14 @@ pub struct AttackRange {
     mob_factor_bits: u32,
 }
 
+#[bon]
 impl AttackRange {
-    /// Builds an attack-range component from its six decoded fields, in wire
-    /// order.
+    /// Builds an attack-range component from its six decoded fields.
+    ///
+    /// This positional form remains available for source compatibility. New
+    /// call sites should use [`AttackRange::builder`] so each same-typed input
+    /// is identified by name.
+    #[builder(start_fn = builder)]
     #[must_use]
     pub fn new(
         min_reach: f32,

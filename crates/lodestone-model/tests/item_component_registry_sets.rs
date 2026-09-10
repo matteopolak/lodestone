@@ -18,8 +18,8 @@
 //! * the bit-packed float fields come back out in the order they went in.
 
 use lodestone_model::{
-    ArmorTrim, BlocksAttacks, ConsumeEffect, DamageReduction, ItemComponents, MobEffectInstance,
-    RegistrySet, Text,
+    ArmorTrim, AttackRange, BlocksAttacks, ConsumeEffect, DamageReduction, ItemComponents,
+    MobEffectInstance, RegistrySet, Text,
 };
 
 /// A tag-form registry set and an explicitly-empty one are **different
@@ -138,6 +138,28 @@ fn blocks_attacks_accessors_return_the_fields_in_wire_order() {
         "a rule with no set applies to every damage type, which is a different \
          statement from a rule whose set is empty"
     );
+}
+
+/// Named setters keep the six same-typed attack-range fields attached to the
+/// accessors they describe. Distinct non-round values make a transposition
+/// observable if this construction path is changed later.
+#[test]
+fn attack_range_builder_preserves_each_named_field() {
+    let component = AttackRange::builder()
+        .min_reach(2.25)
+        .max_reach(3.75)
+        .min_creative_reach(4.5)
+        .max_creative_reach(5.875)
+        .hitbox_margin(0.125)
+        .mob_factor(1.375)
+        .build();
+
+    assert_eq!(component.min_reach(), 2.25);
+    assert_eq!(component.max_reach(), 3.75);
+    assert_eq!(component.min_creative_reach(), 4.5);
+    assert_eq!(component.max_creative_reach(), 5.875);
+    assert_eq!(component.hitbox_margin(), 0.125);
+    assert_eq!(component.mob_factor(), 1.375);
 }
 
 /// A default `ArmorTrim` leaves all four inline-only fields unset.

@@ -1430,14 +1430,16 @@ fn read_component_patch(
                 let max_creative_reach = reader.f32().map_err(dec_err)?;
                 let hitbox_margin = reader.f32().map_err(dec_err)?;
                 let mob_factor = reader.f32().map_err(dec_err)?;
-                components.attack_range = Some(AttackRange::new(
-                    min_reach,
-                    max_reach,
-                    min_creative_reach,
-                    max_creative_reach,
-                    hitbox_margin,
-                    mob_factor,
-                ));
+                components.attack_range = Some(
+                    AttackRange::builder()
+                        .min_reach(min_reach)
+                        .max_reach(max_reach)
+                        .min_creative_reach(min_creative_reach)
+                        .max_creative_reach(max_creative_reach)
+                        .hitbox_margin(hitbox_margin)
+                        .mob_factor(mob_factor)
+                        .build(),
+                );
             }
 
             // `vanilla's own use effects's own stream codec`: two bools (canSprint, interactVibrations)
