@@ -97,6 +97,27 @@ pub const STEP_UNDERGROUND_ORES: i32 = DecorationStep::UndergroundOres.ordinal()
 /// TOP_LAYER_MODIFICATION`).
 pub const STEP_VEGETAL_DECORATION: i32 = DecorationStep::VegetalDecoration.ordinal();
 
+/// The source order used by the historical fixture drivers.  Those drivers
+/// keep this order because their external controls model a direct 3x3 feature
+/// pass rather than the bounded chunk-admission lifecycle used by production.
+const FIXTURE_SOURCE_OFFSETS: &[(i32, i32); 9] = &[
+    (-1, -1),
+    (-1, 0),
+    (-1, 1),
+    (0, -1),
+    (0, 0),
+    (0, 1),
+    (1, -1),
+    (1, 0),
+    (1, 1),
+];
+
+/// The bounded Overworld admission order: source x changes by row and source
+/// z changes fastest within each row. Cross-source placement is stateful, so
+/// this order is part of generated content rather than a traversal detail.
+pub(crate) const OVERWORLD_SOURCE_OFFSETS: &[(i32, i32); 9] =
+    crate::stage_schedule::OVERWORLD_SOURCE_OFFSETS;
+
 /// A block position with `i32` components (vanilla's own block-position record).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BlockPos {
@@ -810,7 +831,9 @@ impl RegionHeights {
         }
     }
 
-    /// Clears a retained height buffer back to the absent-entry sentinel.
+    /// Reuses an existing dense height buffer, restoring the same absence
+    /// sentinel as [`Self::unset`]. A generator can retain this scratch on its
+    /// worker thread instead of allocating and freeing 25 KiB per column.
     pub fn clear(&mut self) {
         self.heights.fill(Self::UNSET);
     }
@@ -1113,35 +1136,122 @@ pub fn apply_ore_step_3x3_per_source_at_step<'a, R: RandomSource>(
     view: &mut RegionView<'_>,
     ores_for_source: &dyn Fn(i32, i32) -> &'a [PlacedOre],
 ) -> i64 {
+    apply_ore_step_3x3_per_source_at_step_with_order(
+        random,
+        seed,
+        center_x,
+        center_z,
+        min_y,
+        height,
+        min_gen_y,
+        gen_depth,
+        read_min,
+        read_max,
+        ocean_floor_wg,
+        in_tag,
+        biome_allows,
+        feature_step,
+        selected_source,
+        view,
+        ores_for_source,
+        FIXTURE_SOURCE_OFFSETS,
+    )
+}
+
+/// Production Overworld variant of [`apply_ore_step_3x3_per_source_at_step`].
+/// The public fixture wrapper retains its direct-pass order, while the
+/// production column path must follow bounded source admission so a spill from
+/// one source is visible to the next source in the same order as the lifecycle.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_ore_step_3x3_per_source_overworld<'a, R: RandomSource>(
+    random: &mut WorldgenRandom<R>,
+    seed: i64,
+    center_x: i32,
+    center_z: i32,
+    min_y: i32,
+    height: i32,
+    min_gen_y: i32,
+    gen_depth: i32,
+    read_min: i32,
+    read_max: i32,
+    ocean_floor_wg: &RegionHeights,
+    in_tag: &dyn Fn(&str, &str) -> bool,
+    biome_allows: Option<&dyn Fn(BlockPos, &str) -> bool>,
+    feature_step: i32,
+    selected_source: Option<(i32, i32)>,
+    view: &mut RegionView<'_>,
+    ores_for_source: &dyn Fn(i32, i32) -> &'a [PlacedOre],
+) -> i64 {
+    apply_ore_step_3x3_per_source_at_step_with_order(
+        random,
+        seed,
+        center_x,
+        center_z,
+        min_y,
+        height,
+        min_gen_y,
+        gen_depth,
+        read_min,
+        read_max,
+        ocean_floor_wg,
+        in_tag,
+        biome_allows,
+        feature_step,
+        selected_source,
+        view,
+        ores_for_source,
+        OVERWORLD_SOURCE_OFFSETS,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_ore_step_3x3_per_source_at_step_with_order<'a, R: RandomSource>(
+    random: &mut WorldgenRandom<R>,
+    seed: i64,
+    center_x: i32,
+    center_z: i32,
+    min_y: i32,
+    height: i32,
+    min_gen_y: i32,
+    gen_depth: i32,
+    read_min: i32,
+    read_max: i32,
+    ocean_floor_wg: &RegionHeights,
+    in_tag: &dyn Fn(&str, &str) -> bool,
+    biome_allows: Option<&dyn Fn(BlockPos, &str) -> bool>,
+    feature_step: i32,
+    selected_source: Option<(i32, i32)>,
+    view: &mut RegionView<'_>,
+    ores_for_source: &dyn Fn(i32, i32) -> &'a [PlacedOre],
+    source_offsets: &[(i32, i32)],
+) -> i64 {
     let mut center_decoration_seed = 0;
-    for dx in -1..=1 {
-        for dz in -1..=1 {
-            let source_x = center_x + dx;
-            let source_z = center_z + dz;
-            if selected_source.is_some_and(|source| source != (source_x, source_z)) {
-                continue;
-            }
-            random.begin_decoration_source();
-            let input = OreInput {
-                chunk_x: source_x,
-                chunk_z: source_z,
-                center_x,
-                center_z,
-                min_y,
-                height,
-                min_gen_y,
-                gen_depth,
-                read_min,
-                read_max,
-                ocean_floor_wg,
-                in_tag,
-                biome_allows,
-            };
-            let ores = ores_for_source(source_x, source_z);
-            let ds = apply_one_source(random, seed, &input, ores, feature_step, view);
-            if dx == 0 && dz == 0 {
-                center_decoration_seed = ds;
-            }
+    for &(dx, dz) in source_offsets {
+        let source_x = center_x + dx;
+        let source_z = center_z + dz;
+        if selected_source.is_some_and(|source| source != (source_x, source_z)) {
+            continue;
+        }
+        random.begin_decoration_source();
+        let input = OreInput {
+            chunk_x: source_x,
+            chunk_z: source_z,
+            center_x,
+            center_z,
+            min_y,
+            height,
+            min_gen_y,
+            gen_depth,
+            read_min,
+            read_max,
+            ocean_floor_wg,
+            in_tag,
+            biome_allows,
+        };
+        let ores = ores_for_source(source_x, source_z);
+        let ds = apply_one_source(random, seed, &input, ores, feature_step, view);
+        if dx == 0 && dz == 0 {
+            center_decoration_seed = ds;
         }
     }
     center_decoration_seed

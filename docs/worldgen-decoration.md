@@ -14,9 +14,10 @@ index)` pair — never a flattened running count — is what isolates its RNG st
 
 The decoration driver first uses section-biome containers to decide which
 globally ordered placed features receive a random stream. A `biome` placement
-modifier is a second, narrower gate: it checks the candidate's exact
-three-dimensional biome cell against the biome memberships of that placed
-feature. These two decisions cannot be collapsed. In particular, a cave feature
+modifier is a second, narrower gate: it resolves the candidate through the
+seed-derived three-dimensional four-block zoom (the nearby corner with its
+positional fiddle), then checks that biome against the placed feature's
+memberships. These two decisions cannot be collapsed. In particular, a cave feature
 can be eligible because one section contains its cave biome while an above-ground
 candidate from the same source column must still be rejected. The gate is
 fail-closed when production biome cells are available but the placed feature has
@@ -57,6 +58,19 @@ after generator construction; rebuilding its `String` keys and sets for every
 served chunk changes no admission or RNG decision and only adds avoidable heap
 traffic.
 
+Built-in disk, block-pile, vegetation-patch ground, and huge-mushroom stem placements keep
+their selected provider state as the grid's `StateId`: `BlockStateProvider::get_state_id`
+feeds `VegGrid::set_id_if_in_bounds` directly, preserving the provider draw and write-log
+order without cloning a state string per successful cell. A canonical built-in mushroom cap
+still uses the compatibility property rewrite because converting all 32 generated property
+variants to local ids currently rebuilds canonical names at the interner boundary; partial and
+extension cap states therefore retain the same fallback. Lake fluid and barrier providers use the
+same numeric selection; the mould's fluid/air checks compare interned base IDs, and its repeated
+fills never clone a state string.
+This is an intermediate write-path optimization, not the final provider representation: provider
+configuration still uses its current textual form. A later generated built-in block/property type
+and explicit extension registry handle can remove that representation from runtime state entirely.
+
 `UNDERGROUND_ORES` is dispatched through the same catalog rather than treated as an ore-only
 list. `select_ores` emits the configured ore entries, while `select_step6_disks` emits disk
 features to the existing `VegGrid` placement interpreter, and
@@ -77,10 +91,38 @@ direction mapping is explicit: below→up, north→south, south→north, west→
 
 Each synthetic 3x3 source pass resets the random wrapper's Gaussian cache before reseeding that source. This keeps cached paired draws local to one source, matching independent source wrappers; sharing the cache would leak a prior source's spare Gaussian into the next feature stream.
 
+The production Overworld dispatcher completes its nine sources in x-major,
+z-fastest order: `(-1,-1), (-1,0), (-1,1), (0,-1), (0,0), (0,1),
+(1,-1), (1,0), (1,1)`. This is the order observed in the external feature
+trace and is shared by production replay and parity admission. Source seeds
+remain position-derived, but placement reads and replacement checks observe
+earlier cross-chunk writes, so changing this order changes generated blocks even
+when every individual source's random stream is unchanged.
+
+Lifecycle packet replay keeps the requested target separate from the completing source. The source
+still owns its position-derived decoration seed, while the requested target owns the three-by-three
+read context and resident overlay used by that source body. Direct source-completion controls retain
+the source-centred default; authenticated target plans use the explicit target-aware seam. This
+distinction is observable at seed 42, target `(2,0)`, where world `(5,-62,0)` must remain tuff after
+the complete source event stream.
+
+Collections traversed while consuming that random stream must have explicit order. Vegetation patches
+use `CompatBlockPosSet` for successful surface positions: a 16-bucket table, a 0.75 load factor,
+low-to-high bucket traversal, insertion-ordered collision chains, and stable low/high chain splitting
+when capacity doubles. That is the compatibility order consumed by nested vegetation placement. Patch
+footprints are too small to reach the table size at which collision chains can become trees. Do not
+replace this with insertion order or Rust's randomly seeded `HashSet`; either change assigns the same
+random draws to different cells and changes generated blocks between implementations (or runs).
+
 Placement modifiers (count, in_square, heightmap, biome, rarity_filter,
 surface_water_depth_filter, noise_threshold_count, random_offset, block_predicate_filter,
 height_range, and the list fan-out `Positions::List`/`count_on_every_layer`/`fixed_placement` need)
 compose as a depth-first flat-map, exactly reproducing vanilla's `Stream` pipeline's draw order.
+`WORLD_SURFACE_WG` placement probes read the immutable source terrain captured before decoration;
+they do not move when an earlier feature writes grass or foliage. `WORLD_SURFACE` and
+`MOTION_BLOCKING` probes remain overlay-aware, so final-heightmap placement still sees writes made
+earlier in the same source pass. This distinction is what keeps a later grass attempt's random
+offset stream unchanged while preventing a prior decorative write from shifting its base column.
 Configured-feature bodies (`simple_block`, `tree`, `random_selector`/`simple_random_selector`,
 `underwater_magma`, `speleothem`, `speleothem_cluster`, `geode`, and the vegetation-specific ones below) each reproduce their placement body's exact draw
 sequence. An unmodelled feature type or placement modifier degrades to a silent, RNG-free no-op
@@ -95,7 +137,11 @@ ten-spike fallback. Their independent feature fixtures cover the platform, islan
 chorus, and gateway shapes. The independent feature-order fixture also pins the global per-step
 indices: `end_gateway_return` is step-4 index 0 and `end_spike` is step-4 index 1, so
 `EndDecoration` derives each feature seed from the dimension-wide order rather than its local
-biome position. The whole-column End terrain fixture deliberately stops before later writers, so
+biome position. Outer-island placement consumes the source's rarity/count/square/height stream for
+every sampled origin and applies the `small_end_islands` biome filter to that origin, rather than
+gating the whole source on its centre biome. During lifecycle replay, each fixed placement is emitted by the source chunk that
+contains its configured origin; its five-by-five footprint then spills into resident neighbors just
+like the complete region path. The whole-column End terrain fixture deliberately stops before later writers, so
 it is not evidence for decoration scheduling or cross-source order. Several rarer
 single-use types remain unmodelled and are tracked by name in
 `lodestone_server::worldgen_data::KNOWN_VEGETATION_GAPS`; update that set whenever a type lands so a
@@ -140,6 +186,10 @@ their own resolved floor tags; mushrooms, lily pads, ceiling plants, carpets, le
 read their respective local support geometry. Full blocks (`melon`, `pumpkin`, `tuff`) and potent
 sulfur have no survival floor gate. The tag sets are resolved once and bound as state-id bitsets per
 decoration pass, so this fidelity does not reintroduce string-set work into each placement attempt.
+The six ordinary two-block plants are resolved by canonical state id. Their simple-block placement
+first requires an empty upper cell, then writes the configured lower state and its corresponding
+upper state as one operation without consuming another random draw. A blocked upper cell leaves
+both cells unchanged; this prevents orphaned halves and preserves the state seen by later features.
 Nether forest roots, fungi and sprouts have their own support family: nylium and soul soil are valid
 for all three, mycelium is additionally valid for fungi, and warped roots follow the same support
 closure as sprouts. Ordinary vegetation keeps its narrower floor tag. Huge fungi use the generated
@@ -147,7 +197,9 @@ source depth even when the Nether receiving window is wider, treat liquid cells 
 only roll their broad-stem variant for the natural (not planted) configuration.
 Block columns also accept weighted nested height providers and randomized integer state properties,
 which covers the hanging cave-vine records; bamboo uses the configured floor tag, stalk states and
-optional podzol disk.
+optional podzol disk. Vegetation patches use the exact orientation-specific support facts for their
+substrate: a floor requires full upward support, while a ceiling requires center support on its
+downward face; this is stricter than the general motion-blocking occupancy check.
 The hanging-vine environment scan now evaluates its downward sturdy-face target against the
 resolved per-state support facts. Air candidates therefore continue upward until they reach a
 ceiling with the required face, while unsupported target directions retain the parser's safe
@@ -164,9 +216,13 @@ the tag-backed cinnabar-to-sulfur replacement, and the generated pointed-state p
 
 The cave-wide cluster form samples its height, wetness, density, and two radii before scanning each
 column in rectangular order. Every accepted air-or-water column consumes its water, ceiling, floor,
-collision, and merge draws in that order before it writes base layers and upward or downward pointed
-segments. `speleothem_cluster_jvm.txt` keeps an external compact cave fixture whose mixed base,
-frustum, tip, and paired-direction results catch a plausible single-column or non-Gaussian port.
+collision, and merge draws in that order. A successful wet column first replaces its floor cell with
+water and lowers the logical floor by one, but only when the floor is surrounded horizontally and
+below by the resolved `base_stone_overworld` tag (or water) and its above cell is not water; this
+keeps the pool branch's substrate gate separate from the cluster's ordinary replacement tag. The
+feature then writes base layers and upward or downward pointed segments. `speleothem_cluster_jvm.txt`
+keeps an external compact cave fixture whose mixed base, frustum, tip, and paired-direction results
+catch a plausible single-column or non-Gaussian port.
 
 The Nether's mixed step does not split ore from its neighbouring entries. Its scheduler applies
 each source's raw indices in order and transfers final writes across the bounded ore/decoration
@@ -191,14 +247,17 @@ cap layouts (brown's cornerless square versus red's three plus-shaped rim layers
 Their preflight clearance accepts air and leaves, while the cap/stem writes use the dedicated mushroom
 replacement set, so a valid canopy can be replaced without allowing a solid obstruction to produce a
 partial tree. Brown's clearance reserves its configured radius above the fourth stem layer; red's
-preflight clearance remains stem-column-only before its cap is written. Every reachable overworld biome's
+preflight clearance reserves its configured radius across the three lower cap rows and the top row before
+its cap is written. Every reachable overworld biome's
 tree content is now covered by a real placer. Multiface
 growth writes complete directional state, checks its support,
 and performs its one seeded outward spread; the external single-source and 3×3 fixtures compare that
 layout exactly. The fixed-seed `vegetation_mushroom_fields_neg1_0_jvm.txt` and
 `vegetation_mushroom_fields_5_5_jvm.txt` external captures exercise the production mushroom-fields
 selector; their composed 3×3 replays contain both cap variants and their stems, so the selector path
-cannot regress while feature-local geometry tests remain green. The
+cannot regress while feature-local geometry tests remain green. The focused red-canopy control also
+proves that leaves satisfy the clearance scan and are replaced only when the mushroom replacement tag
+admits them; a solid lower-cap cell still rejects the whole attempt. The
 Nether's `huge_fungus` body is also modelled: crimson and warped fungi retain their variable
 height, rare broad stem, probabilistic hat/decor blocks, and wart-hat hanging vines, while the
 two source biomes' feature-list indices remain unchanged. The
@@ -257,6 +316,13 @@ falls back to the pre-bitset string path, which is a correctness requirement, no
 unexamined id would answer every tag query `false`, which changes what decorates where. Two derived
 per-position values (`distance=N` leaf rewrite, `waterlogged` fix-up) are memoised `id -> id`
 lookups rather than re-derived per call.
+
+The spring, block-blob and replacement-blob configuration carriers validate their state object into
+the global `lodestone_data::block_states::StateId` while parsing. A malformed object, unknown block,
+or property that does not describe an exact built-in state degrades the configured feature to
+`Unsupported`; it never reaches placement as an unchecked string. At placement time the validated
+state is converted once to the grid's local `StateId`, and every write uses the interned numeric id.
+Other configuration fields remain textual where they are targets or registry/import boundaries.
 
 ### Ore allocation
 
