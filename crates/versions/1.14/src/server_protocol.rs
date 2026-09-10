@@ -161,6 +161,74 @@ fn block_use(
     }
 }
 
+/// Lifts the three hosted `use_entity` layouts into the shared mob inputs.
+///
+/// All three revisions carry target, action and (for ordinary/precise
+/// interaction) a hand ordinal. Protocol 754 appends the sneaking flag to all
+/// forms; 498 and 578 end immediately after their action-specific fields.
+/// Precise hit coordinates are consumed even though the shared model has no
+/// part-specific target, so a shifted or trailing body cannot reach a mob.
+fn entity_use(payload: &[u8], has_sneaking: bool) -> ServerBound {
+    let mut reader = Reader::new(payload);
+    let Ok(entity_id) = reader.var_i32() else {
+        return ServerBound::Ignored;
+    };
+    let Ok(action) = reader.var_i32() else {
+        return ServerBound::Ignored;
+    };
+
+    let finish = |reader: &mut Reader<'_>| -> Option<bool> {
+        let sneaking = if has_sneaking { reader.bool().ok()? } else { false };
+        reader.ensure_empty().ok()?;
+        Some(sneaking)
+    };
+
+    match action {
+        1 => finish(&mut reader)
+            .map_or(ServerBound::Ignored, |_| ServerBound::Attack { entity_id }),
+        0 => {
+            let Ok(hand) = reader.var_i32() else {
+                return ServerBound::Ignored;
+            };
+            if lodestone_model::Hand::from_wire_ordinal(hand).is_none() {
+                return ServerBound::Ignored;
+            }
+            finish(&mut reader).map_or(ServerBound::Ignored, |using_secondary_action| {
+                ServerBound::InteractEntity {
+                    entity_id,
+                    hand,
+                    using_secondary_action,
+                }
+            })
+        }
+        2 => {
+            let Ok(_x) = reader.f32() else {
+                return ServerBound::Ignored;
+            };
+            let Ok(_y) = reader.f32() else {
+                return ServerBound::Ignored;
+            };
+            let Ok(_z) = reader.f32() else {
+                return ServerBound::Ignored;
+            };
+            let Ok(hand) = reader.var_i32() else {
+                return ServerBound::Ignored;
+            };
+            if lodestone_model::Hand::from_wire_ordinal(hand).is_none() {
+                return ServerBound::Ignored;
+            }
+            finish(&mut reader).map_or(ServerBound::Ignored, |using_secondary_action| {
+                ServerBound::InteractEntity {
+                    entity_id,
+                    hand,
+                    using_secondary_action,
+                }
+            })
+        }
+        _ => ServerBound::Ignored,
+    }
+}
+
 /// The hosted releases share the menu registry ordering from their own jar
 /// reports. The wire carries this numeric id, while the server model names the
 /// menu by resource key.
@@ -654,6 +722,9 @@ impl ServerProtocol for V578ServerProtocol {
             State::Play if packet_id == play::serverbound::BLOCK_PLACE => {
                 decode_full::<BlockPlace>(payload).map_or(ServerBound::Ignored, block_use)
             }
+            State::Play if packet_id == play::serverbound::USE_ENTITY => {
+                entity_use(payload, false)
+            }
             State::Play if packet_id == play::serverbound::ARM_ANIMATION => {
                 let Some(hand) = decode_full::<ServerboundArmAnimation>(payload)
                     .and_then(|packet| lodestone_model::Hand::from_wire_ordinal(packet.hand))
@@ -953,6 +1024,9 @@ impl ServerProtocol for V754ServerProtocol {
             }
             State::Play if packet_id == play_754::serverbound::BLOCK_PLACE => {
                 decode_full_754::<BlockPlace>(payload).map_or(ServerBound::Ignored, block_use)
+            }
+            State::Play if packet_id == play_754::serverbound::USE_ENTITY => {
+                entity_use(payload, true)
             }
             State::Play if packet_id == play_754::serverbound::ARM_ANIMATION => {
                 let Some(hand) = decode_full_754::<ServerboundArmAnimation>(payload)
@@ -1257,6 +1331,9 @@ impl ServerProtocol for V498ServerProtocol {
             }
             State::Play if packet_id == play_498::serverbound::BLOCK_PLACE => {
                 decode_full_498::<BlockPlace>(payload).map_or(ServerBound::Ignored, block_use)
+            }
+            State::Play if packet_id == play_498::serverbound::USE_ENTITY => {
+                entity_use(payload, false)
             }
             State::Play if packet_id == play_498::serverbound::ARM_ANIMATION => {
                 let Some(hand) = decode_full_498::<ServerboundArmAnimation>(payload)

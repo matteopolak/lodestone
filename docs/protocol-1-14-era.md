@@ -68,6 +68,16 @@ rather than inventing one. Literal wire bodies prove the decoder separately
 for 498, 578 and 754; adapter-to-registry tests prove the matching producer and
 host agree, including rejection outside Play and for an invalid face.
 
+Entity interaction now crosses the same hosted boundary for all three
+selectors. Protocols 498 and 578 carry the target, action-specific fields and
+hand, while 754 appends the sneaking flag; the shared decoder consumes precise
+hit coordinates before lifting the action to the mob consumer. Literal external
+bodies cover attack, ordinary interaction and interaction-at, with malformed
+hands, trailing flags and non-Play delivery rejected. Registry-selected
+in-memory controls send a real tamed-wolf interaction through each adapter and
+observe the resulting sit state, so this path is verified beyond a decoder-only
+positive.
+
 Container transport now crosses the same three selectors. The open-screen
 menu registry id, full window item list, single-slot correction, click
 transaction and close packets each have literal byte controls; the production

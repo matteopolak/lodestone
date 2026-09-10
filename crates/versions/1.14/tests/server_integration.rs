@@ -5,10 +5,10 @@ use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, LoginProfile, PlayerLoadedPolicy, ServerAddress};
 use lodestone_model::{
-    BlockActionKind, BlockFace, BlockPos, ClientAction, ConnectionState, Hand, Rotation, Vec3,
-    Vec3f, VersionAdapter,
+    BlockActionKind, BlockFace, BlockPos, ClientAction, ConnectionState, EntityInteraction, Hand,
+    ResourceKey, Rotation, Vec3, Vec3f, VersionAdapter,
 };
-use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
+use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer, MobOwner};
 use lodestone_v1_14::adapter_for;
 
 const TARGET: BlockPos = BlockPos::new(8, 100, 8);
@@ -181,6 +181,102 @@ async fn assert_hosted_protocol_reaches_play_and_confirms_a_block_break(protocol
                 "protocol {protocol_version} host must recenter its stream after movement: {error}"
             )
         });
+
+    handle.shutdown();
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn registry_selected_protocol_498_entity_interaction_reaches_the_mob_consumer() {
+    assert_entity_interaction_reaches_mob_consumer(498).await;
+}
+
+#[tokio::test]
+async fn registry_selected_protocol_578_entity_interaction_reaches_the_mob_consumer() {
+    assert_entity_interaction_reaches_mob_consumer(578).await;
+}
+
+#[tokio::test]
+async fn registry_selected_protocol_754_entity_interaction_reaches_the_mob_consumer() {
+    assert_entity_interaction_reaches_mob_consumer(754).await;
+}
+
+async fn assert_entity_interaction_reaches_mob_consumer(protocol_version: i32) {
+    let protocol = lodestone_registry::server_protocol_for_protocol(protocol_version)
+        .unwrap_or_else(|| panic!("protocol {protocol_version} must resolve to a hosted family"));
+    let source = Arc::new(FixtureSource::new());
+    let (server, client_io) = IntegratedServer::open_in_memory_with_mobs(
+        protocol,
+        source,
+        (0..=0, 0..=0),
+        (0, 0),
+        0,
+        0,
+    );
+    let profile = LoginProfile {
+        username: "EntityFixture".to_owned(),
+        uuid: uuid::Uuid::new_v4(),
+    };
+    let (mut handle, _) = ClientBuilder::new(
+        ServerAddress {
+            host: "memory".to_owned(),
+            port: 0,
+        },
+        profile,
+        Box::new(adapter_for(protocol_version)),
+    )
+    .player_loaded_policy(PlayerLoadedPolicy::Manual)
+    .connect_with(client_io);
+    handle
+        .wait_for_spawn(Duration::from_secs(30))
+        .await
+        .unwrap_or_else(|error| panic!("protocol {protocol_version} must reach Play: {error}"));
+
+    let mobs = server.mobs().expect("mob-backed host must expose its live sim");
+    let ready = tokio::time::Instant::now() + Duration::from_secs(10);
+    while mobs.with(|sim| sim.next_id()) < 1000 && tokio::time::Instant::now() < ready {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        mobs.with(|sim| sim.next_id()) >= 1000,
+        "the mob reseed must finish before the interaction fixture is inserted"
+    );
+
+    // The legacy login forms do not carry a UUID, so the host's documented
+    // nil actor identity is the external owner used by this fixture.
+    let player_uuid = uuid::Uuid::nil();
+    let wolf = mobs.with(|sim| {
+        let id = sim
+            .spawn_species(
+                ResourceKey::new("minecraft", "wolf").expect("valid key"),
+                Vec3::new(9.0, 100.0, 8.0),
+            )
+            .id();
+        sim.get_mut(id)
+            .expect("just-spawned wolf")
+            .tame(MobOwner::Player(player_uuid));
+        id
+    });
+    handle
+        .send_action(ClientAction::InteractEntity {
+            entity_id: wolf,
+            interaction: EntityInteraction::Interact { hand: Hand::Main },
+            sneaking: false,
+        })
+        .unwrap_or_else(|error| {
+            panic!("protocol {protocol_version} must encode interaction: {error}")
+        });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !mobs.with(|sim| sim.get(wolf).is_some_and(|mob| mob.is_ordered_to_sit()))
+        && tokio::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        mobs.with(|sim| sim.get(wolf).is_some_and(|mob| mob.is_ordered_to_sit())),
+        "protocol-{protocol_version} entity interaction must reach the shared tamed-mob consumer"
+    );
 
     handle.shutdown();
     server.shutdown().await;
