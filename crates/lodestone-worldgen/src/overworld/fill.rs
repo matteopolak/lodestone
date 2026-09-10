@@ -56,26 +56,36 @@ impl OverworldGenerator {
     pub(super) fn pre_ore_stage_uncached(&self, cx: i32, cz: i32) -> PreOreResult {
         let base_x = cx * 16;
         let base_z = cz * 16;
+        let mut schedule = crate::stage_schedule::OVERWORLD.cursor();
 
         let aquifer = self.build_aquifer(cx, cz);
         // Structure placement's S3. Built here rather than passed in because the *only*
         // consumer is the fill below, and it must be built from this chunk's own
         // refs — a beardifier from a neighbouring chunk has a different junction
         // window and a different affected box.
+        schedule.enter(crate::stage_schedule::ColumnStage::StructureStarts);
+        schedule.enter(crate::stage_schedule::ColumnStage::StructureReferences);
         let beard = self.beardifier_for(cx, cz);
+        schedule.enter(crate::stage_schedule::ColumnStage::StructureInfluence);
+        schedule.enter(crate::stage_schedule::ColumnStage::Fill);
         let field = self.fill_stage(&aquifer, base_x, base_z, &beard);
         let heights = self.heights_from_field(&field);
         // The 4x4x4 grid is now the primary biome product and the
         // 16-entry surface array is read out of it. Two separate sample passes
         // would be two chances to diverge; see `biome_stage`.
+        schedule.enter(crate::stage_schedule::ColumnStage::Biomes);
         let biome_cells = self.biome_cells_stage(base_x, base_z);
         let biome_quarts = self.biome_stage(&biome_cells, &heights);
+        schedule.enter(crate::stage_schedule::ColumnStage::Surface);
         let surface_diff = self.surface_stage(&field, &heights, base_x, base_z);
 
+        schedule.enter(crate::stage_schedule::ColumnStage::Materialize);
         let world = self.materialize_world(&field, surface_diff, base_x, base_z);
+        schedule.enter(crate::stage_schedule::ColumnStage::Carvers);
         let world = self.carve_stage(cx, cz, &aquifer, &heights, &biome_quarts, base_x, base_z, world);
         // Structure placement's S2. A no-op (and free) for a generator with no structure
         // data, which is every fixture resolver in this workspace.
+        schedule.enter(crate::stage_schedule::ColumnStage::StructurePlacement);
         let world = self.structure_place_stage(cx, cz, world);
         // Ores consult the live `OCEAN_FLOOR_WG` map while deciding whether a
         // blob is buried. Unlike the surface and biome heights above, this map
@@ -86,6 +96,11 @@ impl OverworldGenerator {
         // `Arc` because `PreOreResult` hands this world out to
         // the unified FEATURES stage's rim sources rather than only into a mutating
         // consumer — see that alias's own doc.
+        schedule.finish_prefix(
+            crate::stage_schedule::OVERWORLD
+                .index_of(crate::stage_schedule::ColumnStage::Features)
+                .expect("Overworld schedule must have a features boundary"),
+        );
         (Arc::new(world), ore_heights, biome_quarts, Arc::new(biome_cells))
     }
 

@@ -985,22 +985,37 @@ impl OverworldGenerator {
         // writes, so production enters the same dispatcher used by lifecycle
         // replay rather than composing an ore result with a later vegetation
         // pass.
-        let (world, block_entities) = self.features_stage(cx, cz, (*cached.0).clone());
+        let mut schedule = Self::stage_schedule().cursor_at(
+            Self::stage_schedule()
+                .index_of(crate::stage_schedule::ColumnStage::Features)
+                .expect("Overworld schedule must have a features boundary"),
+        );
+        let (world, block_entities) = schedule.run(
+            crate::stage_schedule::ColumnStage::Features,
+            || self.features_stage(cx, cz, (*cached.0).clone()),
+        );
         // `TOP_LAYER_MODIFICATION` is vanilla's LAST decoration
         // step (index 10) and must run after vegetation, because the
         // `MOTION_BLOCKING` height it reads includes leaves and logs — snow sits
         // on a spruce canopy. Running it before vegetation would put snow at the
         // pre-tree surface and then bury it.
-        let (world, _) = self.top_layer_stage(cx, cz, world, &cached.2);
-        self.intern_from_dense(
-            cx,
-            cz,
-            output::GenStage::Full,
-            world,
-            cached.2.clone(),
-            (*cached.3).clone(),
-            block_entities,
-        )
+        let (world, _) = schedule.run(
+            crate::stage_schedule::ColumnStage::TopLayer,
+            || self.top_layer_stage(cx, cz, world, &cached.2),
+        );
+        let column = schedule.run(crate::stage_schedule::ColumnStage::Output, || {
+            self.intern_from_dense(
+                cx,
+                cz,
+                output::GenStage::Full,
+                world,
+                cached.2.clone(),
+                (*cached.3).clone(),
+                block_entities,
+            )
+        });
+        schedule.finish();
+        column
     }
 
     /// Generates chunk `(cx, cz)` through stage 4 only: structure starts/refs,
