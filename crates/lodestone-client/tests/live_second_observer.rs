@@ -1,7 +1,7 @@
 //! Live **second-observer parity gate**: two independent clients on one server.
 //! Client **A** walks a commanded distance through `lodestone-client`'s public
 //! API; client **B** joins separately and observes A's *entity* through the same
-//! public API (`handle.entity(id)`, fed by the driver's read-model from the
+//! public API (`handle.entity_from_wire(id)`, fed by the driver's read-model from the
 //! server's `ADD_ENTITY` / `MOVE_ENTITY_POS` / `TELEPORT_ENTITY` broadcasts).
 //! The gate asserts B's observed displacement of A matches A's commanded walk.
 //!
@@ -371,7 +371,7 @@ async fn join_observer(server: &ServerAddress) -> Observer {
     // The read-model is updated by the driver *before* each event is forwarded,
     // so we only need to drain (and discard) the stream to prevent the bounded
     // channel from back-pressuring the driver. Entity tracking is read via
-    // `handle.entity(id)`, i.e. the production read-model, not this loop.
+    // `handle.entity_from_wire(id)`, i.e. the production read-model, not this loop.
     let disconnected = Arc::new(AtomicBool::new(false));
     let drain = {
         let disconnected = Arc::clone(&disconnected);
@@ -421,14 +421,14 @@ fn find_walker_entity(observer: &ClientHandle, uuid: Uuid) -> Option<EntityView>
 /// so we measure after the last broadcast movement packet has landed.
 async fn observed_position_settled(observer: &ClientHandle, entity_id: i32) -> Vec3 {
     let mut last = observer
-        .entity(entity_id)
+        .entity_from_wire(entity_id)
         .map(|e| e.position)
         .unwrap_or(Vec3::new(0.0, 0.0, 0.0));
     let mut stable = 0;
     for _ in 0..40 {
         tokio::time::sleep(TICK).await;
         let now = observer
-            .entity(entity_id)
+            .entity_from_wire(entity_id)
             .map(|e| e.position)
             .unwrap_or(last);
         if dist3(now, last) < 1e-6 {
@@ -692,7 +692,7 @@ async fn run_scenario(server: &ServerAddress) -> Outcome {
     // from B's public read-model. If a mob knocked A out of B's view distance
     // (or killed it) mid-walk, B no longer tracks the entity — a clean
     // interference case, reported as such rather than as a spurious huge gap.
-    if obs.entity(walker_id).is_none() {
+    if obs.entity_from_wire(walker_id).is_none() {
         teardown(handle, a_drain, obs, b_drain).await;
         return Outcome::Interference(
             "observer lost the walker entity mid-walk (knocked out of range / removed)".into(),
