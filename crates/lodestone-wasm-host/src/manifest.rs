@@ -206,6 +206,11 @@ pub enum ManifestError {
     DuplicateDependency { plugin: String, dependency: String },
     #[error("plugin `{plugin}` declares an empty {kind} dependency name")]
     InvalidDependencyName { plugin: String, kind: &'static str },
+    #[error(
+        "plugin `{plugin}` declares monitor priority with mutating capability `{capability}`; \
+         monitor guests must be observation-only"
+    )]
+    MonitorMutation { plugin: String, capability: String },
     #[error("multiple manifests declare plugin `{plugin}`")]
     DuplicatePluginName { plugin: String },
     #[error("plugin `{plugin}` requires missing dependency `{dependency}`")]
@@ -263,7 +268,17 @@ impl Manifest {
         }
         // Validated here rather than lazily at first use, so a typo is a load-time
         // error rather than a capability that turns out to be missing much later.
-        manifest.requested_capabilities()?;
+        let capabilities = manifest.requested_capabilities()?;
+        if manifest.priority == Priority::Monitor
+            && let Some(capability) = capabilities
+                .iter()
+                .find(|capability| capability.is_monitor_mutation())
+        {
+            return Err(ManifestError::MonitorMutation {
+                plugin: manifest.name.clone(),
+                capability: capability.as_str().to_owned(),
+            });
+        }
         manifest.validate_dependencies()?;
         Ok(manifest)
     }
