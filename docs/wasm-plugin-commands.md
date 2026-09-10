@@ -23,6 +23,10 @@ completion and cannot dispatch the typed alias, while granting the declared node
 delivers the typed result through the same client registry. This keeps permission pruning and dispatch
 in the native registry rather than duplicating policy inside the guest.
 
+The same gate drives the explicit reload path: removing the guest directory makes its alias unknown,
+then reinstalling it makes the alias executable again. This proves the conductor unregisters only the
+roots it owns and does not leave a retired guest command active in the client registry.
+
 The shell's explicit directory reload path stages every guest and its command declarations before it
 commits. On success it unregisters only the roots previously owned by the WASM conductor, swaps the
 guest stores, and registers the replacement declarations. A failed reload leaves both the old stores
