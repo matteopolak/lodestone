@@ -161,6 +161,11 @@ resolved per-state support facts. Air candidates therefore continue upward until
 ceiling with the required face, while unsupported target directions retain the parser's safe
 permissive fallback.
 
+Vegetation state writes use `VegGrid::set_state_if_in_bounds` when the caller already has a
+configured state or canonical name. It interns the borrowed state directly before recording the
+write, so placement keeps the same write order and state ids without allocating a temporary
+`String`; the owned `set_if_in_bounds` form remains available for fixture and extension callers.
+
 The single speleothem feature resolves its anchor-holder tag at construction, chooses an upward or
 downward point from the two adjacent anchor candidates, then writes its base patch before its one-
 or two-segment pointed state. Its horizontal patch branches and their nested direction draws occur

@@ -607,6 +607,14 @@ impl VegGrid {
         self.set_id_if_in_bounds(x, y, z, id)
     }
 
+    /// Borrowed-state form of [`Self::set_if_in_bounds`]. Placement code often
+    /// already has a configured state or a static canonical name; resolving it
+    /// directly avoids allocating a temporary `String` before interning.
+    pub fn set_state_if_in_bounds(&mut self, x: i32, y: i32, z: i32, state: &str) -> bool {
+        let id = self.interner.id_of(state);
+        self.set_id_if_in_bounds(x, y, z, id)
+    }
+
     /// [`Self::set_if_in_bounds`] by interned id — the allocation-free write
     /// path. Identical bounds behaviour, including the census bumps, so which
     /// form a caller uses cannot change a placement outcome.
