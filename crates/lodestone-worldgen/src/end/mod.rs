@@ -949,12 +949,15 @@ impl EndGenerator {
             world.set(*x, *y, *z, state);
         }
         let before = world.clone();
+        let source_biomes = decorate::EndBiomeSet::around_source(source_x, source_z, |cx, cz| {
+            self.biomes.biome_at_quart_typed(cx * 4, 0, cz * 4)
+        });
         let gateways = self.decoration.apply_source(
             self.seed,
             source_x,
             source_z,
             &mut world,
-            self.biomes.biome_at_quart_typed(source_x * 4, 0, source_z * 4),
+            source_biomes,
         );
         let (min_x, min_y, min_z, size_x, size_y, size_z) = world.bounds();
         let mut spills = Vec::new();
