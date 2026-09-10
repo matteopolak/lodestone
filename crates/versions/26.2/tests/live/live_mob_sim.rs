@@ -209,7 +209,7 @@ async fn a_real_client_observes_a_real_ai_ticked_mob_sim() {
     let mut initial = std::collections::HashMap::new();
     while std::time::Instant::now() < spawn_deadline && initial.len() < mob_ids.len() {
         for &id in &mob_ids {
-            if let Some(view) = handle.entity(id) {
+            if let Some(view) = handle.entity_from_wire(id) {
                 initial.entry(id).or_insert(view);
             }
         }
@@ -270,7 +270,7 @@ async fn a_real_client_observes_a_real_ai_ticked_mob_sim() {
         let _ = handle.chat("poke");
         report_position(&handle);
         for &id in &mob_ids {
-            if let Some(view) = handle.entity(id)
+            if let Some(view) = handle.entity_from_wire(id)
                 && view.position != initial[&id].position
             {
                 moved = Some((id, view.position));

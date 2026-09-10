@@ -15,12 +15,18 @@ path before that lookup; an unknown or plugin type remains a miss and follows
 the caller's existing fallback instead of borrowing a built-in hitbox.
 
 The programmable client read-model follows the same ownership rule for entity
-instances: `ClientHandle::entity_by_network_id` accepts an `EntityNetworkId`
-classified as server-owned, while plugin-local ids remain at the ECS/plugin
-boundary. The raw `ClientHandle::entity(i32)` compatibility method performs
-that server-wire classification first, so an unknown or removed server id is a
-normal lookup miss and a negative local id cannot be mistaken for a server
+instances: `ClientHandle::entity` accepts an `EntityNetworkId` classified as
+server-owned, while plugin-local ids remain at the ECS/plugin boundary. The
+explicit `ClientHandle::entity_from_wire(i32)` adapter performs server-wire
+classification for packet-facing callers, so an unknown or removed server id
+is a normal lookup miss and a negative local id cannot be mistaken for a server
 entity.
+
+Render-derived identity helpers use the same canonical `EntityNetworkId` from
+`lodestone-model`. The item bob phase, dropped-stack scatter, and lightning
+seed accept a classified server or plugin id; conversion back to the integer
+hash key happens only inside the deterministic helper. Item previews use a
+separate registry-seed helper because they do not represent a network entity.
 
 Display-entity billboard metadata crosses the version seam as
 `lodestone_model::BillboardMode`, so the ECS and renderer cannot confuse its

@@ -151,7 +151,7 @@ async fn a_real_client_observes_a_live_entity_spawn_then_move() {
     let spawn_deadline = std::time::Instant::now() + Duration::from_secs(30);
     let mut initial = None;
     while std::time::Instant::now() < spawn_deadline {
-        if let Some(view) = handle.entity(mob_id) {
+        if let Some(view) = handle.entity_from_wire(mob_id) {
             initial = Some(view);
             break;
         }
@@ -175,7 +175,7 @@ async fn a_real_client_observes_a_live_entity_spawn_then_move() {
     let mut observed = None;
     while std::time::Instant::now() < move_deadline {
         let _ = handle.chat("poke");
-        if let Some(view) = handle.entity(mob_id)
+        if let Some(view) = handle.entity_from_wire(mob_id)
             && view.position != start_pos
         {
             observed = Some(view.position);
@@ -197,7 +197,7 @@ async fn a_real_client_observes_a_live_entity_spawn_then_move() {
     let mut removed = false;
     while std::time::Instant::now() < remove_deadline {
         let _ = handle.chat("poke");
-        if handle.entity(mob_id).is_none() {
+        if handle.entity_from_wire(mob_id).is_none() {
             removed = true;
             break;
         }

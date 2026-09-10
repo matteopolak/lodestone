@@ -6,6 +6,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use lodestone_ecs::entity::EntityNetworkId;
 use lodestone_model::{
     BlockPos, ChunkPos, ClientAction, ClientEvent, EntityAttributeSnapshot, GameMode, Hand,
     PlayerListEntry, Rotation, Vec3,
@@ -241,7 +242,7 @@ impl ClientHandle {
         self.state.player().game_mode
     }
 
-    /// Returns a view of a tracked entity by id, if present.
+    /// Returns a view of a tracked entity by its classified network id, if present.
     ///
     /// Never returns the **local player**, even when handed our own
     /// [`PlayerSnapshot::entity_id`]: we carry no
@@ -250,9 +251,19 @@ impl ClientHandle {
     /// them. Use [`Self::local_player_attributes`] for the one piece of
     /// entity-shaped state the local player does fold.
     #[must_use]
-    pub fn entity(&self, entity_id: i32) -> Option<EntityView> {
-        let entity_id = lodestone_ecs::entity::EntityNetworkId::from_wire(entity_id)?;
+    pub fn entity(&self, entity_id: EntityNetworkId) -> Option<EntityView> {
         self.entity_by_network_id(entity_id)
+    }
+
+    /// Returns a view of a server entity named by a wire id.
+    ///
+    /// This is the explicit packet-boundary adapter for callers that have not
+    /// yet classified an id. Negative values are rejected because the server
+    /// entity stream owns only the non-negative wire range; plugin-local ids
+    /// belong at the ECS/plugin boundary instead.
+    #[must_use]
+    pub fn entity_from_wire(&self, raw_entity_id: i32) -> Option<EntityView> {
+        self.entity(EntityNetworkId::from_wire(raw_entity_id)?)
     }
 
     /// Returns a view of a server-owned entity by its classified network id.
@@ -263,7 +274,7 @@ impl ClientHandle {
     #[must_use]
     pub fn entity_by_network_id(
         &self,
-        entity_id: lodestone_ecs::entity::EntityNetworkId,
+        entity_id: EntityNetworkId,
     ) -> Option<EntityView> {
         if entity_id.is_plugin() {
             return None;

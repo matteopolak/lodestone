@@ -58,10 +58,12 @@ async fn replay_lifecycle(capture: &Capture, omit_move: bool) {
         Box::new(PlayAdapter(V770Adapter::new())),
     ).connect_with(client_io);
     let mut peer = Connection::new(server_io);
-    assert!(client.entity(capture.entity_id).is_none());
+    assert!(client.entity_from_wire(capture.entity_id).is_none());
     for (index, packet) in capture.packets.iter().enumerate() {
         if index == 1 && omit_move {
-            let actual = client.entity(capture.entity_id).expect("spawn reached client");
+            let actual = client
+                .entity_from_wire(capture.entity_id)
+                .expect("spawn reached client");
             assert_eq!(actual.position, START);
             assert_ne!(actual.position, END, "omitted movement must fail the endpoint oracle");
             continue;
@@ -80,12 +82,17 @@ async fn replay_lifecycle(capture: &Capture, omit_move: bool) {
             }
         }).await.expect("captured lifecycle event deadline");
         if index < 2 {
-            let actual = client.entity(capture.entity_id).expect("event must reach public entity state");
+            let actual = client
+                .entity_from_wire(capture.entity_id)
+                .expect("event must reach public entity state");
             assert_eq!(actual.uuid, Some(ENTITY_UUID));
             assert_eq!(actual.entity_type.to_string(), "minecraft:armor_stand");
             assert_eq!(actual.position, if index == 0 { START } else { END });
         } else {
-            assert!(client.entity(capture.entity_id).is_none(), "removal must reach public state");
+            assert!(
+                client.entity_from_wire(capture.entity_id).is_none(),
+                "removal must reach public state"
+            );
         }
     }
     client.shutdown();

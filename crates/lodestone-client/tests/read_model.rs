@@ -1217,25 +1217,29 @@ async fn entities_are_tracked_moved_and_removed() {
     let entities = handle.entities();
     assert_eq!(entities.len(), 1, "entity 11 was removed");
     let pig = handle
-        .entity_by_network_id(EntityNetworkId::from_wire(10).expect("server id"))
+        .entity(EntityNetworkId::from_wire(10).expect("server id"))
         .expect("entity 10 present");
     assert_eq!(pig.position, Vec3::new(1.0, 64.0, 0.0));
     assert!(pig.on_ground);
     assert!(
         handle
-            .entity_by_network_id(EntityNetworkId::from_wire(11).expect("server id"))
+            .entity(EntityNetworkId::from_wire(11).expect("server id"))
             .is_none(),
         "a removed server entity must not remain in the typed read model"
     );
     assert!(
         handle
-            .entity_by_network_id(EntityNetworkId::Plugin(-1))
+            .entity(EntityNetworkId::Plugin(-1))
             .is_none(),
         "a plugin-local id must not cross the server read-model boundary"
     );
     assert!(
+        handle.entity_from_wire(-1).is_none(),
+        "the wire adapter must reject a negative id before lookup"
+    );
+    assert!(
         handle
-            .entity_by_network_id(EntityNetworkId::Server(999))
+            .entity(EntityNetworkId::Server(999))
             .is_none(),
         "an unknown server id must be an ordinary read-model miss"
     );
@@ -1318,7 +1322,9 @@ async fn entity_head_yaw_and_equipment_are_tracked() {
         events.recv().await.unwrap();
     }
 
-    let zombie = handle.entity(20).expect("entity 20 present");
+    let zombie = handle
+        .entity_from_wire(20)
+        .expect("entity 20 present");
     assert_eq!(zombie.head_yaw, 90.0, "the latest rotate_head wins");
     assert_eq!(
         zombie.rotation,
@@ -1447,7 +1453,9 @@ async fn entity_metadata_and_attributes_merge_incrementally() {
         events.recv().await.unwrap();
     }
 
-    let pig = handle.entity(10).expect("entity 10 present");
+    let pig = handle
+        .entity_from_wire(10)
+        .expect("entity 10 present");
     // Incremental merge: every field from both packets survives.
     assert_eq!(pig.custom_name, Reported::Reported(Some(Text::literal("Babe"))));
     assert_eq!(pig.health, Some(6.0));

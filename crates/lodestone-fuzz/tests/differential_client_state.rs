@@ -435,7 +435,9 @@ impl ClientStateOracle {
     }
 
     fn entity_position(&self, entity_id: i32) -> Option<Vec3> {
-        self.handle.entity(entity_id).map(|entity| entity.position)
+        self.handle
+            .entity_from_wire(entity_id)
+            .map(|entity| entity.position)
     }
 
     fn send_inventory_action(&mut self, action: InventoryAction) -> Result<(), String> {

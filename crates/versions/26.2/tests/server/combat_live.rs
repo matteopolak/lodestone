@@ -198,14 +198,17 @@ async fn real_client_attacks_a_live_mob_and_the_server_applies_damage_and_knockb
     // freshly summoned entity is not selector-visible until the next tick"
     // live-oracle lesson (the client-side analogue: give the wire a moment).
     let spawn_deadline = std::time::Instant::now() + Duration::from_secs(30);
-    while handle.entity(mob_id).is_none() {
+    while handle.entity_from_wire(mob_id).is_none() {
         assert!(
             std::time::Instant::now() < spawn_deadline,
             "client never observed the pre-spawned zombie within 30s"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let seen_before = handle.entity(mob_id).expect("just polled Some").position;
+    let seen_before = handle
+        .entity_from_wire(mob_id)
+        .expect("just polled Some")
+        .position;
     assert!(
         (seen_before - zombie_pos).length() < 1e-6,
         "client's initial view of the mob must match the server's real spawn position, got {seen_before:?}"
@@ -275,7 +278,7 @@ async fn real_client_attacks_a_live_mob_and_the_server_applies_damage_and_knockb
     let move_deadline = std::time::Instant::now() + Duration::from_secs(30);
     let mut last_seen = seen_before;
     loop {
-        if let Some(view) = handle.entity(mob_id) {
+        if let Some(view) = handle.entity_from_wire(mob_id) {
             last_seen = view.position;
             if (last_seen - expected_pos).length() < 1e-3 {
                 break;
@@ -353,7 +356,7 @@ async fn no_attack_means_no_movement() {
         .expect("initial column never arrived");
 
     let spawn_deadline = std::time::Instant::now() + Duration::from_secs(30);
-    while handle.entity(mob_id).is_none() {
+    while handle.entity_from_wire(mob_id).is_none() {
         assert!(std::time::Instant::now() < spawn_deadline, "mob never appeared");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -369,7 +372,10 @@ async fn no_attack_means_no_movement() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    let seen = handle.entity(mob_id).expect("still present").position;
+    let seen = handle
+        .entity_from_wire(mob_id)
+        .expect("still present")
+        .position;
     assert!(
         (seen - zombie_pos).length() < 1e-6,
         "mob must not move without an attack, got {seen:?}"
@@ -461,14 +467,17 @@ async fn real_client_attacks_a_live_mob_off_axis_and_knockback_is_normalized_not
         .expect("initial column never arrived");
 
     let spawn_deadline = std::time::Instant::now() + Duration::from_secs(30);
-    while handle.entity(mob_id).is_none() {
+    while handle.entity_from_wire(mob_id).is_none() {
         assert!(
             std::time::Instant::now() < spawn_deadline,
             "client never observed the pre-spawned zombie within 30s"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let seen_before = handle.entity(mob_id).expect("just polled Some").position;
+    let seen_before = handle
+        .entity_from_wire(mob_id)
+        .expect("just polled Some")
+        .position;
     assert!(
         (seen_before - zombie_pos).length() < 1e-6,
         "client's initial view of the mob must match the server's real spawn position, got {seen_before:?}"
@@ -516,7 +525,7 @@ async fn real_client_attacks_a_live_mob_off_axis_and_knockback_is_normalized_not
     let move_deadline = std::time::Instant::now() + Duration::from_secs(30);
     let mut last_seen = seen_before;
     loop {
-        if let Some(view) = handle.entity(mob_id) {
+        if let Some(view) = handle.entity_from_wire(mob_id) {
             last_seen = view.position;
             if (last_seen - expected_pos).length() < 1e-3 {
                 break;
