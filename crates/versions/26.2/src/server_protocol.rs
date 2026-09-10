@@ -71,9 +71,9 @@ use lodestone_model::{
 };
 use lodestone_server::{
     Abilities, ChunkColumn as ServerChunkColumn, ChunkEncoder, ColumnLightSettlement,
-    EntitySnapshot, HOTBAR_SIZE,
+    EntitySnapshot, HOTBAR_SIZE, RetainedLightStatus,
     MOTION_BLOCKING_HEIGHTMAP_TYPE_ID, MerchantOfferOut, MetadataField, PlayerListing,
-    ResourcePackPush, RetainedLightStatus, ServerBound, ServerDirective, ServerProtocol,
+    ResourcePackPush, ServerBound, ServerDirective, ServerProtocol,
     WorldBorder, WorldgenScope,
 };
 use lodestone_server::dimension::Dimension;
@@ -90,10 +90,11 @@ use lodestone_server::crafting::{
 };
 use lodestone_world::{
     ChunkColumn as WorldChunkColumn, ChunkSection, ColumnLight, Heightmap, Heightmaps,
-    LightData, LightProperties, Neighbourhood, compute_column_light,
+    LightData, LightProperties, LightStorage, Neighbourhood, NibbleArray, compute_column_light,
     compute_column_light_for_initial_chunk, compute_column_light_with_neighbours,
     compute_column_lights_with_neighbours_and_storage,
     compute_column_light_with_neighbours_for_initial_chunk,
+    compute_column_light_with_neighbours_seeded,
 };
 use lodestone_data::block::Block;
 use lodestone_data::item::Item;
@@ -106,6 +107,8 @@ use uuid::Uuid;
 // rather than trusting a literal id.
 #[cfg(test)]
 use lodestone_data::block_states::{block_name, properties};
+#[cfg(test)]
+use lodestone_world::PaletteKind;
 use lodestone_data::entity_type::EntityType;
 use lodestone_data::menus::{MenuId, menu_id};
 use lodestone_data::mob_effects::{MobEffectId, mob_effect_id, mob_effect_name_for};
@@ -2741,6 +2744,9 @@ const MOTION_BLOCKING_NO_LEAVES_HEIGHTMAP_TYPE_ID: u32 = 5;
 /// allocation is deliberate: short test columns are padded with air on the
 /// wire and must therefore have the same heightmaps as their decoded form.
 fn served_heightmaps(shape: &ChunkShape, source: &ServerChunkColumn) -> Heightmaps {
+    if let Some(retained) = source.client_heightmaps() {
+        return retained.clone();
+    }
     let mut maps = Heightmaps::new();
     let type_ids = [
         WORLD_SURFACE_HEIGHTMAP_TYPE_ID,
@@ -2848,7 +2854,7 @@ fn is_non_air_state_id(id: u32) -> bool {
 /// file we did not write, so "this NBT does not encode" is a real input, not an
 /// invariant to `expect` on.
 fn encode_block_entities(w: &mut Writer, source: &ServerChunkColumn) {
-    let entries: Vec<(
+    let mut entries: Vec<(
         lodestone_model::BlockPos,
         lodestone_data::block_entity_types::BlockEntityType,
         Vec<u8>,
@@ -2858,12 +2864,30 @@ fn encode_block_entities(w: &mut Writer, source: &ServerChunkColumn) {
         .filter_map(|(pos, entity)| {
             let type_id =
                 lodestone_data::block_entity_types::block_entity_type_id(entity.type_id())?;
-            let nbt = lodestone_server::chunk_nbt::block_entity_update_nbt(*pos, entity);
+            let mut nbt = lodestone_server::chunk_nbt::block_entity_update_nbt(*pos, entity);
+            // The external packet control stabilizes compounds recursively by
+            // unsigned UTF-8 key order before writing them. This is the same
+            // canonicalization used for the rest of the raw-packet fixture;
+            // retaining the producer's field order would leave the payload
+            // semantically equal but byte-different.
+            stabilize_block_entity_nbt(&mut nbt);
             let mut body = Writer::default();
             write_network_nbt(&mut body, &nbt).ok()?;
             Some((*pos, type_id, body.into_vec()))
         })
         .collect();
+
+    // The external packet control orders the materialized chunk records by
+    // packed local XZ, then absolute Y and registry id. Canonicalizing here
+    // avoids depending on the generator's sidecar insertion order; it is not
+    // a payload or coordinate-specific special case.
+    entries.sort_unstable_by_key(|(pos, type_id, _)| {
+        (
+            ((pos.x & 15) << 4) | (pos.z & 15),
+            pos.y,
+            type_id.raw(),
+        )
+    });
 
     w.var_i32(entries.len() as i32);
     for (pos, type_id, nbt) in entries {
@@ -2871,6 +2895,38 @@ fn encode_block_entities(w: &mut Writer, source: &ServerChunkColumn) {
         w.i16(pos.y as i16);
         w.var_i32(type_id.raw() as i32);
         w.bytes(&nbt);
+    }
+}
+
+/// Canonicalizes the compound field order used by the authenticated packet
+/// controls. NBT compounds are maps semantically, but their wire encoding is
+/// an ordered byte stream; recursively sorting keys keeps generated and
+/// persisted payloads byte-identical without changing any values or list
+/// element order.
+fn stabilize_block_entity_nbt(nbt: &mut Nbt) {
+    match nbt {
+        Nbt::Compound(fields) => {
+            for (_, value) in fields.iter_mut() {
+                stabilize_block_entity_nbt(value);
+            }
+            fields.sort_unstable_by(|(left, _), (right, _)| left.as_bytes().cmp(right.as_bytes()));
+        }
+        Nbt::List { elements, .. } => {
+            for value in elements {
+                stabilize_block_entity_nbt(value);
+            }
+        }
+        Nbt::End
+        | Nbt::Byte(_)
+        | Nbt::Short(_)
+        | Nbt::Int(_)
+        | Nbt::Long(_)
+        | Nbt::Float(_)
+        | Nbt::Double(_)
+        | Nbt::ByteArray(_)
+        | Nbt::String(_)
+        | Nbt::IntArray(_)
+        | Nbt::LongArray(_) => {}
     }
 }
 
@@ -3008,6 +3064,42 @@ fn initial_block_light_storage_sections(
     stored
 }
 
+/// Describes a retained Nether light layer independently from its packet
+/// values. A zero-valued layer can still be allocated, and a layer attached to
+/// block data is distinct from a light-only dependency section.
+fn initial_nether_light_storage(
+    center: &WorldChunkColumn,
+    neighbours: &[WorldChunkColumn],
+) -> LightStorage {
+    initial_nether_light_storage_for_column(center, center, neighbours)
+}
+
+/// Builds the retained allocation metadata for one packed column in a shared
+/// 3×3 admission. Allocation is a property of the complete loaded footprint,
+/// while `LIGHT_AND_DATA` belongs to the selected column itself; keeping those
+/// masks separate is what lets a dependency retain a light-only section rather
+/// than accidentally borrowing the centre's block-data mask.
+fn initial_nether_light_storage_for_column(
+    selected: &WorldChunkColumn,
+    footprint_center: &WorldChunkColumn,
+    neighbours: &[WorldChunkColumn],
+) -> LightStorage {
+    let allocated = initial_block_light_storage_sections(footprint_center, neighbours);
+    let mut light_and_data = vec![false; allocated.len()];
+    for block_section in 0..selected.section_count() {
+        if selected
+            .section(block_section)
+            .is_some_and(|section| !section.is_air_only())
+            // Light section zero is the lower apron, so block section `n`
+            // carries its block data in light section `n + 1`.
+            && let Some(slot) = light_and_data.get_mut(block_section + 1)
+        {
+            *slot = true;
+        }
+    }
+    LightStorage::from_masks(allocated, light_and_data)
+}
+
 /// End's initial light engine retains a vertical propagation corridor in the
 /// loaded footprint, not just the three sections adjacent to each non-air
 /// section. A terrain section seeds the block and sky layers, and propagation
@@ -3087,6 +3179,46 @@ fn retain_zero_block_light_for_storage(light: &mut ColumnLight, stored: &[bool])
     }
 }
 
+/// Replaces the numeric block-light values in a freshly computed centre while
+/// retaining that centre's `Missing`/allocated representation. A dependency
+/// snapshot can carry the light-engine values from an earlier admission, but
+/// its raw storage metadata is for the dependency's footprint and must not be
+/// copied into the centre packet. In particular, a missing retained layer is
+/// represented as zero inside an already allocated computed layer, while an
+/// unallocated computed layer remains `Missing`.
+fn merge_retained_nether_block_values(
+    computed: &ColumnLight,
+    retained: &ColumnLight,
+) -> ColumnLight {
+    debug_assert_eq!(computed.light_section_count(), retained.light_section_count());
+    let mut merged = computed.clone();
+    for section in 0..computed.light_section_count() {
+        let computed_layer = computed.block(section);
+        let retained_layer = retained.block(section);
+        let replacement = match computed_layer {
+            LightData::Missing => LightData::Missing,
+            LightData::Uniform(_) => match retained_layer {
+                LightData::Missing => LightData::Uniform(0),
+                LightData::Uniform(value) => LightData::Uniform(*value),
+                LightData::Values(values) => match values.uniform_value() {
+                    Some(value) => LightData::Uniform(value),
+                    None => LightData::Values(values.clone()),
+                },
+            },
+            LightData::Values(_) => {
+                let values = match retained_layer {
+                    LightData::Missing => NibbleArray::filled(0),
+                    LightData::Uniform(value) => NibbleArray::filled(*value),
+                    LightData::Values(values) => values.clone(),
+                };
+                LightData::Values(values)
+            }
+        };
+        *merged.block_mut(section) = replacement;
+    }
+    merged
+}
+
 /// Applies only the dimension-specific representation rules for an initial
 /// chunk packet. A later `light_update` has prior client state to clear and is
 /// intentionally left in the fully explicit representation returned by the
@@ -3123,6 +3255,60 @@ fn normalize_initial_chunk_light(
                     *light.block_mut(section) = LightData::Missing;
                 }
             }
+        }
+    }
+}
+
+/// Restores the explicit zero layers inside a retained End allocation span.
+///
+/// End's initial storage is a contiguous vertical corridor. Persistence can
+/// omit an all-zero sky and block pair in the middle of that corridor, while
+/// retaining the non-zero layers on either side. The wire snapshot still has
+/// to name that allocated section as empty for both layers; otherwise a fresh
+/// client sees a shorter mask after reopening. Only interior gaps are filled,
+/// so a genuinely sparse lower or upper apron remains absent.
+fn restore_end_retained_storage_gaps(light: &mut ColumnLight) {
+    let mut first = None;
+    let mut last = None;
+    for section in 0..light.light_section_count() {
+        let allocated = !matches!(light.sky(section), LightData::Missing)
+            || !matches!(light.block(section), LightData::Missing);
+        if allocated {
+            first = Some(first.map_or(section, |first: usize| first.min(section)));
+            last = Some(last.map_or(section, |last: usize| last.max(section)));
+        }
+    }
+    let (Some(first), Some(last)) = (first, last) else {
+        return;
+    };
+    for section in first..=last {
+        if matches!(light.sky(section), LightData::Missing) {
+            *light.sky_mut(section) = LightData::Uniform(0);
+        }
+        if matches!(light.block(section), LightData::Missing) {
+            *light.block_mut(section) = LightData::Uniform(0);
+        }
+    }
+}
+
+/// Rebuilds the End allocation mask that is not persisted with a retained
+/// snapshot. A saved `CentreSettled` column carries its explicit sky and block
+/// arrays, but an all-zero allocated layer may have no section tag on disk. The
+/// current terrain footprint recovers that allocation; allocated missing layers
+/// become explicit zero while layers outside the corridor stay Missing.
+fn restore_end_retained_storage_allocation(light: &mut ColumnLight, stored: &[bool]) {
+    debug_assert_eq!(stored.len(), light.light_section_count());
+    for section in 0..light.light_section_count() {
+        if !stored.get(section).copied().unwrap_or(false) {
+            *light.sky_mut(section) = LightData::Missing;
+            *light.block_mut(section) = LightData::Missing;
+            continue;
+        }
+        if matches!(light.sky(section), LightData::Missing) {
+            *light.sky_mut(section) = LightData::Uniform(0);
+        }
+        if matches!(light.block(section), LightData::Missing) {
+            *light.block_mut(section) = LightData::Uniform(0);
         }
     }
 }
@@ -3241,6 +3427,7 @@ fn compute_served_initial_lights_with_neighbours_and_storage(
     shape: &ChunkShape,
     neighbours: &[(i32, i32, ServerChunkColumn)],
     stored: &[Option<&ColumnLight>; 9],
+    statuses: &[Option<RetainedLightStatus>; 9],
     dimension: Dimension,
 ) -> [ColumnLight; 9] {
     let neighbour_columns = neighbours
@@ -3253,41 +3440,105 @@ fn compute_served_initial_lights_with_neighbours_and_storage(
             neighbourhood = neighbourhood.with(*dx, *dz, neighbour);
         }
     }
-    let retained_storage = stored.iter().flatten().any(|light| {
-        (0..light.light_section_count()).any(|section| {
-            light_data_has_nonzero(light.sky(section))
-        })
-    });
+    // End sky light is a terrain-derived field, not a retained source. A
+    // dependency snapshot belongs to the admission that made that column a
+    // centre; seeding the new centre's flood from it lets an old full-sky
+    // layer bypass the current terrain's attenuation. Recompute the shared
+    // 3x3 End field from current blocks, then restore retained dependencies
+    // below. Nether keeps its lifecycle-aware retained block-light path.
+    let fresh_end_storage = [None; 9];
+    let storage = if dimension == Dimension::End {
+        &fresh_end_storage
+    } else {
+        stored
+    };
     let mut lights = compute_column_lights_with_neighbours_and_storage(
         &neighbourhood,
         &V770LightProps {
             has_skylight: dimension.has_skylight(),
         },
-        stored,
+        storage,
         initial_full_sky_sections(dimension),
     );
-    let storage_neighbours = if retained_storage {
-        neighbours
-            .iter()
-            .zip(&neighbour_columns)
-            .filter(|((dx, dz, _), _)| {
-                let slot = ((*dz + 1) * 3 + (*dx + 1)) as usize;
-                stored[slot].is_some_and(|light| {
-                    (0..light.light_section_count()).any(|section| {
-                        light_data_has_nonzero(light.sky(section))
+    let retained_nether_centre = match (dimension, statuses[4], stored[4]) {
+        (
+            Dimension::Nether,
+            Some(RetainedLightStatus::DependencyInitialized),
+            Some(light),
+        ) => Some((*light).clone()),
+        _ => None,
+    };
+    let admitted_neighbours = neighbours
+        .iter()
+        .zip(&neighbour_columns)
+        .filter(|((dx, dz, _), _)| {
+            let slot = ((*dz + 1) * 3 + (*dx + 1)) as usize;
+            statuses
+                .get(slot)
+                .copied()
+                .flatten()
+                .is_some_and(retained_light_is_initialized)
+        })
+        .map(|((dx, dz, _), column)| (*dx, *dz, column.clone()))
+        .collect::<Vec<_>>();
+    if dimension == Dimension::Nether {
+        let mut admitted_neighbourhood = Neighbourhood::new(center);
+        for (dx, dz, column) in &admitted_neighbours {
+            admitted_neighbourhood = admitted_neighbourhood.with(*dx, *dz, column);
+        }
+        let section_min_y = center.min_y();
+        let seeded = compute_column_light_with_neighbours_seeded(
+            &admitted_neighbourhood,
+            &V770LightProps { has_skylight: false },
+            initial_full_sky_sections(dimension),
+            |dx, dz, x, y, z| {
+                let slot = ((dz + 1) * 3 + (dx + 1)) as usize;
+                let section = usize::try_from((y - section_min_y).div_euclid(16) + 1)
+                    .expect("Nether light section index");
+                statuses
+                    .get(slot)
+                    .copied()
+                    .flatten()
+                    .filter(|status| retained_light_is_initialized(*status))
+                    .and_then(|_| stored.get(slot).and_then(Option::as_ref))
+                    .and_then(|light| {
+                        light
+                            .block(section)
+                            .get(NibbleArray::index(x, y.rem_euclid(16) as usize, z))
                     })
-                })
-            })
-            .map(|(_, column)| column.clone())
+                    .unwrap_or(0)
+            },
+            |dx, dz| (dx, dz) == (0, 0),
+        );
+        lights[4] = seeded;
+    }
+    // End allocation follows the complete admitted terrain footprint. A
+    // retained snapshot in one neighbour does not make a fresh terrain
+    // neighbour disappear from the storage walk: using non-zero sky values as
+    // a proxy for snapshot presence omitted the fresh column whenever another
+    // column already supplied retained sky. Nether deliberately keeps its
+    // lifecycle-aware admitted subset because an uninitialized dependency is
+    // an opaque block-light seam.
+    let storage_neighbours = if dimension == Dimension::Nether {
+        admitted_neighbours
+            .iter()
+            .map(|(_, _, column)| column.clone())
             .collect::<Vec<_>>()
     } else {
         neighbour_columns.clone()
     };
+    // A dependency-initialized layer records work done while another column
+    // was the centre. Its raw allocation is therefore not the centre's
+    // allocation. Only a centre-settled snapshot is an authoritative prior
+    // mask for this centre; a sparse one must still be preserved verbatim.
+    let prior_centre = (statuses[4] == Some(RetainedLightStatus::CentreSettled))
+        .then_some(stored[4])
+        .flatten();
     let block_light_storage = match dimension {
         Dimension::End => Some(initial_end_light_storage_sections_with_prior(
             center,
             &storage_neighbours,
-            stored[4],
+            prior_centre,
         )),
         Dimension::Nether => Some(initial_block_light_storage_sections(center, &storage_neighbours)),
         Dimension::Overworld => None,
@@ -3301,21 +3552,155 @@ fn compute_served_initial_lights_with_neighbours_and_storage(
         dimension,
         block_light_storage.as_deref(),
     );
+    if dimension == Dimension::End {
+        for (slot, light) in lights.iter_mut().enumerate() {
+            if slot == 4 {
+                continue;
+            }
+            if let Some(retained) = stored[slot].filter(|_| {
+                statuses[slot].is_some_and(retained_light_is_initialized)
+            }) {
+                // A retained dependency snapshot remains authoritative for
+                // that dependency, but never seeds the fresh centre flood.
+                *light = retained.clone();
+            }
+        }
+    }
+    if dimension == Dimension::Nether {
+        let storage = initial_nether_light_storage(center, &storage_neighbours);
+        lights[4].set_storage(storage.clone());
+        for (slot, light) in lights.iter_mut().enumerate() {
+            if slot == 4 {
+                continue;
+            }
+            if let Some(retained) = stored[slot] {
+                if statuses[slot].is_some_and(retained_light_is_initialized) {
+                    *light = retained.clone();
+                    continue;
+                }
+            }
+            let (target_dx, target_dz, selected) = neighbours
+                .iter()
+                .zip(&neighbour_columns)
+                .find(|((dx, dz, _), _)| {
+                    ((*dz + 1) * 3 + (*dx + 1)) as usize == slot
+                })
+                .map(|((dx, dz, _), column)| (*dx, *dz, column))
+                .expect("every non-centre Nether light slot has a footprint column");
+            *light = compute_nether_dependency_light(
+                selected,
+                target_dx,
+                target_dz,
+                center,
+                neighbours,
+                &neighbour_columns,
+                stored,
+                statuses,
+            );
+        }
+    }
+    if let Some(retained) = retained_nether_centre {
+        // A dependency snapshot was already settled by an earlier footprint.
+        // Promote its numeric block-light values when this column becomes the
+        // centre, while retaining this admission's centre storage shape. Only
+        // newly touched dependencies receive the fresh shared-admission result.
+        lights[4] = merge_retained_nether_block_values(&lights[4], &retained);
+    }
     lights
 }
 
-fn light_data_has_nonzero(data: &LightData) -> bool {
-    match data {
-        LightData::Missing | LightData::Uniform(0) => false,
-        LightData::Uniform(_) => true,
-        LightData::Values(array) => array.as_bytes().iter().any(|byte| *byte != 0),
+fn retained_light_is_initialized(status: RetainedLightStatus) -> bool {
+    matches!(
+        status,
+        RetainedLightStatus::DependencyInitialized | RetainedLightStatus::CentreSettled
+    )
+}
+
+/// Settles a newly initialized Nether dependency from the part of the current
+/// admission footprint that is visible from that dependency's own centre.
+///
+/// The shared centre flood deliberately activates only its centre terrain: an
+/// uninitialized dependency must not illuminate that packet. A dependency is a
+/// different admission boundary, however. Its local 3×3 footprint activates
+/// every supplied terrain source, including a source in a future neighbour
+/// that is diagonal to the original centre. Retained layers are still used as
+/// seeds only for columns that were already initialized; missing columns stay
+/// opaque seams. The selected dependency receives storage masks for this
+/// remapped footprint rather than the original centre's footprint.
+fn compute_nether_dependency_light(
+    target: &WorldChunkColumn,
+    target_dx: i32,
+    target_dz: i32,
+    center: &WorldChunkColumn,
+    neighbours: &[(i32, i32, ServerChunkColumn)],
+    neighbour_columns: &[WorldChunkColumn],
+    stored: &[Option<&ColumnLight>; 9],
+    statuses: &[Option<RetainedLightStatus>; 9],
+) -> ColumnLight {
+    let mut neighbourhood = Neighbourhood::new(target);
+    let mut storage_neighbours = Vec::new();
+
+    let center_dx = -target_dx;
+    let center_dz = -target_dz;
+    if (-1..=1).contains(&center_dx)
+        && (-1..=1).contains(&center_dz)
+        && (center_dx, center_dz) != (0, 0)
+    {
+        neighbourhood = neighbourhood.with(center_dx, center_dz, center);
+        storage_neighbours.push(center.clone());
     }
+    for ((source_dx, source_dz, _), column) in neighbours.iter().zip(neighbour_columns) {
+        let local_dx = *source_dx - target_dx;
+        let local_dz = *source_dz - target_dz;
+        if (-1..=1).contains(&local_dx)
+            && (-1..=1).contains(&local_dz)
+            && (local_dx, local_dz) != (0, 0)
+        {
+            neighbourhood = neighbourhood.with(local_dx, local_dz, column);
+            storage_neighbours.push(column.clone());
+        }
+    }
+
+    let section_min_y = target.min_y();
+    let mut light = compute_column_light_with_neighbours_seeded(
+        &neighbourhood,
+        &V770LightProps { has_skylight: false },
+        initial_full_sky_sections(Dimension::Nether),
+        |local_dx, local_dz, x, y, z| {
+            let source_dx = target_dx + local_dx;
+            let source_dz = target_dz + local_dz;
+            if !(-1..=1).contains(&source_dx) || !(-1..=1).contains(&source_dz) {
+                return 0;
+            }
+            let slot = ((source_dz + 1) * 3 + (source_dx + 1)) as usize;
+            if !statuses[slot].is_some_and(retained_light_is_initialized) {
+                return 0;
+            }
+            let section = usize::try_from((y - section_min_y).div_euclid(16) + 1)
+                .expect("Nether light section index");
+            stored[slot]
+                .and_then(|light| {
+                    light
+                        .block(section)
+                        .get(NibbleArray::index(x, y.rem_euclid(16) as usize, z))
+                })
+                .unwrap_or(0)
+        },
+        |_local_dx, _local_dz| true,
+    );
+    light.set_storage(initial_nether_light_storage_for_column(
+        target,
+        target,
+        &storage_neighbours,
+    ));
+    light
 }
 
 fn empty_light_storage_like(light: &ColumnLight) -> ColumnLight {
-    // `ColumnLight::new` accepts block sections and adds the lower and upper
-    // light boundaries. Recover that input instead of expanding an already
-    // complete light window a second time.
+    // `ColumnLight::new` takes the number of block sections and adds the two
+    // boundary sections used by the wire light window.  Preserve the source
+    // window here; passing its already-expanded length would add the boundary
+    // sections a second time (18 -> 20 for a 16-section Nether column).
     let block_section_count = light
         .light_section_count()
         .checked_sub(2)
@@ -3341,6 +3726,48 @@ fn empty_light_storage_like(light: &ColumnLight) -> ColumnLight {
 pub struct V770ServerProtocol;
 
 impl V770ServerProtocol {
+    /// Computes one initial Nether light snapshot from the columns admitted by
+    /// the caller and retained block-light levels from earlier admissions.
+    ///
+    /// The centre's terrain is the only fresh emission source.  Previously
+    /// admitted neighbours are supplied as opaque-aware terrain and their
+    /// retained block-light values seed the flood.  A missing neighbour is not
+    /// represented in the neighbourhood, so it remains a real seam barrier
+    /// instead of leaking terrain emissions into the centre.  Allocation masks
+    /// are owned by the admission store and are deliberately not inferred from
+    /// this value-only result.
+    #[must_use]
+    pub fn compute_initial_column_light_with_neighbours_seeded<F>(
+        &self,
+        center: &ServerChunkColumn,
+        neighbours: &[(i32, i32, ServerChunkColumn)],
+        dimension: Dimension,
+        seed: F,
+    ) -> ColumnLight
+    where
+        F: Fn(i32, i32, usize, i32, usize) -> u8,
+    {
+        let shape = shape_for_column(center);
+        let center_world = build_world_column(&shape, center);
+        let neighbour_world = neighbours
+            .iter()
+            .map(|(_, _, neighbour)| build_world_column(&shape, neighbour))
+            .collect::<Vec<_>>();
+        let mut neighbourhood = Neighbourhood::new(&center_world);
+        for ((dx, dz, _), neighbour) in neighbours.iter().zip(&neighbour_world) {
+            neighbourhood = neighbourhood.with(*dx, *dz, neighbour);
+        }
+        compute_column_light_with_neighbours_seeded(
+            &neighbourhood,
+            &V770LightProps {
+                has_skylight: dimension.has_skylight(),
+            },
+            initial_full_sky_sections(dimension),
+            seed,
+            |dx, dz| (dx, dz) == (0, 0),
+        )
+    }
+
     /// Computes and returns all nine retained light snapshots produced by one
     /// shared three-by-three admission. The array uses row-major offset slots.
     pub fn compute_initial_column_lights_with_neighbours_and_storage_in_dimension(
@@ -3352,8 +3779,16 @@ impl V770ServerProtocol {
     ) -> Option<[lodestone_world::ColumnLight; 9]> {
         let shape = shape_for_column(column);
         let center = build_world_column(&shape, column);
+        let statuses = std::array::from_fn(|slot| {
+            stored[slot].map(|_| RetainedLightStatus::CentreSettled)
+        });
         Some(compute_served_initial_lights_with_neighbours_and_storage(
-            &center, &shape, neighbours, stored, dimension,
+            &center,
+            &shape,
+            neighbours,
+            stored,
+            &statuses,
+            dimension,
         ))
     }
 }
@@ -5392,19 +5827,34 @@ impl ServerProtocol for V770ServerProtocol {
     ) -> Result<ServerDirective, lodestone_server::ChunkEncodeError> {
         let shape = shape_for_column(column);
         let world_column = build_world_column(&shape, column);
-        let light = column
+        let light = if let Some(retained) = column
             .retained_light()
             .filter(|_| column.retained_light_status() == Some(RetainedLightStatus::CentreSettled))
             .filter(|light| light.light_section_count() == shape.section_count + 2)
-            .cloned()
-            .unwrap_or_else(|| {
-                compute_served_initial_light_with_neighbours(
+        {
+            let mut retained = retained.clone();
+            if dimension == Dimension::End {
+                let neighbour_columns = neighbours
+                    .iter()
+                    .map(|(_, _, neighbour)| build_world_column(&shape, neighbour))
+                    .collect::<Vec<_>>();
+                let storage = initial_end_light_storage_sections_with_prior(
                     &world_column,
-                    &shape,
-                    neighbours,
-                    dimension,
-                )
-            });
+                    &neighbour_columns,
+                    Some(&retained),
+                );
+                restore_end_retained_storage_allocation(&mut retained, &storage);
+                restore_end_retained_storage_gaps(&mut retained);
+            }
+            retained
+        } else {
+            compute_served_initial_light_with_neighbours(
+                &world_column,
+                &shape,
+                neighbours,
+                dimension,
+            )
+        };
         let payload = encode_column_body(cx, cz, &shape, &world_column, &light, column);
         Ok(ServerDirective::Send {
             packet_id: play::clientbound::LEVEL_CHUNK_WITH_LIGHT,
@@ -5435,31 +5885,40 @@ impl ServerProtocol for V770ServerProtocol {
         dimension: Dimension,
     ) -> Option<ColumnLightSettlement> {
         let mut stored: [Option<&ColumnLight>; 9] = [None; 9];
+        let mut statuses: [Option<RetainedLightStatus>; 9] = [None; 9];
         stored[4] = column.retained_light();
+        statuses[4] = column.retained_light_status();
         for &(dx, dz, ref neighbour) in neighbours {
             let slot = ((dz + 1) * 3 + (dx + 1)) as usize;
             if slot < stored.len() {
                 stored[slot] = neighbour.retained_light();
+                statuses[slot] = neighbour.retained_light_status();
             }
         }
-        let mut lights = self
-            .compute_initial_column_lights_with_neighbours_and_storage_in_dimension(
-                column,
-                neighbours,
-                &stored,
-                dimension,
-            )?;
+        let shape = shape_for_column(column);
+        let center = build_world_column(&shape, column);
+        let mut lights = compute_served_initial_lights_with_neighbours_and_storage(
+            &center,
+            &shape,
+            neighbours,
+            &stored,
+            &statuses,
+            dimension,
+        );
         if dimension == Dimension::End {
-            let shape = shape_for_column(column);
-            let centre = build_world_column(&shape, column);
-            let neighbour_columns = neighbours
+            // A newly admitted dependency needs the same sparse allocation
+            // shape as the complete footprint, but a retained dependency
+            // snapshot remains its own light-engine result. Do not replace a
+            // retained layer merely because this admission selected another
+            // centre.
+            let neighbour_world = neighbours
                 .iter()
                 .map(|(_, _, neighbour)| build_world_column(&shape, neighbour))
                 .collect::<Vec<_>>();
-            let admitted_columns = std::iter::once(centre)
-                .chain(neighbour_columns.iter().cloned())
+            let admitted_columns = std::iter::once(center.clone())
+                .chain(neighbour_world.iter().cloned())
                 .collect::<Vec<_>>();
-            for ((dx, dz, _), dependency) in neighbours.iter().zip(&neighbour_columns) {
+            for ((dx, dz, _), dependency) in neighbours.iter().zip(&neighbour_world) {
                 let slot = ((*dz + 1) * 3 + (*dx + 1)) as usize;
                 if stored[slot].is_none() {
                     let storage = initial_end_light_storage_sections(dependency, &admitted_columns);
@@ -5477,9 +5936,15 @@ impl ServerProtocol for V770ServerProtocol {
                 }
             }
         }
-        let dependency_lights = neighbours.iter().map(|&(dx, dz, _)| {
+        let dependency_lights = neighbours.iter().filter_map(|&(dx, dz, _)| {
+            if (dx, dz) == (0, 0)
+                || !(-1..=1).contains(&dx)
+                || !(-1..=1).contains(&dz)
+            {
+                return None;
+            }
             let slot = ((dz + 1) * 3 + (dx + 1)) as usize;
-            (dx, dz, lights[slot].clone())
+            Some((dx, dz, lights[slot].clone()))
         });
         ColumnLightSettlement::with_neighbours(lights[4].clone(), dependency_lights)
     }
@@ -7112,7 +7577,6 @@ impl ServerProtocol for V770ServerProtocol {
 mod block_edit_tests {
     use super::*;
     use lodestone_core::State;
-    use lodestone_model::PredictionSequence;
 
     fn encode<T: Encode>(packet: &T) -> Vec<u8> {
         let mut w = Writer::default();
@@ -7378,7 +7842,7 @@ mod block_edit_tests {
                     y: 1.0,
                     z: 0.5,
                 },
-                sequence: PredictionSequence::from_wire(7),
+                sequence: 7,
                 hand: 0,
             }
         );
@@ -8255,6 +8719,180 @@ mod block_edit_tests {
         assert!(all_air.iter().all(|&stored| !stored));
     }
 
+    /// A dependency snapshot describes the admission that initialized it, not
+    /// the centre admission that is happening now. In particular, an old
+    /// all-sections dependency layer must not make a fresh all-air centre
+    /// retain all 18 light sections when the new footprint only has a
+    /// four-section terrain corridor.
+    #[test]
+    fn end_dependency_snapshot_does_not_define_centre_allocation() {
+        let mut center = ServerChunkColumn::new(0, 256);
+        let mut dependency_snapshot = ColumnLight::new(16);
+        for section in 0..dependency_snapshot.light_section_count() {
+            *dependency_snapshot.sky_mut(section) = LightData::Uniform(0);
+            *dependency_snapshot.block_mut(section) = LightData::Uniform(0);
+        }
+        center.set_retained_light_with_status(
+            dependency_snapshot,
+            RetainedLightStatus::DependencyInitialized,
+        );
+        let mut neighbour = ServerChunkColumn::new(0, 256);
+        neighbour.set_block(8, 16, 8, "minecraft:stone");
+        neighbour.set_block(8, 32, 8, "minecraft:stone");
+
+        let settlement = V770ServerProtocol
+            .compute_initial_column_lights_with_neighbours_in_dimension(
+                &center,
+                &[(1, 0, neighbour)],
+                Dimension::End,
+            )
+            .expect("fresh End centre admission");
+        let light = settlement.centre_light();
+        for section in 0..light.light_section_count() {
+            let expected_stored = (1..=4).contains(&section);
+            assert_eq!(
+                !matches!(light.sky(section), LightData::Missing),
+                expected_stored,
+                "dependency-initialized centre sky allocation at section {section}",
+            );
+            assert_eq!(
+                !matches!(light.block(section), LightData::Missing),
+                expected_stored,
+                "dependency-initialized centre block allocation at section {section}",
+            );
+        }
+    }
+
+    /// A retained snapshot in one neighbour must not cause fresh terrain in a
+    /// different neighbour to disappear from the End storage walk. The
+    /// retained sky seed makes the old non-zero-value filter active; the east
+    /// terrain is the control that proves allocation follows the complete
+    /// admitted footprint rather than retained sky values alone.
+    #[test]
+    fn end_storage_keeps_fresh_terrain_with_another_retained_sky_snapshot() {
+        let center = ServerChunkColumn::new(0, 256);
+        let mut east = ServerChunkColumn::new(0, 256);
+        east.set_block(8, 16, 8, "minecraft:stone");
+        east.set_block(8, 32, 8, "minecraft:stone");
+
+        let mut west = ServerChunkColumn::new(0, 256);
+        let mut west_light = ColumnLight::new(16);
+        *west_light.sky_mut(1) = LightData::Uniform(15);
+        *west_light.block_mut(1) = LightData::Uniform(0);
+        west.set_retained_light_with_status(west_light, RetainedLightStatus::CentreSettled);
+
+        let settlement = V770ServerProtocol
+            .compute_initial_column_lights_with_neighbours_in_dimension(
+                &center,
+                &[(1, 0, east), (-1, 0, west)],
+                Dimension::End,
+            )
+            .expect("fresh End centre admission");
+        let light = settlement.centre_light();
+        for section in 0..light.light_section_count() {
+            let expected_stored = (1..=4).contains(&section);
+            assert_eq!(
+                !matches!(light.sky(section), LightData::Missing),
+                expected_stored,
+                "fresh-neighbour centre sky allocation at section {section}",
+            );
+            assert_eq!(
+                !matches!(light.block(section), LightData::Missing),
+                expected_stored,
+                "fresh-neighbour centre block allocation at section {section}",
+            );
+        }
+        assert_eq!(
+            light.section_light(1).sky_at(0, 0, 0),
+            15,
+            "the retained neighbour must not suppress fresh-centre sky values",
+        );
+    }
+
+    /// A dependency's retained sky values belong to its own settled terrain.
+    /// They must not seed a fresh End centre admission, where the complete
+    /// current 3x3 terrain footprint is the authoritative sky source.
+    #[test]
+    fn end_retained_dependency_sky_does_not_seed_fresh_centre() {
+        let mut center = ServerChunkColumn::new(0, 256);
+        let mut west = ServerChunkColumn::new(0, 256);
+        for z in 0..16 {
+            for x in 0..16 {
+                center.set_block(x, 0, z, "minecraft:end_stone");
+                west.set_block(x, 0, z, "minecraft:end_stone");
+            }
+        }
+
+        let baseline = V770ServerProtocol
+            .compute_initial_column_lights_with_neighbours_in_dimension(
+                &center,
+                &[(-1, 0, west.clone())],
+                Dimension::End,
+            )
+            .expect("fresh End centre admission without retained dependency");
+
+        let mut retained_west = west;
+        let mut retained = ColumnLight::new(16);
+        for section in 0..retained.light_section_count() {
+            *retained.sky_mut(section) = LightData::Uniform(15);
+            *retained.block_mut(section) = LightData::Uniform(0);
+        }
+        retained_west.set_retained_light_with_status(
+            retained,
+            RetainedLightStatus::CentreSettled,
+        );
+        let with_retained_dependency = V770ServerProtocol
+            .compute_initial_column_lights_with_neighbours_in_dimension(
+                &center,
+                &[(-1, 0, retained_west)],
+                Dimension::End,
+            )
+            .expect("fresh End centre admission with retained dependency");
+
+        assert_eq!(
+            with_retained_dependency.centre_light(),
+            baseline.centre_light(),
+            "a retained dependency must not brighten the fresh centre's sky field",
+        );
+    }
+
+    /// A sparse centre-settled snapshot remains authoritative even when its
+    /// terrain is all air. This is distinct from the dependency-initialized
+    /// all-sections control above: the centre's own saved allocation is the
+    /// one prior mask that may survive a new admission.
+    #[test]
+    fn end_centre_settled_sparse_storage_is_preserved() {
+        let mut center = ServerChunkColumn::new(0, 256);
+        let mut saved = ColumnLight::new(16);
+        for section in 1..=4 {
+            *saved.sky_mut(section) = LightData::Uniform(15);
+            *saved.block_mut(section) = LightData::Uniform(0);
+        }
+        center.set_retained_light_with_status(saved, RetainedLightStatus::CentreSettled);
+
+        let settlement = V770ServerProtocol
+            .compute_initial_column_lights_with_neighbours_in_dimension(
+                &center,
+                &[],
+                Dimension::End,
+            )
+            .expect("centre-settled End admission");
+        let light = settlement.centre_light();
+        for section in 0..light.light_section_count() {
+            let expected_stored = (1..=4).contains(&section);
+            assert_eq!(
+                !matches!(light.sky(section), LightData::Missing),
+                expected_stored,
+                "centre-settled sky allocation at section {section}",
+            );
+            assert_eq!(
+                !matches!(light.block(section), LightData::Missing),
+                expected_stored,
+                "centre-settled block allocation at section {section}",
+            );
+        }
+    }
+
     #[test]
     fn end_initial_dependency_layers_use_admitted_storage_shape() {
         let center = ServerChunkColumn::new(0, 256);
@@ -8396,6 +9034,83 @@ mod block_edit_tests {
             empty_light,
             "centre-settled light must be consumed verbatim"
         );
+    }
+
+    /// Persistence can omit an all-zero pair in the middle of an End corridor
+    /// while retaining the non-zero layers around it. The initial packet must
+    /// restore that allocated section as explicit empty sky and block light;
+    /// the unallocated layer above the corridor must remain missing.
+    #[test]
+    fn end_initial_encoder_restores_interior_retained_storage_gap() {
+        use crate::packets::chunk::LevelChunkWithLight;
+
+        let shape = ChunkShape::nether_or_end_1_21();
+        let mut column = ServerChunkColumn::new(0, 256);
+        let mut retained = ColumnLight::new(shape.section_count);
+        for section in [0, 1, 2, 4, 5] {
+            *retained.sky_mut(section) = LightData::Uniform(15);
+            *retained.block_mut(section) = LightData::Uniform(0);
+        }
+        column.set_retained_light_with_status(retained, RetainedLightStatus::CentreSettled);
+
+        let ServerDirective::Send { payload, .. } = V770ServerProtocol
+            .try_encode_chunk_with_neighbours_in_dimension(1, -5, &column, &[], Dimension::End)
+            .expect("End initial chunk")
+        else {
+            panic!("End initial chunk must send a packet");
+        };
+        let mut reader = Reader::new(&payload);
+        let packet = LevelChunkWithLight::decode(&mut reader, &shape)
+            .expect("decode End initial chunk");
+        reader.ensure_empty().expect("no End packet trailing bytes");
+        assert_eq!(packet.light.sky(3), &LightData::Uniform(0));
+        assert_eq!(packet.light.block(3), &LightData::Uniform(0));
+        assert!(matches!(packet.light.sky(6), LightData::Missing));
+        assert!(matches!(packet.light.block(6), LightData::Missing));
+    }
+
+    /// A persisted End centre can omit the zero-valued lower part of its
+    /// allocation corridor because those sections have no retained arrays.
+    /// Reconstruct the corridor from a current terrain neighbour and emit the
+    /// allocated lower layers as explicit empty sky and block sections.
+    #[test]
+    fn end_initial_encoder_restores_persisted_storage_apron() {
+        use crate::packets::chunk::LevelChunkWithLight;
+
+        let shape = ChunkShape::nether_or_end_1_21();
+        let mut column = ServerChunkColumn::new(0, 256);
+        let mut retained = ColumnLight::new(shape.section_count);
+        *retained.sky_mut(2) = LightData::Uniform(15);
+        *retained.block_mut(2) = LightData::Uniform(0);
+        column.set_retained_light_with_status(retained, RetainedLightStatus::CentreSettled);
+
+        let mut neighbour = ServerChunkColumn::new(0, 256);
+        neighbour.set_block(8, 0, 8, "minecraft:end_stone");
+        let ServerDirective::Send { payload, .. } = V770ServerProtocol
+            .try_encode_chunk_with_neighbours_in_dimension(
+                1,
+                -5,
+                &column,
+                &[(1, 0, neighbour)],
+                Dimension::End,
+            )
+            .expect("End initial chunk")
+        else {
+            panic!("End initial chunk must send a packet");
+        };
+        let mut reader = Reader::new(&payload);
+        let packet = LevelChunkWithLight::decode(&mut reader, &shape)
+            .expect("decode End initial chunk");
+        reader.ensure_empty().expect("no End packet trailing bytes");
+
+        for section in 0..=1 {
+            assert_eq!(packet.light.sky(section), &LightData::Uniform(0));
+            assert_eq!(packet.light.block(section), &LightData::Uniform(0));
+        }
+        assert_eq!(packet.light.sky(2), &LightData::Uniform(15));
+        assert_eq!(packet.light.block(2), &LightData::Uniform(0));
+        assert!(matches!(packet.light.sky(3), LightData::Missing));
+        assert!(matches!(packet.light.block(3), LightData::Missing));
     }
 
     /// End's initial path must actually consume the supplied east column. The
@@ -8787,7 +9502,9 @@ mod block_edit_tests {
         // proves `encode_world_effect` routes the new variant instead of dropping it.
         let effect = lodestone_server::effects::WorldEffect::BlockEntityData {
             pos,
-            block_entity_type: lodestone_server::piston::PISTON_BLOCK_ENTITY.to_string(),
+            block_entity_type: lodestone_server::BlockEntityKind::from_name(
+                lodestone_server::piston::PISTON_BLOCK_ENTITY,
+            ),
             nbt: entity.update_tag(),
         };
         let ServerDirective::Send {
