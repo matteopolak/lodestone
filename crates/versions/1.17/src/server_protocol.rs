@@ -7,7 +7,7 @@
 
 use lodestone_core::{Ctx, Decode, Encode, Nbt, Reader, State, Writer, encode_body, write_named_nbt};
 use lodestone_model::{
-    BlockActionKind, BlockFace, BlockPos, ItemComponents, ItemStack, Rotation, Vec3f,
+    BlockActionKind, BlockFace, BlockPos, ItemComponents, ItemStack, Rotation, Text, Vec3, Vec3f,
 };
 use lodestone_server::{ChunkColumn, ChunkEncodeError, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_world::{Heightmap, LongArrayFraming, PaletteKind, PalettedContainer};
@@ -22,7 +22,7 @@ use crate::packet_ids_758::{handshaking as handshaking_758, login as login_758, 
 use crate::packets::game::{
     BlockDig, BlockPlace, ClientCommand, ClientboundChat, ClientboundPositionLook, JoinGame,
     ServerboundChat, ServerboundArmAnimation, ServerboundFlying, ServerboundLook,
-    ServerboundPosition, ServerboundPositionLook,
+    ServerboundPosition, ServerboundPositionLook, Respawn, UpdateHealth,
 };
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
@@ -103,6 +103,23 @@ fn system_chat(message: &str) -> ClientboundChat {
         // This is regular chat history, not an action-bar overlay.
         position: 1,
         sender: Uuid::nil(),
+    }
+}
+
+fn json_text_component(message: &Text) -> String {
+    system_chat_text(&message.to_plain_string())
+}
+
+fn respawn_info(min_y: i32, height: i32) -> Respawn {
+    Respawn {
+        dimension: dimension_type(min_y, height),
+        world_name: "minecraft:overworld".to_owned(),
+        hashed_seed: 0,
+        game_mode: 0,
+        previous_game_mode: u8::MAX,
+        is_debug: false,
+        is_flat: true,
+        copy_metadata: false,
     }
 }
 
@@ -610,6 +627,58 @@ impl ServerProtocol for V756ServerProtocol {
         send(play::clientbound::CHAT, &system_chat(message))
     }
 
+    fn encode_set_health(&self, health: f32, food: i32, saturation: f32) -> ServerDirective {
+        send(
+            play::clientbound::UPDATE_HEALTH,
+            &UpdateHealth {
+                health: health.clamp(0.0, 20.0),
+                food: food.clamp(0, 20),
+                food_saturation: saturation.clamp(0.0, 20.0),
+            },
+        )
+    }
+
+    fn encode_player_combat_kill(&self, player_entity_id: i32, message: &Text) -> ServerDirective {
+        let mut payload = Writer::default();
+        payload.var_i32(player_entity_id);
+        payload.i32(-1);
+        payload.string(&json_text_component(message));
+        ServerDirective::Send {
+            packet_id: play::clientbound::DEATH_COMBAT_EVENT,
+            payload: payload.into_vec(),
+        }
+    }
+
+    fn encode_respawn(&self, spawn: Vec3) -> Vec<ServerDirective> {
+        self.encode_respawn_with_teleport_id(0, spawn)
+    }
+
+    fn encode_respawn_with_teleport_id(
+        &self,
+        teleport_id: i32,
+        spawn: Vec3,
+    ) -> Vec<ServerDirective> {
+        vec![
+            send(
+                play::clientbound::RESPAWN,
+                &respawn_info(MIN_Y, HEIGHT),
+            ),
+            send(
+                play::clientbound::POSITION,
+                &ClientboundPositionLook {
+                    x: spawn.x,
+                    y: spawn.y,
+                    z: spawn.z,
+                    yaw: 0.0,
+                    pitch: 0.0,
+                    flags: 0,
+                    teleport_id,
+                    dismount_vehicle: false,
+                },
+            ),
+        ]
+    }
+
     fn encode_open_screen(&self, window_id: i32, menu: &str, title: &str) -> ServerDirective {
         let menu = menu.parse().expect("container menu must be a resource key");
         let inventory_type = registry::menu_id(PROTOCOL_1_17_1, &menu)
@@ -1106,6 +1175,58 @@ impl ServerProtocol for V758ServerProtocol {
 
     fn encode_system_chat(&self, message: &str) -> ServerDirective {
         send_758(play_758::clientbound::CHAT, &system_chat(message))
+    }
+
+    fn encode_set_health(&self, health: f32, food: i32, saturation: f32) -> ServerDirective {
+        send_758(
+            play_758::clientbound::UPDATE_HEALTH,
+            &UpdateHealth {
+                health: health.clamp(0.0, 20.0),
+                food: food.clamp(0, 20),
+                food_saturation: saturation.clamp(0.0, 20.0),
+            },
+        )
+    }
+
+    fn encode_player_combat_kill(&self, player_entity_id: i32, message: &Text) -> ServerDirective {
+        let mut payload = Writer::default();
+        payload.var_i32(player_entity_id);
+        payload.i32(-1);
+        payload.string(&json_text_component(message));
+        ServerDirective::Send {
+            packet_id: play_758::clientbound::DEATH_COMBAT_EVENT,
+            payload: payload.into_vec(),
+        }
+    }
+
+    fn encode_respawn(&self, spawn: Vec3) -> Vec<ServerDirective> {
+        self.encode_respawn_with_teleport_id(0, spawn)
+    }
+
+    fn encode_respawn_with_teleport_id(
+        &self,
+        teleport_id: i32,
+        spawn: Vec3,
+    ) -> Vec<ServerDirective> {
+        vec![
+            send_758(
+                play_758::clientbound::RESPAWN,
+                &respawn_info(MODERN_MIN_Y, MODERN_HEIGHT),
+            ),
+            send_758(
+                play_758::clientbound::POSITION,
+                &ClientboundPositionLook {
+                    x: spawn.x,
+                    y: spawn.y,
+                    z: spawn.z,
+                    yaw: 0.0,
+                    pitch: 0.0,
+                    flags: 0,
+                    teleport_id,
+                    dismount_vehicle: false,
+                },
+            ),
+        ]
     }
 
     fn encode_open_screen(&self, window_id: i32, menu: &str, title: &str) -> ServerDirective {
