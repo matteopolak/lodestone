@@ -25,7 +25,10 @@ against the completed block field, and `ChunkColumn::reconcile_generated_block_e
 performs the same strict state-owner check after source sidecars and later
 feature writes. This keeps generated records for replaced blocks out of both
 ordinary End columns and detached lifecycle packets while leaving unclaimed
-plugin extension records on the general reconciliation path.
+plugin extension records on the general reconciliation path. A surviving wall
+banner therefore retains its template payload as a sidecar; an orphaned event
+does not become an entity merely because placement reported it before the final
+state pass.
 
 ## How to change it
 
