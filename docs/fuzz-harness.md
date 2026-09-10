@@ -17,6 +17,13 @@ the production parser from the raw packet boundary and requires only clean
 cannot hide behind the valid-input model. The 4 KiB input cap keeps this
 robustness lane cheap enough for the ordinary workspace test run.
 
+`tests/redstone_target_strength_model.rs` covers another small but high-value
+reaction boundary. It generates 256 hit positions on a 997-step cell grid,
+predicts the analog level with integer distance and ceiling arithmetic, and
+compares that prediction with the production target-strength helper. Its fixed
+wrong-face control must disagree, so the campaign cannot pass if the helper
+ignores the hit axis or if the assertion is accidentally removed.
+
 ## How it works
 
 `differential::FixedActionReplay` owns an opaque replay seed, ordered
