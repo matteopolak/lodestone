@@ -108,7 +108,7 @@ fn write_saved_world(dir: &Path) {
         ));
         assert!(queues.fluid.schedule(
             (7, 62, 9),
-            "minecraft:flowing_water".to_owned(),
+            ScheduledTickKind::Extension("minecraft:flowing_water".to_owned()),
             105,
             TickPriority::High,
         ));

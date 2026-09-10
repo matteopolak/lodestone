@@ -342,7 +342,7 @@ fn apply_production(handle: &ScheduledTickHandle, op: QueueOp) -> Event {
                 ),
                 Lane::Fluid => queues.fluid.schedule(
                     POSITIONS[pos],
-                    KINDS[kind].to_owned(),
+                    ScheduledTickKind::from_name(KINDS[kind]),
                     trigger_tick,
                     priority,
                 ),
@@ -379,7 +379,7 @@ fn apply_production(handle: &ScheduledTickHandle, op: QueueOp) -> Event {
                     .map(TickView::from),
                 Lane::Fluid => queues
                     .fluid
-                    .take_matching(POSITIONS[pos], |candidate| candidate == KINDS[kind])
+                    .take_matching(POSITIONS[pos], |candidate| candidate.as_ref() == KINDS[kind])
                     .as_ref()
                     .map(TickView::from),
             },
@@ -425,7 +425,9 @@ fn assert_state_matches(
                     Lane::Block => queues
                         .block
                         .has_scheduled(pos, &ScheduledTickKind::from_name(kind)),
-                    Lane::Fluid => queues.fluid.has_scheduled(pos, &kind.to_owned()),
+                    Lane::Fluid => queues
+                        .fluid
+                        .has_scheduled(pos, &ScheduledTickKind::from_name(kind)),
                 });
                 let expected_has = reference
                     .entries

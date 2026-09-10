@@ -124,7 +124,7 @@ fn write_fixture(dir: &Path) {
         ));
         assert!(queues.fluid.schedule(
             (7, 12, 9),
-            "minecraft:flowing_lava".to_owned(),
+            ScheduledTickKind::Extension("minecraft:flowing_lava".to_owned()),
             SAVE_TICK + 40,
             TickPriority::ExtremelyHigh,
         ));
@@ -207,7 +207,7 @@ fn a_saved_worlds_columns_load_from_inside_the_tick_loops_own_queue_lock() {
                 queues
                     .fluid
                     .iter()
-                    .map(|tick| (tick.trigger_tick, tick.kind.clone())),
+                    .map(|tick| (tick.trigger_tick, tick.kind.as_ref().to_owned())),
             )
             .collect();
         all.sort();

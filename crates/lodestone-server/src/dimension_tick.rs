@@ -316,7 +316,7 @@ mod tests {
         scheduled.with(|queues| {
             queues.fluid.schedule(
                 (5, 60, 5),
-                "minecraft:water".to_string(),
+                crate::scheduled_tick::ScheduledTickKind::Extension("minecraft:water".to_owned()),
                 0,
                 TickPriority::Normal,
             );
@@ -376,7 +376,7 @@ mod tests {
         scheduled.with(|queues| {
             queues.fluid.schedule(
                 (5, 60, 5),
-                "minecraft:water".to_string(),
+                crate::scheduled_tick::ScheduledTickKind::Extension("minecraft:water".to_owned()),
                 0,
                 TickPriority::Normal,
             );

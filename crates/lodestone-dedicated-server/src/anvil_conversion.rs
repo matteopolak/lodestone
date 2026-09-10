@@ -1056,7 +1056,7 @@ mod tests {
         scheduled.with(|queues| {
             assert!(queues.fluid.schedule(
                 (1, 1, 2),
-                lodestone_server::fluid::TICK_FLUID.to_owned(),
+                lodestone_server::ScheduledTickKind::Fluid,
                 5,
                 TickPriority::Normal,
             ));

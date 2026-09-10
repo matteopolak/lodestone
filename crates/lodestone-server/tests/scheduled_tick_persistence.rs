@@ -177,7 +177,7 @@ fn pending_ticks_survive_a_close_and_reopen_with_the_right_delay_and_priority() 
             ));
             assert!(queues.fluid.schedule(
                 fluid_pos,
-                "minecraft:flowing_lava".to_owned(),
+                ScheduledTickKind::Extension("minecraft:flowing_lava".to_owned()),
                 fluid_trigger,
                 TickPriority::ExtremelyHigh,
             ));
@@ -275,7 +275,7 @@ fn pending_ticks_survive_a_close_and_reopen_with_the_right_delay_and_priority() 
             .iter()
             .map(|t| (t.trigger_tick, t.priority, t.kind.clone()))
             .collect();
-        let f: Vec<(u64, TickPriority, String)> = queues
+        let f: Vec<(u64, TickPriority, ScheduledTickKind)> = queues
             .fluid
             .iter()
             .map(|t| (t.trigger_tick, t.priority, t.kind.clone()))
@@ -299,7 +299,7 @@ fn pending_ticks_survive_a_close_and_reopen_with_the_right_delay_and_priority() 
         vec![(
             expected_fluid as u64,
             TickPriority::ExtremelyHigh,
-            "minecraft:flowing_lava".to_owned()
+            ScheduledTickKind::Extension("minecraft:flowing_lava".to_owned())
         )],
         "the overdue fluid tick must come back overdue by the same margin, and \
          keep its priority"
