@@ -1695,6 +1695,7 @@ fn decode_native_chunk(
     })
 }
 
+#[cfg(test)]
 fn encode_chunk(
     column_x: i32,
     column_z: i32,
