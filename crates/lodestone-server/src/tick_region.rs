@@ -253,6 +253,58 @@ impl TickRegionPlan {
 mod tests {
     use super::*;
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn bounded_owner_jobs_overlap_disjoint_regions_and_restore_submission_order() {
+        use std::collections::BTreeSet;
+        use std::sync::{Arc, Barrier, Mutex};
+        use std::time::Duration;
+
+        // This is intentionally a barrier rather than a sleep.  If the
+        // executor ever regresses to one lane, the first owner cannot pass
+        // the barrier and the test fails instead of accidentally accepting a
+        // merely faster serial implementation.
+        let rendezvous = Arc::new(Barrier::new(2));
+        let worker_ids = Arc::new(Mutex::new(BTreeSet::new()));
+        let jobs = [
+            TickOwnedChunk {
+                owner: TickOwner::Chunk { cx: -1, cz: 0 },
+                chunk: (-1, 0),
+            },
+            TickOwnedChunk {
+                owner: TickOwner::Chunk { cx: 1, cz: 0 },
+                chunk: (1, 0),
+            },
+        ];
+
+        let completed = run_bounded_owner_jobs(jobs.to_vec(), 2, &|job| {
+            worker_ids
+                .lock()
+                .expect("worker id set is not poisoned")
+                .insert(std::thread::current().id());
+            let rendezvous_result = rendezvous.wait_timeout(Duration::from_secs(2));
+            assert!(
+                !rendezvous_result.1,
+                "two disjoint owner jobs must reach the executor concurrently"
+            );
+            (job.owner, job.chunk)
+        });
+
+        assert_eq!(
+            completed,
+            jobs.iter().map(|job| (job.owner, job.chunk)).collect::<Vec<_>>(),
+            "owner completion order must remain the deterministic submission order"
+        );
+        assert_eq!(
+            worker_ids
+                .lock()
+                .expect("worker id set is not poisoned")
+                .len(),
+            2,
+            "the two disjoint owners must execute on separate bounded lanes"
+        );
+    }
+
     #[test]
     fn the_single_tick_task_owns_each_canonical_chunk_once() {
         let plan = TickRegionPlan::chunk_owned(vec![(-3, 4), (0, 0), (7, -2)]);
