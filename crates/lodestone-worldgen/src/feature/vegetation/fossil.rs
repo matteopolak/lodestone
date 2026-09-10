@@ -43,6 +43,7 @@
 
 use std::sync::Arc;
 
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::density::Resolver;
@@ -129,58 +130,108 @@ fn parse_processor_list(resolver: &dyn Resolver, value: &Value) -> Option<Vec<Pr
         Value::Object(_) => value.clone(),
         _ => return None,
     };
+    let document = serde_json::from_value::<ProcessorListDocument>(document).ok()?;
     document
-        .get("processors")
-        .and_then(Value::as_array)?
-        .iter()
+        .processors
+        .into_iter()
         .map(|entry| parse_processor(resolver, entry))
         .collect()
 }
 
-fn parse_processor(resolver: &dyn Resolver, value: &Value) -> Option<Processor> {
-    let processor_type = value["processor_type"]
-        .as_str()?
-        .strip_prefix("minecraft:")
-        .unwrap_or(value["processor_type"].as_str()?)
-        .to_owned();
-    match processor_type.as_str() {
-        "nop" => Some(Processor::BlockIgnore(Vec::new())),
-        "block_rot" => {
-            let integrity = probability(value.get("integrity")?)?;
-            let rottable = match value.get("rottable_blocks") {
+/// Closed processor-list schema used by fossil templates.
+///
+/// The processor and predicate names are decoded before any placement code sees
+/// them.  In particular, a new namespaced discriminator or an extra field cannot
+/// silently fall through to a nearby processor with different random draws.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProcessorListDocument {
+    processors: Vec<ProcessorDocument>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "processor_type", deny_unknown_fields)]
+enum ProcessorDocument {
+    #[serde(rename = "minecraft:nop", alias = "nop")]
+    Nop {},
+    #[serde(rename = "minecraft:block_rot", alias = "block_rot")]
+    BlockRot {
+        integrity: f32,
+        rottable_blocks: Option<Value>,
+    },
+    #[serde(rename = "minecraft:protected_blocks", alias = "protected_blocks")]
+    ProtectedBlocks { value: Value },
+    #[serde(rename = "minecraft:rule", alias = "rule")]
+    Rule { rules: Vec<RuleDocument> },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuleDocument {
+    input_predicate: Value,
+    location_predicate: Option<Value>,
+    position_predicate: Option<Value>,
+    output_state: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "predicate_type", deny_unknown_fields)]
+enum RuleTestDocument {
+    #[serde(rename = "minecraft:always_true", alias = "always_true")]
+    AlwaysTrue {},
+    #[serde(rename = "minecraft:block_match", alias = "block_match")]
+    BlockMatch { block: String },
+    #[serde(rename = "minecraft:blockstate_match", alias = "blockstate_match")]
+    BlockStateMatch { block_state: Value },
+    #[serde(rename = "minecraft:random_block_match", alias = "random_block_match")]
+    RandomBlockMatch { block: String, probability: f64 },
+    #[serde(rename = "minecraft:random_blockstate_match", alias = "random_blockstate_match")]
+    RandomBlockStateMatch { block_state: Value, probability: f64 },
+    #[serde(rename = "minecraft:tag_match", alias = "tag_match")]
+    TagMatch { tag: String },
+}
+
+fn parse_processor(resolver: &dyn Resolver, value: ProcessorDocument) -> Option<Processor> {
+    match value {
+        ProcessorDocument::Nop {} => Some(Processor::BlockIgnore(Vec::new())),
+        ProcessorDocument::BlockRot {
+            integrity,
+            rottable_blocks,
+        } => {
+            let integrity = probability_f32(integrity)?;
+            let rottable = match rottable_blocks {
                 None | Some(Value::Null) => None,
-                Some(blocks) => Some(Arc::new(resolve_block_set(resolver, blocks)?)),
+                Some(blocks) => Some(Arc::new(resolve_block_set(resolver, &blocks)?)),
             };
             Some(Processor::BlockRot { rottable, integrity })
         }
-        "protected_blocks" => {
-            let blocks = resolve_block_set(resolver, value.get("value")?)?;
+        ProcessorDocument::ProtectedBlocks { value } => {
+            let blocks = resolve_block_set(resolver, &value)?;
             Some(Processor::ProtectedBlocks(Arc::new(blocks)))
         }
-        "rule" => {
-            let rules = value
-                .get("rules")
-                .and_then(Value::as_array)?
+        ProcessorDocument::Rule { rules } => {
+            let rules = rules
                 .iter()
                 .map(|rule| parse_rule(resolver, rule))
                 .collect::<Option<Vec<_>>>()?;
             Some(Processor::Rule(rules))
         }
-        _ => None,
     }
 }
 
-fn parse_rule(resolver: &dyn Resolver, value: &Value) -> Option<ProcessorRule> {
-    let input = parse_rule_test(resolver, value.get("input_predicate")?)?;
+fn parse_rule(resolver: &dyn Resolver, value: &RuleDocument) -> Option<ProcessorRule> {
+    let input = parse_rule_test(resolver, &value.input_predicate)?;
     let location = value
-        .get("location_predicate")
+        .location_predicate
+        .as_ref()
         .map(|predicate| parse_rule_test(resolver, predicate))
         .unwrap_or(Some(RuleTest::AlwaysTrue))?;
     let position = value
-        .get("position_predicate")
+        .position_predicate
+        .as_ref()
         .map(parse_position_test)
         .unwrap_or(Some(PosTest::AlwaysTrue))?;
-    let output = BlockState::parse(&canonical_state(value.get("output_state")?)?);
+    let output = BlockState::parse(&canonical_state(&value.output_state)?);
     Some(ProcessorRule {
         input,
         location,
@@ -190,47 +241,51 @@ fn parse_rule(resolver: &dyn Resolver, value: &Value) -> Option<ProcessorRule> {
 }
 
 fn parse_position_test(value: &Value) -> Option<PosTest> {
-    let predicate_type = value
-        .get("predicate_type")
-        .and_then(Value::as_str)
-        .unwrap_or("minecraft:always_true");
+    let document = with_default_predicate_type(value)?;
     matches!(
-        predicate_type.strip_prefix("minecraft:").unwrap_or(predicate_type),
-        "always_true"
+        serde_json::from_value::<RuleTestDocument>(document).ok()?,
+        RuleTestDocument::AlwaysTrue {}
     )
     .then_some(PosTest::AlwaysTrue)
 }
 
 fn parse_rule_test(resolver: &dyn Resolver, value: &Value) -> Option<RuleTest> {
-    let predicate_type = value
-        .get("predicate_type")
-        .and_then(Value::as_str)
-        .unwrap_or("minecraft:always_true");
-    match predicate_type.strip_prefix("minecraft:").unwrap_or(predicate_type) {
-        "always_true" => Some(RuleTest::AlwaysTrue),
-        "block_match" => Some(RuleTest::BlockMatch(value.get("block")?.as_str()?.to_owned())),
-        "blockstate_match" => Some(RuleTest::BlockStateMatch(canonical_state(value.get("block_state")?)?)),
-        "random_block_match" => {
-            let probability = probability(value.get("probability")?)?;
-            Some(RuleTest::RandomBlockMatch(
-                value.get("block")?.as_str()?.to_owned(),
-                probability,
-            ))
+    match serde_json::from_value::<RuleTestDocument>(with_default_predicate_type(value)?).ok()? {
+        RuleTestDocument::AlwaysTrue {} => Some(RuleTest::AlwaysTrue),
+        RuleTestDocument::BlockMatch { block } => Some(RuleTest::BlockMatch(block)),
+        RuleTestDocument::BlockStateMatch { block_state } => {
+            Some(RuleTest::BlockStateMatch(canonical_state(&block_state)?))
         }
-        "random_blockstate_match" => {
-            let probability = probability(value.get("probability")?)?;
-            Some(RuleTest::RandomBlockStateMatch(
-                canonical_state(value.get("block_state")?)?,
-                probability,
-            ))
+        RuleTestDocument::RandomBlockMatch { block, probability } => {
+            Some(RuleTest::RandomBlockMatch(block, probability_f64(probability)?))
         }
-        "tag_match" => {
-            let tag = value.get("tag")?.as_str()?;
+        RuleTestDocument::RandomBlockStateMatch {
+            block_state,
+            probability,
+        } => Some(RuleTest::RandomBlockStateMatch(
+            canonical_state(&block_state)?,
+            probability_f64(probability)?,
+        )),
+        RuleTestDocument::TagMatch { tag } => {
             let holder = Value::String(format!("#{tag}"));
             Some(RuleTest::TagMatch(Arc::new(resolve_block_set(resolver, &holder)?)))
         }
-        _ => None,
     }
+}
+
+fn with_default_predicate_type(value: &Value) -> Option<Value> {
+    let Value::Object(object) = value else {
+        return None;
+    };
+    if object.contains_key("predicate_type") {
+        return Some(value.clone());
+    }
+    let mut value = object.clone();
+    value.insert(
+        "predicate_type".to_owned(),
+        Value::String("minecraft:always_true".to_owned()),
+    );
+    Some(Value::Object(value))
 }
 
 fn canonical_state(value: &Value) -> Option<String> {
@@ -238,8 +293,11 @@ fn canonical_state(value: &Value) -> Option<String> {
     Some(canon_state(value))
 }
 
-fn probability(value: &Value) -> Option<f32> {
-    let value = value.as_f64()?;
+fn probability_f32(value: f32) -> Option<f32> {
+    (value.is_finite() && (0.0..=1.0).contains(&value)).then_some(value)
+}
+
+fn probability_f64(value: f64) -> Option<f32> {
     (value.is_finite() && (0.0..=1.0).contains(&value)).then_some(value as f32)
 }
 
@@ -658,6 +716,52 @@ mod tests {
             ));
             assert!(matches!(config.overlay_processors.last(), Some(Processor::ProtectedBlocks(_))));
         }
+    }
+
+    #[test]
+    fn fossil_processor_boundary_rejects_unknown_discriminators_and_fields() {
+        let unknown_processor = serde_json::json!({
+            "processors": [{"processor_type": "minecraft:not_a_processor"}],
+        });
+        assert!(serde_json::from_value::<ProcessorListDocument>(unknown_processor).is_err());
+
+        let unknown_namespace = serde_json::json!({
+            "processors": [{"processor_type": "example:block_rot", "integrity": 0.5}],
+        });
+        assert!(serde_json::from_value::<ProcessorListDocument>(unknown_namespace).is_err());
+
+        let extra_processor_field = serde_json::json!({
+            "processors": [{
+                "processor_type": "minecraft:block_rot",
+                "integrity": 0.5,
+                "unexpected": true,
+            }],
+        });
+        assert!(serde_json::from_value::<ProcessorListDocument>(extra_processor_field).is_err());
+
+        let extra_rule_field = serde_json::json!({
+            "processors": [{
+                "processor_type": "minecraft:rule",
+                "rules": [{
+                    "input_predicate": {"predicate_type": "minecraft:always_true"},
+                    "output_state": {"Name": "minecraft:stone"},
+                    "unexpected": true,
+                }],
+            }],
+        });
+        assert!(serde_json::from_value::<ProcessorListDocument>(extra_rule_field).is_err());
+
+        let unknown_predicate = serde_json::json!({
+            "predicate_type": "minecraft:not_a_predicate",
+        });
+        assert!(serde_json::from_value::<RuleTestDocument>(unknown_predicate).is_err());
+
+        let extra_predicate_field = serde_json::json!({
+            "predicate_type": "minecraft:block_match",
+            "block": "minecraft:stone",
+            "unexpected": true,
+        });
+        assert!(serde_json::from_value::<RuleTestDocument>(extra_predicate_field).is_err());
     }
 
     #[test]
