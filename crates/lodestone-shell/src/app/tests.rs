@@ -5,6 +5,8 @@
 //! used by diagnostics and documentation across the repo.
 
 use super::*;
+use super::session::container_cursor_center;
+use crate::menu::Screen;
 use lodestone_data::item::Item;
 
 fn benchmark_config(workload: crate::config::BenchmarkWorkload) -> Config {

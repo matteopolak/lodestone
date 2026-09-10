@@ -34,6 +34,8 @@
 
 use super::*;
 
+use lodestone_model::EntityNetworkId;
+
 /// Distance fog for a render distance of `render_distance` chunks.
 ///
 /// Fog is what hides the render-distance edge — without it the loaded world
@@ -339,11 +341,11 @@ impl Sim {
     /// this uses the same standing-height fallback as other remote eye consumers.
     fn camera_entity_pose(&self) -> Option<(glam::Vec3, f32, f32)> {
         let entity_id = self.camera_entity_id?;
-        if self.server_entity_id() == Some(entity_id) {
+        if self.server_entity_id().map(EntityNetworkId::from_raw) == Some(entity_id) {
             return None;
         }
         self.read(|world| {
-            let entity = world.resource::<EntityIndex>().get(entity_id)?;
+            let entity = world.resource::<EntityIndex>().get_typed(entity_id)?;
             let position = world.get::<Position>(entity)?.0;
             let rotation = world.get::<lodestone_ecs::entity::Rotation>(entity)?.0;
             Some((
@@ -360,7 +362,7 @@ impl Sim {
 
     /// Adopt the server-selected camera subject. Resolution stays lazy because
     /// the set-camera packet may arrive before the target's entity spawn.
-    pub(crate) fn set_camera_entity(&mut self, entity_id: i32) {
+    pub(crate) fn set_camera_entity(&mut self, entity_id: EntityNetworkId) {
         self.camera_entity_id = Some(entity_id);
     }
 
