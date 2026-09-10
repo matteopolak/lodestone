@@ -6,11 +6,14 @@
 //! view. The controls use the same path with the gateway metadata absent and
 //! with the connection's gateway cooldown still active.
 
+use std::collections::HashSet;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use lodestone_client::{
     ChunkPos, ClientBuilder, ClientEvent, ClientHandle, EventStream, LoginProfile, ServerAddress,
 };
+use lodestone_data::block_states::StateId;
 use lodestone_model::{GameMode, Rotation, Vec3};
 use lodestone_server::dimension::Dimension;
 use lodestone_server::{
@@ -107,6 +110,14 @@ impl ServerProtocol for FixtureProtocol {
     fn end_chunk_batch(&self, batch_size: i32) -> ServerDirective {
         self.0.end_chunk_batch(batch_size)
     }
+
+    fn encode_chunk_cache_center(&self, cx: i32, cz: i32) -> ServerDirective {
+        self.0.encode_chunk_cache_center(cx, cz)
+    }
+
+    fn encode_forget_chunk(&self, cx: i32, cz: i32) -> ServerDirective {
+        self.0.encode_forget_chunk(cx, cz)
+    }
 }
 
 /// A small world whose origin has a solid floor for the server's initial-spawn
@@ -116,10 +127,15 @@ impl ServerProtocol for FixtureProtocol {
 struct GatewayWorld {
     gateway: bool,
     metadata: bool,
+    resident: Mutex<HashSet<(i32, i32)>>,
 }
 
 impl ChunkSource for GatewayWorld {
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+        self.resident
+            .lock()
+            .expect("resident column lock")
+            .insert((cx, cz));
         // Use the ordinary 26.2 build-height window: the client chooses its
         // chunk decoder shape from the join dimension, while the production
         // encoder chooses from the source column. Keeping them equal is what
@@ -150,6 +166,24 @@ impl ChunkSource for GatewayWorld {
         self.column(x.div_euclid(16), z.div_euclid(16))
             .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
             .to_string()
+    }
+
+    fn resident_block_state_id(&self, x: i32, y: i32, z: i32) -> Option<StateId> {
+        let resident = self
+            .resident
+            .lock()
+            .expect("resident block-state lock")
+            .contains(&(x.div_euclid(16), z.div_euclid(16)));
+        resident.then(|| StateId::from_state_str(&self.block_state(x, y, z)))?
+    }
+
+    fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
+        let resident = self
+            .resident
+            .lock()
+            .expect("resident column lock")
+            .contains(&(cx, cz));
+        resident.then(|| self.column(cx, cz))
     }
 
     fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
@@ -191,7 +225,11 @@ async fn connect(gateway: bool, metadata: bool) -> (
     EventStream,
     tokio::task::JoinHandle<Result<ServeSummary, ServerError>>,
 ) {
-    let source = GatewayWorld { gateway, metadata };
+    let source = GatewayWorld {
+        gateway,
+        metadata,
+        resident: Mutex::default(),
+    };
     let (client_io, server_io) = lodestone_net::memory_pair();
     let block_entities = BlockEntityHandle::default();
     let server_task = tokio::spawn(async move {
@@ -209,7 +247,7 @@ async fn connect(gateway: bool, metadata: bool) -> (
     });
     let (handle, events) = ClientBuilder::new(
         address(),
-        profile(if metadata { "Gateway" } else { "GatewayNoMetadata" }),
+        profile(if metadata { "Gateway" } else { "NoMetadata" }),
         Box::new(adapter()),
     )
         .connect_with(client_io);
