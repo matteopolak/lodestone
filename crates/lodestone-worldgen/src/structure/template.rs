@@ -79,7 +79,7 @@ use lodestone_core::{Nbt, Reader};
 use lodestone_data::block::Block;
 use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey};
 use lodestone_data::block_states::StateId as CanonicalStateId;
-use lodestone_data::{block_survival, collision_shapes};
+use lodestone_data::{block_solidity, block_survival, collision_shapes};
 use lodestone_worldgen_core::rng::{LegacyRandomSource, RandomSource, get_seed};
 
 use super::BoundingBox;
@@ -1006,7 +1006,7 @@ fn block_entity_type_for_state(state: &str) -> Option<&'static str> {
 /// are written after a structure template.
 #[derive(Debug, Clone, Copy)]
 enum AttachmentSupport {
-    Face,
+    Face { solid: bool },
     Below,
 }
 
@@ -1018,8 +1018,8 @@ fn attachment_support(block: Block) -> Option<AttachmentSupport> {
         | Block::RedstoneWallTorch
         | Block::SoulWallTorch
         | Block::CopperWallTorch
-        | Block::TripwireHook
-        | Block::OakWallSign
+        | Block::TripwireHook => Face { solid: false },
+        Block::OakWallSign
         | Block::SpruceWallSign
         | Block::BirchWallSign
         | Block::AcaciaWallSign
@@ -1031,25 +1031,6 @@ fn attachment_support(block: Block) -> Option<AttachmentSupport> {
         | Block::BambooWallSign
         | Block::CrimsonWallSign
         | Block::WarpedWallSign
-        | Block::OakWallHangingSign
-        | Block::SpruceWallHangingSign
-        | Block::BirchWallHangingSign
-        | Block::AcaciaWallHangingSign
-        | Block::CherryWallHangingSign
-        | Block::JungleWallHangingSign
-        | Block::DarkOakWallHangingSign
-        | Block::PaleOakWallHangingSign
-        | Block::MangroveWallHangingSign
-        | Block::CrimsonWallHangingSign
-        | Block::WarpedWallHangingSign
-        | Block::BambooWallHangingSign
-        | Block::SkeletonWallSkull
-        | Block::WitherSkeletonWallSkull
-        | Block::ZombieWallHead
-        | Block::PlayerWallHead
-        | Block::CreeperWallHead
-        | Block::DragonWallHead
-        | Block::PiglinWallHead
         | Block::WhiteWallBanner
         | Block::OrangeWallBanner
         | Block::MagentaWallBanner
@@ -1065,7 +1046,7 @@ fn attachment_support(block: Block) -> Option<AttachmentSupport> {
         | Block::BrownWallBanner
         | Block::GreenWallBanner
         | Block::RedWallBanner
-        | Block::BlackWallBanner => Face,
+        | Block::BlackWallBanner => Face { solid: true },
         Block::Rail
         | Block::StonePressurePlate
         | Block::OakPressurePlate
@@ -1134,15 +1115,10 @@ fn attachment_survives(grid: &DenseBlockGrid, pos: [i32; 3], state: CanonicalSta
         return true;
     };
     match support {
-        AttachmentSupport::Face => {
+        AttachmentSupport::Face { solid } => {
             let Some(facing) = property(state, PropertyKey::Facing) else {
                 return true;
             };
-            let support_pos = adjacent(pos, facing);
-            if !inside(support_pos) {
-                return true;
-            }
-            let support = canonical_state_at(grid, support_pos);
             let opposite = match facing {
                 BuiltinPropertyValue::North => BuiltinPropertyValue::South,
                 BuiltinPropertyValue::South => BuiltinPropertyValue::North,
@@ -1150,7 +1126,18 @@ fn attachment_survives(grid: &DenseBlockGrid, pos: [i32; 3], state: CanonicalSta
                 BuiltinPropertyValue::West => BuiltinPropertyValue::East,
                 _ => return true,
             };
-            support.is_some_and(|support| full_support_face(support, opposite))
+            let support_pos = adjacent(pos, opposite);
+            if !inside(support_pos) {
+                return true;
+            }
+            let support = canonical_state_at(grid, support_pos);
+            support.is_some_and(|support| {
+                if solid {
+                    block_solidity::legacy_solid(support)
+                } else {
+                    full_support_face(support, facing)
+                }
+            })
         }
         AttachmentSupport::Below => {
             let support_pos = [pos[0], pos[1] - 1, pos[2]];
@@ -1352,11 +1339,48 @@ mod tests {
         assert_eq!(unsupported.get(1, 1, 0), "minecraft:air");
 
         let mut supported = DenseBlockGrid::new(0, 0, -2, 3, 3, 5, "minecraft:air");
-        support.place(origin([1, 1, -1]), &settings, &mut supported);
+        support.place(origin([1, 1, 1]), &settings, &mut supported);
         ladder.place(origin([1, 1, 0]), &settings, &mut supported);
         assert_eq!(
             supported.get(1, 1, 0),
             "minecraft:ladder[facing=north,waterlogged=false]"
         );
+
+        // Wall banners use the opposite side of FACING as their support and
+        // the block's legacy-solid predicate. A stair is intentionally the
+        // positive control: it is solid enough for a banner even though it
+        // does not expose a full sturdy face.
+        let banner_north = StructureTemplate::from_blocks(
+            [1, 1, 1],
+            vec![BlockState::parse("minecraft:magenta_wall_banner[facing=north]")],
+            vec![([0, 0, 0], 0)],
+        );
+        let banner_south = StructureTemplate::from_blocks(
+            [1, 1, 1],
+            vec![BlockState::parse("minecraft:magenta_wall_banner[facing=south]")],
+            vec![([0, 0, 0], 0)],
+        );
+        let stair = StructureTemplate::from_blocks(
+            [1, 1, 1],
+            vec![BlockState::parse("minecraft:purpur_stairs[facing=south,half=top,shape=straight]")],
+            vec![([0, 0, 0], 0)],
+        );
+
+        let mut banner_supported = DenseBlockGrid::new(0, 0, -2, 3, 3, 5, "minecraft:air");
+        stair.place(origin([1, 1, 1]), &settings, &mut banner_supported);
+        banner_north.place(origin([1, 1, 0]), &settings, &mut banner_supported);
+        assert_eq!(
+            banner_supported.get(1, 1, 0),
+            "minecraft:magenta_wall_banner[facing=north]"
+        );
+
+        let mut banner_unsupported = DenseBlockGrid::new(0, 0, -2, 3, 3, 5, "minecraft:air");
+        banner_north.place(origin([1, 1, 0]), &settings, &mut banner_unsupported);
+        assert_eq!(banner_unsupported.get(1, 1, 0), "minecraft:air");
+
+        let mut banner_wrong_side = DenseBlockGrid::new(0, 0, -2, 3, 3, 5, "minecraft:air");
+        stair.place(origin([1, 1, 1]), &settings, &mut banner_wrong_side);
+        banner_south.place(origin([1, 1, 0]), &settings, &mut banner_wrong_side);
+        assert_eq!(banner_wrong_side.get(1, 1, 0), "minecraft:air");
     }
 }

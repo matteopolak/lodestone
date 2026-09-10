@@ -36,9 +36,13 @@ Each template completes a typed attachment-survival pass before the next piece i
 revisits the written positions and their boundary, removes unsupported face attachments (including
 ladders, wall signs, wall torches and wall banners) and below-supported rails and pressure plates,
 then propagates removals to adjacent candidates. It uses generated block-state properties, collision
-shapes and support predicates rather than parsing state names in the placement loop. This is the
-survival part of the neighbour-shape lifecycle; connection-state recomputation for fences, walls,
-panes, stairs and rails remains a separate extension point.
+shapes and support predicates rather than parsing state names in the placement loop. Face support is
+looked up on the side opposite the attachment's `Facing` value. The generated support facts preserve
+the distinction between legacy-solid support used by wall signs and banners and a full sturdy face
+used by ladders, wall torches and tripwire hooks. A support outside the clipped template grid is
+unknown rather than air, so a boundary attachment is retained until the receiving world can provide
+that neighbour. This is the survival part of the neighbour-shape lifecycle; connection-state
+recomputation for fences, walls, panes, stairs and rails remains a separate extension point.
 
 Concentric-ring sets are generator-wide: `StructureRegistry` resolves the placement set's preferred
 biome holder-set, searches the 112-block square around each initial candidate at quart resolution,

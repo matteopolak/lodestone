@@ -4762,6 +4762,11 @@ mod tests {
             target.len(),
             "target chunk must retain all four completed banner entities"
         );
+        assert_eq!(
+            column.block_state(9, 118, 10),
+            "minecraft:magenta_wall_banner[facing=north]",
+            "target cell must retain the north-facing magenta wall banner"
+        );
         for position in target {
             assert!(
                 column
