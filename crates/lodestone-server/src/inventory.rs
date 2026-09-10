@@ -602,15 +602,13 @@ impl PlayerInventory {
     pub fn add(&mut self, stack: ItemStack) -> (Vec<usize>, Option<ItemStack>) {
         let mut remaining = stack;
         let mut written = Vec::new();
-        // `max_stack_size` is per-item; this
-        // crate has no per-item census of it on the server side, so 64 stands
-        // in. That is right for every block drop the bundled tables produce
-        // (cobblestone/dirt/gravel/flint/coal/raw_iron are all 64-stackable)
-        // and is the same constant `MobSim::spawn_item`'s callers already pass
-        // to `ItemLifecycle::newly_dropped`. A tool or a bucket picked up this
-        // way would over-stack; that wants a real `max_stack_size` census
-        // rather than a guess here.
-        let max = u32::from(lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE);
+        // Use the same typed cap as menu clicks. The item prototype census
+        // supplies the effective built-in restriction, while a modeled
+        // `minecraft:max_stack_size` patch overrides it. Keeping this lookup
+        // here (rather than a 64-item fallback) prevents a pickup from
+        // creating an impossible sword, bucket, or egg stack and keeps the
+        // entity-to-inventory path consistent with ordinary menu placement.
+        let max = crate::container_click::max_stack_size(&remaining).max(1);
 
         loop {
             if remaining.count == 0 {
@@ -1107,5 +1105,20 @@ mod tests {
         assert_eq!(written, vec![0, 1], "topped up slot 0, then opened slot 1");
         assert_eq!(inv.native(0).unwrap().count, 64);
         assert_eq!(inv.native(1).unwrap().count, 6);
+    }
+
+    /// Pickup uses the item's effective typed cap, not the ordinary 64-item
+    /// default. A non-stackable item must leave its remainder in the world
+    /// instead of being silently over-stacked in the player's inventory.
+    #[test]
+    fn add_respects_item_specific_stack_cap() {
+        let mut inv = PlayerInventory::new();
+        let sword = ItemStack::new("minecraft:diamond_sword".parse().unwrap(), 2);
+
+        let (written, leftover) = inv.add(sword);
+
+        assert_eq!(written, vec![0]);
+        assert_eq!(inv.native(0).map(|stack| stack.count), Some(1));
+        assert_eq!(leftover.map(|stack| stack.count), Some(1));
     }
 }

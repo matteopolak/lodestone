@@ -30,6 +30,12 @@ backwards makes every pickaxe mine at fist speed.
 are distinct same-named types; the lowering resolves by name
 (`EquipmentSlot::from_name`), not through `container::equippable_slot`.
 
+Server inventory pickups use the same effective `max_stack_size` lookup as
+container clicks. The per-item prototype census supplies built-in caps, while
+an explicitly modeled stack component overrides them; this keeps entity pickup
+from creating impossible stacks for tools, buckets, eggs, or plugin-authored
+caps. A remainder stays on the item entity when the destination slot is full.
+
 Known gaps: `has_unmodeled` never crosses into `lodestone-game`, so a lowered
 stack cannot say its component set was partial. Only 8 of 111 data components
 are modelled on the game side — an unmodelled one is a deliberate escape
