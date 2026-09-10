@@ -5,15 +5,12 @@
 //! Moved here verbatim from `overworld.rs` by U16 Phase A; see [`super`]'s own module
 //! doc for the pipeline order and for every measurement behind these stages.
 
-use std::cell::RefCell;
 use std::sync::Arc;
 
 use crate::aquifer::{AquiferSystem, BlockKind, AnyPositionalFactory};
-use crate::biome::BiomeSearchCursor;
-use crate::carver::{CarveGrid, CarveObserver, CarverConfig};
+use crate::carver::{CarveGrid, CarverConfig, NoObserver};
 use crate::density::Density;
 use crate::engine::Program;
-use crate::rng::RandomSource;
 use crate::surface::{PreState, SurfaceDiff};
 
 use super::{OverworldGenerator, PreOreResult};
@@ -73,43 +70,19 @@ impl OverworldGenerator {
         schedule.enter(crate::stage_schedule::ColumnStage::Fill);
         let field = self.fill_stage(&aquifer, base_x, base_z, &beard);
         let heights = self.heights_from_field(&field);
-        let mut biome_cursor = self
-            .dynamic_biome
-            .as_ref()
-            .map(|dynamic| dynamic.table.search_cursor());
         // The 4x4x4 grid is now the primary biome product and the
         // 16-entry surface array is read out of it. Two separate sample passes
         // would be two chances to diverge; see `biome_stage`.
         schedule.enter(crate::stage_schedule::ColumnStage::Biomes);
-        let biome_cells = self.biome_cells_stage(
-            base_x,
-            base_z,
-            biome_cursor.as_mut().map(|cursor| cursor),
-        );
+        let biome_cells = self.biome_cells_stage(base_x, base_z);
         let biome_quarts = self.biome_stage(&biome_cells, &heights);
         schedule.enter(crate::stage_schedule::ColumnStage::Surface);
-        let surface_diff = self.surface_stage(
-            &field,
-            &heights,
-            base_x,
-            base_z,
-            biome_cursor.as_mut().map(|cursor| cursor),
-        );
+        let surface_diff = self.surface_stage(&field, &heights, base_x, base_z);
 
         schedule.enter(crate::stage_schedule::ColumnStage::Materialize);
         let world = self.materialize_world(&field, surface_diff, base_x, base_z);
         schedule.enter(crate::stage_schedule::ColumnStage::Carvers);
-        let world = self.carve_stage(
-            cx,
-            cz,
-            &aquifer,
-            &heights,
-            &biome_quarts,
-            base_x,
-            base_z,
-            world,
-            biome_cursor.as_mut().map(|cursor| cursor),
-        );
+        let world = self.carve_stage(cx, cz, &aquifer, &heights, &biome_quarts, base_x, base_z, world);
         // Structure placement's S2. A no-op (and free) for a generator with no structure
         // data, which is every fixture resolver in this workspace.
         schedule.enter(crate::stage_schedule::ColumnStage::StructurePlacement);
@@ -315,7 +288,6 @@ impl OverworldGenerator {
         heights: &[i32; 256],
         base_x: i32,
         base_z: i32,
-        cursor: Option<&mut BiomeSearchCursor>,
     ) -> SurfaceDiff {
         let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Surface);
 
@@ -364,12 +336,9 @@ impl OverworldGenerator {
             }
         };
         let heightmap = |lx: i32, lz: i32| -> i32 { heights[(lz * 16 + lx) as usize] };
-        let cursor_state = cursor.as_ref().map(|value| **value);
-        let surface_biomes = RefCell::new(self.surface_biome_context(base_x, base_z, cursor_state));
+        let surface_biomes = self.surface_biome_context(base_x, base_z);
         let biome_at = |lx: i32, y: i32, lz: i32| -> (&str, bool) {
-            let name = surface_biomes
-                .borrow_mut()
-                .at_block(base_x + lx, y, base_z + lz);
+            let name = surface_biomes.at_block(base_x + lx, y, base_z + lz);
             let cold = match &self.dynamic_biome {
                 Some(dynamic) => crate::biome::cold_enough_to_snow(&dynamic.temperatures, name),
                 None => self.fallback_cold_enough_to_snow,
@@ -377,25 +346,8 @@ impl OverworldGenerator {
             (name, cold)
         };
 
-        let column_biome_at = |lx: i32, y: i32, lz: i32| {
-            surface_biomes
-                .borrow_mut()
-                .touch_block(base_x + lx, y, base_z + lz);
-        };
-        let result = self.surface.build_surface_reusing_with_column_biome(
-            SurfaceDiff::default(),
-            &pre,
-            &heightmap,
-            &biome_at,
-            &column_biome_at,
-            base_x,
-            base_z,
-        );
-        let surface_biomes = surface_biomes.into_inner();
-        if let (Some(cursor), Some(updated)) = (cursor, surface_biomes.into_cursor()) {
-            *cursor = updated;
-        }
-        result
+        self.surface
+            .build_surface(&pre, &heightmap, &biome_at, base_x, base_z)
     }
 
     /// Materialises the full `16×height×16` post-surface column into a
@@ -520,7 +472,6 @@ impl OverworldGenerator {
         base_x: i32,
         base_z: i32,
         world: crate::dense_grid::DenseBlockGrid,
-        mut cursor: Option<&mut BiomeSearchCursor>,
     ) -> crate::dense_grid::DenseBlockGrid {
         let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Carve);
         let heightmap_fn = |lx: i32, lz: i32| -> i32 { heights[(lz * 16 + lx) as usize] };
@@ -535,13 +486,7 @@ impl OverworldGenerator {
                 .top_material(x, y, z, under_fluid, &heightmap_fn, biome, *cold)
         };
         let mut carvers_for_source = |source_x: i32, source_z: i32| -> &[CarverConfig] {
-            let biome = self.biome_for_carver_source(
-                source_x,
-                source_z,
-                cursor
-                    .as_deref_mut()
-                    .expect("dynamic biome carver stage requires a search cursor"),
-            );
+            let biome = self.biome_for_carver_source(source_x, source_z);
             self.carvers_by_biome
                 .get(biome)
                 .map(Vec::as_slice)
@@ -560,11 +505,7 @@ impl OverworldGenerator {
         } else {
             CarveGrid::from_dense(world)
         };
-        let mut observer = TraceObserver {
-            enabled: std::env::var_os("LODESTONE_CARVER_TRACE").is_some(),
-            center_x: cx,
-            center_z: cz,
-        };
+        let mut observer = NoObserver;
         crate::carver::apply_carvers(
             self.seed,
             cx,
@@ -602,38 +543,6 @@ impl OverworldGenerator {
         debug_assert!((0..16).contains(&lx) && (0..16).contains(&lz));
         debug_assert!((0..height).contains(&ly));
         ((ly * 16 + lz) * 16 + lx) as usize
-    }
-}
-
-struct TraceObserver {
-    enabled: bool,
-    center_x: i32,
-    center_z: i32,
-}
-
-impl CarveObserver for TraceObserver {
-    fn after_carver<R: RandomSource>(
-        &mut self,
-        source_x: i32,
-        source_z: i32,
-        index: usize,
-        started: bool,
-        random: &mut R,
-    ) {
-        if self.enabled {
-            eprintln!(
-                "carver-trace center=({}, {}) source=({}, {}) offset=({}, {}) index={} started={} probe={}",
-                self.center_x,
-                self.center_z,
-                source_x,
-                source_z,
-                source_x - self.center_x,
-                source_z - self.center_z,
-                index,
-                started,
-                random.next_long(),
-            );
-        }
     }
 }
 
