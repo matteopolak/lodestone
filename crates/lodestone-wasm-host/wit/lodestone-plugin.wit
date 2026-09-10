@@ -34,7 +34,7 @@
 //     it observes in its `plugin.toml`, and a kind this world does not define is
 //     a loud manifest rejection at load time.
 
-package lodestone:plugin@0.28.0;
+package lodestone:plugin@0.29.0;
 
 /// The vocabulary itself: the intent doctrine's own observe/act types, lifted
 /// into WIT. Nothing here is invented for wasm — every record below is a
@@ -258,6 +258,14 @@ interface types {
     }
 
     record entity-equipment-changed {
+        entity: entity-identity,
+        equipment: list<entity-equipment>,
+    }
+
+    /// A copied request to replace the reported equipment on one observed
+    /// entity. The host checks the lifecycle generation before it reaches ECS;
+    /// a stale identity cannot target a recycled network id.
+    record entity-equipment-mutation {
         entity: entity-identity,
         equipment: list<entity-equipment>,
     }
@@ -586,6 +594,10 @@ interface types {
         /// The host never writes the client replica; one finite outcome returns
         /// in a later guest tick.
         set-resident-block(resident-block-mutation),
+        /// Replace the copied equipment component for one observed entity —
+        /// capability `act:entity-equipment`. The shell resolves the network
+        /// id through its current entity index and never exposes an ECS handle.
+        set-entity-equipment(entity-equipment-mutation),
     }
 
     /// The string parsing mode for a guest command argument.
@@ -689,7 +701,7 @@ interface types {
         name: string,
         version: string,
         /// The world version this guest was built against, e.g.
-        /// `"lodestone:plugin@0.28.0"`.
+        /// `"lodestone:plugin@0.29.0"`.
         abi: string,
         /// Root commands this guest wants the host to register. The host only
         /// installs them when the manifest grants `commands:register`.

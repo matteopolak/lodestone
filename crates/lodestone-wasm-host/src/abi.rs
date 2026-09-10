@@ -148,6 +148,18 @@ pub enum LoweredAction {
     Intent(IntentAction),
     /// A copied request the shell must route to its authoritative net task.
     ResidentBlockMutation(ResidentBlockMutation),
+    /// A generation-scoped copied equipment replacement for the client entity
+    /// store. The conductor validates the identity before scheduling ECS work.
+    EntityEquipment(EntityEquipmentMutation),
+}
+
+/// A copied equipment replacement after capability lowering. The payload keeps
+/// the WIT records until the ECS consumer converts item keys to the native model,
+/// so malformed guest keys can be refused without manufacturing a clear operation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntityEquipmentMutation {
+    pub entity: EntityIdentity,
+    pub equipment: Vec<EntityEquipment>,
 }
 
 /// Per-guest lifecycle generations for copied network entity identities.
@@ -180,6 +192,11 @@ impl EntityGenerations {
                 generation: *generation,
             })
         })
+    }
+
+    #[must_use]
+    pub(crate) fn matches_live(&self, identity: EntityIdentity) -> bool {
+        self.live(identity.entity_id) == Some(identity)
     }
 
     fn removed(&mut self, entity_id: i32) -> Option<EntityIdentity> {
@@ -622,6 +639,7 @@ pub fn capability_for(action: &Action) -> Capability {
         Action::InventoryDropCursor => Capability::ActInventoryDropCursor,
         Action::DropSelectedItem(_) => Capability::ActDropSelectedItem,
         Action::SetResidentBlock(_) => Capability::WriteWorld,
+        Action::SetEntityEquipment(_) => Capability::ActEntityEquipment,
     }
 }
 
@@ -740,6 +758,12 @@ pub fn lower_action(action: Action, granted: &CapabilitySet) -> Result<LoweredAc
             SelectedItemDropMode::Stack => ClientAction::DropSelectedItemStack,
         }),
         Action::SetResidentBlock(request) => LoweredAction::ResidentBlockMutation(request),
+        Action::SetEntityEquipment(request) => LoweredAction::EntityEquipment(
+            EntityEquipmentMutation {
+                entity: request.entity,
+                equipment: request.equipment,
+            },
+        ),
     })
 }
 
@@ -955,6 +979,50 @@ mod tests {
                 }],
             })]
         );
+    }
+
+    #[test]
+    fn entity_equipment_mutation_requires_capability_and_preserves_generation() {
+        let request = crate::host::EntityEquipmentMutation {
+            entity: EntityIdentity {
+                entity_id: 9,
+                generation: 3,
+            },
+            equipment: vec![EntityEquipment {
+                slot: EquipmentSlot::MainHand,
+                item: Some(ItemStack {
+                    item: "minecraft:stone".to_owned(),
+                    count: 1,
+                }),
+            }],
+        };
+        assert_eq!(
+            lower_action(
+                Action::SetEntityEquipment(request.clone()),
+                &CapabilitySet::empty(),
+            ),
+            Err(Capability::ActEntityEquipment)
+        );
+        assert_eq!(
+            lower_action(
+                Action::SetEntityEquipment(request.clone()),
+                &CapabilitySet::from_iter([Capability::ActEntityEquipment]),
+            ),
+            Ok(LoweredAction::EntityEquipment(EntityEquipmentMutation {
+                entity: request.entity,
+                equipment: request.equipment,
+            }))
+        );
+        let mut generations = EntityGenerations::default();
+        assert_eq!(generations.spawned(9).generation, 1);
+        assert!(!generations.matches_live(EntityIdentity {
+            entity_id: 9,
+            generation: 2,
+        }));
+        assert!(generations.matches_live(EntityIdentity {
+            entity_id: 9,
+            generation: 1,
+        }));
     }
 
     /// The lift carries the text and the kind through unchanged.

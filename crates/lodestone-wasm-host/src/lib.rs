@@ -113,14 +113,15 @@ pub mod version_broker;
 
 pub use abi::{
     IntentAction, InventoryClickButton, InventoryClickIntent, InventoryClickMode, InventoryThrowMode,
-    LoweredAction,
+    EntityEquipmentMutation, LoweredAction,
     MovementOverride,
     capability_for, lift_break_outcome, lift_command_context, lift_entity_events, lift_event,
     lift_place_outcome, lift_verdict_context, lower_action, EntityGenerations,
 };
 pub use capability::{Capability, CapabilitySet};
 pub use conductor::{
-    PendingWasmMenuClicks, PendingWasmWorldMutations, WasmHostPlugin, WasmPlugins, WasmReloadError,
+    PendingWasmEntityEquipment, PendingWasmMenuClicks, PendingWasmWorldMutations, WasmHostPlugin,
+    WasmPlugins, WasmReloadError,
     drive_wasm_plugins, reload_wasm_plugins,
 };
 pub use host::{

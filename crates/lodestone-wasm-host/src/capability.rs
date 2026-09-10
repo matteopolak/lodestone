@@ -183,6 +183,10 @@ pub enum Capability {
     /// Drop one item or the complete selected stack through the normal client
     /// action queue. The live client owns the selected stack and wire encoding.
     ActDropSelectedItem,
+    /// Replace one generation-scoped remote entity's copied equipment state.
+    /// The conductor resolves the network identity through `EntityIndex`; no
+    /// ECS handle or world borrow crosses the plugin boundary.
+    ActEntityEquipment,
     /// Receive a generation-bounded outcome after a WASM or native placement
     /// attempt resolves.
     ///
@@ -263,6 +267,7 @@ impl Capability {
         Self::ActInventoryThrow,
         Self::ActInventoryDropCursor,
         Self::ActDropSelectedItem,
+        Self::ActEntityEquipment,
         Self::ObservePlace,
         Self::ObserveBreak,
         Self::VetoActions,
@@ -307,6 +312,7 @@ impl Capability {
             Self::ActInventoryThrow => "act:inventory-throw",
             Self::ActInventoryDropCursor => "act:inventory-drop-cursor",
             Self::ActDropSelectedItem => "act:drop-selected-item",
+            Self::ActEntityEquipment => "act:entity-equipment",
             Self::ObservePlace => "observe:place",
             Self::ObserveBreak => "observe:break",
             Self::VetoActions => "veto:actions",
@@ -371,6 +377,7 @@ impl Capability {
             | Self::ActInventoryThrow
             | Self::ActInventoryDropCursor
             | Self::ActDropSelectedItem
+            | Self::ActEntityEquipment
             | Self::ObservePlace
             | Self::ObserveBreak
             | Self::VetoActions
@@ -580,6 +587,10 @@ mod tests {
         assert!(
             !policy.contains(Capability::ActSelectSlot),
             "act:select-slot must not be granted by default"
+        );
+        assert!(
+            !policy.contains(Capability::ActEntityEquipment),
+            "act:entity-equipment must not be granted by default"
         );
         assert!(
             !policy.contains(Capability::ActInventoryClick),

@@ -30,7 +30,7 @@ fn manifest(name: &str, priority: &str, capabilities: &str) -> String {
     format!(
         "name = \"{name}\"\n\
          version = \"0.1.0\"\n\
-         abi = \"lodestone:plugin@0.28.0\"\n\
+         abi = \"lodestone:plugin@0.29.0\"\n\
          module = \"chat_responder.wasm\"\n\
          priority = \"{priority}\"\n\
          capabilities = [{capabilities}]\n"

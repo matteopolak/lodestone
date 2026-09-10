@@ -27,7 +27,7 @@ fn install(root: &Path, wasm: &Path) {
         plugin.join("plugin.toml"),
         "name = \"raw-observer\"\n\
          version = \"0.1.0\"\n\
-         abi = \"lodestone:plugin@0.28.0\"\n\
+         abi = \"lodestone:plugin@0.29.0\"\n\
          module = \"chat_responder.wasm\"\n\
          capabilities = [\"log\", \"observe:packets\", \"act:chat\"]\n",
     )
