@@ -120,6 +120,46 @@ impl StateId {
     }
 }
 
+/// Typed facts for the base block state used by heightmap scans.
+///
+/// Built-in states are classified from the generated canonical state tables at
+/// the interner/palette boundary. Extension states remain explicit rather than
+/// being guessed from a name; the conservative extension answer preserves the
+/// prior behavior of treating an unknown state as motion blocking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BaseStateFacts {
+    Builtin {
+        is_air: bool,
+        is_fluid: bool,
+        blocks_motion: bool,
+    },
+    Extension,
+}
+
+impl BaseStateFacts {
+    /// Facts for an out-of-bounds cell, which reads as built-in air.
+    pub const fn air() -> Self {
+        Self::Builtin {
+            is_air: true,
+            is_fluid: false,
+            blocks_motion: false,
+        }
+    }
+
+    /// Whether this base state is an ocean-floor heightmap cell.
+    #[inline]
+    pub const fn is_ocean_floor(self) -> bool {
+        match self {
+            Self::Builtin {
+                is_air,
+                is_fluid,
+                blocks_motion,
+            } => !is_air && !is_fluid && blocks_motion,
+            Self::Extension => true,
+        }
+    }
+}
+
 /// Interner state behind the lock. Split out so the recursive base-name intern
 /// can run under a single write guard (see [`intern_locked`]).
 #[derive(Debug, Default)]
@@ -289,6 +329,37 @@ impl StateInterner {
             .read()
             .expect("state interner lock poisoned")
             .canonical_of[id.index()]
+    }
+
+    /// Resolves the base state's typed facts from generated canonical tables.
+    ///
+    /// This is a palette-boundary operation: callers should cache the result
+    /// beside each palette entry instead of invoking it per cell.
+    #[must_use]
+    pub fn base_facts(&self, id: StateId) -> BaseStateFacts {
+        let canonical = self
+            .table
+            .read()
+            .expect("state interner lock poisoned")
+            .canonical_of[id.index()];
+        let Some(canonical) = canonical else {
+            return BaseStateFacts::Extension;
+        };
+
+        let block = canonical.block();
+        BaseStateFacts::Builtin {
+            is_air: matches!(
+                block,
+                lodestone_data::block::Block::Air
+                    | lodestone_data::block::Block::CaveAir
+                    | lodestone_data::block::Block::VoidAir
+            ),
+            is_fluid: matches!(
+                block,
+                lodestone_data::block::Block::Water | lodestone_data::block::Block::Lava
+            ),
+            blocks_motion: lodestone_data::block_solidity::blocks_motion(canonical),
+        }
     }
 
     /// The id of `id`'s base name — `"minecraft:oak_log[axis=y]"` maps to the

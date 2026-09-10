@@ -241,15 +241,14 @@ impl OverworldGenerator {
         min_z: i32,
         height: i32,
     ) -> [i32; 256] {
-        use crate::feature::vegetation::{blocks_motion, is_air, is_fluid};
-
         let mut heights = [min_y; 256];
         for lz in 0..16i32 {
             for lx in 0..16i32 {
                 for y in (min_y..min_y + height).rev() {
-                    let state = world.get(min_x + lx, y, min_z + lz);
-                    let base = state.split('[').next().unwrap_or(state);
-                    if !is_air(base) && !is_fluid(base) && blocks_motion(base) {
+                    if world
+                        .get_base_facts(min_x + lx, y, min_z + lz)
+                        .is_ocean_floor()
+                    {
                         heights[(lz * 16 + lx) as usize] = y + 1;
                         break;
                     }
@@ -547,6 +546,7 @@ impl OverworldGenerator {
 #[cfg(test)]
 mod tests {
     use super::OverworldGenerator;
+    use crate::feature::vegetation::{blocks_motion, is_air, is_fluid};
     use crate::dense_grid::DenseBlockGrid;
     use crate::feature::{
         BlockPos, ORE_READ_MAX, ORE_READ_MIN, OreConfig, OreInput, RegionHeights, place_ore_feature,
@@ -593,6 +593,82 @@ mod tests {
         // setup draws.
         place_ore_feature(&mut random, BlockPos { x: 2, y: 14, z: 2 }, &config, &input, &mut view);
         random.next_long()
+    }
+
+    fn string_ocean_floor_wg_heights(world: &DenseBlockGrid) -> [i32; 256] {
+        let (min_x, min_y, min_z, size_x, size_y, size_z) = world.bounds();
+        assert_eq!((size_x, size_z), (16, 16));
+        let mut heights = [min_y; 256];
+        for lz in 0..16i32 {
+            for lx in 0..16i32 {
+                for y in (min_y..min_y + size_y).rev() {
+                    let state = world.get(min_x + lx, y, min_z + lz);
+                    let base = state.split('[').next().unwrap_or(state);
+                    if !is_air(base) && !is_fluid(base) && blocks_motion(base) {
+                        heights[(lz * 16 + lx) as usize] = y + 1;
+                        break;
+                    }
+                }
+            }
+        }
+        heights
+    }
+
+    #[test]
+    fn numeric_ocean_floor_scan_matches_string_oracle_for_builtin_and_extension_states() {
+        let mut world = DenseBlockGrid::new(0, 0, 0, 16, 16, 16, "minecraft:air");
+        for z in 0..16 {
+            for x in 0..16 {
+                world.set(x, 0, z, "minecraft:stone");
+                world.set(x, 1, z, "minecraft:water[level=0]");
+                world.set(x, 2, z, "minecraft:seagrass");
+                world.set(x, 3, z, "mod:soft_plant[variant=thin]");
+                world.set(x, 4, z, "minecraft:cave_air");
+                world.set(x, 5, z, "minecraft:lava[level=0]");
+                world.set(x, 6, z, "minecraft:oak_leaves[distance=7,persistent=false]");
+            }
+        }
+
+        let numeric = OverworldGenerator::ocean_floor_wg_heights(&world, 0, 0, 0, 16);
+        let oracle = string_ocean_floor_wg_heights(&world);
+        assert_eq!(numeric, oracle);
+        assert!(numeric.iter().all(|&height| height == 7));
+    }
+
+    #[test]
+    #[ignore = "diagnostic timing: run explicitly in release mode"]
+    fn measure_numeric_ocean_floor_scan_against_string_oracle() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let mut world = DenseBlockGrid::new(0, 0, 0, 16, 384, 16, "minecraft:air");
+        for z in 0..16 {
+            for x in 0..16 {
+                for y in 0..64 {
+                    world.set(x, y, z, "minecraft:stone");
+                }
+                world.set(x, 64, z, "minecraft:water[level=0]");
+                world.set(x, 65, z, "minecraft:seagrass");
+                world.set(x, 66, z, "mod:soft_plant[variant=thin]");
+            }
+        }
+        let rounds = 2_000;
+        let start_numeric = Instant::now();
+        let mut numeric_digest = 0i64;
+        for _ in 0..rounds {
+            numeric_digest += i64::from(OverworldGenerator::ocean_floor_wg_heights(&world, 0, 0, 0, 384)[0]);
+        }
+        let numeric_elapsed = start_numeric.elapsed();
+        let start_string = Instant::now();
+        let mut string_digest = 0i64;
+        for _ in 0..rounds {
+            string_digest += i64::from(string_ocean_floor_wg_heights(&world)[0]);
+        }
+        let string_elapsed = start_string.elapsed();
+        assert_eq!(black_box(numeric_digest), black_box(string_digest));
+        eprintln!(
+            "ocean_floor_scan rounds={rounds} numeric={numeric_elapsed:?} string={string_elapsed:?} digest={numeric_digest}"
+        );
     }
 
     #[test]
