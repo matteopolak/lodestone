@@ -187,16 +187,9 @@ pub struct DistantTerrain {
 
 /// Allocation failed before the horizon could reach a partially constructed
 /// state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("unable to allocate the bounded distant-terrain grid")]
 pub struct HorizonAllocationError;
-
-impl std::fmt::Display for HorizonAllocationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("unable to allocate the bounded distant-terrain grid")
-    }
-}
-
-impl std::error::Error for HorizonAllocationError {}
 
 impl DistantTerrain {
     /// Allocates the fixed grid around a camera at world block `(x, z)`.

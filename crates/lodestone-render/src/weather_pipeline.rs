@@ -62,32 +62,23 @@ pub const RAIN_TEXTURE: &str = "assets/minecraft/textures/environment/rain.png";
 pub const SNOW_TEXTURE: &str = "assets/minecraft/textures/environment/snow.png";
 
 /// Why the weather textures could not be loaded.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum WeatherAssetError {
     /// The pack has no such texture.
+    #[error("no {path} in the resource pack")]
     Missing {
         /// The jar path that was looked for.
         path: &'static str,
     },
     /// The texture is present but is not a decodable PNG.
+    #[error("decoding {path}: {source}")]
     Decode {
         /// The jar path that failed.
         path: &'static str,
         /// The decoder's own error.
-        source: lodestone_assets::TextureError,
+        r#source: lodestone_assets::TextureError,
     },
 }
-
-impl std::fmt::Display for WeatherAssetError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Missing { path } => write!(f, "no {path} in the resource pack"),
-            Self::Decode { path, source } => write!(f, "decoding {path}: {source}"),
-        }
-    }
-}
-
-impl std::error::Error for WeatherAssetError {}
 
 /// The two precipitation sheets, decoded but not yet uploaded.
 #[derive(Debug)]
@@ -504,5 +495,25 @@ mod tests {
     #[test]
     fn the_camera_uniform_is_one_mat4() {
         assert_eq!(std::mem::size_of::<WeatherUniform>(), 64);
+    }
+
+    #[test]
+    fn weather_asset_errors_keep_their_diagnostics_without_conversions() {
+        let missing = WeatherAssetError::Missing { path: RAIN_TEXTURE };
+        assert_eq!(
+            missing.to_string(),
+            "no assets/minecraft/textures/environment/rain.png in the resource pack"
+        );
+        assert!(std::error::Error::source(&missing).is_none());
+
+        let decode = WeatherAssetError::Decode {
+            path: SNOW_TEXTURE,
+            source: lodestone_assets::TextureError::Decode("invalid PNG".to_owned()),
+        };
+        assert_eq!(
+            decode.to_string(),
+            "decoding assets/minecraft/textures/environment/snow.png: failed to decode png: invalid PNG"
+        );
+        assert!(std::error::Error::source(&decode).is_none());
     }
 }
