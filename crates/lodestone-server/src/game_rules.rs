@@ -196,34 +196,21 @@ impl GameRuleSpec {
 /// at the wire layer. Vanilla logs a warning and drops the write; this crate
 /// returns the reason so `/gamerule` can *tell the player*, which vanilla's own
 /// command layer also does.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum GameRuleError {
     /// No rule with this identifier exists in 26.2.
     ///
     /// The overwhelmingly likely cause is a pre-26.2 camelCase name — see this
     /// module's rename table.
+    #[error("Unknown game rule '{rule}'")]
     Unknown { rule: String },
     /// The value did not parse as the rule's own type.
+    #[error("Game rule '{rule}' expects {expected}")]
     BadValue { rule: &'static str, expected: &'static str },
     /// The value parsed but fell outside vanilla's own declared range.
+    #[error("Game rule '{rule}' must be between {min} and {max}")]
     OutOfRange { rule: &'static str, min: i32, max: i32 },
 }
-
-impl std::fmt::Display for GameRuleError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Unknown { rule } => write!(f, "Unknown game rule '{rule}'"),
-            Self::BadValue { rule, expected } => {
-                write!(f, "Game rule '{rule}' expects {expected}")
-            }
-            Self::OutOfRange { rule, min, max } => {
-                write!(f, "Game rule '{rule}' must be between {min} and {max}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for GameRuleError {}
 
 /// Every game rule 26.2 has, with its real identifier and default.
 ///
@@ -854,6 +841,28 @@ mod tests {
                     expected: "true or false"
                 })
             );
+        }
+    }
+
+    #[test]
+    fn game_rule_errors_keep_their_public_diagnostics_without_sources_or_conversions() {
+        let cases = [
+            (
+                GameRuleError::Unknown { rule: "missing".to_owned() },
+                "Unknown game rule 'missing'",
+            ),
+            (
+                GameRuleError::BadValue { rule: "keep_inventory", expected: "true or false" },
+                "Game rule 'keep_inventory' expects true or false",
+            ),
+            (
+                GameRuleError::OutOfRange { rule: "random_tick_speed", min: 0, max: i32::MAX },
+                "Game rule 'random_tick_speed' must be between 0 and 2147483647",
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(error.to_string(), expected);
+            assert!(std::error::Error::source(&error).is_none());
         }
     }
 
