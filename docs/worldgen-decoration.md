@@ -161,6 +161,11 @@ their own resolved floor tags; mushrooms, lily pads, ceiling plants, carpets, le
 read their respective local support geometry. Full blocks (`melon`, `pumpkin`, `tuff`) and potent
 sulfur have no survival floor gate. The tag sets are resolved once and bound as state-id bitsets per
 decoration pass, so this fidelity does not reintroduce string-set work into each placement attempt.
+At construction, names that belong to the generated block-state registry are
+converted to typed canonical ids and released from the retained resolver sets;
+only unknown plugin/data-pack names remain as a bounded extension fallback for
+states outside that registry. Late-built-in states therefore use the typed
+canonical map, while extension states keep the original name matching.
 Nether forest roots, fungi and sprouts have their own support family: nylium and soul soil are valid
 for all three, mycelium is additionally valid for fungi, and warped roots follow the same support
 closure as sprouts. Ordinary vegetation keeps its narrower floor tag. Huge fungi use the generated

@@ -203,7 +203,11 @@ fn nether_vegetation_can_survive(
     fungus: bool,
 ) -> bool {
     let below = base_at(grid, pos.x, pos.y - 1, pos.z);
-    tags.supports_vegetation.contains(below)
+    tags.has(
+        grid.interner(),
+        Tag::SupportsVegetation,
+        grid.get_id(pos.x, pos.y - 1, pos.z),
+    )
         || below == "minecraft:crimson_nylium"
         || below == "minecraft:warped_nylium"
         || below == "minecraft:soul_soil"
