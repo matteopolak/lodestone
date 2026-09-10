@@ -4477,7 +4477,7 @@ mod tests {
                 registry.insert(
                     remote_pos((1_000 + i, 1_000 + i)),
                     crate::block_entities::BlockEntity::Opaque {
-                        id: "minecraft:chest".to_owned(),
+                        id: "minecraft:chest".to_owned().into(),
                         nbt: lodestone_core::Nbt::End,
                     },
                 );

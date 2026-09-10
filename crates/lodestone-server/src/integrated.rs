@@ -6111,7 +6111,7 @@ mod tests {
             registry.insert(
                 pos,
                 crate::block_entities::BlockEntity::Container {
-                    id: "minecraft:chest".to_string(),
+                    id: "minecraft:chest".to_string().into(),
                     slots: Vec::new(),
                 },
             );
@@ -7412,7 +7412,7 @@ mod tests {
             (
                 opaque_pos,
                 crate::block_entities::BlockEntity::Opaque {
-                    id: "example:archive".to_owned(),
+                    id: "example:archive".to_owned().into(),
                     nbt: opaque_nbt,
                 },
             ),

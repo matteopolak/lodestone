@@ -3878,7 +3878,7 @@ mod tests {
             (
                 opaque_pos,
                 crate::block_entities::BlockEntity::Opaque {
-                    id: "example:archive".to_owned(),
+                    id: "example:archive".to_owned().into(),
                     nbt: opaque_nbt.clone(),
                 },
             ),
@@ -4056,7 +4056,7 @@ mod tests {
         source.set_block_entities(vec![(
             tuple_pos,
             crate::block_entities::BlockEntity::Opaque {
-                id: "example:custom".to_owned(),
+                id: "example:custom".to_owned().into(),
                 nbt: lodestone_core::Nbt::Compound(vec![
                     ("id".to_owned(), lodestone_core::Nbt::String("example:custom".to_owned())),
                     ("x".to_owned(), lodestone_core::Nbt::Int(2)),

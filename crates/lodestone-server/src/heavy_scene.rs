@@ -949,7 +949,7 @@ impl HeavyChunkSource {
             (
                 BlockPos::new(cx * 16, 65, cz * 16),
                 BlockEntity::Container {
-                    id: "minecraft:chest".to_string(),
+                    id: "minecraft:chest".to_string().into(),
                     slots: vec![None; 27],
                 },
             ),

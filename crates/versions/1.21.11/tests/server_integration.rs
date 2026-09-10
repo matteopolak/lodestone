@@ -371,7 +371,7 @@ impl FixtureSource {
             chest: Some((
                 TARGET,
                 BlockEntity::Container {
-                    id: "minecraft:chest".to_owned(),
+                    id: "minecraft:chest".to_owned().into(),
                     slots,
                 },
             )),

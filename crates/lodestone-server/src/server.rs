@@ -8277,7 +8277,7 @@ where
                     registry.insert(
                         target,
                         crate::block_entities::BlockEntity::Opaque {
-                            id: type_name.to_owned(),
+                            id: type_name.to_owned().into(),
                             nbt: lodestone_core::Nbt::End,
                         },
                     );
@@ -21401,7 +21401,7 @@ mod tests {
             registry.insert(
                 pos,
                 BlockEntity::Container {
-                    id: "minecraft:chest".to_string(),
+                    id: "minecraft:chest".to_string().into(),
                     slots: Vec::new(),
                 },
             );

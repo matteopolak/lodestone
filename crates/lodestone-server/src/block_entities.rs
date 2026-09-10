@@ -125,6 +125,11 @@ impl BlockEntityKind {
         })
     }
 
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.name()
+    }
+
     /// Return the static spelling for a built-in key.
     ///
     /// This is separate from [`Self::name`] so a caller holding a record-owned
@@ -239,7 +244,7 @@ pub enum BlockEntity {
     /// the container's contents changes on its own.
     Container {
         /// The `minecraft:block_entity_type` key (`minecraft:chest`, …).
-        id: String,
+        id: BlockEntityKind,
         /// The container's own slots, in menu order.
         slots: Vec<Option<ItemStack>>,
     },
@@ -247,7 +252,7 @@ pub enum BlockEntity {
     /// …). The full NBT payload is retained for these opaque types.
     /// The vanilla id and the full NBT compound are preserved verbatim so the entity
     /// round-trips through a save/load cycle unchanged.
-    Opaque { id: String, nbt: Nbt },
+    Opaque { id: BlockEntityKind, nbt: Nbt },
     /// `minecraft:command_block`/`chain_command_block`/`repeating_command_block`.
     /// The mode is derived from the block itself
     /// (`crate::command_block::mode_for_block`), never stored here — see that
@@ -475,7 +480,7 @@ impl BlockEntity {
     #[must_use]
     pub fn container(id: &str) -> Self {
         BlockEntity::Container {
-            id: id.to_owned(),
+            id: BlockEntityKind::from_name(id),
             slots: vec![None; CONTAINER_9X3_SIZE],
         }
     }
@@ -486,7 +491,7 @@ impl BlockEntity {
     #[must_use]
     pub fn container_of_size(id: &str, size: usize) -> Self {
         BlockEntity::Container {
-            id: id.to_owned(),
+            id: BlockEntityKind::from_name(id),
             slots: vec![None; size],
         }
     }
@@ -520,7 +525,7 @@ impl BlockEntity {
             // Extension keys own their text in the record. Borrowing those
             // through a temporary `BlockEntityKind` would return a reference
             // to the temporary, so this is the one storage-side exception.
-            Self::Container { id, .. } | Self::Opaque { id, .. } => id,
+            Self::Container { id, .. } | Self::Opaque { id, .. } => id.name(),
             _ => self
                 .kind()
                 .builtin_name()
@@ -546,9 +551,7 @@ impl BlockEntity {
             },
             BlockEntity::Hopper(_) => BlockEntityKind::Hopper,
             BlockEntity::BrewingStand(_) => BlockEntityKind::BrewingStand,
-            BlockEntity::Container { id, .. } | BlockEntity::Opaque { id, .. } => {
-                BlockEntityKind::from_name(id)
-            }
+            BlockEntity::Container { id, .. } | BlockEntity::Opaque { id, .. } => id.clone(),
             BlockEntity::CommandBlock(_) => BlockEntityKind::CommandBlock,
             BlockEntity::Spawner(_) => BlockEntityKind::MobSpawner,
             BlockEntity::Sign(sign) => {
@@ -625,7 +628,11 @@ impl BlockEntity {
             // the two `Container` shapes share one Rust variant but not one
             // vanilla menu, so this reads the id rather than assuming.
             BlockEntity::Container { id, slots } => Some(if slots.len() == CONTAINER_3X3_SIZE {
-                debug_assert!(id == "minecraft:dispenser" || id == "minecraft:dropper", "a 9-slot container must be a dispenser or dropper: {id}");
+                debug_assert!(
+                    id.name() == "minecraft:dispenser" || id.name() == "minecraft:dropper",
+                    "a 9-slot container must be a dispenser or dropper: {}",
+                    id.name()
+                );
                 "minecraft:generic_3x3"
             } else {
                 "minecraft:generic_9x3"
@@ -1975,7 +1982,7 @@ mod tests {
         assert_eq!(entity.type_id(), "example:portable_storage");
 
         let opaque = BlockEntity::Opaque {
-            id: "example:portable_storage".to_owned(),
+            id: BlockEntityKind::from_name("example:portable_storage"),
             nbt: Nbt::Compound(Vec::new()),
         };
         assert_eq!(opaque.kind(), entity.kind());
