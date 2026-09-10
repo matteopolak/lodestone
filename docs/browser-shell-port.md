@@ -42,8 +42,11 @@ renderer, input, and page ECS. `web/worker/` builds the server module, and
 page bundle. On Play, `net::launch_browser_worker` creates a `Worker` and a
 `MessageChannel`; the Worker receives one port together with launch settings,
 constructs the one world source and integrated server, then replies `ready`.
-The control channel also reports the two observed startup milestones
-(`loading-module` and `starting-server`) to the page. These are not a made-up
+The control channel also reports the three observed startup milestones
+(`loading-module`, `starting-server`, and `preparing-world`) to the page. The
+last milestone is emitted immediately before the synchronous source
+construction enters the Worker, so it identifies the only long startup section
+without pretending to know how many columns remain. These are not a made-up
 percentage: terrain progress remains the client-observed count of chunk packets
 already applied to its world, so the existing loading grid and bar continue to
 paint while the Worker prepares and streams the initial view.
@@ -62,8 +65,10 @@ error; both parked reads and writes are woken so the client cannot hang behind a
 dead Worker. The page retains the worker object for the session; a post-ready
 worker failure closes the port and reaches the normal client disconnect path. It
 must not fall back then, because that would create a second authoritative
-mutable world. A failure before `ready` is the one safe fallback point and uses
-the existing in-page duplex server. Dropping or shutting down the page endpoint
+mutable world. A failure before `ready` is reported as a launch error too: the
+page never constructs an integrated server, so browser singleplayer cannot
+silently return to main-thread worldgen or simulation. Dropping or shutting
+down the page endpoint
 also terminates the dedicated Worker: a `MessagePort` has no peer-close event,
 so relying on port drop alone could leave the old authoritative loop alive
 behind a later session.
@@ -72,11 +77,24 @@ behind a later session.
 Worker events. It proves malformed launch envelopes do not import wasm, valid
 launches transfer exactly one port and report milestones in order, and a failing
 server bootstrap cannot claim readiness. The shell tests separately prove that
-an error before `ready` remains fallback-eligible while an error after `ready`
-can only disconnect the existing session. `cargo xtask wasm-check` runs the
-worker control test before building the browser bundle; it complements the real
-browser smoke test, rather than pretending a host-side control-plane test can
-prove painting or browser scheduling.
+an error before `ready` is a launch failure while an error after `ready`
+can only disconnect the existing session. `cargo xtask wasm-check` now builds
+the dedicated server wasm artifact explicitly, runs the worker control test,
+and scans the worker entry point for crash-class host calls before building the
+browser bundle. It complements the real browser smoke test, rather than
+pretending a host-side control-plane test can prove painting or browser
+scheduling.
+
+The authoritative Worker is the browser's first and only world owner. A second
+compute-worker pool is intentionally not created by this boundary: moving a
+generated column across another worker would require serializing its block
+entities, structures, biome cells, generation candidates, edits, and retained
+light before the owner can serve or tick it. That would either duplicate
+mutable state or silently drop gameplay data. The current contract keeps that
+state in one Worker, yields between requested columns there, and leaves the
+page thread free for rendering, input, and client packet application. A future
+compute pool must therefore add a typed immutable-column transfer and an
+owner-side merge gate before it can replace this decision.
 
 The page's synchronous ECS command dispatch cannot cross this boundary. The
 worker installs a command sink that visibly refuses page-plugin commands rather

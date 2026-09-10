@@ -1716,14 +1716,12 @@ impl std::fmt::Debug for Origin {
 
 /// Browser-only client endpoint for an integrated session.
 ///
-/// Before the worker reports ready, [`launch_browser_worker`] may refuse and
-/// `run_async` keeps the old in-page duplex path. Once this variant exists its
-/// `Worker` is retained for the entire connection; a later worker failure closes
-/// the port and the ordinary client EOF path reports a disconnect rather than
-/// quietly recreating a second world on the page.
+/// The Worker is retained for the entire connection. A startup failure is
+/// reported to the session instead of falling back to an in-page server: the
+/// browser's singleplayer world must have one owner, and that owner must stay
+/// off the page thread just as it does after `ready`.
 #[cfg(target_arch = "wasm32")]
 enum BrowserIntegratedTransport {
-    InPage(tokio::io::DuplexStream),
     Worker {
         _worker: Worker,
         port: lodestone_net::MessagePortTransport,
@@ -1739,7 +1737,6 @@ impl tokio::io::AsyncRead for BrowserIntegratedTransport {
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         match &mut *self {
-            Self::InPage(stream) => Pin::new(stream).poll_read(cx, buf),
             Self::Worker { port, .. } => Pin::new(port).poll_read(cx, buf),
         }
     }
@@ -1753,21 +1750,18 @@ impl tokio::io::AsyncWrite for BrowserIntegratedTransport {
         data: &[u8],
     ) -> Poll<io::Result<usize>> {
         match &mut *self {
-            Self::InPage(stream) => Pin::new(stream).poll_write(cx, data),
             Self::Worker { port, .. } => Pin::new(port).poll_write(cx, data),
         }
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match &mut *self {
-            Self::InPage(stream) => Pin::new(stream).poll_flush(cx),
             Self::Worker { port, .. } => Pin::new(port).poll_flush(cx),
         }
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match &mut *self {
-            Self::InPage(stream) => Pin::new(stream).poll_shutdown(cx),
             Self::Worker { _worker, port, .. } => {
                 let result = Pin::new(port).poll_shutdown(cx);
                 if matches!(result, Poll::Ready(_)) {
@@ -1833,9 +1827,11 @@ fn world_preset_from_wire_id(id: u8) -> Option<crate::menu::create_world::WorldT
 ///
 /// The transferred port contains protocol bytes only. The ordinary Worker
 /// channel carries this launch object and its ready/error response, which gives
-/// us a precise point at which falling back to the legacy page-owned server is
-/// still safe: no worker world exists before `ready`.
+/// us a precise point at which startup failure must be reported: no worker
+/// world exists before `ready`, so constructing a page-owned replacement would
+/// violate the browser singleplayer scheduling boundary.
 #[derive(Debug, PartialEq, Eq)]
+#[cfg(any(target_arch = "wasm32", test))]
 enum BrowserWorkerStartupAction {
     Progress(String),
     Ready,
@@ -1844,6 +1840,7 @@ enum BrowserWorkerStartupAction {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+#[cfg(any(target_arch = "wasm32", test))]
 enum BrowserWorkerStartupState {
     Waiting,
     Ready,
@@ -1853,8 +1850,8 @@ enum BrowserWorkerStartupState {
 #[cfg(any(target_arch = "wasm32", test))]
 #[derive(Debug, PartialEq, Eq)]
 enum BrowserWorkerErrorAction {
-    /// Startup did not finish, so the caller may still use the in-page
-    /// fallback without creating a second world.
+    /// Startup did not finish. The caller must report the launch failure; an
+    /// in-page replacement would violate the browser scheduling boundary.
     StartupFailure(String),
     /// The worker was already handed to the running client. Only disconnect is
     /// valid now; starting another server would create two mutable worlds.
@@ -1870,6 +1867,7 @@ fn browser_worker_error_action(startup_pending: bool, message: String) -> Browse
     }
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
 impl BrowserWorkerStartupState {
     fn new() -> Self {
         Self::Waiting
@@ -1877,8 +1875,9 @@ impl BrowserWorkerStartupState {
 
     /// Classify one control-plane message without letting a progress update
     /// consume the one-shot startup result. The browser worker emits several
-    /// progress messages while it loads the module, starts the compute pool,
-    /// and constructs the spawn column; only `ready` completes startup.
+    /// progress messages while it loads the module, enters server startup, and
+    /// constructs the authoritative world source; only `ready` completes
+    /// startup.
     fn receive(
         &mut self,
         kind: Option<&str>,
@@ -3757,37 +3756,15 @@ async fn run_async(
                 {
                     Ok(worker_io) => (None, Some(worker_io), None),
                     Err(error) => {
-                        // A fallback is safe only before the worker's `ready`
-                        // acknowledgement. Once ready, a port/worker failure is
-                        // EOF and disconnects the session; restarting here would
-                        // create a second mutable world behind the same UI.
-                        tracing::warn!("browser server worker unavailable; using page server until next launch: {error}");
-                        let (fallback_source, _, _) = match preset_chunk_source(
-                            server_protocol.worldgen_scope(),
-                            seed,
-                            world_type,
-                        ) {
-                            Ok(source) => source,
-                            Err(mismatch) => {
-                                let _ = tx.try_send(NetUpdate::Error(format!(
-                                    "cannot start this world: {mismatch}"
-                                )));
-                                return;
-                            }
-                        };
-                        let commands = session.as_ref().map_or_else(
-                            lodestone_server::CommandDispatch::none,
-                            |(ecs, _)| lodestone_server::CommandDispatch::installed(Arc::new(EcsCommandSink {
-                                ecs: Arc::clone(ecs),
-                            })),
-                        );
-                        let (server, io) = lodestone_server::IntegratedServer::open_in_memory_with_items_and_commands(
-                            server_protocol,
-                            fallback_source,
-                            view_radius,
-                            commands,
-                        );
-                        (Some(server), Some(BrowserIntegratedTransport::InPage(io)), None)
+                        // Do not construct a second world on the page when the
+                        // dedicated owner cannot start. Apart from violating
+                        // the browser scheduling boundary, that fallback made
+                        // the same launch request have two different authority
+                        // models depending on an asset or Worker failure.
+                        let _ = tx.try_send(NetUpdate::Error(format!(
+                            "cannot start browser server worker: {error}"
+                        )));
+                        return;
                     }
                 };
                 #[cfg(not(target_arch = "wasm32"))]
@@ -5950,7 +5927,7 @@ mod tests {
     #[test]
     fn browser_worker_startup_accepts_progress_until_ready() {
         let mut startup = BrowserWorkerStartupState::new();
-        for stage in ["loading-module", "starting-compute-pool", "generating-spawn"] {
+        for stage in ["loading-module", "starting-server", "preparing-world"] {
             assert_eq!(
                 startup.receive(Some("progress"), Some(stage.to_string()), None),
                 BrowserWorkerStartupAction::Progress(stage.to_string())
@@ -6009,7 +5986,7 @@ mod tests {
     }
 
     #[test]
-    fn browser_worker_error_before_ready_keeps_fallback_eligible() {
+    fn browser_worker_error_before_ready_is_a_launch_failure() {
         assert_eq!(
             browser_worker_error_action(true, "module failed".to_string()),
             BrowserWorkerErrorAction::StartupFailure("module failed".to_string())
@@ -6024,7 +6001,8 @@ mod tests {
             BrowserWorkerErrorAction::SessionFailure("worker crashed".to_string())
         );
         // This is the detector control: changing the post-ready branch to the
-        // pre-ready fallback would produce `StartupFailure` and fail here.
+        // pre-ready launch-failure path would produce `StartupFailure` and
+        // fail here.
         assert!(!matches!(action, BrowserWorkerErrorAction::StartupFailure(_)));
     }
 
