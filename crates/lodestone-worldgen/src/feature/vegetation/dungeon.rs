@@ -11,6 +11,7 @@ use crate::rng::RandomSource;
 
 use super::{base_id, ConfiguredFeature, VegGrid, VegTags};
 use crate::interner::StateId;
+use super::ids::Tag;
 
 const DUNGEON_LOOT_TABLE: &str = "minecraft:chests/simple_dungeon";
 const CAVE_AIR: &str = "minecraft:cave_air";
@@ -206,8 +207,7 @@ fn set_unchecked(grid: &mut VegGrid, pos: BlockPos, state: &str) {
 }
 
 fn safe_set_id(grid: &mut VegGrid, tags: &VegTags, pos: BlockPos, state: StateId) -> bool {
-    let current = base_at(grid, pos);
-    if tags.features_cannot_replace.contains(current) {
+    if tags.has(grid.interner(), Tag::FeaturesCannotReplace, grid.get_id(pos.x, pos.y, pos.z)) {
         return false;
     }
     grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state)

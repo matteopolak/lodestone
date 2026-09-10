@@ -1048,7 +1048,7 @@ pub fn build_veg_tags(resolver: &dyn Resolver) -> VegTags {
         crate::compose::resolve_block_tag(resolver, id, &mut out, &mut seen);
         out
     };
-    VegTags {
+    let mut tags = VegTags {
         features_cannot_replace: resolve("minecraft:features_cannot_replace"),
         cannot_replace_below_tree_trunk: resolve("minecraft:cannot_replace_below_tree_trunk"),
         supports_vegetation: resolve("minecraft:supports_vegetation"),
@@ -1078,7 +1078,12 @@ pub fn build_veg_tags(resolver: &dyn Resolver) -> VegTags {
         // yet at generator-construction time. The decoration driver binds them
         // once per pass. See [`super::ids`].
         id_tags: IdTags::default(),
-    }
+    };
+    // Built-in registry entries are represented by typed canonical ids after
+    // construction. Unknown resolver names remain in the fields as the
+    // explicit plugin/data-pack extension boundary.
+    tags.compact_registry_names();
+    tags
 }
 
 /// The reference placement-modifier base kind (the
