@@ -23,9 +23,27 @@
 //! `get_resource(...).is_some()` pair that happened to be true for some
 //! unrelated reason would pass forever.
 
+use bevy_ecs::message::Message;
 use lodestone_ecs::brand::{ReportedServerBrand, ServerBrandPayload};
 use lodestone_ecs::events::GameEventBus;
-use lodestone_ecs::plugin_channel::PluginChannelState;
+use lodestone_ecs::player::ActionQueue;
+use lodestone_ecs::plugin_channel::{
+    OutboundPluginChannel, OutboundPluginChannelLimits, OutboundPluginChannelState,
+    PluginChannelAppExt, PluginChannelState,
+};
+use lodestone_ecs::GameTick;
+use lodestone_model::ClientAction;
+
+#[derive(Message, Debug, Clone, PartialEq, Eq)]
+struct ProductionProbe(Vec<u8>);
+
+impl OutboundPluginChannel for ProductionProbe {
+    const CHANNEL: &'static str = "example:production-probe";
+
+    fn encode(&self) -> Vec<u8> {
+        self.0.clone()
+    }
+}
 
 /// The positive assertion: `client_app()` carries a live channel dispatch.
 #[test]
@@ -76,4 +94,42 @@ fn a_bare_app_has_neither() {
         "control premise false: CorePlugin alone already installs the bus, \
          so the positive test above proves nothing about client_app()"
     );
+}
+
+/// The production composition must consume the bounded typed-channel path, not
+/// merely expose it in a unit-test-only `App`. The resulting value is the
+/// normal `ClientAction` consumed by the shell's action-queue drain; no socket,
+/// fake channel, or raw packet constructor is involved here.
+#[test]
+fn client_app_connects_bounded_typed_send_to_the_action_queue() {
+    let mut app = lodestone_app::client_app();
+    app.add_outbound_plugin_channel_with_limits::<ProductionProbe>(
+        OutboundPluginChannelLimits {
+            max_messages_per_tick: 1,
+            max_payload_bytes_per_tick: 3,
+            max_payload_bytes_per_message: 3,
+        },
+    );
+    app.world_mut()
+        .write_message(ProductionProbe(b"one".to_vec()));
+    app.world_mut()
+        .write_message(ProductionProbe(b"drop".to_vec()));
+    app.world_mut().run_schedule(GameTick);
+
+    let queue = &app.world().resource::<ActionQueue>().0;
+    assert_eq!(queue.len(), 1);
+    assert_eq!(
+        queue[0],
+        ClientAction::SendCustomPayload {
+            channel: "example:production-probe".parse().unwrap(),
+            data: b"one".to_vec(),
+        }
+    );
+    let stats = app
+        .world()
+        .resource::<OutboundPluginChannelState<ProductionProbe>>()
+        .stats();
+    assert_eq!(stats.queued_messages, 1);
+    assert_eq!(stats.dropped_messages, 1);
+    assert_eq!(stats.dropped_payload_bytes, 4);
 }

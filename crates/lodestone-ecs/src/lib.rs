@@ -216,7 +216,8 @@ pub use brand::{
 };
 pub use plugin::CorePlugin;
 pub use plugin_channel::{
-    OutboundPluginChannel, OutboundPluginChannelPlugin, OutboundPluginChannelState,
+    OutboundPluginChannel, OutboundPluginChannelLimits, OutboundPluginChannelPlugin,
+    OutboundPluginChannelState, OutboundPluginChannelStats,
     PluginChannel, PluginChannelAppExt, PluginChannelPlugin, PluginChannelState,
     dispatch_plugin_channel, dispatch_plugin_channel_outbound,
 };

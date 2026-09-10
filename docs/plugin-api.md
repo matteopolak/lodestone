@@ -232,7 +232,12 @@ duplicate-plugin panic. Aging (`Messages<T>::update()`, or it grows unbounded) r
 decodes nothing, forever, with no error) and panics at build time on a malformed channel string rather
 than silently never matching. `decode` returning `None` is not an error and never disconnects — vanilla
 reads and discards an unparseable payload too. A built-in `minecraft:brand` channel plugin ships as the
-worked example.
+worked example. For outbound channels, `add_outbound_plugin_channel::<T>()` admits at most 64
+messages, 256 KiB total body bytes, and 64 KiB per body per tick by default; use
+`add_outbound_plugin_channel_with_limits` when a channel needs a smaller contract. Rejected encoded
+bodies never enter `ActionQueue`, and `OutboundPluginChannelState::stats` exposes cumulative queued
+and dropped counts. The typed path can only produce `ClientAction::SendCustomPayload` through the
+normal queue drain — it has no raw packet constructor, socket, or fake channel object.
 
 Server-side, `lodestone_server::plugin_channels::{PluginChannelRegistry, PluginChannelHandler}` are the
 plugin-facing API over `custom_payload` — not just wire-level decode. `PluginChannelHandler` is the
