@@ -12,7 +12,9 @@ use uuid::Uuid;
 use crate::mob_effects;
 use crate::redstone_target::HitAxis;
 
-use super::{ChunkWorld, MobSim, ProjectileMeta, ProjectileBlockHit};
+use super::{
+    ChunkWorld, EntityHandoffToken, MobSim, ProjectileBlockHit, ProjectileMeta,
+};
 
 /// The ghast fireball explosion-power default (`1.0`). This sim has no variant
 /// or NBT producer that supplies another value, so every fireball uses this
@@ -26,10 +28,16 @@ pub(crate) enum ProjectileTickOwner {
 }
 
 impl ProjectileTickOwner {
-    fn for_position(position: Vec3) -> Self {
+    pub(crate) fn for_position(position: Vec3) -> Self {
         Self::Chunk {
             cx: (position.x.floor() as i32).div_euclid(16),
             cz: (position.z.floor() as i32).div_euclid(16),
+        }
+    }
+
+    fn tick_owner(self) -> crate::tick_region::TickOwner {
+        match self {
+            Self::Chunk { cx, cz } => crate::tick_region::TickOwner::Chunk { cx, cz },
         }
     }
 }
@@ -46,6 +54,7 @@ pub(crate) struct ProjectileTickOwnerBatch {
 #[derive(Debug, Clone, Copy)]
 struct ProjectileTickEffect {
     owner: ProjectileTickOwner,
+    destination: ProjectileTickOwner,
     serial: usize,
     projectile: TrackedProjectile,
 }
@@ -265,6 +274,8 @@ impl<'w> MobSim<'w> {
             ProjectileMeta {
                 uuid: Uuid::new_v4(),
                 entity_type,
+                tick_owner: ProjectileTickOwner::for_position(projectile.position),
+                handoff: crate::entity_handoff::EntityOwnershipHandoff::default(),
                 owner,
                 potion: None,
             },
@@ -319,7 +330,13 @@ impl<'w> MobSim<'w> {
     ) -> Vec<ProjectileTickOwnerBatch> {
         let mut jobs = Vec::<(ProjectileTickOwner, Vec<ProjectileTickInput>)>::new();
         for (serial, projectile) in self.projectiles.iter().copied().enumerate() {
-            let owner = ProjectileTickOwner::for_position(projectile.projectile.position);
+            let owner = self
+                .projectile_meta
+                .get(&projectile.id)
+                .map_or_else(
+                    || ProjectileTickOwner::for_position(projectile.projectile.position),
+                    |meta| meta.tick_owner,
+                );
             let input = ProjectileTickInput {
                 owner,
                 serial,
@@ -347,6 +364,9 @@ impl<'w> MobSim<'w> {
                         projectile.ticks_alive += 1;
                         ProjectileTickEffect {
                             owner: input.owner,
+                            destination: ProjectileTickOwner::for_position(
+                                projectile.projectile.position,
+                            ),
                             serial: input.serial,
                             projectile,
                         }
@@ -374,6 +394,18 @@ impl<'w> MobSim<'w> {
         &mut self,
         batches: Vec<ProjectileTickOwnerBatch>,
     ) {
+        self.apply_projectile_tick_owner_batches_with_durable_save(batches, |_| true);
+    }
+
+    /// Applies projectile completions with an explicit durable-save callback
+    /// for cross-owner transfers. Every source stop is recorded first; the
+    /// callback must acknowledge persistence before live state replacement,
+    /// and destination admission follows that replacement.
+    pub(crate) fn apply_projectile_tick_owner_batches_with_durable_save(
+        &mut self,
+        batches: Vec<ProjectileTickOwnerBatch>,
+        mut durable_save: impl FnMut(EntityHandoffToken) -> bool,
+    ) {
         if batches.is_empty() {
             return;
         }
@@ -392,11 +424,64 @@ impl<'w> MobSim<'w> {
             self.projectiles.len(),
             "projectile owner completion must retain every live tick-start entity"
         );
+        let transfers: Vec<_> = effects
+            .iter()
+            .filter_map(|effect| {
+                (effect.owner != effect.destination).then(|| {
+                    EntityHandoffToken::new(
+                        effect.projectile.id,
+                        effect.serial,
+                        plan,
+                        effect.owner.tick_owner(),
+                        effect.destination.tick_owner(),
+                    )
+                    .expect("a nonzero projectile plan names a chunk transfer")
+                })
+            })
+            .collect();
+        for &token in &transfers {
+            self.projectile_meta
+                .get_mut(&token.entity_id)
+                .expect("a live projectile transfer has metadata")
+                .handoff
+                .stop_source(token)
+                .expect("projectile source stop must be unique and newer");
+        }
+        for &token in &transfers {
+            assert!(
+                self.projectile_meta
+                    .get_mut(&token.entity_id)
+                    .expect("a live projectile transfer has metadata")
+                    .handoff
+                    .acknowledge_durable_save(token, &mut durable_save)
+                    .is_ok(),
+                "projectile durable-save acknowledgement failed before state replacement"
+            );
+        }
         for effect in effects {
+            let Some(meta) = self.projectile_meta.get(&effect.projectile.id) else {
+                panic!("a live projectile completion has metadata");
+            };
+            assert_eq!(
+                meta.tick_owner, effect.owner,
+                "projectile completion must start from the admitted tick-start owner"
+            );
             assert!(
                 self.projectiles.replace(effect.projectile),
                 "projectile owner completion may update only a live tick-start projectile"
             );
+            self.projectile_meta
+                .get_mut(&effect.projectile.id)
+                .expect("the projectile metadata remains live after replacement")
+                .tick_owner = effect.destination;
+        }
+        for token in transfers {
+            self.projectile_meta
+                .get_mut(&token.entity_id)
+                .expect("a live projectile transfer has metadata")
+                .handoff
+                .start_destination(token)
+                .expect("projectile destination start follows state replacement");
         }
         self.applied_projectile_owner_plan = plan;
     }
@@ -1690,6 +1775,48 @@ mod tests {
         let serial = run_projectile_motion_with_workers(dense_projectile_motion_fixture(256), 1);
         let parallel = run_projectile_motion_with_workers(dense_projectile_motion_fixture(256), 4);
         assert_eq!(
+    #[test]
+    fn crossing_projectile_reports_typed_durable_handoff_before_next_owner_plan() {
+        let world = ChunkWorld::new(-64, 128);
+        let mut sim = MobSim::new(&world);
+        let id = sim.spawn_projectile(
+            "minecraft:arrow".parse().expect("valid key"),
+            Projectile::arrow(
+                Vec3::new(-0.5, 64.0, 0.5),
+                Vec3::new(17.0, 0.0, 0.0),
+            ),
+        );
+        let batches = sim.tick_projectile_owner_batches();
+        let mut acknowledged = Vec::new();
+        sim.apply_projectile_tick_owner_batches_with_durable_save(batches, |token| {
+            acknowledged.push(token);
+            true
+        });
+        assert_eq!(
+            acknowledged,
+            [
+                EntityHandoffToken::new(
+                    id,
+                    0,
+                    1,
+                    crate::tick_region::TickOwner::Chunk { cx: -1, cz: 0 },
+                    crate::tick_region::TickOwner::Chunk { cx: 1, cz: 0 },
+                )
+                .expect("the boundary transfer has a typed durable token")
+            ]
+        );
+        assert_eq!(
+            sim.projectile_meta
+                .get(&id)
+                .expect("the projectile remains live")
+                .handoff
+                .pending(),
+            0
+        );
+        let next = sim.tick_projectile_owner_batches();
+        assert_eq!(next[0].owner, ProjectileTickOwner::Chunk { cx: 1, cz: 0 });
+    }
+
             projectile_motion_state(&serial),
             projectile_motion_state(&parallel),
             "parallel owner completions must preserve registration order and exact motion"

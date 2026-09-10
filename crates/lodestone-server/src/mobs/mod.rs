@@ -3244,7 +3244,7 @@ impl<'w> SimMob<'w> {
 /// the uuid and canonical entity-type key a spawn packet needs live here,
 /// exactly the split [`SimMob`] already makes between `NavigatingMob`'s
 /// version-free body and this crate's wire metadata.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct ProjectileMeta {
     uuid: Uuid,
     entity_type: ResourceKey,
@@ -3253,6 +3253,13 @@ struct ProjectileMeta {
     /// Load-bearing for the impact pass, not bookkeeping: a projectile is spawned
     /// at its shooter's eye, *inside* the shooter's own bounding box, so without
     /// this a skeleton's first arrow strikes the skeleton. Vanilla's own guard is
+    /// The owner admitted for this projectile's next tick-start plan.
+    ///
+    /// The central projectile writer advances this only after the source-stop
+    /// and durable-save barrier has admitted the completed destination.
+    tick_owner: crate::mobs::projectiles::ProjectileTickOwner,
+    /// The bounded handoff state for this projectile's cross-owner movement.
+    handoff: EntityOwnershipHandoff,
     /// two-part — its own "can hit entity" check refuses the owner until
     /// a "has left owner" check has seen the projectile clear it, and
     /// vanilla's own margin computation keeps the hitbox at zero inflation for the
