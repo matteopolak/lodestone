@@ -388,6 +388,108 @@ fn protocol_754_lifts_its_literal_block_use_body() {
     assert_block_use_lift(&V754ServerProtocol, packet_ids::play::serverbound::BLOCK_PLACE);
 }
 
+fn assert_entity_use_lift<P: ServerProtocol>(protocol: &P, packet_id: i32, has_sneaking: bool) {
+    // These are literal protocol bodies, not bytes emitted by the adapter:
+    // target 321 (`c1 02`), action 1/0/2, and the action-specific fields.
+    let attack = if has_sneaking {
+        vec![0xc1, 0x02, 0x01, 0x01]
+    } else {
+        vec![0xc1, 0x02, 0x01]
+    };
+    assert_eq!(
+        protocol.decode(State::Play, packet_id, &attack),
+        ServerBound::Attack { entity_id: 321 },
+        "literal attack body must reach the shared attack consumer"
+    );
+
+    let mut interact = vec![0xc1, 0x02, 0x00, 0x01]; // off hand
+    if has_sneaking {
+        interact.push(0x01);
+    }
+    assert_eq!(
+        protocol.decode(State::Play, packet_id, &interact),
+        ServerBound::InteractEntity {
+            entity_id: 321,
+            hand: 1,
+            using_secondary_action: has_sneaking,
+        },
+        "literal plain-interaction body must retain hand and sneaking"
+    );
+
+    let mut interact_at = vec![
+        0xc1, 0x02, 0x02, // target 321, precise interaction
+        0x3e, 0x80, 0x00, 0x00, // x = 0.25
+        0x3f, 0x40, 0x00, 0x00, // y = 0.75
+        0xbf, 0x00, 0x00, 0x00, // z = -0.5
+        0x01, // off hand
+    ];
+    if has_sneaking {
+        interact_at.push(0x01);
+    }
+    assert_eq!(
+        protocol.decode(State::Play, packet_id, &interact_at),
+        ServerBound::InteractEntity {
+            entity_id: 321,
+            hand: 1,
+            using_secondary_action: has_sneaking,
+        },
+        "literal precise-interaction body must consume hit coordinates"
+    );
+
+    // Neighbour/control bodies must not be accepted as a different action:
+    // invalid hands, a malformed trailing flag, and a wrong connection state
+    // all stay away from the shared consumers.
+    let invalid_hand = if has_sneaking {
+        vec![0xc1, 0x02, 0x00, 0x02, 0x00]
+    } else {
+        vec![0xc1, 0x02, 0x00, 0x02]
+    };
+    assert_eq!(
+        protocol.decode(State::Play, packet_id, &invalid_hand),
+        ServerBound::Ignored
+    );
+    let malformed = if has_sneaking {
+        vec![0xc1, 0x02, 0x01, 0x02]
+    } else {
+        vec![0xc1, 0x02, 0x01, 0x00]
+    };
+    assert_eq!(
+        protocol.decode(State::Play, packet_id, &malformed),
+        ServerBound::Ignored
+    );
+    assert_eq!(
+        protocol.decode(State::Login, packet_id, &attack),
+        ServerBound::Ignored
+    );
+}
+
+#[test]
+fn protocol_498_lifts_literal_entity_use_forms_and_rejects_neighbours() {
+    assert_entity_use_lift(
+        &V498ServerProtocol,
+        packet_ids_498::play::serverbound::USE_ENTITY,
+        false,
+    );
+}
+
+#[test]
+fn protocol_578_lifts_literal_entity_use_forms_and_rejects_neighbours() {
+    assert_entity_use_lift(
+        &V578ServerProtocol,
+        play::serverbound::USE_ENTITY,
+        false,
+    );
+}
+
+#[test]
+fn protocol_754_lifts_literal_entity_use_forms_and_rejects_neighbours() {
+    assert_entity_use_lift(
+        &V754ServerProtocol,
+        packet_ids::play::serverbound::USE_ENTITY,
+        true,
+    );
+}
+
 #[test]
 fn protocol_498_accepts_its_handshake_and_emits_legacy_join() {
     let protocol = V498ServerProtocol;
