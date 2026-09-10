@@ -39,7 +39,7 @@ fn write_chunk(storage: &WorldStorage, x: i32, z: i32, state: &str, impossible_t
         scheduled.with(|queues| {
             assert!(queues.fluid.schedule(
                 (x * 16, 1, z * 16),
-                lodestone_server::fluid::TICK_FLUID.to_owned(),
+                lodestone_server::ScheduledTickKind::Fluid,
                 u64::MAX,
                 TickPriority::Normal,
             ));

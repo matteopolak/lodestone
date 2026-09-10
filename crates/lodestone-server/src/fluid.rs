@@ -134,10 +134,13 @@ use lodestone_model::BlockPos;
 use crate::chunk::ChunkSource;
 use crate::dimension::Dimension;
 use crate::neighbor_update::Direction;
-use crate::scheduled_tick::{ScheduledTick, ScheduledTickQueue, ScheduledTickSink, TickPriority};
+use crate::scheduled_tick::{
+    ScheduledTick, ScheduledTickKind, ScheduledTickQueue, ScheduledTickSink, TickPriority,
+};
 
-/// The scheduled-tick `kind` string every fluid tick carries, the way
-/// `crate::redstone::TICK_TORCH` and friends key the block queue.
+/// The legacy scheduled-tick name used when a fluid record crosses the Anvil
+/// or connection-feed text boundary. Runtime fluid producers use
+/// [`ScheduledTickKind::Fluid`] instead.
 ///
 /// One kind for both fluids deliberately. The real engine keys its per-chunk
 /// pending-tick table by the
@@ -1412,7 +1415,7 @@ fn write_block<S: ChunkSource + ?Sized>(
 ///
 /// Every block this writes is appended to `changes` *and* already written
 /// through `world`; the caller forwards `changes` to connected clients.
-pub fn run_scheduled_tick<S: ChunkSource + ?Sized, Q: ScheduledTickSink<String> + ?Sized>(
+pub fn run_scheduled_tick<S: ChunkSource + ?Sized, Q: ScheduledTickSink<ScheduledTickKind> + ?Sized>(
     world: &S,
     env: FluidEnv,
     pos: BlockPos,
@@ -1473,7 +1476,7 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized, Q: ScheduledTickSink<String> 
                 write_block(world, env, pos, &state, changes);
                 fluid_ticks.schedule_tick(
                     (pos.x, pos.y, pos.z),
-                    TICK_FLUID.to_owned(),
+                    ScheduledTickKind::Fluid,
                     current_tick + env.tick_delay(fluid.kind),
                     TickPriority::Normal,
                 );
@@ -1562,7 +1565,7 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized, Q: ScheduledTickSink<String> 
             if holds_fluid {
                 fluid_ticks.schedule_tick(
                     (notified.x, notified.y, notified.z),
-                    TICK_FLUID.to_owned(),
+                    ScheduledTickKind::Fluid,
                     delay,
                     TickPriority::Normal,
                 );
@@ -1580,7 +1583,10 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized, Q: ScheduledTickSink<String> 
 /// queued: only cells whose normal spread decision would write something are
 /// admitted, which keeps a loaded ocean from creating tens of thousands of
 /// useless due entries.
-pub(crate) fn schedule_generated_ticks<S: ChunkSource + ?Sized, Q: ScheduledTickSink<String> + ?Sized>(
+pub(crate) fn schedule_generated_ticks<
+    S: ChunkSource + ?Sized,
+    Q: ScheduledTickSink<ScheduledTickKind> + ?Sized,
+>(
     world: &S,
     column: &crate::chunk::ChunkColumn,
     chunk_x: i32,
@@ -1618,7 +1624,7 @@ pub(crate) fn schedule_generated_ticks<S: ChunkSource + ?Sized, Q: ScheduledTick
         }
         if fluid_ticks.schedule_tick(
             (pos.x, pos.y, pos.z),
-            TICK_FLUID.to_owned(),
+            ScheduledTickKind::Fluid,
             current_tick + env.tick_delay(fluid.kind),
             TickPriority::Normal,
         ) {
@@ -1837,7 +1843,7 @@ pub fn ticks_after_edit<S: ChunkSource + ?Sized>(
     // Built through a real queue rather than struct literals because
     // `ScheduledTick::sub_tick_order` is private — the same idiom
     // `server::propagate_placement` uses, and for the same reason.
-    let mut pending: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+    let mut pending: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
     for candidate in [
         pos,
         Direction::Down.relative(pos),
@@ -1850,13 +1856,20 @@ pub fn ticks_after_edit<S: ChunkSource + ?Sized>(
         if let Some(fluid) = fluid_state_of(&block_at(world, env, candidate)) {
             pending.schedule(
                 (candidate.x, candidate.y, candidate.z),
-                TICK_FLUID.to_owned(),
+                ScheduledTickKind::Fluid,
                 env.tick_delay(fluid.kind),
                 TickPriority::Normal,
             );
         }
     }
-    pending.drain_due(u64::MAX, usize::MAX)
+    // The connection feed is still a textual compatibility boundary. Keep
+    // the producer typed until this final conversion, so unknown future fluid
+    // keys could not be silently mapped to an unrelated built-in.
+    pending
+        .drain_due(u64::MAX, usize::MAX)
+        .into_iter()
+        .map(|tick| tick.map_kind(ScheduledTickKind::into_name))
+        .collect()
 }
 
 #[cfg(test)]
@@ -1996,9 +2009,9 @@ mod tests {
     /// Drains the fluid queue until it is quiet or `max_ticks` pass, returning
     /// the tick count consumed. The tick loop's own drain, reduced to one queue.
     fn settle(rig: &Rig, seed: BlockPos, max_ticks: u64) -> u64 {
-        let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        let mut queue: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
         for pending in ticks_after_edit(rig, FluidEnv::OVERWORLD, seed) {
-            queue.schedule(pending.pos, pending.kind, pending.trigger_tick, pending.priority);
+            schedule_feed_tick(&mut queue, pending);
         }
         let mut changes = Vec::new();
         for tick in 1..=max_ticks {
@@ -2024,9 +2037,9 @@ mod tests {
     /// vanilla's spread is deterministic, so there is one right answer per tick
     /// number rather than a range.
     fn fall_depth_after(rig: &Rig, source: BlockPos, ticks: u64) -> i32 {
-        let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        let mut queue: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
         for pending in ticks_after_edit(rig, FluidEnv::OVERWORLD, source) {
-            queue.schedule(pending.pos, pending.kind, pending.trigger_tick, pending.priority);
+            schedule_feed_tick(&mut queue, pending);
         }
         let mut changes = Vec::new();
         for tick in 1..=ticks {
@@ -2051,9 +2064,9 @@ mod tests {
         if fluid_state_of(&rig.block_state(pos.x, pos.y, pos.z)).is_some() {
             return Some(0);
         }
-        let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        let mut queue: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
         for pending in ticks_after_edit(rig, FluidEnv::OVERWORLD, seed) {
-            queue.schedule(pending.pos, pending.kind, pending.trigger_tick, pending.priority);
+            schedule_feed_tick(&mut queue, pending);
         }
         let mut changes = Vec::new();
         for tick in 1..=max_ticks {
@@ -2071,6 +2084,20 @@ mod tests {
             }
         }
         None
+    }
+
+    /// Convert the textual connection-feed record at the test boundary before
+    /// handing it to the typed live fluid queue.
+    fn schedule_feed_tick(
+        queue: &mut ScheduledTickQueue<ScheduledTickKind>,
+        pending: ScheduledTick<String>,
+    ) {
+        queue.schedule(
+            pending.pos,
+            ScheduledTickKind::from_name(pending.kind),
+            pending.trigger_tick,
+            pending.priority,
+        );
     }
 
     /// **The cell immediately beside a freshly placed water source wets on
@@ -2194,7 +2221,7 @@ mod tests {
             }
         }
         let column = rig.column(0, 0);
-        let mut queue = ScheduledTickQueue::new();
+        let mut queue: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
         let scheduled = schedule_generated_ticks(
             &rig,
             &column,
@@ -2208,7 +2235,7 @@ mod tests {
         assert_eq!(scheduled, 8, "only the 3x3 pool perimeter can spread");
         assert!(!queue.has_scheduled(
             (1, FLOOR_Y + 1, 1),
-            &TICK_FLUID.to_owned(),
+            &ScheduledTickKind::Fluid,
         ));
         assert!(queue.iter().all(|tick| tick.trigger_tick == 105));
     }
@@ -2231,7 +2258,7 @@ mod tests {
             rig.set_block(4, y, z, "minecraft:stone");
         }
 
-        let mut queue = ScheduledTickQueue::new();
+        let mut queue: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
         assert_eq!(
             schedule_generated_ticks(
                 &rig,
@@ -2249,7 +2276,7 @@ mod tests {
 
         rig.set_block(15, y, 8, "minecraft:water[level=0]");
         rig.reset_probes();
-        let mut boundary_queue = ScheduledTickQueue::new();
+        let mut boundary_queue: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
         assert!(schedule_generated_ticks(
             &rig,
             &rig.column(0, 0),
@@ -2391,7 +2418,7 @@ mod tests {
             }
         });
 
-        let mut queue = ScheduledTickQueue::new();
+        let mut queue: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
         schedule_generated_ticks(
             &rig,
             &column,
@@ -2413,7 +2440,7 @@ mod tests {
         rig.set_block(1, y, 0, "minecraft:oak_slab[type=bottom,waterlogged=false]");
         rig.set_block(2, y, 0, "minecraft:water[level=0]");
 
-        let mut queue = ScheduledTickQueue::new();
+        let mut queue: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
         let generated = rig.column(0, 0);
         assert_eq!(
             schedule_generated_ticks(
@@ -2739,11 +2766,11 @@ mod tests {
             rig.set_block(0, y, 0, "minecraft:water[level=0]");
             rig.set_block(2, y, 0, "minecraft:water[level=0]");
 
-            let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+            let mut queue: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
             let mut changes = Vec::new();
             for seed in [BlockPos::new(0, y, 0), BlockPos::new(2, y, 0)] {
                 for pending in ticks_after_edit(&rig, env, seed) {
-                    queue.schedule(pending.pos, pending.kind, pending.trigger_tick, pending.priority);
+                    schedule_feed_tick(&mut queue, pending);
                 }
             }
             for tick in 1..=200u64 {
@@ -2781,7 +2808,7 @@ mod tests {
             let y = FLOOR_Y + 1;
             rig.set_block(0, y, 0, lava_state);
             rig.set_block(1, y, 0, "minecraft:water[level=0]");
-            let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+            let mut queue: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
             let mut changes = Vec::new();
             run_scheduled_tick(
                 &rig,
@@ -2811,7 +2838,7 @@ mod tests {
         // below), so the spread path runs and writes stone.
         rig.set_block(0, y, 0, "minecraft:water[level=0]");
         rig.set_block(0, y + 1, 0, "minecraft:lava[level=0]");
-        let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        let mut queue: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
         let mut changes = Vec::new();
         run_scheduled_tick(
             &rig,
@@ -2976,7 +3003,7 @@ mod tests {
     #[test]
     fn a_fluid_tick_on_dry_land_changes_nothing() {
         let rig = Rig::flat();
-        let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        let mut queue: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
         let mut changes = Vec::new();
         for pos in [
             BlockPos::new(0, FLOOR_Y, 0),
@@ -3038,10 +3065,10 @@ mod tests {
     /// set of positions whose size can be predicted from the real drop-off, where
     /// "the water went too far" is a judgement about a screenshot.
     fn settle_footprint(rig: &Rig, seeds: &[BlockPos], max_ticks: u64) -> Vec<(i32, i32, i32)> {
-        let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        let mut queue: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
         for seed in seeds {
             for pending in ticks_after_edit(rig, FluidEnv::OVERWORLD, *seed) {
-                queue.schedule(pending.pos, pending.kind, pending.trigger_tick, pending.priority);
+                schedule_feed_tick(&mut queue, pending);
             }
         }
         let mut written: Vec<(i32, i32, i32)> = Vec::new();
@@ -3229,7 +3256,7 @@ mod tests {
         rig.set_block(0, y, 0, SLAB_WET);
         rig.set_block(1, y, 0, "minecraft:water[level=6]");
 
-        let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        let mut queue: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
         let mut changes = Vec::new();
         run_scheduled_tick(
             &rig,

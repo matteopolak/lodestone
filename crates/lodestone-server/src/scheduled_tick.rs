@@ -1,8 +1,8 @@
 //! The scheduled-tick queue (the first half of scheduled block/fluid processing): the
 //! per-block and per-fluid tick machinery, collapsed to one generic
 //! [`ScheduledTickQueue<T>`]. The live block queue uses
-//! [`ScheduledTickKind`]; the fluid queue remains string-keyed behind the
-//! explicit fluid boundary documented below.
+//! [`ScheduledTickKind`]. Text is converted only at Anvil, connection-feed,
+//! and focused legacy-fixture boundaries.
 //!
 //! # Where this comes from in the real engine
 //!
@@ -62,6 +62,8 @@ use std::borrow::Cow;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Mirrors the real per-tick priority enum, in its real declared order:
 /// extremely high, very high, high, normal, low, very low, extremely low —
@@ -197,6 +199,33 @@ impl ScheduledTickKind {
     }
 }
 
+impl Serialize for ScheduledTickKind {
+    /// Encode the stable registry key used by storage and legacy feeds.
+    ///
+    /// The enum is an implementation detail: exposing Rust variant names in
+    /// JSON would make a plugin key such as `example:weather_tick` impossible
+    /// to round-trip through a generic serde boundary. Serializing the
+    /// canonical key keeps built-ins compact and extensions lossless.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_ref())
+    }
+}
+
+impl<'de> Deserialize<'de> for ScheduledTickKind {
+    /// Parse both built-in and plugin-defined keys through the one explicit
+    /// name boundary. Unknown keys deliberately become `Extension` values.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let name = String::deserialize(deserializer)?;
+        Ok(Self::from_name(name))
+    }
+}
+
 impl AsRef<str> for ScheduledTickKind {
     fn as_ref(&self) -> &str {
         match self {
@@ -272,6 +301,24 @@ pub struct ScheduledTick<T> {
     sub_tick_order: u64,
 }
 
+impl<T> ScheduledTick<T> {
+    /// Change only the discriminator type while retaining queue ordering.
+    ///
+    /// This is used by explicit storage/feed adapters. Reconstructing a tick
+    /// at the boundary must not reset its insertion order, or equal-priority
+    /// entries would change order after a round trip.
+    #[must_use]
+    pub fn map_kind<U>(self, map: impl FnOnce(T) -> U) -> ScheduledTick<U> {
+        ScheduledTick {
+            pos: self.pos,
+            kind: map(self.kind),
+            trigger_tick: self.trigger_tick,
+            priority: self.priority,
+            sub_tick_order: self.sub_tick_order,
+        }
+    }
+}
+
 /// One pending tick in the native-storage handoff.
 ///
 /// Unlike [`ScheduledTick`], this record deliberately exposes the global
@@ -326,9 +373,9 @@ impl<T> Ord for HeapEntry<T> {
 /// model today, and what changes (nothing about the ordering contract) if a
 /// per-chunk registry is added later.
 ///
-/// `T` is the tick's payload — the block/fluid *kind* being ticked. The live
-/// block queue uses [`ScheduledTickKind`], while the fluid implementation
-/// remains a `String` queue at its explicit compatibility boundary.
+/// `T` is the tick's payload — the block/fluid *kind* being ticked. Both live
+/// queues use [`ScheduledTickKind`]; a `String` queue is retained only for
+/// explicitly named compatibility fixtures.
 /// `T: Eq + Hash + Clone` is required for the
 /// `(pos, kind)` dedup set — see [`schedule`](Self::schedule).
 #[derive(Debug)]
@@ -616,6 +663,22 @@ impl<T: Eq + Hash + Clone> ScheduledTickSink<T> for ScheduledTickQueue<T> {
         priority: TickPriority,
     ) -> bool {
         self.schedule(pos, kind, trigger_tick, priority)
+    }
+}
+
+/// Typed fluid producers can still feed a focused legacy `String` fixture.
+/// The conversion is intentionally one-way at this adapter: the fixture owns
+/// the textual representation, while production callers use
+/// `ScheduledTickKind` all the way to the queue boundary.
+impl ScheduledTickSink<ScheduledTickKind> for ScheduledTickQueue<String> {
+    fn schedule_tick(
+        &mut self,
+        pos: (i32, i32, i32),
+        kind: ScheduledTickKind,
+        trigger_tick: u64,
+        priority: TickPriority,
+    ) -> bool {
+        ScheduledTickQueue::schedule(self, pos, kind.into_name(), trigger_tick, priority)
     }
 }
 
@@ -1046,6 +1109,21 @@ impl<T: Eq + Hash + Clone> ScheduledTickSink<T> for ChunkScheduledTickQueue<T> {
     }
 }
 
+/// The chunked counterpart to the focused legacy-fixture adapter above.
+/// Keeping this conversion here means fluid tests can retain their compact
+/// textual queue without making the fluid implementation branch on queue type.
+impl ScheduledTickSink<ScheduledTickKind> for ChunkScheduledTickQueue<String> {
+    fn schedule_tick(
+        &mut self,
+        pos: (i32, i32, i32),
+        kind: ScheduledTickKind,
+        trigger_tick: u64,
+        priority: TickPriority,
+    ) -> bool {
+        ChunkScheduledTickQueue::schedule(self, pos, kind.into_name(), trigger_tick, priority)
+    }
+}
+
 impl<T: Eq + Hash + Clone> ScheduledTickQueueAccess<T> for ChunkScheduledTickQueue<T> {
     fn schedule(
         &mut self,
@@ -1225,8 +1303,10 @@ pub struct ScheduledTickQueues {
     /// back to this owner, preserving piston cancellation as well as ordinary
     /// redstone rescheduling across a column boundary.
     pub block: ChunkScheduledTickQueue<ScheduledTickKind>,
-    /// The real per-world fluid-tick queue.
-    pub fluid: ChunkScheduledTickQueue<String>,
+    /// The real per-world fluid-tick queue, keyed by the typed discriminator.
+    /// Legacy text is parsed when a feed or Anvil record enters this queue and
+    /// rendered only when it leaves for one of those boundaries.
+    pub fluid: ChunkScheduledTickQueue<ScheduledTickKind>,
 }
 
 impl ScheduledTickHandle {
@@ -1271,7 +1351,7 @@ impl ScheduledTickHandle {
         };
         for tick in staged {
             if tick.fluid {
-                let kind = tick.kind.into_name();
+                let kind = tick.kind;
                 if let Some(order) = tick.insertion_order {
                     guard
                         .fluid
@@ -1358,7 +1438,7 @@ impl ScheduledTickHandle {
                 ticks.sort_by_key(|tick| tick.insertion_order);
                 ticks
             };
-            let fluid_snapshot = |queue: &ChunkScheduledTickQueue<String>| {
+            let fluid_snapshot = |queue: &ChunkScheduledTickQueue<ScheduledTickKind>| {
                 let mut ticks: Vec<_> = queue
                     .iter()
                     .filter(|tick| {
@@ -1367,7 +1447,7 @@ impl ScheduledTickHandle {
                     })
                     .map(|tick| PersistedScheduledTick {
                         pos: tick.pos,
-                        kind: ScheduledTickKind::from_name(tick.kind.clone()),
+                        kind: tick.kind.clone(),
                         trigger_tick: tick.trigger_tick,
                         priority: tick.priority,
                         insertion_order: tick.sub_tick_order,
@@ -1454,6 +1534,42 @@ mod tests {
     }
 
     #[test]
+    fn typed_kind_serde_uses_canonical_names_and_preserves_extensions() {
+        let built_in = serde_json::to_string(&ScheduledTickKind::Repeater)
+            .expect("scheduled tick built-in serializes");
+        assert_eq!(built_in, r#""redstone:repeater""#);
+        assert_eq!(
+            serde_json::from_str::<ScheduledTickKind>(&built_in)
+                .expect("scheduled tick built-in deserializes"),
+            ScheduledTickKind::Repeater
+        );
+
+        let extension = ScheduledTickKind::Extension("example:weather_tick".to_owned());
+        let encoded = serde_json::to_string(&extension).expect("scheduled tick extension serializes");
+        assert_eq!(encoded, r#""example:weather_tick""#);
+        assert_eq!(
+            serde_json::from_str::<ScheduledTickKind>(&encoded)
+                .expect("scheduled tick extension deserializes"),
+            extension
+        );
+    }
+
+    #[test]
+    fn typed_fluid_sink_adapter_keeps_legacy_queue_lossless() {
+        let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        assert!(ScheduledTickSink::schedule_tick(
+            &mut queue,
+            (3, 4, 5),
+            ScheduledTickKind::Extension("example:weather_tick".to_owned()),
+            12,
+            TickPriority::Normal,
+        ));
+        let tick = queue.drain_due(12, 1).pop().expect("adapter scheduled one tick");
+        assert_eq!(tick.kind, "example:weather_tick");
+        assert_eq!(tick.pos, (3, 4, 5));
+    }
+
+    #[test]
     fn legacy_family_constants_are_the_typed_boundary_names() {
         let builtins = [
             (crate::command_block::TICK_COMMAND_BLOCK, ScheduledTickKind::CommandBlock),
@@ -1470,7 +1586,7 @@ mod tests {
     }
 
     #[test]
-    fn production_handle_keeps_block_keys_typed_and_converts_only_fluid_records() {
+    fn production_handle_keeps_both_live_queues_typed_and_preserves_fluid_extensions() {
         let handle = ScheduledTickHandle::new();
         let accepted = handle.stage_persisted(
             vec![PersistedScheduledTick {
@@ -1482,7 +1598,7 @@ mod tests {
             }],
             vec![PersistedScheduledTick {
                 pos: (3, 64, 4),
-                kind: ScheduledTickKind::Fluid,
+                kind: ScheduledTickKind::Extension("example:fluid_plugin".into()),
                 trigger_tick: 8,
                 priority: TickPriority::Low,
                 insertion_order: 1,
@@ -1493,11 +1609,17 @@ mod tests {
             let block = queues.block.iter().next().expect("typed block tick merged");
             assert_eq!(block.kind, "example:plugin_tick");
             let fluid = queues.fluid.iter().next().expect("typed fluid tick merged");
-            assert_eq!(fluid.kind, "lodestone:fluid");
+            assert_eq!(
+                fluid.kind,
+                ScheduledTickKind::Extension("example:fluid_plugin".into())
+            );
         });
         let (block, fluid) = handle.snapshot_column(0, 0);
         assert_eq!(block[0].kind, ScheduledTickKind::Extension("example:plugin_tick".into()));
-        assert_eq!(fluid[0].kind, ScheduledTickKind::Fluid);
+        assert_eq!(
+            fluid[0].kind,
+            ScheduledTickKind::Extension("example:fluid_plugin".into())
+        );
     }
 
     /// Predicted drain order for a hand-built set of five ticks spanning
