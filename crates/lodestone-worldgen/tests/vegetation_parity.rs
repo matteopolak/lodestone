@@ -272,6 +272,14 @@ fn load(name: &str) -> Fixture {
     let f = parse_fixture(&text);
     assert!(!f.biome.is_empty(), "{name}: fixture carries no meta.biome — regenerate with the current oracle");
     assert!(f.proxy_fallbacks.is_empty(), "{name}: oracle proxy fell through on {:?}; fixture is not valid parity evidence", f.proxy_fallbacks);
+    if f.biome == "minecraft:warm_ocean" {
+        let footprint = (REGION_MAX - REGION_MIN) as usize;
+        assert_eq!(
+            f.base.len(),
+            footprint * footprint * HEIGHT as usize,
+            "{name}: warm-ocean baseline must cover the complete {footprint}x{footprint} read footprint"
+        );
+    }
     f
 }
 
@@ -393,22 +401,44 @@ fn bundled_lush_root_system_writes_only_after_nested_tree_success() {
 /// returns every cell it wrote, local coordinates, matching `f.single_diff`'s
 /// key space.
 fn run_our_engine(f: &Fixture, resolver: &FsResolver) -> HashMap<(i32, i32, i32), String> {
+    run_our_engine_with_context(f, resolver, false)
+}
+
+/// Runs one source's vegetation pass with the complete neighbourhood that
+/// production supplies to composed features. A source can read a neighbouring
+/// column while deciding whether a placement is valid (for example, its
+/// ocean-floor heightmap), even when the parity comparison only keeps writes
+/// in the source chunk.
+fn run_our_engine_with_context(
+    f: &Fixture,
+    resolver: &FsResolver,
+    wide_read_context: bool,
+) -> HashMap<(i32, i32, i32), String> {
     let base_x = f.chunk_x * 16;
     let base_z = f.chunk_z * 16;
-    let mut grid = VegGrid::new(MIN_Y, HEIGHT, base_x, base_z);
+    let mut grid = if wide_read_context {
+        VegGrid::with_footprint(MIN_Y, HEIGHT, base_x, base_z, REGION_MIN, REGION_MAX)
+    } else {
+        VegGrid::new(MIN_Y, HEIGHT, base_x, base_z)
+    };
     for (&(lx, y, lz), state) in &f.base {
         grid.seed(base_x + lx, y, base_z + lz, state.clone());
     }
     let tags = build_veg_tags(resolver);
     let features = vegetal_features_for(resolver, &f.biome);
     assert!(!features.is_empty(), "{}: must resolve a non-empty VEGETAL_DECORATION list", f.biome);
-
     let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
     apply_vegetal_decoration_step(&mut random, f.seed, f.chunk_x, f.chunk_z, &mut grid, &tags, &features);
 
-    grid.dirty_cells()
+    let cells = grid
+        .dirty_cells()
         .map(|(x, y, z, state)| ((x - base_x, y, z - base_z), state.to_string()))
-        .collect()
+        .filter(|((x, _, z), _)| !wide_read_context || (0..16).contains(x) && (0..16).contains(z));
+    cells.collect()
+}
+
+fn run_our_engine_wide(f: &Fixture, resolver: &FsResolver) -> HashMap<(i32, i32, i32), String> {
+    run_our_engine_with_context(f, resolver, true)
 }
 
 /// Runs `crate::feature::vegetation`'s real, production
@@ -450,6 +480,14 @@ fn run_our_engine_full3x3(f: &Fixture, resolver: &FsResolver) -> HashMap<(i32, i
         .collect()
 }
 
+fn expected_single_centre(f: &Fixture) -> HashMap<(i32, i32, i32), String> {
+    f.single_diff
+        .iter()
+        .filter(|&(&(x, _, z), _)| (0..16).contains(&x) && (0..16).contains(&z))
+        .map(|(k, v)| (*k, v.clone()))
+        .collect()
+}
+
 fn assert_matches_single(name: &str, f: &Fixture, ours: &HashMap<(i32, i32, i32), String>) {
     // `single_diff` can carry a handful of cells outside the centre 16x16
     // (see module doc: SINGLE mode's own placement can, in principle, land
@@ -461,17 +499,12 @@ fn assert_matches_single(name: &str, f: &Fixture, ours: &HashMap<(i32, i32, i32)
     // is checking.
     // Every in-window cell in `single_diff` is implemented scope and must
     // match exactly, including multiface state layout.
-    let expected: HashMap<(i32, i32, i32), &String> = f
-        .single_diff
-        .iter()
-        .filter(|&(&(x, _, z), _)| (0..16).contains(&x) && (0..16).contains(&z))
-        .map(|(k, v)| (*k, v))
-        .collect();
+    let expected = expected_single_centre(f);
 
     let mut mismatches = Vec::new();
     for (&pos, exp) in &expected {
         match ours.get(&pos) {
-            Some(got) if got == *exp => {}
+            Some(got) if got == exp => {}
             Some(got) => mismatches.push(format!("{pos:?}: expected {exp}, got {got}")),
             None => mismatches.push(format!("{pos:?}: expected {exp}, got <nothing written>")),
         }
@@ -507,20 +540,38 @@ fn our_engine_matches_jvm_single_chunk_pass() {
     }
 }
 
-/// Manual closure gate for the two biome-specific captures. This is ignored
-/// because the warm-ocean production list currently produces zero Rust writes
-/// where the compiled-server capture records 29, and the cave case is not
-/// allowed to make the RootSystem ledger entry disappear before the same exact
-/// comparison is green. Run with `--ignored` while closing either entry.
+/// Manual closure gate for the biome-specific captures. This remains ignored
+/// until the corresponding composed-feature evidence is complete for every
+/// listed biome; run it with `--ignored` while closing an entry.
 #[test]
 #[ignore = "composed warm-ocean parity is a named production gap; lush-caves evidence needs recapture"]
 fn composed_biome_evidence_must_match_before_closing_coral_or_root_system() {
     let resolver = FsResolver { root: data_dir() };
     for &name in COMPOSED_PARITY_EVIDENCE {
         let f = load(name);
-        let ours = run_our_engine(&f, &resolver);
+        let ours = run_our_engine_wide(&f, &resolver);
         assert_matches_single(name, &f, &ours);
     }
+}
+
+/// The external warm-ocean capture is a regression fixture for composed
+/// vegetation. The narrow grid is a deliberate negative control: it clamps
+/// neighbour reads to the centre chunk and therefore cannot reproduce the
+/// capture, while the production-shaped read window must reproduce it exactly.
+#[test]
+fn warm_ocean_external_fixture_requires_neighbourhood_reads() {
+    let resolver = FsResolver { root: data_dir() };
+    let f = load("vegetation_warm_ocean_0_0_jvm.txt");
+    let expected = expected_single_centre(&f);
+    let narrow = run_our_engine(&f, &resolver);
+    let wide = run_our_engine_wide(&f, &resolver);
+
+    assert_ne!(
+        narrow, expected,
+        "the narrow-grid control unexpectedly matched; this test must continue to detect clamped neighbour reads"
+    );
+    assert_eq!(wide, expected, "the production-shaped read window must match the external capture");
+    assert_eq!(wide.len(), f.single_centre_changed);
 }
 
 /// **The headline finding**: single-chunk-only vegetation (this engine's
