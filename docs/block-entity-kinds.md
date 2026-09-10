@@ -13,9 +13,11 @@ Serde uses the same canonical name representation, so built-ins and `Extension` 
 
 The numeric `lodestone-data` block-entity registry identifier is version-specific wire data and is intentionally separate from this extensible runtime key.
 
+Chunk-state reconciliation converts a validated bundled registry entry to `BlockEntityKind` once, then compares typed keys. A built-in state owner replaces a mismatched record; an extension record survives only when the current state has no bundled owner, preserving plugin data without putting registry-name comparisons in the reconciliation path.
+
 ## How to change it
 
-Add a built-in variant and both directions in `BlockEntityKind::from_name` and `BlockEntityKind::name` when a new built-in becomes part of the server's modeled set. `BlockEntity::type_id` follows automatically because it delegates through `kind`; no second string match should be added. Internal gameplay decisions should match `BlockEntity::kind`; use `type_id`, `name`, or `into_name` only at a format or protocol boundary. When constructing a container or opaque record, convert the boundary string with `BlockEntityKind::from_name`; never discard an `Extension` value while decoding one.
+Add a built-in variant and both directions in `BlockEntityKind::from_name` and `BlockEntityKind::name` when a new built-in becomes part of the server's modeled set. `BlockEntity::type_id` follows automatically because it delegates through `kind`; no second string match should be added. Internal gameplay decisions should match `BlockEntity::kind`; use `BlockEntityKind::from_registry_type` when a state table supplies the version-specific numeric key, and use `type_id`, `name`, or `into_name` only at a format or protocol boundary. When constructing a container or opaque record, convert the boundary string with `BlockEntityKind::from_name`; never discard an `Extension` value while decoding one.
 
 ## Configuration
 

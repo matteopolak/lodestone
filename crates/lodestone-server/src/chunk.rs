@@ -40,7 +40,7 @@ use lodestone_model::BlockPos;
 use lodestone_worldgen::density::{Context, Density};
 use lodestone_worldgen::overworld::{GeneratedColumn, OverworldGenerator};
 
-use crate::block_entities::BlockEntity;
+use crate::block_entities::{BlockEntity, BlockEntityKind};
 use crate::chunk_blocks::SectionedBlocks;
 
 // Counts calls to [`ChunkColumn::intern`] separately for each test thread.
@@ -1032,14 +1032,11 @@ impl ChunkColumn {
             {
                 let state = self.resolved_block_state_id(local_x, position.y, local_z);
                 let expected = lodestone_data::block_entity_types::block_entity_type(state)
-                    .map(lodestone_data::block_entity_types::block_entity_type_name);
-                let known_entity = lodestone_data::block_entity_types::block_entity_type_id(
-                    entity.type_id(),
-                )
-                .is_some();
+                    .map(BlockEntityKind::from_registry_type);
+                let entity_kind = entity.kind();
                 match expected {
-                    Some(expected) if expected == entity.type_id() => {}
-                    None if known_entity => continue,
+                    Some(expected) if expected == entity_kind => {}
+                    None if !entity_kind.is_extension() => continue,
                     None => {}
                     Some(_) => continue,
                 }
@@ -5806,6 +5803,31 @@ mod tests {
         assert_eq!(*actual_position, position);
         assert!(matches!(actual_entity, BlockEntity::Opaque { id, nbt }
             if id.name() == "minecraft:chest" && matches!(nbt, lodestone_core::Nbt::End)));
+    }
+
+    #[test]
+    fn block_entity_reconciliation_preserves_extensions_only_without_a_state_owner() {
+        let position = BlockPos::new(4, 14, 1);
+        let extension = BlockEntity::Opaque {
+            id: BlockEntityKind::Extension("example:portable_storage".to_owned()),
+            nbt: lodestone_core::Nbt::Int(7),
+        };
+
+        let mut unclaimed = ChunkColumn::new(-64, 384);
+        unclaimed.set_block_entities(vec![(position, extension.clone())]);
+        unclaimed.reconcile_block_entity_states(0, 0);
+        assert_eq!(unclaimed.block_entities(), &[(position, extension.clone())]);
+
+        let mut claimed = ChunkColumn::new(-64, 384);
+        claimed.set_block(4, 14, 1, "minecraft:chest");
+        claimed.set_block_entities(vec![(position, extension)]);
+        claimed.reconcile_block_entity_states(0, 0);
+        let [(actual_position, actual_entity)] = claimed.block_entities() else {
+            panic!("the chest state must replace the mismatched extension record");
+        };
+        assert_eq!(*actual_position, position);
+        assert!(matches!(actual_entity, BlockEntity::Opaque { id: BlockEntityKind::Chest, nbt }
+            if matches!(nbt, lodestone_core::Nbt::End)));
     }
 
     #[test]
