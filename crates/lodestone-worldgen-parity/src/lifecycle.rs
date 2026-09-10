@@ -380,27 +380,10 @@ impl LifecycleWorldgenSource for NetherChunkSource {
         overrides: &BTreeMap<AbsoluteCell, String>,
         resident: &BTreeMap<ChunkPos, ChunkColumn>,
     ) -> LifecycleFeatureResult {
-        self.feature_result_for_target(source, source, overrides, resident)
-    }
-
-    fn feature_result_for_target(
-        &self,
-        target: ChunkPos,
-        source: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
-        resident: &BTreeMap<ChunkPos, ChunkColumn>,
-    ) -> LifecycleFeatureResult {
         let interner = std::sync::Arc::clone(self.generator().interner());
-        let overrides = override_vec(overrides);
         let spills = self
             .generator()
-            .parity_source_spills_with_resident(
-                target.0,
-                target.1,
-                source.0,
-                source.1,
-                &overrides,
-                |cx, cz| {
+            .parity_source_spills_with_resident(source.0, source.1, |cx, cz| {
                 let column = resident.get(&(cx, cz))?;
                 Some(lodestone_worldgen::dense_grid::DenseBlockGrid::from_canonical_states(
                     std::sync::Arc::clone(&interner),
@@ -418,8 +401,7 @@ impl LifecycleWorldgenSource for NetherChunkSource {
                         )
                     },
                 ))
-            },
-            )
+            })
             .into_iter()
             .map(|spill| LifecycleSpill {
                 source: spill.source,
@@ -537,28 +519,17 @@ pub fn top_layer_spills(
 /// Stateful resident-column materializer for one authenticated lifecycle
 /// capture.
 ///
-/// `complete` runs one FEATURES event. Targeted replay may run the same source
-/// for several requested targets: the source body keeps its own decoration
-/// seed, while the target supplies the resident read window. Each emitted
-/// transition is applied to the resident destination column. The caller admits
-/// the complete halo before replay so a source may write to a neighbour whose
-/// explicit ticket appears later in the capture.
+/// `complete` runs one globally unique FEATURES event. The source body runs
+/// once against its source-centred production dispatcher, and each emitted
+/// transition is then applied to the resident destination column. The caller
+/// admits the complete halo before replay so a source may write to a neighbour
+/// whose explicit ticket appears later in the capture.
 pub struct LifecycleMaterializer<S> {
     source: S,
     resident: BTreeMap<ChunkPos, ChunkColumn>,
-    /// Completion identity includes the requested target and source. The same
-    /// source can legitimately run once for each target packet because its
-    /// resident read window is target-centred.
-    completions: BTreeSet<(ChunkPos, ChunkPos, LifecycleCompletion)>,
-    /// Chunks whose status is currently mutable for the packet lifecycle.
-    /// Shaped columns may be resident before their target ticket reaches this
-    /// boundary, but feature writes must not mutate them early.
-    mutable_targets: BTreeSet<ChunkPos>,
-    /// Temporary writes to resident dependencies during the active target
-    /// transaction. They are visible to later source bodies in that
-    /// transaction and rolled back before the next target is finalized.
-    temporary_spills: BTreeMap<AbsoluteCell, (ChunkPos, Option<String>, Option<String>)>,
-    active_target: Option<ChunkPos>,
+    /// Completion identity is the source and stage. The captured sequence is
+    /// telemetry and must not allow the same stage to run twice.
+    completions: BTreeSet<(ChunkPos, LifecycleCompletion)>,
     overrides: BTreeMap<AbsoluteCell, String>,
 }
 
@@ -581,9 +552,6 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             source,
             resident: BTreeMap::new(),
             completions: BTreeSet::new(),
-            mutable_targets: BTreeSet::new(),
-            temporary_spills: BTreeMap::new(),
-            active_target: None,
             overrides: BTreeMap::new(),
         }
     }
@@ -604,9 +572,6 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
     pub fn reset_for_lifecycle_replay(&mut self) {
         self.resident.clear();
         self.completions.clear();
-        self.mutable_targets.clear();
-        self.temporary_spills.clear();
-        self.active_target = None;
         self.overrides.clear();
     }
 
@@ -625,7 +590,6 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         for event in plan.feature_events() {
             self.complete_for_target(plan.target(), event.source, event.stage, event.sequence);
         }
-        self.finish_target(plan.target());
     }
 
     /// Admit one shaped resident column.
@@ -679,64 +643,19 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         source: ChunkPos,
         stage: LifecycleCompletion,
         sequence: u64,
-        observe: impl FnMut(&LifecycleSpill),
+        mut observe: impl FnMut(&LifecycleSpill),
     ) {
-        self.complete_observing_for_target(source, source, stage, sequence, false, observe);
+        self.complete_observing_for_target(source, source, stage, sequence, observe);
     }
 
-    pub fn complete_for_target(
+    fn complete_for_target(
         &mut self,
         target: ChunkPos,
         source: ChunkPos,
         stage: LifecycleCompletion,
         sequence: u64,
     ) {
-        self.begin_target(target);
-        self.complete_observing_for_target(target, source, stage, sequence, true, |_| {});
-    }
-
-    /// Marks a packet target mutable and starts its packet-local transaction.
-    pub fn begin_target(&mut self, target: ChunkPos) {
-        assert!(
-            self.resident.contains_key(&target),
-            "lifecycle target {target:?} was not admitted before finalization"
-        );
-        assert!(
-            self.active_target.is_none() || self.active_target == Some(target),
-            "lifecycle target {:?} was not finished before starting {:?}",
-            self.active_target,
-            target,
-        );
-        self.mutable_targets.insert(target);
-        self.active_target = Some(target);
-    }
-
-    /// Ends a packet-local transaction, restoring incidental writes to future
-    /// targets while retaining all writes to targets whose status is mutable.
-    pub fn finish_target(&mut self, target: ChunkPos) {
-        assert_eq!(self.active_target, Some(target), "finished lifecycle target out of order");
-        let temporary_spills = std::mem::take(&mut self.temporary_spills);
-        for (position, (destination, previous, previous_override)) in temporary_spills {
-            if let Some(previous) = previous {
-                if let Some(column) = self.resident.get_mut(&destination) {
-                    column.set_block(
-                        position.0.rem_euclid(16),
-                        position.1,
-                        position.2.rem_euclid(16),
-                        &previous,
-                    );
-                }
-            }
-            match previous_override {
-                Some(value) => {
-                    self.overrides.insert(position, value);
-                }
-                None => {
-                    self.overrides.remove(&position);
-                }
-            }
-        }
-        self.active_target = None;
+        self.complete_observing_for_target(target, source, stage, sequence, |_| {});
     }
 
     fn complete_observing_for_target(
@@ -745,7 +664,6 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         source: ChunkPos,
         stage: LifecycleCompletion,
         sequence: u64,
-        target_scoped: bool,
         mut observe: impl FnMut(&LifecycleSpill),
     ) {
         assert!(
@@ -753,8 +671,8 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             "lifecycle completion source {source:?} was not admitted before sequence {sequence}"
         );
         assert!(
-            self.completions.insert((target, source, stage)),
-            "duplicate lifecycle completion for target {target:?}, source {source:?} at sequence {sequence} ({stage:?})"
+            self.completions.insert((source, stage)),
+            "duplicate lifecycle completion for {source:?} at sequence {sequence} ({stage:?})"
         );
         if stage == LifecycleCompletion::Full {
             return;
@@ -817,33 +735,18 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             column.add_generated_block_entities(std::slice::from_ref(entity));
         }
         for spill in result.spills {
+            observe(&spill);
             let destination = (
                 spill.position.0.div_euclid(16),
                 spill.position.2.div_euclid(16),
             );
-            // A target completion is a packet-local transaction.  The source
-            // dispatcher may inspect the full resident window and report
-            // writes outside the target, but those writes belong to the
-            // corresponding target's own completion.  Retaining them here
-            // would let a dependency source mutate a future packet before its
-            // status transition, and the later source completion could no
-            // longer reproduce the target-local read context.
-            if target_scoped && !self.mutable_targets.contains(&destination) {
-                let previous = self.resident.get(&destination).map(|column| {
-                    column
-                        .block_state(
-                            spill.position.0.rem_euclid(16),
-                            spill.position.1,
-                            spill.position.2.rem_euclid(16),
-                        )
-                        .to_owned()
-                });
-                let previous_override = self.overrides.get(&spill.position).cloned();
-                self.temporary_spills
-                    .entry(spill.position)
-                    .or_insert((destination, previous, previous_override));
-            }
-            observe(&spill);
+            // Keep every source write in the read-after-write map, including
+            // writes outside the admitted destination rectangle.  The
+            // materializer admits only the packet target's bounded halo, but
+            // a source on that halo's edge can spill one chunk farther.  That
+            // outside write is still part of the shared resident world: a
+            // later source can read it through its wider feature context even
+            // though the final packet never encodes that destination.
             self.overrides.insert(spill.position, spill.state.clone());
             if let Some(column) = self.resident.get_mut(&destination) {
                 column.set_block(
@@ -872,26 +775,11 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             }
         }
         for spill in post_features_spills {
+            observe(&spill);
             let destination = (
                 spill.position.0.div_euclid(16),
                 spill.position.2.div_euclid(16),
             );
-            if target_scoped && !self.mutable_targets.contains(&destination) {
-                let previous = self.resident.get(&destination).map(|column| {
-                    column
-                        .block_state(
-                            spill.position.0.rem_euclid(16),
-                            spill.position.1,
-                            spill.position.2.rem_euclid(16),
-                        )
-                        .to_owned()
-                });
-                let previous_override = self.overrides.get(&spill.position).cloned();
-                self.temporary_spills
-                    .entry(spill.position)
-                    .or_insert((destination, previous, previous_override));
-            }
-            observe(&spill);
             self.overrides.insert(spill.position, spill.state.clone());
             if let Some(column) = self.resident.get_mut(&destination) {
                 column.set_block(
