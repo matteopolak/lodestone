@@ -18,6 +18,8 @@
 
 use std::path::Path;
 
+use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
 /// One locally-known account: enough to draw a row in an account switcher
@@ -102,19 +104,10 @@ impl AccountsMetadata {
     ///   the rest of that entry.
     #[must_use]
     pub fn from_json(text: &str) -> Self {
-        let Ok(serde_json::Value::Object(obj)) = serde_json::from_str(text) else {
+        let Ok(document) = serde_json::from_str::<AccountsMetadataDocument>(text) else {
             return Self::default();
         };
-        let selected = obj
-            .get("selected")
-            .and_then(serde_json::Value::as_str)
-            .and_then(|s| Uuid::parse_str(s).ok());
-        let profiles = obj
-            .get("profiles")
-            .and_then(serde_json::Value::as_array)
-            .map(|arr| arr.iter().filter_map(profile_from_json).collect())
-            .unwrap_or_default();
-        Self { selected, profiles }
+        document.into_metadata()
     }
 
     /// Adds `profile`, replacing any existing entry with the same
@@ -140,24 +133,6 @@ impl AccountsMetadata {
         }
     }
 
-    /// The exact JSON value [`Self::save_to`] writes — exposed so tests (and
-    /// any caller that wants the text without touching a file) don't have to
-    /// duplicate the shape.
-    #[must_use]
-    pub fn to_json(&self) -> serde_json::Value {
-        let mut obj = serde_json::Map::new();
-        obj.insert(
-            "selected".into(),
-            self.selected
-                .map_or(serde_json::Value::Null, |id| serde_json::Value::String(id.to_string())),
-        );
-        obj.insert(
-            "profiles".into(),
-            serde_json::Value::Array(self.profiles.iter().map(profile_to_json).collect()),
-        );
-        serde_json::Value::Object(obj)
-    }
-
     /// Writes to the real on-disk location.
     ///
     /// # Errors
@@ -175,7 +150,7 @@ impl AccountsMetadata {
     /// reached at all (wasm32) — see [`Self::load_from`]'s doc.
     pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
         let text =
-            serde_json::to_string_pretty(&self.to_json()).unwrap_or_else(|_| "{}".to_owned());
+            serde_json::to_string_pretty(&self.to_document()).unwrap_or_else(|_| "{}".to_owned());
         #[cfg(target_arch = "wasm32")]
         {
             let storage = local_storage()
@@ -190,6 +165,18 @@ impl AccountsMetadata {
                 std::fs::create_dir_all(dir)?;
             }
             std::fs::write(path, text)
+        }
+    }
+
+    fn to_document(&self) -> AccountsMetadataDocument {
+        AccountsMetadataDocument {
+            selected: self.selected,
+            profiles: self
+                .profiles
+                .iter()
+                .cloned()
+                .map(AccountProfileDocument::from)
+                .collect(),
         }
     }
 }
@@ -211,48 +198,400 @@ fn storage_key(path: &Path) -> String {
     format!("lodestone:{}", path.to_string_lossy())
 }
 
-fn profile_from_json(value: &serde_json::Value) -> Option<AccountProfile> {
-    let obj = value.as_object()?;
-    let profile_id = obj
-        .get("profile_id")
-        .and_then(serde_json::Value::as_str)
-        .and_then(|s| Uuid::parse_str(s).ok())?;
-    let username = obj.get("username").and_then(serde_json::Value::as_str)?.to_owned();
-    let skin_url = obj
-        .get("skin_url")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned);
-    let last_used = obj
-        .get("last_used")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
-    Some(AccountProfile {
-        profile_id,
-        username,
-        skin_url,
-        last_used,
-    })
+/// The typed on-disk roster document. Its optional fields are deliberate: the
+/// reader uses them to distinguish an invalid entry (which is skipped) from a
+/// valid entry whose optional fields should receive their defaults.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AccountsMetadataDocument {
+    #[serde(
+        rename = "profiles",
+        default,
+        deserialize_with = "deserialize_profiles"
+    )]
+    profiles: Vec<AccountProfileDocument>,
+    #[serde(
+        rename = "selected",
+        default,
+        serialize_with = "serialize_optional_uuid",
+        deserialize_with = "deserialize_optional_uuid"
+    )]
+    selected: Option<Uuid>,
 }
 
-fn profile_to_json(profile: &AccountProfile) -> serde_json::Value {
-    let mut obj = serde_json::Map::new();
-    obj.insert(
-        "profile_id".into(),
-        serde_json::Value::String(profile.profile_id.to_string()),
-    );
-    obj.insert(
-        "username".into(),
-        serde_json::Value::String(profile.username.clone()),
-    );
-    obj.insert(
-        "skin_url".into(),
-        profile
-            .skin_url
-            .clone()
-            .map_or(serde_json::Value::Null, serde_json::Value::String),
-    );
-    obj.insert("last_used".into(), serde_json::Value::from(profile.last_used));
-    serde_json::Value::Object(obj)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AccountProfileDocument {
+    #[serde(
+        rename = "last_used",
+        default,
+        deserialize_with = "deserialize_last_used"
+    )]
+    last_used: u64,
+    #[serde(
+        rename = "profile_id",
+        default,
+        serialize_with = "serialize_optional_uuid",
+        deserialize_with = "deserialize_optional_uuid"
+    )]
+    profile_id: Option<Uuid>,
+    #[serde(
+        rename = "skin_url",
+        default,
+        deserialize_with = "deserialize_optional_string"
+    )]
+    skin_url: Option<String>,
+    #[serde(
+        rename = "username",
+        default,
+        deserialize_with = "deserialize_optional_string"
+    )]
+    username: Option<String>,
+}
+
+impl AccountsMetadataDocument {
+    fn into_metadata(self) -> AccountsMetadata {
+        AccountsMetadata {
+            selected: self.selected,
+            profiles: self
+                .profiles
+                .into_iter()
+                .filter_map(AccountProfileDocument::into_profile)
+                .collect(),
+        }
+    }
+}
+
+impl AccountProfileDocument {
+    fn from(profile: AccountProfile) -> Self {
+        Self {
+            profile_id: Some(profile.profile_id),
+            username: Some(profile.username),
+            skin_url: profile.skin_url,
+            last_used: profile.last_used,
+        }
+    }
+
+    fn into_profile(self) -> Option<AccountProfile> {
+        Some(AccountProfile {
+            profile_id: self.profile_id?,
+            username: self.username?,
+            skin_url: self.skin_url,
+            last_used: self.last_used,
+        })
+    }
+}
+
+/// A profile entry is independently optional so one scalar or non-object
+/// element cannot reject the rest of the array.
+#[derive(Debug, Clone)]
+struct LenientAccountProfile(Option<AccountProfileDocument>);
+
+impl<'de> Deserialize<'de> for LenientAccountProfile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self(AccountProfileDocument::deserialize(deserializer).ok()))
+    }
+}
+
+fn deserialize_optional_uuid<'de, D>(deserializer: D) -> Result<Option<Uuid>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(deserialize_optional_string(deserializer)?.and_then(|raw| Uuid::parse_str(&raw).ok()))
+}
+
+fn serialize_optional_uuid<S>(value: &Option<Uuid>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    value.map(|id| id.to_string()).serialize(serializer)
+}
+
+fn deserialize_optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserializer.deserialize_any(LenientStringVisitor)
+}
+
+fn deserialize_last_used<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserializer.deserialize_any(LenientU64Visitor)
+}
+
+struct LenientStringVisitor;
+
+impl<'de> Visitor<'de> for LenientStringVisitor {
+    type Value = Option<String>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("an optional string")
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(None)
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(None)
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Some(value.to_owned()))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Some(value))
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(None)
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(None)
+    }
+
+    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(None)
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(None)
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while sequence.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(None)
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        Ok(None)
+    }
+}
+
+struct LenientU64Visitor;
+
+impl<'de> Visitor<'de> for LenientU64Visitor {
+    type Value = u64;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("an unsigned integer")
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(value)
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(0)
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(0)
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(0)
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(0)
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(0)
+    }
+
+    fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(0)
+    }
+
+    fn visit_string<E>(self, _value: String) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(0)
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while sequence.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(0)
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        Ok(0)
+    }
+}
+
+fn deserialize_profiles<'de, D>(deserializer: D) -> Result<Vec<AccountProfileDocument>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserializer.deserialize_any(ProfilesVisitor)
+}
+
+struct ProfilesVisitor;
+
+impl<'de> Visitor<'de> for ProfilesVisitor {
+    type Value = Vec<AccountProfileDocument>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("an array of account profiles")
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut profiles = Vec::new();
+        while let Some(entry) = sequence.next_element::<LenientAccountProfile>()? {
+            if let Some(profile) = entry.0 {
+                profiles.push(profile);
+            }
+        }
+        Ok(profiles)
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+        Ok(Vec::new())
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Vec::new())
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Vec::new())
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Vec::new())
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Vec::new())
+    }
+
+    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Vec::new())
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Vec::new())
+    }
+
+    fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Vec::new())
+    }
+
+    fn visit_string<E>(self, _value: String) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Vec::new())
+    }
+
+    fn visit_bytes<E>(self, _value: &[u8]) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Vec::new())
+    }
+
+    fn visit_byte_buf<E>(self, _value: Vec<u8>) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(Vec::new())
+    }
 }
 
 #[cfg(test)]
@@ -300,7 +639,7 @@ mod tests {
 
     #[test]
     fn saving_produces_the_exact_hand_written_json_shape() {
-        let text = serde_json::to_string_pretty(&sample().to_json()).unwrap();
+        let text = serde_json::to_string_pretty(&sample().to_document()).unwrap();
         assert_eq!(text, EXPECTED_JSON);
     }
 
@@ -348,11 +687,10 @@ mod tests {
     #[test]
     fn an_invalid_selected_value_is_none_without_costing_profiles() {
         let good = sample();
-        let json_text = serde_json::to_string(&good.to_json()).unwrap();
-        // Corrupt just the `selected` field by re-parsing and mutating.
-        let mut value: serde_json::Value = serde_json::from_str(&json_text).unwrap();
-        value["selected"] = serde_json::Value::String("not-a-uuid".to_owned());
-        let corrupted = serde_json::to_string(&value).unwrap();
+        let corrupted = format!(
+            r#"{{"selected":"not-a-uuid","profiles":[{{"profile_id":"{}","username":"Notch","skin_url":"https://textures.minecraft.net/texture/abc123","last_used":1700000000}}]}}"#,
+            good.profiles[0].profile_id
+        );
 
         let meta = AccountsMetadata::from_json(&corrupted);
         assert_eq!(meta.selected, None);
@@ -389,6 +727,24 @@ mod tests {
         assert_eq!(meta.profiles[1].username, "Carol");
         assert_eq!(meta.profiles[1].skin_url, None, "bad-typed skin_url must default to None");
         assert_eq!(meta.profiles[1].last_used, 0, "bad-typed last_used must default to 0");
+    }
+
+    #[test]
+    fn wrong_json_types_for_each_profile_field_are_tolerated_independently() {
+        let id = Uuid::new_v4();
+        let text = format!(
+            r#"{{"profiles":[
+                {{"profile_id":{{}},"username":"bad id"}},
+                {{"profile_id":"{id}","username":{{}}}},
+                {{"profile_id":"{id}","username":"kept","skin_url":{{}},"last_used":[]}}
+            ]}}"#
+        );
+        let metadata = AccountsMetadata::from_json(&text);
+        assert_eq!(metadata.profiles.len(), 1);
+        assert_eq!(metadata.profiles[0].profile_id, id);
+        assert_eq!(metadata.profiles[0].username, "kept");
+        assert_eq!(metadata.profiles[0].skin_url, None);
+        assert_eq!(metadata.profiles[0].last_used, 0);
     }
 
     // -- upsert / remove ----------------------------------------------------

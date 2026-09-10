@@ -14,6 +14,7 @@ workspace = true
 friends-test-service = []
 
 [dependencies]
+bon.workspace = true
 thiserror = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
