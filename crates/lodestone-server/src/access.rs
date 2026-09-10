@@ -83,6 +83,8 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
 /// Vanilla's four file names, in the server directory.
@@ -97,6 +99,120 @@ pub const BANNED_IPS_FILE: &str = "banned-ips.json";
 /// The highest vanilla permission level (`PermissionLevel.ALL`): bypass spawn
 /// protection, use every command including `/stop`.
 pub const MAX_PERMISSION_LEVEL: u8 = 4;
+
+/// The closed JSON record written to `ops.json`.
+///
+/// The UUID is optional only while reading: old files could contain an entry
+/// without a usable identity, and the old loader ignored that entry. Every
+/// record this module writes has all fields populated.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct OpFileEntry {
+    #[serde(default, with = "optional_uuid")]
+    uuid: Option<Uuid>,
+    #[serde(default, deserialize_with = "deserialize_default_string")]
+    name: String,
+    #[serde(default, deserialize_with = "deserialize_default_u64")]
+    level: u64,
+    #[serde(
+        rename = "bypassesPlayerLimit",
+        default,
+        deserialize_with = "deserialize_default_bool"
+    )]
+    bypasses_player_limit: bool,
+}
+
+/// The closed JSON record written to `whitelist.json`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WhitelistFileEntry {
+    #[serde(default, with = "optional_uuid")]
+    uuid: Option<Uuid>,
+    #[serde(default, deserialize_with = "deserialize_default_string")]
+    name: String,
+}
+
+/// The closed JSON record written to `banned-players.json`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PlayerBanFileEntry {
+    #[serde(default, with = "optional_uuid")]
+    uuid: Option<Uuid>,
+    #[serde(default, deserialize_with = "deserialize_default_string")]
+    name: String,
+    #[serde(default, deserialize_with = "deserialize_default_string")]
+    created: String,
+    #[serde(default, deserialize_with = "deserialize_default_string")]
+    source: String,
+    #[serde(default, deserialize_with = "deserialize_default_string")]
+    expires: String,
+    #[serde(default, deserialize_with = "deserialize_default_string")]
+    reason: String,
+}
+
+/// The closed JSON record written to `banned-ips.json`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct IpBanFileEntry {
+    #[serde(default, deserialize_with = "deserialize_default_string")]
+    ip: String,
+    #[serde(default, deserialize_with = "deserialize_default_string")]
+    name: String,
+    #[serde(default, deserialize_with = "deserialize_default_string")]
+    created: String,
+    #[serde(default, deserialize_with = "deserialize_default_string")]
+    source: String,
+    #[serde(default, deserialize_with = "deserialize_default_string")]
+    expires: String,
+    #[serde(default, deserialize_with = "deserialize_default_string")]
+    reason: String,
+}
+
+/// Keep the persisted UUID spelling a JSON string without enabling UUID's
+/// serde feature for the whole workspace. Invalid UUID strings remain the
+/// same compatibility case as the previous loader: that entry is ignored.
+mod optional_uuid {
+    use super::*;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Uuid>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Option::<String>::deserialize(deserializer)?;
+        Ok(value.and_then(|value| Uuid::parse_str(&value).ok()))
+    }
+
+    pub fn serialize<S>(value: &Option<Uuid>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match value {
+            Some(value) => serializer.serialize_str(&value.to_string()),
+            None => serializer.serialize_none(),
+        }
+    }
+}
+
+fn deserialize_default_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+fn deserialize_default_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<u64>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+fn deserialize_default_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<bool>::deserialize(deserializer)?.unwrap_or_default())
+}
 
 /// Why a join was refused, as the translation key a vanilla client renders plus
 /// the optional reason line vanilla appends.
@@ -337,45 +453,48 @@ impl AccessLists {
     /// for one whose JSON is not vanilla's array-of-objects shape.
     pub fn load(dir: &Path) -> Result<Self, Error> {
         let mut lists = Self::new();
-        for entry in read_array(&dir.join(OPS_FILE))? {
-            let uuid = json_uuid(&entry, "uuid");
+        for entry in read_array::<OpFileEntry>(&dir.join(OPS_FILE))? {
+            let uuid = entry.uuid;
             if let Some(uuid) = uuid {
                 lists.ops.insert(
                     uuid,
                     OpEntry {
                         uuid,
-                        name: json_str(&entry, "name"),
-                        level: u8::try_from(entry.get("level").and_then(serde_json::Value::as_u64).unwrap_or(0))
+                        name: entry.name,
+                        level: u8::try_from(entry.level)
                             .unwrap_or(MAX_PERMISSION_LEVEL)
                             .min(MAX_PERMISSION_LEVEL),
-                        bypasses_player_limit: entry
-                            .get("bypassesPlayerLimit")
-                            .and_then(serde_json::Value::as_bool)
-                            .unwrap_or(false),
+                        bypasses_player_limit: entry.bypasses_player_limit,
                     },
                 );
             }
         }
-        for entry in read_array(&dir.join(WHITELIST_FILE))? {
-            if let Some(uuid) = json_uuid(&entry, "uuid") {
+        for entry in read_array::<WhitelistFileEntry>(&dir.join(WHITELIST_FILE))? {
+            if let Some(uuid) = entry.uuid {
                 lists.whitelist.insert(
                     uuid,
                     WhitelistEntry {
                         uuid,
-                        name: json_str(&entry, "name"),
+                        name: entry.name,
                     },
                 );
             }
         }
-        for entry in read_array(&dir.join(BANNED_PLAYERS_FILE))? {
-            if let Some(uuid) = json_uuid(&entry, "uuid") {
-                lists.bans.insert(uuid, ban_from_json(&entry));
+        for entry in read_array::<PlayerBanFileEntry>(&dir.join(BANNED_PLAYERS_FILE))? {
+            if let Some(uuid) = entry.uuid {
+                lists.bans.insert(
+                    uuid,
+                    ban_from_fields(entry.name, entry.source, entry.created, entry.expires, entry.reason),
+                );
             }
         }
-        for entry in read_array(&dir.join(BANNED_IPS_FILE))? {
-            let ip = json_str(&entry, "ip");
+        for entry in read_array::<IpBanFileEntry>(&dir.join(BANNED_IPS_FILE))? {
+            let ip = entry.ip;
             if !ip.is_empty() {
-                lists.ip_bans.insert(ip, ban_from_json(&entry));
+                lists.ip_bans.insert(
+                    ip,
+                    ban_from_fields(entry.name, entry.source, entry.created, entry.expires, entry.reason),
+                );
             }
         }
         Ok(lists)
@@ -394,48 +513,55 @@ impl AccessLists {
             path: dir.to_path_buf(),
             source,
         })?;
-        let ops: Vec<serde_json::Value> = self
+        let ops: Vec<OpFileEntry> = self
             .sorted_ops()
             .into_iter()
-            .map(|op| {
-                serde_json::json!({
-                    "uuid": op.uuid.to_string(),
-                    "name": op.name,
-                    "level": op.level,
-                    "bypassesPlayerLimit": op.bypasses_player_limit,
-                })
+            .map(|op| OpFileEntry {
+                uuid: Some(op.uuid),
+                name: op.name.clone(),
+                level: u64::from(op.level),
+                bypasses_player_limit: op.bypasses_player_limit,
             })
             .collect();
         write_array(&dir.join(OPS_FILE), &ops)?;
 
         let mut whitelist: Vec<&WhitelistEntry> = self.whitelist.values().collect();
         whitelist.sort_by(|a, b| a.uuid.cmp(&b.uuid));
-        let whitelist: Vec<serde_json::Value> = whitelist
+        let whitelist: Vec<WhitelistFileEntry> = whitelist
             .into_iter()
-            .map(|w| serde_json::json!({ "uuid": w.uuid.to_string(), "name": w.name }))
+            .map(|w| WhitelistFileEntry {
+                uuid: Some(w.uuid),
+                name: w.name.clone(),
+            })
             .collect();
         write_array(&dir.join(WHITELIST_FILE), &whitelist)?;
 
         let mut bans: Vec<(&Uuid, &BanEntry)> = self.bans.iter().collect();
         bans.sort_by(|a, b| a.0.cmp(b.0));
-        let bans: Vec<serde_json::Value> = bans
+        let bans: Vec<PlayerBanFileEntry> = bans
             .into_iter()
-            .map(|(uuid, ban)| {
-                let mut value = ban_to_json(ban);
-                value["uuid"] = serde_json::Value::String(uuid.to_string());
-                value
+            .map(|(uuid, ban)| PlayerBanFileEntry {
+                uuid: Some(*uuid),
+                name: ban.name.clone(),
+                created: ban.created.clone(),
+                source: ban.source.clone(),
+                expires: ban.expires.clone(),
+                reason: ban.reason.clone(),
             })
             .collect();
         write_array(&dir.join(BANNED_PLAYERS_FILE), &bans)?;
 
         let mut ip_bans: Vec<(&String, &BanEntry)> = self.ip_bans.iter().collect();
         ip_bans.sort_by(|a, b| a.0.cmp(b.0));
-        let ip_bans: Vec<serde_json::Value> = ip_bans
+        let ip_bans: Vec<IpBanFileEntry> = ip_bans
             .into_iter()
-            .map(|(ip, ban)| {
-                let mut value = ban_to_json(ban);
-                value["ip"] = serde_json::Value::String(ip.clone());
-                value
+            .map(|(ip, ban)| IpBanFileEntry {
+                ip: ip.clone(),
+                name: ban.name.clone(),
+                created: ban.created.clone(),
+                source: ban.source.clone(),
+                expires: ban.expires.clone(),
+                reason: ban.reason.clone(),
             })
             .collect();
         write_array(&dir.join(BANNED_IPS_FILE), &ip_bans)
@@ -763,49 +889,33 @@ impl AccessHandle {
     }
 }
 
-fn ban_from_json(entry: &serde_json::Value) -> BanEntry {
+fn ban_from_fields(
+    name: String,
+    source: String,
+    created: String,
+    expires: String,
+    reason: String,
+) -> BanEntry {
     BanEntry {
-        name: json_str(entry, "name"),
-        source: match json_str(entry, "source") {
+        name,
+        source: match source {
             s if s.is_empty() => "(Unknown)".to_string(),
             s => s,
         },
-        created: json_str(entry, "created"),
-        expires: match json_str(entry, "expires") {
+        created,
+        expires: match expires {
             s if s.is_empty() => "forever".to_string(),
             s => s,
         },
-        reason: match json_str(entry, "reason") {
+        reason: match reason {
             s if s.is_empty() => "Banned by an operator.".to_string(),
             s => s,
         },
     }
 }
 
-fn ban_to_json(ban: &BanEntry) -> serde_json::Value {
-    serde_json::json!({
-        "name": ban.name,
-        "created": ban.created,
-        "source": ban.source,
-        "expires": ban.expires,
-        "reason": ban.reason,
-    })
-}
-
-fn json_str(entry: &serde_json::Value, key: &str) -> String {
-    entry
-        .get(key)
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_string()
-}
-
-fn json_uuid(entry: &serde_json::Value, key: &str) -> Option<Uuid> {
-    Uuid::parse_str(entry.get(key)?.as_str()?).ok()
-}
-
 /// Reads one file as vanilla's array of objects. A missing file is an empty list.
-fn read_array(path: &Path) -> Result<Vec<serde_json::Value>, Error> {
+fn read_array<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>, Error> {
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -819,21 +929,17 @@ fn read_array(path: &Path) -> Result<Vec<serde_json::Value>, Error> {
     if raw.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| Error::Malformed {
+    serde_json::from_str(&raw).map_err(|e| Error::Malformed {
         path: path.to_path_buf(),
         detail: e.to_string(),
-    })?;
-    match value {
-        serde_json::Value::Array(entries) => Ok(entries),
-        other => Err(Error::Malformed {
-            path: path.to_path_buf(),
-            detail: format!("expected a JSON array, found {other}"),
-        }),
-    }
+    })
 }
 
-fn write_array(path: &Path, entries: &[serde_json::Value]) -> Result<(), Error> {
-    let body = serde_json::to_string_pretty(entries).unwrap_or_else(|_| "[]".to_string());
+fn write_array<T: Serialize>(path: &Path, entries: &[T]) -> Result<(), Error> {
+    let body = serde_json::to_string_pretty(entries).map_err(|source| Error::Malformed {
+        path: path.to_path_buf(),
+        detail: source.to_string(),
+    })?;
     std::fs::write(path, body).map_err(|source| Error::Io {
         path: path.to_path_buf(),
         source,
@@ -963,6 +1069,95 @@ mod tests {
             AccessLists::load(&dir),
             Err(Error::Malformed { .. })
         ));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The field names and ordering are part of the persisted compatibility
+    /// surface. This golden record is independent of the in-memory model and
+    /// catches accidental renames of `bypassesPlayerLimit` or the UUID spelling.
+    #[test]
+    fn persisted_ops_match_golden_json() {
+        let dir = std::env::temp_dir().join("lodestone-access-golden-r7q2");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(
+            dir.join(OPS_FILE),
+            r#"[{"uuid":"00000000-0000-0000-0000-000000000001","name":"admin","level":4,"bypassesPlayerLimit":true}]"#,
+        )
+        .expect("write golden ops");
+
+        let lists = AccessLists::load(&dir).expect("load golden ops");
+        assert_eq!(lists.permission_level(uuid(1)), 4);
+        assert!(lists.bypasses_player_limit(uuid(1)));
+        lists.save(&dir).expect("save golden ops");
+        assert_eq!(
+            std::fs::read_to_string(dir.join(OPS_FILE)).expect("read golden ops"),
+            "[\n  {\n    \"uuid\": \"00000000-0000-0000-0000-000000000001\",\n    \"name\": \"admin\",\n    \"level\": 4,\n    \"bypassesPlayerLimit\": true\n  }\n]",
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Files written by older versions could omit optional fields. The typed
+    /// reader retains those defaults while still rejecting unknown fields.
+    #[test]
+    fn legacy_records_keep_defaults() {
+        let dir = std::env::temp_dir().join("lodestone-access-legacy-r7q2");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(
+            dir.join(OPS_FILE),
+            r#"[{"uuid":"00000000-0000-0000-0000-000000000001","name":"legacy"}]"#,
+        )
+        .expect("write legacy ops");
+        std::fs::write(
+            dir.join(WHITELIST_FILE),
+            r#"[{"uuid":"00000000-0000-0000-0000-000000000002"}]"#,
+        )
+        .expect("write legacy whitelist");
+        std::fs::write(
+            dir.join(BANNED_PLAYERS_FILE),
+            r#"[{"uuid":"00000000-0000-0000-0000-000000000003","name":"legacy"}]"#,
+        )
+        .expect("write legacy player ban");
+        std::fs::write(dir.join(BANNED_IPS_FILE), r#"[{"ip":"192.0.2.7"}]"#)
+            .expect("write legacy ip ban");
+
+        let lists = AccessLists::load(&dir).expect("load legacy records");
+        assert_eq!(lists.permission_level(uuid(1)), 0);
+        assert!(!lists.bypasses_player_limit(uuid(1)));
+        assert_eq!(lists.whitelisted(), vec![uuid(2)]);
+        let (_, player_ban) = lists.bans()[0];
+        assert_eq!(player_ban.source, "(Unknown)");
+        assert_eq!(player_ban.expires, "forever");
+        assert_eq!(player_ban.reason, "Banned by an operator.");
+        assert_eq!(
+            lists.may_join(uuid(9), Some("192.0.2.7".parse().unwrap()), 0, 0),
+            Err(JoinRefusal::IpBanned("Banned by an operator.".to_string()))
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A typo in a closed access-file schema is an error rather than a silently
+    /// dropped permission or ban.
+    #[test]
+    fn unknown_access_field_is_malformed() {
+        let dir = std::env::temp_dir().join("lodestone-access-unknown-r7q2");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(
+            dir.join(OPS_FILE),
+            r#"[{"uuid":"00000000-0000-0000-0000-000000000001","name":"admin","level":4,"bypassesPlayerLimit":false,"bypassesPlayerLimt":true}]"#,
+        )
+        .expect("write unknown field");
+
+        let error = AccessLists::load(&dir).expect_err("unknown field must fail");
+        match error {
+            Error::Malformed { detail, .. } => assert!(detail.contains("unknown field"), "{detail}"),
+            other => panic!("unexpected error: {other:?}"),
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }
