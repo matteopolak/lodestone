@@ -866,30 +866,6 @@ impl StructureTemplate {
         settings: &PlaceSettings,
         grid: &mut DenseBlockGrid,
     ) -> usize {
-        self.place_impl(origin, settings, grid, |_, _| {})
-    }
-
-    /// Place a template and report every state-owned block-entity creation
-    /// event in write order. The callback observes the processed state before a
-    /// later structure write can overwrite it, which is the history needed by
-    /// packet-facing generation sidecars.
-    pub fn place_with_block_entity_events(
-        &self,
-        origin: PlaceOrigin,
-        settings: &PlaceSettings,
-        grid: &mut DenseBlockGrid,
-        mut on_block_entity: impl FnMut([i32; 3], &'static str),
-    ) -> usize {
-        self.place_impl(origin, settings, grid, &mut on_block_entity)
-    }
-
-    fn place_impl(
-        &self,
-        origin: PlaceOrigin,
-        settings: &PlaceSettings,
-        grid: &mut DenseBlockGrid,
-        mut on_block_entity: impl FnMut([i32; 3], &'static str),
-    ) -> usize {
         let position = origin.position;
         let palette = &self.palettes[self.palette_for(position).min(self.palettes.len() - 1)];
         let (min_x, min_y, min_z, size_x, size_y, size_z) = grid.bounds();
@@ -977,22 +953,11 @@ impl StructureTemplate {
             {
                 final_state.properties.insert("waterlogged".into(), "true".into());
             }
-            let canonical = final_state.canonical();
-            if let Some(type_id) = block_entity_type_for_state(&canonical) {
-                on_block_entity(block.pos, type_id);
-            }
-            grid.set(block.pos[0], block.pos[1], block.pos[2], &canonical);
+            grid.set(block.pos[0], block.pos[1], block.pos[2], &final_state.canonical());
             written += 1;
         }
         written
     }
-}
-
-fn block_entity_type_for_state(state: &str) -> Option<&'static str> {
-    let state = lodestone_data::block_states::state_id(state)
-        .and_then(lodestone_data::block_states::StateId::new)?;
-    lodestone_data::block_entity_types::block_entity_type(state)
-        .map(lodestone_data::block_entity_types::block_entity_type_name)
 }
 
 fn compound(value: &Nbt) -> Option<&Vec<(String, Nbt)>> {
