@@ -18,6 +18,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   rubberbanding across a server transfer, the TLS crypto-provider choice underneath
   every HTTPS call, secure (signed) chat, and how a server's `Text` component becomes
   displayed words.
+- [Server advancement state](./advancements.md) — The server advancement subsystem
+  owns advancement completion, per-player progress, visibility, and the version-free
+  update payload consumed by protocol encoders. Registry-backed advancement IDs are
+  validated as `lodestone_model::ResourceKey` values at the manager's internal tree
+  and progress seams.
 - [Anvil import preflight](./anvil-import-preflight.md) —
   `lodestone_anvil::import_preflight` inventories an Anvil world before native
   conversion. It separates source values with a typed destination, values that a lossy
@@ -77,6 +82,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   benchmark metric is *supposed* to be, `scripts/bench-gate.py` compares a fresh run
   against it and fails on drift in either direction, and CI's `bench-gate` job runs
   both on every push and pull request. It gates counts only — never a duration.
+- [Generated block-entity propagation](./block-entity-generation.md) — Generated
+  structures produce block states and block-entity state through separate products.
+  This seam attaches typed spawner and container records to the receiving
+  `ChunkColumn` so chunk packets and saved chunks carry the data behind generated
+  blocks.
 - [Block-entity runtime keys](./block-entity-kinds.md) —
   `lodestone-server::block_entities::BlockEntityKind` is the typed runtime key for a
   block-entity record. Built-in records use enum variants, while plugin-defined and
@@ -90,6 +100,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   sand, piston heads, primed TNT) and flat "ground-plate" blocks (carpets, pressure
   plates, leaf litter, rails) whose flicker problems turned out to be a
   mipmap/sampling issue rather than a geometry one.
+- [Typed block properties](./block-properties.md) — The lodestone-data
+  block_properties module represents built-in block-state keys and values as generated
+  enums and exposes complete states through the Properties domain type. Its storage is
+  private, so callers do not depend on the current fixed-capacity representation.
 - [Block survival capabilities](./block-survival-capabilities.md) —
   `lodestone-data::block_survival` supplies the exact state facts used to decide
   whether a simple world-generation block can remain placed. The server converts its
@@ -138,6 +152,15 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   of the world stays in sync as it walks around — plus the client-side mirror of the
   same "one authoritative copy" idea for the terrain a session renders and collides
   against.
+- [Loaded chunk memory](./chunk-memory.md) — The integrated server retains generated
+  chunk columns in a bounded cache. This document records the representation choices
+  that keep those resident columns small without changing block reads, mutations, or
+  packet bytes.
+- [Chunk retention and residency](./chunk-retention.md) — This document describes
+  the ownership and eviction boundaries for decoded client columns, server-side
+  generated columns, terrain-meshing snapshots, and persistence overlays. The goal is
+  bounded steady-state residency without unloading data that an active ticket or a
+  visible render path still requires.
 - [Server-side chunk column storage and wire encoding](./chunk-storage.md) — How a
   server-side `ChunkColumn` holds its block-state data in memory, how those states
   reach a real client on the wire as the `level_chunk_with_light` packet body,
@@ -167,6 +190,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   ticker and its HUD indicator, hurt/death visual feedback, equipment-derived combat
   attributes (damage, armor, toughness), and the damage-type registry that tags how a
   hit is reduced.
+- [Container first-open performance](./container-first-open.md) — The container
+  renderer prewarms its block-entity icon resources during GPU bring-up and can emit
+  one location-level timing sample for the first drawable container frame. This keeps
+  one-time asset work out of inventory and chest opening while preserving an opt-in
+  diagnostic for regressions.
 - [Container screens](./container-screens.md) — The container/inventory screen
   family: the shared model that draws any open `Menu` (chest, furnace, crafting table,
   anvil-family, creative inventory, merchant), the client-side click predictor that
@@ -214,6 +242,24 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   heightfield visual horizon beyond the real streamed-chunk radius. It is a local
   integrated-Overworld feature, not a chunk cache: it cannot request, retain, or mesh
   ordinary chunks.
+- [End heightmap status oracle](./end-heightmap-status-oracle.md) —
+  `EndHeightmapStatusOracle` is a bounded external probe for the End generation
+  boundary that affects cross-chunk feature writes and the three client-visible
+  heightmaps. It runs the real 26.2 server with seed `42`, holds target chunk
+  `(280,78)` at its pre-feature stage, and records the target before and after each
+  explicitly requested neighbour reaches the feature stage.
+- [End light replay](./end-light-replay.md) — End light replay keeps an initial
+  chunk packet tied to the light snapshot captured after its admitted footprint is
+  settled. A block change invalidates every retained snapshot that could have read the
+  changed column, so a later packet cannot reuse light from an earlier admission
+  state.
+- [Entity ownership transfer](./entity-ownership-transfer.md) —
+  `lodestone_server::entity_handoff::EntityOwnershipHandoff` is the bounded
+  source-stop/destination-start barrier for a moving entity that crosses from one
+  tick-region owner to another. Dropped-item motion and experience-orb motion are
+  production consumers, and ballistic projectile motion now uses the same barrier;
+  this slice keeps the hand-off on the authoritative simulation writer without
+  changing the typed network-id surface.
 - [Entity physics](./entity-physics.md) — General entity and block physics:
   per-block-state collision geometry, the movement constants a block applies to
   whatever stands on it, entity-versus-entity pushing and hard collision, vehicles
@@ -257,8 +303,9 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   `cargo-fuzz`/libFuzzer workspace) is coverage-guided, in-process fuzzing over pure
   parsing functions — packet framing and decoders, NBT, loot-table JSON, block-state
   strings, the density compiler, the unihex font parser, region-file deserialization,
-  and chat-text JSON/NBT. It finds panics, hangs and decode crashes on malformed
-  input; it has no oracle for correctness. **Track B**
+  chat-text JSON/NBT, and server-list status JSON. Most targets find panics, hangs and
+  decode crashes on malformed input; `status_json_model` also checks parsed fields
+  against an independent JSON model. **Track B**
   (`crates/lodestone-fuzz/src/differential.rs`) is a tick-aligned differential-fuzzing
   *harness* against a real vanilla oracle, for the class of bug Track A structurally
   cannot see — wrong behaviour that never panics (the motivating example: breaking a
@@ -298,6 +345,16 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   the HUD is not a widget tree — it is rebuilt fresh from live game state every
   frame, so its layout is a set of pure functions of that state rather than a set of
   persistent objects with their own lifecycle.
+- [Integrated connection admission](./integrated-connection-admission.md) —
+  Integrated connection admission keeps terrain generation away from the connection
+  runtime while preserving packet order. Cold action targets, retained-light
+  neighbours, spawn-clearance cells, portal searches, and gateway/platform footprints
+  are admitted asynchronously before their existing synchronous consumers run.
+- [Integrated tick starvation](./integrated-tick-starvation.md) — The integrated
+  server shares a 20 Hz world-tick task with the live chunk cache. A player-anchor
+  update can expose columns that are still being generated by the join stream; this
+  feature keeps the tick task from synchronously generating those cold columns while
+  retaining an opt-in trace for slow tick phases.
 - [Item model, components and rendering](./items.md) — The item stack model end to
   end: the two `ItemStack` types (wire/model vs. game-side inventory) and the plugin
   read/write surface over them, how a 26.2 clientbound stack's data-component patch is
@@ -425,16 +482,26 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   serverbound (hosting) and clientbound (joining) sides, and the two plugin-facing
   hooks — `EgressFilters` and `ActionVetoes` — that let a plugin inspect, replace,
   suppress, or veto an action before it takes effect or reaches the wire.
+- [Paper command dispatch and completion](./paper-command-dispatch.md) — The server
+  command seam carries plugin command execution and tab completion from an installed
+  host registry into the live player connection. It keeps the authenticated caller and
+  permission decision on the server side while leaving protocol-specific offsets and
+  encoding in the server loop.
 - [Paper inventory bridge](./paper-inventory-bridge.md) — The inventory substrate
   for the optional Java compatibility host. It gives a host an owned, authoritative
   snapshot of a connected player's native inventory without exposing a connection
   task, mutable menu state, or a second inventory simulation.
+- [Paper player messages](./paper-player-messages.md) —
+  `PlayerRegistry::send_message` is the bounded player-object message operation. It
+  queues one exact system-chat line for one connected UUID, matching the useful
+  `Player.sendMessage` compatibility slice without exposing a connection or protocol
+  object.
 - [Paper plugin conformance harness](./paper-plugin-conformance.md) — The Paper
   plugin conformance harness defines reproducible, operator-supplied fixtures for
-  comparing one unmodified plugin scenario on Paper and Lodestone. Its current runner
-  validates the contract and emits an explicit blocked result; it does not claim
-  compatibility while Lodestone lacks the required plugin lifecycle, event dispatch,
-  and shared scenario driver.
+  comparing one unmodified plugin scenario on Paper and Lodestone. Its runner
+  validates and can execute the operator Paper driver, while refusing to claim
+  compatibility until the Lodestone side has the required plugin lifecycle, event
+  dispatch, and shared scenario driver.
 - [Paper world bridge](./paper-world-bridge.md) — `lodestone-jvm-bridge` exposes a
   deliberately small, loader-local world/block surface to an operator-built
   `lodestone.bridge.IsolatedPaperShim`. It supplies resident block-state reads and
@@ -479,6 +546,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   The plugin-facing seam mirrors Bukkit's `PrepareAnvilEvent`/`PrepareSmithingEvent`/
   `PrepareItemCraftEvent`: a plugin can allow, deny, or replace the result a crafting
   station is about to show a player, before it reaches their screen.
+- [Plugin data, config, and durable records](./plugin-data-and-config.md) —
+  `lodestone-plugin-support` is the shared native-plugin convenience crate. It
+  provides a confined per-plugin directory, typed JSON config, live entity/chunk
+  metadata, and bounded durable records for plugin, world, player, and
+  generation-qualified entity scopes.
 - [Plugin entity spawn/despawn/modify, and custom entity type registration](./plugin-entity-api.md) —
   Two independent halves, one per side of the client/server split, both giving a
   native plugin the Bukkit-class `World.spawnEntity(loc,
@@ -500,6 +572,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   `crates/versions/26.2/tests/singleplayer_lan/client_adapter_decorator_escape_hatch.rs`
   are executable proof, one test per verb per direction, each with a control showing
   the undecorated protocol's own behaviour first.
+- [Plugin player game-mode control](./plugin-player-control.md) —
+  `IntegratedServer::set_player_game_mode_proposed` is the native plugin bridge for
+  changing one connected player's game mode. It resolves a typed proposal before
+  queuing a copied effect, then lets the target connection apply the change and emit
+  the protocol-specific state.
 - [Server-side plugin capability parity](./plugin-server-capabilities.md) — A survey
   of what a server-side plugin can actually do today, set against the client's
   five-clause intent doctrine (`docs/plugin-api.md`), and the first working slice of a
@@ -569,6 +646,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   crate, after [`1.9`](./protocol-1-9-era.md), [`1.14`](./protocol-1-14-era.md),
   [`1.13`](./protocol-1-13-era.md), [`1.17`](./protocol-1-17-era.md) and
   [`1.19`](./protocol-1-19-era.md).
+- [Protocol 1.21.11 container sessions](./protocol-1-21-11-containers.md) — This
+  document describes the hosted protocol-774 container bridge. It carries a basic
+  chest session from the server's real inventory producers to the client read model:
+  opening the menu, sending its contents, applying single-slot corrections, and
+  closing it.
 - [The 1.21.11 era crate: a wire era with four protocols, and a client that must answer its own teleports](./protocol-1-21-11-era.md) —
   `crates/versions/1.21.11` (package `lodestone-v1-21-11`, feature `v1-21-11`) joins
   Minecraft **1.21.11** — protocol **774** — with one adapter, one generated
@@ -620,6 +702,16 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   functions over a `Fn(BlockPos) -> String` world lookup, the same shape
   [`docs/tick-scheduling.md`](./tick-scheduling.md) established for gravity blocks —
   no `ChunkColumn` in scope except through that closure.
+- [Region decoration overlay](./region-overlay.md) —
+  `lodestone_worldgen::feature::region_view::RegionView` provides an overlay-first
+  read/write surface over the source chunk grids used by decoration. Its scratch
+  overlay is a bounded, lazily allocated page directory with packed local coordinates
+  and generation-stamped cells, recycled only through the current thread's free list.
+- [Region owner execution](./region-owner-execution.md) —
+  `lodestone_server::tick_region::run_bounded_owner_jobs` is the production handoff
+  boundary for work assigned to disjoint chunk owners. Block-entity non-hopper ticks
+  and several entity simulations use it to execute immutable owner snapshots without
+  holding their shared registry lock.
 - [Registries: synchronized data, canonical block states, and generated tables](./registries.md) —
   How Minecraft's data-driven registries reach this client and this server: the
   Configuration-phase `registry_data` wire packet and what we keep from it, the
@@ -658,9 +750,8 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   `runtime-presentation` Cargo feature on `lodestone-shell` (on by default).
 - [Scheduled tick kinds](./scheduled-tick-kinds.md) — Scheduled tick records use a
   typed key for the built-in update lanes while retaining an exact open extension
-  value for plugin-defined actions. The live block queue is typed, while fluid
-  processing retains an explicit string-keyed boundary until that implementation is
-  migrated.
+  value for plugin-defined actions. Both live queues are typed; text survives only at
+  explicit feed, persistence, and focused-fixture boundaries.
 - [Screen effects](./screen-effects.md) — `lodestone_render::ScreenEffectRenderer`
   draws the client's full-screen and near-full-screen post-hand-pass overlays:
   underwater tint and scroll, fire, a carved-pumpkin vignette, freezing in powder
@@ -683,6 +774,12 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   server-sent command tree for chat tab-completion and syntax highlighting. Access
   control (ops/whitelist/bans) and permission levels gate which of a connection's
   commands are visible or runnable at all.
+- [Server entity network IDs](./server-entity-network-ids.md) — The server vehicle
+  simulation and connected-player registry expose typed `EntityNetworkId` APIs for
+  spawning, mounting, observation, movement, player updates, and dismounting. The
+  adapters make the server-owned versus plugin-owned id domains explicit while
+  packet-facing snapshots and event logs retain raw integers only at their lowering
+  boundaries.
 - [Server-authoritative gameplay: breaking, inventory, crafting, effects, advancements](./server-gameplay.md) —
   Five gameplay surfaces the server is authoritative over rather than trusting a
   client's own claim: whether a block break is legitimate and when it actually
@@ -697,6 +794,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   sky and block light it puts on the wire for a served chunk, and how it keeps that
   light current after a block is placed or broken, rather than only computing it once
   at the moment a chunk is first sent.
+- [Server plugin scheduler](./server-plugin-scheduler.md) —
+  `lodestone_server::ecs::ServerTaskScheduler` is the native server-plugin task
+  surface for delayed callbacks and off-tick work. It keeps all mutable server world
+  access on the primary tick owner while allowing bounded background work to return a
+  value through a queued hand-back.
 - [Server teleport acknowledgements](./server-teleport-acknowledgements.md) — 26.2
   player-position corrections carry a server-issued id. The connection holds its
   latest id and accepts movement only after the client echoes that same id with
@@ -713,6 +815,18 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   and the shell uses for movement, HUD state, and effect-driven rendering. The 26.2
   built-in registry contains 40 ids; recognizing an id on the wire is separate from
   implementing its game rule.
+- [String-dispatch census](./string-dispatch-census.md) — `cargo xtask
+  check-string-dispatch` inventories Rust `match` expressions whose patterns are
+  string literals. The report identifies closed registries and closed configuration
+  domains that should be parsed into types before production dispatch.
+- [Terrain loading readiness](./terrain-loading-readiness.md) — The labelled
+  `Loading terrain...` overlay is reserved for the first creation of a survival
+  singleplayer world. It releases only when the destination world's extent is known
+  and the decoded column under the local player has a settled result for every
+  section. A non-empty section must be CPU-meshed and handed to `RenderState`; an
+  all-air section must be explicitly classified as empty. Existing saves,
+  creative/hardcore creations, and multiplayer joins do not get a fake chunk counter
+  or grid.
 - [Terrain rendering](./terrain-rendering.md) — Everything between "a chunk section
   changed" and "its quads are the right shape, in the right place, drawn or correctly
   not drawn, on screen": meshing and mesh invalidation as chunks stream in,
@@ -783,6 +897,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   ordinary clicks, bulk transfers, pickup-all double clicks, hotbar swaps, drops,
   held-item actions, or respawn while native systems retain menu, simulation, and
   network ownership.
+- [WASM raw packet observation](./wasm-raw-packets.md) — The WASM plugin host can
+  receive bounded, read-only copies of inbound and outbound protocol packets. Each
+  observation carries the negotiated protocol number, connection phase, packet id, and
+  packet body without transport framing.
 - [WASM world snapshots and authoritative mutations](./wasm-world-snapshots.md) —
   The `world:read` WASM capability gives a runtime-loaded plugin a bounded, copied
   view of block-state ids in the current client chunk store. `world:write` adds a
@@ -812,6 +930,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   output. Both values carry block, biome, heightmap, resident block-entity, canonical
   light, and pending block/fluid-tick state together; partial chunk loaders are not
   part of this API.
+- [Worldgen Biome Types](./worldgen-biome-types.md) — Worldgen biome cells carry
+  generated `BuiltinBiome` identities and compact `BiomeRef` handles instead of one
+  owned string per sampled cell. The name view exists only at display, packet, and
+  region serialization boundaries.
 - [Overworld biome assignment and surface material](./worldgen-biomes.md) — How a
   generated column gets a real biome instead of one hardcoded value, and how that
   biome then picks surface material, terracotta banding and snow/ice cover. Four
@@ -844,13 +966,23 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
 - [Integrated world-generation dispatch](./worldgen-dispatch.md) — The integrated
   server generates chunk columns on native workers while keeping the async connection
   and tick tasks serviceable. One reusable Rayon pool is shared by join streams, view
-  batches, and background seed work.
+  batches, and background seed work. A process-wide semaphore admits at most the
+  pool's worker count, so simultaneous players wait asynchronously instead of
+  multiplying native workers or growing an unbounded queue.
 - [World-generation dungeons](./worldgen-dungeons.md) — The `monster_room`
   configured feature places an underground cobblestone room, up to two deferred-loot
   chests, and one monster spawner during Overworld decoration. Generated block
   entities travel with the column, so the server's chunk packet carries their registry
   records while the save path retains the deferred loot, occupants, and spawner state
   needed after reload.
+- [Worldgen iceberg features](./worldgen-iceberg.md) — The iceberg
+  configured-feature path grows the packed-ice and blue-ice masses used by
+  frozen-ocean decoration. It is consumed by the unified Overworld FEATURES dispatcher
+  through the local-modification step.
+- [Large dripstone configuration parsing](./worldgen-large-dripstone.md) — The
+  large-dripstone feature parser turns its JSON float providers into the typed runtime
+  values used by generation. Its provider discriminator is a closed Serde enum, so an
+  unsupported provider cannot silently select a different implementation.
 - [Large worldgen parity harness](./worldgen-large-parity.md) —
   `scripts/worldgen-oracle/LargeParityOracle.java` is the resumable, 251,001-chunk
   parity oracle for the 501 by 501 grid centred at `(0, 0)`. It freezes one generated
@@ -866,10 +998,41 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   start. Its output is a set of oriented, collision-free bounding boxes plus eager
   masonry, air, fence, stair, chest, garden, and spawner block lists translated
   together into the Nether's permitted structure height interval.
+- [Nether glowstone decoration](./worldgen-nether-glowstone.md) — This fixture
+  covers the Nether's step-7 glowstone decoration in the production generator. It ties
+  the `glowstone_extra` placement entry to 152 independently captured block cells in
+  the authenticated seed-42 51×51 region.
+- [Nether gold ore](./worldgen-nether-gold-ore.md) — Nether gold ore is the standard
+  underground ore entry in the Nether's mixed step-7 decoration pass. Focused parity
+  coverage keeps an external light-free stream witness attached to the production
+  source-spill path.
+- [Nether magma ore parity](./worldgen-nether-magma-ore.md) — The Nether's
+  `ore_magma` placed feature is a standard connected ore body in the mixed
+  underground-decoration step. It replaces eligible target blocks with magma while
+  sharing the same source order, raw feature index, and step-7 seed as the neighboring
+  non-ore entries.
+- [Nether soul-fire decoration](./worldgen-nether-soul-fire.md) — This fixture
+  covers the Nether's step-7 soul-fire decoration in the production generator. It ties
+  the `patch_soul_fire` placement entry to eight independently captured
+  `minecraft:soul_fire` cells in the authenticated seed-42 51×51 region.
+- [Nether soul-sand ore coverage](./worldgen-nether-soul-sand-ore.md) — The
+  `ore_soul_sand` entry is the soul-sand valley's biome-specific connected ore body.
+  Its focused parity fixture proves that the configured target reaches the production
+  `NetherGenerator` column rather than existing only in the asset parser or feature
+  table.
 - [Nether world generation](./worldgen-nether.md) —
   `lodestone_worldgen::nether::NetherGenerator` produces a complete Nether column from
   the bundled noise, biome, feature, tag and structure documents. It uses the legacy
   world-generation random family required by the Nether settings.
+- [Ore placement JSON boundary](./worldgen-ore-json.md) — The ore decoration parser
+  decodes placed-feature modifiers and ore target predicates through closed Serde
+  schemas. Known JSON shapes become the existing `Placement` and `RuleTest` runtime
+  enums without retaining discriminator strings.
+- [World-generation predicate fast path](./worldgen-predicate-fast-path.md) —
+  `StatePredicate` keeps its existing text lookup for extension values while caching
+  answers for canonical built-in states as compact local-ID bitsets. Repeated
+  top-layer generation predicates therefore test an interned integer instead of
+  hashing or comparing a state string.
 - [Worldgen registry-consumption census](./worldgen-registry-census.md) —
   `crates/lodestone-worldgen/tests/registry_consumption_census.rs` is a data-only
   coverage gate for the configured-feature and placed-feature records reachable from
@@ -886,6 +1049,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   growing one connected blob. It is the feature body used by the Nether's step-7
   ancient-debris entry and shares the configured targets, placement modifiers, and
   exposure rule with standard ore.
+- [Worldgen Stage Schedule](./worldgen-stage-schedule.md) —
+  `lodestone_worldgen::stage_schedule` names the ordered passes that turn a
+  dimension's density field into a packet-ready chunk. The table is shared by the
+  three generators and is intended to be the vocabulary used by parity replay and
+  production dispatch code.
 - [Structure generation](./worldgen-structures.md) — The structure engine: deciding
   which chunk gets which structure for a seed, and turning that decision into real
   blocks — jittered-grid and concentric-ring placement, `.nbt` structure templates

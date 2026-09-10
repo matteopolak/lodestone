@@ -114,6 +114,14 @@ single-use types remain unmodelled and are tracked by name in
 `lodestone_server::worldgen_data::KNOWN_VEGETATION_GAPS`; update that set whenever a type lands so a
 regression (or a fixed gap that should be pruned) is loud rather than silent.
 
+During lifecycle replay, each resident column also carries its own generation status. A source that
+crosses a chunk boundary initializes the destination's client heightmaps before applying the write,
+but does not advance that destination past CARVERS. The destination's later FEATURES entry preserves
+those maps and switches subsequent writes to the incremental per-cell path; replay must not rescan a
+final block field to reconstruct an earlier lifecycle snapshot. This distinction is observable in
+the canonical five-by-five End admission around source `(280,77)` and target `(280,78)`: the source's
+five writes at y=63..67 make the target maps live while the target is still CARVERS.
+
 The geode body receives the raw world seed separately from its feature stream. It builds its
 normal-noise field from that seed without consuming the placement RNG, then visits its closed
 generation box with X as the innermost coordinate. Layer providers, cracks, invalid-block aborts,

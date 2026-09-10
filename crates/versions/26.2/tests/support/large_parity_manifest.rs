@@ -8,6 +8,10 @@ use lodestone_v26_2::packets::chunk::LevelChunkWithLight;
 use lodestone_world::LightData;
 
 pub const HEADER_BYTES: usize = 256;
+/// Header bytes `70..72` identify the terrain-adaptation scope. The
+/// authenticated world manifests all use the production structure scope;
+/// composed stage fixtures carry their empty scope in their text schema.
+pub const STRUCTURE_BEARD_SCOPE_PRODUCTION_REAL: u16 = 0;
 pub const GRID_MIN: i32 = -250;
 pub const GRID_MAX: i32 = 250;
 pub const GRID_SIDE: i32 = GRID_MAX - GRID_MIN + 1;
@@ -157,7 +161,7 @@ pub fn read_header(mut r: impl Read) -> io::Result<Header> {
     let valid_v7 = magic == MAGIC_V7 && version == 7 && schema == 7;
     let record_width = u16::from_be_bytes(b[68..70].try_into().unwrap());
     let expected_width = if valid_v6 || valid_v7 { RAW_PACKET_HASH_BYTES as u16 } else { DIGEST_BYTES as u16 };
-    if !(valid_v3 || valid_v4 || valid_v5 || valid_v6 || valid_v7) || u16::from_be_bytes(b[10..12].try_into().unwrap()) != HEADER_BYTES as u16 || u16::from_be_bytes(b[12..14].try_into().unwrap()) != MANIFEST_KIND || u32::from_be_bytes(b[16..20].try_into().unwrap()) != 776 || i64::from_be_bytes(b[20..28].try_into().unwrap()) != 42 || record_width != expected_width || u16::from_be_bytes(b[70..72].try_into().unwrap()) != 0 {
+    if !(valid_v3 || valid_v4 || valid_v5 || valid_v6 || valid_v7) || u16::from_be_bytes(b[10..12].try_into().unwrap()) != HEADER_BYTES as u16 || u16::from_be_bytes(b[12..14].try_into().unwrap()) != MANIFEST_KIND || u32::from_be_bytes(b[16..20].try_into().unwrap()) != 776 || i64::from_be_bytes(b[20..28].try_into().unwrap()) != 42 || record_width != expected_width || u16::from_be_bytes(b[70..72].try_into().unwrap()) != STRUCTURE_BEARD_SCOPE_PRODUCTION_REAL {
         return Err(invalid("unsupported large-parity header"));
     }
     if valid_v3 && b[72..104] != sha256(DOMAIN) { return Err(invalid("large-parity semantic schema digest differs")); }
@@ -194,7 +198,7 @@ pub fn read_packet_audit_header(mut r: impl Read) -> io::Result<PacketAuditHeade
         || u32::from_be_bytes(b[16..20].try_into().unwrap()) != 776
         || i64::from_be_bytes(b[20..28].try_into().unwrap()) != 42
         || record_width != PACKET_AUDIT_RECORD_BYTES as u16
-        || u16::from_be_bytes(b[70..72].try_into().unwrap()) != 0
+        || u16::from_be_bytes(b[70..72].try_into().unwrap()) != STRUCTURE_BEARD_SCOPE_PRODUCTION_REAL
     {
         return Err(invalid("unsupported large-parity packet-audit header"));
     }
@@ -280,7 +284,7 @@ pub fn read_light_free_audit_header(mut r: impl Read) -> io::Result<LightFreeAud
         || u32::from_be_bytes(b[16..20].try_into().unwrap()) != 776
         || i64::from_be_bytes(b[20..28].try_into().unwrap()) != 42
         || record_width != LIGHT_FREE_AUDIT_RECORD_BYTES as u16
-        || u16::from_be_bytes(b[70..72].try_into().unwrap()) != 0
+        || u16::from_be_bytes(b[70..72].try_into().unwrap()) != STRUCTURE_BEARD_SCOPE_PRODUCTION_REAL
     {
         return Err(invalid("unsupported large-parity light-free audit header"));
     }
@@ -577,15 +581,21 @@ pub fn light_free_record(
     w.bytes(dimension.name().as_bytes());
 
     let predicates = [1, 4, 5];
+    let retained_heightmaps = column.client_heightmaps_raw();
     w.i32(predicates.len() as i32);
-    for type_id in predicates {
+    for (map_index, type_id) in predicates.into_iter().enumerate() {
         w.i32(type_id as i32);
         for z in 0..16i32 {
             for x in 0..16i32 {
-                let height = (column.min_y..column.min_y + column.height)
-                    .rev()
-                    .find(|&y| lodestone_v26_2::server_protocol::client_heightmap_includes(type_id, column.resolved_block_state_id(x, y, z)))
-                    .map_or(column.min_y, |y| y + 1);
+                let height = retained_heightmaps
+                    .as_ref()
+                    .map(|maps| i32::from(maps[map_index][x as usize + z as usize * 16]) + column.min_y)
+                    .unwrap_or_else(|| {
+                        (column.min_y..column.min_y + column.height)
+                            .rev()
+                            .find(|&y| lodestone_v26_2::server_protocol::client_heightmap_includes(type_id, column.resolved_block_state_id(x, y, z)))
+                            .map_or(column.min_y, |y| y + 1)
+                    });
                 w.i32(height);
             }
         }
@@ -769,6 +779,9 @@ mod tests {
         let mut wrong = header;
         wrong[104..136].fill(0);
         assert!(read_header(&wrong[..]).is_err(), "zero frozen-world identity must fail closed");
+        let mut wrong_scope = header;
+        wrong_scope[70..72].copy_from_slice(&1u16.to_be_bytes());
+        assert!(read_header(&wrong_scope[..]).is_err(), "empty structure-beard scope must fail closed for an authenticated production manifest");
     }
 
     #[test]
