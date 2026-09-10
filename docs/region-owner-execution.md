@@ -38,6 +38,10 @@ The lane count is a bound, not a promise that every call is parallel. A call
 with one job has one useful lane; callers should choose their worker count from
 the measured owner workload. The executor rejects a zero lane bound instead of
 silently converting an invalid production configuration into a serial pass.
+The block-entity production path also rejects entry while its registry lock is
+held: it snapshots and commits under short lock scopes, while owner-local work
+runs in between. Existing mob-owner calls still run under their established
+mob handle and scheduled-physics scopes until those separate migrations land.
 Tests that claim concurrency must use a barrier-controlled fixture so a serial
 fallback cannot pass accidentally.
 

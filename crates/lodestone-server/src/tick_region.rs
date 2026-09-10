@@ -29,6 +29,7 @@ where
     R: Send,
     F: Fn(T) -> R + Sync,
 {
+    crate::lock_order::assert_owner_work_without_block_entity_lock();
     assert!(worker_count > 0, "owner worker count must be positive");
     let lane_count = worker_count.max(1).min(jobs.len().max(1));
     let mut lanes: Vec<Vec<(usize, T)>> = (0..lane_count).map(|_| Vec::new()).collect();
@@ -62,6 +63,7 @@ pub(crate) fn run_bounded_owner_jobs<T, R, F>(jobs: Vec<T>, worker_count: usize,
 where
     F: Fn(T) -> R,
 {
+    crate::lock_order::assert_owner_work_without_block_entity_lock();
     assert!(worker_count > 0, "owner worker count must be positive");
     jobs.into_iter().map(work).collect()
 }
