@@ -77,6 +77,16 @@ literal `[0x00]` body becomes `ServerBound::ClientCommand { action: 0 }` after
 registry selection, which is the server-loop input used to request a respawn;
 trailing bytes and packets received outside Play remain ignored.
 
+Death uses the split `death_combat_event` body in both tables: player id,
+killer entity id, and a JSON component. `V756ServerProtocol` and
+`V758ServerProtocol` now emit that exact shape, followed on respawn by the
+dimension state frame and an absolute `position` correction. The two emitters
+retain their independent dimension bounds (0..256 for 756 and -64..320 for
+758), while the adapter's existing death and respawn consumers remain the
+shared lifecycle boundary. `tests/death_respawn_server.rs` checks the literal
+death bytes, the exact perform-respawn control, both production packet-id
+tables, and the emitted respawn payload through the registry-selected adapter.
+
 The hosted container path now covers one complete chest session for both
 protocols. `open_window` carries the protocol-local menu registry id and JSON
 title; `window_items` carries a VarInt state id, a VarInt-length slot list and
