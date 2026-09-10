@@ -140,7 +140,7 @@ use lodestone_model::{
     ResourceKey, ResourcePackResponseKind, Rotation, Text, TextContent, Vec3, Vec3f,
     WrittenBookContent,
 };
-use lodestone_data::{block::Block, block_items, item::Item, potion::PotionId};
+use lodestone_data::{block::Block, block_items, block_states::BlockStateValue, item::Item, potion::PotionId};
 use lodestone_net::{Connection, NetError, Transport};
 // Encryption half: the server-side RSA keypair/decrypt and the
 // verify-token generator. Native-only for the same reason `crate::access` is
@@ -6600,7 +6600,7 @@ where
         };
         if let Some(state) = full {
             return Some(crate::block_placement::Placement {
-                state,
+                state: lodestone_data::block_states::BlockStateValue::parse(&state),
                 extra: Vec::new(),
             });
         }
@@ -8235,7 +8235,7 @@ where
             let (state, extra) =
                 match placed_block_state(block_name, &ctx, |p| source.block_state(p.x, p.y, p.z).into()) {
                     Some(placed) => (placed.state, placed.extra),
-                    None => (block_name.to_string(), Vec::new()),
+                    None => (BlockStateValue::parse(block_name), Vec::new()),
                 };
             // Vanilla's own block-item can-place → level unobstructed check: a placement that
             // would collide with the placer's own body is refused, not
@@ -8296,7 +8296,7 @@ where
             // needs its own `block_update` below.
             for (p, s) in &extra {
                 source.set_block(p.x, p.y, p.z, s);
-                changed.push((*p, s.clone()));
+                changed.push((*p, s.to_string()));
             }
             // A carved pumpkin or jack o'lantern can complete a snow- or
             // iron-golem pattern. The mob simulation reports the consumed
