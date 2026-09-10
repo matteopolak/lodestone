@@ -284,6 +284,45 @@ async fn a_supplied_server_plugin_runs_on_the_primary_world_tick_task() {
     server.shutdown().await;
 }
 
+/// Delayed and repeating callbacks must survive the production `App` → `World`
+/// handoff with the same tick schedule as the scheduler's focused tests. The
+/// exact trace distinguishes a one-tick phase error from a mere firing count.
+#[tokio::test(start_paused = true)]
+async fn the_production_primary_world_runs_deterministic_scheduler_tasks() {
+    let observed = Arc::new(AtomicU64::new(0));
+    let task_observed = Arc::clone(&observed);
+    let server_app = ServerApp::bootstrap_with(|app| {
+        app.world_mut()
+            .resource_mut::<crate::ecs::ServerTaskScheduler>()
+            .schedule_repeating(2, 3, move |_, _| {
+                task_observed.fetch_add(1, Ordering::Relaxed);
+            });
+    });
+    let (server, _client) = IntegratedServer::open_in_memory_with_mobs_and_server_app(
+        Silent,
+        AirWorld,
+        (0..=0, 0..=0),
+        (0, 0),
+        0,
+        1,
+        server_app,
+    );
+
+    assert_eq!(observed.load(Ordering::Relaxed), 0, "ServerBoot must not advance GameTick");
+    tokio::task::yield_now().await;
+    for (index, expected) in [0, 1, 1, 1, 2, 2, 2, 3].into_iter().enumerate() {
+        tokio::time::advance(crate::tick::TICK_PERIOD).await;
+        wait_for_completed_ticks(&server, index as u64 + 1).await;
+        assert_eq!(
+            observed.load(Ordering::Relaxed),
+            expected,
+            "scheduler trace diverged at production GameTick {}",
+            index + 1
+        );
+    }
+    server.shutdown().await;
+}
+
 /// The async scheduler is only useful if its result crosses the production
 /// extracted-`World` boundary. A hand-built scheduler test cannot prove that
 /// the primary tick task drains this queue after `ServerApp::into_world`.
