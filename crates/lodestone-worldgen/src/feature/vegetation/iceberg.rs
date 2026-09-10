@@ -12,7 +12,7 @@ use super::grid::VegGrid;
 
 /// Parsed state for one iceberg configured feature.
 #[derive(Clone, Debug)]
-pub(super) struct IcebergCfg {
+pub struct IcebergCfg {
     pub(super) state: String,
 }
 
