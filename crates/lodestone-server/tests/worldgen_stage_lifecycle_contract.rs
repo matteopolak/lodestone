@@ -15,6 +15,7 @@ use lodestone_worldgen::{
         self, Biomes, Carvers, Features, Fill, Materialize, Output, StructureInfluence,
         StructurePlacement, StructureReferences, StructureStarts, Surface, TopLayer,
     },
+    stage_schedule::{LifecyclePhase, LIFECYCLE},
 };
 
 const OVERWORLD_SHAPED: &[ColumnStage] = &[
@@ -93,5 +94,11 @@ fn every_dimension_maps_its_complete_named_schedule_to_server_tiers() {
         EndGenerator::stage_schedule().stages(),
         END_SHAPED,
         &[Features, Output],
+    );
+
+    assert_eq!(
+        LIFECYCLE.phases().last().map(|contract| contract.phase()),
+        Some(LifecyclePhase::PacketFinalization),
+        "packet finalization must remain after every generation and lighting phase",
     );
 }
