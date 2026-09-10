@@ -811,7 +811,7 @@ mod tests {
         // Arm 1: run the fuse all the way out over a solid floor the TNT
         // lands on, so the blast has real stone to destroy nearby.
         let mut long = sim();
-        let id = long.spawn_tnt(Vec3::new(11.5, 61.0, -6.5), DEFAULT_FUSE_TIME);
+        let _id = long.spawn_tnt(Vec3::new(11.5, 61.0, -6.5), DEFAULT_FUSE_TIME);
         for _ in 0..DEFAULT_FUSE_TIME {
             long.tick_tnt(&floor());
         }

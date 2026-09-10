@@ -482,7 +482,7 @@ mod tests {
         let sprint = |food: &mut FoodData, blocks: usize| {
             for _ in 0..blocks {
                 food.add_exhaustion(EXHAUSTION_SPRINT_PER_BLOCK);
-                food.tick(Difficulty::Normal, true, 20.0, 20.0);
+                let _ = food.tick(Difficulty::Normal, true, 20.0, 20.0);
             }
         };
         let mut food = FoodData::default();
@@ -528,7 +528,7 @@ mod tests {
         let mut food = FoodData::default();
         for _ in 0..1000 {
             food.add_exhaustion(EXHAUSTION_WALK_PER_BLOCK);
-            food.tick(Difficulty::Normal, true, 20.0, 20.0);
+            let _ = food.tick(Difficulty::Normal, true, 20.0, 20.0);
         }
         assert_eq!(food.food_level(), 20);
         assert_eq!(food.saturation(), 5.0, "not even the hidden buffer moves");
@@ -543,7 +543,7 @@ mod tests {
         let mut food = FoodData::default();
         for _ in 0..200 {
             food.add_exhaustion(EXHAUSTION_SWIM_PER_BLOCK);
-            food.tick(Difficulty::Normal, true, 20.0, 20.0);
+            let _ = food.tick(Difficulty::Normal, true, 20.0, 20.0);
         }
         assert_eq!(food.saturation(), 5.0, "2.0 exhaustion never reaches the 4.0 drop");
         assert!((food.exhaustion() - 2.0).abs() < 1e-3, "got {}", food.exhaustion());
@@ -723,7 +723,7 @@ mod tests {
             let mut food = FoodData::restored(20, 0.0, 0.0, 0);
             for _ in 0..1000 {
                 food.add_exhaustion(EXHAUSTION_SPRINT_PER_BLOCK);
-                food.tick(difficulty, false, 20.0, 20.0);
+                let _ = food.tick(difficulty, false, 20.0, 20.0);
             }
             food.food_level()
         };
