@@ -1845,6 +1845,8 @@ pub enum ConfiguredFeature {
     Fossil(Box<super::fossil::FossilCfg>),
     /// A tapered packed-ice spike rooted on a snow block.
     IceSpike(Box<super::ice_spike::IceSpikeCfg>),
+    /// A sea-level packed-ice or blue-ice mass with optional cavities.
+    Iceberg(Box<super::iceberg::IcebergCfg>),
     /// A paired tapered dripstone cone grown across a cave column.
     LargeDripstone(Box<super::large_dripstone::LargeDripstoneCfg>),
     /// The no-op feature — genuinely nothing, and distinct from
@@ -2109,6 +2111,12 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
         "spike" => match super::ice_spike::IceSpikeCfg::try_parse(resolver, &doc["config"]) {
             Some(cfg) => ConfiguredFeature::IceSpike(Box::new(cfg)),
             None => ConfiguredFeature::Unsupported("spike: malformed support/replacement/state".into()),
+        },
+        "iceberg" => match parse_validated_state(&doc["config"]["state"]) {
+            Some(state) => ConfiguredFeature::Iceberg(Box::new(super::iceberg::IcebergCfg {
+                state: state.canonical_state(),
+            })),
+            None => ConfiguredFeature::Unsupported("iceberg: malformed state".into()),
         },
         "large_dripstone" => match super::large_dripstone::LargeDripstoneCfg::try_parse(
             resolver,
@@ -2631,6 +2639,7 @@ pub fn collect_unsupported(placed: &PlacedRef) -> Vec<String> {
             | ConfiguredFeature::Geode(_)
             | ConfiguredFeature::Fossil(_)
             | ConfiguredFeature::IceSpike(_)
+            | ConfiguredFeature::Iceberg(_)
             | ConfiguredFeature::LargeDripstone(_)
             | ConfiguredFeature::NoOp => {}
         }
@@ -2929,6 +2938,27 @@ mod tests {
             super::parse_configured_feature_doc(&resolver, &malformed),
             ConfiguredFeature::Unsupported(reason)
                 if reason == "root_system: malformed configuration"
+        ));
+    }
+
+    #[test]
+    fn iceberg_parser_preserves_the_configured_state_and_rejects_malformed_state() {
+        let complete = serde_json::json!({
+            "type": "minecraft:iceberg",
+            "config": {"state": {"Name": "minecraft:blue_ice"}}
+        });
+        assert!(matches!(
+            super::parse_configured_feature_doc(&RootResolver, &complete),
+            ConfiguredFeature::Iceberg(cfg) if cfg.state == "minecraft:blue_ice"
+        ));
+
+        let malformed = serde_json::json!({
+            "type": "minecraft:iceberg",
+            "config": {"state": {"Name": "minecraft:not_a_block"}}
+        });
+        assert!(matches!(
+            super::parse_configured_feature_doc(&RootResolver, &malformed),
+            ConfiguredFeature::Unsupported(reason) if reason == "iceberg: malformed state"
         ));
     }
 
