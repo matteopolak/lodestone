@@ -60,7 +60,7 @@ fn install_command_guest(root: &Path, wasm: &Path) {
         r#"
 name = "command-fixture"
 version = "0.1.0"
-abi = "lodestone:plugin@0.28.0"
+abi = "lodestone:plugin@0.29.0"
 module = "command_fixture.wasm"
 priority = "normal"
 capabilities = ["log", "commands:register"]

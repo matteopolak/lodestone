@@ -69,7 +69,7 @@ pub use crate::bindings::lodestone::plugin::types::{
     Action, BlockBreakVerdict, BlockFace, BlockOffset, BlockPlaceVerdict, BlockPos, ChatKind, ChatMessage,
     CommandAnchor, CommandContext, CommandEntity, CommandExecution, CommandOutcome,
     CommandPosition, CommandRotation, CommandSpec, EntityDamageVerdict, EntityEquipment,
-    EntityEquipmentChanged, EntityHealthChanged, EntityIdentity, EntityMotion, EntityMoved,
+    EntityEquipmentChanged, EntityEquipmentMutation, EntityHealthChanged, EntityIdentity, EntityMotion, EntityMoved,
     EntityRotation, EntitySpawned, EntityVelocity, EquipmentSlot, Event, Hand, Health,
     BlockMutationRefusal, BlockMutationStatus, BreakIntent, BreakOutcome, BreakRejection,
     BreakStatus, InventoryClick, InventoryClickButton, InventoryClickVerdict, InventoryHotbarSwap,
@@ -87,7 +87,7 @@ pub use crate::bindings::lodestone::plugin::types::{
 /// The WIT world is a named, versioned unit, so "a guest built against
 /// `lodestone:plugin@0.2.0`" is a thing the host can *detect* rather than
 /// discover as a mysterious trap.
-pub const ABI_WORLD: &str = "lodestone:plugin@0.28.0";
+pub const ABI_WORLD: &str = "lodestone:plugin@0.29.0";
 
 /// Default per-tick fuel budget. Chosen as "enough for any plugin doing plain
 /// data work over a tick's event batch, nowhere near enough to survive a spin
@@ -868,6 +868,12 @@ impl LoadedPlugin {
         event: &lodestone_model::ClientEvent,
     ) -> Vec<Event> {
         crate::abi::lift_entity_events(event, &self.granted, &mut self.entity_generations)
+    }
+
+    /// Whether a guest-supplied identity is still the lifecycle it observed.
+    /// This is checked before an entity mutation enters the ECS command queue.
+    pub(crate) fn entity_identity_is_live(&self, identity: EntityIdentity) -> bool {
+        self.entity_generations.matches_live(identity)
     }
 
     #[must_use]

@@ -54,6 +54,7 @@ use lodestone_command::{
     LongArgument, StringArgument, StringKind,
 };
 use lodestone_ecs::commands::{CommandOutcome, CommandRegistry, PluginCommand, PluginCommandsPlugin};
+use lodestone_ecs::entity::{EntityIndex, Equipment};
 use lodestone_ecs::events::{
     GameEvent, GameEventBusPlugin, OutboundRawPacket, OutboundRawPacketBusPlugin, RawPacket,
     RawPacketBusPlugin,
@@ -68,7 +69,7 @@ use lodestone_ecs::veto::{ActionVetoPlugin, ActionVetoes, Verdict};
 use lodestone_ecs::{ChunkWorld, CorePlugin, GameTick, TickSet};
 
 use crate::abi;
-use crate::abi::{IntentAction, LoweredAction};
+use crate::abi::{EntityEquipmentMutation, IntentAction, LoweredAction};
 use crate::bindings::lodestone::plugin::types::{
     CommandArgument, CommandArgumentKind, CommandStringKind,
 };
@@ -126,6 +127,29 @@ pub struct PendingWasmMenuClicks(Vec<crate::abi::InventoryClickIntent>);
 pub struct PendingWasmWorldMutations {
     requests: Vec<(usize, ResidentBlockMutation)>,
     outcomes: Vec<(usize, ResidentBlockMutationOutcome)>,
+}
+
+/// Bounded generation-checked equipment replacements waiting for the ECS
+/// command flush. Requests contain copied WIT values only; the network entity
+/// id is resolved at application time through [`EntityIndex`].
+#[derive(Resource, Default, Debug)]
+pub struct PendingWasmEntityEquipment(Vec<EntityEquipmentMutation>);
+
+impl PendingWasmEntityEquipment {
+    const MAX_PENDING: usize = 64;
+
+    fn push(&mut self, request: EntityEquipmentMutation) -> bool {
+        if self.0.len() == Self::MAX_PENDING {
+            false
+        } else {
+            self.0.push(request);
+            true
+        }
+    }
+
+    fn take(&mut self) -> Vec<EntityEquipmentMutation> {
+        std::mem::take(&mut self.0)
+    }
 }
 
 impl PendingWasmWorldMutations {
@@ -563,6 +587,10 @@ pub fn reload_wasm_plugins(
     app.world_mut().insert_resource(WasmCommandRoots(roots));
     app.world_mut().resource_mut::<PendingWasmIntents>().0.clear();
     app.world_mut().resource_mut::<PendingWasmMenuClicks>().0.clear();
+    app.world_mut()
+        .resource_mut::<PendingWasmEntityEquipment>()
+        .0
+        .clear();
     Ok(())
 }
 
@@ -647,6 +675,7 @@ impl Plugin for WasmHostPlugin {
         app.init_resource::<PendingWasmIntents>();
         app.init_resource::<PendingWasmMenuClicks>();
         app.init_resource::<PendingWasmWorldMutations>();
+        app.init_resource::<PendingWasmEntityEquipment>();
         app.add_systems(
             GameTick,
             drive_wasm_plugins
@@ -660,6 +689,7 @@ impl Plugin for WasmHostPlugin {
                 apply_wasm_break_intents,
                 apply_wasm_place_intents,
                 apply_wasm_select_slot_intents,
+                apply_wasm_entity_equipment,
                 ApplyDeferred,
             )
                 .chain()
@@ -693,6 +723,7 @@ pub fn drive_wasm_plugins(
     mut intents: ResMut<PendingWasmIntents>,
     mut menu_clicks: ResMut<PendingWasmMenuClicks>,
     mut world_mutations: ResMut<PendingWasmWorldMutations>,
+    mut entity_equipment: ResMut<PendingWasmEntityEquipment>,
     chunk_world: Option<Res<ChunkWorld>>,
     players: Query<(Entity, &BreakOutcome, &PlaceOutcome), With<LocalPlayer>>,
 ) {
@@ -732,7 +763,7 @@ pub fn drive_wasm_plugins(
 
     let mutation_outcomes = world_mutations.take_outcomes();
     let mut refused = 0_u64;
-    let (lowered, lowered_intents, lowered_menu_clicks, lowered_world_mutations) = plugins.with_host(|host| {
+    let (lowered, lowered_intents, lowered_menu_clicks, lowered_world_mutations, lowered_entity_equipment) = plugins.with_host(|host| {
         // `ChunkWorld` is a cloneable Arc handle, not an ECS guard. Guests can
         // only reach it through the bounded `world-snapshot.read-blocks` import, which
         // copies values and drops the chunk lock before returning to guest code.
@@ -742,6 +773,7 @@ pub fn drive_wasm_plugins(
         let mut intent_out = Vec::new();
         let mut menu_click_out = Vec::new();
         let mut world_mutation_out = Vec::new();
+        let mut entity_equipment_out = Vec::new();
         for (plugin_index, plugin) in host.plugins_mut().iter_mut().enumerate() {
             let granted = plugin.granted().clone();
             let lifted: Vec<Event> = batch
@@ -809,6 +841,20 @@ pub fn drive_wasm_plugins(
                     Ok(LoweredAction::ResidentBlockMutation(request)) => {
                         world_mutation_out.push((plugin_index, request));
                     }
+                    Ok(LoweredAction::EntityEquipment(request))
+                        if plugin.entity_identity_is_live(request.entity) =>
+                    {
+                        entity_equipment_out.push(request);
+                    }
+                    Ok(LoweredAction::EntityEquipment(request)) => {
+                        refused += 1;
+                        tracing::warn!(
+                            plugin = %plugin.name(),
+                            entity_id = request.entity.entity_id,
+                            generation = request.entity.generation,
+                            "refused stale WASM entity-equipment identity"
+                        );
+                    }
                     Err(missing) => {
                         refused += 1;
                         tracing::warn!(
@@ -820,7 +866,7 @@ pub fn drive_wasm_plugins(
                 }
             }
         }
-        (out, intent_out, menu_click_out, world_mutation_out)
+        (out, intent_out, menu_click_out, world_mutation_out, entity_equipment_out)
     });
 
     // Appended, not assigned: `ActionQueue` is shared with every native system in
@@ -839,7 +885,63 @@ pub fn drive_wasm_plugins(
             tracing::warn!("refused a WASM resident-block mutation: the bounded shell handoff is full");
         }
     }
+    for request in lowered_entity_equipment {
+        if !entity_equipment.push(request) {
+            refused += 1;
+            tracing::warn!("refused a WASM entity-equipment mutation: the bounded shell handoff is full");
+        }
+    }
     plugins.refused = plugins.refused.saturating_add(refused);
+}
+
+/// Apply generation-checked equipment replacements to the existing client ECS
+/// entity store. Item keys are parsed at this final boundary; one malformed key
+/// rejects the whole request, so invalid guest text can never become an
+/// accidental empty slot.
+fn apply_wasm_entity_equipment(
+    mut pending: ResMut<PendingWasmEntityEquipment>,
+    index: Option<Res<EntityIndex>>,
+    mut commands: Commands,
+) {
+    let Some(index) = index else {
+        pending.0.clear();
+        return;
+    };
+    for request in pending.take() {
+        let Some(entity) = index.get(request.entity.entity_id) else {
+            continue;
+        };
+        let mut equipment = Vec::with_capacity(request.equipment.len());
+        let mut valid = true;
+        for update in request.equipment {
+            let item = match update.item {
+                Some(item) => match item.item.parse().ok() {
+                    Some(key) => Some(lodestone_model::ItemStack::new(key, item.count)),
+                    None => {
+                        valid = false;
+                        break;
+                    }
+                },
+                None => None,
+            };
+            equipment.push(lodestone_model::EntityEquipment {
+                slot: match update.slot {
+                    crate::host::EquipmentSlot::MainHand => lodestone_model::EquipmentSlot::MainHand,
+                    crate::host::EquipmentSlot::OffHand => lodestone_model::EquipmentSlot::OffHand,
+                    crate::host::EquipmentSlot::Feet => lodestone_model::EquipmentSlot::Feet,
+                    crate::host::EquipmentSlot::Legs => lodestone_model::EquipmentSlot::Legs,
+                    crate::host::EquipmentSlot::Chest => lodestone_model::EquipmentSlot::Chest,
+                    crate::host::EquipmentSlot::Head => lodestone_model::EquipmentSlot::Head,
+                    crate::host::EquipmentSlot::Body => lodestone_model::EquipmentSlot::Body,
+                    crate::host::EquipmentSlot::Saddle => lodestone_model::EquipmentSlot::Saddle,
+                },
+                item,
+            });
+        }
+        if valid {
+            commands.entity(entity).insert(Equipment(equipment));
+        }
+    }
 }
 
 /// Apply guest-owned look updates before the existing ECS look consumer.
@@ -988,5 +1090,85 @@ fn apply_wasm_movement_intents(
         intent.0.jump = movement.jump;
         intent.0.sneak = movement.sneak;
         intent.0.sprint = movement.sprint;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy_app::Update;
+    use crate::host::{EntityEquipment, EntityIdentity, EquipmentSlot, ItemStack};
+
+    #[test]
+    fn entity_equipment_handoff_inserts_the_existing_ecs_component() {
+        let mut app = App::new();
+        app.init_resource::<PendingWasmEntityEquipment>();
+        app.init_resource::<EntityIndex>();
+        let entity = app.world_mut().spawn_empty().id();
+        app.world_mut().resource_mut::<EntityIndex>().insert(17, entity);
+        app.world_mut()
+            .resource_mut::<PendingWasmEntityEquipment>()
+            .push(EntityEquipmentMutation {
+                entity: EntityIdentity {
+                    entity_id: 17,
+                    generation: 1,
+                },
+                equipment: vec![EntityEquipment {
+                    slot: EquipmentSlot::MainHand,
+                    item: Some(ItemStack {
+                        item: "minecraft:stone".to_owned(),
+                        count: 2,
+                    }),
+                }],
+            });
+        app.add_systems(Update, apply_wasm_entity_equipment);
+        app.update();
+
+        let equipment = app
+            .world()
+            .entity(entity)
+            .get::<Equipment>()
+            .expect("accepted request must insert the production equipment component");
+        assert_eq!(equipment.0.len(), 1);
+        assert_eq!(equipment.0[0].slot, lodestone_model::EquipmentSlot::MainHand);
+        assert_eq!(equipment.0[0].item.as_ref().map(|item| item.item.to_string()), Some("minecraft:stone".to_owned()));
+        assert_eq!(equipment.0[0].item.as_ref().map(|item| item.count), Some(2));
+    }
+
+    #[test]
+    fn malformed_item_key_does_not_clear_existing_equipment() {
+        let mut app = App::new();
+        app.init_resource::<PendingWasmEntityEquipment>();
+        app.init_resource::<EntityIndex>();
+        let entity = app.world_mut().spawn(Equipment(vec![lodestone_model::EntityEquipment {
+            slot: lodestone_model::EquipmentSlot::MainHand,
+            item: Some(lodestone_model::ItemStack::new(
+                "minecraft:stone".parse().unwrap(),
+                2,
+            )),
+        }])).id();
+        app.world_mut().resource_mut::<EntityIndex>().insert(17, entity);
+        app.world_mut()
+            .resource_mut::<PendingWasmEntityEquipment>()
+            .push(EntityEquipmentMutation {
+                entity: EntityIdentity {
+                    entity_id: 17,
+                    generation: 1,
+                },
+                equipment: vec![EntityEquipment {
+                    slot: EquipmentSlot::MainHand,
+                    item: Some(ItemStack {
+                        item: "not valid".to_owned(),
+                        count: 1,
+                    }),
+                }],
+            });
+        app.add_systems(Update, apply_wasm_entity_equipment);
+        app.update();
+        assert_eq!(
+            app.world().entity(entity).get::<Equipment>().unwrap().0[0]
+                .item.as_ref().map(|item| item.item.to_string()),
+            Some("minecraft:stone".to_owned())
+        );
     }
 }
