@@ -138,7 +138,7 @@ fn seed_ambient_mobs(server: &IntegratedServer) {
 
 fn seed_scheduled_ticks(server: &IntegratedServer) {
     let mut block_pending: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
-    let mut fluid_pending: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+    let mut fluid_pending: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
     for pos in owner_positions() {
         assert!(block_pending.schedule(
             (pos.x + 1, pos.y, pos.z),
@@ -148,7 +148,7 @@ fn seed_scheduled_ticks(server: &IntegratedServer) {
         ));
         assert!(fluid_pending.schedule(
             (pos.x - 1, pos.y, pos.z),
-            "lodestone:fluid".to_owned(),
+            ScheduledTickKind::Fluid,
             1,
             TickPriority::Normal,
         ));

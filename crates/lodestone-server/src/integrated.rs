@@ -5829,7 +5829,7 @@ mod tests {
         let mut pending = crate::scheduled_tick::ScheduledTickQueue::new();
         assert!(pending.schedule(
             (15, 1, 0),
-            crate::fluid::TICK_FLUID.to_owned(),
+            crate::scheduled_tick::ScheduledTickKind::Fluid,
             1,
             crate::scheduled_tick::TickPriority::Normal,
         ));
@@ -5983,7 +5983,7 @@ mod tests {
         let mut pending = crate::scheduled_tick::ScheduledTickQueue::new();
         assert!(pending.schedule(
             (15, 1, 0),
-            crate::fluid::TICK_FLUID.to_owned(),
+            crate::scheduled_tick::ScheduledTickKind::Fluid,
             1,
             crate::scheduled_tick::TickPriority::Normal,
         ));

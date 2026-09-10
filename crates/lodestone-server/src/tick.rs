@@ -495,10 +495,10 @@ pub struct BlockTickFeed(
     /// to be rebased onto the tick loop's counter and hosted in its
     /// typed `block_ticks` queue. `trigger_tick` is a relative delay.
     Arc<Mutex<Vec<ScheduledTick<ScheduledTickKind>>>>,
-    /// Fluid ticks remain on the legacy string-keyed path until the fluid
-    /// scheduler is migrated. This separate lane makes that compatibility
-    /// boundary explicit instead of routing both registries through one feed.
-    Arc<Mutex<Vec<ScheduledTick<String>>>>,
+    /// Fluid ticks use the same typed discriminator as the live fluid queue.
+    /// Text is decoded only at Anvil or other explicit compatibility
+    /// boundaries, never in the runtime feed.
+    Arc<Mutex<Vec<ScheduledTick<ScheduledTickKind>>>>,
     /// sounds, particles and level events the world tick produced —
     /// see [`crate::effects`].
     ///
@@ -634,10 +634,10 @@ impl BlockTickFeed {
             .extend(ticks);
     }
 
-    /// Hands legacy fluid ticks to the fluid queue. This is the only feed
-    /// entry point that still accepts a string discriminator; the central
-    /// block queue remains typed all the way through the live tick loop.
-    pub fn request_fluid_scheduled_ticks(&self, ticks: Vec<ScheduledTick<String>>) {
+    /// Hands typed fluid ticks to the fluid queue. The separate method keeps
+    /// block and fluid admission lanes distinct while both remain typed from
+    /// the connection boundary to the live scheduler.
+    pub fn request_fluid_scheduled_ticks(&self, ticks: Vec<ScheduledTick<ScheduledTickKind>>) {
         if ticks.is_empty() {
             return;
         }
@@ -653,9 +653,9 @@ impl BlockTickFeed {
         std::mem::take(&mut *self.1.lock().expect("block tick feed lock poisoned"))
     }
 
-    /// Drains the explicitly legacy fluid lane.
+    /// Drains the typed fluid lane.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    pub(crate) fn drain_fluid_scheduled_ticks(&self) -> Vec<ScheduledTick<String>> {
+    pub(crate) fn drain_fluid_scheduled_ticks(&self) -> Vec<ScheduledTick<ScheduledTickKind>> {
         std::mem::take(&mut *self.2.lock().expect("block tick feed lock poisoned"))
     }
 }
@@ -2902,11 +2902,10 @@ async fn run_tick_loop_with_weather_impl<W>(
             }
         }
         for pending in block_tick_out.drain_fluid_scheduled_ticks() {
-            let kind = ScheduledTickKind::from_name(pending.kind);
-            if !fluid_ticks.has_scheduled(pending.pos, &kind) {
+            if !fluid_ticks.has_scheduled(pending.pos, &pending.kind) {
                 fluid_ticks.schedule(
                     pending.pos,
-                    kind,
+                    pending.kind,
                     game_tick + pending.trigger_tick,
                     pending.priority,
                 );
@@ -4243,13 +4242,31 @@ mod tests {
         queue.drain_due(u64::MAX, usize::MAX)
     }
 
-    /// One pending fluid tick, kept string-keyed to exercise the explicit
-    /// legacy lane rather than accidentally routing it through the typed block
-    /// lane.
-    fn one_fluid_pending(pos: (i32, i32, i32)) -> Vec<ScheduledTick<String>> {
-        let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
-        queue.schedule(pos, "lodestone:fluid".to_owned(), 2, TickPriority::Normal);
+    /// One pending fluid tick, kept on the distinct fluid lane while retaining
+    /// the same typed discriminator as the live queue.
+    fn one_fluid_pending(pos: (i32, i32, i32)) -> Vec<ScheduledTick<ScheduledTickKind>> {
+        let mut queue: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
+        queue.schedule(pos, ScheduledTickKind::Fluid, 2, TickPriority::Normal);
         queue.drain_due(u64::MAX, usize::MAX)
+    }
+
+    #[test]
+    fn fluid_feed_preserves_extension_keys_without_textual_reclassification() {
+        let feed = BlockTickFeed::default();
+        let extension = ScheduledTickKind::Extension("example:fluid_plugin".to_owned());
+        let mut queue: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
+        assert!(queue.schedule(
+            (8, 1, 9),
+            extension.clone(),
+            2,
+            TickPriority::Normal,
+        ));
+        feed.request_fluid_scheduled_ticks(queue.drain_due(u64::MAX, usize::MAX));
+        let pending = feed
+            .drain_fluid_scheduled_ticks()
+            .pop()
+            .expect("one extension fluid tick must reach the feed");
+        assert_eq!(pending.kind, extension);
     }
 
     /// LAN shape, asserted at the type level so the remaining gap
