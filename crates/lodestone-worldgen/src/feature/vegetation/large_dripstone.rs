@@ -47,6 +47,7 @@
 
 use std::collections::HashSet;
 
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::density::Resolver;
@@ -69,21 +70,18 @@ pub(super) enum FloatRange {
 
 impl FloatRange {
     fn try_parse(value: &Value) -> Option<Self> {
-        match value {
-            Value::Number(number) => finite_f32(number.as_f64()?).map(Self::Constant),
-            Value::Object(object) => {
-                let kind = object.get("type")?.as_str()?;
-                match kind.strip_prefix("minecraft:").unwrap_or(kind) {
-                    "constant" => finite_f32(object.get("value")?.as_f64()?).map(Self::Constant),
-                    "uniform" => {
-                        let min = finite_f32(object.get("min_inclusive")?.as_f64()?)?;
-                        let max = finite_f32(object.get("max_exclusive")?.as_f64()?)?;
-                        (min <= max).then_some(Self::Uniform { min, max })
-                    }
-                    _ => None,
+        match serde_json::from_value::<FloatRangeDocument>(value.clone()).ok()? {
+            FloatRangeDocument::Number(value) => finite_f32(f64::from(value)).map(Self::Constant),
+            FloatRangeDocument::Provider(provider) => match provider.kind {
+                FloatProviderKind::Constant => {
+                    finite_f32(f64::from(provider.value?)).map(Self::Constant)
                 }
-            }
-            _ => None,
+                FloatProviderKind::Uniform => {
+                    let min = finite_f32(f64::from(provider.min_inclusive?))?;
+                    let max = finite_f32(f64::from(provider.max_exclusive?))?;
+                    (min <= max).then_some(Self::Uniform { min, max })
+                }
+            },
         }
     }
 
@@ -102,6 +100,35 @@ impl FloatRange {
             }
         }
     }
+}
+
+/// The closed discriminator set accepted by the bundled float providers.
+///
+/// Serde owns the JSON boundary here so an unknown provider cannot silently
+/// become a constant or fall through to a string-based compatibility branch.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+enum FloatProviderKind {
+    #[serde(rename = "minecraft:constant", alias = "constant")]
+    Constant,
+    #[serde(rename = "minecraft:uniform", alias = "uniform")]
+    Uniform,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TypedFloatProvider {
+    #[serde(rename = "type")]
+    kind: FloatProviderKind,
+    value: Option<f32>,
+    min_inclusive: Option<f32>,
+    max_exclusive: Option<f32>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(untagged)]
+enum FloatRangeDocument {
+    Number(f32),
+    Provider(TypedFloatProvider),
 }
 
 fn finite_f32(value: f64) -> Option<f32> {
@@ -602,6 +629,33 @@ mod tests {
             min_radius_for_wind: 3,
             min_bluntness_for_wind: 0.6,
         }
+    }
+
+    #[test]
+    fn float_provider_json_uses_closed_typed_discriminator() {
+        let document = serde_json::json!({
+            "type": "minecraft:uniform",
+            "min_inclusive": 0.25,
+            "max_exclusive": 0.75,
+        });
+        let parsed = FloatRange::try_parse(&document).expect("uniform provider parses");
+        assert_eq!(parsed, FloatRange::Uniform { min: 0.25, max: 0.75 });
+
+        let unknown = serde_json::json!({
+            "type": "minecraft:triangular",
+            "min_inclusive": 0.25,
+            "max_exclusive": 0.75,
+        });
+        assert!(serde_json::from_value::<FloatRangeDocument>(unknown.clone()).is_err());
+        assert!(FloatRange::try_parse(&unknown).is_none());
+
+        let extra_field = serde_json::json!({
+            "type": "minecraft:uniform",
+            "min_inclusive": 0.25,
+            "max_exclusive": 0.75,
+            "unexpected": true,
+        });
+        assert!(serde_json::from_value::<FloatRangeDocument>(extra_field).is_err());
     }
 
     fn cave_grid(origin: BlockPos) -> VegGrid {
