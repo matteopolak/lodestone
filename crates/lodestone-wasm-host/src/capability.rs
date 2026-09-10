@@ -63,6 +63,9 @@ pub enum Capability {
     ObserveInventory,
     /// Receive `ClientEvent::SectionBlocksChanged`.
     ObserveBlocks,
+    /// Receive bounded copies of inbound and outbound packet bodies together
+    /// with their negotiated protocol and connection phase.
+    ObservePackets,
     /// Receive generation-scoped remote-entity lifecycle, movement, velocity,
     /// health, and equipment reports plus local-player teleports.
     ///
@@ -230,6 +233,7 @@ impl Capability {
         Self::ObserveHealth,
         Self::ObserveInventory,
         Self::ObserveBlocks,
+        Self::ObservePackets,
         Self::ObserveEntities,
         Self::ReadWorld,
         Self::WriteWorld,
@@ -272,6 +276,7 @@ impl Capability {
             Self::ObserveHealth => "observe:health",
             Self::ObserveInventory => "observe:inventory",
             Self::ObserveBlocks => "observe:blocks",
+            Self::ObservePackets => "observe:packets",
             Self::ObserveEntities => "observe:entities",
             Self::ReadWorld => "world:read",
             Self::WriteWorld => "world:write",
@@ -334,6 +339,7 @@ impl Capability {
             | Self::ObserveHealth
             | Self::ObserveInventory
             | Self::ObserveBlocks
+            | Self::ObservePackets
             | Self::ObserveEntities
             | Self::WriteWorld
             | Self::ActChat
@@ -402,6 +408,7 @@ impl CapabilitySet {
             Capability::ObserveChat,
             Capability::ObserveHealth,
             Capability::ObserveBlocks,
+            Capability::ObservePackets,
             Capability::ObserveEntities,
             Capability::ActChat,
             Capability::ActInteract,

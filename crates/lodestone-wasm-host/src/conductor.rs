@@ -54,7 +54,10 @@ use lodestone_command::{
     LongArgument, StringArgument, StringKind,
 };
 use lodestone_ecs::commands::{CommandOutcome, CommandRegistry, PluginCommand, PluginCommandsPlugin};
-use lodestone_ecs::events::{GameEvent, GameEventBusPlugin};
+use lodestone_ecs::events::{
+    GameEvent, GameEventBusPlugin, OutboundRawPacket, OutboundRawPacketBusPlugin, RawPacket,
+    RawPacketBusPlugin,
+};
 use lodestone_ecs::player::{
     ActionQueue, BreakIntent, BreakOutcome, LocalPlayer, LookIntent, MovementIntent, PlaceOutcome,
     SelectSlotIntent,
@@ -585,6 +588,39 @@ impl Plugin for WasmHostPlugin {
         }
         app.init_resource::<ActionQueue>();
 
+        let raw_packets_enabled = self
+            .host
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|host| {
+                host.plugins()
+                    .iter()
+                    .any(|plugin| plugin.granted().contains(Capability::ObservePackets))
+            });
+        let raw_limits = if raw_packets_enabled {
+            lodestone_ecs::RawPacketLimits::default()
+        } else {
+            lodestone_ecs::RawPacketLimits {
+                max_packets_per_tick: 0,
+                max_payload_bytes_per_tick: 0,
+            }
+        };
+        if !app.is_plugin_added::<RawPacketBusPlugin>() {
+            app.add_plugins(RawPacketBusPlugin::with_limits(raw_limits));
+        }
+        let outbound_limits = if raw_packets_enabled {
+            lodestone_ecs::OutboundRawPacketLimits::default()
+        } else {
+            lodestone_ecs::OutboundRawPacketLimits {
+                max_packets_per_tick: 0,
+                max_payload_bytes_per_tick: 0,
+            }
+        };
+        if !app.is_plugin_added::<OutboundRawPacketBusPlugin>() {
+            app.add_plugins(OutboundRawPacketBusPlugin::with_limits(outbound_limits));
+        }
+
         let Some(host) = self
             .host
             .lock()
@@ -651,6 +687,8 @@ impl Plugin for WasmHostPlugin {
 pub fn drive_wasm_plugins(
     mut plugins: ResMut<WasmPlugins>,
     mut events: MessageReader<GameEvent>,
+    mut inbound_packets: MessageReader<RawPacket>,
+    mut outbound_packets: MessageReader<OutboundRawPacket>,
     mut queue: ResMut<ActionQueue>,
     mut intents: ResMut<PendingWasmIntents>,
     mut menu_clicks: ResMut<PendingWasmMenuClicks>,
@@ -659,6 +697,30 @@ pub fn drive_wasm_plugins(
     players: Query<(Entity, &BreakOutcome, &PlaceOutcome), With<LocalPlayer>>,
 ) {
     let batch: Vec<lodestone_model::ClientEvent> = events.read().map(|e| e.0.clone()).collect();
+    let inbound_batch: Vec<(i32, lodestone_model::ConnectionState, i32, Vec<u8>)> =
+        inbound_packets
+            .read()
+            .map(|packet| {
+                (
+                    packet.protocol,
+                    packet.state,
+                    packet.packet_id,
+                    packet.payload.clone(),
+                )
+            })
+            .collect();
+    let outbound_batch: Vec<(i32, lodestone_model::ConnectionState, i32, Vec<u8>)> =
+        outbound_packets
+            .read()
+            .map(|packet| {
+                (
+                    packet.protocol,
+                    packet.state,
+                    packet.packet_id,
+                    packet.payload.clone(),
+                )
+            })
+            .collect();
     let place_outcome = players
         .iter()
         .next()
@@ -687,6 +749,32 @@ pub fn drive_wasm_plugins(
                 .filter_map(|e| abi::lift_event(e, &granted))
                 .collect();
             let mut lifted = lifted;
+            if granted.contains(Capability::ObservePackets) {
+                lifted.extend(inbound_batch.iter().filter_map(
+                    |(protocol, state, packet_id, payload)| {
+                        abi::lift_raw_packet(
+                            *protocol,
+                            *state,
+                            *packet_id,
+                            payload,
+                            false,
+                            &granted,
+                        )
+                    },
+                ));
+                lifted.extend(outbound_batch.iter().filter_map(
+                    |(protocol, state, packet_id, payload)| {
+                        abi::lift_raw_packet(
+                            *protocol,
+                            *state,
+                            *packet_id,
+                            payload,
+                            true,
+                            &granted,
+                        )
+                    },
+                ));
+            }
             // Entity lifecycles carry a host-owned generation ledger, so they
             // cannot be lifted by the stateless generic event mapper above.
             // The guest receives copied packet vocabulary only; the ledger never

@@ -581,17 +581,24 @@ impl SharedState {
     /// installed [`lodestone_ecs::RawPacketBusPlugin`] in the caller's world.
     pub(crate) fn record_raw_packet(
         &self,
+        protocol: i32,
         state: ConnectionState,
         packet_id: i32,
         payload: &[u8],
     ) {
         if self.raw_packet_bus_enabled {
             lodestone_ecs::hold_write(&self.ecs, |world| {
-                world.write_message(lodestone_ecs::RawPacket {
-                    state,
-                    packet_id,
-                    payload: payload.to_vec(),
-                });
+                let accepted = world
+                    .resource_mut::<lodestone_ecs::RawPacketBus>()
+                    .try_reserve(payload.len());
+                if accepted {
+                    world.write_message(lodestone_ecs::RawPacket {
+                        protocol,
+                        state,
+                        packet_id,
+                        payload: payload.to_vec(),
+                    });
+                }
             });
         }
     }
@@ -602,13 +609,11 @@ impl SharedState {
     /// only the copy for the observer is dropped.
     pub(crate) fn record_outbound_raw_packet(
         &self,
+        protocol: i32,
         state: ConnectionState,
         packet_id: i32,
         payload: &[u8],
     ) {
-        #[cfg(target_arch = "wasm32")]
-        let _ = (state, packet_id, payload);
-        #[cfg(not(target_arch = "wasm32"))]
         if self.outbound_raw_packet_bus_enabled {
             lodestone_ecs::hold_write(&self.ecs, |world| {
                 let accepted = world
@@ -616,6 +621,7 @@ impl SharedState {
                     .try_reserve(payload.len());
                 if accepted {
                     world.write_message(lodestone_ecs::OutboundRawPacket {
+                        protocol,
                         state,
                         packet_id,
                         payload: payload.to_vec(),
@@ -2549,7 +2555,7 @@ mod tests {
     #[test]
     fn a_default_state_does_not_record_raw_packets() {
         let state = SharedState::default();
-        state.record_raw_packet(ConnectionState::Play, 7, &[0, 255]);
+        state.record_raw_packet(776, ConnectionState::Play, 7, &[0, 255]);
 
         let ecs = state.ecs.read();
         assert!(

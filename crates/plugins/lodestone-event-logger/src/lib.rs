@@ -292,6 +292,7 @@ mod tests {
         let mut app = lodestone_ecs::app::App::new();
         app.add_plugins(plugin);
         app.world_mut().write_message(OutboundRawPacket {
+            protocol: 776,
             state: ConnectionState::Play,
             packet_id: 7,
             payload: vec![0, 255],

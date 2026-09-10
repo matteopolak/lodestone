@@ -94,6 +94,9 @@ inventory = []
 # The copied remote-entity lifecycle fixture. It reports a generation-scoped
 # spawn through the normal guest action return path.
 entity-observation = []
+# The bounded raw-packet observation fixture. It reports both packet directions
+# through the version-free event ABI; the host remains the only transport owner.
+raw-observation = []
 # The bounded inventory-click fixtures. The positive request targets player-menu
 # slot 36; the invalid control uses the largest ABI slot and must be rejected by
 # the shell before it reaches the live predictor.

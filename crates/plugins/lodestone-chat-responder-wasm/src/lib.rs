@@ -166,6 +166,9 @@ impl Guest for ChatResponder {
         #[cfg(feature = "entity-observation")]
         return report_entity_observation(events);
 
+        #[cfg(feature = "raw-observation")]
+        return report_raw_observation(events);
+
         #[cfg(feature = "inventory-click")]
         return vec![Action::InventoryClick(InventoryClick {
             slot: 36,
@@ -514,6 +517,28 @@ fn report_entity_observation(events: Vec<Event>) -> Vec<Action> {
         return Vec::new();
     };
     vec![action]
+}
+
+/// Report the first bounded packet observation. The two directions are kept
+/// distinct so a guest cannot accidentally treat a serverbound action as an
+/// inbound server report.
+#[cfg(feature = "raw-observation")]
+fn report_raw_observation(events: Vec<Event>) -> Vec<Action> {
+    for event in events {
+        let (direction, packet) = match event {
+            Event::RawInboundPacket(packet) => ("in", packet),
+            Event::RawOutboundPacket(packet) => ("out", packet),
+            _ => continue,
+        };
+        return vec![Action::SendChat(format!(
+            "raw:{direction} protocol={} phase={:?} id={} bytes={}",
+            packet.protocol,
+            packet.phase,
+            packet.packet_id,
+            packet.payload.len()
+        ))];
+    }
+    Vec::new()
 }
 
 fn command_specs() -> Vec<CommandSpec> {

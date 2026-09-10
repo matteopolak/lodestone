@@ -51,7 +51,7 @@ use crate::host::{
     ResidentBlockMutation,
     SelectedItemDropMode, TeleportRelative, Vec3,
     PlayerInteractVerdict, PlayerMoveVerdict,
-    SectionBlocksChanged, SectionPos, VerdictContext,
+    SectionBlocksChanged, SectionPos, VerdictContext, PacketPhase, RawPacket,
 };
 
 /// An action that changes a local-player intent rather than queuing a protocol
@@ -354,6 +354,43 @@ pub fn lift_event(event: &ClientEvent, granted: &CapabilitySet) -> Option<Event>
         // kind that lands here — the manifest rejects the name.
         _ => None,
     }
+}
+
+/// Lift one bounded raw packet into the guest vocabulary.
+///
+/// The caller has already admitted the packet through the ECS bus's per-tick
+/// packet/byte budget. This function copies the body into the component-model
+/// value, so the guest cannot retain a transport buffer or mutate the bytes
+/// that the adapter consumes.
+#[must_use]
+pub fn lift_raw_packet(
+    protocol: i32,
+    state: lodestone_model::ConnectionState,
+    packet_id: i32,
+    payload: &[u8],
+    outbound: bool,
+    granted: &CapabilitySet,
+) -> Option<Event> {
+    if !granted.contains(Capability::ObservePackets) {
+        return None;
+    }
+    let packet = RawPacket {
+        protocol,
+        phase: match state {
+            lodestone_model::ConnectionState::Handshaking => PacketPhase::Handshaking,
+            lodestone_model::ConnectionState::Status => PacketPhase::Status,
+            lodestone_model::ConnectionState::Login => PacketPhase::Login,
+            lodestone_model::ConnectionState::Configuration => PacketPhase::Configuration,
+            lodestone_model::ConnectionState::Play => PacketPhase::Play,
+        },
+        packet_id,
+        payload: payload.to_vec(),
+    };
+    Some(if outbound {
+        Event::RawOutboundPacket(packet)
+    } else {
+        Event::RawInboundPacket(packet)
+    })
 }
 
 /// Lift the entity/player subset of one decoded event into copied guest events.
@@ -733,6 +770,48 @@ mod tests {
                 13,
             )),
         }
+    }
+
+    #[test]
+    fn raw_packet_lift_is_capability_gated_and_copies_metadata() {
+        let denied = lift_raw_packet(
+            776,
+            lodestone_model::ConnectionState::Play,
+            0x2a,
+            &[0, 255],
+            false,
+            &CapabilitySet::empty(),
+        );
+        assert_eq!(denied, None);
+
+        let granted = CapabilitySet::from_iter([Capability::ObservePackets]);
+        let Some(Event::RawInboundPacket(packet)) = lift_raw_packet(
+            776,
+            lodestone_model::ConnectionState::Play,
+            0x2a,
+            &[0, 255],
+            false,
+            &granted,
+        ) else {
+            panic!("packet observation must be lifted for a granted guest");
+        };
+        assert_eq!(packet.protocol, 776);
+        assert_eq!(packet.phase, PacketPhase::Play);
+        assert_eq!(packet.packet_id, 0x2a);
+        assert_eq!(packet.payload, vec![0, 255]);
+
+        let Some(Event::RawOutboundPacket(packet)) = lift_raw_packet(
+            776,
+            lodestone_model::ConnectionState::Configuration,
+            7,
+            &[3],
+            true,
+            &granted,
+        ) else {
+            panic!("outbound packet observation must retain its direction");
+        };
+        assert_eq!(packet.phase, PacketPhase::Configuration);
+        assert_eq!(packet.payload, vec![3]);
     }
 
     fn entity_spawn(entity_id: i32) -> ClientEvent {
