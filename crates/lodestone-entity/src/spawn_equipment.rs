@@ -74,6 +74,7 @@
 //! [`DifficultyInstance::special_multiplier`]: ../../lodestone_server/regional_difficulty/struct.DifficultyInstance.html
 
 use crate::equipment::EquipmentSlot;
+use lodestone_data::entity_type::EntityType;
 use lodestone_data::item::Item;
 
 /// The two `RandomSource` operations this module needs. A trait rather than a
@@ -152,13 +153,6 @@ impl EquipmentSlots {
     }
 }
 
-/// Resolves one name embedded in this module's closed default-equipment
-/// table. A missing value is a source-code or generated-registry drift, not a
-/// recoverable runtime input.
-fn built_in_item(path: &str) -> Item {
-    Item::from_name(path).expect("default equipment item is in the built-in registry")
-}
-
 /// Vanilla's own equipment population order.
 const EQUIPMENT_POPULATION_ORDER: [EquipmentSlot; 4] = [
     EquipmentSlot::Head,
@@ -174,49 +168,33 @@ const EQUIPMENT_POPULATION_ORDER: [EquipmentSlot; 4] = [
 /// for the two non-armour slots.
 #[must_use]
 fn equipment_for_slot(slot: EquipmentSlot, armor_type: i32) -> Option<Item> {
-    let piece = match slot {
-        EquipmentSlot::Head => "helmet",
-        EquipmentSlot::Chest => "chestplate",
-        EquipmentSlot::Legs => "leggings",
-        EquipmentSlot::Feet => "boots",
-        EquipmentSlot::MainHand | EquipmentSlot::OffHand => return None,
-    };
-    let tier = match armor_type {
-        0 => "leather",
-        1 => "copper",
-        2 => "golden",
-        3 => "chainmail",
-        4 => "iron",
-        5 => "diamond",
-        _ => return None,
-    };
-    Some(built_in_item(match (tier, piece) {
-        ("leather", "helmet") => "leather_helmet",
-        ("leather", "chestplate") => "leather_chestplate",
-        ("leather", "leggings") => "leather_leggings",
-        ("leather", "boots") => "leather_boots",
-        ("copper", "helmet") => "copper_helmet",
-        ("copper", "chestplate") => "copper_chestplate",
-        ("copper", "leggings") => "copper_leggings",
-        ("copper", "boots") => "copper_boots",
-        ("golden", "helmet") => "golden_helmet",
-        ("golden", "chestplate") => "golden_chestplate",
-        ("golden", "leggings") => "golden_leggings",
-        ("golden", "boots") => "golden_boots",
-        ("chainmail", "helmet") => "chainmail_helmet",
-        ("chainmail", "chestplate") => "chainmail_chestplate",
-        ("chainmail", "leggings") => "chainmail_leggings",
-        ("chainmail", "boots") => "chainmail_boots",
-        ("iron", "helmet") => "iron_helmet",
-        ("iron", "chestplate") => "iron_chestplate",
-        ("iron", "leggings") => "iron_leggings",
-        ("iron", "boots") => "iron_boots",
-        ("diamond", "helmet") => "diamond_helmet",
-        ("diamond", "chestplate") => "diamond_chestplate",
-        ("diamond", "leggings") => "diamond_leggings",
-        ("diamond", "boots") => "diamond_boots",
-        _ => unreachable!("every (tier, piece) pair above is covered"),
-    }))
+    Some(match (armor_type, slot) {
+        (0, EquipmentSlot::Head) => Item::LeatherHelmet,
+        (0, EquipmentSlot::Chest) => Item::LeatherChestplate,
+        (0, EquipmentSlot::Legs) => Item::LeatherLeggings,
+        (0, EquipmentSlot::Feet) => Item::LeatherBoots,
+        (1, EquipmentSlot::Head) => Item::CopperHelmet,
+        (1, EquipmentSlot::Chest) => Item::CopperChestplate,
+        (1, EquipmentSlot::Legs) => Item::CopperLeggings,
+        (1, EquipmentSlot::Feet) => Item::CopperBoots,
+        (2, EquipmentSlot::Head) => Item::GoldenHelmet,
+        (2, EquipmentSlot::Chest) => Item::GoldenChestplate,
+        (2, EquipmentSlot::Legs) => Item::GoldenLeggings,
+        (2, EquipmentSlot::Feet) => Item::GoldenBoots,
+        (3, EquipmentSlot::Head) => Item::ChainmailHelmet,
+        (3, EquipmentSlot::Chest) => Item::ChainmailChestplate,
+        (3, EquipmentSlot::Legs) => Item::ChainmailLeggings,
+        (3, EquipmentSlot::Feet) => Item::ChainmailBoots,
+        (4, EquipmentSlot::Head) => Item::IronHelmet,
+        (4, EquipmentSlot::Chest) => Item::IronChestplate,
+        (4, EquipmentSlot::Legs) => Item::IronLeggings,
+        (4, EquipmentSlot::Feet) => Item::IronBoots,
+        (5, EquipmentSlot::Head) => Item::DiamondHelmet,
+        (5, EquipmentSlot::Chest) => Item::DiamondChestplate,
+        (5, EquipmentSlot::Legs) => Item::DiamondLeggings,
+        (5, EquipmentSlot::Feet) => Item::DiamondBoots,
+        (_, EquipmentSlot::MainHand | EquipmentSlot::OffHand) | (..=-1 | 6.., _) => return None,
+    })
 }
 
 /// `Mob.populateDefaultEquipmentSlots` — the generic armour-upgrade roll every
@@ -260,7 +238,7 @@ pub fn base_armor_roll(
 }
 
 /// Vanilla's `populateDefaultEquipmentSlots(RandomSource, DifficultyInstance)`
-/// for one species, resolved by path. An unlisted species takes
+/// for one generated entity type. An unlisted species takes
 /// [`base_armor_roll`] alone, which is the honest default: every species this
 /// module does not name individually still extends `Mob` and inherits its
 /// generic roll, exactly as the jar does.
@@ -269,7 +247,7 @@ pub fn base_armor_roll(
 /// (and so take [`base_armor_roll`] first) and which fully override it.
 #[must_use]
 pub fn populate_default_equipment_slots(
-    species: &str,
+    species: EntityType,
     rng: &mut impl EquipRandom,
     special_multiplier: f32,
     hard: bool,
@@ -280,14 +258,14 @@ pub fn populate_default_equipment_slots(
         // 1%/5%(Hard) chance of an iron weapon at 1/6 sword, 1/6 spear, 4/6
         // shovel. `Husk` and `ZombieVillager` declare no override, so they
         // share this arm; `Drowned` overrides fully and gets its own arm.
-        "zombie" | "husk" | "zombie_villager" => {
+        EntityType::Zombie | EntityType::Husk | EntityType::ZombieVillager => {
             base_armor_roll(rng, special_multiplier, hard, &mut slots);
             let weapon_chance = if hard { 0.05 } else { 0.01 };
             if rng.next_f32() < weapon_chance {
                 let item = match rng.next_int(6) {
-                    0 => built_in_item("iron_sword"),
-                    1 => built_in_item("iron_spear"),
-                    _ => built_in_item("iron_shovel"),
+                    0 => Item::IronSword,
+                    1 => Item::IronSpear,
+                    _ => Item::IronShovel,
                 };
                 slots.set(EquipmentSlot::MainHand, item);
             }
@@ -295,31 +273,31 @@ pub fn populate_default_equipment_slots(
         // `Drowned.populateDefaultEquipmentSlots` does not call `super` — no
         // armour, just the trident/fishing-rod roll: 10% * 10/16 = 6.25% of
         // spawns get a trident, 10% * 6/16 = 3.75% a fishing rod, 90% neither.
-        "drowned" => {
+        EntityType::Drowned => {
             if rng.next_f32() > 0.9 {
                 let item = if rng.next_int(16) < 10 {
-                    built_in_item("trident")
+                    Item::Trident
                 } else {
-                    built_in_item("fishing_rod")
+                    Item::FishingRod
                 };
                 slots.set(EquipmentSlot::MainHand, item);
             }
         }
         // `AbstractSkeleton.populateDefaultEquipmentSlots`: `super` then an
         // unconditional bow. `Stray`, `Bogged` and `Parched` share this arm.
-        "skeleton" | "stray" | "bogged" | "parched" => {
+        EntityType::Skeleton | EntityType::Stray | EntityType::Bogged | EntityType::Parched => {
             base_armor_roll(rng, special_multiplier, hard, &mut slots);
-            slots.set(EquipmentSlot::MainHand, built_in_item("bow"));
+            slots.set(EquipmentSlot::MainHand, Item::Bow);
         }
         // `WitherSkeleton.populateDefaultEquipmentSlots`: no `super`, just an
         // unconditional stone sword.
-        "wither_skeleton" => {
-            slots.set(EquipmentSlot::MainHand, built_in_item("stone_sword"));
+        EntityType::WitherSkeleton => {
+            slots.set(EquipmentSlot::MainHand, Item::StoneSword);
         }
         // `Pillager.populateDefaultEquipmentSlots`: no `super`, just an
         // unconditional crossbow.
-        "pillager" => {
-            slots.set(EquipmentSlot::MainHand, built_in_item("crossbow"));
+        EntityType::Pillager => {
+            slots.set(EquipmentSlot::MainHand, Item::Crossbow);
         }
         // Every other species: the generic roll alone, the honest default for
         // a class that declares no override at all.
@@ -328,12 +306,31 @@ pub fn populate_default_equipment_slots(
     slots
 }
 
+/// Populates the inherited equipment for an entity type supplied by an
+/// extension rather than the generated built-in registry.
+///
+/// A custom entity has no generated variant on which to select one of the
+/// built-in species overrides above, but it still enters the same generic
+/// mob path as an unlisted built-in type. Keeping that fallback as a separate,
+/// string-free function preserves the extension seam without pretending a
+/// custom key is a built-in [`EntityType`].
+#[must_use]
+pub fn populate_default_equipment_slots_for_extension(
+    rng: &mut impl EquipRandom,
+    special_multiplier: f32,
+    hard: bool,
+) -> EquipmentSlots {
+    let mut slots = EquipmentSlots::default();
+    base_armor_roll(rng, special_multiplier, hard, &mut slots);
+    slots
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn item(path: &str) -> Item {
-        built_in_item(path)
+        Item::from_name(path).expect("test item is in the built-in registry")
     }
 
     /// A scripted [`EquipRandom`]: a fixed sequence of floats and ints, so a
@@ -479,7 +476,7 @@ mod tests {
     fn drowned_rolls_a_trident_on_the_documented_branch() {
         let mut rng = Script::new(vec![0.95], vec![5]);
         let slots =
-            populate_default_equipment_slots("drowned", &mut rng, 1.0, false);
+            populate_default_equipment_slots(EntityType::Drowned, &mut rng, 1.0, false);
         assert_eq!(slots.main_hand, Some(item("trident")));
         assert!(slots.head.is_none(), "drowned's override must not call super");
     }
@@ -490,7 +487,7 @@ mod tests {
     fn drowned_rolls_a_fishing_rod_on_the_sibling_branch() {
         let mut rng = Script::new(vec![0.95], vec![12]);
         let slots =
-            populate_default_equipment_slots("drowned", &mut rng, 1.0, false);
+            populate_default_equipment_slots(EntityType::Drowned, &mut rng, 1.0, false);
         assert_eq!(slots.main_hand, Some(item("fishing_rod")));
     }
 
@@ -501,7 +498,7 @@ mod tests {
     fn drowned_usually_holds_nothing_and_never_wears_armor() {
         let mut rng = Script::new(vec![0.5], Vec::new());
         let slots =
-            populate_default_equipment_slots("drowned", &mut rng, 1.0, false);
+            populate_default_equipment_slots(EntityType::Drowned, &mut rng, 1.0, false);
         assert_eq!(slots, EquipmentSlots::default());
     }
 
@@ -511,7 +508,7 @@ mod tests {
     fn a_skeleton_always_holds_a_bow() {
         let mut rng = Script::new(vec![0.99], Vec::new());
         let slots =
-            populate_default_equipment_slots("skeleton", &mut rng, 0.0, false);
+            populate_default_equipment_slots(EntityType::Skeleton, &mut rng, 0.0, false);
         assert_eq!(slots.main_hand, Some(item("bow")));
     }
 
@@ -521,7 +518,7 @@ mod tests {
     fn a_wither_skeleton_always_holds_a_stone_sword_with_no_armor_roll() {
         let mut rng = Script::new(Vec::new(), Vec::new());
         let slots = populate_default_equipment_slots(
-            "wither_skeleton",
+            EntityType::WitherSkeleton,
             &mut rng,
             1.0,
             true,
@@ -534,7 +531,7 @@ mod tests {
     #[test]
     fn a_pillager_always_holds_a_crossbow() {
         let mut rng = Script::new(Vec::new(), Vec::new());
-        let slots = populate_default_equipment_slots("pillager", &mut rng, 1.0, false);
+        let slots = populate_default_equipment_slots(EntityType::Pillager, &mut rng, 1.0, false);
         assert_eq!(slots.main_hand, Some(item("crossbow")));
     }
 
@@ -545,13 +542,29 @@ mod tests {
         for (roll, expect) in [(0, "iron_sword"), (1, "iron_spear"), (2, "iron_shovel"), (5, "iron_shovel")] {
             let mut rng = Script::new(vec![0.0, 0.005], vec![roll]);
             let slots =
-                populate_default_equipment_slots("zombie", &mut rng, 0.0, true);
+                populate_default_equipment_slots(EntityType::Zombie, &mut rng, 0.0, true);
             assert_eq!(
                 slots.main_hand,
                 Some(item(expect)),
                 "roll {roll} should give {expect}"
             );
         }
+    }
+
+    /// A custom entity has no generated variant for a species-specific arm,
+    /// but it still receives the inherited generic armour roll that an
+    /// unlisted built-in type receives.
+    #[test]
+    fn extension_equipment_keeps_the_generic_armor_fallback() {
+        let mut rng = Script::new(
+            vec![0.0, 0.99, 0.99, 0.99, 0.99, 0.99, 0.99],
+            vec![2],
+        );
+        let slots = populate_default_equipment_slots_for_extension(&mut rng, 1.0, false);
+        assert_eq!(slots.head, Some(item("golden_helmet")));
+        assert_eq!(slots.chest, Some(item("golden_chestplate")));
+        assert_eq!(slots.legs, Some(item("golden_leggings")));
+        assert_eq!(slots.feet, Some(item("golden_boots")));
     }
 
     /// `iter()` round-trips through [`crate::equipment::apply_equipment`],

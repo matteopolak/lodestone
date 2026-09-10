@@ -4932,18 +4932,19 @@ impl<'w> MobSim<'w> {
         let follow_range = attr_present(&attrs, "follow_range").unwrap_or(DEFAULT_FOLLOW_RANGE);
         let visited_budget = (follow_range * 16.0).floor() as i32;
         let hostile = species::is_hostile_species(&entity_type);
+        let built_in_entity_type = EntityType::from_resource_key(&entity_type);
 
-        // Captured before `entity_type` moves into `spawn_with_type` below, so
-        // the equipment roll (which also needs the species path, after the
-        // move) has its own owned copy rather than fighting the borrow.
-        let species_path = entity_type.path().to_owned();
+        // The roster still consumes the dynamic key's borrowed path. Closed
+        // built-in behavior below uses the generated `EntityType` instead of
+        // allocating a second species string and matching its characters.
+        let species_path = entity_type.path();
 
         // Built *before* `entity_type` is moved into the spawn. `SpeciesContext`
         // wants the raw attribute — every roster goal supplies its own
         // speed multiplier on top — so it is *not* `ai_ground_speed`-converted
         // here; the conversion happens once, below, for the kinematic
         // follower's own rate.
-        let goals = roster::goals_for(&species_path, &SpeciesContext::new(base_speed));
+        let goals = roster::goals_for(species_path, &SpeciesContext::new(base_speed));
 
         // Vanilla's own default-equipment-population step — what this mob spawns holding
         // and wearing (`lodestone_entity::spawn_equipment`'s module doc has
@@ -4951,19 +4952,27 @@ impl<'w> MobSim<'w> {
         // `spawn_with_type` reads combat stats from a fresh
         // `default_attributes` call of its own, so the two cannot disagree on
         // the base and only equipment is layered on top here.
-        let equipped = spawn_equipment::populate_default_equipment_slots(
-            &species_path,
-            &mut self.equipment_rng,
-            self.spawn_special_multiplier,
-            self.spawn_hard_difficulty,
-        );
+        let equipped = match built_in_entity_type {
+            Some(species) => spawn_equipment::populate_default_equipment_slots(
+                species,
+                &mut self.equipment_rng,
+                self.spawn_special_multiplier,
+                self.spawn_hard_difficulty,
+            ),
+            None => spawn_equipment::populate_default_equipment_slots_for_extension(
+                &mut self.equipment_rng,
+                self.spawn_special_multiplier,
+                self.spawn_hard_difficulty,
+            ),
+        };
         equipment::apply_equipment(&mut attrs, equipped.iter());
 
         // Vanilla's own goat spawn-finalization's own pre-broken-horn roll — see
         // `goat_horn_spawn_roll`'s own doc. Rolled here, before `entity_type`
         // moves into `spawn_with_type` below, for the identical reason
         // `species_path` was captured above.
-        let (has_left_horn, has_right_horn) = goat_horn_spawn_roll(&species_path, &mut self.goat_horn_rng);
+        let (has_left_horn, has_right_horn) =
+            goat_horn_spawn_roll(species_path, &mut self.goat_horn_rng);
 
         // Vanilla's own reinforcements-chance randomizer — its attribute-handling
         // step calls
@@ -4974,7 +4983,7 @@ impl<'w> MobSim<'w> {
         // `has_right_horn` are: before `entity_type` moves into
         // `spawn_with_type` below.
         let reinforcement_chance = if matches!(
-            species_path.as_str(),
+            species_path,
             "zombie" | "husk" | "zombie_villager" | "drowned" | "zombified_piglin"
         ) {
             self.reinforcement_rng.next_f64() * 0.1

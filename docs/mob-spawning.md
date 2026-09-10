@@ -107,7 +107,11 @@ entry in `equipment::weapon_attack_damage` (a combat-stats gap, not an equipping
 `EquipmentSlots` stores `lodestone_data::item::Item`, not item-name text: every result of this
 closed default-equipment table is a known built-in registry entry. `equipment::apply_equipment`
 accepts that typed path directly; its string form remains the explicit dynamic player-inventory
-boundary, where an unknown name contributes no built-in modifiers.
+boundary, where an unknown name contributes no built-in modifiers. The equipment producer also
+accepts the generated `EntityType` enum and matches direct `Item` variants. `MobSim::spawn_species`
+parses its dynamic `ResourceKey` once at the built-in boundary. Built-in keys use the generated
+`EntityType` enum; extension keys use the explicit generic inherited-equipment fallback rather than
+being stringified or mistaken for a built-in species.
 
 ### Species-aware spawning
 
