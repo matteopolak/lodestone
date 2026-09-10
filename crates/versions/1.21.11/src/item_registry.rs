@@ -133,6 +133,7 @@ pub(crate) fn wire_id_for_item(item: Item) -> Option<i32> {
 
 #[cfg(test)]
 mod tests {
+    use serde::Deserialize;
     use sha2::{Digest as _, Sha256};
 
     use super::WIRE_TO_CANONICAL;
@@ -144,6 +145,24 @@ mod tests {
     const WIRE_SHA256: &str =
         "0031a948bf8210aaf68d4964499cb2c31f2c3bf5d7339439540ca82a9eb28686";
 
+    #[derive(Debug, Deserialize)]
+    struct RegistryFixture {
+        source_files: SourceFiles,
+        items: Vec<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct SourceFiles {
+        items: SourceMetadata,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct SourceMetadata {
+        path: String,
+        sha256: String,
+        count: usize,
+    }
+
     fn sha256_hex(bytes: &[u8]) -> String {
         Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
     }
@@ -151,17 +170,24 @@ mod tests {
     #[test]
     fn every_protocol_item_id_matches_the_pinned_source_registry() {
         assert_eq!(sha256_hex(SOURCE.as_bytes()), SOURCE_SHA256);
-        let document: serde_json::Value = serde_json::from_str(SOURCE).expect("registry fixture");
-        let source = &document["source_files"]["items"];
-        assert_eq!(source["path"], "vendor/minecraft-data/data/pc/1.21.11/items.json");
-        assert_eq!(source["sha256"], WIRE_SHA256);
-        assert_eq!(source["count"], WIRE_TO_CANONICAL.len());
-        let names = document["items"].as_array().expect("item names");
+        let document: RegistryFixture =
+            serde_json::from_str(SOURCE).expect("registry fixture");
+        let source = document.source_files.items;
+        assert_eq!(source.path, "vendor/minecraft-data/data/pc/1.21.11/items.json");
+        assert_eq!(source.sha256, WIRE_SHA256);
+        assert_eq!(source.count, WIRE_TO_CANONICAL.len());
+        let names = document.items;
         assert_eq!(names.len(), WIRE_TO_CANONICAL.len());
         for (wire_id, name) in names.iter().enumerate() {
-            let name = name.as_str().expect("item name");
             let item = Item::from_name(name).expect("source item exists canonically");
             assert_eq!(item.registry_id(), WIRE_TO_CANONICAL[wire_id], "wire id {wire_id}: {name}");
         }
+    }
+
+    #[test]
+    fn registry_fixture_rejects_wrong_metadata_types() {
+        let malformed =
+            r#"{"source_files":{"items":{"path":7,"sha256":"x","count":1}},"items":[]}"#;
+        assert!(serde_json::from_str::<RegistryFixture>(malformed).is_err());
     }
 }

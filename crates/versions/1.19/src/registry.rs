@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use lodestone_model::ResourceKey;
+use serde::Deserialize;
 
 use crate::PROTOCOL_1_19_4;
 
@@ -23,25 +24,39 @@ struct Registries {
     menu_ids: HashMap<ResourceKey, i32>,
 }
 
+/// The committed jar report is a map of version-local registry names to a
+/// shared record shape. Registry names and entry names remain strings because
+/// the report includes many registries this adapter does not consume; ids are
+/// typed so malformed requested entries fail at deserialization.
+#[derive(Debug, Deserialize)]
+#[serde(transparent)]
+struct RegistryReport(HashMap<String, RegistryDefinition>);
+
+#[derive(Debug, Deserialize)]
+struct RegistryDefinition {
+    #[serde(default)]
+    entries: Option<HashMap<String, RegistryEntry>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RegistryEntry {
+    protocol_id: i32,
+}
+
 fn registry(report: &'static str, registry: &str) -> HashMap<i32, ResourceKey> {
-    let value: serde_json::Value = serde_json::from_str(report)
+    let report: RegistryReport = serde_json::from_str(report)
         .expect("the committed jar registry report must remain valid JSON");
-    value
+    report
+        .0
         .get(registry)
-        .and_then(|registry| registry.get("entries"))
-        .and_then(serde_json::Value::as_object)
-        .expect("the committed jar registry report must contain the requested registry")
+        .and_then(|registry| registry.entries.as_ref())
+        .expect("the committed jar registry report must contain the requested registry entries")
         .iter()
         .map(|(name, entry)| {
-            let id = entry
-                .get("protocol_id")
-                .and_then(serde_json::Value::as_i64)
-                .and_then(|id| i32::try_from(id).ok())
-                .expect("a jar registry id must fit an i32");
             let key = name
                 .parse()
                 .expect("a jar registry entry must be a valid resource key");
-            (id, key)
+            (entry.protocol_id, key)
         })
         .collect()
 }
@@ -118,5 +133,30 @@ mod tests {
             menu_id(PROTOCOL_1_19_4, &"minecraft:generic_9x3".parse().unwrap()),
             Some(2)
         );
+    }
+
+    #[test]
+    fn registry_report_rejects_missing_or_non_integer_ids() {
+        for report in [
+            r#"{"minecraft:item":{"entries":{"minecraft:stone":{}}}}"#,
+            r#"{"minecraft:item":{"entries":{"minecraft:stone":{"protocol_id":"7"}}}}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<super::RegistryReport>(report).is_err(),
+                "malformed registry report was accepted: {report}"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_report_keeps_unconsumed_registry_names_external() {
+        let report = serde_json::from_str::<super::RegistryReport>(
+            r#"{
+                "minecraft:item":{"entries":{"minecraft:stone":{"protocol_id":7}}},
+                "plugin:custom":{"entries":{"plugin:entry":{"protocol_id":0}}}
+            }"#,
+        )
+        .expect("unconsumed registry names are still report data");
+        assert!(report.0.contains_key("plugin:custom"));
     }
 }

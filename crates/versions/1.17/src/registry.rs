@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use lodestone_model::ResourceKey;
+use serde::Deserialize;
 
 use crate::{PROTOCOL_1_17_1, PROTOCOL_1_18_2};
 
@@ -24,25 +25,41 @@ struct Registries {
     menu_ids: HashMap<ResourceKey, i32>,
 }
 
+/// The jar report is a map of registry names to the same small record shape.
+///
+/// Registry names and entry names are intentionally strings: the report is a
+/// version-local external fixture and contains many registries that this
+/// adapter does not consume. The fields we do consume are typed, so malformed
+/// ids fail while unrelated registries remain forward-compatible.
+#[derive(Debug, Deserialize)]
+#[serde(transparent)]
+struct RegistryReport(HashMap<String, RegistryDefinition>);
+
+#[derive(Debug, Deserialize)]
+struct RegistryDefinition {
+    #[serde(default)]
+    entries: Option<HashMap<String, RegistryEntry>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RegistryEntry {
+    protocol_id: i32,
+}
+
 fn registry(report: &'static str, registry: &str) -> HashMap<i32, ResourceKey> {
-    let value: serde_json::Value = serde_json::from_str(report)
+    let report: RegistryReport = serde_json::from_str(report)
         .expect("the committed jar registry report must remain valid JSON");
-    value
+    report
+        .0
         .get(registry)
-        .and_then(|registry| registry.get("entries"))
-        .and_then(serde_json::Value::as_object)
-        .expect("the committed jar registry report must contain the requested registry")
+        .and_then(|registry| registry.entries.as_ref())
+        .expect("the committed jar registry report must contain the requested registry entries")
         .iter()
         .map(|(name, entry)| {
-            let id = entry
-                .get("protocol_id")
-                .and_then(serde_json::Value::as_i64)
-                .and_then(|id| i32::try_from(id).ok())
-                .expect("a jar registry id must fit an i32");
             let key = name
                 .parse()
                 .expect("a jar registry entry must be a valid resource key");
-            (id, key)
+            (entry.protocol_id, key)
         })
         .collect()
 }
@@ -92,4 +109,34 @@ pub(crate) fn menu_id(protocol: i32, key: &ResourceKey) -> Option<i32> {
 /// Resolves a protocol-local block registry id to its canonical key.
 pub(crate) fn block(protocol: i32, id: i32) -> Option<ResourceKey> {
     for_protocol(protocol).blocks.get(&id).cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RegistryReport;
+
+    #[test]
+    fn registry_report_rejects_missing_or_non_integer_ids() {
+        for report in [
+            r#"{"minecraft:item":{"entries":{"minecraft:stone":{}}}}"#,
+            r#"{"minecraft:item":{"entries":{"minecraft:stone":{"protocol_id":"7"}}}}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<RegistryReport>(report).is_err(),
+                "malformed registry report was accepted: {report}"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_report_keeps_unconsumed_registry_names_external() {
+        let report = serde_json::from_str::<RegistryReport>(
+            r#"{
+                "minecraft:item":{"entries":{"minecraft:stone":{"protocol_id":7}}},
+                "plugin:custom":{"entries":{"plugin:entry":{"protocol_id":0}}}
+            }"#,
+        )
+        .expect("unconsumed registry names are still report data");
+        assert!(report.0.contains_key("plugin:custom"));
+    }
 }

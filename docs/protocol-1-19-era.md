@@ -190,6 +190,25 @@ adapter retains the registry blob the join delivered and re-resolves through
 it. An adapter that keeps reading the old inline field reads a string where an
 NBT compound was and desynchronises immediately.
 
+### Static registry reports have a typed boundary
+
+The committed jar registry reports used by the 1.17 and 1.19 adapters are
+decoded into a typed report map. Registry and entry names remain strings because
+the report contains many registries that an era does not consume, but every
+`protocol_id` used by the adapter is an integer field in the deserialization
+schema. A missing or string-valued id therefore fails before a lookup table is
+built; an unrelated registry name remains available to the report parser rather
+than being rejected as an unknown enum variant. The 1.21.11 item and block
+bridge guards apply the same rule to their pinned source fixture: metadata and
+name lists are typed, and malformed metadata is a negative test rather than a
+silently empty table.
+
+When refreshing one of these fixtures, update the captured file and its digest
+together, then run the adapter's registry tests. Do not replace the typed
+records with a generic JSON tree to tolerate an extra report field; unknown
+fields are intentionally ignored while the fields consumed by a wire lookup
+remain closed and validated.
+
 ### Hosted play
 
 `V762ServerProtocol` is selected by `lodestone-registry` for protocol 762.

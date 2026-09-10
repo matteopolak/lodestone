@@ -19,6 +19,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+serde = { workspace = true }
 lodestone-client = { workspace = true }
 lodestone-registry = { workspace = true, features = ["v1-21-11"] }
 lodestone-net = { workspace = true }
