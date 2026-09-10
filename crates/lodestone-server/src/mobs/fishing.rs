@@ -29,13 +29,12 @@ const MAX_OUT_OF_WATER_TIME: i32 = 10;
 /// §5 for why that half of `shouldStopFishing` is not ported here).
 const HOOK_MAX_GROUND_LIFE: i32 = 1200;
 
-/// `FishingHook.FishHookState` — vanilla's own three-state machine, ported
-/// verbatim.
+/// The two bobber states this server can produce: flight until the hook reaches
+/// water, then the bobbing/fishing state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FishHookState {
     Flying,
     Bobbing,
-    HookedInEntity,
 }
 
 /// One live fishing bobber — the fields `FishingHook` itself carries, minus
@@ -370,7 +369,7 @@ impl<'w> MobSim<'w> {
     ) -> Option<FishingRetrieve> {
         let bobber = self.fishing_bobbers.remove(&id)?;
         // Not reachable by this port (see the struct's own doc): a bobber
-        // never enters `HookedInEntity` here, so vanilla's `dmg = 5` (a
+        // never enters an entity-hooked state here, so the `dmg = 5` (a
         // player) / `3` (an item) branch never fires. Only the loot-roll and
         // on-ground branches are live.
         let rod_damage = if bobber.nibble > 0 {
@@ -562,10 +561,6 @@ impl<'w> MobSim<'w> {
                         // No entity-hit search here (see this file's doc) —
                         // only the block/on-ground transition below applies.
                     }
-                }
-                FishHookState::HookedInEntity => {
-                    // Unreachable in this port (never set), kept only so the
-                    // match is exhaustive against vanilla's own state machine.
                 }
                 FishHookState::Bobbing => {
                     let movement = b.velocity;

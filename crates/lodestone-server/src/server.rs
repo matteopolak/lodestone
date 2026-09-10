@@ -2945,87 +2945,6 @@ where
     .await
 }
 
-/// [`serve_connection_with_mob_events`], but with chunk generation off the
-/// core thread.
-///
-/// This compatibility wrapper has no command dispatcher; integrated
-/// singleplayer uses [`serve_connection_with_mob_events_and_commands_shared`].
-/// Callers that need only mob event feeds use this entry point.
-///
-/// # Errors
-///
-/// As [`serve_connection`].
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn serve_connection_with_mob_events_shared<T, P, S, E>(
-    conn: &mut Connection<T>,
-    proto: &P,
-    source: &Arc<S>,
-    entities: &E,
-    view_radius: i32,
-    // The caller supplies the ceiling: in-memory worlds use
-    // [`MAX_CLIENT_VIEW_RADIUS`], while LAN hosts use their configured
-    // `view_radius`. See `ViewTracker::max_radius`.
-    max_view_radius: i32,
-    block_entities: &BlockEntityHandle,
-    mobs: &MobHandle,
-    block_ticks: &BlockTickFeed,
-    explosions: &ExplosionFeed,
-    // Night-skip vote state and notifications consumed by the world tick.
-    sleep_vote: &SleepVote,
-    sleep_feed: &SleepFeed,
-    // Shared world-border state updated by the world tick and `/worldborder`
-    // commands. Other wrappers use an unconfigured border feed.
-    border: &BorderFeed,
-    // Shared world rules, difficulty, and clock updated by `run_tick_loop`.
-    world: &crate::world_state::WorldStateHandle,
-    // `serve_play` publishes the player's live-save mirror each loop iteration.
-    // LAN connections use connection-local slots; integrated shutdown reads the
-    // slot supplied by the host.
-    live_save: &crate::live_save::LiveSaveSlot,
-    // `IntegratedServer`'s real handle — see
-    // `serve_connection_shared`'s own parameter comment; this is the
-    // singleplayer/open-to-LAN sibling that carries it.
-    tickets: &TicketStoreHandle,
-) -> Result<ServeSummary, ServerError>
-where
-    T: Transport,
-    P: ServerProtocol,
-    S: ChunkSource + 'static,
-    E: EntitySource,
-{
-    serve_connection_inner(
-        conn,
-        proto,
-        SourceRef::Shared(source),
-        entities,
-        view_radius,
-        max_view_radius,
-        block_entities,
-        mobs,
-        tickets,
-        block_ticks,
-        explosions,
-        &WeatherFeed::default(),
-        sleep_vote,
-        sleep_feed,
-        &CommandDispatch::none(),
-        border,
-        &ResourcePackPushFeed::default(),
-        &PluginChannelRegistry::default(),
-        world,
-        live_save,
-        // The inert default admits everybody and grants no operator role.
-        #[cfg(not(target_arch = "wasm32"))]
-        &crate::access::AccessHandle::default(),
-        #[cfg(not(target_arch = "wasm32"))]
-        None,
-        // Offline mode; `serve_connection_with_online_mode` passes `Some`.
-        #[cfg(not(target_arch = "wasm32"))]
-        None,
-    )
-    .await
-}
-
 /// [`serve_connection`], plus the host's access lists and this connection's
 /// remote address.
 ///
@@ -3154,7 +3073,7 @@ where
     .await
 }
 
-/// [`serve_connection_with_mob_events_shared`], plus a host-installed command
+/// [`serve_connection_shared`], plus a host-installed command
 /// dispatcher (the host-installed command dispatcher).
 ///
 /// The singleplayer-shaped counterpart to
@@ -3442,7 +3361,7 @@ where
         explosions,
         weather,
         // No caller wires a sleep vote through this wrapper; the feed-carrying
-        // variant is `serve_connection_with_mob_events_shared`.
+        // variant is `serve_connection_with_mob_events_and_commands_shared`.
         &SleepVote::default(),
         &SleepFeed::default(),
         &CommandDispatch::none(),

@@ -1503,6 +1503,7 @@ fn run_command_block_command(
 /// Tokio deadline and bounded catch-up policy; wasm32 waits through
 /// [`crate::browser_timer::BrowserInterval`], whose `Delay` policy runs one
 /// delayed tick and never replays a catch-up burst.
+#[cfg(test)]
 pub(crate) async fn run_tick_loop<W>(
     mobs: MobHandle,
     mob_out: LiveMobSource,
