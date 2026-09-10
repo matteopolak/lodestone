@@ -103,8 +103,13 @@ ten-spike fallback. Their independent feature fixtures cover the platform, islan
 chorus, and gateway shapes. The independent feature-order fixture also pins the global per-step
 indices: `end_gateway_return` is step-4 index 0 and `end_spike` is step-4 index 1, so
 `EndDecoration` derives each feature seed from the dimension-wide order rather than its local
-biome position. The whole-column End terrain fixture deliberately stops before later writers, so
-it is not evidence for decoration scheduling or cross-source order. Several rarer
+biome position. End lifecycle replay runs each source body with its own source-centred three-by-three
+read window, then commits the absolute spills to resident destination columns. The requested packet
+target selects the final snapshot; it must not become the source body's read-window origin. This is
+observable at seed `42`: source `(128,131)` writes the target `(128,130)` focus cell `(4,67,15)`
+as chorus, while target-centred replay leaves it air. Withholding that source is the negative control
+and leaves the focus cell air. The whole-column End terrain fixture deliberately stops before later
+writers, so it is not evidence for decoration scheduling or cross-source order. Several rarer
 single-use types remain unmodelled and are tracked by name in
 `lodestone_server::worldgen_data::KNOWN_VEGETATION_GAPS`; update that set whenever a type lands so a
 regression (or a fixed gap that should be pruned) is loud rather than silent.
