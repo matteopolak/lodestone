@@ -182,6 +182,10 @@ fn profile_ids(profiles: &[FriendProfile]) -> HashSet<Uuid> {
 pub enum FriendsViewState {
     #[default]
     Disabled,
+    /// The selected account has not made a local decision about enabling the
+    /// Friends service yet. The menu must ask once instead of silently
+    /// treating the service's disabled default as a permanent opt-out.
+    Undecided,
     Resolving,
     FetchingAttributes,
     Ready,
@@ -264,6 +268,11 @@ pub struct FriendsCoordinator {
     account: Option<FriendsAccount>,
     session_ready: bool,
     preferences: Option<FriendsPreferences>,
+    /// The local first-use decision is deliberately separate from the
+    /// service-backed preference. A missing decision is what makes a freshly
+    /// resolved disabled account prompt; once the player answers, later
+    /// disabled responses do not reopen the prompt automatically.
+    local_consent: Option<bool>,
     snapshot: Option<FriendsSnapshot>,
     presence: Option<PresenceSnapshot>,
     friends_tag: Option<EntityTag>,
@@ -297,6 +306,7 @@ impl Default for FriendsCoordinator {
             account: None,
             session_ready: false,
             preferences: None,
+            local_consent: None,
             snapshot: None,
             presence: None,
             friends_tag: None,
@@ -354,7 +364,21 @@ impl FriendsCoordinator {
     }
 
     pub fn set_preferences(&mut self, preferences: FriendsPreferences) {
+        self.local_consent = Some(preferences.enabled);
         self.queued_preferences = Some(preferences);
+    }
+
+    /// Records the explicit first-use choice. Enabling or declining is routed
+    /// through the same typed preference operation as the Settings tab, so it
+    /// receives the normal request floor, retry, and authoritative response
+    /// handling.
+    pub fn set_opt_in(&mut self, enabled: bool) {
+        self.local_consent = Some(enabled);
+        let current = self.preferences.unwrap_or_default();
+        let preferences = FriendsPreferences { enabled, ..current };
+        if self.preferences != Some(preferences) {
+            self.queued_preferences = Some(preferences);
+        }
     }
 
     /// Records a semantic activity change. The debounce is applied here, not
@@ -485,6 +509,7 @@ impl FriendsCoordinator {
             (FriendsOperation::FetchAttributes, FriendsResponse::Attributes(attributes)) => {
                 self.preferences = Some(attributes.preferences);
                 if attributes.preferences.enabled {
+                    self.local_consent = Some(true);
                     self.friends_due = Some(now);
                 } else {
                     self.clear_live_caches();
@@ -532,6 +557,7 @@ impl FriendsCoordinator {
             }
             (FriendsOperation::SetPreferences { preferences }, FriendsResponse::Preferences(attributes)) => {
                 self.preferences = Some(attributes.preferences);
+                self.local_consent = Some(attributes.preferences.enabled);
                 if attributes.preferences.enabled {
                     self.friends_due = Some(now);
                     self.presence_due = Some(now);
@@ -617,7 +643,7 @@ impl FriendsCoordinator {
 
     #[must_use]
     pub fn view(&self, now: Duration) -> FriendsView {
-        let state = if self.account.is_none() || self.preferences.is_some_and(|p| !p.enabled) {
+        let state = if self.account.is_none() {
             FriendsViewState::Disabled
         } else if self.backoff_until.is_some_and(|until| now < until) {
             FriendsViewState::Backoff
@@ -629,6 +655,12 @@ impl FriendsCoordinator {
                 FriendsOperation::PublishPresence { .. } => FriendsViewState::PublishingPresence,
                 FriendsOperation::Mutate { .. } => FriendsViewState::Mutating,
                 FriendsOperation::SetPreferences { .. } => FriendsViewState::SavingPreferences,
+            }
+        } else if self.preferences.is_some_and(|p| !p.enabled) {
+            if self.local_consent.is_none() {
+                FriendsViewState::Undecided
+            } else {
+                FriendsViewState::Disabled
             }
         } else {
             FriendsViewState::Ready
@@ -702,6 +734,10 @@ impl<C: FriendsClock> FriendsRuntime<C> {
 
     pub fn set_preferences(&mut self, preferences: FriendsPreferences) {
         self.coordinator.set_preferences(preferences);
+    }
+
+    pub fn set_opt_in(&mut self, enabled: bool) {
+        self.coordinator.set_opt_in(enabled);
     }
 
     pub fn set_desired_presence(&mut self, status: PresenceStatus) {
@@ -787,6 +823,10 @@ mod tests {
         UserFriendsAttributes { preferences: FriendsPreferences { enabled: true, allow_requests: true } }
     }
 
+    fn disabled() -> UserFriendsAttributes {
+        UserFriendsAttributes { preferences: FriendsPreferences::default() }
+    }
+
     fn resolve_and_enable(coordinator: &mut FriendsCoordinator) {
         let now = Duration::ZERO;
         coordinator.select_account(Some(account()));
@@ -795,6 +835,40 @@ mod tests {
         let operation = coordinator.poll(now, false).expect("attributes");
         assert_eq!(operation, FriendsOperation::FetchAttributes);
         coordinator.complete(now, &operation, Ok(FriendsResponse::Attributes(enabled())));
+    }
+
+    #[test]
+    fn freshly_disabled_attributes_require_an_explicit_first_use_decision() {
+        let mut coordinator = FriendsCoordinator::default();
+        coordinator.select_account(Some(account()));
+        assert!(matches!(coordinator.poll(Duration::ZERO, false), Some(FriendsOperation::ResolveSession { .. })));
+        coordinator.session_resolved(Duration::ZERO, account().profile_id, true);
+        let operation = coordinator.poll(Duration::ZERO, false).expect("attributes");
+        coordinator.complete(Duration::ZERO, &operation, Ok(FriendsResponse::Attributes(disabled())));
+        assert_eq!(coordinator.view(Duration::ZERO).state, FriendsViewState::Undecided);
+
+        coordinator.set_opt_in(true);
+        let operation = coordinator.poll(Duration::from_secs(10), false).expect("opt-in save");
+        assert_eq!(
+            operation,
+            FriendsOperation::SetPreferences {
+                preferences: FriendsPreferences { enabled: true, allow_requests: false },
+            }
+        );
+        assert_eq!(coordinator.view(Duration::from_secs(10)).state, FriendsViewState::SavingPreferences);
+    }
+
+    #[test]
+    fn declining_first_use_is_local_and_does_not_send_a_redundant_disable() {
+        let mut coordinator = FriendsCoordinator::default();
+        coordinator.select_account(Some(account()));
+        let _ = coordinator.poll(Duration::ZERO, false);
+        coordinator.session_resolved(Duration::ZERO, account().profile_id, true);
+        let operation = coordinator.poll(Duration::ZERO, false).expect("attributes");
+        coordinator.complete(Duration::ZERO, &operation, Ok(FriendsResponse::Attributes(disabled())));
+        coordinator.set_opt_in(false);
+        assert!(coordinator.poll(Duration::from_secs(10), false).is_none());
+        assert_eq!(coordinator.view(Duration::from_secs(10)).state, FriendsViewState::Disabled);
     }
 
     #[test]
