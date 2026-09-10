@@ -2935,7 +2935,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                 continue;
             };
             world.set_block(hit.pos.x, hit.pos.y, hit.pos.z, &outcome.new_state);
-            block_tick_out.publish(hit.pos.x, hit.pos.y, hit.pos.z, outcome.new_state.clone());
+            block_tick_out.publish(hit.pos.x, hit.pos.y, hit.pos.z, outcome.new_state.to_string());
             block_ticks.schedule(
                 (hit.pos.x, hit.pos.y, hit.pos.z),
                 target_decay_kind.clone(),
@@ -3090,7 +3090,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                 {
                     let origin = BlockPos::new(x, y, z);
                     let (_id, effects) = mobs.with(|sim| {
-                        sim.spawn_falling_block(settle.state.clone(), origin, settle.landing_y)
+                        sim.spawn_falling_block(settle.state.to_string(), origin, settle.landing_y)
                     });
                     for effect in effects {
                         apply_falling_block_effect(
