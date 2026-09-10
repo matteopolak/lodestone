@@ -33,8 +33,12 @@ state of the project; work that out yourself from the tracker and the tree.
 - **Contention is your main job.** Four to six agents at once works *if* you broker the wiring files;
   without that, three collide. Assign file ownership explicitly, name what other agents are holding,
   and tell agents to report rather than edit outside their territory. If two tasks want the same file,
-  send one agent, not two. Have them commit through a private `GIT_INDEX_FILE` + `commit-tree`, reading
-  the tree and committing in one step.
+  send one agent, not two. Have them commit through a private `GIT_INDEX_FILE`, recording the exact
+  `HEAD` they read before constructing any whole-file blob. Publish with
+  `scripts/private-index-commit.sh <recorded-head> <message> <path>...`; it refuses when `HEAD` moved,
+  then uses compare-and-swap publication so a concurrent commit cannot be overwritten. Re-read and
+  rebuild every selected blob after a refusal. Raw `commit-tree` is unsafe here: it cannot tell that a
+  selected file came from an older tree, which can silently reverse another agent's landed code.
 - **Broker the high-churn wiring files: you are their only writer.** Measured over 200 commits:
   `docs/README.md` (generated now, so no longer hand-edited), `app.rs` (26), `sim.rs` (25), `gpu.rs` (22), `menu/render.rs` (20),
   `crates/lodestone-render/src/lib.rs` (13). Every feature needs one line in some of them — an index
@@ -46,8 +50,9 @@ state of the project; work that out yourself from the tracker and the tree.
   has. Use later messages for facts (HEAD moved, an oracle is down, a file was released), not for
   changing a constraint the brief already stated. If one must change, expect a refusal and re-dispatch.
 - **Every commit invalidates every other agent's index entries**, so `git status` starts reporting staged
-  *deletions* of files the commit just added, which the next `git commit` would ship. After any commit,
-  `git reset -- <your paths>` and confirm `git diff --cached --name-only` is empty.
+  *deletions* of files the commit just added, which the next `git commit` would ship. A private index is
+  disposable after publication; remove its temporary file rather than resetting the shared index.
+  Confirm `git diff --cached --name-only` is empty before any ordinary pathspec commit.
 - **Ask what consumes it.** A subsystem that is built, tested and called by nothing is this repo's
   dominant defect. "Nothing consumes it yet" is an acceptable answer if stated; found later, it is not.
 - **Never launch the game.** The user drives that.

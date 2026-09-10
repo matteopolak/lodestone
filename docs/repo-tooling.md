@@ -106,6 +106,20 @@ link time; keep an unstripped `release` build when source-level profiling or
 symbolized crash diagnostics are needed. The resulting binary is under
 `target/release-dist/` (or the configured shared target directory).
 
+### Stale-safe private-index commits
+
+Concurrent agents construct commits in private Git indexes so they never stage another agent's files.
+The index must be based on a recorded `HEAD`, and publication goes through
+`scripts/private-index-commit.sh <recorded-head> <message> <path>...`. The helper fails before writing a
+commit when the branch has advanced, requiring the caller to re-read current blobs and rebuild the
+selected files. It also requires every named path to exist in that private index, then uses `git
+update-ref` with the recorded old object as a compare-and-swap, closing
+the smaller race between validation and publication. This protects unrelated shared working-tree edits:
+the helper reads selected blobs from the private index and never stages, resets, or rewrites working files.
+
+Run `scripts/test-private-index-commit.sh` for both controls: an intentionally stale private index must
+fail without changing the branch, while a rebuilt index must retain the concurrently landed file.
+
 ### Shared local target, CI caching, and trimmed dev profiles
 
 Local builds deliberately share one global target. Cargo's exclusive target lock is the queue: many
