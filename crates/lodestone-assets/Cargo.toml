@@ -10,6 +10,7 @@ workspace = true
 [dependencies]
 lodestone-model.workspace = true
 thiserror.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 zip.workspace = true
 png.workspace = true

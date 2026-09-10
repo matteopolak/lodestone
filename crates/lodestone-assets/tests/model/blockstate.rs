@@ -95,6 +95,22 @@ fn parses_multipart_with_apply_list_and_no_when() {
 }
 
 #[test]
+fn parses_checked_multipart_fixture() {
+    let bytes = include_bytes!("../fixtures/blockstate_multipart.json");
+    let bs = BlockStates::parse(bytes).expect("fixture uses the typed blockstate schema");
+    let BlockStateDefinition::Multipart(cases) = &bs.definition else {
+        panic!("expected multipart");
+    };
+    assert_eq!(cases.len(), 2);
+    assert!(cases[0].when.is_none());
+    assert_eq!(cases[1].apply[0].weight, 2);
+    let when = cases[1].when.as_ref().expect("fixture has a condition");
+    assert!(when.matches(&props(&[("north", "true"), ("south", "false")])));
+    assert!(when.matches(&props(&[("north", "false"), ("south", "false")])));
+    assert!(!when.matches(&props(&[("north", "false"), ("south", "true")])));
+}
+
+#[test]
 fn parses_multipart_apply_as_weighted_list() {
     let json = br#"{"multipart":[
         {"apply":[{"model":"m:a"},{"model":"m:b"}],"when":{"north":"true"}}
@@ -179,6 +195,26 @@ fn malformed_blockstate_errors() {
     assert!(BlockStates::parse(br#"{"variants":{"":{"model":123}}}"#).is_err());
     // invalid model identifier
     assert!(BlockStates::parse(br#"{"variants":{"":{"model":"BAD NS"}}}"#).is_err());
+}
+
+#[test]
+fn unknown_closed_schema_fields_are_rejected() {
+    assert!(BlockStates::parse(
+        br#"{"variants":{"":{"model":"m:stone","unexpected":true}}}"#
+    )
+    .is_err());
+    assert!(BlockStates::parse(
+        br#"{"multipart":[{"apply":{"model":"m:stone"},"unexpected":true}]}"#
+    )
+    .is_err());
+}
+
+#[test]
+fn non_scalar_when_values_are_rejected() {
+    assert!(BlockStates::parse(
+        br#"{"multipart":[{"when":{"facing":["north"]},"apply":{"model":"m:stone"}}]}"#
+    )
+    .is_err());
 }
 
 #[test]
