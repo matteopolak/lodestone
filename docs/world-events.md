@@ -194,6 +194,15 @@ darken-screen bit on `BossBarSnapshot`, a skull hitting a *different* live withe
 applying the effect or healing its shooter, and real difficulty threading for the
 wither-effect duration (currently always Normal).
 
+The wither's world-free state transition now uses the bounded region executor in
+dense native scenes (128 or more live withers, at most four lanes). Workers receive
+cloned tick-start state only; skull targeting, the shared skull RNG, emergence blasts,
+projectile allocation and the live-map commit stay in entity-id order on the central
+writer. Smaller scenes and browser builds keep the serial arm. The ignored
+`measure_dense_wither_owner_workers` gate measures the planning half explicitly, while
+the regular owner-batch parity gate proves one-lane and four-lane transitions produce
+the same state and deferred skull actions.
+
 ## How to change it
 
 * **Weather**: constants/geometry in `lodestone-render/src/weather.rs` (pure, no GPU);

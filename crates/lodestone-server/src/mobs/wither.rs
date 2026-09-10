@@ -112,6 +112,15 @@ struct WitherTickEffect {
     action: WitherTickAction,
 }
 
+/// One immutable wither snapshot handed to an owner worker.
+#[derive(Debug, Clone)]
+struct WitherTickInput {
+    owner: WitherTickOwner,
+    serial: usize,
+    id: i32,
+    wither: TrackedWither,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum WitherTickAction {
     None,
@@ -145,6 +154,9 @@ const SKULL_COOLDOWN_TICKS: i32 = 30;
 /// "15 idle updates with no target" gate (`idleHeadUpdates[i] > 15`, checked
 /// every `~15` ticks, so roughly `225` ticks of being targetless).
 const IDLE_SKULL_COOLDOWN_TICKS: i32 = 220;
+
+/// Dense-scene cutoff measured by `measure_dense_wither_owner_workers`.
+const WITHER_OWNER_PARALLEL_THRESHOLD: usize = 128;
 
 /// The entity-type key every wither streams as.
 pub(super) fn wither_entity_type() -> ResourceKey {
@@ -263,9 +275,30 @@ impl<'w> MobSim<'w> {
     /// state. No completion mutates the live map or fires an action; central
     /// application restores serial entity-id order before either becomes live.
     pub(crate) fn tick_wither_owner_batches(&self) -> Vec<WitherTickOwnerBatch> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let workers = if self.withers.len() >= WITHER_OWNER_PARALLEL_THRESHOLD {
+            std::thread::available_parallelism()
+                .map(std::num::NonZero::get)
+                .unwrap_or(1)
+                .min(4)
+        } else {
+            1
+        };
+        #[cfg(target_arch = "wasm32")]
+        let workers = 1;
+        self.tick_wither_owner_batches_with_workers(workers)
+    }
+
+    /// Produces the same owner completions with an explicit lane count for
+    /// parity and focused measurement. Every worker receives only a cloned
+    /// wither; the live map and all visible actions stay on the central writer.
+    fn tick_wither_owner_batches_with_workers(
+        &self,
+        worker_count: usize,
+    ) -> Vec<WitherTickOwnerBatch> {
         let mut ids: Vec<i32> = self.withers.keys().copied().collect();
         ids.sort_unstable();
-        let mut batches = Vec::<WitherTickOwnerBatch>::new();
+        let mut jobs = Vec::<(WitherTickOwner, Vec<WitherTickInput>)>::new();
         for (serial, id) in ids.into_iter().enumerate() {
             let wither = self
                 .withers
@@ -273,24 +306,40 @@ impl<'w> MobSim<'w> {
                 .cloned()
                 .expect("a tick-start wither id must remain live while planning");
             let owner = WitherTickOwner::for_position(wither.position);
-            let (wither, action) = ticked_wither(wither);
-            let effect = WitherTickEffect {
+            let input = WitherTickInput {
                 owner,
                 serial,
                 id,
                 wither,
-                action,
             };
-            if let Some(batch) = batches.iter_mut().find(|batch| batch.owner == owner) {
-                batch.effects.push(effect);
+            if let Some((_, inputs)) = jobs.iter_mut().find(|(candidate, _)| *candidate == owner) {
+                inputs.push(input);
             } else {
-                batches.push(WitherTickOwnerBatch {
-                    owner,
-                    expected_batch_count: 0,
-                    effects: vec![effect],
-                });
+                jobs.push((owner, vec![input]));
             }
         }
+
+        let mut batches =
+            crate::tick_region::run_bounded_owner_jobs(jobs, worker_count, &|(owner, inputs)| {
+                let effects = inputs
+                    .into_iter()
+                    .map(|input| {
+                        let (wither, action) = ticked_wither(input.wither);
+                        WitherTickEffect {
+                            owner: input.owner,
+                            serial: input.serial,
+                            id: input.id,
+                            wither,
+                            action,
+                        }
+                    })
+                    .collect();
+                WitherTickOwnerBatch {
+                    owner,
+                    expected_batch_count: 0,
+                    effects,
+                }
+            });
         let batch_count = batches.len();
         for batch in &mut batches {
             batch.expected_batch_count = batch_count;
@@ -728,6 +777,43 @@ mod tests {
         sim
     }
 
+    fn dense_owner_fixture(count: usize) -> MobSim<'static> {
+        let mut sim = sim();
+        let x_by_owner = [-0.5, 16.5, 32.5, 48.5];
+        for index in 0..count {
+            let id = sim.spawn_wither_at(Vec3::new(
+                x_by_owner[index % x_by_owner.len()],
+                64.0,
+                (index / x_by_owner.len()) as f64 + 0.5,
+            ));
+            let wither = sim.withers.get_mut(&id).expect("just spawned");
+            wither.invulnerable_ticks = if index % 5 == 0 { 3 } else { 0 };
+            wither.age = (index % 20) as i64;
+            wither.next_skull_tick = 100;
+            wither.health = MAX_HEALTH - (index % 7) as f32;
+        }
+        sim
+    }
+
+    fn wither_state(sim: &MobSim<'_>) -> Vec<(i32, Vec3, f32, i32, i64, i32)> {
+        let mut state: Vec<_> = sim
+            .withers
+            .iter()
+            .map(|(&id, wither)| {
+                (
+                    id,
+                    wither.position,
+                    wither.health,
+                    wither.invulnerable_ticks,
+                    wither.age,
+                    wither.next_skull_tick,
+                )
+            })
+            .collect();
+        state.sort_unstable_by_key(|(id, ..)| *id);
+        state
+    }
+
     #[test]
     fn wither_owner_batches_restore_serial_state_after_reversed_completion() {
         let mut completed = owner_batch_fixture();
@@ -785,6 +871,68 @@ mod tests {
         let mut batches = sim.tick_wither_owner_batches();
         batches.push(batches.first().expect("two owner batches").clone());
         sim.apply_wither_tick_owner_batches(batches);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn parallel_wither_owner_batches_match_one_lane_with_interleaved_owners() {
+        let mut serial = dense_owner_fixture(256);
+        let serial_batches = serial.tick_wither_owner_batches_with_workers(1);
+        let serial_owners: Vec<_> = serial_batches
+            .iter()
+            .map(WitherTickOwnerBatch::owner)
+            .collect();
+        assert_eq!(
+            serial_owners,
+            vec![
+                WitherTickOwner::Chunk { cx: -1, cz: 0 },
+                WitherTickOwner::Chunk { cx: 1, cz: 0 },
+                WitherTickOwner::Chunk { cx: 2, cz: 0 },
+                WitherTickOwner::Chunk { cx: 3, cz: 0 },
+            ],
+            "the dense parity scene must span four source owners"
+        );
+        serial.apply_wither_tick_owner_batches(serial_batches);
+
+        let mut parallel = dense_owner_fixture(256);
+        let parallel_batches = parallel.tick_wither_owner_batches_with_workers(4);
+        parallel.apply_wither_tick_owner_batches(parallel_batches);
+
+        assert_eq!(
+            wither_state(&parallel),
+            wither_state(&serial),
+            "four wither owners must preserve one-lane state transitions"
+        );
+        assert_eq!(
+            parallel.projectile_count(),
+            serial.projectile_count(),
+            "central application must preserve the same deferred skull actions"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "focused wither worker measurement; run explicitly before changing the cutoff"]
+    fn measure_dense_wither_owner_workers() {
+        use std::time::Instant;
+
+        for count in [64, 128, 256, 512, 1_024] {
+            let serial = dense_owner_fixture(count);
+            let parallel = dense_owner_fixture(count);
+
+            let started = Instant::now();
+            let _ = serial.tick_wither_owner_batches_with_workers(1);
+            let serial_ms = started.elapsed().as_secs_f64() * 1_000.0;
+
+            let started = Instant::now();
+            let _ = parallel.tick_wither_owner_batches_with_workers(4);
+            let parallel_ms = started.elapsed().as_secs_f64() * 1_000.0;
+
+            println!(
+                "dense_wither owners=4 withers={count} serial_ms={serial_ms:.3} parallel_ms={parallel_ms:.3} speedup={:.3}",
+                serial_ms / parallel_ms
+            );
+        }
     }
 
     #[test]
