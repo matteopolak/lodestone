@@ -69,6 +69,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   content-addressed asset index and exposes the indexed bytes as a resource source.
   `AssetObjectHash` represents the validated address used for each object's
   two-character fanout directory and filename.
+- [Atlas source-list JSON](./atlas-source-json.md) —
+  `lodestone-assets::AtlasDefinition` reads `atlases/<id>.json` source lists into
+  typed `AtlasSource` values before the atlas resolver turns them into sprite paths.
+  The boundary covers directory, single, and paletted-permutation sources while
+  preserving source kinds this client does not yet resolve.
 - [Attack-range builder](./attack-range-builder.md) — `lodestone_model::AttackRange`
   carries the six floating-point fields of an item's attack-range component and
   exposes a named builder for constructing it. The builder removes same-typed
@@ -514,6 +519,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   `lodestone.bridge.IsolatedPaperShim`. It supplies resident block-state reads and
   replacements plus ordered bulk reads; it is not a general server, world, chunk, or
   block-object API.
+- [Particle definition JSON](./particle-definition-json.md) —
+  `lodestone-assets::ParticleDefinition` parses `assets/<namespace>/particles/*.json`
+  into the ordered resource locations that name a particle's sprite frames. It is the
+  resource-pack boundary used by particle-atlas discovery.
 - [Particle rendering](./particles.md) — The particle system: how a decoded particle
   type becomes a physically-simulated, textured billboard on screen, and the special
   case of block-break debris, whose colour and texture are derived from the broken
@@ -851,6 +860,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   it into words before it is drawn. `ResolvedText` makes that step a type rather than
   a convention: the styled flatteners live on it, so a surface that forgot to consult
   the language table fails to compile instead of drawing a raw key.
+- [Texture metadata JSON](./texture-metadata-json.md) —
+  `lodestone-assets::TextureMeta` parses a texture's sibling `*.png.mcmeta` document
+  into animation scheduling and per-sprite sampling metadata. The decoded result feeds
+  atlas frame tables and mipmap generation without carrying a JSON tree into those
+  consumers.
 - [Tick region ownership](./tick-region-ownership.md) —
   `lodestone_server::tick_region::TickRegionPlan` makes the ownership of every chunk
   selected for a server tick explicit. The current plan assigns every selected chunk
