@@ -47,7 +47,7 @@ fn manifest(name: &str, priority: &str, required: Option<&str>) -> String {
     format!(
         "name = \"{name}\"\n\
          version = \"0.1.0\"\n\
-         abi = \"lodestone:plugin@0.27.0\"\n\
+         abi = \"lodestone:plugin@0.28.0\"\n\
          module = \"chat_responder.wasm\"\n\
          priority = \"{priority}\"\n\
          capabilities = [\"log\", \"observe:chat\", \"act:chat\"]\n\

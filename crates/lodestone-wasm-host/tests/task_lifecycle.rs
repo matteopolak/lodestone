@@ -26,7 +26,7 @@ fn install(root: &Path, wasm: &Path) {
         r#"
 name = "scheduler"
 version = "0.1.0"
-abi = "lodestone:plugin@0.27.0"
+abi = "lodestone:plugin@0.28.0"
 module = "scheduler.wasm"
 priority = "normal"
 capabilities = ["log", "schedule:tasks", "act:chat"]
