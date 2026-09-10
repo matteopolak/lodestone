@@ -39,7 +39,7 @@
 //! malformed value is still an error, which is what keeps this from silently
 //! accepting half a document.
 
-use serde_json::Value;
+use serde::de::DeserializeOwned;
 
 /// Parses the first JSON value in `bytes` and ignores anything after it —
 /// vanilla's own tolerant-parsing behaviour for pack-authored documents.
@@ -47,30 +47,44 @@ use serde_json::Value;
 /// Strict about the value itself: a truncated or malformed document is still an
 /// error. Only *trailing* content is tolerated.
 ///
-/// Returns a [`Value`] rather than being generic over `Deserialize`, because
-/// this crate depends on `serde_json` and not on `serde` itself, and every
-/// pack-document parser here already walks a `Value` by hand.
+/// The result type is generic so a parser can deserialize a named transport
+/// DTO directly while retaining the same trailing-content tolerance.
 ///
 /// # Errors
 ///
 /// Returns the underlying [`serde_json::Error`] when the input holds no JSON
 /// value at all, or when the first value is malformed.
-pub(crate) fn from_slice_lenient(bytes: &[u8]) -> Result<Value, serde_json::Error> {
-    let mut stream = serde_json::Deserializer::from_slice(bytes).into_iter::<Value>();
+pub(crate) fn from_slice_lenient<T>(bytes: &[u8]) -> Result<T, serde_json::Error>
+where
+    T: DeserializeOwned,
+{
+    let mut stream = serde_json::Deserializer::from_slice(bytes).into_iter::<T>();
     match stream.next() {
         Some(result) => result,
         // An empty (or whitespace-only) input yields no item at all. Ask
         // `serde_json` for its own EOF error rather than inventing one, so the
         // message a caller surfaces is the same as the strict path's.
-        None => Err(serde_json::from_slice::<Value>(b"")
-            .expect_err("empty input is never valid JSON")),
+        None => match serde_json::from_slice::<T>(b"") {
+            Ok(_) => unreachable!("empty input is never valid JSON"),
+            Err(error) => Err(error),
+        },
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::from_slice_lenient;
-    use serde_json::Value;
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct TestDocument {
+        animation: TestAnimation,
+    }
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct TestAnimation {
+        frametime: u32,
+    }
 
     /// The exact shape measured in a real pack: one closing brace too many.
     /// This is the whole reason the module exists, so it is the first gate.
@@ -86,13 +100,13 @@ mod tests {
         // The control: the strict parser this replaced rejects it, so the pass
         // below is an observation about the change rather than about the input.
         assert!(
-            serde_json::from_slice::<Value>(doc).is_err(),
+            serde_json::from_slice::<TestDocument>(doc).is_err(),
             "control failed: serde_json already accepts trailing content, so this \
              module would be a no-op"
         );
-        let value = from_slice_lenient(doc).expect("the first value must parse");
+        let value: TestDocument = from_slice_lenient(doc).expect("the first value must parse");
         assert_eq!(
-            value["animation"]["frametime"], 2,
+            value.animation.frametime, 2,
             "the value itself must still be read in full, not merely accepted"
         );
     }
@@ -102,12 +116,12 @@ mod tests {
     /// hand back a partial object.
     #[test]
     fn a_malformed_value_is_still_an_error() {
-        assert!(from_slice_lenient(br#"{"animation": {"#).is_err());
-        assert!(from_slice_lenient(b"").is_err());
-        assert!(from_slice_lenient(b"   \n\t ").is_err());
+        assert!(from_slice_lenient::<TestDocument>(br#"{"animation": {"#).is_err());
+        assert!(from_slice_lenient::<TestDocument>(b"").is_err());
+        assert!(from_slice_lenient::<TestDocument>(b"   \n\t ").is_err());
         // Vanilla's strict value-parsing mode still rejects JSON5-isms, and so
         // must this: the divergence being fixed is trailing content only.
-        assert!(from_slice_lenient(br#"{animation: 1}"#).is_err());
+        assert!(from_slice_lenient::<TestDocument>(br#"{animation: 1}"#).is_err());
     }
 
     /// An ordinary, well-formed document must be unaffected — the overwhelmingly
@@ -115,8 +129,8 @@ mod tests {
     #[test]
     fn a_well_formed_document_parses_identically() {
         let doc = br#"{"animation":{"frametime":3},"texture":{"blur":true}}"#;
-        let lenient = from_slice_lenient(doc).expect("lenient");
-        let strict: Value = serde_json::from_slice(doc).expect("strict");
+        let lenient: TestDocument = from_slice_lenient(doc).expect("lenient");
+        let strict: TestDocument = serde_json::from_slice(doc).expect("strict");
         assert_eq!(lenient, strict);
     }
 }

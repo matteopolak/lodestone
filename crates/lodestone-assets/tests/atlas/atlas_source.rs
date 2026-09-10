@@ -39,6 +39,28 @@ fn parses_real_directory_source_shape() {
 }
 
 #[test]
+fn typed_source_fixture_covers_every_known_source_shape() {
+    let def = AtlasDefinition::parse(include_bytes!("../fixtures/atlas_source_typed.json"))
+        .expect("typed atlas source fixture");
+    assert_eq!(def.sources.len(), 3);
+    assert!(matches!(def.sources[0], AtlasSource::Directory { .. }));
+    assert!(matches!(def.sources[1], AtlasSource::Single { .. }));
+    assert!(matches!(
+        def.sources[2],
+        AtlasSource::PalettedPermutations { .. }
+    ));
+}
+
+#[test]
+fn closed_source_fixture_rejects_unknown_fields() {
+    let err = AtlasDefinition::parse(include_bytes!(
+        "../fixtures/negative/atlas_source_unknown_field.json"
+    ))
+    .expect_err("known source schemas are closed");
+    assert!(format!("{err}").contains("atlas definition"));
+}
+
+#[test]
 fn directory_source_derives_prefixed_namespaced_sprite_ids() {
     // A chest-style directory source: textures/entity/chest/*.png become
     // sprites entity/chest/<name>. A wrong impl that drops the prefix, keeps the

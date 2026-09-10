@@ -5,9 +5,17 @@
 //! reported as an error and never panics; the PNG decoder is also bounded by a
 //! byte limit to resist decompression bombs.
 
+use std::{collections::BTreeSet, fmt};
+
+use serde::{
+    Deserialize, Serialize,
+    de::{self, IgnoredAny, MapAccess, Visitor, value::MapAccessDeserializer},
+    ser::SerializeMap,
+};
+use std::marker::PhantomData;
+
 use crate::error::TextureError;
 use crate::mipmap::MipStrategy;
-use serde_json::Value;
 
 /// A decoded, RGBA8, row-major image.
 ///
@@ -138,6 +146,399 @@ fn expand(buf: &[u8], pixels: usize, channels: usize, f: impl Fn(&[u8], &mut Vec
     out
 }
 
+/// Typed wire names for the texture metadata mipmap strategies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MipmapStrategyDocument {
+    Auto,
+    Mean,
+    Cutout,
+    StrictCutout,
+    DarkCutout,
+}
+
+impl Default for MipmapStrategyDocument {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+impl From<MipmapStrategyDocument> for MipStrategy {
+    fn from(strategy: MipmapStrategyDocument) -> Self {
+        match strategy {
+            MipmapStrategyDocument::Auto => Self::Auto,
+            MipmapStrategyDocument::Mean => Self::Mean,
+            MipmapStrategyDocument::Cutout => Self::Cutout,
+            MipmapStrategyDocument::StrictCutout => Self::StrictCutout,
+            MipmapStrategyDocument::DarkCutout => Self::DarkCutout,
+        }
+    }
+}
+
+/// A positive `u32` field in a texture metadata document.
+///
+/// Dimensions and durations are optional at the object level but, when
+/// present, zero is not a valid value. Keeping that rule in the DTO means the
+/// lowering step never has to inspect an untyped JSON number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PositiveU32Document(u32);
+
+impl<'de> Deserialize<'de> for PositiveU32Document {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = u64::deserialize(deserializer)?;
+        let value =
+            u32::try_from(value).map_err(|_| de::Error::custom("value does not fit in a u32"))?;
+        if value == 0 {
+            return Err(de::Error::custom("value must be greater than zero"));
+        }
+        Ok(Self(value))
+    }
+}
+
+impl Serialize for PositiveU32Document {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_u32(self.0)
+    }
+}
+
+/// An optional positive `u32` that rejects explicit `null` while still using
+/// the enclosing struct's default when the field is absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct OptionalPositiveU32Document(Option<u32>);
+
+impl OptionalPositiveU32Document {
+    fn is_none(&self) -> bool {
+        self.0.is_none()
+    }
+}
+
+impl<'de> Deserialize<'de> for OptionalPositiveU32Document {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(Self(Some(
+            PositiveU32Document::deserialize(deserializer)?.0,
+        )))
+    }
+}
+
+impl Serialize for OptionalPositiveU32Document {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self.0 {
+            Some(value) => serializer.serialize_u32(value),
+            None => serializer.serialize_none(),
+        }
+    }
+}
+
+fn default_frametime_document() -> PositiveU32Document {
+    PositiveU32Document(1)
+}
+
+/// Restricts a derived struct DTO to JSON objects. Serde's default struct
+/// visitor also accepts positional sequences when every field has a default;
+/// resource-pack sections are named objects, so the outer map check matters.
+fn deserialize_object<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct ObjectVisitor<T>(PhantomData<T>);
+
+    impl<'de, T> Visitor<'de> for ObjectVisitor<T>
+    where
+        T: Deserialize<'de>,
+    {
+        type Value = T;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("an object")
+        }
+
+        fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
+        where
+            M: MapAccess<'de>,
+        {
+            T::deserialize(MapAccessDeserializer::new(map))
+        }
+    }
+
+    deserializer.deserialize_map(ObjectVisitor(PhantomData))
+}
+
+/// The closed `texture` section of a texture metadata document.
+#[derive(Debug, Clone, PartialEq)]
+struct TextureSectionDocument(TextureSectionDocumentFields);
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TextureSectionDocumentFields {
+    #[serde(default)]
+    blur: bool,
+    #[serde(default)]
+    clamp: bool,
+    #[serde(default)]
+    mipmap_strategy: MipmapStrategyDocument,
+    #[serde(default)]
+    alpha_cutoff_bias: f32,
+}
+
+impl Serialize for TextureSectionDocument {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for TextureSectionDocument {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserialize_object(deserializer).map(Self)
+    }
+}
+
+impl From<TextureSectionDocument> for TextureSection {
+    fn from(document: TextureSectionDocument) -> Self {
+        Self {
+            blur: document.0.blur,
+            clamp: document.0.clamp,
+            mipmap_strategy: document.0.mipmap_strategy.into(),
+            alpha_cutoff_bias: document.0.alpha_cutoff_bias,
+        }
+    }
+}
+
+/// The closed object form of one animation frame.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnimationFrameObjectDocument {
+    index: u32,
+    #[serde(default, skip_serializing_if = "OptionalPositiveU32Document::is_none")]
+    time: OptionalPositiveU32Document,
+}
+
+/// The two legal animation-frame shapes: a bare index or an object with an
+/// optional duration override.
+#[derive(Debug, Clone, PartialEq)]
+enum AnimationFrameDocument {
+    Index(u32),
+    Object(AnimationFrameObjectDocument),
+}
+
+impl Serialize for AnimationFrameDocument {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Index(index) => serializer.serialize_u32(*index),
+            Self::Object(document) => document.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AnimationFrameDocument {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct FrameVisitor;
+
+        impl<'de> Visitor<'de> for FrameVisitor {
+            type Value = AnimationFrameDocument;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("an animation frame index or object")
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                let index = u32::try_from(value)
+                    .map_err(|_| E::custom("frame index does not fit in a u32"))?;
+                Ok(AnimationFrameDocument::Index(index))
+            }
+
+            fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                AnimationFrameObjectDocument::deserialize(MapAccessDeserializer::new(map))
+                    .map(AnimationFrameDocument::Object)
+            }
+        }
+
+        deserializer.deserialize_any(FrameVisitor)
+    }
+}
+
+impl From<AnimationFrameDocument> for AnimationFrame {
+    fn from(document: AnimationFrameDocument) -> Self {
+        match document {
+            AnimationFrameDocument::Index(index) => Self { index, time: None },
+            AnimationFrameDocument::Object(document) => Self {
+                index: document.index,
+                time: document.time.0,
+            },
+        }
+    }
+}
+
+/// The closed `animation` section of a texture metadata document.
+#[derive(Debug, Clone, PartialEq)]
+struct AnimationDocument(AnimationDocumentFields);
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnimationDocumentFields {
+    #[serde(default = "default_frametime_document")]
+    frametime: PositiveU32Document,
+    #[serde(default)]
+    interpolate: bool,
+    #[serde(default, skip_serializing_if = "OptionalPositiveU32Document::is_none")]
+    width: OptionalPositiveU32Document,
+    #[serde(default, skip_serializing_if = "OptionalPositiveU32Document::is_none")]
+    height: OptionalPositiveU32Document,
+    #[serde(default)]
+    frames: Vec<AnimationFrameDocument>,
+}
+
+impl Serialize for AnimationDocument {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for AnimationDocument {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserialize_object(deserializer).map(Self)
+    }
+}
+
+impl From<AnimationDocument> for AnimationMeta {
+    fn from(document: AnimationDocument) -> Self {
+        Self {
+            frametime: document.0.frametime.0,
+            interpolate: document.0.interpolate,
+            frame_width: document.0.width.0,
+            frame_height: document.0.height.0,
+            frames: document
+                .0
+                .frames
+                .into_iter()
+                .map(AnimationFrame::from)
+                .collect(),
+        }
+    }
+}
+
+/// Typed transport form of the metadata root.
+///
+/// Unknown top-level section values are deliberately consumed as
+/// [`IgnoredAny`]. Their payloads are section-specific and not interpreted by
+/// this crate; only their names are part of the public API's presence census.
+#[derive(Debug, Clone, PartialEq)]
+struct TextureMetaDocument {
+    animation: Option<AnimationDocument>,
+    texture: Option<TextureSectionDocument>,
+    other_sections: BTreeSet<String>,
+}
+
+impl Serialize for TextureMetaDocument {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let unknown_count = self
+            .other_sections
+            .iter()
+            .filter(|name| name.as_str() != "animation" && name.as_str() != "texture")
+            .count();
+        let field_count = usize::from(self.animation.is_some())
+            + usize::from(self.texture.is_some())
+            + unknown_count;
+        let mut state = serializer.serialize_map(Some(field_count))?;
+        if let Some(animation) = &self.animation {
+            state.serialize_entry("animation", animation)?;
+        }
+        if let Some(texture) = &self.texture {
+            state.serialize_entry("texture", texture)?;
+        }
+        // The payload is intentionally not retained. `null` is a valid JSON
+        // placeholder that preserves the documented presence-only semantics.
+        for name in &self.other_sections {
+            if name != "animation" && name != "texture" {
+                state.serialize_entry(name, &())?;
+            }
+        }
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for TextureMetaDocument {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct TextureMetaVisitor;
+
+        impl<'de> Visitor<'de> for TextureMetaVisitor {
+            type Value = TextureMetaDocument;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a texture metadata object")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut animation: Option<AnimationDocument> = None;
+                let mut texture: Option<TextureSectionDocument> = None;
+                let mut other_sections = BTreeSet::new();
+                while let Some(name) = map.next_key::<String>()? {
+                    match name.as_str() {
+                        "animation" => animation = Some(map.next_value()?),
+                        "texture" => texture = Some(map.next_value()?),
+                        _ => {
+                            other_sections.insert(name);
+                            let _: IgnoredAny = map.next_value()?;
+                        }
+                    }
+                }
+                Ok(TextureMetaDocument {
+                    animation,
+                    texture,
+                    other_sections,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(TextureMetaVisitor)
+    }
+}
+
 /// The `texture` section of a `*.png.mcmeta`, mirroring vanilla's
 /// `TextureMetadataSection` record.
 ///
@@ -213,87 +614,20 @@ impl TextureMeta {
         // here costs the whole texture, not just its animation, because
         // `AtlasBuilder::load` treats a metadata failure as a texture failure.
         // See `crate::json`.
-        let value: Value = crate::json::from_slice_lenient(bytes)
+        let document: TextureMetaDocument = crate::json::from_slice_lenient(bytes)
             .map_err(|e| TextureError::MetaMalformed(e.to_string()))?;
-        let obj = value
-            .as_object()
-            .ok_or_else(|| TextureError::MetaMalformed("root is not an object".to_string()))?;
-
-        let animation = match obj.get("animation") {
-            Some(a) => Some(AnimationMeta::from_value(a)?),
-            None => None,
-        };
-        let texture = match obj.get("texture") {
-            Some(t) => Some(TextureSection::from_value(t)?),
-            None => None,
-        };
-        let mut other_sections: Vec<String> = obj
-            .keys()
-            .filter(|k| k.as_str() != "animation")
-            .cloned()
-            .collect();
+        let texture = document.texture.map(TextureSection::from);
+        let animation = document.animation.map(AnimationMeta::from);
+        let mut other_sections: Vec<String> = document.other_sections.into_iter().collect();
+        if texture.is_some() {
+            other_sections.push("texture".to_owned());
+        }
         other_sections.sort();
         other_sections.dedup();
         Ok(Self {
             animation,
             texture,
             other_sections,
-        })
-    }
-}
-
-impl TextureSection {
-    /// Parses the `texture` object, mirroring `TextureMetadataSection`'s codec:
-    /// every field optional, `blur`/`clamp` defaulting to `false`,
-    /// `mipmap_strategy` to `auto` and `alpha_cutoff_bias` to `0.0`.
-    ///
-    /// An unrecognised `mipmap_strategy` string is an error rather than a
-    /// silent fallback, because vanilla's `StringRepresentable` codec rejects
-    /// it too — and a silent fallback would render the sprite through a
-    /// different downsample with nothing to say so.
-    fn from_value(value: &Value) -> Result<Self, TextureError> {
-        let obj = value
-            .as_object()
-            .ok_or_else(|| TextureError::MetaMalformed("\"texture\" is not an object".into()))?;
-        let flag = |key: &str| -> Result<bool, TextureError> {
-            match obj.get(key) {
-                None => Ok(false),
-                Some(v) => v
-                    .as_bool()
-                    .ok_or_else(|| TextureError::MetaMalformed(format!("invalid \"{key}\""))),
-            }
-        };
-        let mipmap_strategy = match obj.get("mipmap_strategy") {
-            None => MipStrategy::Auto,
-            Some(v) => {
-                let name = v.as_str().ok_or_else(|| {
-                    TextureError::MetaMalformed("invalid \"mipmap_strategy\"".into())
-                })?;
-                match name {
-                    "auto" => MipStrategy::Auto,
-                    "mean" => MipStrategy::Mean,
-                    "cutout" => MipStrategy::Cutout,
-                    "strict_cutout" => MipStrategy::StrictCutout,
-                    "dark_cutout" => MipStrategy::DarkCutout,
-                    other => {
-                        return Err(TextureError::MetaMalformed(format!(
-                            "unknown \"mipmap_strategy\" {other:?}"
-                        )));
-                    }
-                }
-            }
-        };
-        let alpha_cutoff_bias = match obj.get("alpha_cutoff_bias") {
-            None => 0.0,
-            Some(v) => v.as_f64().ok_or_else(|| {
-                TextureError::MetaMalformed("invalid \"alpha_cutoff_bias\"".into())
-            })? as f32,
-        };
-        Ok(Self {
-            blur: flag("blur")?,
-            clamp: flag("clamp")?,
-            mipmap_strategy,
-            alpha_cutoff_bias,
         })
     }
 }
@@ -317,67 +651,6 @@ pub struct AnimationMeta {
     pub frames: Vec<AnimationFrame>,
 }
 
-impl AnimationMeta {
-    fn from_value(value: &Value) -> Result<Self, TextureError> {
-        let obj = value
-            .as_object()
-            .ok_or_else(|| TextureError::MetaMalformed("\"animation\" is not an object".into()))?;
-        let frametime = obj
-            .get("frametime")
-            .map(|v| {
-                v.as_u64()
-                    .filter(|&n| n > 0)
-                    .ok_or_else(|| TextureError::MetaMalformed("invalid \"frametime\"".into()))
-            })
-            .transpose()?
-            .unwrap_or(1) as u32;
-        let interpolate = obj
-            .get("interpolate")
-            .map(|v| {
-                v.as_bool()
-                    .ok_or_else(|| TextureError::MetaMalformed("invalid \"interpolate\"".into()))
-            })
-            .transpose()?
-            .unwrap_or(false);
-        let frame_width = parse_opt_dim(obj.get("width"), "width")?;
-        let frame_height = parse_opt_dim(obj.get("height"), "height")?;
-
-        let frames = match obj.get("frames") {
-            None => Vec::new(),
-            Some(Value::Array(items)) => {
-                let mut out = Vec::with_capacity(items.len());
-                for item in items {
-                    out.push(AnimationFrame::from_value(item)?);
-                }
-                out
-            }
-            Some(_) => {
-                return Err(TextureError::MetaMalformed(
-                    "\"frames\" is not an array".into(),
-                ));
-            }
-        };
-        Ok(Self {
-            frametime,
-            interpolate,
-            frame_width,
-            frame_height,
-            frames,
-        })
-    }
-}
-
-fn parse_opt_dim(value: Option<&Value>, field: &str) -> Result<Option<u32>, TextureError> {
-    match value {
-        None => Ok(None),
-        Some(v) => v
-            .as_u64()
-            .filter(|&n| n > 0 && n <= u32::MAX as u64)
-            .map(|n| Some(n as u32))
-            .ok_or_else(|| TextureError::MetaMalformed(format!("invalid \"{field}\""))),
-    }
-}
-
 /// A single animation frame: an index into the strip and an optional per-frame
 /// duration override.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -388,32 +661,66 @@ pub struct AnimationFrame {
     pub time: Option<u32>,
 }
 
-impl AnimationFrame {
-    fn from_value(value: &Value) -> Result<Self, TextureError> {
-        // Bare index form.
-        if let Some(index) = value.as_u64() {
-            return Ok(Self {
-                index: index as u32,
-                time: None,
-            });
-        }
-        // { "index": N, "time": M } form.
-        let obj = value.as_object().ok_or_else(|| {
-            TextureError::MetaMalformed("frame is neither an index nor an object".into())
-        })?;
-        let index =
-            obj.get("index").and_then(Value::as_u64).ok_or_else(|| {
-                TextureError::MetaMalformed("frame missing valid \"index\"".into())
-            })? as u32;
-        let time = obj
-            .get("time")
-            .map(|v| {
-                v.as_u64()
-                    .filter(|&n| n > 0)
-                    .ok_or_else(|| TextureError::MetaMalformed("invalid frame \"time\"".into()))
-            })
-            .transpose()?
-            .map(|n| n as u32);
-        Ok(Self { index, time })
+#[cfg(test)]
+mod tests {
+    use super::TextureMetaDocument;
+
+    #[test]
+    fn typed_document_round_trips_known_sections_and_unknown_section_names() {
+        let source = r#"{
+            "animation":{"frametime":2,"interpolate":true,"width":16,
+                "height":16,"frames":[0,{"index":1,"time":3}]},
+            "texture":{"mipmap_strategy":"dark_cutout","blur":true},
+            "gui":{"scaling":{"type":"nine_slice"}},
+            "future_section":[1,2,3]
+        }"#;
+        let document: TextureMetaDocument = serde_json::from_str(source).unwrap();
+        let encoded = serde_json::to_string(&document).unwrap();
+        let decoded: TextureMetaDocument = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(document, decoded);
+    }
+
+    #[test]
+    fn closed_nested_sections_reject_unknown_fields() {
+        assert!(
+            serde_json::from_str::<TextureMetaDocument>(
+                r#"{"animation":{"frametime":1,"unexpected":true}}"#,
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<TextureMetaDocument>(
+                r#"{"texture":{"blur":false,"unexpected":true}}"#,
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<TextureMetaDocument>(
+                r#"{"animation":{"frames":[{"index":0,"unexpected":true}]}}"#,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn positive_optional_fields_reject_zero_and_null() {
+        assert!(
+            serde_json::from_str::<TextureMetaDocument>(r#"{"animation":{"width":0}}"#,).is_err()
+        );
+        assert!(
+            serde_json::from_str::<TextureMetaDocument>(r#"{"animation":{"height":null}}"#,)
+                .is_err()
+        );
+        assert!(
+            serde_json::from_str::<TextureMetaDocument>(
+                r#"{"animation":{"frames":[{"index":0,"time":null}]}}"#,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn animation_array_is_not_a_document() {
+        assert!(serde_json::from_str::<TextureMetaDocument>(r#"{"animation":[]}"#).is_err());
     }
 }

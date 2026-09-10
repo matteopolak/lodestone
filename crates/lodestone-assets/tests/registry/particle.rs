@@ -16,6 +16,19 @@ fn parses_texture_list_in_order() {
 }
 
 #[test]
+fn typed_particle_fixture_preserves_order() {
+    let def = ParticleDefinition::parse(include_bytes!("../fixtures/particle_typed.json"))
+        .expect("typed particle fixture");
+    assert_eq!(
+        def.textures
+            .into_iter()
+            .map(|texture| texture.to_string())
+            .collect::<Vec<_>>(),
+        vec!["minecraft:effect_1", "minecraft:effect_0"]
+    );
+}
+
+#[test]
 fn default_namespace_is_applied() {
     let def = parse(r#"{"textures":["angry"]}"#).unwrap();
     assert_eq!(def.textures[0].to_string(), "minecraft:angry");
@@ -34,6 +47,16 @@ fn missing_textures_key_is_tolerated() {
 fn textures_not_an_array_is_rejected() {
     assert!(matches!(
         parse(r#"{"textures":"nope"}"#),
+        Err(ParticleError::Json(_))
+    ));
+}
+
+#[test]
+fn closed_particle_fixture_rejects_unknown_fields() {
+    assert!(matches!(
+        ParticleDefinition::parse(include_bytes!(
+            "../fixtures/negative/particle_unknown_field.json"
+        )),
         Err(ParticleError::Json(_))
     ));
 }
