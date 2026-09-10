@@ -106,6 +106,12 @@ world with no access lists configured at all (a fresh singleplayer world, above 
 permissive by default, since its one player must be able to do everything; a host opts *into*
 restriction rather than every world opting out of it.
 
+The four files are decoded through named Serde records with closed schemas. Missing fields retain
+the historical defaults so older files continue to load, while an unknown field or incompatible
+JSON type is a hard parse error instead of a silently ignored permission or ban. Invalid UUID
+entries remain ignored for compatibility with the previous loader; records written by the server
+always contain the complete, stable field set.
+
 ### The client side: decoding and using a server's tree
 
 A real server's command tree arrives as a self-describing, variable-length node stream with no
