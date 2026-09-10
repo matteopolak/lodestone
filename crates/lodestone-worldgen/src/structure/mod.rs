@@ -427,6 +427,27 @@ pub enum HeightmapKind {
     OceanFloorWg,
 }
 
+/// Per-build cache for deterministic climate targets inspected by a structure
+/// placement search. The biome lookup itself remains uncached so the caller's
+/// search cursor continues to observe the complete probe order.
+#[derive(Debug, Default)]
+pub struct RingProbeCache {
+    targets: HashMap<(i32, i32, i32), [i64; 7]>,
+}
+
+impl RingProbeCache {
+    pub(crate) fn insert_target(&mut self, qx: i32, qy: i32, qz: i32, target: [i64; 7]) {
+        self.targets.insert((qx, qy, qz), target);
+    }
+
+    pub(crate) fn target<F>(&mut self, qx: i32, qy: i32, qz: i32, build: F) -> [i64; 7]
+    where
+        F: FnOnce() -> [i64; 7],
+    {
+        *self.targets.entry((qx, qy, qz)).or_insert_with(build)
+    }
+}
+
 /// The world data a start predicate needs, supplied by the generator.
 ///
 /// Deliberately tiny and deliberately *not* the terrain pipeline: implementing
@@ -438,6 +459,37 @@ pub trait StartContext {
     fn first_occupied_height(&self, x: i32, z: i32, heightmap: HeightmapKind) -> i32;
     /// The biome id at a quart cell `(qx, qy, qz)`.
     fn biome_at_quart(&self, qx: i32, qy: i32, qz: i32) -> String;
+    /// Whether the biome at a quart belongs to `allowed`. Implementors with a
+    /// borrowed biome table may override this to avoid a temporary `String`.
+    fn biome_in_set_at_quart(
+        &self,
+        qx: i32,
+        qy: i32,
+        qz: i32,
+        allowed: &HashSet<String>,
+    ) -> bool {
+        allowed.contains(&self.biome_at_quart(qx, qy, qz))
+    }
+    /// Cached form used by broad placement searches. The default preserves the
+    /// original callback behavior for generic contexts.
+    fn biome_in_set_at_quart_cached(
+        &self,
+        qx: i32,
+        qy: i32,
+        qz: i32,
+        allowed: &HashSet<String>,
+        _cache: &mut RingProbeCache,
+    ) -> bool {
+        self.biome_in_set_at_quart(qx, qy, qz, allowed)
+    }
+    /// Optional batch climate-target seam for contexts that can evaluate the
+    /// immutable sampler independently of the structure predicate.
+    fn ring_probe_targets(&self, _quart_cells: &[(i32, i32, i32)]) -> Option<Vec<[i64; 7]>> {
+        None
+    }
+    fn supports_ring_probe_batch(&self) -> bool {
+        false
+    }
     /// The dimension's sea level.
     fn sea_level(&self) -> i32;
     /// The dimension's lowest generatable Y. Defaulted to the overworld's so
@@ -3241,6 +3293,14 @@ impl StructureRegistry {
             .get_or_init(|| build_ring_positions(sets, seed, ctx))
     }
 
+    /// Eagerly materialises the registry-wide placement index used by
+    /// concentric-ring sets. Random-spread-only registries make this a cheap
+    /// no-op; callers that will query starts repeatedly can move the first
+    /// ring-search cost into generator construction.
+    pub fn prepare_origin_index(&self, ctx: &dyn StartContext) {
+        let _ = self.ring_positions_for_context(ctx);
+    }
+
     /// Placement check that also knows the generator-wide ring list. Random
     /// spread remains the data-only predicate used by the public compatibility
     /// method above; ring placement requires the `StartContext` biome sampler.
@@ -3619,6 +3679,7 @@ fn build_ring_positions(
     ctx: &dyn StartContext,
 ) -> HashMap<String, Vec<(i32, i32)>> {
     let mut out = HashMap::new();
+    let mut cache = RingProbeCache::default();
     for set in sets {
         let PlacementKind::ConcentricRings {
             distance,
@@ -3634,7 +3695,7 @@ fn build_ring_positions(
         } else {
             let preferred: HashSet<String> = preferred_biomes.iter().cloned().collect();
             placement::ring_positions(seed, *distance, *spread, *count, |random, x, z| {
-                preferred_ring_chunk(random, x, z, &preferred, ctx)
+                preferred_ring_chunk(random, x, z, &preferred, &mut cache, ctx)
             })
         };
         out.insert(set.id.clone(), positions);
@@ -3650,6 +3711,7 @@ fn preferred_ring_chunk(
     initial_x: i32,
     initial_z: i32,
     preferred: &HashSet<String>,
+    cache: &mut RingProbeCache,
     ctx: &dyn StartContext,
 ) -> Option<(i32, i32)> {
     const SEARCH_RADIUS_QUARTS: i32 = 28;
@@ -3661,7 +3723,7 @@ fn preferred_ring_chunk(
         for offset_x in -SEARCH_RADIUS_QUARTS..=SEARCH_RADIUS_QUARTS {
             let quart_x = center_x + offset_x;
             let quart_z = center_z + offset_z;
-            if !preferred.contains(&ctx.biome_at_quart(quart_x, 0, quart_z)) {
+            if !ctx.biome_in_set_at_quart_cached(quart_x, 0, quart_z, preferred, cache) {
                 continue;
             }
             if random.next_int_bounded(found + 1) == 0 {
@@ -3765,8 +3827,7 @@ mod tests {
                 "separation": 11,
                 "spacing": 20,
                 "spread_type": "triangular"
-            }))
-            .unwrap(),
+            })),
             entries: Vec::new(),
         };
         let registry = StructureRegistry {
@@ -3804,8 +3865,7 @@ mod tests {
                 "spread": 3,
                 "count": 8,
                 "preferred_biomes": []
-            }))
-            .unwrap(),
+            })),
             entries: Vec::new(),
         };
         let registry = StructureRegistry {

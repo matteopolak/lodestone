@@ -41,6 +41,7 @@ fn authenticated_end_replay_uses_the_source_context_for_chorus() {
             source,
             stage: LifecycleCompletion::Features,
             sequence: sequence as u64,
+            resident_transitions: Vec::new(),
         })
         .collect::<Vec<_>>();
     let plan = LifecycleReplayPlan::for_target(TARGET, &admissions, &events)

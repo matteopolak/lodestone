@@ -5,7 +5,7 @@
 //! Moved here verbatim from `overworld.rs` by U16 Phase A. See [`crate::biome`] for the
 //! sampler itself and its "y = 0 trap" section.
 
-use crate::biome::{BiomeTable, ClimateSampler};
+use crate::biome::{BiomeSearchCursor, BiomeTable, ClimateSampler};
 use sha2::{Digest as _, Sha256};
 
 use super::OverworldGenerator;
@@ -127,7 +127,7 @@ fn fiddled_distance(seed: i64, x: i32, y: i32, z: i32, dx: f64, dy: f64, dz: f64
 /// Keeping this here makes candidate biome predicates use the same category
 /// lookup as surface rules instead of silently reading only the containing
 /// quart cell.
-pub(super) fn zoomed_biome<'a, F>(
+pub(crate) fn zoomed_biome<'a, F>(
     zoom_seed: i64,
     x: i32,
     y: i32,
@@ -229,7 +229,7 @@ fn zoom_seed(seed: i64) -> i64 {
     i64::from_le_bytes(digest[..8].try_into().expect("SHA-256 digest prefix"))
 }
 
-pub(super) fn biome_zoom_seed(seed: i64) -> i64 {
+pub(crate) fn biome_zoom_seed(seed: i64) -> i64 {
     zoom_seed(seed)
 }
 
@@ -323,7 +323,12 @@ impl OverworldGenerator {
     ///
     /// Falls back to a single-biome column when the resolver supplied no climate
     /// table, matching [`Self::biome_stage`]'s own per-quart degradation.
-    pub(super) fn biome_cells_stage(&self, base_x: i32, base_z: i32) -> BiomeCells {
+    pub(super) fn biome_cells_stage(
+        &self,
+        base_x: i32,
+        base_z: i32,
+        mut cursor: Option<&mut BiomeSearchCursor>,
+    ) -> BiomeCells {
         let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Biome);
         let Some(dynamic) = &self.dynamic_biome else {
             return BiomeCells::uniform(&self.fallback_biome, self.min_y, self.height);
@@ -338,7 +343,11 @@ impl OverworldGenerator {
             let target = dynamic
                 .climate
                 .target(base_x + qx as i32 * 4, y, base_z + qz as i32 * 4);
-            dynamic.table.nearest(&target).to_string()
+            let row = cursor.as_deref_mut().map_or_else(
+                || dynamic.table.nearest_row(&target),
+                |cursor| dynamic.table.nearest_row_with_cursor(&target, cursor),
+            );
+            dynamic.table.biome_at(row).to_string()
         })
     }
 

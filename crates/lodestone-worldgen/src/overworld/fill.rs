@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use crate::aquifer::{AquiferSystem, BlockKind, AnyPositionalFactory};
+use crate::biome::BiomeSearchCursor;
 use crate::carver::{CarveGrid, CarverConfig, NoObserver};
 use crate::density::Density;
 use crate::engine::Program;
@@ -74,15 +75,25 @@ impl OverworldGenerator {
         // 16-entry surface array is read out of it. Two separate sample passes
         // would be two chances to diverge; see `biome_stage`.
         schedule.enter(crate::stage_schedule::ColumnStage::Biomes);
-        let biome_cells = self.biome_cells_stage(base_x, base_z);
+        let biome_cells = self.biome_cells_stage(base_x, base_z, None);
         let biome_quarts = self.biome_stage(&biome_cells, &heights);
         schedule.enter(crate::stage_schedule::ColumnStage::Surface);
-        let surface_diff = self.surface_stage(&field, &heights, base_x, base_z);
+        let surface_diff = self.surface_stage(&field, &heights, base_x, base_z, None);
 
         schedule.enter(crate::stage_schedule::ColumnStage::Materialize);
         let world = self.materialize_world(&field, surface_diff, base_x, base_z);
         schedule.enter(crate::stage_schedule::ColumnStage::Carvers);
-        let world = self.carve_stage(cx, cz, &aquifer, &heights, &biome_quarts, base_x, base_z, world);
+        let world = self.carve_stage(
+            cx,
+            cz,
+            &aquifer,
+            &heights,
+            &biome_quarts,
+            base_x,
+            base_z,
+            world,
+            None,
+        );
         // Structure placement's S2. A no-op (and free) for a generator with no structure
         // data, which is every fixture resolver in this workspace.
         schedule.enter(crate::stage_schedule::ColumnStage::StructurePlacement);
@@ -288,7 +299,9 @@ impl OverworldGenerator {
         heights: &[i32; 256],
         base_x: i32,
         base_z: i32,
+        cursor: Option<&mut BiomeSearchCursor>,
     ) -> SurfaceDiff {
+        let _ = cursor;
         let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Surface);
 
         // The lock-step check on every `PreState` this stage can hand over.
@@ -472,7 +485,9 @@ impl OverworldGenerator {
         base_x: i32,
         base_z: i32,
         world: crate::dense_grid::DenseBlockGrid,
+        cursor: Option<&mut BiomeSearchCursor>,
     ) -> crate::dense_grid::DenseBlockGrid {
+        let _ = cursor;
         let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Carve);
         let heightmap_fn = |lx: i32, lz: i32| -> i32 { heights[(lz * 16 + lx) as usize] };
         let top_material = |x: i32, y: i32, z: i32, under_fluid: bool| -> Option<String> {

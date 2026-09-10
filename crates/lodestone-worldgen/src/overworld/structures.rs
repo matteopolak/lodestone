@@ -46,7 +46,7 @@
 //!   wants the sampler to cache per chunk, which it does.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use lodestone_worldgen_core::rng::{
@@ -55,7 +55,8 @@ use lodestone_worldgen_core::rng::{
 
 use crate::aquifer::{AquiferSystem, BlockKind};
 use crate::structure::{
-    CodedBlock, HeightmapKind, PieceRefinement, StartContext, StructureKind, StructureStart,
+    CodedBlock, HeightmapKind, PieceRefinement, RingProbeCache, StartContext, StructureKind,
+    StructureStart,
     VerticalPlacement,
 };
 
@@ -182,15 +183,24 @@ const PORTAL_TERRAIN_REACH: i32 = 14;
 /// `structure_starts` above `pre_ore` instead of circular. The per-chunk
 /// [`AquiferSystem`] cache exists because building one is the expensive part and
 /// a structure predicate asks about several columns of the same chunk.
-struct StartSampler<'a> {
+pub(super) struct StartSampler<'a> {
     generator: &'a OverworldGenerator,
     /// `(cx, cz)` → that chunk's aquifer. `RefCell` because [`StartContext`]
     /// takes `&self` (it is called from a `&dyn` behind the registry) and this is
     /// single-threaded per stage invocation.
     aquifers: RefCell<HashMap<(i32, i32), Arc<AquiferSystem>>>,
+    biome_cursor: RefCell<Option<crate::biome::BiomeSearchCursor>>,
 }
 
 impl StartSampler<'_> {
+    pub(super) fn new(generator: &OverworldGenerator) -> StartSampler<'_> {
+        StartSampler {
+            generator,
+            aquifers: RefCell::new(HashMap::new()),
+            biome_cursor: RefCell::new(generator.biome_search_cursor()),
+        }
+    }
+
     fn aquifer(&self, cx: i32, cz: i32) -> Arc<AquiferSystem> {
         if let Some(existing) = self.aquifers.borrow().get(&(cx, cz)) {
             return Arc::clone(existing);
@@ -253,6 +263,48 @@ impl StartContext for StartSampler<'_> {
 
     fn biome_at_quart(&self, qx: i32, qy: i32, qz: i32) -> String {
         self.generator.biome_at_quart(qx, qy, qz)
+    }
+
+    fn biome_in_set_at_quart(
+        &self,
+        qx: i32,
+        qy: i32,
+        qz: i32,
+        allowed: &HashSet<String>,
+    ) -> bool {
+        self.generator.biome_in_set_at_quart(
+            qx,
+            qy,
+            qz,
+            allowed,
+            &mut self.biome_cursor.borrow_mut(),
+        )
+    }
+
+    fn biome_in_set_at_quart_cached(
+        &self,
+        qx: i32,
+        qy: i32,
+        qz: i32,
+        allowed: &HashSet<String>,
+        cache: &mut RingProbeCache,
+    ) -> bool {
+        self.generator.biome_in_set_at_quart_cached(
+            qx,
+            qy,
+            qz,
+            allowed,
+            cache,
+            &mut self.biome_cursor.borrow_mut(),
+        )
+    }
+
+    fn ring_probe_targets(&self, quart_cells: &[(i32, i32, i32)]) -> Option<Vec<[i64; 7]>> {
+        self.generator.ring_probe_targets(quart_cells)
+    }
+
+    fn supports_ring_probe_batch(&self) -> bool {
+        self.generator.has_dynamic_biome()
     }
 
     fn sea_level(&self) -> i32 {
@@ -579,10 +631,7 @@ impl OverworldGenerator {
                 let Some(registry) = &self.structures else {
                     return Vec::new();
                 };
-                let sampler = StartSampler {
-                    generator: self,
-                    aquifers: RefCell::new(HashMap::new()),
-                };
+                let sampler = StartSampler::new(self);
                 registry
                     .starts_at(cx, cz, &sampler)
                     .into_iter()
@@ -750,10 +799,7 @@ impl OverworldGenerator {
             String,
             crate::rng::WorldgenRandom<crate::rng::XoroshiroRandomSource>,
         > = HashMap::new();
-        let mineshaft_sampler = StartSampler {
-            generator: self,
-            aquifers: RefCell::new(HashMap::new()),
-        };
+        let mineshaft_sampler = StartSampler::new(self);
         let solid_render = |state: &str| {
             self.veg_tags.simple_block_support.solid_render.test(state)
         };

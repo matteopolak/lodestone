@@ -354,6 +354,45 @@ impl BiomeTree {
         self.search(target, None).0
     }
 
+    /// Search with the caller's cached leaf as the incumbent and return both
+    /// the selected row and leaf node. The leaf is retained by
+    /// [`BiomeSearchCursor`](super::BiomeSearchCursor) so the next lookup can
+    /// reproduce the same lifecycle without relying on worker identity.
+    pub(crate) fn nearest_row_with_candidate(
+        &self,
+        target: &[i64; DIMENSIONS],
+        candidate: Option<u32>,
+    ) -> (u32, u32) {
+        let mut evaluations = 0u64;
+        let mut best_dist = i64::MAX;
+        let mut best_node = NONE;
+        if let Some(seed) = candidate {
+            if (seed as usize) < self.nodes.len() && self.nodes[seed as usize].is_leaf() {
+                best_dist = self.bound(seed, target);
+                best_node = seed;
+                evaluations += 1;
+            }
+        }
+        if self.nodes[self.root as usize].is_leaf() {
+            let distance = self.bound(self.root, target);
+            evaluations += 1;
+            if best_dist > distance {
+                best_node = self.root;
+            }
+        } else {
+            self.visit(
+                self.root,
+                target,
+                &mut best_dist,
+                &mut best_node,
+                &mut evaluations,
+            );
+        }
+        debug_assert_ne!(best_node, NONE, "the tree always has at least one leaf");
+        crate::counters::bump_biome_search(evaluations);
+        (self.nodes[best_node as usize].row, best_node)
+    }
+
     /// Vanilla's search with an explicit `candidate` in place of its `ThreadLocal`
     /// — the seeded form, kept **only** so a gate can demonstrate that seeding
     /// changes the returned row (and never the distance). Production always passes
@@ -383,6 +422,11 @@ impl BiomeTree {
     /// recomputes. Neither is a semantic change; the counter counts the
     /// evaluations this form actually performs.
     fn search(&self, target: &[i64; DIMENSIONS], candidate: Option<u32>) -> (u32, i64) {
+        let (best_node, best_dist) = self.search_node(target, candidate);
+        (self.nodes[best_node as usize].row, best_dist)
+    }
+
+    fn search_node(&self, target: &[i64; DIMENSIONS], candidate: Option<u32>) -> (u32, i64) {
         let mut evaluations = 0u64;
         let mut best_dist = i64::MAX;
         let mut best_node = NONE;
@@ -407,7 +451,7 @@ impl BiomeTree {
         }
         debug_assert_ne!(best_node, NONE, "the tree always has at least one leaf");
         crate::counters::bump_biome_search(evaluations);
-        (self.nodes[best_node as usize].row, best_dist)
+        (best_node, best_dist)
     }
 
     /// One subtree-search frame: iterate children in order, evaluate each
