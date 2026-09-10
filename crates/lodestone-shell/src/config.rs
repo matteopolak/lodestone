@@ -14,8 +14,8 @@
 //! divided into less than that minimum. See the function's own docs for the
 //! one deliberate omission (the legacy `enforceUnicode` even-scale rounding).
 //!
-//! [`Options`] is the persisted settings model built on top of it — today
-//! `gui_scale` plus the [`crate::keybinds`] table. It is written to
+//! [`Options`] is the persisted settings model built on top of it, including
+//! the [`crate::keybinds`] table and local Friends privacy controls. It is written to
 //! `options.json` next to `servers.json`, in the
 //! **same** platform data directory [`crate::menu::servers::data_dir`] already
 //! discovers; see [`options_path`]. That reuse is deliberate — see that
@@ -30,6 +30,40 @@ use crate::keybinds::Keybinds;
 /// still fits [`MIN_SCALED_WIDTH`]x[`MIN_SCALED_HEIGHT`] into the framebuffer.
 /// Matches vanilla's own auto-gui-scale sentinel.
 pub const AUTO_GUI_SCALE: u32 = 0;
+
+/// Controls how much activity the Friends service may publish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresenceSharing {
+    /// Do not publish a presence state.
+    None,
+    /// Publish that the account is online, without the current world type.
+    Limited,
+    /// Publish the current world type when connected.
+    All,
+}
+
+impl Default for PresenceSharing {
+    fn default() -> Self {
+        Self::All
+    }
+}
+
+fn presence_sharing_from_name(name: &str) -> Option<PresenceSharing> {
+    match name {
+        "none" => Some(PresenceSharing::None),
+        "limited" => Some(PresenceSharing::Limited),
+        "all" => Some(PresenceSharing::All),
+        _ => None,
+    }
+}
+
+fn presence_sharing_name(value: PresenceSharing) -> &'static str {
+    match value {
+        PresenceSharing::None => "none",
+        PresenceSharing::Limited => "limited",
+        PresenceSharing::All => "all",
+    }
+}
 
 /// Default look sensitivity: a unit-interval value with default `0.5`. This
 /// matches [`Config::default`], so loading an untouched install keeps the same
@@ -974,6 +1008,10 @@ pub struct Options {
     /// `operateOnLevelExtractor(LevelExtractor::allChanged)` — the blend is
     /// baked per vertex, so there is no uniform to update in place.
     pub biome_blend_radius: i32,
+    /// Whether Friends change notifications may be shown while actively in a world.
+    pub in_game_notification: bool,
+    /// The activity detail published to the Friends service.
+    pub share_presence: PresenceSharing,
 }
 
 impl Default for Options {
@@ -1027,6 +1065,8 @@ impl Default for Options {
             attack_indicator: AttackIndicator::default(),
             particles: ParticleLevel::default(),
             biome_blend_radius: DEFAULT_BIOME_BLEND_RADIUS,
+            in_game_notification: false,
+            share_presence: PresenceSharing::All,
         }
     }
 }
@@ -1347,6 +1387,15 @@ impl Options {
             .map_or(DEFAULT_BIOME_BLEND_RADIUS, |v| {
                 v.clamp(MIN_BIOME_BLEND_RADIUS, MAX_BIOME_BLEND_RADIUS)
             });
+        let in_game_notification = obj
+            .get("in_game_notification")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let share_presence = obj
+            .get("share_presence")
+            .and_then(serde_json::Value::as_str)
+            .and_then(presence_sharing_from_name)
+            .unwrap_or_default();
         Self {
             gui_scale,
             keybinds,
@@ -1394,6 +1443,8 @@ impl Options {
             attack_indicator,
             particles,
             biome_blend_radius,
+            in_game_notification,
+            share_presence,
         }
     }
 
@@ -1414,7 +1465,7 @@ impl Options {
     pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
         // `crate::platform::store`, not `std::fs`: a browser has no filesystem, so
         // every read would miss and every write would fail, and the player would lose
-        // all 44 live option rows on reload with no error anywhere. The browser arm is
+        // all live option rows on reload with no error anywhere. The browser arm is
         // `localStorage`, keyed by this same path. See that module.
         let mut obj = serde_json::Map::new();
         obj.insert("gui_scale".into(), self.gui_scale.into());
@@ -1615,6 +1666,18 @@ impl Options {
             obj.insert(
                 "menu_background_blurriness".into(),
                 self.menu_background_blurriness.into(),
+            );
+        }
+        if self.in_game_notification != default.in_game_notification {
+            obj.insert(
+                "in_game_notification".into(),
+                self.in_game_notification.into(),
+            );
+        }
+        if self.share_presence != default.share_presence {
+            obj.insert(
+                "share_presence".into(),
+                presence_sharing_name(self.share_presence).into(),
             );
         }
         let text = serde_json::to_string_pretty(&serde_json::Value::Object(obj))
@@ -3415,6 +3478,32 @@ mod tests {
             );
             assert!(loaded.chat_colors, "chat_colors: {bad} must degrade to ON");
         }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn friends_local_privacy_options_round_trip_and_reject_unknown_visibility() {
+        let defaults = Options::from_json("{}");
+        assert!(!defaults.in_game_notification);
+        assert_eq!(defaults.share_presence, PresenceSharing::All);
+
+        let custom = Options {
+            in_game_notification: true,
+            share_presence: PresenceSharing::Limited,
+            ..Options::default()
+        };
+        let path = temp_options_path("friends-local-privacy");
+        custom.save_to(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("in_game_notification"));
+        assert!(text.contains("share_presence"));
+        assert_eq!(Options::load_from(&path), custom);
+
+        let invalid = Options::from_json(
+            r#"{"in_game_notification": "yes", "share_presence": "unexpected"}"#,
+        );
+        assert!(!invalid.in_game_notification);
+        assert_eq!(invalid.share_presence, PresenceSharing::All);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

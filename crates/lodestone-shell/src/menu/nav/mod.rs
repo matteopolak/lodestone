@@ -3994,6 +3994,15 @@ impl MenuNav {
                 self.step_biome_blend_radius(1);
                 MenuAction::None
             }
+            SettingsOutcome::Cycle(LiveOption::InGameNotification) => {
+                self.options.in_game_notification = !self.options.in_game_notification;
+                self.persist_options();
+                MenuAction::None
+            }
+            SettingsOutcome::Cycle(LiveOption::SharePresence) => {
+                self.cycle_share_presence(1);
+                MenuAction::None
+            }
         }
     }
 
@@ -4166,6 +4175,23 @@ impl MenuNav {
             .unwrap_or(0) as i32;
         let next = (index + delta).rem_euclid(ORDER.len() as i32) as usize;
         self.options.inactivity_fps_limit = ORDER[next];
+        self.persist_options();
+    }
+
+    /// Cycles the three Friends activity visibility levels and persists them.
+    fn cycle_share_presence(&mut self, delta: i32) {
+        use crate::config::PresenceSharing;
+        const ORDER: [PresenceSharing; 3] = [
+            PresenceSharing::All,
+            PresenceSharing::Limited,
+            PresenceSharing::None,
+        ];
+        let index = ORDER
+            .iter()
+            .position(|value| *value == self.options.share_presence)
+            .unwrap_or(0) as i32;
+        let next = (index + delta).rem_euclid(ORDER.len() as i32) as usize;
+        self.options.share_presence = ORDER[next];
         self.persist_options();
     }
 
