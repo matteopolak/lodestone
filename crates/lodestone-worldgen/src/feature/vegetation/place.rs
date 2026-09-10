@@ -6,7 +6,6 @@
 
 use std::cell::RefCell;
 
-use lodestone_data::block_states::StateId as CanonicalStateId;
 use lodestone_worldgen_core::hash::FastSet;
 
 use crate::feature::BlockPos;
@@ -47,34 +46,7 @@ pub(super) fn place_simple_block<R: RandomSource>(
         census_bump(|c| c.simple_block_unsupported_ground += 1);
         return;
     }
-    if let Some(upper) = double_plant_upper_state(grid, state) {
-        // A two-block plant is one placement. The upper cell must be empty
-        // before either half is written; rejecting after the lower write would
-        // leave an impossible orphan and would make later features observe a
-        // block that the placement never produced.
-        if grid.get_id(pos.x, pos.y + 1, pos.z) != StateId::AIR {
-            return;
-        }
-        grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state);
-        grid.set_id_if_in_bounds(pos.x, pos.y + 1, pos.z, upper);
-        return;
-    }
     grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state);
-}
-
-/// Maps the lower state of each ordinary two-block plant to its upper state.
-///
-/// These are contiguous pairs in the canonical 26.2 state table, with upper
-/// immediately before lower. Checking the exact canonical ids keeps this hot
-/// placement path free of block-name and property-string comparisons.
-fn double_plant_upper_state(grid: &VegGrid, lower: StateId) -> Option<StateId> {
-    let canonical = grid.interner().canonical_id(lower)?;
-    const LOWER: [u32; 6] = [12916, 12918, 12920, 12922, 12924, 12926];
-    if !LOWER.contains(&canonical.raw()) {
-        return None;
-    }
-    let upper = CanonicalStateId::new(canonical.raw() - 1)?;
-    Some(grid.interner().id_of(&upper.canonical_state()))
 }
 
 thread_local! {
@@ -653,18 +625,6 @@ pub(super) fn place_tree<R: RandomSource>(
                     );
                 });
             }
-            Decorator::AlterGround { provider } => {
-                ROOT_POSITIONS.with(|roots| {
-                    place_alter_ground_decorator(
-                        random,
-                        &trunk_positions,
-                        &roots.borrow(),
-                        provider,
-                        grid,
-                        tags,
-                    );
-                });
-            }
             Decorator::TrunkVine => {
                 place_trunk_vine_decorator(random, &trunk_positions, grid, tags);
             }
@@ -807,91 +767,6 @@ fn height_motion_blocking_no_leaves(grid: &VegGrid, tags: &VegTags, x: i32, z: i
     grid.min_y
 }
 
-/// Alters eligible ground beneath every lowest trunk/root position.
-fn place_alter_ground_decorator<R: RandomSource>(
-    random: &mut R,
-    logs: &[BlockPos],
-    roots: &[BlockPos],
-    provider: &BlockStateProvider,
-    grid: &mut VegGrid,
-    tags: &VegTags,
-) {
-    let Some(lowest_y) = logs.iter().chain(roots).map(|pos| pos.y).min() else {
-        return;
-    };
-    for origin in logs.iter().chain(roots).filter(|pos| pos.y == lowest_y) {
-        for (dx, dz) in [(-1, -1), (2, -1), (-1, 2), (2, 2)] {
-            place_alter_ground_circle(
-                random,
-                BlockPos { x: origin.x + dx, y: origin.y, z: origin.z + dz },
-                provider,
-                grid,
-                tags,
-            );
-        }
-        for _ in 0..5 {
-            let placement = random.next_int_bounded(64);
-            let x = placement % 8;
-            let z = placement / 8;
-            if x == 0 || x == 7 || z == 0 || z == 7 {
-                place_alter_ground_circle(
-                    random,
-                    BlockPos {
-                        x: origin.x - 3 + x,
-                        y: origin.y,
-                        z: origin.z - 3 + z,
-                    },
-                    provider,
-                    grid,
-                    tags,
-                );
-            }
-        }
-    }
-}
-
-fn place_alter_ground_circle<R: RandomSource>(
-    random: &mut R,
-    center: BlockPos,
-    provider: &BlockStateProvider,
-    grid: &mut VegGrid,
-    tags: &VegTags,
-) {
-    for dx in -2_i32..=2 {
-        for dz in -2_i32..=2 {
-            if dx.abs() == 2 && dz.abs() == 2 {
-                continue;
-            }
-            place_alter_ground_at(
-                random,
-                BlockPos { x: center.x + dx, y: center.y, z: center.z + dz },
-                provider,
-                grid,
-                tags,
-            );
-        }
-    }
-}
-
-fn place_alter_ground_at<R: RandomSource>(
-    random: &mut R,
-    pos: BlockPos,
-    provider: &BlockStateProvider,
-    grid: &mut VegGrid,
-    tags: &VegTags,
-) {
-    for dy in (-3..=2).rev() {
-        let cursor = BlockPos { y: pos.y + dy, ..pos };
-        if let Some(state) = provider.get_state_id(grid, tags, random, cursor) {
-            grid.set_id_if_in_bounds(cursor.x, cursor.y, cursor.z, state);
-            break;
-        }
-        if dy < 0 && !tag_at(grid, tags, Tag::Air, cursor.x, cursor.y, cursor.z) {
-            break;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
@@ -899,157 +774,6 @@ mod tests {
     use super::*;
     use crate::rng::{WorldgenRandom, XoroshiroRandomSource};
     use crate::feature::top_layer::StatePredicate;
-    use crate::rng::XoroshiroPositionalFactory;
-
-    struct ScriptedRandom {
-        ints: Vec<i32>,
-        cursor: usize,
-    }
-
-    impl ScriptedRandom {
-        fn new(ints: &[i32]) -> Self {
-            Self { ints: ints.to_vec(), cursor: 0 }
-        }
-    }
-
-    impl RandomSource for ScriptedRandom {
-        type Positional = XoroshiroPositionalFactory;
-
-        fn fork_positional(&mut self) -> Self::Positional { panic!("fixture does not fork") }
-        fn set_seed(&mut self, _seed: i64) { panic!("fixture does not reseed") }
-        fn next_bits(&mut self, _bits: u32) -> i32 { panic!("fixture does not draw bits") }
-        fn next_int(&mut self) -> i32 { panic!("fixture does not draw unbounded ints") }
-        fn next_int_bounded(&mut self, bound: i32) -> i32 {
-            let value = self.ints[self.cursor];
-            self.cursor += 1;
-            assert!((0..bound).contains(&value));
-            value
-        }
-        fn next_long(&mut self) -> i64 { panic!("fixture does not draw longs") }
-        fn next_bool(&mut self) -> bool { panic!("fixture does not draw bools") }
-        fn next_float(&mut self) -> f32 { panic!("fixture does not draw floats") }
-        fn next_double(&mut self) -> f64 { panic!("fixture does not draw doubles") }
-        fn next_gaussian(&mut self) -> f64 { panic!("fixture does not draw gaussians") }
-        fn consume_count(&mut self, _rounds: u32) { panic!("fixture does not consume rounds") }
-    }
-
-    fn podzol_fixture() -> (VegGrid, VegTags, BlockStateProvider) {
-        let mut grid = VegGrid::new(0, 12, 0, 0);
-        for x in 0..16 {
-            for z in 0..16 {
-                grid.seed(x, 4, z, "minecraft:dirt".to_owned());
-            }
-        }
-        let mut tags = VegTags::default();
-        tags.beneath_tree_podzol_replaceable.insert("minecraft:dirt".to_owned());
-        let provider = BlockStateProvider::RuleBased {
-            rules: vec![(
-                super::super::config::BlockPredicate::MatchingBlockTag {
-                    tag: Some(super::super::ids::Tag::BeneathTreePodzolReplaceable),
-                    offset: (0, 0, 0),
-                },
-                Box::new(BlockStateProvider::Simple("minecraft:podzol[snowy=false]".to_owned())),
-            )],
-            fallback: None,
-        };
-        (grid, tags, provider)
-    }
-
-    #[test]
-    fn alter_ground_literal_shape_and_rng_fixture() {
-        let (mut grid, tags, provider) = podzol_fixture();
-        // No perimeter draw is admitted. The fixture therefore isolates the
-        // four fixed rounded patches and proves the unconditional five draws.
-        let mut random = ScriptedRandom::new(&[9, 18, 27, 36, 45]);
-        place_alter_ground_decorator(
-            &mut random,
-            &[BlockPos { x: 7, y: 5, z: 7 }],
-            &[],
-            &provider,
-            &mut grid,
-            &tags,
-        );
-        assert_eq!(random.cursor, 5);
-        // Union of the four rounded 5x5 patches, derived independently from
-        // their literal centers and corner exclusion.
-        let mut expected = std::collections::HashSet::new();
-        for (cx, cz) in [(6, 6), (9, 6), (6, 9), (9, 9)] {
-            for dx in -2_i32..=2 {
-                for dz in -2_i32..=2 {
-                    if dx.abs() != 2 || dz.abs() != 2 {
-                        expected.insert((cx + dx, 4, cz + dz));
-                    }
-                }
-            }
-        }
-        let actual: std::collections::HashSet<_> = grid
-            .dirty_cells()
-            .map(|(x, y, z, state)| {
-                assert_eq!(state, "minecraft:podzol[snowy=false]");
-                (x, y, z)
-            })
-            .collect();
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn alter_ground_stops_below_first_blocked_cell() {
-        let (mut grid, tags, provider) = podzol_fixture();
-        grid.seed(8, 5, 8, "minecraft:stone".to_owned());
-        let mut random = ScriptedRandom::new(&[]);
-        place_alter_ground_at(
-            &mut random,
-            BlockPos { x: 8, y: 8, z: 8 },
-            &provider,
-            &mut grid,
-            &tags,
-        );
-        assert_eq!(grid.get(8, 4, 8), "minecraft:dirt");
-        assert_eq!(grid.dirty_len(), 0);
-    }
-
-    #[test]
-    fn simple_block_places_both_halves_of_a_double_plant() {
-        let mut grid = VegGrid::new(0, 8, 0, 0);
-        grid.seed(3, 0, 4, "minecraft:grass_block".to_string());
-        let mut tags = VegTags::default();
-        tags.supports_vegetation.insert("minecraft:grass_block".to_string());
-        let provider = BlockStateProvider::Simple("minecraft:tall_grass[half=lower]".to_string());
-        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
-
-        place_simple_block(
-            &mut random,
-            BlockPos { x: 3, y: 1, z: 4 },
-            &provider,
-            &mut grid,
-            &tags,
-        );
-
-        assert_eq!(grid.get(3, 1, 4), "minecraft:tall_grass[half=lower]");
-        assert_eq!(grid.get(3, 2, 4), "minecraft:tall_grass[half=upper]");
-    }
-
-    #[test]
-    fn simple_block_refuses_a_double_plant_with_a_blocked_upper_cell() {
-        let mut grid = VegGrid::new(0, 8, 0, 0);
-        grid.seed(3, 0, 4, "minecraft:grass_block".to_string());
-        grid.seed(3, 2, 4, "minecraft:stone".to_string());
-        let mut tags = VegTags::default();
-        tags.supports_vegetation.insert("minecraft:grass_block".to_string());
-        let provider = BlockStateProvider::Simple("minecraft:tall_grass[half=lower]".to_string());
-        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
-
-        place_simple_block(
-            &mut random,
-            BlockPos { x: 3, y: 1, z: 4 },
-            &provider,
-            &mut grid,
-            &tags,
-        );
-
-        assert_eq!(grid.get(3, 1, 4), "minecraft:air");
-        assert_eq!(grid.get(3, 2, 4), "minecraft:stone");
-    }
 
     #[test]
     fn place_on_ground_mixed_oak_try_counts_and_output_are_stable() {

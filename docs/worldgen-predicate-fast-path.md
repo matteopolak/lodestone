@@ -12,13 +12,13 @@ The resolver facts are parsed once into `lodestone_data::block_states::StateId` 
 
 The top-layer column scan binds its five predicates once before scanning and uses `DenseBlockGrid::get_id` for motion, fluid-source, and `snowy` checks. This does not change the string-facing methods used by adapters and tests.
 
-`BlockPredicate::parse` first decodes the closed `type` discriminator through the internally tagged Serde enum `PredicateDocument`. It maps supported `matching_block_tag` ids to `Tag`; `BlockPredicate::test` then performs one `tag_at` lookup and does not repeat the former eight-way string comparison chain for each candidate position. Extension discriminator values fail the typed decode and take the explicit unsupported fallback.
+`BlockPredicate::parse` first decodes the closed `type` discriminator through the internally tagged Serde enum `PredicateDocument`. Its `matching_block_tag` payload is another Serde-renamed enum, so both the predicate kind and tag id cross the JSON boundary as types. `BlockPredicate::test` then performs one `tag_at` lookup and does not repeat the former string comparison chain for each candidate position. Unknown discriminator or tag values take the explicit unsupported or fail-closed fallback.
 
 ## How to change it
 
 Keep `bind` at a generation/pass boundary rather than inside a cell loop. If a new state-producing stage is added, bind again after that stage or leave the new ID on the correctness-preserving fallback. Do not remove the built-in eligibility bit: a plugin state must not be treated as a generated-table state merely because its text resembles a built-in base name.
 
-When supporting another `matching_block_tag`, add its `Tag` variant and membership rule in `feature::vegetation::ids`, then add its registry-id mapping in `feature::vegetation::config::block_tag_of`. Do not add a string comparison in `BlockPredicate::test`; unknown ids deliberately remain `None` and match no blocks.
+When supporting another `matching_block_tag`, add its `Tag` variant and membership rule in `feature::vegetation::ids`, then add the Serde-renamed boundary variant in `feature::vegetation::config::BlockTagDocument`. Do not add a string comparison in `BlockPredicate::test`; unknown ids deliberately remain `None` and match no blocks.
 
 The cache is per predicate and per interner instance. Cloning a predicate intentionally starts with an unbound cache because local IDs are only meaningful against the interner that issued them.
 
