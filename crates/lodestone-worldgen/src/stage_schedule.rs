@@ -8,8 +8,9 @@
 //! This module contains no generation work and therefore cannot alter terrain.
 //! A generator can use [`StageCursor`] at the boundaries between helper
 //! functions; a debug build then fails immediately if a refactor enters a pass
-//! out of order or forgets one.  The static schedules are also useful to
-//! parity tooling that needs to describe which prefix a captured column owns.
+//! out of order or forgets one. [`LifecycleSchedule`] separately records the
+//! externally observable status/dependency graph through packet finalization,
+//! so an internal helper split cannot be mistaken for a chunk lifecycle edge.
 
 /// Dimension whose pass schedule is being described.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +40,208 @@ pub enum ColumnStage {
     TopLayer,
     Output,
 }
+
+/// A named, externally observable chunk-lifecycle phase.
+///
+/// These names deliberately do not mirror [`ColumnStage`] one-for-one. A
+/// column stage is an implementation boundary inside a dimension generator;
+/// a lifecycle phase is a scheduler boundary with a dependency radius and a
+/// block-write radius. `PacketFinalization` is Lodestone's serving boundary,
+/// after the generated column has been finalized and its centre light has
+/// settled. Keeping it in this typed graph prevents packet parity from being
+/// described as if it ended at [`ColumnStage::Output`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum LifecyclePhase {
+    Empty,
+    StructureStarts,
+    StructureReferences,
+    Biomes,
+    Noise,
+    Surface,
+    Carvers,
+    Features,
+    InitializeLight,
+    Light,
+    Spawn,
+    Full,
+    PacketFinalization,
+}
+
+/// One required predecessor of a lifecycle phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhaseDependency {
+    phase: LifecyclePhase,
+    radius: u8,
+}
+
+impl PhaseDependency {
+    #[must_use]
+    pub const fn new(phase: LifecyclePhase, radius: u8) -> Self {
+        Self { phase, radius }
+    }
+
+    #[must_use]
+    pub const fn phase(self) -> LifecyclePhase {
+        self.phase
+    }
+
+    #[must_use]
+    pub const fn radius(self) -> u8 {
+        self.radius
+    }
+}
+
+/// Static contract for one lifecycle phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhaseContract {
+    phase: LifecyclePhase,
+    dependencies: &'static [PhaseDependency],
+    block_write_radius: u8,
+}
+
+impl PhaseContract {
+    #[must_use]
+    pub const fn new(
+        phase: LifecyclePhase,
+        dependencies: &'static [PhaseDependency],
+        block_write_radius: u8,
+    ) -> Self {
+        Self {
+            phase,
+            dependencies,
+            block_write_radius,
+        }
+    }
+
+    #[must_use]
+    pub const fn phase(self) -> LifecyclePhase {
+        self.phase
+    }
+
+    #[must_use]
+    pub const fn dependencies(self) -> &'static [PhaseDependency] {
+        self.dependencies
+    }
+
+    #[must_use]
+    pub const fn block_write_radius(self) -> u8 {
+        self.block_write_radius
+    }
+}
+
+/// The ordered lifecycle and dependency graph shared by all dimensions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LifecycleSchedule {
+    phases: &'static [PhaseContract],
+}
+
+impl LifecycleSchedule {
+    #[must_use]
+    pub const fn new(phases: &'static [PhaseContract]) -> Self {
+        Self { phases }
+    }
+
+    #[must_use]
+    pub const fn phases(self) -> &'static [PhaseContract] {
+        self.phases
+    }
+
+    #[must_use]
+    pub const fn contract(self, phase: LifecyclePhase) -> Option<PhaseContract> {
+        let mut index = 0;
+        while index < self.phases.len() {
+            if self.phases[index].phase as u8 == phase as u8 {
+                return Some(self.phases[index]);
+            }
+            index += 1;
+        }
+        None
+    }
+
+    /// Validate uniqueness, dependency direction, and the serving boundary.
+    pub fn validate(self) {
+        assert!(!self.phases.is_empty(), "worldgen lifecycle is empty");
+        let mut index = 0;
+        while index < self.phases.len() {
+            let contract = self.phases[index];
+            let mut previous = 0;
+            while previous < index {
+                assert_ne!(
+                    self.phases[previous].phase, contract.phase,
+                    "worldgen lifecycle repeats {:?}",
+                    contract.phase
+                );
+                previous += 1;
+            }
+            for dependency in contract.dependencies {
+                let dependency_index = self
+                    .index_of(dependency.phase)
+                    .expect("lifecycle dependency must name a scheduled phase");
+                assert!(
+                    dependency_index < index,
+                    "lifecycle dependency {:?} must precede {:?}",
+                    dependency.phase,
+                    contract.phase
+                );
+            }
+            index += 1;
+        }
+        assert_eq!(
+            self.phases.last().map(|contract| contract.phase),
+            Some(LifecyclePhase::PacketFinalization),
+            "packet finalization must be the terminal lifecycle boundary"
+        );
+    }
+
+    #[must_use]
+    pub const fn index_of(self, phase: LifecyclePhase) -> Option<usize> {
+        let mut index = 0;
+        while index < self.phases.len() {
+            if self.phases[index].phase as u8 == phase as u8 {
+                return Some(index);
+            }
+            index += 1;
+        }
+        None
+    }
+}
+
+const STARTS_8: &[PhaseDependency] = &[PhaseDependency::new(LifecyclePhase::StructureStarts, 8)];
+const STARTS_8_BIOMES_1: &[PhaseDependency] = &[
+    PhaseDependency::new(LifecyclePhase::StructureStarts, 8),
+    PhaseDependency::new(LifecyclePhase::Biomes, 1),
+];
+const STARTS_8_CARVERS_1: &[PhaseDependency] = &[
+    PhaseDependency::new(LifecyclePhase::StructureStarts, 8),
+    PhaseDependency::new(LifecyclePhase::Carvers, 1),
+];
+const INITIALIZE_LIGHT_1: &[PhaseDependency] =
+    &[PhaseDependency::new(LifecyclePhase::InitializeLight, 1)];
+const BIOMES_1: &[PhaseDependency] = &[PhaseDependency::new(LifecyclePhase::Biomes, 1)];
+const FULL_0_LIGHT_1: &[PhaseDependency] = &[
+    PhaseDependency::new(LifecyclePhase::Full, 0),
+    PhaseDependency::new(LifecyclePhase::Light, 1),
+];
+
+const LIFECYCLE_PHASES: &[PhaseContract] = &[
+    PhaseContract::new(LifecyclePhase::Empty, &[], 0),
+    PhaseContract::new(LifecyclePhase::StructureStarts, &[], 0),
+    PhaseContract::new(LifecyclePhase::StructureReferences, STARTS_8, 0),
+    PhaseContract::new(LifecyclePhase::Biomes, STARTS_8, 0),
+    PhaseContract::new(LifecyclePhase::Noise, STARTS_8_BIOMES_1, 0),
+    PhaseContract::new(LifecyclePhase::Surface, STARTS_8_BIOMES_1, 0),
+    PhaseContract::new(LifecyclePhase::Carvers, STARTS_8, 0),
+    PhaseContract::new(LifecyclePhase::Features, STARTS_8_CARVERS_1, 1),
+    PhaseContract::new(LifecyclePhase::InitializeLight, &[], 0),
+    PhaseContract::new(LifecyclePhase::Light, INITIALIZE_LIGHT_1, 0),
+    PhaseContract::new(LifecyclePhase::Spawn, BIOMES_1, 0),
+    PhaseContract::new(LifecyclePhase::Full, &[], 0),
+    PhaseContract::new(LifecyclePhase::PacketFinalization, FULL_0_LIGHT_1, 0),
+];
+
+/// The common externally observable chunk lifecycle.
+pub const LIFECYCLE: LifecycleSchedule = LifecycleSchedule::new(LIFECYCLE_PHASES);
 
 /// The stable numeric decoration steps used by configured feature lists.
 ///
@@ -391,12 +594,21 @@ pub const NETHER_FEATURES: FeatureSchedule =
 pub struct StageSchedule {
     dimension: Dimension,
     stages: &'static [ColumnStage],
+    shaped_boundary: ColumnStage,
 }
 
 impl StageSchedule {
     /// Construct a schedule for a static stage slice.
-    pub const fn new(dimension: Dimension, stages: &'static [ColumnStage]) -> Self {
-        Self { dimension, stages }
+    pub const fn new(
+        dimension: Dimension,
+        stages: &'static [ColumnStage],
+        shaped_boundary: ColumnStage,
+    ) -> Self {
+        Self {
+            dimension,
+            stages,
+            shaped_boundary,
+        }
     }
 
     #[must_use]
@@ -407,6 +619,26 @@ impl StageSchedule {
     #[must_use]
     pub const fn stages(self) -> &'static [ColumnStage] {
         self.stages
+    }
+
+    /// First stage not represented by this dimension's shaped-column value.
+    ///
+    /// The boundary is dimension-specific: Overworld and End shaped columns
+    /// already include structure placement, while Nether placement belongs to
+    /// source completion. Callers must ask the schedule instead of assigning a
+    /// universal meaning to a `Shaped` label.
+    #[must_use]
+    pub const fn shaped_boundary(self) -> ColumnStage {
+        self.shaped_boundary
+    }
+
+    /// Index where a shaped-column producer must stop its cursor.
+    #[must_use]
+    pub const fn shaped_boundary_index(self) -> usize {
+        match self.index_of(self.shaped_boundary) {
+            Some(index) => index,
+            None => panic!("shaped boundary must belong to the dimension schedule"),
+        }
     }
 
     /// Return the first position of `stage`, if this dimension runs it.
@@ -462,6 +694,11 @@ impl StageSchedule {
             }
             left += 1;
         }
+        assert!(
+            self.shaped_boundary_index() > 0,
+            "{} shaped prefix is empty",
+            self.dimension_name()
+        );
     }
 
     fn dimension_name(self) -> &'static str {
@@ -575,18 +812,30 @@ const END_STAGES: &[ColumnStage] = &[
 ];
 
 /// The complete Overworld order.
-pub const OVERWORLD: StageSchedule = StageSchedule::new(Dimension::Overworld, OVERWORLD_STAGES);
+pub const OVERWORLD: StageSchedule = StageSchedule::new(
+    Dimension::Overworld,
+    OVERWORLD_STAGES,
+    ColumnStage::Features,
+);
 /// The complete Nether order.
-pub const NETHER: StageSchedule = StageSchedule::new(Dimension::Nether, NETHER_STAGES);
+pub const NETHER: StageSchedule = StageSchedule::new(
+    Dimension::Nether,
+    NETHER_STAGES,
+    ColumnStage::StructurePlacement,
+);
 /// The complete End order.
-pub const END: StageSchedule = StageSchedule::new(Dimension::End, END_STAGES);
+pub const END: StageSchedule = StageSchedule::new(
+    Dimension::End,
+    END_STAGES,
+    ColumnStage::Features,
+);
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ChunkRequest, ColumnStage, DecorationStep, Dimension, END, END_SOURCES, NETHER,
-        NETHER_FEATURES, NETHER_SOURCES, OVERWORLD, OVERWORLD_FEATURES, OVERWORLD_SOURCES,
-        SourceCompletion,
+        ChunkRequest, ColumnStage, DecorationStep, Dimension, END, END_SOURCES, LIFECYCLE,
+        LifecyclePhase, NETHER, NETHER_FEATURES, NETHER_SOURCES, OVERWORLD,
+        OVERWORLD_FEATURES, OVERWORLD_SOURCES, SourceCompletion,
     };
 
     #[test]
@@ -613,6 +862,38 @@ mod tests {
         assert!(OVERWORLD.index_of(ColumnStage::StructurePlacement).unwrap() < OVERWORLD.index_of(ColumnStage::Features).unwrap());
         assert!(NETHER.index_of(ColumnStage::StructurePlacement).unwrap() < NETHER.index_of(ColumnStage::Features).unwrap());
         assert!(END.index_of(ColumnStage::StructurePlacement).unwrap() < END.index_of(ColumnStage::Features).unwrap());
+    }
+
+    #[test]
+    fn shaped_prefixes_name_each_dimensions_actual_resume_boundary() {
+        assert_eq!(OVERWORLD.shaped_boundary(), ColumnStage::Features);
+        assert_eq!(NETHER.shaped_boundary(), ColumnStage::StructurePlacement);
+        assert_eq!(END.shaped_boundary(), ColumnStage::Features);
+        assert_eq!(OVERWORLD.shaped_boundary_index(), 9);
+        assert_eq!(NETHER.shaped_boundary_index(), 8);
+        assert_eq!(END.shaped_boundary_index(), 6);
+    }
+
+    #[test]
+    fn lifecycle_dependencies_are_ordered_and_packet_finalization_is_terminal() {
+        LIFECYCLE.validate();
+        let features = LIFECYCLE
+            .contract(LifecyclePhase::Features)
+            .expect("features lifecycle contract");
+        assert_eq!(features.block_write_radius(), 1);
+        assert!(features.dependencies().iter().any(|dependency| {
+            dependency.phase() == LifecyclePhase::Carvers && dependency.radius() == 1
+        }));
+        let packet = LIFECYCLE
+            .contract(LifecyclePhase::PacketFinalization)
+            .expect("packet lifecycle contract");
+        assert!(packet.dependencies().iter().any(|dependency| {
+            dependency.phase() == LifecyclePhase::Light && dependency.radius() == 1
+        }));
+        assert_eq!(
+            LIFECYCLE.phases().last().map(|contract| contract.phase()),
+            Some(LifecyclePhase::PacketFinalization)
+        );
     }
 
     #[test]
