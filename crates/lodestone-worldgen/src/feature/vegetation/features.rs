@@ -637,30 +637,6 @@ const DIRECTIONS: [(i32, i32, i32); 6] = [
 /// `Direction.Plane.HORIZONTAL`, in vanilla order (NORTH, EAST, SOUTH, WEST).
 const HORIZONTAL: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
 
-/// The 18 non-corner offsets visited by a sculk cursor. Coordinates advance
-/// along X first, then Y, with Z as the outer coordinate; retaining this order
-/// is part of the seeded cursor-shuffle contract.
-const SCULK_NON_CORNER_NEIGHBOURS: [(i32, i32, i32); 18] = [
-    (0, -1, -1),
-    (-1, 0, -1),
-    (0, 0, -1),
-    (1, 0, -1),
-    (0, 1, -1),
-    (-1, -1, 0),
-    (0, -1, 0),
-    (1, -1, 0),
-    (-1, 0, 0),
-    (1, 0, 0),
-    (-1, 1, 0),
-    (0, 1, 0),
-    (1, 1, 0),
-    (0, -1, 1),
-    (-1, 0, 1),
-    (0, 0, 1),
-    (1, 0, 1),
-    (0, 1, 1),
-];
-
 // ---------------------------------------------------------------------------
 // Configs
 // ---------------------------------------------------------------------------
@@ -3068,33 +3044,6 @@ mod tests {
     use crate::feature::{HeightProvider, VerticalAnchor};
     use crate::feature::top_layer::StatePredicate;
     use crate::rng::{LegacyRandomSource, RandomSource, WorldgenRandom, XoroshiroPositionalFactory, XoroshiroRandomSource};
-
-    #[test]
-    fn sculk_movement_neighbour_order_matches_coordinate_iteration() {
-        assert_eq!(
-            SCULK_NON_CORNER_NEIGHBOURS,
-            [
-                (0, -1, -1),
-                (-1, 0, -1),
-                (0, 0, -1),
-                (1, 0, -1),
-                (0, 1, -1),
-                (-1, -1, 0),
-                (0, -1, 0),
-                (1, -1, 0),
-                (-1, 0, 0),
-                (1, 0, 0),
-                (-1, 1, 0),
-                (0, 1, 0),
-                (1, 1, 0),
-                (0, -1, 1),
-                (-1, 0, 1),
-                (0, 0, 1),
-                (1, 0, 1),
-                (0, 1, 1),
-            ],
-        );
-    }
 
     struct DeltaScriptRandom {
         bounded: VecDeque<i32>,
