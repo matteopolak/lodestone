@@ -361,17 +361,29 @@ impl DenseBlockGrid {
         let mut inline_source_to_destination = [u16::MAX; INLINE_PALETTE_MAPPING];
         let mut heap_source_to_destination = (source.palette.len() > INLINE_PALETTE_MAPPING)
             .then(|| vec![u16::MAX; source.palette.len()]);
+        let destination_offset_x = destination_x - self.min_x;
+        let destination_offset_y = destination_y - self.min_y;
+        let destination_offset_z = destination_z - self.min_z;
+        let destination_size_x = self.size_x;
+        let destination_size_z = self.size_z;
+        // Detach the destination carrier once for the whole transfer. Calling
+        // `Arc::make_mut` for every row repeats the refcount/uniqueness check
+        // and needlessly re-enters the copy-on-write boundary in this hot
+        // path; the palette still mutates in the same y-z-x scan order below.
+        let destination_blocks = Arc::make_mut(&mut self.blocks);
         for y in 0..size_y {
             for z in 0..size_z {
                 let source_start = source
                     .index(source_x, source_y + y, source_z + z)
                     .expect("validated source row");
-                let destination_start = self
-                    .index(destination_x, destination_y + y, destination_z + z)
-                    .expect("validated destination row");
+                let destination_start = (((destination_offset_y + y) * destination_size_z
+                    + destination_offset_z
+                    + z)
+                    * destination_size_x
+                    + destination_offset_x) as usize;
                 let source_row = &source.blocks[source_start..source_start + width];
-                let destination_row =
-                    &mut Arc::make_mut(&mut self.blocks)[destination_start..destination_start + width];
+                let destination_row = &mut destination_blocks
+                    [destination_start..destination_start + width];
                 for (destination, &source_index) in destination_row.iter_mut().zip(source_row) {
                     let source_index = source_index as usize;
                     let destination_index = if source.palette.len() <= INLINE_PALETTE_MAPPING {
@@ -650,6 +662,28 @@ mod tests {
         assert_eq!(destination.get(0, 0, 0), "minecraft:air");
         let (palette, _) = destination.into_palette_and_blocks();
         assert_eq!(palette, ["minecraft:air", "minecraft:stone", "minecraft:dirt"]);
+    }
+
+    #[test]
+    fn bulk_copy_detaches_shared_destination_without_changing_alias() {
+        let interner = Arc::new(StateInterner::new());
+        let air = interner.id_of("minecraft:air");
+        let mut source = DenseBlockGrid::with_interner(
+            Arc::clone(&interner), 0, 0, 0, 2, 1, 1, air,
+        );
+        source.set(0, 0, 0, "minecraft:stone");
+        source.set(1, 0, 0, "minecraft:dirt");
+
+        let mut destination = DenseBlockGrid::with_interner(
+            Arc::clone(&interner), 8, 0, 8, 2, 1, 1, air,
+        );
+        let alias = destination.clone();
+        destination.copy_box_from(&source, 0, 0, 0, 8, 0, 8, 2, 1, 1);
+
+        assert_eq!(destination.get(8, 0, 8), "minecraft:stone");
+        assert_eq!(destination.get(9, 0, 8), "minecraft:dirt");
+        assert_eq!(alias.get(8, 0, 8), "minecraft:air");
+        assert_eq!(alias.get(9, 0, 8), "minecraft:air");
     }
 
     #[test]
