@@ -325,6 +325,20 @@ impl BiomeTable {
         }
     }
 
+    /// Builds a table at a resource-loading boundary and rejects unknown
+    /// built-in biome names before generation starts.
+    #[must_use]
+    pub fn new_strict(points: Vec<BiomeParameterPoint>) -> Self {
+        if let Some((row, point)) = points
+            .iter()
+            .enumerate()
+            .find(|(_, point)| !lodestone_data::biomes::is_biome(&point.biome))
+        {
+            panic!("unknown built-in biome {:?} at parameter row {row}", point.biome);
+        }
+        Self::new(points)
+    }
+
     /// The nearest biome's table row, via vanilla's own indexed search
     /// (its parameter-list value lookup) with no cached-last-result seeding — the
     /// fresh-instance answer. Always at the same minimum squared distance as

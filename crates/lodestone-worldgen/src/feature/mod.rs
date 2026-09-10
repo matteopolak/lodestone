@@ -810,6 +810,11 @@ impl RegionHeights {
         }
     }
 
+    /// Clears a retained height buffer back to the absent-entry sentinel.
+    pub fn clear(&mut self) {
+        self.heights.fill(Self::UNSET);
+    }
+
     #[inline]
     fn index(lx: i32, lz: i32) -> usize {
         debug_assert!((ORE_READ_MIN..ORE_READ_MAX).contains(&lx), "lx {lx} not clamped");

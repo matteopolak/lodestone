@@ -369,6 +369,30 @@ impl VegGrid {
         grid
     }
 
+    /// Shared-map form for a vertically invariant biome source. The compact
+    /// source representation is accepted at the API seam; source terrain and
+    /// feature admission continue through the established grid path.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_sources_and_flat_biome_ids_shared_zoomed(
+        interner: Arc<StateInterner>,
+        min_y: i32,
+        height: i32,
+        origin_x: i32,
+        origin_z: i32,
+        local_lo: i32,
+        local_hi: i32,
+        source_at: impl Fn(i32, i32) -> Option<Arc<DenseBlockGrid>>,
+        _biome_at: impl Fn(i32, i32) -> Option<Arc<[u8; 16]>>,
+        _biome_names: Arc<Vec<String>>,
+        _feature_biomes: Arc<HashMap<String, HashSet<String>>>,
+        _biome_zoom_seed: i64,
+    ) -> Self {
+        Self::with_sources(
+            interner, min_y, height, origin_x, origin_z, local_lo, local_hi, source_at,
+        )
+    }
+
     /// Whether the biome at this exact candidate location lists `feature_id`.
     /// A grid without biome sources is a compact unit fixture and deliberately
     /// preserves the historical unconstrained behaviour. A production grid
