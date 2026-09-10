@@ -1128,7 +1128,7 @@ fn attachment_survives(grid: &DenseBlockGrid, pos: [i32; 3], state: CanonicalSta
             };
             let support_pos = adjacent(pos, opposite);
             if !inside(support_pos) {
-                return true;
+                return false;
             }
             let support = canonical_state_at(grid, support_pos);
             support.is_some_and(|support| {
@@ -1382,5 +1382,9 @@ mod tests {
         stair.place(origin([1, 1, 1]), &settings, &mut banner_wrong_side);
         banner_south.place(origin([1, 1, 0]), &settings, &mut banner_wrong_side);
         assert_eq!(banner_wrong_side.get(1, 1, 0), "minecraft:air");
+
+        let mut banner_at_boundary = DenseBlockGrid::new(0, 0, 0, 3, 3, 3, "minecraft:air");
+        banner_north.place(origin([1, 1, 2]), &settings, &mut banner_at_boundary);
+        assert_eq!(banner_at_boundary.get(1, 1, 2), "minecraft:air");
     }
 }
