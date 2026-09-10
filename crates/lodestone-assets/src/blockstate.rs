@@ -8,8 +8,81 @@
 
 use crate::error::BlockStateError;
 use crate::location::ResourceLocation;
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+/// The closed top-level shape of a blockstate document.
+///
+/// The public API deliberately lowers this transport model into
+/// [`BlockStateDefinition`], so the rest of the asset pipeline never has to
+/// inspect JSON. `variants` wins when a malformed pack supplies both keys,
+/// matching the parser's historical precedence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BlockStateDocument {
+    variants: Option<BTreeMap<String, ModelRefsDocument>>,
+    multipart: Option<Vec<MultipartCaseDocument>>,
+}
+
+/// A variant or multipart `apply` value: one model object or a weighted list.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum ModelRefsDocument {
+    One(ModelRefDocument),
+    Many(Vec<ModelRefDocument>),
+}
+
+/// The closed shape of one model reference in a blockstate document.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelRefDocument {
+    model: String,
+    #[serde(default)]
+    x: i32,
+    #[serde(default)]
+    y: i32,
+    #[serde(default)]
+    uvlock: bool,
+    #[serde(default = "default_weight")]
+    weight: u32,
+}
+
+fn default_weight() -> u32 {
+    1
+}
+
+/// The closed shape of a multipart case.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MultipartCaseDocument {
+    #[serde(default)]
+    when: Option<WhenDocument>,
+    apply: ModelRefsDocument,
+}
+
+/// A typed recursive `when` document.
+///
+/// Property names are intentionally open because blockstate properties come
+/// from the block definition rather than this file. Their values are still
+/// closed to the three scalar forms accepted by the resource-pack format.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct WhenDocument {
+    #[serde(rename = "OR", default)]
+    or: Option<Vec<WhenDocument>>,
+    #[serde(rename = "AND", default)]
+    and: Option<Vec<WhenDocument>>,
+    #[serde(flatten)]
+    properties: BTreeMap<String, PropertyValueDocument>,
+}
+
+/// A scalar blockstate property value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum PropertyValueDocument {
+    String(String),
+    Bool(bool),
+    Number(serde_json::Number),
+}
 
 /// A reference to a model, with optional rotation, uv-lock, and random weight.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,34 +162,21 @@ pub struct BlockStates {
 impl BlockStates {
     /// Parses blockstate JSON.
     pub fn parse(bytes: &[u8]) -> Result<Self, BlockStateError> {
-        let root: Value =
+        let document: BlockStateDocument =
             serde_json::from_slice(bytes).map_err(|e| BlockStateError::Json(e.to_string()))?;
-        let obj = root.as_object().ok_or(BlockStateError::MissingDefinition)?;
 
-        if let Some(variants) = obj.get("variants") {
-            let map = variants
-                .as_object()
-                .ok_or_else(|| BlockStateError::InvalidField {
-                    field: "variants",
-                    reason: "expected an object".to_string(),
-                })?;
-            let mut out = Vec::with_capacity(map.len());
-            for (key, value) in map {
-                out.push((key.clone(), parse_model_refs(value)?));
+        if let Some(variants) = document.variants {
+            let mut out = Vec::with_capacity(variants.len());
+            for (key, value) in variants {
+                out.push((key, model_refs_from_document(value)?));
             }
             Ok(Self {
                 definition: BlockStateDefinition::Variants(out),
             })
-        } else if let Some(multipart) = obj.get("multipart") {
-            let list = multipart
-                .as_array()
-                .ok_or_else(|| BlockStateError::InvalidField {
-                    field: "multipart",
-                    reason: "expected an array".to_string(),
-                })?;
-            let mut cases = Vec::with_capacity(list.len());
-            for case in list {
-                cases.push(parse_multipart_case(case)?);
+        } else if let Some(multipart) = document.multipart {
+            let mut cases = Vec::with_capacity(multipart.len());
+            for case in multipart {
+                cases.push(multipart_case_from_document(case)?);
             }
             Ok(Self {
                 definition: BlockStateDefinition::Multipart(cases),
@@ -198,97 +258,55 @@ fn variant_key_matches(key: &str, props: &BTreeMap<String, String>) -> bool {
         .all(|(k, v)| props.get(k) == Some(v))
 }
 
-/// Parses either a single model object or an array of them into a weighted list.
-fn parse_model_refs(value: &Value) -> Result<Vec<ModelRef>, BlockStateError> {
+/// Lowers either a single model object or an array of them into a weighted list.
+fn model_refs_from_document(value: ModelRefsDocument) -> Result<Vec<ModelRef>, BlockStateError> {
     match value {
-        Value::Array(items) => items.iter().map(parse_model_ref).collect(),
-        Value::Object(_) => Ok(vec![parse_model_ref(value)?]),
-        _ => Err(BlockStateError::InvalidField {
-            field: "model",
-            reason: "expected an object or array".to_string(),
-        }),
+        ModelRefsDocument::One(model) => Ok(vec![model_ref_from_document(model)?]),
+        ModelRefsDocument::Many(models) => models
+            .into_iter()
+            .map(model_ref_from_document)
+            .collect(),
     }
 }
 
-/// Parses a single model reference object.
-fn parse_model_ref(value: &Value) -> Result<ModelRef, BlockStateError> {
-    let obj = value
-        .as_object()
-        .ok_or_else(|| BlockStateError::InvalidField {
-            field: "model",
-            reason: "expected an object".to_string(),
-        })?;
-    let model_str =
-        obj.get("model")
-            .and_then(Value::as_str)
-            .ok_or_else(|| BlockStateError::InvalidField {
-                field: "model",
-                reason: "missing string \"model\"".to_string(),
-            })?;
-    let model = ResourceLocation::parse(model_str)?;
-    let x = obj.get("x").and_then(Value::as_i64).unwrap_or(0) as i32;
-    let y = obj.get("y").and_then(Value::as_i64).unwrap_or(0) as i32;
-    let uvlock = obj.get("uvlock").and_then(Value::as_bool).unwrap_or(false);
-    let weight = obj.get("weight").and_then(Value::as_u64).unwrap_or(1) as u32;
+/// Lowers a single typed model reference into the public representation.
+fn model_ref_from_document(value: ModelRefDocument) -> Result<ModelRef, BlockStateError> {
+    let model = ResourceLocation::parse(&value.model)?;
     Ok(ModelRef {
         model,
-        x,
-        y,
-        uvlock,
-        weight,
+        x: value.x,
+        y: value.y,
+        uvlock: value.uvlock,
+        weight: value.weight,
     })
 }
 
-/// Parses a single multipart case (`{when?, apply}`).
-fn parse_multipart_case(value: &Value) -> Result<MultipartCase, BlockStateError> {
-    let obj = value
-        .as_object()
-        .ok_or_else(|| BlockStateError::InvalidField {
-            field: "multipart",
-            reason: "case must be an object".to_string(),
-        })?;
-    let apply = obj
-        .get("apply")
-        .ok_or_else(|| BlockStateError::InvalidField {
-            field: "apply",
-            reason: "missing".to_string(),
-        })?;
-    let apply = parse_model_refs(apply)?;
-    let when = obj.get("when").map(parse_when).transpose()?;
+/// Lowers a single multipart case (`{when?, apply}`).
+fn multipart_case_from_document(
+    value: MultipartCaseDocument,
+) -> Result<MultipartCase, BlockStateError> {
+    let apply = model_refs_from_document(value.apply)?;
+    let when = value.when.map(when_from_document).transpose()?;
     Ok(MultipartCase { when, apply })
 }
 
-/// Parses a `when` object into a [`When`] tree.
-fn parse_when(value: &Value) -> Result<When, BlockStateError> {
-    let obj = value
-        .as_object()
-        .ok_or_else(|| BlockStateError::InvalidField {
-            field: "when",
-            reason: "expected an object".to_string(),
-        })?;
-
-    let parse_list = |v: &Value| -> Result<Vec<When>, BlockStateError> {
-        v.as_array()
-            .ok_or_else(|| BlockStateError::InvalidField {
-                field: "when",
-                reason: "OR/AND must be an array".to_string(),
-            })?
-            .iter()
-            .map(parse_when)
-            .collect()
-    };
-
-    if let Some(or) = obj.get("OR") {
-        return Ok(When::Or(parse_list(or)?));
+/// Lowers a typed `when` object into a [`When`] tree.
+fn when_from_document(value: WhenDocument) -> Result<When, BlockStateError> {
+    if let Some(or) = value.or {
+        return Ok(When::Or(
+            or.into_iter().map(when_from_document).collect::<Result<_, _>>()?,
+        ));
     }
-    if let Some(and) = obj.get("AND") {
-        return Ok(When::And(parse_list(and)?));
+    if let Some(and) = value.and {
+        return Ok(When::And(
+            and.into_iter().map(when_from_document).collect::<Result<_, _>>()?,
+        ));
     }
 
     // Otherwise an implicit AND of property predicates.
-    let mut predicates = Vec::with_capacity(obj.len());
-    for (property, raw) in obj {
-        let as_string = value_to_property_string(raw)?;
+    let mut predicates = Vec::with_capacity(value.properties.len());
+    for (property, raw) in value.properties {
+        let as_string = property_value_to_string(raw);
         let values = as_string.split('|').map(str::to_string).collect();
         predicates.push(When::Match {
             property: property.clone(),
@@ -305,15 +323,41 @@ fn parse_when(value: &Value) -> Result<When, BlockStateError> {
     }
 }
 
-/// Coerces a `when` predicate value (string, bool, or number) to a string.
-fn value_to_property_string(value: &Value) -> Result<String, BlockStateError> {
+/// Coerces a typed `when` predicate value (string, bool, or number) to a string.
+fn property_value_to_string(value: PropertyValueDocument) -> String {
     match value {
-        Value::String(s) => Ok(s.clone()),
-        Value::Bool(b) => Ok(b.to_string()),
-        Value::Number(n) => Ok(n.to_string()),
-        _ => Err(BlockStateError::InvalidField {
-            field: "when",
-            reason: "property value must be a string, bool, or number".to_string(),
-        }),
+        PropertyValueDocument::String(s) => s,
+        PropertyValueDocument::Bool(b) => b.to_string(),
+        PropertyValueDocument::Number(n) => n.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BlockStateDocument, PropertyValueDocument};
+
+    #[test]
+    fn typed_document_round_trips_the_recursive_schema() {
+        let source = r#"{
+            "multipart":[
+                {"apply":{"model":"minecraft:block/stone"}},
+                {"when":{"OR":[{"north":"true"},{"south":false}]},"apply":[
+                    {"model":"minecraft:block/oak_fence","weight":2}
+                ]}
+            ]
+        }"#;
+        let document: BlockStateDocument = serde_json::from_str(source).unwrap();
+        let encoded = serde_json::to_string(&document).unwrap();
+        let decoded: BlockStateDocument = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(document, decoded);
+        assert!(matches!(
+            decoded
+                .multipart
+                .as_ref()
+                .and_then(|cases| cases.get(1))
+                .and_then(|case| case.when.as_ref())
+                .and_then(|when| when.properties.get("south")),
+            None | Some(PropertyValueDocument::Bool(false))
+        ));
     }
 }
