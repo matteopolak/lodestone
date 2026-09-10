@@ -238,7 +238,7 @@ fn place_speleothem_base_if_possible(
     z: i32,
 ) {
     if cfg.replaceable_blocks.contains(base_at(grid, x, y, z)) {
-        grid.set_if_in_bounds(x, y, z, cfg.base_block.clone());
+        grid.set_state_if_in_bounds(x, y, z, &cfg.base_block);
     }
 }
 
@@ -478,7 +478,7 @@ fn replace_speleothem_base_layer(
         if !cfg.replaceable_blocks.contains(base_at(grid, pos.x, y, pos.z)) {
             return;
         }
-        grid.set_if_in_bounds(pos.x, y, pos.z, cfg.base_block.clone());
+        grid.set_state_if_in_bounds(pos.x, y, pos.z, &cfg.base_block);
     }
 }
 
@@ -914,7 +914,7 @@ pub(super) fn place_spring(pos: BlockPos, cfg: &SpringCfg, grid: &mut VegGrid) {
         }
     }
     if rock_count == cfg.rock_count && hole_count == cfg.hole_count {
-        grid.set_if_in_bounds(pos.x, pos.y, pos.z, cfg.state.clone());
+        grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, &cfg.state);
     }
 }
 
@@ -1177,7 +1177,7 @@ pub(super) fn place_block_blob<R: RandomSource>(
                 for z in (origin.z - zr)..=(origin.z + zr) {
                     let d = (x - origin.x).pow(2) + (y - origin.y).pow(2) + (z - origin.z).pow(2);
                     if (d as f32) <= tr * tr {
-                        grid.set_if_in_bounds(x, y, z, cfg.state.clone());
+                        grid.set_state_if_in_bounds(x, y, z, &cfg.state);
                     }
                 }
             }
@@ -1255,11 +1255,11 @@ pub(super) fn place_delta<R: RandomSource>(
                 return;
             }
             if has_rim {
-                grid.set_if_in_bounds(pos.x, pos.y, pos.z, cfg.rim.clone());
+                grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, &cfg.rim);
             }
             let contents = BlockPos { x: pos.x + rim_x, y: pos.y, z: pos.z + rim_z };
             if delta_clear(grid, contents, &cfg.contents) {
-                grid.set_if_in_bounds(contents.x, contents.y, contents.z, cfg.contents.clone());
+                grid.set_state_if_in_bounds(contents.x, contents.y, contents.z, &cfg.contents);
             }
         },
         radius_x,
@@ -1335,7 +1335,7 @@ fn place_basalt_column(grid: &mut VegGrid, origin: BlockPos, height: i32, reach:
             let mut blocks = height - distance / 2;
             while blocks >= 0 {
                 if air_or_lava_ocean(grid, cursor) {
-                    grid.set_if_in_bounds(cursor.x, cursor.y, cursor.z, "minecraft:basalt[axis=y]".to_string());
+                    grid.set_state_if_in_bounds(cursor.x, cursor.y, cursor.z, "minecraft:basalt[axis=y]");
                     cursor.y += 1;
                 } else if base_at(grid, cursor.x, cursor.y, cursor.z) == "minecraft:basalt" {
                     cursor.y += 1;
@@ -1419,7 +1419,7 @@ pub(super) fn place_replace_blobs<R: RandomSource>(
                 }
                 let (x, y, z) = (pos.x + dx, cy + dy, pos.z + dz);
                 if base_at(grid, x, y, z) == cfg.target {
-                    grid.set_if_in_bounds(x, y, z, cfg.state.clone());
+                    grid.set_state_if_in_bounds(x, y, z, &cfg.state);
                 }
             }
         }
@@ -1441,7 +1441,7 @@ pub(super) fn place_glowstone_blob<R: RandomSource>(
     if above != "minecraft:netherrack" && above != "minecraft:basalt" && above != "minecraft:blackstone" {
         return;
     }
-    grid.set_if_in_bounds(pos.x, pos.y, pos.z, GLOWSTONE.to_string());
+    grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, GLOWSTONE);
     for _ in 0..1500 {
         let x = pos.x + random.next_int_bounded(8) - random.next_int_bounded(8);
         let y = pos.y - random.next_int_bounded(12);
@@ -1459,7 +1459,7 @@ pub(super) fn place_glowstone_blob<R: RandomSource>(
             }
         }
         if neighbours == 1 {
-            grid.set_if_in_bounds(x, y, z, GLOWSTONE.to_string());
+            grid.set_state_if_in_bounds(x, y, z, GLOWSTONE);
         }
     }
 }
@@ -1482,12 +1482,12 @@ pub(super) fn place_basalt_pillar<R: RandomSource>(
         if y < min || y > max {
             return;
         }
-        grid.set_if_in_bounds(pos.x, y, pos.z, BASALT.to_string());
+        grid.set_state_if_in_bounds(pos.x, y, pos.z, BASALT);
         for (i, (dx, dz)) in [(0, -1), (0, 1), (-1, 0), (1, 0)].into_iter().enumerate() {
             // N, S, W, E — vanilla's own order for the four hang-off flags.
             if hang[i] {
                 hang[i] = if random.next_int_bounded(10) != 0 {
-                    grid.set_if_in_bounds(pos.x + dx, y, pos.z + dz, BASALT.to_string());
+                    grid.set_state_if_in_bounds(pos.x + dx, y, pos.z + dz, BASALT);
                     true
                 } else {
                     false
@@ -1499,7 +1499,7 @@ pub(super) fn place_basalt_pillar<R: RandomSource>(
     y += 1;
     for (dx, dz) in [(0, -1), (0, 1), (-1, 0), (1, 0)] {
         if random.next_bool() {
-            grid.set_if_in_bounds(pos.x + dx, y, pos.z + dz, BASALT.to_string());
+            grid.set_state_if_in_bounds(pos.x + dx, y, pos.z + dz, BASALT);
         }
     }
     y -= 1;
@@ -1518,7 +1518,7 @@ pub(super) fn place_basalt_pillar<R: RandomSource>(
                     }
                 }
                 if !air_at(grid, bx, by - 1, bz) {
-                    grid.set_if_in_bounds(bx, by, bz, BASALT.to_string());
+                    grid.set_state_if_in_bounds(bx, by, bz, BASALT);
                 }
             }
         }
@@ -1559,7 +1559,7 @@ pub(super) fn place_desert_well<R: RandomSource>(
         }
     }
     let set = |grid: &mut VegGrid, dx: i32, dy: i32, dz: i32, s: &str| {
-        grid.set_if_in_bounds(origin.x + dx, origin.y + dy, origin.z + dz, s.to_string());
+        grid.set_state_if_in_bounds(origin.x + dx, origin.y + dy, origin.z + dz, s);
     };
     for oy in -2..=0 {
         for ox in -2..=2 {
@@ -1626,7 +1626,7 @@ pub(super) fn place_blue_ice<R: RandomSource>(random: &mut R, pos: BlockPos, gri
     if !found {
         return;
     }
-    grid.set_if_in_bounds(pos.x, pos.y, pos.z, BLUE_ICE.to_string());
+    grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, BLUE_ICE);
     for _ in 0..200 {
         let y_off = random.next_int_bounded(5) - random.next_int_bounded(6);
         let mut xz_diff = 3;
@@ -1649,7 +1649,7 @@ pub(super) fn place_blue_ice<R: RandomSource>(random: &mut R, pos: BlockPos, gri
         }
         for (dx, dy, dz) in DIRECTIONS {
             if base_at(grid, x + dx, y + dy, z + dz) == BLUE_ICE {
-                grid.set_if_in_bounds(x, y, z, BLUE_ICE.to_string());
+                grid.set_state_if_in_bounds(x, y, z, BLUE_ICE);
                 break;
             }
         }
@@ -1671,7 +1671,7 @@ pub(super) fn place_kelp<R: RandomSource>(random: &mut R, pos: BlockPos, grid: &
                 let age = random.next_int_bounded(4) + 20;
                 grid.set_if_in_bounds(x, cy, z, format!("minecraft:kelp[age={age}]"));
             } else {
-                grid.set_if_in_bounds(x, cy, z, "minecraft:kelp_plant".to_string());
+                grid.set_state_if_in_bounds(x, cy, z, "minecraft:kelp_plant");
             }
         } else if h > 0 {
             let below = cy - 1;
@@ -1730,11 +1730,11 @@ pub(super) fn place_seagrass<R: RandomSource>(
     }
     if is_tall {
         if water_at(grid, x, y + 1, z) {
-            grid.set_if_in_bounds(x, y, z, "minecraft:tall_seagrass[half=lower]".to_string());
-            grid.set_if_in_bounds(x, y + 1, z, "minecraft:tall_seagrass[half=upper]".to_string());
+            grid.set_state_if_in_bounds(x, y, z, "minecraft:tall_seagrass[half=lower]");
+            grid.set_state_if_in_bounds(x, y + 1, z, "minecraft:tall_seagrass[half=upper]");
         }
     } else {
-        grid.set_if_in_bounds(x, y, z, "minecraft:seagrass".to_string());
+        grid.set_state_if_in_bounds(x, y, z, "minecraft:seagrass");
     }
 }
 
@@ -1850,7 +1850,7 @@ fn place_growing_column_with_age<R: RandomSource>(
                 grid.set_if_in_bounds(pos.x, pos.y, pos.z, format!("{head}[age={age}]"));
                 return;
             }
-            grid.set_if_in_bounds(pos.x, pos.y, pos.z, plant.to_string());
+            grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, plant);
         }
         pos.y += step;
         h += 1;
@@ -1871,7 +1871,7 @@ pub(super) fn place_weeping_vines<R: RandomSource>(
     if above != "minecraft:netherrack" && above != WART {
         return;
     }
-    grid.set_if_in_bounds(pos.x, pos.y, pos.z, WART.to_string());
+    grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, WART);
     for _ in 0..200 {
         let x = pos.x + random.next_int_bounded(6) - random.next_int_bounded(6);
         let y = pos.y + random.next_int_bounded(2) - random.next_int_bounded(5);
@@ -1890,7 +1890,7 @@ pub(super) fn place_weeping_vines<R: RandomSource>(
             }
         }
         if neighbours == 1 {
-            grid.set_if_in_bounds(x, y, z, WART.to_string());
+            grid.set_state_if_in_bounds(x, y, z, WART);
         }
     }
     for _ in 0..100 {
@@ -1994,7 +1994,7 @@ pub(super) fn place_bamboo<R: RandomSource>(
                     .beneath_bamboo_podzol_replaceable
                     .contains(base_at(grid, x, y, z))
                 {
-                    grid.set_if_in_bounds(x, y, z, "minecraft:podzol[snowy=false]".to_string());
+                    grid.set_state_if_in_bounds(x, y, z, "minecraft:podzol[snowy=false]");
                 }
             }
         }
@@ -2080,7 +2080,7 @@ fn place_growth_if_possible<R: RandomSource>(
             return false;
         }
         let new_state = multiface_state(&cfg.block, &existing, face);
-        grid.set_if_in_bounds(pos.x, pos.y, pos.z, new_state.clone());
+        grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, &new_state);
         if random.next_float() < cfg.chance_of_spreading {
             spread_multiface(random, pos, (dx, dy, dz), &new_state, cfg, grid);
         }
@@ -2335,7 +2335,7 @@ pub(super) fn place_lake<R: RandomSource>(
                 if sturdy_at(grid, at.x, at.y, at.z)
                     && cfg.can_replace_with_barrier.test(grid, tags, at)
                 {
-                    grid.set_if_in_bounds(at.x, at.y, at.z, barrier.clone());
+                    grid.set_state_if_in_bounds(at.x, at.y, at.z, &barrier);
                 }
             }
         }
@@ -2523,7 +2523,7 @@ pub(super) fn place_huge_mushroom_at_height<R: RandomSource>(
         let at = BlockPos { x: pos.x, y: pos.y + y, z: pos.z };
         if let Some(state) = cfg.stem_provider.get_state(grid, tags, random, pos) {
             if replaceable_mushroom_pos(grid, tags, at.x, at.y, at.z) {
-                grid.set_if_in_bounds(at.x, at.y, at.z, state.to_string());
+                grid.set_state_if_in_bounds(at.x, at.y, at.z, state);
             }
         }
     }
@@ -2558,7 +2558,7 @@ pub(super) fn place_huge_fungus<R: RandomSource>(
     // important for the shared stream: the planted configuration must not
     // consume a draw that its source feature does not make.
     let huge = !cfg.planted && random.next_float() < 0.06;
-    grid.set_if_in_bounds(origin.x, origin.y, origin.z, "minecraft:air".to_string());
+    grid.set_state_if_in_bounds(origin.x, origin.y, origin.z, "minecraft:air");
 
     let stem_radius: i32 = if huge { 1 } else { 0 };
     for dx in -stem_radius..=stem_radius {
@@ -2572,7 +2572,7 @@ pub(super) fn place_huge_fungus<R: RandomSource>(
                 if !cfg.planted && corner && random.next_float() >= 0.1 {
                     continue;
                 }
-                grid.set_if_in_bounds(at.x, at.y, at.z, cfg.stem_state.clone());
+                grid.set_state_if_in_bounds(at.x, at.y, at.z, &cfg.stem_state);
             }
         }
     }
@@ -2683,9 +2683,9 @@ fn place_huge_fungus_hat_block<R: RandomSource>(
     grid: &mut VegGrid,
 ) {
     if random.next_float() < decor_probability {
-        grid.set_if_in_bounds(pos.x, pos.y, pos.z, cfg.decor_state.clone());
+        grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, &cfg.decor_state);
     } else if random.next_float() < hat_probability {
-        grid.set_if_in_bounds(pos.x, pos.y, pos.z, cfg.hat_state.clone());
+        grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, &cfg.hat_state);
         if random.next_float() < vines_probability {
             try_place_huge_fungus_vines(random, pos, grid);
         }
@@ -2700,9 +2700,9 @@ fn place_huge_fungus_drop<R: RandomSource>(
     grid: &mut VegGrid,
 ) {
     if base_at(grid, pos.x, pos.y - 1, pos.z) == super::base_id(&cfg.hat_state) {
-        grid.set_if_in_bounds(pos.x, pos.y, pos.z, cfg.hat_state.clone());
+        grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, &cfg.hat_state);
     } else if random.next_float() < 0.15 {
-        grid.set_if_in_bounds(pos.x, pos.y, pos.z, cfg.hat_state.clone());
+        grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, &cfg.hat_state);
         if place_vines && random.next_int_bounded(11) == 0 {
             try_place_huge_fungus_vines(random, pos, grid);
         }
@@ -2805,7 +2805,7 @@ pub(super) fn place_vegetation_patch_with_seed<R: RandomSource>(
             .filter(|p| !patch_exposed(grid, *p))
             .collect();
         for p in &kept {
-            grid.set_if_in_bounds(p.x, p.y, p.z, "minecraft:water".to_string());
+            grid.set_state_if_in_bounds(p.x, p.y, p.z, "minecraft:water");
         }
         surface = kept;
     }
@@ -2891,12 +2891,12 @@ pub(super) fn place_sculk_patch<R: RandomSource>(
             }
             let (x, z) = (pos.x + dx, pos.z + dz);
             if sturdy_at(grid, x, pos.y - 1, z) && air_at(grid, x, pos.y, z) {
-                grid.set_if_in_bounds(x, pos.y - 1, z, "minecraft:sculk".to_string());
+                grid.set_state_if_in_bounds(x, pos.y - 1, z, "minecraft:sculk");
             }
         }
     }
     if random.next_float() <= cfg.catalyst_chance && sturdy_at(grid, pos.x, pos.y - 1, pos.z) {
-        grid.set_if_in_bounds(pos.x, pos.y, pos.z, "minecraft:sculk_catalyst".to_string());
+        grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, "minecraft:sculk_catalyst");
     }
     let extra = cfg.extra_rare_growths.sample(random);
     for _ in 0..extra {
