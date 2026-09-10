@@ -44,6 +44,8 @@ pub(crate) mod generated_block_entity_types;
 pub(crate) mod generated_block_enum;
 #[path = "generated/block_items.rs"]
 pub(crate) mod generated_block_items;
+#[path = "generated/block_property_tables.rs"]
+pub(crate) mod generated_block_property_tables;
 #[path = "generated/block_registry.rs"]
 pub(crate) mod generated_block_registry;
 #[path = "generated/block_solidity.rs"]
@@ -115,6 +117,7 @@ pub mod block;
 pub mod block_blast;
 pub mod block_entity_types;
 pub mod block_items;
+pub mod block_properties;
 pub mod block_solidity;
 pub mod block_survival;
 pub mod block_states;
