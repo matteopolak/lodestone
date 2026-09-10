@@ -35,6 +35,7 @@ use std::{collections::{BTreeMap, BTreeSet, HashMap, HashSet}, sync::Arc};
 
 use crate::feature::{PlacedOre, apply_ore_step_3x3_per_source, apply_ore_step_3x3_per_source_at_step};
 use crate::rng::{WorldgenRandom, XoroshiroRandomSource};
+use crate::stage_schedule::OVERWORLD_DECORATION_STEPS;
 
 use super::OverworldGenerator;
 
@@ -1180,7 +1181,8 @@ impl OverworldGenerator {
                 random.begin_decoration_source();
                 let decoration_seed = random.set_decoration_seed(self.seed, origin.x, origin.z);
 
-                for step in [0_i32, 1, 2, 3, 4, 6, 7, 8, crate::feature::STEP_VEGETAL_DECORATION] {
+                for &step_kind in OVERWORLD_DECORATION_STEPS {
+                    let step = step_kind.ordinal();
                     let mut decoration_at = 0usize;
                     let mut ore_at = 0usize;
                     loop {

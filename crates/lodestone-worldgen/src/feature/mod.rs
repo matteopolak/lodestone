@@ -54,6 +54,7 @@ use serde_json::Value;
 
 use crate::math;
 use crate::rng::{RandomSource, WorldgenRandom};
+use crate::stage_schedule::DecorationStep;
 
 use self::region_view::RegionView;
 
@@ -84,7 +85,7 @@ pub mod top_layer;
 pub mod ore_probe;
 
 /// `GenerationStep.Decoration.UNDERGROUND_ORES.ordinal()`.
-pub const STEP_UNDERGROUND_ORES: i32 = 6;
+pub const STEP_UNDERGROUND_ORES: i32 = DecorationStep::UndergroundOres.ordinal();
 
 /// `GenerationStep.Decoration.VEGETAL_DECORATION.ordinal()` — grass, flowers
 /// and trees. One past `UNDERGROUND_DECORATION`/`FLUID_SPRINGS`
@@ -94,7 +95,7 @@ pub const STEP_UNDERGROUND_ORES: i32 = 6;
 /// UNDERGROUND_STRUCTURES, SURFACE_STRUCTURES, STRONGHOLDS, UNDERGROUND_ORES,
 /// UNDERGROUND_DECORATION, FLUID_SPRINGS, VEGETAL_DECORATION,
 /// TOP_LAYER_MODIFICATION`).
-pub const STEP_VEGETAL_DECORATION: i32 = 9;
+pub const STEP_VEGETAL_DECORATION: i32 = DecorationStep::VegetalDecoration.ordinal();
 
 /// A block position with `i32` components (vanilla's own block-position record).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
