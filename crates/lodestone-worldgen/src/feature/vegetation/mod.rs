@@ -252,6 +252,7 @@ mod dungeon;
 mod fossil;
 mod geode;
 mod ice_spike;
+mod iceberg;
 mod large_dripstone;
 pub mod features;
 mod grid;
@@ -837,6 +838,10 @@ fn place_configured_feature_with_seed<R: RandomSource>(
         ConfiguredFeature::IceSpike(cfg) => {
             census_bump(|c| c.other_feature += 1);
             ice_spike::place_ice_spike(random, pos, cfg, grid);
+        }
+        ConfiguredFeature::Iceberg(cfg) => {
+            census_bump(|c| c.other_feature += 1);
+            iceberg::place_iceberg(random, pos, cfg, grid);
         }
         ConfiguredFeature::LargeDripstone(cfg) => {
             census_bump(|c| c.other_feature += 1);

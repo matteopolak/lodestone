@@ -290,6 +290,7 @@ fn feature_type(feature: &ConfiguredFeature) -> Option<&str> {
         ConfiguredFeature::Geode(_) => "minecraft:geode",
         ConfiguredFeature::Fossil(_) => "minecraft:fossil",
         ConfiguredFeature::IceSpike(_) => "minecraft:spike",
+        ConfiguredFeature::Iceberg(_) => "minecraft:iceberg",
         ConfiguredFeature::LargeDripstone(_) => "minecraft:large_dripstone",
         ConfiguredFeature::NoOp => "minecraft:no_op",
         ConfiguredFeature::Unsupported(_) => return None,
