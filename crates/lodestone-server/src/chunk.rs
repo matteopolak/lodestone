@@ -865,6 +865,23 @@ impl ChunkColumn {
                     event.position[1],
                     event.position[2],
                 );
+                // Structure placement reports a state-owned creation before
+                // the template's attachment-survival pass runs.  A later
+                // pass may therefore have replaced that state with air (or
+                // another block-entity type).  Only carry the event across
+                // the source boundary when the completed block still owns
+                // the same type; otherwise it is an orphan packet sidecar.
+                let actual_type = lodestone_data::block_states::state_id(out.block_state(
+                    position.x.rem_euclid(16),
+                    position.y,
+                    position.z.rem_euclid(16),
+                ))
+                .and_then(lodestone_data::block_states::StateId::new)
+                .and_then(lodestone_data::block_entity_types::block_entity_type)
+                .map(lodestone_data::block_entity_types::block_entity_type_name);
+                if actual_type != Some(event.type_id.as_str()) {
+                    continue;
+                }
                 if entities.iter().any(|(existing, _)| *existing == position) {
                     continue;
                 }
@@ -1039,6 +1056,39 @@ impl ChunkColumn {
                     None if !entity_kind.is_extension() => continue,
                     None => {}
                     Some(_) => continue,
+                }
+            }
+            retained.push((position, entity));
+        }
+        self.block_entities = retained;
+        self.populate_missing_block_entity_states(cx, cz);
+    }
+
+    /// Reconciles sidecars produced by world generation against the final
+    /// block field, removing every record whose owning state was removed or
+    /// replaced and materializing records for final state-owned blocks that
+    /// were written after the sidecar pass.
+    ///
+    /// This is deliberately stricter than [`Self::reconcile_block_entity_states`]:
+    /// the latter preserves unclaimed extension records for plugin-owned data,
+    /// while generated sidecars are authenticated by the generated block state
+    /// and must never survive without that state.
+    pub fn reconcile_generated_block_entity_states(&mut self, cx: i32, cz: i32) {
+        let existing = std::mem::take(&mut self.block_entities);
+        let mut retained = Vec::with_capacity(existing.len());
+        for (position, entity) in existing {
+            let local_x = position.x - cx * 16;
+            let local_z = position.z - cz * 16;
+            if (0..16).contains(&local_x)
+                && (0..16).contains(&local_z)
+                && self.contains_y(position.y)
+            {
+                let state = self.resolved_block_state_id(local_x, position.y, local_z);
+                let expected = lodestone_data::block_entity_types::block_entity_type(state)
+                    .map(BlockEntityKind::from_registry_type);
+                match expected {
+                    Some(expected) if expected == entity.kind() => {}
+                    _ => continue,
                 }
             }
             retained.push((position, entity));
@@ -4150,6 +4200,19 @@ impl EndChunkSource {
         });
         packet_entities.dedup_by(|(left, _), (right, _)| left == right);
         column.block_entities = packet_entities;
+        // A source completion may have written over a structure attachment
+        // after its sidecar was installed.  Reconcile the detached packet
+        // against the final block field so removed or replaced generated
+        // blocks cannot leave an orphan record.  Ender chests are the one
+        // state-owned type deliberately omitted from a fresh End packet.
+        column.reconcile_generated_block_entity_states(cx, cz);
+        column
+            .block_entities
+            .retain(|(_, entity)| entity.type_id() != "minecraft:ender_chest");
+        column.block_entities.sort_by_key(|(position, entity)| {
+            (position.x, position.y, position.z, entity.type_id().to_owned())
+        });
+        column.block_entities.dedup_by(|(left, _), (right, _)| left == right);
     }
 
     fn complete_rectangle(coords: &[(i32, i32)]) -> bool {
@@ -4288,7 +4351,7 @@ impl EndChunkSource {
         // the block state is installed, so materialize those records after
         // preserving the richer patterned banner sidecars above.
         column.set_block_entities(entities);
-        column.populate_missing_block_entity_states(cx, cz);
+        column.reconcile_generated_block_entity_states(cx, cz);
         column.set_structures(starts, references);
     }
 }
@@ -4632,6 +4695,45 @@ mod tests {
                 BlockPos::new(4542, 170, 1389),
             ]
         );
+    }
+
+    /// The external End stream records no block entities for this chunk.  The
+    /// four positions below are template banner writes whose support is lost
+    /// during attachment survival; retaining their creation events would
+    /// encode records for blocks that are now air.
+    #[test]
+    fn end_chunk_source_drops_orphaned_banner_events_after_attachment_survival() {
+        let source = crate::worldgen_data::end_chunk_source(42);
+        let column = source.column(283, 81);
+        let orphaned = [
+            BlockPos::new(4535, 118, 1308),
+            BlockPos::new(4537, 118, 1306),
+            BlockPos::new(4541, 118, 1306),
+            BlockPos::new(4543, 118, 1308),
+        ];
+        assert!(column.block_entities().is_empty(), "the external chunk has no block entities");
+        for position in orphaned {
+            assert_eq!(
+                column.block_state(position.x.rem_euclid(16), position.y, position.z.rem_euclid(16)),
+                "minecraft:air",
+                "removed banner at {position:?} must not retain a state"
+            );
+            assert!(
+                column.block_entities().iter().all(|(actual, _)| *actual != position),
+                "removed banner at {position:?} must not retain a sidecar"
+            );
+        }
+
+        // Negative control: the adjacent captured city chunk has supported
+        // banners, so the same sidecar path must still retain its three
+        // patterned records.
+        let control = source.column(283, 86);
+        let surviving = control
+            .block_entities()
+            .iter()
+            .filter(|(_, entity)| entity.type_id() == "minecraft:banner")
+            .count();
+        assert_eq!(surviving, 3, "supported banners must remain visible to the packet path");
     }
 
     #[test]
