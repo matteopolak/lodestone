@@ -14,6 +14,18 @@ fn nav(label: &str) -> MenuNav {
         "lodestone-friends-overlay-{label}-{}",
         std::process::id()
     ));
+    let profile_id = uuid::Uuid::new_v4();
+    let mut metadata = lodestone_auth::AccountsMetadata::default();
+    metadata.upsert(lodestone_auth::AccountProfile {
+        profile_id,
+        username: "FriendsLifecycleAccount".to_owned(),
+        skin_url: None,
+        last_used: 1,
+    });
+    metadata.selected = Some(profile_id);
+    metadata
+        .save_to(&root.join("profiles.json"))
+        .expect("the lifecycle roster must be writable");
     MenuNav::with_paths(
         root.join("servers.json"),
         root.join("options.json"),
