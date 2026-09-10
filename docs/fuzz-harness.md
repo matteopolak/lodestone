@@ -7,6 +7,16 @@ tick-aligned differential harness. Track B's fixed replay is a deterministic,
 bounded action script that compares a caller-named block-state region after
 every tick and retains the seed and script alongside the first divergence.
 
+The legacy status boundary has two deliberately separate lanes. `tests/legacy_status_model.rs`
+generates valid UTF-16BE response packets and compares their parsed fields with
+an independent layout model, including a detector control that must reject a
+missing protocol field. `tests/legacy_status_raw_bytes.rs` complements it with
+fixed malformed framing edges and 256 bounded arbitrary-byte cases. It drives
+the production parser from the raw packet boundary and requires only clean
+`Err`/`Ok` results, so a panic in the length, UTF-16, or field-validation path
+cannot hide behind the valid-input model. The 4 KiB input cap keeps this
+robustness lane cheap enough for the ordinary workspace test run.
+
 ## How it works
 
 `differential::FixedActionReplay` owns an opaque replay seed, ordered
