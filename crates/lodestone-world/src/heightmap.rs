@@ -283,4 +283,38 @@ mod tests {
         let err = Heightmaps::decode(384, &mut Reader::new(&w.into_vec())).unwrap_err();
         assert!(matches!(err, WorldError::WrongLongCount { .. }));
     }
+
+    #[test]
+    fn incremental_column_model_raises_and_rescans_only_when_top_is_removed() {
+        // This small model is intentionally independent of PackedArray and of
+        // the server column representation. It captures the event rule used
+        // by a live heightmap: an opaque write raises immediately; removing
+        // the stored top scans downward; edits below the top do not rescan.
+        let mut blocks = [false; 64];
+        let mut stored = 0usize;
+        fn write(blocks: &mut [bool; 64], stored: &mut usize, y: usize, opaque: bool) {
+            blocks[y] = opaque;
+            if opaque {
+                if y >= *stored {
+                    *stored = y + 1;
+                }
+            } else if *stored != 0 && y + 1 == *stored {
+                *stored = (0..y)
+                    .rev()
+                    .find(|&candidate| blocks[candidate])
+                    .map_or(0, |candidate| candidate + 1);
+            }
+        }
+
+        write(&mut blocks, &mut stored, 55, true);
+        write(&mut blocks, &mut stored, 56, true);
+        write(&mut blocks, &mut stored, 57, true);
+        assert_eq!(stored, 58);
+        write(&mut blocks, &mut stored, 56, false);
+        assert_eq!(stored, 58, "removing below the top must not rescan");
+        write(&mut blocks, &mut stored, 57, false);
+        assert_eq!(stored, 56, "removing the top must retain the next opaque row");
+        write(&mut blocks, &mut stored, 57, true);
+        assert_eq!(stored, 58, "a later opaque write raises from the retained value");
+    }
 }
