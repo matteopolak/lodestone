@@ -32,6 +32,12 @@ cache inventory state on its worker. It must also preserve the explicit
 refusals: a missing player, invalid slot, empty slot, zero count, or unmodeled
 component is an error, not an empty item or a successful no-op.
 
+Player saves preserve the typed `minecraft:damage` component as a checked NBT
+integer, so durability observed through this snapshot remains stable across a
+disconnect and reload. A malformed or out-of-range damage value is marked as an
+unmodeled component and the next save refuses before replacing the previous
+player file; it is never silently reset or truncated.
+
 The first JNI read is `playerHandleNativeItemKey(long, int)`. It resolves a
 generation-checked player handle, sends only the copied UUID and native slot
 through a bounded host port, and returns a key string or `null` for a real
