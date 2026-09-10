@@ -53,8 +53,18 @@ spawned mob is ordinary use of an accessor that already shipped for combat.
 `observe` returns an owned identity/motion/health copy, while `mutate` accepts typed knockback,
 health, effect, teleport, and despawn operations. Mob knockback changes the snapshot consumed by
 the entity streamer. Player teleports and effects enter `PlayerRegistry`'s directed queue, whose
-owning connection emits the authoritative packet. Unsupported operations and unknown ids are
-reported explicitly instead of being silently applied to a different entity.
+owning connection emits the authoritative packet. Player observations also include a copied
+six-slot equipment snapshot from that connection-owned inventory; empty slots are explicit and the
+returned stacks are owned values. Mobs currently report an empty equipment vector because their
+internal combat equipment has no server-side equipment snapshot producer. Unsupported operations
+and unknown ids are reported explicitly instead of being silently applied to a different entity.
+
+`EntityLifecycleCursor` supplies the bounded lifecycle half of the same surface. A plugin owns the
+cursor and polls it for copied `Spawned`/`Despawned` edges from the live mob and player stores. The
+first poll reports the current population, later polls report only additions and removals, and a
+removed edge carries the last copied observation. There is no process-lifetime event log, callback,
+ECS handle, or lock guard for a plugin to retain; updates to a surviving entity remain an explicit
+`observe` call.
 
 `crates/lodestone-server/tests/native_plugin_spawns_and_despawns_a_mob.rs` is the real-consumer gate: it
 drives a real, running `IntegratedServer` through `spawn_mob`/`despawn_mob` only — never

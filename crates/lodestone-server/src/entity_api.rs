@@ -10,7 +10,9 @@
 //! boundary. A future canonical id wrapper can replace that field without
 //! changing the operation or observation shapes.
 
-use lodestone_model::{ResourceKey, Rotation, Vec3};
+use std::collections::HashMap;
+
+use lodestone_model::{EntityEquipment, ResourceKey, Rotation, Vec3};
 use uuid::Uuid;
 
 use crate::commands::Effect;
@@ -39,6 +41,69 @@ pub struct EntityObservation {
     pub health: Option<f32>,
     /// Maximum health for a mob.
     pub max_health: Option<f32>,
+    /// The six player equipment slots, including empty slots. Mobs currently
+    /// expose an empty vector because their equipment has no server-side
+    /// equipment snapshot producer yet.
+    pub equipment: Vec<EntityEquipment>,
+}
+
+/// A lifecycle edge observed by a plugin-owned [`EntityLifecycleCursor`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum EntityLifecycleEvent {
+    /// The entity was present when the cursor first observed it.
+    Spawned(EntityObservation),
+    /// The entity was present in the previous poll and is no longer live.
+    Despawned(EntityObservation),
+}
+
+/// Caller-owned cursor for bounded entity lifecycle observation.
+///
+/// The cursor stores only copied observations keyed by the server entity id.
+/// It never retains an ECS entity, a mob/player lock guard, or a callback into
+/// the connection task. A fresh cursor reports every currently live entity as
+/// `Spawned`; subsequent polls report only additions and removals. Changes to
+/// an existing entity are available through [`ServerEntityApi::observe`] and
+/// deliberately do not create an unbounded event log here.
+#[derive(Debug, Default)]
+pub struct EntityLifecycleCursor {
+    known: HashMap<i32, EntityObservation>,
+}
+
+impl EntityLifecycleCursor {
+    /// Creates a cursor that starts at the next poll's live population.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns lifecycle edges since the previous poll and advances the
+    /// cursor. Events are sorted by entity id for deterministic plugin code and
+    /// tests, independent of the mob/player store iteration order.
+    pub fn poll(&mut self, api: &ServerEntityApi) -> Vec<EntityLifecycleEvent> {
+        let current: HashMap<_, _> = api
+            .observations()
+            .into_iter()
+            .map(|observation| (observation.id, observation))
+            .collect();
+        let mut events = Vec::new();
+
+        for (id, observation) in &current {
+            if !self.known.contains_key(id) {
+                events.push(EntityLifecycleEvent::Spawned(observation.clone()));
+            }
+        }
+        for (id, observation) in &self.known {
+            if !current.contains_key(id) {
+                events.push(EntityLifecycleEvent::Despawned(observation.clone()));
+            }
+        }
+        events.sort_by_key(|event| match event {
+            EntityLifecycleEvent::Spawned(observation)
+            | EntityLifecycleEvent::Despawned(observation) => observation.id,
+        });
+        self.known = current;
+        events
+    }
 }
 
 /// A server-authoritative operation against one entity.
@@ -105,6 +170,7 @@ impl ServerEntityApi {
                 velocity: mob.velocity(),
                 health: Some(mob.health()),
                 max_health: Some(mob.max_health()),
+                equipment: Vec::new(),
             })
         }) {
             return Some(observation);
@@ -125,7 +191,55 @@ impl ServerEntityApi {
                 velocity: Vec3::new(0.0, 0.0, 0.0),
                 health: None,
                 max_health: None,
+                equipment: self
+                    .players
+                    .inventory(player.uuid)
+                    .map_or_else(Vec::new, |inventory| inventory.equipment_snapshot()),
             })
+    }
+
+    /// Copies every currently live mob and connected player into owned
+    /// observations. This is the snapshot producer used by
+    /// [`EntityLifecycleCursor`]; no internal guard escapes the call.
+    #[must_use]
+    pub fn observations(&self) -> Vec<EntityObservation> {
+        let mut observations = self
+            .mobs
+            .with(|sim| {
+                sim.iter()
+                    .map(|mob| EntityObservation {
+                        id: mob.id(),
+                        uuid: mob.uuid(),
+                        entity_type: mob.entity_type().clone(),
+                        position: mob.position(),
+                        rotation: mob.rotation(),
+                        velocity: mob.velocity(),
+                        health: Some(mob.health()),
+                        max_health: Some(mob.max_health()),
+                        equipment: Vec::new(),
+                    })
+                    .collect::<Vec<_>>()
+            });
+        observations.extend(self.players.candidates().into_iter().map(|player| {
+            EntityObservation {
+                id: player.entity_id,
+                uuid: player.uuid,
+                entity_type: "minecraft:player"
+                    .parse()
+                    .expect("the built-in player entity key is valid"),
+                position: player.position,
+                rotation: player.rotation,
+                velocity: Vec3::new(0.0, 0.0, 0.0),
+                health: None,
+                max_health: None,
+                equipment: self
+                    .players
+                    .inventory(player.uuid)
+                    .map_or_else(Vec::new, |inventory| inventory.equipment_snapshot()),
+            }
+        }));
+        observations.sort_by_key(|observation| observation.id);
+        observations
     }
 
     /// Apply one typed operation against the authoritative mob or player store.
