@@ -1100,6 +1100,7 @@ impl CanyonConfig {
                     return;
                 }
                 let min_gen_y = env.min_gen_y;
+                let wf = width_factors.clone();
                 carve_ellipsoid(
                     env,
                     x,
@@ -1107,8 +1108,8 @@ impl CanyonConfig {
                     z,
                     horizontal_radius,
                     vertical_radius,
-                    |xd, yd, zd, world_y| {
-                        canyon_should_skip(&width_factors, min_gen_y, xd, yd, zd, world_y)
+                    move |xd, yd, zd, world_y| {
+                        canyon_should_skip(&wf, min_gen_y, xd, yd, zd, world_y)
                     },
                 );
             }
