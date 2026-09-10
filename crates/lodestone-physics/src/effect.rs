@@ -32,6 +32,7 @@
 //! [`PlayerState::movement_speed`]: crate::player::PlayerState::movement_speed
 
 use crate::player::StatusEffects;
+use lodestone_data::mob_effects::MobEffectId;
 
 /// A direct-read movement effect and its 0-based amplifier (level I = `0`).
 ///
@@ -77,29 +78,20 @@ const SPEED_MOVEMENT_SPEED_BASE: f32 = 0.2;
 /// added as an "add multiplied total" modifier.
 const SLOWNESS_MOVEMENT_SPEED_BASE: f32 = -0.15;
 
-/// Strips an optional `minecraft:` namespace, so both the canonical
-/// `minecraft:speed` and a bare `speed` resolve identically.
-fn effect_path(effect_id: &str) -> &str {
-    effect_id.strip_prefix("minecraft:").unwrap_or(effect_id)
-}
-
 /// Classifies a mob effect's movement consequence from its canonical id and
-/// 0-based amplifier.
-///
-/// The id may be namespaced (`minecraft:speed`) or bare (`speed`). Every effect
-/// that does not change movement — including purely cosmetic or combat effects —
-/// maps to [`MovementEffect::None`].
+/// 0-based amplifier. Every effect that does not change movement — including
+/// purely cosmetic or combat effects — maps to [`MovementEffect::None`].
 #[must_use]
-pub fn classify(effect_id: &str, amplifier: u32) -> MovementEffect {
-    match effect_path(effect_id) {
-        "levitation" => MovementEffect::Direct(DirectEffect::Levitation(amplifier)),
-        "slow_falling" => MovementEffect::Direct(DirectEffect::SlowFalling),
-        "dolphins_grace" => MovementEffect::Direct(DirectEffect::DolphinsGrace),
-        "jump_boost" => MovementEffect::Direct(DirectEffect::JumpBoost(amplifier)),
-        "speed" => MovementEffect::MovementSpeed {
+pub fn classify(effect_id: MobEffectId, amplifier: u32) -> MovementEffect {
+    match effect_id {
+        MobEffectId::LEVITATION => MovementEffect::Direct(DirectEffect::Levitation(amplifier)),
+        MobEffectId::SLOW_FALLING => MovementEffect::Direct(DirectEffect::SlowFalling),
+        MobEffectId::DOLPHINS_GRACE => MovementEffect::Direct(DirectEffect::DolphinsGrace),
+        MobEffectId::JUMP_BOOST => MovementEffect::Direct(DirectEffect::JumpBoost(amplifier)),
+        MobEffectId::SPEED => MovementEffect::MovementSpeed {
             amount: f64::from(SPEED_MOVEMENT_SPEED_BASE) * f64::from(amplifier.saturating_add(1)),
         },
-        "slowness" => MovementEffect::MovementSpeed {
+        MobEffectId::SLOWNESS => MovementEffect::MovementSpeed {
             amount: f64::from(SLOWNESS_MOVEMENT_SPEED_BASE)
                 * f64::from(amplifier.saturating_add(1)),
         },
@@ -116,7 +108,7 @@ pub fn classify(effect_id: &str, amplifier: u32) -> MovementEffect {
 /// the direct-read effects). The entity layer adds the returned amount to
 /// its own movement-speed attribute instance; physics never folds it.
 #[must_use]
-pub fn movement_speed_modifier(effect_id: &str, amplifier: u32) -> Option<f64> {
+pub fn movement_speed_modifier(effect_id: MobEffectId, amplifier: u32) -> Option<f64> {
     match classify(effect_id, amplifier) {
         MovementEffect::MovementSpeed { amount } => Some(amount),
         _ => None,
@@ -125,14 +117,14 @@ pub fn movement_speed_modifier(effect_id: &str, amplifier: u32) -> Option<f64> {
 
 impl StatusEffects {
     /// Folds a mob-effect application (`update_mob_effect`) into these effects,
-    /// keyed by canonical id (namespaced or bare) and 0-based amplifier.
+    /// keyed by the validated built-in effect id and 0-based amplifier.
     ///
     /// Only the four direct-read movement effects (Levitation, Slow Falling,
     /// Dolphin's Grace, Jump Boost) are recognised. Everything else — including
     /// Speed / Slowness, which are movement-speed attribute modifiers handled
     /// by [`movement_speed_modifier`] — leaves `self` unchanged. Returns `true`
     /// iff a direct-read field changed as a result.
-    pub fn apply(&mut self, effect_id: &str, amplifier: u32) -> bool {
+    pub fn apply(&mut self, effect_id: MobEffectId, amplifier: u32) -> bool {
         match classify(effect_id, amplifier) {
             MovementEffect::Direct(DirectEffect::Levitation(amp)) => {
                 self.levitation = Some(amp);
@@ -159,12 +151,12 @@ impl StatusEffects {
     /// Clears the matching direct-read field. Returns `true` iff a field that
     /// was set is now cleared (so a no-op removal of an inactive effect reports
     /// `false`).
-    pub fn remove(&mut self, effect_id: &str) -> bool {
-        match effect_path(effect_id) {
-            "levitation" => self.levitation.take().is_some(),
-            "slow_falling" => core::mem::replace(&mut self.slow_falling, false),
-            "dolphins_grace" => core::mem::replace(&mut self.dolphins_grace, false),
-            "jump_boost" => self.jump_boost.take().is_some(),
+    pub fn remove(&mut self, effect_id: MobEffectId) -> bool {
+        match effect_id {
+            MobEffectId::LEVITATION => self.levitation.take().is_some(),
+            MobEffectId::SLOW_FALLING => core::mem::replace(&mut self.slow_falling, false),
+            MobEffectId::DOLPHINS_GRACE => core::mem::replace(&mut self.dolphins_grace, false),
+            MobEffectId::JUMP_BOOST => self.jump_boost.take().is_some(),
             _ => false,
         }
     }
@@ -179,25 +171,25 @@ mod tests {
     use crate::profile::PhysicsProfile;
 
     #[test]
-    fn classify_direct_effects_namespaced_and_bare() {
+    fn classify_direct_effects_uses_typed_generated_ids() {
         assert_eq!(
-            classify("minecraft:levitation", 2),
+            classify(MobEffectId::LEVITATION, 2),
             MovementEffect::Direct(DirectEffect::Levitation(2))
         );
         assert_eq!(
-            classify("levitation", 2),
+            classify(MobEffectId::LEVITATION, 2),
             MovementEffect::Direct(DirectEffect::Levitation(2))
         );
         assert_eq!(
-            classify("minecraft:slow_falling", 0),
+            classify(MobEffectId::SLOW_FALLING, 0),
             MovementEffect::Direct(DirectEffect::SlowFalling)
         );
         assert_eq!(
-            classify("minecraft:dolphins_grace", 0),
+            classify(MobEffectId::DOLPHINS_GRACE, 0),
             MovementEffect::Direct(DirectEffect::DolphinsGrace)
         );
         assert_eq!(
-            classify("minecraft:jump_boost", 1),
+            classify(MobEffectId::JUMP_BOOST, 1),
             MovementEffect::Direct(DirectEffect::JumpBoost(1))
         );
     }
@@ -205,10 +197,9 @@ mod tests {
     #[test]
     fn unknown_and_non_movement_effects_are_none() {
         // A real effect that does not touch movement, plus a nonsense id.
-        assert_eq!(classify("minecraft:night_vision", 0), MovementEffect::None);
-        assert_eq!(classify("minecraft:regeneration", 3), MovementEffect::None);
-        assert_eq!(classify("not_an_effect", 0), MovementEffect::None);
-        assert_eq!(movement_speed_modifier("minecraft:levitation", 0), None);
+        assert_eq!(classify(MobEffectId::from_registry_id(15).unwrap(), 0), MovementEffect::None);
+        assert_eq!(classify(MobEffectId::from_registry_id(9).unwrap(), 3), MovementEffect::None);
+        assert_eq!(movement_speed_modifier(MobEffectId::LEVITATION, 0), None);
     }
 
     #[test]
@@ -216,47 +207,47 @@ mod tests {
         // Vanilla's own attribute-modifier construction: amount *
         // (amplifier + 1), with amount the double-widened float literal
         // 0.2F. The widening is observable: 0.2f64 != f64::from(0.2f32).
-        let amp0 = movement_speed_modifier("minecraft:speed", 0).unwrap();
+        let amp0 = movement_speed_modifier(MobEffectId::SPEED, 0).unwrap();
         assert_eq!(amp0.to_bits(), f64::from(0.2f32).to_bits());
         assert_ne!(amp0.to_bits(), 0.2f64.to_bits());
 
-        let amp1 = movement_speed_modifier("minecraft:speed", 1).unwrap();
+        let amp1 = movement_speed_modifier(MobEffectId::SPEED, 1).unwrap();
         assert_eq!(amp1.to_bits(), (f64::from(0.2f32) * 2.0).to_bits());
     }
 
     #[test]
     fn slowness_modifier_is_negative_widened_float_times_level() {
-        let amp0 = movement_speed_modifier("minecraft:slowness", 0).unwrap();
+        let amp0 = movement_speed_modifier(MobEffectId::SLOWNESS, 0).unwrap();
         assert_eq!(amp0.to_bits(), f64::from(-0.15f32).to_bits());
         assert!(amp0 < 0.0);
-        let amp2 = movement_speed_modifier("slowness", 2).unwrap();
+        let amp2 = movement_speed_modifier(MobEffectId::SLOWNESS, 2).unwrap();
         assert_eq!(amp2.to_bits(), (f64::from(-0.15f32) * 3.0).to_bits());
     }
 
     #[test]
     fn apply_and_remove_round_trip_on_status_effects() {
         let mut e = StatusEffects::default();
-        assert!(e.apply("minecraft:levitation", 3));
+        assert!(e.apply(MobEffectId::LEVITATION, 3));
         assert_eq!(e.levitation, Some(3));
-        assert!(e.apply("minecraft:jump_boost", 1));
+        assert!(e.apply(MobEffectId::JUMP_BOOST, 1));
         assert_eq!(e.jump_boost, Some(1));
-        assert!(e.apply("slow_falling", 0));
+        assert!(e.apply(MobEffectId::SLOW_FALLING, 0));
         assert!(!e.dolphins_grace);
-        assert!(e.apply("dolphins_grace", 0));
+        assert!(e.apply(MobEffectId::DOLPHINS_GRACE, 0));
         assert!(e.dolphins_grace);
 
         // Speed/Slowness are attribute-path effects: apply() must not touch
         // StatusEffects and must report "not a direct-read change".
         let before = e;
-        assert!(!e.apply("minecraft:speed", 4));
-        assert!(!e.apply("minecraft:slowness", 0));
+        assert!(!e.apply(MobEffectId::SPEED, 4));
+        assert!(!e.apply(MobEffectId::SLOWNESS, 0));
         assert_eq!(e, before);
 
-        assert!(e.remove("minecraft:levitation"));
+        assert!(e.remove(MobEffectId::LEVITATION));
         assert_eq!(e.levitation, None);
         // Removing an already-inactive effect is a no-op that reports false.
-        assert!(!e.remove("minecraft:levitation"));
-        assert!(!e.remove("minecraft:speed"));
+        assert!(!e.remove(MobEffectId::LEVITATION));
+        assert!(!e.remove(MobEffectId::SPEED));
     }
 
     /// End-to-end seam proof: routing a decoded effect *id* through
@@ -272,7 +263,7 @@ mod tests {
         }
         let p = PhysicsProfile::mc_1_21();
         let mut effects = StatusEffects::default();
-        assert!(effects.apply("minecraft:levitation", 0));
+        assert!(effects.apply(MobEffectId::LEVITATION, 0));
         let mut s = PlayerState::at(Vec3d::new(0.5, 100.0, 0.5), 0.0).with_effects(effects);
         for _ in 0..40 {
             tick(&mut s, MovementInput::NONE, &Air, &p);
@@ -316,7 +307,7 @@ mod tests {
             s.position.z - 0.5
         };
 
-        let amount = movement_speed_modifier("minecraft:speed", 0).unwrap();
+        let amount = movement_speed_modifier(MobEffectId::SPEED, 0).unwrap();
         let boosted = base_speed * (1.0 + amount); // "add multiplied total" fold
         let plain_dist = walk(base_speed);
         let boosted_dist = walk(boosted);
