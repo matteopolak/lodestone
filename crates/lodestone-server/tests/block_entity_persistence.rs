@@ -25,11 +25,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
+use lodestone_core::Nbt;
 use lodestone_model::{BlockPos, ItemStack};
 use lodestone_server::dimension::Dimension;
 use lodestone_server::region_source::RegionChunkSource;
 use lodestone_server::{
-    BlockEntity, ChunkColumn, ChunkSource, Furnace, FurnaceKind, Hopper, HOPPER_SIZE,
+    BlockEntity, BlockEntityKind, ChunkColumn, ChunkSource, Furnace, FurnaceKind, Hopper,
+    HOPPER_SIZE,
 };
 
 const MIN_Y: i32 = -64;
@@ -452,4 +454,80 @@ fn the_persistent_server_and_its_world_share_one_block_entity_registry() {
         1,
         "the save handle read the registry the world handed out, not a private one"
     );
+}
+
+/// An unknown block-entity key is an extension, not a reason to discard the
+/// record. This drives the real load/reconcile/save path through three
+/// independent world instances: a text-only or built-in-only representation
+/// would either reject the first load or lose the extension when the live
+/// record is written back.
+#[test]
+fn an_extension_block_entity_key_survives_reconciliation_and_reopen() {
+    let dir = tempdir("extension-reconcile");
+    let pos = BlockPos::new(6, 68, 6);
+    let key = "example:portable_storage";
+    let original = Nbt::Compound(vec![
+        ("id".to_owned(), Nbt::String(key.to_owned())),
+        ("x".to_owned(), Nbt::Int(pos.x)),
+        ("y".to_owned(), Nbt::Int(pos.y)),
+        ("z".to_owned(), Nbt::Int(pos.z)),
+        ("custom_marker".to_owned(), Nbt::String("before".to_owned())),
+    ]);
+
+    {
+        let world = open(&dir);
+        world.set_block(pos.x, pos.y, pos.z, "minecraft:chest");
+        world.block_entities().with(|registry| {
+            registry.insert(
+                pos,
+                BlockEntity::Opaque {
+                    id: BlockEntityKind::Extension(key.to_owned()),
+                    nbt: original.clone(),
+                },
+            );
+        });
+        world.save_handle().save().expect("save extension entity");
+    }
+
+    {
+        let world = open(&dir);
+        let _ = world.column(pos.x >> 4, pos.z >> 4);
+        world.block_entities().with(|registry| {
+            let Some(BlockEntity::Opaque { id, nbt }) = registry.get_mut(pos) else {
+                panic!("the extension entity must load as Opaque");
+            };
+            assert_eq!(id, &BlockEntityKind::Extension(key.to_owned()));
+            assert_eq!(nbt, &original);
+            let Nbt::Compound(fields) = nbt else {
+                panic!("the extension payload must remain a compound");
+            };
+            fields.retain(|(name, _)| name != "custom_marker");
+            fields.push((
+                "custom_marker".to_owned(),
+                Nbt::String("after".to_owned()),
+            ));
+        });
+        world
+            .save_handle()
+            .save()
+            .expect("save the reconciled extension entity");
+    }
+
+    let world = open(&dir);
+    let _ = world.column(pos.x >> 4, pos.z >> 4);
+    let (id, nbt) = world.block_entities().with(|registry| {
+        let Some(BlockEntity::Opaque { id, nbt }) = registry.get(pos) else {
+            panic!("the reconciled extension entity must load again");
+        };
+        (id.clone(), nbt.clone())
+    });
+    assert_eq!(id, BlockEntityKind::Extension(key.to_owned()));
+    assert!(matches!(
+        nbt,
+        Nbt::Compound(ref fields)
+            if fields.iter().any(|(name, value)| {
+                name == "custom_marker" && value == &Nbt::String("after".to_owned())
+            })
+    ));
+    std::fs::remove_dir_all(dir).expect("remove extension test world");
 }
