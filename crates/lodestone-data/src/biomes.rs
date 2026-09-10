@@ -1,111 +1,153 @@
-//! The 66 `minecraft:worldgen/biome` ids shipped as 26.2's own base data —
-//! `/execute if biome`'s census.
+//! The generated built-in `minecraft:worldgen/biome` domain and its extension
+//! boundary.
 //!
-//! # Why this is a hand-listed array, not a generated table
-//!
-//! Every other id census in this crate (`block`, `item`, `entity_types`, …)
-//! resolves a **network id** — a registry ordinal carried on the wire — so it
-//! has to be generated from `registries.json` to stay byte-exact with the
-//! protocol. A biome is never referred to by a network id anywhere this
-//! crate's callers touch it: `/execute if biome` compares a *string*
-//! (`ChunkSource::biome_state_at`'s return value) against a parsed
-//! `minecraft:*` identifier, and the client never receives a per-block biome
-//! id over the wire in a form this crate encodes. So there is no ordinal to
-//! keep in sync — only "is this string a real biome" — and a plain sorted
-//! array is the whole of what that needs.
-//!
-//! # Data source
-//!
-//! The 66 filenames under `data/minecraft/worldgen/biome/*.json` in 26.2's
-//! own generated/client data (the highest-authority data source per
-//! CLAUDE.md: Mojang's own generator, not a community dataset) — the same "vanilla ships this as base
-//! data, not a datapack addition" category
-//! [`crate::block`]/`lodestone_server::loot`'s bundled loot tables are in.
-//! Every biome's own worldgen definition (climate parameters, surface rules,
-//! feature list) is **not** modelled here; this is only the name census
-//! `/execute if biome` needs to validate a bare `<biome>` argument at parse
-//! time, the same posture [`crate::entity_types::entity_type_id`] takes for
-//! `/summon`.
-//!
-//! # How to change it
-//!
-//! A biome added or removed by a future version bump is a diff against the
-//! same `data/minecraft/worldgen/biome/` listing — re-list the directory and
-//! update [`BIOME_NAMES`]. `tests::the_census_matches_the_generated_directory`
-//! is a regenerate-or-assert gate the same shape as this crate's other
-//! `LODESTONE_REGEN=1` tests, guarded on `.cache` being present.
+//! The enum is generated from the checked-in worldgen asset registry by
+//! `tests/biome_enum.rs`; it is not a hand-maintained list. `BiomeRef` keeps
+//! dynamically registered entries explicit and compact instead of silently
+//! treating arbitrary text as a built-in.
 
-/// Every biome id 26.2 ships as base data, path-only (the `minecraft:`
-/// namespace is implicit — every entry here is `minecraft:*`), sorted for a
-/// stable [`is_biome`] scan and reproducible [`all`] iteration.
-pub const BIOME_NAMES: [&str; 66] = [
-    "badlands",
-    "bamboo_jungle",
-    "basalt_deltas",
-    "beach",
-    "birch_forest",
-    "cherry_grove",
-    "cold_ocean",
-    "crimson_forest",
-    "dark_forest",
-    "deep_cold_ocean",
-    "deep_dark",
-    "deep_frozen_ocean",
-    "deep_lukewarm_ocean",
-    "deep_ocean",
-    "desert",
-    "dripstone_caves",
-    "end_barrens",
-    "end_highlands",
-    "end_midlands",
-    "eroded_badlands",
-    "flower_forest",
-    "forest",
-    "frozen_ocean",
-    "frozen_peaks",
-    "frozen_river",
-    "grove",
-    "ice_spikes",
-    "jagged_peaks",
-    "jungle",
-    "lukewarm_ocean",
-    "lush_caves",
-    "mangrove_swamp",
-    "meadow",
-    "mushroom_fields",
-    "nether_wastes",
-    "ocean",
-    "old_growth_birch_forest",
-    "old_growth_pine_taiga",
-    "old_growth_spruce_taiga",
-    "pale_garden",
-    "plains",
-    "river",
-    "savanna",
-    "savanna_plateau",
-    "small_end_islands",
-    "snowy_beach",
-    "snowy_plains",
-    "snowy_slopes",
-    "snowy_taiga",
-    "soul_sand_valley",
-    "sparse_jungle",
-    "stony_peaks",
-    "stony_shore",
-    "sulfur_caves",
-    "sunflower_plains",
-    "swamp",
-    "taiga",
-    "the_end",
-    "the_void",
-    "warm_ocean",
-    "warped_forest",
-    "windswept_forest",
-    "windswept_gravelly_hills",
-    "windswept_hills",
-    "windswept_savanna",
-    "wooded_badlands",
-];
+use crate::generated_biome_enum as table;
+
+pub use self::table::BuiltinBiome;
+
+/// Every built-in biome path, sorted for the existing command/data census
+/// callers. The generated table is the source of truth.
+pub use self::table::BIOME_NAMES;
+
+/// A host-assigned index for a biome supplied by a plugin or data pack.
+///
+/// The index deliberately carries no string storage. The component that owns
+/// the extension registry owns the name-to-id mapping and is responsible for
+/// providing the display/serialization name at its boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ExtensionId(u32);
+
+impl ExtensionId {
+    /// Wraps a host-assigned extension index.
+    #[must_use]
+    pub const fn from_index(index: u32) -> Self {
+        Self(index)
+    }
+
+    /// Returns the host-assigned extension index.
+    #[must_use]
+    pub const fn index(self) -> u32 {
+        self.0
+    }
+}
+
+/// A biome identity that is either one of this build's generated built-ins or
+/// an explicitly registered extension, packed into one `u32`.
+///
+/// Built-in ids occupy `0..BuiltinBiome::COUNT`; extension ids follow them.
+/// This keeps the resident worldgen representation compact while retaining an
+/// explicit split at the boundary where an extension can actually appear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(transparent)]
+pub struct BiomeRef(u32);
+
+/// The resolved form of a [`BiomeRef`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BiomeKind {
+    /// A generated built-in biome.
+    Builtin(BuiltinBiome),
+    /// A plugin/data-pack biome resolved by an external registry.
+    Extension(ExtensionId),
+}
+
+/// A strict parse failure at a resource-loading boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnknownBiome<'a> {
+    /// The resource name that was rejected.
+    pub name: &'a str,
+}
+
+impl std::fmt::Display for UnknownBiome<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "unknown built-in biome {:?}", self.name)
+    }
+}
+
+impl std::error::Error for UnknownBiome<'_> {}
+
+impl BuiltinBiome {
+    /// Number of built-in entries in this generated table.
+    pub const COUNT: u8 = table::BUILTINS.len() as u8;
+
+    /// Resolves a generated registry id without allocating.
+    #[must_use]
+    pub fn from_registry_id(id: u32) -> Option<Self> {
+        table::BUILTINS.get(id as usize).copied()
+    }
+
+    /// The path without the `minecraft:` namespace.
+    #[must_use]
+    pub fn path(self) -> &'static str {
+        table::BIOME_NAMES[self as usize]
+    }
+
+    /// Resolves a namespaced built-in name without allocating.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        let path = name.strip_prefix("minecraft:")?;
+        let index = table::BIOME_NAMES.binary_search(&path).ok()?;
+        table::BUILTINS.get(index).copied()
+    }
+
+    /// Resolves a namespaced name or returns a strict parse error.
+    pub fn parse(name: &str) -> Result<Self, UnknownBiome<'_>> {
+        Self::from_name(name).ok_or(UnknownBiome { name })
+    }
+
+    /// Every built-in biome in canonical generated order.
+    pub fn all() -> impl ExactSizeIterator<Item = Self> + Clone {
+        table::BUILTINS.iter().copied()
+    }
+}
+
+impl BiomeRef {
+    /// Wraps a generated built-in.
+    #[must_use]
+    pub const fn builtin(biome: BuiltinBiome) -> Self {
+        Self(biome as u8 as u32)
+    }
+
+    /// Wraps an extension id supplied by an external registry.
+    #[must_use]
+    pub const fn extension(id: ExtensionId) -> Self {
+        match id.0.checked_add(BuiltinBiome::COUNT as u32) {
+            Some(raw) => Self(raw),
+            None => panic!("extension biome id overflows the BiomeRef encoding"),
+        }
+    }
+
+    /// Splits this packed identity into its generated or extension arm.
+    #[must_use]
+    pub fn kind(self) -> BiomeKind {
+        match BuiltinBiome::from_registry_id(self.0) {
+            Some(biome) => BiomeKind::Builtin(biome),
+            None => BiomeKind::Extension(ExtensionId(self.0 - BuiltinBiome::COUNT as u32)),
+        }
+    }
+
+    /// The built-in value, if this is not an extension.
+    #[must_use]
+    pub fn builtin_or_none(self) -> Option<BuiltinBiome> {
+        match self.kind() {
+            BiomeKind::Builtin(biome) => Some(biome),
+            BiomeKind::Extension(_) => None,
+        }
+    }
+
+    /// The extension handle, or `None` for a generated built-in.
+    #[must_use]
+    pub fn extension_or_none(self) -> Option<ExtensionId> {
+        match self.kind() {
+            BiomeKind::Builtin(_) => None,
+            BiomeKind::Extension(id) => Some(id),
+        }
+    }
+}
 
 /// Whether `namespace:path` (or a bare `path`, defaulting to `minecraft`) names
 /// a real 26.2 biome — `/execute if biome`'s parse-time validation, the same
@@ -113,9 +155,7 @@ pub const BIOME_NAMES: [&str; 66] = [
 /// take for their own registries.
 #[must_use]
 pub fn is_biome(qualified: &str) -> bool {
-    qualified
-        .strip_prefix("minecraft:")
-        .is_some_and(|path| BIOME_NAMES.binary_search(&path).is_ok())
+    BuiltinBiome::from_name(qualified).is_some()
 }
 
 /// Every biome id, namespace-qualified — [`lodestone_command_mc::BiomeArg`]'s

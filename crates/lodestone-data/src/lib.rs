@@ -44,10 +44,14 @@ pub(crate) mod generated_block_entity_types;
 pub(crate) mod generated_block_enum;
 #[path = "generated/block_items.rs"]
 pub(crate) mod generated_block_items;
+#[path = "generated/block_properties.rs"]
+pub(crate) mod generated_block_properties;
 #[path = "generated/block_property_tables.rs"]
 pub(crate) mod generated_block_property_tables;
 #[path = "generated/block_registry.rs"]
 pub(crate) mod generated_block_registry;
+#[path = "generated/biome_enum.rs"]
+pub(crate) mod generated_biome_enum;
 #[path = "generated/block_solidity.rs"]
 pub(crate) mod generated_block_solidity;
 #[path = "generated/block_states.rs"]
