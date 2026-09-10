@@ -60,12 +60,12 @@
 //! cave biomes. Preserve first, model later.
 //!
 //! Item components use the same fail-closed rule at the inventory boundary.
-//! This schema currently converts only `minecraft:custom_data`; an item with
-//! another component, or malformed custom data, is marked through
-//! [`ItemComponents::has_unmodeled`](lodestone_model::ItemComponents::has_unmodeled)
-//! and a later save refuses before the file writer can replace the previous
-//! player file. This keeps an incomplete item from looking like a valid,
-//! losslessly serializable stack.
+//! This schema converts `minecraft:custom_data` and typed `minecraft:damage`;
+//! an item with another component, or malformed custom data/damage, is marked
+//! through [`ItemComponents::has_unmodeled`](lodestone_model::ItemComponents::has_unmodeled)
+//! and a later save refuses before the file writer can replace the previous player
+//! file. This keeps an incomplete item from looking like a valid, losslessly
+//! serializable stack.
 //!
 //! # How to change it, and the gotchas
 //!
@@ -558,11 +558,12 @@ fn game_type_from_value(value: i32) -> Option<GameMode> {
 
 /// The `Inventory` list: `{Slot, id, count, components?}` per occupied slot,
 /// empties omitted — the sparse persistent form (a real file with 12 items has
-/// 12 entries, not 41). The only component currently converted is the
-/// top-level `minecraft:custom_data` compound; its model bytes are validated
-/// as complete network NBT before this function returns. Any other component
-/// marks the stack incomplete on read, and [`item_to_nbt`] refuses that stack
-/// before a save can replace the previous player file.
+/// 12 entries, not 41). The converted components are the top-level
+/// `minecraft:custom_data` compound and the typed `minecraft:damage` integer;
+/// custom-data model bytes are validated as complete network NBT before this
+/// function returns. Any other component marks the stack incomplete on read,
+/// and [`item_to_nbt`] refuses that stack before a save can replace the previous
+/// player file.
 fn inventory_to_nbt(slots: &[Option<ItemStack>]) -> Result<Nbt, lodestone_anvil::Error> {
     let elements = slots
         .iter()
@@ -592,13 +593,25 @@ fn item_to_nbt(index: usize, stack: &ItemStack) -> Result<Nbt, lodestone_anvil::
             Nbt::Int(i32::try_from(stack.count).unwrap_or(i32::MAX)),
         ),
     ];
+    let mut components = Vec::new();
     if let Some(bytes) = &stack.components.custom_data {
+        components.push((
+            "minecraft:custom_data".to_owned(),
+            custom_data_to_persistent(index, bytes)?,
+        ));
+    }
+    if let Some(damage) = stack.components.damage {
+        let damage = i32::try_from(damage).map_err(|_| {
+            lodestone_anvil::Error::Nbt(lodestone_core::Error::Custom(format!(
+                "inventory slot {index} damage exceeds the persistent integer range"
+            )))
+        })?;
+        components.push(("minecraft:damage".to_owned(), Nbt::Int(damage)));
+    }
+    if !components.is_empty() {
         fields.push((
             "components".to_owned(),
-            Nbt::Compound(vec![(
-                "minecraft:custom_data".to_owned(),
-                custom_data_to_persistent(index, bytes)?,
-            )]),
+            Nbt::Compound(components),
         ));
     }
     Ok(Nbt::Compound(fields))
@@ -672,6 +685,13 @@ fn inventory_from_nbt(nbt: Option<&Nbt>) -> Vec<Option<ItemStack>> {
                                 }
                                 None => stack.components.has_unmodeled = true,
                             }
+                        } else if name == "minecraft:damage" {
+                            match value {
+                                Nbt::Int(damage) if *damage >= 0 => {
+                                    stack.components.damage = Some(*damage as u32)
+                                }
+                                _ => stack.components.has_unmodeled = true,
+                            }
                         } else {
                             stack.components.has_unmodeled = true;
                         }
@@ -683,4 +703,68 @@ fn inventory_from_nbt(nbt: Option<&Nbt>) -> Vec<Option<ItemStack>> {
         out[slot] = Some(stack);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{inventory_from_nbt, inventory_to_nbt, PlayerData};
+    use crate::inventory::PLAYER_NATIVE_SIZE;
+    use lodestone_core::{Nbt, NbtTag};
+    use lodestone_model::ItemStack;
+
+    #[test]
+    fn player_data_round_trips_typed_damage_component() {
+        let mut data = PlayerData::default();
+        let mut stack = ItemStack::new("minecraft:diamond_pickaxe".parse().unwrap(), 1);
+        stack.components.damage = Some(17);
+        data.inventory[3] = Some(stack);
+
+        let encoded = data.to_nbt().expect("typed damage should encode");
+        let restored = PlayerData::from_nbt(&encoded).expect("encoded player data should decode");
+        let restored_stack = restored.inventory[3].as_ref().expect("slot should be present");
+        assert_eq!(restored_stack.components.damage, Some(17));
+        assert!(!restored_stack.components.has_unmodeled);
+    }
+
+    #[test]
+    fn malformed_damage_is_marked_and_refused_instead_of_dropped() {
+        let encoded = Nbt::List {
+            element_type: NbtTag::Compound,
+            elements: vec![Nbt::Compound(vec![
+                ("Slot".to_owned(), Nbt::Byte(3)),
+                (
+                    "id".to_owned(),
+                    Nbt::String("minecraft:diamond_pickaxe".to_owned()),
+                ),
+                ("count".to_owned(), Nbt::Int(1)),
+                (
+                    "components".to_owned(),
+                    Nbt::Compound(vec![(
+                        "minecraft:damage".to_owned(),
+                        Nbt::String("not-an-integer".to_owned()),
+                    )]),
+                ),
+            ])],
+        };
+        let inventory = inventory_from_nbt(Some(&encoded));
+        let stack = inventory[3].as_ref().expect("malformed stack is retained");
+        assert!(stack.components.has_unmodeled);
+        let error = inventory_to_nbt(&inventory).expect_err("malformed data must not be saved");
+        assert!(error
+            .to_string()
+            .contains("inventory slot 3 contains unmodeled item components"));
+    }
+
+    #[test]
+    fn damage_outside_persistent_integer_range_is_refused() {
+        let mut stack = ItemStack::new("minecraft:diamond_pickaxe".parse().unwrap(), 1);
+        stack.components.damage = Some(i32::MAX as u32 + 1);
+        let mut inventory = vec![None; PLAYER_NATIVE_SIZE];
+        inventory[3] = Some(stack);
+
+        let error = inventory_to_nbt(&inventory).expect_err("overflow must not be truncated");
+        assert!(error
+            .to_string()
+            .contains("inventory slot 3 damage exceeds the persistent integer range"));
+    }
 }
