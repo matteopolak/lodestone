@@ -48,3 +48,34 @@ fn initial_nether_admits_cardinal_sources_but_defers_diagonal_sources() {
         .expect("initial Nether light with diagonal source");
     assert_eq!(block_at(&with_diagonal, 82, 0, 0), 0);
 }
+
+#[test]
+#[rustfmt::skip]
+fn dependency_placeholder_keeps_exact_nether_light_window() {
+    let shape = ChunkShape::nether_or_end_1_21();
+    let column = ChunkColumn::new(shape.min_y, shape.world_height as i32);
+    let neighbours = [(1, 0, column.clone())];
+    let settlement = V770ServerProtocol
+        .compute_initial_column_lights_with_neighbours_in_dimension(
+            &column,
+            &neighbours,
+            Dimension::Nether,
+        )
+        .expect("initial Nether light settlement");
+    let dependency = settlement
+        .dependency_lights()
+        .find_map(|((dx, dz), light)| ((dx, dz) == (1, 0)).then_some(light))
+        .expect("east dependency light");
+
+    assert_eq!(shape.section_count, 16, "fixture block-section count");
+    assert_eq!(
+        dependency.light_section_count(),
+        18,
+        "a 16-section Nether column has exactly two boundary light sections"
+    );
+    assert_ne!(
+        dependency.light_section_count(),
+        20,
+        "the helper must not expand an already complete 18-section light window"
+    );
+}

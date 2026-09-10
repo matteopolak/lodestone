@@ -95,6 +95,11 @@ their own centre admission had completed. A later footprint may read a
 downgrade that authoritative centre snapshot; a block mutation clears the
 status before any replacement is allowed.
 
+A retained dependency uses the column's block-section count plus exactly two
+boundary light sections. Helpers that clone an empty dependency shape must
+remove those boundaries before calling `ColumnLight::new`, because that
+constructor adds the boundaries itself.
+
 The initial chunk encoder consumes a `CentreSettled` retained snapshot verbatim. An independent sealed-
 world capture showed that a persisted End section mask can differ from the first in-memory settlement,
 so a reload must serve what storage restored rather than recomputing from the current terrain or a
