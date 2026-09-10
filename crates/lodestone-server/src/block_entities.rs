@@ -116,6 +116,18 @@ impl BlockEntityKind {
         }
     }
 
+    /// Convert a validated bundled-registry entry into the runtime key.
+    ///
+    /// The numeric entry is version-specific input, so it must not escape the
+    /// data boundary. Converting it once here lets internal code compare
+    /// [`BlockEntityKind`] values without reverse-looking up entity names.
+    #[must_use]
+    pub fn from_registry_type(
+        id: lodestone_data::block_entity_types::BlockEntityType,
+    ) -> Self {
+        Self::from_name(lodestone_data::block_entity_types::block_entity_type_name(id))
+    }
+
     /// Return the canonical registry spelling for this key.
     #[must_use]
     pub fn name(&self) -> &str {
@@ -125,6 +137,7 @@ impl BlockEntityKind {
         })
     }
 
+    /// Borrow the canonical registry spelling at an explicit text boundary.
     #[must_use]
     pub fn as_str(&self) -> &str {
         self.name()
@@ -252,7 +265,11 @@ pub enum BlockEntity {
     /// …). The full NBT payload is retained for these opaque types.
     /// The vanilla id and the full NBT compound are preserved verbatim so the entity
     /// round-trips through a save/load cycle unchanged.
-    Opaque { id: BlockEntityKind, nbt: Nbt },
+    Opaque {
+        /// The original registry key, retained as a typed built-in or extension.
+        id: BlockEntityKind,
+        nbt: Nbt,
+    },
     /// `minecraft:command_block`/`chain_command_block`/`repeating_command_block`.
     /// The mode is derived from the block itself
     /// (`crate::command_block::mode_for_block`), never stored here — see that
