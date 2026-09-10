@@ -3324,7 +3324,9 @@ async fn run_tick_loop_with_weather_impl<W>(
                                 // vanilla's own `FlintAndSteelDispenseItemBehavior`.
                                 None => consumed = false,
                             }
-                        } else if let Some(entity_type) = crate::redstone_dispenser::arrow_entity_type(&item_str) {
+                        } else if let Some(entity_type) = lodestone_data::item::Item::from_name(&item_str)
+                            .and_then(crate::redstone_dispenser::arrow_entity_type)
+                        {
                             // Projectile dispensing: arrow item variants all use the same default
                             // power/uncertainty; see `arrow_entity_type`'s own
                             // doc for why a tipped arrow's potion is not
@@ -3338,7 +3340,10 @@ async fn run_tick_loop_with_weather_impl<W>(
                             );
                             mobs.with(|sim| {
                                 sim.spawn_projectile(
-                                    entity_type.parse().expect("arrow_entity_type names a real key"),
+                                    entity_type
+                                        .name()
+                                        .parse()
+                                        .expect("generated entity type names are valid resource keys"),
                                     lodestone_entity::projectile::Projectile::arrow(
                                         lodestone_model::Vec3::new(position.0, position.1, position.2),
                                         lodestone_model::Vec3::new(velocity.0, velocity.1, velocity.2),
