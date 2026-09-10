@@ -13,6 +13,7 @@ use serde_json::Value;
 use crate::density::Resolver;
 use crate::feature::{BlockPos, IntProvider};
 use crate::rng::RandomSource;
+use lodestone_data::block_states::StateId as CanonicalStateId;
 
 use super::grid::VegGrid;
 use super::grid::census::bump as census_bump;
@@ -21,8 +22,7 @@ use super::super::top_layer::StatePredicate;
 use super::tree::{FoliagePlacerCfg, RootPlacerCfg, TrunkPlacerCfg};
 
 /// The reference heightmap-type enum (the subset vegetal decoration references). See this
-/// module's doc "Approximations, named" for why only two scans back all
-/// five.
+/// module's doc "Approximations, named" for the remaining collapsed pairs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HeightmapKind {
     OceanFloor,
@@ -47,7 +47,8 @@ impl HeightmapKind {
     fn scan(self, grid: &VegGrid, x: i32, z: i32) -> i32 {
         match self {
             Self::OceanFloor | Self::OceanFloorWg => grid.height_ocean_floor(x, z),
-            Self::WorldSurface | Self::WorldSurfaceWg => grid.height_world_surface(x, z),
+            Self::WorldSurface => grid.height_world_surface(x, z),
+            Self::WorldSurfaceWg => grid.height_world_surface_wg(x, z),
             Self::MotionBlocking => grid.height_motion_blocking(x, z),
         }
     }
@@ -297,6 +298,15 @@ pub(super)     fn test(&self, grid: &VegGrid, tags: &VegTags, pos: BlockPos) -> 
                     tag_at(grid, tags, Tag::ReplaceableByMushrooms, pos.x, pos.y, pos.z)
                 } else if tag == "minecraft:replaceable_by_trees" {
                     tag_at(grid, tags, Tag::ReplaceableByTrees, pos.x, pos.y, pos.z)
+                } else if tag == "minecraft:beneath_tree_podzol_replaceable" {
+                    tag_at(
+                        grid,
+                        tags,
+                        Tag::BeneathTreePodzolReplaceable,
+                        pos.x,
+                        pos.y,
+                        pos.z,
+                    )
                 } else if tag == "minecraft:azalea_grows_on" {
                     tags.azalea_grows_on.contains(super::base_id(grid.get(pos.x, pos.y, pos.z)))
                 } else {
@@ -543,6 +553,58 @@ pub(super) fn canon_state(v: &Value) -> String {
     crate::feature::canon_state(v)
 }
 
+/// Parse a configured feature's state object into the validated built-in state
+/// table. Unlike the general string canonicalizer, this path rejects malformed
+/// objects and state properties instead of panicking or silently falling back
+/// to a block's default state.
+fn parse_validated_state(v: &Value) -> Option<CanonicalStateId> {
+    let object = v.as_object()?;
+    let name = object.get("Name")?.as_str()?;
+    // Fluid spring records describe a FluidState, whose `falling` property is
+    // not part of the block-state registry consumed by the packet path.  A
+    // placed source fluid materializes as that fluid block's default
+    // level-zero state; preserve that typed conversion instead of degrading
+    // the entire configured feature to Unsupported.
+    if matches!(name, "minecraft:lava" | "minecraft:water")
+        && object
+            .get("Properties")
+            .and_then(Value::as_object)
+            .is_some_and(|properties| {
+                properties.len() == 1
+                    && properties
+                        .get("falling")
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| matches!(value, "true" | "false"))
+            })
+    {
+        return CanonicalStateId::from_state_str(name);
+    }
+    let mut state = name.to_owned();
+    if let Some(properties) = object.get("Properties") {
+        let properties = properties.as_object()?;
+        if properties.is_empty() {
+            return None;
+        }
+        let mut entries: Vec<_> = properties.iter().collect();
+        entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        state.push('[');
+        for (index, (key, value)) in entries.into_iter().enumerate() {
+            if index != 0 {
+                state.push(',');
+            }
+            state.push_str(key);
+            state.push('=');
+            state.push_str(value.as_str()?);
+        }
+        state.push(']');
+    }
+    let id = CanonicalStateId::from_state_str(&state)?;
+    if object.contains_key("Properties") && id.canonical_state() != state {
+        return None;
+    }
+    Some(id)
+}
+
 impl BlockStateProvider {
 pub(super)     fn try_parse(v: &Value) -> Option<Self> {
         let ty = v["type"].as_str()?;
@@ -680,7 +742,7 @@ pub(super)     fn try_parse(v: &Value) -> Option<Self> {
     ///
     /// Prefer [`Self::get_state_id`] at a placement site — the grid stores ids, so
     /// the name is only ever an intermediate.
-pub(super)     fn get_state<'a, R: RandomSource>(
+    fn get_state<'a, R: RandomSource>(
         &'a self,
         grid: &VegGrid,
         tags: &VegTags,
@@ -807,6 +869,21 @@ pub(super)     fn get_state<'a, R: RandomSource>(
         }
     }
 
+    /// Compatibility-only name selection for the mushroom cap property
+    /// rewrite. Built-in placement uses [`Self::get_state_id`]; this explicit
+    /// escape hatch keeps partial and extension cap states byte-compatible
+    /// until a typed property override can return local ids directly.
+    #[cold]
+    pub(super) fn get_state_for_mushroom_cap<'a, R: RandomSource>(
+        &'a self,
+        grid: &VegGrid,
+        tags: &VegTags,
+        random: &mut R,
+        pos: BlockPos,
+    ) -> Option<&'a str> {
+        self.get_state(grid, tags, random, pos)
+    }
+
     /// [`Self::get_state`] resolved to the id the grid actually stores.
     ///
     /// The interner lookup here is not new cost: `VegGrid::set_if_in_bounds`
@@ -919,6 +996,19 @@ pub struct VegTags {
     pub azalea_grows_on: HashSet<String>,
     /// Ground blocks replaced by bamboo's optional podzol disk.
     pub beneath_bamboo_podzol_replaceable: HashSet<String>,
+    /// Ground blocks accepted by giant-conifer ground alteration.
+    pub beneath_tree_podzol_replaceable: HashSet<String>,
+    /// Blocks that a live sculk spread may replace after the first charge
+    /// reaches a substrate. This is the ordinary spread tag; world generation
+    /// has a separate, slightly wider closure below.
+    pub sculk_replaceable: HashSet<String>,
+    /// Blocks the world-generation sculk spread may replace. Keeping this
+    /// separate from [`Self::sculk_replaceable`] is load-bearing: the two
+    /// tag closures intentionally differ for world-gen-only substrate.
+    pub sculk_replaceable_world_gen: HashSet<String>,
+    /// `#minecraft:base_stone_overworld` — the substrate required by a
+    /// speleothem cluster's optional water pool.
+    pub base_stone_overworld: HashSet<String>,
     /// Unit 8: the same membership questions as the sets above, as bitsets
     /// indexed by [`crate::interner::StateId`] — see [`super::ids`] for the whole
     /// design, including why the sets above must not be mutated after
@@ -991,6 +1081,10 @@ pub fn build_veg_tags(resolver: &dyn Resolver) -> VegTags {
         simple_block_support: SimpleBlockSupport::parse(&resolver.block_survival_facts()),
         azalea_grows_on: resolve("minecraft:azalea_grows_on"),
         beneath_bamboo_podzol_replaceable: resolve("minecraft:beneath_bamboo_podzol_replaceable"),
+        beneath_tree_podzol_replaceable: resolve("minecraft:beneath_tree_podzol_replaceable"),
+        sculk_replaceable: resolve("minecraft:sculk_replaceable"),
+        sculk_replaceable_world_gen: resolve("minecraft:sculk_replaceable_world_gen"),
+        base_stone_overworld: resolve("minecraft:base_stone_overworld"),
         // Unbound: the bitsets are per-interner and the interner does not exist
         // yet at generator-construction time. The decoration driver binds them
         // once per pass. See [`super::ids`].
@@ -1268,11 +1362,12 @@ impl VegPlacement {
                 let scatter_x = pos.x + xz.sample(random);
                 let scatter_y = pos.y + y.sample(random);
                 let scatter_z = pos.z + xz.sample(random);
-                Positions::One(BlockPos {
+                let out = BlockPos {
                     x: scatter_x,
                     y: scatter_y,
                     z: scatter_z,
-                })
+                };
+                Positions::One(out)
             }
             VegPlacement::BlockPredicateFilter(pred) => {
                 census_bump(|c| c.block_predicate_filter_in += 1);
@@ -1493,6 +1588,11 @@ pub enum Decorator {
         radius: i32,
         tries: i32,
     },
+    /// Replaces eligible terrain under a tree using fixed rounded patches and
+    /// seeded perimeter probes.
+    AlterGround {
+        provider: BlockStateProvider,
+    },
     /// The trunk-vine decorator — a hanging vine on each of a log's four
     /// horizontal neighbours, one independent coin flip per side (the
     /// savanna/acacia increment: reached from `mega_jungle_tree`/`jungle_tree`'s own
@@ -1544,6 +1644,10 @@ impl Decorator {
                     None => Decorator::Unsupported,
                 }
             }
+            "alter_ground" => match BlockStateProvider::try_parse(&v["provider"]) {
+                Some(provider) => Decorator::AlterGround { provider },
+                None => Decorator::Unsupported,
+            },
             "trunk_vine" => Decorator::TrunkVine,
             "attached_to_logs" => {
                 let block_provider = BlockStateProvider::try_parse(&v["block_provider"]);
@@ -1847,6 +1951,8 @@ pub enum ConfiguredFeature {
     IceSpike(Box<super::ice_spike::IceSpikeCfg>),
     /// A paired tapered dripstone cone grown across a cave column.
     LargeDripstone(Box<super::large_dripstone::LargeDripstoneCfg>),
+    /// A sea-level packed-ice or blue-ice mass with optional cavities.
+    Iceberg(Box<super::iceberg::IcebergCfg>),
     /// The no-op feature — genuinely nothing, and distinct from
     /// [`ConfiguredFeature::Unsupported`] so it is not counted as a gap.
     NoOp,
@@ -2155,13 +2261,16 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
         // ------------------------------------------------------------------
         "spring_feature" => {
             let c = &doc["config"];
-            ConfiguredFeature::Spring(Box::new(super::features::SpringCfg {
-                state: canon_state(&c["state"]),
-                requires_block_below: c["requires_block_below"].as_bool().unwrap_or(true),
-                rock_count: c["rock_count"].as_i64().unwrap_or(4) as i32,
-                hole_count: c["hole_count"].as_i64().unwrap_or(1) as i32,
-                valid_blocks: parse_id_list(&c["valid_blocks"]).into_iter().collect(),
-            }))
+            match parse_validated_state(&c["state"]) {
+                Some(state) => ConfiguredFeature::Spring(Box::new(super::features::SpringCfg {
+                    state,
+                    requires_block_below: c["requires_block_below"].as_bool().unwrap_or(true),
+                    rock_count: c["rock_count"].as_i64().unwrap_or(4) as i32,
+                    hole_count: c["hole_count"].as_i64().unwrap_or(1) as i32,
+                    valid_blocks: parse_id_list(&c["valid_blocks"]).into_iter().collect(),
+                })),
+                None => ConfiguredFeature::Unsupported("spring_feature: malformed state".into()),
+            }
         }
         "underwater_magma" => {
             parse_underwater_magma_config(&doc["config"]).map_or_else(
@@ -2207,10 +2316,13 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
         }
         "block_blob" => {
             let c = &doc["config"];
-            ConfiguredFeature::BlockBlob(Box::new(super::features::BlockBlobCfg {
-                state: canon_state(&c["state"]),
-                can_place_on: BlockPredicate::parse(&c["can_place_on"]),
-            }))
+            match parse_validated_state(&c["state"]) {
+                Some(state) => ConfiguredFeature::BlockBlob(Box::new(super::features::BlockBlobCfg {
+                    state,
+                    can_place_on: BlockPredicate::parse(&c["can_place_on"]),
+                })),
+                None => ConfiguredFeature::Unsupported("block_blob: malformed state".into()),
+            }
         }
         "delta_feature" => {
             let c = &doc["config"];
@@ -2237,15 +2349,18 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
         }
         "netherrack_replace_blobs" => {
             let c = &doc["config"];
-            match try_parse_int_provider(&c["radius"]) {
-                Some(radius) => {
+            match (try_parse_int_provider(&c["radius"]), parse_validated_state(&c["state"])) {
+                (Some(radius), Some(state)) => {
                     ConfiguredFeature::ReplaceBlobs(Box::new(super::features::ReplaceBlobsCfg {
                         target: canon_state(&c["target"]),
-                        state: canon_state(&c["state"]),
+                        state,
                         radius,
                     }))
                 }
-                None => ConfiguredFeature::Unsupported(
+                (_, None) => ConfiguredFeature::Unsupported(
+                    "netherrack_replace_blobs: malformed state".into(),
+                ),
+                (None, Some(_)) => ConfiguredFeature::Unsupported(
                     "netherrack_replace_blobs: unsupported radius".into(),
                 ),
             }
@@ -2254,6 +2369,12 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
         "basalt_pillar" => ConfiguredFeature::BasaltPillar,
         "desert_well" => ConfiguredFeature::DesertWell,
         "blue_ice" => ConfiguredFeature::BlueIce,
+        "iceberg" => match parse_validated_state(&doc["config"]["state"]) {
+            Some(state) => ConfiguredFeature::Iceberg(Box::new(super::iceberg::IcebergCfg {
+                state: state.canonical_state(),
+            })),
+            None => ConfiguredFeature::Unsupported("iceberg: malformed state".into()),
+        },
         "kelp" => ConfiguredFeature::Kelp,
         "sea_pickle" => match try_parse_int_provider(&doc["config"]["count"]) {
             Some(ip) => ConfiguredFeature::SeaPickle(ip),
@@ -2631,6 +2752,7 @@ pub fn collect_unsupported(placed: &PlacedRef) -> Vec<String> {
             | ConfiguredFeature::Geode(_)
             | ConfiguredFeature::Fossil(_)
             | ConfiguredFeature::IceSpike(_)
+            | ConfiguredFeature::Iceberg(_)
             | ConfiguredFeature::LargeDripstone(_)
             | ConfiguredFeature::NoOp => {}
         }
@@ -2644,7 +2766,7 @@ pub fn collect_unsupported(placed: &PlacedRef) -> Vec<String> {
 mod tests {
     use std::collections::{HashMap, HashSet};
 
-    use super::{BlockPredicate, ConfiguredFeature};
+    use super::{BlockPredicate, CanonicalStateId, ConfiguredFeature};
     use crate::density::{NoiseParams, Resolver};
     use crate::feature::BlockPos;
     use crate::feature::top_layer::StatePredicate;
@@ -2803,6 +2925,103 @@ mod tests {
         assert_eq!(cfg.outer_wall_distance_max, 5);
     }
 
+    #[test]
+    fn typed_vegetation_states_are_validated_at_parse_time() {
+        let spring = super::parse_configured_feature_doc(
+            &RootResolver,
+            &serde_json::json!({
+                "type": "minecraft:spring_feature",
+                "config": {"state": {"Name": "minecraft:lava"}}
+            }),
+        );
+        let ConfiguredFeature::Spring(cfg) = spring else {
+            panic!("spring feature state must parse");
+        };
+        assert_eq!(cfg.state, CanonicalStateId::from_state_str("minecraft:lava").unwrap());
+
+        let blob = super::parse_configured_feature_doc(
+            &RootResolver,
+            &serde_json::json!({
+                "type": "minecraft:block_blob",
+                "config": {"state": {"Name": "minecraft:moss_block"}}
+            }),
+        );
+        let ConfiguredFeature::BlockBlob(cfg) = blob else {
+            panic!("block blob state must parse");
+        };
+        assert_eq!(cfg.state, CanonicalStateId::from_state_str("minecraft:moss_block").unwrap());
+
+        let replace = super::parse_configured_feature_doc(
+            &RootResolver,
+            &serde_json::json!({
+                "type": "minecraft:netherrack_replace_blobs",
+                "config": {
+                    "target": {"Name": "minecraft:netherrack"},
+                    "state": {"Name": "minecraft:basalt", "Properties": {"axis": "y"}},
+                    "radius": 3
+                }
+            }),
+        );
+        let ConfiguredFeature::ReplaceBlobs(cfg) = replace else {
+            panic!("replace-blobs state must parse");
+        };
+        assert_eq!(
+            cfg.state,
+            CanonicalStateId::from_state_str("minecraft:basalt[axis=y]").unwrap()
+        );
+    }
+
+    #[test]
+    fn fluid_spring_state_converts_falling_property_to_default_block_state() {
+        for name in ["minecraft:lava", "minecraft:water"] {
+            let feature = super::parse_configured_feature_doc(
+                &RootResolver,
+                &serde_json::json!({
+                    "type": "minecraft:spring_feature",
+                    "config": {
+                        "state": {"Name": name, "Properties": {"falling": "true"}}
+                    }
+                }),
+            );
+            let ConfiguredFeature::Spring(cfg) = feature else {
+                panic!("fluid spring state must parse: {name}");
+            };
+            assert_eq!(cfg.state.canonical_state(), format!("{name}[level=0]"));
+        }
+    }
+
+    #[test]
+    fn typed_vegetation_states_reject_malformed_config() {
+        for (ty, state, reason) in [
+            (
+                "minecraft:spring_feature",
+                serde_json::json!({"Properties": {"falling": "false"}}),
+                "spring_feature: malformed state",
+            ),
+            (
+                "minecraft:block_blob",
+                serde_json::json!({"Name": "minecraft:not_a_block"}),
+                "block_blob: malformed state",
+            ),
+            (
+                "minecraft:netherrack_replace_blobs",
+                serde_json::json!({"Name": "minecraft:basalt", "Properties": {"axis": true}}),
+                "netherrack_replace_blobs: malformed state",
+            ),
+        ] {
+            let mut config = serde_json::json!({"state": state});
+            if ty == "minecraft:netherrack_replace_blobs" {
+                config["target"] = serde_json::json!({"Name": "minecraft:netherrack"});
+                config["radius"] = serde_json::json!(3);
+            }
+            let feature = super::parse_configured_feature_doc(
+                &RootResolver,
+                &serde_json::json!({"type": ty, "config": config}),
+            );
+            assert!(matches!(feature, ConfiguredFeature::Unsupported(actual) if actual == reason));
+        }
+    }
+
     fn underwater_magma_doc() -> Value {
         serde_json::json!({
             "type": "minecraft:underwater_magma",
@@ -2932,4 +3151,42 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn iceberg_parser_preserves_the_configured_state_and_rejects_malformed_state() {
+        let complete = serde_json::json!({
+            "type": "minecraft:iceberg",
+            "config": {"state": {"Name": "minecraft:blue_ice"}}
+        });
+        assert!(matches!(
+            super::parse_configured_feature_doc(&RootResolver, &complete),
+            ConfiguredFeature::Iceberg(cfg) if cfg.state == "minecraft:blue_ice"
+        ));
+
+        let malformed = serde_json::json!({
+            "type": "minecraft:iceberg",
+            "config": {"state": {"Name": "minecraft:not_a_block"}}
+        });
+        assert!(matches!(
+            super::parse_configured_feature_doc(&RootResolver, &malformed),
+            ConfiguredFeature::Unsupported(reason) if reason == "iceberg: malformed state"
+        ));
+    }
+
+}
+
+#[cfg(test)]
+mod heightmap_tests {
+    use super::{HeightmapKind, VegGrid};
+
+    #[test]
+    fn final_world_surface_sees_overlay_while_worldgen_surface_stays_frozen() {
+        // This overlay-only fixture is deliberate: WORLD_SURFACE must see a
+        // decoration write, while WORLD_SURFACE_WG must stay at the immutable
+        // all-air source height rather than delegating to the live scan.
+        let mut grid = VegGrid::new(0, 16, 0, 0);
+        grid.seed(8, 4, 8, "minecraft:stone".to_string());
+
+        assert_eq!(HeightmapKind::WorldSurface.scan(&grid, 8, 8), 5);
+        assert_eq!(HeightmapKind::WorldSurfaceWg.scan(&grid, 8, 8), 0);
+    }
 }
