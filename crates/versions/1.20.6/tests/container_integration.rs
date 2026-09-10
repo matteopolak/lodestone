@@ -112,7 +112,7 @@ async fn protocol_766_chest_move_is_authoritative_and_corrected_before_close() {
             face: BlockFace::Up,
             cursor: Vec3f { x: 0.5, y: 1.0, z: 0.5 },
             inside_block: false,
-            sequence: 1,
+            sequence: lodestone_model::PredictionSequence::new(1),
         })
         .unwrap();
     handle
