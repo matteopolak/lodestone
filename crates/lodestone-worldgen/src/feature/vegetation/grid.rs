@@ -623,9 +623,9 @@ impl VegGrid {
         }
     }
 
-    /// `Heightmap.Types.WORLD_SURFACE`/`WORLD_SURFACE_WG` — topmost non-air,
-    /// scanned live against the current (possibly already-modified-this-step)
-    /// grid. `x`/`z` are absolute world coordinates. Returns `min_y` (not
+    /// The final world-surface heightmap — topmost non-air, scanned live
+    /// against the current (possibly already-modified-this-step) grid.
+    /// `x`/`z` are absolute world coordinates. Returns `min_y` (not
     /// `min_y - 1`) for an all-air column, matching vanilla's `y + 1`
     /// convention with `y` floored at one below the lowest placeable block.
     #[must_use]
@@ -633,6 +633,20 @@ impl VegGrid {
         let (lx, lz) = self.to_local_clamped(x, z);
         for y in (self.min_y..self.min_y + self.height).rev() {
             if !self.is_air_id(self.get_local_id(lx, y, lz)) {
+                return y + 1;
+            }
+        }
+        self.min_y
+    }
+
+    /// The generation-time world-surface heightmap — topmost non-air in the
+    /// immutable terrain source, before decoration writes. The generation
+    /// heightmap stays fixed while feature placement updates the final one.
+    #[must_use]
+    pub fn height_world_surface_wg(&self, x: i32, z: i32) -> i32 {
+        let (lx, lz) = self.to_local_clamped(x, z);
+        for y in (self.min_y..self.min_y + self.height).rev() {
+            if !self.is_air_id(self.source_id(lx, y, lz)) {
                 return y + 1;
             }
         }
