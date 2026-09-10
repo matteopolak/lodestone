@@ -1100,7 +1100,6 @@ impl CanyonConfig {
                     return;
                 }
                 let min_gen_y = env.min_gen_y;
-                let wf = width_factors.clone();
                 carve_ellipsoid(
                     env,
                     x,
@@ -1108,8 +1107,8 @@ impl CanyonConfig {
                     z,
                     horizontal_radius,
                     vertical_radius,
-                    move |xd, yd, zd, world_y| {
-                        canyon_should_skip(&wf, min_gen_y, xd, yd, zd, world_y)
+                    |xd, yd, zd, world_y| {
+                        canyon_should_skip(&width_factors, min_gen_y, xd, yd, zd, world_y)
                     },
                 );
             }
@@ -1191,15 +1190,17 @@ impl CarveObserver for NoObserver {
 /// depends on — can differ
 /// per source chunk. A caller with a single fixed biome for the whole
 /// neighbourhood (every isolated fixture test in this crate) can ignore the
-/// arguments and return the same list every time.
+/// arguments and return the same list every time. The returned slice is
+/// borrowed for the duration of this call; keeping the parsed lists in the
+/// generator avoids cloning one `Vec<CarverConfig>` per source chunk.
 #[allow(clippy::too_many_arguments)]
-pub fn apply_carvers<O: CarveObserver>(
+pub fn apply_carvers<'a, O: CarveObserver>(
     seed: i64,
     chunk_x: i32,
     chunk_z: i32,
     min_gen_y: i32,
     gen_depth: i32,
-    carvers_for_source: &dyn Fn(i32, i32) -> Vec<CarverConfig>,
+    carvers_for_source: &mut dyn FnMut(i32, i32) -> &'a [CarverConfig],
     grid: &mut CarveGrid,
     aquifer: &AquiferSystem,
     replaceable: &HashSet<String>,
