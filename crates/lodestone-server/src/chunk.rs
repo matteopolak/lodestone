@@ -871,12 +871,11 @@ impl ChunkColumn {
                 // another block-entity type).  Only carry the event across
                 // the source boundary when the completed block still owns
                 // the same type; otherwise it is an orphan packet sidecar.
-                let actual_type = lodestone_data::block_states::state_id(out.block_state(
+                let actual_type = lodestone_data::block_states::StateId::new(out.block_state_id(
                     position.x.rem_euclid(16),
                     position.y,
                     position.z.rem_euclid(16),
                 ))
-                .and_then(lodestone_data::block_states::StateId::new)
                 .and_then(lodestone_data::block_entity_types::block_entity_type)
                 .map(lodestone_data::block_entity_types::block_entity_type_name);
                 if actual_type != Some(event.type_id.as_str()) {
@@ -885,11 +884,16 @@ impl ChunkColumn {
                 if entities.iter().any(|(existing, _)| *existing == position) {
                     continue;
                 }
+                let nbt = if event.type_id == "minecraft:banner" {
+                    end_city_banner_nbt()
+                } else {
+                    lodestone_core::Nbt::End
+                };
                 entities.push((
                     position,
                     BlockEntity::Opaque {
                         id: event.type_id.into(),
-                        nbt: lodestone_core::Nbt::End,
+                        nbt,
                     },
                 ));
             }
@@ -1209,6 +1213,44 @@ impl ChunkColumn {
     #[must_use]
     pub fn client_heightmaps(&self) -> Option<&lodestone_world::Heightmaps> {
         self.client_heightmaps.as_ref()
+    }
+
+    /// Return the retained client maps as authenticated raw cells in wire
+    /// registry order (`WORLD_SURFACE`, `MOTION_BLOCKING`,
+    /// `MOTION_BLOCKING_NO_LEAVES`). This boundary preserves map transitions
+    /// captured independently of a later block-field scan.
+    #[must_use]
+    pub fn client_heightmaps_raw(&self) -> Option<[[u16; 256]; 3]> {
+        let maps = self.client_heightmaps.as_ref()?;
+        let mut raw = [[0u16; 256]; 3];
+        for (map_index, type_id) in [1u32, 4, 5].into_iter().enumerate() {
+            let map = maps.get(type_id)?;
+            for z in 0..16usize {
+                for x in 0..16usize {
+                    raw[map_index][x + z * 16] = u16::try_from(map.get(x, z)).ok()?;
+                }
+            }
+        }
+        Some(raw)
+    }
+
+    /// Install an authenticated raw client-map snapshot and synchronize the
+    /// generator's stored `MOTION_BLOCKING` view with the registry-id-4 map.
+    pub fn install_client_heightmaps_raw(&mut self, raw: [[u16; 256]; 3]) {
+        let mut maps = lodestone_world::Heightmaps::new();
+        for (map_index, type_id) in [1u32, 4, 5].into_iter().enumerate() {
+            let mut map = lodestone_world::Heightmap::new(self.height as u32);
+            for z in 0..16usize {
+                for x in 0..16usize {
+                    map.set(x, z, u32::from(raw[map_index][x + z * 16]));
+                }
+            }
+            maps.insert(type_id, map);
+        }
+        self.client_heightmaps = Some(maps);
+        if let Some(motion) = self.motion_blocking.as_mut() {
+            motion.copy_from_slice(&raw[1]);
+        }
     }
 
     /// Prime the three client-visible heightmaps from the column's current
@@ -3580,7 +3622,7 @@ impl OverworldChunkSource {
             cz,
             crate::block_drops::bundled_tables(),
         );
-        let spawners = crate::structure_loot::spawners_for_chunk(&starts, cx, cz);
+        let spawners = crate::structure_loot::spawners_for_chunk(column, &starts, cx, cz);
         if chests.is_empty() && spawners.is_empty() {
             return;
         }
@@ -3894,7 +3936,7 @@ impl NetherChunkSource {
                 cz,
                 crate::block_drops::bundled_tables(),
             );
-            let spawners = crate::structure_loot::spawners_for_chunk(&referenced_starts, cx, cz);
+            let spawners = crate::structure_loot::spawners_for_chunk(column, &referenced_starts, cx, cz);
             if !chests.is_empty() || !spawners.is_empty() {
                 let mut entities = column.block_entities().to_vec();
                 for chest in chests {
@@ -4317,7 +4359,7 @@ impl EndChunkSource {
             cz,
             crate::block_drops::bundled_tables(),
         );
-        let spawners = crate::structure_loot::spawners_for_chunk(&referenced_starts, cx, cz);
+        let spawners = crate::structure_loot::spawners_for_chunk(column, &referenced_starts, cx, cz);
         let mut entities = column.block_entities().to_vec();
         for chest in chests {
             if let Some(block) = chest.block {
@@ -4331,25 +4373,10 @@ impl EndChunkSource {
             entities.push((chest.pos, chest.entity));
         }
         entities.extend(spawners);
-        // End-city templates carry patterned black banners as block states;
-        // their component payload is a separate block-entity sidecar. The
-        // template placer already emitted the banner states, so recover only
-        // missing banner records here and leave richer entities untouched.
-        for (pos, kind) in column.missing_block_entity_states(cx, cz, &entities) {
-            if kind == "minecraft:banner" {
-                entities.push((
-                    pos,
-                    BlockEntity::Opaque {
-                        id: kind.to_owned().into(),
-                        nbt: end_city_banner_nbt(),
-                    },
-                ));
-            }
-        }
         // Structure placement can leave state-owned containers that do not
         // carry a loot marker.  They still become empty block entities when
         // the block state is installed, so materialize those records after
-        // preserving the richer patterned banner sidecars above.
+        // preserving the richer generated sidecars above.
         column.set_block_entities(entities);
         column.reconcile_generated_block_entity_states(cx, cz);
         column.set_structures(starts, references);
@@ -4674,66 +4701,106 @@ mod tests {
         );
     }
 
-    /// End-city banners are block-state placements plus patterned records. The
-    /// literal witness keeps the source attachment from regressing to blocks
-    /// without packet-visible banner sidecars.
+    /// End-city banners carry their patterned block-entity payload across the
+    /// source boundary. The literal witness is the positive control for the
+    /// state/event handoff, including the payload rather than only the block
+    /// state.
     #[test]
-    fn end_chunk_source_attaches_city_banner_sidecars() {
+    fn end_chunk_source_attaches_city_banners_with_pattern_sidecars() {
         let source = crate::worldgen_data::end_chunk_source(42);
         let column = source.column(283, 86);
-        let mut banners = column
-            .block_entities()
-            .iter()
-            .filter_map(|(pos, entity)| (entity.type_id() == "minecraft:banner").then_some(*pos))
-            .collect::<Vec<_>>();
-        banners.sort_by_key(|pos| (pos.x, pos.y, pos.z));
-        assert_eq!(
-            banners,
-            vec![
-                BlockPos::new(4536, 170, 1391),
-                BlockPos::new(4538, 170, 1389),
-                BlockPos::new(4542, 170, 1389),
-            ]
-        );
+        let expected = BlockEntity::Opaque {
+            id: BlockEntityKind::from("minecraft:banner"),
+            nbt: end_city_banner_nbt(),
+        };
+        for position in [
+            BlockPos::new(4536, 170, 1391),
+            BlockPos::new(4538, 170, 1389),
+            BlockPos::new(4542, 170, 1389),
+        ] {
+            assert!(
+                column
+                    .block_state(position.x.rem_euclid(16), position.y, position.z.rem_euclid(16))
+                    .starts_with("minecraft:magenta_wall_banner["),
+                "supported banner state must remain at {position:?}"
+            );
+            assert_eq!(
+                column
+                    .block_entities()
+                    .iter()
+                    .find(|(actual, _)| *actual == position)
+                    .map(|(_, entity)| entity),
+                Some(&expected),
+                "supported banner must retain its patterned sidecar at {position:?}"
+            );
+        }
     }
 
-    /// The external End stream records no block entities for this chunk.  The
-    /// four positions below are template banner writes whose support is lost
-    /// during attachment survival; retaining their creation events would
-    /// encode records for blocks that are now air.
+    /// The four banner records in the target End chunk survive attachment
+    /// reconciliation and carry the same patterned payload as the external
+    /// stream. The adjacent chunk is a negative control with three records.
     #[test]
-    fn end_chunk_source_drops_orphaned_banner_events_after_attachment_survival() {
+    fn end_chunk_source_preserves_target_banner_sidecars_and_control_count() {
         let source = crate::worldgen_data::end_chunk_source(42);
         let column = source.column(283, 81);
-        let orphaned = [
+        let expected = BlockEntity::Opaque {
+            id: BlockEntityKind::from("minecraft:banner"),
+            nbt: end_city_banner_nbt(),
+        };
+        let target = [
             BlockPos::new(4535, 118, 1308),
             BlockPos::new(4537, 118, 1306),
             BlockPos::new(4541, 118, 1306),
             BlockPos::new(4543, 118, 1308),
         ];
-        assert!(column.block_entities().is_empty(), "the external chunk has no block entities");
-        for position in orphaned {
-            assert_eq!(
-                column.block_state(position.x.rem_euclid(16), position.y, position.z.rem_euclid(16)),
-                "minecraft:air",
-                "removed banner at {position:?} must not retain a state"
+        assert_eq!(
+            column
+                .block_entities()
+                .iter()
+                .filter(|(_, entity)| entity.type_id() == "minecraft:banner")
+                .count(),
+            target.len(),
+            "target chunk must retain all four completed banner entities"
+        );
+        for position in target {
+            assert!(
+                column
+                    .block_state(position.x.rem_euclid(16), position.y, position.z.rem_euclid(16))
+                    .starts_with("minecraft:magenta_wall_banner["),
+                "banner state at {position:?} must remain"
             );
             assert!(
-                column.block_entities().iter().all(|(actual, _)| *actual != position),
-                "removed banner at {position:?} must not retain a sidecar"
+                column
+                    .block_entities()
+                    .iter()
+                    .any(|(actual, entity)| *actual == position && entity == &expected),
+                "completed banner at {position:?} must retain its patterned sidecar"
             );
         }
 
-        // Negative control: the adjacent captured city chunk has supported
-        // banners, so the same sidecar path must still retain its three
-        // patterned records.
+        // Negative control: the adjacent captured city chunk has three, not
+        // four, banner records, proving the detector is location-sensitive.
         let control = source.column(283, 86);
         let surviving = control
             .block_entities()
             .iter()
             .filter(|(_, entity)| entity.type_id() == "minecraft:banner")
             .count();
-        assert_eq!(surviving, 3, "supported banners must remain visible to the packet path");
+        assert_eq!(surviving, 3, "control chunk must retain exactly three banner sidecars");
+    }
+
+    #[test]
+    fn debug_end_heightmap_phases_280_78() {
+        let generator = crate::worldgen_data::end_generator(42);
+        let base = generator.column_shaped(280, 78);
+        let full = generator.column(280, 78);
+        for (name, column) in [("base", base), ("full", full)] {
+            let non_air = (0..128)
+                .filter(|&y| column.block_state(2, y, 0) != "minecraft:air")
+                .map(|y| (y, column.block_state(2, y, 0).to_owned()))
+                .collect::<Vec<_>>();
+            println!("{name} top {:?} maps {:?}", non_air.last(), [0, 1, 2].map(|i| column.client_heightmaps()[i][2]));
+        }
     }
 
     #[test]

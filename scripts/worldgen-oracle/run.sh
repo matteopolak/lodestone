@@ -48,6 +48,39 @@ fi
 if [ -n "${LODESTONE_ORACLE_DIMENSION:-}" ]; then
   WORLD_ENV+=( -e "ORACLE_DIMENSION=$LODESTONE_ORACLE_DIMENSION" )
 fi
+if [ -n "${LODESTONE_ORACLE_PAUSE_WHEN_EMPTY_SECONDS:-}" ]; then
+  WORLD_ENV+=( -e "ORACLE_PAUSE_WHEN_EMPTY_SECONDS=$LODESTONE_ORACLE_PAUSE_WHEN_EMPTY_SECONDS" )
+fi
+if [ -n "${LODESTONE_ORACLE_TRAVERSAL:-}" ]; then
+  WORLD_ENV+=( -e "ORACLE_TRAVERSAL=$LODESTONE_ORACLE_TRAVERSAL" )
+fi
+if [ "${LODESTONE_ORACLE_ADMISSION:-}" = 1 ]; then
+  WORLD_ENV+=( -e ORACLE_ADMISSION=1 )
+fi
+for placement_var in SOURCE_X SOURCE_Z PLACED_FEATURE FEATURE_INDEX FEATURE_STEP TARGET_CHUNK TARGET_X TARGET_Z FOCUS FOCUS_X FOCUS_Y FOCUS_Z BLOCK; do
+  host_var="LODESTONE_ORACLE_${placement_var}"
+  if [ -n "${!host_var:-}" ]; then
+    WORLD_ENV+=( -e "ORACLE_${placement_var}=${!host_var}" )
+  fi
+done
+if [ "${LODESTONE_ORACLE_STOP_STAGE_PROBE:-}" = 1 ]; then
+  WORLD_ENV+=( -e STOP_STAGE_PROBE=1 )
+fi
+if [ "${LODESTONE_ORACLE_STREAM_FULL:-}" = 1 ]; then
+  WORLD_ENV+=( -e ORACLE_STREAM_FULL=1 )
+fi
+if [ "${LODESTONE_ORACLE_BEARD_TRACE:-}" = 1 ]; then
+  WORLD_ENV+=( -e ORACLE_BEARD_TRACE=1 )
+fi
+if [ "${LODESTONE_ORACLE_JIGSAW_REPLAY:-}" = 1 ]; then
+  WORLD_ENV+=( -e ORACLE_JIGSAW_REPLAY=1 )
+fi
+for replay_var in REPLAY_FULL_ONLY REPLAY_FIRST_TILE REPLAY_SINGLE_SOURCE REPLAY_BASE_ONLY REPLAY_BIOMES_ONLY; do
+  host_var="LODESTONE_ORACLE_${replay_var}"
+  if [ "${!host_var:-}" = 1 ]; then
+    WORLD_ENV+=( -e "${replay_var}=1" )
+  fi
+done
 if [ -n "${LODESTONE_ORACLE_FROZEN_WORLD_ROOT:-}" ]; then
   if [ ! -d "$LODESTONE_ORACLE_FROZEN_WORLD_ROOT" ]; then
     echo "LODESTONE_ORACLE_FROZEN_WORLD_ROOT must name an existing frozen-world directory" >&2
@@ -115,7 +148,8 @@ CONTAINER_ARGS+=( "${WORLD_ENV[@]}" "${WORLD_MOUNTS[@]}" )
 set -u
 container run "${CONTAINER_ARGS[@]}" eclipse-temurin:25-jdk bash -c '
     set -e
-    CP="/mc/versions/26.2/server-26.2.jar:$(find /mc/libraries -name "*.jar" | tr "\n" ":")"
+    LIB_CP="$(find /mc/libraries -name "*.jar" | tr "\n" ":")"
+    CP="/mc/versions/26.2/server-26.2.jar:$LIB_CP"
     mkdir -p /work
     if [ ! -f /work/server.properties ]; then
       printf "%s\\n" \
@@ -124,13 +158,22 @@ container run "${CONTAINER_ARGS[@]}" eclipse-temurin:25-jdk bash -c '
         "level-type=minecraft\\:normal" \
         "online-mode=false" \
         "enable-status=false" \
-        "pause-when-empty-seconds=0" \
+        "pause-when-empty-seconds=${ORACLE_PAUSE_WHEN_EMPTY_SECONDS:-0}" \
         "view-distance=2" \
         "simulation-distance=2" \
         "server-port=25565" > /work/server.properties
     fi
     printf 'eula=true\n' > /work/eula.txt
     cp /oracle/'"$CLASS"'.java /work/
-    javac -cp "$CP" -d /work /work/'"$CLASS"'.java
+    if [ '"$CLASS"' = EndHeightmapStatusOracle ] || [ '"$CLASS"' = LargeParityOracle ]; then
+      cp /oracle/LargeParityOracle.java /work/
+      cp /oracle/EndHeightmapStatusOracle.java /work/
+      javac -cp "$CP" -d /work /work/LargeParityOracle.java /work/EndHeightmapStatusOracle.java
+    elif [ '"$CLASS"' = NetherPlacementOracle ] || [ '"$CLASS"' = NetherColumnOracle ] || [ '"$CLASS"' = NetherStageOracle ] || [ '"$CLASS"' = NetherFeatureAdmissionOracle ] || [ '"$CLASS"' = NetherFeatureCellsOracle ] || [ '"$CLASS"' = NetherBlobPlacementOracle ] || [ '"$CLASS"' = OverworldFeatureTraceOracle ] || [ '"$CLASS"' = OverworldReplayFeaturesOracle ]; then
+      cp /oracle/LargeParityOracle.java /work/
+      javac -cp "$CP" -d /work /work/LargeParityOracle.java /work/'"$CLASS"'.java
+    else
+      javac -cp "$CP" -d /work /work/'"$CLASS"'.java
+    fi
     java -Dmax.bg.threads=1 -cp "/work:$CP" '"$CLASS"'
   '

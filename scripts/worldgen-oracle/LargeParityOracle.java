@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicReference;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.Holder;
 import net.minecraft.core.Registry;
@@ -57,6 +58,7 @@ import net.minecraft.server.notifications.NotificationManager;
 import net.minecraft.server.packs.repository.PackRepository;
 import net.minecraft.server.packs.repository.ServerPacksSource;
 import net.minecraft.util.Util;
+import net.minecraft.util.RandomSource;
 import net.minecraft.util.datafix.DataFixers;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.Block;
@@ -67,7 +69,25 @@ import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.level.chunk.Strategy;
 import net.minecraft.world.level.dimension.LevelStem;
+import net.minecraft.world.level.levelgen.WorldgenRandom;
+import net.minecraft.world.level.levelgen.XoroshiroRandomSource;
+import net.minecraft.world.level.levelgen.LegacyRandomSource;
 import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.level.levelgen.Beardifier;
+import net.minecraft.world.level.levelgen.DensityFunction;
+import net.minecraft.world.level.levelgen.structure.PoolElementStructurePiece;
+import net.minecraft.world.level.levelgen.structure.StructureStart;
+import net.minecraft.world.level.levelgen.structure.TerrainAdjustment;
+import net.minecraft.world.level.levelgen.structure.pools.JigsawPlacement;
+import net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool;
+import net.minecraft.world.level.levelgen.structure.pools.alias.PoolAliasLookup;
+import net.minecraft.world.level.levelgen.structure.templatesystem.LiquidSettings;
+import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplateManager;
+import net.minecraft.world.level.levelgen.structure.templatesystem.StructurePlaceSettings;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.shapes.BooleanOp;
+import net.minecraft.world.phys.shapes.Shapes;
+import net.minecraft.world.phys.shapes.VoxelShape;
 import net.minecraft.world.level.storage.LevelDataAndDimensions;
 import net.minecraft.world.level.storage.LevelStorageSource;
 import net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket;
@@ -83,6 +103,10 @@ public final class LargeParityOracle {
     static final byte[] MAGIC_V7 = "LWP26P07".getBytes(StandardCharsets.US_ASCII);
     static final byte[] LIGHT_FREE_AUDIT_MAGIC = "LWP26A07".getBytes(StandardCharsets.US_ASCII);
     static final int HEADER_BYTES = 256, FORMAT_VERSION = 3, SCHEMA_VERSION = 3, DIGEST_BYTES = 32;
+    // Header bytes 70..72 identify the structure-terrain scope. Zero is the
+    // production scope used by every authenticated full-world export; the
+    // composed stage oracle records its empty scope in its own text schema.
+    static final short STRUCTURE_BEARD_SCOPE_PRODUCTION_REAL = 0;
     static final int GRID_MIN = -250, GRID_MAX = 250;
     static final int RAW_GRID_MIN = -500, RAW_GRID_MAX = 500, RAW_RECORD_BYTES = 2;
     static final int GRID_SIDE = GRID_MAX - GRID_MIN + 1;
@@ -97,6 +121,18 @@ public final class LargeParityOracle {
     static final byte[] MANIFEST_DOMAIN_V7 = "lodestone.worldgen.large-parity.manifest/v7/light-free".getBytes(StandardCharsets.US_ASCII);
     static final byte[] PACKET_AUDIT_MAGIC = "LWP26A06".getBytes(StandardCharsets.US_ASCII);
     static final byte[] PACKET_AUDIT_DOMAIN = "lodestone.worldgen.large-parity.packet-audit/v6/raw-packet".getBytes(StandardCharsets.US_ASCII);
+    /**
+     * Live one-way oracle stream. The stream is separate from the frozen-world
+     * manifests so a consumer can compare a packet while the JVM is still
+     * admitting the next coordinate.
+     */
+    static final byte[] STREAM_MAGIC = "LWS26S01".getBytes(StandardCharsets.US_ASCII);
+    static final byte[] STREAM_DOMAIN = "lodestone.worldgen.streaming-parity/v2/light-free".getBytes(StandardCharsets.US_ASCII);
+    static final byte[] END_STREAM_DOMAIN = "lodestone.worldgen.streaming-parity/v3/end-lifecycle".getBytes(StandardCharsets.US_ASCII);
+    static final byte[] END_STREAM_EVENT_DOMAIN = "lodestone.worldgen.streaming-parity/end-lifecycle-event/v1".getBytes(StandardCharsets.US_ASCII);
+    static final int STREAM_HEADER_BYTES = 256;
+    static final int STREAM_FORMAT_LIGHT_FREE = 7;
+    static final int STREAM_FORMAT_END_LIFECYCLE = 8;
     static final byte[] LIGHT_FREE_AUDIT_DOMAIN = "lodestone.worldgen.large-parity.audit/v7/light-free".getBytes(StandardCharsets.US_ASCII);
     static final byte[] RECORD_DOMAIN = "lodestone.worldgen.large-parity.chunk/v3/semantic".getBytes(StandardCharsets.US_ASCII);
     static final byte[] RECORD_DOMAIN_V4 = "lodestone.worldgen.large-parity.chunk/v4/semantic".getBytes(StandardCharsets.US_ASCII);
@@ -109,8 +145,66 @@ public final class LargeParityOracle {
     static final String MATERIALIZATION_CONTRACT_V6 = "lodestone-large-parity-materialization-v6";
     static final String MATERIALIZATION_CONTRACT_V7 = "lodestone-large-parity-materialization-v7";
     static final int MATERIALIZE_TILE = 16;
+    static final int MATERIALIZE_RADIUS = 1;
     static final String OVERWORLD = "overworld", NETHER = "nether", END = "end";
     static String diagnosticPacketOut, diagnosticRecordOut;
+
+    /**
+     * The compiled generator keeps the last nearest-biome leaf in a
+     * thread-local accelerator. That cache is an optimization, but its
+     * tie-breaking candidate is observable when independent generation tasks
+     * reach the same worker in a different order. Clear it on the worker
+     * which will execute the next generation task so the admission order is
+     * the only ordering input retained by the oracle.
+     */
+    static void resetBiomeSearchState(ServerLevel level) {
+        try {
+            Object source = level.getChunkSource().getGenerator().getBiomeSource();
+            Method parameters = source.getClass().getDeclaredMethod("parameters");
+            parameters.setAccessible(true);
+            Object parameterList = parameters.invoke(source);
+            Object index = field(parameterList, "index");
+            Object lastResult = field(index, "lastResult");
+            if (!(lastResult instanceof ThreadLocal<?> cache)) throw new IllegalStateException("biome search cache is not thread-local");
+            cache.remove();
+        } catch (NoSuchMethodException ignored) {
+            // Fixed and end-dimension sources do not use a parameter tree.
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("cannot reset biome search state", e);
+        }
+    }
+
+    static void resetBiomeSearchStateOnWorker(ServerLevel level) {
+        CompletableFuture.runAsync(() -> resetBiomeSearchState(level), Util.backgroundExecutor()).join();
+    }
+
+    static void resetLevelRandom(ServerLevel level) {
+        // Structure placement and neighbour updates may consult the level
+        // random source. The source is normally seeded from process entropy,
+        // so seed it at the oracle boundary before any admitted centre can use
+        // it. Per-chunk generator randomness remains position-derived.
+        level.getRandom().setSeed(SEED);
+    }
+
+    static void resetLevelRandom(ServerLevel level, ChunkPos pos) {
+        long mixed = SEED + 0x9E3779B97F4A7C15L * pos.x() + 0xC2B2AE3D27D4EB4FL * pos.z();
+        mixed ^= mixed >>> 30;
+        mixed *= 0xBF58476D1CE4E5B9L;
+        mixed ^= mixed >>> 27;
+        mixed *= 0x94D049BB133111EBL;
+        mixed ^= mixed >>> 31;
+        level.getRandom().setSeed(mixed);
+    }
+
+    static void waitForEmptyServerPause() throws InterruptedException {
+        String value = System.getenv("ORACLE_PAUSE_WHEN_EMPTY_SECONDS");
+        if (value == null || value.isBlank()) return;
+        int seconds;
+        try { seconds = Integer.parseInt(value); }
+        catch (NumberFormatException e) { throw new IllegalStateException("ORACLE_PAUSE_WHEN_EMPTY_SECONDS must be an integer: " + value, e); }
+        if (seconds < 0) throw new IllegalStateException("ORACLE_PAUSE_WHEN_EMPTY_SECONDS must be non-negative: " + value);
+        if (seconds > 0) Thread.sleep(Math.multiplyExact((long)seconds + 1L, 1000L));
+    }
 
     static void verifySingleWorldgenWorker() {
         if (!"1".equals(System.getProperty("max.bg.threads"))) {
@@ -124,6 +218,11 @@ public final class LargeParityOracle {
         String packetOut;
         String packetAuditOut;
         String recordOut;
+        String streamOut;
+        long streamStartIndex;
+        String diagnosticCoordinates;
+        String diagnosticPacketDir;
+        String diagnosticRecordDir;
         int loX = GRID_MIN, hiX = GRID_MAX, loZ = GRID_MIN, hiZ = GRID_MAX;
         boolean resume, help, provenanceSelftest, determinismSelftest, rawPacketV6, lightFreeV7;
         boolean explicitCx, explicitCz;
@@ -168,6 +267,11 @@ public final class LargeParityOracle {
             case "--packet-out" -> out.packetOut = a[++i];
             case "--packet-audit-out" -> out.packetAuditOut = a[++i];
             case "--record-out" -> out.recordOut = a[++i];
+            case "--stream-out" -> out.streamOut = a[++i];
+            case "--start-index" -> out.streamStartIndex = Long.parseLong(a[++i]);
+            case "--diagnostic-coordinates" -> out.diagnosticCoordinates = a[++i];
+            case "--diagnostic-packet-dir" -> out.diagnosticPacketDir = a[++i];
+            case "--diagnostic-record-dir" -> out.diagnosticRecordDir = a[++i];
             case "--dimension" -> { out.dimension = a[++i].toLowerCase(); out.explicitDimension = true; }
             default -> throw new IllegalArgumentException("unknown argument " + a[i]);
         }
@@ -179,10 +283,33 @@ public final class LargeParityOracle {
         }
         if (out.help || out.provenanceSelftest || out.determinismSelftest) return out;
         if (!OVERWORLD.equals(out.dimension) && !NETHER.equals(out.dimension) && !END.equals(out.dimension)) throw new IllegalArgumentException("--dimension must be overworld, nether, or end");
-        if (!"materialize".equals(out.mode) && !"export".equals(out.mode)) throw new IllegalArgumentException("--mode must be materialize or export");
+        if (!"materialize".equals(out.mode) && !"export".equals(out.mode) && !"diagnostic".equals(out.mode) && !"stream".equals(out.mode)) throw new IllegalArgumentException("--mode must be materialize, export, diagnostic, or stream");
         if (out.loX > out.hiX || out.loZ > out.hiZ || out.loX < out.gridMin() || out.hiX > out.gridMax() || out.loZ < out.gridMin() || out.hiZ > out.gridMax()) throw new IllegalArgumentException("ranges must lie in " + out.gridMin() + "..=" + out.gridMax());
         if ("materialize".equals(out.mode) && out.out != null) throw new IllegalArgumentException("materialize has no --out; it seals the persistent world");
+        if ("diagnostic".equals(out.mode)) {
+            if (out.diagnosticCoordinates == null) throw new IllegalArgumentException("diagnostic mode requires --diagnostic-coordinates");
+            if (out.out != null || out.resume || out.packetOut != null || out.packetAuditOut != null || out.recordOut != null) throw new IllegalArgumentException("diagnostic mode accepts only coordinate and diagnostic output options");
+            if (out.v7()) {
+                if (out.diagnosticRecordDir == null || out.diagnosticPacketDir != null) throw new IllegalArgumentException("light-free diagnostic mode requires only --diagnostic-record-dir");
+            } else if (out.diagnosticPacketDir == null || out.diagnosticRecordDir != null) {
+                throw new IllegalArgumentException("packet diagnostic mode requires only --diagnostic-packet-dir");
+            }
+        } else if (out.diagnosticCoordinates != null || out.diagnosticPacketDir != null || out.diagnosticRecordDir != null) {
+            throw new IllegalArgumentException("diagnostic output options require --mode diagnostic");
+        }
         if ("export".equals(out.mode) && out.out == null) throw new IllegalArgumentException("export requires --out");
+        if ("stream".equals(out.mode)) {
+            if (out.streamOut == null || out.streamOut.isBlank()) throw new IllegalArgumentException("stream requires --stream-out");
+            if (!out.v6() && !out.v7()) throw new IllegalArgumentException("stream requires --raw-packet or --light-free");
+            if (END.equals(out.dimension) && !out.v7()) throw new IllegalArgumentException("End lifecycle stream requires --light-free");
+            if (out.streamStartIndex < 0) throw new IllegalArgumentException("--start-index must be non-negative");
+            if (out.streamStartIndex != 0) throw new IllegalArgumentException("stream is ephemeral; --start-index is not supported");
+            if (out.out != null || out.resume || out.packetOut != null || out.packetAuditOut != null || out.recordOut != null) throw new IllegalArgumentException("stream mode accepts only --stream-out and --start-index output options");
+            long count = (long)(out.hiX - out.loX + 1) * (out.hiZ - out.loZ + 1);
+            if (out.streamStartIndex > count) throw new IllegalArgumentException("--start-index exceeds stream count");
+        } else if (out.streamOut != null || out.streamStartIndex != 0) {
+            throw new IllegalArgumentException("--stream-out and --start-index require --mode stream");
+        }
         if ((out.packetOut != null || out.recordOut != null) && (out.loX != out.hiX || out.loZ != out.hiZ)) throw new IllegalArgumentException("--packet-out and --record-out require exactly one chunk");
         if (out.v7() && out.packetOut != null) throw new IllegalArgumentException("--packet-out requires the full-packet v6 format; light-free v7 never encodes a packet");
         if (out.v7() && out.packetAuditOut != null) throw new IllegalArgumentException("--packet-audit-out requires the full-packet v6 format; light-free v7 has no packet audit");
@@ -193,6 +320,8 @@ public final class LargeParityOracle {
     static void usage() {
         System.out.println("materialize: LargeParityOracle --mode materialize [--dimension overworld|nether|end]");
         System.out.println("export:      LargeParityOracle --mode export --out /oracle/shard.lwp --cx LO HI --cz LO HI [--raw-packet|--light-free] [--dimension overworld|nether|end] [--resume] [--packet-out /oracle/chunk.bin] [--packet-audit-out /oracle/shard.packet-audit] [--record-out /oracle/chunk.record]");
+        System.out.println("stream:      LargeParityOracle --mode stream --stream-out /oracle-out/stream --cx LO HI --cz LO HI --light-free [--dimension overworld|nether|end]");
+        System.out.println("diagnostic:  LargeParityOracle --mode diagnostic --diagnostic-coordinates /oracle/coords.tsv --diagnostic-packet-dir /oracle/packets [--dimension overworld|nether|end]");
         System.out.println("control:     LargeParityOracle --provenance-selftest");
         System.out.println("control:     LargeParityOracle --determinism-selftest [--dimension overworld|nether|end]");
         System.out.println("materialize needs LODESTONE_ORACLE_WORLD_ROOT; export needs LODESTONE_ORACLE_FROZEN_WORLD_ROOT.");
@@ -207,7 +336,7 @@ public final class LargeParityOracle {
         byte[] magic = a.magic(), domain = a.manifestDomain();
         b.put(magic).putShort((short)a.semanticVersion()).putShort((short)HEADER_BYTES).putShort((short)2).putShort((short)a.semanticVersion()).putInt(776).putLong(SEED);
         b.putInt(a.gridMin()).putInt(a.gridMax()).putInt(a.gridMin()).putInt(a.gridMax()).putInt(a.loX).putInt(a.hiX).putInt(a.loZ).putInt(a.hiZ).putLong(count);
-        b.putShort((short)a.recordWidth()).putShort((short)0).put(digest(domain)).put(frozenDigest).put(payloadDigest);
+        b.putShort((short)a.recordWidth()).putShort(STRUCTURE_BEARD_SCOPE_PRODUCTION_REAL).put(digest(domain)).put(frozenDigest).put(payloadDigest);
         if (a.v6() || a.v7() || a.dimensionFormat()) b.put(digest(a.dimensionKey().getBytes(StandardCharsets.UTF_8)));
         return b.array();
     }
@@ -221,8 +350,8 @@ public final class LargeParityOracle {
             byte[] expectedMagic = a.magic(); int expectedVersion = a.semanticVersion(), expectedSchema = a.semanticVersion();
             if (!Arrays.equals(magic, expectedMagic) || b.getShort() != expectedVersion || b.getShort() != HEADER_BYTES || b.getShort() != 2 || b.getShort() != expectedSchema || b.getInt() != 776 || b.getLong() != SEED) throw new IllegalStateException("manifest format differs; resume requires the selected parity format: " + f);
             b.position(28);
-            if (b.getInt()!=a.gridMin() || b.getInt()!=a.gridMax() || b.getInt()!=a.gridMin() || b.getInt()!=a.gridMax() || b.getInt()!=a.loX || b.getInt()!=a.hiX || b.getInt()!=a.loZ || b.getInt()!=a.hiZ || b.getLong()!=count || b.getShort()!=width) throw new IllegalStateException("resume shard geometry differs: " + f);
-            b.getShort(); byte[] domain = new byte[32]; b.get(domain); byte[] recordedFrozen = new byte[32]; b.get(recordedFrozen); byte[] expected = new byte[32]; b.get(expected);
+            if (b.getInt()!=a.gridMin() || b.getInt()!=a.gridMax() || b.getInt()!=a.gridMin() || b.getInt()!=a.gridMax() || b.getInt()!=a.loX || b.getInt()!=a.hiX || b.getInt()!=a.loZ || b.getInt()!=a.hiZ || b.getLong()!=count || b.getShort()!=width || b.getShort()!=STRUCTURE_BEARD_SCOPE_PRODUCTION_REAL) throw new IllegalStateException("resume shard geometry or structure-beard scope differs: " + f);
+            byte[] domain = new byte[32]; b.get(domain); byte[] recordedFrozen = new byte[32]; b.get(recordedFrozen); byte[] expected = new byte[32]; b.get(expected);
             if (!Arrays.equals(domain, digest(a.manifestDomain())) || !Arrays.equals(recordedFrozen, frozenDigest)) throw new IllegalStateException("resume schema or frozen-world identity differs: " + f);
             if (a.v6() || a.v7() || a.dimensionFormat()) { byte[] recordedDimension = new byte[32]; b.get(recordedDimension); if (!Arrays.equals(recordedDimension, digest(a.dimensionKey().getBytes(StandardCharsets.UTF_8)))) throw new IllegalStateException("resume dimension identity differs: " + f); }
             long records = (f.length() - HEADER_BYTES) / width;
@@ -236,7 +365,7 @@ public final class LargeParityOracle {
         ByteBuffer b = ByteBuffer.allocate(HEADER_BYTES).order(ByteOrder.BIG_ENDIAN);
         b.put(PACKET_AUDIT_MAGIC).putShort((short)6).putShort((short)HEADER_BYTES).putShort((short)3).putShort((short)6).putInt(776).putLong(SEED);
         b.putInt(a.gridMin()).putInt(a.gridMax()).putInt(a.gridMin()).putInt(a.gridMax()).putInt(a.loX).putInt(a.hiX).putInt(a.loZ).putInt(a.hiZ).putLong(count);
-        b.putShort((short)DIGEST_BYTES).putShort((short)0).put(digest(PACKET_AUDIT_DOMAIN)).put(frozenDigest).put(payloadDigest).put(digest(a.dimensionKey().getBytes(StandardCharsets.UTF_8)));
+        b.putShort((short)DIGEST_BYTES).putShort(STRUCTURE_BEARD_SCOPE_PRODUCTION_REAL).put(digest(PACKET_AUDIT_DOMAIN)).put(frozenDigest).put(payloadDigest).put(digest(a.dimensionKey().getBytes(StandardCharsets.UTF_8)));
         return b.array();
     }
     static long resumePacketAudits(File f, Args a, long count, byte[] frozenDigest) throws Exception {
@@ -246,7 +375,8 @@ public final class LargeParityOracle {
             if (!Arrays.equals(magic, PACKET_AUDIT_MAGIC) || b.getShort() != 6 || b.getShort() != HEADER_BYTES || b.getShort() != 3 || b.getShort() != 6 || b.getInt() != 776 || b.getLong() != SEED) throw new IllegalStateException("packet audit sidecar identity differs: " + f);
             b.position(28);
             if (b.getInt()!=a.gridMin() || b.getInt()!=a.gridMax() || b.getInt()!=a.gridMin() || b.getInt()!=a.gridMax() || b.getInt()!=a.loX || b.getInt()!=a.hiX || b.getInt()!=a.loZ || b.getInt()!=a.hiZ || b.getLong()!=count || b.getShort()!=DIGEST_BYTES) throw new IllegalStateException("packet audit sidecar geometry differs: " + f);
-            b.getShort(); byte[] domain = new byte[32]; b.get(domain); byte[] recordedFrozen = new byte[32]; b.get(recordedFrozen); byte[] expected = new byte[32]; b.get(expected); byte[] recordedDimension = new byte[32]; b.get(recordedDimension);
+            if (b.getShort() != STRUCTURE_BEARD_SCOPE_PRODUCTION_REAL) throw new IllegalStateException("packet-audit structure-beard scope differs: " + f);
+            byte[] domain = new byte[32]; b.get(domain); byte[] recordedFrozen = new byte[32]; b.get(recordedFrozen); byte[] expected = new byte[32]; b.get(expected); byte[] recordedDimension = new byte[32]; b.get(recordedDimension);
             if (!Arrays.equals(domain, digest(PACKET_AUDIT_DOMAIN)) || !Arrays.equals(recordedFrozen, frozenDigest) || !Arrays.equals(recordedDimension, digest(a.dimensionKey().getBytes(StandardCharsets.UTF_8)))) throw new IllegalStateException("packet audit sidecar provenance differs: " + f);
             long records = (f.length() - HEADER_BYTES) / DIGEST_BYTES;
             if (records == count) { MessageDigest actual = sha256(); byte[] buf = new byte[8192]; int n; while ((n = in.read(buf)) != -1) actual.update(buf, 0, n); if (!Arrays.equals(expected, actual.digest())) throw new IllegalStateException("packet audit sidecar checksum differs: " + f); }
@@ -259,7 +389,7 @@ public final class LargeParityOracle {
         ByteBuffer b = ByteBuffer.allocate(HEADER_BYTES).order(ByteOrder.BIG_ENDIAN);
         b.put(LIGHT_FREE_AUDIT_MAGIC).putShort((short)7).putShort((short)HEADER_BYTES).putShort((short)3).putShort((short)7).putInt(776).putLong(SEED);
         b.putInt(a.gridMin()).putInt(a.gridMax()).putInt(a.gridMin()).putInt(a.gridMax()).putInt(a.loX).putInt(a.hiX).putInt(a.loZ).putInt(a.hiZ).putLong(count);
-        b.putShort((short)DIGEST_BYTES).putShort((short)0).put(digest(LIGHT_FREE_AUDIT_DOMAIN)).put(frozenDigest).put(payloadDigest).put(digest(a.dimensionKey().getBytes(StandardCharsets.UTF_8)));
+        b.putShort((short)DIGEST_BYTES).putShort(STRUCTURE_BEARD_SCOPE_PRODUCTION_REAL).put(digest(LIGHT_FREE_AUDIT_DOMAIN)).put(frozenDigest).put(payloadDigest).put(digest(a.dimensionKey().getBytes(StandardCharsets.UTF_8)));
         return b.array();
     }
 
@@ -270,7 +400,8 @@ public final class LargeParityOracle {
             if (!Arrays.equals(magic, LIGHT_FREE_AUDIT_MAGIC) || b.getShort() != 7 || b.getShort() != HEADER_BYTES || b.getShort() != 3 || b.getShort() != 7 || b.getInt() != 776 || b.getLong() != SEED) throw new IllegalStateException("light-free audit sidecar identity differs: " + f);
             b.position(28);
             if (b.getInt()!=a.gridMin() || b.getInt()!=a.gridMax() || b.getInt()!=a.gridMin() || b.getInt()!=a.gridMax() || b.getInt()!=a.loX || b.getInt()!=a.hiX || b.getInt()!=a.loZ || b.getInt()!=a.hiZ || b.getLong()!=count || b.getShort()!=DIGEST_BYTES) throw new IllegalStateException("light-free audit sidecar geometry differs: " + f);
-            b.getShort(); byte[] domain = new byte[32]; b.get(domain); byte[] recordedFrozen = new byte[32]; b.get(recordedFrozen); byte[] expected = new byte[32]; b.get(expected); byte[] recordedDimension = new byte[32]; b.get(recordedDimension);
+            if (b.getShort() != STRUCTURE_BEARD_SCOPE_PRODUCTION_REAL) throw new IllegalStateException("light-free audit structure-beard scope differs: " + f);
+            byte[] domain = new byte[32]; b.get(domain); byte[] recordedFrozen = new byte[32]; b.get(recordedFrozen); byte[] expected = new byte[32]; b.get(expected); byte[] recordedDimension = new byte[32]; b.get(recordedDimension);
             if (!Arrays.equals(domain, digest(LIGHT_FREE_AUDIT_DOMAIN)) || !Arrays.equals(recordedFrozen, frozenDigest) || !Arrays.equals(recordedDimension, digest(a.dimensionKey().getBytes(StandardCharsets.UTF_8)))) throw new IllegalStateException("light-free audit sidecar provenance differs: " + f);
             long records = (f.length() - HEADER_BYTES) / DIGEST_BYTES;
             if (records == count) { MessageDigest actual = sha256(); byte[] buf = new byte[8192]; int n; while ((n = in.read(buf)) != -1) actual.update(buf, 0, n); if (!Arrays.equals(expected, actual.digest())) throw new IllegalStateException("light-free audit sidecar checksum differs: " + f); }
@@ -625,24 +756,289 @@ public final class LargeParityOracle {
     }
 
     static void materializeOne(MinecraftServer server, ServerLevel level, Args a, ChunkPos pos) {
+        resetBiomeSearchState(level);
+        resetBiomeSearchStateOnWorker(level);
         CompletableFuture<?> future = server.submit(() -> level.getChunkSource().addTicketAndLoadWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, 0)).join();
         net.minecraft.server.level.ChunkResult<?> result = (net.minecraft.server.level.ChunkResult<?>)future.join();
         if (!result.isSuccess()) throw new IllegalStateException("chunk generation failed at " + pos + ": " + result.getError());
         if (!a.v7()) settleMaterializedBatch(server, level, List.of(pos));
-        server.submit(() -> level.getChunkSource().removeTicketWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, 0)).join();
+        server.submit(() -> {
+            level.getChunkSource().removeTicketWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, 0);
+            // Ticket removal only queues the chunk for unloading. Drain that
+            // queue before the next admission so a later generation cannot
+            // observe a prior centre at an implementation-dependent point in
+            // its save/unload lifecycle.
+            level.getChunkSource().tick(() -> true, false);
+        }).join();
+    }
+
+    /**
+     * Admit one centre at a time while retaining every earlier centre ticket
+     * in the tile. A one-centre loop that releases immediately lets the server
+     * evict a dependency between admissions; the next feature pass can then
+     * observe that dependency at a different generation stage even with one
+     * worldgen worker. The tile is the durable scheduling unit, so its
+     * admission order and release are one fence.
+     */
+    static void materializeBatch(MinecraftServer server, ServerLevel level, Args a, List<ChunkPos> positions) {
+        if (positions.isEmpty()) return;
+        for (ChunkPos pos : positions) {
+            resetLevelRandom(level, pos);
+            resetBiomeSearchState(level);
+            resetBiomeSearchStateOnWorker(level);
+            CompletableFuture<?> future = server.submit(() -> level.getChunkSource().addTicketAndLoadWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, MATERIALIZE_RADIUS)).join();
+            net.minecraft.server.level.ChunkResult<?> result = (net.minecraft.server.level.ChunkResult<?>) future.join();
+            if (!result.isSuccess()) throw new IllegalStateException("chunk generation failed at " + pos + ": " + result.getError());
+            // FULL completion can leave feature and light work queued behind
+            // the returned future. Fence each centre before admitting the
+            // next one; earlier tile tickets remain live, so this preserves
+            // the tile's dependency closure without allowing deferred work to
+            // race a later centre.
+            settleMaterializedBatch(server, level, List.of(pos));
+        }
+        // The materialization contract does not capture packets here, but a
+        // complete tile must still drain scheduler work before its tickets are
+        // released. This is deliberately a server-thread fence: joining the
+        // futures from that thread would deadlock the server executor.
+        server.submit(() -> level.getChunkSource().tick(() -> true, false)).join();
+        server.submit(() -> {
+            for (ChunkPos pos : positions) level.getChunkSource().removeTicketWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, MATERIALIZE_RADIUS);
+            level.getChunkSource().tick(() -> true, false);
+        }).join();
     }
 
     static void loadBatch(MinecraftServer server, ServerLevel level, Args a, List<ChunkPos> positions, boolean capture, List<byte[]> out) { loadBatch(server, level, a, positions, capture, out, null); }
     static void loadBatch(MinecraftServer server, ServerLevel level, Args a, List<ChunkPos> positions, boolean capture, List<byte[]> out, List<byte[]> packetAudits) {
         if (!capture) {
-            for (ChunkPos pos : positions) materializeOne(server, level, a, pos);
+            materializeBatch(server, level, a, positions);
             return;
         }
-        List<ChunkPos> loaded = positions;
-        List<CompletableFuture<?>> futures = server.submit(() -> { List<CompletableFuture<?>> result = new ArrayList<>(loaded.size()); for (ChunkPos pos : loaded) result.add(level.getChunkSource().addTicketAndLoadWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, 0)); return result; }).join();
-        for (int i = 0; i < loaded.size(); i++) { net.minecraft.server.level.ChunkResult<?> result = (net.minecraft.server.level.ChunkResult<?>)futures.get(i).join(); if (!result.isSuccess()) throw new IllegalStateException("chunk generation failed at " + loaded.get(i) + ": " + result.getError()); }
-        if (capture) out.addAll(server.submit(() -> { try { List<byte[]> result = new ArrayList<>(positions.size()); for (ChunkPos pos : positions) { LevelChunk chunk = level.getChunkSource().getChunkNow(pos.x(), pos.z()); if (chunk == null) throw new IllegalStateException("loaded chunk was evicted: " + pos); byte[] packet = a.v6() || diagnosticPacketOut != null ? packetBody(server, chunk, level) : null; if (diagnosticPacketOut != null) Files.write(Path.of(diagnosticPacketOut), packet); if (a.v7()) { byte[] record = lightFreeRecord(level, chunk, a); byte[] full = digest(record); if (packetAudits != null) packetAudits.add(full); if (diagnosticRecordOut != null) Files.write(Path.of(diagnosticRecordOut), record); result.add(Arrays.copyOf(full, RAW_RECORD_BYTES)); } else if (a.v6()) { byte[] full = digest(packet); if (packetAudits != null) packetAudits.add(full); result.add(Arrays.copyOf(full, RAW_RECORD_BYTES)); } else { byte[] record = semanticRecord(level, chunk, a); if (diagnosticRecordOut != null) Files.write(Path.of(diagnosticRecordOut), record); result.add(digest(record)); } } return result; } catch (Exception e) { throw new IllegalStateException("canonical chunk export failed", e); } }).join());
-        server.submit(() -> { for (ChunkPos pos : loaded) level.getChunkSource().removeTicketWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, 0); }).join();
+
+        // A range future only orders the requested FULL status.  It does not
+        // order the deferred feature/light work that can still mutate a
+        // neighbouring column before a later capture.  Capturing a centre as
+        // soon as it settles therefore lets later admissions change the value
+        // that the export is supposed to describe.  Admit every centre first,
+        // retain the whole dependency closure, then settle and capture the
+        // final set in the requested order.
+        List<CompletableFuture<?>> futures = new ArrayList<>(positions.size());
+        for (ChunkPos pos : positions) {
+            resetLevelRandom(level, pos);
+            resetBiomeSearchState(level);
+            resetBiomeSearchStateOnWorker(level);
+            futures.add(server.submit(() -> level.getChunkSource().addTicketAndLoadWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, MATERIALIZE_RADIUS)).join());
+        }
+        for (int i = 0; i < positions.size(); i++) {
+            net.minecraft.server.level.ChunkResult<?> result = (net.minecraft.server.level.ChunkResult<?>)futures.get(i).join();
+            ChunkPos pos = positions.get(i);
+            if (!result.isSuccess()) throw new IllegalStateException("chunk generation failed at " + pos + ": " + result.getError());
+        }
+        settleMaterializedBatch(server, level, positions);
+        out.addAll(server.submit(() -> {
+            try {
+                List<byte[]> result = new ArrayList<>(positions.size());
+                for (ChunkPos pos : positions) {
+                    LevelChunk chunk = level.getChunkSource().getChunkNow(pos.x(), pos.z());
+                    if (chunk == null) throw new IllegalStateException("loaded chunk was evicted: " + pos);
+                    byte[] packet = a.v6() || diagnosticPacketOut != null ? packetBody(server, chunk, level) : null;
+                    if (diagnosticPacketOut != null) Files.write(Path.of(diagnosticPacketOut), packet);
+                    if (a.v7()) {
+                        byte[] record = lightFreeRecord(level, chunk, a);
+                        byte[] full = digest(record);
+                        if (packetAudits != null) packetAudits.add(full);
+                        if (diagnosticRecordOut != null) Files.write(Path.of(diagnosticRecordOut), record);
+                        result.add(Arrays.copyOf(full, RAW_RECORD_BYTES));
+                    } else if (a.v6()) {
+                        byte[] full = digest(packet);
+                        if (packetAudits != null) packetAudits.add(full);
+                        result.add(Arrays.copyOf(full, RAW_RECORD_BYTES));
+                    } else {
+                        byte[] record = semanticRecord(level, chunk, a);
+                        if (diagnosticRecordOut != null) Files.write(Path.of(diagnosticRecordOut), record);
+                        result.add(digest(record));
+                    }
+                }
+                return result;
+            } catch (Exception e) {
+                throw new IllegalStateException("canonical chunk export failed", e);
+            }
+        }).join());
+        /*
+         * All centres remain ticketed until their complete final-set capture
+         * above.  Releasing them as a group prevents an unload queue from
+         * interleaving with the next export batch.
+         */
+        server.submit(() -> {
+            for (ChunkPos pos : positions) level.getChunkSource().removeTicketWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, MATERIALIZE_RADIUS);
+            level.getChunkSource().tick(() -> true, false);
+        }).join();
+    }
+
+    /** Admit one centre and capture only the requested bounded content record. */
+    static byte[] streamPacket(MinecraftServer server, ServerLevel level, Args a, ChunkPos pos) throws Exception {
+        resetBiomeSearchState(level);
+        resetBiomeSearchStateOnWorker(level);
+        CompletableFuture<?> future = server.submit(() -> level.getChunkSource().addTicketAndLoadWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, 0)).join();
+        net.minecraft.server.level.ChunkResult<?> result = (net.minecraft.server.level.ChunkResult<?>)future.join();
+        if (!result.isSuccess()) throw new IllegalStateException("chunk generation failed at " + pos + ": " + result.getError());
+        if (!a.v7()) settleMaterializedBatch(server, level, List.of(pos));
+        LevelChunk chunk = server.submit(() -> level.getChunkSource().getChunkNow(pos.x(), pos.z())).join();
+        if (chunk == null) throw new IllegalStateException("stream centre was evicted before packet capture: " + pos);
+        byte[] packet = a.v7() ? lightFreeRecord(level, chunk, a) : packetBody(server, chunk, level);
+        server.submit(() -> {
+            level.getChunkSource().removeTicketWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, 0);
+            level.getChunkSource().tick(() -> true, false);
+        }).join();
+        return packet;
+    }
+
+    static byte[] fileDigest(Path path) throws Exception {
+        MessageDigest digest = sha256();
+        try (var input = Files.newInputStream(path)) {
+            byte[] buffer = new byte[8192];
+            for (int n; (n = input.read(buffer)) != -1;) digest.update(buffer, 0, n);
+        }
+        return digest.digest();
+    }
+
+    /**
+     * Fixed binary stream header.  The fields intentionally mirror the
+     * provenance needed by the host ledger, while leaving the existing LWP
+     * formats untouched.  Offsets are documented in the streaming parity doc.
+     */
+    static byte[] streamHeader(Args a, long count) throws Exception {
+        ByteBuffer b = ByteBuffer.allocate(STREAM_HEADER_BYTES).order(ByteOrder.BIG_ENDIAN);
+        b.put(STREAM_MAGIC).putShort((short)1).putShort((short)STREAM_HEADER_BYTES).putShort((short)2).putShort((short)1).putInt(776).putLong(SEED);
+        int format = END.equals(a.dimension) ? STREAM_FORMAT_END_LIFECYCLE : (a.v7() ? STREAM_FORMAT_LIGHT_FREE : 6);
+        byte[] domain = END.equals(a.dimension) ? END_STREAM_DOMAIN : STREAM_DOMAIN;
+        b.putInt(a.loX).putInt(a.hiX).putInt(a.loZ).putInt(a.hiZ).putLong(count).putShort((short)DIGEST_BYTES).putShort((short)format);
+        b.put(digest(domain)).put(digest(a.dimensionKey().getBytes(StandardCharsets.UTF_8)));
+        b.put(fileDigest(Path.of("/mc/versions/26.2/server-26.2.jar")));
+        b.put(fileDigest(Path.of("/oracle/LargeParityOracle.java")));
+        b.putLong(a.streamStartIndex);
+        return b.array();
+    }
+
+    static int lifecycleResidentStage(String name) {
+        String status = name.substring(name.lastIndexOf(':') + 1);
+        return switch (status) {
+            case "carvers" -> 0;
+            case "features" -> 1;
+            case "full", "initialize_light", "light" -> 2;
+            default -> throw new IllegalStateException("external lifecycle reported unsupported resident status: " + name);
+        };
+    }
+
+    static byte[] lifecycleEventPayload(List<EndHeightmapStatusOracle.LifecycleEvent> events) throws Exception {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream(32 + events.size() * 32_000);
+        DataOutputStream out = new DataOutputStream(bytes);
+        out.write(END_STREAM_EVENT_DOMAIN);
+        out.writeInt(events.size());
+        for (EndHeightmapStatusOracle.LifecycleEvent event : events) {
+            if (!"features".equals(event.stage)) throw new IllegalStateException("external lifecycle event is not FEATURES: " + event.stage);
+            out.writeLong(event.sequence);
+            out.writeInt(event.source.x());
+            out.writeInt(event.source.z());
+            out.writeByte(1);
+            out.writeInt(event.residentTransitions.size());
+            for (EndHeightmapStatusOracle.LifecycleTransition transition : event.residentTransitions) {
+                out.writeInt(transition.resident.x());
+                out.writeInt(transition.resident.z());
+                out.writeByte(lifecycleResidentStage(transition.stage));
+                if (transition.clientHeightmaps == null) {
+                    out.writeByte(0);
+                } else {
+                    out.writeByte(1);
+                    if (transition.clientHeightmaps.length != 3) throw new IllegalStateException("external lifecycle map count differs");
+                    for (int map = 0; map < 3; map++) {
+                        if (transition.clientHeightmaps[map].length != 256) throw new IllegalStateException("external lifecycle map width differs");
+                        for (int value : transition.clientHeightmaps[map]) {
+                            if (value < 0 || value > 0xffff) throw new IllegalStateException("external lifecycle map cell exceeds u16: " + value);
+                            out.writeShort(value);
+                        }
+                    }
+                }
+            }
+        }
+        out.flush();
+        return bytes.toByteArray();
+    }
+
+    /**
+     * Produce a bounded frame stream.  Each frame carries the full packet only
+     * in transit; the consumer keeps the packet only when its digest differs.
+     * A broken FIFO is treated as cancellation, allowing fail-fast comparison
+     * to stop the JVM without a second world export.
+     */
+    static void stream(Args a) throws Exception {
+        long count = (long)(a.hiX - a.loX + 1) * (a.hiZ - a.loZ + 1);
+        if (a.streamStartIndex > count) throw new IllegalArgumentException("stream start exceeds count");
+        Path root = Path.of("/work/stream-world");
+        runServer(root, false, a, (server, level) -> {
+            int width = a.hiX - a.loX + 1;
+            Path output = Path.of(a.streamOut);
+            if (output.getParent() != null) Files.createDirectories(output.getParent());
+            // Publish readiness before opening the FIFO. The shell can now
+            // distinguish a JVM that failed during boot from one that is
+            // merely waiting for the Rust reader, and the reader receives the
+            // provenance header before the potentially long resume replay.
+            Files.writeString(Path.of(a.streamOut + ".ready"), "ready\n", StandardCharsets.US_ASCII);
+            try (var raw = Files.newOutputStream(output, java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.TRUNCATE_EXISTING, java.nio.file.StandardOpenOption.WRITE); var out = new DataOutputStream(new java.io.BufferedOutputStream(raw, 64 * 1024))) {
+                out.write(streamHeader(a, count));
+                out.flush();
+                // Rebuild the server's state prefix while the reader remains
+                // attached to the FIFO. A failed replay therefore closes the
+                // stream instead of leaving the comparator blocked before its
+                // first frame.
+                for (long index = 0; index < a.streamStartIndex; index++) {
+                    int cx = a.loX + (int)(index % width), cz = a.loZ + (int)(index / width);
+                    streamPacket(server, level, a, new ChunkPos(cx, cz));
+                    if ((index + 1) % 256 == 0) System.err.printf("[stream %s] replayed-prefix=%d/%d%n", a.dimension, index + 1, a.streamStartIndex);
+                }
+                long eventSequence = 0;
+                for (long index = a.streamStartIndex; index < count; index++) {
+                    int cx = a.loX + (int)(index % width), cz = a.loZ + (int)(index / width);
+                    List<EndHeightmapStatusOracle.LifecycleEvent> events = END.equals(a.dimension)
+                        ? EndHeightmapStatusOracle.captureLifecycleEvents(server, level, new ChunkPos(cx, cz), eventSequence)
+                        : List.of();
+                    eventSequence += events.size();
+                    byte[] packet = streamPacket(server, level, a, new ChunkPos(cx, cz));
+                    byte[] recordDigest = digest(packet);
+                    if (END.equals(a.dimension)) {
+                        byte[] eventPayload = lifecycleEventPayload(events);
+                        byte[] eventDigest = digest(eventPayload);
+                        long bodyLength = 8L + 4L + 4L + 4L + 4L + DIGEST_BYTES + DIGEST_BYTES + eventPayload.length + packet.length;
+                        if (bodyLength > Integer.MAX_VALUE) throw new IllegalStateException("stream lifecycle frame is too large at " + cx + "," + cz);
+                        out.writeInt((int)bodyLength);
+                        out.writeLong(index);
+                        out.writeInt(cx);
+                        out.writeInt(cz);
+                        out.writeInt(eventPayload.length);
+                        out.writeInt(packet.length);
+                        out.write(eventDigest);
+                        out.write(recordDigest);
+                        out.write(eventPayload);
+                        out.write(packet);
+                    } else {
+                        long bodyLength = 8L + 4L + 4L + 4L + DIGEST_BYTES + packet.length;
+                        if (bodyLength > Integer.MAX_VALUE) throw new IllegalStateException("stream packet frame is too large at " + cx + "," + cz);
+                        out.writeInt((int)bodyLength);
+                        out.writeLong(index);
+                        out.writeInt(cx);
+                        out.writeInt(cz);
+                        out.writeInt(packet.length);
+                        out.write(recordDigest);
+                        out.write(packet);
+                    }
+                    out.flush();
+                    if (index == a.streamStartIndex) Files.writeString(Path.of(a.streamOut + ".frame-ready"), "ready\n", StandardCharsets.US_ASCII);
+                    if ((index + 1) % 256 == 0 || index + 1 == count) System.err.printf("[stream %s] emitted=%d/%d coord=(%d,%d)%n", a.dimension, index + 1, count, cx, cz);
+                }
+                out.writeInt(0);
+                out.flush();
+            }
+            Files.writeString(Path.of(a.streamOut + ".complete"), "complete\n", StandardCharsets.US_ASCII);
+        });
     }
 
     record MaterializeProgress(int minX, int maxX, int minZ, int maxZ, int tilesX, int tilesZ, int epochTiles, int nextTile, int inflightEnd) {
@@ -656,6 +1052,13 @@ public final class LargeParityOracle {
         if (value == null || value.isBlank()) throw new IllegalStateException("materialize requires ORACLE_MATERIALIZE_EPOCH_TILES; use large-parity.sh, which starts a fresh JVM for every epoch");
         try { int parsed = Integer.parseInt(value); if (parsed <= 0) throw new NumberFormatException(); return parsed; }
         catch (NumberFormatException e) { throw new IllegalStateException("ORACLE_MATERIALIZE_EPOCH_TILES must be a positive integer: " + value, e); }
+    }
+
+    static boolean reverseMaterializationTraversal() {
+        String value = System.getenv().getOrDefault("ORACLE_TRAVERSAL", "forward");
+        if ("forward".equalsIgnoreCase(value)) return false;
+        if ("reverse".equalsIgnoreCase(value)) return true;
+        throw new IllegalStateException("ORACLE_TRAVERSAL must be forward or reverse: " + value);
     }
 
     static String progressText(Args a, MaterializeProgress progress) {
@@ -729,13 +1132,20 @@ public final class LargeParityOracle {
         int end = (int)Math.min(progress.totalTiles(), (long)progress.nextTile + progress.epochTiles);
         writeProgress(root, a, progress.withInflight(end));
         MaterializeProgress current = progress;
+        boolean reverse = reverseMaterializationTraversal();
         runServer(root, false, a, (server, level) -> {
             long start = System.nanoTime();
-            for (int tile = current.nextTile; tile < end; tile++) {
+            for (int ordinal = current.nextTile; ordinal < end; ordinal++) {
+                int tile = reverse ? current.totalTiles() - 1 - ordinal : ordinal;
                 int x0 = current.minX + (tile % current.tilesX) * MATERIALIZE_TILE, z0 = current.minZ + (tile / current.tilesX) * MATERIALIZE_TILE;
-                List<ChunkPos> positions = new ArrayList<>(MATERIALIZE_TILE * MATERIALIZE_TILE); for (int z = z0; z <= Math.min(current.maxZ, z0 + MATERIALIZE_TILE - 1); z++) for (int x = x0; x <= Math.min(current.maxX, x0 + MATERIALIZE_TILE - 1); x++) positions.add(new ChunkPos(x, z));
+                List<ChunkPos> positions = new ArrayList<>(MATERIALIZE_TILE * MATERIALIZE_TILE);
+                if (reverse) {
+                    for (int z = Math.min(current.maxZ, z0 + MATERIALIZE_TILE - 1); z >= z0; z--) for (int x = Math.min(current.maxX, x0 + MATERIALIZE_TILE - 1); x >= x0; x--) positions.add(new ChunkPos(x, z));
+                } else {
+                    for (int z = z0; z <= Math.min(current.maxZ, z0 + MATERIALIZE_TILE - 1); z++) for (int x = x0; x <= Math.min(current.maxX, x0 + MATERIALIZE_TILE - 1); x++) positions.add(new ChunkPos(x, z));
+                }
                 loadBatch(server, level, a, positions, false, new ArrayList<>());
-                System.err.printf("[large-parity %s] materialized-tile=%d/%d epoch=%d..%d rate=%.1f tiles/s%n", formatLabel(a), tile + 1, current.totalTiles(), current.nextTile + 1, end, (tile - current.nextTile + 1) / ((System.nanoTime() - start) / 1_000_000_000.0));
+                System.err.printf("[large-parity %s] materialized-tile=%d/%d traversal=%s epoch=%d..%d rate=%.1f tiles/s%n", formatLabel(a), ordinal + 1, current.totalTiles(), reverse ? "reverse" : "forward", current.nextTile + 1, end, (ordinal - current.nextTile + 1) / ((System.nanoTime() - start) / 1_000_000_000.0));
             }
         });
         progress = current.withNext(end); writeProgress(root, a, progress);
@@ -751,23 +1161,166 @@ public final class LargeParityOracle {
     static void runServer(Path root, boolean requireExisting, Args a, ServerWork work) throws Exception {
         SharedConstants.tryDetectVersion(); Bootstrap.bootStrap(); Bootstrap.validate(); Files.createDirectories(root); DedicatedServerSettings settings = new DedicatedServerSettings(Path.of("/work/server.properties")); LevelStorageSource storage = LevelStorageSource.createDefault(root);
         LevelStorageSource.LevelStorageAccess access = storage.validateAndCreateAccess(settings.getProperties().levelName); Dynamic<?> tag = access.hasWorldData() ? access.getUnfixedDataTagWithFallback() : null; if (requireExisting && tag == null) throw new IllegalStateException("frozen world is missing level data");
+        boolean freshWorld = tag == null;
         PackRepository packs = ServerPacksSource.createPackRepository(access); WorldStem stem = loadWorld(settings.getProperties(), access, packs, tag); Services services = Services.create(new YggdrasilAuthenticationService(Proxy.NO_PROXY), root.toFile()); NotificationManager notifications = new NotificationManager(); ManagementServer management = JsonRpc.create(settings, notifications);
-        DedicatedServer server = MinecraftServer.spin(thread -> { DedicatedServer s = new DedicatedServer(thread, access, packs, stem, Optional.empty(), settings, DataFixers.getDataFixer(), services, management, notifications); notifications.setServer(s); s.setPort(25565); return s; });
+        // A new world normally performs an unordered 11-by-11 spawn search
+        // before the oracle can establish its admission fence. That search
+        // consumes the process-seeded level random source and can write
+        // overlapping columns, so two empty roots can diverge before oracle
+        // work begins. Mark only a genuinely new root initialized before the
+        // server thread starts; its default spawn is the deterministic origin.
+        // Existing roots, including authenticated roots, retain their saved
+        // startup state byte-for-byte.
+        AtomicReference<DedicatedServer> serverReference = new AtomicReference<>();
+        Thread serverThread = new Thread(() -> {
+            try {
+                Method runServer = MinecraftServer.class.getDeclaredMethod("runServer");
+                runServer.setAccessible(true);
+                runServer.invoke(serverReference.get());
+            } catch (ReflectiveOperationException e) {
+                throw new IllegalStateException("server thread failed to start", e);
+            }
+        }, "Server thread");
+        serverThread.setUncaughtExceptionHandler((thread, error) -> System.err.println("[large-parity] server thread failed: " + error));
+        if (Runtime.getRuntime().availableProcessors() > 4) serverThread.setPriority(8);
+        DedicatedServer server = new DedicatedServer(serverThread, access, packs, stem, Optional.empty(), settings, DataFixers.getDataFixer(), services, management, notifications);
+        if (!requireExisting && freshWorld) server.getWorldData().overworldData().setInitialized(true);
+        notifications.setServer(server); server.setPort(25565); serverReference.set(server); serverThread.start();
         try {
             while (server.overworld() == null) Thread.sleep(25);
-            // The server publishes the overworld before finishing its dimension
-            // loop. Wait for the requested level so Nether/End work cannot race
-            // startup and incorrectly report that a valid dimension is absent.
+            // The server publishes its level objects before initial spawn
+            // preparation has drained the startup chunk work. Wait for the
+            // first ready tick as well as the selected level so oracle
+            // admissions cannot race that work.
             ServerLevel level = null;
             long deadline = System.nanoTime() + 60_000_000_000L;
-            while (level == null && System.nanoTime() < deadline) {
+            while ((level == null || !server.isReady()) && System.nanoTime() < deadline) {
                 level = selectedLevel(server, a);
                 if (level == null) Thread.sleep(25);
+                else if (!server.isReady()) Thread.sleep(25);
             }
             if (level == null) throw new IllegalStateException("selected dimension is unavailable: " + a.dimensionKey() + "; loaded=" + server.levelKeys());
+            if (!server.isReady()) throw new IllegalStateException("server did not reach ready state before oracle work");
+            // The empty-server pause is asynchronous. Wait past its deadline
+            // before reseeding the level source so no startup tick can race
+            // the first deterministic admission.
+            waitForEmptyServerPause();
+            resetLevelRandom(level);
+            resetBiomeSearchState(level);
+            resetBiomeSearchStateOnWorker(level);
             work.run(server, level);
         } finally { server.halt(true); stem.close(); access.close(); }
     }
+
+    /**
+     * Read a validated mismatch-coordinate stream without accepting arbitrary
+     * paths or duplicate work.  The Rust comparator authenticates the
+     * inventory against the manifest before invoking this mode; this reader
+     * still checks its small structural contract so a stale or hand-edited
+     * coordinate list cannot silently select a different world location.
+     */
+    static List<ChunkPos> diagnosticPositions(Args a) throws Exception {
+        List<String> lines = Files.readAllLines(Path.of(a.diagnosticCoordinates), StandardCharsets.US_ASCII);
+        if (lines.isEmpty() || !"index\tcx\tcz".equals(lines.get(0))) throw new IllegalStateException("diagnostic coordinate file has an unexpected header");
+        if (lines.size() - 1 > 4096) throw new IllegalStateException("diagnostic coordinate file exceeds the 4096-coordinate bound");
+        List<ChunkPos> positions = new ArrayList<>(lines.size() - 1);
+        long previous = -1;
+        for (int line = 1; line < lines.size(); line++) {
+            String[] fields = lines.get(line).split("\\t", -1);
+            if (fields.length != 3) throw new IllegalStateException("diagnostic coordinate row " + line + " does not have index/cx/cz fields");
+            long index = Long.parseLong(fields[0]);
+            int cx = Integer.parseInt(fields[1]), cz = Integer.parseInt(fields[2]);
+            if (index <= previous) throw new IllegalStateException("diagnostic coordinate indices are not strictly increasing at row " + line);
+            if (cx < a.gridMin() || cx > a.gridMax() || cz < a.gridMin() || cz > a.gridMax()) throw new IllegalStateException("diagnostic coordinate is outside the authenticated grid: (" + cx + "," + cz + ")");
+            long expected = (long)(cz - a.gridMin()) * (a.gridMax() - a.gridMin() + 1) + cx - a.gridMin();
+            if (index != expected) throw new IllegalStateException("diagnostic coordinate index disagrees with its grid position at row " + line);
+            positions.add(new ChunkPos(cx, cz));
+            previous = index;
+        }
+        return positions;
+    }
+
+    static Path diagnosticOutputPath(String directory, ChunkPos pos, String suffix) {
+        return Path.of(directory).resolve("x" + pos.x() + "_z" + pos.z() + suffix);
+    }
+
+    static void diagnostic(Args a, Path frozenRoot) throws Exception {
+        byte[] frozen = frozenDigest(frozenRoot, a);
+        Path copy = copyReadOnlyWorld();
+        if (!Arrays.equals(frozen, frozenDigest(copy, a))) throw new IllegalStateException("prepared frozen-world clone differs from its sealed source");
+        List<ChunkPos> positions = diagnosticPositions(a);
+        Path output = Path.of(a.v7() ? a.diagnosticRecordDir : a.diagnosticPacketDir);
+        Files.createDirectories(output);
+        try {
+            runServer(copy, true, a, (server, level) -> {
+                int batch = Math.max(1, Integer.parseInt(System.getenv().getOrDefault("LODESTONE_ORACLE_BATCH", "256")));
+                for (int start = 0; start < positions.size(); start += batch) {
+                    int end = Math.min(positions.size(), start + batch);
+                    List<ChunkPos> selected = positions.subList(start, end);
+                    List<CompletableFuture<?>> futures = server.submit(() -> {
+                        List<CompletableFuture<?>> result = new ArrayList<>(selected.size());
+                        for (ChunkPos pos : selected) result.add(level.getChunkSource().addTicketAndLoadWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, 0));
+                        return result;
+                    }).join();
+                    for (int i = 0; i < selected.size(); i++) {
+                        net.minecraft.server.level.ChunkResult<?> result = (net.minecraft.server.level.ChunkResult<?>)futures.get(i).join();
+                        if (!result.isSuccess()) throw new IllegalStateException("chunk diagnostic load failed at " + selected.get(i) + ": " + result.getError());
+                    }
+                    server.submit(() -> {
+                        try {
+                            for (ChunkPos pos : selected) {
+                                LevelChunk chunk = level.getChunkSource().getChunkNow(pos.x(), pos.z());
+                                if (chunk == null) throw new IllegalStateException("diagnostic chunk was evicted: " + pos);
+                                if (System.getenv("ORACLE_BEARD_TRACE") != null && pos.x() == -50 && pos.z() == -50) {
+                                    Beardifier beard = Beardifier.forStructuresInChunk(level.structureManager(), pos);
+                                    level.structureManager()
+                                            .startsForStructure(pos, structure -> structure.terrainAdaptation() == TerrainAdjustment.ENCAPSULATE)
+                                            .forEach(structureStart -> {
+                                                System.err.println("structure-start " + structureStart.getChunkPos()
+                                                        + " bbox=" + structureStart.getBoundingBox()
+                                                        + " pieces=" + structureStart.getPieces().size());
+                                                for (int i = 0; i < structureStart.getPieces().size(); i++) {
+                                                    var piece = structureStart.getPieces().get(i);
+                                                    System.err.println("structure-piece " + i + " class="
+                                                            + piece.getClass().getSimpleName() + " box=" + piece.getBoundingBox());
+                                                }
+                                            });
+                                    for (java.lang.reflect.Field field : beard.getClass().getDeclaredFields()) {
+                                        field.setAccessible(true);
+                                        System.err.println("beard-field " + field.getName() + " " + field.get(beard));
+                                    }
+                                    for (int y = -25; y <= 10; y++) {
+                                        for (int x = pos.getMinBlockX(); x <= pos.getMaxBlockX(); x++) {
+                                            for (int z = pos.getMinBlockZ(); z <= pos.getMaxBlockZ(); z++) {
+                                                double value = beard.compute(new DensityFunction.SinglePointContext(x, y, z));
+                                                System.err.println("beard-trace " + x + "," + y + "," + z + " bits=" + Long.toHexString(Double.doubleToRawLongBits(value)));
+                                            }
+                                        }
+                                    }
+                                }
+                                if (System.getenv("ORACLE_JIGSAW_REPLAY") != null && pos.x() == -50 && pos.z() == -50) {
+                                    replayJigsawRandom(level);
+                                }
+                                byte[] bytes = a.v7() ? lightFreeRecord(level, chunk, a) : packetBody(server, chunk, level);
+                                Path target = output.resolve("x" + pos.x() + "_z" + pos.z() + (a.v7() ? ".record" : ".packet"));
+                                if (Files.exists(target)) throw new IllegalStateException("diagnostic output already exists: " + target);
+                                Files.write(target, bytes);
+                            }
+                        } catch (Exception error) {
+                            throw new IllegalStateException("diagnostic packet export failed", error);
+                        }
+                    }).join();
+                    server.submit(() -> {
+                        for (ChunkPos pos : selected) level.getChunkSource().removeTicketWithRadius(net.minecraft.server.level.TicketType.PLAYER_LOADING, pos, 0);
+                    }).join();
+                    System.err.println("[large-parity diagnostic] exported " + end + "/" + positions.size() + " mismatching chunks");
+                }
+            });
+        } finally {
+            if (!Arrays.equals(frozen, frozenDigest(frozenRoot, a))) throw new IllegalStateException("sealed frozen-world source changed during diagnostic export");
+        }
+    }
+
     static void export(Args a, Path frozenRoot) throws Exception {
         diagnosticPacketOut = a.packetOut; diagnosticRecordOut = a.recordOut; byte[] frozen = frozenDigest(frozenRoot, a); Path copy = copyReadOnlyWorld();
         if (!Arrays.equals(frozen, frozenDigest(copy, a))) throw new IllegalStateException("prepared frozen-world clone differs from its sealed source");
@@ -801,10 +1354,105 @@ public final class LargeParityOracle {
             if (!Arrays.equals(frozen, frozenDigest(frozenRoot, a))) throw new IllegalStateException("sealed frozen-world source changed during export");
         }
     }
+    private static final class ReplayRandom extends WorldgenRandom {
+        private boolean trace;
+        private int calls;
+
+        ReplayRandom() {
+            super(new LegacyRandomSource(0L));
+        }
+
+        void enableTrace() {
+            trace = true;
+        }
+
+        @Override
+        public int nextInt(int bound) {
+            int value = super.nextInt(bound);
+            if (trace) System.err.println("java-jigsaw-rng " + calls++ + " bound=" + bound + " value=" + value);
+            return value;
+        }
+    }
+
+    private static void replayJigsawRandom(ServerLevel level) throws Exception {
+        ChunkPos target = new ChunkPos(-50, -50);
+        StructureStart selected = level.structureManager()
+                .startsForStructure(target, structure -> structure.terrainAdaptation() == TerrainAdjustment.ENCAPSULATE)
+                .stream().findFirst().orElseThrow(() -> new IllegalStateException("no encapsulating target start"));
+        if (selected.getPieces().isEmpty() || !(selected.getPieces().get(0) instanceof PoolElementStructurePiece center)) {
+            throw new IllegalStateException("target start has no pool center");
+        }
+        System.err.println("java-jigsaw-center position=" + center.getPosition() + " rotation=" + center.getRotation()
+                + " box=" + center.getBoundingBox());
+        ReplayRandom random = new ReplayRandom();
+        random.setLargeFeatureSeed(SEED, selected.getChunkPos().x(), selected.getChunkPos().z());
+        random.enableTrace();
+        int startHeight = -40 + random.nextInt(21);
+        random.nextInt(4);
+        random.nextInt(2);
+        System.err.println("java-jigsaw-initial-height=" + startHeight);
+        var centerBox = center.getBoundingBox();
+        int centerX = (centerBox.maxX() + centerBox.minX()) / 2;
+        int centerZ = (centerBox.maxZ() + centerBox.minZ()) / 2;
+        int centerY = center.getPosition().getY();
+        AABB limit = new AABB(
+                centerX - 116,
+                Math.max(centerY - 116, level.getMinY() + 10),
+                centerZ - 116,
+                centerX + 117,
+                Math.min(centerY + 117, level.getMaxY() + 1 - 10),
+                centerZ + 117
+        );
+        VoxelShape shape = Shapes.join(Shapes.create(limit), Shapes.create(AABB.of(centerBox)), BooleanOp.ONLY_FIRST);
+        List<PoolElementStructurePiece> pieces = new ArrayList<>();
+        pieces.add(center);
+        Registry<StructureTemplatePool> pools = level.registryAccess().lookupOrThrow(Registries.TEMPLATE_POOL);
+        Method addPieces = JigsawPlacement.class.getDeclaredMethod(
+                "addPieces",
+                net.minecraft.world.level.levelgen.RandomState.class,
+                int.class,
+                boolean.class,
+                net.minecraft.world.level.chunk.ChunkGenerator.class,
+                StructureTemplateManager.class,
+                net.minecraft.world.level.LevelHeightAccessor.class,
+                RandomSource.class,
+                Registry.class,
+                PoolElementStructurePiece.class,
+                List.class,
+                VoxelShape.class,
+                PoolAliasLookup.class,
+                LiquidSettings.class
+        );
+        addPieces.setAccessible(true);
+        addPieces.invoke(
+                null,
+                level.getChunkSource().randomState(),
+                20,
+                false,
+                level.getChunkSource().getGenerator(),
+                level.getStructureManager(),
+                level,
+                random,
+                pools,
+                center,
+                pieces,
+                shape,
+                PoolAliasLookup.EMPTY,
+                LiquidSettings.IGNORE_WATERLOGGING
+        );
+        for (int i = 0; i < Math.min(4, pieces.size()); i++) {
+            PoolElementStructurePiece piece = pieces.get(i);
+            System.err.println("java-jigsaw-piece " + i + " element=" + piece.getElement()
+                    + " rotation=" + piece.getRotation() + " box=" + piece.getBoundingBox());
+        }
+    }
+
     public static void main(String[] ignored) throws Exception {
         verifySingleWorldgenWorker(); verifyCanonicalLightContract(); Args a = args(); if (a.help) { usage(); return; } if (a.provenanceSelftest) { provenanceSelftest(); return; }
         if (a.determinismSelftest) { String root = System.getenv("ORACLE_FROZEN_WORLD_ROOT"); if (root == null || root.isBlank()) throw new IllegalStateException("determinism selftest requires LODESTONE_ORACLE_FROZEN_WORLD_ROOT"); determinismSelftest(a, Path.of(root)); return; }
         if ("materialize".equals(a.mode)) { String root = System.getenv("ORACLE_WORLD_ROOT"); if (root == null || root.isBlank()) throw new IllegalStateException("materialize requires LODESTONE_ORACLE_WORLD_ROOT"); materialize(a, Path.of(root)); }
+        else if ("diagnostic".equals(a.mode)) { String root = System.getenv("ORACLE_FROZEN_WORLD_ROOT"); if (root == null || root.isBlank()) throw new IllegalStateException("diagnostic requires LODESTONE_ORACLE_FROZEN_WORLD_ROOT"); diagnostic(a, Path.of(root)); }
+        else if ("stream".equals(a.mode)) stream(a);
         else { String root = System.getenv("ORACLE_FROZEN_WORLD_ROOT"); if (root == null || root.isBlank()) throw new IllegalStateException("export requires LODESTONE_ORACLE_FROZEN_WORLD_ROOT"); export(a, Path.of(root)); }
     }
 }
