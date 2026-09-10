@@ -97,15 +97,39 @@ impl Resolver for WithoutGoldOre {
 fn external_cell() -> (i32, i32, i32) {
     let mut cell = None;
     let mut stream_sha256 = None;
+    let mut seed = None;
+    let mut target = None;
+    let mut source = None;
+    let mut step = None;
+    let mut feature_index = None;
+    let mut feature = None;
+    let mut block = None;
+    let mut scope = None;
     for line in EXTERNAL.lines() {
         let mut fields = line.split_whitespace();
         match fields.next() {
             Some("stream-sha256") => stream_sha256 = fields.next(),
+            Some("seed") => seed = fields.next().and_then(|value| value.parse().ok()),
+            Some("target") => target = Some((fields.next().unwrap().parse().unwrap(), fields.next().unwrap().parse().unwrap())),
+            Some("source") => source = Some((fields.next().unwrap().parse().unwrap(), fields.next().unwrap().parse().unwrap())),
+            Some("step") => step = fields.next().and_then(|value| value.parse().ok()),
+            Some("feature-index") => feature_index = fields.next().and_then(|value| value.parse().ok()),
+            Some("feature") => feature = fields.next(),
+            Some("block") => block = fields.next(),
+            Some("scope") => scope = fields.next(),
             Some("cell") => cell = Some((fields.next().unwrap().parse().unwrap(), fields.next().unwrap().parse().unwrap(), fields.next().unwrap().parse().unwrap())),
             _ => {}
         }
     }
     assert_eq!(stream_sha256.map(str::len), Some(64));
+    assert_eq!(seed, Some(SEED));
+    assert_eq!(target, Some(TARGET));
+    assert_eq!(source, Some(SOURCE));
+    assert_eq!(step, Some(DecorationStep::UndergroundDecoration.ordinal()));
+    assert_eq!(feature_index, Some(19));
+    assert_eq!(feature, Some("minecraft:ore_gold_nether"));
+    assert_eq!(block, Some("minecraft:nether_gold_ore"));
+    assert_eq!(scope, Some("source-spill"));
     assert_eq!(cell, Some((6, 18, 0)));
     cell.unwrap()
 }
