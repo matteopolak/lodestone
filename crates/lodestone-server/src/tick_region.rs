@@ -256,7 +256,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn bounded_owner_jobs_overlap_disjoint_regions_and_restore_submission_order() {
-        use std::collections::BTreeSet;
+        use std::collections::HashSet;
         use std::sync::{Arc, Barrier, Mutex};
         use std::time::Duration;
 
@@ -265,7 +265,7 @@ mod tests {
         // the barrier and the test fails instead of accidentally accepting a
         // merely faster serial implementation.
         let rendezvous = Arc::new(Barrier::new(2));
-        let worker_ids = Arc::new(Mutex::new(BTreeSet::new()));
+        let worker_ids = Arc::new(Mutex::new(HashSet::new()));
         let jobs = [
             TickOwnedChunk {
                 owner: TickOwner::Chunk { cx: -1, cz: 0 },
