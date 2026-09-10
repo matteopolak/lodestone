@@ -5,7 +5,7 @@ mod support { pub mod large_parity_manifest; }
 use std::{collections::{BTreeMap, BTreeSet}, fs::File, io::{BufReader, Cursor, Read, Seek, SeekFrom}, path::{Path, PathBuf}, time::{Duration, Instant}};
 use lodestone_core::{Reader, Writer};
 use lodestone_server::{
-    ChunkColumn, ChunkSource, ServerDirective, ServerProtocol,
+    ChunkColumn, ChunkSource, RetainedLightStatus, ServerDirective, ServerProtocol,
     end_chunk_source,
     nether_chunk_source, overworld_chunk_source, retained_chunk_source_for_view_radius,
 };
@@ -16,8 +16,9 @@ use lodestone_v26_2::packets::chunk::{ChunkShape, LevelChunkWithLight};
 use lodestone_world::{ColumnLight, LightData};
 use lodestone_worldgen_parity::lifecycle::{
     LifecycleCompletion, LifecycleMaterializer, LifecycleReplayEvent, LifecycleReplayPlan,
-    LifecycleWorldgenSource,
+    LifecycleWorldgenSource, FEATURES_WRITE_RADIUS,
 };
+use lodestone_worldgen::stage_schedule::{ChunkRequest, NETHER_FEATURE_WRITE_RADIUS};
 use support::large_parity_manifest::{
     Dimension, Header as ManifestHeader, IncrementalSha256, HEADER_BYTES, PACKET_AUDIT_RECORD_BYTES, RAW_PACKET_HASH_BYTES,
     LIGHT_FREE_AUDIT_RECORD_BYTES,
@@ -47,6 +48,11 @@ const TRACE_OUT_ENV: &str = "LODESTONE_LARGE_PARITY_TRACE_OUT";
 const PHASE_PROFILE_ENV: &str = "LODESTONE_LARGE_PARITY_PHASE_PROFILE";
 const CONTENT_ONLY_ENV: &str = "LODESTONE_LARGE_PARITY_CONTENT_ONLY";
 const PERSISTED_PACKET_OUT_ENV: &str = "LODESTONE_LARGE_PARITY_PERSISTED_PACKET_OUT";
+const START_INDEX_ENV: &str = "LODESTONE_LARGE_PARITY_START_INDEX";
+const MISMATCH_INVENTORY_ENV: &str = "LODESTONE_LARGE_PARITY_MISMATCH_OUT";
+const MISMATCH_PACKET_DIR_ENV: &str = "LODESTONE_LARGE_PARITY_MISMATCH_PACKET_DIR";
+const MISMATCH_REFERENCE_PACKET_DIR_ENV: &str = "LODESTONE_LARGE_PARITY_MISMATCH_REFERENCE_PACKET_DIR";
+const MISMATCH_COMPONENT_REPORT_ENV: &str = "LODESTONE_LARGE_PARITY_MISMATCH_COMPONENT_REPORT";
 const PERSISTED_BATCH_SIZE: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -438,6 +444,19 @@ impl LifecycleCapture {
             }
         }
         assert_eq!(seen.len(), 324);
+        let expected_admissions = ChunkRequest::new(
+            header.cx0,
+            header.cx1,
+            header.cz0,
+            header.cz1,
+            1,
+        )
+        .admission_order();
+        assert_eq!(
+            admissions.iter().map(|admission| admission.chunk).collect::<Vec<_>>(),
+            expected_admissions,
+            "external lifecycle admissions must match the named request wavefront",
+        );
         let target_order = (header.cz0..=header.cz1)
             .flat_map(|z| (header.cx0..=header.cx1).map(move |x| (x, z)))
             .collect::<Vec<_>>();
@@ -945,6 +964,37 @@ fn parity_batch_limit(
     })
 }
 
+/// Select a contiguous export range while retaining the complete causal
+/// replay prefix. `max_chunks`/`batch_size` remain the range length; the
+/// optional start index only moves the comparison window forward.
+fn parity_batch_range(
+    count: u64,
+    max_chunks: Option<u64>,
+    batch_size: Option<u64>,
+    target_index: Option<usize>,
+    start_index: Option<usize>,
+    scan_all: bool,
+) -> Result<(u64, u64), String> {
+    if start_index.is_some() && target_index.is_some() {
+        return Err(format!("{START_INDEX_ENV} cannot be combined with LODESTONE_LARGE_PARITY_TARGET_INDEX"));
+    }
+    let start = u64::try_from(start_index.unwrap_or(0)).map_err(|_| "start index does not fit u64".to_owned())?;
+    if start > count {
+        return Err(format!("{START_INDEX_ENV}={start} exceeds the authenticated manifest count {count}"));
+    }
+    if start_index.is_some() && max_chunks.is_none() && batch_size.is_none() {
+        return Err(format!("{START_INDEX_ENV} requires LODESTONE_LARGE_PARITY_MAX_CHUNKS or LODESTONE_LARGE_PARITY_BATCH_SIZE"));
+    }
+    let length = parity_batch_limit(count, max_chunks, batch_size, target_index, scan_all)?;
+    let end = start
+        .checked_add(length)
+        .ok_or_else(|| "parity comparison range overflows u64".to_owned())?;
+    if end > count {
+        return Err(format!("parity comparison range {start}..{end} exceeds the authenticated manifest count {count}"));
+    }
+    Ok((start, end))
+}
+
 fn is_partial_lifecycle_manifest(header: &support::large_parity_manifest::Header) -> bool {
     header.semantic_version != 6 && header.semantic_version != 7
         && header.dimension != Dimension::End
@@ -995,11 +1045,17 @@ fn initial_admission_neighbour_offsets() -> &'static [(i32, i32)] {
     &INITIAL_ADMISSION_NEIGHBOUR_OFFSETS
 }
 
-/// Later packet admissions adopt cardinal source columns before encoding the
-/// initial light snapshot. The first admission is the bootstrap with no
-/// adopted neighbours.
-const INITIAL_CARDINAL_NEIGHBOUR_OFFSETS: [(i32, i32); 4] =
-    [(-1, 0), (0, -1), (1, 0), (0, 1)];
+fn raw_packet_targets_range(
+    header: &support::large_parity_manifest::Header,
+    start: u64,
+    end: u64,
+) -> Vec<ChunkPos> {
+    let width = u64::try_from(i64::from(header.cx1) - i64::from(header.cx0) + 1)
+        .expect("authenticated manifest coordinate width fits u64");
+    (start..end)
+        .map(|index| raw_packet_target(header, index, width))
+        .collect()
+}
 const END_LIGHT_NEIGHBOUR_OFFSETS: [(i32, i32); 8] = [
     (-1, -1),
     (0, -1),
@@ -1087,14 +1143,6 @@ fn nether_packet_replay_generator_capacity_is_row_bounded() {
     source.generator().reset_packet_replay();
 }
 
-fn initial_light_admission_neighbour_offsets(record_index: u64) -> &'static [(i32, i32)] {
-    if record_index == 0 {
-        &[]
-    } else {
-        &INITIAL_CARDINAL_NEIGHBOUR_OFFSETS
-    }
-}
-
 /// Replays one initial admission's saved-light boundary. The packet still
 /// carries all eight terrain neighbours, but the retained centre light is
 /// computed from the columns that existed at admission time.
@@ -1117,32 +1165,436 @@ fn initial_light_snapshot_for_admission<P: ServerProtocol>(
     settled
 }
 
+/// A radius-zero admission sees the complete immediate 3x3 footprint. Keep
+/// this order explicit because the serial light lifecycle is part of the raw
+/// packet contract; it is not an export batching knob.
+const PACKET_LIGHT_NEIGHBOUR_OFFSETS: [(i32, i32); 8] = [
+    (-1, -1),
+    (0, -1),
+    (1, -1),
+    (-1, 0),
+    (1, 0),
+    (-1, 1),
+    (0, 1),
+    (1, 1),
+];
+
+/// The admission trace is deliberately a small diagnostic window. It is
+/// opt-in because hashing every light nibble is useful for an oracle run but
+/// would be needless work in the ordinary parity gate.
+const MAX_LIGHT_TRACE_ADMISSIONS: usize = 64;
+const LIGHT_TRACE_ADMISSIONS_ENV: &str = "LODESTONE_LARGE_PARITY_LIGHT_TRACE_ADMISSIONS";
+const LIGHT_TRACE_OUT_ENV: &str = "LODESTONE_LARGE_PARITY_LIGHT_TRACE_OUT";
+
+struct NetherLightTrace {
+    next_admission: usize,
+    limit: usize,
+    output: Option<PathBuf>,
+    lines: Vec<String>,
+}
+
+impl NetherLightTrace {
+    fn from_env() -> Option<Self> {
+        let raw_limit = std::env::var(LIGHT_TRACE_ADMISSIONS_ENV).ok()?;
+        let limit = raw_limit.parse::<usize>().unwrap_or_else(|error| {
+            panic!(
+                "invalid {LIGHT_TRACE_ADMISSIONS_ENV} value {raw_limit:?}: {error}"
+            )
+        });
+        if limit == 0 {
+            return None;
+        }
+        assert!(
+            limit <= MAX_LIGHT_TRACE_ADMISSIONS,
+            "{LIGHT_TRACE_ADMISSIONS_ENV} must be at most {MAX_LIGHT_TRACE_ADMISSIONS}, got {limit}"
+        );
+        Some(Self {
+            next_admission: 0,
+            limit,
+            output: std::env::var_os(LIGHT_TRACE_OUT_ENV).map(PathBuf::from),
+            lines: Vec::new(),
+        })
+    }
+
+    fn begin_admission(&mut self) -> Option<usize> {
+        if self.next_admission >= self.limit {
+            return None;
+        }
+        let index = self.next_admission;
+        self.next_admission += 1;
+        Some(index)
+    }
+
+    fn record_source_phase(
+        &mut self,
+        admission: usize,
+        phase: &str,
+        center: ChunkPos,
+        source: &dyn ChunkSource,
+    ) {
+        self.lines.push(format!(
+            "admission={admission} phase={phase} center_x={} center_z={}",
+            center.0, center.1
+        ));
+        for (dx, dz) in trace_offsets() {
+            let cx = center.0 + dx;
+            let cz = center.1 + dz;
+            match source.resident_column(cx, cz) {
+                Some(column) => self.record_column(
+                    admission,
+                    phase,
+                    (dx, dz),
+                    (cx, cz),
+                    column.retained_light_status(),
+                    column.retained_light(),
+                ),
+                None => self.lines.push(format!(
+                    "admission={} phase={} slot_dx={} slot_dz={} coordinate_x={} coordinate_z={} status=absent light=absent",
+                    admission, phase, dx, dz, cx, cz
+                )),
+            }
+        }
+    }
+
+    fn record_returned_settlement(
+        &mut self,
+        admission: usize,
+        center: ChunkPos,
+        settlement: &lodestone_server::ColumnLightSettlement,
+    ) {
+        let phase = "returned_settlement";
+        self.lines.push(format!(
+            "admission={admission} phase={phase} center_x={} center_z={}",
+            center.0, center.1
+        ));
+        self.record_light(
+            admission,
+            phase,
+            (0, 0),
+            center,
+            "centre_returned",
+            settlement.centre_light(),
+        );
+        for ((dx, dz), light) in settlement.dependency_lights() {
+            self.record_light(
+                admission,
+                phase,
+                (dx, dz),
+                (center.0 + dx, center.1 + dz),
+                "dependency_returned",
+                light,
+            );
+        }
+    }
+
+    fn record_column(
+        &mut self,
+        admission: usize,
+        phase: &str,
+        offset: (i32, i32),
+        coordinate: ChunkPos,
+        status: Option<RetainedLightStatus>,
+        light: Option<&lodestone_world::ColumnLight>,
+    ) {
+        let status = status.map(retained_light_status_name).unwrap_or("none");
+        match light {
+            Some(light) => self.record_light(
+                admission, phase, offset, coordinate, status, light,
+            ),
+            None => self.lines.push(format!(
+                "admission={} phase={} slot_dx={} slot_dz={} coordinate_x={} coordinate_z={} status={} light=absent",
+                admission,
+                phase,
+                offset.0,
+                offset.1,
+                coordinate.0,
+                coordinate.1,
+                status,
+            )),
+        }
+    }
+
+    fn record_light(
+        &mut self,
+        admission: usize,
+        phase: &str,
+        offset: (i32, i32),
+        coordinate: ChunkPos,
+        status: &str,
+        light: &lodestone_world::ColumnLight,
+    ) {
+        self.lines.push(format!(
+            "admission={} phase={} slot_dx={} slot_dz={} coordinate_x={} coordinate_z={} status={} light=present sections={}",
+            admission,
+            phase,
+            offset.0,
+            offset.1,
+            coordinate.0,
+            coordinate.1,
+            status,
+            light.light_section_count(),
+        ));
+        let storage = light.storage();
+        for section in 0..light.light_section_count() {
+            let sky = light_layer_summary(light.sky(section));
+            let block = light_layer_summary(light.block(section));
+            let (allocated, light_only, block_data) = storage.map_or(
+                (None, None, None),
+                |storage| (
+                    Some(storage.is_allocated(section)),
+                    Some(storage.is_light_only(section)),
+                    Some(storage.has_block_data(section)),
+                ),
+            );
+            self.lines.push(format!(
+                "admission={} phase={} slot_dx={} slot_dz={} section_y={} sky_state={} sky_sha256={} sky_nonzero={} sky_max={} block_state={} block_sha256={} block_nonzero={} block_max={} storage_allocated={:?} storage_light_only={:?} storage_block_data={:?}",
+                admission,
+                phase,
+                offset.0,
+                offset.1,
+                section as isize - 1,
+                sky.0,
+                sky.1,
+                sky.2,
+                sky.3,
+                block.0,
+                block.1,
+                block.2,
+                block.3,
+                allocated,
+                light_only,
+                block_data,
+            ));
+        }
+    }
+
+    fn finish(self) {
+        if self.lines.is_empty() {
+            return;
+        }
+        let mut output = self.lines.join("\n");
+        output.push('\n');
+        if let Some(path) = self.output {
+            std::fs::write(&path, output).unwrap_or_else(|error| {
+                panic!("write Nether light trace {}: {error}", path.display())
+            });
+        } else {
+            eprint!("{output}");
+        }
+    }
+}
+
+fn trace_offsets() -> impl Iterator<Item = (i32, i32)> {
+    std::iter::once((0, 0)).chain(PACKET_LIGHT_NEIGHBOUR_OFFSETS.iter().copied())
+}
+
+fn retained_light_status_name(status: RetainedLightStatus) -> &'static str {
+    match status {
+        RetainedLightStatus::DependencyInitialized => "dependency_initialized",
+        RetainedLightStatus::CentreSettled => "centre_settled",
+    }
+}
+
+
+
+fn light_layer_summary(data: &lodestone_world::LightData) -> (&'static str, String, usize, u8) {
+    match data {
+        lodestone_world::LightData::Missing => {
+            ("missing", "none".to_owned(), 0, 0)
+        }
+        lodestone_world::LightData::Uniform(value) => {
+            let value = value & 0x0f;
+            let byte = value | (value << 4);
+            let bytes = [byte; 2048];
+            (
+                "uniform",
+                hex(&support::large_parity_manifest::sha256(&bytes)),
+                if value == 0 { 0 } else { 4096 },
+                value,
+            )
+        }
+        lodestone_world::LightData::Values(values) => {
+            let mut nonzero = 0;
+            let mut max = 0;
+            for index in 0..lodestone_world::NibbleArray::LEN {
+                let value = values.get(index);
+                nonzero += usize::from(value != 0);
+                max = max.max(value);
+            }
+            (
+                "values",
+                hex(&support::large_parity_manifest::sha256(values.as_bytes())),
+                nonzero,
+                max,
+            )
+        }
+    }
+}
+
+/// Builds the production persistent source used by the Nether raw-packet
+/// comparator. The bounded cache is still the serving layer, while the region
+/// source below it owns settled light after an admission is evicted. This is
+/// deliberately a fresh directory per process: the comparator must never
+/// consume a stale world or make the checked-in generator depend on one.
+#[cfg(not(target_arch = "wasm32"))]
+fn nether_parity_source(seed: i64, root: &Path) -> Box<dyn ChunkSource> {
+    let persistent = RegionChunkSource::new(
+        nether_chunk_source(seed),
+        root,
+        ServerDimension::Nether,
+        ServerDimension::Nether.min_y(),
+        ServerDimension::Nether.height(),
+    )
+    .unwrap_or_else(|error| panic!("open Nether parity source at {}: {error}", root.display()));
+    Box::new(retained_chunk_source_for_view_radius(persistent, 8))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn nether_parity_source(seed: i64, _root: &Path) -> Box<dyn ChunkSource> {
+    Box::new(retained_chunk_source_for_view_radius(nether_chunk_source(seed), 8))
+}
+
+/// Serially admits one Nether centre through the production source lifecycle.
+///
+/// The source owns both generated terrain and retained light. Each admission
+/// captures the complete 3×3 footprint, calls the version adapter's plural
+/// initial-light hook, and commits the centre plus dependency snapshots through
+/// one `ChunkSource` transaction. This wrapper only keeps the admission order;
+/// it deliberately has no parallel terrain or light map of its own.
+struct NetherSerialLightStore<'a> {
+    source: &'a dyn ChunkSource,
+    trace: Option<NetherLightTrace>,
+}
+
+impl<'a> NetherSerialLightStore<'a> {
+    fn new(source: &'a dyn ChunkSource, trace: Option<NetherLightTrace>) -> Self {
+        Self { source, trace }
+    }
+
+    fn admit(&mut self, center: ChunkPos) {
+        let source = self.source;
+        let trace_admission = self
+            .trace
+            .as_mut()
+            .and_then(NetherLightTrace::begin_admission);
+        if let Some(admission) = trace_admission {
+            self.trace
+                .as_mut()
+                .expect("trace admission was allocated")
+                .record_source_phase(admission, "pre_callback", center, source);
+        }
+        let fallback = source
+            .resident_column(center.0, center.1)
+            .unwrap_or_else(|| source.column(center.0, center.1));
+        let trace = &mut self.trace;
+        let mut compute = |column: &ChunkColumn,
+                           neighbours: &[(i32, i32, ChunkColumn)]| {
+            let settlement = V770ServerProtocol
+                .compute_initial_column_lights_with_neighbours_in_dimension(
+                    column,
+                    neighbours,
+                    ServerDimension::Nether,
+                );
+            if let (Some(admission), Some(trace), Some(settlement)) =
+                (trace_admission, trace.as_mut(), settlement.as_ref())
+            {
+                trace.record_returned_settlement(admission, center, settlement);
+            }
+            settlement
+        };
+        source
+            .settle_resident_column_lights_with_neighbours(
+                center.0,
+                center.1,
+                &fallback,
+                &PACKET_LIGHT_NEIGHBOUR_OFFSETS,
+                false,
+                false,
+                true,
+                &mut compute,
+            )
+            .unwrap_or_else(|error| {
+                panic!("production Nether light admission failed at {center:?}: {error:?}")
+            });
+        if let Some(admission) = trace_admission {
+            trace
+                .as_mut()
+                .expect("trace admission was allocated")
+                .record_source_phase(admission, "committed", center, source);
+        }
+    }
+
+    fn materialize_until(&mut self, order: &[ChunkPos], targets: &BTreeSet<ChunkPos>) {
+        for &center in order {
+            self.admit(center);
+            if targets.iter().all(|target| self.is_centre_settled(*target)) {
+                return;
+            }
+        }
+        assert!(
+            targets.iter().all(|target| self.is_centre_settled(*target)),
+            "serial materialization order ended before every requested target was retained",
+        );
+    }
+
+    fn finish_trace(&mut self) {
+        if let Some(trace) = self.trace.take() {
+            trace.finish();
+        }
+    }
+
+    fn is_centre_settled(&self, target: ChunkPos) -> bool {
+        self.source
+            .resident_column(target.0, target.1)
+            .is_some_and(|column| {
+                column.retained_light_status() == Some(RetainedLightStatus::CentreSettled)
+            })
+    }
+
+    fn packet_inputs(
+        &self,
+        target: ChunkPos,
+    ) -> (ChunkColumn, Vec<(i32, i32, ChunkColumn)>) {
+        let column = self
+            .source
+            .resident_column(target.0, target.1)
+            .unwrap_or_else(|| self.source.column(target.0, target.1));
+        assert!(
+            column.retained_light_status() == Some(RetainedLightStatus::CentreSettled),
+            "target {target:?} must have a settled production light snapshot",
+        );
+        let neighbours = PACKET_LIGHT_NEIGHBOUR_OFFSETS
+            .iter()
+            .map(|&(dx, dz)| {
+                let column = self
+                    .source
+                    .resident_column(target.0 + dx, target.1 + dz)
+                    .unwrap_or_else(|| self.source.column(target.0 + dx, target.1 + dz));
+                (dx, dz, column)
+            })
+            .collect();
+        (column, neighbours)
+    }
+}
+
+fn nether_materialization_order(
+    header: &support::large_parity_manifest::Header,
+) -> Vec<ChunkPos> {
+    // The target rectangle is the admission sequence. Its one-chunk halo is
+    // generated as dependency terrain by each centre admission, but halo
+    // columns are not themselves admitted as centres before the first packet.
+    ChunkRequest::new(header.cx0, header.cx1, header.cz0, header.cz1, 0)
+        .admission_order()
+}
+
 /// Replays the serial materializer order used to seal the raw-packet world.
 ///
 /// The frozen-world export order is x-fastest/z, but the light-engine state was
 /// produced tile-z/tile-x/z/x. Keeping those orders separate is essential: an
 /// export prefix is not an admission prefix.
 fn end_materialization_positions(h: &ManifestHeader) -> Vec<ChunkPos> {
-    const TILE_SIDE: i32 = 16;
-    let min_x = h.cx0 - 1;
-    let max_x = h.cx1 + 1;
-    let min_z = h.cz0 - 1;
-    let max_z = h.cz1 + 1;
-    let tiles_x = (max_x - min_x) / TILE_SIDE + 1;
-    let tiles_z = (max_z - min_z) / TILE_SIDE + 1;
-    let mut positions = Vec::new();
-    for tile_z in 0..tiles_z {
-        let z0 = min_z + tile_z * TILE_SIDE;
-        for tile_x in 0..tiles_x {
-            let x0 = min_x + tile_x * TILE_SIDE;
-            for cz in z0..=max_z.min(z0 + TILE_SIDE - 1) {
-                for cx in x0..=max_x.min(x0 + TILE_SIDE - 1) {
-                    positions.push((cx, cz));
-                }
-            }
-        }
-    }
-    positions
+    ChunkRequest::new(h.cx0, h.cx1, h.cz0, h.cz1, 1)
+        .admission_order()
 }
 
 /// Returns the exclusive admission prefix needed to export the requested
@@ -1197,6 +1649,7 @@ fn compare_end_raw_from_persisted_world(
     source: &dyn ChunkSource,
     manifest: &Path,
     h: &ManifestHeader,
+    start: u64,
     limit: u64,
     scan_all: bool,
     reference_packets: &BTreeMap<ChunkPos, PathBuf>,
@@ -1206,7 +1659,9 @@ fn compare_end_raw_from_persisted_world(
         File::open(manifest).unwrap_or_else(|error| panic!("open persisted-world manifest {}: {error}", manifest.display())),
     );
     expected
-        .seek(SeekFrom::Start(HEADER_BYTES as u64))
+        .seek(SeekFrom::Start(
+            HEADER_BYTES as u64 + start * u64::try_from(RAW_PACKET_HASH_BYTES).expect("manifest record width fits u64"),
+        ))
         .unwrap_or_else(|error| panic!("seek persisted-world manifest payload: {error}"));
     let audit_path = raw_packet_audit_path(manifest);
     let mut expected_audit = BufReader::new(
@@ -1214,16 +1669,19 @@ fn compare_end_raw_from_persisted_world(
             .unwrap_or_else(|error| panic!("open persisted-world packet audit {}: {error}", audit_path.display())),
     );
     expected_audit
-        .seek(SeekFrom::Start(HEADER_BYTES as u64))
+        .seek(SeekFrom::Start(
+            HEADER_BYTES as u64 + start * u64::try_from(PACKET_AUDIT_RECORD_BYTES).expect("manifest audit width fits u64"),
+        ))
         .unwrap_or_else(|error| panic!("seek persisted-world packet audit payload: {error}"));
 
     let mut mismatches = Vec::new();
     let mut reference_mismatches = Vec::new();
     let mut retained_target_lights = 0usize;
-    let total = usize::try_from(limit).expect("persisted export limit fits usize");
+    let total = usize::try_from(limit - start).expect("persisted export batch fits usize");
     for (batch_start, batch_end) in persisted_batch_ranges(total, batch_size) {
         let mut records = Vec::with_capacity(batch_end - batch_start);
-        for index in batch_start..batch_end {
+        for relative_index in batch_start..batch_end {
+            let index = relative_index + usize::try_from(start).expect("persisted export start fits usize");
             let mut prefix = [0u8; RAW_PACKET_HASH_BYTES];
             expected
                 .read_exact(&mut prefix)
@@ -1511,17 +1969,19 @@ fn compare_end_raw_after_generated_save_reopen<R: Read, A: Read>(
     expected_audit: &mut A,
     h: &ManifestHeader,
     server_dimension: ServerDimension,
+    start: u64,
     limit: u64,
     scan_all: bool,
     reference_packets: &BTreeMap<ChunkPos, PathBuf>,
+    raw_packet_output: &mut Option<RawPacketOutput>,
     component_reports: &mut Vec<(ChunkPos, PacketComponentReport)>,
     profile: &mut PhaseProfile,
 ) -> Vec<RawPacketMismatch> {
     let width = u64::try_from(i64::from(h.cx1) - i64::from(h.cx0) + 1)
         .expect("authenticated manifest coordinate width fits u64");
-    let mut records = Vec::with_capacity(usize::try_from(limit).expect("parity prefix fits memory"));
+    let mut records = Vec::with_capacity(usize::try_from(limit - start).expect("parity batch fits memory"));
     profile.call("manifest_io", None, || {
-        for index in 0..limit {
+        for index in start..limit {
             let mut prefix = [0u8; RAW_PACKET_HASH_BYTES];
             expected.read_exact(&mut prefix).expect("manifest raw packet hash prefix");
             let mut full = [0u8; PACKET_AUDIT_RECORD_BYTES];
@@ -1699,6 +2159,9 @@ fn compare_end_raw_after_generated_save_reopen<R: Read, A: Read>(
                     )
                 },
             );
+            if let Some(output) = raw_packet_output.as_mut() {
+                output.write((cx, cz), &payload);
+            }
             let actual_full = profile.call("packet_hash", Some((cx, cz)), || raw_packet_full_digest(&payload));
             let actual_prefix = [actual_full[0], actual_full[1]];
             if actual_prefix != expected_prefix || actual_full != expected_full {
@@ -1969,6 +2432,52 @@ fn lifecycle_target_selection_rejects_ambiguous_single_target_requests() {
 }
 
 #[test]
+fn packet_light_admission_uses_a_serial_3x3_footprint() {
+    assert_eq!(PACKET_LIGHT_NEIGHBOUR_OFFSETS.len(), 8);
+}
+
+#[test]
+fn nether_materialization_order_keeps_halo_as_dependency_terrain() {
+    let header = support::large_parity_manifest::Header {
+        semantic_version: 6,
+        cx0: -25,
+        cx1: 25,
+        cz0: -25,
+        cz1: 25,
+        count: 2_601,
+        frozen_world: [0; 32],
+        dimension: Dimension::Nether,
+        record_width: RAW_PACKET_HASH_BYTES as u16,
+        kind: 2,
+    };
+    let order = nether_materialization_order(&header);
+    assert_eq!(order.len(), 51 * 51);
+    assert_eq!(
+        &order[..18],
+        &[
+            (-25, -25),
+            (-24, -25),
+            (-23, -25),
+            (-22, -25),
+            (-21, -25),
+            (-20, -25),
+            (-19, -25),
+            (-18, -25),
+            (-17, -25),
+            (-16, -25),
+            (-15, -25),
+            (-14, -25),
+            (-13, -25),
+            (-12, -25),
+            (-11, -25),
+            (-10, -25),
+            (-25, -24),
+            (-24, -24),
+        ]
+    );
+}
+
+#[test]
 fn manifest_record_reader_seeks_using_the_authenticated_record_width() {
     let mut bytes = vec![0u8; HEADER_BYTES];
     bytes.extend([0x10, 0x11, 0x20, 0x21, 0x30, 0x31]);
@@ -2110,6 +2619,21 @@ fn parity_batch_selection_requires_scan_all_and_two_thousand_targets() {
         parity_batch_limit(4_000, Some(2), None, None, false),
         Ok(2),
     );
+}
+
+#[test]
+fn parity_batch_range_selects_a_contiguous_window_and_rejects_overrun() {
+    assert_eq!(
+        parity_batch_range(2_601, Some(256), None, None, Some(512), false),
+        Ok((512, 768)),
+    );
+    assert_eq!(
+        parity_batch_range(2_601, Some(2_000), Some(2_000), None, Some(601), true),
+        Ok((601, 2_601)),
+    );
+    assert!(parity_batch_range(2_601, None, None, None, Some(1), false).is_err());
+    assert!(parity_batch_range(2_601, Some(2_000), None, None, Some(1_000), false).is_err());
+    assert!(parity_batch_range(2_601, Some(1), None, Some(0), Some(1), false).is_err());
 }
 
 #[test]
@@ -2442,13 +2966,262 @@ fn java_and_rust_light_free_records_agree() {
         Dimension::End => Box::new(end_chunk_source(42)),
     };
     let column = source.column(header.cx0, header.cz0);
+    if header.dimension == Dimension::Nether && header.cx0 == 50 && header.cz0 == -50 {
+        eprintln!("P07_TARGET_STATE state={} id={}", column.block_state(14, 7, 1), column.block_state_id(14, 7, 1));
+    }
     let rust_record = light_free_record(&column, header.cx0, header.cz0, header.dimension);
+    if let Some(path) = std::env::var_os("LODESTONE_LARGE_PARITY_RUST_RECORD_OUT") {
+        std::fs::write(&path, &rust_record)
+            .unwrap_or_else(|error| panic!("write Rust light-free record {}: {error}", Path::new(&path).display()));
+    }
     if rust_record != java_record {
         let first = rust_record.iter().zip(&java_record).position(|(left, right)| left != right).unwrap_or(rust_record.len().min(java_record.len()));
         panic!("light-free content bytes differ at offset {first}: Java length {}, Rust length {}, Java byte {:?}, Rust byte {:?}", java_record.len(), rust_record.len(), java_record.get(first), rust_record.get(first));
     }
     assert_eq!(sha256(&rust_record), expected_full, "Rust light-free digest must match Java sidecar");
     assert_eq!([expected_full[0], expected_full[1]], expected_prefix, "Rust light-free prefix must match Java manifest");
+}
+
+/// Replays one P07 target through the serial tiled lifecycle that produced the
+/// frozen world. This isolates mutable neighbour writes from light and packet
+/// encoding while keeping the replay bounded to the selected target's causal
+/// dependency closure.
+#[test]
+#[ignore = "requires an authenticated P07 manifest; see docs/worldgen-large-parity.md"]
+fn light_free_target_matches_serial_lifecycle() {
+    let path = std::env::var("LODESTONE_LARGE_PARITY_MANIFEST")
+        .expect("set LODESTONE_LARGE_PARITY_MANIFEST to an authenticated P07 manifest");
+    let target_index = optional_usize_env("LODESTONE_LARGE_PARITY_TARGET_INDEX")
+        .expect("valid P07 target index")
+        .expect("set LODESTONE_LARGE_PARITY_TARGET_INDEX to one zero-based target index");
+    let mut raw_header = [0; HEADER_BYTES];
+    let mut manifest = File::open(&path).expect("open P07 manifest");
+    manifest.read_exact(&mut raw_header).expect("read P07 header");
+    let header = read_header(&raw_header[..]).expect("valid P07 header");
+    assert_eq!(header.semantic_version, 7, "target lifecycle control requires P07");
+    assert!(target_index < header.count as usize, "P07 target index is out of range");
+    let (audit_path, audit_header) = load_light_free_audit(Path::new(&path), &header);
+    verify_light_free_audit_files(
+        Path::new(&path),
+        &raw_header,
+        &header,
+        &audit_path,
+        &audit_header,
+    );
+
+    let offset = HEADER_BYTES as u64 + target_index as u64 * RAW_PACKET_HASH_BYTES as u64;
+    manifest.seek(SeekFrom::Start(offset)).expect("seek P07 target prefix");
+    let mut expected_prefix = [0; RAW_PACKET_HASH_BYTES];
+    manifest.read_exact(&mut expected_prefix).expect("read P07 target prefix");
+    let mut audit = File::open(&audit_path).expect("open P07 light-free audit");
+    audit
+        .seek(SeekFrom::Start(
+            HEADER_BYTES as u64 + target_index as u64 * LIGHT_FREE_AUDIT_RECORD_BYTES as u64,
+        ))
+        .expect("seek P07 target digest");
+    let mut expected_full = [0; LIGHT_FREE_AUDIT_RECORD_BYTES];
+    audit.read_exact(&mut expected_full).expect("read P07 target digest");
+
+    let width = usize::try_from(header.cx1 - header.cx0 + 1).expect("P07 width");
+    let target = raw_packet_target(&header, target_index as u64, width as u64);
+    let admissions = match header.dimension {
+        Dimension::Nether => nether_lifecycle_halo_order(&header),
+        _ => tiled_materialization_halo_order(&header),
+    };
+    let events = admissions
+        .iter()
+        .enumerate()
+        .map(|(sequence, &source)| LifecycleReplayEvent {
+            source,
+            stage: LifecycleCompletion::Features,
+            sequence: sequence as u64,
+        })
+        .collect::<Vec<_>>();
+    let plan = LifecycleReplayPlan::for_target(target, &admissions, &events)
+        .expect("P07 target must have a complete lifecycle closure");
+    let column = match header.dimension {
+        Dimension::Overworld => materialize_light_free_target(
+            overworld_chunk_source(42),
+            &plan,
+            target,
+        ),
+        Dimension::Nether => materialize_light_free_target(
+            nether_chunk_source(42),
+            &plan,
+            target,
+        ),
+        Dimension::End => end_chunk_source(42).column(target.0, target.1),
+    };
+    let record = light_free_record(&column, target.0, target.1, header.dimension);
+    if let Some(path) = std::env::var_os("LODESTONE_LARGE_PARITY_RUST_RECORD_OUT") {
+        std::fs::write(&path, &record).unwrap_or_else(|error| {
+            panic!("write Rust lifecycle record {}: {error}", Path::new(&path).display())
+        });
+    }
+    let actual_full = sha256(&record);
+    assert_eq!(actual_full, expected_full, "P07 lifecycle digest differs at {target:?}");
+    assert_eq!([actual_full[0], actual_full[1]], expected_prefix);
+}
+
+fn materialize_light_free_target<S: LifecycleWorldgenSource>(
+    source: S,
+    plan: &LifecycleReplayPlan,
+    target: ChunkPos,
+) -> ChunkColumn {
+    let mut materializer = LifecycleMaterializer::new(source);
+    materializer.prepare_lifecycle_replay(plan.admissions());
+    for &admission in plan.admissions() {
+        materializer.admit(admission);
+    }
+    for event in plan.feature_events() {
+        materializer.complete_observing(
+            event.source,
+            event.stage,
+            event.sequence,
+            |_| {},
+        );
+    }
+    materializer.snapshot_for_packet(target)
+}
+
+/// Compares every Nether target in a bounded P07 manifest after replaying the
+/// complete sealed-world feature lifecycle once. This is intentionally a
+/// bounded development gate: the million-column acceptance path uses the same
+/// order with row eviction rather than retaining the complete grid.
+#[test]
+#[ignore = "requires a bounded authenticated Nether P07 manifest"]
+fn bounded_nether_light_free_manifest_matches_serial_lifecycle() {
+    let path = std::env::var("LODESTONE_LARGE_PARITY_MANIFEST")
+        .expect("set LODESTONE_LARGE_PARITY_MANIFEST to a bounded Nether P07 manifest");
+    let mut raw_header = [0; HEADER_BYTES];
+    let mut manifest = File::open(&path).expect("open Nether P07 manifest");
+    manifest.read_exact(&mut raw_header).expect("read Nether P07 header");
+    let header = read_header(&raw_header[..]).expect("valid Nether P07 header");
+    assert_eq!(header.semantic_version, 7, "bounded lifecycle control requires P07");
+    assert_eq!(header.dimension, Dimension::Nether, "bounded lifecycle control requires Nether");
+    assert!(header.count <= 10_000, "bounded lifecycle control refuses more than 10,000 targets");
+    let (audit_path, audit_header) = load_light_free_audit(Path::new(&path), &header);
+    verify_light_free_audit_files(
+        Path::new(&path),
+        &raw_header,
+        &header,
+        &audit_path,
+        &audit_header,
+    );
+
+    let admissions = match header.dimension {
+        Dimension::Nether => nether_lifecycle_halo_order(&header),
+        _ => tiled_materialization_halo_order(&header),
+    };
+    let mut materializer = LifecycleMaterializer::new(nether_chunk_source(42));
+    materializer.prepare_lifecycle_replay(&admissions);
+    for &source in &admissions {
+        materializer.admit(source);
+    }
+    for (sequence, &source) in admissions.iter().enumerate() {
+        materializer.complete(source, LifecycleCompletion::Features, sequence as u64);
+    }
+
+    manifest.seek(SeekFrom::Start(HEADER_BYTES as u64)).expect("seek Nether P07 payload");
+    let mut audit = File::open(&audit_path).expect("open Nether P07 audit");
+    audit.seek(SeekFrom::Start(HEADER_BYTES as u64)).expect("seek Nether P07 audit payload");
+    let width = u64::try_from(header.cx1 - header.cx0 + 1).expect("Nether P07 width");
+    for index in 0..header.count {
+        let mut expected_prefix = [0; RAW_PACKET_HASH_BYTES];
+        manifest.read_exact(&mut expected_prefix).expect("read Nether P07 prefix");
+        let mut expected_full = [0; LIGHT_FREE_AUDIT_RECORD_BYTES];
+        audit.read_exact(&mut expected_full).expect("read Nether P07 digest");
+        let target = raw_packet_target(&header, index, width);
+        let column = materializer.snapshot_for_packet(target);
+        let actual_full = sha256(&light_free_record(
+            &column,
+            target.0,
+            target.1,
+            Dimension::Nether,
+        ));
+        assert_eq!(actual_full, expected_full, "Nether P07 lifecycle digest differs at {target:?} after {index} matches");
+        assert_eq!([actual_full[0], actual_full[1]], expected_prefix);
+        if (index + 1) % 256 == 0 || index + 1 == header.count {
+            eprintln!("bounded Nether P07 lifecycle: compared {}/{} chunks", index + 1, header.count);
+        }
+    }
+}
+
+fn tiled_materialization_halo_order(header: &ManifestHeader) -> Vec<ChunkPos> {
+    tiled_materialization_halo_order_with_radius(header, 1)
+}
+
+fn tiled_materialization_halo_order_with_radius(
+    header: &ManifestHeader,
+    radius: i32,
+) -> Vec<ChunkPos> {
+    ChunkRequest::new(
+        header.cx0,
+        header.cx1,
+        header.cz0,
+        header.cz1,
+        radius,
+    )
+    .admission_order()
+}
+
+/// The Nether source dispatcher can write into a two-chunk destination halo.
+/// Admit that complete source halo in the same tile-z/tile-x/z/x order as the
+/// sealed materialization, while callers still emit only authenticated target
+/// records from the manifest rectangle.
+fn nether_lifecycle_halo_order(header: &ManifestHeader) -> Vec<ChunkPos> {
+    tiled_materialization_halo_order_with_radius(header, NETHER_FEATURE_WRITE_RADIUS)
+}
+
+#[test]
+fn nether_lifecycle_halo_keeps_first_row_source_effects_outside_output() {
+    let header = ManifestHeader {
+        semantic_version: 7,
+        cx0: 0,
+        cx1: 1,
+        cz0: 0,
+        cz1: 1,
+        count: 4,
+        frozen_world: [1; 32],
+        dimension: Dimension::Nether,
+        record_width: RAW_PACKET_HASH_BYTES as u16,
+        kind: 2,
+    };
+    let admissions = nether_lifecycle_halo_order(&header);
+    let source = (0, -2);
+    let target = (0, 0);
+    assert!(
+        admissions.contains(&source),
+        "the first target row needs the complete two-chunk feature source halo",
+    );
+    assert!(
+        admissions.iter().position(|&chunk| chunk == source)
+            < admissions.iter().position(|&chunk| chunk == target),
+        "the preceding source row must be admitted before the first requested row",
+    );
+    let events = admissions
+        .iter()
+        .enumerate()
+        .map(|(sequence, &source)| LifecycleReplayEvent {
+            source,
+            stage: LifecycleCompletion::Features,
+            sequence: sequence as u64,
+        })
+        .collect::<Vec<_>>();
+    let plan = LifecycleReplayPlan::for_target(target, &admissions, &events)
+        .expect("the synthetic two-chunk halo must form a valid target plan");
+    assert!(
+        plan.feature_events().iter().any(|event| event.source == source),
+        "the z=-2 source effect must survive target-plan pruning",
+    );
+    let outputs = (0..header.count as usize)
+        .map(|index| raw_packet_target(&header, index as u64, 2))
+        .collect::<Vec<_>>();
+    assert_eq!(outputs, vec![(0, 0), (1, 0), (0, 1), (1, 1)]);
+    assert!(
+        !outputs.contains(&source),
+        "the admission halo is lifecycle input, never an extra emitted record",
+    );
 }
 
 /// Reads any authenticated frozen-world shard strictly sequentially and uses
@@ -2534,16 +3307,56 @@ fn parity_manifest_streams_before_rust_comparison() {
     }
     let batch_size = optional_u64_env("LODESTONE_LARGE_PARITY_BATCH_SIZE")
         .unwrap_or_else(|error| panic!("invalid parity batch selection: {error}"));
-    let limit = parity_batch_limit(h.count, max_chunks, batch_size, target_index, scan_all)
+    let start_index = optional_usize_env(START_INDEX_ENV)
         .unwrap_or_else(|error| panic!("invalid parity batch selection: {error}"));
+    let (start, limit) = parity_batch_range(
+        h.count,
+        max_chunks,
+        batch_size,
+        target_index,
+        start_index,
+        scan_all,
+    )
+    .unwrap_or_else(|error| panic!("invalid parity batch selection: {error}"));
+    assert!(
+        !(start > 0 && is_partial_lifecycle_manifest(&h)),
+        "{START_INDEX_ENV} is only supported for full-grid manifests"
+    );
+    let selected_count = limit - start;
+    if start > 0 {
+        let payload_offset = HEADER_BYTES as u64
+            + start
+                * u64::try_from(if raw_packet || light_free {
+                    RAW_PACKET_HASH_BYTES
+                } else {
+                    32
+                })
+                .expect("manifest record width fits u64");
+        expected
+            .seek(SeekFrom::Start(payload_offset))
+            .expect("seek manifest payload to selected batch start");
+        if let Some(audit) = expected_audit.as_mut() {
+            let audit_offset = HEADER_BYTES as u64
+                + start * u64::try_from(if raw_packet {
+                    PACKET_AUDIT_RECORD_BYTES
+                } else {
+                    LIGHT_FREE_AUDIT_RECORD_BYTES
+                })
+                .expect("manifest audit width fits u64");
+            audit
+                .seek(SeekFrom::Start(audit_offset))
+                .expect("seek manifest audit to selected batch start");
+        }
+    }
+    let mut raw_packet_output = prepare_raw_packet_output(raw_packet, selected_count);
     if batch_size.is_some() {
         eprintln!(
-            "large {} parity: authenticated scan-all batch selected ({limit} targets)",
+            "large {} parity: authenticated scan-all batch selected (start={start}, {selected_count} targets)",
             if raw_packet { "raw-packet" } else if light_free { "light-free" } else { "semantic" },
         );
     }
     let reference_packets = if scan_all && !light_free {
-        load_reference_packets(dimension, h.cx0, h.cx1, h.cz0, h.cz1, limit)
+        load_reference_packets(dimension, h.cx0, h.cx1, h.cz0, h.cz1, start, limit)
     } else {
         BTreeMap::new()
     };
@@ -2581,6 +3394,7 @@ fn parity_manifest_streams_before_rust_comparison() {
             &persisted,
             Path::new(&path),
             &h,
+            start,
             limit,
             scan_all,
             &reference_packets,
@@ -2670,6 +3484,74 @@ fn parity_manifest_streams_before_rust_comparison() {
             let _ = std::fs::remove_dir_all(&dir);
             dir
         });
+        let nether_persistence_dir = (raw_packet && dimension == Dimension::Nether).then(|| {
+            let dir = std::env::temp_dir().join(format!(
+                "lodestone-nether-large-parity-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            dir
+        });
+        let source: Box<dyn ChunkSource> = if light_free {
+            match dimension {
+                Dimension::Overworld => Box::new(overworld_chunk_source(42)),
+                Dimension::Nether => Box::new(nether_chunk_source(42)),
+                Dimension::End => Box::new(end_chunk_source(42)),
+            }
+        } else {
+            match dimension {
+                // A frozen external world is a retained, settled lifecycle result.
+                // Keep the comparator on the server's retained-source path rather than
+                // regenerating an isolated column for every packet request.
+                Dimension::Overworld => Box::new(retained_chunk_source_for_view_radius(
+                    overworld_chunk_source(42),
+                    8,
+                )),
+                Dimension::Nether if raw_packet => nether_parity_source(
+                    42,
+                    nether_persistence_dir
+                        .as_deref()
+                        .expect("Nether raw replay must have a persistence directory"),
+                ),
+                Dimension::Nether => Box::new(retained_chunk_source_for_view_radius(
+                    nether_chunk_source(42),
+                    8,
+                )),
+                Dimension::End => {
+                    let dir = end_persistence_dir
+                        .as_deref()
+                        .expect("End raw replay must have a persistence directory");
+                    let persistent = RegionChunkSource::new(
+                        end_chunk_source(42),
+                        dir,
+                        server_dimension,
+                        0,
+                        256,
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!("open temporary End persistence source {}: {error}", dir.display())
+                    });
+                    Box::new(retained_chunk_source_for_view_radius(persistent, 8))
+                }
+            }
+        };
+        let column_for = |cx, cz| -> ChunkColumn { source.column(cx, cz) };
+        let mut nether_light = if raw_packet && dimension == Dimension::Nether {
+            let targets = raw_packet_targets_range(&h, 0, limit)
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+            let order = nether_materialization_order(&h);
+            let mut store = NetherSerialLightStore::new(&*source, NetherLightTrace::from_env());
+            store.materialize_until(&order, &targets);
+            store.finish_trace();
+            eprintln!(
+                "large raw-packet parity: settled serial Nether admissions for {} targets through the production source",
+                targets.len(),
+            );
+            Some(store)
+        } else {
+            None
+        };
         if raw_packet && dimension == Dimension::End {
             let mut audit = expected_audit
                 .take()
@@ -2683,35 +3565,21 @@ fn parity_manifest_streams_before_rust_comparison() {
                 &mut audit,
                 &h,
                 server_dimension,
+                start,
                 limit,
                 scan_all,
                 &reference_packets,
+                &mut raw_packet_output,
                 &mut component_reports,
                 &mut phase_profile,
             ));
         } else {
-        let source: Box<dyn ChunkSource> = if light_free {
-            match dimension {
-                Dimension::Overworld => Box::new(overworld_chunk_source(42)),
-                Dimension::Nether => Box::new(nether_chunk_source(42)),
-                Dimension::End => Box::new(end_chunk_source(42)),
-            }
-        } else {
-            match dimension {
-            // A frozen external world is a retained, settled lifecycle result.
-            // Keep the comparator on the server's retained-source path rather than
-            // regenerating an isolated column for every packet request.
-            Dimension::Overworld => Box::new(retained_chunk_source_for_view_radius(overworld_chunk_source(42), 8)),
-            Dimension::Nether => {
-                Box::new(retained_chunk_source_for_view_radius(nether_chunk_source(42), 8))
-            }
-            Dimension::End => Box::new(retained_chunk_source_for_view_radius(end_chunk_source(42), 8)),
-            }
-        };
-        let column_for = |cx, cz| -> ChunkColumn { source.column(cx, cz) };
-        let mut expected_digest = [0u8; 32];
+            let mut expected_digest = [0u8; 32];
         let mut nether_replay_window_end = 0;
         for index in 0..limit {
+            if index < start {
+                continue;
+            }
             if light_free {
                 let mut expected_prefix = [0u8; RAW_PACKET_HASH_BYTES];
                 expected.read_exact(&mut expected_prefix).expect("manifest light-free hash prefix");
@@ -2789,31 +3657,21 @@ fn parity_manifest_streams_before_rust_comparison() {
                 expected.read_exact(&mut expected_digest).expect("manifest semantic digest");
                 (None, None)
             };
-            let (cx, cz) = raw_packet_target(&h, index, width);
-            let column = column_for(cx, cz);
-            let mut neighbours = Vec::with_capacity(8);
-            for dz in -1..=1 {
-                for dx in -1..=1 {
-                    if (dx, dz) != (0, 0) {
-                        neighbours.push((dx, dz, column_for(cx + dx, cz + dz)));
+            let cx = h.cx0 + (index % width) as i32;
+            let cz = h.cz0 + (index / width) as i32;
+            let (settled_column, neighbours) = if let Some(store) = nether_light.as_mut() {
+                store.packet_inputs((cx, cz))
+            } else {
+                let column = column_for(cx, cz);
+                let mut neighbours = Vec::with_capacity(8);
+                for dz in -1..=1 {
+                    for dx in -1..=1 {
+                        if (dx, dz) != (0, 0) {
+                            neighbours.push((dx, dz, column_for(cx + dx, cz + dz)));
+                        }
                     }
                 }
-            }
-            let settled_column = if raw_packet && dimension == Dimension::Nether {
-                let admitted_neighbour_offsets =
-                    initial_light_admission_neighbour_offsets(index);
-                let admitted_neighbours = admitted_neighbour_offsets
-                    .iter()
-                    .map(|&(dx, dz)| (dx, dz, column_for(cx + dx, cz + dz)))
-                    .collect::<Vec<_>>();
-                initial_light_snapshot_for_admission(
-                    &V770ServerProtocol,
-                    &column,
-                    &admitted_neighbours,
-                    server_dimension,
-                )
-            } else {
-                column.clone()
+                (column, neighbours)
             };
             let directive = V770ServerProtocol
                 .try_encode_chunk_with_neighbours_in_dimension(
@@ -2831,7 +3689,10 @@ fn parity_manifest_streams_before_rust_comparison() {
                 }
                 other => panic!("production chunk encoder returned {other:?} at ({cx},{cz})"),
             };
-            if index == 0 {
+            if let Some(output) = raw_packet_output.as_mut() {
+                output.write((cx, cz), &payload);
+            }
+            if index == start {
                 if let Some(path) = std::env::var_os("LODESTONE_LARGE_PARITY_PACKET_OUT") {
                     std::fs::write(&path, &payload).expect("write requested Lodestone packet capture");
                 }
@@ -2908,28 +3769,41 @@ fn parity_manifest_streams_before_rust_comparison() {
                 );
             }
         }
-        drop(source);
         }
+        drop(nether_light);
+        drop(source);
         if let Some(dir) = end_persistence_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        if let Some(dir) = nether_persistence_dir {
             let _ = std::fs::remove_dir_all(dir);
         }
     }
     phase_profile.report();
-    if limit < h.count {
+    if start > 0 || limit < h.count {
         eprintln!(
-            "large {} parity: bounded pilot completed successfully at {} chunks; full grid remains pending",
+            "large {} parity: bounded pilot completed successfully for export indices {start}..{limit} ({} chunks); full grid remains pending",
             if raw_packet { "raw-packet" } else { "semantic" },
-            limit,
+            selected_count,
         );
     }
     let diagnostic = format_diagnostic_report(
         raw_packet,
-        limit,
+        selected_count,
         h.count,
         &digest_mismatches,
         &raw_mismatches,
         &component_reports,
     );
+    if let Some(inventory_path) = std::env::var_os(MISMATCH_INVENTORY_ENV) {
+        write_mismatch_inventory(
+            Path::new(&path),
+            Path::new(&inventory_path),
+            &h,
+            &digest_mismatches,
+            &raw_mismatches,
+        );
+    }
     let has_component_mismatches = component_reports.iter().any(|(_, report)| report.has_mismatch());
     let has_failing_component_mismatches = component_reports.iter().any(|(_, report)| report.has_failing_mismatch());
     if !digest_mismatches.is_empty() || !raw_mismatches.is_empty() || has_component_mismatches {
@@ -2942,7 +3816,7 @@ fn parity_manifest_streams_before_rust_comparison() {
             "{}",
             format_diagnostic_summary(
                 raw_packet,
-                limit,
+                selected_count,
                 h.count,
                 &digest_mismatches,
                 &raw_mismatches,
@@ -3258,7 +4132,7 @@ fn assert_full_and_pruned_lifecycle_packet_bytes(path: &Path, target: ChunkPos, 
     }
 }
 
-fn compare_lifecycle_manifest<S: LifecycleWorldgenSource>(
+fn compare_lifecycle_manifest<S: LifecycleWorldgenSource + Sync>(
     mut materializer: LifecycleMaterializer<S>,
     capture: &LifecycleCapture,
     expected: &mut BufReader<File>,
@@ -3293,14 +4167,15 @@ fn compare_lifecycle_manifest<S: LifecycleWorldgenSource>(
                 .unwrap_or_else(|error| panic!("static target replay plan rejected authenticated capture: {error}"));
             assert_eq!(plan.target(), target);
             materializer.prepare_lifecycle_replay(plan.admissions());
-            materializer.replay_plan(&plan);
+            materializer.admit_many_parallel(plan.admissions());
+            for event in plan.feature_events() {
+                materializer.complete(event.source, event.stage, event.sequence);
+            }
             eprintln!("large lifecycle replay: pruned target index {selected_index} {target:?}, admitted {} destinations, applied {} FEATURES events", plan.admissions().len(), plan.feature_events().len());
         }
         LifecycleReplayMode::Full => {
             materializer.prepare_lifecycle_replay(&full_admissions);
-            for &admission in &full_admissions {
-                materializer.admit(admission);
-            }
+            materializer.admit_many_parallel(&full_admissions);
             eprintln!(
                 "large lifecycle replay: admitted {} halo columns, applying {} FEATURES events; ignoring {} FULL telemetry events",
                 full_admissions.len(),
@@ -3669,6 +4544,112 @@ const MAX_COMPONENT_EXAMPLES: usize = 32;
 const MAX_COMPONENT_SIGNATURES: usize = 32;
 const MAX_REFERENCE_PACKET_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_REFERENCE_PACKET_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_RAW_PACKET_OUTPUT_PACKETS: u64 = 4_096;
+const MAX_RAW_PACKET_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
+
+struct RawPacketOutput {
+    directory: PathBuf,
+    packets: u64,
+    bytes: u64,
+}
+
+fn validate_raw_packet_output_limit(limit: u64) -> Result<(), String> {
+    if limit > MAX_RAW_PACKET_OUTPUT_PACKETS {
+        return Err(format!(
+            "LODESTONE_LARGE_PARITY_PACKET_OUT_DIR supports at most {MAX_RAW_PACKET_OUTPUT_PACKETS} packets, got {limit}"
+        ));
+    }
+    Ok(())
+}
+
+fn raw_packet_output_path(directory: &Path, target: ChunkPos) -> PathBuf {
+    directory.join(format!("x{}_z{}.packet", target.0, target.1))
+}
+
+fn prepare_raw_packet_output(raw_packet: bool, limit: u64) -> Option<RawPacketOutput> {
+    let path = std::env::var_os("LODESTONE_LARGE_PARITY_PACKET_OUT_DIR")?;
+    assert!(
+        raw_packet,
+        "LODESTONE_LARGE_PARITY_PACKET_OUT_DIR is only supported for raw-packet manifests"
+    );
+    validate_raw_packet_output_limit(limit)
+        .unwrap_or_else(|error| panic!("invalid raw packet output directory: {error}"));
+    let directory = PathBuf::from(path);
+    std::fs::create_dir_all(&directory).unwrap_or_else(|error| {
+        panic!(
+            "create raw packet output directory {}: {error}",
+            directory.display()
+        )
+    });
+    let mut entries = std::fs::read_dir(&directory).unwrap_or_else(|error| {
+        panic!(
+            "read raw packet output directory {}: {error}",
+            directory.display()
+        )
+    });
+    if let Some(entry) = entries.next() {
+        let entry = entry.unwrap_or_else(|error| {
+            panic!(
+                "read raw packet output directory {} entry: {error}",
+                directory.display()
+            )
+        });
+        panic!(
+            "raw packet output directory {} must be empty; found {}",
+            directory.display(),
+            entry.path().display()
+        );
+    }
+    Some(RawPacketOutput {
+        directory,
+        packets: 0,
+        bytes: 0,
+    })
+}
+
+impl RawPacketOutput {
+    fn write(&mut self, target: ChunkPos, payload: &[u8]) {
+        assert!(
+            self.packets < MAX_RAW_PACKET_OUTPUT_PACKETS,
+            "raw packet output exceeded the {MAX_RAW_PACKET_OUTPUT_PACKETS}-packet bound"
+        );
+        let packet_bytes = u64::try_from(payload.len()).expect("raw packet length fits u64");
+        assert!(
+            packet_bytes <= MAX_REFERENCE_PACKET_BYTES,
+            "raw packet at {target:?} is {packet_bytes} bytes, over the {MAX_REFERENCE_PACKET_BYTES}-byte diagnostic bound"
+        );
+        let total = self
+            .bytes
+            .checked_add(packet_bytes)
+            .expect("raw packet output byte count overflow");
+        assert!(
+            total <= MAX_RAW_PACKET_OUTPUT_BYTES,
+            "raw packet output exceeded the {MAX_RAW_PACKET_OUTPUT_BYTES}-byte bound"
+        );
+        let path = raw_packet_output_path(&self.directory, target);
+        assert!(
+            !path.exists(),
+            "raw packet output path already exists for {target:?}: {}",
+            path.display()
+        );
+        std::fs::write(&path, payload).unwrap_or_else(|error| {
+            panic!("write raw packet output {}: {error}", path.display())
+        });
+        self.packets += 1;
+        self.bytes = total;
+    }
+}
+
+#[test]
+fn raw_packet_output_directory_is_bounded_and_coordinate_keyed() {
+    assert!(validate_raw_packet_output_limit(0).is_ok());
+    assert!(validate_raw_packet_output_limit(MAX_RAW_PACKET_OUTPUT_PACKETS).is_ok());
+    assert!(validate_raw_packet_output_limit(MAX_RAW_PACKET_OUTPUT_PACKETS + 1).is_err());
+    assert_eq!(
+        raw_packet_output_path(Path::new("/tmp/raw-packets"), (-24, -25)),
+        PathBuf::from("/tmp/raw-packets/x-24_z-25.packet")
+    );
+}
 
 #[derive(Default)]
 struct ComponentDiff {
@@ -3703,6 +4684,13 @@ struct PacketComponentReport {
     sky_light: ComponentDiff,
     block_light: ComponentDiff,
     masks: ComponentDiff,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComponentComparison {
+    Exact,
+    LightOnly,
+    ContentMismatch,
 }
 
 #[test]
@@ -3743,14 +4731,50 @@ impl PacketComponentReport {
             || self.masks.total != 0
     }
 
-    fn has_failing_mismatch(&self) -> bool {
-        self.terrain.total != 0
+    fn comparison(&self) -> ComponentComparison {
+        if self.terrain.total != 0
             || self.biomes.total != 0
             || self.heightmaps.total != 0
             || self.block_entities.total != 0
-            || self.sky_light.total != 0
+        {
+            ComponentComparison::ContentMismatch
+        } else if self.sky_light.total != 0
             || self.block_light.total != 0
+            || self.masks.total != 0
+        {
+            ComponentComparison::LightOnly
+        } else {
+            ComponentComparison::Exact
+        }
     }
+
+    fn has_failing_mismatch(&self) -> bool {
+        self.comparison() == ComponentComparison::ContentMismatch
+    }
+}
+
+#[test]
+fn packet_component_policy_fails_for_terrain_mismatches() {
+    let mut report = PacketComponentReport::default();
+    report
+        .terrain
+        .push("minecraft:air -> minecraft:stone".to_owned(), "cell".to_owned());
+
+    assert_eq!(report.comparison(), ComponentComparison::ContentMismatch);
+    assert!(report.has_failing_mismatch());
+}
+
+#[test]
+fn packet_component_policy_records_light_without_failing() {
+    let mut report = PacketComponentReport::default();
+    report.sky_light.push("15 -> 14".to_owned(), "cell".to_owned());
+    report
+        .masks
+        .push("sky: present -> missing".to_owned(), "section".to_owned());
+
+    assert!(report.has_mismatch());
+    assert_eq!(report.comparison(), ComponentComparison::LightOnly);
+    assert!(!report.has_failing_mismatch());
 }
 
 fn load_reference_packets(
@@ -3759,6 +4783,7 @@ fn load_reference_packets(
     cx1: i32,
     cz0: i32,
     cz1: i32,
+    start: u64,
     limit: u64,
 ) -> BTreeMap<ChunkPos, PathBuf> {
     let mut paths = Vec::new();
@@ -3777,8 +4802,8 @@ fn load_reference_packets(
             }
         }
     }
-    let packet_limit = usize::try_from(limit).unwrap_or(usize::MAX);
-    assert!(paths.len() <= packet_limit, "reference packet inputs ({}) exceed the selected manifest prefix ({limit} chunks)", paths.len());
+    let packet_limit = usize::try_from(limit - start).unwrap_or(usize::MAX);
+    assert!(paths.len() <= packet_limit, "reference packet inputs ({}) exceed the selected manifest batch ({start}..{limit}, {packet_limit} chunks)", paths.len());
     let mut packets = BTreeMap::new();
     let mut total_bytes = 0u64;
     for path in paths {
@@ -3790,7 +4815,7 @@ fn load_reference_packets(
         let coordinate = (packet.x, packet.z);
         let width = i64::from(cx1 - cx0 + 1);
         let index = i64::from(coordinate.1 - cz0) * width + i64::from(coordinate.0 - cx0);
-        assert!(coordinate.0 >= cx0 && coordinate.0 <= cx1 && coordinate.1 >= cz0 && coordinate.1 <= cz1 && index >= 0 && u64::try_from(index).is_ok_and(|index| index < limit), "reference packet {} decodes to {coordinate:?}, outside the selected manifest prefix", path.display());
+        assert!(coordinate.0 >= cx0 && coordinate.0 <= cx1 && coordinate.1 >= cz0 && coordinate.1 <= cz1 && index >= 0 && u64::try_from(index).is_ok_and(|index| index >= start && index < limit), "reference packet {} decodes to {coordinate:?}, outside the selected manifest batch", path.display());
         total_bytes = total_bytes
             .checked_add(size)
             .expect("reference packet diagnostic byte count overflow");
@@ -4061,6 +5086,214 @@ fn format_diagnostic_summary(
         output.push_str(&format!("\npacket ({x},{z}) counts: terrain={}, biomes={}, heightmaps={}, block_entities={}, sky_light={}, block_light={}, masks={}", report.terrain.total, report.biomes.total, report.heightmaps.total, report.block_entities.total, report.sky_light.total, report.block_light.total, report.masks.total));
     }
     output
+}
+
+/// Writes a machine-readable mismatch inventory for the follow-up oracle
+/// diagnostic.  The inventory is evidence, not acceptance input: every row
+/// repeats the authenticated manifest identity and the expected full digest,
+/// allowing the reference-export step to reject stale or hand-edited rows
+/// before it asks the external oracle for packet bodies.
+fn write_mismatch_inventory(
+    path: &Path,
+    manifest: &Path,
+    header: &ManifestHeader,
+    digest: &[(i32, i32, [u8; 32], [u8; 32])],
+    raw: &[RawPacketMismatch],
+) {
+    let kind = match header.semantic_version {
+        6 => "raw-packet",
+        7 => "light-free",
+        _ => "semantic",
+    };
+    let sidecar = match header.semantic_version {
+        6 => Some(raw_packet_audit_path(manifest)),
+        7 => Some(light_free_audit_path(manifest)),
+        _ => None,
+    };
+    let width = i64::from(header.cx1 - header.cx0 + 1);
+    let mut rows = Vec::with_capacity(digest.len() + raw.len());
+    for &(cx, cz, expected, actual) in digest {
+        let index = i64::from(cz - header.cz0)
+            .checked_mul(width)
+            .and_then(|value| value.checked_add(i64::from(cx - header.cx0)))
+            .expect("mismatch inventory index fits i64");
+        rows.push((index as u64, (cx, cz), expected, actual));
+    }
+    rows.extend(raw.iter().map(|mismatch| {
+        (
+            mismatch.index,
+            mismatch.target,
+            mismatch.expected_full,
+            mismatch.actual_full,
+        )
+    }));
+    rows.sort_unstable_by_key(|row| row.0);
+
+    let mut output = String::new();
+    output.push_str("schema=lodestone-large-parity-mismatch-v1\n");
+    output.push_str(&format!("manifest_sha256={}\n", file_sha256(manifest)));
+    if let Some(sidecar) = sidecar {
+        output.push_str(&format!("sidecar_sha256={}\n", file_sha256(&sidecar)));
+    }
+    output.push_str(&format!(
+        "semantic_version={}\ndimension={}\nfrozen_world_sha256={}\ngeometry={}..{}:{}..{}\nrecord_width={}\nkind={}\nmismatch_count={}\n",
+        header.semantic_version,
+        dimension_capture_name(header.dimension),
+        hex(&header.frozen_world),
+        header.cx0,
+        header.cx1,
+        header.cz0,
+        header.cz1,
+        header.record_width,
+        kind,
+        rows.len(),
+    ));
+    output.push_str("index\tcx\tcz\texpected_full_sha256\tactual_full_sha256\n");
+    for (index, (cx, cz), expected, actual) in rows {
+        output.push_str(&format!(
+            "{index}\t{cx}\t{cz}\t{}\t{}\n",
+            hex(&expected),
+            hex(&actual),
+        ));
+    }
+    std::fs::write(path, output).unwrap_or_else(|error| {
+        panic!("write mismatch inventory {}: {error}", path.display())
+    });
+}
+
+fn decode_digest32(value: &str, what: &str) -> [u8; 32] {
+    assert_eq!(value.len(), 64, "{what} must contain 64 hexadecimal characters");
+    let mut result = [0u8; 32];
+    for (index, byte) in result.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .unwrap_or_else(|error| panic!("invalid {what} at byte {index}: {error}"));
+    }
+    result
+}
+
+/// Reads the inventory after re-authenticating the manifest and its v6
+/// sidecar.  The file is intentionally small and line-oriented so shell
+/// orchestration can move it between the Rust comparator and the JVM oracle
+/// without inventing a second binary format.
+fn load_mismatch_inventory(
+    inventory: &Path,
+    manifest: &Path,
+    header: &ManifestHeader,
+    sidecar: &Path,
+) -> Vec<RawPacketMismatch> {
+    assert_eq!(header.semantic_version, 6, "packet component diagnostics require a v6 manifest");
+    let lines = std::fs::read_to_string(inventory)
+        .unwrap_or_else(|error| panic!("read mismatch inventory {}: {error}", inventory.display()))
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(lines.first().map(String::as_str), Some("schema=lodestone-large-parity-mismatch-v1"), "mismatch inventory schema differs");
+    let mut fields = BTreeMap::new();
+    let row_start = lines
+        .iter()
+        .position(|line| line == "index\tcx\tcz\texpected_full_sha256\tactual_full_sha256")
+        .unwrap_or_else(|| panic!("mismatch inventory has no row header"));
+    for line in &lines[1..row_start] {
+        let (key, value) = line
+            .split_once('=')
+            .unwrap_or_else(|| panic!("malformed mismatch inventory header: {line}"));
+        assert!(fields.insert(key, value).is_none(), "duplicate mismatch inventory field {key}");
+    }
+    let manifest_sha = file_sha256(manifest);
+    let sidecar_sha = file_sha256(sidecar);
+    assert_eq!(fields.get("manifest_sha256").copied(), Some(manifest_sha.as_str()), "mismatch inventory manifest identity differs");
+    assert_eq!(fields.get("sidecar_sha256").copied(), Some(sidecar_sha.as_str()), "mismatch inventory sidecar identity differs");
+    assert_eq!(fields.get("kind").copied(), Some("raw-packet"), "mismatch inventory kind differs");
+    assert_eq!(fields.get("semantic_version").copied(), Some("6"), "mismatch inventory version differs");
+    assert_eq!(fields.get("dimension").copied(), Some(dimension_capture_name(header.dimension)), "mismatch inventory dimension differs");
+    let frozen_sha = hex(&header.frozen_world);
+    assert_eq!(fields.get("frozen_world_sha256").copied(), Some(frozen_sha.as_str()), "mismatch inventory frozen-world identity differs");
+    let expected_count = fields
+        .get("mismatch_count")
+        .unwrap_or_else(|| panic!("mismatch inventory has no mismatch_count"))
+        .parse::<usize>()
+        .expect("mismatch inventory count is an integer");
+    assert!(expected_count <= 4_096, "mismatch inventory exceeds the bounded 4096-row diagnostic limit");
+    assert_eq!(lines.len() - row_start - 1, expected_count, "mismatch inventory count differs from its rows");
+
+    let width = i64::from(header.cx1 - header.cx0 + 1);
+    let mut rows = Vec::with_capacity(expected_count);
+    let mut audit = File::open(sidecar).unwrap_or_else(|error| panic!("open packet-audit sidecar: {error}"));
+    for line in &lines[row_start + 1..] {
+        let fields = line.split('\t').collect::<Vec<_>>();
+        assert_eq!(fields.len(), 5, "mismatch inventory row has the wrong number of fields");
+        let index = fields[0].parse::<u64>().expect("mismatch index is an integer");
+        let cx = fields[1].parse::<i32>().expect("mismatch x is an integer");
+        let cz = fields[2].parse::<i32>().expect("mismatch z is an integer");
+        assert!(index < header.count, "mismatch index is outside the manifest");
+        let expected_index = i64::from(cz - header.cz0)
+            .checked_mul(width)
+            .and_then(|value| value.checked_add(i64::from(cx - header.cx0)))
+            .expect("mismatch coordinate index fits i64");
+        assert_eq!(u64::try_from(expected_index).expect("mismatch index is non-negative"), index, "mismatch coordinate disagrees with index");
+        let expected = decode_digest32(fields[3], "expected mismatch digest");
+        let actual = decode_digest32(fields[4], "actual mismatch digest");
+        assert_ne!(expected, actual, "mismatch inventory contains an equal digest");
+        let authenticated: [u8; PACKET_AUDIT_RECORD_BYTES] = read_manifest_record_at(&mut audit, index as usize, PACKET_AUDIT_RECORD_BYTES)
+            .expect("read authenticated mismatch digest")
+            .try_into()
+            .expect("authenticated mismatch digest width");
+        assert_eq!(expected, authenticated, "mismatch inventory expected digest differs from sidecar");
+        rows.push(RawPacketMismatch {
+            target: (cx, cz),
+            index,
+            expected_prefix: [expected[0], expected[1]],
+            actual_prefix: [actual[0], actual[1]],
+            expected_full: expected,
+            actual_full: actual,
+            payload_bytes: 0,
+        });
+    }
+    rows
+}
+
+/// File-only second phase of the bounded mismatch workflow.  The expensive
+/// generated-world scan writes actual packets and an authenticated inventory;
+/// the JVM oracle then writes reference packets only for those coordinates.
+/// This test compares those files without regenerating any chunk, and retains
+/// the existing exact component/signature census.
+#[test]
+#[ignore = "requires an authenticated mismatch inventory and packet directories"]
+fn parity_mismatch_packet_files_report_components() {
+    let manifest_path = std::env::var(MISMATCH_INVENTORY_ENV)
+        .expect("set LODESTONE_LARGE_PARITY_MISMATCH_OUT");
+    let inventory = Path::new(&manifest_path);
+    let manifest = std::env::var("LODESTONE_LARGE_PARITY_MANIFEST")
+        .expect("set LODESTONE_LARGE_PARITY_MANIFEST");
+    let manifest = Path::new(&manifest);
+    let mut raw_header = [0; HEADER_BYTES];
+    File::open(manifest)
+        .unwrap_or_else(|error| panic!("open manifest {}: {error}", manifest.display()))
+        .read_exact(&mut raw_header)
+        .expect("read manifest header");
+    let header = read_header(&raw_header[..]).expect("valid manifest header");
+    let (sidecar, sidecar_header) = load_raw_packet_audit(manifest, &header);
+    verify_raw_packet_audit_files(manifest, &raw_header, &header, &sidecar, &sidecar_header);
+    let mismatches = load_mismatch_inventory(inventory, manifest, &header, &sidecar);
+    let actual_dir = PathBuf::from(std::env::var(MISMATCH_PACKET_DIR_ENV).expect("set LODESTONE_LARGE_PARITY_MISMATCH_PACKET_DIR"));
+    let reference_dir = PathBuf::from(std::env::var(MISMATCH_REFERENCE_PACKET_DIR_ENV).expect("set LODESTONE_LARGE_PARITY_MISMATCH_REFERENCE_PACKET_DIR"));
+    let mut components = Vec::with_capacity(mismatches.len());
+    for mismatch in &mismatches {
+        let name = format!("x{}_z{}.packet", mismatch.target.0, mismatch.target.1);
+        let actual_path = actual_dir.join(&name);
+        let reference_path = reference_dir.join(&name);
+        let actual = std::fs::read(&actual_path).unwrap_or_else(|error| panic!("read actual packet {}: {error}", actual_path.display()));
+        let reference = std::fs::read(&reference_path).unwrap_or_else(|error| panic!("read reference packet {}: {error}", reference_path.display()));
+        assert_eq!(raw_packet_full_digest(&actual), mismatch.actual_full, "actual packet digest differs from the inventory at {:?}", mismatch.target);
+        assert_eq!(raw_packet_full_digest(&reference), mismatch.expected_full, "reference packet digest differs from the authenticated sidecar at {:?}", mismatch.target);
+        components.push((mismatch.target, packet_component_difference(&reference, &actual, header.dimension)));
+    }
+    let report = format_diagnostic_report(true, mismatches.len() as u64, header.count, &[], &mismatches, &components);
+    if let Some(path) = std::env::var_os(MISMATCH_COMPONENT_REPORT_ENV) {
+        std::fs::write(&path, &report).unwrap_or_else(|error| panic!("write component report {}: {error}", Path::new(&path).display()));
+    }
+    print!("{report}");
+    assert!(components.iter().all(|(_, report)| !report.has_failing_mismatch()), "component mismatch report contains failing terrain/content differences");
 }
 
 fn state_label(id: u32) -> String {

@@ -11,7 +11,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use lodestone_server::{
-    ChunkColumn, ChunkGenerationStage, ChunkSource, NetherChunkSource, OverworldChunkSource,
+    ChunkColumn, ChunkGenerationStage, ChunkSource, EndChunkSource, NetherChunkSource,
+    OverworldChunkSource,
 };
 use lodestone_worldgen::overworld::{GeneratedBlockEntity, OverworldGenerator};
 
@@ -26,6 +27,9 @@ pub const PACKET_LIGHT_RADIUS: i32 = 1;
 
 /// Maximum horizontal chunk radius touched by one FEATURES source write.
 pub const FEATURES_WRITE_RADIUS: i32 = 2;
+
+/// Horizontal chunk radius whose source bodies are dispatched for one target.
+pub const FEATURES_SOURCE_RADIUS: i32 = 1;
 
 /// Maximum source-to-source distance of a mutable dependency.
 pub const MUTABLE_READ_RADIUS: i32 = 4;
@@ -53,6 +57,10 @@ pub struct LifecycleSpill {
     pub position: AbsoluteCell,
     /// The canonical block-state string after the write.
     pub state: String,
+    /// Whether this source-crossing fungus write was transient during feature
+    /// execution. Ordered lifecycle replay retains it for later reads and
+    /// packet materialization.
+    pub transient: bool,
 }
 
 /// One complete FEATURES result emitted by a production source dispatcher.
@@ -62,6 +70,8 @@ pub struct LifecycleFeatureResult {
     pub spills: Vec<LifecycleSpill>,
     /// Generated block entities carried with the source result.
     pub block_entities: Vec<GeneratedBlockEntity>,
+    /// End return-gateway sidecars emitted with the source's block writes.
+    pub end_gateways: Vec<lodestone_worldgen::end::EndGateway>,
 }
 
 /// One authenticated FEATURES event accepted by a target replay plan.
@@ -209,6 +219,7 @@ pub trait LifecycleWorldgenSource {
         &self,
         source: ChunkPos,
         overrides: &BTreeMap<AbsoluteCell, String>,
+        _resident: &BTreeMap<ChunkPos, ChunkColumn>,
     ) -> LifecycleFeatureResult;
 
     /// Run any source-local stage after FEATURES. The Nether has no such
@@ -220,6 +231,29 @@ pub trait LifecycleWorldgenSource {
     ) -> Vec<LifecycleSpill> {
         Vec::new()
     }
+
+    /// Attach End-only gateway metadata after its source completion.
+    fn attach_end_gateways(
+        &self,
+        _column: &mut ChunkColumn,
+        gateways: &[lodestone_worldgen::end::EndGateway],
+    ) {
+        assert!(gateways.is_empty(), "non-End lifecycle source emitted End gateways");
+    }
+
+    /// Attach source-owned save sidecars after the source's feature body.
+    ///
+    /// Most sources have no sidecars at this boundary. End structures carry
+    /// their starts, references, and container entities through the source
+    /// rather than through block-state spills, so the End adapter overrides
+    /// this hook.
+    fn attach_source_sidecars(&self, _source: ChunkPos, _column: &mut ChunkColumn) {}
+
+    /// Finalize the detached packet snapshot after every admitted source has
+    /// completed. Sources may keep richer runtime sidecars in their resident
+    /// columns while the wire view uses the state-owned records that existed
+    /// before gameplay-only payload generation.
+    fn finalize_packet_snapshot(&self, _target: ChunkPos, _column: &mut ChunkColumn) {}
 }
 
 fn override_vec(overrides: &BTreeMap<AbsoluteCell, String>) -> Vec<(i32, i32, i32, String)> {
@@ -242,6 +276,7 @@ impl LifecycleWorldgenSource for OverworldChunkSource {
         &self,
         source: ChunkPos,
         overrides: &BTreeMap<AbsoluteCell, String>,
+        _resident: &BTreeMap<ChunkPos, ChunkColumn>,
     ) -> LifecycleFeatureResult {
         let overrides = override_vec(overrides);
         let result = self.generator().parity_source_decoration_with_overrides(
@@ -259,9 +294,11 @@ impl LifecycleWorldgenSource for OverworldChunkSource {
                     source: spill.source,
                     position: spill.position,
                     state: spill.state,
+                    transient: false,
                 })
                 .collect(),
             block_entities: result.block_entities,
+            end_gateways: Vec::new(),
         }
     }
 
@@ -284,9 +321,10 @@ impl LifecycleWorldgenSource for NetherChunkSource {
     }
 
     fn shaped_column(&self, cx: i32, cz: i32) -> ChunkColumn {
-        ChunkColumn::from_nether(
+        ChunkColumn::from_nether_at(
             self.generator().column_shaped(cx, cz),
             Self::WINDOW_HEIGHT,
+            ChunkGenerationStage::Shaped,
         )
     }
 
@@ -294,8 +332,8 @@ impl LifecycleWorldgenSource for NetherChunkSource {
         &self,
         source: ChunkPos,
         overrides: &BTreeMap<AbsoluteCell, String>,
+        _resident: &BTreeMap<ChunkPos, ChunkColumn>,
     ) -> LifecycleFeatureResult {
-        let overrides = override_vec(overrides);
         let spills = self
             .generator()
             .parity_source_spills_with_overrides(
@@ -303,20 +341,69 @@ impl LifecycleWorldgenSource for NetherChunkSource {
                 source.1,
                 source.0,
                 source.1,
-                &overrides,
+                &override_vec(overrides),
             )
             .into_iter()
             .map(|spill| LifecycleSpill {
                 source: spill.source,
                 position: spill.position,
                 state: spill.state,
+                transient: spill.transient,
             })
             .collect();
         LifecycleFeatureResult {
             spills,
             block_entities: Vec::new(),
+            end_gateways: Vec::new(),
         }
     }
+}
+
+impl LifecycleWorldgenSource for EndChunkSource {
+    fn shaped_column(&self, cx: i32, cz: i32) -> ChunkColumn {
+        self.shaped_column(cx, cz)
+    }
+
+    fn feature_result(
+        &self,
+        source: ChunkPos,
+        overrides: &BTreeMap<AbsoluteCell, String>,
+        _resident: &BTreeMap<ChunkPos, ChunkColumn>,
+    ) -> LifecycleFeatureResult {
+        let overrides = override_vec(overrides);
+        let result = self.generator().parity_source_decoration_with_overrides(
+            source.0,
+            source.1,
+            &overrides,
+        );
+        LifecycleFeatureResult {
+            spills: result.spills.into_iter().map(|spill| LifecycleSpill {
+                source: spill.source,
+                position: spill.position,
+                state: spill.state,
+                transient: false,
+            }).collect(),
+            block_entities: Vec::new(),
+            end_gateways: result.gateways,
+        }
+    }
+
+    fn attach_end_gateways(
+        &self,
+        column: &mut ChunkColumn,
+        gateways: &[lodestone_worldgen::end::EndGateway],
+    ) {
+        self.attach_generated_gateways(column, gateways);
+    }
+
+    fn attach_source_sidecars(&self, source: ChunkPos, column: &mut ChunkColumn) {
+        self.attach_structures(column, source.0, source.1);
+    }
+
+    fn finalize_packet_snapshot(&self, target: ChunkPos, column: &mut ChunkColumn) {
+        self.finalize_packet_snapshot_for_packet(column, target.0, target.1);
+    }
+
 }
 
 /// Run one source-local Overworld top-layer pass with resident overrides.
@@ -338,6 +425,7 @@ pub fn top_layer_spills(
             source: spill.source,
             position: spill.position,
             state: spill.state,
+            transient: false,
         })
         .collect()
 }
@@ -389,6 +477,18 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         self.source.prepare_lifecycle_replay(admissions);
     }
 
+    /// Clear the resident replay state before starting another bounded batch.
+    ///
+    /// The production source remains owned by this materializer, so its staged
+    /// generation caches survive between batches while resident columns and
+    /// read-after-write overrides retain the same batch boundary as a fresh
+    /// materializer. Call [`Self::prepare_lifecycle_replay`] after this reset.
+    pub fn reset_for_lifecycle_replay(&mut self) {
+        self.resident.clear();
+        self.completions.clear();
+        self.overrides.clear();
+    }
+
     /// Read the optional source computation counter used by lifecycle parity
     /// controls. It has no effect on replay state or generated output.
     #[must_use]
@@ -408,10 +508,33 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
 
     /// Admit one shaped resident column.
     pub fn admit(&mut self, chunk: ChunkPos) {
+        let column = self.source.shaped_column(chunk.0, chunk.1);
+        self.admit_shaped(chunk, column);
+    }
+
+    /// Generate independent shaped admissions on the server's process-wide
+    /// worker dispatcher, then commit them in the supplied canonical order.
+    /// No mutable lifecycle state is visible to workers: FEATURES completions
+    /// still run serially through [`Self::complete`] because each one observes
+    /// the prior source's spills.
+    pub fn admit_many_parallel(&mut self, chunks: &[ChunkPos])
+    where
+        S: Sync,
+    {
+        let source = &self.source;
+        let jobs = chunks.to_vec();
+        let columns = lodestone_server::run_worldgen_jobs(jobs.clone(), |(cx, cz)| {
+            source.shaped_column(cx, cz)
+        });
+        assert_eq!(columns.len(), jobs.len(), "worldgen dispatcher changed admission count");
+        for (chunk, column) in jobs.into_iter().zip(columns) {
+            self.admit_shaped(chunk, column);
+        }
+    }
+
+    fn admit_shaped(&mut self, chunk: ChunkPos, column: ChunkColumn) {
         assert!(
-            self.resident
-                .insert(chunk, self.source.shaped_column(chunk.0, chunk.1))
-                .is_none(),
+            self.resident.insert(chunk, column).is_none(),
             "duplicate lifecycle admission for {chunk:?}"
         );
     }
@@ -422,6 +545,19 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         source: ChunkPos,
         stage: LifecycleCompletion,
         sequence: u64,
+    ) {
+        self.complete_observing(source, stage, sequence, |_| {});
+    }
+
+    /// Apply one captured completion event and observe every resulting state
+    /// transition in application order. The observer is diagnostic only: it
+    /// cannot alter the resident world or the read-after-write overlay.
+    pub fn complete_observing(
+        &mut self,
+        source: ChunkPos,
+        stage: LifecycleCompletion,
+        sequence: u64,
+        mut observe: impl FnMut(&LifecycleSpill),
     ) {
         assert!(
             self.resident.contains_key(&source),
@@ -435,7 +571,16 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             return;
         }
 
-        let result = self.source.feature_result(source, &self.overrides);
+        // Heightmaps become live when the source enters FEATURES, before its
+        // own feature body writes anything. A neighbour that entered earlier
+        // already has live maps, so the same spill updates that destination
+        // incrementally through `ChunkColumn::set_block` below.
+        self.resident
+            .get_mut(&source)
+            .expect("lifecycle source was checked resident above")
+            .prime_client_heightmaps();
+
+        let result = self.source.feature_result(source, &self.overrides, &self.resident);
         for spill in &result.spills {
             assert_eq!(
                 spill.source, source,
@@ -463,7 +608,22 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 );
             }
         }
+        for gateway in &result.end_gateways {
+            let destination = (gateway.pos.0.div_euclid(16), gateway.pos.2.div_euclid(16));
+            if let Some(column) = self.resident.get_mut(&destination) {
+                self.source.attach_end_gateways(column, std::slice::from_ref(gateway));
+            }
+        }
+        for entity in &result.block_entities {
+            let (x, _y, z) = entity.position();
+            let destination = (x.div_euclid(16), z.div_euclid(16));
+            let Some(column) = self.resident.get_mut(&destination) else {
+                continue;
+            };
+            column.add_generated_block_entities(std::slice::from_ref(entity));
+        }
         for spill in result.spills {
+            observe(&spill);
             let destination = (
                 spill.position.0.div_euclid(16),
                 spill.position.2.div_euclid(16),
@@ -485,15 +645,6 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 );
             }
         }
-        for entity in result.block_entities {
-            let (x, _y, z) = entity.position();
-            let destination = (x.div_euclid(16), z.div_euclid(16));
-            let Some(column) = self.resident.get_mut(&destination) else {
-                continue;
-            };
-            column.add_generated_block_entities(std::slice::from_ref(&entity));
-        }
-
         let post_features_spills = self.source.post_features_spills(source, &self.overrides);
         for spill in &post_features_spills {
             assert_eq!(
@@ -512,6 +663,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             }
         }
         for spill in post_features_spills {
+            observe(&spill);
             let destination = (
                 spill.position.0.div_euclid(16),
                 spill.position.2.div_euclid(16),
@@ -526,6 +678,12 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 );
             }
         }
+        self.source.attach_source_sidecars(
+            source,
+            self.resident
+                .get_mut(&source)
+                .expect("lifecycle source was admitted before sidecar attachment"),
+        );
     }
 
     /// Borrow one admitted resident column for neighbour-aware encoding.
@@ -537,10 +695,17 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
     /// Clone one admitted resident column for packet encoding.
     #[must_use]
     pub fn snapshot_for_packet(&self, target: ChunkPos) -> ChunkColumn {
-        self.resident
+        let mut snapshot = self
+            .resident
             .get(&target)
             .cloned()
-            .unwrap_or_else(|| panic!("lifecycle target {target:?} was not admitted before encoding"))
+            .unwrap_or_else(|| panic!("lifecycle target {target:?} was not admitted before encoding"));
+        // A later source completion can write a state-owned block entity into
+        // this target after the target's own sidecar hook ran. Finalize only
+        // the detached packet snapshot so the resident lifecycle remains the
+        // authenticated replay state and richer generated payloads survive.
+        self.source.finalize_packet_snapshot(target, &mut snapshot);
+        snapshot
     }
 }
 
@@ -559,6 +724,118 @@ mod tests {
         post_features: bool,
     }
 
+    struct StateOnlySpillSource;
+
+    struct HeightmapLifecycleSource;
+
+    impl LifecycleWorldgenSource for StateOnlySpillSource {
+        fn shaped_column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            ChunkColumn::new(-64, 384)
+        }
+
+        fn feature_result(
+            &self,
+            source: ChunkPos,
+            _overrides: &BTreeMap<AbsoluteCell, String>,
+            _resident: &BTreeMap<ChunkPos, ChunkColumn>,
+        ) -> LifecycleFeatureResult {
+            LifecycleFeatureResult {
+                spills: (source == (0, 0)).then(|| LifecycleSpill {
+                    source,
+                    position: (4, 14, 1),
+                    state: "minecraft:spawner".to_owned(),
+                    transient: false,
+                }).into_iter().collect(),
+                block_entities: Vec::new(),
+            end_gateways: Vec::new(),
+            }
+        }
+    }
+
+    impl LifecycleWorldgenSource for HeightmapLifecycleSource {
+        fn shaped_column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            let mut column = ChunkColumn::new(0, 8);
+            column.set_block(0, 0, 0, "minecraft:stone");
+            column
+        }
+
+        fn feature_result(
+            &self,
+            source: ChunkPos,
+            _overrides: &BTreeMap<AbsoluteCell, String>,
+            _resident: &BTreeMap<ChunkPos, ChunkColumn>,
+        ) -> LifecycleFeatureResult {
+            let position = match source {
+                // The first source writes into itself and the unprimed east
+                // neighbour. The second source later writes back into the
+                // already-primed west neighbour.
+                (0, 0) => (16, 4, 0),
+                (1, 0) => (0, 6, 0),
+                _ => return LifecycleFeatureResult::default(),
+            };
+            LifecycleFeatureResult {
+                spills: vec![LifecycleSpill {
+                    source,
+                    position,
+                    state: "minecraft:stone".to_owned(),
+                    transient: false,
+                }],
+                block_entities: Vec::new(),
+            end_gateways: Vec::new(),
+            }
+        }
+    }
+
+    fn world_surface(column: &ChunkColumn) -> u32 {
+        column
+            .client_heightmaps()
+            .expect("FEATURES entry primes client maps")
+            .get(1)
+            .expect("WORLD_SURFACE map")
+            .get(0, 0)
+    }
+
+    #[test]
+    fn heightmaps_prime_at_own_features_entry_and_track_later_neighbour_writes() {
+        let mut materializer = LifecycleMaterializer::new(HeightmapLifecycleSource);
+        materializer.admit((0, 0));
+        materializer.admit((1, 0));
+
+        materializer.complete((0, 0), LifecycleCompletion::Features, 0);
+        assert_eq!(world_surface(materializer.resident_column((0, 0)).unwrap()), 1);
+        assert!(
+            materializer
+                .resident_column((1, 0))
+                .unwrap()
+                .client_heightmaps()
+                .is_none(),
+            "a source write must not prime an unentered destination"
+        );
+
+        materializer.complete((1, 0), LifecycleCompletion::Features, 1);
+        assert_eq!(
+            world_surface(materializer.resident_column((1, 0)).unwrap()),
+            5,
+            "own entry must include writes that arrived before priming"
+        );
+        assert_eq!(
+            world_surface(materializer.resident_column((0, 0)).unwrap()),
+            7,
+            "a later neighbour write must update an already-primed map"
+        );
+    }
+
+    #[test]
+    fn state_only_spill_does_not_invent_a_lifecycle_block_entity() {
+        let mut materializer = LifecycleMaterializer::new(StateOnlySpillSource);
+        materializer.admit((0, 0));
+        materializer.complete((0, 0), LifecycleCompletion::Features, 0);
+
+        let column = materializer.resident_column((0, 0)).expect("admitted source column");
+        assert_eq!(column.block_state(4, 14, 1), "minecraft:spawner");
+        assert!(column.block_entities().is_empty());
+    }
+
     impl LifecycleWorldgenSource for SpillSource {
         fn shaped_column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
             ChunkColumn::new(0, 1)
@@ -568,6 +845,7 @@ mod tests {
             &self,
             source: ChunkPos,
             overrides: &BTreeMap<AbsoluteCell, String>,
+            _resident: &BTreeMap<ChunkPos, ChunkColumn>,
         ) -> LifecycleFeatureResult {
             if source == (0, 1) {
                 self.expected_override.set(
@@ -579,11 +857,12 @@ mod tests {
                     source,
                     position: (16, 0, 0),
                     state: "minecraft:stone".to_owned(),
+                    transient: false,
                 }]
             } else {
                 Vec::new()
             };
-            LifecycleFeatureResult { spills, block_entities: Vec::new() }
+            LifecycleFeatureResult { spills, block_entities: Vec::new(), end_gateways: Vec::new() }
         }
 
         fn post_features_spills(
@@ -596,6 +875,7 @@ mod tests {
                     source,
                     position: (16, 0, 0),
                     state: "minecraft:stone".to_owned(),
+                    transient: false,
                 }]
             } else {
                 Vec::new()
@@ -612,12 +892,107 @@ mod tests {
             &self,
             _source: ChunkPos,
             _overrides: &BTreeMap<AbsoluteCell, String>,
+            _resident: &BTreeMap<ChunkPos, ChunkColumn>,
         ) -> LifecycleFeatureResult {
             let calls = self.feature_calls.get() + 1;
             self.feature_calls.set(calls);
             assert_eq!(calls, 1, "source body ran twice");
             LifecycleFeatureResult::default()
         }
+    }
+
+    struct AdmissionSource;
+
+    impl LifecycleWorldgenSource for AdmissionSource {
+        fn shaped_column(&self, cx: i32, cz: i32) -> ChunkColumn {
+            let mut column = ChunkColumn::new(0, 1);
+            let state = if (cx + cz) & 1 == 0 {
+                "minecraft:stone"
+            } else {
+                "minecraft:dirt"
+            };
+            column.set_block(0, 0, 0, state);
+            column
+        }
+
+        fn feature_result(
+            &self,
+            _source: ChunkPos,
+            _overrides: &BTreeMap<AbsoluteCell, String>,
+            _resident: &BTreeMap<ChunkPos, ChunkColumn>,
+        ) -> LifecycleFeatureResult {
+            LifecycleFeatureResult::default()
+        }
+    }
+
+    struct ReorderSource;
+
+    impl LifecycleWorldgenSource for ReorderSource {
+        fn shaped_column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            ChunkColumn::new(0, 1)
+        }
+
+        fn feature_result(
+            &self,
+            source: ChunkPos,
+            overrides: &BTreeMap<AbsoluteCell, String>,
+            _resident: &BTreeMap<ChunkPos, ChunkColumn>,
+        ) -> LifecycleFeatureResult {
+            let state = match source {
+                (0, 0) => "minecraft:stone",
+                (1, 0) if overrides.contains_key(&(16, 0, 0)) => "minecraft:diamond_block",
+                (1, 0) => "minecraft:dirt",
+                _ => return LifecycleFeatureResult::default(),
+            };
+            LifecycleFeatureResult {
+                spills: vec![LifecycleSpill {
+                    source,
+                    position: (16, 0, 0),
+                    state: state.to_owned(),
+                    transient: false,
+                }],
+                block_entities: Vec::new(),
+            end_gateways: Vec::new(),
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_admissions_match_serial_generation_and_commit_order() {
+        let chunks = vec![(-2, -1), (-1, -1), (0, -1), (1, -1), (-2, 0), (-1, 0), (0, 0), (1, 0)];
+        let mut serial = LifecycleMaterializer::new(AdmissionSource);
+        for &chunk in &chunks {
+            serial.admit(chunk);
+        }
+        let mut parallel = LifecycleMaterializer::new(AdmissionSource);
+        parallel.admit_many_parallel(&chunks);
+        for &chunk in &chunks {
+            assert_eq!(
+                serial.resident_column(chunk).unwrap().block_state(0, 0, 0),
+                parallel.resident_column(chunk).unwrap().block_state(0, 0, 0),
+                "parallel admission changed shaped output at {chunk:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn reordered_feature_commit_changes_state_and_is_not_accepted_as_canonical() {
+        let mut canonical = LifecycleMaterializer::new(ReorderSource);
+        canonical.admit((0, 0));
+        canonical.admit((1, 0));
+        canonical.complete((0, 0), LifecycleCompletion::Features, 0);
+        canonical.complete((1, 0), LifecycleCompletion::Features, 1);
+
+        let mut reordered = LifecycleMaterializer::new(ReorderSource);
+        reordered.admit_many_parallel(&[(0, 0), (1, 0)]);
+        reordered.complete((1, 0), LifecycleCompletion::Features, 0);
+        reordered.complete((0, 0), LifecycleCompletion::Features, 1);
+
+        let canonical_state = canonical.resident_column((1, 0)).unwrap().block_state(0, 0, 0);
+        let reordered_state = reordered.resident_column((1, 0)).unwrap().block_state(0, 0, 0);
+        assert_eq!(canonical_state, "minecraft:diamond_block");
+        assert_eq!(reordered_state, "minecraft:stone");
+        assert_ne!(canonical_state, reordered_state, "reordered mutable commits must change the control output");
     }
 
     #[test]
@@ -722,4 +1097,5 @@ mod tests {
             .expect_err("mutated authenticated event order must fail closed");
         assert!(error.contains("order") || error.contains("disagrees"));
     }
+
 }
