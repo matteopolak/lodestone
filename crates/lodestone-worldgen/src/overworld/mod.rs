@@ -224,6 +224,7 @@ use self::fill::AquiferTrees;
 
 pub use self::biome_cells::BiomeCells;
 pub use self::block_entities::{BeeOccupant, GeneratedBlockEntity};
+pub(crate) use self::biome::zoomed_biome_flat;
 pub use self::output::{
     GenStage, GeneratedColumn, HEIGHTMAP_COLUMNS, MOTION_BLOCKING_HEIGHTMAP_TYPE_ID,
 };

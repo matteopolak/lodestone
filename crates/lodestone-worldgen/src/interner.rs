@@ -331,6 +331,13 @@ impl StateInterner {
             .canonical_of[id.index()]
     }
 
+    /// The local id for a validated canonical state. Resident columns cross
+    /// this boundary once per distinct palette state, not once per block.
+    #[must_use]
+    pub fn id_of_canonical(&self, id: CanonicalStateId) -> StateId {
+        self.id_of(&id.canonical_state())
+    }
+
     /// Resolves the base state's typed facts from generated canonical tables.
     ///
     /// This is a palette-boundary operation: callers should cache the result
@@ -452,6 +459,17 @@ mod tests {
         assert!(interner.canonical_id(slab).is_some());
         assert!(interner.canonical_id(invalid).is_none());
         assert!(interner.canonical_id(unknown).is_none());
+    }
+
+    #[test]
+    fn canonical_ids_enter_through_the_typed_interner_boundary() {
+        let interner = StateInterner::new();
+        let canonical = canonical_states::state_id("minecraft:stone")
+            .and_then(CanonicalStateId::new)
+            .expect("stone is a built-in state");
+        let local = interner.id_of_canonical(canonical);
+        assert_eq!(interner.canonical_id(local), Some(canonical));
+        assert_eq!(interner.id_of_canonical(canonical), local);
     }
 
     #[test]

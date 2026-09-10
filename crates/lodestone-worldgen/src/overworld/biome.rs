@@ -181,6 +181,49 @@ where
     Some(cells.at_quart(local_qx, local_qy.max(0) as usize, local_qz))
 }
 
+/// Resolves the same seed-fiddled quart corner for a vertically invariant
+/// biome source. The callback receives the selected chunk and local quart.
+pub(crate) fn zoomed_biome_flat<T, F>(
+    zoom_seed: i64, x: i32, y: i32, z: i32, source_at: F,
+) -> Option<T>
+where
+    F: Fn(i32, i32, usize, usize) -> Option<T>,
+{
+    let shifted_x = x - 2;
+    let shifted_y = y - 2;
+    let shifted_z = z - 2;
+    let parent_x = shifted_x >> 2;
+    let parent_y = shifted_y >> 2;
+    let parent_z = shifted_z >> 2;
+    let fract_x = f64::from(shifted_x.rem_euclid(4)) / 4.0;
+    let fract_y = f64::from(shifted_y.rem_euclid(4)) / 4.0;
+    let fract_z = f64::from(shifted_z.rem_euclid(4)) / 4.0;
+    let mut selected = 0;
+    let mut best = f64::INFINITY;
+    for corner in 0..8 {
+        let x_low = corner & 4 == 0;
+        let y_low = corner & 2 == 0;
+        let z_low = corner & 1 == 0;
+        let qx = if x_low { parent_x } else { parent_x + 1 };
+        let qy = if y_low { parent_y } else { parent_y + 1 };
+        let qz = if z_low { parent_z } else { parent_z + 1 };
+        let dx = if x_low { fract_x } else { fract_x - 1.0 };
+        let dy = if y_low { fract_y } else { fract_y - 1.0 };
+        let dz = if z_low { fract_z } else { fract_z - 1.0 };
+        let distance = fiddled_distance(zoom_seed, qx, qy, qz, dx, dy, dz);
+        if best > distance { selected = corner; best = distance; }
+    }
+    let qx = if selected & 4 == 0 { parent_x } else { parent_x + 1 };
+    let qz = if selected & 1 == 0 { parent_z } else { parent_z + 1 };
+    let block_x = qx * 4;
+    let block_z = qz * 4;
+    source_at(
+        block_x.div_euclid(16), block_z.div_euclid(16),
+        block_x.rem_euclid(16).div_euclid(4) as usize,
+        block_z.rem_euclid(16).div_euclid(4) as usize,
+    )
+}
+
 fn zoom_seed(seed: i64) -> i64 {
     let digest = Sha256::digest(seed.to_le_bytes());
     i64::from_le_bytes(digest[..8].try_into().expect("SHA-256 digest prefix"))
