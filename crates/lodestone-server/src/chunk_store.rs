@@ -636,6 +636,27 @@ struct ChunkWriteSnapshot {
     observations: Vec<ChunkWriteObservation>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum TryResident<T> {
+    Busy,
+    Absent,
+    Present(T),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TryResidentEdit {
+    Busy,
+    Applied,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TryBlockMutation {
+    Busy,
+    Unsupported,
+    Absent,
+    Applied,
+}
+
 /// A canonical, multi-coordinate write lease. The table mutex is held only
 /// while the lease claims or releases its coordinate records; the lease itself
 /// does not hold the global cache mutex, so an expensive light computation can
