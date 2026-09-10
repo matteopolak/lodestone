@@ -230,17 +230,26 @@ impl BlockState {
     /// deliberate limits).
     #[must_use]
     pub fn rotate(&self, rotation: Rotation) -> Self {
+        self.clone().into_rotate(rotation)
+    }
+
+    /// Applies a rotation while consuming the state.
+    ///
+    /// Placement already owns each processed state. Keeping the transform
+    /// consuming lets that path mutate its one property map instead of cloning
+    /// the map once for `mirror` and again for `rotate`.
+    #[must_use]
+    pub fn into_rotate(mut self, rotation: Rotation) -> Self {
         if rotation == Rotation::None {
-            return self.clone();
+            return self;
         }
-        let mut out = self.clone();
         let turns = rotation.turns();
-        if let Some(facing) = out.properties.get("facing") {
+        if let Some(facing) = self.properties.get("facing") {
             if let Some(rotated) = rotate_direction(facing, turns) {
-                out.properties.insert("facing".into(), rotated.into());
+                self.properties.insert("facing".into(), rotated.into());
             }
         }
-        if let Some(axis) = out.properties.get("axis") {
+        if let Some(axis) = self.properties.get("axis") {
             if turns % 2 == 1 {
                 let swapped = match axis.as_str() {
                     "x" => Some("z"),
@@ -248,27 +257,27 @@ impl BlockState {
                     _ => None,
                 };
                 if let Some(swapped) = swapped {
-                    out.properties.insert("axis".into(), swapped.into());
+                    self.properties.insert("axis".into(), swapped.into());
                 }
             }
         }
-        if let Some(value) = out.properties.get("rotation").and_then(|r| r.parse::<u32>().ok()) {
+        if let Some(value) = self.properties.get("rotation").and_then(|r| r.parse::<u32>().ok()) {
             // Vanilla's own rotation-index rotate over a span of 16: +4 per clockwise quarter turn.
             let rotated = (value + 4 * turns) % 16;
-            out.properties.insert("rotation".into(), rotated.to_string());
+            self.properties.insert("rotation".into(), rotated.to_string());
         }
-        if let Some(orientation) = out.properties.get("orientation") {
+        if let Some(orientation) = self.properties.get("orientation") {
             if let Some(rotated) = rotate_orientation(orientation, turns) {
-                out.properties.insert("orientation".into(), rotated);
+                self.properties.insert("orientation".into(), rotated);
             }
         }
-        if let Some(shape) = out.properties.get("shape") {
+        if let Some(shape) = self.properties.get("shape") {
             if let Some(rotated) = rotate_rail_shape(shape, turns) {
-                out.properties.insert("shape".into(), rotated.into());
+                self.properties.insert("shape".into(), rotated.into());
             }
         }
-        rotate_directional_flags(&mut out, turns);
-        out
+        rotate_directional_flags(&mut self, turns);
+        self
     }
 
     /// Vanilla's own jigsaw-block front-facing / top-facing accessors — the two halves of the
@@ -284,10 +293,15 @@ impl BlockState {
     /// Vanilla's own block-state mirror at `(mirror)` for the same property set.
     #[must_use]
     pub fn mirror(&self, mirror: Mirror) -> Self {
+        self.clone().into_mirror(mirror)
+    }
+
+    /// Applies a mirror while consuming the state.
+    #[must_use]
+    pub fn into_mirror(mut self, mirror: Mirror) -> Self {
         if mirror == Mirror::None {
-            return self.clone();
+            return self;
         }
-        let mut out = self.clone();
         let flip = |dir: &str| -> Option<&'static str> {
             match (mirror, dir) {
                 (Mirror::LeftRight, "north") => Some("south"),
@@ -305,11 +319,11 @@ impl BlockState {
         // facing, FRONT_BACK with an X facing), and the two cases are *not*
         // symmetric: LEFT_RIGHT swaps all four inner/outer variants, FRONT_BACK
         // swaps only the outer pair.
-        let is_stair = out.properties.contains_key("shape")
-            && out.properties.contains_key("half")
-            && out.properties.contains_key("facing");
+        let is_stair = self.properties.contains_key("shape")
+            && self.properties.contains_key("half")
+            && self.properties.contains_key("facing");
         if is_stair {
-            let facing = out.properties.get("facing").cloned().unwrap_or_default();
+            let facing = self.properties.get("facing").cloned().unwrap_or_default();
             let z_axis = facing == "north" || facing == "south";
             let applies = match mirror {
                 Mirror::LeftRight => z_axis,
@@ -317,7 +331,7 @@ impl BlockState {
                 Mirror::None => false,
             };
             if applies {
-                if let Some(shape) = out.properties.get("shape").cloned() {
+                if let Some(shape) = self.properties.get("shape").cloned() {
                     let swapped = match (mirror, shape.as_str()) {
                         (Mirror::LeftRight, "outer_left") | (Mirror::FrontBack, "outer_left") => {
                             Some("outer_right")
@@ -332,33 +346,40 @@ impl BlockState {
                         _ => None,
                     };
                     if let Some(swapped) = swapped {
-                        out.properties.insert("shape".into(), swapped.into());
+                        self.properties.insert("shape".into(), swapped.into());
                     }
                 }
             }
         }
-        if let Some(shape) = out.properties.get("shape") {
+        if let Some(shape) = self.properties.get("shape") {
             if let Some(flipped) = mirror_rail_shape(shape, mirror) {
-                out.properties.insert("shape".into(), flipped.into());
+                self.properties.insert("shape".into(), flipped.into());
             }
         }
-        if let Some(facing) = out.properties.get("facing") {
+        if let Some(facing) = self.properties.get("facing") {
             if let Some(flipped) = flip(facing) {
-                out.properties.insert("facing".into(), flipped.into());
+                self.properties.insert("facing".into(), flipped.into());
             }
         }
-        let flags: Vec<(String, String)> = ["north", "east", "south", "west"]
-            .into_iter()
-            .filter_map(|dir| {
-                let value = out.properties.get(dir)?;
-                let target = flip(dir).unwrap_or(dir);
-                Some((target.to_string(), value.clone()))
-            })
-            .collect();
-        for (dir, value) in flags {
-            out.properties.insert(dir, value);
+        // There are only four directional keys. Snapshot their values in a
+        // stack array so mirroring does not allocate a temporary Vec before
+        // writing the permuted values back.
+        let mut flags: [Option<(usize, String)>; 4] = std::array::from_fn(|_| None);
+        for (source, dir) in ["north", "east", "south", "west"].into_iter().enumerate() {
+            let Some(value) = self.properties.get(dir) else {
+                continue;
+            };
+            let target = flip(dir).unwrap_or(dir);
+            let target = ["north", "east", "south", "west"]
+                .iter()
+                .position(|candidate| *candidate == target)
+                .unwrap_or(source);
+            flags[source] = Some((target, value.clone()));
         }
-        out
+        for (target, value) in flags.into_iter().flatten() {
+            self.properties.insert(["north", "east", "south", "west"][target].into(), value);
+        }
+        self
     }
 
     /// True when this state carries `waterlogged=false`, i.e. the block *has* the
@@ -499,7 +520,16 @@ pub fn direction_step(dir: &str) -> [i32; 3] {
 /// The four directional booleans of a fence/pane/vine, permuted by `turns`.
 fn rotate_directional_flags(state: &mut BlockState, turns: u32) {
     const CW: [&str; 4] = ["north", "east", "south", "west"];
-    let current: Vec<Option<String>> = CW.iter().map(|d| state.properties.get(*d).cloned()).collect();
+    // There are only four directional keys. Keep the temporary inline instead
+    // of allocating a Vec for every rotated fence, pane, or vine state. The
+    // source values are still cloned before any destination is overwritten, so
+    // the permutation has the same snapshot semantics as the old buffer.
+    let current = [
+        state.properties.get(CW[0]).cloned(),
+        state.properties.get(CW[1]).cloned(),
+        state.properties.get(CW[2]).cloned(),
+        state.properties.get(CW[3]).cloned(),
+    ];
     if current.iter().all(Option::is_none) {
         return;
     }
@@ -836,6 +866,30 @@ impl StructureTemplate {
         settings: &PlaceSettings,
         grid: &mut DenseBlockGrid,
     ) -> usize {
+        self.place_impl(origin, settings, grid, |_, _| {})
+    }
+
+    /// Place a template and report every state-owned block-entity creation
+    /// event in write order. The callback observes the processed state before a
+    /// later structure write can overwrite it, which is the history needed by
+    /// packet-facing generation sidecars.
+    pub fn place_with_block_entity_events(
+        &self,
+        origin: PlaceOrigin,
+        settings: &PlaceSettings,
+        grid: &mut DenseBlockGrid,
+        mut on_block_entity: impl FnMut([i32; 3], &'static str),
+    ) -> usize {
+        self.place_impl(origin, settings, grid, &mut on_block_entity)
+    }
+
+    fn place_impl(
+        &self,
+        origin: PlaceOrigin,
+        settings: &PlaceSettings,
+        grid: &mut DenseBlockGrid,
+        mut on_block_entity: impl FnMut([i32; 3], &'static str),
+    ) -> usize {
         let position = origin.position;
         let palette = &self.palettes[self.palette_for(position).min(self.palettes.len() - 1)];
         let (min_x, min_y, min_z, size_x, size_y, size_z) = grid.bounds();
@@ -916,18 +970,29 @@ impl StructureTemplate {
             if !inside(block.pos) {
                 continue;
             }
-            let mut final_state = block.state.mirror(settings.mirror).rotate(settings.rotation);
+            let mut final_state = block.state.into_mirror(settings.mirror).into_rotate(settings.rotation);
             if settings.waterlogging
                 && final_state.is_waterloggable_and_dry()
                 && grid.get(block.pos[0], block.pos[1], block.pos[2]).starts_with("minecraft:water")
             {
                 final_state.properties.insert("waterlogged".into(), "true".into());
             }
-            grid.set(block.pos[0], block.pos[1], block.pos[2], &final_state.canonical());
+            let canonical = final_state.canonical();
+            if let Some(type_id) = block_entity_type_for_state(&canonical) {
+                on_block_entity(block.pos, type_id);
+            }
+            grid.set(block.pos[0], block.pos[1], block.pos[2], &canonical);
             written += 1;
         }
         written
     }
+}
+
+fn block_entity_type_for_state(state: &str) -> Option<&'static str> {
+    let state = lodestone_data::block_states::state_id(state)
+        .and_then(lodestone_data::block_states::StateId::new)?;
+    lodestone_data::block_entity_types::block_entity_type(state)
+        .map(lodestone_data::block_entity_types::block_entity_type_name)
 }
 
 fn compound(value: &Nbt) -> Option<&Vec<(String, Nbt)>> {
@@ -1021,6 +1086,25 @@ mod tests {
             fence.rotate(Rotation::Cw90).canonical(),
             "minecraft:oak_fence[east=false,north=false,south=true,west=false]"
         );
+    }
+
+    #[test]
+    fn consuming_transform_matches_borrowed_transform() {
+        let states = [
+            BlockState::parse("minecraft:oak_stairs[facing=north,half=bottom,shape=straight]"),
+            BlockState::parse("minecraft:oak_fence[east=true,north=false,south=false,west=false]"),
+            BlockState::parse("minecraft:oak_sign[rotation=2]"),
+            BlockState::parse("minecraft:oak_log[axis=x]"),
+        ];
+        for state in states {
+            for mirror in [Mirror::None, Mirror::LeftRight, Mirror::FrontBack] {
+                for rotation in [Rotation::None, Rotation::Cw90, Rotation::Cw180, Rotation::Ccw90] {
+                    let expected = state.mirror(mirror).rotate(rotation).canonical();
+                    let actual = state.clone().into_mirror(mirror).into_rotate(rotation).canonical();
+                    assert_eq!(actual, expected, "mirror={mirror:?} rotation={rotation:?}");
+                }
+            }
+        }
     }
 
     #[test]
