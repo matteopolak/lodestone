@@ -29,7 +29,10 @@
 use std::collections::{HashMap, HashSet};
 
 use lodestone_entity::equipment::EquipmentSlot;
-use lodestone_model::{BundleItemSlot, HotbarSlot, ItemStack, MenuSlot, RecipeBookType};
+use lodestone_model::{
+    BundleItemSlot, EntityEquipment, EquipmentSlot as ModelEquipmentSlot, HotbarSlot, ItemStack,
+    MenuSlot, RecipeBookType,
+};
 
 use crate::crafting::CraftingState;
 use lodestone_game::recipe::RecipeBookSettings;
@@ -241,6 +244,34 @@ impl PlayerInventory {
     #[must_use]
     pub fn selected_item(&self) -> Option<&ItemStack> {
         self.native(self.selected_hotbar_slot.index())
+    }
+
+    /// Returns the six player equipment slots as owned protocol-independent
+    /// values. Empty slots are retained as `item: None` so an observer can
+    /// distinguish an empty slot from a missing snapshot.
+    ///
+    /// The selected hotbar slot is the main hand. This is a snapshot helper,
+    /// not a second inventory representation: the connection task remains the
+    /// only writer and callers receive cloned stacks.
+    #[must_use]
+    pub fn equipment_snapshot(&self) -> Vec<EntityEquipment> {
+        [
+            (
+                ModelEquipmentSlot::MainHand,
+                self.selected_hotbar_slot.index(),
+            ),
+            (ModelEquipmentSlot::OffHand, OFFHAND_NATIVE),
+            (ModelEquipmentSlot::Head, HEAD_NATIVE),
+            (ModelEquipmentSlot::Chest, CHEST_NATIVE),
+            (ModelEquipmentSlot::Legs, LEGS_NATIVE),
+            (ModelEquipmentSlot::Feet, FEET_NATIVE),
+        ]
+        .into_iter()
+        .map(|(slot, native)| EntityEquipment {
+            slot,
+            item: self.native(native).cloned(),
+        })
+        .collect()
     }
 
     /// Every combat-relevant equipment slot and the item in it, ready to feed
