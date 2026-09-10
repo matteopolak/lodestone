@@ -103,7 +103,7 @@ use super::config::VegTags;
 /// not need a second membership path. See the module doc on why they share one
 /// mechanism.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Tag {
+pub enum Tag {
     CannotReplaceBelowTreeTrunk,
     SupportsVegetation,
     ReplaceableByTrees,
@@ -155,12 +155,16 @@ pub(super) enum Tag {
     OverridesMushroomLightRequirement,
     /// Solid floors that support lily pads when the floor is not water.
     SupportsLilyPad,
+    /// Ground states the giant-conifer decorator may replace with podzol.
+    BeneathTreePodzolReplaceable,
+    /// Ground blocks accepted by azalea root-system candidates.
+    AzaleaGrowsOn,
 }
 
 impl Tag {
     /// Every variant, in declaration order. `TAG_COUNT` and the mask layout are
     /// both derived from this, so it is the single place a new tag registers.
-    pub(super) const ALL: [Tag; 26] = [
+    pub(super) const ALL: [Tag; 28] = [
         Tag::CannotReplaceBelowTreeTrunk,
         Tag::SupportsVegetation,
         Tag::ReplaceableByTrees,
@@ -187,6 +191,8 @@ impl Tag {
         Tag::SoulFireBaseBlocks,
         Tag::OverridesMushroomLightRequirement,
         Tag::SupportsLilyPad,
+        Tag::BeneathTreePodzolReplaceable,
+        Tag::AzaleaGrowsOn,
     ];
 
     const fn slot(self) -> usize {
@@ -417,6 +423,10 @@ impl VegTags {
             Tag::SoulFireBaseBlocks => self.soul_fire_base_blocks.contains(base),
             Tag::OverridesMushroomLightRequirement => self.overrides_mushroom_light_requirement.contains(base),
             Tag::SupportsLilyPad => self.supports_lily_pad.contains(base),
+            Tag::BeneathTreePodzolReplaceable => {
+                self.beneath_tree_podzol_replaceable.contains(base)
+            }
+            Tag::AzaleaGrowsOn => self.azalea_grows_on.contains(base),
         }
     }
 
