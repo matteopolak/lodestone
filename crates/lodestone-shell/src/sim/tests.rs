@@ -1,7 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::*;
 use crate::config::{Config, Mode};
+use lodestone_game::placement::{Axis, Half, PlacedState};
 use lodestone_ecs::player::SWIMMING_EYE_HEIGHT;
 use lodestone_physics::UseEffects;
 
@@ -1150,7 +1151,7 @@ fn a_sensitivity_change_applies_to_the_same_sim_without_a_restart() {
     // One `Sim`, two sensitivities, no reconstruction between them — that is
     // the whole point. A test that built a second `Sim` would pass even if
     // the value were only read at construction.
-    let mut measure = |sim: &mut Sim, slider: f32| {
+    let measure = |sim: &mut Sim, slider: f32| {
         sim.set_sensitivity(slider);
         let before = sim.player().yaw;
         sim.input_mut(|i| i.add_mouse(DRAG_PX, 0.0));
@@ -2434,6 +2435,10 @@ fn disconnected_sim_sends_nothing() {
     assert!(sim.net.is_none());
 }
 
+fn effect_id(path: &str) -> lodestone_data::mob_effects::MobEffectId {
+    lodestone_data::mob_effects::mob_effect_id(path).expect("test names a built-in mob effect")
+}
+
 #[test]
 fn mob_effect_applied_for_local_player_reaches_status_effects() {
     use crate::net::NetUpdate;
@@ -2455,7 +2460,7 @@ fn mob_effect_applied_for_local_player_reaches_status_effects() {
 
     feed.send(NetUpdate::EffectApplied {
         entity_id: 7,
-        effect: "levitation".into(),
+        effect: lodestone_data::mob_effects::MobEffectId::LEVITATION,
         amplifier: 2,
         duration_ticks: 200,
         ambient: false,
@@ -2490,7 +2495,7 @@ fn mob_effect_applied_for_local_player_reaches_status_effects() {
 
     feed.send(NetUpdate::EffectRemoved {
         entity_id: 7,
-        effect: "levitation".into(),
+        effect: lodestone_data::mob_effects::MobEffectId::LEVITATION,
     })
     .unwrap();
     sim.poll_net();
@@ -2513,7 +2518,7 @@ fn night_vision_reaches_the_shared_effect_light_source_without_an_icon_or_partic
 
     feed.send(NetUpdate::EffectApplied {
         entity_id: 7,
-        effect: "night_vision".into(),
+        effect: effect_id("night_vision"),
         amplifier: 0,
         duration_ticks: 3_600,
         ambient: false,
@@ -2545,7 +2550,7 @@ fn night_vision_reaches_the_shared_effect_light_source_without_an_icon_or_partic
 
     feed.send(NetUpdate::EffectRemoved {
         entity_id: 7,
-        effect: "night_vision".into(),
+        effect: effect_id("night_vision"),
     })
     .unwrap();
     sim.poll_net();
@@ -2570,7 +2575,7 @@ fn mob_effect_for_a_different_entity_is_not_applied_to_the_local_player() {
 
     feed.send(NetUpdate::EffectApplied {
         entity_id: 1234, // some other (mob) entity, not the local player
-        effect: "levitation".into(),
+        effect: lodestone_data::mob_effects::MobEffectId::LEVITATION,
         amplifier: 0,
         duration_ticks: 200,
         ambient: false,
@@ -2600,7 +2605,7 @@ fn mob_effect_for_a_different_entity_is_not_applied_to_the_local_player() {
 
     feed.send(NetUpdate::EffectRemoved {
         entity_id: 1234,
-        effect: "levitation".into(),
+        effect: lodestone_data::mob_effects::MobEffectId::LEVITATION,
     })
     .unwrap();
     sim.poll_net();
@@ -2627,7 +2632,7 @@ fn status_particle_source_respects_the_wire_visible_flag() {
 
     let apply = |show_particles| NetUpdate::EffectApplied {
         entity_id: 7,
-        effect: "speed".into(),
+        effect: lodestone_data::mob_effects::MobEffectId::SPEED,
         amplifier: 0,
         duration_ticks: 200,
         ambient: false,
@@ -2663,7 +2668,7 @@ fn nausea_blend_flag_controls_the_live_screen_effect_source() {
 
     feed.send(NetUpdate::EffectApplied {
         entity_id: 7,
-        effect: "nausea".into(),
+        effect: effect_id("nausea"),
         amplifier: 0,
         duration_ticks: 200,
         ambient: false,
@@ -2681,7 +2686,7 @@ fn nausea_blend_flag_controls_the_live_screen_effect_source() {
 
     feed.send(NetUpdate::EffectApplied {
         entity_id: 7,
-        effect: "nausea".into(),
+        effect: effect_id("nausea"),
         amplifier: 0,
         duration_ticks: 200,
         ambient: false,
@@ -3191,7 +3196,7 @@ fn always_show_gives_a_minimal_setting_particle_a_reprieve_and_not_an_exemption(
     // single `poll_net` rather than one step per send, which is the whole
     // difference between a two-second gate and a half-minute one; the relay
     // channel holds 1024, comfortably above `SENDS`.
-    let mut survivors = |feed: &std::sync::mpsc::SyncSender<NetUpdate>,
+    let survivors = |feed: &std::sync::mpsc::SyncSender<NetUpdate>,
                          sim: &mut Sim,
                          always_show: bool| {
         for _ in 0..SENDS {
@@ -6552,7 +6557,8 @@ fn player_interact_veto_denies_block_branch_before_prediction_or_send() {
     assert!(
         allowed_actions.iter().any(|action| matches!(
             action,
-            ClientAction::UseItemOn { pos, sequence: 1, .. } if *pos == clicked
+            ClientAction::UseItemOn { pos, sequence, .. }
+                if *pos == clicked && sequence.raw() == 1
         )),
         "the first allowed block interaction must retain sequence one: {allowed_actions:?}"
     );
@@ -9966,6 +9972,30 @@ fn an_outstanding_resource_pack_holds_the_world_back_at_the_moment_it_would_have
         None,
         "and it must let go once the pack resolves, or the screen never clears"
     );
+}
+
+/// The labelled terrain screen is opt-in state, not a side effect of receiving
+/// a login or a server view radius. This isolates the scope boundary used by
+/// the launcher: a new survival creation arms it, while every fresh `Sim`
+/// (including remote joins and existing saves) starts unarmed and a reset
+/// clears the latch again.
+#[test]
+fn initial_terrain_screen_is_scoped_to_the_new_world_latch() {
+    let mut sim = Sim::new(client_config());
+    assert!(!sim.shows_new_world_loading());
+    assert!(sim.terrain_progress().is_none());
+
+    sim.arm_new_world_loading(32);
+    assert!(sim.shows_new_world_loading());
+    assert_eq!(
+        sim.terrain_progress.snapshot().map(|progress| progress.expected),
+        Some(65 * 65),
+        "arming a new world must establish the selected 32-radius square"
+    );
+
+    sim.reset_loading_state();
+    assert!(!sim.shows_new_world_loading());
+    assert!(sim.terrain_progress.snapshot().is_none());
 }
 
 /// The **ordering inside `app/redraw.rs`**, which no type check and no unit test
