@@ -34,6 +34,11 @@ separate screen-effect intensity with its 150-tick entry and 20-tick exit transi
 the wire blend flag selects immediate versus transitioned adoption. A missing or expired
 effect returns no light floor or screen intensity and leaves ordinary rendering unchanged.
 
+Potion drinking and splash falloff carry `MobEffectId` through the server's runtime
+path, including instant-health/damage dispatch and timed application. The canonical
+name is reconstructed only for an effect-update packet; this keeps the potion result
+typed while retaining the protocol's textual boundary.
+
 Blindness and Darkness also supply a frame-polled vision-obscuration strength. Blindness
 is opaque until its final 19 ticks, which fade out linearly; Darkness uses a 22-tick
 entry and exit transition. The current bounded implementation draws this as a

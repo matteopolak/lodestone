@@ -14896,12 +14896,11 @@ where
                                         effect_id,
                                         amount,
                                     } => {
-                                        match effect_id
-                                            .strip_prefix("minecraft:")
-                                            .unwrap_or(effect_id.as_str())
-                                        {
-                                            "instant_health" => vitals.heal(amount),
-                                            "instant_damage" => {
+                                        match effect_id {
+                                            lodestone_data::mob_effects::MobEffectId::INSTANT_HEALTH => {
+                                                vitals.heal(amount)
+                                            }
+                                            lodestone_data::mob_effects::MobEffectId::INSTANT_DAMAGE => {
                                                 vitals.apply_effect_damage(amount);
                                             }
                                             _ => continue,
@@ -14913,13 +14912,15 @@ where
                                         duration,
                                         amplifier,
                                     } => {
-                                        effects.apply(&effect_id, duration, amplifier);
+                                        effects.apply(effect_id, duration, amplifier);
+                                        let effect_name =
+                                            lodestone_data::mob_effects::mob_effect_name_for(effect_id);
                                         apply(
                                             conn,
                                             &mut state,
                                             proto.encode_update_mob_effect(
                                                 LOCAL_PLAYER_ENTITY_ID,
-                                                &effect_id,
+                                                effect_name,
                                                 amplifier,
                                                 duration,
                                                 false,
@@ -16209,9 +16210,13 @@ where
                 for effect in potion_effects {
                     match effect {
                         crate::mob_effects::SplashEffect::Instant { effect_id, amount } => {
-                            match effect_id.strip_prefix("minecraft:").unwrap_or(effect_id.as_str()) {
-                                "instant_health" => vitals.heal(amount),
-                                "instant_damage" => vitals.apply_effect_damage(amount),
+                            match effect_id {
+                                lodestone_data::mob_effects::MobEffectId::INSTANT_HEALTH => {
+                                    vitals.heal(amount)
+                                }
+                                lodestone_data::mob_effects::MobEffectId::INSTANT_DAMAGE => {
+                                    vitals.apply_effect_damage(amount)
+                                }
                                 _ => continue,
                             }
                             health_changed = true;
@@ -16221,13 +16226,15 @@ where
                             duration,
                             amplifier,
                         } => {
-                            effects.apply(&effect_id, duration, amplifier);
+                            effects.apply(effect_id, duration, amplifier);
+                            let effect_name =
+                                lodestone_data::mob_effects::mob_effect_name_for(effect_id);
                             apply(
                                 conn,
                                 state,
                                 proto.encode_update_mob_effect(
                                     LOCAL_PLAYER_ENTITY_ID,
-                                    &effect_id,
+                                    effect_name,
                                     amplifier,
                                     duration,
                                     false,
@@ -21928,7 +21935,7 @@ mod tests {
         assert_eq!(
             effects,
             vec![crate::mob_effects::SplashEffect::Timed {
-                effect_id: "minecraft:strength".to_owned(),
+                effect_id: lodestone_data::mob_effects::MobEffectId::STRENGTH,
                 duration: 1800,
                 amplifier: 1,
             }],
@@ -21957,7 +21964,7 @@ mod tests {
         assert_eq!(
             effects,
             vec![crate::mob_effects::SplashEffect::Instant {
-                effect_id: "minecraft:instant_damage".to_owned(),
+                effect_id: lodestone_data::mob_effects::MobEffectId::INSTANT_DAMAGE,
                 amount: 6.0,
             }]
         );

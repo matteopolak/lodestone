@@ -927,7 +927,7 @@ impl<'w> MobSim<'w> {
             for effect in effects {
                 match effect {
                     mob_effects::SplashEffect::Instant { effect_id, amount } => {
-                        self.apply_instant_splash_effect(id, &effect_id, amount, impact.location);
+                        self.apply_instant_splash_effect(id, effect_id, amount, impact.location);
                     }
                     mob_effects::SplashEffect::Timed {
                         effect_id,
@@ -935,7 +935,7 @@ impl<'w> MobSim<'w> {
                         amplifier,
                     } => {
                         if let Some(mob) = self.get_mut(id) {
-                            mob.apply_effect(&effect_id, duration, amplifier);
+                            mob.apply_effect(effect_id, duration, amplifier);
                         }
                     }
                 }
@@ -947,15 +947,20 @@ impl<'w> MobSim<'w> {
     /// damage channel. Any other id [`mob_effects`] resolved as
     /// instantaneous would be a bug in that module's own table, so it is
     /// silently skipped here rather than guessed at.
-    fn apply_instant_splash_effect(&mut self, target: i32, effect_id: &str, amount: f32, impact_location: Vec3) {
-        let path = effect_id.strip_prefix("minecraft:").unwrap_or(effect_id);
-        match path {
-            "instant_health" => {
+    fn apply_instant_splash_effect(
+        &mut self,
+        target: i32,
+        effect_id: lodestone_data::mob_effects::MobEffectId,
+        amount: f32,
+        impact_location: Vec3,
+    ) {
+        match effect_id {
+            lodestone_data::mob_effects::MobEffectId::INSTANT_HEALTH => {
                 if let Some(mob) = self.get_mut(target) {
                     mob.heal(amount);
                 }
             }
-            "instant_damage" => {
+            lodestone_data::mob_effects::MobEffectId::INSTANT_DAMAGE => {
                 if amount <= 0.0 {
                     return;
                 }
