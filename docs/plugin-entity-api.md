@@ -53,11 +53,12 @@ spawned mob is ordinary use of an accessor that already shipped for combat.
 `observe` returns an owned identity/motion/health copy, while `mutate` accepts typed knockback,
 health, effect, teleport, and despawn operations. Mob knockback changes the snapshot consumed by
 the entity streamer. Player teleports and effects enter `PlayerRegistry`'s directed queue, whose
-owning connection emits the authoritative packet. Player observations also include a copied
-six-slot equipment snapshot from that connection-owned inventory; empty slots are explicit and the
-returned stacks are owned values. Mobs currently report an empty equipment vector because their
-internal combat equipment has no server-side equipment snapshot producer. Unsupported operations
-and unknown ids are reported explicitly instead of being silently applied to a different entity.
+owning connection emits the authoritative packet. Observations include copied six-slot equipment
+snapshots from the connection-owned player inventory or the mob's authoritative spawn state;
+empty slots are explicit and returned stacks are owned values. Mob equipment is retained beside
+the simulation record when species spawning resolves it, so an observer sees the same held item
+that combat and ranged-goal code consumes. Unsupported operations and unknown ids are reported
+explicitly instead of being silently applied to a different entity.
 
 `EntityLifecycleCursor` supplies the bounded lifecycle half of the same surface. A plugin owns the
 cursor and polls it for copied `Spawned`/`Despawned` edges from the live mob and player stores. The

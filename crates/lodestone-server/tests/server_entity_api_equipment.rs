@@ -86,6 +86,30 @@ fn player_observation_copies_authoritative_equipment_slots() {
 }
 
 #[test]
+fn mob_observation_copies_authoritative_spawn_equipment() {
+    let api = ServerEntityApi::new(MobHandle::default(), PlayerRegistry::new());
+    let mob_id = api.spawn(
+        ResourceKey::from_str("minecraft:wither_skeleton").expect("valid entity key"),
+        Vec3::new(4.0, 8.0, 4.0),
+    );
+
+    let observation = api.observe(mob_id).expect("spawned mob is observable");
+    assert_eq!(observation.equipment.len(), 6);
+    assert_eq!(
+        observation.equipment[0]
+            .item
+            .as_ref()
+            .map(|item| item.item.to_string()),
+        Some("minecraft:stone_sword".to_owned()),
+        "the observation must copy the mob's authoritative held item"
+    );
+    assert!(
+        observation.equipment[1..].iter().all(|slot| slot.item.is_none()),
+        "unoccupied mob slots must remain explicit empty values"
+    );
+}
+
+#[test]
 fn lifecycle_cursor_reports_authoritative_spawn_and_despawn_edges() {
     let players = PlayerRegistry::new();
     let api = ServerEntityApi::new(MobHandle::default(), players.clone());

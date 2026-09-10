@@ -81,7 +81,10 @@ use lodestone_entity::{
     AttributeMap, DamageFlags, Defenses, HurtCooldown, HurtDecision, RayView, entity_damage,
     seen_percent,
 };
-use lodestone_model::{BlockPos, Difficulty, Identifier, ResourceKey, Rotation, Vec3};
+use lodestone_model::{
+    BlockPos, Difficulty, EntityEquipment, EquipmentSlot as ModelEquipmentSlot, Identifier,
+    ItemStack, ResourceKey, Rotation, Vec3,
+};
 use uuid::Uuid;
 
 use crate::chunk::{AIR, ChunkColumn, ChunkSource};
@@ -1617,6 +1620,10 @@ pub struct SimMob<'w> {
     /// `Monster` category) until species-aware spawning lands; a consumer that
     /// knows the species sets it with [`set_entity_type`](SimMob::set_entity_type).
     entity_type: ResourceKey,
+    /// Equipment assigned during species spawning. This is retained as owned
+    /// simulation state so plugin observations read the same values that
+    /// combat attributes and ranged goals consume.
+    equipment: spawn_equipment::EquipmentSlots,
     /// Current health. A hit that drives this to `0.0` removes the mob from
     /// the sim at the end of the tick that landed it (vanilla's immediate
     /// death removal).
@@ -2835,6 +2842,33 @@ impl<'w> SimMob<'w> {
     #[must_use]
     pub fn entity_type(&self) -> &ResourceKey {
         &self.entity_type
+    }
+
+    /// Copies the six equipment slots assigned by the species spawn path.
+    /// Empty slots remain explicit so observers can distinguish an empty mob
+    /// slot from an unavailable snapshot, and no simulation-owned value
+    /// escapes the call.
+    #[must_use]
+    pub fn equipment_snapshot(&self) -> Vec<EntityEquipment> {
+        [
+            (ModelEquipmentSlot::MainHand, self.equipment.main_hand),
+            (ModelEquipmentSlot::OffHand, self.equipment.off_hand),
+            (ModelEquipmentSlot::Head, self.equipment.head),
+            (ModelEquipmentSlot::Chest, self.equipment.chest),
+            (ModelEquipmentSlot::Legs, self.equipment.legs),
+            (ModelEquipmentSlot::Feet, self.equipment.feet),
+        ]
+        .into_iter()
+        .map(|(slot, item)| EntityEquipment {
+            slot,
+            item: item.map(|item| {
+                ItemStack::new(
+                    ResourceKey::from_str(item.name()).expect("built-in item key is valid"),
+                    1,
+                )
+            }),
+        })
+        .collect()
     }
 
     /// Sets the mob's canonical entity-type key. Used by a species-aware spawn
@@ -4715,6 +4749,7 @@ impl<'w> MobSim<'w> {
             persistent: false,
             uuid: Uuid::new_v4(),
             entity_type,
+            equipment: spawn_equipment::EquipmentSlots::default(),
             health: max_health,
             max_health,
             defenses,
@@ -4942,6 +4977,7 @@ impl<'w> MobSim<'w> {
         // numbers with the equipped versions — armour, weapon damage,
         // netherite's knockback resistance.
         mob.mob.set_main_hand_item(equipped.main_hand.clone());
+        mob.equipment = equipped;
         mob.defenses = defenses_from_attributes(&attrs);
         mob.attack_damage = attack_damage_from_attributes(&attrs);
         mob.knockback_resistance = knockback_resistance_from_attributes(&attrs);
