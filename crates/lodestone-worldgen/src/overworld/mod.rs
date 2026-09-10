@@ -41,8 +41,8 @@
 //!
 //! 5. **FEATURES** — [`Self::features_stage`] runs the unified, globally
 //!    ordered decoration stream over the real 3×3 source neighbourhood. Each
-//!    source uses its own pre-ore terrain prefix and biome container, while
-//!    all ore, disk and vegetal bodies share one read/write region and observe
+//!    source uses its own pre-ore terrain prefix and 3x3 section-biome union,
+//!    while all ore, disk and vegetal bodies share one read/write region and observe
 //!    preceding entries' writes. The surrounding 5×5 terrain-prefix context
 //!    supplies the padded probes required by those source passes; the centre
 //!    16×16 result and entities are then returned to the caller.
@@ -224,7 +224,9 @@ use self::fill::AquiferTrees;
 
 pub use self::biome_cells::BiomeCells;
 pub use self::block_entities::{BeeOccupant, GeneratedBlockEntity};
-pub(crate) use self::biome::zoomed_biome_flat;
+pub(crate) use self::biome::{zoomed_biome, zoomed_biome_flat};
+#[cfg(test)]
+pub(crate) use self::biome::biome_zoom_seed;
 pub use self::output::{
     GenStage, GeneratedColumn, HEIGHTMAP_COLUMNS, MOTION_BLOCKING_HEIGHTMAP_TYPE_ID,
 };
@@ -344,47 +346,26 @@ const COLUMN_CLOSURE_RADIUS: i32 = 2;
 /// than adjusted.
 const STRUCTURE_CLOSURE_RADIUS: i32 = COLUMN_CLOSURE_RADIUS + structures::REFS_RADIUS;
 
+/// Side length of the default admitted generation window.
+///
+/// Admission is tile-based, and the normal shaped request spans two adjacent
+/// 16×16 tiles. Keeping that contract here means the retention policy follows
+/// the scheduler's bounded window instead of a benchmark-specific constant.
+pub const ADMITTED_GENERATION_WINDOW_SIDE: usize =
+    (crate::stage_schedule::ADMISSION_TILE_SIDE as usize) * 2;
+
 /// Soft ceiling on entries retained by [`OverworldGenerator::store`].
 ///
-/// **Derived from the scenario this unit exists to fix, not picked as a round
-/// number.** `4307b59` — the revert that put `lodestone-server`'s per-ring
-/// barrier back — names a **289-column join burst**. 289 columns are a 17×17
-/// view, and a 17×17 view's closure is `17 + 2 ×`
-/// [`STRUCTURE_CLOSURE_RADIUS`]` = 37` on a side, i.e. 37×37 = **1,369** chunks.
-/// Retention therefore has to exceed 1,369, or the very burst this store is built
-/// for could evict its own live working set; 2,048 is the next power of two above
-/// it, and also comfortably covers the 12×12 parity sweep's 32×32 = 1,024-chunk
-/// closure.
-///
-/// **This was 512 and 512 was the derivation from before structure placement landed** — the same sentence with
-/// the pre-ore radius 2 in place of the structure radius 10, giving 441 and 256.
-/// It is on the record in `DESIGN.md` §12.130 as a *measured* regression rather
-/// than a theoretical one: at 512 the 12×12 sweep recomputed `pre_ore` 740 times
-/// instead of 256, because the sweep's real working set was 1,024 entries and the
-/// oldest unpinned ones were the neighbours it was about to read back.
-///
-/// **Entry count is not proportional to memory here, which is why raising it is
-/// affordable.** Only entries whose `pre_ore` slot was actually computed hold a
-/// dense grid (~192 KiB each); the extra entries this ceiling admits are
-/// structure-starts-only, which hold a `Vec` of starts and nothing else. Per
-/// column of travel a session adds ~21 structure-only entries against ~5
-/// terrain-bearing ones, so the resident terrain set at 2,048 entries is on the
-/// order of the 512-entry ceiling's — see `docs/worldgen-store-distance-leak.md`.
-///
-/// Two things keep this from being the capacity-FIFO guess it replaced. First,
-/// in-flight neighbourhoods are **pinned** ([`store::StagedStore::open_view`]),
-/// so exceeding the ceiling can never evict something a live request needs.
-/// Second, [`store::StagedStore::evicted`] is observable, so "no eviction
-/// happened" is a checkable control rather than an assumption — which is what
-/// licenses reading the stage-computation counters as `chunks × stages`.
-///
-/// Memory is bounded by the terrain prefix held per entry, and the reason a
-/// ceiling exists at all is still `lodestone_server`'s `OverworldChunkSource`,
-/// which holds one generator
-/// for a whole world's lifetime — a session gradually exploring a large area
-/// would otherwise grow this without bound, a real if slow leak on a machine
-/// CLAUDE.md already flags memory as the binding limit on.
-const STORE_RETENTION: usize = 2048;
+/// The default shaped request admits a 32×32 window and reads a radius-10
+/// structure halo, so its closure is 52×52 = 2,704 entries. The helper rounds
+/// that area to the next power of two, yielding 4,096 entries. In-flight
+/// neighbourhoods are pinned, so exceeding this bound can evict only an
+/// unpinned cold tail; the bounded ceiling protects a long-lived generator's
+/// memory without changing deterministic values.
+const STORE_RETENTION: usize = store::retention_for_window(
+    ADMITTED_GENERATION_WINDOW_SIDE,
+    STRUCTURE_CLOSURE_RADIUS as usize,
+);
 
 /// A composed, reusable overworld generator. Build once per seed; call
 /// [`column`](Self::column) per chunk.
@@ -722,7 +703,7 @@ impl OverworldGenerator {
         let mut carver_replaceable = HashSet::new();
         {
             let mut seen = HashSet::new();
-            crate::compose::resolve_block_tag(
+        crate::compose::resolve_block_tag(
                 resolver,
                 "minecraft:overworld_carver_replaceables",
                 &mut carver_replaceable,
@@ -800,7 +781,7 @@ impl OverworldGenerator {
             if registry.is_empty() { None } else { Some(registry) }
         };
 
-        Self {
+        let generator = Self {
             slot_count,
             surface,
             // Fresh per generator, built just above so `SurfaceSystem::new`
@@ -844,7 +825,12 @@ impl OverworldGenerator {
             climate_noise: crate::noise::ClimateNoise::new(),
             structures,
             replay_context_cache: std::sync::Mutex::new(None),
+        };
+        if let Some(registry) = &generator.structures {
+            let sampler = structures::StartSampler::new(&generator);
+            registry.prepare_origin_index(&sampler);
         }
+        generator
     }
 
     /// The SPAWN generation's part 1: one biome's parsed `MobSpawnSettings`, or `None` when
@@ -893,6 +879,107 @@ impl OverworldGenerator {
                 dynamic.table.nearest(&target).to_string()
             }
         }
+    }
+
+    pub(super) fn biome_search_cursor(&self) -> Option<crate::biome::BiomeSearchCursor> {
+        self.dynamic_biome
+            .as_ref()
+            .map(|dynamic| dynamic.table.search_cursor())
+    }
+
+    /// Answers a placement biome-membership probe without materialising the
+    /// selected biome name. `cursor` is owned by the current sampler lifecycle
+    /// and is never shared across generators or worker threads.
+    pub(super) fn biome_in_set_at_quart(
+        &self,
+        qx: i32,
+        qy: i32,
+        qz: i32,
+        allowed: &HashSet<String>,
+        cursor: &mut Option<crate::biome::BiomeSearchCursor>,
+    ) -> bool {
+        match &self.dynamic_biome {
+            None => allowed.contains(&self.fallback_biome),
+            Some(dynamic) => {
+                let target = dynamic.climate.target(qx * 4, qy * 4, qz * 4);
+                let Some(search) = cursor.as_mut() else {
+                    return allowed.contains(dynamic.table.nearest(&target));
+                };
+                let row = dynamic.table.nearest_row_with_cursor(&target, search);
+                allowed.contains(dynamic.table.biome_at(row))
+            }
+        }
+    }
+
+    pub(super) fn biome_in_set_at_quart_cached(
+        &self,
+        qx: i32,
+        qy: i32,
+        qz: i32,
+        allowed: &HashSet<String>,
+        cache: &mut crate::structure::RingProbeCache,
+        cursor: &mut Option<crate::biome::BiomeSearchCursor>,
+    ) -> bool {
+        match &self.dynamic_biome {
+            None => allowed.contains(&self.fallback_biome),
+            Some(dynamic) => {
+                let target = cache.target(qx, qy, qz, || {
+                    dynamic.climate.target(qx * 4, qy * 4, qz * 4)
+                });
+                let Some(search) = cursor.as_mut() else {
+                    return allowed.contains(dynamic.table.nearest(&target));
+                };
+                let row = dynamic.table.nearest_row_with_cursor(&target, search);
+                allowed.contains(dynamic.table.biome_at(row))
+            }
+        }
+    }
+
+    pub(super) fn ring_probe_targets(
+        &self,
+        quart_cells: &[(i32, i32, i32)],
+    ) -> Option<Vec<[i64; 7]>> {
+        let dynamic = self.dynamic_biome.as_ref()?;
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (dynamic, quart_cells);
+            return None;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if quart_cells.is_empty() {
+                return Some(Vec::new());
+            }
+            let workers = std::thread::available_parallelism()
+                .map_or(1, std::num::NonZeroUsize::get)
+                .min(quart_cells.len());
+            let mut targets = vec![[0; 7]; quart_cells.len()];
+            if workers < 2 || quart_cells.len() < 4_096 {
+                for (target, &(qx, qy, qz)) in targets.iter_mut().zip(quart_cells) {
+                    *target = dynamic.climate.target(qx * 4, qy * 4, qz * 4);
+                }
+                return Some(targets);
+            }
+            let chunk_len = quart_cells.len().div_ceil(workers);
+            std::thread::scope(|scope| {
+                for (target_chunk, cell_chunk) in targets
+                    .chunks_mut(chunk_len)
+                    .zip(quart_cells.chunks(chunk_len))
+                {
+                    let climate = &dynamic.climate;
+                    scope.spawn(move || {
+                        for (target, &(qx, qy, qz)) in target_chunk.iter_mut().zip(cell_chunk) {
+                            *target = climate.target(qx * 4, qy * 4, qz * 4);
+                        }
+                    });
+                }
+            });
+            Some(targets)
+        }
+    }
+
+    pub(super) fn has_dynamic_biome(&self) -> bool {
+        self.dynamic_biome.is_some()
     }
 
     /// World Y of the lowest generated block row.
@@ -993,9 +1080,7 @@ impl OverworldGenerator {
         // replay rather than composing an ore result with a later vegetation
         // pass.
         let mut schedule = Self::stage_schedule().cursor_at(
-            Self::stage_schedule()
-                .index_of(crate::stage_schedule::ColumnStage::Features)
-                .expect("Overworld schedule must have a features boundary"),
+            Self::stage_schedule().shaped_boundary_index(),
         );
         let (world, block_entities) = schedule.run(
             crate::stage_schedule::ColumnStage::Features,
@@ -1214,19 +1299,43 @@ impl OverworldGenerator {
         let t_shape_start = lodestone_time::Instant::now();
         let field = self.fill_stage(&aquifer, base_x, base_z, &beard);
         let heights = self.heights_from_field(&field);
+        let mut biome_cursor = self
+            .dynamic_biome
+            .as_ref()
+            .map(|dynamic| dynamic.table.search_cursor());
         let t_biome_start = lodestone_time::Instant::now();
         // Same two-line shape as `pre_ore_stage_uncached` — the 4x4x4
         // grid is sampled and the 16 surface quarts are read out of it, so this
         // timing bucket now covers 96x the samples it used to. That is the point
         // of measuring it here.
-        let biome_cells = self.biome_cells_stage(base_x, base_z);
+        let biome_cells = self.biome_cells_stage(
+            base_x,
+            base_z,
+            biome_cursor.as_mut().map(|cursor| cursor),
+        );
         let biome_quarts = self.biome_stage(&biome_cells, &heights);
         let t_surface_start = lodestone_time::Instant::now();
-        let surface_diff = self.surface_stage(&field, &heights, base_x, base_z);
+        let surface_diff = self.surface_stage(
+            &field,
+            &heights,
+            base_x,
+            base_z,
+            biome_cursor.as_mut().map(|cursor| cursor),
+        );
         let t_materialize_start = lodestone_time::Instant::now();
         let world = self.materialize_world(&field, surface_diff, base_x, base_z);
         let t_carve_start = lodestone_time::Instant::now();
-        let world = self.carve_stage(cx, cz, &aquifer, &heights, &biome_quarts, base_x, base_z, world);
+        let world = self.carve_stage(
+            cx,
+            cz,
+            &aquifer,
+            &heights,
+            &biome_quarts,
+            base_x,
+            base_z,
+            world,
+            biome_cursor.as_mut().map(|cursor| cursor),
+        );
         // The same stage `pre_ore_stage_uncached` runs; timed inside the carve
         // bucket rather than given one of its own, because for a chunk with no
         // structure in reach it is a single early return.

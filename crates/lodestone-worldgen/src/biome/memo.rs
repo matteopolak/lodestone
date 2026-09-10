@@ -23,9 +23,11 @@
 //! reaches radius 8 beyond a pre-ore chunk. One `column()` closes over pre-ore
 //! radius 2, so its carver-source closure is radius **10** — a 21×21 = 441-chunk
 //! pin becomes 41×41 = 1,681, and the 289-column burst's 441-chunk working set
-//! becomes 37×37 = 1,369. `STORE_RETENTION = 512` is *derived from 441*; a stage
-//! with a 1,369-chunk closure either forces retention past 1,369 — quadrupling the
-//! worst-case live grid memory, since an entry retains its pre-ore and post-ore
+//! becomes 37×37 = 1,369. The production `STORE_RETENTION` is now derived from
+//! the admitted 32×32 window plus its radius-10 halo (2,704 entries, rounded to
+//! 4,096); that bound already exceeds the 1,369-chunk burst closure. Making this
+//! memo a staged-store field would still quadruple the worst-case live grid
+//! memory, since an entry retains its pre-ore and post-ore
 //! grids too — or it evicts inside a live request, which is the exact property
 //! that doc calls "structurally ineligible" and gates at zero. Neither is
 //! acceptable for a memo whose value is four bytes and whose recomputation is one

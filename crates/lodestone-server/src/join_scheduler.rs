@@ -4,9 +4,9 @@
 //! # Why the pipeline uses a bounded window
 //!
 //! Join generation queues columns by priority and keeps only a bounded number
-//! in flight. The window is derived from `available_parallelism`, not the view
-//! radius ([`generation_window`]), so a large visible area cannot create an
-//! unbounded blocking-pool fan-out.
+//! in flight. The window follows the native dispatcher's worker budget, not the
+//! view radius ([`generation_window`]), so a large visible area cannot create
+//! an unbounded worker-pool fan-out.
 //!
 //! Each staged world-generation cache computes a column once even when several
 //! requests race. The scheduler handles a separate concern: limiting
@@ -469,6 +469,17 @@ impl ColumnQueue {
         self.pending.pop().map(|(coord, _)| coord)
     }
 
+    /// The best pending coordinate without handing it to a worker.
+    ///
+    /// Admission into the native dispatcher is a non-blocking try-operation.
+    /// Peeking first lets a saturated pipeline retain this coordinate in its
+    /// deterministic queue instead of popping it and having to reconstruct its
+    /// priority metadata after backpressure.
+    #[must_use]
+    pub(crate) fn peek(&self) -> Option<(i32, i32)> {
+        self.pending.last().map(|&(coord, _)| coord)
+    }
+
     /// How many columns have not been handed out yet.
     #[must_use]
     pub(crate) fn len(&self) -> usize {
@@ -499,10 +510,13 @@ fn yaw_sector(yaw_degrees: f32) -> i32 {
 }
 
 /// How many columns the join burst keeps in flight once primed, derived from the
-/// machine rather than from the view.
+/// dispatcher's worker budget rather than from the view.
 ///
-/// `available_parallelism`, floored at 2 — **one in-flight column per hardware
-/// thread**.
+/// Native uses the dedicated dispatcher's worker count, floored at 2 — one
+/// in-flight column per generation worker. The dispatcher itself reserves one
+/// hardware thread for the runtime and authoritative tick. WASM keeps the same
+/// scheduler contract but has no native worker, so it uses the floor and its
+/// platform-specific serial execution arm below.
 ///
 /// * **the floor of 2** is what makes a window a window. At 1 this degenerates to
 ///   the fully serial shape, and the ring-overlap detector in
@@ -554,17 +568,18 @@ fn yaw_sector(yaw_degrees: f32) -> i32 {
 ///
 /// Each in-flight `column()` call pins its own pre-ore neighbourhood in the staged
 /// store — `COLUMN_CLOSURE_RADIUS + REFS_RADIUS = 10`, so 21×21 = 441 entries per
-/// column under the 2,048-entry retention ceiling derived from
-/// the 289-column burst's own 37×37 closure. At `P` in flight nothing is evicted
-/// for the duration of the burst, which is what licenses reading the stage counters
-/// as one-per-chunk; halving the window can only make that more true.
+/// column. The default shaped admission window is two adjacent 16×16 tiles; its
+/// 52×52 closure is the source of the 4,096-entry retention ceiling. At `P` in
+/// flight nothing is evicted for the duration of the burst, which is what licenses
+/// reading the stage counters as one-per-chunk; halving the window can only make
+/// that more true.
 #[must_use]
 pub fn generation_window() -> usize {
-    generation_window_for(
-        std::thread::available_parallelism()
-            .map(std::num::NonZero::get)
-            .unwrap_or(4),
-    )
+    #[cfg(not(target_arch = "wasm32"))]
+    let parallelism = crate::worldgen_dispatch::worker_count();
+    #[cfg(target_arch = "wasm32")]
+    let parallelism = 1;
+    generation_window_for(parallelism)
 }
 
 /// [`generation_window`]'s arithmetic, split out so it is testable without
@@ -858,7 +873,7 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
         // time-to-first-chunk fix. See the module doc.
         let target = if self.primed { self.window } else { 1 };
         while self.inflight.len() < target {
-            let Some((cx, cz)) = self.queue.pop() else {
+            let Some((cx, cz)) = self.queue.peek() else {
                 break;
             };
             let source = Arc::clone(&self.source);
@@ -873,10 +888,11 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
             // multi-hundred-KiB column plus 62 M instructions of work to do to it.
             let encoder = self.encoder.clone();
             let trace = self.trace.clone();
-            // This await is only global-pool admission: it does not await the
-            // column. Once admitted, `spawn` has no suspension point before its
-            // receiver is stored, so cancellation cannot lose an in-flight result.
-            let result = crate::worldgen_dispatch::spawn(move || {
+            // Admission is deliberately a try-operation. If every worker is
+            // occupied by another connection, keep this coordinate in the
+            // queue and let an already-in-flight head make progress rather
+            // than waiting on a semaphore from the connection/tick task.
+            let result = match crate::worldgen_dispatch::try_spawn(move || {
                 let column = source.column_at(cx, cz, stage);
                 if let Some(trace) = trace.as_ref() {
                     trace.mark("generated", cx, cz);
@@ -895,8 +911,21 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
                     }
                     None => Ok(ColumnPayload::Column(column)),
                 }
-            })
-            .await;
+            }) {
+                Ok(result) => result,
+                Err(_job) if !self.inflight.is_empty() => break,
+                Err(_job) => {
+                    // No head exists to emit yet, so wait cooperatively for a
+                    // returned permit. This is not a blocking admission wait:
+                    // the dispatcher wakes this future after releasing a
+                    // permit, and Tokio can continue socket and tick service
+                    // on the same runtime thread while generation runs.
+                    crate::worldgen_dispatch::wait_for_capacity().await;
+                    continue;
+                }
+            };
+            let popped = self.queue.pop();
+            debug_assert_eq!(popped, Some((cx, cz)));
             self.inflight.push_back(((cx, cz), result));
         }
         let (pos, handle) = self
