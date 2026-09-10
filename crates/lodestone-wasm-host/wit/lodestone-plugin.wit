@@ -104,6 +104,24 @@ interface types {
         game-info,
     }
 
+    /// Protocol phase attached to a raw packet observation.
+    enum packet-phase {
+        handshaking,
+        status,
+        login,
+        configuration,
+        play,
+    }
+
+    /// A bounded copy of one packet body. The packet id and negotiated protocol
+    /// remain explicit metadata; outer length framing is intentionally absent.
+    record raw-packet {
+        protocol: s32,
+        phase: packet-phase,
+        packet-id: s32,
+        payload: list<u8>,
+    }
+
     /// `lodestone_model::ClientEvent::Chat`.
     ///
     /// `text` is the *plain* string (`Text::to_plain_string`), not the styled
@@ -308,6 +326,12 @@ interface types {
     variant event {
         /// `ClientEvent::Chat` — capability `observe:chat`.
         chat(chat-message),
+        /// One inbound packet before version-specific decoding — capability
+        /// `observe:packets`.
+        raw-inbound-packet(raw-packet),
+        /// One outbound packet after version-specific encoding — capability
+        /// `observe:packets`.
+        raw-outbound-packet(raw-packet),
         /// `ClientEvent::HealthChanged` — capability `observe:health`.
         health-changed(health),
         /// `ClientEvent::InventorySlotChanged` — capability `observe:inventory`.

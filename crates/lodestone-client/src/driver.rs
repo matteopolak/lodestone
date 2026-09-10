@@ -584,7 +584,12 @@ impl<T: Transport> Driver<T> {
                             // Publish the exact packet before version-specific
                             // decoding can consume it.
                             self.read_model
-                                .record_raw_packet(self.state, packet_id, &payload);
+                                .record_raw_packet(
+                                    self.adapter.protocol_version(),
+                                    self.state,
+                                    packet_id,
+                                    &payload,
+                                );
                             // Hand the adapter the client-owned world as a
                             // `WorldSink` so decoded chunks are applied in place
                             // and never travel the event channel. The write
@@ -1888,7 +1893,12 @@ impl<T: Transport> Driver<T> {
         payload: &[u8],
     ) -> lodestone_net::Result<()> {
         self.read_model
-            .record_outbound_raw_packet(self.state, packet_id, payload);
+            .record_outbound_raw_packet(
+                self.adapter.protocol_version(),
+                self.state,
+                packet_id,
+                payload,
+            );
         self.conn.write_packet(packet_id, payload).await
     }
 

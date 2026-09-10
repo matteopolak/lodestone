@@ -191,7 +191,7 @@ pub use plugin_draw::{PluginBillboard, PluginBillboards, PluginTexture, clear_pl
 pub use events::{
     GameEvent, GameEventBus, GameEventBusPlugin, OutboundRawPacket, OutboundRawPacketBus,
     OutboundRawPacketBusPlugin, OutboundRawPacketLimits, OutboundRawPacketStats, RawPacket,
-    RawPacketBus, RawPacketBusPlugin,
+    RawPacketBus, RawPacketBusPlugin, RawPacketLimits, RawPacketStats,
 };
 pub use handle::{
     EcsHandle, HoldStats, LockHolds, hold_read, hold_write, new_handle, new_ingest_handle,

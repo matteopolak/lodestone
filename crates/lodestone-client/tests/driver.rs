@@ -576,7 +576,7 @@ async fn raw_packet_bus_observes_the_wire_bytes_before_decoding() {
     app.add_plugins((
         lodestone_ecs::ingest::IngestPlugin,
         lodestone_ecs::SessionPlugin,
-        lodestone_ecs::RawPacketBusPlugin,
+        lodestone_ecs::RawPacketBusPlugin::default(),
     ));
     let session = lodestone_ecs::spawn_session(app.world_mut());
     let world = Arc::new(lodestone_ecs::parking_lot::RwLock::new(

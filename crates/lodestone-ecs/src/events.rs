@@ -11,10 +11,11 @@
 //! second one to grow a variant when the first one does.
 //!
 //! The `RawPacket` bus is the version-*opaque* inbound half of the plugin event
-//! bus: it carries the connection state, packet id, and exact body before a
-//! version-specific adapter decodes it. `OutboundRawPacket` is its native
-//! client counterpart: it carries the exact encoded body after the adapter
-//! (including any decorator) returns it and before transport framing. The
+//! bus: it carries the protocol number, connection state, packet id, and exact
+//! body before a version-specific adapter decodes it. `OutboundRawPacket` is
+//! its client counterpart: it carries the same metadata and exact encoded body
+//! after the adapter (including any decorator) returns it and before transport
+//! framing. The
 //! `GameEvent` bus is the
 //! version-*free*, already-decoded half, and it costs nothing extra to keep in
 //! sync because it is not a copy — it is `ClientEvent` itself, one field deep.
@@ -238,6 +239,9 @@ impl GameEvent {
 /// without depending on a protocol family.
 #[derive(Message, Debug, Clone, PartialEq, Eq)]
 pub struct RawPacket {
+    /// Negotiated protocol number. This identifies the wire family without
+    /// making this version-free crate depend on a concrete adapter.
+    pub protocol: i32,
     /// Protocol phase in which the packet arrived.
     pub state: ConnectionState,
     /// Packet id as read from the length-framed packet.
@@ -253,10 +257,13 @@ pub struct RawPacket {
 /// packet id, and an owned copy of the exact adapter output, then writes the
 /// same bytes to the connection. A reader cannot replace, cancel, reorder, or
 /// inject transport data. The bus is native-client only at its producer; the
-/// version-free type remains available to plugins on every target without
-/// changing the WASM ABI.
+/// version-free type remains available to plugins on every target, while the
+/// WASM event is a bounded copied projection.
 #[derive(Message, Debug, Clone, PartialEq, Eq)]
 pub struct OutboundRawPacket {
+    /// Negotiated protocol number. This identifies the wire family without
+    /// making this version-free crate depend on a concrete adapter.
+    pub protocol: i32,
     /// Protocol phase in which the packet was encoded.
     pub state: ConnectionState,
     /// Packet id returned by the version adapter.
@@ -265,9 +272,118 @@ pub struct OutboundRawPacket {
     pub payload: Vec<u8>,
 }
 
-/// Marker resource a plugin inserts to opt into [`RawPacket`] observation.
-#[derive(Resource, Debug, Default, Clone, Copy)]
-pub struct RawPacketBus;
+/// Per-tick bounds for the inbound raw-packet observer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawPacketLimits {
+    /// Maximum number of packets accepted between bus aging points.
+    pub max_packets_per_tick: usize,
+    /// Maximum total payload bytes accepted between bus aging points.
+    pub max_payload_bytes_per_tick: usize,
+}
+
+impl Default for RawPacketLimits {
+    fn default() -> Self {
+        Self {
+            max_packets_per_tick: 256,
+            max_payload_bytes_per_tick: 1024 * 1024,
+        }
+    }
+}
+
+/// Counters for accepted and dropped inbound observations.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RawPacketStats {
+    /// Observations published since the last reset.
+    pub published_packets: u64,
+    /// Payload bytes copied into published observations since the last reset.
+    pub published_payload_bytes: u64,
+    /// Observations rejected by either configured bound since the last reset.
+    pub dropped_packets: u64,
+    /// Payload bytes that were not copied because an observation was dropped.
+    pub dropped_payload_bytes: u64,
+}
+
+/// Resource that opts a client into bounded inbound raw-packet observation.
+#[derive(Resource, Debug)]
+pub struct RawPacketBus {
+    limits: RawPacketLimits,
+    window_packets: usize,
+    window_payload_bytes: usize,
+    stats: RawPacketStats,
+}
+
+impl RawPacketBus {
+    /// Creates a bus with explicit per-tick bounds.
+    #[must_use]
+    pub const fn with_limits(limits: RawPacketLimits) -> Self {
+        Self {
+            limits,
+            window_packets: 0,
+            window_payload_bytes: 0,
+            stats: RawPacketStats {
+                published_packets: 0,
+                published_payload_bytes: 0,
+                dropped_packets: 0,
+                dropped_payload_bytes: 0,
+            },
+        }
+    }
+
+    /// The configured bounds.
+    #[must_use]
+    pub const fn limits(&self) -> RawPacketLimits {
+        self.limits
+    }
+
+    /// Current counters. Counters are reset only by [`Self::reset_stats`].
+    #[must_use]
+    pub const fn stats(&self) -> RawPacketStats {
+        self.stats
+    }
+
+    /// Clears cumulative counters while retaining the current tick window.
+    pub fn reset_stats(&mut self) {
+        self.stats = RawPacketStats::default();
+    }
+
+    fn reset_window(&mut self) {
+        self.window_packets = 0;
+        self.window_payload_bytes = 0;
+    }
+
+    /// Reserves one observation, or records a drop when the configured bounds
+    /// would be exceeded. The caller must write the message only on `true`.
+    pub fn try_reserve(&mut self, payload_bytes: usize) -> bool {
+        let packet_ok = self.window_packets < self.limits.max_packets_per_tick;
+        let bytes_ok = self
+            .window_payload_bytes
+            .checked_add(payload_bytes)
+            .is_some_and(|total| total <= self.limits.max_payload_bytes_per_tick);
+        if packet_ok && bytes_ok {
+            self.window_packets += 1;
+            self.window_payload_bytes += payload_bytes;
+            self.stats.published_packets = self.stats.published_packets.saturating_add(1);
+            self.stats.published_payload_bytes = self
+                .stats
+                .published_payload_bytes
+                .saturating_add(payload_bytes as u64);
+            true
+        } else {
+            self.stats.dropped_packets = self.stats.dropped_packets.saturating_add(1);
+            self.stats.dropped_payload_bytes = self
+                .stats
+                .dropped_payload_bytes
+                .saturating_add(payload_bytes as u64);
+            false
+        }
+    }
+}
+
+impl Default for RawPacketBus {
+    fn default() -> Self {
+        Self::with_limits(RawPacketLimits::default())
+    }
+}
 
 /// Per-tick bounds for the native outbound raw-packet observer.
 ///
@@ -454,15 +570,31 @@ impl Plugin for GameEventBusPlugin {
 /// Registers the version-free raw-packet observation bus and its tick aging
 /// system. This plugin is separate from [`GameEventBusPlugin`] so a plugin that
 /// needs decoded events does not also pay to clone every inbound payload.
-#[derive(Debug, Default)]
-pub struct RawPacketBusPlugin;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawPacketBusPlugin {
+    limits: RawPacketLimits,
+}
+
+impl RawPacketBusPlugin {
+    /// Creates the inbound observer with explicit per-tick packet/byte bounds.
+    #[must_use]
+    pub const fn with_limits(limits: RawPacketLimits) -> Self {
+        Self { limits }
+    }
+}
+
+impl Default for RawPacketBusPlugin {
+    fn default() -> Self {
+        Self::with_limits(RawPacketLimits::default())
+    }
+}
 
 impl Plugin for RawPacketBusPlugin {
     fn build(&self, app: &mut App) {
         if !app.is_plugin_added::<crate::CorePlugin>() {
             app.add_plugins(crate::CorePlugin);
         }
-        app.init_resource::<RawPacketBus>();
+        app.insert_resource(RawPacketBus::with_limits(self.limits));
         app.add_message::<RawPacket>();
         app.add_systems(GameTick, age_raw_packet_bus.in_set(TickSet::Send));
     }
@@ -507,8 +639,12 @@ fn age_game_event_bus(mut messages: ResMut<Messages<GameEvent>>) {
 
 /// Ages [`Messages<RawPacket>`] after every reader has observed this tick's
 /// inbound packets.
-fn age_raw_packet_bus(mut messages: ResMut<Messages<RawPacket>>) {
+fn age_raw_packet_bus(
+    mut messages: ResMut<Messages<RawPacket>>,
+    mut bus: ResMut<RawPacketBus>,
+) {
     messages.update();
+    bus.reset_window();
 }
 
 /// Ages outbound observations and reopens the admission window for the next
@@ -532,7 +668,7 @@ mod tests {
     use super::{
         GameEvent, GameEventBus, GameEventBusPlugin, InventoryMenuEvent, OutboundRawPacket,
         OutboundRawPacketBus, OutboundRawPacketBusPlugin, OutboundRawPacketLimits, RawPacket,
-        RawPacketBus, RawPacketBusPlugin,
+        RawPacketBus, RawPacketBusPlugin, RawPacketLimits,
     };
     use crate::GameTick;
 
@@ -607,6 +743,7 @@ mod tests {
 
         assert!(app.world_mut().resource_mut::<OutboundRawPacketBus>().try_reserve(2));
         app.world_mut().write_message(OutboundRawPacket {
+            protocol: 776,
             state: ConnectionState::Play,
             packet_id: 1,
             payload: vec![0, 255],
@@ -711,11 +848,12 @@ mod tests {
     #[test]
     fn a_raw_packet_reaches_a_reader_with_exact_bytes() {
         let mut app = bevy_app::App::new();
-        app.add_plugins(RawPacketBusPlugin);
+        app.add_plugins(RawPacketBusPlugin::default());
         app.init_resource::<SeenCount>();
 
         fn observe(mut packets: MessageReader<RawPacket>, mut count: ResMut<SeenCount>) {
             for packet in packets.read() {
+                assert_eq!(packet.protocol, 776);
                 assert_eq!(packet.state, ConnectionState::Play);
                 assert_eq!(packet.packet_id, 0x2a);
                 assert_eq!(packet.payload.as_slice(), [0x00, 0xff, 0x7f]);
@@ -725,6 +863,7 @@ mod tests {
 
         app.add_systems(GameTick, observe);
         app.world_mut().write_message(RawPacket {
+            protocol: 776,
             state: ConnectionState::Play,
             packet_id: 0x2a,
             payload: vec![0x00, 0xff, 0x7f],
@@ -741,10 +880,28 @@ mod tests {
         let mut world = World::new();
         assert!(world
             .write_message(RawPacket {
+                protocol: 776,
                 state: ConnectionState::Login,
                 packet_id: 3,
                 payload: vec![1, 2, 3],
             })
-            .is_none());
+        .is_none());
+    }
+
+    /// The inbound observer applies the same explicit packet/byte admission
+    /// policy as the outbound observer; an oversized packet never enters the
+    /// message queue and therefore cannot retain unbounded transport data.
+    #[test]
+    fn inbound_observation_drops_when_its_byte_bound_is_full() {
+        let mut app = bevy_app::App::new();
+        app.add_plugins(RawPacketBusPlugin::with_limits(RawPacketLimits {
+            max_packets_per_tick: 2,
+            max_payload_bytes_per_tick: 2,
+        }));
+        let mut bus = app.world_mut().resource_mut::<RawPacketBus>();
+        assert!(bus.try_reserve(2));
+        assert!(!bus.try_reserve(1));
+        assert_eq!(bus.stats().published_packets, 1);
+        assert_eq!(bus.stats().dropped_packets, 1);
     }
 }

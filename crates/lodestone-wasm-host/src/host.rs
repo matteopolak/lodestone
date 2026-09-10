@@ -73,6 +73,7 @@ pub use crate::bindings::lodestone::plugin::types::{
     MovementIntent, PlaceIntent, PlaceOutcome, PlaceRejection, PlaceStatus, PlayerInteractVerdict,
     PlayerMoveVerdict, PlayerTeleported, PluginInfo, PluginVerdict,
     ResidentBlockMutation, ResidentBlockMutationOutcome, SectionBlocksChanged, SectionPos,
+    PacketPhase, RawPacket,
     SelectedItemDropMode, TeleportRelative, Vec3, VerdictContext,
 };
 
