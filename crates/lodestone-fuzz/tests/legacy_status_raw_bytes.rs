@@ -39,6 +39,7 @@ fn fixed_malformed_status_edges_never_panic() {
         );
     }
 }
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(CASES))]
 
