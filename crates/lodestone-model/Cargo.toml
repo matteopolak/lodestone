@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+bon.workspace = true
 lodestone-core.workspace = true
 lodestone-world.workspace = true
 smol_str.workspace = true
