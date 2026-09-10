@@ -77,7 +77,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use lodestone_model::{GameMode, ResourceKey, Rotation, Vec3};
+use lodestone_model::{EntityNetworkId, GameMode, ResourceKey, Rotation, Vec3};
 use uuid::Uuid;
 
 use crate::protocol::{EntitySnapshot, MetadataField, PlayerListing, ServerDirective, ServerProtocol};
@@ -104,6 +104,20 @@ use crate::server::EntitySource;
 /// mob range by this module's own tests.
 pub const PLAYER_ENTITY_ID_BASE: i32 = 1 << 30;
 
+/// Converts a server-owned id to the signed representation required by the
+/// packet and command compatibility fields in this module.
+fn server_entity_raw(id: EntityNetworkId) -> Option<i32> {
+    match id {
+        EntityNetworkId::Server(raw) => i32::try_from(raw).ok(),
+        EntityNetworkId::Plugin(_) => None,
+    }
+}
+
+/// Classifies a signed id at the legacy packet-facing player boundary.
+fn server_entity_id(raw: i32) -> Option<EntityNetworkId> {
+    EntityNetworkId::from_wire(raw)
+}
+
 /// The canonical entity-type key a player entity streams as.
 ///
 /// `minecraft:player` is network entity-type id **156** in protocol 776
@@ -124,7 +138,7 @@ const PLAYER_ENTITY_TYPE: &str = "minecraft:player";
 #[derive(Debug, Clone, PartialEq)]
 struct TrackedPlayer {
     /// The network entity id other connections address this player by.
-    entity_id: i32,
+    entity_id: EntityNetworkId,
     /// The profile UUID. This is the uuid the client presented at
     /// login and that
     /// [`ServerProtocol::login_success`](crate::ServerProtocol::login_success)
@@ -386,7 +400,8 @@ impl PlayerRegistry {
         inner.chat_base + inner.chat.len() as u64
     }
 
-    /// Appends one arm-swing to the shared broadcast log (`ServerBound::Swing`).
+    /// Appends one arm-swing from the legacy signed-id boundary to the shared
+    /// broadcast log (`ServerBound::Swing`).
     ///
     /// Unlike [`say`](Self::say), the *reader* excludes the sender
     /// (`swings_since`'s callers filter `entity_id != player_entity_id`) —
@@ -395,6 +410,21 @@ impl PlayerRegistry {
     /// log itself carries the sender so each reader can make that
     /// per-connection decision; it does not decide for them.
     pub fn swing(&self, entity_id: i32, hand: lodestone_model::Hand) {
+        let Some(entity_id) = server_entity_id(entity_id) else {
+            return;
+        };
+        self.swing_typed(entity_id, hand);
+    }
+
+    /// Appends one arm-swing for a server-owned player id.
+    ///
+    /// Plugin-owned ids are rejected before they can enter the shared player
+    /// event log. The log keeps its signed field because the server loop turns
+    /// it into a protocol directive at the explicit wire boundary.
+    pub fn swing_typed(&self, entity_id: EntityNetworkId, hand: lodestone_model::Hand) {
+        let Some(entity_id) = server_entity_raw(entity_id) else {
+            return;
+        };
         let mut inner = self.lock();
         inner.swings.push_back(SwingEvent { entity_id, hand });
         while inner.swings.len() > SWING_LOG_CAPACITY {
@@ -443,7 +473,9 @@ impl PlayerRegistry {
     pub fn join(&self, username: &str, uuid: Uuid, position: Vec3) -> PlayerTicket {
         let entity_id = {
             let mut inner = self.lock();
-            let entity_id = PLAYER_ENTITY_ID_BASE.wrapping_add(inner.next_offset);
+            let raw_entity_id = PLAYER_ENTITY_ID_BASE.wrapping_add(inner.next_offset);
+            let entity_id =
+                server_entity_id(raw_entity_id).expect("allocated player ids must be non-negative");
             inner.next_offset += 1;
             inner.players.push(TrackedPlayer {
                 entity_id,
@@ -483,6 +515,17 @@ impl PlayerRegistry {
     /// position update computed from a packet that arrived as the player's own
     /// ticket dropped.
     pub fn set_position(&self, entity_id: i32, position: Vec3) {
+        let Some(entity_id) = server_entity_id(entity_id) else {
+            return;
+        };
+        self.set_position_typed(entity_id, position);
+    }
+
+    /// Moves a tracked player addressed by a server-owned id.
+    pub fn set_position_typed(&self, entity_id: EntityNetworkId, position: Vec3) {
+        if server_entity_raw(entity_id).is_none() {
+            return;
+        }
         if let Some(player) = self
             .lock()
             .players
@@ -498,6 +541,17 @@ impl PlayerRegistry {
     /// each entity-stream pass; a changed byte becomes a metadata diff for
     /// every remote viewer.
     pub fn set_shared_flags(&self, entity_id: i32, shared_flags: u8) {
+        let Some(entity_id) = server_entity_id(entity_id) else {
+            return;
+        };
+        self.set_shared_flags_typed(entity_id, shared_flags);
+    }
+
+    /// Publishes shared flags for a server-owned player id.
+    pub fn set_shared_flags_typed(&self, entity_id: EntityNetworkId, shared_flags: u8) {
+        if server_entity_raw(entity_id).is_none() {
+            return;
+        }
         if let Some(player) = self
             .lock()
             .players
@@ -521,6 +575,17 @@ impl PlayerRegistry {
     /// — and inventing `(0, 0)` for the yaw is precisely the bug this field
     /// exists to fix.
     pub fn set_rotation(&self, entity_id: i32, rotation: Rotation) {
+        let Some(entity_id) = server_entity_id(entity_id) else {
+            return;
+        };
+        self.set_rotation_typed(entity_id, rotation);
+    }
+
+    /// Re-aims a tracked player addressed by a server-owned id.
+    pub fn set_rotation_typed(&self, entity_id: EntityNetworkId, rotation: Rotation) {
+        if server_entity_raw(entity_id).is_none() {
+            return;
+        }
         if let Some(player) = self
             .lock()
             .players
@@ -541,6 +606,16 @@ impl PlayerRegistry {
     /// control for the doppelgänger rule flips to).
     #[must_use]
     pub fn view(&self, viewer: Option<i32>) -> PlayerView {
+        self.view_typed(viewer.and_then(server_entity_id))
+    }
+
+    /// The roster and entity snapshots addressed by a typed server-owned id.
+    ///
+    /// `EntitySnapshot::id` remains signed because it is the packet-facing
+    /// representation. The conversion is performed only while lowering the
+    /// typed registry state to that explicit protocol model.
+    #[must_use]
+    pub fn view_typed(&self, viewer: Option<EntityNetworkId>) -> PlayerView {
         let inner = self.lock();
         let entity_type = player_entity_type();
         PlayerView {
@@ -556,41 +631,45 @@ impl PlayerRegistry {
                 .players
                 .iter()
                 .filter(|p| Some(p.entity_id) != viewer)
-                .map(|p| EntitySnapshot {
-                    id: p.entity_id,
-                    uuid: p.uuid,
-                    entity_type: entity_type.clone(),
-                    position: p.position,
-                    rotation: p.rotation,
-                    // A player's head yaw and body yaw are the same value on
-                    // this wire: the client reports one yaw per movement
-                    // packet and vanilla's `ServerEntity` sends that same
-                    // angle in both the move-rotation and head-rotation
-                    // packets for a player. They diverge only for mobs, whose
-                    // AI aims the head independently of the body — which is
-                    // why `EntitySnapshot` keeps them as two fields even
-                    // though this producer sets them equal.
-                    head_yaw: p.rotation.yaw,
-                    // Player motion is client-authoritative here: the client
-                    // reports positions, never velocities, so there is no
-                    // per-tick delta to publish. An absolute position update
-                    // is what the streamer sends anyway.
-                    velocity: Vec3::new(0.0, 0.0, 0.0),
-                    // Index zero's base-entity byte is unambiguous for a
-                    // player. Keep it present even at zero: a remote viewer
-                    // that previously received invisibility needs an explicit
-                    // zero transition to restore the body.
-                    metadata: vec![MetadataField::SharedFlags(p.shared_flags)],
-                    // The real player entity does not override the
-                    // add-entity-packet builder, so the
-                    // Object Data field is `0`.
-                    object_data: 0,
-                    // The real leashable interface is never implemented by
-                    // the player entity — a
-                    // player cannot be the *leashed* end of a lead, only a holder
-                    // (see `crates/lodestone-server/src/mobs/mod.rs`'s
-                    // `LeashHolder::Player`).
-                    leash_link: None,
+                .map(|p| {
+                    let id = server_entity_raw(p.entity_id)
+                        .expect("tracked player ids must fit the protocol representation");
+                    EntitySnapshot {
+                        id,
+                        uuid: p.uuid,
+                        entity_type: entity_type.clone(),
+                        position: p.position,
+                        rotation: p.rotation,
+                        // A player's head yaw and body yaw are the same value on
+                        // this wire: the client reports one yaw per movement
+                        // packet and vanilla's `ServerEntity` sends that same
+                        // angle in both the move-rotation and head-rotation
+                        // packets for a player. They diverge only for mobs, whose
+                        // AI aims the head independently of the body — which is
+                        // why `EntitySnapshot` keeps them as two fields even
+                        // though this producer sets them equal.
+                        head_yaw: p.rotation.yaw,
+                        // Player motion is client-authoritative here: the client
+                        // reports positions, never velocities, so there is no
+                        // per-tick delta to publish. An absolute position update
+                        // is what the streamer sends anyway.
+                        velocity: Vec3::new(0.0, 0.0, 0.0),
+                        // Index zero's base-entity byte is unambiguous for a
+                        // player. Keep it present even at zero: a remote viewer
+                        // that previously received invisibility needs an explicit
+                        // zero transition to restore the body.
+                        metadata: vec![MetadataField::SharedFlags(p.shared_flags)],
+                        // The real player entity does not override the
+                        // add-entity-packet builder, so the
+                        // Object Data field is `0`.
+                        object_data: 0,
+                        // The real leashable interface is never implemented by
+                        // the player entity — a
+                        // player cannot be the *leashed* end of a lead, only a holder
+                        // (see `crates/lodestone-server/src/mobs/mod.rs`'s
+                        // `LeashHolder::Player`).
+                        leash_link: None,
+                    }
                 })
                 .collect(),
         }
@@ -685,7 +764,8 @@ impl PlayerRegistry {
             .iter()
             .map(|p| crate::commands::PlayerCandidate {
                 uuid: p.uuid,
-                entity_id: p.entity_id,
+                entity_id: server_entity_raw(p.entity_id)
+                    .expect("tracked player ids must fit command candidates"),
                 username: p.username.clone(),
                 position: p.position,
                 rotation: p.rotation,
@@ -739,7 +819,10 @@ impl PlayerRegistry {
 
     /// Deregisters a player. Private: [`PlayerTicket`]'s `Drop` is the only
     /// caller, so a registration cannot be leaked by forgetting to call this.
-    fn remove(&self, entity_id: i32) {
+    fn remove_typed(&self, entity_id: EntityNetworkId) {
+        if server_entity_raw(entity_id).is_none() {
+            return;
+        }
         let mut inner = self.lock();
         // Drop the departing player's undelivered effects along with their
         // registration. Without this a `/give` aimed at someone who leaves in the
@@ -803,7 +886,7 @@ fn player_entity_type() -> ResourceKey {
 /// rather than an explicit `leave` call.
 #[derive(Debug)]
 pub struct PlayerTicket {
-    entity_id: i32,
+    entity_id: EntityNetworkId,
     uuid: Uuid,
     registry: PlayerRegistry,
 }
@@ -814,6 +897,12 @@ impl PlayerTicket {
     /// [`PlayerRegistry::view`].
     #[must_use]
     pub fn entity_id(&self) -> i32 {
+        server_entity_raw(self.entity_id).expect("player ticket id must fit wire representation")
+    }
+
+    /// The typed network id other connections address this player by.
+    #[must_use]
+    pub fn entity_network_id(&self) -> EntityNetworkId {
         self.entity_id
     }
 
@@ -826,7 +915,7 @@ impl PlayerTicket {
 
 impl Drop for PlayerTicket {
     fn drop(&mut self) {
-        self.registry.remove(self.entity_id);
+        self.registry.remove_typed(self.entity_id);
     }
 }
 
@@ -1141,6 +1230,69 @@ mod tests {
         // An unknown id is a no-op, not a panic.
         registry.set_position(i32::MIN, Vec3::new(0.0, 0.0, 0.0));
         assert_eq!(registry.view(None).entities[0].position.x, 20.0);
+    }
+
+    #[test]
+    fn typed_player_ids_drive_registry_updates_and_reject_plugin_ids() {
+        let registry = PlayerRegistry::new();
+        let alice = registry.join("Alice", uuid(1), Vec3::new(8.0, 100.0, 8.0));
+        let bob = registry.join("Bob", uuid(2), Vec3::new(9.0, 100.0, 9.0));
+        let alice_id = alice.entity_network_id();
+        let bob_id = bob.entity_network_id();
+        assert!(matches!(alice_id, EntityNetworkId::Server(_)));
+
+        registry.set_position_typed(alice_id, Vec3::new(20.0, 65.0, -3.0));
+        registry.set_rotation_typed(
+            alice_id,
+            Rotation {
+                yaw: 17.0,
+                pitch: -8.0,
+            },
+        );
+        registry.set_shared_flags_typed(alice_id, 0x20);
+        let alice_view = registry.view_typed(Some(bob_id));
+        let alice_snapshot = alice_view
+            .entities
+            .iter()
+            .find(|entity| entity.id == alice.entity_id())
+            .expect("Bob receives Alice through the production player view");
+        assert_eq!(alice_snapshot.position, Vec3::new(20.0, 65.0, -3.0));
+        assert_eq!(alice_snapshot.rotation.yaw, 17.0);
+        assert_eq!(
+            alice_snapshot.metadata,
+            vec![MetadataField::SharedFlags(0x20)]
+        );
+
+        let plugin_id = EntityNetworkId::plugin(-7).expect("negative plugin id");
+        registry.set_position_typed(plugin_id, Vec3::new(99.0, 99.0, 99.0));
+        registry.set_shared_flags_typed(plugin_id, 0);
+        registry.set_rotation_typed(
+            plugin_id,
+            Rotation {
+                yaw: 99.0,
+                pitch: 99.0,
+            },
+        );
+        let unchanged = registry
+            .view_typed(Some(bob_id))
+            .entities
+            .into_iter()
+            .find(|entity| entity.id == alice.entity_id())
+            .expect("Alice remains registered");
+        assert_eq!(unchanged.position, Vec3::new(20.0, 65.0, -3.0));
+        assert_eq!(unchanged.rotation.yaw, 17.0);
+        assert_eq!(unchanged.metadata, vec![MetadataField::SharedFlags(0x20)]);
+
+        let mut cursor = registry.swing_cursor();
+        registry.swing_typed(alice_id, lodestone_model::Hand::Main);
+        registry.swing_typed(plugin_id, lodestone_model::Hand::Off);
+        let swings = registry.swings_since(&mut cursor);
+        assert_eq!(
+            swings.len(),
+            1,
+            "plugin ids cannot enter the player event log"
+        );
+        assert_eq!(swings[0].entity_id, alice.entity_id());
     }
 
     /// `snapshots()` on the composed source returns the inner source's
