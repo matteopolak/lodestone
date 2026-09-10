@@ -1453,7 +1453,8 @@ pub(super) fn can_place_root(grid: &VegGrid, tags: &VegTags, can_grow_through: T
 /// positions for the next root segment, drawn from `pos`'s manhattan
 /// distance to `root_origin` and, in the two RNG-bearing branches, real
 /// draws. Order matches a faithful implementation's own list construction exactly (`below`
-/// first where both are returned).
+/// first where both are returned). The fixed two-slot result is sufficient
+/// because no branch can produce more than two candidates.
 fn potential_root_positions<R: RandomSource>(
     pos: BlockPos,
     prev_dir: (i32, i32),
@@ -1461,27 +1462,28 @@ fn potential_root_positions<R: RandomSource>(
     root_origin: BlockPos,
     max_root_width: i32,
     random_skew_chance: f32,
-    out: &mut Vec<BlockPos>,
-) {
+) -> [Option<BlockPos>; 2] {
+    let mut out = [None, None];
     let below = BlockPos { x: pos.x, y: pos.y - 1, z: pos.z };
     let next_to = BlockPos { x: pos.x + prev_dir.0, y: pos.y, z: pos.z + prev_dir.1 };
     let width = (pos.x - root_origin.x).abs() + (pos.y - root_origin.y).abs() + (pos.z - root_origin.z).abs();
     if width > max_root_width - 3 && width <= max_root_width {
         if random.next_float() < random_skew_chance {
-            out.push(below);
-            out.push(BlockPos { x: next_to.x, y: next_to.y - 1, z: next_to.z });
+            out[0] = Some(below);
+            out[1] = Some(BlockPos { x: next_to.x, y: next_to.y - 1, z: next_to.z });
         } else {
-            out.push(below);
+            out[0] = Some(below);
         }
     } else if width > max_root_width {
-        out.push(below);
+        out[0] = Some(below);
     } else if random.next_float() < random_skew_chance {
-        out.push(below);
+        out[0] = Some(below);
     } else if random.next_bool() {
-        out.push(next_to);
+        out[0] = Some(next_to);
     } else {
-        out.push(below);
+        out[0] = Some(below);
     }
+    out
 }
 
 /// The mangrove root placer's own root simulation — recurses along one direction until
@@ -1497,6 +1499,7 @@ pub(super) fn simulate_roots<R: RandomSource>(
     dir: (i32, i32),
     root_origin: BlockPos,
     root_positions: &mut Vec<BlockPos>,
+    root_start: usize,
     layer: i32,
     grid: &VegGrid,
     tags: &VegTags,
@@ -1505,14 +1508,13 @@ pub(super) fn simulate_roots<R: RandomSource>(
     max_root_width: i32,
     random_skew_chance: f32,
 ) -> bool {
-    if layer != max_root_length && root_positions.len() as i32 <= max_root_length {
-        let mut candidates = Vec::with_capacity(2);
-        potential_root_positions(root_pos, dir, random, root_origin, max_root_width, random_skew_chance, &mut candidates);
-        for pos in candidates {
+    if layer != max_root_length && (root_positions.len() - root_start) as i32 <= max_root_length {
+        let candidates = potential_root_positions(root_pos, dir, random, root_origin, max_root_width, random_skew_chance);
+        for pos in candidates.into_iter().flatten() {
             if can_place_root(grid, tags, can_grow_through, pos) {
                 root_positions.push(pos);
                 if !simulate_roots(
-                    random, pos, dir, root_origin, root_positions, layer + 1, grid, tags, can_grow_through,
+                    random, pos, dir, root_origin, root_positions, root_start, layer + 1, grid, tags, can_grow_through,
                     max_root_length, max_root_width, random_skew_chance,
                 ) {
                     return false;
