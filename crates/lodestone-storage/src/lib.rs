@@ -8,7 +8,6 @@
 //! producer can call later.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -18,6 +17,7 @@ use lodestone_storage_schema::{
     validate_extension_table, validate_record, validate_record_with_extensions,
 };
 use prost::Message;
+use thiserror::Error;
 
 const SEGMENT_NAME: &str = "world.ls";
 const COMPACTING_SEGMENT_NAME: &str = "world.ls.compacting";
@@ -202,21 +202,33 @@ struct IndexEntry {
 
 /// An error that preserves the difference between incomplete crash tails and
 /// committed corruption.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum StoreError {
-    Io(io::Error),
-    InvalidRecord(lodestone_storage_schema::ValidationError),
-    InvalidExtensionTable(lodestone_storage_schema::ValidationError),
+    #[error("storage I/O failed: {0}")]
+    Io(#[from] io::Error),
+    #[error("invalid storage record: {0}")]
+    InvalidRecord(#[source] lodestone_storage_schema::ValidationError),
+    #[error("invalid native extension table: {0}")]
+    InvalidExtensionTable(#[source] lodestone_storage_schema::ValidationError),
+    #[error(
+        "extension {namespace}:{name} is already registered at schema version {existing_version}, \
+         not requested version {requested_version}"
+    )]
     ExtensionSchemaConflict {
         namespace: String,
         name: String,
         existing_version: u32,
         requested_version: u32,
     },
+    #[error("native extension IDs are exhausted")]
     ExtensionIdExhausted,
+    #[error("storage transaction has no records")]
     EmptyTransaction,
+    #[error("storage transaction repeats key {0:?}")]
     DuplicateKey(RecordKey),
+    #[error("storage record exceeds u32 length")]
     RecordTooLarge,
+    #[error("corrupt storage segment at offset {offset}: {reason}")]
     Corrupt { offset: u64, reason: String },
 }
 
@@ -226,46 +238,6 @@ impl StoreError {
             offset,
             reason: reason.into(),
         }
-    }
-}
-
-impl fmt::Display for StoreError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io(error) => write!(formatter, "storage I/O failed: {error}"),
-            Self::InvalidRecord(error) => write!(formatter, "invalid storage record: {error}"),
-            Self::InvalidExtensionTable(error) => {
-                write!(formatter, "invalid native extension table: {error}")
-            }
-            Self::ExtensionSchemaConflict {
-                namespace,
-                name,
-                existing_version,
-                requested_version,
-            } => write!(
-                formatter,
-                "extension {namespace}:{name} is already registered at schema version \
-                 {existing_version}, not requested version {requested_version}"
-            ),
-            Self::ExtensionIdExhausted => formatter.write_str("native extension IDs are exhausted"),
-            Self::EmptyTransaction => formatter.write_str("storage transaction has no records"),
-            Self::DuplicateKey(key) => write!(formatter, "storage transaction repeats key {key:?}"),
-            Self::RecordTooLarge => formatter.write_str("storage record exceeds u32 length"),
-            Self::Corrupt { offset, reason } => {
-                write!(
-                    formatter,
-                    "corrupt storage segment at offset {offset}: {reason}"
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for StoreError {}
-
-impl From<io::Error> for StoreError {
-    fn from(error: io::Error) -> Self {
-        Self::Io(error)
     }
 }
 
@@ -971,6 +943,7 @@ fn crc32_continue(mut crc: u32, bytes: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::error::Error as _;
     use lodestone_storage_schema::{
         ChunkRecord, ChunkSection, ExtensionValue, GeneralRecord, LightData, LightSection,
         WorldProperties, generated::{general_record, light_data, storage_record},
@@ -1006,6 +979,84 @@ mod tests {
 
     fn key() -> RecordKey {
         RecordKey::chunk(-12, 34)
+    }
+
+    #[test]
+    fn store_error_display_and_sources_match_the_storage_contract() {
+        let io_error: StoreError =
+            io::Error::new(io::ErrorKind::PermissionDenied, "read denied").into();
+        assert_eq!(io_error.to_string(), "storage I/O failed: read denied");
+        assert_eq!(io_error.source().unwrap().to_string(), "read denied");
+        assert_eq!(
+            io_error
+                .source()
+                .unwrap()
+                .downcast_ref::<io::Error>()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+
+        let invalid_record = StoreError::InvalidRecord(
+            lodestone_storage_schema::ValidationError::MissingRecord,
+        );
+        assert_eq!(
+            invalid_record.to_string(),
+            "invalid storage record: storage record has no body"
+        );
+        assert!(invalid_record
+            .source()
+            .unwrap()
+            .downcast_ref::<lodestone_storage_schema::ValidationError>()
+            .is_some());
+
+        let invalid_extensions = StoreError::InvalidExtensionTable(
+            lodestone_storage_schema::ValidationError::ZeroExtensionId,
+        );
+        assert_eq!(
+            invalid_extensions.to_string(),
+            "invalid native extension table: extension local ID zero is reserved"
+        );
+        assert!(invalid_extensions
+            .source()
+            .unwrap()
+            .downcast_ref::<lodestone_storage_schema::ValidationError>()
+            .is_some());
+
+        assert_eq!(
+            StoreError::ExtensionSchemaConflict {
+                namespace: "example".into(),
+                name: "claims".into(),
+                existing_version: 3,
+                requested_version: 4,
+            }
+            .to_string(),
+            "extension example:claims is already registered at schema version 3, not requested version 4"
+        );
+        assert_eq!(
+            StoreError::DuplicateKey(key()).to_string(),
+            "storage transaction repeats key RecordKey { column_x: -12, column_z: 34, local_id: 0, kind: Chunk }"
+        );
+        assert_eq!(
+            StoreError::Corrupt {
+                offset: 17,
+                reason: "bad checksum".into(),
+            }
+            .to_string(),
+            "corrupt storage segment at offset 17: bad checksum"
+        );
+        assert_eq!(
+            StoreError::EmptyTransaction.to_string(),
+            "storage transaction has no records"
+        );
+        assert_eq!(
+            StoreError::ExtensionIdExhausted.to_string(),
+            "native extension IDs are exhausted"
+        );
+        assert_eq!(
+            StoreError::RecordTooLarge.to_string(),
+            "storage record exceeds u32 length"
+        );
     }
 
     #[test]

@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 lodestone-storage-schema = { path = "../lodestone-storage-schema" }
 prost = "0.14.3"
+thiserror.workspace = true
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
