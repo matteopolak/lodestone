@@ -222,12 +222,6 @@ height, rare broad stem, probabilistic hat/decor blocks, and wart-hat hanging vi
 two source biomes' feature-list indices remain unchanged. The
 remaining named gaps degrade individually rather than disabling the whole tree.
 
-Sculk cursor movement uses an explicit 18-offset order: X advances fastest,
-then Y, with Z as the outer coordinate, while the zero offset and cube corners
-are omitted. That order is part of the seeded shuffle contract, so changing it
-changes which reachable vein is updated even when the bounded random values do
-not change.
-
 The three Nether basalt-deltas records at step 4 use the same scheduler as the later vegetation
 records and retain their raw `(step, index)` identities. The delta writes a floor-held contents
 patch only when all horizontal and lower neighbours are occupied and the upper neighbour is air;
