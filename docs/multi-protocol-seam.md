@@ -39,6 +39,14 @@ into a user-visible refusal, so an older protocol can never receive 26.2 terrain
 `lodestone_registry::worldgen_scope_for_protocol` exposes the same capability at the
 protocol-number seam for diagnostics and launch checks.
 
+The hosted-worldgen contract is independently checked by
+`crates/lodestone-registry/tests/worldgen_scope_matrix.rs`. It spells every protocol row enabled
+by each registry feature, checks that the registry and the boxed server protocol agree, and then
+passes that scope to `lodestone_server::overworld_chunk_source_checked`. Legacy rows must return
+the visible `WorldgenScopeMismatch`; protocol 776 must construct the embedded source. A
+`--no-default-features` run must resolve no hosted rows at all, so the test also catches a
+version-free build that accidentally acquires a default host or worldgen fallback.
+
 A small set of codec helpers (`encode_body`, `decode_body`, `decode_body_exact`,
 `unpack_degrees`) is shared in `lodestone-core` rather than hand-copied per family, because they
 carry no version-specific behaviour and their *error* type can be downgraded to `String` (each
