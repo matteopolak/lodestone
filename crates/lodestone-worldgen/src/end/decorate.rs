@@ -10,12 +10,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde_json::Value;
+use lodestone_data::biomes::BuiltinBiome;
 
 use crate::dense_grid::DenseBlockGrid;
 use crate::density::Resolver;
 use crate::rng::{RandomSource, WorldgenRandom, XoroshiroRandomSource};
 
-use super::{END_HIGHLANDS, SMALL_END_ISLANDS, THE_END, EndSpike, end_spike_blocks, end_spikes_for_seed};
+use super::{END_HIGHLANDS, SMALL_END_ISLANDS, THE_END, EndBiomeSource, EndSpike, end_spike_blocks, end_spikes_for_seed};
 
 /// The exit metadata attached to a generated return gateway.  The block itself
 /// belongs in the palette; this record is the data the gateway block entity
@@ -28,6 +29,25 @@ pub struct EndGateway {
     pub exit: (i32, i32, i32),
     /// Whether the exit bypasses a destination search.
     pub exact: bool,
+}
+
+/// Final state written by one End FEATURES source.
+///
+/// The lifecycle materializer applies these absolute transitions to its
+/// resident columns in admission order. Text is intentional at this boundary:
+/// state ids belong to one generator's interner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndDecorationSpill {
+    pub source: (i32, i32),
+    pub position: (i32, i32, i32),
+    pub state: String,
+}
+
+/// Complete output of one source-filtered End FEATURES invocation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EndDecorationResult {
+    pub spills: Vec<EndDecorationSpill>,
+    pub gateways: Vec<EndGateway>,
 }
 
 /// One fixed platform origin read from the `end_platform` placed-feature data.
@@ -161,14 +181,7 @@ impl EndDecoration {
     /// same world state without a shared cache.
     pub(crate) fn apply(&self, world: &mut DenseBlockGrid) {
         for origin in &self.platforms {
-            for dz in -2..=2 {
-                for dx in -2..=2 {
-                    world.set(origin.x + dx, origin.y - 1, origin.z + dz, "minecraft:obsidian");
-                    for dy in 0..3 {
-                        world.set(origin.x + dx, origin.y + dy, origin.z + dz, "minecraft:air");
-                    }
-                }
-            }
+            apply_platform(world, *origin);
         }
     }
 
@@ -181,105 +194,145 @@ impl EndDecoration {
         cx: i32,
         cz: i32,
         world: &mut DenseBlockGrid,
-        biome_at_chunk: impl Fn(i32, i32) -> &'static str,
+        biome_at_chunk: impl Fn(i32, i32) -> BuiltinBiome,
     ) -> Vec<EndGateway> {
         self.apply(world);
         let mut gateways = Vec::new();
-        // An empty `spikes` config is the feature's documented signal to use
-        // the seed-derived default layout. A non-empty config is an explicit
-        // layout and must not consume or replace it with a generated one.
+        for source_x in cx - 1..=cx + 1 {
+            for source_z in cz - 1..=cz + 1 {
+                let biome = biome_at_chunk(source_x, source_z);
+                gateways.extend(self.apply_source(seed, source_x, source_z, world, biome).into_iter().filter(|gateway| {
+                    gateway.pos.0.div_euclid(16) == cx && gateway.pos.2.div_euclid(16) == cz
+                }));
+            }
+        }
+        gateways
+    }
+
+    pub(crate) fn apply_source(
+        &self,
+        seed: i64,
+        source_x: i32,
+        source_z: i32,
+        world: &mut DenseBlockGrid,
+        biome: BuiltinBiome,
+    ) -> Vec<EndGateway> {
+        let biome_source = EndBiomeSource::new(seed);
+        let mut gateways = Vec::new();
+        // Fixed placement is a source-owned TOP_LAYER feature.  The complete
+        // region path applies all fixed placements before replaying the
+        // mutable source window; the lifecycle path must emit the same write
+        // from the chunk containing each configured placement origin so the
+        // spill reaches both the origin and adjacent resident columns.
+        for &origin in &self.platforms {
+            if origin.x.div_euclid(16) == source_x && origin.z.div_euclid(16) == source_z {
+                apply_platform(world, origin);
+            }
+        }
         let generated_spikes = self
             .spikes
             .as_ref()
             .filter(|configured| configured.is_empty())
             .map(|_| end_spikes_for_seed(seed));
-        for source_x in cx - 1..=cx + 1 {
-            for source_z in cz - 1..=cz + 1 {
-                let biome = biome_at_chunk(source_x, source_z);
-                let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
-                let decoration_seed = random.set_decoration_seed(seed, source_x * 16, source_z * 16);
-                if biome == THE_END {
-                    random.set_feature_seed(
-                        decoration_seed,
-                        self.spike_index.unwrap_or_default() as i32,
-                        4,
-                    );
-                    // This feature has no placement modifiers before its biome
-                    // filter. Its producer is therefore the chunk containing a
-                    // spike centre, rather than the chunk receiving an edge write.
-                    let spikes: &[EndSpike] = match self.spikes.as_deref() {
-                        Some(configured) if !configured.is_empty() => configured,
-                        Some(_) => generated_spikes
-                            .as_ref()
-                            .expect("empty spike config must have a generated fallback"),
-                        None => &[],
-                    };
-                    for spike in spikes {
-                        if spike.center_x.div_euclid(16) != source_x || spike.center_z.div_euclid(16) != source_z {
-                            continue;
-                        }
-                        // The bundled End noise settings have `min_y: 0`; this
-                        // feature's clear/write box starts at the dimension floor.
-                        for block in end_spike_blocks(&spike, 0) {
-                            world.set(block.x, block.y, block.z, &block.state);
-                        }
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        let decoration_seed = random.set_decoration_seed(seed, source_x * 16, source_z * 16);
+        if biome == BuiltinBiome::TheEnd {
+            random.set_feature_seed(decoration_seed, self.spike_index.unwrap_or_default() as i32, 4);
+            let spikes: &[EndSpike] = match self.spikes.as_deref() {
+                Some(configured) if !configured.is_empty() => configured,
+                Some(_) => generated_spikes.as_ref().expect("empty spike config must have a generated fallback"),
+                None => &[],
+            };
+            for spike in spikes {
+                if spike.center_x.div_euclid(16) == source_x && spike.center_z.div_euclid(16) == source_z {
+                    for block in end_spike_blocks(spike, 0) {
+                        world.set(block.x, block.y, block.z, &block.state);
                     }
                 }
-                if biome == SMALL_END_ISLANDS && self.outer_islands {
-                    random.set_feature_seed(
-                        decoration_seed,
-                        self.outer_island_index.unwrap_or_default() as i32,
-                        0,
-                    );
-                    if random.next_float() < 1.0 / 14.0 {
-                        let count = if random.next_int_bounded(4) < 3 { 1 } else { 2 };
-                        for _ in 0..count {
-                            let x = source_x * 16 + random.next_int_bounded(16);
-                            let z = source_z * 16 + random.next_int_bounded(16);
-                            let y = 55 + random.next_int_bounded(16);
-                            place_outer_island(world, &mut random, (x, y, z));
-                        }
-                    }
+            }
+        }
+        if self.outer_islands {
+            apply_outer_islands(
+                world,
+                &mut random,
+                decoration_seed,
+                self.outer_island_index.unwrap_or_default() as i32,
+                source_x,
+                source_z,
+                |x, y, z| biome_source.biome_at_block_typed(x, y, z) == BuiltinBiome::SmallEndIslands,
+            );
+        }
+        if biome == BuiltinBiome::EndHighlands && self.gateway_return.is_some() {
+            random.set_feature_seed(decoration_seed, self.gateway_index.unwrap_or_default() as i32, 4);
+            if random.next_float() < 1.0 / 700.0 {
+                let x = source_x * 16 + random.next_int_bounded(16);
+                let z = source_z * 16 + random.next_int_bounded(16);
+                let y = surface_y(world, x, z) + 3 + random.next_int_bounded(7);
+                if biome_source.biome_at_block_typed(x, y, z) == BuiltinBiome::EndHighlands {
+                    write_gateway(world, (x, y, z));
+                    let config = self.gateway_return.expect("gateway flag checked immediately above");
+                    gateways.push(EndGateway { pos: (x, y, z), exit: config.exit, exact: config.exact });
                 }
-                if biome == END_HIGHLANDS && self.gateway_return.is_some() {
-                    random.set_feature_seed(
-                        decoration_seed,
-                        self.gateway_index.unwrap_or_default() as i32,
-                        4,
-                    );
-                    if random.next_float() < 1.0 / 700.0 {
-                        let x = source_x * 16 + random.next_int_bounded(16);
-                        let z = source_z * 16 + random.next_int_bounded(16);
-                        let y = surface_y(world, x, z) + 3 + random.next_int_bounded(7);
-                        write_gateway(world, (x, y, z));
-                        if x.div_euclid(16) == cx && z.div_euclid(16) == cz {
-                            let config = self
-                                .gateway_return
-                                .expect("gateway flag checked immediately above");
-                            gateways.push(EndGateway { pos: (x, y, z), exit: config.exit, exact: config.exact });
-                        }
-                    }
-                }
-                if biome == END_HIGHLANDS && self.chorus {
-                    random.set_feature_seed(
-                        decoration_seed,
-                        self.chorus_index.unwrap_or_default() as i32,
-                        9,
-                    );
-                    for _ in 0..random.next_int_bounded(5) {
-                        let x = source_x * 16 + random.next_int_bounded(16);
-                        let z = source_z * 16 + random.next_int_bounded(16);
-                        let y = surface_y(world, x, z);
-                        if world.get(x, y, z) == "minecraft:air" && world.get(x, y - 1, z) == "minecraft:end_stone" {
-                        grow_chorus(world, &mut random, (x, y, z), (x, y, z), 0, &self.chorus_supports);
-                        }
-                    }
+            }
+        }
+        if self.chorus {
+            random.set_feature_seed(decoration_seed, self.chorus_index.unwrap_or_default() as i32, 9);
+            let attempts = random.next_int_bounded(5);
+            for _ in 0..attempts {
+                let x = source_x * 16 + random.next_int_bounded(16);
+                let z = source_z * 16 + random.next_int_bounded(16);
+                let y = surface_y(world, x, z);
+                if biome_source.biome_at_block_typed(x, y, z) == BuiltinBiome::EndHighlands
+                    && world.get(x, y, z) == "minecraft:air"
+                    && world.get(x, y - 1, z) == "minecraft:end_stone"
+                {
+                    grow_chorus(world, &mut random, (x, y, z), (x, y, z), 0, &self.chorus_supports);
                 }
             }
         }
         gateways
     }
 
+}
+
+/// Runs the `end_island` placement chain for one source chunk. The final
+/// biome filter is deliberately evaluated at each sampled origin, after the
+/// rarity, count, square, and height modifiers have consumed their draws.
+/// This keeps a source-centre biome from suppressing an eligible origin near a
+/// biome boundary while retaining the feature's exact random stream.
+fn apply_outer_islands<R: RandomSource, F: FnMut(i32, i32, i32) -> bool>(
+    world: &mut DenseBlockGrid,
+    random: &mut WorldgenRandom<R>,
+    decoration_seed: i64,
+    feature_index: i32,
+    source_x: i32,
+    source_z: i32,
+    mut biome_at_origin: F,
+) {
+    random.set_feature_seed(decoration_seed, feature_index, 0);
+    if random.next_float() >= 1.0 / 14.0 {
+        return;
+    }
+    let count = if random.next_int_bounded(4) < 3 { 1 } else { 2 };
+    for _ in 0..count {
+        let x = source_x * 16 + random.next_int_bounded(16);
+        let z = source_z * 16 + random.next_int_bounded(16);
+        let y = 55 + random.next_int_bounded(16);
+        if biome_at_origin(x, y, z) {
+            place_outer_island(world, random, (x, y, z));
+        }
+    }
+}
+
+fn apply_platform(world: &mut DenseBlockGrid, origin: PlatformOrigin) {
+    for dz in -2..=2 {
+        for dx in -2..=2 {
+            world.set(origin.x + dx, origin.y - 1, origin.z + dz, "minecraft:obsidian");
+            for dy in 0..3 {
+                world.set(origin.x + dx, origin.y + dy, origin.z + dz, "minecraft:air");
+            }
+        }
+    }
 }
 
 fn is_chorus(state: &str) -> bool {
@@ -576,7 +629,13 @@ fn parse_position(value: &Value) -> Option<(i32, i32, i32)> {
 
 fn surface_y(world: &DenseBlockGrid, x: i32, z: i32) -> i32 {
     for y in (0..128).rev() {
-        if world.get(x, y, z) != "minecraft:air" {
+        let state = world.get_id(x, y, z);
+        let Some(state) = world.interner().canonical_id(state) else {
+            continue;
+        };
+        if lodestone_data::block_solidity::blocks_motion(state)
+            || lodestone_data::snow_support::has_fluid_state(state)
+        {
             return y + 1;
         }
     }
@@ -713,6 +772,105 @@ mod tests {
             writes += 1;
         }
         assert_eq!(writes, 402, "fixture must exercise a non-trivial island");
+    }
+
+    /// The source chunk's biome is not a substitute for the final placement
+    /// modifier. A source-centre `end_barrens` answer can still produce an
+    /// eligible `small_end_islands` sample at one of the in-square origins.
+    /// The true arm accepts every sampled origin; the control rejects every
+    /// sampled origin while using the same source seed and therefore writes no
+    /// island. This also guards that the rarity/count/square/height draws stay
+    /// ahead of the per-origin biome decision.
+    #[test]
+    fn outer_island_filter_runs_per_sampled_origin() {
+        let mut accepted_seed = None;
+        for decoration_seed in 0..100_000 {
+            let mut world = DenseBlockGrid::new(-16, 0, -16, 48, 128, 48, "minecraft:air");
+            apply_outer_islands(
+                &mut world,
+                &mut WorldgenRandom::new(XoroshiroRandomSource::new(0)),
+                decoration_seed,
+                0,
+                0,
+                0,
+                |_, _, _| true,
+            );
+            let (min_x, min_y, min_z, size_x, size_y, size_z) = world.bounds();
+            let has_island = (min_x..min_x + size_x).any(|x| {
+                (min_y..min_y + size_y).any(|y| {
+                    (min_z..min_z + size_z).any(|z| world.get(x, y, z) == "minecraft:end_stone")
+                })
+            });
+            if has_island {
+                accepted_seed = Some(decoration_seed);
+                break;
+            }
+        }
+        let decoration_seed = accepted_seed.expect("test search must find a rarity pass");
+        let mut rejected = DenseBlockGrid::new(-16, 0, -16, 48, 128, 48, "minecraft:air");
+        apply_outer_islands(
+            &mut rejected,
+            &mut WorldgenRandom::new(XoroshiroRandomSource::new(0)),
+            decoration_seed,
+            0,
+            0,
+            0,
+            |_, _, _| false,
+        );
+        let (min_x, min_y, min_z, size_x, size_y, size_z) = rejected.bounds();
+        assert!((min_x..min_x + size_x).all(|x| {
+            (min_y..min_y + size_y).all(|y| {
+                (min_z..min_z + size_z).all(|z| rejected.get(x, y, z) == "minecraft:air")
+            })
+        }), "an ineligible sampled origin must suppress only that feature placement");
+    }
+
+    /// Causal control for the production path: search an outer ring until the
+    /// source-centre biome is ineligible but one of that source's sampled
+    /// origins resolves to `small_end_islands`. The latter must still place the
+    /// island at its origin.
+    #[test]
+    fn outer_island_uses_origin_biome_when_source_centre_is_ineligible() {
+        let seed = 42;
+        let decoration = EndDecoration::from_resolver(&FeatureOrderResolver);
+        let biome_source = EndBiomeSource::new(seed);
+        let mut found = false;
+        'sources: for source_x in 240..272 {
+            for source_z in 240..272 {
+                let center = biome_source.biome_at_quart_typed(source_x * 4, 0, source_z * 4);
+                if center == BuiltinBiome::SmallEndIslands {
+                    continue;
+                }
+                let mut candidates = Vec::new();
+                let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+                let decoration_seed = random.set_decoration_seed(seed, source_x * 16, source_z * 16);
+                let mut scratch = DenseBlockGrid::new(-16, 0, -16, 48, 128, 48, "minecraft:air");
+                apply_outer_islands(
+                    &mut scratch,
+                    &mut random,
+                    decoration_seed,
+                    0,
+                    source_x,
+                    source_z,
+                    |x, y, z| {
+                        candidates.push((x, y, z));
+                        false
+                    },
+                );
+                let Some(origin) = candidates
+                    .into_iter()
+                    .find(|&(x, y, z)| biome_source.biome_at_block_typed(x, y, z) == BuiltinBiome::SmallEndIslands)
+                else {
+                    continue;
+                };
+                let mut world = DenseBlockGrid::new(source_x * 16 - 16, 0, source_z * 16 - 16, 48, 128, 48, "minecraft:air");
+                decoration.apply_source(seed, source_x, source_z, &mut world, center);
+                assert_eq!(world.get(origin.0, origin.1, origin.2), "minecraft:end_stone");
+                found = true;
+                break 'sources;
+            }
+        }
+        assert!(found, "outer-ring search must find a cross-boundary sampled origin");
     }
 
     #[test]
@@ -890,7 +1048,7 @@ mod tests {
         assert_eq!(decoration.spikes.as_ref().map(Vec::len), Some(1));
 
         let mut world = DenseBlockGrid::new(-16, 0, -16, 48, 128, 48, "minecraft:air");
-        decoration.apply_region(17, 0, 0, &mut world, |_, _| THE_END);
+        decoration.apply_region(17, 0, 0, &mut world, |_, _| BuiltinBiome::TheEnd);
 
         assert_eq!(world.get(0, 69, 0), "minecraft:obsidian", "configured center/radius must be used");
         assert_eq!(world.get(2, 69, 0), "minecraft:air", "the configured radius must clip the pillar");
@@ -960,6 +1118,25 @@ mod tests {
                 serde_json::json!({ "type": kind, "config": {} })
             }
         }
+    }
+
+    #[test]
+    fn chorus_origin_filter_uses_the_sampled_biome_not_the_source_center() {
+        let decoration = EndDecoration::from_resolver(&FeatureOrderResolver);
+        let seed = 42;
+        let mut world = DenseBlockGrid::new(2944, 0, 1392, 48, 128, 48, "minecraft:air");
+        for z in 1392..1440 {
+            for x in 2944..2992 {
+                world.set(x, 63, z, "minecraft:end_stone");
+            }
+        }
+
+        let gateways = decoration.apply_source(seed, 185, 87, &mut world, BuiltinBiome::EndBarrens);
+        assert!(gateways.is_empty(), "this source does not produce a return gateway");
+        assert!(
+            (1392..1440).any(|z| (2944..2992).any(|x| is_chorus(world.get(x, 64, z)))),
+            "a sampled highlands origin must remain eligible even when the source centre has another biome",
+        );
     }
 
     /// The global order fixture is independent of the End driver's local
