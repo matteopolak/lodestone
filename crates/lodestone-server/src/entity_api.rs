@@ -41,9 +41,9 @@ pub struct EntityObservation {
     pub health: Option<f32>,
     /// Maximum health for a mob.
     pub max_health: Option<f32>,
-    /// The six player equipment slots, including empty slots. Mobs currently
-    /// expose an empty vector because their equipment has no server-side
-    /// equipment snapshot producer yet.
+    /// The six equipment slots, including empty slots. Player values are read
+    /// from the connection-owned inventory mirror; mob values are copied from
+    /// the authoritative species-spawn state.
     pub equipment: Vec<EntityEquipment>,
 }
 
@@ -170,7 +170,7 @@ impl ServerEntityApi {
                 velocity: mob.velocity(),
                 health: Some(mob.health()),
                 max_health: Some(mob.max_health()),
-                equipment: Vec::new(),
+                equipment: mob.equipment_snapshot(),
             })
         }) {
             return Some(observation);
@@ -216,7 +216,7 @@ impl ServerEntityApi {
                         velocity: mob.velocity(),
                         health: Some(mob.health()),
                         max_health: Some(mob.max_health()),
-                        equipment: Vec::new(),
+                        equipment: mob.equipment_snapshot(),
                     })
                     .collect::<Vec<_>>()
             });
