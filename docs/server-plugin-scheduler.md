@@ -31,6 +31,12 @@ work, cancels outstanding jobs, and discards queued completions. Worker panics
 are contained and release their reservation without invoking a hand-back.
 Dropping the scheduler performs the same shutdown transition.
 
+Synchronous callback panics are different: they are rethrown to the schedule
+owner, but the scheduler clears its in-dispatch latch first. A host that catches
+the plugin failure can therefore run a later tick and receive the original
+named failure once, rather than getting a misleading recursive-dispatch error
+on every subsequent pass.
+
 The production integrated-server constructors move the configured `World` into
 their primary tick task after `ServerBoot`. The production gate in
 `crate::ecs::gate` exercises that real boundary and asserts the exact delayed
@@ -43,7 +49,9 @@ effects belong in a hand-back or synchronous callback, never in the worker
 closure. Preserve the single reservation bound when changing completion
 storage: a completed result must continue to hold capacity until the tick owner
 handles or discards it. Add a focused lifecycle test for every new terminal
-state, and assert exact tick indices for delay or repetition changes.
+state, and assert exact tick indices for delay or repetition changes. If callback
+panic handling changes, preserve the rule that the original panic is rethrown
+after scheduler state is made recoverable.
 
 When changing production wiring, update the constructor path that calls
 `ServerApp::bootstrap_with` and the primary tick loop together. A scheduler unit
