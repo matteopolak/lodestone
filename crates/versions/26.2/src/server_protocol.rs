@@ -3313,7 +3313,15 @@ fn light_data_has_nonzero(data: &LightData) -> bool {
 }
 
 fn empty_light_storage_like(light: &ColumnLight) -> ColumnLight {
-    let mut empty = ColumnLight::new(light.light_section_count());
+    // `ColumnLight::new` accepts block sections and adds the lower and upper
+    // light boundaries. Recover that input instead of expanding an already
+    // complete light window a second time.
+    let block_section_count = light
+        .light_section_count()
+        .checked_sub(2)
+        .expect("a light window always includes its two boundary sections");
+    let mut empty = ColumnLight::new(block_section_count);
+    debug_assert_eq!(empty.light_section_count(), light.light_section_count());
     for section in 0..empty.light_section_count() {
         *empty.sky_mut(section) = LightData::Uniform(0);
         *empty.block_mut(section) = LightData::Uniform(0);
