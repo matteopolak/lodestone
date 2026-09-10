@@ -2967,15 +2967,12 @@ impl StructureRegistry {
             );
             unsupported.insert(
                 "mineshaft:pre_surface_world_reads".into(),
-                "six mineshaft placement helpers branch on what the world already holds \
-                 (replaceability, support-box, support-pillar placement, \
-                 plank-block assignment, double lower/upper support placement, \
-                 the downward pillar/chain probe). They read the eager overlay plus \
-                 `StartContext::block_kind_at`, which is the raw `_WG` shape: **every \
-                 solid block is one `Stone`**, so a surface rule's sand or an ore blob's \
-                 granite is invisible and a carver's cave is not. The face-sturdiness check is a \
-                 table over the eight states a mineshaft writes rather than a solidity \
-                 model"
+                "the eager mineshaft tree's vertical shift reads the pre-surface \
+                 heightmap, before later surface and carve output exists. The placement-time \
+                 replay now receives the decorating chunk's post-surface, post-carve grid for \
+                 replaceability, liquid-shell, support-box, plank, double-support and \
+                 downward pillar/chain probes; only the start-time vertical shift remains \
+                 outside that receiving-world view"
                     .into(),
             );
             unsupported.insert(

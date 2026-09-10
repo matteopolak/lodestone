@@ -324,6 +324,17 @@ fn the_coded_structures_s5_models_are_not_on_the_ledger() {
     ] {
         assert!(ledger.contains_key(key), "{key} is not on the ledger");
     }
+    let mineshaft_row = ledger
+        .get("mineshaft:pre_surface_world_reads")
+        .expect("the mineshaft pre-surface deviation stays named");
+    assert!(
+        mineshaft_row.contains("vertical shift"),
+        "the mineshaft row must identify the remaining eager height read: {mineshaft_row}"
+    );
+    assert!(
+        !mineshaft_row.contains("six mineshaft placement helpers"),
+        "placement-time world reads were moved to the receiving grid; stale detail remains: {mineshaft_row}"
+    );
     // The row whose gap **closed**: a rail `shape` is remapped now, by both
     // `rotate` and `mirror`, because a mineshaft corridor is the first thing in this
     // engine to place a rail under a real transform. A ledger that still carried it
