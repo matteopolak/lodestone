@@ -643,4 +643,112 @@ mod tests {
         }
         assert!(world.resource::<Calls>().0.is_empty());
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_panicking_worker_releases_capacity_without_a_hand_back() {
+        let mut world = world();
+        world.insert_resource(ServerTaskScheduler::with_async_hand_back_capacity(1));
+        let (started_tx, started_rx) = mpsc::sync_channel(1);
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        world
+            .resource_mut::<ServerTaskScheduler>()
+            .spawn_with_handback(
+                move || {
+                    started_tx.send(()).expect("worker start receiver alive");
+                    panic!("intentional scheduler worker failure");
+                },
+                |_, world| world.resource_mut::<Calls>().0.push(99),
+            )
+            .expect("the first task fits");
+        started_rx.recv_timeout(Duration::from_secs(1)).expect("worker starts");
+
+        // A panic is caught inside the worker. Once its reservation drops, a
+        // replacement is admitted; this is the lifecycle guarantee that keeps
+        // one faulty plugin job from permanently consuming the queue.
+        let mut replacement = None;
+        for _ in 0..1000 {
+            world.run_schedule(GameTick);
+            let result = world
+                .resource_mut::<ServerTaskScheduler>()
+                .spawn_with_handback(
+                    || 7_u8,
+                    |value, world| world.resource_mut::<Calls>().0.push(u64::from(value)),
+                );
+            match result {
+                Ok(id) => {
+                    replacement = Some(id);
+                    break;
+                }
+                Err(ServerAsyncTaskError::Full) => std::thread::yield_now(),
+                Err(ServerAsyncTaskError::Shutdown) => panic!("scheduler shut down unexpectedly"),
+            }
+        }
+        std::panic::set_hook(previous);
+        let replacement = replacement.expect("a panicking worker must release its reservation");
+
+        for _ in 0..1000 {
+            world.run_schedule(GameTick);
+            if world.resource::<Calls>().0 == [7] {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert_eq!(world.resource::<Calls>().0, [7]);
+        assert!(!world.resource_mut::<ServerTaskScheduler>().cancel_async(replacement));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn shutdown_discards_a_completed_hand_back_and_reports_named_errors() {
+        let mut world = world();
+        world.insert_resource(ServerTaskScheduler::with_async_hand_back_capacity(1));
+        let (finished_tx, finished_rx) = mpsc::sync_channel(1);
+        let id = world
+            .resource_mut::<ServerTaskScheduler>()
+            .spawn_with_handback(
+                move || {
+                    finished_tx.send(()).expect("worker finish receiver alive");
+                    42_u8
+                },
+                |value, world| world.resource_mut::<Calls>().0.push(u64::from(value)),
+            )
+            .expect("the first task fits");
+        finished_rx.recv_timeout(Duration::from_secs(1)).expect("worker finishes");
+        std::thread::yield_now();
+
+        let mut completion_reserved = false;
+        for _ in 0..1000 {
+            let result = world
+                .resource_mut::<ServerTaskScheduler>()
+                .spawn_with_handback(|| 8_u8, |_, _| {});
+            if result == Err(ServerAsyncTaskError::Full) {
+                completion_reserved = true;
+                break;
+            }
+            if let Ok(id) = result {
+                let _ = world.resource_mut::<ServerTaskScheduler>().cancel_async(id);
+                panic!("completed result released its reservation before the tick owner");
+            }
+            panic!("scheduler shut down unexpectedly");
+        }
+        assert!(completion_reserved, "the completed result must retain its reservation");
+
+        // The completion can already be queued, but shutdown owns the queue's
+        // terminal transition and must discard that result before any future
+        // world callback. Both terminal outcomes are named and non-blocking.
+        world.resource_mut::<ServerTaskScheduler>().shutdown_async_tasks();
+        assert!(!world.resource_mut::<ServerTaskScheduler>().cancel_async(id));
+        assert_eq!(
+            world
+                .resource_mut::<ServerTaskScheduler>()
+                .spawn_with_handback(|| 8_u8, |_, _| {}),
+            Err(ServerAsyncTaskError::Shutdown)
+        );
+        for _ in 0..4 {
+            world.run_schedule(GameTick);
+        }
+        assert!(world.resource::<Calls>().0.is_empty());
+    }
 }
