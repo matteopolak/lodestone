@@ -15,6 +15,7 @@ use lodestone_model::{
     ItemStack, RecipeBookType, ResourceKey, ResourcePackResponseKind, Rotation, SoundCategory,
     Text, Vec3, Vec3f,
 };
+use url::Url;
 use uuid::Uuid;
 
 use crate::chunk::{ChunkColumn, ColumnLightSettlement};
@@ -260,6 +261,95 @@ pub struct PlayerListing {
     pub username: String,
 }
 
+/// A valid resource-pack URL held by the server's version-free vocabulary.
+///
+/// The wrapper keeps the raw URL string behind an explicit parse boundary.
+/// Resource-pack downloads are restricted to absolute `http` and `https`
+/// URLs, matching the client-side admission rule; packet encoders still get a
+/// borrowed wire spelling through [`Self::as_str`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResourcePackUrl(Url);
+
+/// Why a resource-pack URL could not cross the server's version-free seam.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResourcePackUrlError {
+    /// The input is not an absolute URL understood by the URL parser.
+    Invalid(url::ParseError),
+    /// The URL uses a scheme other than `http` or `https`.
+    UnsupportedScheme(String),
+}
+
+impl std::fmt::Display for ResourcePackUrlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(error) => error.fmt(f),
+            Self::UnsupportedScheme(scheme) => {
+                write!(f, "unsupported resource-pack URL scheme {scheme:?}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ResourcePackUrlError {}
+
+impl ResourcePackUrl {
+    /// Parses and validates a resource-pack URL before it crosses the
+    /// version-free server seam.
+    pub fn parse(raw: impl AsRef<str>) -> Result<Self, ResourcePackUrlError> {
+        let url = Url::parse(raw.as_ref()).map_err(ResourcePackUrlError::Invalid)?;
+        Self::try_from(url)
+    }
+
+    /// Borrows the canonical URL text for wire encoding and diagnostics.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    /// Borrows the parsed URL when a caller needs URL semantics rather than
+    /// its wire spelling.
+    #[must_use]
+    pub fn as_url(&self) -> &Url {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ResourcePackUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ResourcePackUrl {
+    type Err = ResourcePackUrlError;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        Self::parse(raw)
+    }
+}
+
+impl TryFrom<Url> for ResourcePackUrl {
+    type Error = ResourcePackUrlError;
+
+    fn try_from(url: Url) -> Result<Self, Self::Error> {
+        if matches!(url.scheme(), "http" | "https") {
+            Ok(Self(url))
+        } else {
+            Err(ResourcePackUrlError::UnsupportedScheme(
+                url.scheme().to_owned(),
+            ))
+        }
+    }
+}
+
+impl std::ops::Deref for ResourcePackUrl {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
 /// A server-initiated resource pack push (the real resource-pack-push
 /// packet) in version-free vocabulary — the
 /// server-side representation of a push, fed by
@@ -270,9 +360,11 @@ pub struct PlayerListing {
 /// the pack's SHA-1 [`hash`] (lowercase hex, at most 40 chars — the real
 /// packet's own max-hash-length constant), the [`required`]
 /// flag that makes declining a disconnect, and an optional [`prompt`] chat
-/// component shown on the accept/decline screen. `url` and `hash` are owned
-/// `String`s (not borrowed) so a push can outlive its construction site and
-/// ride a feed across a task boundary.
+/// component shown on the accept/decline screen. The URL is parsed before it
+/// crosses this version-free seam; the version adapter converts it back to the
+/// wire string at its packet boundary. `hash` remains an owned `String`
+/// because its empty-or-hex shape is a wire compatibility rule rather than a
+/// URL-like identity.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResourcePackPush {
     /// The push's own uuid — the real engine generates a fresh one per push, and the
@@ -280,7 +372,7 @@ pub struct ResourcePackPush {
     /// `crate::server`'s decode of the serverbound `RESOURCE_PACK` frame).
     pub id: Uuid,
     /// The pack's download URL.
-    pub url: String,
+    pub url: ResourcePackUrl,
     /// The SHA-1 hash of the pack, lowercase hex, at most 40 characters
     /// (may be empty if the pack does not declare one).
     pub hash: String,
@@ -4293,6 +4385,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn resource_pack_url_is_parsed_at_the_server_seam() {
+        let url = ResourcePackUrl::parse("https://example.invalid/packs/demo.zip")
+            .expect("well-formed resource-pack URL");
+        assert_eq!(url.as_url().scheme(), "https");
+        assert_eq!(url.as_str(), "https://example.invalid/packs/demo.zip");
+        assert_eq!(&*url, url.as_str());
+        assert!(ResourcePackUrl::parse("not a URL").is_err());
+        assert!(matches!(
+            ResourcePackUrl::parse("ftp://example.invalid/packs/demo.zip"),
+            Err(ResourcePackUrlError::UnsupportedScheme(scheme)) if scheme == "ftp"
+        ));
+    }
+
+    #[test]
     fn ability_mode_changes_preserve_configured_speeds_and_revoke_flight() {
         let mut abilities = Abilities::for_mode(GameMode::Spectator);
         abilities.flying_speed = 0.075;
@@ -4507,7 +4613,11 @@ mod tests {
             send(1500 + warning_blocks)
         }
         fn encode_resource_pack_push(&self, push: &ResourcePackPush) -> ServerDirective {
-            send(1600 + push.url.len() as i32 + push.hash.len() as i32 + i32::from(push.required))
+            send(
+                1600 + push.url.as_str().len() as i32
+                    + push.hash.len() as i32
+                    + i32::from(push.required),
+            )
         }
         fn encode_update_advancements(
             &self,
@@ -4728,7 +4838,9 @@ mod tests {
         );
         let push = ResourcePackPush {
             id: Uuid::nil(),
-            url: "https://example.com/pack.zip".to_owned(),
+            url: "https://example.com/pack.zip"
+                .parse()
+                .expect("valid resource-pack URL"),
             hash: "0123456789abcdef".to_owned(),
             required: true,
             prompt: None,

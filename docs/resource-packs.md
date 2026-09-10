@@ -81,6 +81,11 @@ pack goes on top") and never appears in the local pack-selection screen's own
 list, matching vanilla keeping downloaded packs out of the user-visible
 repository.
 
+The server-side `ResourcePackPush` seam carries a parsed `ResourcePackUrl`
+rather than a free-form string. Construction accepts only absolute `http` and
+`https` URLs; the version adapter converts the validated value back to text
+only while writing the packet, while client packet DTOs remain wire strings.
+
 ### What a reload has to re-attach — the borrow/own split
 
 `Sim::reload_resource_pack_atlas` rebuilds the classifier, the block atlas
