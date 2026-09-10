@@ -41,7 +41,7 @@ use lodestone_game::placement::{
     Axis, Half, OrientationKind, Placement, PlacedState, UseOnContext, UseOnDecision,
 };
 use lodestone_model::event::EquipmentSlot;
-use lodestone_model::{BlockFace, BlockStateRef, EntityInteraction, Vec3f};
+use lodestone_model::{BlockFace, BlockStateRef, EntityInteraction, EntityNetworkId, Vec3f};
 use lodestone_particle::emit as particle_emit;
 use lodestone_physics::{
     CollisionView, EntityDimensions, FluidState, NearbyEntity, PhysicsProfile, PlayerState, Vec3d,
@@ -697,7 +697,7 @@ pub struct Sim {
     /// This holds an entity id rather than a copied pose: [`Sim::camera`]
     /// resolves it from shared entity state each frame, so a moving subject
     /// moves the rendered camera too.
-    camera_entity_id: Option<i32>,
+    camera_entity_id: Option<EntityNetworkId>,
     /// The local player's own walk/head-look/**arm-swing** animation clock,
     /// driven once per physics tick from its real position/orientation exactly the
     /// way `entities.rs` drives an [`EntityPose`] for a tracked network entity

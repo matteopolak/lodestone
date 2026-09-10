@@ -34,6 +34,8 @@
 
 use super::*;
 
+use lodestone_model::EntityNetworkId;
+
 impl Sim {
     /// World-space origin for an entity-attached sound: the entity's live feet
     /// position raised half a block so the source sits at body centre. Falls
@@ -46,8 +48,12 @@ impl Sim {
     /// `fold_entities` output every entity pixel gate reads, so a missing id
     /// (no connection, or a track the fold has not spawned yet) falls through
     /// to the player position exactly as before.
-    pub(crate) fn entity_sound_position(&self, entity_id: i32) -> glam::Vec3 {
-        if let Some(draw) = self.entity_draws().into_iter().find(|d| d.id == entity_id) {
+    pub(crate) fn entity_sound_position(&self, entity_id: EntityNetworkId) -> glam::Vec3 {
+        if let Some(draw) = self
+            .entity_draws()
+            .into_iter()
+            .find(|d| EntityNetworkId::from_raw(d.id) == entity_id)
+        {
             return draw.feet + glam::Vec3::new(0.0, 0.5, 0.0);
         }
         let p = self.player().position;
