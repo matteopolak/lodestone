@@ -108,11 +108,12 @@ use serde_json::Value;
 
 use crate::dense_grid::DenseBlockGrid;
 use crate::noise::ClimateNoise;
+use crate::stage_schedule::DecorationStep;
 
 /// Vanilla's own decoration-step ordinal — the eleventh
 /// and last decoration step. One past `VEGETAL_DECORATION`
 /// ([`super::STEP_VEGETAL_DECORATION`], 9).
-pub const STEP_TOP_LAYER_MODIFICATION: i32 = 10;
+pub const STEP_TOP_LAYER_MODIFICATION: i32 = DecorationStep::TopLayerModification.ordinal();
 
 /// The block state vanilla's own feature writes at `topPos`:
 /// one snow layer (vanilla's snow-layer block registers a single layer as

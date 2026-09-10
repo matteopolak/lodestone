@@ -50,6 +50,7 @@ pub mod overworld;
 pub mod profile;
 pub mod spawn_stage;
 pub mod spawners;
+pub mod stage_schedule;
 pub mod structure;
 pub mod surface;
 pub mod table_resolver;
