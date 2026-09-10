@@ -348,6 +348,12 @@ pub struct EndGenerator {
 const STARTS_MEMO_CEILING: usize = 8192;
 
 impl EndGenerator {
+    /// The named pass order consumed by this generator and its parity tools.
+    #[must_use]
+    pub const fn stage_schedule() -> &'static crate::stage_schedule::StageSchedule {
+        &crate::stage_schedule::END
+    }
+
     /// Builds the generator for `seed` from `noise_settings/end.json` and a
     /// [`Resolver`] carrying the End's density functions and noises.
     ///
@@ -451,7 +457,15 @@ impl EndGenerator {
     /// then decoration. No End biome names a carver.
     #[must_use]
     pub fn column(&self, cx: i32, cz: i32) -> EndColumn {
-        let (world, gateways) = self.decoration_region(cx, cz);
+        let mut schedule = Self::stage_schedule().cursor_at(
+            Self::stage_schedule()
+                .index_of(crate::stage_schedule::ColumnStage::Features)
+                .expect("End schedule must have a features boundary"),
+        );
+        let (world, gateways) = schedule.run(
+            crate::stage_schedule::ColumnStage::Features,
+            || self.decoration_region(cx, cz),
+        );
         let biome_quarts = self.biomes.chunk_quarts(cx, cz);
         let mut served = DenseBlockGrid::with_interner(
             self.interner.clone(),
@@ -472,7 +486,11 @@ impl EndGenerator {
             }
         }
         let (palette, blocks) = served.into_palette_and_blocks();
-        EndColumn { min_y: self.min_y, height: self.height, palette, blocks, biome_quarts, gateways }
+        let column = schedule.run(crate::stage_schedule::ColumnStage::Output, || {
+            EndColumn { min_y: self.min_y, height: self.height, palette, blocks, biome_quarts, gateways }
+        });
+        schedule.finish();
+        column
     }
 
     /// Complete structure starts whose origin is `(cx, cz)`.
@@ -569,6 +587,8 @@ impl EndGenerator {
     fn base_world(&self, cx: i32, cz: i32) -> DenseBlockGrid {
         let base_x = cx * 16;
         let base_z = cz * 16;
+        let mut schedule = Self::stage_schedule().cursor();
+        schedule.enter(crate::stage_schedule::ColumnStage::Fill);
         let aquifer = self.build_fill(cx, cz);
         // `Beardifier::empty()` rather than an `Option`: it takes
         // `fill_column`'s no-addition loop, so the End's density is the interpolated
@@ -583,8 +603,11 @@ impl EndGenerator {
         );
         let heights =
             crate::compose::solid_top_heights(&field, self.min_y, self.height, self.sea_level);
+        schedule.enter(crate::stage_schedule::ColumnStage::Biomes);
         let biome_quarts = self.biomes.chunk_quarts(cx, cz);
+        schedule.enter(crate::stage_schedule::ColumnStage::Surface);
         let surface_diff = self.surface_stage(&field, &heights, &biome_quarts, base_x, base_z);
+        schedule.enter(crate::stage_schedule::ColumnStage::Materialize);
         let world = crate::compose::materialize_column(
             &self.interner,
             &field,
@@ -596,7 +619,15 @@ impl EndGenerator {
             self.default_block_pre.state,
             self.default_fluid_pre.state,
         );
-        self.structure_place_stage(cx, cz, world)
+        schedule.enter(crate::stage_schedule::ColumnStage::StructureStarts);
+        let world = self.structure_place_stage(cx, cz, world);
+        schedule.enter(crate::stage_schedule::ColumnStage::StructurePlacement);
+        schedule.finish_prefix(
+            Self::stage_schedule()
+                .index_of(crate::stage_schedule::ColumnStage::Features)
+                .expect("End schedule must have a features boundary"),
+        );
+        world
     }
 
     /// Places every complete End-city piece intersecting this chunk after

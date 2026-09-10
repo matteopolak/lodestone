@@ -121,30 +121,36 @@ pub const NETHER_DECORATION_STEPS: &[DecorationStep] = &[
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceSchedule {
     dimension: Dimension,
-    offsets: &'static [(i32, i32)],
     completion: SourceCompletion,
 }
 
-/// Whether a source window has one proven completion permutation.
+/// How a source window completes.
+///
+/// The offsets are part of the `Fixed` variant rather than a field on the
+/// enclosing schedule. This makes it impossible to accidentally read a
+/// centre-last (or any other) permutation from a dimension whose completion
+/// is admission-dependent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceCompletion {
     /// The producer and replay comparator may use `offsets` directly.
-    Fixed,
+    Fixed(&'static [(i32, i32)]),
     /// The completion order is derived from the admitted/resident state for
     /// this request; no one 3x3 permutation is valid for every request.
     AdmissionDependent,
 }
 
 impl SourceSchedule {
-    pub const fn new(
-        dimension: Dimension,
-        offsets: &'static [(i32, i32)],
-        completion: SourceCompletion,
-    ) -> Self {
+    pub const fn fixed(dimension: Dimension, offsets: &'static [(i32, i32)]) -> Self {
         Self {
             dimension,
-            offsets,
-            completion,
+            completion: SourceCompletion::Fixed(offsets),
+        }
+    }
+
+    pub const fn admission_dependent(dimension: Dimension) -> Self {
+        Self {
+            dimension,
+            completion: SourceCompletion::AdmissionDependent,
         }
     }
 
@@ -154,24 +160,10 @@ impl SourceSchedule {
     }
 
     #[must_use]
-    pub const fn offsets(self) -> &'static [(i32, i32)] {
-        self.offsets
-    }
-
-    #[must_use]
     pub const fn completion(self) -> SourceCompletion {
         self.completion
     }
 
-    #[must_use]
-    pub fn contains_centre(self) -> bool {
-        self.offsets.contains(&(0, 0))
-    }
-
-    #[must_use]
-    pub fn centre_is_last(self) -> bool {
-        self.offsets.last() == Some(&(0, 0))
-    }
 }
 
 pub(crate) const OVERWORLD_SOURCE_OFFSETS: &[(i32, i32); 9] = &[
@@ -186,35 +178,19 @@ pub(crate) const OVERWORLD_SOURCE_OFFSETS: &[(i32, i32); 9] = &[
     (1, 1),
 ];
 
-pub(crate) const NETHER_SOURCE_OFFSETS: &[(i32, i32); 9] = &[
-    (-1, -1),
-    (-1, 0),
-    (-1, 1),
-    (0, -1),
-    (0, 1),
-    (1, -1),
-    (1, 0),
-    (1, 1),
-    (0, 0),
-];
-
 pub(crate) const END_SOURCE_OFFSETS: &[(i32, i32); 9] = OVERWORLD_SOURCE_OFFSETS;
 
 /// Current production source order for the Overworld mutable feature window.
 pub const OVERWORLD_SOURCES: SourceSchedule =
-    SourceSchedule::new(Dimension::Overworld, OVERWORLD_SOURCE_OFFSETS, SourceCompletion::Fixed);
+    SourceSchedule::fixed(Dimension::Overworld, OVERWORLD_SOURCE_OFFSETS);
 /// The Nether's mutable feature window. Its completion order is derived from
 /// the admitted/resident state; a fixed centre-last or centre-first permutation
 /// is not valid for every request.
 pub const NETHER_SOURCES: SourceSchedule =
-    SourceSchedule::new(
-        Dimension::Nether,
-        NETHER_SOURCE_OFFSETS,
-        SourceCompletion::AdmissionDependent,
-    );
+    SourceSchedule::admission_dependent(Dimension::Nether);
 /// End source order used when applying the three-by-three decoration region.
 pub const END_SOURCES: SourceSchedule =
-    SourceSchedule::new(Dimension::End, END_SOURCE_OFFSETS, SourceCompletion::Fixed);
+    SourceSchedule::fixed(Dimension::End, END_SOURCE_OFFSETS);
 
 /// One dimension's configured feature-step sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -374,6 +350,18 @@ impl StageCursor {
             self.schedule.stages.get(self.next)
         );
     }
+
+    /// Assert that a cached-prefix boundary was reached.
+    #[inline]
+    pub fn finish_prefix(self, boundary: usize) {
+        debug_assert_eq!(
+            self.next, boundary,
+            "{} generation prefix stopped at {}, expected {}",
+            self.schedule.dimension_name(),
+            self.next,
+            boundary
+        );
+    }
 }
 
 const OVERWORLD_STAGES: &[ColumnStage] = &[
@@ -472,13 +460,17 @@ mod tests {
         assert_eq!(OVERWORLD_SOURCES.dimension(), Dimension::Overworld);
         assert_eq!(NETHER_SOURCES.dimension(), Dimension::Nether);
         assert_eq!(END_SOURCES.dimension(), Dimension::End);
-        assert_eq!(OVERWORLD_SOURCES.completion(), SourceCompletion::Fixed);
+        let SourceCompletion::Fixed(overworld_offsets) = OVERWORLD_SOURCES.completion() else {
+            panic!("the Overworld source window must have a fixed order");
+        };
         assert_eq!(NETHER_SOURCES.completion(), SourceCompletion::AdmissionDependent);
-        assert_eq!(END_SOURCES.completion(), SourceCompletion::Fixed);
-        assert!(OVERWORLD_SOURCES.contains_centre());
-        assert!(!OVERWORLD_SOURCES.centre_is_last());
-        assert_eq!(OVERWORLD_SOURCES.offsets().len(), 9);
-        assert_eq!(END_SOURCES.offsets(), OVERWORLD_SOURCES.offsets());
+        let SourceCompletion::Fixed(end_offsets) = END_SOURCES.completion() else {
+            panic!("the End source window must have a fixed order");
+        };
+        assert!(overworld_offsets.contains(&(0, 0)));
+        assert_ne!(overworld_offsets.last(), Some(&(0, 0)));
+        assert_eq!(overworld_offsets.len(), 9);
+        assert_eq!(end_offsets, overworld_offsets);
     }
 
     #[test]

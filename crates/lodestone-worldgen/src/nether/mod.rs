@@ -138,6 +138,7 @@ use crate::structure::{
     CodedLoot, HeightmapKind, PieceRefinement, StartContext, StructureRegistry, StructureStart,
 };
 use crate::surface::{PreState, SurfaceDiff, SurfaceSystem, identity_canon};
+use crate::stage_schedule::ColumnStage;
 
 /// One generated Nether chunk: the block column plus its 16 horizontal biome
 /// quarts.
@@ -1028,6 +1029,12 @@ fn build_nether_ore_tag_map(
 }
 
 impl NetherGenerator {
+    /// The named pass order consumed by this generator and its parity tools.
+    #[must_use]
+    pub const fn stage_schedule() -> &'static crate::stage_schedule::StageSchedule {
+        &crate::stage_schedule::NETHER
+    }
+
     /// Builds the generator for `seed` from `noise_settings/nether.json` and a
     /// [`Resolver`] carrying the Nether's density functions, noises, biome
     /// parameter table, biome documents and configured carvers.
@@ -1258,23 +1265,29 @@ impl NetherGenerator {
     #[must_use]
     pub fn column(&self, cx: i32, cz: i32) -> NetherColumn {
         let pre = self.pre_decoration_stage(cx, cz);
-        let (world, decoration_spills) = self.mixed_step7_stage_with_spills(
-            cx,
-            cz,
-            (*pre.0).clone(),
-            &pre.1,
+        let mut schedule = Self::stage_schedule().cursor_at(
+            Self::stage_schedule()
+                .index_of(ColumnStage::Features)
+                .expect("Nether schedule must have a features boundary"),
         );
+        let (world, decoration_spills) = schedule.run(ColumnStage::Features, || {
+            self.mixed_step7_stage_with_spills(cx, cz, (*pre.0).clone(), &pre.1)
+        });
 
-        let (palette, blocks) = world.into_palette_and_blocks();
-        NetherColumn {
-            min_y: self.min_y,
-            height: self.height,
-            palette,
-            blocks,
-            biome_quarts: pre.2.clone(),
-            placement_loot: pre.3.clone(),
-            decoration_spills,
-        }
+        let column = schedule.run(ColumnStage::Output, || {
+            let (palette, blocks) = world.into_palette_and_blocks();
+            NetherColumn {
+                min_y: self.min_y,
+                height: self.height,
+                palette,
+                blocks,
+                biome_quarts: pre.2.clone(),
+                placement_loot: pre.3.clone(),
+                decoration_spills,
+            }
+        });
+        schedule.finish();
+        column
     }
 
     /// Generates the complete pre-decoration field for `(cx, cz)`.
@@ -1680,16 +1693,31 @@ impl NetherGenerator {
                 .fetch_add(1, Ordering::Relaxed);
             let base_x = cx * 16;
             let base_z = cz * 16;
+            let mut schedule = Self::stage_schedule().cursor();
+            schedule.enter(ColumnStage::StructureStarts);
             let refs = self.structure_refs(cx, cz);
+            schedule.enter(ColumnStage::StructureReferences);
+            schedule.enter(ColumnStage::StructureInfluence);
             let beard = self.beardifier_for(cx, cz, &refs);
             let aquifer = self.build_fill(cx, cz);
+            schedule.enter(ColumnStage::Fill);
             let field = self.fill_stage(&aquifer, base_x, base_z, &beard);
             let heights = self.heights_from_field(&field);
+            schedule.enter(ColumnStage::Biomes);
             let biome_quarts = self.biome_quarts(cx, cz);
+            schedule.enter(ColumnStage::Surface);
             let surface_diff = self.surface_stage(&field, &heights, base_x, base_z);
+            schedule.enter(ColumnStage::Materialize);
             let world = self.materialize_world(&field, surface_diff, base_x, base_z);
+            schedule.enter(ColumnStage::Carvers);
             let world = self.carve_stage(cx, cz, &aquifer, world);
+            schedule.enter(ColumnStage::StructurePlacement);
             let (world, placement_loot) = self.structure_place_stage(cx, cz, &refs, world);
+            schedule.finish_prefix(
+                Self::stage_schedule()
+                    .index_of(ColumnStage::Features)
+                    .expect("Nether schedule must have a features boundary"),
+            );
             (Arc::new(world), heights, biome_quarts, placement_loot)
         })
     }
