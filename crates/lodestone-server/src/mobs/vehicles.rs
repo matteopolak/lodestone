@@ -7,7 +7,7 @@
 
 use lodestone_data::{block_states, collision_shapes};
 use lodestone_physics::{CollisionView, EntityDimensions, Vec3d};
-use lodestone_model::{ResourceKey, Vec3};
+use lodestone_model::{EntityNetworkId, ResourceKey, Vec3};
 use uuid::Uuid;
 
 use super::{MobSim, TrackedVehicle, block_state_id};
@@ -120,6 +120,22 @@ impl<'w> MobSim<'w> {
         id
     }
 
+    /// Spawns a vehicle through the typed server-facing id seam.
+    ///
+    /// The older [`Self::spawn_vehicle`] entry point remains the raw store
+    /// operation used by packet-facing server code in this module. Callers
+    /// outside that protocol/internal boundary should use this method so a
+    /// plugin-owned id can never be mistaken for a server-owned vehicle.
+    #[must_use]
+    pub fn spawn_vehicle_typed(
+        &mut self,
+        entity_type: ResourceKey,
+        position: Vec3,
+        yaw: f32,
+    ) -> EntityNetworkId {
+        server_entity_id(self.spawn_vehicle(entity_type, position, yaw))
+    }
+
     /// `VehicleEntity.hurtServer` — the whole of what a punch does to a boat,
     /// raft or minecart: flip the rock direction, restart the ten-tick clock and
     /// add the damage that scales the rock's amplitude.
@@ -173,6 +189,12 @@ impl<'w> MobSim<'w> {
         self.vehicles.get(&id).map(|v| &v.entity_type)
     }
 
+    /// Returns a vehicle type through the typed server-facing id seam.
+    #[must_use]
+    pub fn vehicle_type_typed(&self, id: EntityNetworkId) -> Option<&ResourceKey> {
+        self.vehicle_type(server_entity_raw(id)?)
+    }
+
     /// A tracked vehicle's `(position, yaw)`.
     #[must_use]
     pub fn vehicle_transform(&self, id: i32) -> Option<(Vec3, f32)> {
@@ -184,10 +206,22 @@ impl<'w> MobSim<'w> {
         })
     }
 
+    /// Returns a vehicle transform through the typed server-facing id seam.
+    #[must_use]
+    pub fn vehicle_transform_typed(&self, id: EntityNetworkId) -> Option<(Vec3, f32)> {
+        self.vehicle_transform(server_entity_raw(id)?)
+    }
+
     /// The controlling passenger's player entity id, if the vehicle is occupied.
     #[must_use]
     pub fn vehicle_rider(&self, id: i32) -> Option<i32> {
         self.vehicles.get(&id).and_then(|v| v.rider)
+    }
+
+    /// Returns the typed id of a vehicle's rider, when occupied.
+    #[must_use]
+    pub fn vehicle_rider_typed(&self, id: EntityNetworkId) -> Option<EntityNetworkId> {
+        self.vehicle_rider(server_entity_raw(id)?).map(server_entity_id)
     }
 
     /// The vehicle `player_entity_id` is riding, if any.
@@ -197,6 +231,16 @@ impl<'w> MobSim<'w> {
             .iter()
             .find(|(_, v)| v.rider == Some(player_entity_id))
             .map(|(&id, _)| id)
+    }
+
+    /// Returns the typed vehicle occupied by a typed player id.
+    #[must_use]
+    pub fn vehicle_ridden_by_typed(
+        &self,
+        player_entity_id: EntityNetworkId,
+    ) -> Option<EntityNetworkId> {
+        self.vehicle_ridden_by(server_entity_raw(player_entity_id)?)
+            .map(server_entity_id)
     }
 
     /// `AbstractBoat.interact` → `player.startRiding(this)`.
@@ -250,6 +294,22 @@ impl<'w> MobSim<'w> {
         true
     }
 
+    /// Mounts a typed player id on a typed vehicle id.
+    pub fn mount_vehicle_typed(
+        &mut self,
+        id: EntityNetworkId,
+        player_entity_id: EntityNetworkId,
+        using_secondary_action: bool,
+    ) -> bool {
+        let Some(id) = server_entity_raw(id) else {
+            return false;
+        };
+        let Some(player_entity_id) = server_entity_raw(player_entity_id) else {
+            return false;
+        };
+        self.mount_vehicle(id, player_entity_id, using_secondary_action)
+    }
+
     /// `Entity.stopRiding` for whatever `player_entity_id` is aboard, returning the
     /// vehicle it left.
     ///
@@ -262,6 +322,15 @@ impl<'w> MobSim<'w> {
             vehicle.rider = None;
         }
         Some(id)
+    }
+
+    /// Dismounts a typed player id and returns the typed vehicle it left.
+    pub fn dismount_rider_typed(
+        &mut self,
+        player_entity_id: EntityNetworkId,
+    ) -> Option<EntityNetworkId> {
+        self.dismount_rider(server_entity_raw(player_entity_id)?)
+            .map(server_entity_id)
     }
 
     /// Vanilla `AbstractBoat.getDismountLocationForPassenger` for one tracked
@@ -285,6 +354,17 @@ impl<'w> MobSim<'w> {
             passenger_yaw,
             block_state,
         ))
+    }
+
+    /// Computes a dismount position through the typed vehicle-id seam.
+    #[must_use]
+    pub fn vehicle_dismount_position_typed(
+        &self,
+        id: EntityNetworkId,
+        passenger_yaw: f32,
+        block_state: &dyn Fn(i32, i32, i32) -> String,
+    ) -> Option<Vec3> {
+        self.vehicle_dismount_position(server_entity_raw(id)?, passenger_yaw, block_state)
     }
 
     /// Accepts a client-authoritative `MoveVehicle` for the vehicle
@@ -326,6 +406,19 @@ impl<'w> MobSim<'w> {
         Some(id)
     }
 
+    /// Applies a vehicle move from a typed player id and returns the typed
+    /// vehicle id. The packet decoder remains responsible for the one raw-id
+    /// conversion before calling this adapter.
+    pub fn apply_vehicle_move_typed(
+        &mut self,
+        player_entity_id: EntityNetworkId,
+        position: Vec3,
+        yaw: f32,
+    ) -> Option<EntityNetworkId> {
+        self.apply_vehicle_move(server_entity_raw(player_entity_id)?, position, yaw)
+            .map(server_entity_id)
+    }
+
     /// Accepts a `ServerboundPaddleBoatPacket` for the vehicle
     /// `player_entity_id` is riding — purely cosmetic bookkeeping for
     /// [`snapshots`](Self::snapshots)'s `MetadataField::BoatPaddles`, refused
@@ -342,6 +435,18 @@ impl<'w> MobSim<'w> {
         vehicle.paddle_left = left;
         vehicle.paddle_right = right;
         Some(id)
+    }
+
+    /// Applies paddle state from a typed player id and returns the typed
+    /// vehicle id.
+    pub fn apply_boat_paddle_typed(
+        &mut self,
+        player_entity_id: EntityNetworkId,
+        left: bool,
+        right: bool,
+    ) -> Option<EntityNetworkId> {
+        self.apply_boat_paddle(server_entity_raw(player_entity_id)?, left, right)
+            .map(server_entity_id)
     }
 
     /// One tick of every **unridden** vehicle — `AbstractBoat.tick`'s
@@ -517,6 +622,21 @@ impl<'w> MobSim<'w> {
             }
         }
     }
+}
+
+/// Converts an id from the typed server-facing vehicle API to the raw key used
+/// by the simulation's packet-facing maps. Plugin-owned ids and values outside
+/// the signed wire range are rejected before they reach those maps.
+fn server_entity_raw(id: EntityNetworkId) -> Option<i32> {
+    match id {
+        EntityNetworkId::Server(raw) => i32::try_from(raw).ok(),
+        EntityNetworkId::Plugin(_) => None,
+    }
+}
+
+/// Classifies an id produced by the server-owned vehicle map.
+fn server_entity_id(raw: i32) -> EntityNetworkId {
+    EntityNetworkId::from_wire(raw).expect("server vehicle ids must be non-negative")
 }
 
 fn merge_vehicle_tick_owner_batches(
@@ -1069,6 +1189,32 @@ mod vehicle_tests {
             wrong.push("an id that is not a vehicle cannot be boarded");
         }
         assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    #[test]
+    fn typed_vehicle_ids_cover_spawn_mount_observation_and_dismount() {
+        let world = world();
+        let mut sim = MobSim::new(&world);
+        let boat = sim.spawn_vehicle_typed(
+            "minecraft:oak_boat".parse().expect("a valid key"),
+            Vec3::new(8.5, 63.4, 8.5),
+            41.0,
+        );
+        let player = EntityNetworkId::from_wire(7).expect("a server player id");
+
+        assert_eq!(
+            sim.vehicle_type_typed(boat).map(ToString::to_string),
+            Some("minecraft:oak_boat".to_owned()),
+        );
+        assert!(sim.mount_vehicle_typed(boat, player, false));
+        assert_eq!(sim.vehicle_rider_typed(boat), Some(player));
+        assert_eq!(sim.vehicle_ridden_by_typed(player), Some(boat));
+        assert_eq!(sim.dismount_rider_typed(player), Some(boat));
+        assert_eq!(sim.vehicle_rider_typed(boat), None);
+
+        let plugin_id = EntityNetworkId::plugin(-1).expect("a plugin id");
+        assert!(!sim.mount_vehicle_typed(boat, plugin_id, false));
+        assert_eq!(sim.vehicle_ridden_by_typed(plugin_id), None);
     }
 
     /// **The handover, which is the whole point of the vehicle registry.**
