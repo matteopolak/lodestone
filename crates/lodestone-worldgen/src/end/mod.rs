@@ -705,6 +705,8 @@ impl EndGenerator {
                         }
                         Some(crate::structure::PieceRefinement::BuriedTreasureChest)
                         | Some(crate::structure::PieceRefinement::RuinedPortalTerrain { .. })
+                        | Some(crate::structure::PieceRefinement::FortressPlacement { .. })
+                        | Some(crate::structure::PieceRefinement::NetherFossilDriedGhast { .. })
                         | None => {}
                     }
                 }

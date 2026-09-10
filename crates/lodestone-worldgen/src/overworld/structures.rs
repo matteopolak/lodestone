@@ -900,6 +900,8 @@ impl OverworldGenerator {
                             features_cannot_replace,
                         );
                     }
+                    Some(PieceRefinement::FortressPlacement { .. })
+                    | Some(PieceRefinement::NetherFossilDriedGhast { .. }) => {}
                     None => {}
                 }
             }

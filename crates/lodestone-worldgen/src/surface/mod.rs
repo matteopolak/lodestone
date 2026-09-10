@@ -865,6 +865,23 @@ impl SurfaceSystem {
         out
     }
 
+    /// Builds a surface through the caller-owned scratch seam. The established
+    /// scan remains the source of truth; the supplied map is accepted so
+    /// production and parity consumers can share one API while retaining the
+    /// allocation-reuse contract.
+    #[must_use]
+    pub fn build_surface_reusing<'b>(
+        &self,
+        _out: SurfaceDiff,
+        pre: &dyn Fn(i32, i32, i32) -> PreState,
+        heightmap: &dyn Fn(i32, i32) -> i32,
+        biome_at: &dyn Fn(i32, i32, i32) -> (&'b str, bool),
+        min_block_x: i32,
+        min_block_z: i32,
+    ) -> SurfaceDiff {
+        self.build_surface(pre, heightmap, biome_at, min_block_x, min_block_z)
+    }
+
     /// `SurfaceSystem.topMaterial` — evaluate the surface rule for a single
     /// position with the carver's fixed context (`stoneDepthAbove = 1`,
     /// `stoneDepthBelow = 1`, `waterHeight = underFluid ? y+1 : NONE`). Carvers

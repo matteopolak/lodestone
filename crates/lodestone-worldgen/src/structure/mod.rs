@@ -624,6 +624,14 @@ pub struct StructurePiece {
 /// structure's own chunk has already been through surface rules and carvers.
 #[derive(Debug, Clone)]
 pub enum PieceRefinement {
+    /// Terrain-dependent remainder of a fortress piece whose immutable block
+    /// list was already emitted when the start was created.
+    FortressPlacement {
+        kind: fortress::FortressPieceKind,
+        facing: coded::Facing,
+        chest: bool,
+        end_seed: Option<i32>,
+    },
     /// Placed-feature elements retained from a jigsaw pool in document order.
     FeaturePlacements {
         /// Fully resolved placements at this assembled piece's world origin.
@@ -653,6 +661,8 @@ pub enum PieceRefinement {
     /// deferred-placement walk runs) — only the chest's *placement* is
     /// deferred, not its start.
     BuriedTreasureChest,
+    /// The dried-ghast roll for a Nether fossil, tested after template writes.
+    NetherFossilDriedGhast { seed: i64 },
     /// The post-template terrain growth around a ruined portal.
     ///
     /// Template processors build the frame first. This refinement then reads
