@@ -447,33 +447,6 @@ impl LifecycleWorldgenSource for EndChunkSource {
         }
     }
 
-    fn feature_result_for_target(
-        &self,
-        target: ChunkPos,
-        source: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
-        _resident: &BTreeMap<ChunkPos, ChunkColumn>,
-    ) -> LifecycleFeatureResult {
-        let overrides = override_vec(overrides);
-        let result = self.generator().parity_source_decoration_for_target_with_overrides(
-            target.0,
-            target.1,
-            source.0,
-            source.1,
-            &overrides,
-        );
-        LifecycleFeatureResult {
-            spills: result.spills.into_iter().map(|spill| LifecycleSpill {
-                source: spill.source,
-                position: spill.position,
-                state: spill.state,
-                transient: false,
-            }).collect(),
-            block_entities: Vec::new(),
-            end_gateways: result.gateways,
-        }
-    }
-
     fn attach_end_gateways(
         &self,
         column: &mut ChunkColumn,
