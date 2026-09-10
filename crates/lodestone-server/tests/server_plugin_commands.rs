@@ -11,7 +11,7 @@ use std::sync::Arc;
 use lodestone_command::{IntegerArgument, ParsedValue};
 use lodestone_server::plugin_commands::{
     ServerCommandOutcome, ServerCommandRegistry, ServerPermissionDefault,
-    ServerPermissions, ServerPluginCommand,
+    ServerCommandInvocation, ServerPermissions, ServerPluginCommand,
 };
 use lodestone_server::{
     ChunkColumn, ChunkSource, CommandDispatch, IntegratedServer, RconConfig, ServerBound,
@@ -78,7 +78,7 @@ fn plugin_dispatch() -> CommandDispatch {
     let mut command = ServerPluginCommand::new("probe");
     command.alias("p").permission("example.probe");
     let count = command.argument(command.root(), "count", Arc::new(IntegerArgument::bounded(1, 9)));
-    command.on_execute(|invocation| {
+    command.on_execute(count, |invocation: &ServerCommandInvocation| {
         let count = match invocation.parsed.argument("count") {
             Some(ParsedValue::Integer(value)) => *value,
             _ => return ServerCommandOutcome::refused("missing count"),
