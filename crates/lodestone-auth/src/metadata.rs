@@ -648,6 +648,38 @@ mod tests {
         assert_eq!(AccountsMetadata::from_json(EXPECTED_JSON), sample());
     }
 
+    #[test]
+    fn the_legacy_profiles_document_migrates_into_typed_metadata() {
+        // This is the on-disk shape written before the typed document existed;
+        // parsing it is the read-side migration boundary.
+        let legacy = r#"{
+          "selected":"069a79f4-44e9-4726-a5be-fca90e38aaf5",
+          "profiles":[
+            {"profile_id":"069a79f4-44e9-4726-a5be-fca90e38aaf5","username":"Notch",
+             "skin_url":"https://textures.minecraft.net/texture/abc123","last_used":1700000000}
+          ]
+        }"#;
+        assert_eq!(AccountsMetadata::from_json(legacy), sample());
+    }
+
+    #[test]
+    fn serialization_keeps_optional_metadata_fields_in_the_legacy_shape() {
+        let id = Uuid::parse_str("069a79f4-44e9-4726-a5be-fca90e38aaf5").unwrap();
+        let metadata = AccountsMetadata {
+            selected: None,
+            profiles: vec![AccountProfile {
+                profile_id: id,
+                username: "NoSkin".to_owned(),
+                skin_url: None,
+                last_used: 0,
+            }],
+        };
+        let text = serde_json::to_string_pretty(&metadata.to_document()).unwrap();
+        assert!(text.contains("\"skin_url\": null"));
+        assert!(text.contains("\"last_used\": 0"));
+        assert_eq!(AccountsMetadata::from_json(&text), metadata);
+    }
+
     // -- tolerant parsing -------------------------------------------------
 
     #[test]
