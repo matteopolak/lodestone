@@ -19,7 +19,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use lodestone_game::recipe::{CraftingGrid, Ingredient, Recipe, TagResolver};
-use lodestone_game::recipe_json::{parse_recipe, parse_tag};
+use lodestone_game::recipe_json::{
+    IngredientDocument, RecipeDocument, ShapedRecipeDocument, parse_recipe, parse_recipe_document,
+    parse_tag_text,
+};
 use lodestone_model::Identifier;
 
 fn cache_root() -> Option<PathBuf> {
@@ -49,12 +52,9 @@ fn load_tags(root: &Path) -> TagResolver {
         let Ok(text) = fs::read_to_string(&path) else {
             continue;
         };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
-            continue;
-        };
         let stem = path.file_stem().unwrap().to_string_lossy();
         let tag_id: Identifier = format!("minecraft:{stem}").parse().unwrap();
-        if let Ok(entries) = parse_tag(&value) {
+        if let Ok(entries) = parse_tag_text(&text) {
             tags.insert(tag_id, entries);
         }
     }
@@ -121,8 +121,14 @@ fn recipe_corpus_coverage() {
         total += 1;
         let name = path.file_stem().unwrap().to_string_lossy().to_string();
         let text = fs::read_to_string(&path).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        let recipe = match parse_recipe(&value) {
+        let document = match parse_recipe_document(&text) {
+            Ok(document) => document,
+            Err(error) => {
+                parse_fail.push(format!("{name}: {error}"));
+                continue;
+            }
+        };
+        let recipe = match parse_recipe(&document) {
             Ok(r) => {
                 parse_ok += 1;
                 r
@@ -149,7 +155,10 @@ fn recipe_corpus_coverage() {
         match &recipe {
             Recipe::Shaped(r) => {
                 grid_recipes += 1;
-                let cells = shaped_cells(&value);
+                let RecipeDocument::Shaped(document) = &document else {
+                    panic!("typed recipe kind disagreed with parsed model");
+                };
+                let cells = shaped_cells(document);
                 match build_grid_shaped(&cells.0, cells.1, cells.2, &tags) {
                     Some(grid) => match r.matches(&grid, &tags) {
                         true => grid_matched += 1,
@@ -160,7 +169,10 @@ fn recipe_corpus_coverage() {
             }
             Recipe::Shapeless(r) => {
                 grid_recipes += 1;
-                let ings = shapeless_ings(&value);
+                let RecipeDocument::Shapeless(document) = &document else {
+                    panic!("typed recipe kind disagreed with parsed model");
+                };
+                let ings: Vec<Ingredient> = document.ingredients.iter().map(parse_ing).collect();
                 let mut reps = Vec::new();
                 let mut ok = true;
                 for ing in &ings {
@@ -234,16 +246,10 @@ fn recipe_corpus_coverage() {
 
 /// Re-extract shaped pattern cells from raw JSON (the parsed `ShapedRecipe`
 /// keeps them private). Mirrors the loader's own logic.
-fn shaped_cells(value: &serde_json::Value) -> (Vec<Option<Ingredient>>, usize, usize) {
-    let rows: Vec<&str> = value["pattern"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|r| r.as_str().unwrap())
-        .collect();
+fn shaped_cells(document: &ShapedRecipeDocument) -> (Vec<Option<Ingredient>>, usize, usize) {
+    let rows: Vec<&str> = document.pattern.iter().map(String::as_str).collect();
     let h = rows.len();
     let w = rows.iter().map(|r| r.chars().count()).max().unwrap_or(0);
-    let key = value["key"].as_object().unwrap();
     let mut cells = Vec::with_capacity(w * h);
     for row in &rows {
         let chars: Vec<char> = row.chars().collect();
@@ -252,32 +258,21 @@ fn shaped_cells(value: &serde_json::Value) -> (Vec<Option<Ingredient>>, usize, u
             if c == ' ' {
                 cells.push(None);
             } else {
-                cells.push(Some(parse_ing(&key[&c.to_string()])));
+                cells.push(Some(parse_ing(
+                    document.key.get(&c.to_string()).expect("pattern key"),
+                )));
             }
         }
     }
     (cells, w, h)
 }
 
-fn shapeless_ings(value: &serde_json::Value) -> Vec<Ingredient> {
-    value["ingredients"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(parse_ing)
-        .collect()
-}
-
-fn parse_ing(v: &serde_json::Value) -> Ingredient {
-    match v {
-        serde_json::Value::String(s) => {
-            if let Some(t) = s.strip_prefix('#') {
-                Ingredient::Tag(t.parse().unwrap())
-            } else {
-                Ingredient::Item(s.parse().unwrap())
-            }
+fn parse_ing(document: &IngredientDocument) -> Ingredient {
+    match document {
+        IngredientDocument::Item(id) => Ingredient::Item(id.clone()),
+        IngredientDocument::Tag(id) => Ingredient::Tag(id.clone()),
+        IngredientDocument::Any(options) => {
+            Ingredient::Any(options.iter().map(parse_ing).collect())
         }
-        serde_json::Value::Array(a) => Ingredient::Any(a.iter().map(parse_ing).collect()),
-        _ => panic!("unexpected ingredient shape"),
     }
 }
