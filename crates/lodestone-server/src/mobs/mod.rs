@@ -3244,17 +3244,10 @@ impl<'w> SimMob<'w> {
 /// the uuid and canonical entity-type key a spawn packet needs live here,
 /// exactly the split [`SimMob`] already makes between `NavigatingMob`'s
 /// version-free body and this crate's wire metadata.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ProjectileMeta {
     uuid: Uuid,
     entity_type: ResourceKey,
-    /// The owner admitted for this projectile's next tick-start plan.
-    ///
-    /// The central projectile writer advances this only after the source-stop
-    /// and durable-save barrier has admitted the completed destination.
-    tick_owner: crate::mobs::projectiles::ProjectileTickOwner,
-    /// The bounded handoff state for this projectile's cross-owner movement.
-    handoff: EntityOwnershipHandoff,
     /// The entity id that launched it, if known.
     ///
     /// Load-bearing for the impact pass, not bookkeeping: a projectile is spawned

@@ -5,9 +5,8 @@
 `lodestone_server::entity_handoff::EntityOwnershipHandoff` is the bounded
 source-stop/destination-start barrier for a moving entity that crosses from one
 tick-region owner to another. Dropped-item motion and experience-orb motion
-are production consumers, and ballistic projectile motion now uses the same
-barrier; this slice keeps the hand-off on the authoritative simulation writer
-without changing the typed network-id surface.
+are production consumers; this slice keeps the hand-off on the authoritative
+simulation writer without changing the typed network-id surface.
 
 ## How it works
 
@@ -43,10 +42,8 @@ admit the destination only after that replacement. `saved_entities` and
 `native_entities` read the same centrally applied state, so a save sees either
 the pre-transfer or post-transfer record. An asynchronous region worker must
 retain the token until its durable-save acknowledgement before releasing the
-source; the current item, orb, and projectile paths use the synchronous
-in-memory writer callback at this boundary. Projectiles retain their admitted
-owner and handoff state with their existing wire metadata, so an impact cannot
-recreate ownership from a post-transfer position.
+source; the current item and orb paths use the synchronous in-memory writer
+callback at this boundary.
 
 ## How to change it
 
