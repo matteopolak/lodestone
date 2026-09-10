@@ -50,6 +50,7 @@ use std::sync::{Arc, Mutex};
 
 use lodestone_core::Nbt;
 use lodestone_model::{BlockPos, ItemStack};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::brewing::BrewingStand;
 use crate::composter::Composter;
@@ -118,7 +119,20 @@ impl BlockEntityKind {
     /// Return the canonical registry spelling for this key.
     #[must_use]
     pub fn name(&self) -> &str {
-        match self {
+        self.builtin_name().unwrap_or_else(|| match self {
+            Self::Extension(name) => name,
+            _ => unreachable!("every built-in has a canonical name"),
+        })
+    }
+
+    /// Return the static spelling for a built-in key.
+    ///
+    /// This is separate from [`Self::name`] so a caller holding a record-owned
+    /// extension can keep borrowing its storage while callers of a typed key
+    /// can borrow a static built-in string without an owned temporary.
+    #[must_use]
+    pub const fn builtin_name(&self) -> Option<&'static str> {
+        Some(match self {
             Self::EndGateway => "minecraft:end_gateway",
             Self::Composter => "minecraft:composter",
             Self::Furnace => "minecraft:furnace",
@@ -137,8 +151,8 @@ impl BlockEntityKind {
             Self::HangingSign => "minecraft:hanging_sign",
             Self::Beacon => "minecraft:beacon",
             Self::Crafter => "minecraft:crafter",
-            Self::Extension(name) => name,
-        }
+            Self::Extension(_) => return None,
+        })
     }
 
     /// Consume this key into its registry spelling.
@@ -154,6 +168,30 @@ impl BlockEntityKind {
     #[must_use]
     pub fn is_extension(&self) -> bool {
         matches!(self, Self::Extension(_))
+    }
+}
+
+impl Serialize for BlockEntityKind {
+    /// Serialize the stable registry key rather than Rust variant names.
+    /// Unknown container and opaque keys therefore remain usable at generic
+    /// JSON boundaries without losing their original spelling.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.name())
+    }
+}
+
+impl<'de> Deserialize<'de> for BlockEntityKind {
+    /// Decode known keys to built-in variants and preserve every other key as
+    /// an extension, matching the NBT/protocol boundary conversion.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let name = String::deserialize(deserializer)?;
+        Ok(Self::from_name(&name))
     }
 }
 
@@ -475,32 +513,18 @@ impl BlockEntity {
     /// type and no menu at all.
     #[must_use]
     pub fn type_id(&self) -> &str {
+        // Keep one classifier for gameplay and persistence. `BlockEntityKind`
+        // is the typed runtime key; this method is only the explicit string
+        // conversion needed by NBT and protocol boundaries.
         match self {
-            BlockEntity::EndGateway { .. } => "minecraft:end_gateway",
-            BlockEntity::Composter(_) => "minecraft:composter",
-            BlockEntity::Furnace(f) => match f.kind() {
-                FurnaceKind::Furnace => "minecraft:furnace",
-                FurnaceKind::Smoker => "minecraft:smoker",
-                FurnaceKind::BlastFurnace => "minecraft:blast_furnace",
-            },
-            BlockEntity::Hopper(_) => "minecraft:hopper",
-            BlockEntity::BrewingStand(_) => "minecraft:brewing_stand",
-            BlockEntity::Container { id, .. } | BlockEntity::Opaque { id, .. } => id,
-            // `BlockEntityTypes.COMMAND_BLOCK` is the one registry entry
-            // `CommandBlockEntity`'s constructor names regardless of which of
-            // the three command-block *blocks* it is attached to — unlike
-            // `Furnace`, there is no per-instance kind to switch on here.
-            BlockEntity::CommandBlock(_) => "minecraft:command_block",
-            BlockEntity::Spawner(_) => "minecraft:mob_spawner",
-            BlockEntity::Sign(sign) => {
-                if sign.hanging {
-                    "minecraft:hanging_sign"
-                } else {
-                    "minecraft:sign"
-                }
-            }
-            BlockEntity::Beacon(_) => "minecraft:beacon",
-            BlockEntity::Crafter { .. } => "minecraft:crafter",
+            // Extension keys own their text in the record. Borrowing those
+            // through a temporary `BlockEntityKind` would return a reference
+            // to the temporary, so this is the one storage-side exception.
+            Self::Container { id, .. } | Self::Opaque { id, .. } => id,
+            _ => self
+                .kind()
+                .builtin_name()
+                .expect("non-storage block entities always have built-in keys"),
         }
     }
 
@@ -1917,6 +1941,28 @@ mod tests {
             BlockEntityKind::from_name(&kind.clone().into_name()),
             kind
         );
+
+        let encoded_builtin = serde_json::to_string(&BlockEntityKind::Chest)
+            .expect("block-entity built-in serializes");
+        assert_eq!(encoded_builtin, r#""minecraft:chest""#);
+        assert_eq!(
+            serde_json::from_str::<BlockEntityKind>(&encoded_builtin)
+                .expect("block-entity built-in deserializes"),
+            BlockEntityKind::Chest
+        );
+        let extension = BlockEntityKind::Extension(plugin.to_owned());
+        let encoded_extension =
+            serde_json::to_string(&extension).expect("block-entity extension serializes");
+        assert_eq!(encoded_extension, r#""example:portable_storage""#);
+        assert_eq!(
+            serde_json::from_str::<BlockEntityKind>(&encoded_extension)
+                .expect("block-entity extension deserializes"),
+            extension
+        );
+
+        let simulated = BlockEntity::Composter(Composter::new());
+        assert_eq!(simulated.type_id(), simulated.kind().name());
+        assert_eq!(simulated.kind().builtin_name(), Some("minecraft:composter"));
     }
 
     #[test]
@@ -2339,6 +2385,51 @@ mod tests {
             ],
             "each owner receives one contiguous serial execution unit"
         );
+    }
+
+    /// The owner partition must be a disjoint cover of the tick-start
+    /// snapshot.  Checking only the expected owner order would miss a future
+    /// grouping change that accidentally duplicates an entity or drops one at
+    /// a chunk boundary.
+    #[test]
+    fn tick_plan_owner_batches_cover_each_entity_once_without_overlap() {
+        let mut reg = BlockEntityRegistry::new();
+        let positions = [
+            BlockPos::new(-17, 70, -1),
+            BlockPos::new(-1, 72, 0),
+            BlockPos::new(1, 64, 1),
+            BlockPos::new(16, 68, 0),
+            BlockPos::new(31, 80, 16),
+        ];
+        for pos in positions {
+            reg.insert(pos, BlockEntity::Composter(Composter::new()));
+        }
+
+        let plan = reg.tick_plan();
+        let batches = plan.owner_batches();
+        let mut flattened = Vec::new();
+        let mut seen_positions = std::collections::HashSet::new();
+        for batch in &batches {
+            for assignment in batch.assignments() {
+                assert_eq!(assignment.owner, batch.owner);
+                assert_eq!(
+                    assignment.owner,
+                    BlockEntityTickOwner::Chunk {
+                        cx: assignment.pos.x.div_euclid(16),
+                        cz: assignment.pos.z.div_euclid(16),
+                    },
+                    "a block entity must be assigned to its containing chunk"
+                );
+                assert!(
+                    seen_positions.insert((assignment.pos.x, assignment.pos.y, assignment.pos.z)),
+                    "one tick-start entity must not be assigned to multiple owners"
+                );
+                flattened.push(*assignment);
+            }
+        }
+
+        assert_eq!(flattened, plan.assignments());
+        assert_eq!(seen_positions.len(), positions.len());
     }
 
     /// Two chunk owners handing lit flips to the global world writer must
