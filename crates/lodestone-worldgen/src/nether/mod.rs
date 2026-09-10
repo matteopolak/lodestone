@@ -140,8 +140,7 @@ use crate::structure::{
 };
 use crate::surface::{PreState, SurfaceDiff, SurfaceSystem, identity_canon};
 use crate::stage_schedule::{
-    ChunkRequest, ColumnStage, DecorationStep, NETHER_DECORATION_STEPS,
-    NETHER_FEATURE_WRITE_RADIUS,
+    ColumnStage, DecorationStep, NETHER_DECORATION_STEPS,
 };
 
 thread_local! {
@@ -1902,13 +1901,22 @@ impl NetherGenerator {
         // the pass commits, so retain their coordinates until a later feature
         // overwrites one, then filter them from the final resident/spill fold.
         let mut suppressed_huge = HashSet::new();
-        // The ordinary column API is one request with its complete write halo.
-        // Derive the 3x3 source order from that request's admission wavefront;
-        // do not bake one centre-first/centre-last permutation into the
-        // feature dispatcher.
-        let source_order = ChunkRequest::single(cx, cz, NETHER_FEATURE_WRITE_RADIUS)
-            .source_completion_order((cx, cz));
-        for (dx, dz) in source_order.offsets() {
+        // The ordinary one-column API has no external admission stream. Keep
+        // its historical x-major source dispatch explicit; lifecycle replay
+        // supplies captured completion order one source at a time, so it does
+        // not use this unconstrained fallback permutation.
+        let source_order = [
+            (-1, -1),
+            (-1, 0),
+            (-1, 1),
+            (0, -1),
+            (0, 0),
+            (0, 1),
+            (1, -1),
+            (1, 0),
+            (1, 1),
+        ];
+        for (dx, dz) in source_order {
             let source_x = cx + dx;
             let source_z = cz + dz;
             if selected_source.is_some_and(|source| source != (source_x, source_z)) {
