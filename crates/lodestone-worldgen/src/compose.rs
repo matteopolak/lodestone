@@ -160,6 +160,55 @@ impl DecorationCatalog {
             .collect()
     }
 
+    /// Selects every vegetation-capable entry for a source in one catalog walk.
+    ///
+    /// The three public selectors below remain separate because the ore and
+    /// step-6 callers have distinct contracts. The unified Overworld replay
+    /// context needs all three streams for the same biome union, though; doing
+    /// that through the separate selectors rebuilt the membership set and
+    /// rescanned `ordered` three times. Keeping one shared raw-index walk here
+    /// preserves the global seed indices while avoiding those redundant
+    /// temporary sets and scans.
+    #[must_use]
+    pub fn select_source_features<'a>(
+        &'a self,
+        biomes: impl IntoIterator<Item = &'a str>,
+    ) -> Vec<(i32, usize, crate::feature::vegetation::PlacedRef)> {
+        let mut selected = HashSet::new();
+        for biome in biomes {
+            if let Some(entries) = self.members.get(biome) {
+                selected.extend(entries.iter().cloned());
+            }
+        }
+        let mut per_step = HashMap::<i32, usize>::new();
+        self.ordered
+            .iter()
+            .filter_map(|(step, id)| {
+                let index = per_step.entry(*step).or_default();
+                let result = selected
+                    .contains(&(*step, id.clone()))
+                    .then(|| {
+                        self.placed.get(id).and_then(|placed| {
+                            if *step != STEP_UNDERGROUND_ORES {
+                                Some((*step, *index, placed.clone()))
+                            } else {
+                                match placed.feature.as_ref() {
+                                    crate::feature::vegetation::ConfiguredFeature::Disk(_)
+                                    | crate::feature::vegetation::ConfiguredFeature::UnderwaterMagma(_) => {
+                                        Some((*step, *index, placed.clone()))
+                                    }
+                                    _ => None,
+                                }
+                            }
+                        })
+                    })
+                    .flatten();
+                *index += 1;
+                result
+            })
+            .collect()
+    }
+
     /// Selects disk features from `UNDERGROUND_ORES` with their global raw
     /// index. Ore entries and other unsupported step-6 entries remain in the
     /// index walk but are dispatched by their own engine or as no-ops.
@@ -965,6 +1014,19 @@ mod tests {
             .select(["minecraft:first"])
             .iter()
             .all(|(step, _, _)| *step != STEP_UNDERGROUND_ORES));
+
+        let mut expected = catalog.select(["minecraft:first"]);
+        expected.extend(catalog.select_step6_disks(["minecraft:first"]));
+        expected.extend(catalog.select_step6_non_ore(["minecraft:first"]));
+        expected.sort_by_key(|(step, index, _)| (*step, *index));
+        let actual = catalog.select_source_features(["minecraft:first"]);
+        let signature = |entries: &[(i32, usize, crate::feature::vegetation::PlacedRef)]| {
+            entries
+                .iter()
+                .map(|(step, index, placed)| (*step, *index, placed.registry_id.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(signature(&actual), signature(&expected));
     }
 
     #[test]

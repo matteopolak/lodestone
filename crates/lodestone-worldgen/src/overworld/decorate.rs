@@ -682,15 +682,7 @@ impl OverworldGenerator {
         );
         let mut features = self
             .decoration_catalog
-            .select(biomes.iter().map(String::as_str));
-        features.extend(
-            self.decoration_catalog
-                .select_step6_disks(biomes.iter().map(String::as_str)),
-        );
-        features.extend(
-            self.decoration_catalog
-                .select_step6_non_ore(biomes.iter().map(String::as_str)),
-        );
+            .select_source_features(biomes.iter().map(String::as_str));
         features.sort_by_key(|(step, index, _)| (*step, *index));
         features
     }
