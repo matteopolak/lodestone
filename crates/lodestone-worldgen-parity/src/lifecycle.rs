@@ -222,6 +222,21 @@ pub trait LifecycleWorldgenSource {
         _resident: &BTreeMap<ChunkPos, ChunkColumn>,
     ) -> LifecycleFeatureResult;
 
+    /// Run one source's FEATURES body for a requested target packet.  The
+    /// source controls its decoration seed, while the requested target owns
+    /// the read context and resident view.  Direct completion controls retain
+    /// the historical source-centred default; authenticated target replay
+    /// supplies this distinction explicitly.
+    fn feature_result_for_target(
+        &self,
+        _target: ChunkPos,
+        source: ChunkPos,
+        overrides: &BTreeMap<AbsoluteCell, String>,
+        resident: &BTreeMap<ChunkPos, ChunkColumn>,
+    ) -> LifecycleFeatureResult {
+        self.feature_result(source, overrides, resident)
+    }
+
     /// Run any source-local stage after FEATURES. The Nether has no such
     /// stage, so its implementation keeps the default empty result.
     fn post_features_spills(
@@ -282,6 +297,37 @@ impl LifecycleWorldgenSource for OverworldChunkSource {
         let result = self.generator().parity_source_decoration_with_overrides(
             source.0,
             source.1,
+            source.0,
+            source.1,
+            &overrides,
+        );
+        LifecycleFeatureResult {
+            spills: result
+                .spills
+                .into_iter()
+                .map(|spill| LifecycleSpill {
+                    source: spill.source,
+                    position: spill.position,
+                    state: spill.state,
+                    transient: false,
+                })
+                .collect(),
+            block_entities: result.block_entities,
+            end_gateways: Vec::new(),
+        }
+    }
+
+    fn feature_result_for_target(
+        &self,
+        target: ChunkPos,
+        source: ChunkPos,
+        overrides: &BTreeMap<AbsoluteCell, String>,
+        _resident: &BTreeMap<ChunkPos, ChunkColumn>,
+    ) -> LifecycleFeatureResult {
+        let overrides = override_vec(overrides);
+        let result = self.generator().parity_source_decoration_with_overrides(
+            target.0,
+            target.1,
             source.0,
             source.1,
             &overrides,
@@ -502,7 +548,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             self.admit(admission);
         }
         for event in plan.feature_events() {
-            self.complete(event.source, event.stage, event.sequence);
+            self.complete_for_target(plan.target(), event.source, event.stage, event.sequence);
         }
     }
 
@@ -559,6 +605,27 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         sequence: u64,
         mut observe: impl FnMut(&LifecycleSpill),
     ) {
+        self.complete_observing_for_target(source, source, stage, sequence, observe);
+    }
+
+    fn complete_for_target(
+        &mut self,
+        target: ChunkPos,
+        source: ChunkPos,
+        stage: LifecycleCompletion,
+        sequence: u64,
+    ) {
+        self.complete_observing_for_target(target, source, stage, sequence, |_| {});
+    }
+
+    fn complete_observing_for_target(
+        &mut self,
+        target: ChunkPos,
+        source: ChunkPos,
+        stage: LifecycleCompletion,
+        sequence: u64,
+        mut observe: impl FnMut(&LifecycleSpill),
+    ) {
         assert!(
             self.resident.contains_key(&source),
             "lifecycle completion source {source:?} was not admitted before sequence {sequence}"
@@ -580,7 +647,12 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             .expect("lifecycle source was checked resident above")
             .prime_client_heightmaps();
 
-        let result = self.source.feature_result(source, &self.overrides, &self.resident);
+        let result = self.source.feature_result_for_target(
+            target,
+            source,
+            &self.overrides,
+            &self.resident,
+        );
         for spill in &result.spills {
             assert_eq!(
                 spill.source, source,
