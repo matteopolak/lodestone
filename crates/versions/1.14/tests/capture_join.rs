@@ -375,6 +375,46 @@ fn the_1_15_2_capture_lands_the_flat_preset_floor_in_canonical_ids() {
     assert_flat_world_floor(&MEMBERS[1]);
 }
 
+/// A small positive detector for the negotiated adapter, independent of the
+/// whole-capture error tally below. The captured body at play id 20 is a real
+/// 498 `window_items` frame: one window byte, a big-endian slot count of 46,
+/// and 46 empty-slot markers. Protocol 754 assigns that same id to
+/// `craft_progress_bar`, whose body is only one byte plus two i16 values.
+/// Therefore a 498 adapter must produce container contents from these bytes;
+/// deliberately returning the 754 adapter makes this test fail with trailing
+/// bytes instead of silently accepting a plausible event.
+#[test]
+fn negotiated_498_adapter_recognises_the_captured_window_items_frame() {
+    let packet = read_capture("1.14.4")
+        .into_iter()
+        .find(|packet| {
+            packet.state == ConnectionState::Play
+                && packet.id == clientbound_id(PROTOCOL_1_14_4, "minecraft:window_items")
+        })
+        .expect("the 1.14.4 capture carries the flat-world inventory snapshot");
+    assert_eq!(
+        packet.payload.len(),
+        49,
+        "the raw capture has 3 header bytes and 46 empty slots"
+    );
+    assert_eq!(&packet.payload[..3], &[0, 0, 46]);
+    assert!(packet.payload[3..].iter().all(|byte| *byte == 0));
+
+    let mut world = World::new();
+    let directives = lodestone_v1_14::adapter_for(PROTOCOL_1_14_4)
+        .handle_packet(&mut world, ConnectionState::Play, packet.id, &packet.payload)
+        .expect("protocol 498 must decode its captured window_items frame");
+    assert!(directives.iter().any(|directive| matches!(
+        directive,
+        Directive::Emit(ClientEvent::ContainerContent { .. })
+    )));
+
+    let error = lodestone_v1_14::adapter_for(PROTOCOL_1_16_5)
+        .handle_packet(&mut World::new(), ConnectionState::Play, packet.id, &packet.payload)
+        .expect_err("protocol 754 must not accept the 498 window_items body");
+    assert!(error.to_string().contains("44 trailing bytes"), "{error}");
+}
+
 /// **The negative control.** One packet, one id, two protocols.
 ///
 /// `update_health` is clientbound id **72** at 498 and **73** at 754; id 72 at
@@ -552,10 +592,13 @@ fn the_1_14_4_capture_does_not_replay_as_1_16_5() {
     // before the era merge `adapter_for(498)` returned exactly this adapter.
     assert_eq!(
         (logins, chunks, outcome.errors.len()),
-        // One formerly ignored id is now decoded strictly by the incremental
-        // world/event handlers. Its 498 body is not the 754 shape, so it adds
-        // one expected framing error without producing a plausible event.
-        (0, 0, 11),
+        // Two formerly ignored ids are now decoded strictly by incremental
+        // world/event handlers. Their 498 bodies are not the 754 shapes, so
+        // they add two framing errors without producing plausible events:
+        // `window_items` at 498 shares id 20 with 754's five-byte
+        // `craft_progress_bar`; `experience` at 498 shares id 71 with 754's
+        // `entity_equipment`, whose 6-byte body leaves three bytes over.
+        (0, 0, 12),
         "the pre-merge failure mode has changed shape; re-derive it rather than \
          adjusting the numbers"
     );
