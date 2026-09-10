@@ -31,19 +31,30 @@
 //! [`RandomSource`] supplies the structure stream; [`BoundingBox`] and
 //! [`StructurePiece`] are the structure-stage interchange format.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::sync::Arc;
 
-use lodestone_worldgen_core::rng::{LegacyRandomSource, RandomSource};
+use lodestone_worldgen_core::{
+    hash::FastMap,
+    rng::{LegacyRandomSource, RandomSource},
+};
 
 use super::coded::Facing;
 use super::template::{BlockState, Mirror, Rotation};
 use super::{BoundingBox, CodedBlock, CodedLoot, StructurePiece};
 use crate::dense_grid::DenseBlockGrid;
+use crate::interner::StateId;
 
 const MAX_DEPTH: i32 = 30;
 const MAX_SPREAD: i32 = 112;
 const LOWEST_Y: i32 = 10;
 const START_Y: i32 = 64;
+
+#[cfg(test)]
+thread_local! {
+    static PIECE_STATE_RESOLUTION_CALLS: Cell<u64> = const { Cell::new(0) };
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FortressPieceKind {
@@ -477,6 +488,37 @@ fn support_in_placing_chunk(
     }
 }
 
+/// Applies an immutable piece block list to a receiving grid.
+///
+/// Piece geometry is cached as canonical strings because it crosses generator
+/// lifetimes and must retain an explicit extension/plugin fallback. The
+/// receiving grid's interner is generator-local, however, so resolving the
+/// same piece state once per block (`DenseBlockGrid::set`) needlessly takes the
+/// interner lock for every cell. This small per-piece map keeps the string at
+/// the cache boundary and carries the typed [`StateId`] through every write.
+/// The first-use order of `DenseBlockGrid`'s own palette is unchanged because
+/// blocks are still visited in their original order.
+fn apply_piece_blocks(
+    world: &mut DenseBlockGrid,
+    blocks: &[CodedBlock],
+    chest_pos: Option<[i32; 3]>,
+) {
+    let interner = std::sync::Arc::clone(world.interner());
+    let mut ids: FastMap<&str, StateId> = FastMap::default();
+    for block in blocks {
+        if chest_pos == Some(block.pos) {
+            continue;
+        }
+        let state = block.state.as_str();
+        let state_id = *ids.entry(state).or_insert_with(|| {
+            #[cfg(test)]
+            PIECE_STATE_RESOLUTION_CALLS.with(|calls| calls.set(calls.get() + 1));
+            interner.id_of(state)
+        });
+        world.set_id(block.pos[0], block.pos[1], block.pos[2], state_id);
+    }
+}
+
 fn place_supports_in_chunk(
     piece: &Node,
     placing_cx: i32,
@@ -583,12 +625,7 @@ pub(crate) fn place_cached_piece(
     };
     let chest_pos = chest_position(&node);
     if let Some(blocks) = &piece.blocks {
-        for block in blocks.iter() {
-            if chest_pos == Some(block.pos) {
-                continue;
-            }
-            world.set(block.pos[0], block.pos[1], block.pos[2], &block.state);
-        }
+        apply_piece_blocks(world, blocks, chest_pos);
     }
     let loot = chest_pos.and_then(|pos| {
         (pos[0].div_euclid(16) == placing_cx
@@ -1047,12 +1084,7 @@ pub fn place_for_chunk<R: RandomSource, P: RandomSource>(
     let mut loot = Vec::new();
     for piece in tree.pieces {
         let blocks = emit_blocks(&piece);
-        for block in blocks {
-            if chest_position(&piece) == Some(block.pos) {
-                continue;
-            }
-            world.set(block.pos[0], block.pos[1], block.pos[2], &block.state);
-        }
+        apply_piece_blocks(&mut *world, &blocks, chest_position(&piece));
         if let Some(pos) = chest_position(&piece)
             && pos[0].div_euclid(16) == placing_cx
             && pos[2].div_euclid(16) == placing_cz
@@ -1131,5 +1163,47 @@ mod tests {
             assert_eq!(world.get(x, y, z), "minecraft:nether_bricks", "support at ({x},{y},{z})");
         }
         assert_eq!(world.get(9, 68, 2), "minecraft:netherrack", "solid terrain is the negative control");
+    }
+
+    #[test]
+    fn piece_state_cache_keeps_custom_fallback_and_resolves_distinct_states_once() {
+        PIECE_STATE_RESOLUTION_CALLS.with(|calls| calls.set(0));
+        let mut world = DenseBlockGrid::new(0, 0, 0, 3, 1, 1, "minecraft:air");
+        let blocks = [
+            CodedBlock {
+                pos: [0, 0, 0],
+                state: "modded:custom_block[property=value]".to_owned(),
+            },
+            CodedBlock {
+                pos: [1, 0, 0],
+                state: "modded:custom_block[property=value]".to_owned(),
+            },
+            CodedBlock {
+                pos: [2, 0, 0],
+                state: "minecraft:stone".to_owned(),
+            },
+        ];
+
+        apply_piece_blocks(&mut world, &blocks, None);
+
+        assert_eq!(
+            PIECE_STATE_RESOLUTION_CALLS.with(Cell::get),
+            2,
+            "the per-piece cache must resolve each distinct state once"
+        );
+        assert_eq!(world.get(0, 0, 0), "modded:custom_block[property=value]");
+        assert_eq!(world.get(1, 0, 0), "modded:custom_block[property=value]");
+        assert_eq!(world.get(2, 0, 0), "minecraft:stone");
+        let interner = std::sync::Arc::clone(world.interner());
+        let (palette, _) = world.into_id_palette_and_blocks();
+        let names: Vec<_> = palette.iter().map(|&id| interner.name_of(id)).collect();
+        assert_eq!(
+            names,
+            vec![
+                "minecraft:air",
+                "modded:custom_block[property=value]",
+                "minecraft:stone",
+            ]
+        );
     }
 }
