@@ -918,7 +918,8 @@ mod tests {
         registry.register(command()).unwrap();
         let mut replacement = ServerPluginCommand::new("tools");
         replacement.alias("replacement");
-        replacement.on_execute(|_| ServerCommandOutcome::ran(9));
+        let root = replacement.root();
+        replacement.on_execute(root, |_| ServerCommandOutcome::ran(9));
         registry.reload(replacement).unwrap();
         assert_eq!(registry.names(), &["tools".to_owned()]);
         assert_eq!(

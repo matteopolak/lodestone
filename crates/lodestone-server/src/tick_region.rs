@@ -261,14 +261,12 @@ mod tests {
     #[test]
     fn bounded_owner_jobs_overlap_disjoint_regions_and_restore_submission_order() {
         use std::collections::HashSet;
-        use std::sync::{Arc, Barrier, Mutex};
-        use std::time::Duration;
+        use std::sync::{atomic::{AtomicUsize, Ordering}, Arc, Mutex};
+        use std::time::{Duration, Instant};
 
-        // This is intentionally a barrier rather than a sleep.  If the
-        // executor ever regresses to one lane, the first owner cannot pass
-        // the barrier and the test fails instead of accidentally accepting a
-        // merely faster serial implementation.
-        let rendezvous = Arc::new(Barrier::new(2));
+        // Each worker must reach the rendezvous before either may finish. A
+        // bounded spin makes a one-lane regression fail instead of hanging.
+        let rendezvous = Arc::new(AtomicUsize::new(0));
         let worker_ids = Arc::new(Mutex::new(HashSet::new()));
         let jobs = [
             TickOwnedChunk {
@@ -286,9 +284,13 @@ mod tests {
                 .lock()
                 .expect("worker id set is not poisoned")
                 .insert(std::thread::current().id());
-            let rendezvous_result = rendezvous.wait_timeout(Duration::from_secs(2));
+            rendezvous.fetch_add(1, Ordering::AcqRel);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while rendezvous.load(Ordering::Acquire) < 2 && Instant::now() < deadline {
+                std::thread::yield_now();
+            }
             assert!(
-                !rendezvous_result.1,
+                rendezvous.load(Ordering::Acquire) >= 2,
                 "two disjoint owner jobs must reach the executor concurrently"
             );
             (job.owner, job.chunk)
