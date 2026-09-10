@@ -9,6 +9,7 @@ mod support;
 
 use std::path::PathBuf;
 
+use lodestone_plugin_support::{DataScope, PluginDataKey, PluginDataStore};
 use lodestone_wasm_host::{Action, Capability, CapabilitySet, HostError, PluginHost};
 
 fn declared_capabilities() -> CapabilitySet {
@@ -176,6 +177,47 @@ fn persistent_writes_are_bounded_atomic_and_deletable() {
     );
     plugin.delete_file("record.bin").expect("delete persisted data");
     assert!(!plugin_root.join("record.bin").exists(), "deleted data must be absent");
+}
+
+#[test]
+fn typed_plugin_snapshot_survives_the_wasm_host_file_lifecycle() {
+    let wasm = support::build_example_plugin(&["fs-write"]);
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("typed-fs-lifecycle");
+    let plugin_root = root.join("writer");
+    std::fs::create_dir_all(&plugin_root).expect("create plugin filesystem root");
+    let mut host = PluginHost::new(CapabilitySet::permissive())
+        .expect("engine")
+        .with_filesystem_root(root.clone());
+    let mut granted = declared_capabilities();
+    granted.insert(Capability::FsWrite);
+    host.load_file("writer", &wasm, &granted).expect("load writer");
+
+    let key = PluginDataKey::new(
+        "claims",
+        DataScope::Entity {
+            id: [6; 16],
+            generation: 4,
+        },
+        "owner",
+    )
+    .expect("valid entity key");
+    let mut store = PluginDataStore::default();
+    store.set(key.clone(), 1, &"alice").expect("store typed record");
+    let snapshot = store.to_snapshot_bytes().expect("encode typed snapshot");
+    host.plugins_mut()[0]
+        .write_file("typed.json", snapshot)
+        .expect("write typed snapshot through host");
+
+    let reopened = PluginDataStore::load_snapshot_file(plugin_root.join("typed.json"))
+        .expect("reopen typed snapshot");
+    assert_eq!(
+        reopened.get::<String>(&key).expect("decode typed snapshot"),
+        Some("alice".to_owned())
+    );
+    host.plugins_mut()[0]
+        .delete_file("typed.json")
+        .expect("delete typed snapshot through host");
+    assert!(!plugin_root.join("typed.json").exists());
 }
 
 #[test]

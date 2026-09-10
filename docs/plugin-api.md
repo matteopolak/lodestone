@@ -295,12 +295,29 @@ a load error), and a namespaced (`"<plugin>:<key>"`) in-memory key-value store a
 chunk (`EntityDataStore`/`ChunkDataStore`, mirroring `PersistentDataContainer`). Values are opaque
 `serde_json::Value`, deliberately never decoded into named fields — a schema that decides which fields
 to carry through by consulting a static name list is exactly the shape that silently drops data
-elsewhere in this codebase whenever a field is present but unlisted; a future persistent (survives-
-restart) tier must keep that property, carrying each entry through as one opaque blob per key. There is
-no automatic eviction on entity despawn (a despawned id can be reused, so a stale entry could be read
-back by a new occupant) — wiring that would require this crate to depend on the engine's ingest fold,
-inverting the plugin→engine dependency direction every plugin crate is checked against; a plugin that
-cares removes its own entries on observing a despawn via `GameEvent`.
+elsewhere in this codebase whenever a field is present but unlisted.
+
+`durable_data::PluginDataStore` is the storage-neutral durable half. A
+`PluginDataKey` combines a validated plugin namespace, a bare key and one of four scopes: plugin,
+world UUID, player UUID, or entity UUID plus lifecycle generation. `PluginDataRecord` carries an opaque
+blob and the plugin's schema version. Each blob is capped at 1 MiB; namespaces and keys at 256 UTF-8
+bytes; a restore accepts at most 16,384 records; and the optional JSON snapshot helper is capped at
+16 MiB. Typed `set`/`get` helpers serialize only at the plugin boundary, so Anvil or Lodestone
+adapters can carry the bytes without a static field list. `snapshot`/`restore_entries` are the backend
+boundary: a world owner snapshots before save and restores after open, while `unload_scope` returns
+the drained entries so unloading memory is not confused with deleting backend data.
+`load_snapshot_file`/`save_snapshot_file` provide a small file-backed adapter for an embedding: a
+missing file opens empty, an existing file must validate, and saves sync an exclusive temporary
+sibling before rename so a failed write leaves the previous snapshot intact. `migrate` exposes
+monotonic schema-version upgrades and refuses downgrades. Entity generation is part of the key, so a
+runtime id reused after despawn cannot read the prior occupant's record. The store does not choose a
+world backend; server save-path wiring and a typed WASM scope ABI remain separate work.
+
+The live entity/chunk stores still have no automatic eviction on entity despawn (a despawned id can be
+reused, so a stale entry could be read back by a new occupant) — wiring that would require this crate
+to depend on the engine's ingest fold, inverting the plugin→engine dependency direction every plugin
+crate is checked against. A plugin that uses those live stores must remove its own entries on observing
+a despawn via `GameEvent`; durable entity records instead use the generation-qualified key above.
 
 The native WASM host's optional filesystem capability is the current durable client-side seam. When an
 embedding calls `PluginHost::with_filesystem_root(parent)`, each loaded plugin gets a validated ASCII
@@ -313,10 +330,10 @@ cannot create missing subdirectories. The shipped native shell uses
 WASM host. The host's `LoadedPlugin::write_file` and `delete_file` helpers apply the same guarantees to
 embedding lifecycle code.
 
-There is no automatic eviction of the native support crate's entity entries on despawn (a despawned id
-can be reused, so a stale entry could be read back by a new occupant). A durable entity-scoped tier
-must key data by a stable identity plus lifecycle generation and clear it on despawn/reconnect; a plugin
-that uses the current in-memory store must remove its own entries on observing a despawn via `GameEvent`.
+WASM filesystem data remains plugin-scoped files: the host does not expose typed world/player/entity
+records or a scope-unload event through the component ABI yet. A guest that needs those scopes must
+currently encode its own records in its confined directory; the native `PluginDataStore` envelope is
+the reference shape for a future typed import.
 
 ### Bulk world edits
 
@@ -462,7 +479,8 @@ inside a wasm32 guest.
 **Native tier:** none. A plugin is a `Cargo.toml` dependency added with `App::add_plugins` — there is no
 loading mechanism, feature flag, or manifest format yet. `GameEventBusPlugin`, `SchedulerPlugin`,
 `AsyncTaskPoolPlugin`, and `PersistentDataPlugin` are each opt-in and install `CorePlugin` themselves if
-absent.
+absent. `PersistentDataPlugin` initializes the live entity/chunk stores and the storage-neutral
+`PluginDataStore`; the enclosing world-save owner must call its snapshot/restore methods.
 
 **WASM tier:** `PluginHost::new(policy)` takes a `CapabilitySet` (`default_policy()` withholds
 `fs:read`, `schedule:tasks`, `commands:register`, `act:look`, `act:movement`, `act:place`, and

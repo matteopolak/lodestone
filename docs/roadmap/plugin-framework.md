@@ -71,8 +71,8 @@ insert-to-take-control/remove-to-release convention for plugin movement control.
 
 | capability | status | completion gate or remaining work |
 |---|---|---|
-| Plugin metadata | partial | `EntityDataStore` and `ChunkDataStore` are in-memory. Persistence requires the world/player persistence layer. |
-| Config/data directory | gap | Establish one shared convention rather than another per-plugin directory implementation. |
+| Plugin metadata | partial | `EntityDataStore` and `ChunkDataStore` remain live in-memory stores. `lodestone-plugin-support::durable_data::PluginDataStore` now supplies bounded, versioned, generation-qualified records and deterministic snapshot/restore; wiring those snapshots into the world/player save paths remains. |
+| Config/data directory | done (native) | `lodestone-plugin-support::{paths, config}` is the shared per-plugin directory and typed-config convention; WASM uses the host's confined filesystem capability. |
 | Database access | done (native) | Native plugins may use normal Rust database libraries. |
 | Shared packet observation | done (native), observation-only ceiling | `RawPacketBusPlugin` and bounded `OutboundRawPacketBusPlugin` provide read-only, opt-in messages before decoding and after adapter/decorator encoding; the version-free surface cannot mutate, cancel, or inject wire data. |
 | Version-locked packet mutation | done at the escape-hatch layer | A `ServerProtocol` decorator can drop, rewrite, or append directives. It is compiled into the server, unsandboxed, and version-locked; see [`../plugin-packet-decorators.md`](../plugin-packet-decorators.md). |

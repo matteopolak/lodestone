@@ -104,7 +104,7 @@ piece named) · **gap** (nothing) · **ceiling** (will not exist by design; stat
 | custom menu (`createInventory`) | **done**, local-only — `Menus::open_local`, one menu at a time | **gap** | **gap** — no open-to-remote-player path; `PlayerInventory` is a connection-task local |
 | inventory click veto | **done** — `SharedState::menu_click` asks before prediction and direct send | **gap** | **gap** |
 | custom items / recipes / station hooks | **done** — `CustomItemRegistry`, `RecipeRegistryExt::add_recipe` | **gap** | **done** — `CraftingStationHooks` (anvil, grindstone, smithing, loom, stonecutter) |
-| per-entity / per-chunk key-value data | partial — `EntityDataStore`/`ChunkDataStore` are in-memory by their own module doc | partial — the per-plugin `fs:read`/`fs:write` directory is durable and reload-safe, but there is no typed entity/chunk key-value ABI | **gap** — `NbtStorageHandle` has no save path in `live_save`; nothing plugin-keyed is written to disk |
+| per-entity / per-chunk key-value data | partial — `EntityDataStore`/`ChunkDataStore` are live in-memory stores; `durable_data::PluginDataStore` adds bounded, versioned records for plugin/world/player/entity-generation scopes with a storage-neutral snapshot boundary | partial — the per-plugin `fs:read`/`fs:write` directory is durable and reload-safe, but there is no typed entity/chunk key-value ABI | **gap** — `NbtStorageHandle` has no save path in `live_save`; nothing plugin-keyed is written to disk |
 | plugin config file / data dir | **done** — `lodestone-plugin-support::{paths, config}` | partial — read-only | **done** for an embedding crate (plain `std`) |
 | database access | **done**, trivially (unrestricted `std`) | **ceiling** — no network import exists, by design | **done**, trivially |
 | inbound/outbound packet observation | **done (native)** — decoded `GameEvent` plus opt-in `RawPacket` and bounded `OutboundRawPacket` observation; the inbound bus publishes exact owned bytes before decoding, and the outbound bus publishes exact adapter output after decorators and before transport framing, with per-tick packet/byte drop counters | **gap** — WASM receives curated decoded events only; no raw-packet event or capability | partial — a `ServerProtocol` decorator sees every `decode(state, id, payload)` call, version-locked |
@@ -310,16 +310,22 @@ and sends no action despite that path bypassing `ActionQueue`.
 
 ### Persistence
 
-The per-plugin data directory and typed JSON config are durable and shipped. The per-entity and
-per-chunk key-value stores are explicitly the "non-persistent half" of Bukkit's persistent data
-container, in their own module doc. Nothing on either side writes a plugin-keyed value to disk:
-`live_save` has no `nbt_storage` path, and `player_data::to_nbt` serialises a closed struct. The
+The per-plugin data directory and typed JSON config are durable and shipped. Native plugin support
+also now has a storage-neutral `PluginDataStore`: bounded opaque blobs can be keyed by plugin, world,
+player, or entity UUID plus lifecycle generation; snapshots are deterministic and schema versions can
+be migrated monotonically. The per-entity and per-chunk key-value stores remain the explicitly
+non-persistent half of the per-object metadata surface, in their own module doc. The native server
+save path still has no adapter that writes these plugin-keyed records to either backend, so the
+snapshot boundary is not yet a server persistence guarantee. The
 one opaque blob that does round-trip is `ItemComponents::custom_data` on the client — kept as raw
 network-NBT bytes precisely so a lobby hotbar item stamped by a Java plugin does not truncate the
 packet — and whether the server's own item save path carries it through is unverified (searched
 `player_data.rs` and `inventory.rs` for `custom_data`: no hit). A durable tier has to keep the
 "one opaque blob per key" property `docs/plugin-api.md` records, because a schema that consults a
-static field list is the shape that silently drops data elsewhere in the tree.
+static field list is the shape that silently drops data elsewhere in the tree. The durable store's
+restore path rejects unknown format versions, duplicate keys and oversized blobs before returning a
+partially populated value; `unload_scope` drains memory without implying backend deletion, while
+`remove` makes a deletion visible in the next snapshot.
 
 WASM: `fs:read` and `fs:write` are enforced by the linker (an ungranted import is absent, so a guest
 referencing it fails to instantiate). The native host gives each granted plugin a confined persistent
@@ -506,9 +512,11 @@ plan, not a sprint.
    synchronous verdicts, and native-windowed shell discovery are shipped. Client, WASM. Medium,
    three small pieces.
 10. **Both: durable per-entity/per-chunk plugin data**, one opaque blob per namespaced key,
-    through the world save on the server and the plugin data directory on the client. Both sides,
-    native (WASM follows via `fs:write`). Medium; the server half needs the save path to carry an
-    opaque section it does not model.
+    through the world save on the server and the plugin data directory on the client. The native
+    storage-neutral `PluginDataStore` envelope, bounds, generation-qualified entity key and
+    migration/unload contract are shipped; remaining work is the server save-path adapter for both
+    backends plus a typed WASM scope ABI. Both sides, native (WASM follows via `fs:write`). Medium;
+    the server half needs the save path to carry an opaque section it does not model.
 11. **Both: a reentrancy ledger for the other lock classes** — `MobHandle`, `ChunkWorld`, the chunk
     edit cache — or a type-level shape for `MobHandle::with` that cannot nest. Both sides, native.
     Small to medium.

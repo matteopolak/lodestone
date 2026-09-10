@@ -8,12 +8,13 @@
 //! - [`paths`]/[`config`] — a per-plugin data directory and a minimal typed
 //!   config-loading helper, matching the familiar per-plugin-data-directory
 //!   and config-loading conventions.
-//! - [`persistent_data`]'s non-persistent half — an in-memory, namespaced
-//!   key-value store attachable to an entity or a chunk, matching the
-//!   familiar per-object metadata convention. The *persistent*
-//!   half (surviving a restart) is out of scope until world persistence
-//!   exists at all — see that module's doc for the hazard to avoid when
-//!   someone builds it.
+//! - [`persistent_data`]'s in-memory, namespaced key-value stores attachable
+//!   to an entity or a chunk, matching the familiar per-object metadata
+//!   convention.
+//! - [`durable_data`]'s storage-neutral, versioned record store for plugin,
+//!   world, player and generation-qualified entity scopes. It supplies the
+//!   bounded snapshot/restore lifecycle; a world backend owns the actual
+//!   transaction and file format.
 //! - [`reentrancy`] (native only) — a reusable test harness for the
 //!   `EcsHandle` reentrancy-deadlock class of bug, so a plugin author can
 //!   check their own plugin before shipping it instead of discovering the
@@ -26,6 +27,7 @@
 //! deleted.
 
 pub mod config;
+pub mod durable_data;
 pub mod paths;
 pub mod persistent_data;
 // Not built for wasm32: a browser has no real threads and `std::thread::spawn`
@@ -35,4 +37,8 @@ pub mod persistent_data;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod reentrancy;
 
+pub use durable_data::{
+    plugin_data_snapshot_path, DataScope, PluginDataEntry, PluginDataError, PluginDataKey,
+    PluginDataKeyError, PluginDataRecord, PluginDataStore, PLUGIN_DATA_SNAPSHOT_FILE,
+};
 pub use persistent_data::{ChunkDataStore, EntityDataStore, PersistentDataPlugin, namespaced_key};

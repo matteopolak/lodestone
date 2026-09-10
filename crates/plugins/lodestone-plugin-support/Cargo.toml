@@ -1,8 +1,7 @@
 # Shared, non-engine conveniences every native plugin otherwise reimplements for
-# itself: a per-plugin data directory and config file, and an
-# in-memory namespaced key-value store attachable to an entity or a chunk
-# (the non-persistent half of a persistent data container — see
-# `src/persistent_data.rs` for why the persistent half is out of scope here).
+# itself: a per-plugin data directory and config file, live namespaced
+# key-value stores for entity/chunk metadata, and a storage-neutral durable
+# record envelope for plugin/world/player/entity scopes.
 #
 # `GPL-3.0-or-later`, the workspace default, matching `lodestone-event-logger`.
 [package]

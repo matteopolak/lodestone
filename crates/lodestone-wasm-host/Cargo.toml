@@ -92,6 +92,7 @@ lodestone-world = { workspace = true }
 # the host remains version-free and does not acquire a server dependency in its
 # production graph.
 lodestone-server = { path = "../lodestone-server" }
+lodestone-plugin-support = { path = "../plugins/lodestone-plugin-support" }
 lodestone-core = { workspace = true }
 lodestone-data = { workspace = true }
 uuid = { workspace = true }
