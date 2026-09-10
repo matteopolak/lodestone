@@ -40,9 +40,10 @@ shapes and support predicates rather than parsing state names in the placement l
 looked up on the side opposite the attachment's `Facing` value. The generated support facts preserve
 the distinction between legacy-solid support used by wall signs and banners and a full sturdy face
 used by ladders, wall torches and tripwire hooks. A support outside the clipped template grid is
-unknown rather than air, so a boundary attachment is retained until the receiving world can provide
-that neighbour. This is the survival part of the neighbour-shape lifecycle; connection-state
-recomputation for fences, walls, panes, stairs and rails remains a separate extension point.
+treated as absent rather than inventing a cross-chunk support, so a boundary attachment is removed
+unless its support is written in the same grid. This is the survival part of the neighbour-shape
+lifecycle; connection-state recomputation for fences, walls, panes, stairs and rails remains a
+separate extension point.
 
 Concentric-ring sets are generator-wide: `StructureRegistry` resolves the placement set's preferred
 biome holder-set, searches the 112-block square around each initial candidate at quart resolution,
