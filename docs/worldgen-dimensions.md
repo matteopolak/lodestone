@@ -69,6 +69,11 @@ specially — `LegacyRandomSource(seed + 0)` / `(seed + 1)`, the raw world seed 
 octaves but a nonzero `firstOctave`, so vanilla constructs and discards a zero'th-octave noise and
 skips several more before building the two it keeps — porting the octave *count* without the
 skipped-draw count consumes the wrong amount of randomness and produces a plausible but wrong Nether.
+The seed-derived biome-zoom salt is a separate immutable value: `NetherGenerator` computes
+`nether_zoom_seed` once during construction and reuses its 64-bit digest prefix for block-biome and
+mixed-decoration lookups. This cache changes cost only; it does not memoise positions or alter seed
+bytes, traversal, or output order. Preserve the helper's little-endian seed input and digest prefix,
+then compare generated content and packet bytes when changing it.
 The lava "sea" (`sea_level 32`, `default_fluid` lava) is the disabled aquifer's global fluid picker,
 not a real aquifer — and the Overworld's `-54` deep-lava threshold is unreachable at the Nether's
 `min_y 0`, so it is not "an aquifer whose second fluid is lava," it is a flat fluid boundary at y=32.
@@ -107,6 +112,12 @@ picker return air everywhere, regardless of what `default_fluid` names) and no b
 rule is a same-value no-op and, unlike the Nether, contains no `vertical_gradient` construct at all —
 copying the Nether's floor/roof shape here would be actively wrong). There is no carver (no bundled
 End biome names one). Its structure stage samples and places End-city template pieces.
+The End density and surface passes intentionally remain 128 rows (`Y=0..127`), while the resident
+build grid and served column retain the full 256-row dimension window (`Y=0..255`), initialized to
+air above the terrain. Structure placement runs after that widening: an End-city template can write
+above the noise ceiling (the seed-42 witness at `(283,86)`, local `(12,133,0)`, is a purpur pillar),
+and extraction plus spatial-batch copies must preserve those rows. Do not widen the density field or
+surface loops themselves; that would change terrain evaluation rather than merely retain structure output.
 
 The survival reference save still has no End region, but this is no longer an evidence gap:
 `scripts/worldgen-oracle/EndChunkOracle.java` runs the bundled 26.2 server classes directly and emits
@@ -143,7 +154,18 @@ terrain fixture deliberately stops before later writers, so it is not evidence t
 the served `ChunkColumn`; it resolves referenced origins again for template-owned container payloads
 before the column reaches packet encoding or region persistence. This source attachment is separate
 from block placement so a city can remain visible while its save metadata and container sidecars are
-still checked independently.
+still checked independently. Patterned black banners are template block states with a separate
+component payload, so the attachment also materializes their missing banner records; lifecycle replay
+invokes the same source-sidecar hook after FEATURES instead of dropping those records at the shaped
+column boundary.
+The End's retained motion-blocking heightmap is taken from the final served
+column, after intersecting city pieces and the three-by-three decoration pass.
+This is the same content boundary as the three client heightmaps: a later
+writer that adds a taller block must be reflected in the map sent with the
+chunk. The focused external control is
+`scripts/worldgen-oracle/stream-parity.sh --dimension end --cx -2 2 --cz -2 2`,
+which compares terrain, biomes, heightmaps, and block entities while
+deliberately excluding light.
 The integrated server's `DimensionalSource` builds the Nether and End sources lazily behind the
 same chunk lifecycle used by the primary dimension. A generated Nether column therefore passes
 through the shared cache, the dimension-specific Anvil region path when persistence is enabled,
@@ -154,7 +176,9 @@ Nether's 256-row wire window plus a bedrock floor marker against the external fu
 at `crates/lodestone-worldgen/tests/support/nether_vanilla_oracle.txt`. End portal entry lands on
 the generated fixed platform, and generated outer-island return gateways carry a destination sidecar
 that the server consumes on contact. Exact exits use the stored point; delayed exits search the
-destination terrain for a safe standing cell, and missing exits remain inert. The integrated-server
+destination terrain for a safe standing cell, and missing exits remain inert. Contact with a
+generated or persisted portal also records its cell in the shared point index before travel, so a
+return trip and a restart reuse that portal without a broad cold-terrain scan. The integrated-server
 restart gate in
 `integrated::tests::persistent_generated_nether_sibling_survives_portal_restart` also verifies
 generated Nether edits and both dimension portal indexes survive and remain findable after reopening.
@@ -186,6 +210,11 @@ singleplayer path, so a future resolver split must preserve each dimension's own
   `EndDecoration::gateway_config_in_step` and its resolver tests to follow the biome step's
   placed-feature reference and parse a three-integer exit. Do not restore a fallback exit for
   missing or malformed metadata; absence disables return-gateway sidecar output.
+- **Apply candidate-level biome filtering after placement coordinates are chosen.** The source
+  chunk's biome determines whether an End feature participates in that FEATURES pass, but the
+  final placement modifier resolves the candidate block through the seed-fiddled nearby-quart
+  zoom. Near outer-island biome boundaries these answers can differ; skipping the second check
+  creates chorus plants or return gateways that the reference generator rejects.
 
 ## Configuration
 

@@ -115,7 +115,11 @@ pub struct DenseBlockGrid {
     /// pre-ore closure — on a `u16` key. U17's profile measured that probe at
     /// 11.8% of all SipHash time in the pipeline.
     index_of: FastMap<StateId, u16>,
-    blocks: Vec<u16>,
+    /// Cell indices are shared by cheap read snapshots and detached on the
+    /// first write. Decoration keeps the cached terrain immutable while
+    /// returning a modified column, so this avoids eagerly copying the whole
+    /// 16x128x16 carrier when a source snapshot is installed.
+    blocks: Arc<Vec<u16>>,
 }
 
 impl DenseBlockGrid {
@@ -154,12 +158,30 @@ impl DenseBlockGrid {
         size_z: i32,
         default: StateId,
     ) -> Self {
-        let mut index_of = FastMap::default();
+        // Production terrain grids normally carry a few dozen distinct states.
+        // Reserve that small palette once instead of growing the three palette
+        // vectors and reverse map in lock-step as surface/carver writes arrive.
+        // This changes capacities only: insertion order and the emitted palette
+        // remain exactly the same, while cold dependency closures avoid repeated
+        // metadata reallocations. The cell buffer below is still sized exactly
+        // to the requested box.
+        const INITIAL_PALETTE_CAPACITY: usize = 32;
+        let mut index_of = FastMap::with_capacity_and_hasher(
+            INITIAL_PALETTE_CAPACITY,
+            Default::default(),
+        );
         index_of.insert(default, 0u16);
         let cells = (size_x.max(0) as usize) * (size_y.max(0) as usize) * (size_z.max(0) as usize);
         let default_name = interner.name_of(default);
         let default_base = interner.base_of(default);
-        let default_facts = interner.base_facts(default_base);
+        let mut palette = Vec::with_capacity(INITIAL_PALETTE_CAPACITY);
+        palette.push(default);
+        let mut palette_names = Vec::with_capacity(INITIAL_PALETTE_CAPACITY);
+        palette_names.push(default_name);
+        let mut palette_bases = Vec::with_capacity(INITIAL_PALETTE_CAPACITY);
+        palette_bases.push(default_base);
+        let mut palette_base_facts = Vec::with_capacity(INITIAL_PALETTE_CAPACITY);
+        palette_base_facts.push(interner.base_facts(default_base));
         Self {
             min_x,
             min_y,
@@ -168,12 +190,12 @@ impl DenseBlockGrid {
             size_y,
             size_z,
             interner,
-            palette: vec![default],
-            palette_names: vec![default_name],
-            palette_bases: vec![default_base],
-            palette_base_facts: vec![default_facts],
+            palette,
+            palette_names,
+            palette_bases,
+            palette_base_facts,
             index_of,
-            blocks: vec![0u16; cells],
+            blocks: Arc::new(vec![0u16; cells]),
         }
     }
 
@@ -273,7 +295,7 @@ impl DenseBlockGrid {
             self.index_of.insert(state, id);
             id
         };
-        self.blocks[i] = id;
+        Arc::make_mut(&mut self.blocks)[i] = id;
     }
 
     /// Writes `state` at `(x, y, z)`, interning it first.
@@ -285,6 +307,148 @@ impl DenseBlockGrid {
     pub fn set(&mut self, x: i32, y: i32, z: i32, state: &str) {
         let id = self.interner.id_of(state);
         self.set_id(x, y, z, id);
+    }
+
+    /// Copies an axis-aligned box from another grid backed by the same state
+    /// interner. The observable result is identical to `get_id`/`set_id` in
+    /// y-z-x order: destination palette entries are therefore still appended
+    /// in first-write order. Each x row uses direct slice indexing instead of
+    /// paying coordinate bounds checks and source palette resolution for every
+    /// cell. A lazy source-to-destination palette mapping also avoids hashing
+    /// the same small set of state ids once per copied cell.
+    ///
+    /// # Panics
+    ///
+    /// Panics when either box lies outside its grid or the grids do not share
+    /// the same interner instance.
+    #[allow(clippy::too_many_arguments)]
+    pub fn copy_box_from(
+        &mut self,
+        source: &Self,
+        source_x: i32,
+        source_y: i32,
+        source_z: i32,
+        destination_x: i32,
+        destination_y: i32,
+        destination_z: i32,
+        size_x: i32,
+        size_y: i32,
+        size_z: i32,
+    ) {
+        assert!(Arc::ptr_eq(&self.interner, &source.interner), "grid interners differ");
+        assert!(size_x >= 0 && size_y >= 0 && size_z >= 0, "copy size is negative");
+        if size_x == 0 || size_y == 0 || size_z == 0 {
+            return;
+        }
+        assert!(
+            source.index(source_x, source_y, source_z).is_some()
+                && source.index(source_x + size_x - 1, source_y + size_y - 1, source_z + size_z - 1).is_some(),
+            "source copy box is outside the grid",
+        );
+        assert!(
+            self.index(destination_x, destination_y, destination_z).is_some()
+                && self.index(destination_x + size_x - 1, destination_y + size_y - 1, destination_z + size_z - 1).is_some(),
+            "destination copy box is outside the grid",
+        );
+
+        let width = size_x as usize;
+        // Keep this mapping lazy. Eagerly mapping `source.palette` would alter
+        // the destination palette's first-write order (which is observable in
+        // the packet), while laziness preserves the exact scan-order contract.
+        // `u16::MAX` is not a valid local palette index: the insertion path
+        // checks the destination palette length before assigning an id.
+        const INLINE_PALETTE_MAPPING: usize = 256;
+        let mut inline_source_to_destination = [u16::MAX; INLINE_PALETTE_MAPPING];
+        let mut heap_source_to_destination = (source.palette.len() > INLINE_PALETTE_MAPPING)
+            .then(|| vec![u16::MAX; source.palette.len()]);
+        for y in 0..size_y {
+            for z in 0..size_z {
+                let source_start = source
+                    .index(source_x, source_y + y, source_z + z)
+                    .expect("validated source row");
+                let destination_start = self
+                    .index(destination_x, destination_y + y, destination_z + z)
+                    .expect("validated destination row");
+                let source_row = &source.blocks[source_start..source_start + width];
+                let destination_row =
+                    &mut Arc::make_mut(&mut self.blocks)[destination_start..destination_start + width];
+                for (destination, &source_index) in destination_row.iter_mut().zip(source_row) {
+                    let source_index = source_index as usize;
+                    let destination_index = if source.palette.len() <= INLINE_PALETTE_MAPPING {
+                        &mut inline_source_to_destination[source_index]
+                    } else {
+                        &mut heap_source_to_destination
+                            .as_mut()
+                            .expect("large source palette mapping")[source_index]
+                    };
+                    if *destination_index == u16::MAX {
+                        let state = source.palette[source_index];
+                        let id = if let Some(&id) = self.index_of.get(&state) {
+                            id
+                        } else {
+                            let id = u16::try_from(self.palette.len())
+                                .expect("more than 65,536 palette entries in one grid");
+                            self.palette.push(state);
+                            self.palette_names.push(self.interner.name_of(state));
+                            let base = self.interner.base_of(state);
+                            self.palette_bases.push(base);
+                            self.palette_base_facts.push(self.interner.base_facts(base));
+                            self.index_of.insert(state, id);
+                            id
+                        };
+                        *destination_index = id;
+                    }
+                    *destination = *destination_index;
+                }
+            }
+        }
+    }
+
+    /// Builds a chunk-sized grid from canonical global state ids.
+    ///
+    /// The callback is invoked in the grid's normal `y, z, x` materialisation
+    /// order. Distinct canonical values cross through the generator interner
+    /// once, then every cell remains an integer move. This is the lifecycle
+    /// seam used to expose already-mutated resident columns to a later feature
+    /// source without constructing a string-keyed override map.
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn from_canonical_states(
+        interner: Arc<StateInterner>,
+        min_x: i32,
+        min_y: i32,
+        min_z: i32,
+        size_x: i32,
+        size_y: i32,
+        size_z: i32,
+        mut state_at: impl FnMut(i32, i32, i32) -> lodestone_data::block_states::StateId,
+    ) -> Self {
+        let mut grid = Self::with_interner(
+            Arc::clone(&interner),
+            min_x,
+            min_y,
+            min_z,
+            size_x,
+            size_y,
+            size_z,
+            StateId::AIR,
+        );
+        let mut canonical_to_local = FastMap::default();
+        canonical_to_local.insert(lodestone_data::block_states::air_state(), StateId::AIR);
+        for y in min_y..min_y + size_y {
+            for z in min_z..min_z + size_z {
+                for x in min_x..min_x + size_x {
+                    let canonical = state_at(x, y, z);
+                    let local = *canonical_to_local
+                        .entry(canonical)
+                        .or_insert_with(|| interner.id_of_canonical(canonical));
+                    if local != StateId::AIR {
+                        grid.set_id(x, y, z, local);
+                    }
+                }
+            }
+        }
+        grid
     }
 
     /// Test-adapter constructor (see module doc): builds a dense grid over
@@ -377,7 +541,70 @@ impl DenseBlockGrid {
     #[must_use]
     pub fn into_palette_and_blocks(self) -> (Vec<String>, Vec<u16>) {
         let palette = self.palette_names.iter().map(|&name| name.to_owned()).collect();
-        (palette, self.blocks)
+        (palette, Arc::unwrap_or_clone(self.blocks))
+    }
+
+    /// Consumes the grid and emits one axis-aligned box in the same palette
+    /// order as copying that box into a fresh grid initialized with `default`.
+    ///
+    /// This is the output boundary used by a decorated region: the working
+    /// grid is a three-by-three halo, but only its centre chunk is served. A
+    /// temporary centre-sized grid would allocate and copy the whole output
+    /// once more; folding the box directly keeps the observable first-write
+    /// palette order while avoiding that carrier allocation.
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn into_palette_and_blocks_box(
+        self,
+        min_x: i32,
+        min_y: i32,
+        min_z: i32,
+        size_x: i32,
+        size_y: i32,
+        size_z: i32,
+        default: StateId,
+    ) -> (Vec<String>, Vec<u16>) {
+        assert!(size_x >= 0 && size_y >= 0 && size_z >= 0, "box size is negative");
+        if size_x == 0 || size_y == 0 || size_z == 0 {
+            return (vec![self.interner.name_of(default).to_owned()], Vec::new());
+        }
+        let source_index = |x: i32, y: i32, z: i32| {
+            self.index(x, y, z).expect("output box is outside the grid")
+        };
+        assert!(
+            self.index(min_x, min_y, min_z).is_some()
+                && self
+                    .index(min_x + size_x - 1, min_y + size_y - 1, min_z + size_z - 1)
+                    .is_some(),
+            "output box is outside the grid",
+        );
+
+        let cell_count = (size_x as usize) * (size_y as usize) * (size_z as usize);
+        let capacity = self.palette.len().min(cell_count + 1);
+        let mut palette_names = Vec::with_capacity(capacity);
+        let mut index_of = FastMap::with_capacity_and_hasher(capacity.max(1), Default::default());
+        palette_names.push(self.interner.name_of(default));
+        index_of.insert(default, 0);
+
+        let mut blocks = Vec::with_capacity(cell_count);
+        for y in min_y..min_y + size_y {
+            for z in min_z..min_z + size_z {
+                for x in min_x..min_x + size_x {
+                    let source_state = self.palette[self.blocks[source_index(x, y, z)] as usize];
+                    let local = if let Some(&local) = index_of.get(&source_state) {
+                        local
+                    } else {
+                        let local = u16::try_from(palette_names.len())
+                            .expect("more than 65,536 palette entries in one output box");
+                        palette_names.push(self.interner.name_of(source_state));
+                        index_of.insert(source_state, local);
+                        local
+                    };
+                    blocks.push(local);
+                }
+            }
+        }
+        (palette_names.into_iter().map(str::to_owned).collect(), blocks)
     }
 
     /// The palette as interned ids, in first-write order — the allocation-free
@@ -385,7 +612,7 @@ impl DenseBlockGrid {
     /// carry ids instead of strings.
     #[must_use]
     pub fn into_id_palette_and_blocks(self) -> (Vec<StateId>, Vec<u16>) {
-        (self.palette, self.blocks)
+        (self.palette, Arc::unwrap_or_clone(self.blocks))
     }
 }
 
@@ -401,6 +628,45 @@ mod tests {
         assert_eq!(g.get(6, -60, 7), "minecraft:stone");
         // Neighbouring cells are untouched.
         assert_eq!(g.get(6, -60, 6), "minecraft:air");
+    }
+
+    #[test]
+    fn bulk_copy_preserves_cells_and_first_write_palette_order() {
+        let interner = Arc::new(StateInterner::new());
+        let air = interner.id_of("minecraft:air");
+        let mut source = DenseBlockGrid::with_interner(
+            Arc::clone(&interner), 16, 0, 32, 4, 3, 4, air,
+        );
+        source.set(17, 1, 33, "minecraft:stone");
+        source.set(18, 1, 33, "minecraft:dirt");
+        let mut destination = DenseBlockGrid::with_interner(
+            Arc::clone(&interner), 0, 0, 0, 8, 3, 8, air,
+        );
+
+        destination.copy_box_from(&source, 16, 0, 32, 2, 0, 2, 4, 3, 4);
+
+        assert_eq!(destination.get(3, 1, 3), "minecraft:stone");
+        assert_eq!(destination.get(4, 1, 3), "minecraft:dirt");
+        assert_eq!(destination.get(0, 0, 0), "minecraft:air");
+        let (palette, _) = destination.into_palette_and_blocks();
+        assert_eq!(palette, ["minecraft:air", "minecraft:stone", "minecraft:dirt"]);
+    }
+
+    #[test]
+    fn boxed_output_matches_copy_into_a_centre_grid() {
+        let interner = Arc::new(StateInterner::new());
+        let air = interner.id_of("minecraft:air");
+        let mut source = DenseBlockGrid::with_interner(
+            Arc::clone(&interner), -16, 0, -16, 48, 4, 48, air,
+        );
+        source.set(-1, 1, -1, "minecraft:stone");
+        source.set(0, 2, 0, "minecraft:dirt");
+
+        let mut copied = DenseBlockGrid::with_interner(Arc::clone(&interner), 0, 0, 0, 16, 4, 16, air);
+        copied.copy_box_from(&source, 0, 0, 0, 0, 0, 0, 16, 4, 16);
+        let expected = copied.into_palette_and_blocks();
+        let actual = source.into_palette_and_blocks_box(0, 0, 0, 16, 4, 16, air);
+        assert_eq!(actual, expected);
     }
 
     #[test]

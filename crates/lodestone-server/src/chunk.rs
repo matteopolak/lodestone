@@ -99,6 +99,45 @@ fn y_quarts_for(height: i32) -> usize {
     (height as usize).div_ceil(4).max(1)
 }
 
+const CLIENT_WORLD_SURFACE_HEIGHTMAP_TYPE_ID: u32 = 1;
+const CLIENT_MOTION_BLOCKING_HEIGHTMAP_TYPE_ID: u32 = 4;
+const CLIENT_MOTION_BLOCKING_NO_LEAVES_HEIGHTMAP_TYPE_ID: u32 = 5;
+
+fn client_heightmap_includes(type_id: u32, state: lodestone_data::block_states::StateId) -> bool {
+    let motion = lodestone_data::block_solidity::blocks_motion(state)
+        || lodestone_data::snow_support::has_fluid_state(state);
+    match type_id {
+        CLIENT_WORLD_SURFACE_HEIGHTMAP_TYPE_ID => state != lodestone_data::block_states::air_state(),
+        CLIENT_MOTION_BLOCKING_HEIGHTMAP_TYPE_ID => motion,
+        CLIENT_MOTION_BLOCKING_NO_LEAVES_HEIGHTMAP_TYPE_ID => {
+            motion && !lodestone_data::tool::builtin_block_tag_contains("minecraft:leaves", state.block())
+        }
+        _ => false,
+    }
+}
+
+fn derive_client_heightmaps(column: &ChunkColumn) -> lodestone_world::Heightmaps {
+    let mut maps = lodestone_world::Heightmaps::new();
+    for type_id in [
+        CLIENT_WORLD_SURFACE_HEIGHTMAP_TYPE_ID,
+        CLIENT_MOTION_BLOCKING_HEIGHTMAP_TYPE_ID,
+        CLIENT_MOTION_BLOCKING_NO_LEAVES_HEIGHTMAP_TYPE_ID,
+    ] {
+        let mut map = lodestone_world::Heightmap::new(column.height as u32);
+        for z in 0..16i32 {
+            for x in 0..16i32 {
+                let stored = (column.min_y..column.min_y + column.height)
+                    .rev()
+                    .find(|&y| client_heightmap_includes(type_id, column.resolved_block_state_id(x, y, z)))
+                    .map_or(0, |y| (y + 1 - column.min_y) as u32);
+                map.set(x as usize, z as usize, stored);
+            }
+        }
+        maps.insert(type_id, map);
+    }
+    maps
+}
+
 /// Returns `true` for blocks that do not count as collidable terrain: air
 /// variants and fluids. `is_solid` is the negation of this over the block name.
 ///
@@ -145,6 +184,33 @@ pub(crate) fn is_water(name: &str) -> bool {
 pub(crate) fn resolve_palette_state_id(state: &str) -> lodestone_data::block_states::StateId {
     lodestone_data::block_states::StateId::from_state_str(state)
         .unwrap_or_else(lodestone_data::block_states::air_state)
+}
+
+/// Returns the canonical state text through one process-wide allocation per
+/// built-in state.  A retained column still owns its text palette because
+/// plugin and persistence paths need the original strings, but its hot-path
+/// `Arc<str>` view must not allocate a second copy of every built-in state in
+/// every column.  The table is lazy: builds that never use an `Arc` lookup pay
+/// no heap cost, while the common multi-column server path amortises the one
+/// canonical copy across all retained columns.
+fn canonical_state_arc(id: lodestone_data::block_states::StateId) -> std::sync::Arc<str> {
+    // Keep the out-of-range and blank-column air answer on the same singleton
+    // as generated columns. Apart from avoiding one duplicate string, this
+    // means an all-air `ChunkColumn::new` does not initialize the 32k-entry
+    // canonical table just to serve its default palette.
+    if id == lodestone_data::block_states::air_state() {
+        return air_state_arc();
+    }
+    static STATES: std::sync::OnceLock<Box<[std::sync::OnceLock<std::sync::Arc<str>>]>> =
+        std::sync::OnceLock::new();
+    let states = STATES.get_or_init(|| {
+        (0..lodestone_data::block_states::STATE_COUNT)
+            .map(|_| std::sync::OnceLock::new())
+            .collect()
+    });
+    states[id.raw() as usize]
+        .get_or_init(|| std::sync::Arc::<str>::from(id.canonical_state()))
+        .clone()
 }
 
 /// The amount of world generation a streamed column requires.
@@ -242,11 +308,14 @@ pub struct ChunkColumn {
     /// why a palette-derived table has no staleness class, and
     /// `docs/redstone-execution.md` for the measured split.
     palette_reaction: Vec<crate::redstone_graph::ReactionClass>,
-    /// `palette_arc[id]` is an `Arc<str>` holding the same bytes as
-    /// `palette[id]`, computed once per palette entry as that entry is
-    /// appended — the fourth per-palette-entry derived table, sound for
-    /// exactly the reason [`palette_ticking`](Self::palette_ticking) is, and
-    /// maintained in the same two places.
+    /// `palette_arc[id]` is an `Arc<str>` view of `palette[id]`, computed once
+    /// per palette entry as that entry is appended — the fourth per-entry
+    /// derived table, sound for exactly the reason
+    /// [`palette_ticking`](Self::palette_ticking) is, and maintained in the
+    /// same two places. Built-in 26.2 states point at a process-wide lazy
+    /// canonical table, so this vector no longer duplicates their string bytes
+    /// for every retained column; only unknown plugin/data-pack states own an
+    /// additional allocation.
     ///
     /// **This is what makes a redstone lookup closure cheap to call
     /// repeatedly.** Every `redstone::*`/`redstone_wire::*`/… signal query
@@ -339,6 +408,10 @@ pub struct ChunkColumn {
     /// carries it, which is exactly the send a client has no other way to
     /// derive one for.
     motion_blocking: Option<Box<[u16; 256]>>,
+    /// All three client-visible maps retained for a completed generated column.
+    /// An edit refreshes only its affected XZ cell; imported and placeholder
+    /// columns leave this absent and use the protocol fallback scan.
+    client_heightmaps: Option<lodestone_world::Heightmaps>,
     /// The generation stage's proposed creature placements —
     /// see [`lodestone_worldgen::spawn_stage`]'s module doc for what a
     /// candidate is (unconditioned on light/ground) and is not.
@@ -387,6 +460,76 @@ pub enum RetainedLightStatus {
     CentreSettled,
 }
 
+/// Logical allocation-capacity components of one retained [`ChunkColumn`].
+///
+/// This is intentionally a value report rather than a process RSS claim. The
+/// `*_bytes` fields count direct buffers and their spare capacities; allocator
+/// headers, hash-map/tree node padding, and nested block-entity/structure
+/// payloads are separate concerns and are not silently presented as exact.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChunkColumnMemory {
+    /// Inline `ChunkColumn` value, useful when the cache owns it in a map node.
+    pub inline_bytes: usize,
+    /// Sectioned block-index spine and packed section payloads.
+    pub blocks_bytes: usize,
+    /// `Vec<String>` slot array for the block-state palette.
+    pub block_palette_slots_bytes: usize,
+    /// Block-state string capacities owned by the column.
+    pub block_palette_text_bytes: usize,
+    /// Per-palette derived arrays, including the `Arc` handle spine.
+    pub block_derived_bytes: usize,
+    /// Payload/control bytes for unknown extension-state `Arc<str>` values.
+    /// Built-in state text is shared and therefore omitted from per-column cost.
+    pub custom_arc_payload_bytes: usize,
+    /// Per-section random-ticking counters.
+    pub section_ticking_bytes: usize,
+    /// The 16 surface-biome string payloads.
+    pub biome_surface_text_bytes: usize,
+    /// `Vec<String>` slot array for the 3-D biome palette.
+    pub biome_palette_slots_bytes: usize,
+    /// 3-D biome palette string capacities.
+    pub biome_palette_text_bytes: usize,
+    /// Packed 3-D biome cell indices.
+    pub biome_cells_bytes: usize,
+    /// Outer block-entity record slots (nested values are owned by the entity).
+    pub block_entities_slots_bytes: usize,
+    /// Outer structure-start `Arc` handles (pointees are nested values).
+    pub structure_slots_bytes: usize,
+    /// Direct structure-reference key/vector capacities and entry values.
+    pub structure_refs_bytes: usize,
+    /// Optional motion-blocking map.
+    pub motion_blocking_bytes: usize,
+    /// Spawn-candidate vector and entity-name capacities.
+    pub generation_spawns_bytes: usize,
+    /// Retained light vectors and non-uniform arrays.
+    pub retained_light_bytes: usize,
+}
+
+impl ChunkColumnMemory {
+    /// Sum of all reported logical bytes, excluding the shared state cache and
+    /// allocator metadata.
+    #[must_use]
+    pub const fn logical_total(self) -> usize {
+        self.inline_bytes
+            + self.blocks_bytes
+            + self.block_palette_slots_bytes
+            + self.block_palette_text_bytes
+            + self.block_derived_bytes
+            + self.custom_arc_payload_bytes
+            + self.section_ticking_bytes
+            + self.biome_surface_text_bytes
+            + self.biome_palette_slots_bytes
+            + self.biome_palette_text_bytes
+            + self.biome_cells_bytes
+            + self.block_entities_slots_bytes
+            + self.structure_slots_bytes
+            + self.structure_refs_bytes
+            + self.motion_blocking_bytes
+            + self.generation_spawns_bytes
+            + self.retained_light_bytes
+    }
+}
+
 impl ChunkColumn {
     /// Creates an all-air column of the given vertical extent, biome fixed
     /// to [`DEFAULT_BIOME`] everywhere (no generator behind this column to
@@ -417,8 +560,10 @@ impl ChunkColumn {
             // assumed so the one place a class is decided stays
             // `redstone_graph::classify`.
             palette_reaction: vec![crate::redstone_graph::classify(AIR)],
-            // Fourth derived table, same append-time contract.
-            palette_arc: vec![std::sync::Arc::from(AIR)],
+            // Fourth derived table, same append-time contract. Built-in states
+            // point into the lazy process-wide canonical table; only unknown
+            // plugin/data-pack text gets a column-owned allocation.
+            palette_arc: vec![air_state_arc()],
             section_ticking: vec![0u16; (height as usize).div_ceil(SECTION_ROWS)],
             biome_quarts: std::array::from_fn(|_| DEFAULT_BIOME.to_string()),
             biome_palette: vec![DEFAULT_BIOME.to_string()],
@@ -427,6 +572,7 @@ impl ChunkColumn {
             structure_starts: Vec::new(),
             structure_references: std::collections::BTreeMap::new(),
             motion_blocking: None,
+            client_heightmaps: None,
             generation_spawns: Vec::new(),
             retained_light: None,
             retained_light_status: None,
@@ -508,12 +654,14 @@ impl ChunkColumn {
             structure_starts: Vec::new(),
             structure_references: std::collections::BTreeMap::new(),
             motion_blocking,
+            client_heightmaps: None,
             generation_spawns,
             retained_light: None,
             retained_light_status: None,
         };
         column.add_generated_block_entities(&generated_block_entities);
         column.recalc_ticking_counts();
+        column.client_heightmaps = Some(derive_client_heightmaps(&column));
         debug_assert_eq!(
             column.biome_cells.len(),
             column.biome_y_quarts() * 16,
@@ -561,9 +709,23 @@ impl ChunkColumn {
         column: lodestone_worldgen::nether::NetherColumn,
         window_height: i32,
     ) -> Self {
+        Self::from_nether_at(column, window_height, ChunkGenerationStage::Full)
+    }
+
+    /// Adopts a Nether column while preserving the generation tier that
+    /// produced it. The ordinary constructor remains the complete-column
+    /// boundary; progressive serving uses this variant so a later packet
+    /// admission can upgrade a shaped resident instead of mistaking it for a
+    /// complete one.
+    #[must_use]
+    pub fn from_nether_at(
+        column: lodestone_worldgen::nether::NetherColumn,
+        window_height: i32,
+        generation_stage: ChunkGenerationStage,
+    ) -> Self {
         let decoration_spills = column.decoration_spills().to_vec();
         let (min_y, generated_height, palette, blocks, biome_quarts) = column.into_raw();
-        Self::from_raw_window(
+        let mut out = Self::from_raw_window(
             min_y,
             generated_height,
             window_height,
@@ -571,7 +733,10 @@ impl ChunkColumn {
             &blocks,
             biome_quarts,
             &decoration_spills,
-        )
+        );
+        out.generation_stage = generation_stage;
+        out.client_heightmaps = Some(derive_client_heightmaps(&out));
+        out
     }
 
     /// The shared body behind [`from_nether`](Self::from_nether): a flat
@@ -659,7 +824,10 @@ impl ChunkColumn {
     /// `cache_2d`), so this is exact rather than an approximation.
     #[must_use]
     pub fn from_end(column: lodestone_worldgen::end::EndColumn, window_height: i32) -> Self {
+        let motion_blocking = *column.motion_blocking_heightmap();
+        let client_heightmaps = *column.client_heightmaps();
         let gateways = column.gateways().to_vec();
+        let block_entity_events = column.block_entity_events().to_vec();
         let (min_y, generated_height, palette, blocks, biome_quarts) = column.into_raw();
         let mut out = Self::from_raw_window(
             min_y,
@@ -670,6 +838,46 @@ impl ChunkColumn {
             biome_quarts.map(str::to_string),
             &[],
         );
+        out.set_motion_blocking(motion_blocking);
+        let mut maps = lodestone_world::Heightmaps::new();
+        for (index, type_id) in [
+            CLIENT_WORLD_SURFACE_HEIGHTMAP_TYPE_ID,
+            CLIENT_MOTION_BLOCKING_HEIGHTMAP_TYPE_ID,
+            CLIENT_MOTION_BLOCKING_NO_LEAVES_HEIGHTMAP_TYPE_ID,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut map = lodestone_world::Heightmap::new(out.height as u32);
+            for z in 0..16usize {
+                for x in 0..16usize {
+                    map.set(x, z, u32::from(client_heightmaps[index][x + z * 16]));
+                }
+            }
+            maps.insert(type_id, map);
+        }
+        out.client_heightmaps = Some(maps);
+        if !block_entity_events.is_empty() {
+            let mut entities = out.block_entities().to_vec();
+            for event in block_entity_events {
+                let position = BlockPos::new(
+                    event.position[0],
+                    event.position[1],
+                    event.position[2],
+                );
+                if entities.iter().any(|(existing, _)| *existing == position) {
+                    continue;
+                }
+                entities.push((
+                    position,
+                    BlockEntity::Opaque {
+                        id: event.type_id.into(),
+                        nbt: lodestone_core::Nbt::End,
+                    },
+                ));
+            }
+            out.set_block_entities(entities);
+        }
         if !gateways.is_empty() {
             let mut entities = out.block_entities().to_vec();
             entities.extend(gateways.into_iter().map(|gateway| {
@@ -778,6 +986,70 @@ impl ChunkColumn {
         self.block_entities = entities;
     }
 
+    /// Materializes the empty records owned by block states in a generated or
+    /// edited column but not already represented by a richer sidecar.
+    ///
+    /// The external chunk lifecycle creates a block entity from the state
+    /// itself, including state-only types such as `minecraft:potent_sulfur`.
+    /// Generated columns arrive through a bulk palette adoption path, so they
+    /// do not pass through the ordinary state-write hook. Keep this repair at
+    /// the source boundary, where the chunk coordinates are available to turn
+    /// local cells into absolute [`BlockPos`] values. `Nbt::End` is intentional:
+    /// an empty update tag is encoded as the network end tag, while the record
+    /// still carries the registry type and position.
+    pub fn populate_missing_block_entity_states(&mut self, cx: i32, cz: i32) {
+        let missing = self.missing_block_entity_states(cx, cz, &self.block_entities);
+        if missing.is_empty() {
+            return;
+        }
+        self.block_entities.extend(missing.into_iter().map(|(pos, id)| {
+            (
+                pos,
+                BlockEntity::Opaque {
+                    id: id.to_owned().into(),
+                    nbt: lodestone_core::Nbt::End,
+                },
+            )
+        }));
+    }
+
+    /// Reconciles block-entity records with the final block states in this
+    /// column, preserving richer payloads at positions whose state still owns
+    /// the same registry type. A lifecycle source may write a container block
+    /// into a target after that target's own sidecar attachment; snapshotting
+    /// must then create the state-owned empty record just as a direct generated
+    /// column does. Conversely, a later write that replaces a container block
+    /// must not leave its old record in the packet.
+    pub fn reconcile_block_entity_states(&mut self, cx: i32, cz: i32) {
+        let existing = std::mem::take(&mut self.block_entities);
+        let mut retained = Vec::with_capacity(existing.len());
+        for (position, entity) in existing {
+            let local_x = position.x - cx * 16;
+            let local_z = position.z - cz * 16;
+            if (0..16).contains(&local_x)
+                && (0..16).contains(&local_z)
+                && self.contains_y(position.y)
+            {
+                let state = self.resolved_block_state_id(local_x, position.y, local_z);
+                let expected = lodestone_data::block_entity_types::block_entity_type(state)
+                    .map(lodestone_data::block_entity_types::block_entity_type_name);
+                let known_entity = lodestone_data::block_entity_types::block_entity_type_id(
+                    entity.type_id(),
+                )
+                .is_some();
+                match expected {
+                    Some(expected) if expected == entity.type_id() => {}
+                    None if known_entity => continue,
+                    None => {}
+                    Some(_) => continue,
+                }
+            }
+            retained.push((position, entity));
+        }
+        self.block_entities = retained;
+        self.populate_missing_block_entity_states(cx, cz);
+    }
+
     /// Adds typed world-generation block entities through the same boundary
     /// conversion used by [`Self::from_generated`]. Lifecycle replay calls
     /// this after one source completion so its packet sees the same entity
@@ -804,6 +1076,17 @@ impl ChunkColumn {
     #[must_use]
     pub fn retained_light_status(&self) -> Option<RetainedLightStatus> {
         self.retained_light_status
+    }
+
+    /// Returns the retained light only when this column completed its own
+    /// initial admission. Dependency-initialized storage is deliberately not
+    /// eligible for packet or final-save consumers: it still has to pass
+    /// through the centre admission when this coordinate is requested.
+    #[must_use]
+    pub fn centre_settled_light(&self) -> Option<&lodestone_world::ColumnLight> {
+        (self.retained_light_status == Some(RetainedLightStatus::CentreSettled))
+            .then(|| self.retained_light.as_ref())
+            .flatten()
     }
 
     /// Installs a complete light snapshot for this column.
@@ -875,6 +1158,36 @@ impl ChunkColumn {
         self.motion_blocking.as_deref()
     }
 
+    /// Retained client-visible heightmaps for a generated column.
+    #[must_use]
+    pub fn client_heightmaps(&self) -> Option<&lodestone_world::Heightmaps> {
+        self.client_heightmaps.as_ref()
+    }
+
+    /// Prime the three client-visible heightmaps from the column's current
+    /// resident block field.
+    ///
+    /// Generation lifecycle callers invoke this exactly when the column enters
+    /// FEATURES. Subsequent [`Self::set_block`] calls then maintain only the
+    /// affected XZ cell. This is deliberately separate from construction:
+    /// neighbouring chunks can enter FEATURES and write here before this
+    /// column enters the stage itself, while writes after entry must update the
+    /// retained maps rather than being erased by a final-state rescan.
+    pub fn prime_client_heightmaps(&mut self) {
+        self.client_heightmaps = Some(derive_client_heightmaps(self));
+        if let (Some(maps), Some(motion)) =
+            (self.client_heightmaps.as_ref(), self.motion_blocking.as_mut())
+        {
+            if let Some(map) = maps.get(CLIENT_MOTION_BLOCKING_HEIGHTMAP_TYPE_ID) {
+                for z in 0..16usize {
+                    for x in 0..16usize {
+                        motion[x + z * 16] = map.get(x, z) as u16;
+                    }
+                }
+            }
+        }
+    }
+
     /// Restores the generator's stored `MOTION_BLOCKING` answer.
     ///
     /// The values use the persisted `top_y + 1` convention and are indexed by
@@ -883,6 +1196,43 @@ impl ChunkColumn {
     /// that load it must restore all 256 cells or leave the answer absent.
     pub fn set_motion_blocking(&mut self, heights: [u16; 256]) {
         self.motion_blocking = Some(Box::new(heights));
+        if let Some(maps) = self.client_heightmaps.as_mut() {
+            if let Some(map) = maps.get_mut(CLIENT_MOTION_BLOCKING_HEIGHTMAP_TYPE_ID) {
+                for z in 0..16usize {
+                    for x in 0..16usize {
+                        map.set(x, z, u32::from(heights[x + z * 16]));
+                    }
+                }
+            }
+        }
+    }
+
+    fn refresh_client_heightmaps_at(&mut self, x: i32, z: i32) {
+        if !(0..16).contains(&x) || !(0..16).contains(&z) {
+            return;
+        }
+        let Some(mut maps) = self.client_heightmaps.take() else {
+            return;
+        };
+        for type_id in [
+            CLIENT_WORLD_SURFACE_HEIGHTMAP_TYPE_ID,
+            CLIENT_MOTION_BLOCKING_HEIGHTMAP_TYPE_ID,
+            CLIENT_MOTION_BLOCKING_NO_LEAVES_HEIGHTMAP_TYPE_ID,
+        ] {
+            let stored = (self.min_y..self.min_y + self.height)
+                .rev()
+                .find(|&y| client_heightmap_includes(type_id, self.resolved_block_state_id(x, y, z)))
+                .map_or(0, |y| (y + 1 - self.min_y) as u32);
+            if let Some(map) = maps.get_mut(type_id) {
+                map.set(x as usize, z as usize, stored);
+            }
+            if type_id == CLIENT_MOTION_BLOCKING_HEIGHTMAP_TYPE_ID {
+                if let Some(motion) = self.motion_blocking.as_mut() {
+                    motion[x as usize + z as usize * 16] = stored as u16;
+                }
+            }
+        }
+        self.client_heightmaps = Some(maps);
     }
 
     /// Structure starts originating in this column.
@@ -964,8 +1314,17 @@ impl ChunkColumn {
             .collect();
         // And the fourth, for the same reason: this constructor adopts a
         // palette `intern` never saw, so the append-time `Arc` build in
-        // `intern` cannot have run for any of its entries.
-        self.palette_arc = self.palette.iter().map(|state| std::sync::Arc::from(state.as_str())).collect();
+        // `intern` cannot have run for any of its entries. Built-in state text
+        // is shared process-wide; unknown text remains owned by this column.
+        self.palette_arc = self
+            .palette
+            .iter()
+            .map(|state| {
+                lodestone_data::block_states::StateId::from_state_str(state)
+                    .map(canonical_state_arc)
+                    .unwrap_or_else(|| std::sync::Arc::from(state.as_str()))
+            })
+            .collect();
         let sections = (self.height as usize).div_ceil(SECTION_ROWS);
         let mut counts = vec![0u16; sections];
         for s in 0..sections {
@@ -1008,8 +1367,13 @@ impl ChunkColumn {
         self.palette_reaction.push(crate::redstone_graph::classify(name));
         // And the fourth: build the `Arc<str>` once per entry so a redstone
         // lookup closure can hand one out on every call for the cost of an
-        // atomic increment. See `palette_arc`.
-        self.palette_arc.push(std::sync::Arc::from(name));
+        // atomic increment. Built-in states reuse the process-wide canonical
+        // allocation; custom text remains column-owned. See `palette_arc`.
+        self.palette_arc.push(
+            lodestone_data::block_states::StateId::from_state_str(name)
+                .map(canonical_state_arc)
+                .unwrap_or_else(|| std::sync::Arc::from(name)),
+        );
         debug_assert_eq!(
             self.palette.len(),
             self.palette_ticking.len(),
@@ -1038,6 +1402,7 @@ impl ChunkColumn {
         self.clear_retained_light();
         let id = self.intern(name);
         self.write_block_id(x, y, z, id);
+        self.refresh_client_heightmaps_at(x, z);
     }
 
     /// Whether `y` lies inside this column's stored vertical extent.
@@ -1191,6 +1556,7 @@ impl ChunkColumn {
         }
         self.palette_state_ids[self.blocks.get(x, y_local, z) as usize].raw()
     }
+
 
     /// The validated global 26.2 state at a local coordinate.
     ///
@@ -1405,6 +1771,97 @@ impl ChunkColumn {
         self.blocks.heap_bytes()
     }
 
+    /// Returns the logical resident-memory census for this column.
+    ///
+    /// The values are allocation capacities, not an RSS reading: they include
+    /// spare `Vec` capacity and direct string payloads, but deliberately exclude
+    /// allocator metadata and shared built-in state text. Nested payloads owned
+    /// by block entities and structure pieces are reported through their outer
+    /// slots only; those are normally absent on a freshly generated terrain
+    /// column and need their owning subsystem's census when present.
+    #[must_use]
+    pub fn memory_census(&self) -> ChunkColumnMemory {
+        fn string_bytes(value: &str, capacity: usize) -> usize {
+            capacity.max(value.len())
+        }
+
+        let block_palette_slots = self.palette.capacity() * size_of::<String>();
+        let block_palette_text = self
+            .palette
+            .iter()
+            .map(|state| string_bytes(state, state.capacity()))
+            .sum();
+        let block_derived = self.palette_ticking.capacity() * size_of::<bool>()
+            + self.palette_state_ids.capacity()
+                * size_of::<lodestone_data::block_states::StateId>()
+            + self.palette_reaction.capacity() * size_of::<crate::redstone_graph::ReactionClass>()
+            + self.palette_arc.capacity() * size_of::<std::sync::Arc<str>>();
+        let custom_arc_payload = self
+            .palette
+            .iter()
+            .filter(|state| lodestone_data::block_states::StateId::from_state_str(state).is_none())
+            .map(|state| state.len() + 2 * size_of::<usize>())
+            .sum();
+
+        let biome_surface_text = self
+            .biome_quarts
+            .iter()
+            .map(|state| string_bytes(state, state.capacity()))
+            .sum();
+        let biome_palette_slots = self.biome_palette.capacity() * size_of::<String>();
+        let biome_palette_text = self
+            .biome_palette
+            .iter()
+            .map(|state| string_bytes(state, state.capacity()))
+            .sum();
+        let block_entities_slots =
+            self.block_entities.capacity() * size_of::<(BlockPos, BlockEntity)>();
+        let structure_slots = self.structure_starts.capacity()
+            * size_of::<std::sync::Arc<lodestone_worldgen::structure::StructureStart>>();
+        let structure_refs = self
+            .structure_references
+            .iter()
+            .map(|(id, references)| {
+                id.capacity()
+                    + references.capacity() * size_of::<i64>()
+                    + size_of::<(String, Vec<i64>)>()
+            })
+            .sum();
+        let generation_spawns = self.generation_spawns.capacity()
+            * size_of::<lodestone_worldgen::spawn_stage::GenerationSpawn>()
+            + self
+                .generation_spawns
+                .iter()
+                .map(|spawn| spawn.entity_type.capacity())
+                .sum::<usize>();
+
+        ChunkColumnMemory {
+            inline_bytes: size_of::<Self>(),
+            blocks_bytes: self.blocks.heap_bytes(),
+            block_palette_slots_bytes: block_palette_slots,
+            block_palette_text_bytes: block_palette_text,
+            block_derived_bytes: block_derived,
+            custom_arc_payload_bytes: custom_arc_payload,
+            section_ticking_bytes: self.section_ticking.capacity() * size_of::<u16>(),
+            biome_surface_text_bytes: biome_surface_text,
+            biome_palette_slots_bytes: biome_palette_slots,
+            biome_palette_text_bytes: biome_palette_text,
+            biome_cells_bytes: self.biome_cells.capacity() * size_of::<u16>(),
+            block_entities_slots_bytes: block_entities_slots,
+            structure_slots_bytes: structure_slots,
+            structure_refs_bytes: structure_refs,
+            motion_blocking_bytes: self
+                .motion_blocking
+                .as_ref()
+                .map_or(0, |heights| size_of_val(heights.as_ref())),
+            generation_spawns_bytes: generation_spawns,
+            retained_light_bytes: self
+                .retained_light
+                .as_ref()
+                .map_or(0, lodestone_world::ColumnLight::heap_bytes),
+        }
+    }
+
     /// Vanilla's own is-randomly-ticking boolean for the 16-row window
     /// whose lowest row is world `section_min_y` — the per-section ticking
     /// counter being greater than zero.
@@ -1559,12 +2016,38 @@ impl ColumnLightSettlement {
     ) -> impl Iterator<Item = ((i32, i32), &lodestone_world::ColumnLight)> + '_ {
         self.entries.iter().map(|(offset, light)| (*offset, light))
     }
+
+    /// Iterates over the dependency snapshots without yielding the centre.
+    ///
+    /// This read-only view is intentionally hidden from generated API docs:
+    /// parity and diagnostic consumers need to inspect the exact settlement
+    /// boundary, while normal callers should continue to use
+    /// [`Self::centre_light`] and let the source own dependency persistence.
+    #[doc(hidden)]
+    pub fn dependency_lights(
+        &self,
+    ) -> impl Iterator<Item = ((i32, i32), &lodestone_world::ColumnLight)> + '_ {
+        self.entries
+            .iter()
+            .skip(1)
+            .map(|(offset, light)| (*offset, light))
+    }
 }
 
 /// Supplies terrain columns to the integrated server.
 pub trait ChunkSource: Send + Sync {
     /// Generates the column at chunk coordinates `(cx, cz)`.
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn;
+
+    /// Generates several columns in the caller's exact coordinate order.
+    /// Sources with shared dependency windows override this hook; the default
+    /// preserves every existing source's scalar behavior.
+    fn columns(&self, coords: &[(i32, i32)]) -> Vec<ChunkColumn> {
+        coords
+            .iter()
+            .map(|&(cx, cz)| self.column(cx, cz))
+            .collect()
+    }
 
     /// Generates a column through at least `stage`.
     ///
@@ -1577,6 +2060,18 @@ pub trait ChunkSource: Send + Sync {
     fn column_at(&self, cx: i32, cz: i32, stage: ChunkGenerationStage) -> ChunkColumn {
         let _ = stage;
         self.column(cx, cz)
+    }
+
+    /// Returns the stage a source must reach before a partial column can be
+    /// encoded into a packet. Most sources can encode their shaped product as
+    /// returned; sources whose decoration reads and writes a neighbouring
+    /// source must finish the target through their normal ordered full-column
+    /// path first. The default keeps progressive streaming unchanged.
+    fn packet_generation_stage(
+        &self,
+        _stage: ChunkGenerationStage,
+    ) -> Option<ChunkGenerationStage> {
+        None
     }
 
     /// Reads a single block's canonical state string at world coordinates
@@ -1607,6 +2102,64 @@ pub trait ChunkSource: Send + Sync {
     /// enriching an answer with loaded neighbours must preserve the unloaded
     /// result rather than turning one request into eight loads.
     fn resident_column(&self, _cx: i32, _cz: i32) -> Option<ChunkColumn> {
+        None
+    }
+
+    /// Attempts a resident-only column snapshot through a source with an
+    /// atomic admission boundary. `None` means the source keeps the legacy
+    /// capability surface, so callers may preserve their existing fallback.
+    /// `Some(Busy)` and `Some(Absent)` are distinct outcomes for a source such
+    /// as [`crate::chunk_store::ChunkStore`] that must not let a race turn into
+    /// blocking generation.
+    fn try_resident_column(
+        &self,
+        _cx: i32,
+        _cz: i32,
+    ) -> Option<crate::chunk_store::TryResident<ChunkColumn>> {
+        None
+    }
+
+    /// Attempts a resident-only block snapshot through an atomic source
+    /// boundary. See [`Self::try_resident_column`] for the meaning of the
+    /// outer `Option` and the three resident outcomes.
+    fn try_resident_block_state_id(
+        &self,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+    ) -> Option<crate::chunk_store::TryResident<lodestone_data::block_states::StateId>> {
+        None
+    }
+
+    /// Attempts a resident block mutation without waiting or starting
+    /// generation. Sources without this explicit capability return `None`, so
+    /// existing callers can retain their ordinary mutation path; a capable
+    /// source returns `Some(Busy)`, `Some(Absent)`, `Some(Unsupported)`, or
+    /// `Some(Applied)`.
+    fn try_set_block(
+        &self,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        _name: &str,
+    ) -> Option<crate::chunk_store::TryBlockMutation> {
+        None
+    }
+
+    /// Retains a post-edit resident snapshot in a source's mutation-only edit
+    /// ledger without generating or waiting on a condition variable. This is
+    /// intentionally separate from [`Self::store_resident_column`]: light
+    /// settlement may retain a complete snapshot for serving without turning
+    /// every settled generated column into a permanent terrain edit. Returning
+    /// `None` means this source has no nonblocking edit ledger; `Some(Busy)`
+    /// means its short ledger lock was unavailable, and `Some(Applied)` means
+    /// the exact snapshot was retained.
+    fn try_store_resident_edit(
+        &self,
+        _cx: i32,
+        _cz: i32,
+        _column: &ChunkColumn,
+    ) -> Option<crate::chunk_store::TryResidentEdit> {
         None
     }
 
@@ -2032,6 +2585,42 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
         (**self).resident_column(cx, cz)
     }
 
+    fn try_resident_column(
+        &self,
+        cx: i32,
+        cz: i32,
+    ) -> Option<crate::chunk_store::TryResident<ChunkColumn>> {
+        (**self).try_resident_column(cx, cz)
+    }
+
+    fn try_resident_block_state_id(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> Option<crate::chunk_store::TryResident<lodestone_data::block_states::StateId>> {
+        (**self).try_resident_block_state_id(x, y, z)
+    }
+
+    fn try_set_block(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        name: &str,
+    ) -> Option<crate::chunk_store::TryBlockMutation> {
+        (**self).try_set_block(x, y, z, name)
+    }
+
+    fn try_store_resident_edit(
+        &self,
+        cx: i32,
+        cz: i32,
+        column: &ChunkColumn,
+    ) -> Option<crate::chunk_store::TryResidentEdit> {
+        (**self).try_store_resident_edit(cx, cz, column)
+    }
+
     fn store_resident_column(&self, cx: i32, cz: i32, column: &ChunkColumn) -> bool {
         (**self).store_resident_column(cx, cz, column)
     }
@@ -2111,8 +2700,19 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
         (**self).column(cx, cz)
     }
 
+    fn columns(&self, coords: &[(i32, i32)]) -> Vec<ChunkColumn> {
+        (**self).columns(coords)
+    }
+
     fn column_at(&self, cx: i32, cz: i32, stage: ChunkGenerationStage) -> ChunkColumn {
         (**self).column_at(cx, cz, stage)
+    }
+
+    fn packet_generation_stage(
+        &self,
+        stage: ChunkGenerationStage,
+    ) -> Option<ChunkGenerationStage> {
+        (**self).packet_generation_stage(stage)
     }
 
     fn block_state(&self, x: i32, y: i32, z: i32) -> String {
@@ -2201,6 +2801,42 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
         (**self).resident_column(cx, cz)
     }
 
+    fn try_resident_column(
+        &self,
+        cx: i32,
+        cz: i32,
+    ) -> Option<crate::chunk_store::TryResident<ChunkColumn>> {
+        (**self).try_resident_column(cx, cz)
+    }
+
+    fn try_resident_block_state_id(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> Option<crate::chunk_store::TryResident<lodestone_data::block_states::StateId>> {
+        (**self).try_resident_block_state_id(x, y, z)
+    }
+
+    fn try_set_block(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        name: &str,
+    ) -> Option<crate::chunk_store::TryBlockMutation> {
+        (**self).try_set_block(x, y, z, name)
+    }
+
+    fn try_store_resident_edit(
+        &self,
+        cx: i32,
+        cz: i32,
+        column: &ChunkColumn,
+    ) -> Option<crate::chunk_store::TryResidentEdit> {
+        (**self).try_store_resident_edit(cx, cz, column)
+    }
+
     fn store_resident_column(&self, cx: i32, cz: i32, column: &ChunkColumn) -> bool {
         (**self).store_resident_column(cx, cz, column)
     }
@@ -2282,6 +2918,13 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
 
     fn column_at(&self, cx: i32, cz: i32, stage: ChunkGenerationStage) -> ChunkColumn {
         (**self).column_at(cx, cz, stage)
+    }
+
+    fn packet_generation_stage(
+        &self,
+        stage: ChunkGenerationStage,
+    ) -> Option<ChunkGenerationStage> {
+        (**self).packet_generation_stage(stage)
     }
 
     fn block_state(&self, x: i32, y: i32, z: i32) -> String {
@@ -2428,7 +3071,33 @@ pub(crate) fn generate_columns_parallel<S: ChunkSource + ?Sized>(
     source: &S,
     coords: &[(i32, i32)],
 ) -> Vec<ChunkColumn> {
-    map_columns_parallel(source, coords, |_, column| column)
+    source.columns(coords)
+}
+
+/// Run independent world-generation jobs on the server's persistent global
+/// worker dispatcher and collect them in submission order. This is the shared
+/// hand-off used by lifecycle tooling: workers may finish out of order, but a
+/// caller can apply each result to mutable world state in canonical order.
+#[must_use]
+#[cfg(not(target_arch = "wasm32"))]
+pub fn run_worldgen_jobs<T, R, F>(jobs: Vec<T>, work: F) -> Vec<R>
+where
+    T: Send,
+    R: Send,
+    F: Fn(T) -> R + Send + Sync,
+{
+    crate::worldgen_dispatch::run_ordered(jobs, work)
+}
+
+/// Browser twin of [`run_worldgen_jobs`]. Native workers are unavailable on
+/// wasm, so submission order is also execution order.
+#[must_use]
+#[cfg(target_arch = "wasm32")]
+pub fn run_worldgen_jobs<T, R, F>(jobs: Vec<T>, work: F) -> Vec<R>
+where
+    F: Fn(T) -> R,
+{
+    jobs.into_iter().map(work).collect()
 }
 
 /// [`generate_columns_parallel`] with a per-column transform applied **inside the
@@ -2466,32 +3135,11 @@ where
     T: Send,
     F: Fn((i32, i32), ChunkColumn) -> T + Sync,
 {
-    if coords.len() <= 1 {
-        return coords
-            .iter()
-            .map(|&(cx, cz)| f((cx, cz), source.column(cx, cz)))
-            .collect();
-    }
-
-    // Indexed parallel collection retains coordinate order while Rayon reuses
-    // the process-wide pool for every native batch and connection.
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        use rayon::prelude::*;
-
-        return coords
-            .par_iter()
-            .map(|&(cx, cz)| f((cx, cz), source.column(cx, cz)))
-            .collect();
-    }
-
-    // Browser builds deliberately keep the yielding caller above this helper;
-    // this fallback also keeps the generic function available to wasm tests
-    // without linking Rayon into the browser target.
-    #[cfg(target_arch = "wasm32")]
-    coords
-        .iter()
-        .map(|&(cx, cz)| f((cx, cz), source.column(cx, cz)))
+    source
+        .columns(coords)
+        .into_iter()
+        .zip(coords.iter().copied())
+        .map(|(column, coordinate)| f(coordinate, column))
         .collect()
 }
 
@@ -2885,7 +3533,8 @@ impl OverworldChunkSource {
             cz,
             crate::block_drops::bundled_tables(),
         );
-        if chests.is_empty() {
+        let spawners = crate::structure_loot::spawners_for_chunk(column, &starts, cx, cz);
+        if chests.is_empty() && spawners.is_empty() {
             return;
         }
         let mut entities = column.block_entities().to_vec();
@@ -2898,8 +3547,23 @@ impl OverworldChunkSource {
                     block,
                 );
             }
+            // A template-owned loot field is only a request to decorate the
+            // container block that survived structure placement.  Pieces can
+            // overlap, and a later write may replace that cell with air or a
+            // different block; retaining the sidecar in that case creates a
+            // chest BE with no chest block (the same final-state authority used
+            // by generated spawners below).
+            if column
+                .block_state(chest.pos.x.rem_euclid(16), chest.pos.y, chest.pos.z.rem_euclid(16))
+                .split('[')
+                .next()
+                != Some("minecraft:chest")
+            {
+                continue;
+            }
             entities.push((chest.pos, chest.entity));
         }
+        entities.extend(spawners);
         column.set_block_entities(entities);
     }
 }
@@ -2916,6 +3580,59 @@ impl ChunkSource for OverworldChunkSource {
         self.column_at(cx, cz, ChunkGenerationStage::Full)
     }
 
+    fn columns(&self, coords: &[(i32, i32)]) -> Vec<ChunkColumn> {
+        if coords.len() <= 1 {
+            return coords
+                .iter()
+                .map(|&(cx, cz)| self.column(cx, cz))
+                .collect();
+        }
+
+        // An edited column is a retained mutable snapshot rather than a pure
+        // generator result. Keep the scalar path for a mixed batch so the
+        // short edit-map lock and the generated-column path retain exactly the
+        // same precedence as repeated `column()` calls.
+        let pristine = {
+            let edits = self.edits.lock().expect("chunk edit cache lock poisoned");
+            !coords.iter().any(|coord| edits.contains_key(coord))
+        };
+        if !pristine {
+            return coords
+                .iter()
+                .map(|&(cx, cz)| self.column(cx, cz))
+                .collect();
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use rayon::prelude::*;
+
+            // `generate_columns_offloaded` already owns one permit while it
+            // invokes this hook. Rayon nested inside its own worker joins the
+            // same persistent pool, so the batch can use the idle workers
+            // without creating a second pool or waiting on a permit held by
+            // its parent job. Calls made from the runtime/tick thread use the
+            // dispatcher entry point, which supplies the bounded admission.
+            if rayon::current_thread_index().is_some() {
+                return coords
+                    .par_iter()
+                    .map(|&(cx, cz)| self.column(cx, cz))
+                    .collect();
+            }
+            return crate::worldgen_dispatch::run_ordered(coords.to_vec(), |(cx, cz)| {
+                self.column(cx, cz)
+            });
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            coords
+                .iter()
+                .map(|&(cx, cz)| self.column(cx, cz))
+                .collect()
+        }
+    }
+
     fn column_at(&self, cx: i32, cz: i32, stage: ChunkGenerationStage) -> ChunkColumn {
         let edits = self.edits.lock().expect("chunk edit cache lock poisoned");
         if let Some(edited) = edits.get(&(cx, cz)) {
@@ -2927,7 +3644,14 @@ impl ChunkSource for OverworldChunkSource {
             ChunkGenerationStage::Full => self.generator.column(cx, cz),
         };
         let mut column = ChunkColumn::from_generated(generated);
-        self.attach_structures(&mut column, cx, cz);
+        if stage == ChunkGenerationStage::Full {
+            // Shaped columns are the terrain-only distant-view product. Structure
+            // payloads and state-owned block-entity records belong to the full
+            // packet/save path; attaching them here makes a shaped request emit
+            // containers for blocks whose feature pass has not run yet.
+            self.attach_structures(&mut column, cx, cz);
+            column.populate_missing_block_entity_states(cx, cz);
+        }
         column
     }
 
@@ -2968,9 +3692,29 @@ impl ChunkSource for OverworldChunkSource {
             // and dropping the chests would empty a shipwreck the moment someone
             // mined a block in its chunk.
             self.attach_structures(&mut column, cx, cz);
+            column.populate_missing_block_entity_states(cx, cz);
             column
         });
         column.set_block(lx, y, lz, name);
+    }
+
+    fn try_store_resident_edit(
+        &self,
+        cx: i32,
+        cz: i32,
+        column: &ChunkColumn,
+    ) -> Option<crate::chunk_store::TryResidentEdit> {
+        let mut edits = match self.edits.try_lock() {
+            Ok(edits) => edits,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Some(crate::chunk_store::TryResidentEdit::Busy);
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                panic!("chunk edit cache lock poisoned")
+            }
+        };
+        edits.insert((cx, cz), column.clone());
+        Some(crate::chunk_store::TryResidentEdit::Applied)
     }
 }
 
@@ -3052,6 +3796,31 @@ impl NetherChunkSource {
         column
     }
 
+    fn generate_parallel_prewarmed(&self, coords: &[(i32, i32)]) -> Vec<ChunkColumn> {
+        let mut dependencies = coords
+            .iter()
+            .flat_map(|&(cx, cz)| {
+                (-2..=2).flat_map(move |dx| (-2..=2).map(move |dz| (cx + dx, cz + dz)))
+            })
+            .collect::<Vec<_>>();
+        if dependencies
+            .iter()
+            .all(|&(cx, cz)| self.generator.prewarmed_for_batch(cx, cz))
+        {
+            return coords.iter().map(|&(cx, cz)| self.generate(cx, cz)).collect();
+        }
+        dependencies.sort_unstable();
+        dependencies.dedup();
+        dependencies.retain(|&(cx, cz)| !self.generator.prewarmed_for_batch(cx, cz));
+        if dependencies.len() >= 8 {
+            crate::worldgen_dispatch::run_ordered(dependencies, |(cx, cz)| {
+                self.generator.prewarm_for_batch(cx, cz);
+            });
+        }
+        let columns = coords.iter().map(|&(cx, cz)| self.generate(cx, cz)).collect();
+        columns
+    }
+
     /// Copies the Nether generator's complete starts/references and attaches
     /// the coded payloads from every referenced start.  A fortress spawner or
     /// chest can sit outside its origin chunk, so this must resolve references
@@ -3078,7 +3847,7 @@ impl NetherChunkSource {
                 cz,
                 crate::block_drops::bundled_tables(),
             );
-            let spawners = crate::structure_loot::spawners_for_chunk(&referenced_starts, cx, cz);
+            let spawners = crate::structure_loot::spawners_for_chunk(column, &referenced_starts, cx, cz);
             if !chests.is_empty() || !spawners.is_empty() {
                 let mut entities = column.block_entities().to_vec();
                 for chest in chests {
@@ -3116,6 +3885,41 @@ impl ChunkSource for NetherChunkSource {
         self.generate(cx, cz)
     }
 
+    fn column_at(&self, cx: i32, cz: i32, stage: ChunkGenerationStage) -> ChunkColumn {
+        let edits = self.edits.lock().expect("chunk edit cache lock poisoned");
+        if let Some(edited) = edits.get(&(cx, cz)) {
+            return edited.clone();
+        }
+        drop(edits);
+        match stage {
+            ChunkGenerationStage::Shaped => ChunkColumn::from_nether_at(
+                self.generator.column_shaped(cx, cz),
+                Self::WINDOW_HEIGHT,
+                ChunkGenerationStage::Shaped,
+            ),
+            ChunkGenerationStage::Full => self.generate(cx, cz),
+        }
+    }
+
+    fn packet_generation_stage(
+        &self,
+        stage: ChunkGenerationStage,
+    ) -> Option<ChunkGenerationStage> {
+        (stage == ChunkGenerationStage::Shaped).then_some(ChunkGenerationStage::Full)
+    }
+
+
+    fn columns(&self, coords: &[(i32, i32)]) -> Vec<ChunkColumn> {
+        let edits = self.edits.lock().expect("chunk edit cache lock poisoned");
+        let pristine = !coords.iter().any(|coord| edits.contains_key(coord));
+        drop(edits);
+        if pristine && coords.len() > 1 {
+            self.generate_parallel_prewarmed(coords)
+        } else {
+            coords.iter().map(|&(cx, cz)| self.column(cx, cz)).collect()
+        }
+    }
+
     fn prepare_packet_replay(&self, targets: &[(i32, i32)]) -> Option<usize> {
         Some(self.generator.prepare_packet_replay(targets))
     }
@@ -3150,6 +3954,25 @@ impl ChunkSource for NetherChunkSource {
             .entry((cx, cz))
             .or_insert_with(|| self.generate(cx, cz));
         column.set_block(lx, y, lz, name);
+    }
+
+    fn try_store_resident_edit(
+        &self,
+        cx: i32,
+        cz: i32,
+        column: &ChunkColumn,
+    ) -> Option<crate::chunk_store::TryResidentEdit> {
+        let mut edits = match self.edits.try_lock() {
+            Ok(edits) => edits,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Some(crate::chunk_store::TryResidentEdit::Busy);
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                panic!("chunk edit cache lock poisoned")
+            }
+        };
+        edits.insert((cx, cz), column.clone());
+        Some(crate::chunk_store::TryResidentEdit::Applied)
     }
 }
 
@@ -3199,11 +4022,196 @@ impl EndChunkSource {
         }
     }
 
+    /// The production generator owned by this source.
+    #[must_use]
+    pub fn generator(&self) -> &lodestone_worldgen::end::EndGenerator {
+        &self.generator
+    }
+
+    /// Adopt the immutable End prefix used when a column enters the lifecycle
+    /// materializer. Client maps are intentionally cleared: they become live
+    /// only when that resident column reaches FEATURES.
+    #[must_use]
+    pub fn shaped_column(&self, cx: i32, cz: i32) -> ChunkColumn {
+        let mut column = ChunkColumn::from_end(
+            self.generator.column_shaped(cx, cz),
+            Self::WINDOW_HEIGHT,
+        );
+        column.client_heightmaps = None;
+        column
+    }
+
+    /// Attach the return-gateway sidecars emitted by one End source completion.
+    pub fn attach_generated_gateways(
+        &self,
+        column: &mut ChunkColumn,
+        gateways: &[lodestone_worldgen::end::EndGateway],
+    ) {
+        if gateways.is_empty() {
+            return;
+        }
+        let mut entities = column.block_entities().to_vec();
+        entities.extend(gateways.iter().map(|gateway| {
+            (
+                BlockPos::new(gateway.pos.0, gateway.pos.1, gateway.pos.2),
+                BlockEntity::EndGateway {
+                    exit: Some(BlockPos::new(gateway.exit.0, gateway.exit.1, gateway.exit.2)),
+                    exact: gateway.exact,
+                },
+            )
+        }));
+        column.set_block_entities(entities);
+    }
+
+    /// Rebuild the packet-facing End block-entity list from the final resident
+    /// states and the shaped pre-feature snapshot. Structure loot is a
+    /// gameplay/save sidecar, while a freshly generated chunk packet carries
+    /// empty update tags for containers. Ender chests are intentionally
+    /// omitted: their contents are player-owned and the state itself does not
+    /// produce a chunk update record in the external lifecycle.
+    pub fn finalize_packet_snapshot_for_packet(
+        &self,
+        column: &mut ChunkColumn,
+        cx: i32,
+        cz: i32,
+    ) {
+        fn packet_state_type(
+            state: lodestone_data::block_states::StateId,
+        ) -> Option<&'static str> {
+            let name = lodestone_data::block_entity_types::block_entity_type(state)
+                .map(lodestone_data::block_entity_types::block_entity_type_name)?;
+            (name != "minecraft:ender_chest").then_some(name)
+        }
+
+        let mut baseline = self.shaped_column(cx, cz);
+        baseline.populate_missing_block_entity_states(cx, cz);
+
+        let existing = std::mem::take(&mut column.block_entities);
+        let mut packet_entities = Vec::with_capacity(existing.len());
+        for (position, entity) in existing {
+            if entity.type_id() == "minecraft:ender_chest" {
+                continue;
+            }
+            if matches!(
+                entity.type_id(),
+                "minecraft:chest"
+                    | "minecraft:trapped_chest"
+                    | "minecraft:barrel"
+                    | "minecraft:beehive"
+            ) {
+                packet_entities.push((
+                    position,
+                    BlockEntity::Opaque {
+                        id: entity.type_id().to_owned().into(),
+                        nbt: lodestone_core::Nbt::End,
+                    },
+                ));
+            } else {
+                packet_entities.push((position, entity));
+            }
+        }
+
+        // Structure placement owns the first packet-visible state. A later
+        // feature write may replace that block before the packet is encoded,
+        // but the source lifecycle still carries the state-owned empty record.
+        // Merge that shaped record before scanning final states so this stale
+        // but authenticated sidecar is not lost.
+        for (position, entity) in baseline.block_entities() {
+            if entity.type_id() == "minecraft:ender_chest"
+                || packet_entities.iter().any(|(existing, _)| existing == position)
+            {
+                continue;
+            }
+            packet_entities.push((*position, entity.clone()));
+        }
+
+        for section in 0..column.section_count() {
+            column.for_each_section_palette_index(section, |cell, palette_id| {
+                let row = cell / (16 * 16);
+                let rem = cell % (16 * 16);
+                let local_z = (rem / 16) as i32;
+                let local_x = (rem % 16) as i32;
+                let y = column.min_y + (section * 16 + row) as i32;
+                let Some(type_id) = packet_state_type(column.palette_state_ids()[palette_id as usize]) else {
+                    return;
+                };
+                let position = BlockPos::new(cx * 16 + local_x, y, cz * 16 + local_z);
+                if packet_entities.iter().any(|(existing, _)| *existing == position) {
+                    return;
+                }
+                packet_entities.push((
+                    position,
+                    BlockEntity::Opaque {
+                        id: type_id.to_owned().into(),
+                        nbt: lodestone_core::Nbt::End,
+                    },
+                ));
+            });
+        }
+        packet_entities.sort_by_key(|(position, entity)| {
+            (position.x, position.y, position.z, entity.type_id().to_owned())
+        });
+        packet_entities.dedup_by(|(left, _), (right, _)| left == right);
+        column.block_entities = packet_entities;
+    }
+
+    fn complete_rectangle(coords: &[(i32, i32)]) -> bool {
+        let Some(&(first_x, first_z)) = coords.first() else {
+            return true;
+        };
+        let (min_x, max_x, min_z, max_z) = coords.iter().skip(1).fold(
+            (first_x, first_x, first_z, first_z),
+            |(min_x, max_x, min_z, max_z), &(cx, cz)| {
+                (min_x.min(cx), max_x.max(cx), min_z.min(cz), max_z.max(cz))
+            },
+        );
+        let expected = usize::try_from(i64::from(max_x - min_x + 1) * i64::from(max_z - min_z + 1))
+            .expect("End dependency rectangle size");
+        coords.len() == expected
+    }
+
     fn generate(&self, cx: i32, cz: i32) -> ChunkColumn {
         let generated = self.generator.column(cx, cz);
         let mut column = ChunkColumn::from_end(generated, Self::WINDOW_HEIGHT);
         self.attach_structures(&mut column, cx, cz);
         column
+    }
+
+    /// Generate an ordered End batch after deduplicating its overlapping
+    /// immutable three-by-three source windows. Dependency worlds execute on
+    /// the persistent global worker pool; decoration, structure attachment,
+    /// and output order remain canonical.
+    #[must_use]
+    pub fn generate_batch(&self, coords: &[(i32, i32)]) -> Vec<ChunkColumn> {
+        let generated = self.generator.columns_spatial_batch(
+            coords,
+            |dependencies, generator| {
+                let cached = dependencies
+                    .iter()
+                    .map(|&chunk| generator.base_world_cache_get(chunk).map(|base| (chunk, base)))
+                    .collect::<Option<Vec<_>>>();
+                if let Some(cached) = cached {
+                    return cached;
+                }
+                if Self::complete_rectangle(&dependencies) {
+                    generator.base_world_rectangle(&dependencies)
+                } else {
+                    crate::worldgen_dispatch::run_ordered(dependencies, |chunk @ (cx, cz)| {
+                        (chunk, generator.base_world_for_batch(cx, cz))
+                    })
+                }
+            },
+        );
+        coords
+            .iter()
+            .copied()
+            .zip(generated)
+            .map(|((cx, cz), generated)| {
+                let mut column = ChunkColumn::from_end(generated, Self::WINDOW_HEIGHT);
+                self.attach_structures(&mut column, cx, cz);
+                column
+            })
+            .collect()
     }
 
     /// Copies End-city starts and references onto the generated column and
@@ -3214,7 +4222,11 @@ impl EndChunkSource {
     /// blocks reach the client while `structures` and template containers stay
     /// empty. References are resolved back to their origin chunks so a city
     /// crossing a chunk boundary retains its chest sidecars too.
-    fn attach_structures(&self, column: &mut ChunkColumn, cx: i32, cz: i32) {
+    /// Attach structure save metadata and generated container entities to a
+    /// completed End column. The lifecycle materializer uses this same seam
+    /// after its feature replay, so packet generation and persisted columns
+    /// retain the same structure-owned sidecars.
+    pub fn attach_structures(&self, column: &mut ChunkColumn, cx: i32, cz: i32) {
         let starts = self
             .generator
             .structure_starts(cx, cz)
@@ -3238,31 +4250,71 @@ impl EndChunkSource {
                     .into_iter(),
             );
         }
+        referenced_starts.extend(starts.iter().cloned());
         let chests = crate::structure_loot::chests_for_chunk(
             &referenced_starts,
             cx,
             cz,
             crate::block_drops::bundled_tables(),
         );
-        let spawners = crate::structure_loot::spawners_for_chunk(&referenced_starts, cx, cz);
-        if !chests.is_empty() || !spawners.is_empty() {
-            let mut entities = column.block_entities().to_vec();
-            for chest in chests {
-                if let Some(block) = chest.block {
-                    column.set_block(
-                        chest.pos.x.rem_euclid(16),
-                        chest.pos.y,
-                        chest.pos.z.rem_euclid(16),
-                        block,
-                    );
-                }
-                entities.push((chest.pos, chest.entity));
+        let spawners = crate::structure_loot::spawners_for_chunk(column, &referenced_starts, cx, cz);
+        let mut entities = column.block_entities().to_vec();
+        for chest in chests {
+            if let Some(block) = chest.block {
+                column.set_block(
+                    chest.pos.x.rem_euclid(16),
+                    chest.pos.y,
+                    chest.pos.z.rem_euclid(16),
+                    block,
+                );
             }
-            entities.extend(spawners);
-            column.set_block_entities(entities);
+            entities.push((chest.pos, chest.entity));
         }
+        entities.extend(spawners);
+        // End-city templates carry patterned black banners as block states;
+        // their component payload is a separate block-entity sidecar. The
+        // template placer already emitted the banner states, so recover only
+        // missing banner records here and leave richer entities untouched.
+        for (pos, kind) in column.missing_block_entity_states(cx, cz, &entities) {
+            if kind == "minecraft:banner" {
+                entities.push((
+                    pos,
+                    BlockEntity::Opaque {
+                        id: kind.to_owned().into(),
+                        nbt: end_city_banner_nbt(),
+                    },
+                ));
+            }
+        }
+        // Structure placement can leave state-owned containers that do not
+        // carry a loot marker.  They still become empty block entities when
+        // the block state is installed, so materialize those records after
+        // preserving the richer patterned banner sidecars above.
+        column.set_block_entities(entities);
+        column.populate_missing_block_entity_states(cx, cz);
         column.set_structures(starts, references);
     }
+}
+
+fn end_city_banner_nbt() -> lodestone_core::Nbt {
+    use lodestone_core::Nbt;
+
+    let pattern = |name: &str| {
+        Nbt::Compound(vec![
+            ("color".to_owned(), Nbt::String("black".to_owned())),
+            ("pattern".to_owned(), Nbt::String(name.to_owned())),
+        ])
+    };
+    Nbt::Compound(vec![
+        ("components".to_owned(), Nbt::Compound(Vec::new())),
+        (
+            "patterns".to_owned(),
+            Nbt::List {
+                element_type: lodestone_core::NbtTag::Compound,
+                elements: vec![pattern("minecraft:triangle_top"), pattern("minecraft:triangle_bottom")],
+            },
+        ),
+    ])
 }
 
 impl std::fmt::Debug for EndChunkSource {
@@ -3279,6 +4331,10 @@ impl ChunkSource for EndChunkSource {
         }
         drop(edits);
         self.generate(cx, cz)
+    }
+
+    fn columns(&self, coords: &[(i32, i32)]) -> Vec<ChunkColumn> {
+        self.generate_batch(coords)
     }
 
     fn block_state(&self, x: i32, y: i32, z: i32) -> String {
@@ -3307,6 +4363,25 @@ impl ChunkSource for EndChunkSource {
             .entry((cx, cz))
             .or_insert_with(|| self.generate(cx, cz));
         column.set_block(lx, y, lz, name);
+    }
+
+    fn try_store_resident_edit(
+        &self,
+        cx: i32,
+        cz: i32,
+        column: &ChunkColumn,
+    ) -> Option<crate::chunk_store::TryResidentEdit> {
+        let mut edits = match self.edits.try_lock() {
+            Ok(edits) => edits,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Some(crate::chunk_store::TryResidentEdit::Busy);
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                panic!("chunk edit cache lock poisoned")
+            }
+        };
+        edits.insert((cx, cz), column.clone());
+        Some(crate::chunk_store::TryResidentEdit::Applied)
     }
 
     /// The one real override — a compare-exchange on `dragon_fight_started`,
@@ -3474,6 +4549,29 @@ mod tests {
         assert!(solid, "the generator's own 0..128 range must not be entirely air at the island's centre");
     }
 
+    /// The End generator's three client heightmaps must survive the server
+    /// carrier without being replaced by a scan of the final block field.
+    /// Cross-column feature writes make that scan observably different from
+    /// the retained generation lifecycle, so this test checks the handoff
+    /// rather than restating a predicate over the same output blocks.
+    #[test]
+    fn end_client_heightmaps_survive_the_server_carrier() {
+        let generated = crate::worldgen_data::end_generator(42).column(-2, -2);
+        let expected = *generated.client_heightmaps();
+        let column = ChunkColumn::from_end(generated, EndChunkSource::WINDOW_HEIGHT);
+        let actual = column
+            .client_heightmaps()
+            .expect("generated End columns retain all client maps");
+        for (index, type_id) in [1, 4, 5].into_iter().enumerate() {
+            let map = actual.get(type_id).expect("retained client map");
+            for z in 0..16 {
+                for x in 0..16 {
+                    assert_eq!(map.get(x, z), u32::from(expected[index][x + z * 16]));
+                }
+            }
+        }
+    }
+
     /// Structure blocks, save metadata and the block-entity handoff must all
     /// survive the End source boundary. Checking only the generator would
     /// leave a source-level island: city blocks could reach the packet while
@@ -3514,6 +4612,107 @@ mod tests {
                 .all(|(_, entity)| !matches!(entity, BlockEntity::Container { .. })),
             "the captured city must not gain a fabricated container sidecar"
         );
+    }
+
+    /// End-city banners are block-state placements plus patterned records. The
+    /// literal witness keeps the source attachment from regressing to blocks
+    /// without packet-visible banner sidecars.
+    #[test]
+    fn end_chunk_source_attaches_city_banner_sidecars() {
+        let source = crate::worldgen_data::end_chunk_source(42);
+        let column = source.column(283, 86);
+        let mut banners = column
+            .block_entities()
+            .iter()
+            .filter_map(|(pos, entity)| (entity.type_id() == "minecraft:banner").then_some(*pos))
+            .collect::<Vec<_>>();
+        banners.sort_by_key(|pos| (pos.x, pos.y, pos.z));
+        assert_eq!(
+            banners,
+            vec![
+                BlockPos::new(4536, 170, 1391),
+                BlockPos::new(4538, 170, 1389),
+                BlockPos::new(4542, 170, 1389),
+            ]
+        );
+    }
+
+    #[test]
+    fn end_spatial_batch_matches_scalar_columns_in_canonical_order() {
+        let coords = [(-1, 0), (0, 0), (1, 0), (1, 1), (0, 1)];
+        let scalar_source = crate::worldgen_data::end_chunk_source(42);
+        let scalar = coords
+            .iter()
+            .map(|&(cx, cz)| column_bytes(&scalar_source.column(cx, cz)))
+            .collect::<Vec<_>>();
+        let batch_source = crate::worldgen_data::end_chunk_source(42);
+        let batch = batch_source
+            .generate_batch(&coords)
+            .iter()
+            .map(column_bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(batch, scalar);
+    }
+
+    #[test]
+    fn end_cold_and_spatial_batch_preserve_block_entity_positions_and_payloads() {
+        let target = (283, 85);
+        let coords = (84..=87)
+            .flat_map(|cz| (280..=295).map(move |cx| (cx, cz)))
+            .collect::<Vec<_>>();
+        assert_eq!(coords[19], target, "the regression target stays at batch index 19");
+
+        let cold_source = crate::worldgen_data::end_chunk_source(42);
+        let mut cold = cold_source.column(target.0, target.1);
+        cold_source.finalize_packet_snapshot_for_packet(&mut cold, target.0, target.1);
+        let batch_source = crate::worldgen_data::end_chunk_source(42);
+        let batch = batch_source.generate_batch(&coords);
+        let mut batched = batch[19].clone();
+        batch_source.finalize_packet_snapshot_for_packet(&mut batched, target.0, target.1);
+        let expected = vec![
+            (BlockPos::new(4540, 103, 1369), BlockEntity::Opaque {
+                id: "minecraft:chest".to_owned().into(),
+                nbt: lodestone_core::Nbt::End,
+            }),
+            (BlockPos::new(4541, 103, 1369), BlockEntity::Opaque {
+                id: "minecraft:chest".to_owned().into(),
+                nbt: lodestone_core::Nbt::End,
+            }),
+            (BlockPos::new(4543, 143, 1360), BlockEntity::Opaque {
+                id: "minecraft:chest".to_owned().into(),
+                nbt: lodestone_core::Nbt::End,
+            }),
+        ];
+        assert_eq!(cold.block_entities(), expected.as_slice());
+        assert_eq!(batched.block_entities(), expected.as_slice());
+        let positions = batched
+            .block_entities()
+            .iter()
+            .map(|(position, _)| *position)
+            .collect::<Vec<_>>();
+        assert_eq!(positions, expected.iter().map(|(position, _)| *position).collect::<Vec<_>>());
+        for (position, entity) in batched.block_entities() {
+            assert_eq!(entity.type_id(), "minecraft:chest");
+            assert!(matches!(entity, BlockEntity::Opaque { nbt: lodestone_core::Nbt::End, .. }),
+                "packet chest at {position:?} must carry the empty pre-loot update payload");
+        }
+    }
+
+    #[test]
+    fn nether_default_columns_matches_scalar_columns_in_canonical_order() {
+        let coords = [(-1, 0), (0, 0), (1, 0), (1, 1), (0, 1)];
+        let scalar_source = crate::worldgen_data::nether_chunk_source(42);
+        let scalar = coords
+            .iter()
+            .map(|&(cx, cz)| column_bytes(&scalar_source.column(cx, cz)))
+            .collect::<Vec<_>>();
+        let batch_source = crate::worldgen_data::nether_chunk_source(42);
+        let batch = batch_source
+            .columns(&coords)
+            .iter()
+            .map(column_bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(batch, scalar);
     }
 
     #[test]
@@ -3683,6 +4882,363 @@ mod tests {
                  would show up here"
             );
         }
+    }
+
+    /// Runs a production-shaped load batch through a caller-selected Rayon
+    /// pool and the same lifecycle hand-off used by `ChunkStore::ensure`.
+    ///
+    /// The pool is local only so this gate can exercise 1/2/4/8 workers in one
+    /// test process; the closure itself is the production `column_at` call,
+    /// and every admission goes through `ChunkLifecycleHandoff`. Keeping the
+    /// lifecycle boundary inside the parallel map is important: a digest gate
+    /// over bare generators would miss a cross-coordinate load/release race.
+    fn lifecycle_columns_with_workers<S: ChunkSource + 'static>(
+        source: Arc<S>,
+        coords: &[(i32, i32)],
+        workers: usize,
+    ) -> Vec<ChunkColumn> {
+        use rayon::prelude::*;
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .thread_name(|index| format!("worldgen-determinism-{index}"))
+            .build()
+            .expect("determinism worker pool must build");
+        let handoff = Arc::new(crate::chunk_lifecycle::ChunkLifecycleHandoff::default());
+        pool.install(|| {
+            coords
+                .par_iter()
+                .map(|&(cx, cz)| {
+                    let handoff = Arc::clone(&handoff);
+                    let source = Arc::clone(&source);
+                    handoff
+                        .execute(crate::chunk_lifecycle::ChunkLifecyclePlan::load((cx, cz)), |assignment| {
+                            source.column_at(
+                                assignment.chunk.0,
+                                assignment.chunk.1,
+                                ChunkGenerationStage::Full,
+                            )
+                        })
+                        .pop()
+                        .expect("one lifecycle load must return one column")
+                })
+                .collect()
+        })
+    }
+
+    /// Test-only wrapper that keeps the lifecycle admission inside a source
+    /// call while using the real async dispatcher below it. This lets the
+    /// controlled worker-count arms and the process-wide production pool share
+    /// exactly the same source/lifecycle boundary.
+    struct LifecycleSource<S> {
+        source: Arc<S>,
+        handoff: Arc<crate::chunk_lifecycle::ChunkLifecycleHandoff>,
+    }
+
+    impl<S: ChunkSource> ChunkSource for LifecycleSource<S> {
+        fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+            self.handoff
+                .execute(crate::chunk_lifecycle::ChunkLifecyclePlan::load((cx, cz)), |assignment| {
+                    self.source.column_at(
+                        assignment.chunk.0,
+                        assignment.chunk.1,
+                        ChunkGenerationStage::Full,
+                    )
+                })
+                .pop()
+                .expect("one lifecycle load must return one column")
+        }
+
+        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+            self.source.block_state(x, y, z)
+        }
+
+        fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+            self.source.biome_state_at(x, y, z)
+        }
+
+        fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+            self.source.set_block(x, y, z, name);
+        }
+    }
+
+    /// The parts of a generated column that can affect the chunk packet or its
+    /// packet-side source state. This is deliberately componentised so a
+    /// worker-count mismatch reports whether it changed the palette order,
+    /// block indices, biomes, heightmap, or block-entity records instead of
+    /// reducing the entire column to one opaque hash.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct PacketColumnParts {
+        metadata: Vec<u8>,
+        palette: Vec<u8>,
+        blocks: Vec<u8>,
+        biomes: Vec<u8>,
+        block_entities: Vec<u8>,
+        motion_blocking: Vec<u8>,
+    }
+
+    fn packet_column_parts(column: &ChunkColumn) -> PacketColumnParts {
+        fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
+            out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+            out.extend_from_slice(bytes);
+        }
+
+        let mut metadata = Vec::new();
+        metadata.extend_from_slice(&column.min_y.to_le_bytes());
+        metadata.extend_from_slice(&column.height.to_le_bytes());
+        metadata.push(match column.generation_stage() {
+            ChunkGenerationStage::Shaped => 0,
+            ChunkGenerationStage::Full => 1,
+        });
+
+        let mut palette = Vec::new();
+        for state in column.raw_palette() {
+            put_bytes(&mut palette, state.as_bytes());
+        }
+        for state_id in column.palette_state_ids() {
+            palette.extend_from_slice(&state_id.raw().to_le_bytes());
+        }
+
+        let mut blocks = Vec::new();
+        for section in 0..column.section_count() {
+            let mut cells = Vec::new();
+            column.append_section_cells(section, &mut cells);
+            for id in cells {
+                blocks.extend_from_slice(&id.to_le_bytes());
+            }
+        }
+
+        let mut biomes = Vec::new();
+        for state in column.biome_quarts() {
+            put_bytes(&mut biomes, state.as_bytes());
+        }
+        for state in column.biome_cell_palette() {
+            put_bytes(&mut biomes, state.as_bytes());
+        }
+        biomes.extend_from_slice(&(column.biome_y_quarts() as u64).to_le_bytes());
+        for qy in 0..column.biome_y_quarts() {
+            for qz in 0..4 {
+                for qx in 0..4 {
+                    biomes.extend_from_slice(&column.biome_cell_index(qx, qy, qz).to_le_bytes());
+                }
+            }
+        }
+
+        let mut block_entities = Vec::new();
+        for (position, entity) in column.block_entities() {
+            block_entities.extend_from_slice(&position.x.to_le_bytes());
+            block_entities.extend_from_slice(&position.y.to_le_bytes());
+            block_entities.extend_from_slice(&position.z.to_le_bytes());
+            put_bytes(&mut block_entities, entity.type_id().as_bytes());
+            // The debug form includes the payload fields (loot, NBT, and
+            // typed state) that the packet writer serializes after the type.
+            put_bytes(&mut block_entities, format!("{entity:?}").as_bytes());
+        }
+
+        let mut motion_blocking = Vec::new();
+        if let Some(heights) = column.motion_blocking() {
+            motion_blocking.push(1);
+            for height in heights {
+                motion_blocking.extend_from_slice(&height.to_le_bytes());
+            }
+        } else {
+            motion_blocking.push(0);
+        }
+
+        PacketColumnParts {
+            metadata,
+            palette,
+            blocks,
+            biomes,
+            block_entities,
+            motion_blocking,
+        }
+    }
+
+    fn first_packet_component_difference(
+        expected: &PacketColumnParts,
+        actual: &PacketColumnParts,
+    ) -> Option<&'static str> {
+        if expected.metadata != actual.metadata {
+            Some("metadata")
+        } else if expected.palette != actual.palette {
+            Some("palette")
+        } else if expected.blocks != actual.blocks {
+            Some("blocks")
+        } else if expected.biomes != actual.biomes {
+            Some("biomes")
+        } else if expected.block_entities != actual.block_entities {
+            Some("block_entities")
+        } else if expected.motion_blocking != actual.motion_blocking {
+            Some("motion_blocking")
+        } else {
+            None
+        }
+    }
+
+    fn packet_digest_chain(
+        coords: &[(i32, i32)],
+        columns: &[PacketColumnParts],
+    ) -> [u8; 32] {
+        use sha2::{Digest as _, Sha256};
+
+        let mut digest = Sha256::new();
+        digest.update(b"lodestone-production-lifecycle-packet-chain-v1");
+        for (&(cx, cz), column) in coords.iter().zip(columns) {
+            digest.update(cx.to_le_bytes());
+            digest.update(cz.to_le_bytes());
+            for component in [
+                &column.metadata,
+                &column.palette,
+                &column.blocks,
+                &column.biomes,
+                &column.block_entities,
+                &column.motion_blocking,
+            ] {
+                digest.update((component.len() as u64).to_le_bytes());
+                digest.update(component);
+            }
+        }
+        digest.finalize().into()
+    }
+
+    /// **Production lifecycle determinism gate.** Every dimension is loaded
+    /// through its real `ChunkSource`, with each coordinate admitted through
+    /// `ChunkLifecycleHandoff`, and the resulting packet-relevant columns are
+    /// compared against a one-worker baseline for 1, 2, 4, and 8 workers.
+    ///
+    /// A local pool is used solely to vary the worker count; production uses
+    /// the process-wide pool in `worldgen_dispatch`. The map is indexed by
+    /// Rayon, so completion order is intentionally different from coordinate
+    /// order while the returned vector remains coordinate ordered. The fixed
+    /// batch is adjacent and includes negative coordinates to exercise both
+    /// cross-chunk feature writes and canonical lifecycle ordering.
+    #[test]
+    #[ignore = "full decorated lifecycle batch across all dimensions; run in release"]
+    fn production_lifecycle_generation_is_identical_at_1_2_4_and_8_workers() {
+        const SEED: i64 = 42;
+        const WORKERS: [usize; 4] = [1, 2, 4, 8];
+        let coords: Vec<(i32, i32)> = (-2..=1)
+            .flat_map(|cx| (-2..=1).map(move |cz| (cx, cz)))
+            .collect();
+
+        #[derive(Clone)]
+        enum DimensionSource {
+            Overworld(Arc<OverworldChunkSource>),
+            Nether(Arc<NetherChunkSource>),
+            End(Arc<EndChunkSource>),
+        }
+
+        impl DimensionSource {
+            fn label(&self) -> &'static str {
+                match self {
+                    Self::Overworld(_) => "overworld",
+                    Self::Nether(_) => "nether",
+                    Self::End(_) => "end",
+                }
+            }
+
+            fn run(&self, coords: &[(i32, i32)], workers: usize) -> Vec<ChunkColumn> {
+                match self {
+                    Self::Overworld(source) => {
+                        lifecycle_columns_with_workers(Arc::clone(source), coords, workers)
+                    }
+                    Self::Nether(source) => {
+                        lifecycle_columns_with_workers(Arc::clone(source), coords, workers)
+                    }
+                    Self::End(source) => {
+                        lifecycle_columns_with_workers(Arc::clone(source), coords, workers)
+                    }
+                }
+            }
+        }
+
+        let dimensions = [
+            DimensionSource::Overworld(Arc::new(crate::worldgen_data::overworld_chunk_source(SEED))),
+            DimensionSource::Nether(Arc::new(crate::worldgen_data::nether_chunk_source(SEED))),
+            DimensionSource::End(Arc::new(crate::worldgen_data::end_chunk_source(SEED))),
+        ];
+
+        for dimension in dimensions {
+            let baseline = dimension.run(&coords, WORKERS[0]);
+            let baseline_parts: Vec<_> = baseline.iter().map(packet_column_parts).collect();
+            let baseline_digest = packet_digest_chain(&coords, &baseline_parts);
+
+            // Negative control: a lifecycle that committed adjacent results in
+            // reverse coordinate order must not be accepted as equivalent to
+            // the canonical chain. This proves the digest includes both the
+            // coordinate admission order and every component, rather than
+            // merely reducing a commutative set of chunk contents.
+            let mut reversed_coords = coords.clone();
+            let mut reversed_parts = baseline_parts.iter().collect::<Vec<_>>();
+            reversed_coords.reverse();
+            reversed_parts.reverse();
+            let reversed_parts = reversed_parts.into_iter().cloned().collect::<Vec<_>>();
+            assert_ne!(
+                baseline_digest,
+                packet_digest_chain(&reversed_coords, &reversed_parts),
+                "{} negative commit-order control did not distinguish reversed adjacent results",
+                dimension.label()
+            );
+            for &workers in &WORKERS[1..] {
+                // Construct a fresh source for each worker count. Reusing a
+                // source could turn an order-dependent cache hit into a false
+                // pass and would not model a fresh lifecycle admission.
+                let source = match &dimension {
+                    DimensionSource::Overworld(_) => DimensionSource::Overworld(Arc::new(
+                        crate::worldgen_data::overworld_chunk_source(SEED),
+                    )),
+                    DimensionSource::Nether(_) => DimensionSource::Nether(Arc::new(
+                        crate::worldgen_data::nether_chunk_source(SEED),
+                    )),
+                    DimensionSource::End(_) => {
+                        DimensionSource::End(Arc::new(crate::worldgen_data::end_chunk_source(SEED)))
+                    }
+                };
+                let actual = source.run(&coords, workers);
+                assert_eq!(actual.len(), coords.len(), "{} returned the wrong column count", source.label());
+                let actual_parts: Vec<_> = actual.iter().map(packet_column_parts).collect();
+                assert_eq!(
+                    packet_digest_chain(&coords, &actual_parts),
+                    baseline_digest,
+                    "{} worker-count digest chain changed at {workers} workers",
+                    source.label()
+                );
+                for (index, ((cx, cz), column)) in coords.iter().zip(actual.iter()).enumerate() {
+                    let actual_parts = packet_column_parts(column);
+                    if let Some(component) =
+                        first_packet_component_difference(&baseline_parts[index], &actual_parts)
+                    {
+                        panic!(
+                            "{} worker-count mismatch at ({cx},{cz}) with {workers} workers: first component={component}",
+                            source.label()
+                        );
+                    }
+                }
+            }
+        }
+
+        // Wiring control: one fresh Overworld source traverses the actual
+        // process-wide `worldgen_dispatch::spawn` path. Its digest must agree
+        // with the one-worker controlled pool above; otherwise the local
+        // worker-count gate could pass while production admission used a
+        // different source or ordering boundary.
+        let baseline_source = crate::worldgen_data::overworld_chunk_source(SEED);
+        let baseline = lifecycle_columns_with_workers(Arc::new(baseline_source), &coords, 1);
+        let baseline_parts: Vec<_> = baseline.iter().map(packet_column_parts).collect();
+        let baseline_digest = packet_digest_chain(&coords, &baseline_parts);
+        let production_source = Arc::new(LifecycleSource {
+            source: Arc::new(crate::worldgen_data::overworld_chunk_source(SEED)),
+            handoff: Arc::new(crate::chunk_lifecycle::ChunkLifecycleHandoff::default()),
+        });
+        let runtime = tokio::runtime::Runtime::new().expect("production dispatch test runtime");
+        let dispatched = runtime.block_on(generate_columns_offloaded(production_source, coords.clone()));
+        let dispatched_parts: Vec<_> = dispatched.iter().map(packet_column_parts).collect();
+        assert_eq!(
+            packet_digest_chain(&coords, &dispatched_parts),
+            baseline_digest,
+            "the production dispatcher changed the ordered lifecycle digest"
+        );
     }
 
     /// A source whose every column costs a fixed amount of *blocking*
@@ -4181,6 +5737,75 @@ mod tests {
              gate is not distinguishing yielded generation from the pre-fix shape; got \
              {control_observed:?}"
         );
+    }
+
+    #[test]
+    fn generated_state_block_entity_scan_emits_potent_sulfur_and_rejects_plain_sulfur() {
+        let mut column = ChunkColumn::new(-64, 384);
+        column.set_block(4, 14, 1, "minecraft:potent_sulfur");
+        column.populate_missing_block_entity_states(-25, -25);
+
+        assert_eq!(column.block_entities().len(), 1);
+        let (position, entity) = &column.block_entities()[0];
+        assert_eq!(*position, BlockPos::new(-396, 14, -399));
+        assert!(matches!(
+            entity,
+            BlockEntity::Opaque { id, nbt }
+                if id.name() == "minecraft:potent_sulfur"
+                    && matches!(nbt, lodestone_core::Nbt::End)
+        ));
+        assert_eq!(
+            lodestone_data::block_entity_types::block_entity_type_id(entity.type_id())
+                .map(|id| id.raw()),
+            Some(48),
+            "the state-owned potent-sulfur record uses registry slot 48"
+        );
+
+        // Negative control: ordinary sulfur is a terrain block, not a
+        // state-owned block entity, so the table-driven scan must stay empty.
+        let mut control = ChunkColumn::new(-64, 384);
+        control.set_block(4, 14, 1, "minecraft:sulfur");
+        control.populate_missing_block_entity_states(-25, -25);
+        assert!(
+            control.block_entities().is_empty(),
+            "plain sulfur must not create a block-entity sidecar"
+        );
+    }
+
+    #[test]
+    fn block_entity_reconciliation_preserves_payloads_and_removes_replaced_records() {
+        let position = BlockPos::new(4, 14, 1);
+        let rich = BlockEntity::Opaque {
+            id: "minecraft:chest".to_owned().into(),
+            nbt: lodestone_core::Nbt::Compound(vec![
+                ("marker".to_owned(), lodestone_core::Nbt::Int(7)),
+            ]),
+        };
+        let mut preserved = ChunkColumn::new(-64, 384);
+        preserved.set_block(4, 14, 1, "minecraft:chest");
+        preserved.set_block_entities(vec![(position, rich.clone())]);
+        preserved.reconcile_block_entity_states(0, 0);
+        assert_eq!(preserved.block_entities(), &[(position, rich)]);
+
+        let mut replaced = ChunkColumn::new(-64, 384);
+        replaced.set_block(4, 14, 1, "minecraft:chest");
+        replaced.set_block_entities(vec![(position, BlockEntity::Opaque {
+            id: "minecraft:chest".to_owned().into(),
+            nbt: lodestone_core::Nbt::End,
+        })]);
+        replaced.set_block(4, 14, 1, "minecraft:stone");
+        replaced.reconcile_block_entity_states(0, 0);
+        assert!(replaced.block_entities().is_empty());
+
+        let mut late = ChunkColumn::new(-64, 384);
+        late.set_block(4, 14, 1, "minecraft:chest");
+        late.reconcile_block_entity_states(0, 0);
+        let [(actual_position, actual_entity)] = late.block_entities() else {
+            panic!("a final chest state must receive one empty record");
+        };
+        assert_eq!(*actual_position, position);
+        assert!(matches!(actual_entity, BlockEntity::Opaque { id, nbt }
+            if id.name() == "minecraft:chest" && matches!(nbt, lodestone_core::Nbt::End)));
     }
 
     #[test]
