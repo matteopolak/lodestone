@@ -42,7 +42,7 @@ use std::sync::Arc;
 
 use lodestone_worldgen_core::hash::FastMap;
 
-use crate::interner::{StateId, StateInterner};
+use crate::interner::{BaseStateFacts, StateId, StateInterner};
 
 /// A dense block field over `[min_x, min_x+size_x) × [min_y, min_y+size_y) ×
 /// [min_z, min_z+size_z)`, palette-indexed the same way
@@ -101,6 +101,10 @@ pub struct DenseBlockGrid {
     /// interner's public `base_of` accessor takes a read lock and is therefore
     /// a boundary-time helper, not something a per-cell loop should call.
     palette_bases: Vec<StateId>,
+    /// Canonical typed facts for each palette entry's base state. Resolving
+    /// these once when a palette entry is added keeps heightmap scans on a
+    /// direct palette-indexed read with no interner lock or string path.
+    palette_base_facts: Vec<BaseStateFacts>,
     /// Reverse lookup for [`Self::palette`] — **not** an ordered structure, and
     /// never iterated (see U17's note on [`FastMap`]). `palette` is the thing
     /// whose order reaches the wire, and it is a `Vec` appended in first-write
@@ -155,6 +159,7 @@ impl DenseBlockGrid {
         let cells = (size_x.max(0) as usize) * (size_y.max(0) as usize) * (size_z.max(0) as usize);
         let default_name = interner.name_of(default);
         let default_base = interner.base_of(default);
+        let default_facts = interner.base_facts(default_base);
         Self {
             min_x,
             min_y,
@@ -166,6 +171,7 @@ impl DenseBlockGrid {
             palette: vec![default],
             palette_names: vec![default_name],
             palette_bases: vec![default_base],
+            palette_base_facts: vec![default_facts],
             index_of,
             blocks: vec![0u16; cells],
         }
@@ -212,6 +218,15 @@ impl DenseBlockGrid {
         }
     }
 
+    /// Typed canonical facts for the base state at `(x, y, z)`.
+    #[must_use]
+    pub fn get_base_facts(&self, x: i32, y: i32, z: i32) -> BaseStateFacts {
+        match self.index(x, y, z) {
+            Some(i) => self.palette_base_facts[self.blocks[i] as usize],
+            None => BaseStateFacts::air(),
+        }
+    }
+
     /// Canonical block-state string at `(x, y, z)`. `"minecraft:air"` outside
     /// the box.
     ///
@@ -252,7 +267,9 @@ impl DenseBlockGrid {
             // state this grid has not seen before (~76 per chunk). Kept in
             // lock-step with `palette` so the two are always the same length.
             self.palette_names.push(self.interner.name_of(state));
-            self.palette_bases.push(self.interner.base_of(state));
+            let base = self.interner.base_of(state);
+            self.palette_bases.push(base);
+            self.palette_base_facts.push(self.interner.base_facts(base));
             self.index_of.insert(state, id);
             id
         };
