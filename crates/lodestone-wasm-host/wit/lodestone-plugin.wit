@@ -34,7 +34,7 @@
 //     it observes in its `plugin.toml`, and a kind this world does not define is
 //     a loud manifest rejection at load time.
 
-package lodestone:plugin@0.27.0;
+package lodestone:plugin@0.28.0;
 
 /// The vocabulary itself: the intent doctrine's own observe/act types, lifted
 /// into WIT. Nothing here is invented for wasm — every record below is a
@@ -689,7 +689,7 @@ interface types {
         name: string,
         version: string,
         /// The world version this guest was built against, e.g.
-        /// `"lodestone:plugin@0.27.0"`.
+        /// `"lodestone:plugin@0.28.0"`.
         abi: string,
         /// Root commands this guest wants the host to register. The host only
         /// installs them when the manifest grants `commands:register`.
@@ -734,6 +734,36 @@ interface filesystem {
 /// the linker is unavailable even to a guest that knows the other interface.
 interface filesystem-write {
     write-file: func(path: string, contents: list<u8>) -> result<_, string>;
+}
+
+/// Capability `data:persistent` — bounded, typed plugin-owned records.
+///
+/// The host supplies the plugin namespace; a guest supplies only the stable
+/// scope identity and its bare key. Entity identities include a lifecycle
+/// generation so a reused runtime id cannot reveal the previous occupant's
+/// value. Records are opaque bytes with a plugin-owned schema version; the
+/// host validates size and key limits but never interprets the payload.
+interface persistent-data {
+    record entity-scope {
+        id: list<u8>,
+        generation: u64,
+    }
+
+    variant scope {
+        plugin,
+        world(list<u8>),
+        player(list<u8>),
+        entity(entity-scope),
+    }
+
+    record value {
+        schema-version: u32,
+        blob: list<u8>,
+    }
+
+    get: func(scope: scope, key: string) -> result<option<value>, string>;
+    set: func(scope: scope, key: string, schema-version: u32, blob: list<u8>) -> result<_, string>;
+    delete: func(scope: scope, key: string) -> result<_, string>;
 }
 
 /// Capability `schedule:tasks` — denied unless the plugin manifest requests it
@@ -795,6 +825,7 @@ world plugin {
     import logging;
     import filesystem;
     import filesystem-write;
+    import persistent-data;
     import scheduler;
     import world-snapshot;
     import version-broker;
