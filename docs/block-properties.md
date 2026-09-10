@@ -26,6 +26,13 @@ the extension registry. The resident built-in Properties representation stores
 one-byte keys and one-byte built-in values; extension values do not enlarge
 every resident block state.
 
+BlockStateValue uses this typed parser when a serialized state crosses into the
+generated census. A partial list keeps the registered default for omitted keys,
+while duplicate, unknown, malformed, and wrong-schema properties remain an
+extension value. `as_str` and `into_string` are the explicit serialization
+boundary APIs; runtime consumers should retain StateId or Properties instead of
+re-parsing their spelling.
+
 ## How to change it
 
 Add or change generation in

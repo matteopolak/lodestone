@@ -48,6 +48,7 @@ use std::ops::Deref;
 
 use lodestone_model::{BlockStateRegistry, Identifier, ResolvedBlockState};
 
+use crate::block_properties::Properties;
 use crate::generated_block_states as table;
 
 pub use crate::generated_block_registry::BLOCK_COUNT;
@@ -312,29 +313,31 @@ impl PartialEq<String> for BlockStateValue {
 
 /// Resolves only a state whose named properties are all part of the generated
 /// state domain. Missing properties are valid shorthand and are filled by the
-/// same default-state lookup used by [`StateId::from_state_str`].
+/// same default-state lookup used by [`StateId::from_state_str`]. The property
+/// text itself is parsed into [`Properties`], so duplicate keys, unknown keys,
+/// and values from another property's domain cannot be mistaken for a state.
 fn exact_state_id(state: &str) -> Option<StateId> {
-    let id = StateId::from_state_str(state)?;
-    let Some((name, raw_properties)) = state.split_once('[') else {
-        return Some(id);
+    let Some((name, _)) = state.split_once('[') else {
+        return StateId::from_state_str(state);
     };
-    let raw_properties = raw_properties.strip_suffix(']')?;
-    if raw_properties.is_empty() {
+    let property_text = &state[name.len()..];
+    if !property_text.ends_with(']') {
+        return None;
+    }
+    let parsed = Properties::parse(property_text).ok()?;
+    if parsed.is_empty() {
         return None;
     }
 
-    let mut seen = Vec::new();
-    for pair in raw_properties.split(',') {
-        let (key, value) = pair.split_once('=')?;
-        if key.is_empty() || value.is_empty() || seen.iter().any(|known| known == &key) {
-            return None;
-        }
-        if !id.properties().iter().any(|&(known, allowed)| known == key && allowed == value) {
-            return None;
-        }
-        seen.push(key);
+    let id = StateId::from_state_str(state)?;
+    if name != id.name() {
+        return None;
     }
-    (name == id.name()).then_some(id)
+    let generated = Properties::from_state_id(id);
+    parsed
+        .iter()
+        .all(|property| generated.get(property.key()) == Some(property.value()))
+        .then_some(id)
 }
 
 /// The interned block identifier for `id` (for example `minecraft:oak_stairs`),
@@ -699,6 +702,7 @@ impl Default for BlockStateTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block_properties::{ParseError, PropertiesError, PropertyError};
 
     #[test]
     fn canonical_state_round_trips_a_non_default_property_set() {
@@ -830,6 +834,33 @@ mod tests {
         assert_eq!(synthetic.state_id(), None);
         let malformed = BlockStateValue::parse("minecraft:stone[not-a-property]");
         assert_eq!(malformed.state_id(), None);
+    }
+
+    #[test]
+    fn block_state_value_rejects_duplicate_unknown_and_wrong_schema_properties() {
+        let duplicate = BlockStateValue::parse("minecraft:target[power=12,power=12]");
+        assert_eq!(duplicate.state_id(), None);
+        assert!(matches!(
+            Properties::parse("[power=12,power=12]"),
+            Err(ParseError::InvalidProperties(PropertiesError::DuplicateKey(_)))
+        ));
+
+        let unknown = BlockStateValue::parse("minecraft:target[definitely_unknown=true]");
+        assert_eq!(unknown.state_id(), None);
+        assert!(matches!(
+            Properties::parse("[definitely_unknown=true]"),
+            Err(ParseError::UnknownKey)
+        ));
+
+        let wrong_schema = BlockStateValue::parse("minecraft:comparator[power=12]");
+        assert_eq!(wrong_schema.state_id(), None);
+        assert!(matches!(
+            Properties::parse("[power=north]"),
+            Err(ParseError::InvalidProperties(
+                PropertiesError::InvalidProperty(PropertyError::ValueNotAllowed { .. })
+            ))
+        ));
+        assert!(Properties::parse("[power=12]").is_ok());
     }
 
     #[test]
