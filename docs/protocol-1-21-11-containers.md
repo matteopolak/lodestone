@@ -19,7 +19,12 @@ VarInt state id, signed-short slot indexes, and component-shaped item slots.
 item registry bridge and emits `ClientEvent::ScreenOpened`,
 `ClientEvent::ContainerContent`, or `ClientEvent::ContainerSlot`. The existing
 session fold then persists those events in the live menu, where prediction and
-authoritative corrections meet.
+authoritative corrections meet. `joined_protocol_774_chest_moves_a_slot_and_closes_cleanly`
+exercises that production path against a source-backed chest: it opens the
+window, quick-moves a diamond into the player tail, closes, and reopens to
+prove that the server-owned slot mutation persisted. The neighboring
+protocol-766 full-stack click body is also a negative wire control; protocol
+774 must reject it because its changed slots carry hashed-stack presence bits.
 
 The server encoder currently writes bare item stacks (zero added and removed
 component counts). An item outside the protocol registry, a non-positive count,

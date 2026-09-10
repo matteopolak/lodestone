@@ -59,6 +59,27 @@ fn container_session_hosting_uses_literal_774_layouts() {
 }
 
 #[test]
+fn protocol_774_rejects_the_neighboring_full_stack_click_layout() {
+    // This is the literal protocol-766 click body used by the preceding
+    // hosted family: its changed-slot entry carries a complete item stack.
+    // Protocol 774 changed that entry to a hashed-stack presence bit. Feeding
+    // the old bytes must not turn the first stack byte into a valid click.
+    let stale_766_click = [
+        0x01, 0x01, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x01, 0x00,
+        0x00, 0x00,
+    ];
+    assert_eq!(
+        V774ServerProtocol.decode(
+            State::Play,
+            packet_ids::play::serverbound::CONTAINER_CLICK,
+            &stale_766_click,
+        ),
+        ServerBound::Ignored,
+        "protocol-774 must reject protocol-766 full-stack click bytes",
+    );
+}
+
+#[test]
 fn protocol_774_does_not_opt_into_retained_initial_light() {
     assert!(!V774ServerProtocol.retains_initial_column_light());
 }
