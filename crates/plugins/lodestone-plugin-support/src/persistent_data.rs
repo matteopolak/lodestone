@@ -1,8 +1,8 @@
-//! The persistent data container's non-persistent half: an in-memory, namespaced key-value store,
-//! attachable to an entity or a chunk — the familiar plugin per-object metadata
-//! convention, minus the "survives a restart" guarantee, which
-//! the issue itself scopes out until world persistence (Anvil, Tier 4 of
-//! `docs/backlog.md`) exists at all.
+//! The in-memory, namespaced key-value stores attachable to an entity or a
+//! chunk — the familiar plugin per-object metadata convention. The
+//! storage-neutral durable record half lives in [`crate::durable_data`]; this
+//! module remains the convenient live ECS resource for plugins that do not
+//! need to hold a backend snapshot themselves.
 //!
 //! # Why `serde_json::Value`, not a decoded struct
 //!
@@ -13,11 +13,10 @@
 //! This store never decodes into named fields at all — every value is an
 //! opaque [`serde_json::Value`] keyed by whatever string the plugin chose, so
 //! there is no schema to fall out of sync with and nothing gets silently
-//! excluded. **This matters again the moment persistence is added**: whoever
-//! builds the Tier 2 half of this issue must carry each entry through
-//! wholesale (e.g. as one opaque NBT compound blob per key) rather than
-//! decoding into a fixed set of named fields and excluding whatever a schema
-//! does not list — the exact shape that hazard needs to recur.
+//! excluded. The durable record API carries each entry through wholesale
+//! rather than decoding into a fixed set of named fields and excluding
+//! whatever a schema does not list — the exact shape that hazard needs to
+//! recur.
 //!
 //! # Why two stores, not one keyed by an enum
 //!
@@ -202,12 +201,13 @@ impl ChunkDataStore {
     }
 }
 
-/// Installs both [`EntityDataStore`] and [`ChunkDataStore`] as resources.
+/// Installs the live entity/chunk stores and the storage-neutral durable
+/// [`crate::durable_data::PluginDataStore`] as resources.
 ///
 /// Adds no systems of its own — this is pure storage a plugin's own systems
 /// read and write directly through `Res`/`ResMut`, the same shape
 /// [`lodestone_ecs::ChunkWorldWrite`] uses. `init_resource`, so adding it
-/// twice (two plugins that both want the store) is a no-op, not a panic.
+/// twice (two plugins that both want the stores) is a no-op, not a panic.
 #[derive(Debug, Default)]
 pub struct PersistentDataPlugin;
 
@@ -215,6 +215,7 @@ impl Plugin for PersistentDataPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<EntityDataStore>();
         app.init_resource::<ChunkDataStore>();
+        app.init_resource::<crate::durable_data::PluginDataStore>();
     }
 
     /// Multiple plugins each want the store and none of them knows whether
@@ -351,5 +352,9 @@ mod tests {
             app.world().resource::<ChunkDataStore>().tracked_chunk_count(),
             0
         );
+        assert!(app
+            .world()
+            .resource::<crate::durable_data::PluginDataStore>()
+            .is_empty());
     }
 }
