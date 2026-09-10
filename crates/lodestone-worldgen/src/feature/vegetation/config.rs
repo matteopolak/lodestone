@@ -12,6 +12,7 @@ use serde_json::Value;
 
 use crate::density::Resolver;
 use crate::feature::{BlockPos, IntProvider};
+use lodestone_data::block_states::StateId as CanonicalStateId;
 use crate::rng::RandomSource;
 
 use super::grid::VegGrid;
@@ -541,6 +542,36 @@ pub enum BlockStateProvider {
 
 pub(super) fn canon_state(v: &Value) -> String {
     crate::feature::canon_state(v)
+}
+
+/// Parses a configured feature state into the validated built-in state table.
+fn parse_validated_state(v: &Value) -> Option<CanonicalStateId> {
+    let object = v.as_object()?;
+    let name = object.get("Name")?.as_str()?;
+    let mut state = name.to_owned();
+    if let Some(properties) = object.get("Properties") {
+        let properties = properties.as_object()?;
+        if properties.is_empty() {
+            return None;
+        }
+        let mut entries: Vec<_> = properties.iter().collect();
+        entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        state.push('[');
+        for (index, (key, value)) in entries.into_iter().enumerate() {
+            if index != 0 {
+                state.push(',');
+            }
+            state.push_str(key);
+            state.push('=');
+            state.push_str(value.as_str()?);
+        }
+        state.push(']');
+    }
+    let id = CanonicalStateId::from_state_str(&state)?;
+    if object.contains_key("Properties") && id.canonical_state() != state {
+        return None;
+    }
+    Some(id)
 }
 
 impl BlockStateProvider {
