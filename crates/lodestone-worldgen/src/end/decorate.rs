@@ -18,6 +18,69 @@ use crate::rng::{RandomSource, WorldgenRandom, XoroshiroRandomSource};
 
 use super::{END_HIGHLANDS, SMALL_END_ISLANDS, THE_END, EndBiomeSource, EndSpike, end_spike_blocks, end_spikes_for_seed};
 
+/// Built-in End biomes visible in one source chunk's 3x3 feature region.
+///
+/// The source can return only five identities, so a compact bitset avoids a
+/// general-purpose set allocation for every FEATURES source.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct EndBiomeSet(u8);
+
+impl EndBiomeSet {
+    #[must_use]
+    pub(crate) fn around_source(
+        source_x: i32,
+        source_z: i32,
+        mut biome_at_chunk: impl FnMut(i32, i32) -> BuiltinBiome,
+    ) -> Self {
+        let mut biomes = Self::default();
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                biomes.insert(biome_at_chunk(source_x + dx, source_z + dz));
+            }
+        }
+        biomes
+    }
+
+    fn insert(&mut self, biome: BuiltinBiome) {
+        let bit = match biome {
+            BuiltinBiome::TheEnd => 1 << 0,
+            BuiltinBiome::EndHighlands => 1 << 1,
+            BuiltinBiome::EndMidlands => 1 << 2,
+            BuiltinBiome::SmallEndIslands => 1 << 3,
+            BuiltinBiome::EndBarrens => 1 << 4,
+            _ => 0,
+        };
+        self.0 |= bit;
+    }
+
+    #[must_use]
+    fn contains(self, biome: BuiltinBiome) -> bool {
+        let mut singleton = Self::default();
+        singleton.insert(biome);
+        singleton.0 != 0 && self.0 & singleton.0 != 0
+    }
+}
+
+#[cfg(test)]
+mod biome_set_tests {
+    use super::*;
+
+    #[test]
+    fn source_neighbourhood_collects_each_typed_identity_without_duplicates() {
+        let biomes = EndBiomeSet::around_source(10, 20, |x, z| match (x - 10, z - 20) {
+            (-1, -1) => BuiltinBiome::TheEnd,
+            (1, 1) => BuiltinBiome::SmallEndIslands,
+            _ => BuiltinBiome::EndHighlands,
+        });
+
+        assert!(biomes.contains(BuiltinBiome::TheEnd));
+        assert!(biomes.contains(BuiltinBiome::EndHighlands));
+        assert!(biomes.contains(BuiltinBiome::SmallEndIslands));
+        assert!(!biomes.contains(BuiltinBiome::EndBarrens));
+        assert!(!biomes.contains(BuiltinBiome::Plains));
+    }
+}
+
 /// The exit metadata attached to a generated return gateway.  The block itself
 /// belongs in the palette; this record is the data the gateway block entity
 /// needs in order to be functional.
@@ -200,8 +263,8 @@ impl EndDecoration {
         let mut gateways = Vec::new();
         for source_x in cx - 1..=cx + 1 {
             for source_z in cz - 1..=cz + 1 {
-                let biome = biome_at_chunk(source_x, source_z);
-                gateways.extend(self.apply_source(seed, source_x, source_z, world, biome).into_iter().filter(|gateway| {
+                let biomes = EndBiomeSet::around_source(source_x, source_z, &biome_at_chunk);
+                gateways.extend(self.apply_source(seed, source_x, source_z, world, biomes).into_iter().filter(|gateway| {
                     gateway.pos.0.div_euclid(16) == cx && gateway.pos.2.div_euclid(16) == cz
                 }));
             }
@@ -215,7 +278,7 @@ impl EndDecoration {
         source_x: i32,
         source_z: i32,
         world: &mut DenseBlockGrid,
-        biome: BuiltinBiome,
+        source_biomes: EndBiomeSet,
     ) -> Vec<EndGateway> {
         let biome_source = EndBiomeSource::new(seed);
         let mut gateways = Vec::new();
@@ -236,7 +299,7 @@ impl EndDecoration {
             .map(|_| end_spikes_for_seed(seed));
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
         let decoration_seed = random.set_decoration_seed(seed, source_x * 16, source_z * 16);
-        if biome == BuiltinBiome::TheEnd {
+        if source_biomes.contains(BuiltinBiome::TheEnd) {
             random.set_feature_seed(decoration_seed, self.spike_index.unwrap_or_default() as i32, 4);
             let spikes: &[EndSpike] = match self.spikes.as_deref() {
                 Some(configured) if !configured.is_empty() => configured,
@@ -251,7 +314,7 @@ impl EndDecoration {
                 }
             }
         }
-        if self.outer_islands {
+        if self.outer_islands && source_biomes.contains(BuiltinBiome::SmallEndIslands) {
             apply_outer_islands(
                 world,
                 &mut random,
@@ -262,7 +325,7 @@ impl EndDecoration {
                 |x, y, z| biome_source.biome_at_block_typed(x, y, z) == BuiltinBiome::SmallEndIslands,
             );
         }
-        if biome == BuiltinBiome::EndHighlands && self.gateway_return.is_some() {
+        if source_biomes.contains(BuiltinBiome::EndHighlands) && self.gateway_return.is_some() {
             random.set_feature_seed(decoration_seed, self.gateway_index.unwrap_or_default() as i32, 4);
             if random.next_float() < 1.0 / 700.0 {
                 let x = source_x * 16 + random.next_int_bounded(16);
@@ -864,7 +927,15 @@ mod tests {
                     continue;
                 };
                 let mut world = DenseBlockGrid::new(source_x * 16 - 16, 0, source_z * 16 - 16, 48, 128, 48, "minecraft:air");
-                decoration.apply_source(seed, source_x, source_z, &mut world, center);
+                decoration.apply_source(
+                    seed,
+                    source_x,
+                    source_z,
+                    &mut world,
+                    EndBiomeSet::around_source(source_x, source_z, |x, z| {
+                        biome_source.biome_at_quart_typed(x * 4, 0, z * 4)
+                    }),
+                );
                 assert_eq!(world.get(origin.0, origin.1, origin.2), "minecraft:end_stone");
                 found = true;
                 break 'sources;
@@ -1131,7 +1202,16 @@ mod tests {
             }
         }
 
-        let gateways = decoration.apply_source(seed, 185, 87, &mut world, BuiltinBiome::EndBarrens);
+        let biome_source = EndBiomeSource::new(seed);
+        let gateways = decoration.apply_source(
+            seed,
+            185,
+            87,
+            &mut world,
+            EndBiomeSet::around_source(185, 87, |x, z| {
+                biome_source.biome_at_quart_typed(x * 4, 0, z * 4)
+            }),
+        );
         assert!(gateways.is_empty(), "this source does not produce a return gateway");
         assert!(
             (1392..1440).any(|z| (2944..2992).any(|x| is_chorus(world.get(x, 64, z)))),
