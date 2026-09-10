@@ -515,15 +515,29 @@ impl AquiferSystem {
     ) -> Self {
         let min_block_x = chunk_x * 16;
         let min_block_z = chunk_z * 16;
+        Self::disabled_bounded(final_density_node, slots, sea_level, default_fluid,
+            min_y, height, (min_block_x, min_block_x + 15),
+            (min_block_z, min_block_z + 15), cell_width, cell_height)
+    }
+
+    /// Disabled aquifer over an explicit inclusive horizontal block rectangle.
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn disabled_bounded(
+        final_density_node: Program, slots: usize, sea_level: i32,
+        default_fluid: BlockKind, min_y: i32, height: i32,
+        x_bounds: (i32, i32), z_bounds: (i32, i32),
+        cell_width: i32, cell_height: i32,
+    ) -> Self {
         let final_density = NoiseChunkSampler::from_program(
             final_density_node,
             slots,
             cell_width,
             cell_height,
             Some(Bounds {
-                x: (min_block_x, min_block_x + 15),
+                x: x_bounds,
                 y: (min_y, min_y + height - 1),
-                z: (min_block_z, min_block_z + 15),
+                z: z_bounds,
             }),
         );
         let stub = || Arc::new(Density::Const(0.0));
