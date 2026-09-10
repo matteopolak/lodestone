@@ -713,6 +713,18 @@ impl PlayerRegistry {
         true
     }
 
+    /// Queue one system-chat message for exactly one connected player.
+    ///
+    /// This is the player-object equivalent of Paper's `sendMessage`: the
+    /// message is directed to the target rather than appended to the shared
+    /// broadcast chat log. The owning connection drains the resulting
+    /// [`crate::commands::Effect::Message`] and emits the normal system-chat
+    /// packet, so the API never borrows a connection or bypasses protocol
+    /// output. `false` means the UUID is no longer connected.
+    pub fn send_message(&self, target: Uuid, message: impl Into<String>) -> bool {
+        self.push_effect(target, crate::commands::Effect::Message(message.into()))
+    }
+
     /// Take everything queued for `uuid`, leaving the queue empty.
     ///
     /// Single-consumer by construction: the only caller is `uuid`'s own
@@ -1022,6 +1034,30 @@ mod tests {
         assert_eq!(registry.candidates().len(), 1);
 
         drop(alice);
+    }
+
+    /// A player-facing message is queued for the owning connection with the
+    /// exact text supplied by the plugin-facing call. The disconnected UUID
+    /// control proves the queue does not retain an undeliverable message.
+    #[test]
+    fn send_message_reaches_one_player_effect_queue_and_rejects_unknown_uuid() {
+        let registry = PlayerRegistry::new();
+        let alice = registry.join("Alice", uuid(1), Vec3::new(0.0, 64.0, 0.0));
+
+        assert!(registry.send_message(uuid(1), "The redstone test passed: 17/23"));
+        assert_eq!(
+            registry.take_effects(uuid(1)),
+            vec![crate::commands::Effect::Message(
+                "The redstone test passed: 17/23".to_owned(),
+            )],
+            "the directed player operation must preserve the supplied message exactly",
+        );
+
+        assert!(!registry.send_message(uuid(99), "must not be queued"));
+        assert!(registry.take_effects(uuid(99)).is_empty());
+
+        drop(alice);
+        assert!(!registry.send_message(uuid(1), "stale handle"));
     }
 
     #[test]
