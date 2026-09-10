@@ -1129,7 +1129,7 @@ impl<S: ChunkSource> RegionChunkSource<S> {
                 extras.block_entities.push((
                     pos,
                     crate::block_entities::BlockEntity::Opaque {
-                        id: type_name.to_owned(),
+                        id: type_name.to_owned().into(),
                         nbt: lodestone_core::Nbt::End,
                     },
                 ));
