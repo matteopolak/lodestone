@@ -2902,10 +2902,11 @@ async fn run_tick_loop_with_weather_impl<W>(
             }
         }
         for pending in block_tick_out.drain_fluid_scheduled_ticks() {
-            if !fluid_ticks.has_scheduled(pending.pos, &pending.kind) {
+            let kind = ScheduledTickKind::from_name(pending.kind);
+            if !fluid_ticks.has_scheduled(pending.pos, &kind) {
                 fluid_ticks.schedule(
                     pending.pos,
-                    pending.kind,
+                    kind,
                     game_tick + pending.trigger_tick,
                     pending.priority,
                 );
