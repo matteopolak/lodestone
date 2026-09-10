@@ -47,7 +47,7 @@ fn adapter_block_use_reaches_protocol_762_host_consumer() {
                 y: 1.0,
                 z: 0.75,
             },
-            sequence: lodestone_model::PredictionSequence::new(17),
+            sequence: 17,
             hand: 1,
         },
         "the adapter and registry-selected host must agree on the placement consumer input"

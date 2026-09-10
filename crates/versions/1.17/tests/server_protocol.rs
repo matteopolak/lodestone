@@ -296,7 +296,7 @@ fn assert_block_place_lift<P: ServerProtocol>(protocol: &P, packet_id: i32) {
                 y: 1.0,
                 z: 0.75,
             },
-            sequence: lodestone_model::PredictionSequence::INITIAL,
+            sequence: 0,
             hand: 1,
         }
     );
