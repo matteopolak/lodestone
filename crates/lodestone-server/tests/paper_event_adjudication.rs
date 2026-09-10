@@ -330,7 +330,7 @@ fn resident_block_change_later_listeners_see_mutation_before_cancellation() {
             listeners: Arc::new({
                 let seen = Arc::clone(&seen);
                 move |events| {
-                    let seen = Arc::clone(&seen);
+                    let replace_seen = Arc::clone(&seen);
                     events
                         .register(
                             PaperEventKind::ResidentBlockChange,
@@ -344,12 +344,15 @@ fn resident_block_change_later_listeners_see_mutation_before_cancellation() {
                                 assert_eq!(*pos, target);
                                 assert_eq!(*state, stone);
                                 *state = air;
-                                seen.lock().expect("block listener lock").push("replace");
+                                replace_seen
+                                    .lock()
+                                    .expect("block listener lock")
+                                    .push("replace");
                             },
                         )
                         .expect("resident block change is supported");
 
-                    let seen = Arc::clone(&seen);
+                    let cancel_seen = Arc::clone(&seen);
                     events
                         .register(
                             PaperEventKind::ResidentBlockChange,
@@ -363,12 +366,15 @@ fn resident_block_change_later_listeners_see_mutation_before_cancellation() {
                                 assert_eq!(*pos, target);
                                 assert_eq!(*state, air);
                                 event.cancel();
-                                seen.lock().expect("block listener lock").push("cancel");
+                                cancel_seen
+                                    .lock()
+                                    .expect("block listener lock")
+                                    .push("cancel");
                             },
                         )
                         .expect("resident block change is supported");
 
-                    let seen = Arc::clone(&seen);
+                    let monitor_seen = Arc::clone(&seen);
                     events
                         .register(
                             PaperEventKind::ResidentBlockChange,
@@ -382,7 +388,10 @@ fn resident_block_change_later_listeners_see_mutation_before_cancellation() {
                                 assert_eq!(*pos, target);
                                 assert_eq!(*state, air);
                                 assert!(event.is_cancelled());
-                                seen.lock().expect("block monitor lock").push("monitor");
+                                monitor_seen
+                                    .lock()
+                                    .expect("block monitor lock")
+                                    .push("monitor");
                             },
                         )
                         .expect("resident block change is supported");
