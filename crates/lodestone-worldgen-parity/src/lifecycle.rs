@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use lodestone_server::{
-    ChunkColumn, ChunkGenerationStage, ChunkSource, EndChunkSource, NetherChunkSource,
+    BlockEntity, ChunkColumn, ChunkGenerationStage, ChunkSource, EndChunkSource, NetherChunkSource,
     OverworldChunkSource,
 };
 use lodestone_worldgen::overworld::{GeneratedBlockEntity, OverworldGenerator};
@@ -346,9 +346,9 @@ pub trait LifecycleWorldgenSource {
     fn attach_source_sidecars(&self, _source: ChunkPos, _column: &mut ChunkColumn) {}
 
     /// Finalize the detached packet snapshot after every admitted source has
-    /// completed. Sources may keep richer runtime sidecars in their resident
-    /// columns while the wire view uses the state-owned records that existed
-    /// before gameplay-only payload generation.
+    /// completed. Sources may keep richer runtime/save sidecars in their
+    /// resident columns while the wire view selects only the records observed
+    /// at that dimension's authenticated packet boundary.
     fn finalize_packet_snapshot(&self, _target: ChunkPos, _column: &mut ChunkColumn) {}
 }
 
@@ -557,8 +557,21 @@ impl LifecycleWorldgenSource for EndChunkSource {
         self.attach_structures(column, source.0, source.1);
     }
 
-    fn finalize_packet_snapshot(&self, target: ChunkPos, column: &mut ChunkColumn) {
-        self.finalize_packet_snapshot_for_packet(column, target.0, target.1);
+    fn finalize_packet_snapshot(&self, _target: ChunkPos, column: &mut ChunkColumn) {
+        // End structure placement carries banner and container creation events
+        // in the direct source column for persistence and save-sidecar tests.
+        // The external End lifecycle packet boundary does not publish those
+        // structure-owned records; retain only feature-owned gateway metadata
+        // that was attached during the replay itself.  This is deliberately a
+        // lifecycle-only view: EndChunkSource::column remains the direct
+        // four-banner control.
+        let gateways = column
+            .block_entities()
+            .iter()
+            .filter(|(_, entity)| matches!(entity, BlockEntity::EndGateway { .. }))
+            .cloned()
+            .collect();
+        column.set_block_entities(gateways);
     }
 
 }
@@ -1226,14 +1239,16 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             .cloned()
             .unwrap_or_else(|| panic!("lifecycle target {target:?} was not admitted before encoding"));
         // Packet finalization may reconcile state-owned sidecars by walking
-        // the detached block field. Lifecycle heightmaps are authenticated
-        // external transition data, so preserve that snapshot across the
-        // sidecar pass instead of allowing a later scan to replace it.
+        // the detached block field or apply a dimension-specific packet
+        // filter. Lifecycle heightmaps are authenticated external transition
+        // data, so preserve that snapshot across the sidecar pass instead of
+        // allowing a later scan to replace it.
         let retained_heightmaps = snapshot.client_heightmaps_raw();
         // A later source completion can write a state-owned block entity into
         // this target after the target's own sidecar hook ran. Finalize only
         // the detached packet snapshot so the resident lifecycle remains the
-        // authenticated replay state and richer generated payloads survive.
+        // authenticated replay state and dimension-specific sidecar policy is
+        // applied only to the emitted view.
         self.source.finalize_packet_snapshot(target, &mut snapshot);
         if let Some(heightmaps) = retained_heightmaps {
             snapshot.install_client_heightmaps_raw(heightmaps);
