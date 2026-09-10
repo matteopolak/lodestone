@@ -11686,6 +11686,27 @@ mod item_owner_tests {
         sim
     }
 
+    #[test]
+    fn spawning_an_item_records_its_initial_chunk_owner() {
+        let sim = fixture();
+        let mut owners = sim
+            .item_state
+            .iter()
+            .map(|(&id, state)| (id, state.owner))
+            .collect::<Vec<_>>();
+        owners.sort_unstable_by_key(|&(id, _)| id);
+
+        assert_eq!(
+            owners,
+            vec![
+                (1, ItemTickOwner::Chunk { cx: -1, cz: 0 }),
+                (2, ItemTickOwner::Chunk { cx: 1, cz: 0 }),
+                (3, ItemTickOwner::Chunk { cx: -1, cz: 0 }),
+            ],
+            "spawned items must start with the Euclidean chunk owner used by the first tick",
+        );
+    }
+
     fn item_state(sim: &MobSim<'_>) -> Vec<(i32, ItemLifecycle, ItemMotion, ItemTickOwner)> {
         sim.items
             .iter()

@@ -43,6 +43,7 @@ impl<'w> MobSim<'w> {
                 uuid: Uuid::new_v4(),
                 item,
                 motion: ItemMotion::new(position, velocity),
+                owner: super::ItemTickOwner::for_position(position),
             },
         );
         id
