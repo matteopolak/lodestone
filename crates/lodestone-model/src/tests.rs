@@ -1212,7 +1212,7 @@ fn client_actions_cover_modern_play_interactions_without_protocol_ids() {
             face: BlockFace::Up,
             cursor: Vec3f::new(0.5, 1.0, 0.25),
             inside_block: false,
-            sequence: 42,
+            sequence: PredictionSequence::new(42),
         },
         ClientAction::UseItem {
             hand: Hand::Off,
@@ -1285,7 +1285,7 @@ fn client_actions_cover_modern_play_interactions_without_protocol_ids() {
             sequence,
             cursor,
             ..
-        } if *sequence == 42 && *cursor == Vec3f::new(0.5, 1.0, 0.25)
+        } if *sequence == PredictionSequence::new(42) && *cursor == Vec3f::new(0.5, 1.0, 0.25)
     ));
     assert!(matches!(
         &actions[11],
