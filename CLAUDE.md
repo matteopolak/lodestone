@@ -110,12 +110,14 @@ follows from that.
 | `git commit --amend`, `git push --force` | rewrites a commit others built on. Land a follow-up instead |
 | `cargo fmt`, `rustfmt` | rewrites files you do not own. Format the lines you wrote, by hand |
 
-**Commit with the pathspec form: `git commit -m "…" -- <your file paths>`.** It ignores the index
-entirely, which is the property that makes it safe. Put `-m` before the `--`, or git parses the message
-as a pathspec and commits nothing. It cannot introduce an untracked file, so `git add <files>` anything
-new first. Read your sha back in the same shell invocation and `git show --stat` it — a no-op commit
-does not look like a failure. Name only paths in your own cluster, and check `git diff --cached` is
-empty (count it, do not eyeball it) before committing: the index is shared, so never leave work staged.
+**Do not use `git commit -- <paths>` in the shared checkout.** Git builds a temporary index from each
+selected working-tree file, which can silently include another agent's dirty hunks. Construct a private
+index from the recorded `HEAD`, update only the exact blobs you own, and publish with
+`scripts/private-index-commit.sh <recorded-head> <message> <path>...`; the helper performs a stale-HEAD
+check and compare-and-swap publication. The pre-commit hook rejects pathspec and `--only` commits as an
+additional mechanical guard. Read your sha back in the same shell invocation and `git show --stat` it — a
+no-op commit does not look like a failure. Confirm `git diff --cached --name-only` is empty before any
+ordinary non-pathspec operation, and never leave work staged in the shared index.
 
 **Never rewrite a shared file wholesale — edit the lines you mean, and re-read the file immediately
 before writing to it.** No git command is involved, so no ban above catches it: a full new copy silently

@@ -117,8 +117,14 @@ update-ref` with the recorded old object as a compare-and-swap, closing
 the smaller race between validation and publication. This protects unrelated shared working-tree edits:
 the helper reads selected blobs from the private index and never stages, resets, or rewrites working files.
 
-Run `scripts/test-private-index-commit.sh` for both controls: an intentionally stale private index must
-fail without changing the branch, while a rebuilt index must retain the concurrently landed file.
+The pre-commit hook rejects `git commit -- <paths>` (and `--only`) in this checkout. Git implements those
+forms by constructing a temporary `next-index-*.lock` from the working tree, so a selected file can carry
+another agent's dirty hunks even when the path list looks narrow. Build the private index explicitly and
+publish it through the helper instead; this makes the committed tree an auditable set of exact blobs.
+
+Run `scripts/test-private-index-commit.sh` for all controls: a pathspec commit must be rejected, an
+intentionally stale private index must fail without changing the branch, while a rebuilt index must retain
+the concurrently landed file.
 
 ### Shared local target, CI caching, and trimmed dev profiles
 

@@ -20,6 +20,21 @@
 
 set -u
 
+# `git commit -- <paths>` builds a temporary `next-index-*.lock` index from
+# the working tree before invoking this hook. In a shared checkout that can
+# silently fold another agent's dirty hunks from a selected file into the
+# commit. Commits assembled from a private index use `commit-tree` through
+# `scripts/private-index-commit.sh` and do not take this path. Reject the
+# ambiguous operation before any commit object is written.
+index_file=${GIT_INDEX_FILE-}
+case "$index_file" in
+    */next-index-*.lock|next-index-*.lock)
+        echo "pre-commit: refusing pathspec commit through a temporary index" >&2
+        echo "pre-commit: use scripts/private-index-commit.sh with a private GIT_INDEX_FILE" >&2
+        exit 1
+        ;;
+esac
+
 # path <space> max_tokens. Add a row here when a new file starts being
 # auto-loaded into an agent's context; do not add rows for docs under docs/,
 # which are read on demand.
