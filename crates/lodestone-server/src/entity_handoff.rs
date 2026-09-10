@@ -80,6 +80,12 @@ pub enum EntityHandoffError {
     DuplicateDestinationStart,
     /// The token does not match the active source-to-destination route.
     MismatchedDestination,
+    /// Destination admission was attempted before the source durable-save
+    /// callback acknowledged the route.
+    DurableSavePending,
+    /// The source's durable-save callback did not acknowledge this transfer.
+    /// The active route remains pending and the source must remain resident.
+    DurableSaveRejected,
 }
 
 /// A bounded source-stop/destination-start barrier for moving entities.
@@ -90,8 +96,14 @@ pub enum EntityHandoffError {
 /// [`Self::forget_entity`] when the entity is removed.
 #[derive(Debug, Default)]
 pub struct EntityOwnershipHandoff {
-    active: BTreeMap<(i32, u64), EntityHandoffToken>,
+    active: BTreeMap<(i32, u64), EntityHandoffEntry>,
     completed_epoch: BTreeMap<i32, u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EntityHandoffEntry {
+    token: EntityHandoffToken,
+    durable: bool,
 }
 
 impl EntityOwnershipHandoff {
@@ -122,15 +134,23 @@ impl EntityOwnershipHandoff {
         {
             return Err(EntityHandoffError::ConcurrentTransfer);
         }
-        self.active.insert(key, token);
+        self.active.insert(
+            key,
+            EntityHandoffEntry {
+                token,
+                durable: false,
+            },
+        );
         Ok(())
     }
 
-    /// Starts the destination owner after the matching source stop.
+    /// Starts the destination owner after the matching source stop and durable
+    /// acknowledgement.
     ///
-    /// Consuming the active token is the destination barrier: a replay after
-    /// this call cannot mutate the entity again, and a stale token cannot
-    /// replace a newer destination state.
+    /// `acknowledge_durable_save` must have succeeded first. Consuming the
+    /// active token is the destination barrier: a replay after this call cannot
+    /// mutate the entity again, and a stale token cannot replace a newer
+    /// destination state.
     pub fn start_destination(
         &mut self,
         token: EntityHandoffToken,
@@ -145,14 +165,87 @@ impl EntityOwnershipHandoff {
         {
             return Err(EntityHandoffError::DuplicateDestinationStart);
         }
-        let Some(active) = self.active.remove(&(token.entity_id, token.epoch)) else {
+        let Some(active) = self.active.get(&(token.entity_id, token.epoch)) else {
             return Err(EntityHandoffError::DestinationBeforeSource);
         };
-        if active != token {
-            self.active.insert((active.entity_id, active.epoch), active);
+        if active.token != token {
             return Err(EntityHandoffError::MismatchedDestination);
         }
+        if !active.durable {
+            return Err(EntityHandoffError::DurableSavePending);
+        }
+        self.active
+            .remove(&(token.entity_id, token.epoch))
+            .expect("the matching active route remains present");
         self.completed_epoch.insert(token.entity_id, token.epoch);
+        Ok(())
+    }
+
+    /// Starts the destination only after the caller's durable-save callback
+    /// acknowledges the source state.
+    ///
+    /// The callback is invoked only for the currently matching active route.
+    /// If it returns `false`, no barrier state is consumed: the source remains
+    /// stopped, `source_unload_ready` remains false, and the caller can retry
+    /// after its durable writer completes. This keeps a delayed persistence
+    /// reply from admitting a destination that may overtake an unload.
+    pub fn start_destination_after_durable_save(
+        &mut self,
+        token: EntityHandoffToken,
+        durable_save: impl FnOnce(EntityHandoffToken) -> bool,
+    ) -> Result<(), EntityHandoffError> {
+        if !EntityHandoffToken::valid_fields(token.epoch, token.source, token.destination) {
+            return Err(EntityHandoffError::InvalidToken);
+        }
+        if self
+            .completed_epoch
+            .get(&token.entity_id)
+            .is_some_and(|&epoch| token.epoch <= epoch)
+        {
+            return Err(EntityHandoffError::DuplicateDestinationStart);
+        }
+        let Some(active) = self.active.get(&(token.entity_id, token.epoch)) else {
+            return Err(EntityHandoffError::DestinationBeforeSource);
+        };
+        if active.token != token {
+            return Err(EntityHandoffError::MismatchedDestination);
+        }
+        self.acknowledge_durable_save(token, durable_save)?;
+        self.start_destination(token)
+    }
+
+    /// Runs the durable-save callback for a matching active route without
+    /// admitting its destination yet. This lets a central writer acknowledge
+    /// persistence before replacing live state, then call `start_destination`
+    /// after that replacement.
+    pub fn acknowledge_durable_save(
+        &mut self,
+        token: EntityHandoffToken,
+        durable_save: impl FnOnce(EntityHandoffToken) -> bool,
+    ) -> Result<(), EntityHandoffError> {
+        if !EntityHandoffToken::valid_fields(token.epoch, token.source, token.destination) {
+            return Err(EntityHandoffError::InvalidToken);
+        }
+        if self
+            .completed_epoch
+            .get(&token.entity_id)
+            .is_some_and(|&epoch| token.epoch <= epoch)
+        {
+            return Err(EntityHandoffError::DuplicateDestinationStart);
+        }
+        let Some(active) = self.active.get_mut(&(token.entity_id, token.epoch)) else {
+            return Err(EntityHandoffError::DestinationBeforeSource);
+        };
+        if active.token != token {
+            return Err(EntityHandoffError::MismatchedDestination);
+        }
+        if active.durable {
+            return Ok(());
+        }
+        if !durable_save(token) {
+            return Err(EntityHandoffError::DurableSaveRejected);
+        }
+        active.durable = true;
         Ok(())
     }
 
@@ -184,7 +277,7 @@ impl EntityOwnershipHandoff {
         !self
             .active
             .values()
-            .any(|token| token.source == source)
+            .any(|entry| entry.token.source == source)
     }
 }
 
@@ -212,6 +305,13 @@ mod tests {
         );
         assert_eq!(handoff.pending(), 0);
         handoff.stop_source(token(1)).expect("source stop");
+        assert_eq!(
+            handoff.start_destination(token(1)),
+            Err(EntityHandoffError::DurableSavePending)
+        );
+        handoff
+            .acknowledge_durable_save(token(1), |_| true)
+            .expect("durable source save");
         handoff
             .start_destination(token(1))
             .expect("source stop opens destination");
@@ -222,6 +322,9 @@ mod tests {
     fn stale_and_duplicate_delivery_is_rejected_by_epoch_and_entity_id() {
         let mut handoff = EntityOwnershipHandoff::default();
         handoff.stop_source(token(4)).expect("first source stop");
+        handoff
+            .acknowledge_durable_save(token(4), |_| true)
+            .expect("durable source save");
         assert_eq!(
             handoff.stop_source(token(4)),
             Err(EntityHandoffError::DuplicateSourceStop)
@@ -334,9 +437,29 @@ mod tests {
         assert!(!handoff.source_unload_ready(source));
         assert!(handoff.source_unload_ready(destination));
         handoff
+            .acknowledge_durable_save(transfer, |_| true)
+            .expect("durable source save");
+        handoff
             .start_destination(transfer)
             .expect("destination admission");
         assert!(handoff.source_unload_ready(source));
+    }
+
+    #[test]
+    fn durable_save_must_ack_before_destination_admission_and_can_retry() {
+        let mut handoff = EntityOwnershipHandoff::default();
+        let transfer = token(12);
+        handoff.stop_source(transfer).expect("source stop");
+        assert_eq!(
+            handoff.start_destination_after_durable_save(transfer, |_| false),
+            Err(EntityHandoffError::DurableSaveRejected)
+        );
+        assert_eq!(handoff.pending(), 1);
+        assert!(!handoff.source_unload_ready(transfer.source));
+        handoff
+            .start_destination_after_durable_save(transfer, |_| true)
+            .expect("the retry admits only after durable acknowledgement");
+        assert_eq!(handoff.pending(), 0);
     }
 
     #[test]
@@ -348,6 +471,9 @@ mod tests {
         handoff
             .stop_source(token(1))
             .expect("a live id can start fresh");
+        handoff
+            .acknowledge_durable_save(token(1), |_| true)
+            .expect("durable source save");
         handoff
             .start_destination(token(1))
             .expect("destination admission records the completed epoch");

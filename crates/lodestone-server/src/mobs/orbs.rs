@@ -10,7 +10,8 @@ use lodestone_model::Vec3;
 use uuid::Uuid;
 
 use super::{
-    MobSim, OrbState, PLAYER_EYE_HEIGHT, VOID_DESPAWN_DEPTH, dist_sqr, settle_entity, within_box,
+    EntityHandoffToken, MobSim, OrbState, PLAYER_EYE_HEIGHT, VOID_DESPAWN_DEPTH, dist_sqr,
+    settle_entity, within_box,
 };
 
 // ---------------------------------------------------------------------------
@@ -92,11 +93,27 @@ pub(crate) enum OrbTickOwner {
 
 impl OrbTickOwner {
     fn for_position(position: Vec3) -> Self {
-        Self::Chunk {
-            cx: (position.x.floor() as i32).div_euclid(16),
-            cz: (position.z.floor() as i32).div_euclid(16),
+        let (cx, cz) = owner_key(position);
+        Self::Chunk { cx, cz }
+    }
+
+    fn tick_owner(self) -> crate::tick_region::TickOwner {
+        match self {
+            Self::Chunk { cx, cz } => crate::tick_region::TickOwner::Chunk { cx, cz },
         }
     }
+}
+
+/// Returns the Euclidean chunk coordinates for a completed orb position.
+///
+/// This is shared by spawn, the pure owner pass, and the central apply
+/// boundary. Truncating a negative coordinate would hand an orb at `x=-0.5`
+/// to chunk `0`, allowing the source and destination writers to disagree.
+fn owner_key(position: Vec3) -> (i32, i32) {
+    (
+        (position.x.floor() as i32).div_euclid(16),
+        (position.z.floor() as i32).div_euclid(16),
+    )
 }
 
 /// One completed chunk-owner pass for experience-orb motion.
@@ -126,6 +143,10 @@ struct OrbTickEffect {
     owner: OrbTickOwner,
     serial: usize,
     id: i32,
+    /// The chunk containing the completed position. The source owner remains
+    /// in `owner`; the central writer is the only place that commits this
+    /// transfer to the live orb.
+    destination: OrbTickOwner,
     /// `None` means this orb expired or crossed the void boundary during its
     /// owner pass and the central writer must remove it.
     orb: Option<OrbState>,
@@ -250,6 +271,7 @@ impl<'w> MobSim<'w> {
             id,
             OrbState {
                 uuid: Uuid::new_v4(),
+                owner: owner_key(spawn_at),
                 value,
                 count: 1,
                 age: 0,
@@ -326,13 +348,20 @@ impl<'w> MobSim<'w> {
                 .get(&id)
                 .cloned()
                 .expect("a tick-start orb id must remain live while planning");
-            let owner = OrbTickOwner::for_position(orb.motion.position);
+            let owner = OrbTickOwner::Chunk {
+                cx: orb.owner.0,
+                cz: orb.owner.1,
+            };
             let target = self.nearest_follow_target(orb.motion.position);
+            let completed = ticked_orb(orb, target, view, min_y);
             let effect = OrbTickEffect {
                 owner,
                 serial,
                 id,
-                orb: ticked_orb(orb, target, view, min_y),
+                destination: completed.as_ref().map_or(owner, |orb| {
+                    OrbTickOwner::for_position(orb.motion.position)
+                }),
+                orb: completed,
             };
             if let Some(batch) = batches.iter_mut().find(|batch| batch.owner == owner) {
                 batch.effects.push(effect);
@@ -366,7 +395,10 @@ impl<'w> MobSim<'w> {
                 .get(&id)
                 .cloned()
                 .expect("a tick-start orb id must remain live while planning");
-            let owner = OrbTickOwner::for_position(orb.motion.position);
+            let owner = OrbTickOwner::Chunk {
+                cx: orb.owner.0,
+                cz: orb.owner.1,
+            };
             let input = OrbTickInput {
                 owner,
                 serial,
@@ -389,11 +421,17 @@ impl<'w> MobSim<'w> {
             };
             let effects = inputs
                 .into_iter()
-                .map(|input| OrbTickEffect {
-                    owner: input.owner,
-                    serial: input.serial,
-                    id: input.id,
-                    orb: ticked_orb(input.orb, input.target, &view, min_y),
+                .map(|input| {
+                    let completed = ticked_orb(input.orb, input.target, &view, min_y);
+                    OrbTickEffect {
+                        owner: input.owner,
+                        serial: input.serial,
+                        id: input.id,
+                        destination: completed.as_ref().map_or(input.owner, |orb| {
+                            OrbTickOwner::for_position(orb.motion.position)
+                        }),
+                        orb: completed,
+                    }
                 })
                 .collect();
             OrbTickOwnerBatch {
@@ -416,6 +454,23 @@ impl<'w> MobSim<'w> {
     /// merge scan remains after this method in [`Self::tick_orbs`], retaining
     /// its current global id order when two completed owners are adjacent.
     pub(crate) fn apply_orb_tick_owner_batches(&mut self, batches: Vec<OrbTickOwnerBatch>) {
+        self.apply_orb_tick_owner_batches_with_durable_save(batches, |_| true);
+    }
+
+    /// Applies orb completions with an explicit durable-save acknowledgement
+    /// callback for cross-owner transfers.
+    ///
+    /// The callback runs after every source stop has been recorded and before
+    /// the live orb state is replaced. A false acknowledgement fails closed by
+    /// panicking before state replacement, while the handoff barrier retains
+    /// the active source routes. The ordinary tick path supplies the
+    /// synchronous in-memory acknowledgement; an asynchronous region worker
+    /// must supply its actual durable writer result here.
+    pub(crate) fn apply_orb_tick_owner_batches_with_durable_save(
+        &mut self,
+        batches: Vec<OrbTickOwnerBatch>,
+        mut durable_save: impl FnMut(EntityHandoffToken) -> bool,
+    ) {
         if batches.is_empty() {
             return;
         }
@@ -434,6 +489,40 @@ impl<'w> MobSim<'w> {
             self.orbs.len(),
             "orb owner completion must retain every live tick-start entity"
         );
+        let transfers: Vec<_> = effects
+            .iter()
+            .filter_map(|effect| {
+                effect.orb.as_ref().and_then(|orb| {
+                    (effect.owner != effect.destination).then(|| {
+                        EntityHandoffToken::new(
+                            effect.id,
+                            effect.serial,
+                            plan,
+                            effect.owner.tick_owner(),
+                            effect.destination.tick_owner(),
+                        )
+                        .expect("a nonzero orb plan names a chunk transfer")
+                    })
+                })
+            })
+            .collect();
+        // Every source stops before any durable acknowledgement or destination
+        // admission. The live state is still unchanged until all callbacks have
+        // acknowledged, so an unload cannot race a partially transferred batch.
+        for &token in &transfers {
+            self.orb_handoff
+                .stop_source(token)
+                .expect("orb source stop must be unique and newer than the last transfer");
+        }
+        for &token in &transfers {
+            assert!(
+                self.orb_handoff
+                    .acknowledge_durable_save(token, &mut durable_save)
+                    .is_ok(),
+                "orb durable-save acknowledgement failed before state replacement"
+            );
+        }
+
         let mut ids = HashSet::new();
         for effect in effects {
             assert!(
@@ -444,14 +533,45 @@ impl<'w> MobSim<'w> {
                 self.orbs.contains_key(&effect.id),
                 "orb owner completion may update only a live tick-start entity"
             );
+            let source_owner = self
+                .orbs
+                .get(&effect.id)
+                .expect("the live orb was checked immediately above")
+                .owner;
+            let source_owner = OrbTickOwner::Chunk {
+                cx: source_owner.0,
+                cz: source_owner.1,
+            };
+            assert_eq!(
+                effect.owner, source_owner,
+                "orb completion must start from the live tick-start owner"
+            );
             match effect.orb {
-                Some(orb) => {
+                Some(mut orb) => {
+                    let destination = match effect.destination {
+                        OrbTickOwner::Chunk { cx, cz } => (cx, cz),
+                    };
+                    assert_eq!(
+                        destination,
+                        owner_key(orb.motion.position),
+                        "orb completion must carry the owner of its completed position"
+                    );
+                    orb.owner = destination;
                     self.orbs.insert(effect.id, orb);
                 }
                 None => {
                     self.orbs.remove(&effect.id);
+                    self.orb_handoff.forget_entity(effect.id);
                 }
             }
+        }
+        // Destination admission follows durable acknowledgement and the live
+        // state replacement. The next tick can therefore submit this orb only
+        // to its newly admitted owner.
+        for token in transfers {
+            self.orb_handoff
+                .start_destination(token)
+                .expect("orb destination start must follow source stop");
         }
         self.applied_orb_owner_plan = plan;
     }
@@ -762,7 +882,8 @@ mod experience_orb_tests {
             let orb = sim.orbs.get(&id).cloned().expect("tick-start orb remains live");
             let target = sim.nearest_follow_target(orb.motion.position);
             match ticked_orb(orb, target, view, min_y) {
-                Some(orb) => {
+                Some(mut orb) => {
+                    orb.owner = owner_key(orb.motion.position);
                     sim.orbs.insert(id, orb);
                 }
                 None => {
@@ -822,6 +943,99 @@ mod experience_orb_tests {
             );
             assert_eq!(live.orb_position(id), serial.orb_position(id));
         }
+    }
+
+    #[test]
+    fn crossing_chunk_boundary_commits_destination_before_next_owner_plan() {
+        let world = dense_orb_world();
+        let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
+        let view = super::super::LiveBlockCollision {
+            block_state: &state_at,
+            probe_count: std::cell::Cell::new(0),
+        };
+        let mut sim = MobSim::new(&world);
+        let id = sim.spawn_orb(
+            3,
+            Vec3::new(-0.5, 3.0, 0.5),
+            Vec3::new(17.0, 0.0, 0.0),
+        );
+
+        let batches = sim.tick_orb_owner_batches(&view);
+        let effect = batches
+            .iter()
+            .flat_map(|batch| &batch.effects)
+            .find(|effect| effect.id == id)
+            .expect("the boundary orb has one owner completion");
+        assert_eq!(effect.owner, OrbTickOwner::Chunk { cx: -1, cz: 0 });
+        assert_eq!(
+            effect.destination,
+            OrbTickOwner::Chunk { cx: 1, cz: 0 },
+            "a completed position on the positive side must transfer ownership"
+        );
+        sim.apply_orb_tick_owner_batches(batches);
+
+        let next = sim.tick_orb_owner_batches(&view);
+        assert_eq!(
+            next[0].owner,
+            OrbTickOwner::Chunk { cx: 1, cz: 0 },
+            "the destination owner must be the next tick's sole source owner"
+        );
+    }
+
+    #[test]
+    fn crossing_orb_requires_and_reports_durable_save_ack_before_destination_start() {
+        let world = dense_orb_world();
+        let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
+        let view = super::super::LiveBlockCollision {
+            block_state: &state_at,
+            probe_count: std::cell::Cell::new(0),
+        };
+        let mut sim = MobSim::new(&world);
+        let id = sim.spawn_orb(
+            3,
+            Vec3::new(-0.5, 3.0, 0.5),
+            Vec3::new(17.0, 0.0, 0.0),
+        );
+        let batches = sim.tick_orb_owner_batches(&view);
+        let mut acknowledged = Vec::new();
+        sim.apply_orb_tick_owner_batches_with_durable_save(batches, |token| {
+            acknowledged.push(token);
+            true
+        });
+        assert_eq!(
+            acknowledged,
+            [
+                EntityHandoffToken::new(
+                    id,
+                    0,
+                    1,
+                    crate::tick_region::TickOwner::Chunk { cx: -1, cz: 0 },
+                    crate::tick_region::TickOwner::Chunk { cx: 1, cz: 0 },
+                )
+                .expect("the boundary transfer has a typed durable token")
+            ]
+        );
+        assert_eq!(sim.orb_handoff.pending(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "owner of its completed position")]
+    fn orb_owner_batches_reject_a_wrong_destination() {
+        let world = dense_orb_world();
+        let state_at = |x, y, z| world.block_state(x, y, z).to_owned();
+        let view = super::super::LiveBlockCollision {
+            block_state: &state_at,
+            probe_count: std::cell::Cell::new(0),
+        };
+        let mut sim = MobSim::new(&world);
+        sim.spawn_orb(
+            3,
+            Vec3::new(-0.5, 3.0, 0.5),
+            Vec3::new(0.0, 0.0, 0.0),
+        );
+        let mut batches = sim.tick_orb_owner_batches(&view);
+        batches[0].effects[0].destination = OrbTickOwner::Chunk { cx: 0, cz: 0 };
+        sim.apply_orb_tick_owner_batches(batches);
     }
 
     #[test]
