@@ -22,11 +22,41 @@ use crate::generated_mob_effects::MOB_EFFECT_NAMES;
 pub struct MobEffectId(u8);
 
 impl MobEffectId {
+    /// Generated-registry ids consumed by movement rules. Keeping these as
+    /// typed constants avoids string comparisons in the hot physics path.
+    pub const SPEED: Self = Self(0);
+    pub const SLOWNESS: Self = Self(1);
+    pub const STRENGTH: Self = Self(4);
+    pub const INSTANT_HEALTH: Self = Self(5);
+    pub const INSTANT_DAMAGE: Self = Self(6);
+    pub const JUMP_BOOST: Self = Self(7);
+    pub const REGENERATION: Self = Self(9);
+    pub const RESISTANCE: Self = Self(10);
+    pub const WATER_BREATHING: Self = Self(12);
+    pub const HUNGER: Self = Self(16);
+    pub const WEAKNESS: Self = Self(17);
+    pub const POISON: Self = Self(18);
+    pub const WITHER: Self = Self(19);
+    pub const HEALTH_BOOST: Self = Self(20);
+    pub const ABSORPTION: Self = Self(21);
+    pub const SATURATION: Self = Self(22);
+    pub const LEVITATION: Self = Self(24);
+    pub const LUCK: Self = Self(25);
+    pub const UNLUCK: Self = Self(26);
+    pub const SLOW_FALLING: Self = Self(27);
+    pub const CONDUIT_POWER: Self = Self(28);
+    pub const DOLPHINS_GRACE: Self = Self(29);
+    pub const WIND_CHARGED: Self = Self(35);
+    pub const BREATH_OF_THE_NAUTILUS: Self = Self(39);
+
     /// Validates a raw network registry id against the 26.2 built-in census.
     #[must_use]
-    pub fn from_registry_id(id: i32) -> Option<Self> {
-        let id = u8::try_from(id).ok()?;
-        (usize::from(id) < MOB_EFFECT_NAMES.len()).then_some(Self(id))
+    pub const fn from_registry_id(id: i32) -> Option<Self> {
+        if id < 0 || id > u8::MAX as i32 || id >= MOB_EFFECT_NAMES.len() as i32 {
+            None
+        } else {
+            Some(Self(id as u8))
+        }
     }
 
     /// The registry id emitted by the 26.2 wire codec.
@@ -71,7 +101,7 @@ pub fn mob_effect_name(id: i32) -> Option<&'static str> {
 pub fn mob_effect_id(name: &str) -> Option<MobEffectId> {
     MOB_EFFECT_NAMES
         .iter()
-        .position(|candidate| *candidate == name)
+        .position(|candidate| *candidate == name || candidate.strip_prefix("minecraft:") == Some(name))
         .and_then(|index| i32::try_from(index).ok())
         .and_then(MobEffectId::from_registry_id)
 }
@@ -116,6 +146,7 @@ mod tests {
         assert_eq!(mob_effect_name_for(speed), "minecraft:speed");
         assert_eq!(mob_effect_name_for(nautilus), "minecraft:breath_of_the_nautilus");
         assert_eq!(mob_effect_id("minecraft:speed"), Some(speed));
+        assert_eq!(mob_effect_id("speed"), Some(speed));
         assert_eq!(mob_effect_id("minecraft:breath_of_the_nautilus"), Some(nautilus));
     }
 
@@ -125,5 +156,15 @@ mod tests {
             let id = MobEffectId::from_registry_id(raw).expect("generated ids validate");
             assert_eq!(mob_effect_id(mob_effect_name_for(id)), Some(id));
         }
+    }
+
+    #[test]
+    fn movement_constants_are_pinned_to_the_generated_registry_names() {
+        assert_eq!(mob_effect_name_for(MobEffectId::SPEED), "minecraft:speed");
+        assert_eq!(mob_effect_name_for(MobEffectId::SLOWNESS), "minecraft:slowness");
+        assert_eq!(mob_effect_name_for(MobEffectId::JUMP_BOOST), "minecraft:jump_boost");
+        assert_eq!(mob_effect_name_for(MobEffectId::LEVITATION), "minecraft:levitation");
+        assert_eq!(mob_effect_name_for(MobEffectId::SLOW_FALLING), "minecraft:slow_falling");
+        assert_eq!(mob_effect_name_for(MobEffectId::DOLPHINS_GRACE), "minecraft:dolphins_grace");
     }
 }

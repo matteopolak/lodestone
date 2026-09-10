@@ -1249,12 +1249,13 @@ fn fold_effect_movement_speed(
     let Some(hud_effects) = hud_effects else {
         return attr;
     };
-    ["speed", "slowness"]
+    [("speed", lodestone_data::mob_effects::MobEffectId::SPEED),
+        ("slowness", lodestone_data::mob_effects::MobEffectId::SLOWNESS)]
         .into_iter()
-        .filter_map(|bare| {
+        .filter_map(|(bare, effect_id)| {
             let ident = lodestone_model::Identifier::new("minecraft", bare).ok()?;
             let effect = hud_effects.0.get(&ident)?;
-            movement_speed_modifier(bare, u32::from(effect.amplifier))
+            movement_speed_modifier(effect_id, u32::from(effect.amplifier))
         })
         .fold(attr, |value, amount| value * (1.0 + amount))
 }

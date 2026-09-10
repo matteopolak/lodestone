@@ -18,6 +18,12 @@ validates the registry id and the shell retains each of them in
 second, entity-keyed view for continuous particle emission and entity-outline state,
 while the local player's `HudEffects` remains the display and renderer source of truth.
 
+The live server store is keyed by validated `lodestone_data::mob_effects::MobEffectId`,
+so periodic rules, attribute folds, and presence checks do not compare canonical strings
+on every tick. Canonical names are reconstructed only when a protocol encoder or
+presentation-facing API explicitly needs text; command and packet input remains textual
+at those boundaries and is validated before entering the store.
+
 The client consumes the full effect list in independent ways. The physics/ECS path
 uses movement-relevant amplifiers, while interaction prediction applies Haste, Conduit
 Power, and Mining Fatigue to digging speed. The HUD and inventory use duration, ambient,

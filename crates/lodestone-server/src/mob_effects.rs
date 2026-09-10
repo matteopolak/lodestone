@@ -147,6 +147,34 @@
 
 use std::collections::BTreeMap;
 
+use lodestone_data::mob_effects::MobEffectId;
+
+/// A status-effect key at an API boundary. Runtime storage resolves this once
+/// and keeps the validated [`MobEffectId`]; textual implementations remain for
+/// command, packet, and persistence callers that are explicit string seams.
+pub trait EffectKey {
+    /// Resolves the key against the generated built-in effect census.
+    fn resolve_effect(self) -> Option<MobEffectId>;
+}
+
+impl EffectKey for MobEffectId {
+    fn resolve_effect(self) -> Option<MobEffectId> { Some(self) }
+}
+
+impl EffectKey for &str {
+    fn resolve_effect(self) -> Option<MobEffectId> {
+        lodestone_data::mob_effects::mob_effect_id(self)
+    }
+}
+
+impl EffectKey for &String {
+    fn resolve_effect(self) -> Option<MobEffectId> { self.as_str().resolve_effect() }
+}
+
+impl EffectKey for String {
+    fn resolve_effect(self) -> Option<MobEffectId> { self.as_str().resolve_effect() }
+}
+
 /// Vanilla's sentinel for an infinite effect (`MobEffectInstance.isInfiniteDuration`
 /// tests `duration == -1`).
 pub const INFINITE_DURATION: i32 = -1;
@@ -225,15 +253,15 @@ impl UnderwaterBreathing {
 /// `shouldApplyEffectTickThisTick` is a bare `return true`, which `1 >> anything` also
 /// gives; encoding it as `1` keeps one code path rather than a special case.
 #[must_use]
-pub fn periodic_effect(effect_id: &str) -> Option<(i32, PeriodicAction)> {
-    // Accepts a bare path as well as a namespaced id, matching how
-    // `lodestone_physics::effect::classify` reads its input.
-    let path = effect_id.strip_prefix("minecraft:").unwrap_or(effect_id);
-    match path {
-        "poison" => Some((POISON_INTERVAL, PeriodicAction::PoisonDamage)),
-        "wither" => Some((WITHER_INTERVAL, PeriodicAction::WitherDamage)),
-        "regeneration" => Some((REGENERATION_INTERVAL, PeriodicAction::Regenerate)),
-        "hunger" => Some((1, PeriodicAction::Exhaust)),
+pub fn periodic_effect<K: EffectKey>(effect_id: K) -> Option<(i32, PeriodicAction)> {
+    let effect_id = effect_id.resolve_effect()?;
+    match effect_id {
+        MobEffectId::POISON => Some((POISON_INTERVAL, PeriodicAction::PoisonDamage)),
+        MobEffectId::WITHER => Some((WITHER_INTERVAL, PeriodicAction::WitherDamage)),
+        MobEffectId::REGENERATION => {
+            Some((REGENERATION_INTERVAL, PeriodicAction::Regenerate))
+        }
+        MobEffectId::HUNGER => Some((1, PeriodicAction::Exhaust)),
         _ => None,
     }
 }
@@ -319,11 +347,13 @@ pub fn splash_scale(distance_sq: f64) -> f64 {
 /// registry: `instant_health`, `instant_damage`, and `saturation`. A bare path and a
 /// namespaced id are both accepted, matching [`periodic_effect`].
 #[must_use]
-pub fn effect_is_instantaneous(effect_id: &str) -> bool {
-    matches!(
-        effect_id.strip_prefix("minecraft:").unwrap_or(effect_id),
-        "instant_health" | "instant_damage" | "saturation"
-    )
+pub fn effect_is_instantaneous<K: EffectKey>(effect_id: K) -> bool {
+    let Some(effect_id) = effect_id.resolve_effect() else {
+        return false;
+    };
+    effect_id == MobEffectId::INSTANT_HEALTH
+        || effect_id == MobEffectId::INSTANT_DAMAGE
+        || effect_id == MobEffectId::SATURATION
 }
 
 /// Computes an instantaneous splash amount as
@@ -405,20 +435,20 @@ pub fn potion_splash_effects(
             let effect_id = lodestone_data::mob_effects::MobEffectId::from_registry_id(
                 i32::try_from(effect_index).ok()?,
             )?;
-            let effect_id = lodestone_data::mob_effects::mob_effect_name_for(effect_id);
+            let effect_name = lodestone_data::mob_effects::mob_effect_name_for(effect_id);
             let amplifier = u32::from(amplifier);
             if effect_is_instantaneous(effect_id) {
-                let base_amount = match effect_id.strip_prefix("minecraft:").unwrap_or(effect_id) {
-                    "instant_health" => instant_health_amount(amplifier),
-                    "instant_damage" => instant_damage_amount(amplifier),
-                    "saturation" => saturation_food_points(amplifier) as f32,
+                let base_amount = match effect_id {
+                    id if id == MobEffectId::INSTANT_HEALTH => instant_health_amount(amplifier),
+                    id if id == MobEffectId::INSTANT_DAMAGE => instant_damage_amount(amplifier),
+                    id if id == MobEffectId::SATURATION => saturation_food_points(amplifier) as f32,
                     // No other id passes `effect_is_instantaneous`, so this
                     // arm is unreachable — kept explicit rather than panicking
                     // on a table this module does not own.
                     _ => return None,
                 };
                 Some(SplashEffect::Instant {
-                    effect_id: effect_id.to_owned(),
+                    effect_id: effect_name.to_owned(),
                     amount: splash_instant_amount(base_amount, scale),
                 })
             } else {
@@ -427,7 +457,7 @@ pub fn potion_splash_effects(
                     None
                 } else {
                     Some(SplashEffect::Timed {
-                        effect_id: effect_id.to_owned(),
+                        effect_id: effect_name.to_owned(),
                         duration,
                         amplifier,
                     })
@@ -762,7 +792,7 @@ impl EffectTick {
 /// can fire on the same tick, and a caller reporting them (or a gate asserting them)
 /// should not depend on hash order.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct ActiveEffects(BTreeMap<String, EffectInstance>);
+pub struct ActiveEffects(BTreeMap<MobEffectId, EffectInstance>);
 
 impl ActiveEffects {
     /// No effects.
@@ -786,8 +816,8 @@ impl ActiveEffects {
 
     /// The active instance for `effect_id`, if any.
     #[must_use]
-    pub fn get(&self, effect_id: &str) -> Option<&EffectInstance> {
-        self.0.get(effect_id)
+    pub fn get<K: EffectKey>(&self, effect_id: K) -> Option<&EffectInstance> {
+        self.0.get(&effect_id.resolve_effect()?)
     }
 
     /// The active amplifier for `effect_id`, or `None` if it is not present.
@@ -796,8 +826,8 @@ impl ActiveEffects {
     /// copy — `lodestone_physics::effect::classify` takes exactly an id and an
     /// amplifier, so it composes directly.
     #[must_use]
-    pub fn amplifier_of(&self, effect_id: &str) -> Option<u32> {
-        self.0.get(effect_id).map(EffectInstance::amplifier)
+    pub fn amplifier_of<K: EffectKey>(&self, effect_id: K) -> Option<u32> {
+        self.get(effect_id).map(EffectInstance::amplifier)
     }
 
     /// Resolves every active effect that changes underwater air handling.
@@ -808,11 +838,11 @@ impl ActiveEffects {
     /// than reducing this to a boolean.
     #[must_use]
     pub fn underwater_breathing(&self) -> UnderwaterBreathing {
-        if self.get("minecraft:water_breathing").is_some()
-            || self.get("minecraft:conduit_power").is_some()
+        if self.get(MobEffectId::WATER_BREATHING).is_some()
+            || self.get(MobEffectId::CONDUIT_POWER).is_some()
         {
             UnderwaterBreathing::Refill
-        } else if self.get("minecraft:breath_of_the_nautilus").is_some() {
+        } else if self.get(MobEffectId::BREATH_OF_THE_NAUTILUS).is_some() {
             UnderwaterBreathing::Hold
         } else {
             UnderwaterBreathing::None
@@ -830,10 +860,10 @@ impl ActiveEffects {
     #[must_use]
     pub fn melee_damage(&self, weapon_damage: f32) -> f32 {
         let strength = self
-            .amplifier_of("minecraft:strength")
+            .amplifier_of(MobEffectId::STRENGTH)
             .map_or(0.0, |amplifier| 3.0 * (amplifier + 1) as f32);
         let weakness = self
-            .amplifier_of("minecraft:weakness")
+            .amplifier_of(MobEffectId::WEAKNESS)
             .map_or(0.0, |amplifier| 4.0 * (amplifier + 1) as f32);
         weapon_damage + strength - weakness
     }
@@ -851,7 +881,7 @@ impl ActiveEffects {
         const BASE: f32 = crate::vitals::MAX_HEALTH;
         const PER_LEVEL: f32 = 4.0;
         const ATTRIBUTE_MAX: f32 = 1024.0;
-        self.amplifier_of("minecraft:health_boost")
+        self.amplifier_of(MobEffectId::HEALTH_BOOST)
             .map_or(BASE, |amplifier| {
                 (BASE + PER_LEVEL * (amplifier.saturating_add(1)) as f32).min(ATTRIBUTE_MAX)
             })
@@ -866,11 +896,11 @@ impl ActiveEffects {
     /// receives the value.
     #[must_use]
     pub fn luck(&self) -> i32 {
-        let magnitude = |id: &str| {
+        let magnitude = |id: MobEffectId| {
             self.amplifier_of(id)
                 .map_or(0_i64, |amplifier| i64::from(amplifier.saturating_add(1)))
         };
-        (magnitude("minecraft:luck") - magnitude("minecraft:unluck"))
+        (magnitude(MobEffectId::LUCK) - magnitude(MobEffectId::UNLUCK))
             .clamp(-1024, 1024) as i32
     }
 
@@ -882,17 +912,29 @@ impl ActiveEffects {
     /// replaced instance cannot fire later from a second timer.
     #[must_use]
     pub fn death_trigger(&self) -> Option<DeathTrigger> {
-        self.get("minecraft:wind_charged")
+        self.get(MobEffectId::WIND_CHARGED)
             .map(|_| DeathTrigger::WindCharged)
     }
 
     /// Every active `(id, amplifier)`, in stable order — for handing the movement
     /// classifier the whole set.
     #[must_use]
-    pub fn active(&self) -> Vec<(&str, u32)> {
+    pub fn active(&self) -> Vec<(&'static str, u32)> {
         self.0
             .iter()
-            .map(|(id, instance)| (id.as_str(), instance.amplifier))
+            .map(|(id, instance)| {
+                (lodestone_data::mob_effects::mob_effect_name_for(*id), instance.amplifier)
+            })
+            .collect()
+    }
+
+    /// Every active validated id, for runtime consumers that do not need a
+    /// canonical string at a packet or presentation boundary.
+    #[must_use]
+    pub fn active_ids(&self) -> Vec<(MobEffectId, u32)> {
+        self.0
+            .iter()
+            .map(|(id, instance)| (*id, instance.amplifier))
             .collect()
     }
 
@@ -917,9 +959,9 @@ impl ActiveEffects {
     #[must_use]
     pub fn overlay_defenses(&self, base: lodestone_entity::Defenses) -> lodestone_entity::Defenses {
         lodestone_entity::Defenses {
-            resistance_amplifier: self.amplifier_of("minecraft:resistance").map(|a| a as i32),
+            resistance_amplifier: self.amplifier_of(MobEffectId::RESISTANCE).map(|a| a as i32),
             absorption: self
-                .amplifier_of("minecraft:absorption")
+                .amplifier_of(MobEffectId::ABSORPTION)
                 .map(|a| 4.0 * (a + 1) as f32)
                 .unwrap_or(0.0),
             ..base
@@ -929,12 +971,15 @@ impl ActiveEffects {
     /// Applies an effect, updating an existing [`EffectInstance`] when one is
     /// already present. Returns `true` when the stored state changed, allowing
     /// the caller to decide whether to send an update packet.
-    pub fn apply(&mut self, effect_id: &str, duration: i32, amplifier: u32) -> bool {
+    pub fn apply<K: EffectKey>(&mut self, effect_id: K, duration: i32, amplifier: u32) -> bool {
+        let Some(effect_id) = effect_id.resolve_effect() else {
+            return false;
+        };
         let incoming = EffectInstance::new(duration, amplifier);
-        match self.0.get_mut(effect_id) {
+        match self.0.get_mut(&effect_id) {
             Some(existing) => existing.update(&incoming),
             None => {
-                self.0.insert(effect_id.to_owned(), incoming);
+                self.0.insert(effect_id, incoming);
                 true
             }
         }
@@ -942,8 +987,11 @@ impl ActiveEffects {
 
     /// Removes an effect outright, hidden chain and all — a milk bucket, or
     /// `/effect clear`. Returns whether anything was there.
-    pub fn remove(&mut self, effect_id: &str) -> bool {
-        self.0.remove(effect_id).is_some()
+    pub fn remove<K: EffectKey>(&mut self, effect_id: K) -> bool {
+        effect_id
+            .resolve_effect()
+            .and_then(|effect_id| self.0.remove(&effect_id))
+            .is_some()
     }
 
     /// Removes every effect.
@@ -966,7 +1014,7 @@ impl ActiveEffects {
     /// numbers.
     pub fn tick(&mut self, entity_tick_count: i32, health: f32, max_health: f32) -> EffectTick {
         let mut out = EffectTick::default();
-        let mut expired: Vec<String> = Vec::new();
+        let mut expired: Vec<MobEffectId> = Vec::new();
 
         for (id, instance) in &mut self.0 {
             if !instance.has_remaining() {
@@ -978,9 +1026,9 @@ impl ActiveEffects {
             } else {
                 instance.duration
             };
-            if id == "minecraft:saturation" {
+            if *id == MobEffectId::SATURATION {
                 out.saturation = out.saturation.saturating_add(instance.amplifier + 1);
-            } else if let Some((base, action)) = periodic_effect(id)
+            } else if let Some((base, action)) = periodic_effect(*id)
                 && should_apply_this_tick(base, instance.amplifier, tick_count)
             {
                 match action {
@@ -1023,6 +1071,23 @@ impl ActiveEffects {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn active_store_uses_validated_ids_and_only_reconstructs_names_at_boundaries() {
+        let mut effects = ActiveEffects::new();
+        assert!(effects.apply(MobEffectId::SPEED, 200, 1));
+        assert_eq!(
+            effects.get(MobEffectId::SPEED).map(EffectInstance::amplifier),
+            Some(1)
+        );
+        assert_eq!(effects.active_ids(), vec![(MobEffectId::SPEED, 1)]);
+        assert_eq!(effects.active(), vec![("minecraft:speed", 1)]);
+
+        // Canonical command text remains accepted at the explicit string seam,
+        // but the map still has exactly one typed key.
+        assert_eq!(effects.amplifier_of("minecraft:speed"), Some(1));
+        assert_eq!(effects.len(), 1);
+    }
 
     #[test]
     fn underwater_effects_keep_the_distinct_hold_and_refill_rules() {
