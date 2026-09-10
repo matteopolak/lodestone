@@ -172,6 +172,10 @@ impl FriendsApp {
         self.worker.submit(FriendsCommand::Preferences(preferences));
     }
 
+    pub(super) fn set_opt_in(&mut self, enabled: bool) {
+        self.worker.submit(FriendsCommand::OptIn(enabled));
+    }
+
     pub(super) fn shutdown(&mut self) {
         self.worker.shutdown();
         self.account = None;
@@ -266,6 +270,9 @@ impl WindowApp {
                 crate::menu::friends::FriendsIntent::SetPreferences(preferences) => {
                     self.friends.set_preferences(preferences);
                 }
+                crate::menu::friends::FriendsIntent::SetOptIn(enabled) => {
+                    self.friends.set_opt_in(enabled);
+                }
             }
         }
         self.friends
@@ -321,6 +328,7 @@ enum FriendsCommand {
     Refresh,
     Mutate(FriendMutation),
     Preferences(FriendsPreferences),
+    OptIn(bool),
     Shutdown,
 }
 
@@ -332,6 +340,7 @@ fn apply_command(runtime: &mut FriendsRuntime<SystemFriendsClock>, command: Frie
         FriendsCommand::Refresh => runtime.request_refresh(),
         FriendsCommand::Mutate(mutation) => runtime.queue_mutation(mutation),
         FriendsCommand::Preferences(preferences) => runtime.set_preferences(preferences),
+        FriendsCommand::OptIn(enabled) => runtime.set_opt_in(enabled),
         FriendsCommand::Shutdown => {
             runtime.shutdown();
             return false;

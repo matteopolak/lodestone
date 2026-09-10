@@ -44,6 +44,9 @@ impl FriendsTab {
 pub enum FriendsIntent {
     Refresh,
     Mutate(FriendMutation),
+    /// The first-use prompt records an explicit local choice before the
+    /// service-backed preference request is submitted by the app boundary.
+    SetOptIn(bool),
     /// Replace the service-backed preferences for the currently selected account.
     /// The app forwards this value to its private Friends worker; it never
     /// exposes a session to the menu.
@@ -60,6 +63,8 @@ enum Control {
     Add,
     Primary,
     Secondary,
+    OptIn,
+    OptOut,
     Done,
 }
 
@@ -258,6 +263,9 @@ impl FriendsNav {
     }
 
     fn controls(&self) -> Vec<Control> {
+        if self.view.state == FriendsViewState::Undecided {
+            return vec![Control::OptIn, Control::OptOut];
+        }
         let mut controls = vec![Control::Tab(FriendsTab::Friends), Control::Tab(FriendsTab::Pending)];
         controls.push(Control::Tab(FriendsTab::Settings));
         controls.extend(self.preference_controls());
@@ -279,6 +287,9 @@ impl FriendsNav {
     }
 
     fn visible_controls(&self) -> Vec<Control> {
+        if self.view.state == FriendsViewState::Undecided {
+            return vec![Control::OptIn, Control::OptOut];
+        }
         let mut controls = vec![Control::Tab(FriendsTab::Friends), Control::Tab(FriendsTab::Pending)];
         controls.push(Control::Tab(FriendsTab::Settings));
         controls.extend(self.preference_controls());
@@ -398,6 +409,14 @@ impl FriendsNav {
             }
             Control::Primary => self.queue_selected(false),
             Control::Secondary => self.queue_selected(true),
+            Control::OptIn => {
+                self.intents.push(FriendsIntent::SetOptIn(true));
+                false
+            }
+            Control::OptOut => {
+                self.intents.push(FriendsIntent::SetOptIn(false));
+                true
+            }
             Control::Done => true,
             _ => false,
         }
@@ -523,6 +542,9 @@ pub fn list_spec(len: usize, scroll: f32) -> widget::ListSpec {
 
 #[must_use]
 pub fn frame(nav: &FriendsNav) -> MenuFrame<'static> {
+    if nav.view.state == FriendsViewState::Undecided {
+        return opt_in_frame(nav);
+    }
     let entries = nav.entries();
     let mut rows = Vec::new();
     for tab in [FriendsTab::Friends, FriendsTab::Pending, FriendsTab::Settings] {
@@ -676,6 +698,49 @@ pub fn frame(nav: &FriendsNav) -> MenuFrame<'static> {
     }
 }
 
+fn opt_in_frame(nav: &FriendsNav) -> MenuFrame<'static> {
+    let mut labels = vec![MenuLabel {
+        text: "Friends".to_owned(),
+        origin: Origin::ScreenTop,
+        dx: 0.0,
+        dy: 30.0,
+        align: Align::Centre,
+        colour: widget::ACTIVE_LABEL,
+        scale: 1.0,
+    }, MenuLabel {
+        text: "Enable Friends to see requests and presence from friends.".to_owned(),
+        origin: Origin::ScreenTop,
+        dx: 0.0,
+        dy: HEADER_H + 18.0,
+        align: Align::Centre,
+        colour: widget::ACTIVE_LABEL,
+        scale: 1.0,
+    }];
+    if let Some(account) = &nav.view.account {
+        labels.push(MenuLabel {
+            text: account.display_name.clone(),
+            origin: Origin::ScreenTop,
+            dx: 0.0,
+            dy: 48.0,
+            align: Align::Centre,
+            colour: widget::ACTIVE_LABEL,
+            scale: 1.0,
+        });
+    }
+    let footer_count = 2;
+    MenuFrame {
+        rows: vec![
+            footer_row("Enable Friends", 0, footer_count),
+            footer_row("Not Now", 1, footer_count),
+        ],
+        selected: nav.selected.min(1),
+        vanilla: true,
+        labels,
+        notice: notice(nav.view(), None),
+        ..Default::default()
+    }
+}
+
 /// The pending tab's bounded incoming-request badge.
 ///
 /// A badge is only meaningful after the account has an enabled Friends view
@@ -749,6 +814,7 @@ fn notice(view: &FriendsView, success: Option<&'static str>) -> Option<MenuNotic
         Some(FriendsError::Rejected) => "Friends rejected that change.",
         None => match view.state {
             FriendsViewState::Disabled if view.account.is_none() => "Select an online account to use Friends.",
+            FriendsViewState::Undecided => "Choose whether to enable Friends for this account.",
             FriendsViewState::Resolving | FriendsViewState::FetchingAttributes | FriendsViewState::FetchingFriends => {
                 "Loading Friends..."
             }
@@ -908,6 +974,35 @@ mod tests {
         let frame = frame(&nav);
         assert_eq!(frame.rows.last().map(|row| row.label.as_str()), Some("Done"));
         assert!(frame.notice.as_ref().is_some_and(|notice| notice.text.contains("online account")));
+    }
+
+    #[test]
+    fn undecided_view_reaches_pixels_and_emits_an_explicit_choice() {
+        let mut nav = FriendsNav::default();
+        nav.refresh(FriendsView {
+            account: Some(crate::friends_runtime::FriendsAccount {
+                profile_id: Uuid::from_u128(99),
+                display_name: "Owner".to_owned(),
+            }),
+            state: FriendsViewState::Undecided,
+            preferences: Some(FriendsPreferences::default()),
+            ..FriendsView::default()
+        });
+        let rendered = frame(&nav);
+        assert!(rendered.rows.iter().any(|row| row.label == "Enable Friends"));
+        assert!(rendered.rows.iter().any(|row| row.label == "Not Now"));
+        assert!(rendered.labels.iter().any(|label| label.text.contains("Enable Friends")));
+
+        assert!(!nav.click_row(0));
+        assert_eq!(nav.take_intents(), vec![FriendsIntent::SetOptIn(true)]);
+
+        nav.refresh(FriendsView {
+            state: FriendsViewState::Undecided,
+            preferences: Some(FriendsPreferences::default()),
+            ..nav.view().clone()
+        });
+        assert!(nav.click_row(1));
+        assert_eq!(nav.take_intents(), vec![FriendsIntent::SetOptIn(false)]);
     }
 
     #[test]
