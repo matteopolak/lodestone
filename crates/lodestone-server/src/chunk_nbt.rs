@@ -440,6 +440,9 @@ pub fn column_to_nbt_with(cx: i32, cz: i32, column: &ChunkColumn, extras: &Chunk
     // reload sees the same shape regardless of whether a boundary section was
     // present in the terrain payload.
     let has_retained_light = column.retained_light().is_some();
+    let retained_light_sections = column
+        .retained_light()
+        .map(ColumnLight::light_section_count);
     if let Some(light) = column.retained_light() {
         append_retained_light(&mut sections, min_section, section_count, light);
     }
@@ -489,6 +492,12 @@ pub fn column_to_nbt_with(cx: i32, cz: i32, column: &ChunkColumn, extras: &Chunk
         ),
         ("structures".to_owned(), structures_to_nbt(column)),
     ];
+    if let Some(count) = retained_light_sections {
+        fields.push((
+            "LodestoneLightSections".to_owned(),
+            Nbt::Int(count as i32),
+        ));
+    }
     if let Some(status) = column.retained_light_status() {
         fields.push((
             "LodestoneLightStatus".to_owned(),
@@ -511,14 +520,9 @@ pub fn column_to_nbt_with(cx: i32, cz: i32, column: &ChunkColumn, extras: &Chunk
 fn append_retained_light(
     sections: &mut Vec<Nbt>,
     min_section: i32,
-    block_section_count: usize,
+    _block_section_count: usize,
     light: &ColumnLight,
 ) {
-    debug_assert_eq!(
-        light.light_section_count(),
-        block_section_count + 2,
-        "retained light must span both column boundaries"
-    );
     for index in 0..light.light_section_count() {
         let sky = light_data_bytes(light.sky(index));
         let block = light_data_bytes(light.block(index));
@@ -675,8 +679,13 @@ pub fn column_from_nbt(nbt: &Nbt, min_y: i32, height: i32) -> Result<ChunkColumn
     let mut column = ChunkColumn::new(min_y, height);
     let min_section = min_y.div_euclid(16);
     let section_count = (height as usize).div_ceil(SECTION_EDGE);
+    let light_section_count = match field(nbt, "LodestoneLightSections") {
+        None => section_count + 2,
+        Some(Nbt::Int(count)) if *count >= 2 => *count as usize,
+        Some(_) => return Err(bad("LodestoneLightSections")),
+    };
     let mut retained_light = matches!(field(nbt, "isLightOn"), Some(Nbt::Byte(1)))
-        .then(|| ColumnLight::new(section_count));
+        .then(|| ColumnLight::new(light_section_count - 2));
     let retained_light_status = match field(nbt, "LodestoneLightStatus") {
         None => None,
         Some(Nbt::Byte(1)) => Some(RetainedLightStatus::DependencyInitialized),
@@ -689,7 +698,7 @@ pub fn column_from_nbt(nbt: &Nbt, min_y: i32, height: i32) -> Result<ChunkColumn
             return Err(bad(&format!("sections[{i}].Y")));
         };
         let section_index = i32::from(y) - min_section;
-        if (-1..=section_count as i32).contains(&section_index) {
+        if (-1..=(light_section_count as i32 - 2)).contains(&section_index) {
             let light_index = (section_index + 1) as usize;
             for (name, sky) in [("SkyLight", true), ("BlockLight", false)] {
                 let Some(value) = field(section, name) else {
@@ -2389,6 +2398,19 @@ mod retained_light_tests {
             restored.retained_light_status(),
             Some(RetainedLightStatus::DependencyInitialized)
         );
+    }
+
+    #[test]
+    fn retained_light_window_survives_a_shared_compact_storage_column() {
+        let mut column = ChunkColumn::new(0, 16);
+        let mut light = ColumnLight::new(24);
+        *light.sky_mut(25) = LightData::Uniform(15);
+        column.set_retained_light(light.clone());
+
+        let nbt = column_to_nbt(0, 0, &column);
+        let restored = column_from_nbt(&nbt, column.min_y, column.height)
+            .expect("dimension-aware light window must decode");
+        assert_eq!(restored.retained_light(), Some(&light));
     }
 
     #[test]

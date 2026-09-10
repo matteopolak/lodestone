@@ -15633,6 +15633,16 @@ where
                     let in_end_portal = crate::portal::is_end_portal(&feet_state);
                     let standing_in =
                         (in_end_portal || crate::portal::is_portal(&feet_state)).then_some(feet);
+                    // A portal can come from generated or persisted terrain rather than
+                    // from this server's ignition path. Remember the cell when a player
+                    // actually enters it so the world's POI index (and its persistence
+                    // path) can serve the same portal on the return trip without a
+                    // broad cold-terrain scan.
+                    if !in_end_portal && standing_in.is_some() {
+                        if let Some(index) = source.get().portal_index() {
+                            index.insert(source.dimension(), feet);
+                        }
+                    }
                     // End portals transition on the first tick inside. Nether
                     // transitions use the creative or default delay from the
                     // shared rules, which is read every tick so rule changes

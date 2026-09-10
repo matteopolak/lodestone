@@ -3350,7 +3350,7 @@ fn compute_served_light_with_neighbours(
     neighbours: &[(i32, i32, ServerChunkColumn)],
     dimension: Dimension,
 ) -> ColumnLight {
-    let shape = shape_for_column(column);
+    let shape = shape_for_dimension(dimension);
     let center = build_world_column(&shape, column);
     let neighbour_columns = neighbours
         .iter()
@@ -3747,7 +3747,7 @@ impl V770ServerProtocol {
     where
         F: Fn(i32, i32, usize, i32, usize) -> u8,
     {
-        let shape = shape_for_column(center);
+        let shape = shape_for_dimension(dimension);
         let center_world = build_world_column(&shape, center);
         let neighbour_world = neighbours
             .iter()
@@ -3777,7 +3777,7 @@ impl V770ServerProtocol {
         stored: &[Option<&lodestone_world::ColumnLight>; 9],
         dimension: Dimension,
     ) -> Option<[lodestone_world::ColumnLight; 9]> {
-        let shape = shape_for_column(column);
+        let shape = shape_for_dimension(dimension);
         let center = build_world_column(&shape, column);
         let statuses = std::array::from_fn(|slot| {
             stored[slot].map(|_| RetainedLightStatus::CentreSettled)
@@ -4165,13 +4165,24 @@ fn shape_for_column(column: &ServerChunkColumn) -> ChunkShape {
     ChunkShape::overworld_1_21()
 }
 
+/// Selects the wire window from the dimension registry, not from the source
+/// column's backing allocation. A persisted test world and a newly generated
+/// world can expose the same storage height for more than one dimension; the
+/// client-facing dimension is the authority for section framing.
+fn shape_for_dimension(dimension: Dimension) -> ChunkShape {
+    match dimension {
+        Dimension::Nether | Dimension::End => ChunkShape::nether_or_end_1_21(),
+        Dimension::Overworld => ChunkShape::overworld_1_21(),
+    }
+}
+
 fn encode_chunk_in_dimension(
     cx: i32,
     cz: i32,
     column: &ServerChunkColumn,
     dimension: Dimension,
 ) -> ServerDirective {
-    let shape = shape_for_column(column);
+    let shape = shape_for_dimension(dimension);
     let world_column = build_world_column(&shape, column);
     let light = column
         .retained_light()
@@ -5789,7 +5800,7 @@ impl ServerProtocol for V770ServerProtocol {
         column: &ServerChunkColumn,
         dimension: Dimension,
     ) -> Option<ColumnLight> {
-        let shape = shape_for_column(column);
+        let shape = shape_for_dimension(dimension);
         Some(compute_served_light(&build_world_column(&shape, column), dimension))
     }
 
@@ -5825,7 +5836,7 @@ impl ServerProtocol for V770ServerProtocol {
         neighbours: &[(i32, i32, ServerChunkColumn)],
         dimension: Dimension,
     ) -> Result<ServerDirective, lodestone_server::ChunkEncodeError> {
-        let shape = shape_for_column(column);
+        let shape = shape_for_dimension(dimension);
         let world_column = build_world_column(&shape, column);
         let light = if let Some(retained) = column
             .retained_light()
@@ -5868,7 +5879,7 @@ impl ServerProtocol for V770ServerProtocol {
         neighbours: &[(i32, i32, ServerChunkColumn)],
         dimension: Dimension,
     ) -> Option<ColumnLight> {
-        let shape = shape_for_column(column);
+        let shape = shape_for_dimension(dimension);
         let world_column = build_world_column(&shape, column);
         Some(compute_served_initial_light_with_neighbours(
             &world_column,
@@ -5895,7 +5906,7 @@ impl ServerProtocol for V770ServerProtocol {
                 statuses[slot] = neighbour.retained_light_status();
             }
         }
-        let shape = shape_for_column(column);
+        let shape = shape_for_dimension(dimension);
         let center = build_world_column(&shape, column);
         let mut lights = compute_served_initial_lights_with_neighbours_and_storage(
             &center,
@@ -10825,6 +10836,21 @@ mod dimension_wire_tests {
             "the Nether's own window is 16 sections"
         );
         assert_eq!(shape_for_column(&nether).min_y, 0);
+    }
+
+    #[test]
+    fn dimension_shape_overrides_a_shared_storage_window() {
+        let compact = ServerChunkColumn::new(0, 256);
+        assert_eq!(shape_for_dimension(Dimension::Overworld).section_count, 24);
+        assert_eq!(shape_for_dimension(Dimension::Overworld).min_y, -64);
+        assert_eq!(shape_for_dimension(Dimension::Nether).section_count, 16);
+        assert_eq!(shape_for_dimension(Dimension::Nether).min_y, 0);
+        assert_eq!(shape_for_column(&compact).section_count, 16);
+        assert_ne!(
+            shape_for_dimension(Dimension::Overworld).section_count,
+            shape_for_column(&compact).section_count,
+            "the client's dimension, not a shared fixture allocation, frames the packet"
+        );
     }
 }
 
