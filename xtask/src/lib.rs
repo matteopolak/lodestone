@@ -15,6 +15,7 @@ pub mod islands;
 pub mod no_winit_headless;
 pub mod protocol_dup;
 pub mod ptr_const;
+pub mod string_dispatch;
 pub mod world_coverage;
 
 pub const DEFAULT_PACKET_IDS_OUT: &str = "crates/versions/26.2/src/generated/packet_ids.rs";
@@ -1153,6 +1154,8 @@ pub enum CliCommand {
     WorldCoverage,
     /// Pointer-identity comparison / const-vs-static guard (`ptr_const`).
     CheckPtrConst,
+    /// Closed-registry string-pattern match census (`string_dispatch`).
+    CheckStringDispatch,
     /// `winit`-absence guard for a `--no-default-features` `lodestone-shell`
     /// build (`no_winit_headless`).
     CheckNoWinitHeadless,
@@ -1209,6 +1212,7 @@ where
         "islands" => parse_islands_args(&args[1..]),
         "world-coverage" => Ok(CliCommand::WorldCoverage),
         "check-ptr-const" => Ok(CliCommand::CheckPtrConst),
+        "check-string-dispatch" => Ok(CliCommand::CheckStringDispatch),
         "check-no-winit-headless" => Ok(CliCommand::CheckNoWinitHeadless),
         "check-comment-voice" => parse_check_comment_voice_args(&args[1..]),
         "protocol-dup" => Ok(CliCommand::ProtocolDup),
@@ -1467,6 +1471,11 @@ pub fn run_cli_command(command: CliCommand) -> Result<()> {
             let workspace_root =
                 std::env::current_dir().context("determine current workspace directory")?;
             ptr_const::run_check_ptr_const(&workspace_root)
+        }
+        CliCommand::CheckStringDispatch => {
+            let workspace_root =
+                std::env::current_dir().context("determine current workspace directory")?;
+            string_dispatch::run_check(&workspace_root)
         }
         CliCommand::CheckNoWinitHeadless => {
             let workspace_root =
@@ -10437,6 +10446,7 @@ mod tests {
         assert!(help.contains("conformance"));
         assert!(help.contains("wasm-check"));
         assert!(help.contains("check-ptr-const"));
+        assert!(help.contains("check-string-dispatch"));
         assert!(help.contains("check-comment-voice"));
     }
 
@@ -10445,6 +10455,15 @@ mod tests {
         assert_eq!(
             parse_cli_args(["check-ptr-const"])?,
             CliCommand::CheckPtrConst
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cli_parses_check_string_dispatch_command() -> Result<()> {
+        assert_eq!(
+            parse_cli_args(["check-string-dispatch"])?,
+            CliCommand::CheckStringDispatch
         );
         Ok(())
     }
