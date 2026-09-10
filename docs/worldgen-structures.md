@@ -32,6 +32,14 @@ exist yet at start time). Stronghold writes are a fourth, ordered post-surface l
 selector boxes skip a candidate only when the current state is air, while later decorations remain
 unconditional. Keeping the guarded and unguarded writes in one list preserves their source order.
 
+Each template completes a typed attachment-survival pass before the next piece is placed. The pass
+revisits the written positions and their boundary, removes unsupported face attachments (including
+ladders, wall signs, wall torches and wall banners) and below-supported rails and pressure plates,
+then propagates removals to adjacent candidates. It uses generated block-state properties, collision
+shapes and support predicates rather than parsing state names in the placement loop. This is the
+survival part of the neighbour-shape lifecycle; connection-state recomputation for fences, walls,
+panes, stairs and rails remains a separate extension point.
+
 Concentric-ring sets are generator-wide: `StructureRegistry` resolves the placement set's preferred
 biome holder-set, searches the 112-block square around each initial candidate at quart resolution,
 and caches the relocated chunk list for `starts_at`. The resulting list is consumed by the same
