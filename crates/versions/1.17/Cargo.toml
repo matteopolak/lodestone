@@ -20,6 +20,7 @@ lodestone-server = { path = "../../lodestone-server" }
 lodestone-world = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 
 [features]
