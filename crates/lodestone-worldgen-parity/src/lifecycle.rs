@@ -377,7 +377,7 @@ impl LifecycleWorldgenSource for NetherChunkSource {
     fn feature_result(
         &self,
         source: ChunkPos,
-        overrides: &BTreeMap<AbsoluteCell, String>,
+        _overrides: &BTreeMap<AbsoluteCell, String>,
         resident: &BTreeMap<ChunkPos, ChunkColumn>,
     ) -> LifecycleFeatureResult {
         let interner = std::sync::Arc::clone(self.generator().interner());
@@ -616,7 +616,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         source: ChunkPos,
         stage: LifecycleCompletion,
         sequence: u64,
-        mut observe: impl FnMut(&LifecycleSpill),
+        observe: impl FnMut(&LifecycleSpill),
     ) {
         self.complete_observing_for_target(source, source, stage, sequence, observe);
     }
