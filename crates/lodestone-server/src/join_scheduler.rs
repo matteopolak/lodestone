@@ -625,7 +625,7 @@ pub struct ColumnPipeline<S> {
     /// order they finish in. Pairing them here (rather than indexing a `coords`
     /// vector) is what lets the spawn order itself be dynamic.
     #[cfg(not(target_arch = "wasm32"))]
-    inflight: VecDeque<((i32, i32), tokio::sync::oneshot::Receiver<Result<ColumnPayload, ChunkEncodeError>>)>,
+    inflight: VecDeque<((i32, i32), crate::worldgen_dispatch::DispatchHandle<Result<ColumnPayload, ChunkEncodeError>>)>,
     #[cfg(target_arch = "wasm32")]
     inflight: VecDeque<((i32, i32), ColumnPayload)>,
 }

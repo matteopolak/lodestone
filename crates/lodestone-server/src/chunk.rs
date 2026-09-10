@@ -3580,7 +3580,7 @@ impl OverworldChunkSource {
             cz,
             crate::block_drops::bundled_tables(),
         );
-        let spawners = crate::structure_loot::spawners_for_chunk(column, &starts, cx, cz);
+        let spawners = crate::structure_loot::spawners_for_chunk(&starts, cx, cz);
         if chests.is_empty() && spawners.is_empty() {
             return;
         }
@@ -3894,7 +3894,7 @@ impl NetherChunkSource {
                 cz,
                 crate::block_drops::bundled_tables(),
             );
-            let spawners = crate::structure_loot::spawners_for_chunk(column, &referenced_starts, cx, cz);
+            let spawners = crate::structure_loot::spawners_for_chunk(&referenced_starts, cx, cz);
             if !chests.is_empty() || !spawners.is_empty() {
                 let mut entities = column.block_entities().to_vec();
                 for chest in chests {
@@ -4317,7 +4317,7 @@ impl EndChunkSource {
             cz,
             crate::block_drops::bundled_tables(),
         );
-        let spawners = crate::structure_loot::spawners_for_chunk(column, &referenced_starts, cx, cz);
+        let spawners = crate::structure_loot::spawners_for_chunk(&referenced_starts, cx, cz);
         let mut entities = column.block_entities().to_vec();
         for chest in chests {
             if let Some(block) = chest.block {
