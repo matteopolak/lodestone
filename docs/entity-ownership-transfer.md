@@ -4,9 +4,9 @@
 
 `lodestone_server::entity_handoff::EntityOwnershipHandoff` is the bounded
 source-stop/destination-start barrier for a moving entity that crosses from one
-tick-region owner to another. The first production consumer is dropped-item
-motion; this slice establishes the hand-off contract without changing the
-typed network-id surface.
+tick-region owner to another. Dropped-item motion and experience-orb motion
+are production consumers; this slice keeps the hand-off on the authoritative
+simulation writer without changing the typed network-id surface.
 
 ## How it works
 
@@ -36,11 +36,14 @@ admitted owner.
 
 Item snapshots are sorted by entity id, so completion order cannot change
 client publication order. Items have no passenger or leash relationship; those
-relationships remain outside this first consumer. `saved_entities` and
+relationships remain outside these consumers. Orbs use the same source-stop
+barrier, invoke the durable-save callback before replacing the live state, and
+admit the destination only after that replacement. `saved_entities` and
 `native_entities` read the same centrally applied state, so a save sees either
-the pre-transfer or post-transfer item record. An asynchronous region worker
-must retain the token until its durable-save acknowledgement before releasing
-the source; the current item path remains synchronous at this boundary.
+the pre-transfer or post-transfer record. An asynchronous region worker must
+retain the token until its durable-save acknowledgement before releasing the
+source; the current item and orb paths use the synchronous in-memory writer
+callback at this boundary.
 
 ## How to change it
 

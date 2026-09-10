@@ -27,6 +27,9 @@ fn source_stop_is_a_barrier_before_destination_start() {
     );
     handoff.stop_source(transfer).expect("source stop");
     handoff
+        .acknowledge_durable_save(transfer, |_| true)
+        .expect("durable source save");
+    handoff
         .start_destination(transfer)
         .expect("destination start after source stop");
     assert_eq!(handoff.pending(), 0);
@@ -46,6 +49,9 @@ fn stale_duplicate_and_concurrent_transfers_fail_without_losing_newer_state() {
         Err(EntityHandoffError::ConcurrentTransfer)
     );
     handoff
+        .acknowledge_durable_save(first, |_| true)
+        .expect("first durable source save");
+    handoff
         .start_destination(first)
         .expect("first destination start");
     assert_eq!(
@@ -59,6 +65,9 @@ fn stale_duplicate_and_concurrent_transfers_fail_without_losing_newer_state() {
 
     let newer = token(9, 4, 8);
     handoff.stop_source(newer).expect("newer source stop");
+    handoff
+        .acknowledge_durable_save(newer, |_| true)
+        .expect("newer durable source save");
     assert_eq!(handoff.pending(), 1);
     handoff
         .start_destination(newer)
@@ -80,6 +89,9 @@ fn mismatched_destination_does_not_consume_the_active_route() {
         Err(EntityHandoffError::MismatchedDestination)
     );
     assert_eq!(handoff.pending(), 1);
+    handoff
+        .acknowledge_durable_save(transfer, |_| true)
+        .expect("durable source save");
     handoff
         .start_destination(transfer)
         .expect("the matching destination still owns the route");
