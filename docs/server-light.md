@@ -58,7 +58,10 @@ while an all-air selected column inherits only the vertical corridor induced by 
 terrain. Its initial block layer admits centre and cardinal-neighbour sources while deferring diagonal
 propagation until a later seam-aware update; the allocation mask still reflects the complete loaded
 3x3 footprint. The mask is derived from block occupancy in the admitted columns, never from coordinates
-or state-name strings. The Overworld keeps the one-section sky form and elides uniform zero block light
+or state-name strings. A retained non-zero sky layer in one dependency never filters a fresh terrain
+neighbour out of that footprint walk. A `DependencyInitialized` all-sections layer is not a prior
+centre allocation; only a `CentreSettled` snapshot can preserve a sparse prior mask. The Overworld keeps
+the one-section sky form and elides uniform zero block light
 in an initial chunk. `ChunkSource::dimension`
 carries that choice to the protocol's dimension-aware initial-encoding and light-computation hooks. An
 unlabelled source uses the Overworld as the compatibility default; an in-memory generator therefore
@@ -92,13 +95,31 @@ only after the centre reaches `CentreSettled`; dependency snapshots remain
 available as seeds for the next admission and are never serialized as though
 their own centre admission had completed. A later footprint may read a
 `CentreSettled` column as a dependency, but its dependency result cannot
-downgrade that authoritative centre snapshot; a block mutation clears the
-status before any replacement is allowed.
+downgrade or replace that authoritative centre snapshot; a block mutation
+clears the status before any replacement is allowed.
 
-A retained dependency uses the column's block-section count plus exactly two
-boundary light sections. Helpers that clone an empty dependency shape must
-remove those boundaries before calling `ColumnLight::new`, because that
-constructor adds the boundaries itself.
+For both skylit dimensions, each fresh initial admission has a complete 3x3
+terrain footprint, so its centre sky layer is recomputed from current terrain
+even when older retained snapshots exist. Reusing a retained dependency's sky
+cells as the new centre's flood source would let an old full-sky layer bypass
+current terrain attenuation. The End still restores each retained dependency
+verbatim after that fresh centre computation, preserving its sparse per-column
+wire shape; the Overworld keeps its ordinary compact form. The Nether remains
+block-light-only and keeps its lifecycle-aware retained block-light seeds.
+
+The Nether admission path also keeps a missing dependency out of the flood
+entirely. A generated column may be present as terrain for allocation accounting,
+but until its light layer is admitted it is an opaque seam and cannot contribute
+emission or propagation to a neighbouring centre. A later centre uses retained
+block-light values from admitted dependencies as seeds, settles its own terrain
+first, then records newly queued dependency allocation separately. This keeps
+zero-valued storage distinguishable from an absent layer and prevents packet
+section masks from being reconstructed from terrain after holder eviction. A
+retained dependency uses the same light window as its column: the number of
+block sections plus the lower and upper boundary sections. Helpers cloning an
+empty dependency shape must remove those two boundaries before calling
+`ColumnLight::new`, whose argument is a block-section count; passing an existing
+light-section count would add the boundaries twice.
 
 The initial chunk encoder consumes a `CentreSettled` retained snapshot verbatim. An independent sealed-
 world capture showed that a persisted End section mask can differ from the first in-memory settlement,
@@ -122,10 +143,14 @@ they do not consume. `RegionChunkSource` keeps opted-in snapshots in its edit/pe
 allowing an in-memory cache hit to hide a future reload. The source trait's default batch method
 preserves compatibility for small sources by forwarding individual columns; persistent sources
 that need an all-at-once visibility boundary override it.
-The typed native record path stores the same `ColumnLight` beside terrain and reattaches it to the
-decoded `ChunkColumn` on reopen, so a caller can feed that record directly back to the serving source.
-Persisted columns remain authoritative after eviction and restart; admission and ticket policy remain
-the responsibility of the source/cache lifecycle that owns the column.
+The typed native record path stores only a canonical, centre-settled `ColumnLight` beside terrain and
+reattaches it to the decoded `ChunkColumn` on reopen. Native saves recompute when a dirty column has
+only dependency-initialized storage, clear the attached lifecycle marker before writing, and mark the
+separate decoded payload as `CentreSettled`; this prevents a dependency snapshot from being paired
+with an unrelated canonical payload. An Anvil import follows the same rule, while the NBT decoder
+rejects a lifecycle marker that has no retained light arrays. Persisted columns remain authoritative
+after eviction and restart; admission and ticket policy remain the responsibility of the source/cache
+lifecycle that owns the column.
 
 The bounded cache must therefore sit above a persistence-capable source whenever retained light is
 part of the serving contract. The focused `RegionChunkSource` control exercises a plural admission,

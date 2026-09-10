@@ -297,9 +297,85 @@ impl SectionLight {
 /// Light section `0` is the section immediately below the world's lowest block
 /// section; index `i` corresponds to world section `i - 1`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LightStorage {
+    allocated: Vec<bool>,
+    light_only: Vec<bool>,
+    light_and_data: Vec<bool>,
+}
+
+impl LightStorage {
+    /// Creates an unallocated storage description.
+    #[must_use]
+    pub fn new(section_count: usize) -> Self {
+        Self {
+            allocated: vec![false; section_count],
+            light_only: vec![false; section_count],
+            light_and_data: vec![false; section_count],
+        }
+    }
+
+    /// Creates storage metadata from allocation and resident-data masks. The
+    /// vectors must describe the same light-section range. Admission lifecycle
+    /// belongs to the owning server column, not to this value/allocation
+    /// description.
+    #[must_use]
+    pub fn from_masks(allocated: Vec<bool>, light_and_data: Vec<bool>) -> Self {
+        assert_eq!(
+            allocated.len(),
+            light_and_data.len(),
+            "light allocation and resident-data masks must have equal lengths"
+        );
+        assert!(
+            allocated
+                .iter()
+                .zip(&light_and_data)
+                .all(|(&is_allocated, &has_data)| !has_data || is_allocated),
+            "resident light data requires an allocated light section"
+        );
+        let light_only = allocated
+            .iter()
+            .zip(&light_and_data)
+            .map(|(&is_allocated, &has_data)| is_allocated && !has_data)
+            .collect();
+        Self {
+            allocated,
+            light_only,
+            light_and_data,
+        }
+    }
+
+    /// Number of light sections described by this storage metadata.
+    #[must_use]
+    pub fn section_count(&self) -> usize {
+        self.allocated.len()
+    }
+
+    /// Whether light storage was allocated for `section`.
+    #[must_use]
+    pub fn is_allocated(&self, section: usize) -> bool {
+        self.allocated.get(section).copied().unwrap_or(false)
+    }
+
+    /// Whether `section` is a light-only section without resident block data.
+    #[must_use]
+    pub fn is_light_only(&self, section: usize) -> bool {
+        self.light_only.get(section).copied().unwrap_or(false)
+    }
+
+    /// Whether `section` carries both light and resident block data.
+    #[must_use]
+    pub fn has_block_data(&self, section: usize) -> bool {
+        self.light_and_data.get(section).copied().unwrap_or(false)
+    }
+}
+
+/// Sky and block light for a complete chunk column, including the two boundary
+/// light sections around its block-section range.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnLight {
     sky: Vec<LightData>,
     block: Vec<LightData>,
+    storage: Option<LightStorage>,
 }
 
 impl ColumnLight {
@@ -311,6 +387,7 @@ impl ColumnLight {
         Self {
             sky: vec![LightData::Missing; light_sections],
             block: vec![LightData::Missing; light_sections],
+            storage: None,
         }
     }
 
@@ -355,6 +432,23 @@ impl ColumnLight {
     /// Mutable block light for light section `i`.
     pub fn block_mut(&mut self, i: usize) -> &mut LightData {
         &mut self.block[i]
+    }
+
+    /// Returns the retained light-engine allocation metadata, when this
+    /// snapshot came from a complete admission.
+    #[must_use]
+    pub fn storage(&self) -> Option<&LightStorage> {
+        self.storage.as_ref()
+    }
+
+    /// Attaches a typed light-engine allocation snapshot to this column.
+    pub fn set_storage(&mut self, storage: LightStorage) {
+        assert_eq!(
+            storage.section_count(),
+            self.light_section_count(),
+            "light storage metadata must cover the complete column light range"
+        );
+        self.storage = Some(storage);
     }
 
     /// An O(1) copy-on-write snapshot of light section `i` (`0` is below the
@@ -497,7 +591,11 @@ impl ColumnLight {
 
         let sky = assemble_layer(count, &sky_mask, &empty_sky, sky_arrays)?;
         let block = assemble_layer(count, &block_mask, &empty_block, block_arrays)?;
-        Ok(Self { sky, block })
+        Ok(Self {
+            sky,
+            block,
+            storage: None,
+        })
     }
 }
 
