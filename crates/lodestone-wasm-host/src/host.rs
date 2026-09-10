@@ -695,7 +695,7 @@ impl GuestState {
 fn data_scope(scope: persistent_data::Scope) -> Result<DataScope, String> {
     match scope {
         persistent_data::Scope::Plugin => Ok(DataScope::Plugin),
-        persistent_data::Scope::World(id) => Ok(DataScope::World {
+        persistent_data::Scope::WorldScope(id) => Ok(DataScope::World {
             id: scope_identity(id)?,
         }),
         persistent_data::Scope::Player(id) => Ok(DataScope::Player {
@@ -1986,7 +1986,7 @@ mod tests {
         let mut guest = data_guest();
         let error = <GuestState as persistent_data::Host>::get(
             &mut guest,
-            persistent_data::Scope::World(vec![1; 15]),
+            persistent_data::Scope::WorldScope(vec![1; 15]),
             "state".to_owned(),
         )
         .expect_err("identity must be exactly one UUID");
