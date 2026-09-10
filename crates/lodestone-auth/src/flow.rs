@@ -30,6 +30,7 @@
 //! (de)serialisation shapes). This code is written to the documented protocol
 //! but is, by construction, unverified end-to-end; see the crate report.
 
+use bon::bon;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -615,6 +616,127 @@ struct Xui {
     uhs: String,
 }
 
+#[derive(Debug, Serialize)]
+struct XboxAuthenticationProperties {
+    #[serde(rename = "AuthMethod")]
+    auth_method: &'static str,
+    #[serde(rename = "SiteName")]
+    site_name: &'static str,
+    #[serde(rename = "RpsTicket")]
+    rps_ticket: String,
+}
+
+#[bon]
+impl XboxAuthenticationProperties {
+    #[builder(start_fn = builder)]
+    fn new(auth_method: &'static str, site_name: &'static str, rps_ticket: String) -> Self {
+        Self {
+            auth_method,
+            site_name,
+            rps_ticket,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct XboxAuthenticationRequest {
+    #[serde(rename = "Properties")]
+    properties: XboxAuthenticationProperties,
+    #[serde(rename = "RelyingParty")]
+    relying_party: &'static str,
+    #[serde(rename = "TokenType")]
+    token_type: &'static str,
+}
+
+#[bon]
+impl XboxAuthenticationRequest {
+    #[builder(start_fn = builder)]
+    fn new(
+        properties: XboxAuthenticationProperties,
+        relying_party: &'static str,
+        token_type: &'static str,
+    ) -> Self {
+        Self {
+            properties,
+            relying_party,
+            token_type,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct XstsAuthorizationProperties {
+    #[serde(rename = "SandboxId")]
+    sandbox_id: &'static str,
+    #[serde(rename = "UserTokens")]
+    user_tokens: Vec<String>,
+}
+
+#[bon]
+impl XstsAuthorizationProperties {
+    #[builder(start_fn = builder)]
+    fn new(sandbox_id: &'static str, user_tokens: Vec<String>) -> Self {
+        Self {
+            sandbox_id,
+            user_tokens,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct XstsAuthorizationRequest {
+    #[serde(rename = "Properties")]
+    properties: XstsAuthorizationProperties,
+    #[serde(rename = "RelyingParty")]
+    relying_party: &'static str,
+    #[serde(rename = "TokenType")]
+    token_type: &'static str,
+}
+
+#[bon]
+impl XstsAuthorizationRequest {
+    #[builder(start_fn = builder)]
+    fn new(
+        properties: XstsAuthorizationProperties,
+        relying_party: &'static str,
+        token_type: &'static str,
+    ) -> Self {
+        Self {
+            properties,
+            relying_party,
+            token_type,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct MinecraftLoginRequest {
+    #[serde(rename = "identityToken")]
+    identity_token: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SessionJoinRequest {
+    #[serde(rename = "accessToken")]
+    access_token: String,
+    #[serde(rename = "selectedProfile")]
+    selected_profile: String,
+    #[serde(rename = "serverId")]
+    server_id: String,
+}
+
+#[bon]
+impl SessionJoinRequest {
+    #[builder(start_fn = builder)]
+    fn new(access_token: String, selected_profile: String, server_id: String) -> Self {
+        Self {
+            access_token,
+            selected_profile,
+            server_id,
+        }
+    }
+}
+
 /// The result of the Xbox authentication legs: an XSTS token and the user hash
 /// that pairs with it.
 #[derive(Debug, Clone)]
@@ -625,15 +747,17 @@ struct XstsToken {
 
 /// Authenticates the MS token with Xbox Live, returning the XBL token.
 async fn authenticate_xbl(client: &reqwest::Client, ms_access_token: &str) -> Result<String> {
-    let body = serde_json::json!({
-        "Properties": {
-            "AuthMethod": "RPS",
-            "SiteName": "user.auth.xboxlive.com",
-            "RpsTicket": format!("d={ms_access_token}"),
-        },
-        "RelyingParty": "http://auth.xboxlive.com",
-        "TokenType": "JWT",
-    });
+    let body = XboxAuthenticationRequest::builder()
+        .properties(
+            XboxAuthenticationProperties::builder()
+                .auth_method("RPS")
+                .site_name("user.auth.xboxlive.com")
+                .rps_ticket(format!("d={ms_access_token}"))
+                .build(),
+        )
+        .relying_party("http://auth.xboxlive.com")
+        .token_type("JWT")
+        .build();
     let http = client.post(XBL_URL).json(&body).send().await?;
     let resp: XboxResponse = step_result("xbl", http).await?.json().await?;
     Ok(resp.token)
@@ -650,14 +774,16 @@ struct XstsErrorBody {
 
 /// Exchanges an XBL token for an XSTS token + user hash.
 async fn authorize_xsts(client: &reqwest::Client, xbl_token: &str) -> Result<XstsToken> {
-    let body = serde_json::json!({
-        "Properties": {
-            "SandboxId": "RETAIL",
-            "UserTokens": [xbl_token],
-        },
-        "RelyingParty": "rp://api.minecraftservices.com/",
-        "TokenType": "JWT",
-    });
+    let body = XstsAuthorizationRequest::builder()
+        .properties(
+            XstsAuthorizationProperties::builder()
+                .sandbox_id("RETAIL")
+                .user_tokens(vec![xbl_token.to_owned()])
+                .build(),
+        )
+        .relying_party("rp://api.minecraftservices.com/")
+        .token_type("JWT")
+        .build();
     let http = client.post(XSTS_URL).json(&body).send().await?;
     if http.status() == reqwest::StatusCode::UNAUTHORIZED {
         let text = http.text().await.unwrap_or_default();
@@ -767,7 +893,9 @@ async fn login_with_xbox(client: &reqwest::Client, xsts: &XstsToken) -> Result<(
     let identity = format!("XBL3.0 x={};{}", xsts.user_hash, xsts.token);
     let http = client
         .post(MC_LOGIN_URL)
-        .json(&serde_json::json!({ "identityToken": identity }))
+        .json(&MinecraftLoginRequest {
+            identity_token: identity,
+        })
         .send()
         .await?;
     if http.status() == reqwest::StatusCode::FORBIDDEN {
@@ -932,11 +1060,11 @@ pub async fn join_server(
     session: &Session,
     server_hash: &str,
 ) -> Result<()> {
-    let body = serde_json::json!({
-        "accessToken": session.access_token,
-        "selectedProfile": session.profile.id.simple().to_string(),
-        "serverId": server_hash,
-    });
+    let body = SessionJoinRequest::builder()
+        .access_token(session.access_token.clone())
+        .selected_profile(session.profile.id.simple().to_string())
+        .server_id(server_hash.to_owned())
+        .build();
     let http = client.post(JOIN_URL).json(&body).send().await?;
     if http.status().is_success() {
         Ok(())
@@ -1229,6 +1357,64 @@ mod tests {
         let resp: XboxResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.token, "tok");
         assert_eq!(resp.display_claims.xui[0].uhs, "user-hash");
+    }
+
+    #[test]
+    fn xbox_authentication_request_matches_the_external_wire_shape() {
+        let request = XboxAuthenticationRequest::builder()
+            .properties(
+                XboxAuthenticationProperties::builder()
+                    .auth_method("RPS")
+                    .site_name("user.auth.xboxlive.com")
+                    .rps_ticket("d=access-token".to_owned())
+                    .build(),
+            )
+            .relying_party("http://auth.xboxlive.com")
+            .token_type("JWT")
+            .build();
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"Properties":{"AuthMethod":"RPS","SiteName":"user.auth.xboxlive.com","RpsTicket":"d=access-token"},"RelyingParty":"http://auth.xboxlive.com","TokenType":"JWT"}"#
+        );
+    }
+
+    #[test]
+    fn xsts_authorization_request_matches_the_external_wire_shape() {
+        let request = XstsAuthorizationRequest::builder()
+            .properties(
+                XstsAuthorizationProperties::builder()
+                    .sandbox_id("RETAIL")
+                    .user_tokens(vec!["xbl-token".to_owned()])
+                    .build(),
+            )
+            .relying_party("rp://api.minecraftservices.com/")
+            .token_type("JWT")
+            .build();
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"Properties":{"SandboxId":"RETAIL","UserTokens":["xbl-token"]},"RelyingParty":"rp://api.minecraftservices.com/","TokenType":"JWT"}"#
+        );
+    }
+
+    #[test]
+    fn minecraft_login_and_session_join_requests_match_the_external_wire_shapes() {
+        let login = MinecraftLoginRequest {
+            identity_token: "XBL3.0 x=user-hash;xsts-token".to_owned(),
+        };
+        assert_eq!(
+            serde_json::to_string(&login).unwrap(),
+            r#"{"identityToken":"XBL3.0 x=user-hash;xsts-token"}"#
+        );
+
+        let join = SessionJoinRequest::builder()
+            .access_token("mc-access-token".to_owned())
+            .selected_profile("069a79f444e94726a5befca90e38aaf5".to_owned())
+            .server_id("server-hash".to_owned())
+            .build();
+        assert_eq!(
+            serde_json::to_string(&join).unwrap(),
+            r#"{"accessToken":"mc-access-token","selectedProfile":"069a79f444e94726a5befca90e38aaf5","serverId":"server-hash"}"#
+        );
     }
 
     #[test]
