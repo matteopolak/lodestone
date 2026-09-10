@@ -284,6 +284,35 @@ fn where_the_ore_stages_allocations_come_from() {
     });
     let snap = counters::snapshot();
 
+    // Positive detector control: production now runs ores inside the unified
+    // FEATURES dispatcher, so its allocations intentionally belong to the
+    // Vegetation bucket.  The isolated profiling seam still enters the
+    // standalone Ore guard; exercise it after the production sweep has warmed
+    // the pre-ore store so a zero here cannot be explained by a cold cache or
+    // an empty resolver catalog.
+    counters::reset();
+    let (changed, control_by_stage) = armed(false, || {
+        coords
+            .iter()
+            .map(|&(cx, cz)| generator.ore_stage_for_profiling(cx, cz))
+            .sum::<u64>()
+    });
+    let control_snap = counters::snapshot();
+    let control_ore = control_by_stage[Stage::Ore as usize];
+    let control_ore_passes = control_snap.stage_entered[Stage::Ore as usize];
+    assert!(
+        changed > 0,
+        "the isolated ore control placed no cells; the detector workload is vacuous"
+    );
+    assert!(
+        control_ore_passes > 0,
+        "the isolated ore control never entered the Ore guard; stage attribution is broken"
+    );
+    assert!(
+        control_ore > 0,
+        "the isolated ore control entered Ore but counted no allocations"
+    );
+
     let total: u64 = by_stage.iter().sum();
     let ore = by_stage[Stage::Ore as usize];
     let ore_passes = snap.stage_entered[Stage::Ore as usize];
@@ -297,6 +326,9 @@ fn where_the_ore_stages_allocations_come_from() {
         println!("  per ore pass              : {}", ore / ore_passes);
     }
     println!("  rng_draws[Ore]            : {}", snap.rng_draws[Stage::Ore as usize]);
+    println!(
+        "  isolated ore control      : changed {changed} cells, entered {control_ore_passes}, allocations {control_ore}"
+    );
 
     // U21 added this table. `rng_draws[Ore]` alone is the right
     // control for a change to the ore engine and the wrong one for a change to
@@ -385,8 +417,24 @@ fn where_the_ore_stages_allocations_come_from() {
         );
     }
 
-    assert!(ore > 0, "the ore stage allocated nothing — scene or arming is wrong");
-    assert!(ore_passes > 0, "the ore stage never ran; this is the wrong scene");
+    let features = by_stage[Stage::Vegetation as usize];
+    let feature_passes = snap.stage_entered[Stage::Vegetation as usize];
+    assert!(
+        features > 0,
+        "the unified FEATURES stream allocated nothing — scene or arming is wrong"
+    );
+    assert!(
+        feature_passes > 0,
+        "the unified FEATURES stream never ran; this is the wrong scene"
+    );
+    assert_eq!(
+        ore, 0,
+        "production FEATURES work must stay under the unified Vegetation guard"
+    );
+    assert_eq!(
+        ore_passes, 0,
+        "production FEATURES work must not enter the obsolete standalone Ore guard"
+    );
 }
 
 fn pct(n: u64, d: u64) -> f64 {
