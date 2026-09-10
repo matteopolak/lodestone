@@ -142,24 +142,15 @@ pub fn bundled_worldgen_serves(scope: WorldgenScope) -> bool {
 
 /// Why [`overworld_chunk_source_checked`] refused — the hosting protocol's
 /// own reported [`WorldgenScope`] does not match what this crate embeds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "the embedded worldgen bundle serves only {bundle:?}, but the hosting protocol reports {requested:?}",
+    bundle = BUNDLED_WORLDGEN_SCOPE
+)]
 pub struct WorldgenScopeMismatch {
     /// What the hosting protocol actually reported.
     pub requested: WorldgenScope,
 }
-
-impl std::fmt::Display for WorldgenScopeMismatch {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "the embedded worldgen bundle serves only {BUNDLED_WORLDGEN_SCOPE:?}, but the hosting \
-             protocol reports {:?}",
-            self.requested
-        )
-    }
-}
-
-impl std::error::Error for WorldgenScopeMismatch {}
 
 /// [`overworld_chunk_source`], gated by [`bundled_worldgen_serves`] — the
 /// Checked construction requires a hosting family
@@ -1708,6 +1699,16 @@ mod tests {
         let err = overworld_chunk_source_checked(WorldgenScope::None, 42)
             .expect_err("a mismatched scope must refuse rather than silently serving 26.2 terrain");
         assert_eq!(err, WorldgenScopeMismatch { requested: WorldgenScope::None });
+    }
+
+    #[test]
+    fn worldgen_scope_mismatch_keeps_its_public_diagnostic_without_a_source() {
+        let error = WorldgenScopeMismatch { requested: WorldgenScope::None };
+        assert_eq!(
+            error.to_string(),
+            "the embedded worldgen bundle serves only V26_2, but the hosting protocol reports None"
+        );
+        assert!(std::error::Error::source(&error).is_none());
     }
 
     /// The exact, named vegetal-decoration gap surface for every biome
