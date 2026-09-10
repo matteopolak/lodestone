@@ -1,6 +1,6 @@
 //! Tests for PNG decoding and `*.png.mcmeta` parsing.
 
-use lodestone_assets::{Image, TextureError, TextureMeta};
+use lodestone_assets::{Image, MipStrategy, TextureError, TextureMeta};
 
 /// Encodes a PNG with the given colour type/bit depth for use as decoder input.
 fn encode(
@@ -179,6 +179,26 @@ fn animation_meta_bare_index_frames() {
 }
 
 #[test]
+fn typed_texture_metadata_fixture_covers_known_and_presence_only_sections() {
+    let meta = TextureMeta::parse(include_bytes!("../fixtures/texture_meta_typed.json"))
+        .expect("typed texture metadata fixture");
+    assert_eq!(meta.animation.as_ref().unwrap().frametime, 2);
+    assert_eq!(meta.animation.as_ref().unwrap().frames[1].time, Some(3));
+    assert_eq!(
+        meta.texture.unwrap().mipmap_strategy,
+        MipStrategy::DarkCutout
+    );
+    assert_eq!(
+        meta.other_sections,
+        vec![
+            "future_section".to_string(),
+            "gui".to_string(),
+            "texture".to_string()
+        ]
+    );
+}
+
+#[test]
 fn animation_meta_indexed_time_frames() {
     let json = br#"{"animation":{"interpolate":true,"frametime":1,
         "frames":[{"index":0,"time":5},2,{"index":1,"time":10}]}}"#;
@@ -233,6 +253,16 @@ fn malformed_mcmeta_is_rejected() {
     // animation present but wrong shape.
     assert!(TextureMeta::parse(br#"{"animation":[]}"#).is_err());
     assert!(TextureMeta::parse(br#"{"animation":{"frames":5}}"#).is_err());
+}
+
+#[test]
+fn closed_texture_section_fixture_rejects_unknown_fields() {
+    assert!(matches!(
+        TextureMeta::parse(include_bytes!(
+            "../fixtures/negative/texture_meta_unknown_field.json"
+        )),
+        Err(TextureError::MetaMalformed(_))
+    ));
 }
 
 /// [`Image::first_animation_frame`] crops the **top** slice, in row order —
@@ -299,10 +329,8 @@ fn first_animation_frame_is_a_no_op_when_frame_height_covers_the_whole_image() {
 
 #[test]
 fn texture_section_is_parsed() {
-    use lodestone_assets::MipStrategy;
-
-    let meta =
-        TextureMeta::parse(br#"{"texture":{"mipmap_strategy":"dark_cutout","blur":true}}"#).unwrap();
+    let meta = TextureMeta::parse(br#"{"texture":{"mipmap_strategy":"dark_cutout","blur":true}}"#)
+        .unwrap();
     let tex = meta.texture.expect("texture section present");
     assert_eq!(tex.mipmap_strategy, MipStrategy::DarkCutout);
     assert!(tex.blur);

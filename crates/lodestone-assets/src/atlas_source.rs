@@ -17,11 +17,362 @@
 //! left to the atlas-baking layer — this crate only reports what it will
 //! produce.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 
-use serde_json::Value;
+use serde::{
+    Deserialize, Serialize,
+    de::{self, IgnoredAny, MapAccess, Visitor},
+    ser::SerializeStruct,
+};
 
 use crate::{ResourceLocation, ResourceManager, error::AtlasSourceError};
+
+/// The closed top-level shape of an atlas source-list document.
+///
+/// `sources` is optional in the transport DTO so a missing field can retain
+/// the public [`AtlasSourceError::MissingSources`] diagnostic. The successful
+/// path always lowers a present list into [`AtlasDefinition`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AtlasDefinitionDocument {
+    #[serde(default)]
+    sources: Option<Vec<AtlasSourceDocument>>,
+}
+
+/// The closed shape of a directory source.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectorySourceDocument {
+    source: String,
+    prefix: String,
+}
+
+/// The closed shape of a single-texture source.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SingleSourceDocument {
+    resource: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sprite: Option<String>,
+}
+
+/// The closed shape of a paletted-permutations source.
+///
+/// `permutations` is intentionally a dynamic map: its keys are pack-authored
+/// variant names, while every value is still constrained to a resource string.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PalettedPermutationsDocument {
+    textures: Vec<String>,
+    palette_key: String,
+    permutations: BTreeMap<String, String>,
+    #[serde(default = "default_separator")]
+    separator: String,
+}
+
+fn default_separator() -> String {
+    "_".to_owned()
+}
+
+/// Typed transport form for one atlas source.
+///
+/// The custom deserializer has one intentional escape hatch: an unknown
+/// `type` is preserved as [`AtlasSource::Unknown`]. This is part of the asset
+/// boundary contract because newer packs may add source kinds before this
+/// crate learns how to resolve them.
+#[derive(Debug, Clone, PartialEq)]
+enum AtlasSourceDocument {
+    Directory(DirectorySourceDocument),
+    Single(SingleSourceDocument),
+    PalettedPermutations(PalettedPermutationsDocument),
+    Unknown { kind: String },
+}
+
+impl Serialize for AtlasSourceDocument {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Directory(document) => {
+                let mut state = serializer.serialize_struct("DirectorySourceDocument", 3)?;
+                state.serialize_field("type", "minecraft:directory")?;
+                state.serialize_field("source", &document.source)?;
+                state.serialize_field("prefix", &document.prefix)?;
+                state.end()
+            }
+            Self::Single(document) => {
+                let field_count = if document.sprite.is_some() { 3 } else { 2 };
+                let mut state = serializer.serialize_struct("SingleSourceDocument", field_count)?;
+                state.serialize_field("type", "minecraft:single")?;
+                state.serialize_field("resource", &document.resource)?;
+                if let Some(sprite) = &document.sprite {
+                    state.serialize_field("sprite", sprite)?;
+                }
+                state.end()
+            }
+            Self::PalettedPermutations(document) => {
+                let mut state = serializer.serialize_struct("PalettedPermutationsDocument", 5)?;
+                state.serialize_field("type", "minecraft:paletted_permutations")?;
+                state.serialize_field("textures", &document.textures)?;
+                state.serialize_field("palette_key", &document.palette_key)?;
+                state.serialize_field("permutations", &document.permutations)?;
+                state.serialize_field("separator", &document.separator)?;
+                state.end()
+            }
+            Self::Unknown { kind } => {
+                let mut state = serializer.serialize_struct("UnknownAtlasSourceDocument", 1)?;
+                state.serialize_field("type", kind)?;
+                state.end()
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceField {
+    Type,
+    Source,
+    Prefix,
+    Resource,
+    Sprite,
+    Textures,
+    PaletteKey,
+    Permutations,
+    Separator,
+}
+
+impl SourceField {
+    const ALL: [Self; 9] = [
+        Self::Type,
+        Self::Source,
+        Self::Prefix,
+        Self::Resource,
+        Self::Sprite,
+        Self::Textures,
+        Self::PaletteKey,
+        Self::Permutations,
+        Self::Separator,
+    ];
+
+    fn index(self) -> usize {
+        match self {
+            Self::Type => 0,
+            Self::Source => 1,
+            Self::Prefix => 2,
+            Self::Resource => 3,
+            Self::Sprite => 4,
+            Self::Textures => 5,
+            Self::PaletteKey => 6,
+            Self::Permutations => 7,
+            Self::Separator => 8,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Type => "type",
+            Self::Source => "source",
+            Self::Prefix => "prefix",
+            Self::Resource => "resource",
+            Self::Sprite => "sprite",
+            Self::Textures => "textures",
+            Self::PaletteKey => "palette_key",
+            Self::Permutations => "permutations",
+            Self::Separator => "separator",
+        }
+    }
+}
+
+struct AtlasSourceFields {
+    kind: Option<String>,
+    source: Option<String>,
+    prefix: Option<String>,
+    resource: Option<String>,
+    sprite: Option<String>,
+    textures: Option<Vec<String>>,
+    palette_key: Option<String>,
+    permutations: Option<BTreeMap<String, String>>,
+    separator: Option<String>,
+    seen: [bool; SourceField::ALL.len()],
+    unknown: Vec<String>,
+}
+
+impl AtlasSourceFields {
+    fn new() -> Self {
+        Self {
+            kind: None,
+            source: None,
+            prefix: None,
+            resource: None,
+            sprite: None,
+            textures: None,
+            palette_key: None,
+            permutations: None,
+            separator: None,
+            seen: [false; SourceField::ALL.len()],
+            unknown: Vec::new(),
+        }
+    }
+
+    fn mark(&mut self, field: SourceField) {
+        self.seen[field.index()] = true;
+    }
+
+    fn validate<E: de::Error>(&self, kind: &str, allowed: &[SourceField]) -> Result<(), E> {
+        if let Some(field) = self.unknown.first() {
+            return Err(E::custom(format!(
+                "unknown field {field:?} for atlas source type {kind:?}"
+            )));
+        }
+        for field in SourceField::ALL {
+            if self.seen[field.index()] && !allowed.contains(&field) {
+                return Err(E::custom(format!(
+                    "field {:?} is not valid for atlas source type {kind:?}",
+                    field.name()
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<'de> Deserialize<'de> for AtlasSourceDocument {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct AtlasSourceVisitor;
+
+        impl<'de> Visitor<'de> for AtlasSourceVisitor {
+            type Value = AtlasSourceDocument;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("an atlas source object")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut fields = AtlasSourceFields::new();
+                while let Some(name) = map.next_key::<String>()? {
+                    match name.as_str() {
+                        "type" => {
+                            fields.mark(SourceField::Type);
+                            fields.kind = Some(map.next_value()?);
+                        }
+                        "source" => {
+                            fields.mark(SourceField::Source);
+                            fields.source = map.next_value()?;
+                        }
+                        "prefix" => {
+                            fields.mark(SourceField::Prefix);
+                            fields.prefix = map.next_value()?;
+                        }
+                        "resource" => {
+                            fields.mark(SourceField::Resource);
+                            fields.resource = map.next_value()?;
+                        }
+                        "sprite" => {
+                            fields.mark(SourceField::Sprite);
+                            fields.sprite = map.next_value()?;
+                        }
+                        "textures" => {
+                            fields.mark(SourceField::Textures);
+                            fields.textures = map.next_value()?;
+                        }
+                        "palette_key" => {
+                            fields.mark(SourceField::PaletteKey);
+                            fields.palette_key = map.next_value()?;
+                        }
+                        "permutations" => {
+                            fields.mark(SourceField::Permutations);
+                            fields.permutations = map.next_value()?;
+                        }
+                        "separator" => {
+                            fields.mark(SourceField::Separator);
+                            fields.separator = map.next_value()?;
+                        }
+                        _ => {
+                            fields.unknown.push(name);
+                            let _: IgnoredAny = map.next_value()?;
+                        }
+                    }
+                }
+
+                let kind = fields
+                    .kind
+                    .as_deref()
+                    .ok_or_else(|| de::Error::missing_field("type"))?;
+                let kind = strip_ns(kind);
+                match kind {
+                    "directory" => {
+                        fields.validate(
+                            kind,
+                            &[SourceField::Type, SourceField::Source, SourceField::Prefix],
+                        )?;
+                        Ok(AtlasSourceDocument::Directory(DirectorySourceDocument {
+                            source: fields
+                                .source
+                                .ok_or_else(|| de::Error::missing_field("source"))?,
+                            prefix: fields
+                                .prefix
+                                .ok_or_else(|| de::Error::missing_field("prefix"))?,
+                        }))
+                    }
+                    "single" => {
+                        fields.validate(
+                            kind,
+                            &[
+                                SourceField::Type,
+                                SourceField::Resource,
+                                SourceField::Sprite,
+                            ],
+                        )?;
+                        Ok(AtlasSourceDocument::Single(SingleSourceDocument {
+                            resource: fields
+                                .resource
+                                .ok_or_else(|| de::Error::missing_field("resource"))?,
+                            sprite: fields.sprite,
+                        }))
+                    }
+                    "paletted_permutations" => {
+                        fields.validate(
+                            kind,
+                            &[
+                                SourceField::Type,
+                                SourceField::Textures,
+                                SourceField::PaletteKey,
+                                SourceField::Permutations,
+                                SourceField::Separator,
+                            ],
+                        )?;
+                        Ok(AtlasSourceDocument::PalettedPermutations(
+                            PalettedPermutationsDocument {
+                                textures: fields
+                                    .textures
+                                    .ok_or_else(|| de::Error::missing_field("textures"))?,
+                                palette_key: fields
+                                    .palette_key
+                                    .ok_or_else(|| de::Error::missing_field("palette_key"))?,
+                                permutations: fields
+                                    .permutations
+                                    .ok_or_else(|| de::Error::missing_field("permutations"))?,
+                                separator: fields.separator.unwrap_or_else(default_separator),
+                            },
+                        ))
+                    }
+                    other => Ok(AtlasSourceDocument::Unknown {
+                        kind: other.to_owned(),
+                    }),
+                }
+            }
+        }
+
+        deserializer.deserialize_map(AtlasSourceVisitor)
+    }
+}
 
 /// A parsed `atlases/<id>.json` document: an ordered list of sources.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,26 +437,16 @@ fn strip_ns(kind: &str) -> &str {
     kind.strip_prefix("minecraft:").unwrap_or(kind)
 }
 
-fn str_field<'a>(obj: &'a Value, key: &'static str) -> Result<&'a str, AtlasSourceError> {
-    obj.get(key)
-        .and_then(Value::as_str)
-        .ok_or(AtlasSourceError::MissingKey(key))
-}
-
 impl AtlasDefinition {
     /// Parses an `atlases/<id>.json` document.
     pub fn parse(bytes: &[u8]) -> Result<Self, AtlasSourceError> {
-        let root: Value =
+        let document: AtlasDefinitionDocument =
             serde_json::from_slice(bytes).map_err(|e| AtlasSourceError::Json(e.to_string()))?;
-        let arr = root
-            .get("sources")
-            .and_then(Value::as_array)
-            .ok_or(AtlasSourceError::MissingSources)?;
-
-        let mut sources = Vec::with_capacity(arr.len());
-        for entry in arr {
-            sources.push(AtlasSource::parse(entry)?);
-        }
+        let documents = document.sources.ok_or(AtlasSourceError::MissingSources)?;
+        let sources = documents
+            .into_iter()
+            .map(source_from_document)
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Self { sources })
     }
 
@@ -193,76 +534,46 @@ impl AtlasDefinition {
     }
 }
 
-impl AtlasSource {
-    fn parse(value: &Value) -> Result<Self, AtlasSourceError> {
-        let obj = value
-            .as_object()
-            .ok_or_else(|| AtlasSourceError::BadField("source must be an object".into()))?;
-        let kind = obj
-            .get("type")
-            .and_then(Value::as_str)
-            .ok_or(AtlasSourceError::MissingKey("type"))?;
-
-        match strip_ns(kind) {
-            "directory" => Ok(AtlasSource::Directory {
-                source: str_field(value, "source")?.to_string(),
-                prefix: str_field(value, "prefix")?.to_string(),
-            }),
-            "single" => {
-                let resource = ResourceLocation::parse(str_field(value, "resource")?)?;
-                let sprite = match obj.get("sprite").and_then(Value::as_str) {
-                    Some(s) => ResourceLocation::parse(s)?,
-                    None => resource.clone(),
-                };
-                Ok(AtlasSource::Single { resource, sprite })
-            }
-            "paletted_permutations" => {
-                let textures = obj
-                    .get("textures")
-                    .and_then(Value::as_array)
-                    .ok_or(AtlasSourceError::MissingKey("textures"))?
-                    .iter()
-                    .map(|t| {
-                        t.as_str()
-                            .ok_or_else(|| {
-                                AtlasSourceError::BadField("texture must be a string".into())
-                            })
-                            .and_then(|s| ResourceLocation::parse(s).map_err(Into::into))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let palette_key = ResourceLocation::parse(str_field(value, "palette_key")?)?;
-                let perms = obj
-                    .get("permutations")
-                    .and_then(Value::as_object)
-                    .ok_or(AtlasSourceError::MissingKey("permutations"))?;
-                let mut permutations = BTreeMap::new();
-                for (k, v) in perms {
-                    let loc = v
-                        .as_str()
-                        .ok_or_else(|| {
-                            AtlasSourceError::BadField("permutation must be a string".into())
-                        })
-                        .and_then(|s| ResourceLocation::parse(s).map_err(Into::into))?;
-                    permutations.insert(k.clone(), loc);
-                }
-                let separator = obj
-                    .get("separator")
-                    .and_then(Value::as_str)
-                    .unwrap_or("_")
-                    .to_string();
-                Ok(AtlasSource::PalettedPermutations {
-                    textures,
-                    palette_key,
-                    permutations,
-                    separator,
-                })
-            }
-            other => Ok(AtlasSource::Unknown {
-                kind: other.to_string(),
-            }),
+fn source_from_document(document: AtlasSourceDocument) -> Result<AtlasSource, AtlasSourceError> {
+    match document {
+        AtlasSourceDocument::Directory(document) => Ok(AtlasSource::Directory {
+            source: document.source,
+            prefix: document.prefix,
+        }),
+        AtlasSourceDocument::Single(document) => {
+            let resource = ResourceLocation::parse(&document.resource)?;
+            let sprite = document
+                .sprite
+                .as_deref()
+                .map(ResourceLocation::parse)
+                .transpose()?
+                .unwrap_or_else(|| resource.clone());
+            Ok(AtlasSource::Single { resource, sprite })
         }
+        AtlasSourceDocument::PalettedPermutations(document) => {
+            let textures = document
+                .textures
+                .iter()
+                .map(|texture| ResourceLocation::parse(texture))
+                .collect::<Result<Vec<_>, _>>()?;
+            let palette_key = ResourceLocation::parse(&document.palette_key)?;
+            let permutations = document
+                .permutations
+                .into_iter()
+                .map(|(key, value)| ResourceLocation::parse(&value).map(|location| (key, location)))
+                .collect::<Result<BTreeMap<_, _>, _>>()?;
+            Ok(AtlasSource::PalettedPermutations {
+                textures,
+                palette_key,
+                permutations,
+                separator: document.separator,
+            })
+        }
+        AtlasSourceDocument::Unknown { kind } => Ok(AtlasSource::Unknown { kind }),
     }
+}
 
+impl AtlasSource {
     /// Resolves this single source against the manager. `paletted_permutations`
     /// and `unknown` return nothing (see [`AtlasDefinition::resolve`]).
     pub fn resolve(&self, manager: &ResourceManager) -> Vec<AtlasSpriteEntry> {
@@ -340,5 +651,47 @@ impl AtlasSource {
             }
             _ => Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AtlasDefinitionDocument;
+
+    #[test]
+    fn typed_document_round_trips_all_known_source_shapes() {
+        let source = r#"{
+            "sources":[
+                {"type":"minecraft:directory","source":"entity/chest","prefix":"entity/chest/"},
+                {"type":"minecraft:single","resource":"minecraft:gui/empty_slot","sprite":"minecraft:gui/empty"},
+                {"type":"minecraft:paletted_permutations","textures":["minecraft:trims/entity/humanoid/sentry"],
+                 "palette_key":"minecraft:trims/color_palettes/trim_palette",
+                 "permutations":{"gold":"minecraft:trims/color_palettes/gold"}}
+            ]
+        }"#;
+        let document: AtlasDefinitionDocument = serde_json::from_str(source).unwrap();
+        let encoded = serde_json::to_string(&document).unwrap();
+        let decoded: AtlasDefinitionDocument = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(document, decoded);
+    }
+
+    #[test]
+    fn unknown_source_type_survives_typed_deserialization() {
+        let document: AtlasDefinitionDocument = serde_json::from_str(
+            r#"{"sources":[{"type":"minecraft:future_source","payload":{"x":1}}]}"#,
+        )
+        .unwrap();
+        let encoded = serde_json::to_string(&document).unwrap();
+        assert!(encoded.contains("future_source"));
+        let decoded: AtlasDefinitionDocument = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(document, decoded);
+    }
+
+    #[test]
+    fn closed_known_source_rejects_an_unexpected_field() {
+        assert!(serde_json::from_str::<AtlasDefinitionDocument>(
+            r#"{"sources":[{"type":"minecraft:directory","source":"block","prefix":"","typo":true}]}"#,
+        )
+        .is_err());
     }
 }
