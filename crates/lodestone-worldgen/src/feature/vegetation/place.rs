@@ -198,8 +198,11 @@ fn place_root<R: RandomSource>(
     grid: &mut VegGrid,
     tags: &VegTags,
 ) {
-    let existing_base = super::base_id(grid.get(pos.x, pos.y, pos.z)).to_string();
-    if muddy_roots_in.iter().any(|b| *b == existing_base) {
+    let existing_base = grid.interner().base_of(grid.get_id(pos.x, pos.y, pos.z));
+    if muddy_roots_in
+        .iter()
+        .any(|name| grid.interner().id_of(name) == existing_base)
+    {
         if let Some(state) = muddy_roots_provider.get_state_id(grid, tags, random, pos) {
             write_potentially_waterlogged_state(grid, tags, pos, state);
         }
@@ -265,16 +268,16 @@ pub(super) fn place_roots<R: RandomSource>(
     const STEP: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)]; // NORTH, EAST, SOUTH, WEST
     for dir in STEP {
         let pos = BlockPos { x: trunk_origin.x + dir.0, y: trunk_origin.y, z: trunk_origin.z + dir.1 };
-        let mut positions_in_direction = Vec::new();
+        let root_start = root_positions.len();
         let ok = simulate_roots(
-            random, pos, dir, trunk_origin, &mut positions_in_direction, 0, grid, tags, can_grow_through,
+            random, pos, dir, trunk_origin, &mut root_positions, root_start, 0, grid, tags, can_grow_through,
             *max_root_length, *max_root_width, *random_skew_chance,
         );
         if !ok {
+            root_positions.truncate(root_start);
             ROOT_POSITIONS.set(root_positions);
             return false;
         }
-        root_positions.extend(positions_in_direction);
         root_positions.push(pos);
     }
 
