@@ -492,7 +492,7 @@ impl<'w> MobSim<'w> {
         let transfers: Vec<_> = effects
             .iter()
             .filter_map(|effect| {
-                effect.orb.as_ref().and_then(|orb| {
+                effect.orb.as_ref().and_then(|_| {
                     (effect.owner != effect.destination).then(|| {
                         EntityHandoffToken::new(
                             effect.id,
