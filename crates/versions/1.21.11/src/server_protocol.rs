@@ -5,9 +5,11 @@
 //! unique 774 state return an error instead of becoming a different block.
 
 use lodestone_core::{
-    Ctx, Decode, Encode, Reader, State, Writer, encode_body, Nbt,
+    Ctx, Decode, Encode, Nbt, NbtTag, Reader, State, Writer, encode_body, write_network_nbt,
 };
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ItemStack, Rotation, Vec3f};
+use lodestone_model::{
+    BlockActionKind, BlockFace, BlockPos, ItemStack, Rotation, Text, TextContent, Vec3, Vec3f,
+};
 use lodestone_server::{ChunkColumn, ChunkEncodeError, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_world::{Heightmap, PaletteKind, PalettedContainer};
 use uuid::Uuid;
@@ -16,9 +18,9 @@ use crate::PROTOCOL_1_21_11;
 use crate::packet_ids::{configuration, handshaking, login, play};
 use crate::packets::configuration::RegistryData;
 use crate::packets::game::{
-    ChunkBatchFinished, ChunkBatchStart, ClientboundPlayerPosition, JoinGame, MovePlayerPos,
-    MovePlayerPosRot, MovePlayerRot, MovePlayerStatusOnly, PlayerAction, PlayerLoaded, SpawnInfo,
-    SetHealth, UseItem, UseItemOn,
+    ChunkBatchFinished, ChunkBatchStart, ClientCommand, ClientboundPlayerPosition, JoinGame,
+    MovePlayerPos, MovePlayerPosRot, MovePlayerRot, MovePlayerStatusOnly, PlayerAction,
+    PlayerLoaded, Respawn, SpawnInfo, SetHealth, UseItem, UseItemOn,
 };
 use crate::packets::handshake::Intention;
 use crate::packets::login::{LoginStart, LoginFinished, SetCompression};
@@ -34,6 +36,61 @@ const HEIGHT: i32 = 384;
 const SECTION_EDGE: i32 = 16;
 const SECTION_COUNT: usize = 24;
 const SECTION_BLOCKS: usize = 4096;
+
+fn respawn_info() -> SpawnInfo {
+    SpawnInfo {
+        dimension: registry_index("minecraft:dimension_type", "minecraft:overworld"),
+        world_name: "minecraft:overworld".to_owned(),
+        hashed_seed: 0,
+        game_mode: 0,
+        previous_game_mode: u8::MAX,
+        is_debug: false,
+        is_flat: true,
+        has_death_location: false,
+        death_dimension: None,
+        death_location: None,
+        portal_cooldown: 0,
+        sea_level: 63,
+    }
+}
+
+fn text_component(text: &Text) -> Nbt {
+    let mut fields = Vec::new();
+    match &text.content {
+        TextContent::Literal(literal) => {
+            fields.push(("text".to_owned(), Nbt::String(literal.clone())));
+        }
+        TextContent::Translate {
+            key,
+            with,
+            fallback,
+        } => {
+            fields.push(("translate".to_owned(), Nbt::String(key.clone())));
+            if let Some(fallback) = fallback {
+                fields.push(("fallback".to_owned(), Nbt::String(fallback.clone())));
+            }
+            if !with.is_empty() {
+                fields.push((
+                    "with".to_owned(),
+                    Nbt::List {
+                        element_type: NbtTag::Compound,
+                        elements: with.iter().map(text_component).collect(),
+                    },
+                ));
+            }
+        }
+    }
+    if !text.extra.is_empty() {
+        fields.push((
+            "extra".to_owned(),
+            Nbt::List {
+                element_type: NbtTag::Compound,
+                elements: text.extra.iter().map(text_component).collect(),
+            },
+        ));
+    }
+    Nbt::Compound(fields)
+}
 
 /// Server implementation for protocol 774.
 #[derive(Clone, Copy, Debug, Default)]
@@ -471,6 +528,13 @@ impl ServerProtocol for V774ServerProtocol {
                 decode_full::<PlayerLoaded>(payload)
                     .map_or(ServerBound::Ignored, |_| ServerBound::PlayerLoaded)
             }
+            State::Play if packet_id == play::serverbound::CLIENT_COMMAND => {
+                decode_full::<ClientCommand>(payload).map_or(ServerBound::Ignored, |command| {
+                    ServerBound::ClientCommand {
+                        action: command.action,
+                    }
+                })
+            }
             State::Play if packet_id == play::serverbound::CONTAINER_CLOSE => {
                 decode_full::<ContainerClose>(payload).map_or(
                     ServerBound::Ignored,
@@ -795,5 +859,51 @@ impl ServerProtocol for V774ServerProtocol {
                 food_saturation: saturation.clamp(0.0, 20.0),
             },
         )
+    }
+
+    fn encode_player_combat_kill(&self, player_entity_id: i32, message: &Text) -> ServerDirective {
+        let mut payload = Writer::default();
+        payload.var_i32(player_entity_id);
+        write_network_nbt(&mut payload, &text_component(message))
+            .expect("death text component always encodes");
+        ServerDirective::Send {
+            packet_id: play::clientbound::PLAYER_COMBAT_KILL,
+            payload: payload.into_vec(),
+        }
+    }
+
+    fn encode_respawn(&self, spawn: Vec3) -> Vec<ServerDirective> {
+        self.encode_respawn_with_teleport_id(0, spawn)
+    }
+
+    fn encode_respawn_with_teleport_id(
+        &self,
+        teleport_id: i32,
+        spawn: Vec3,
+    ) -> Vec<ServerDirective> {
+        vec![
+            send(
+                play::clientbound::RESPAWN,
+                &Respawn {
+                    world_state: respawn_info(),
+                    data_kept: 0,
+                },
+            ),
+            send(
+                play::clientbound::PLAYER_POSITION,
+                &ClientboundPlayerPosition {
+                    teleport_id,
+                    x: spawn.x,
+                    y: spawn.y,
+                    z: spawn.z,
+                    dx: 0.0,
+                    dy: 0.0,
+                    dz: 0.0,
+                    yaw: 0.0,
+                    pitch: 0.0,
+                    flags: 0,
+                },
+            ),
+        ]
     }
 }
