@@ -36,8 +36,10 @@ duplicate-free owner set and restores the tick-start sequence.
 
 The lane count is a bound, not a promise that every call is parallel. A call
 with one job has one useful lane; callers should choose their worker count from
-the measured owner workload. Tests that claim concurrency must use a
-barrier-controlled fixture so a serial fallback cannot pass accidentally.
+the measured owner workload. The executor rejects a zero lane bound instead of
+silently converting an invalid production configuration into a serial pass.
+Tests that claim concurrency must use a barrier-controlled fixture so a serial
+fallback cannot pass accidentally.
 
 ## Configuration
 
