@@ -141,6 +141,7 @@ tracing = { workspace = true }
 # `ServerProtocol::login_success` carry a `Uuid` in production code, not just
 # tests.
 uuid = { workspace = true }
+url = { workspace = true }
 
 # --- Native (non-wasm) target dependencies ---
 # Native tokio keeps the full workspace feature set (including `net` and

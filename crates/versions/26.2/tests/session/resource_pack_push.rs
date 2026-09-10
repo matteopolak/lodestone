@@ -89,7 +89,7 @@ fn cheap_source() -> WorldgenChunkSource {
 fn sample_push() -> ResourcePackPush {
     ResourcePackPush {
         id: Uuid::from_u128(0x1234_5678_9abc_def0_1234_5678_9abc_def0),
-        url: "https://example.com/pack.zip".to_owned(),
+        url: "https://example.com/pack.zip".parse().expect("valid resource-pack URL"),
         hash: "0123456789abcdef0123456789abcdef01234567".to_owned(),
         required: true,
         prompt: Some(Text::literal("Accept this pack?")),
@@ -175,7 +175,7 @@ async fn a_pushed_resource_pack_reaches_the_client_and_round_trips() {
 
     let (id, url, hash, required, prompt) = wait_for_push(&mut events).await;
     assert_eq!(id, push.id);
-    assert_eq!(url, push.url);
+    assert_eq!(url, push.url.as_str());
     assert_eq!(hash, push.hash);
     assert_eq!(required, push.required);
     assert_eq!(

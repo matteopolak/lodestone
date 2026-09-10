@@ -636,7 +636,8 @@ pub use plugin_channels::{
 };
 pub use protocol::{
     Abilities, ChunkEncodeError, ChunkEncoder, EntitySnapshot, MerchantOfferOut, MetadataField,
-    PlayerListing, ResourcePackPush, ServerBound, ServerDirective, ServerProtocol, WorldgenScope,
+    PlayerListing, ResourcePackPush, ResourcePackUrl, ResourcePackUrlError, ServerBound,
+    ServerDirective, ServerProtocol, WorldgenScope,
 };
 /// The `EntityEvent` status bytes [`ServerProtocol::encode_entity_event`] carries.
 ///
