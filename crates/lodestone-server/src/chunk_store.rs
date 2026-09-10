@@ -2004,9 +2004,6 @@ mod tests {
             self.calls.load(Ordering::Relaxed)
         }
 
-        fn unloaded(&self) -> Vec<(i32, i32)> {
-            self.unloaded.lock().expect("unloaded log poisoned").clone()
-        }
     }
 
     /// The worst per-coordinate generation count, with its coordinate — the

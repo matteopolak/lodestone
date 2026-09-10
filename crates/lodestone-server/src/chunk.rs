@@ -43,10 +43,10 @@ use lodestone_worldgen::overworld::{GeneratedColumn, OverworldGenerator};
 use crate::block_entities::BlockEntity;
 use crate::chunk_blocks::SectionedBlocks;
 
-/// Counts calls to [`ChunkColumn::intern`] separately for each test thread.
-/// A counter records operation count rather than wall-clock time, so scheduling
-/// variance cannot change the measurement. Thread-local storage isolates each
-/// test's reset/read pair from calls made by other test threads.
+// Counts calls to [`ChunkColumn::intern`] separately for each test thread.
+// A counter records operation count rather than wall-clock time, so scheduling
+// variance cannot change the measurement. Thread-local storage isolates each
+// test's reset/read pair from calls made by other test threads.
 #[cfg(test)]
 thread_local! {
     static INTERN_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -3812,7 +3812,7 @@ mod tests {
         // so arm 1 and arm 2 begin from the same state.
         tokio::task::yield_now().await;
         let started = lodestone_time::Instant::now();
-        let offloaded = generate_columns_offloaded(
+        let _offloaded = generate_columns_offloaded(
             Arc::new(SleepyChunkSource { per_column }),
             coords.clone(),
         )
@@ -3836,7 +3836,7 @@ mod tests {
         };
         tokio::task::yield_now().await;
         let control_started = lodestone_time::Instant::now();
-        let blocking = generate_columns_parallel(
+        let _blocking = generate_columns_parallel(
             &SleepyChunkSource { per_column },
             &coords,
         );
