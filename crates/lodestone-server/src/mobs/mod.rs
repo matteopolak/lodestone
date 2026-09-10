@@ -2759,7 +2759,12 @@ impl<'w> SimMob<'w> {
     /// — see that type's own doc for the "remembered, not ignored or replaced"
     /// table). Returns whether the active instance changed, matching
     /// [`crate::mob_effects::ActiveEffects::apply`]'s own return.
-    pub fn apply_effect(&mut self, effect_id: &str, duration: i32, amplifier: u32) -> bool {
+    pub fn apply_effect<K: crate::mob_effects::EffectKey>(
+        &mut self,
+        effect_id: K,
+        duration: i32,
+        amplifier: u32,
+    ) -> bool {
         self.effects.apply(effect_id, duration, amplifier)
     }
 

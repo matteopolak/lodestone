@@ -389,8 +389,9 @@ pub enum SplashEffect {
     /// `effect_id` is an instantaneous effect; `amount` is already
     /// distance-scaled ([`splash_instant_amount`]) and ready for its consumer.
     Instant {
-        /// Canonical `minecraft:*` mob-effect id.
-        effect_id: String,
+        /// Validated built-in mob-effect id. Text is reconstructed only at a
+        /// packet, command, or persistence boundary.
+        effect_id: MobEffectId,
         /// Already scaled by distance; never negative.
         amount: f32,
     },
@@ -398,8 +399,9 @@ pub enum SplashEffect {
     /// [`ActiveEffects::apply`]. It has passed [`splash_would_be_dropped`], so
     /// every `Timed` value this module returns is meant to land.
     Timed {
-        /// Canonical `minecraft:*` mob-effect id.
-        effect_id: String,
+        /// Validated built-in mob-effect id. Text is reconstructed only at a
+        /// packet, command, or persistence boundary.
+        effect_id: MobEffectId,
         /// Distance-scaled duration in ticks, always `> 20`.
         duration: i32,
         /// Unscaled: falloff affects only duration and, for instant effects,
@@ -435,7 +437,6 @@ pub fn potion_splash_effects(
             let effect_id = lodestone_data::mob_effects::MobEffectId::from_registry_id(
                 i32::try_from(effect_index).ok()?,
             )?;
-            let effect_name = lodestone_data::mob_effects::mob_effect_name_for(effect_id);
             let amplifier = u32::from(amplifier);
             if effect_is_instantaneous(effect_id) {
                 let base_amount = match effect_id {
@@ -448,7 +449,7 @@ pub fn potion_splash_effects(
                     _ => return None,
                 };
                 Some(SplashEffect::Instant {
-                    effect_id: effect_name.to_owned(),
+                    effect_id,
                     amount: splash_instant_amount(base_amount, scale),
                 })
             } else {
@@ -457,7 +458,7 @@ pub fn potion_splash_effects(
                     None
                 } else {
                     Some(SplashEffect::Timed {
-                        effect_id: effect_name.to_owned(),
+                        effect_id,
                         duration,
                         amplifier,
                     })
@@ -1713,8 +1714,8 @@ mod tests {
                 SplashEffect::Timed { effect_id: c_id, duration: c_dur, amplifier: c_amp },
                 SplashEffect::Timed { effect_id: f_id, duration: f_dur, amplifier: f_amp },
             ) => {
-                assert_eq!(c_id, "minecraft:speed");
-                assert_eq!(f_id, "minecraft:speed");
+                assert_eq!(*c_id, MobEffectId::SPEED);
+                assert_eq!(*f_id, MobEffectId::SPEED);
                 assert_eq!(*c_amp, amplifier);
                 assert_eq!(*f_amp, amplifier);
                 // scale(0.0) = 1.0 -> 3600; scale(10.24) = 1.0 - 3.2/4.0 = 0.2 -> 720.
@@ -1734,8 +1735,8 @@ mod tests {
             .expect("generated potion id is valid");
         let close = potion_splash_effects(harming, splash_scale(0.0), 1.0);
         let far = potion_splash_effects(harming, splash_scale(10.24), 1.0);
-        assert_eq!(close, vec![SplashEffect::Instant { effect_id: "minecraft:instant_damage".to_owned(), amount: 6.0 }]);
-        assert_eq!(far, vec![SplashEffect::Instant { effect_id: "minecraft:instant_damage".to_owned(), amount: 1.0 }]);
+        assert_eq!(close, vec![SplashEffect::Instant { effect_id: MobEffectId::INSTANT_DAMAGE, amount: 6.0 }]);
+        assert_eq!(far, vec![SplashEffect::Instant { effect_id: MobEffectId::INSTANT_DAMAGE, amount: 1.0 }]);
     }
 
     /// **Control**: a water bottle (`minecraft:water`, `POTION_EFFECTS` empty)
