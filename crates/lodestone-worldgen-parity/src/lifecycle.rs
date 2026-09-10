@@ -378,17 +378,30 @@ impl LifecycleWorldgenSource for NetherChunkSource {
         &self,
         source: ChunkPos,
         overrides: &BTreeMap<AbsoluteCell, String>,
-        _resident: &BTreeMap<ChunkPos, ChunkColumn>,
+        resident: &BTreeMap<ChunkPos, ChunkColumn>,
     ) -> LifecycleFeatureResult {
+        let interner = std::sync::Arc::clone(self.generator().interner());
         let spills = self
             .generator()
-            .parity_source_spills_with_overrides(
-                source.0,
-                source.1,
-                source.0,
-                source.1,
-                &override_vec(overrides),
-            )
+            .parity_source_spills_with_resident(source.0, source.1, |cx, cz| {
+                let column = resident.get(&(cx, cz))?;
+                Some(lodestone_worldgen::dense_grid::DenseBlockGrid::from_canonical_states(
+                    std::sync::Arc::clone(&interner),
+                    cx * 16,
+                    0,
+                    cz * 16,
+                    16,
+                    NetherChunkSource::WINDOW_HEIGHT,
+                    16,
+                    |x, y, z| {
+                        column.resolved_block_state_id(
+                            x.rem_euclid(16),
+                            y,
+                            z.rem_euclid(16),
+                        )
+                    },
+                ))
+            })
             .into_iter()
             .map(|spill| LifecycleSpill {
                 source: spill.source,
@@ -418,6 +431,33 @@ impl LifecycleWorldgenSource for EndChunkSource {
     ) -> LifecycleFeatureResult {
         let overrides = override_vec(overrides);
         let result = self.generator().parity_source_decoration_with_overrides(
+            source.0,
+            source.1,
+            &overrides,
+        );
+        LifecycleFeatureResult {
+            spills: result.spills.into_iter().map(|spill| LifecycleSpill {
+                source: spill.source,
+                position: spill.position,
+                state: spill.state,
+                transient: false,
+            }).collect(),
+            block_entities: Vec::new(),
+            end_gateways: result.gateways,
+        }
+    }
+
+    fn feature_result_for_target(
+        &self,
+        target: ChunkPos,
+        source: ChunkPos,
+        overrides: &BTreeMap<AbsoluteCell, String>,
+        _resident: &BTreeMap<ChunkPos, ChunkColumn>,
+    ) -> LifecycleFeatureResult {
+        let overrides = override_vec(overrides);
+        let result = self.generator().parity_source_decoration_for_target_with_overrides(
+            target.0,
+            target.1,
             source.0,
             source.1,
             &overrides,
