@@ -10,6 +10,7 @@ git -C "$fixture" init -q
 git -C "$fixture" config user.name test
 git -C "$fixture" config user.email test@example.invalid
 git -C "$fixture" config commit.gpgSign false
+git -C "$fixture" config core.hooksPath "$script_dir/../.githooks"
 printf 'base\n' > "$fixture/owned.txt"
 git -C "$fixture" add owned.txt
 git -C "$fixture" commit -qm base
@@ -20,6 +21,24 @@ GIT_INDEX_FILE=$private_index git -C "$fixture" read-tree "$base"
 printf 'agent edit\n' > "$fixture/owned.txt"
 blob=$(git -C "$fixture" hash-object -w "$fixture/owned.txt")
 GIT_INDEX_FILE=$private_index git -C "$fixture" update-index --cacheinfo 100644 "$blob" owned.txt
+
+printf 'pathspec edit that must not land\n' > "$fixture/owned.txt"
+if git -C "$fixture" commit -m "must fail" -- owned.txt >"$fixture/pathspec.out" 2>"$fixture/pathspec.err"; then
+    echo "pathspec commit unexpectedly passed the shared-checkout guard" >&2
+    exit 1
+fi
+grep -q "refusing pathspec commit" "$fixture/pathspec.err"
+test "$(git -C "$fixture" log -1 --format=%s)" = base
+printf 'agent edit\n' > "$fixture/owned.txt"
+
+printf 'only edit that must not land\n' > "$fixture/owned.txt"
+if git -C "$fixture" commit --only -m "must fail" -- owned.txt >"$fixture/only.out" 2>"$fixture/only.err"; then
+    echo "--only commit unexpectedly passed the shared-checkout guard" >&2
+    exit 1
+fi
+grep -q "refusing pathspec commit" "$fixture/only.err"
+test "$(git -C "$fixture" log -1 --format=%s)" = base
+printf 'agent edit\n' > "$fixture/owned.txt"
 
 printf 'concurrent edit\n' > "$fixture/concurrent.txt"
 git -C "$fixture" add concurrent.txt
@@ -41,4 +60,4 @@ GIT_INDEX_FILE=$private_index git -C "$fixture" update-index --cacheinfo 100644 
 test "$(git -C "$fixture" log -1 --format=%s)" = "safe commit"
 test "$(git -C "$fixture" show HEAD:owned.txt)" = "agent edit"
 test "$(git -C "$fixture" show HEAD:concurrent.txt)" = "concurrent edit"
-echo "private-index stale-base controls passed"
+echo "private-index pathspec and stale-base controls passed"
