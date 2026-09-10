@@ -1839,7 +1839,7 @@ pub fn ticks_after_edit<S: ChunkSource + ?Sized>(
     world: &S,
     env: FluidEnv,
     pos: BlockPos,
-) -> Vec<ScheduledTick<String>> {
+) -> Vec<ScheduledTick<ScheduledTickKind>> {
     // Built through a real queue rather than struct literals because
     // `ScheduledTick::sub_tick_order` is private — the same idiom
     // `server::propagate_placement` uses, and for the same reason.
@@ -1862,14 +1862,7 @@ pub fn ticks_after_edit<S: ChunkSource + ?Sized>(
             );
         }
     }
-    // The connection feed is still a textual compatibility boundary. Keep
-    // the producer typed until this final conversion, so unknown future fluid
-    // keys could not be silently mapped to an unrelated built-in.
-    pending
-        .drain_due(u64::MAX, usize::MAX)
-        .into_iter()
-        .map(|tick| tick.map_kind(ScheduledTickKind::into_name))
-        .collect()
+    pending.drain_due(u64::MAX, usize::MAX)
 }
 
 #[cfg(test)]
@@ -2086,15 +2079,13 @@ mod tests {
         None
     }
 
-    /// Convert the textual connection-feed record at the test boundary before
-    /// handing it to the typed live fluid queue.
     fn schedule_feed_tick(
         queue: &mut ScheduledTickQueue<ScheduledTickKind>,
-        pending: ScheduledTick<String>,
+        pending: ScheduledTick<ScheduledTickKind>,
     ) {
         queue.schedule(
             pending.pos,
-            ScheduledTickKind::from_name(pending.kind),
+            pending.kind,
             pending.trigger_tick,
             pending.priority,
         );

@@ -34,11 +34,10 @@ collected before any callback runs — so a tick scheduled while processing this
 itself run in the same batch. A second schedule for a position/kind pair already pending is a silent
 no-op, matching vanilla's dedup behavior for the same case.
 
-The live block queue uses `ScheduledTickKind` variants. The family-level `TICK_*` names remain the
-canonical names at the persistence and legacy-fixture boundary, and the typed parser is the only
-place that translates those names back into built-in variants; new producers should schedule the
-typed key directly. The fluid queue is still string-keyed because it is an explicit compatibility
-lane, not part of the block queue's typed dispatch.
+The live block and fluid queues use `ScheduledTickKind` variants. The family-level `TICK_*` names
+remain the canonical names at the persistence and legacy-fixture boundary, and the typed parser is
+the only place that translates those names back into built-in variants; new producers should
+schedule the typed key directly. The connection feed carries that key without a text conversion.
 
 Both halves are physically partitioned by chunk column. `ChunkScheduledTickQueue` routes each tick to
 the column that owns its position, while its outer owner assigns one shared insertion sequence and

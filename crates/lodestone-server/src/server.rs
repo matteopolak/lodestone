@@ -21176,28 +21176,20 @@ mod tests {
         // south — while an observer watches north.
         assert_eq!(
             state("minecraft:repeater", Some(180.0)),
-            Some(BlockStateValue::parse(
-                "minecraft:repeater[facing=south,delay=1,locked=false,powered=false]",
-            ))
+            Some("minecraft:repeater[facing=south,delay=1,locked=false,powered=false]".to_string())
         );
         assert_eq!(
             state("minecraft:comparator", Some(180.0)),
-            Some(BlockStateValue::parse(
-                "minecraft:comparator[facing=south,mode=compare,powered=false,output=0]",
-            ))
+            Some("minecraft:comparator[facing=south,mode=compare,powered=false,output=0]".to_string())
         );
         assert_eq!(
             state("minecraft:observer", Some(180.0)),
-            Some(BlockStateValue::parse(
-                "minecraft:observer[facing=north,powered=false]",
-            ))
+            Some("minecraft:observer[facing=north,powered=false]".to_string())
         );
         // Looking east (yaw -90): a repeater faces west.
         assert_eq!(
             state("minecraft:repeater", Some(-90.0)),
-            Some(BlockStateValue::parse(
-                "minecraft:repeater[facing=west,delay=1,locked=false,powered=false]",
-            ))
+            Some("minecraft:repeater[facing=west,delay=1,locked=false,powered=false]".to_string())
         );
         // Blocks without any orientation keep the bare census name.
         assert_eq!(state("minecraft:dirt", Some(0.0)), None);
