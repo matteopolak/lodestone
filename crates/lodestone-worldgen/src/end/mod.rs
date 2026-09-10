@@ -929,24 +929,34 @@ impl EndGenerator {
         source_z: i32,
         overrides: &[(i32, i32, i32, String)],
     ) -> EndDecorationResult {
-        let mut world = DenseBlockGrid::with_interner(
-            Arc::clone(&self.interner),
-            (source_x - 1) * 16,
-            self.min_y,
-            (source_z - 1) * 16,
-            48,
-            WORLD_HEIGHT,
-            48,
-            self.interner.id_of("minecraft:air"),
-        );
-        for cx in source_x - 1..=source_x + 1 {
-            for cz in source_z - 1..=source_z + 1 {
-                let base = self.base_world_for_batch(cx, cz);
-                world.copy_box_from(&base.world, cx * 16, self.min_y, cz * 16, cx * 16, self.min_y, cz * 16, 16, WORLD_HEIGHT, 16);
-            }
-        }
+        self.parity_source_decoration_for_target_with_overrides(
+            source_x, source_z, source_x, source_z, overrides,
+        )
+    }
+
+    /// Run one source body in the target-owned three-by-three read window.
+    ///
+    /// The target chooses which immutable columns and earlier overrides are
+    /// visible. The completing source still chooses the decoration seed and
+    /// the source-relative biome set used to select globally ordered features.
+    #[must_use]
+    pub fn parity_source_decoration_for_target_with_overrides(
+        &self,
+        target_x: i32,
+        target_z: i32,
+        source_x: i32,
+        source_z: i32,
+        overrides: &[(i32, i32, i32, String)],
+    ) -> EndDecorationResult {
+        let mut world = self.parity_decoration_grid_for_target(target_x, target_z);
+        let (min_x, min_y, min_z, size_x, size_y, size_z) = world.bounds();
         for (x, y, z, state) in overrides {
-            world.set(*x, *y, *z, state);
+            if (min_x..min_x + size_x).contains(x)
+                && (min_y..min_y + size_y).contains(y)
+                && (min_z..min_z + size_z).contains(z)
+            {
+                world.set(*x, *y, *z, state);
+            }
         }
         let before = world.clone();
         let source_biomes = decorate::EndBiomeSet::around_source(source_x, source_z, |cx, cz| {
@@ -959,7 +969,6 @@ impl EndGenerator {
             &mut world,
             source_biomes,
         );
-        let (min_x, min_y, min_z, size_x, size_y, size_z) = world.bounds();
         let mut spills = Vec::new();
         for y in min_y..min_y + size_y {
             for z in min_z..min_z + size_z {
@@ -975,6 +984,41 @@ impl EndGenerator {
             }
         }
         EndDecorationResult { spills, gateways }
+    }
+
+    fn parity_decoration_grid_for_target(
+        &self,
+        target_x: i32,
+        target_z: i32,
+    ) -> DenseBlockGrid {
+        let mut world = DenseBlockGrid::with_interner(
+            Arc::clone(&self.interner),
+            (target_x - 1) * 16,
+            self.min_y,
+            (target_z - 1) * 16,
+            48,
+            WORLD_HEIGHT,
+            48,
+            self.interner.id_of("minecraft:air"),
+        );
+        for cx in target_x - 1..=target_x + 1 {
+            for cz in target_z - 1..=target_z + 1 {
+                let base = self.base_world_for_batch(cx, cz);
+                world.copy_box_from(
+                    &base.world,
+                    cx * 16,
+                    self.min_y,
+                    cz * 16,
+                    cx * 16,
+                    self.min_y,
+                    cz * 16,
+                    16,
+                    WORLD_HEIGHT,
+                    16,
+                );
+            }
+        }
+        world
     }
 
     /// Returns a previously prepared immutable source world without starting
