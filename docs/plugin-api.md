@@ -191,7 +191,10 @@ only order a plugin against *our* systems. `EventPriority::{Lowest, Low, Normal,
 mirrors Bukkit's tiers, `.chain()`ed into all four public schedules. `Monitor` is enforced structurally:
 a system with any mutable `World` access fails to register in that tier, checked against bevy's
 per-system access metadata before scheduling (a `Monitor` system queuing a deferred `Commands` mutation
-is the one known gap this check cannot see).
+is the one known gap this check cannot see). WASM manifests apply the same read-only boundary at
+admission: a `monitor` guest may observe, but cannot request `act:*`, `world:write`, `veto:actions`,
+or `commands:register` capabilities. A malformed monitor manifest is rejected before its module is
+compiled, while an observation-only monitor remains loadable.
 
 The native client has opt-in raw-packet observation in both directions: `RawPacketBusPlugin` publishes
 the connection state, packet id, and owned payload before version-specific decoding, while
@@ -440,7 +443,8 @@ multi-tick break claim remains
 outside the ABI because it needs a separate cancellation and ownership contract. Portable command
 registration/invocation and declared manifest dependencies are implemented; a required dependency
 must itself load successfully before its dependent is admitted, while startup still reports broken
-siblings independently. Async equivalents and `Monitor`-tier enforcement for a guest remain gaps.
+siblings independently. Async equivalents remain gaps; monitor guests are read-only at manifest
+admission, matching the native tier's mutation boundary.
 The native windowed client installs the WASM conductor
 before `WindowApp` adopts its `App` and scans the cwd-relative `plugins/` directory through
 `PluginHost::load_directory`. Browser plugin support is out of scope: `wasmtime` cannot itself run

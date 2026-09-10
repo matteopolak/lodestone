@@ -377,6 +377,20 @@ impl Capability {
             | Self::RegisterCommands => false,
         }
     }
+
+    /// Whether this capability can mutate the client or its action surface.
+    ///
+    /// A manifest at the `monitor` event tier is observation-only. Keep this
+    /// predicate next to the capability vocabulary so adding another `act:*`
+    /// capability cannot accidentally bypass the manifest gate.
+    #[must_use]
+    pub fn is_monitor_mutation(self) -> bool {
+        self.as_str().starts_with("act:")
+            || matches!(
+                self,
+                Self::WriteWorld | Self::VetoActions | Self::RegisterCommands
+            )
+    }
 }
 
 impl fmt::Display for Capability {
