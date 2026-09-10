@@ -112,7 +112,7 @@ pub const NETHER_DECORATION_STEPS: &[DecorationStep] = &[
     DecorationStep::VegetalDecoration,
 ];
 
-/// Source-chunk completion order for a mutable neighbourhood dispatch.
+/// Candidate source chunks for a mutable neighbourhood dispatch.
 ///
 /// This is deliberately separate from [`StageSchedule`]: admission order is a
 /// scheduler concern, while the column stages below describe one source's
@@ -139,6 +139,166 @@ pub enum SourceCompletion {
     AdmissionDependent,
 }
 
+/// Side length of one admission tile in the chunk wavefront.
+pub const ADMISSION_TILE_SIDE: i32 = 16;
+
+/// Horizontal source radius consumed by the mixed Nether feature pass.
+pub const NETHER_FEATURE_SOURCE_RADIUS: i32 = 1;
+
+/// Horizontal write radius covered by one Nether source completion.
+pub const NETHER_FEATURE_WRITE_RADIUS: i32 = 2;
+
+/// A requested target rectangle and the dependency halo admitted with it.
+///
+/// The request is the input to the mutable worldgen lifecycle.  It is kept
+/// separate from [`StageSchedule`] because a request controls *which* source
+/// columns become residents, while a stage schedule controls the passes inside
+/// one source column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChunkRequest {
+    target_min_x: i32,
+    target_max_x: i32,
+    target_min_z: i32,
+    target_max_z: i32,
+    dependency_radius: i32,
+}
+
+impl ChunkRequest {
+    /// Construct a rectangular request. `dependency_radius` expands the
+    /// rectangle before admission; the expanded rectangle is the complete
+    /// resident wavefront used by source completion.
+    #[must_use]
+    pub const fn new(
+        target_min_x: i32,
+        target_max_x: i32,
+        target_min_z: i32,
+        target_max_z: i32,
+        dependency_radius: i32,
+    ) -> Self {
+        Self {
+            target_min_x,
+            target_max_x,
+            target_min_z,
+            target_max_z,
+            dependency_radius,
+        }
+    }
+
+    /// Construct the request used by the one-column production API.
+    #[must_use]
+    pub const fn single(cx: i32, cz: i32, dependency_radius: i32) -> Self {
+        Self::new(cx, cx, cz, cz, dependency_radius)
+    }
+
+    /// The request's admitted chunk order: tile-z, tile-x, local-z,
+    /// local-x. The minimum admitted coordinate anchors the tiles, so two
+    /// otherwise identical source windows can have different orders when
+    /// they belong to different requests.
+    #[must_use]
+    pub fn admission_order(self) -> Vec<(i32, i32)> {
+        let wavefront = self.admission_wavefront();
+        let min_x = wavefront.origin_x;
+        let min_z = wavefront.origin_z;
+        let max_x = self.target_max_x + self.dependency_radius;
+        let max_z = self.target_max_z + self.dependency_radius;
+        assert!(min_x <= max_x, "chunk request has an inverted x range");
+        assert!(min_z <= max_z, "chunk request has an inverted z range");
+        let width = i64::from(max_x) - i64::from(min_x) + 1;
+        let height = i64::from(max_z) - i64::from(min_z) + 1;
+        let capacity = usize::try_from(width * height)
+            .expect("chunk request admission rectangle is too large");
+        let tiles_x = (max_x - min_x).div_euclid(ADMISSION_TILE_SIDE) + 1;
+        let tiles_z = (max_z - min_z).div_euclid(ADMISSION_TILE_SIDE) + 1;
+        let mut order = Vec::with_capacity(capacity);
+        for tile_z in 0..tiles_z {
+            let z0 = min_z + tile_z * ADMISSION_TILE_SIDE;
+            for tile_x in 0..tiles_x {
+                let x0 = min_x + tile_x * ADMISSION_TILE_SIDE;
+                for z in z0..=max_z.min(z0 + ADMISSION_TILE_SIDE - 1) {
+                    for x in x0..=max_x.min(x0 + ADMISSION_TILE_SIDE - 1) {
+                        order.push((x, z));
+                    }
+                }
+            }
+        }
+        order
+    }
+
+    /// Derive the admission wavefront that owns this request's coordinate
+    /// order. The wavefront origin is the minimum admitted chunk, not a global
+    /// world-grid origin.
+    #[must_use]
+    pub const fn admission_wavefront(self) -> AdmissionWavefront {
+        AdmissionWavefront {
+            origin_x: self.target_min_x - self.dependency_radius,
+            origin_z: self.target_min_z - self.dependency_radius,
+        }
+    }
+
+    /// Return the source completion order for one target in this request.
+    #[must_use]
+    pub fn source_completion_order(self, center: (i32, i32)) -> SourceCompletionOrder {
+        self.admission_wavefront().source_completion_order(center)
+    }
+}
+
+/// The tiled admission wavefront derived from one [`ChunkRequest`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdmissionWavefront {
+    origin_x: i32,
+    origin_z: i32,
+}
+
+impl AdmissionWavefront {
+    /// Construct a wavefront anchored at the first admitted chunk.
+    #[must_use]
+    pub const fn new(origin_x: i32, origin_z: i32) -> Self {
+        Self { origin_x, origin_z }
+    }
+
+    /// Return the external scheduler's lexicographic key for one chunk.
+    ///
+    /// The tuple is named to keep the four transitions visible at call sites:
+    /// tile-z, tile-x, local-z, then local-x.
+    #[must_use]
+    pub fn order_key(self, chunk: (i32, i32)) -> (i32, i32, i32, i32) {
+        let tile_x = (chunk.0 - self.origin_x).div_euclid(ADMISSION_TILE_SIDE);
+        let tile_z = (chunk.1 - self.origin_z).div_euclid(ADMISSION_TILE_SIDE);
+        let local_x = (chunk.0 - self.origin_x).rem_euclid(ADMISSION_TILE_SIDE);
+        let local_z = (chunk.1 - self.origin_z).rem_euclid(ADMISSION_TILE_SIDE);
+        (tile_z, tile_x, local_z, local_x)
+    }
+
+    /// Sort the fixed three-by-three candidate set by this request's
+    /// admission key. No global centre-first, centre-last, or axis-major
+    /// permutation is implied: the request anchor decides the result.
+    #[must_use]
+    pub fn source_completion_order(self, center: (i32, i32)) -> SourceCompletionOrder {
+        let mut offsets = *SOURCE_WINDOW_OFFSETS;
+        offsets.sort_unstable_by_key(|&(dx, dz)| {
+            self.order_key((center.0 + dx, center.1 + dz))
+        });
+        SourceCompletionOrder { offsets }
+    }
+}
+
+/// The source offsets after one request's admission wavefront has ordered
+/// their completion. The offsets remain relative to the target centre so the
+/// production dispatcher and lifecycle comparator cannot disagree about the
+/// same source window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceCompletionOrder {
+    offsets: [(i32, i32); 9],
+}
+
+impl SourceCompletionOrder {
+    /// Consume the order into its fixed-size offset array.
+    #[must_use]
+    pub const fn offsets(self) -> [(i32, i32); 9] {
+        self.offsets
+    }
+}
+
 impl SourceSchedule {
     pub const fn fixed(dimension: Dimension, offsets: &'static [(i32, i32)]) -> Self {
         Self {
@@ -163,7 +323,6 @@ impl SourceSchedule {
     pub const fn completion(self) -> SourceCompletion {
         self.completion
     }
-
 }
 
 pub(crate) const OVERWORLD_SOURCE_OFFSETS: &[(i32, i32); 9] = &[
@@ -177,6 +336,11 @@ pub(crate) const OVERWORLD_SOURCE_OFFSETS: &[(i32, i32); 9] = &[
     (0, 1),
     (1, 1),
 ];
+
+// Nether uses the same candidate neighbourhood; only its admission key is
+// dynamic. Keeping the candidate set named independently prevents callers from
+// mistaking the Overworld's fixed order for Nether completion order.
+const SOURCE_WINDOW_OFFSETS: &[(i32, i32); 9] = OVERWORLD_SOURCE_OFFSETS;
 
 pub(crate) const END_SOURCE_OFFSETS: &[(i32, i32); 9] = OVERWORLD_SOURCE_OFFSETS;
 
@@ -352,6 +516,12 @@ impl StageCursor {
     }
 
     /// Assert that a cached-prefix boundary was reached.
+    ///
+    /// The production generators use one cursor for the immutable prefix and
+    /// a second cursor for the suffix when the prefix is memoised. Keeping the
+    /// boundary explicit prevents a cached result from silently skipping a
+    /// named pass while still allowing the prefix and suffix to be computed by
+    /// different calls.
     #[inline]
     pub fn finish_prefix(self, boundary: usize) {
         debug_assert_eq!(
@@ -414,8 +584,9 @@ pub const END: StageSchedule = StageSchedule::new(Dimension::End, END_STAGES);
 #[cfg(test)]
 mod tests {
     use super::{
-        ColumnStage, DecorationStep, Dimension, END, END_SOURCES, NETHER, NETHER_FEATURES,
-        NETHER_SOURCES, OVERWORLD, OVERWORLD_FEATURES, OVERWORLD_SOURCES, SourceCompletion,
+        ChunkRequest, ColumnStage, DecorationStep, Dimension, END, END_SOURCES, NETHER,
+        NETHER_FEATURES, NETHER_SOURCES, OVERWORLD, OVERWORLD_FEATURES, OVERWORLD_SOURCES,
+        SourceCompletion,
     };
 
     #[test]
@@ -495,6 +666,70 @@ mod tests {
                 .map(|step| step.ordinal())
                 .collect::<Vec<_>>(),
             [2, 4, 7, 9]
+        );
+    }
+
+    #[test]
+    fn nether_completion_order_is_derived_from_the_request_wavefront() {
+        let request = ChunkRequest::new(32, 39, 48, 55, 2);
+        assert_eq!(request.admission_wavefront().order_key((30, 46)), (0, 0, 0, 0));
+        let admissions = request.admission_order();
+        assert_eq!(admissions.len(), 12 * 12);
+        assert_eq!(&admissions[..4], &[(30, 46), (31, 46), (32, 46), (33, 46)]);
+        assert_eq!(
+            request.source_completion_order((32, 48)).offsets(),
+            [
+                (-1, -1),
+                (0, -1),
+                (1, -1),
+                (-1, 0),
+                (0, 0),
+                (1, 0),
+                (-1, 1),
+                (0, 1),
+                (1, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn nether_source_controls_follow_completion_not_a_global_permutation() {
+        let offsets = ChunkRequest::single(32, 48, 2)
+            .source_completion_order((32, 48))
+            .offsets();
+        let position = |offset| {
+            offsets
+                .iter()
+                .position(|candidate| *candidate == offset)
+                .expect("source offset must be present")
+        };
+        assert!(position((0, -1)) < position((0, 0)));
+        assert!(position((0, 0)) < position((0, 1)));
+        assert!(position((1, 0)) < position((0, 1)));
+    }
+
+    #[test]
+    fn a_tile_boundary_changes_source_order_without_a_coordinate_rule() {
+        let request = ChunkRequest::new(2, 16, 2, 16, 2);
+        assert_eq!(
+            request.source_completion_order((16, 16)).offsets(),
+            [
+                (-1, -1),
+                (0, -1),
+                (1, -1),
+                (-1, 0),
+                (-1, 1),
+                (0, 0),
+                (1, 0),
+                (0, 1),
+                (1, 1),
+            ]
+        );
+        assert_ne!(
+            request.source_completion_order((16, 16)).offsets(),
+            ChunkRequest::single(32, 48, 2)
+                .source_completion_order((32, 48))
+                .offsets()
         );
     }
 }

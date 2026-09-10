@@ -83,12 +83,13 @@
 //!
 //! ## Decoration uses the Nether's mixed step
 //!
-//! The bundled Nether biome documents carry a mixed feature list at step 7:
-//! springs, fire, glowstone and mushrooms share raw indices with ore entries.
-//! This module separates those two bodies while preserving every raw index and
-//! seeding both with step 7; deleting the non-ore entries would shift every ore
-//! stream. Step 9 is driven through the existing vegetation interpreter. The
-//! terrain setting selects the legacy family for terrain construction, but the
+//! The bundled Nether biome documents carry local-modification entries before
+//! the mixed feature list at step 7. The latter has springs, fire, glowstone and
+//! mushrooms sharing raw indices with ore entries. This module schedules step 2
+//! first, then separates the step-7 bodies while preserving every raw index and
+//! seeding both with step 7; deleting an entry would shift every later stream.
+//! Step 9 is driven through the existing vegetation interpreter. The terrain
+//! setting selects the legacy family for terrain construction, but the
 //! decoration scheduler derives each feature stream through
 //! `WorldgenRandom<XoroshiroRandomSource>` in every dimension. Do not reuse the
 //! terrain carrier here: its two decoration-seed scale draws relocate every
@@ -114,7 +115,7 @@
 //! [`crate::interner`], and `lodestone-worldgen-core`'s density interpreter.
 //! Nothing version-specific.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{
     atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -138,7 +139,56 @@ use crate::structure::{
     CodedLoot, HeightmapKind, PieceRefinement, StartContext, StructureRegistry, StructureStart,
 };
 use crate::surface::{PreState, SurfaceDiff, SurfaceSystem, identity_canon};
-use crate::stage_schedule::ColumnStage;
+use crate::stage_schedule::{
+    ChunkRequest, ColumnStage, DecorationStep, NETHER_DECORATION_STEPS,
+    NETHER_FEATURE_WRITE_RADIUS,
+};
+
+thread_local! {
+    static NETHER_HEIGHT_SCRATCH: RefCell<Option<crate::feature::RegionHeights>> =
+        const { RefCell::new(None) };
+    static NETHER_CHANGED_SCRATCH: RefCell<Option<Vec<(i32, i32, i32, StateId)>>> =
+        const { RefCell::new(None) };
+    static NETHER_SURFACE_SCRATCH: RefCell<Option<SurfaceDiff>> =
+        const { RefCell::new(None) };
+}
+
+fn take_nether_surface_scratch() -> SurfaceDiff {
+    NETHER_SURFACE_SCRATCH.with(|slot| slot.borrow_mut().take().unwrap_or_default())
+}
+
+fn return_nether_surface_scratch(mut diff: SurfaceDiff) {
+    diff.clear();
+    NETHER_SURFACE_SCRATCH.with(|slot| {
+        let _ = slot.borrow_mut().replace(diff);
+    });
+}
+
+fn take_nether_height_scratch() -> crate::feature::RegionHeights {
+    NETHER_HEIGHT_SCRATCH.with(|slot| {
+        slot.borrow_mut()
+            .take()
+            .unwrap_or_else(crate::feature::RegionHeights::unset)
+    })
+}
+
+fn return_nether_height_scratch(mut heights: crate::feature::RegionHeights) {
+    heights.clear();
+    NETHER_HEIGHT_SCRATCH.with(|slot| {
+        let _ = slot.borrow_mut().replace(heights);
+    });
+}
+
+fn take_nether_changed_scratch() -> Vec<(i32, i32, i32, StateId)> {
+    NETHER_CHANGED_SCRATCH.with(|slot| slot.borrow_mut().take().unwrap_or_default())
+}
+
+fn return_nether_changed_scratch(mut changed: Vec<(i32, i32, i32, StateId)>) {
+    changed.clear();
+    NETHER_CHANGED_SCRATCH.with(|slot| {
+        let _ = slot.borrow_mut().replace(changed);
+    });
+}
 
 /// One generated Nether chunk: the block column plus its 16 horizontal biome
 /// quarts.
@@ -164,14 +214,16 @@ pub struct NetherColumn {
     decoration_spills: Vec<(i32, i32, i32, String)>,
 }
 
+type NetherBiomeQuarts = [u8; 16];
+
 type PreDecorationResult = (
     Arc<crate::dense_grid::DenseBlockGrid>,
     [i32; 256],
-    [String; 16],
-    Vec<CodedLoot>,
+    Arc<NetherBiomeQuarts>,
 );
 
 type DecorationFeatures = Vec<(i32, usize, crate::feature::vegetation::PlacedRef)>;
+type MixedFeaturePlan = (Vec<NetherOre>, DecorationFeatures);
 
 const MEMO_SHARD_COUNT: usize = 32;
 
@@ -354,11 +406,32 @@ impl<T> ShardedMemo<T> {
     fn stats(&self) -> NetherCacheStats {
         self.stats.read()
     }
+
+    fn contains(&self, key: (i32, i32)) -> bool {
+        self.shards[Self::shard(key)]
+            .entries
+            .lock()
+            .expect("nether memo shard poisoned")
+            .get(&key)
+            .is_some_and(|slot| slot.get().is_some())
+    }
+
 }
 
 fn profile_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("LODESTONE_NETHER_PROFILE").is_some())
+}
+
+fn profile_stage<T>(name: &str, f: impl FnOnce() -> T) -> T {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    if !*ENABLED.get_or_init(|| std::env::var_os("LODESTONE_NETHER_STAGE_PROFILE").is_some()) {
+        return f();
+    }
+    let started = Instant::now();
+    let value = f();
+    eprintln!("nether_stage name={name} millis={:.3}", started.elapsed().as_secs_f64() * 1_000.0);
+    value
 }
 
 /// A step-7 ore entry retains the body selected by its configured feature.
@@ -422,6 +495,10 @@ pub struct ParityDecorationSpill {
     /// packet/source layer by its raw number.
     pub position: (i32, i32, i32),
     pub state: String,
+    /// A source-crossing huge-fungus write that was transient during the
+    /// source pass. Lifecycle replay retains it in the ordered spill stream so
+    /// later source reads and the final packet snapshot observe the same state.
+    pub transient: bool,
 }
 
 impl NetherColumn {
@@ -515,6 +592,9 @@ impl NetherColumn {
 #[allow(missing_debug_implementations)]
 pub struct NetherGenerator {
     seed: i64,
+    /// Seed-derived biome-zoom state, computed once per generator rather than
+    /// re-hashing the same seed for every block-biome lookup.
+    zoom_seed: i64,
     slot_count: usize,
     interner: Arc<StateInterner>,
     surface: SurfaceSystem,
@@ -541,6 +621,11 @@ pub struct NetherGenerator {
     /// this per-step order, not a biome document's local position; the source
     /// pass selects the union of its 3x3 section biomes from this catalog.
     decoration_catalog: crate::compose::DecorationCatalog,
+    /// Stable constructor-assigned indices for the dimension's possible
+    /// biomes. A source neighbourhood is represented as a bitmask, avoiding
+    /// string clones and an ordered-set allocation on every warm lookup.
+    biome_plan_bits: HashMap<String, u8>,
+    biome_source_order: Arc<Vec<String>>,
     /// Ore bodies keyed by their placed-feature identity so the mixed
     /// dispatcher can recover standard and scattered entries from the global
     /// catalog while retaining the correct body-specific parser.
@@ -570,6 +655,11 @@ pub struct NetherGenerator {
     /// retention where the Overworld needed a view-pinned one.
     starts: ShardedMemo<Vec<Arc<StructureStart>>>,
     pre_decoration: ShardedMemo<PreDecorationResult>,
+    /// Immutable mixed-feature plans keyed by the sorted biome set visible to
+    /// one source's 3x3 container. Nether has only a handful of possible
+    /// biomes, so warm generation borrows one shared parsed feature tree
+    /// instead of deeply cloning it for nine sources in every output column.
+    mixed_feature_plans: Mutex<HashMap<u64, Arc<MixedFeaturePlan>>>,
     /// Capacity of the pure pre-decoration memo. Production keeps the bounded
     /// sharded floor; an explicit lifecycle or packet replay raises retention
     /// only for the requested closure, so a bounded replay cannot trigger the
@@ -792,18 +882,79 @@ fn nether_fiddled_distance(
     x * x + y * y + z * z
 }
 
-/// Expands one Nether chunk's horizontal biome answer into the 3-D cell shape
-/// the vegetation placement gate consumes.  The Nether climate is invariant in
-/// Y, including the widened resident decoration window, so every vertical
-/// quart repeats its source chunk's horizontal value.
-fn nether_biome_cells(
-    biome_quarts: &[String; 16],
-    min_y: i32,
-    height: i32,
-) -> crate::overworld::BiomeCells {
-    crate::overworld::BiomeCells::from_fn(min_y, height, |qx, _, qz| {
-        biome_quarts[qz * 4 + qx].clone()
-    })
+// A surface scan asks the zoomed biome accessor repeatedly for the same quart
+// corners.  The three fiddle offsets and the climate row are pure functions of
+// that corner, so keep them together in a small fixed cache for one scan.  The
+// six-by-six horizontal corner window and 34 vertical corners cover a 16x16x128
+// Nether column, including the one-cell corner on each side.  Values outside
+// that window use the uncached path; this keeps the helper safe if a caller's
+// surface bounds ever change without making the hot path hash-map backed.
+const NETHER_ZOOM_CACHE_XZ: usize = 6;
+const NETHER_ZOOM_CACHE_Y: usize = 34;
+const NETHER_ZOOM_CACHE_LEN: usize =
+    NETHER_ZOOM_CACHE_XZ * NETHER_ZOOM_CACHE_Y * NETHER_ZOOM_CACHE_XZ;
+
+#[derive(Clone, Copy)]
+struct NetherZoomCell {
+    fiddle: [f64; 3],
+    biome_row: u32,
+}
+
+type NetherZoomCache = [Cell<Option<NetherZoomCell>>; NETHER_ZOOM_CACHE_LEN];
+
+fn nether_zoom_cell(
+    generator: &NetherGenerator,
+    cache: &NetherZoomCache,
+    base_qx: i32,
+    base_qy: i32,
+    base_qz: i32,
+    qx: i32,
+    qy: i32,
+    qz: i32,
+) -> NetherZoomCell {
+    let ix = qx - base_qx;
+    let iy = qy - base_qy;
+    let iz = qz - base_qz;
+    if (0..NETHER_ZOOM_CACHE_XZ as i32).contains(&ix)
+        && (0..NETHER_ZOOM_CACHE_Y as i32).contains(&iy)
+        && (0..NETHER_ZOOM_CACHE_XZ as i32).contains(&iz)
+    {
+        let slot = (iy as usize * NETHER_ZOOM_CACHE_XZ + iz as usize)
+            * NETHER_ZOOM_CACHE_XZ
+            + ix as usize;
+        if let Some(cell) = cache[slot].get() {
+            return cell;
+        }
+        let mut value = generator.zoom_seed;
+        for coordinate in [qx, qy, qz, qx, qy, qz] {
+            value = next_nether_zoom_random(value, i64::from(coordinate));
+        }
+        let fx = nether_zoom_fiddle(value);
+        value = next_nether_zoom_random(value, generator.zoom_seed);
+        let fy = nether_zoom_fiddle(value);
+        value = next_nether_zoom_random(value, generator.zoom_seed);
+        let fz = nether_zoom_fiddle(value);
+        let row = generator
+            .table
+            .nearest_row(&generator.climate.target(qx * 4, qy * 4, qz * 4));
+        let cell = NetherZoomCell { fiddle: [fx, fy, fz], biome_row: row };
+        cache[slot].set(Some(cell));
+        cell
+    } else {
+        let mut value = generator.zoom_seed;
+        for coordinate in [qx, qy, qz, qx, qy, qz] {
+            value = next_nether_zoom_random(value, i64::from(coordinate));
+        }
+        let fx = nether_zoom_fiddle(value);
+        value = next_nether_zoom_random(value, generator.zoom_seed);
+        let fy = nether_zoom_fiddle(value);
+        value = next_nether_zoom_random(value, generator.zoom_seed);
+        let fz = nether_zoom_fiddle(value);
+        let row = generator
+            .table
+            .nearest_row(&generator.climate.target(qx * 4, qy * 4, qz * 4));
+        NetherZoomCell { fiddle: [fx, fy, fz], biome_row: row }
+    }
 }
 
 /// Which representation produced the entry that just completed.
@@ -876,13 +1027,20 @@ fn synchronize_mixed_entry_reusing(
     match writer {
         MixedEntryWriter::Decoration => {
             let end = grid.dirty_len();
-            let mut final_cells = BTreeMap::new();
-            for (x, y, z, state) in grid.dirty_cell_ids().skip(*grid_cursor) {
-                final_cells.insert((x, y, z), state);
-            }
+            changed.clear();
+            changed.extend(grid.dirty_cell_ids().skip(*grid_cursor));
+            changed.sort_unstable_by_key(|&(x, y, z, _)| (x, z, y));
+            changed.dedup_by(|later, earlier| {
+                if (later.0, later.1, later.2) == (earlier.0, earlier.1, earlier.2) {
+                    *later = *earlier;
+                    true
+                } else {
+                    false
+                }
+            });
             *grid_cursor = end;
             let mut sync = MixedSync::default();
-            for ((x, y, z), state) in &final_cells {
+            for &(x, y, z, state) in changed.iter() {
                 let lx = x - centre_x * 16;
                 let lz = z - centre_z * 16;
                 if !(crate::feature::REGION_MIN..crate::feature::REGION_MAX).contains(&lx)
@@ -891,12 +1049,12 @@ fn synchronize_mixed_entry_reusing(
                     sync.retained_outside += 1;
                     continue;
                 }
-                if ore_view.set_id(lx, *y, lz, *state) {
-                    ore_transferred.insert((*x, *y, *z), *state);
+                if ore_view.set_id(lx, y, lz, state) {
+                    ore_transferred.insert((x, y, z), state);
                     sync.projected += 1;
                 } else {
                     assert!(
-                        !(terrain_min_y..terrain_min_y + terrain_height).contains(y),
+                        !(terrain_min_y..terrain_min_y + terrain_height).contains(&y),
                         "mixed decoration entry dropped an in-region write at ({x},{y},{z})"
                     );
                     // The decoration grid covers the receiving dimension's
@@ -937,11 +1095,11 @@ fn synchronize_mixed_entry_reusing(
     }
 }
 
-/// Splits the Nether's deliberately mixed step 7 without changing the raw
-/// `(step, index)` identity either engine seeds from. Step 9 contains the
-/// usual vegetal pass. This is dimension-specific data interpretation: the
-/// Overworld's step-6 ore helper must not be taught that every data pack has
-/// the Nether's mixed layout.
+/// Retains the Nether's local-modification entries and splits its deliberately
+/// mixed step 7 without changing the raw `(step, index)` identity either engine
+/// seeds from. Step 9 contains the usual vegetal pass. This is dimension-
+/// specific data interpretation: the Overworld's step-6 ore helper must not be
+/// taught that every data pack has the Nether's mixed layout.
 fn build_nether_feature_lists(
     resolver: &dyn Resolver,
     biome: &str,
@@ -952,7 +1110,8 @@ fn build_nether_feature_lists(
     };
     let mut ores = Vec::new();
     let mut decoration = Vec::new();
-    for &step in &[4_i32, 7, crate::feature::STEP_VEGETAL_DECORATION] {
+    for &step_kind in NETHER_DECORATION_STEPS {
+        let step = step_kind.ordinal();
         let Some(entries) = steps.get(step as usize).and_then(Value::as_array) else {
             continue;
         };
@@ -972,7 +1131,7 @@ fn build_nether_feature_lists(
                 .as_ref()
                 .and_then(|feature| feature.get("type"))
                 .and_then(Value::as_str);
-            if step == 7
+            if step == DecorationStep::UndergroundDecoration.ordinal()
                 && matches!(configured_type, Some("minecraft:ore" | "minecraft:scattered_ore"))
             {
                 let configured = configured.as_ref().expect("checked above");
@@ -1035,6 +1194,12 @@ impl NetherGenerator {
         &crate::stage_schedule::NETHER
     }
 
+    /// Shared block-state interner used by resident lifecycle adapters.
+    #[must_use]
+    pub fn interner(&self) -> &Arc<StateInterner> {
+        &self.interner
+    }
+
     /// Builds the generator for `seed` from `noise_settings/nether.json` and a
     /// [`Resolver`] carrying the Nether's density functions, noises, biome
     /// parameter table, biome documents and configured carvers.
@@ -1089,7 +1254,7 @@ impl NetherGenerator {
             !raw_table.is_empty(),
             "the Nether needs its multi-noise parameter table (biome_parameters/nether)"
         );
-        let table = BiomeTable::new(raw_table);
+        let table = BiomeTable::new_strict(raw_table);
 
         let mut carver_replaceable = HashSet::new();
         {
@@ -1123,8 +1288,18 @@ impl NetherGenerator {
                 biome_source_order.push(point.biome.clone());
             }
         }
+        let biome_source_order = Arc::new(biome_source_order);
         let decoration_catalog =
-            crate::compose::build_decoration_catalog(resolver, &biome_source_order);
+            crate::compose::build_decoration_catalog(resolver, biome_source_order.as_ref());
+        assert!(
+            biome_source_order.len() <= u64::BITS as usize,
+            "Nether biome plan mask supports at most 64 possible biomes"
+        );
+        let biome_plan_bits = biome_source_order
+            .iter()
+            .enumerate()
+            .map(|(index, biome)| (biome.clone(), index as u8))
+            .collect();
         let feature_biomes = decoration_catalog.feature_biomes();
         let mut ore_definitions = HashMap::new();
         for ore in ores_by_biome.values().flatten() {
@@ -1154,6 +1329,7 @@ impl NetherGenerator {
 
         Self {
             seed,
+            zoom_seed: nether_zoom_seed(seed),
             slot_count,
             interner,
             surface,
@@ -1172,6 +1348,8 @@ impl NetherGenerator {
             carver_replaceable,
             carvers_by_biome,
             decoration_catalog,
+            biome_plan_bits,
+            biome_source_order,
             ore_definitions,
             feature_biomes,
             ore_tag_map,
@@ -1179,6 +1357,7 @@ impl NetherGenerator {
             structures,
             starts: ShardedMemo::new(STARTS_MEMO_CEILING),
             pre_decoration: ShardedMemo::new(DECORATION_MEMO_CEILING),
+            mixed_feature_plans: Mutex::new(HashMap::new()),
             pre_decoration_computations: AtomicUsize::new(0),
         }
     }
@@ -1246,6 +1425,20 @@ impl NetherGenerator {
         self.pre_decoration_computations.load(Ordering::Relaxed)
     }
 
+    /// Materialises one coordinate-pure immutable prefix for a native batch
+    /// worker. The returned handle keeps the memo entry resident until the
+    /// caller completes its ordered decoration phase.
+    #[doc(hidden)]
+    pub fn prewarm_for_batch(&self, cx: i32, cz: i32) {
+        let _ = self.pre_decoration_stage(cx, cz);
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn prewarmed_for_batch(&self, cx: i32, cz: i32) -> bool {
+        self.pre_decoration.contains((cx, cz))
+    }
+
     /// Number of pre-decoration shard evictions since the last explicit replay
     /// preparation (or since generator construction before the first
     /// preparation).
@@ -1261,29 +1454,52 @@ impl NetherGenerator {
         (self.starts.stats(), self.pre_decoration.stats())
     }
 
+    /// Number of distinct immutable mixed-feature plans retained by this
+    /// generator. Exposed for allocation regression tests; generation never
+    /// branches on the count.
+    #[cfg(test)]
+    fn mixed_feature_plan_count(&self) -> usize {
+        self.mixed_feature_plans
+            .lock()
+            .expect("Nether mixed-feature plan memo poisoned")
+            .len()
+    }
+
     /// The generated column for chunk `(cx, cz)`.
     #[must_use]
     pub fn column(&self, cx: i32, cz: i32) -> NetherColumn {
         let pre = self.pre_decoration_stage(cx, cz);
+        // Structure placement is a completion-local operation.  The ordinary
+        // one-column API has no externally supplied completion stream, so it
+        // materializes the target's own pieces before composing the mixed
+        // feature window, preserving the historical packet-ready result.  The
+        // lifecycle API below applies the same stage when the target source
+        // completes, after earlier source spills have been installed.
+        let refs = self.structure_refs(cx, cz);
         let mut schedule = Self::stage_schedule().cursor_at(
             Self::stage_schedule()
-                .index_of(ColumnStage::Features)
-                .expect("Nether schedule must have a features boundary"),
+                .index_of(ColumnStage::StructurePlacement)
+                .expect("Nether schedule must have a structure boundary"),
         );
+        let (world, placement_loot) = schedule.run(ColumnStage::StructurePlacement, || {
+            profile_stage("structure_place", || {
+                self.structure_place_stage(cx, cz, &refs, (*pre.0).clone())
+            })
+        });
         let (world, decoration_spills) = schedule.run(ColumnStage::Features, || {
-            self.mixed_step7_stage_with_spills(cx, cz, (*pre.0).clone(), &pre.1)
+            self.mixed_step7_stage_with_spills(cx, cz, world, &pre.1)
         });
 
         let column = schedule.run(ColumnStage::Output, || {
             let (palette, blocks) = world.into_palette_and_blocks();
             NetherColumn {
-                min_y: self.min_y,
-                height: self.height,
-                palette,
-                blocks,
-                biome_quarts: pre.2.clone(),
-                placement_loot: pre.3.clone(),
-                decoration_spills,
+            min_y: self.min_y,
+            height: self.height,
+            palette,
+            blocks,
+            biome_quarts: self.biome_names_from_ids(&pre.2),
+            placement_loot,
+            decoration_spills,
             }
         });
         schedule.finish();
@@ -1292,11 +1508,12 @@ impl NetherGenerator {
 
     /// Generates the complete pre-decoration field for `(cx, cz)`.
     ///
-    /// The returned column contains terrain, biome, carving and structure
-    /// placement products, but no mixed decoration entries.  A lifecycle
+    /// The returned column contains terrain, biome and carving products, but
+    /// no target-local structure or mixed decoration entries.  A lifecycle
     /// materializer uses this prefix as the resident value before applying
-    /// source completion spill in the observed order; ordinary callers should
-    /// use [`Self::column`] for a packet-ready result.
+    /// source completion spill in the observed order.  Keeping structures out
+    /// of the immutable prefix is important: a neighbouring source can write
+    /// into the target before the target's own fortress support pass runs.
     #[must_use]
     pub fn column_shaped(&self, cx: i32, cz: i32) -> NetherColumn {
         let pre = self.pre_decoration_stage(cx, cz);
@@ -1306,8 +1523,8 @@ impl NetherGenerator {
             height: self.height,
             palette,
             blocks,
-            biome_quarts: pre.2.clone(),
-            placement_loot: pre.3.clone(),
+            biome_quarts: self.biome_names_from_ids(&pre.2),
+            placement_loot: Vec::new(),
             decoration_spills: Vec::new(),
         }
     }
@@ -1340,6 +1557,45 @@ impl NetherGenerator {
             &pre.1,
             Some((source_x, source_z)),
             overrides,
+        )
+        .1
+    }
+
+    /// Runs one source completion against the actual mutable resident region.
+    ///
+    /// `resident_at` supplies the current state of each admitted chunk after
+    /// all earlier completion events. Missing outer context falls back to the
+    /// immutable pre-decoration prefix. This keeps occupancy and survival
+    /// probes causally ordered without flattening the region into a sparse
+    /// string override map.
+    #[must_use]
+    pub fn parity_source_spills_with_resident(
+        &self,
+        source_x: i32,
+        source_z: i32,
+        mut resident_at: impl FnMut(i32, i32) -> Option<crate::dense_grid::DenseBlockGrid>,
+    ) -> Vec<ParityDecorationSpill> {
+        let mut resident: [Option<Arc<crate::dense_grid::DenseBlockGrid>>; 25] =
+            std::array::from_fn(|_| None);
+        for dx in -crate::feature::region_view::WIDE_RADIUS
+            ..=crate::feature::region_view::WIDE_RADIUS
+        {
+            for dz in -crate::feature::region_view::WIDE_RADIUS
+                ..=crate::feature::region_view::WIDE_RADIUS
+            {
+                resident[crate::feature::region_view::wide_slot_of_offset(dx, dz)] =
+                    resident_at(source_x + dx, source_z + dz).map(Arc::new);
+            }
+        }
+        let pre = self.pre_decoration_stage(source_x, source_z);
+        self.mixed_step7_stage_selected_with_resident(
+            source_x,
+            source_z,
+            (*pre.0).clone(),
+            &pre.1,
+            Some((source_x, source_z)),
+            &[],
+            Some(&resident),
         )
         .1
     }
@@ -1378,9 +1634,77 @@ impl NetherGenerator {
         Vec<ParityDecorationSpill>,
         Vec<(i32, i32, i32, String)>,
     ) {
+        self.mixed_step7_stage_selected_with_resident(
+            cx,
+            cz,
+            center_world,
+            center_heights,
+            selected_source,
+            overrides,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn mixed_step7_stage_selected_with_resident(
+        &self,
+        cx: i32,
+        cz: i32,
+        center_world: crate::dense_grid::DenseBlockGrid,
+        center_heights: &[i32; 256],
+        selected_source: Option<(i32, i32)>,
+        overrides: &[(i32, i32, i32, String)],
+        resident: Option<&[Option<Arc<crate::dense_grid::DenseBlockGrid>>; 25]>,
+    ) -> (
+        crate::dense_grid::DenseBlockGrid,
+        Vec<ParityDecorationSpill>,
+        Vec<(i32, i32, i32, String)>,
+    ) {
+        let mut center_world = center_world;
+        // A source-filtered completion still needs the target-local structure
+        // pass before it runs the mixed feature stream.  In particular, a
+        // neighbouring source can be the first writer into this target, but
+        // its step-7 ore body must read the target's structure/air result
+        // rather than the carved netherrack beneath it.  When a resident
+        // target exists, structure placement starts from that live field so
+        // earlier source spills remain visible to its replacement predicates.
+        let mut structure_changes = Vec::new();
+        if selected_source.is_some() {
+            if let Some(sources) = resident {
+                if let Some(source) =
+                    sources[crate::feature::region_view::wide_slot_of_offset(0, 0)].as_ref()
+                {
+                    center_world = source.as_ref().clone();
+                }
+            }
+            let (min_x, min_y, min_z, size_x, size_y, size_z) = center_world.bounds();
+            for &(x, y, z, ref state) in overrides {
+                if (min_x..min_x + size_x).contains(&x)
+                    && (min_y..min_y + size_y).contains(&y)
+                    && (min_z..min_z + size_z).contains(&z)
+                {
+                    center_world.set(x, y, z, state);
+                }
+            }
+            let structure_seeded = center_world.clone();
+            let refs = self.structure_refs(cx, cz);
+            center_world = profile_stage("structure_place", || {
+                self.structure_place_stage(cx, cz, &refs, center_world)
+            })
+            .0;
+            for y in min_y..min_y + size_y {
+                for z in min_z..min_z + size_z {
+                    for x in min_x..min_x + size_x {
+                        let before = structure_seeded.get_id(x, y, z);
+                        let after = center_world.get_id(x, y, z);
+                        if before != after {
+                            structure_changes.push((x, y, z, after));
+                        }
+                    }
+                }
+            }
+        }
         let mut nearby: [Option<Arc<PreDecorationResult>>; 25] =
-            std::array::from_fn(|_| None);
-        let mut nearby_biomes: [Option<Arc<crate::overworld::BiomeCells>>; 25] =
             std::array::from_fn(|_| None);
         for dx in -crate::feature::region_view::WIDE_RADIUS
             ..=crate::feature::region_view::WIDE_RADIUS
@@ -1392,22 +1716,14 @@ impl NetherGenerator {
                     let pre = self.pre_decoration_stage(cx + dx, cz + dz);
                     let slot = crate::feature::region_view::wide_slot_of_offset(dx, dz);
                     nearby[slot] = Some(Arc::clone(&pre));
-                    nearby_biomes[slot] = Some(Arc::new(nether_biome_cells(
-                        &pre.2,
-                        self.min_y,
-                        DECORATION_WINDOW_HEIGHT,
-                    )));
                 }
             }
         }
-        let centre_biomes = self.pre_decoration_stage(cx, cz).2.clone();
-        let centre_biome_cells = Arc::new(nether_biome_cells(
-            &centre_biomes,
-            self.min_y,
-            DECORATION_WINDOW_HEIGHT,
-        ));
+        let centre_pre = self.pre_decoration_stage(cx, cz);
+        let centre_biomes = Arc::clone(&centre_pre.2);
+        let biome_names = Arc::clone(&self.biome_source_order);
         let feature_biomes = &self.feature_biomes;
-        let zoom_seed = nether_zoom_seed(self.seed);
+        let zoom_seed = self.zoom_seed;
         let biome_quart_at = |block_x: i32, block_z: i32| {
             let source_x = block_x.div_euclid(16);
             let source_z = block_z.div_euclid(16);
@@ -1432,7 +1748,9 @@ impl NetherGenerator {
             }?;
             let qx = block_x.rem_euclid(16).div_euclid(4) as usize;
             let qz = block_z.rem_euclid(16).div_euclid(4) as usize;
-            Some(source_biomes[qz * 4 + qx].as_str())
+            biome_names
+                .get(source_biomes[qz * 4 + qx] as usize)
+                .map(String::as_str)
         };
         let biome_at = |pos: crate::feature::BlockPos| {
             let shifted_x = pos.x - 2;
@@ -1473,7 +1791,7 @@ impl NetherGenerator {
                     .is_some_and(|eligible| eligible.contains(biome))
             })
         };
-        let mut heights = crate::feature::RegionHeights::unset();
+        let mut heights = take_nether_height_scratch();
         Self::stitch_heights(&mut heights, 0, 0, center_heights);
         for dx in -crate::feature::region_view::WIDE_RADIUS
             ..=crate::feature::region_view::WIDE_RADIUS
@@ -1490,26 +1808,43 @@ impl NetherGenerator {
             }
         }
         let in_tag = |block: &str, tag: &str| self.ore_tag_map.get(tag).is_some_and(|members| members.contains(block));
-        let centre_source = &center_world;
+        let resident_source = |dx: i32, dz: i32| {
+            if selected_source.is_some() && dx == 0 && dz == 0 {
+                Some(&center_world)
+            } else {
+                resident.and_then(|sources| {
+                    sources[crate::feature::region_view::wide_slot_of_offset(dx, dz)].as_deref()
+                })
+            }
+        };
+        let centre_source = resident_source(0, 0).unwrap_or(&center_world);
         let mut ore_view = crate::feature::region_view::RegionView::over_wide_sources(
             Arc::clone(&self.interner), cx, cz, self.min_y, self.height,
-            |dx, dz| if dx == 0 && dz == 0 { Some(centre_source) } else {
+            |dx, dz| resident_source(dx, dz).or_else(|| if dx == 0 && dz == 0 {
+                Some(centre_source)
+            } else {
                 nearby[crate::feature::region_view::wide_slot_of_offset(dx, dz)]
                     .as_ref()
                     .map(|source| &*source.0)
-            },
+            }),
         );
-        let centre_grid = Arc::new(center_world.clone());
+        let centre_grid = resident_source(0, 0)
+            .map(|source| Arc::new(source.clone()))
+            .unwrap_or_else(|| Arc::new(center_world.clone()));
         let grid_sources = &nearby;
-        let grid_biomes = &nearby_biomes;
+        let resident_sources = resident;
         let grid_feature_biomes = self.feature_biomes.clone();
-        let mut grid = crate::feature::vegetation::VegGrid::with_sources_and_biomes_shared(
+        let mut grid = crate::feature::vegetation::VegGrid::with_sources_and_flat_biome_ids_shared_zoomed(
             Arc::clone(&self.interner), self.min_y, DECORATION_WINDOW_HEIGHT, cx * 16, cz * 16,
             crate::feature::REGION_MIN - crate::feature::VEG_PADDING,
             crate::feature::REGION_MAX + crate::feature::VEG_PADDING,
             |dx, dz| {
                 if dx == 0 && dz == 0 {
                     Some(Arc::clone(&centre_grid))
+                } else if let Some(source) = resident_sources.and_then(|sources| {
+                    sources[crate::feature::region_view::wide_slot_of_offset(dx, dz)].as_ref()
+                }) {
+                    Some(Arc::clone(source))
                 } else {
                     grid_sources[crate::feature::region_view::wide_slot_of_offset(dx, dz)]
                         .as_ref()
@@ -1518,14 +1853,16 @@ impl NetherGenerator {
             },
             |dx, dz| {
                 if dx == 0 && dz == 0 {
-                    Some(Arc::clone(&centre_biome_cells))
+                    Some(Arc::clone(&centre_biomes))
                 } else {
-                    grid_biomes[crate::feature::region_view::wide_slot_of_offset(dx, dz)]
+                    grid_sources[crate::feature::region_view::wide_slot_of_offset(dx, dz)]
                         .as_ref()
-                        .map(Arc::clone)
+                        .map(|source| Arc::clone(&source.2))
                 }
             },
+            Arc::clone(&self.biome_source_order),
             grid_feature_biomes,
+            zoom_seed,
         );
         self.veg_tags.bind(grid.interner());
         let mut ore_transferred = HashMap::new();
@@ -1549,21 +1886,29 @@ impl NetherGenerator {
                 seeded.insert((x, y, z), id);
             }
         }
-        let mut source_features = BTreeMap::new();
-        for source_x in cx - 1..=cx + 1 {
-            for source_z in cz - 1..=cz + 1 {
-                source_features.insert(
-                    (source_x, source_z),
-                    self.source_mixed_features(source_x, source_z),
-                );
-            }
-        }
+        let source_features: [Arc<MixedFeaturePlan>; 9] = std::array::from_fn(|index| {
+            let dx = index as i32 % 3 - 1;
+            let dz = index as i32 / 3 - 1;
+            self.source_mixed_features(cx + dx, cz + dz)
+        });
         let mut decoration_rng = decoration_random();
         let mut ore_random = decoration_random();
         let mut grid_cursor = 0usize;
         let mut ore_cursor = 0usize;
-        let mut changed_scratch = Vec::new();
-        for dx in -1..=1_i32 { for dz in -1..=1_i32 {
+        let mut changed_scratch = take_nether_changed_scratch();
+        // Huge fungus needs to expose its border writes to later features in
+        // this same source pass: their heightmap and replacement probes read
+        // the live generation view.  Those writes are not source-owned when
+        // the pass commits, so retain their coordinates until a later feature
+        // overwrites one, then filter them from the final resident/spill fold.
+        let mut suppressed_huge = HashSet::new();
+        // The ordinary column API is one request with its complete write halo.
+        // Derive the 3x3 source order from that request's admission wavefront;
+        // do not bake one centre-first/centre-last permutation into the
+        // feature dispatcher.
+        let source_order = ChunkRequest::single(cx, cz, NETHER_FEATURE_WRITE_RADIUS)
+            .source_completion_order((cx, cz));
+        for (dx, dz) in source_order.offsets() {
             let source_x = cx + dx;
             let source_z = cz + dz;
             if selected_source.is_some_and(|source| source != (source_x, source_z)) {
@@ -1574,18 +1919,21 @@ impl NetherGenerator {
             ore_random.begin_decoration_source();
             let decoration_seed = decoration_rng.set_decoration_seed(self.seed, origin.x, origin.z);
             let ore_seed = ore_random.set_decoration_seed(self.seed, origin.x, origin.z);
-            let (ores, decorations) = source_features
-                .get(&(source_x, source_z))
-                .map(|(ores, decorations)| (ores.as_slice(), decorations.as_slice()))
-                .unwrap_or((&[], &[]));
-            for step in [4_i32, 7, crate::feature::STEP_VEGETAL_DECORATION] {
+            let plan = &source_features[((dz + 1) * 3 + dx + 1) as usize];
+            let (ores, decorations) = (plan.0.as_slice(), plan.1.as_slice());
+            for &step_kind in NETHER_DECORATION_STEPS {
+                let step = step_kind.ordinal();
                 let mut decoration_at = 0usize;
                 let mut ore_at = 0usize;
                 loop {
                     let next_decoration = decorations.iter().enumerate()
                         .skip(decoration_at)
                         .find(|(_, (s, _, _))| *s == step);
-                    let next_ore = if step == 7 { ores.get(ore_at) } else { None };
+                    let next_ore = if step == DecorationStep::UndergroundDecoration.ordinal() {
+                        ores.get(ore_at)
+                    } else {
+                        None
+                    };
                     let next_index = match (next_decoration, next_ore) {
                         (Some((_, (_, index, _))), Some(ore)) => Some((*index).min(ore.index())),
                         (Some((_, (_, index, _))), None) => Some(*index),
@@ -1596,7 +1944,20 @@ impl NetherGenerator {
                     if let Some((entry_at, (_, found, placed))) = next_decoration
                         .filter(|(_, (_, found, _))| *found == index)
                     {
+                        let dirty_before = grid.dirty_len();
+                        let is_huge_fungus = matches!(
+                            placed.feature.as_ref(),
+                            crate::feature::vegetation::ConfiguredFeature::HugeFungus(_)
+                        );
                         crate::feature::vegetation::apply_decoration_entry_at_world_seed(&mut decoration_rng, self.seed, decoration_seed, origin, step, *found, placed, &mut grid, &self.veg_tags);
+                        for (x, y, z, _) in grid.dirty_cell_ids().skip(dirty_before) {
+                            let owned = x.div_euclid(16) == source_x && z.div_euclid(16) == source_z;
+                            if is_huge_fungus && !owned {
+                                suppressed_huge.insert((x, y, z));
+                            } else {
+                                suppressed_huge.remove(&(x, y, z));
+                            }
+                        }
                         synchronize_mixed_entry_reusing(
                             MixedEntryWriter::Decoration,
                             &mut grid,
@@ -1650,10 +2011,13 @@ impl NetherGenerator {
                     }
                 }
             }
-        }}
-        let mut world = center_world;
+        }
+        let mut world = resident_source(0, 0).cloned().unwrap_or(center_world);
         let mut decoration_spills = Vec::new();
         for (x, y, z, state) in grid.dirty_cell_ids() {
+            if suppressed_huge.contains(&(x, y, z)) {
+                continue;
+            }
             if (self.min_y..self.min_y + self.height).contains(&y) {
                 world.set_id(x, y, z, state);
             } else if selected_source.is_none()
@@ -1671,55 +2035,89 @@ impl NetherGenerator {
         }
         let mut final_spills = BTreeMap::new();
         if let Some(source) = selected_source {
-            for (x, y, z, state) in grid.dirty_cell_ids() {
+            // Structure writes are part of this source completion too.  Insert
+            // them first so a later feature write at the same coordinate wins,
+            // matching the source's local structure-before-feature order.
+            for (x, y, z, state) in structure_changes {
                 if seeded.get(&(x, y, z)).copied() != Some(state) {
                     final_spills.insert((x, y, z), ParityDecorationSpill {
                         source,
                         position: (x, y, z),
                         state: self.interner.name_of(state).to_owned(),
+                        transient: false,
+                    });
+                }
+            }
+            for (x, y, z, state) in grid.dirty_cell_ids() {
+                let transient = suppressed_huge.contains(&(x, y, z));
+                if transient || seeded.get(&(x, y, z)).copied() != Some(state) {
+                    final_spills.insert((x, y, z), ParityDecorationSpill {
+                        source,
+                        position: (x, y, z),
+                        state: self.interner.name_of(state).to_owned(),
+                        transient,
                     });
                 }
             }
         }
+        return_nether_height_scratch(heights);
+        return_nether_changed_scratch(changed_scratch);
         (world, final_spills.into_values().collect(), decoration_spills)
     }
 
-    /// The complete prefix decorations read: terrain through structure pieces.
-    /// It is cached by exact chunk coordinate because both 3×3 drivers need
-    /// neighbours' real terrain, not a copy of the centre field.
+    /// The immutable base prefix: terrain through carving, before target-local
+    /// structure placement.  It is cached by exact chunk coordinate because
+    /// both 3×3 drivers need neighbours' real terrain, not a copy of the
+    /// centre field.  Structure pieces are applied at source completion so a
+    /// prior neighbour spill is visible to their replacement predicates.
     fn pre_decoration_stage(&self, cx: i32, cz: i32) -> Arc<PreDecorationResult> {
         self.pre_decoration.get_or_compute((cx, cz), || {
             self.pre_decoration_computations
                 .fetch_add(1, Ordering::Relaxed);
-            let base_x = cx * 16;
-            let base_z = cz * 16;
-            let mut schedule = Self::stage_schedule().cursor();
-            schedule.enter(ColumnStage::StructureStarts);
-            let refs = self.structure_refs(cx, cz);
-            schedule.enter(ColumnStage::StructureReferences);
-            schedule.enter(ColumnStage::StructureInfluence);
-            let beard = self.beardifier_for(cx, cz, &refs);
-            let aquifer = self.build_fill(cx, cz);
-            schedule.enter(ColumnStage::Fill);
-            let field = self.fill_stage(&aquifer, base_x, base_z, &beard);
-            let heights = self.heights_from_field(&field);
-            schedule.enter(ColumnStage::Biomes);
-            let biome_quarts = self.biome_quarts(cx, cz);
-            schedule.enter(ColumnStage::Surface);
-            let surface_diff = self.surface_stage(&field, &heights, base_x, base_z);
-            schedule.enter(ColumnStage::Materialize);
-            let world = self.materialize_world(&field, surface_diff, base_x, base_z);
-            schedule.enter(ColumnStage::Carvers);
-            let world = self.carve_stage(cx, cz, &aquifer, world);
-            schedule.enter(ColumnStage::StructurePlacement);
-            let (world, placement_loot) = self.structure_place_stage(cx, cz, &refs, world);
-            schedule.finish_prefix(
-                Self::stage_schedule()
-                    .index_of(ColumnStage::Features)
-                    .expect("Nether schedule must have a features boundary"),
-            );
-            (Arc::new(world), heights, biome_quarts, placement_loot)
+            let aquifer = profile_stage("build_fill", || self.build_fill(cx, cz));
+            self.pre_decoration_stage_with_aquifer(cx, cz, &aquifer)
         })
+    }
+
+    fn pre_decoration_stage_with_aquifer(
+        &self,
+        cx: i32,
+        cz: i32,
+        aquifer: &AquiferSystem,
+    ) -> PreDecorationResult {
+        let base_x = cx * 16;
+        let base_z = cz * 16;
+        let mut schedule = Self::stage_schedule().cursor();
+        schedule.enter(ColumnStage::StructureStarts);
+        schedule.enter(ColumnStage::StructureReferences);
+        let refs = profile_stage("structure_refs", || self.structure_refs(cx, cz));
+        schedule.enter(ColumnStage::StructureInfluence);
+        let beard = profile_stage("beardifier", || self.beardifier_for(cx, cz, &refs));
+        schedule.enter(ColumnStage::Fill);
+        let field = profile_stage("fill", || self.fill_stage(aquifer, base_x, base_z, &beard));
+        let heights = profile_stage("heights", || self.heights_from_field(&field));
+        schedule.enter(ColumnStage::Biomes);
+        let biome_quarts = profile_stage("biomes", || self.biome_quart_ids(cx, cz));
+        schedule.enter(ColumnStage::Surface);
+        let surface_diff = profile_stage("surface", || {
+            self.surface_stage(&field, &heights, base_x, base_z)
+        });
+        schedule.enter(ColumnStage::Materialize);
+        let world = profile_stage("materialize", || {
+            self.materialize_world(&field, surface_diff, base_x, base_z)
+        });
+        schedule.enter(ColumnStage::Carvers);
+        let world = profile_stage("carve", || self.carve_stage(cx, cz, aquifer, world));
+        // Target-local structure pieces are deliberately not part of this
+        // cached prefix.  Their placement belongs to the target source's
+        // completion, after earlier neighbouring sources have had a chance to
+        // spill into the resident chunk.
+        schedule.finish_prefix(
+            Self::stage_schedule()
+                .index_of(ColumnStage::StructurePlacement)
+                .expect("Nether schedule must have a structure boundary"),
+        );
+        (Arc::new(world), heights, Arc::new(biome_quarts))
     }
 
     /// Selects the mixed source list from the same globally ordered catalog
@@ -1731,24 +2129,44 @@ impl NetherGenerator {
         &self,
         source_x: i32,
         source_z: i32,
-    ) -> (Vec<NetherOre>, DecorationFeatures) {
-        let mut biomes = std::collections::BTreeSet::new();
+    ) -> Arc<MixedFeaturePlan> {
+        let mut key = 0_u64;
         for dx in -1..=1 {
             for dz in -1..=1 {
                 let pre = self.pre_decoration_stage(source_x + dx, source_z + dz);
-                biomes.extend(pre.2.iter().cloned());
+                for &biome in pre.2.iter() {
+                    key |= 1_u64 << biome;
+                }
             }
+        }
+        if let Some(plan) = self
+            .mixed_feature_plans
+            .lock()
+            .expect("Nether mixed-feature plan memo poisoned")
+            .get(&key)
+        {
+            return Arc::clone(plan);
         }
         let mut ores = Vec::new();
         let mut decorations = Vec::new();
         for (step, index, placed) in self
             .decoration_catalog
-            .select(biomes.iter().map(String::as_str))
+            .select(
+                self.biome_source_order
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, biome)| {
+                        ((key & (1_u64 << index)) != 0).then_some(biome.as_str())
+                    }),
+            )
         {
-            if !matches!(step, 4 | 7 | crate::feature::STEP_VEGETAL_DECORATION) {
+            if !NETHER_DECORATION_STEPS
+                .iter()
+                .any(|kind| kind.ordinal() == step)
+            {
                 continue;
             }
-            if step == 7 {
+            if step == DecorationStep::UndergroundDecoration.ordinal() {
                 if let Some(id) = placed.registry_id.as_deref() {
                     if let Some(ore) = self.ore_definitions.get(id) {
                         ores.push(ore.with_index(index));
@@ -1762,7 +2180,14 @@ impl NetherGenerator {
                 nether_window_placed_ref(&placed, self.height),
             ));
         }
-        (ores, decorations)
+        let plan = Arc::new((ores, decorations));
+        Arc::clone(
+            self.mixed_feature_plans
+                .lock()
+                .expect("Nether mixed-feature plan memo poisoned")
+                .entry(key)
+                .or_insert(plan),
+        )
     }
 
     fn stitch_heights(
@@ -1845,6 +2270,30 @@ impl NetherGenerator {
         })
     }
 
+    /// The same quart answers as [`Self::biome_quarts`], represented by the
+    /// generator's immutable source-order ids for the pre-decoration cache.
+    /// These ids are not exposed at the column boundary; keeping that boundary
+    /// string-based preserves packet and fixture APIs while the hot cache keeps
+    /// only sixteen bytes per chunk.
+    fn biome_quart_ids(&self, cx: i32, cz: i32) -> NetherBiomeQuarts {
+        std::array::from_fn(|i| {
+            let qx = cx * 4 + (i % 4) as i32;
+            let qz = cz * 4 + (i / 4) as i32;
+            let target = self.climate.target(qx * 4, 0, qz * 4);
+            let biome = self.table.nearest(&target);
+            *self
+                .biome_plan_bits
+                .get(biome)
+                .expect("generated Nether biome is absent from the parameter table")
+        })
+    }
+
+    fn biome_names_from_ids(&self, ids: &NetherBiomeQuarts) -> [String; 16] {
+        std::array::from_fn(|index| {
+            self.biome_source_order[ids[index] as usize].clone()
+        })
+    }
+
     /// Resolves the biome at a block position through the dimension's zoomed
     /// quart lookup.  The packet biome container stores the climate answer at
     /// quart corners, but surface rules ask the biome manager at each block
@@ -1852,6 +2301,7 @@ impl NetherGenerator {
     /// seed-derived fiddle.  Nether climate is y-invariant, while the zoom
     /// choice still uses the supplied block Y exactly as the dimension's
     /// biome accessor does.
+    #[cfg(test)]
     fn biome_at_block(&self, x: i32, y: i32, z: i32) -> &str {
         let shifted_x = x - 2;
         let shifted_y = y - 2;
@@ -1862,7 +2312,7 @@ impl NetherGenerator {
         let fract_x = f64::from(shifted_x.rem_euclid(4)) / 4.0;
         let fract_y = f64::from(shifted_y.rem_euclid(4)) / 4.0;
         let fract_z = f64::from(shifted_z.rem_euclid(4)) / 4.0;
-        let zoom_seed = nether_zoom_seed(self.seed);
+        let zoom_seed = self.zoom_seed;
         let mut selected = 0;
         let mut best = f64::INFINITY;
         for corner in 0..8 {
@@ -1932,12 +2382,78 @@ impl NetherGenerator {
         // `cold_enough_to_snow` is false for every Nether biome (they all declare
         // `temperature: 2.0`), and nothing in vanilla's own bundled Nether surface-rule data reads it
         // — there is no `temperature` condition in the Nether rule tree.
+        let base_qx = (base_x - 2).div_euclid(4);
+        let base_qy = (self.min_y - 2).div_euclid(4);
+        let base_qz = (base_z - 2).div_euclid(4);
+        let zoom_cache: NetherZoomCache = std::array::from_fn(|_| Cell::new(None));
         let biome_at = |lx: i32, y: i32, lz: i32| -> (&str, bool) {
-            (self.biome_at_block(base_x + lx, y, base_z + lz), false)
+            let x = base_x + lx;
+            let z = base_z + lz;
+            let shifted_x = x - 2;
+            let shifted_y = y - 2;
+            let shifted_z = z - 2;
+            let parent_x = shifted_x >> 2;
+            let parent_y = shifted_y >> 2;
+            let parent_z = shifted_z >> 2;
+            let fract_x = f64::from(shifted_x.rem_euclid(4)) / 4.0;
+            let fract_y = f64::from(shifted_y.rem_euclid(4)) / 4.0;
+            let fract_z = f64::from(shifted_z.rem_euclid(4)) / 4.0;
+            let mut selected = 0;
+            let mut best = f64::INFINITY;
+            for corner in 0..8 {
+                let x_low = corner & 4 == 0;
+                let y_low = corner & 2 == 0;
+                let z_low = corner & 1 == 0;
+                let qx = if x_low { parent_x } else { parent_x + 1 };
+                let qy = if y_low { parent_y } else { parent_y + 1 };
+                let qz = if z_low { parent_z } else { parent_z + 1 };
+                let dx = if x_low { fract_x } else { fract_x - 1.0 };
+                let dy = if y_low { fract_y } else { fract_y - 1.0 };
+                let dz = if z_low { fract_z } else { fract_z - 1.0 };
+                let cell = nether_zoom_cell(
+                    self,
+                    &zoom_cache,
+                    base_qx,
+                    base_qy,
+                    base_qz,
+                    qx,
+                    qy,
+                    qz,
+                );
+                let [fx, fy, fz] = cell.fiddle;
+                let x = dx + fx;
+                let y = dy + fy;
+                let z = dz + fz;
+                let distance = x * x + y * y + z * z;
+                if best > distance {
+                    selected = corner;
+                    best = distance;
+                }
+            }
+            let qx = if selected & 4 == 0 { parent_x } else { parent_x + 1 };
+            let qy = if selected & 2 == 0 { parent_y } else { parent_y + 1 };
+            let qz = if selected & 1 == 0 { parent_z } else { parent_z + 1 };
+            let cell = nether_zoom_cell(
+                self,
+                &zoom_cache,
+                base_qx,
+                base_qy,
+                base_qz,
+                qx,
+                qy,
+                qz,
+            );
+            (self.table.biome_at(cell.biome_row), false)
         };
 
-        self.surface
-            .build_surface(&pre, &heightmap, &biome_at, base_x, base_z)
+        self.surface.build_surface_reusing(
+            take_nether_surface_scratch(),
+            &pre,
+            &heightmap,
+            &biome_at,
+            base_x,
+            base_z,
+        )
     }
 
     fn materialize_world(
@@ -1950,7 +2466,7 @@ impl NetherGenerator {
         // Point lookups into `surface_diff` in a fixed order, never iteration — see
         // [`crate::compose::materialize_column`] for the palette-order rule and the
         // bug that established it.
-        crate::compose::materialize_column(
+        let world = crate::compose::materialize_column(
             &self.interner,
             field,
             &surface_diff,
@@ -1960,7 +2476,9 @@ impl NetherGenerator {
             self.height,
             self.default_block_pre.state,
             self.default_fluid_pre.state,
-        )
+        );
+        return_nether_surface_scratch(surface_diff);
+        world
     }
 
     /// Vanilla's own carve-application step over the post-surface column.
@@ -2143,8 +2661,10 @@ impl NetherGenerator {
         })
     }
 
-    /// Stage 0b: vanilla's own structure-reference-gathering 17×17 walk, keeping the starts whose adjusted
-    /// box comes within [`BEARD_REACH`] blocks of this chunk.
+    /// Stage 0b: vanilla's own structure-reference-gathering 17×17 closure,
+    /// keeping the starts whose adjusted box comes within [`BEARD_REACH`]
+    /// blocks of this chunk. Random-spread sets use their exact origin index
+    /// inside that closure; data-defined placements fall back to the full walk.
     ///
     /// Identical in shape to the Overworld's — the widened reach is the
     /// beardifier's own ("beardifier for structures in chunk"'s
@@ -2155,27 +2675,40 @@ impl NetherGenerator {
     /// Not memoised: it is a walk over an already-memoised product and is consumed
     /// exactly once per column, so a second map would carry no work.
     fn structure_refs(&self, cx: i32, cz: i32) -> StructureRefs {
-        if self.structures.is_none() {
+        let Some(registry) = &self.structures else {
             return StructureRefs::default();
-        }
+        };
+        let min_x = cx - REFS_RADIUS;
+        let max_x = cx + REFS_RADIUS;
+        let min_z = cz - REFS_RADIUS;
+        let max_z = cz + REFS_RADIUS;
+        // All bundled Nether structure sets are random-spread.  Enumerating
+        // their placement cells visits only the few possible origins in this
+        // 17x17 window; the rectangular fallback keeps data-defined ring or
+        // unsupported placements correct without making this assumption part
+        // of the public registry contract.
+        let origins = registry.random_spread_origins_in(min_x, max_x, min_z, max_z)
+            .unwrap_or_else(|| {
+                (min_x..=max_x)
+                    .flat_map(|start_x| (min_z..=max_z).map(move |start_z| (start_x, start_z)))
+                    .collect()
+            });
         let mut entries = Vec::new();
-        for sx in (cx - REFS_RADIUS)..=(cx + REFS_RADIUS) {
-            for sz in (cz - REFS_RADIUS)..=(cz + REFS_RADIUS) {
-                for start in self.structure_starts_stage(sx, sz).iter() {
-                    let beard_reaches = start
-                        .adjusted_bounding_box()
-                        .is_close_to_chunk(cx, cz, BEARD_REACH);
-                    let portal_terrain_reaches = start.pieces.iter().any(|piece| {
-                        matches!(
-                            piece.refine.as_ref(),
-                            Some(PieceRefinement::RuinedPortalTerrain { .. })
-                        ) && piece
-                            .bounding_box
-                            .is_close_to_chunk(cx, cz, PORTAL_TERRAIN_REACH)
-                    });
-                    if beard_reaches || portal_terrain_reaches {
-                        entries.push((sx, sz, Arc::clone(start)));
-                    }
+        for (sx, sz) in origins {
+            for start in self.structure_starts_stage(sx, sz).iter() {
+                let beard_reaches = start
+                    .adjusted_bounding_box()
+                    .is_close_to_chunk(cx, cz, BEARD_REACH);
+                let portal_terrain_reaches = start.pieces.iter().any(|piece| {
+                    matches!(
+                        piece.refine.as_ref(),
+                        Some(PieceRefinement::RuinedPortalTerrain { .. })
+                    ) && piece
+                        .bounding_box
+                        .is_close_to_chunk(cx, cz, PORTAL_TERRAIN_REACH)
+                });
+                if beard_reaches || portal_terrain_reaches {
+                    entries.push((sx, sz, Arc::clone(start)));
                 }
             }
         }
@@ -2247,13 +2780,37 @@ impl NetherGenerator {
                     let solid_render = |state: &str| {
                         self.veg_tags.simple_block_support.solid_render.test(state)
                     };
+                    let mut cached_fortress = false;
+                    for piece in &start.pieces {
+                        if let Some(PieceRefinement::FortressPlacement {
+                            kind,
+                            facing,
+                            chest,
+                            end_seed,
+                        }) = piece.refine.as_ref()
+                        {
+                            cached_fortress = true;
+                            if let Some(loot) = crate::structure::fortress::place_cached_piece(
+                                piece,
+                                *kind,
+                                *facing,
+                                *chest,
+                                *end_seed,
+                                cx,
+                                cz,
+                                &mut world,
+                                structure_random,
+                                &solid_render,
+                            ) {
+                                placement_loot.push(loot);
+                            }
+                        }
+                    }
+                    if cached_fortress {
+                        continue;
+                    }
                     if let Some(mut loot) = registry.place_fortress_for_chunk_with(
-                        start,
-                        cx,
-                        cz,
-                        &mut world,
-                        structure_random,
-                        &solid_render,
+                        start, cx, cz, &mut world, structure_random, &solid_render,
                     ) {
                         placement_loot.append(&mut loot);
                         continue;
@@ -2297,6 +2854,38 @@ impl NetherGenerator {
                             seed,
                         };
                         extra.template.place(origin, &extra.settings, &mut world);
+                    }
+                }
+                if let Some(PieceRefinement::NetherFossilDriedGhast { seed }) = piece.refine.as_ref() {
+                    use crate::rng::{LegacyRandomSource, PositionalRandomFactory, RandomSource};
+                    let box_ = piece.bounding_box;
+                    let centre = [
+                        box_.min[0] + (box_.max[0] - box_.min[0] + 1) / 2,
+                        box_.min[1] + (box_.max[1] - box_.min[1] + 1) / 2,
+                        box_.min[2] + (box_.max[2] - box_.min[2] + 1) / 2,
+                    ];
+                    let mut ghast = LegacyRandomSource::new(*seed)
+                        .fork_positional()
+                        .at(centre[0], centre[1], centre[2]);
+                    if ghast.next_float() < 0.5 {
+                        let x = box_.min[0]
+                            + ghast.next_int_bounded(box_.max[0] - box_.min[0] + 1);
+                        let y = box_.min[1];
+                        let z = box_.min[2]
+                            + ghast.next_int_bounded(box_.max[2] - box_.min[2] + 1);
+                        let (min_x, min_y, min_z, size_x, size_y, size_z) = world.bounds();
+                        if (min_x..min_x + size_x).contains(&x)
+                            && (min_y..min_y + size_y).contains(&y)
+                            && (min_z..min_z + size_z).contains(&z)
+                            && world.get_id(x, y, z) == StateId::AIR
+                        {
+                            let state = crate::structure::template::BlockState::parse(
+                                "minecraft:dried_ghast[facing=north,hydration=0,waterlogged=false]",
+                            )
+                            .rotate(crate::structure::template::Rotation::random(&mut ghast));
+                            let state = state.canonical();
+                            world.set(x, y, z, &state);
+                        }
                     }
                 }
                 match piece.refine.as_ref() {
@@ -2352,7 +2941,10 @@ impl NetherGenerator {
                     Some(PieceRefinement::StrongholdBlocks { writes }) => {
                         crate::structure::stronghold::place_post_surface_blocks(&mut world, writes);
                     }
-                    Some(PieceRefinement::BuriedTreasureChest) | None => {}
+                    Some(PieceRefinement::FortressPlacement { .. })
+                    | Some(PieceRefinement::BuriedTreasureChest)
+                    | Some(PieceRefinement::NetherFossilDriedGhast { .. })
+                    | None => {}
                 }
             }
         }
@@ -2467,8 +3059,8 @@ mod tests {
 
     use super::{
         MixedEntryWriter, NetherGenerator, build_nether_feature_lists, decoration_random,
-        lifecycle_pre_decoration_capacity, pre_decoration_capacity, synchronize_mixed_entry,
-        ShardedMemo,
+        lifecycle_pre_decoration_capacity, nether_zoom_seed, pre_decoration_capacity,
+        synchronize_mixed_entry, ShardedMemo,
     };
     use crate::dense_grid::DenseBlockGrid;
     use crate::density::{NoiseParams, Resolver};
@@ -2724,6 +3316,22 @@ mod tests {
     }
 
     #[test]
+    fn nether_zoom_seed_uses_exact_little_endian_seed_digest() {
+        // These values come from an independent SHA-256 calculation over each
+        // seed's little-endian bytes. They keep the cached field from silently
+        // changing the seed-byte order or the selected digest prefix.
+        for (seed, expected) in [
+            (i64::MIN, 6_374_347_445_474_471_398_i64),
+            (-1, 6_759_447_113_877_070_610_i64),
+            (0, 8_794_265_229_978_523_055_i64),
+            (42, -4_111_196_313_959_201_555_i64),
+            (i64::MAX, 7_179_146_226_492_139_882_i64),
+        ] {
+            assert_eq!(nether_zoom_seed(seed), expected, "seed {seed}");
+        }
+    }
+
+    #[test]
     fn nether_surface_biome_zoom_distinguishes_containing_quart() {
         let assets = NetherAssets { root: nether_assets_root() };
         let settings: Value = serde_json::from_str(
@@ -2731,6 +3339,7 @@ mod tests {
                 .expect("reading Nether settings"),
         ).expect("parsing Nether settings");
         let generator = NetherGenerator::new(42, &settings, &assets);
+        assert_eq!(generator.zoom_seed, nether_zoom_seed(42));
         let quarts = generator.biome_quarts(-2, -8);
         let containing = quarts[(11 / 4) * 4 + (13 / 4)].as_str();
 
@@ -2755,6 +3364,25 @@ mod tests {
     }
 
     #[test]
+    fn nether_cached_biome_ids_expand_to_public_quarts() {
+        let assets = NetherAssets { root: nether_assets_root() };
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(assets.root.join("noise_settings/nether.json"))
+                .expect("reading Nether settings"),
+        )
+        .expect("parsing Nether settings");
+        let generator = NetherGenerator::new(42, &settings, &assets);
+        let expected = generator.biome_quarts(-2, -8);
+        let shaped = generator.column_shaped(-2, -8);
+
+        for qz in 0..4 {
+            for qx in 0..4 {
+                assert_eq!(shaped.biome_at_quart(qx, qz), expected[qz * 4 + qx]);
+            }
+        }
+    }
+
+    #[test]
     fn nether_vegetation_biome_gate_has_positive_and_negative_candidate_controls() {
         let interner = Arc::new(StateInterner::new());
         let air = interner.id_of("minecraft:air");
@@ -2775,18 +3403,15 @@ mod tests {
                 "minecraft:nether_wastes".to_owned()
             }
         });
-        let cells = Arc::new(super::nether_biome_cells(
-            &biome_quarts,
-            0,
-            super::DECORATION_WINDOW_HEIGHT,
-        ));
+        let cells = Arc::new(biome_quarts);
         let feature_biomes = [(
             "minecraft:crimson_fungi".to_owned(),
             ["minecraft:crimson_forest".to_owned()].into_iter().collect(),
         )]
         .into_iter()
         .collect();
-        let grid = VegGrid::with_sources_and_biomes(
+        let feature_biomes = Arc::new(feature_biomes);
+        let grid = VegGrid::with_sources_and_flat_biomes_shared_zoomed(
             Arc::clone(&interner),
             0,
             super::DECORATION_WINDOW_HEIGHT,
@@ -2796,7 +3421,8 @@ mod tests {
             16,
             |_, _| Some(Arc::clone(&source)),
             |dx, dz| (dx == 0 && dz == 0).then(|| Arc::clone(&cells)),
-            feature_biomes,
+            Arc::clone(&feature_biomes),
+            super::nether_zoom_seed(42),
         );
 
         assert!(grid.biome_allows_placed_feature(
@@ -2818,6 +3444,36 @@ mod tests {
             1,
         ));
         assert!(!grid.biome_allows_placed_feature(None, 1, 200, 1));
+
+        let id_cells = Arc::new(std::array::from_fn(|index| u8::from(index != 0)));
+        let id_grid = VegGrid::with_sources_and_flat_biome_ids_shared_zoomed(
+            Arc::clone(&interner),
+            0,
+            super::DECORATION_WINDOW_HEIGHT,
+            0,
+            0,
+            0,
+            16,
+            |_, _| Some(Arc::clone(&source)),
+            |dx, dz| (dx == 0 && dz == 0).then(|| Arc::clone(&id_cells)),
+            Arc::new(vec![
+                "minecraft:crimson_forest".to_owned(),
+                "minecraft:nether_wastes".to_owned(),
+            ]),
+            Arc::clone(&feature_biomes),
+            super::nether_zoom_seed(42),
+        );
+        for (feature, x) in [
+            (Some("minecraft:crimson_fungi"), 1),
+            (Some("minecraft:crimson_fungi"), 5),
+            (Some("minecraft:warped_fungi"), 1),
+            (None, 1),
+        ] {
+            assert_eq!(
+                id_grid.biome_allows_placed_feature(feature, x, 200, 1),
+                grid.biome_allows_placed_feature(feature, x, 200, 1),
+            );
+        }
     }
 
     fn mushroom_fixture_source() -> Arc<DenseBlockGrid> {
@@ -3274,4 +3930,22 @@ mod tests {
         assert_eq!(grid.get_id(1, 128, 1), brown);
         assert_eq!(ore_view.get_id(1, 128, 1), air);
     }
+
+    #[test]
+    fn repeated_sources_reuse_immutable_mixed_feature_plans() {
+        let assets = NetherAssets { root: nether_assets_root() };
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(assets.root.join("noise_settings/nether.json")).unwrap(),
+        )
+        .unwrap();
+        let generator = NetherGenerator::new(42, &settings, &assets);
+
+        let first = generator.source_mixed_features(0, 0);
+        let count = generator.mixed_feature_plan_count();
+        let second = generator.source_mixed_features(0, 0);
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(generator.mixed_feature_plan_count(), count);
+    }
+
 }

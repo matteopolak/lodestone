@@ -18,27 +18,27 @@ There are three intentionally separate typed schedules:
   materialisation. Biomes, surface rules, decoration, and the final output are
   named separately. The Overworld has the final top-layer pass, while the
   Nether and End do not.
-* `SourceSchedule` describes the order in which neighbouring source chunks are
-  admitted and completed by a mutable three-by-three feature dispatcher. This
-  is not a column-stage order: it exists because one source can write into a
-  neighbouring resident chunk. Fixed dimensions carry their offsets inside a
-  `SourceCompletion::Fixed` value; admission-dependent dimensions carry no
-  fixed permutation at all.
+* `SourceSchedule` describes the candidate source window for a mutable
+  three-by-three feature dispatcher. Nether completion order is derived from a
+  `ChunkRequest`: its admitted rectangle is tiled from the request's halo
+  minimum, then ordered by tile-z, tile-x, local-z, and local-x. The resulting
+  `AdmissionWavefront` sorts each target's source window; it is not a global
+  centre-first/centre-last permutation. This is not a column-stage order: it
+  exists because one source can write into a neighbouring resident chunk.
 * `FeatureSchedule` describes the configured decoration ordinals inside one
   FEATURES pass. `DecorationStep` gives those ordinals names while preserving
   the numeric value needed by the seed derivation. External numeric values are
   decoded once at the data boundary.
 
-`StageCursor` is wired into the canonical Overworld, Nether, and End entry
-paths. It is a small debug guard for pipelines whose prefix and suffix live in
-different helper methods: the immutable prefix calls `finish_prefix`, and the
-packet-producing suffix resumes with `cursor_at` and asserts each named stage
-in debug builds.
+`StageCursor` is a small debug guard for pipelines whose prefix and suffix live
+in different helper methods: a cursor can resume at a cached-prefix boundary
+and asserts the next named stage in debug builds.
 
-The schedule describes pass order only. It does not perform generation, choose
-worker admission order, or replace the dimension-specific dependency logic.
-Those operations remain in the corresponding generator so a schedule change
-cannot silently alter terrain output.
+The schedule describes pass order and the named request-order vocabulary. It
+does not perform generation or replace dimension-specific dependency logic.
+The Nether production dispatcher and parity replay both consume
+`ChunkRequest::admission_order`, so a schedule change cannot silently leave
+one comparator with a copied tile loop.
 
 ## How to change it
 
@@ -55,7 +55,10 @@ ordinal.
 
 Do not use this table to paper over an unknown parity mismatch. First capture
 the external order, then add a focused production and replay assertion that
-proves both paths consume the same schedule.
+proves both paths consume the same request/admission/completion model. A
+request whose source window crosses a tile boundary is a useful control: it
+must produce a different local source permutation than a request wholly inside
+one tile.
 
 ## Configuration
 
