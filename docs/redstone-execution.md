@@ -25,6 +25,16 @@ use the impulse/redstone fallback before entering gameplay code.
 Redstone work enters from three event-shaped places. **Nothing scans the world
 for redstone on a tick.**
 
+Dispenser projectile selection crosses its textual inventory boundary once:
+`lodestone_data::item::Item::from_name` resolves built-in item names, then
+`redstone_dispenser::arrow_entity_type` exhaustively maps the three arrow item
+variants to the generated `lodestone_data::entity_type::EntityType`. A plugin
+or otherwise unknown item does not acquire a guessed built-in identity; it
+stays outside this classifier and follows the existing plain-toss fallback.
+When extending projectile support, add generated `Item` variants to the typed
+classifier and return a generated `EntityType` rather than adding another
+string-literal dispatch arm.
+
 1. `lodestone_server::random_tick::propagate_and_react` — called once per
    just-mutated position, from a random tick that changed a block, from the
    scheduled-tick drain, and from placement.

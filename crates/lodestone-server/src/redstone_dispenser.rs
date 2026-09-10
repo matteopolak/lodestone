@@ -103,7 +103,9 @@
 //!   model sound effects for yet.
 
 use lodestone_data::collision_shapes;
+use lodestone_data::entity_type::EntityType;
 use lodestone_data::block_states::BlockStateValue;
+use lodestone_data::item::Item;
 use lodestone_model::{BlockPos, Vec3};
 
 use crate::chunk::ChunkSource;
@@ -287,10 +289,10 @@ fn triangle(mean: f64, spread: f64, next_f64: &mut impl FnMut() -> f64) -> f64 {
 /// uses (`TippedArrowItem` still `extends ArrowItem` and does not override
 /// `createArrow`/`asProjectile`).
 #[must_use]
-pub fn arrow_entity_type(item: &str) -> Option<&'static str> {
+pub const fn arrow_entity_type(item: Item) -> Option<EntityType> {
     match item {
-        "minecraft:arrow" | "minecraft:tipped_arrow" => Some("minecraft:arrow"),
-        "minecraft:spectral_arrow" => Some("minecraft:spectral_arrow"),
+        Item::Arrow | Item::TippedArrow => Some(EntityType::Arrow),
+        Item::SpectralArrow => Some(EntityType::SpectralArrow),
         _ => None,
     }
 }
@@ -692,6 +694,18 @@ mod tests {
     fn is_dropper_distinguishes_the_two_registrations() {
         assert!(is_dropper("minecraft:dropper[facing=up,triggered=false]"));
         assert!(!is_dropper("minecraft:dispenser[facing=up,triggered=false]"));
+    }
+
+    #[test]
+    fn arrow_dispatch_uses_the_generated_item_and_entity_registries() {
+        assert_eq!(arrow_entity_type(Item::Arrow), Some(EntityType::Arrow));
+        assert_eq!(arrow_entity_type(Item::TippedArrow), Some(EntityType::Arrow));
+        assert_eq!(
+            arrow_entity_type(Item::SpectralArrow),
+            Some(EntityType::SpectralArrow)
+        );
+        assert_eq!(arrow_entity_type(Item::Bow), None);
+        assert_eq!(Item::from_name("example:arrow"), None);
     }
 
     /// A small helper so a test can hand `plain_toss` a fixed draw sequence —
