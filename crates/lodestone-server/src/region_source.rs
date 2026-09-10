@@ -3123,8 +3123,6 @@ mod tests {
     /// later in-memory write.
     #[test]
     fn a_skull_state_with_no_saved_block_entity_gets_one_synthesized_on_load() {
-        use crate::block_entities::BlockEntity;
-
         let dir = tempdir("skull-repair");
         const SKULL: &str = "minecraft:wither_skeleton_skull";
         {
