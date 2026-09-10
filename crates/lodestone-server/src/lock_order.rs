@@ -59,6 +59,28 @@ pub(crate) fn acquire(class: LockClass) -> HeldLock {
     }
 }
 
+/// Rejects dispatching owner-local work while the block-entity registry is
+/// still borrowed. The current mob owner methods are invoked through their
+/// existing mob handle, and scheduled physics still surrounds those calls, so
+/// those two lock classes remain legal until their own hand-off migrations.
+/// Block-entity workers already snapshot and commit outside this lock; keep
+/// that boundary mechanically enforced here.
+#[inline]
+pub(crate) fn assert_owner_work_without_block_entity_lock() {
+    #[cfg(any(debug_assertions, test))]
+    HELD.with(|held| {
+        let held = held.borrow();
+        assert!(
+            !held.contains(&LockClass::BlockEntities),
+            "owner-local work must start without the block-entity registry lock; held {held:?}"
+        );
+    });
+}
+
+#[cfg(not(any(debug_assertions, test)))]
+#[allow(dead_code)]
+const _: fn() = assert_owner_work_without_block_entity_lock;
+
 #[cfg(any(debug_assertions, test))]
 std::thread_local! {
     static HELD: std::cell::RefCell<Vec<LockClass>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -92,4 +114,14 @@ mod tests {
 
         rules.with(|_| scheduled.with(|_| {}));
     }
+
+    #[test]
+    #[should_panic(expected = "owner-local work must start without the block-entity registry lock")]
+    fn owner_work_rejects_a_held_block_entity_lock() {
+        let entities = crate::block_entities::BlockEntityHandle::new();
+        entities.with(|_| {
+            crate::lock_order::assert_owner_work_without_block_entity_lock();
+        });
+    }
+
 }
