@@ -361,7 +361,7 @@ Replaying what those logins produced:
 
 | neighbour | errored | silent | plausible wrong events | ids 762 does not carry |
 |---|---|---|---|---|
-| 1.18.2 (758) | 36 | 18 | **10** | 0 |
+| 1.18.2 (758) | 38 | 16 | **10** | 0 |
 | 1.20.6 (766) | 39 | 13 | **3** | 10 |
 
 Two of the lower neighbour's ten are wrong in a way nothing downstream could
