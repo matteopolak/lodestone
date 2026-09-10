@@ -1507,6 +1507,13 @@ impl WindowApp {
                 self.tab_held = false;
                 self.focus_container_screen();
             }
+            Some(KeyOutcome::OpenFriends) => {
+                self.sim.input_mut(InputState::release_all);
+                self.ui.pause();
+                self.ui.open_friends_from_pause();
+                self.tab_held = false;
+                self.set_grab(false);
+            }
             // Vanilla's own third-/first-person toggle.
             Some(KeyOutcome::TogglePerspective) => self.sim.cycle_camera_type(),
             Some(KeyOutcome::SelectSlot(slot)) => self.sim.select_slot(slot),

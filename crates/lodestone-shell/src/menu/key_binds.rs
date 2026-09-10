@@ -36,7 +36,7 @@
 //! ## Wired vs. decorative
 //!
 //! - **Wired**: reaching this page (Controls → Key Binds → Escape/Done
-//!   back), viewing every one of the 29 actions grouped by category in
+//!   back), viewing every one of the 37 actions grouped by category in
 //!   vanilla's registration order, per-row Reset (`Keybinds::reset` +
 //!   persist), and Reset Keys (`Keybinds::reset_all` + persist). None of
 //!   these needs anything this crate cannot reach on its own.
@@ -883,6 +883,7 @@ pub fn action_caption(action: InputAction) -> &'static str {
         InputAction::Chat => "Open Chat",
         InputAction::Command => "Open Command",
         InputAction::PlayerList => "List Players",
+        InputAction::Friends => "Friends",
         InputAction::TogglePerspective => "Toggle Perspective",
         InputAction::Pause => "Pause Game",
         InputAction::DebugOverlay => "Toggle Overlay",
@@ -905,9 +906,9 @@ mod tests {
     use crate::keybinds::Binding;
 
     /// The census: 6 categories (Creative/Spectator have no actions — see the
-    /// module docs), 29 actions, 35 rows total.
+    /// module docs), 37 actions, 43 rows total.
     #[test]
-    fn six_categories_carry_all_twenty_seven_actions() {
+    fn six_categories_carry_all_thirty_seven_actions() {
         let rows = all_rows();
         let categories: Vec<Category> = rows
             .iter()
@@ -938,7 +939,7 @@ mod tests {
                 Row::Category(_) => None,
             })
             .collect();
-        // 36: 29 (Pick Block and Take Screenshot included) plus the seven F3
+        // 37: 30 (Friends, Pick Block and Take Screenshot included) plus the seven F3
         // chords, which vanilla's own persisted-options declarations declare as `Category.DEBUG`
         // `KeyMapping`s in `debugKeys` and vanilla's own debug-key handling
         // dispatches through its own key-matching check — so they belong on this
@@ -948,8 +949,8 @@ mod tests {
         // from `InputAction::ALL.len()` would make the assertion vacuous: it
         // would then agree with itself no matter which actions the screen
         // forgot.
-        assert_eq!(actions.len(), 36, "every InputAction, once each");
-        assert_eq!(rows.len(), 6 + 36);
+        assert_eq!(actions.len(), 37, "every InputAction, once each");
+        assert_eq!(rows.len(), 6 + 37);
         // The control: Creative and Spectator genuinely have zero actions —
         // if they ever gain one, this must start failing until the six above
         // does too, which is what proves the category list is not hand-typed
@@ -967,7 +968,7 @@ mod tests {
     /// (TogglePerspective/Pause), then Debug — Gameplay and Inventory both
     /// come *before* Multiplayer there, where `SORT_ORDER` puts Multiplayer
     /// *before* both. Walking `ALL` directly instead of `SORT_ORDER` would
-    /// pass every other test in this file (same 29 actions, same 6 non-empty
+    /// pass every other test in this file (same 37 actions, same 6 non-empty
     /// categories) and still render the Controls-menu categories in the wrong
     /// relative order — this is the one assertion that would catch it.
     #[test]

@@ -42,6 +42,11 @@ rather than guessed — including category sort order, which is vanilla's own *r
 not alphabetical (a commonly-mis-guessed detail: the Misc category sorts second, ahead of Multiplayer,
 Gameplay and Inventory).
 
+The Multiplayer category includes `key.friends`, default `O`. It is active only during gameplay and
+opens the existing Friends screen as a world overlay; menu, chat, and container focus continue to win
+the resolver's precedence chain. Because the hotkey enters through the pause-origin route, Done or
+Escape returns to the paused world instead of leaving the session or jumping to the title screen.
+
 ### One action can mean two different things depending on context
 
 Several actions (drop, pick-item, swap-offhand) are not one mechanism but two, selected by whether a
