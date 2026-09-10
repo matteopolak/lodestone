@@ -96,21 +96,26 @@ pub struct GenerationSpawn {
 /// vanilla-exact" for why this is real per-chunk determinism and not vanilla's
 /// own draw order.
 #[must_use]
-pub fn spawn_candidates_for_chunk(
-    biome_at: impl Fn(usize, usize) -> String,
-    surface_y: impl Fn(usize, usize) -> i32,
+pub fn spawn_candidates_for_chunk<B, S, T>(
+    biome_at: B,
+    surface_y: S,
     spawners_by_biome: &HashMap<String, BiomeSpawners>,
     seed: i64,
     cx: i32,
     cz: i32,
-) -> Vec<GenerationSpawn> {
+) -> Vec<GenerationSpawn>
+where
+    B: Fn(usize, usize) -> T,
+    S: Fn(usize, usize) -> i32,
+    T: AsRef<str>,
+{
     let mut random = WorldgenRandom::new(LegacyRandomSource::new(seed));
     random.set_decoration_seed(seed, cx * 16, cz * 16);
 
     let lx = random.next_int_bounded(16) as usize;
     let lz = random.next_int_bounded(16) as usize;
     let biome = biome_at(lx, lz);
-    let Some(spawners) = spawners_by_biome.get(&biome) else {
+    let Some(spawners) = spawners_by_biome.get(biome.as_ref()) else {
         return Vec::new();
     };
     let entries = spawners.for_category(MobCategory::Creature);

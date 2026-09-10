@@ -3871,7 +3871,7 @@ where
                 // offline login rather than sending a request nothing would
                 // answer.
                 #[cfg(not(target_arch = "wasm32"))]
-                let sent_encryption_request = if online_mode.is_some() {
+                let sent_encryption_request = if let Some(cfg) = online_mode {
                     let keypair = ServerKeyPair::generate()?;
                     let verify_token = generate_verify_token();
                     let directive =
@@ -4633,6 +4633,7 @@ where
                     proto,
                     source,
                     entities,
+                    view_radius,
                     state,
                     initial_teleport_id,
                     streamer,
@@ -11474,6 +11475,7 @@ async fn dispatch_play_packet<T, P, S>(
     conn: &mut Connection<T>,
     proto: &P,
     source: SourceRef<'_, S>,
+    view_radius: i32,
     state: &mut State,
     view: &mut ViewTracker,
     // This connection's chunk-residency guard, so a chunk-boundary
@@ -13718,6 +13720,7 @@ async fn serve_play<T, P, S, E>(
     proto: &P,
     source: SourceRef<'_, S>,
     entities: &E,
+    view_radius: i32,
     mut state: State,
     initial_teleport_id: Option<i32>,
     mut streamer: EntityStreamer,
@@ -14210,6 +14213,7 @@ where
                     conn,
                     proto,
                     source,
+                    view_radius,
                     &mut state,
                     &mut view,
                     &player_ticket_guard,
@@ -16532,6 +16536,7 @@ async fn serve_play<T, P, S, E>(
     proto: &P,
     source: SourceRef<'_, S>,
     entities: &E,
+    view_radius: i32,
     mut state: State,
     initial_teleport_id: Option<i32>,
     mut streamer: EntityStreamer,
@@ -16828,6 +16833,7 @@ where
             conn,
             proto,
             source,
+            view_radius,
             &mut state,
             &mut view,
             &player_ticket_guard,

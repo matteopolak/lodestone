@@ -66,7 +66,6 @@ impl OverworldGenerator {
         // server-side consumer re-validates. Gated on `stage` — see this
         // function's own doc for why `Shaped` must never produce one.
         let spawn_candidates = if matches!(stage, GenStage::Full) {
-            let biome_names: [String; 16] = std::array::from_fn(|i| biome_quarts[i].0.clone());
             let height = self.height;
             let min_y = self.min_y;
             let surface_y_at = |lx: usize, lz: usize| -> i32 {
@@ -78,7 +77,9 @@ impl OverworldGenerator {
                 }
                 min_y
             };
-            let biome_at = |lx: usize, lz: usize| -> String { biome_names[(lz >> 2) * 4 + (lx >> 2)].clone() };
+            let biome_at = |lx: usize, lz: usize| -> &str {
+                biome_quarts[(lz >> 2) * 4 + (lx >> 2)].0.as_str()
+            };
             crate::spawn_stage::spawn_candidates_for_chunk(
                 biome_at,
                 surface_y_at,
