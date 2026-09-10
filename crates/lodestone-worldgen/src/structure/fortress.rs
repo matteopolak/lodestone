@@ -46,7 +46,7 @@ const LOWEST_Y: i32 = 10;
 const START_Y: i32 = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
+pub enum FortressPieceKind {
     Start,
     LongBridge,
     WideJunction,
@@ -64,7 +64,7 @@ enum Kind {
     EndCap,
 }
 
-impl Kind {
+impl FortressPieceKind {
     fn id(self) -> &'static str {
         match self {
             // The start is persisted with the crossing's piece type, not a
@@ -89,7 +89,7 @@ impl Kind {
 
 #[derive(Debug, Clone)]
 struct Node {
-    kind: Kind,
+    kind: FortressPieceKind,
     box_: BoundingBox,
     facing: Facing,
     depth: i32,
@@ -99,7 +99,7 @@ struct Node {
 
 #[derive(Debug, Clone, Copy)]
 struct Weight {
-    kind: Kind,
+    kind: FortressPieceKind,
     weight: i32,
     max: i32,
     placed: i32,
@@ -108,24 +108,24 @@ struct Weight {
 
 fn bridge_weights() -> Vec<Weight> {
     vec![
-        Weight { kind: Kind::LongBridge, weight: 30, max: 0, placed: 0, repeatable: true },
-        Weight { kind: Kind::WideJunction, weight: 10, max: 4, placed: 0, repeatable: false },
-        Weight { kind: Kind::SmallJunction, weight: 10, max: 4, placed: 0, repeatable: false },
-        Weight { kind: Kind::RisingJunction, weight: 10, max: 3, placed: 0, repeatable: false },
-        Weight { kind: Kind::SpawnerHall, weight: 5, max: 2, placed: 0, repeatable: false },
-        Weight { kind: Kind::CastleGate, weight: 5, max: 1, placed: 0, repeatable: false },
+        Weight { kind: FortressPieceKind::LongBridge, weight: 30, max: 0, placed: 0, repeatable: true },
+        Weight { kind: FortressPieceKind::WideJunction, weight: 10, max: 4, placed: 0, repeatable: false },
+        Weight { kind: FortressPieceKind::SmallJunction, weight: 10, max: 4, placed: 0, repeatable: false },
+        Weight { kind: FortressPieceKind::RisingJunction, weight: 10, max: 3, placed: 0, repeatable: false },
+        Weight { kind: FortressPieceKind::SpawnerHall, weight: 5, max: 2, placed: 0, repeatable: false },
+        Weight { kind: FortressPieceKind::CastleGate, weight: 5, max: 1, placed: 0, repeatable: false },
     ]
 }
 
 fn castle_weights() -> Vec<Weight> {
     vec![
-        Weight { kind: Kind::CastleHall, weight: 25, max: 0, placed: 0, repeatable: true },
-        Weight { kind: Kind::CastleJunction, weight: 15, max: 5, placed: 0, repeatable: false },
-        Weight { kind: Kind::RightElbow, weight: 5, max: 10, placed: 0, repeatable: false },
-        Weight { kind: Kind::LeftElbow, weight: 5, max: 10, placed: 0, repeatable: false },
-        Weight { kind: Kind::Ascender, weight: 10, max: 3, placed: 0, repeatable: true },
-        Weight { kind: Kind::Balcony, weight: 7, max: 2, placed: 0, repeatable: false },
-        Weight { kind: Kind::Garden, weight: 5, max: 2, placed: 0, repeatable: false },
+        Weight { kind: FortressPieceKind::CastleHall, weight: 25, max: 0, placed: 0, repeatable: true },
+        Weight { kind: FortressPieceKind::CastleJunction, weight: 15, max: 5, placed: 0, repeatable: false },
+        Weight { kind: FortressPieceKind::RightElbow, weight: 5, max: 10, placed: 0, repeatable: false },
+        Weight { kind: FortressPieceKind::LeftElbow, weight: 5, max: 10, placed: 0, repeatable: false },
+        Weight { kind: FortressPieceKind::Ascender, weight: 10, max: 3, placed: 0, repeatable: true },
+        Weight { kind: FortressPieceKind::Balcony, weight: 7, max: 2, placed: 0, repeatable: false },
+        Weight { kind: FortressPieceKind::Garden, weight: 5, max: 2, placed: 0, repeatable: false },
     ]
 }
 
@@ -135,7 +135,7 @@ struct Tree {
     pending: Vec<usize>,
     bridge: Vec<Weight>,
     castle: Vec<Weight>,
-    previous: Option<Kind>,
+    previous: Option<FortressPieceKind>,
     start: BoundingBox,
 }
 
@@ -173,22 +173,22 @@ fn orient(foot: [i32; 3], off: [i32; 3], size: [i32; 3], facing: Facing) -> Boun
     }
 }
 
-fn shape(kind: Kind) -> ([i32; 3], [i32; 3]) {
+fn shape(kind: FortressPieceKind) -> ([i32; 3], [i32; 3]) {
     match kind {
-        Kind::Start | Kind::WideJunction => ([-8, -3, 0], [19, 10, 19]),
-        Kind::LongBridge => ([-1, -3, 0], [5, 10, 19]),
-        Kind::SmallJunction => ([-2, 0, 0], [7, 9, 7]),
-        Kind::RisingJunction => ([-2, 0, 0], [7, 11, 7]),
-        Kind::SpawnerHall => ([-2, 0, 0], [7, 8, 9]),
-        Kind::CastleGate | Kind::Garden => ([-5, -3, 0], [13, 14, 13]),
-        Kind::CastleHall | Kind::CastleJunction | Kind::RightElbow | Kind::LeftElbow => ([-1, 0, 0], [5, 7, 5]),
-        Kind::Ascender => ([-1, -7, 0], [5, 14, 10]),
-        Kind::Balcony => ([-3, 0, 0], [9, 7, 9]),
-        Kind::EndCap => ([-1, -3, 0], [5, 10, 8]),
+        FortressPieceKind::Start | FortressPieceKind::WideJunction => ([-8, -3, 0], [19, 10, 19]),
+        FortressPieceKind::LongBridge => ([-1, -3, 0], [5, 10, 19]),
+        FortressPieceKind::SmallJunction => ([-2, 0, 0], [7, 9, 7]),
+        FortressPieceKind::RisingJunction => ([-2, 0, 0], [7, 11, 7]),
+        FortressPieceKind::SpawnerHall => ([-2, 0, 0], [7, 8, 9]),
+        FortressPieceKind::CastleGate | FortressPieceKind::Garden => ([-5, -3, 0], [13, 14, 13]),
+        FortressPieceKind::CastleHall | FortressPieceKind::CastleJunction | FortressPieceKind::RightElbow | FortressPieceKind::LeftElbow => ([-1, 0, 0], [5, 7, 5]),
+        FortressPieceKind::Ascender => ([-1, -7, 0], [5, 14, 10]),
+        FortressPieceKind::Balcony => ([-3, 0, 0], [9, 7, 9]),
+        FortressPieceKind::EndCap => ([-1, -3, 0], [5, 10, 8]),
     }
 }
 
-fn candidate(tree: &Tree, kind: Kind, foot: [i32; 3], facing: Facing, depth: i32) -> Option<Node> {
+fn candidate(tree: &Tree, kind: FortressPieceKind, foot: [i32; 3], facing: Facing, depth: i32) -> Option<Node> {
     let (off, size) = shape(kind);
     let box_ = orient(foot, off, size, facing);
     (box_.min[1] > LOWEST_Y && !tree.collides(box_)).then_some(Node {
@@ -202,7 +202,7 @@ fn candidate(tree: &Tree, kind: Kind, foot: [i32; 3], facing: Facing, depth: i32
 }
 
 fn end_filler<R: RandomSource>(tree: &Tree, random: &mut R, foot: [i32; 3], facing: Facing, depth: i32) -> Option<Node> {
-    let mut node = candidate(tree, Kind::EndCap, foot, facing, depth)?;
+    let mut node = candidate(tree, FortressPieceKind::EndCap, foot, facing, depth)?;
     // Its persistent local seed is drawn at construction.  The block writer uses
     // it later; advancing here keeps following tree choices aligned.
     node.end_seed = Some(random.next_int());
@@ -244,7 +244,7 @@ fn add_weighted<R: RandomSource>(tree: &mut Tree, random: &mut R, foot: [i32; 3]
                     break;
                 }
                 if let Some(mut node) = candidate(tree, weight.kind, foot, facing, depth) {
-                    if matches!(weight.kind, Kind::RightElbow | Kind::LeftElbow) {
+                    if matches!(weight.kind, FortressPieceKind::RightElbow | FortressPieceKind::LeftElbow) {
                         node.chest = random.next_int_bounded(3) == 0;
                     }
                     let weights = if castle { &mut tree.castle } else { &mut tree.bridge };
@@ -299,40 +299,40 @@ fn right<R: RandomSource>(tree: &mut Tree, random: &mut R, node: Node, y_off: i3
 fn grow_children<R: RandomSource>(tree: &mut Tree, index: usize, random: &mut R) {
     let node = tree.pieces[index].clone();
     match node.kind {
-        Kind::Start | Kind::WideJunction => {
+        FortressPieceKind::Start | FortressPieceKind::WideJunction => {
             forward(tree, random, node.clone(), 8, 3, false);
             left(tree, random, node.clone(), 3, 8, false);
             right(tree, random, node, 3, 8, false);
         }
-        Kind::LongBridge => forward(tree, random, node, 1, 3, false),
-        Kind::SmallJunction => {
+        FortressPieceKind::LongBridge => forward(tree, random, node, 1, 3, false),
+        FortressPieceKind::SmallJunction => {
             forward(tree, random, node.clone(), 2, 0, false);
             left(tree, random, node.clone(), 0, 2, false);
             right(tree, random, node, 0, 2, false);
         }
-        Kind::RisingJunction => right(tree, random, node, 6, 2, false),
-        Kind::CastleGate => forward(tree, random, node, 5, 3, true),
-        Kind::CastleHall => forward(tree, random, node, 1, 0, true),
-        Kind::CastleJunction => {
+        FortressPieceKind::RisingJunction => right(tree, random, node, 6, 2, false),
+        FortressPieceKind::CastleGate => forward(tree, random, node, 5, 3, true),
+        FortressPieceKind::CastleHall => forward(tree, random, node, 1, 0, true),
+        FortressPieceKind::CastleJunction => {
             forward(tree, random, node.clone(), 1, 0, true);
             left(tree, random, node.clone(), 0, 1, true);
             right(tree, random, node, 0, 1, true);
         }
-        Kind::RightElbow => right(tree, random, node, 0, 1, true),
-        Kind::LeftElbow => left(tree, random, node, 0, 1, true),
-        Kind::Ascender => forward(tree, random, node, 1, 0, true),
-        Kind::Balcony => {
+        FortressPieceKind::RightElbow => right(tree, random, node, 0, 1, true),
+        FortressPieceKind::LeftElbow => left(tree, random, node, 0, 1, true),
+        FortressPieceKind::Ascender => forward(tree, random, node, 1, 0, true),
+        FortressPieceKind::Balcony => {
             let side = if matches!(node.facing, Facing::West | Facing::North) { 5 } else { 1 };
             let left_opens = random.next_int_bounded(8) > 0;
             left(tree, random, node.clone(), 0, side, left_opens);
             let right_opens = random.next_int_bounded(8) > 0;
             right(tree, random, node, 0, side, right_opens);
         }
-        Kind::Garden => {
+        FortressPieceKind::Garden => {
             forward(tree, random, node.clone(), 5, 3, true);
             forward(tree, random, node, 5, 11, true);
         }
-        Kind::SpawnerHall | Kind::EndCap => {}
+        FortressPieceKind::SpawnerHall | FortressPieceKind::EndCap => {}
     }
 }
 
@@ -484,7 +484,7 @@ fn place_supports_in_chunk(
     world: &mut DenseBlockGrid,
 ) {
     match piece.kind {
-        Kind::Start | Kind::WideJunction => {
+        FortressPieceKind::Start | FortressPieceKind::WideJunction => {
             for x in 7..=11 {
                 for z in 0..=2 {
                     support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
@@ -498,14 +498,14 @@ fn place_supports_in_chunk(
                 }
             }
         }
-        Kind::SmallJunction | Kind::RisingJunction => {
+        FortressPieceKind::SmallJunction | FortressPieceKind::RisingJunction => {
             for x in 0..=6 {
                 for z in 0..=6 {
                     support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
                 }
             }
         }
-        Kind::LongBridge => {
+        FortressPieceKind::LongBridge => {
             for x in 0..=4 {
                 for z in 0..=2 {
                     support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
@@ -513,7 +513,7 @@ fn place_supports_in_chunk(
                 }
             }
         }
-        Kind::CastleGate | Kind::Garden => {
+        FortressPieceKind::CastleGate | FortressPieceKind::Garden => {
             for x in 4..=8 {
                 for z in 0..=2 {
                     support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
@@ -527,28 +527,28 @@ fn place_supports_in_chunk(
                 }
             }
         }
-        Kind::CastleHall | Kind::CastleJunction | Kind::RightElbow | Kind::LeftElbow => {
+        FortressPieceKind::CastleHall | FortressPieceKind::CastleJunction | FortressPieceKind::RightElbow | FortressPieceKind::LeftElbow => {
             for x in 0..=4 {
                 for z in 0..=4 {
                     support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
                 }
             }
         }
-        Kind::Ascender => {
+        FortressPieceKind::Ascender => {
             for x in 0..=4 {
                 for z in 0..=9 {
                     support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
                 }
             }
         }
-        Kind::Balcony => {
+        FortressPieceKind::Balcony => {
             for x in 0..=8 {
                 for z in 0..=5 {
                     support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
                 }
             }
         }
-        Kind::SpawnerHall => {
+        FortressPieceKind::SpawnerHall => {
             for x in 0..=6 {
                 for z in 0..=6 {
                     support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
@@ -557,6 +557,55 @@ fn place_supports_in_chunk(
         }
         _ => {}
     }
+}
+
+/// Applies only the terrain-dependent remainder of an already-generated
+/// fortress piece. Its immutable block list remains owned by `StructurePiece`.
+pub(crate) fn place_cached_piece(
+    piece: &StructurePiece,
+    kind: FortressPieceKind,
+    facing: Facing,
+    chest: bool,
+    end_seed: Option<i32>,
+    placing_cx: i32,
+    placing_cz: i32,
+    world: &mut DenseBlockGrid,
+    placement_random: &mut impl RandomSource,
+    solid_render: &dyn Fn(&str) -> bool,
+) -> Option<CodedLoot> {
+    let node = Node {
+        kind,
+        box_: piece.bounding_box,
+        facing,
+        depth: piece.gen_depth,
+        chest,
+        end_seed,
+    };
+    let chest_pos = chest_position(&node);
+    if let Some(blocks) = &piece.blocks {
+        for block in blocks.iter() {
+            if chest_pos == Some(block.pos) {
+                continue;
+            }
+            world.set(block.pos[0], block.pos[1], block.pos[2], &block.state);
+        }
+    }
+    let loot = chest_pos.and_then(|pos| {
+        (pos[0].div_euclid(16) == placing_cx
+            && pos[2].div_euclid(16) == placing_cz
+            && base_name(world.get(pos[0], pos[1], pos[2])) != "minecraft:chest")
+            .then(|| {
+                let state = chest_state(world, pos, solid_render);
+                world.set(pos[0], pos[1], pos[2], &state);
+                CodedLoot {
+                    pos,
+                    table: "minecraft:chests/nether_bridge".to_string(),
+                    seed: placement_random.next_long(),
+                }
+            })
+    });
+    place_supports_in_chunk(&node, placing_cx, placing_cz, world);
+    loot
 }
 
 fn emit_long_bridge(blocks: &mut Vec<CodedBlock>, piece: &Node) {
@@ -588,7 +637,7 @@ fn emit_small_castle(blocks: &mut Vec<CodedBlock>, piece: &Node) {
     box_fill(blocks, piece, BRICK, 0, 0, 0, 4, 1, 4);
     box_fill(blocks, piece, AIR, 0, 2, 0, 4, 5, 4);
     match piece.kind {
-        Kind::CastleHall => {
+        FortressPieceKind::CastleHall => {
             box_fill(blocks, piece, BRICK, 0, 2, 0, 0, 5, 4);
             box_fill(blocks, piece, BRICK, 4, 2, 0, 4, 5, 4);
             for x in [0, 4] {
@@ -596,19 +645,19 @@ fn emit_small_castle(blocks: &mut Vec<CodedBlock>, piece: &Node) {
                 box_fill(blocks, piece, &ns, x, 3, 3, x, 4, 3);
             }
         }
-        Kind::CastleJunction => {
+        FortressPieceKind::CastleJunction => {
             for (x, z) in [(0, 0), (4, 0), (0, 4), (4, 4)] {
                 box_fill(blocks, piece, BRICK, x, 2, z, x, 5, z);
             }
         }
-        Kind::LeftElbow => {
+        FortressPieceKind::LeftElbow => {
             box_fill(blocks, piece, BRICK, 4, 2, 0, 4, 5, 4);
             for z in [1, 3] { box_fill(blocks, piece, &ns, 4, 3, z, 4, 4, z); }
             box_fill(blocks, piece, BRICK, 0, 2, 0, 0, 5, 0);
             box_fill(blocks, piece, BRICK, 0, 2, 4, 3, 5, 4);
             for x in [1, 3] { box_fill(blocks, piece, &we, x, 3, 4, x, 4, 4); }
         }
-        Kind::RightElbow => {
+        FortressPieceKind::RightElbow => {
             box_fill(blocks, piece, BRICK, 0, 2, 0, 0, 5, 4);
             for z in [1, 3] { box_fill(blocks, piece, &ns, 0, 3, z, 0, 4, z); }
             box_fill(blocks, piece, BRICK, 4, 2, 0, 4, 5, 0);
@@ -844,20 +893,20 @@ fn emit_end_cap(blocks: &mut Vec<CodedBlock>, piece: &Node) {
 fn emit_blocks(piece: &Node) -> Vec<CodedBlock> {
     let mut blocks = Vec::new();
     match piece.kind {
-        Kind::LongBridge => emit_long_bridge(&mut blocks, piece),
-        Kind::WideJunction | Kind::Start => emit_cross(&mut blocks, piece),
-        Kind::SmallJunction => emit_room(&mut blocks, piece),
-        Kind::RisingJunction => emit_rising_room(&mut blocks, piece),
-        Kind::SpawnerHall => emit_spawner_hall(&mut blocks, piece),
-        Kind::CastleGate => emit_castle_gate(&mut blocks, piece),
-        Kind::CastleHall | Kind::CastleJunction | Kind::RightElbow | Kind::LeftElbow => emit_small_castle(&mut blocks, piece),
-        Kind::Ascender => emit_ascender(&mut blocks, piece),
-        Kind::Balcony => emit_balcony(&mut blocks, piece),
-        Kind::Garden => emit_garden(&mut blocks, piece),
-        Kind::EndCap => emit_end_cap(&mut blocks, piece),
+        FortressPieceKind::LongBridge => emit_long_bridge(&mut blocks, piece),
+        FortressPieceKind::WideJunction | FortressPieceKind::Start => emit_cross(&mut blocks, piece),
+        FortressPieceKind::SmallJunction => emit_room(&mut blocks, piece),
+        FortressPieceKind::RisingJunction => emit_rising_room(&mut blocks, piece),
+        FortressPieceKind::SpawnerHall => emit_spawner_hall(&mut blocks, piece),
+        FortressPieceKind::CastleGate => emit_castle_gate(&mut blocks, piece),
+        FortressPieceKind::CastleHall | FortressPieceKind::CastleJunction | FortressPieceKind::RightElbow | FortressPieceKind::LeftElbow => emit_small_castle(&mut blocks, piece),
+        FortressPieceKind::Ascender => emit_ascender(&mut blocks, piece),
+        FortressPieceKind::Balcony => emit_balcony(&mut blocks, piece),
+        FortressPieceKind::Garden => emit_garden(&mut blocks, piece),
+        FortressPieceKind::EndCap => emit_end_cap(&mut blocks, piece),
     }
     if piece.chest {
-        let x = if matches!(piece.kind, Kind::RightElbow) { 1 } else { 3 };
+        let x = if matches!(piece.kind, FortressPieceKind::RightElbow) { 1 } else { 3 };
         let pos = local_pos(piece, x, 2, 3);
         // This eager block list has no receiving chunk grid. The external
         // state is wall-dependent, so keep the default state until container
@@ -872,7 +921,7 @@ fn emit_blocks(piece: &Node) -> Vec<CodedBlock> {
 
 fn chest_position(piece: &Node) -> Option<[i32; 3]> {
     piece.chest.then(|| {
-        let x = if matches!(piece.kind, Kind::RightElbow) { 1 } else { 3 };
+        let x = if matches!(piece.kind, FortressPieceKind::RightElbow) { 1 } else { 3 };
         local_pos(piece, x, 2, 3)
     })
 }
@@ -944,7 +993,12 @@ fn finish(tree: Tree) -> Vec<StructurePiece> {
         blocks: Some(Arc::new(blocks)),
         loot: Vec::new(),
         beard: None,
-        refine: None,
+        refine: Some(super::PieceRefinement::FortressPlacement {
+            kind: piece.kind,
+            facing: piece.facing,
+            chest: piece.chest,
+            end_seed: piece.end_seed,
+        }),
     }}).collect()
 }
 
@@ -955,7 +1009,7 @@ fn build_tree<R: RandomSource>(cx: i32, cz: i32, random: &mut R) -> (Tree, [i32;
         max: [cx * 16 + 20, START_Y + 9, cz * 16 + 20],
     };
     let mut tree = Tree { pieces: Vec::new(), pending: Vec::new(), bridge: bridge_weights(), castle: castle_weights(), previous: None, start };
-    let root = tree.add(Node { kind: Kind::Start, box_: start, facing, depth: 0, chest: false, end_seed: None });
+    let root = tree.add(Node { kind: FortressPieceKind::Start, box_: start, facing, depth: 0, chest: false, end_seed: None });
     grow_children(&mut tree, root, random);
     while !tree.pending.is_empty() {
         let index = tree.pending.remove(random.next_int_bounded(tree.pending.len() as i32) as usize);
