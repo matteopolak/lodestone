@@ -596,6 +596,12 @@ fn canonical_state_from_settings(value: &Value, fallback: &str) -> String {
 }
 
 impl OverworldGenerator {
+    /// The named pass order consumed by this generator and its parity tools.
+    #[must_use]
+    pub const fn stage_schedule() -> &'static crate::stage_schedule::StageSchedule {
+        &crate::stage_schedule::OVERWORLD
+    }
+
     /// Builds the generator for `seed` from a noise-settings `Value` and a
     /// [`Resolver`] that supplies the density functions, noises, carvers,
     /// features and tags it references.
