@@ -110,7 +110,7 @@ fn native_chunk_ticks_reopen_in_their_original_world_wide_order() {
         fluid,
         vec![(
             (16, 5, 0),
-            "lodestone:fluid".to_owned(),
+            ScheduledTickKind::Fluid,
             51,
             TickPriority::VeryLow,
         )],
