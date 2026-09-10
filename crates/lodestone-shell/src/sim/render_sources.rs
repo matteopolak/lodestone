@@ -1045,7 +1045,13 @@ impl Sim {
         let frame_ids = self.read(crate::entities::entity_map_ids);
         Some(move |id: Option<i32>, frame_entity: Option<i32>| {
             let id = match id
-                .or_else(|| frame_entity.and_then(|entity| frame_ids.get(&entity).copied()))
+                .or_else(|| {
+                    frame_entity.and_then(|entity| {
+                        frame_ids
+                            .get(&lodestone_model::EntityNetworkId::from_raw(entity))
+                            .copied()
+                    })
+                })
             {
                 Some(raw) => lodestone_game::maps::MapId::new(raw)?,
                 None => store.ids().next()?,

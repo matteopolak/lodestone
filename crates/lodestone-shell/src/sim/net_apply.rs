@@ -181,11 +181,15 @@ impl Sim {
                     // that is a human-readable string, not state.
                     self.status = format!("connected (entity {entity_id})");
                     self.set_phase(SessionPhase::Connected);
-                    // Login done, so the screen is now naming the
-                    // terrain stream rather than the connect handshake. On a
-                    // brand-new singleplayer world this is also when generation
-                    // happens — columns are generated lazily as they stream.
-                    self.set_connect_phase(crate::menu::loading::ConnectPhase::LoadingTerrain);
+                    // Login done. Only a newly-created survival world has the
+                    // labelled terrain-generation screen; existing saves and
+                    // remote servers enter the world as soon as login is
+                    // complete and must not acquire a fake chunk counter.
+                    self.set_connect_phase(if self.shows_new_world_loading() {
+                        crate::menu::loading::ConnectPhase::LoadingTerrain
+                    } else {
+                        crate::menu::loading::ConnectPhase::Joining
+                    });
                     // The baseline for `apply_respawn`'s comparison. Safe to read
                     // the shared handle here — unlike in the `Respawned` arm —
                     // because the fold runs on the net thread *before* the event is
@@ -237,11 +241,15 @@ impl Sim {
                     self.on_column_unloaded(x, z);
                 }
                 NetUpdate::ChunkCacheRadiusChanged { radius } => {
-                    // The server can revise the streamed radius after login.
-                    // The loading screen reads this exact value for both its
-                    // progress denominator and its bounded chunk-status grid;
-                    // retaining the launcher's request makes either surface lie.
-                    self.set_view_radius(u32::try_from(radius).unwrap_or(0));
+                    // A newly-created world keeps the player's selected
+                    // render distance for its loading square. The integrated
+                    // server streams one extra neighbour ring for meshing, so
+                    // adopting its wire radius here would make the animation
+                    // visibly larger than the option the player chose. Other
+                    // sessions retain the server-owned radius for diagnostics.
+                    if !self.new_world_loading {
+                        self.set_view_radius(u32::try_from(radius).unwrap_or(0));
+                    }
                 }
                 NetUpdate::ChunkCacheCenterChanged { x, z } => {
                     // The center can lead the player's own position during a
@@ -323,7 +331,7 @@ impl Sim {
                 NetUpdate::CameraSet { entity_id } => {
                     // Keep the id, not a sampled pose: `Sim::camera` resolves
                     // it every frame, so a moving subject stays followed.
-                    self.set_camera_entity(entity_id);
+                    self.set_camera_entity(EntityNetworkId::from_raw(entity_id));
                 }
                 NetUpdate::BlockEvent { pos, b0, b1 } => {
                     // Chest lids. `ChestBlockEntity.triggerEvent`
@@ -906,7 +914,7 @@ impl Sim {
                 } => {
                     // Resolve the entity's live position *before* borrowing the
                     // audio engine mutably (disjoint, sequential borrows).
-                    let pos = self.entity_sound_position(entity_id);
+                    let pos = self.entity_sound_position(EntityNetworkId::from_raw(entity_id));
                     self.audio_mut(|audio| {
                         if let Some(audio) = audio {
                             audio.play_server_entity_sound(
@@ -937,9 +945,10 @@ impl Sim {
                     let local_entity = self.server_entity_id() == Some(entity_id);
                     let local = self.local;
                     self.write(|w| {
-                        let Ok(id) = lodestone_model::Identifier::new("minecraft", effect.as_str()) else {
-                            return;
-                        };
+                        let id: lodestone_model::Identifier =
+                            lodestone_data::mob_effects::mob_effect_name_for(effect)
+                                .parse()
+                                .expect("generated mob-effect names are valid identifiers");
                         if let Some(mut entity_effects) = w.get_resource_mut::<lodestone_ecs::EntityStatusEffects>() {
                             entity_effects.apply(
                                 entity_id,
@@ -956,7 +965,7 @@ impl Sim {
                         }
                         if local_entity {
                             if let Some(mut state) = w.get_mut::<PhysicsState>(local) {
-                                state.0.effects.apply(&effect, amplifier);
+                                state.0.effects.apply(effect, amplifier);
                             }
                             if let Some(mut effects) = w.get_mut::<HudEffects>(local) {
                                 effects.0.apply(lodestone_game::effect::StatusEffect {
@@ -991,17 +1000,19 @@ impl Sim {
                     let local_entity = self.server_entity_id() == Some(entity_id);
                     let local = self.local;
                     self.write(|w| {
-                        if let Ok(id) = lodestone_model::Identifier::new("minecraft", effect.as_str()) {
-                            if let Some(mut entity_effects) = w.get_resource_mut::<lodestone_ecs::EntityStatusEffects>() {
-                                entity_effects.remove(entity_id, &id);
+                        let id: lodestone_model::Identifier =
+                            lodestone_data::mob_effects::mob_effect_name_for(effect)
+                                .parse()
+                                .expect("generated mob-effect names are valid identifiers");
+                        if let Some(mut entity_effects) = w.get_resource_mut::<lodestone_ecs::EntityStatusEffects>() {
+                            entity_effects.remove(entity_id, &id);
+                        }
+                        if local_entity {
+                            if let Some(mut state) = w.get_mut::<PhysicsState>(local) {
+                                state.0.effects.remove(effect);
                             }
-                            if local_entity {
-                                if let Some(mut state) = w.get_mut::<PhysicsState>(local) {
-                                    state.0.effects.remove(&effect);
-                                }
-                                if let Some(mut effects) = w.get_mut::<HudEffects>(local) {
-                                    effects.0.remove(&id);
-                                }
+                            if let Some(mut effects) = w.get_mut::<HudEffects>(local) {
+                                effects.0.remove(&id);
                             }
                         }
                     });
@@ -1104,8 +1115,8 @@ impl Sim {
                     // unreported drop.
                     let _ = crate::entities::begin_item_pickup(
                         w,
-                        pickup.item_entity_id,
-                        pickup.collector_id,
+                        lodestone_model::EntityNetworkId::from_raw(pickup.item_entity_id),
+                        lodestone_model::EntityNetworkId::from_raw(pickup.collector_id),
                     );
                 }
             });

@@ -129,6 +129,7 @@ use lodestone_client::AuthenticationIntent;
 use lodestone_game::menu::Menu;
 use lodestone_game::scoreboard::Scoreboard;
 use lodestone_game::tablist::TabList;
+use lodestone_data::mob_effects::MobEffectId;
 use lodestone_model::Vec3f;
 use lodestone_model::action::ResourcePackResponseKind;
 use lodestone_model::event::{
@@ -1174,9 +1175,8 @@ pub enum NetUpdate {
     EffectApplied {
         /// Entity the effect applies to.
         entity_id: i32,
-        /// Canonical effect id, namespace stripped (e.g. `"speed"`), matching
-        /// the [`NetUpdate::Sound`] convention.
-        effect: String,
+        /// Validated built-in effect id.
+        effect: MobEffectId,
         /// Effect amplifier (0 = level I).
         amplifier: u32,
         /// Remaining duration in ticks; `-1` means infinite.
@@ -1217,8 +1217,8 @@ pub enum NetUpdate {
     EffectRemoved {
         /// Entity the effect was removed from.
         entity_id: i32,
-        /// Canonical effect id, namespace stripped.
-        effect: String,
+        /// Validated built-in effect id.
+        effect: MobEffectId,
     },
     /// An item entity was collected (`take_item_entity`), for the fly-to-collector
     /// animation.
@@ -5605,16 +5605,22 @@ fn forward(
             visible,
             show_icon,
             blend,
-        } => NetUpdate::EffectApplied {
-            entity_id,
-            effect: effect.path().to_string(),
-            amplifier: u32::try_from(amplifier).unwrap_or(0),
-            duration_ticks,
-            ambient,
-            show_particles: visible,
-            show_icon,
-            blend,
-        },
+        } => {
+            let Some(effect) = lodestone_data::mob_effects::mob_effect_id(&effect.to_string())
+            else {
+                return Ok(());
+            };
+            NetUpdate::EffectApplied {
+                entity_id,
+                effect,
+                amplifier: u32::try_from(amplifier).unwrap_or(0),
+                duration_ticks,
+                ambient,
+                show_particles: visible,
+                show_icon,
+                blend,
+            }
+        }
         // Forwarded unfiltered, like the effect arms above: `net_apply` compares
         // against `server_entity_id()`. The filtering deliberately does **not**
         // happen here, so this router keeps its one-job shape and a reader can see
@@ -5622,10 +5628,13 @@ fn forward(
         ClientEvent::EntityHurtAnimation { entity_id, yaw } => {
             NetUpdate::HurtAnimation { entity_id, yaw }
         }
-        ClientEvent::MobEffectRemoved { entity_id, effect } => NetUpdate::EffectRemoved {
-            entity_id,
-            effect: effect.path().to_string(),
-        },
+        ClientEvent::MobEffectRemoved { entity_id, effect } => {
+            let Some(effect) = lodestone_data::mob_effects::mob_effect_id(&effect.to_string())
+            else {
+                return Ok(());
+            };
+            NetUpdate::EffectRemoved { entity_id, effect }
+        }
         // The tab-list and scoreboard families used to be forwarded here as
         // `NetUpdate::{TabListEvent, ScoreboardEvent}` for the shell to fold a
         // *second* time. Since Stage 3 of `docs/bevy-migration.md` the client's
@@ -6752,7 +6761,7 @@ mod tests {
     }
 
     #[test]
-    fn forward_translates_mob_effect_applied_with_stripped_namespace() {
+    fn forward_validates_mob_effect_applied_into_typed_id() {
         use lodestone_client::ResourceKey;
         use std::str::FromStr;
 
@@ -6780,8 +6789,7 @@ mod tests {
                 blend,
             } => {
                 assert_eq!(entity_id, 42);
-                // Namespace stripped, matching the `NetUpdate::Sound` convention.
-                assert_eq!(effect, "speed");
+                assert_eq!(effect, MobEffectId::SPEED);
                 assert_eq!(amplifier, 1);
                 assert_eq!(duration_ticks, 200, "duration must reach the HUD model");
                 assert!(!ambient);
@@ -7083,7 +7091,7 @@ mod tests {
         match rx.try_recv().expect("an update was forwarded") {
             NetUpdate::EffectRemoved { entity_id, effect } => {
                 assert_eq!(entity_id, 99);
-                assert_eq!(effect, "levitation");
+                assert_eq!(effect, MobEffectId::LEVITATION);
             }
             other => panic!("expected EffectRemoved, got {other:?}"),
         }
