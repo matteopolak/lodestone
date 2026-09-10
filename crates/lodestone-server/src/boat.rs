@@ -637,8 +637,12 @@ pub fn apply_boat_item(
             position,
             yaw,
         } => {
-            let entity_id =
-                mobs.with(|sim| sim.spawn_vehicle(entity_type.clone(), position, yaw));
+            // `BoatApplied::Placed` is consumed by the protocol-facing item
+            // path, so this is the explicit conversion back to its raw wire id.
+            let entity_id = mobs.with(|sim| {
+                sim.spawn_vehicle_typed(entity_type.clone(), position, yaw)
+                    .raw()
+            });
             BoatApplied::Placed {
                 entity_id,
                 entity_type,
