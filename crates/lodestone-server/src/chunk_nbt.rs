@@ -1265,7 +1265,7 @@ pub fn generated_block_entity(entity: &GeneratedBlockEntity) -> (BlockPos, Block
     (
         BlockPos::new(x, y, z),
         BlockEntity::Opaque {
-            id,
+            id: crate::block_entities::BlockEntityKind::from_name(&id),
             nbt: Nbt::Compound(fields),
         },
     )
@@ -1813,7 +1813,7 @@ pub(crate) fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)
         }
         "minecraft:chest" | "minecraft:trapped_chest" | "minecraft:barrel" => {
             BlockEntity::Container {
-                id: id.to_owned(),
+                id: crate::block_entities::BlockEntityKind::from_name(id),
                 slots: items_from_nbt(
                     field(nbt, "Items"),
                     crate::block_entities::CONTAINER_9X3_SIZE,
@@ -1909,7 +1909,7 @@ pub(crate) fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)
             BlockEntity::Crafter { slots: Box::new(slots), disabled }
         }
         _ => BlockEntity::Opaque {
-            id: id.to_owned(),
+            id: crate::block_entities::BlockEntityKind::from_name(id),
             nbt: nbt.clone(),
         },
     };
@@ -2266,6 +2266,48 @@ mod crafter_nbt_tests {
             .find(|(name, _)| name == "id")
             .map(|(_, value)| value.clone());
         assert_eq!(id, Some(lodestone_core::Nbt::String("minecraft:crafter".to_owned())));
+    }
+}
+
+#[cfg(test)]
+mod typed_container_nbt_tests {
+    use super::{block_entity_from_nbt, block_entity_to_nbt};
+    use crate::block_entities::{BlockEntity, BlockEntityKind};
+    use lodestone_core::Nbt;
+    use lodestone_model::BlockPos;
+
+    #[test]
+    fn container_and_opaque_keys_survive_the_text_nbt_boundary() {
+        let position = BlockPos::new(5, 70, -3);
+        let container = BlockEntity::container("minecraft:chest");
+        let encoded = block_entity_to_nbt(position, &container);
+        let (decoded_position, decoded) =
+            block_entity_from_nbt(&encoded).expect("known container must decode");
+        assert_eq!(decoded_position, position);
+        assert_eq!(decoded.kind(), BlockEntityKind::Chest);
+        assert_eq!(decoded.type_id(), "minecraft:chest");
+        assert_eq!(decoded, container);
+
+        let opaque_nbt = Nbt::Compound(vec![
+            (
+                "id".to_owned(),
+                Nbt::String("example:portable_storage".to_owned()),
+            ),
+            ("x".to_owned(), Nbt::Int(position.x)),
+            ("y".to_owned(), Nbt::Int(position.y)),
+            ("z".to_owned(), Nbt::Int(position.z)),
+            ("marker".to_owned(), Nbt::Int(17)),
+        ]);
+        let opaque = BlockEntity::Opaque {
+            id: BlockEntityKind::Extension("example:portable_storage".to_owned()),
+            nbt: opaque_nbt.clone(),
+        };
+        let (decoded_position, decoded) = block_entity_from_nbt(&opaque_nbt)
+            .expect("unknown opaque key must decode losslessly");
+        assert_eq!(decoded_position, position);
+        assert_eq!(decoded.kind(), opaque.kind());
+        assert_eq!(decoded.type_id(), "example:portable_storage");
+        assert_eq!(block_entity_to_nbt(position, &decoded), opaque_nbt);
     }
 }
 

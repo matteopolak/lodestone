@@ -4219,7 +4219,7 @@ mod tests {
         assert!(matches!(
             &converted[0],
             (BlockPos { x: 1, y: 65, z: 2 }, BlockEntity::Opaque { id, nbt })
-                if id == "minecraft:beehive"
+                if id.name() == "minecraft:beehive"
                     && matches!(nbt, lodestone_core::Nbt::Compound(fields)
                         if fields.iter().any(|(key, value)| key == "bees"
                             && matches!(value, lodestone_core::Nbt::List { elements, .. }
@@ -4228,7 +4228,7 @@ mod tests {
         assert!(matches!(
             &converted[1],
             (BlockPos { x: 3, y: 20, z: 4 }, BlockEntity::Opaque { id, nbt })
-                if id == "minecraft:chest"
+                if id.name() == "minecraft:chest"
                     && matches!(nbt, lodestone_core::Nbt::Compound(fields)
                         if fields.iter().any(|(key, value)| key == "LootTable"
                             && matches!(value, lodestone_core::Nbt::String(table)

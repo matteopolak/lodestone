@@ -381,7 +381,7 @@ fn fill_container(items: Vec<ItemStack>, rng: &mut SpawnRng) -> BlockEntity {
         slots[slot] = Some(item);
     }
     BlockEntity::Container {
-        id: "minecraft:chest".to_owned(),
+        id: "minecraft:chest".to_owned().into(),
         slots,
     }
 }
