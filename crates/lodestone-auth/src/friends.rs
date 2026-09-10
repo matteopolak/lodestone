@@ -1001,6 +1001,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hidden_presence_is_encoded_as_offline_on_the_wire() {
+        let (base, requests) = loopback_service(vec![ExpectedResponse {
+            status: "200 OK",
+            headers: "",
+            body: r#"{"presence":[]}"#,
+        }])
+        .await;
+        let service = FriendsService::for_test_base(base).expect("loopback fake is permitted");
+        service
+            .publish_presence(&session(), PresenceStatus::Offline, None)
+            .await
+            .expect("offline presence response");
+        let request = requests.recv().expect("captured presence request");
+        assert!(request.starts_with("POST /presence HTTP/1.1\r\n"));
+        assert!(request.ends_with(r#"{"status":"OFFLINE"}"#));
+    }
+
+    #[tokio::test]
     async fn chunked_success_response_is_capped_while_remaining_usable() {
         let (base, requests) = loopback_service(vec![ExpectedResponse {
             status: "200 OK",
