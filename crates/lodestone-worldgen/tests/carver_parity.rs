@@ -322,14 +322,14 @@ fn run_fixture(label: &str, surface_text: &str, carver_text: &str) {
         started_count: 0,
     };
 
-    let carvers_for_source = |_source_x: i32, _source_z: i32| carvers.clone();
+    let mut carvers_for_source = |_source_x: i32, _source_z: i32| carvers.as_slice();
     apply_carvers(
         SEED,
         r.chunk_x,
         r.chunk_z,
         MIN_Y,
         HEIGHT,
-        &carvers_for_source,
+        &mut carvers_for_source,
         &mut grid,
         &aquifer,
         &replaceable,
