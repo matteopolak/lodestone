@@ -184,8 +184,15 @@ impl FriendsApp {
     /// Returns the next Friends toast only when the shared HUD slot is free.
     /// The caller owns that slot's cross-feature priority; a Friends change
     /// remains queued instead of expiring behind a recipe or advancement toast.
-    pub(super) fn toast(&mut self, now_ms: u64, slot_available: bool) -> Option<FriendsToast> {
-        slot_available.then(|| self.toasts.current(now_ms)).flatten()
+    pub(super) fn toast(
+        &mut self,
+        now_ms: u64,
+        slot_available: bool,
+        in_world_notifications: bool,
+    ) -> Option<FriendsToast> {
+        (slot_available && in_world_notifications)
+            .then(|| self.toasts.current(now_ms))
+            .flatten()
     }
 
     fn pump(&mut self) {
@@ -264,7 +271,14 @@ impl WindowApp {
         self.friends
             .set_overlay_open(self.ui.screen() == crate::menu::Screen::Friends);
         self.friends
-            .sync(account, friends_activity(&self.ui, self.sim.session_phase()));
+            .sync(
+                account,
+                friends_activity(
+                    &self.ui,
+                    self.sim.session_phase(),
+                    self.nav.options().share_presence,
+                ),
+            );
         self.nav.refresh_friends_view(self.friends_view().clone());
     }
 
@@ -279,8 +293,15 @@ impl WindowApp {
 fn friends_activity(
     ui: &crate::menu::UiState,
     phase: crate::sim::SessionPhase,
+    visibility: crate::config::PresenceSharing,
 ) -> PresenceStatus {
+    if visibility == crate::config::PresenceSharing::None {
+        return PresenceStatus::Offline;
+    }
     if phase != crate::sim::SessionPhase::Connected {
+        return PresenceStatus::Online;
+    }
+    if visibility == crate::config::PresenceSharing::Limited {
         return PresenceStatus::Online;
     }
     match ui.kind() {
@@ -692,18 +713,18 @@ mod tests {
         }));
 
         assert_eq!(
-            app.toast(100, true),
+            app.toast(100, true, true),
             Some(FriendsToast {
                 message: "Alex sent you a friend request".to_owned(),
             })
         );
         assert_eq!(
-            app.toast(5_099, true),
+            app.toast(5_099, true, true),
             Some(FriendsToast {
                 message: "Alex sent you a friend request".to_owned(),
             })
         );
-        assert!(app.toast(5_100, true).is_none());
+        assert!(app.toast(5_100, true, true).is_none());
         app.shutdown();
     }
 
@@ -720,15 +741,29 @@ mod tests {
             friends: vec![profile(2, "Alex")],
             ..FriendsSnapshot::default()
         }));
-        assert!(app.toast(10, false).is_none());
+        assert!(app.toast(10, false, true).is_none());
         assert_eq!(
-            app.toast(5_000, true),
+            app.toast(5_000, true, true),
             Some(FriendsToast {
                 message: "Alex accepted your friend request".to_owned(),
             })
         );
-        assert!(app.toast(9_999, true).is_some());
-        assert!(app.toast(10_000, true).is_none());
+        assert!(app.toast(9_999, true, true).is_some());
+        assert!(app.toast(10_000, true, true).is_none());
+        app.shutdown();
+    }
+
+    #[test]
+    fn in_world_notification_setting_is_a_real_negative_control() {
+        let mut app = FriendsApp::new();
+        app.account = Some(account());
+        app.apply_view(enabled_view(FriendsSnapshot::default()));
+        app.apply_view(enabled_view(FriendsSnapshot {
+            incoming: vec![profile(2, "Alex")],
+            ..FriendsSnapshot::default()
+        }));
+        assert!(app.toast(100, true, false).is_none());
+        assert!(app.toast(100, true, true).is_some());
         app.shutdown();
     }
 
@@ -764,27 +799,59 @@ mod tests {
     fn production_activity_consumer_publishes_the_current_session_context() {
         let title = crate::menu::UiState::new();
         assert_eq!(
-            friends_activity(&title, crate::sim::SessionPhase::LocalOnly),
+            friends_activity(
+                &title,
+                crate::sim::SessionPhase::LocalOnly,
+                crate::config::PresenceSharing::All,
+            ),
             PresenceStatus::Online
         );
 
         let mut singleplayer = crate::menu::UiState::new();
         singleplayer.begin(crate::menu::SessionKind::Singleplayer);
         assert_eq!(
-            friends_activity(&singleplayer, crate::sim::SessionPhase::Connected),
+            friends_activity(
+                &singleplayer,
+                crate::sim::SessionPhase::Connected,
+                crate::config::PresenceSharing::All,
+            ),
             PresenceStatus::LocalWorld
         );
 
         let mut multiplayer = crate::menu::UiState::new();
         multiplayer.begin(crate::menu::SessionKind::Multiplayer);
         assert_eq!(
-            friends_activity(&multiplayer, crate::sim::SessionPhase::Connected),
+            friends_activity(
+                &multiplayer,
+                crate::sim::SessionPhase::Connected,
+                crate::config::PresenceSharing::All,
+            ),
             PresenceStatus::Server
         );
 
         assert_eq!(
-            friends_activity(&multiplayer, crate::sim::SessionPhase::Connecting),
+            friends_activity(
+                &multiplayer,
+                crate::sim::SessionPhase::Connecting,
+                crate::config::PresenceSharing::All,
+            ),
             PresenceStatus::Online
+        );
+        assert_eq!(
+            friends_activity(
+                &multiplayer,
+                crate::sim::SessionPhase::Connected,
+                crate::config::PresenceSharing::Limited,
+            ),
+            PresenceStatus::Online
+        );
+        assert_eq!(
+            friends_activity(
+                &multiplayer,
+                crate::sim::SessionPhase::Connected,
+                crate::config::PresenceSharing::None,
+            ),
+            PresenceStatus::Offline
         );
     }
 }

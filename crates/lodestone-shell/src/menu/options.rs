@@ -24,23 +24,15 @@
 //!
 //! There is no disabled widget type in vanilla and none here — see
 //! [`super::widget`]'s module docs. [`Cell::is_live`] is what decides it, and
-//! it answers `false` for **99 or 100 of the 143** controls this module
-//! renders. The 44-or-43 live ones break down as:
+//! it answers `false` for most of the 143 controls this module renders. The
+//! remaining controls are the persisted options, completed navigation buttons,
+//! and the local Friends privacy rows.
 //!
-//! - **25 option rows**, driving **22** distinct [`LiveOption`]s — three of them
-//!   (`textBackgroundOpacity`, `chatOpacity`, `chatLineSpacing`) are placed on
-//!   two pages each, which is vanilla's own shape and why the row count exceeds
-//!   the option count. The 22 are `guiScale`/`bobView`,
-//!   `toggleCrouch`/`toggleSprint`/`invertMouseX`/`invertMouseY`/
-//!   `mouseWheelSensitivity`, the eight chat options
-//!   (`9eba2bb`), `sensitivity`/`renderDistance`, and
-//!   `discreteMouseScroll` plus the four remaining Controls rows
-//!   (`toggleAttack`/`toggleUse`/`autoJump`/`sprintWindow`).
-//! - **9 `Done` buttons**, one per page, always live.
-//! - **14 or 13 working navigation/action buttons** — the swing is the root's
-//!   Online button:
-//!   live outside a world, the inactive World Options placeholder inside one
-//!   (see [`online_cell`]), which is the whole of the 44-vs-43 difference.
+//! - persisted option rows, including local Friends notification and presence
+//!   controls;
+//! - **9 `Done` buttons**, one per page, always live; and
+//! - working navigation/action buttons, with the root's Online button live only
+//!   outside a world (see [`online_cell`]).
 //!
 //! **These numbers are asserted, not maintained by hand** —
 //! `the_disabled_majority_is_the_point_and_it_is_measured` and
@@ -111,9 +103,8 @@
 //! - [`super::widget`] — `Widget`, `WidgetSprites`, the grey label.
 //! - [`super::render`] — [`Origin::Settings`] resolves a [`Placement`] to a
 //!   rect; `draw_widget` draws the row.
-//! - [`crate::config`] — the 22 distinct live options represented by
-//!   [`LiveOption`] across 25 rows; their persisted values are the source of
-//!   truth for the controls below.
+//! - [`crate::config`] — the persisted option values represented by
+//!   [`LiveOption`], including Friends notification and presence privacy.
 
 use super::layout::{self, HeaderAndFooterLayout, LayoutSettings, LinearLayout};
 use super::render::{Align, MenuFrame, MenuLabel, MenuRow, Origin, Slot};
@@ -569,6 +560,10 @@ pub enum LiveOption {
     /// as the value used "unless a caller has an actual video-settings" one. No
     /// caller did.
     BiomeBlendRadius,
+    /// `inGameNotification` → [`crate::config::Options::in_game_notification`].
+    InGameNotification,
+    /// `sharePresence` → [`crate::config::Options::share_presence`].
+    SharePresence,
 }
 
 impl LiveOption {
@@ -654,7 +649,9 @@ impl LiveOption {
             // A three-state cycle, not a slider at all.
             | LiveOption::Particles
             // The seventh `IntRange`, `RenderDistance`'s reason again.
-            | LiveOption::BiomeBlendRadius => None,
+            | LiveOption::BiomeBlendRadius
+            | LiveOption::InGameNotification
+            | LiveOption::SharePresence => None,
         }
     }
 
@@ -725,7 +722,9 @@ impl LiveOption {
             // A three-state cycle, not a slider at all.
             | LiveOption::Particles
             // The seventh `IntRange`, `RenderDistance`'s reason again.
-            | LiveOption::BiomeBlendRadius => None,
+            | LiveOption::BiomeBlendRadius
+            | LiveOption::InGameNotification
+            | LiveOption::SharePresence => None,
         }
     }
 
@@ -2026,6 +2025,14 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
         // **width**, not the stored radius, and `en_us.json` gives each width
         // its own hand-written name rather than a format pattern.
         LiveOption::BiomeBlendRadius => biome_blend_caption(options.biome_blend_radius),
+        LiveOption::InGameNotification => {
+            if options.in_game_notification { "ON" } else { "OFF" }.to_string()
+        }
+        LiveOption::SharePresence => match options.share_presence {
+            crate::config::PresenceSharing::None => "Hidden".to_string(),
+            crate::config::PresenceSharing::Limited => "Limited".to_string(),
+            crate::config::PresenceSharing::All => "Full".to_string(),
+        },
     }
 }
 
@@ -2645,8 +2652,12 @@ static ONLINE: &[Entry] = &[
         friends_settings("Allow Requests..."), // opens the account-scoped preference surface
     ),
     pair(
-        cycle("inGameNotification", "In-Game Notification"),
-        cycle("sharePresence", "Visibility"), // options.sharePresence
+        live_cycle(
+            "inGameNotification",
+            "In-Game Notification",
+            LiveOption::InGameNotification,
+        ),
+        live_cycle("sharePresence", "Visibility", LiveOption::SharePresence),
     ),
     big(unsupported("Xbox Settings...")), // options.online.xboxSettings
     head("Servers"),                      // options.online.servers.header
@@ -2720,10 +2731,9 @@ pub enum SettingsPage {
     /// Settings link, server-listing opt-out and Realms news/invites. The
     /// Friends List and request-permission rows are live as routes to the
     /// account-scoped Friends settings surface, where service persistence and
-    /// failure rollback are implemented. The other five controls remain
-    /// decorative because this
-    /// client has no local notification/visibility store, Realms client, or
-    /// Xbox link to send them to; see [`ONLINE`].
+    /// failure rollback are implemented. The notification and visibility rows
+    /// are local persisted controls; the remaining server-list, Realms, and
+    /// Xbox rows remain decorative because their consumers are not implemented.
     ///
     /// Reached from the root's second header button when
     /// [`super::UiState::settings_in_world`] is `false` — vanilla's own fork
@@ -4395,6 +4405,10 @@ mod tests {
                 LiveOption::GlintSpeed,
                 LiveOption::GlintStrength,
                 LiveOption::PanoramaSpeed,
+                // Online Options: local controls for in-world notifications and
+                // activity privacy.
+                LiveOption::InGameNotification,
+                LiveOption::SharePresence,
             ],
             "FOV on the root; GUI Scale, Biome Blend, Render Distance, Clouds, \
              Mipmap Levels, \
@@ -4456,7 +4470,7 @@ mod tests {
         // Accessibility -> Controls, Controls -> Mouse, Controls -> Key Binds,
         // and the root's own Online button, live outside a world).
         // A change that adds or removes a live row anywhere must say so here.
-        assert_eq!(live.len(), 81, "outside a world: {live:?}");
+        assert_eq!(live.len(), 83, "outside a world: {live:?}");
     }
 
     /// The companion to [`the_disabled_majority_is_the_point_and_it_is_measured`]:
@@ -4490,8 +4504,8 @@ mod tests {
         // and
         // `menuBackgroundBlurriness`, which is **two** rows (Video and
         // Accessibility) for one option.
-        assert_eq!(outside.len(), 81);
-        assert_eq!(inside.len(), 80, "one fewer: the root's Online button");
+        assert_eq!(outside.len(), 83);
+        assert_eq!(inside.len(), 82, "one fewer: the root's Online button");
         assert!(
             outside.contains(&nav("Online...", SettingsPage::Online)),
             "outside a world the root links to Online"
@@ -4529,6 +4543,34 @@ mod tests {
             cycle("improvedTransparency", "Improved Transparency").label(&options),
             "Improved Transparency"
         );
+    }
+
+    #[test]
+    fn online_privacy_rows_are_live_and_have_distinguishable_values() {
+        let mut options = crate::config::Options::default();
+        let controls = all_controls(SettingsPage::Online, false);
+        let notification = controls
+            .iter()
+            .find_map(|cell| match cell {
+                Cell::Option(spec) if spec.accessor == "inGameNotification" => Some(*cell),
+                _ => None,
+            })
+            .expect("Online exposes in-game notification");
+        let visibility = controls
+            .iter()
+            .find_map(|cell| match cell {
+                Cell::Option(spec) if spec.accessor == "sharePresence" => Some(*cell),
+                _ => None,
+            })
+            .expect("Online exposes presence visibility");
+        assert!(notification.is_live());
+        assert!(visibility.is_live());
+        assert_eq!(notification.label(&options), "In-Game Notification: OFF");
+        assert_eq!(visibility.label(&options), "Visibility: Full");
+        options.in_game_notification = true;
+        options.share_presence = crate::config::PresenceSharing::None;
+        assert_eq!(notification.label(&options), "In-Game Notification: ON");
+        assert_eq!(visibility.label(&options), "Visibility: Hidden");
     }
 
     /// Owner report: a settings row showing the value with no name at all —
@@ -5506,6 +5548,8 @@ mod tests {
         // The biome tint blend window: `BlendedTintCursor` already took a
         // radius and every caller handed it the frozen `BLEND_RADIUS`.
         LiveOption::BiomeBlendRadius,
+        LiveOption::InGameNotification,
+        LiveOption::SharePresence,
     ];
 
     /// Every [`LiveOption`] must be placed on some page — the island check in
@@ -5582,7 +5626,9 @@ mod tests {
                 | LiveOption::MenuBackgroundBlurriness
                 | LiveOption::AttackIndicator
                 | LiveOption::Particles
-                | LiveOption::BiomeBlendRadius => {}
+                | LiveOption::BiomeBlendRadius
+                | LiveOption::InGameNotification
+                | LiveOption::SharePresence => {}
             }
         }
         // 25 before the kind A batch, plus eleven sound buses, FOV, both glint
@@ -5591,7 +5637,7 @@ mod tests {
         // session's entity-shadows row, plus the weather-radius,
         // menu-background-blur, attack-indicator, particles and biome-blend
         // rows.
-        assert_eq!(ALL.len(), 52, "fifty-two distinct live options");
+        assert_eq!(ALL.len(), 54, "fifty-four distinct live options");
         // And the eleven indices are all of them, none repeated: `SoundVolume` is
         // a *payload* variant, so neither the compiler nor the match above can see
         // a missing or duplicated index, and a duplicate would silently leave one

@@ -442,6 +442,7 @@ impl WindowApp {
             .toast(
                 toast_now,
                 recipe_toast.is_none() && advancement_toast.is_none(),
+                !self.ui.is_playing() || self.nav.options().in_game_notification,
             )
             .map(|toast| crate::hud::FriendsToastView {
                 message: toast.message,
