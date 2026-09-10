@@ -751,7 +751,7 @@ interface persistent-data {
 
     variant scope {
         plugin,
-        world(list<u8>),
+        world-scope(list<u8>),
         player(list<u8>),
         entity(entity-scope),
     }
