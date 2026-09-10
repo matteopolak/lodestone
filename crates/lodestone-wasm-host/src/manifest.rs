@@ -8,7 +8,7 @@
 //! version = "0.1.0"
 //! # The WIT world the module was built against. Checked against
 //! # `lodestone_wasm_host::ABI_WORLD` before the module is compiled.
-//! abi = "lodestone:plugin@0.27.0"
+//! abi = "lodestone:plugin@0.28.0"
 //! # The `.wasm`, relative to this file. A core module or a component; the host
 //! # encodes the former.
 //! module = "chat_responder.wasm"
@@ -570,7 +570,7 @@ mod tests {
     const GOOD: &str = r#"
 name = "chat-responder"
 version = "0.1.0"
-abi = "lodestone:plugin@0.27.0"
+abi = "lodestone:plugin@0.28.0"
 module = "chat_responder.wasm"
 priority = "normal"
 description = "Replies pong to ping."

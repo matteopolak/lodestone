@@ -104,7 +104,7 @@ fn persistent_data_survives_a_successful_directory_reload() {
         plugin_dir.join("plugin.toml"),
         r#"name = "chat-responder"
 version = "0.1.0"
-abi = "lodestone:plugin@0.27.0"
+abi = "lodestone:plugin@0.28.0"
 module = "chat_responder.wasm"
 capabilities = ["log", "observe:chat", "act:chat", "fs:write"]
 "#,

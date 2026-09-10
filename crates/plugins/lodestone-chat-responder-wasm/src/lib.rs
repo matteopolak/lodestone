@@ -117,7 +117,7 @@ impl Guest for ChatResponder {
             version: env!("CARGO_PKG_VERSION").to_string(),
             // Must match `lodestone_wasm_host::ABI_WORLD`, or the host refuses to
             // load this plugin with a message that names both sides.
-            abi: "lodestone:plugin@0.27.0".to_string(),
+            abi: "lodestone:plugin@0.28.0".to_string(),
             commands: command_specs(),
         }
     }
