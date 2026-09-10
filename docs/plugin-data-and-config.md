@@ -22,9 +22,11 @@ and syncs the parent directory. Missing files open as empty; malformed existing 
 
 The conventional `lodestone-plugin-data.json` sidecar is independent of terrain encoding. An Anvil
 world and a Lodestone-native world can therefore use the same record envelope beside their respective
-stores without teaching either terrain codec to decode plugin-owned bytes. The WASM host's confined
-filesystem uses the same bounded atomic-write and delete lifecycle; a typed snapshot can be carried
-through that path unchanged.
+stores without teaching either terrain codec to decode plugin-owned bytes. The native WASM host exposes
+that envelope through the optional `data:persistent` component import: `get`, `set`, and `delete` accept
+plugin, world, player, or generation-qualified entity scopes. World, player, and entity identities must
+be exactly 16 bytes; entity generations are part of the key. With a filesystem root, the host loads and
+atomically saves the sidecar; without one, the same ABI is process-local.
 
 ## How to change it
 

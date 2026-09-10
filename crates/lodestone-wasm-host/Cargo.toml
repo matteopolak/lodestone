@@ -66,6 +66,10 @@ lodestone-model = { workspace = true }
 # therefore invisible to every crate below this one, which is what keeps the tier
 # additive rather than a second API.
 lodestone-ecs = { workspace = true }
+# The typed durable-record envelope used by the optional persistent-data import.
+# The host remains the lifecycle owner; this dependency only supplies the
+# validated scope/key/blob contract and snapshot format.
+lodestone-plugin-support = { path = "../plugins/lodestone-plugin-support" }
 # The movement intent boundary is explicitly ordered after this crate's normal
 # input producer.  It still writes the ECS intent rather than synthesising an
 # outbound packet, so physics and the controller's egress remain the owners of
@@ -92,7 +96,6 @@ lodestone-world = { workspace = true }
 # the host remains version-free and does not acquire a server dependency in its
 # production graph.
 lodestone-server = { path = "../lodestone-server" }
-lodestone-plugin-support = { path = "../plugins/lodestone-plugin-support" }
 lodestone-core = { workspace = true }
 lodestone-data = { workspace = true }
 uuid = { workspace = true }

@@ -49,11 +49,15 @@ use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 use bevy_ecs::entity::Entity;
 
 use crate::bindings::lodestone::plugin::{
-    filesystem, filesystem_write, logging, scheduler, types, version_broker, world_snapshot,
+    filesystem, filesystem_write, logging, persistent_data, scheduler, types, version_broker,
+    world_snapshot,
 };
 use crate::capability::{Capability, CapabilitySet};
 use crate::version_broker::{VersionBroker, VersionBrokerDescriptor};
 use lodestone_ecs::ChunkWorld;
+use lodestone_plugin_support::{
+    plugin_data_snapshot_path, DataScope, PluginDataKey, PluginDataStore,
+};
 
 /// The WIT vocabulary, re-exported from the generated bindings so that nothing
 /// outside this crate spells a `bindings::lodestone::plugin::…` path.
@@ -83,7 +87,7 @@ pub use crate::bindings::lodestone::plugin::types::{
 /// The WIT world is a named, versioned unit, so "a guest built against
 /// `lodestone:plugin@0.2.0`" is a thing the host can *detect* rather than
 /// discover as a mysterious trap.
-pub const ABI_WORLD: &str = "lodestone:plugin@0.27.0";
+pub const ABI_WORLD: &str = "lodestone:plugin@0.28.0";
 
 /// Default per-tick fuel budget. Chosen as "enough for any plugin doing plain
 /// data work over a tick's event batch, nowhere near enough to survive a spin
@@ -271,6 +275,8 @@ pub enum HostError {
     InvalidFilesystemName { name: String },
     #[error("plugin `{plugin}` filesystem root: {message}")]
     Filesystem { plugin: String, message: String },
+    #[error("plugin `{plugin}` persistent data: {message}")]
+    PersistentData { plugin: String, message: String },
 }
 
 /// Either half of loading a plugin from a manifest can fail, and the two halves have
@@ -407,6 +413,12 @@ pub struct GuestState {
     /// their respective capabilities are granted. `None` refuses both, while
     /// still recording attempts.
     fs_root: Option<PathBuf>,
+    /// Validated typed records owned by this guest. The host keeps one store per
+    /// guest, matching the existing per-plugin filesystem boundary.
+    persistent_data: PluginDataStore,
+    /// The durable snapshot path, when the embedding configured a filesystem
+    /// root. Without a root, the same ABI remains process-local.
+    persistent_data_path: Option<PathBuf>,
     /// The selected version-specific broker. Every response is copied into
     /// generated WIT records before guest code sees it.
     version_broker: Option<Arc<dyn VersionBroker>>,
@@ -436,6 +448,8 @@ impl fmt::Debug for GuestState {
                     .collect::<Vec<_>>(),
             )
             .field("fs_root", &self.fs_root)
+            .field("persistent_data", &self.persistent_data.len())
+            .field("persistent_data_path", &self.persistent_data_path)
             .field(
                 "version_broker",
                 &self
@@ -547,7 +561,66 @@ impl filesystem_write::Host for GuestState {
     }
 }
 
+impl persistent_data::Host for GuestState {
+    fn get(
+        &mut self,
+        scope: persistent_data::Scope,
+        key: String,
+    ) -> Result<Option<persistent_data::Value>, String> {
+        let key = self.persistent_key(scope, key)?;
+        Ok(self
+            .persistent_data
+            .record(&key)
+            .map(|record| persistent_data::Value {
+                schema_version: record.schema_version(),
+                blob: record.blob().to_vec(),
+            }))
+    }
+
+    fn set(
+        &mut self,
+        scope: persistent_data::Scope,
+        key: String,
+        schema_version: u32,
+        blob: Vec<u8>,
+    ) -> Result<(), String> {
+        let key = self.persistent_key(scope, key)?;
+        self.persistent_data
+            .set_blob(key, schema_version, blob)
+            .map_err(|error| error.to_string())?;
+        self.persist_persistent_data()
+    }
+
+    fn delete(
+        &mut self,
+        scope: persistent_data::Scope,
+        key: String,
+    ) -> Result<(), String> {
+        let key = self.persistent_key(scope, key)?;
+        self.persistent_data.remove(&key);
+        self.persist_persistent_data()
+    }
+}
+
 impl GuestState {
+    fn persistent_key(
+        &self,
+        scope: persistent_data::Scope,
+        key: String,
+    ) -> Result<PluginDataKey, String> {
+        PluginDataKey::new(self.name.clone(), data_scope(scope)?, key)
+            .map_err(|error| error.to_string())
+    }
+
+    fn persist_persistent_data(&self) -> Result<(), String> {
+        let Some(path) = self.persistent_data_path.as_ref() else {
+            return Ok(());
+        };
+        self.persistent_data
+            .save_snapshot_file(path)
+            .map_err(|error| error.to_string())
+    }
+
     fn filesystem_target(&self, path: &str) -> Result<PathBuf, String> {
         let Some(root) = self.fs_root.as_ref() else {
             return Err("no filesystem root is configured for this plugin".to_owned());
@@ -617,6 +690,28 @@ impl GuestState {
             .map(|(index, _)| index)?;
         Some(self.scheduled_tasks.swap_remove(index))
     }
+}
+
+fn data_scope(scope: persistent_data::Scope) -> Result<DataScope, String> {
+    match scope {
+        persistent_data::Scope::Plugin => Ok(DataScope::Plugin),
+        persistent_data::Scope::World(id) => Ok(DataScope::World {
+            id: scope_identity(id)?,
+        }),
+        persistent_data::Scope::Player(id) => Ok(DataScope::Player {
+            id: scope_identity(id)?,
+        }),
+        persistent_data::Scope::Entity(entity) => Ok(DataScope::Entity {
+            id: scope_identity(entity.id)?,
+            generation: entity.generation,
+        }),
+    }
+}
+
+fn scope_identity(identity: Vec<u8>) -> Result<[u8; 16], String> {
+    identity
+        .try_into()
+        .map_err(|_| "scope identity must contain exactly 16 bytes".to_owned())
 }
 
 impl scheduler::Host for GuestState {
@@ -1079,10 +1174,11 @@ impl PluginHost {
         self
     }
 
-    /// Use `root` as the parent of one filesystem subtree per plugin. Without
-    /// this, a plugin holding `fs:read` or `fs:write` still reads or writes
-    /// nothing — the capability is necessary and not sufficient. The host
-    /// creates `<root>/<plugin-name>` on load after validating the name.
+    /// Use `root` as the parent of one confined data subtree per plugin. Without
+    /// this, a plugin holding `fs:read`, `fs:write`, or `data:persistent` still
+    /// reads, writes, or persists nothing — the capability is necessary and not
+    /// sufficient. The host creates `<root>/<plugin-name>` on load after
+    /// validating the name.
     #[must_use]
     pub fn with_filesystem_root(mut self, root: PathBuf) -> Self {
         self.fs_root = Some(root);
@@ -1107,7 +1203,10 @@ impl PluginHost {
         let Some(root) = self.fs_root.as_ref() else {
             return Ok(None);
         };
-        if !granted.contains(Capability::FsRead) && !granted.contains(Capability::FsWrite) {
+        if !granted.contains(Capability::FsRead)
+            && !granted.contains(Capability::FsWrite)
+            && !granted.contains(Capability::PersistentData)
+        {
             return Ok(None);
         }
         if !valid_filesystem_name(name) {
@@ -1320,6 +1419,21 @@ impl PluginHost {
                 message: format!("{e:?}"),
             })?;
         let plugin_fs_root = self.plugin_filesystem_root(name, &granted)?;
+        let persistent_data_path = if granted.contains(Capability::PersistentData) {
+            plugin_fs_root
+                .as_ref()
+                .map(|root| plugin_data_snapshot_path(root))
+        } else {
+            None
+        };
+        let persistent_data = if let Some(path) = persistent_data_path.as_ref() {
+            PluginDataStore::load_snapshot_file(path).map_err(|error| HostError::PersistentData {
+                plugin: name.to_owned(),
+                message: error.to_string(),
+            })?
+        } else {
+            PluginDataStore::default()
+        };
 
         let mut linker: Linker<GuestState> = Linker::new(&self.engine);
         // **This block is the capability gate.** Every `if` here is a security
@@ -1347,6 +1461,16 @@ impl PluginHost {
             .map_err(|e| HostError::Compile {
                 name: name.to_owned(),
                 message: format!("linking filesystem-write: {e:?}"),
+            })?;
+        }
+        if granted.contains(Capability::PersistentData) {
+            persistent_data::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
+                &mut linker,
+                |s| s,
+            )
+            .map_err(|e| HostError::Compile {
+                name: name.to_owned(),
+                message: format!("linking persistent-data: {e:?}"),
             })?;
         }
         if granted.contains(Capability::ScheduleTasks) {
@@ -1399,6 +1523,8 @@ impl PluginHost {
             } else {
                 None
             },
+            persistent_data,
+            persistent_data_path,
             version_broker: self.version_broker.clone(),
             chunk_world: None,
             current_tick: 0,
@@ -1787,5 +1913,83 @@ mod tests {
             matches!(err, HostError::CapabilityDenied { .. }),
             "expected CapabilityDenied, got {err:?}"
         );
+    }
+
+    fn data_guest() -> GuestState {
+        GuestState {
+            name: "scope-test".to_owned(),
+            limits: StoreLimitsBuilder::new().build(),
+            log_lines: Vec::new(),
+            fs_reads: Vec::new(),
+            fs_writes: Vec::new(),
+            fs_root: None,
+            persistent_data: PluginDataStore::default(),
+            persistent_data_path: None,
+            version_broker: None,
+            chunk_world: None,
+            current_tick: 0,
+            next_task_id: 0,
+            scheduled_tasks: Vec::new(),
+            running_task: None,
+            cancel_running_task: false,
+        }
+    }
+
+    /// The component ABI carries the record schema version and opaque bytes
+    /// without interpreting them, while entity generations remain part of the
+    /// lookup identity.
+    #[test]
+    fn persistent_data_round_trips_versioned_entity_records_and_deletes() {
+        let mut guest = data_guest();
+        let scope = persistent_data::Scope::Entity(persistent_data::EntityScope {
+            id: vec![7; 16],
+            generation: 3,
+        });
+        <GuestState as persistent_data::Host>::set(
+            &mut guest,
+            scope.clone(),
+            "state".to_owned(),
+            4,
+            vec![0, 2, 5],
+        )
+        .expect("valid record");
+        let value = <GuestState as persistent_data::Host>::get(
+            &mut guest,
+            scope.clone(),
+            "state".to_owned(),
+        )
+        .expect("lookup")
+        .expect("record");
+        assert_eq!(value.schema_version, 4);
+        assert_eq!(value.blob, vec![0, 2, 5]);
+        assert!(
+            <GuestState as persistent_data::Host>::get(
+                &mut guest,
+                persistent_data::Scope::Entity(persistent_data::EntityScope {
+                    id: vec![7; 16],
+                    generation: 4,
+                }),
+                "state".to_owned(),
+            )
+            .expect("new generation lookup")
+            .is_none()
+        );
+        <GuestState as persistent_data::Host>::delete(&mut guest, scope, "state".to_owned())
+            .expect("delete");
+        assert_eq!(guest.persistent_data.len(), 0);
+    }
+
+    /// Identity width is checked before a scope can become a durable key; a
+    /// malformed guest value cannot alias another world, player, or entity.
+    #[test]
+    fn persistent_data_rejects_malformed_scope_identity() {
+        let mut guest = data_guest();
+        let error = <GuestState as persistent_data::Host>::get(
+            &mut guest,
+            persistent_data::Scope::World(vec![1; 15]),
+            "state".to_owned(),
+        )
+        .expect_err("identity must be exactly one UUID");
+        assert!(error.contains("exactly 16 bytes"), "{error}");
     }
 }

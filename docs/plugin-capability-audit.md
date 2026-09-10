@@ -104,7 +104,7 @@ piece named) · **gap** (nothing) · **ceiling** (will not exist by design; stat
 | custom menu (`createInventory`) | **done**, local-only — `Menus::open_local`, one menu at a time | **gap** | **gap** — no open-to-remote-player path; `PlayerInventory` is a connection-task local |
 | inventory click veto | **done** — `SharedState::menu_click` asks before prediction and direct send | **gap** | **gap** |
 | custom items / recipes / station hooks | **done** — `CustomItemRegistry`, `RecipeRegistryExt::add_recipe` | **gap** | **done** — `CraftingStationHooks` (anvil, grindstone, smithing, loom, stonecutter) |
-| per-entity / per-chunk key-value data | partial — `EntityDataStore`/`ChunkDataStore` are live in-memory stores; `durable_data::PluginDataStore` adds bounded, versioned records for plugin/world/player/entity-generation scopes with a storage-neutral snapshot boundary | partial — the per-plugin `fs:read`/`fs:write` directory is durable and reload-safe, but there is no typed entity/chunk key-value ABI | **gap** — `NbtStorageHandle` has no save path in `live_save`; nothing plugin-keyed is written to disk |
+| per-entity / per-chunk key-value data | partial — `EntityDataStore`/`ChunkDataStore` are live in-memory stores; `durable_data::PluginDataStore` adds bounded, versioned records for plugin/world/player/entity-generation scopes with a storage-neutral snapshot boundary | partial — default-denied `data:persistent` provides bounded typed plugin/world/player/entity-generation records and reload-safe sidecar persistence when a filesystem root is configured; chunk scopes and automatic scope unload are not exposed | **gap** — `NbtStorageHandle` has no save path in `live_save`; nothing plugin-keyed is written to disk |
 | plugin config file / data dir | **done** — `lodestone-plugin-support::{paths, config}` | partial — read-only | **done** for an embedding crate (plain `std`) |
 | database access | **done**, trivially (unrestricted `std`) | **ceiling** — no network import exists, by design | **done**, trivially |
 | inbound/outbound packet observation | **done (native)** — decoded `GameEvent` plus opt-in `RawPacket` and bounded `OutboundRawPacket` observation; the inbound bus publishes exact owned bytes before decoding, and the outbound bus publishes exact adapter output after decorators and before transport framing, with per-tick packet/byte drop counters | **gap** — WASM receives curated decoded events only; no raw-packet event or capability | partial — a `ServerProtocol` decorator sees every `decode(state, id, payload)` call, version-locked |
@@ -327,11 +327,11 @@ restore path rejects unknown format versions, duplicate keys and oversized blobs
 partially populated value; `unload_scope` drains memory without implying backend deletion, while
 `remove` makes a deletion visible in the next snapshot.
 
-WASM: `fs:read` and `fs:write` are enforced by the linker (an ungranted import is absent, so a guest
-referencing it fails to instantiate). The native host gives each granted plugin a confined persistent
-directory, bounds and atomically replaces non-empty files, and treats an empty write as deletion; a
-successful guest reload reuses that directory. This is plugin-scoped durable data, not yet typed
-entity/chunk records.
+WASM: `fs:read`, `fs:write`, and `data:persistent` are enforced by the linker (an ungranted import is
+absent, so a guest referencing it fails to instantiate). The native host gives each granted plugin a
+confined directory, bounds and atomically replaces durable snapshots, and reloads the validated
+generation-qualified records on a successful guest reload. The typed ABI covers plugin/world/player/
+entity scopes; chunk scopes and automatic scope-unload callbacks remain outside the component contract.
 
 ### Packet interception
 

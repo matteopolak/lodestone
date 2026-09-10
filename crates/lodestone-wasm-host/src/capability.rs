@@ -212,6 +212,12 @@ pub enum Capability {
     /// **Never in [`CapabilitySet::default_policy`].** The host confines writes
     /// to its configured plugin filesystem root and records every attempt.
     FsWrite,
+    /// Read and write bounded, generation-qualified plugin-owned records.
+    ///
+    /// **Never in [`CapabilitySet::default_policy`].** The host persists the
+    /// record envelope below the plugin's confined data directory when one is
+    /// configured; without that directory the scope remains process-local.
+    PersistentData,
     /// Schedule delayed or repeating guest callbacks through the host tick.
     ///
     /// **Never in [`CapabilitySet::default_policy`].** The scheduler is exposed
@@ -263,6 +269,7 @@ impl Capability {
         Self::RegisterCommands,
         Self::FsRead,
         Self::FsWrite,
+        Self::PersistentData,
         Self::ScheduleTasks,
         Self::VersionBroker,
     ];
@@ -306,6 +313,7 @@ impl Capability {
             Self::RegisterCommands => "commands:register",
             Self::FsRead => "fs:read",
             Self::FsWrite => "fs:write",
+            Self::PersistentData => "data:persistent",
             Self::ScheduleTasks => "schedule:tasks",
             Self::VersionBroker => "version:broker",
         }
@@ -332,6 +340,7 @@ impl Capability {
             Self::Log
             | Self::FsRead
             | Self::FsWrite
+            | Self::PersistentData
             | Self::ScheduleTasks
             | Self::ReadWorld
             | Self::VersionBroker => true,
@@ -533,6 +542,7 @@ mod tests {
         let policy = CapabilitySet::default_policy();
         assert!(!policy.contains(Capability::FsRead), "fs:read must not be granted by default");
         assert!(!policy.contains(Capability::FsWrite), "fs:write must not be granted by default");
+        assert!(!policy.contains(Capability::PersistentData));
         assert!(
             !policy.contains(Capability::ActCommand),
             "act:command must not be granted by default"
@@ -610,6 +620,7 @@ mod tests {
         // `contains` always answering false.
         assert!(CapabilitySet::permissive().contains(Capability::FsRead));
         assert!(CapabilitySet::permissive().contains(Capability::FsWrite));
+        assert!(CapabilitySet::permissive().contains(Capability::PersistentData));
         assert!(CapabilitySet::permissive().contains(Capability::ScheduleTasks));
         assert!(CapabilitySet::permissive().contains(Capability::ReadWorld));
         assert!(CapabilitySet::permissive().contains(Capability::RegisterCommands));
@@ -637,6 +648,7 @@ mod tests {
     fn dangerous_host_services_are_import_capabilities() {
         assert!(Capability::FsRead.is_import());
         assert!(Capability::FsWrite.is_import());
+        assert!(Capability::PersistentData.is_import());
         assert!(Capability::ScheduleTasks.is_import());
         assert!(Capability::ReadWorld.is_import());
         assert!(Capability::VersionBroker.is_import());
