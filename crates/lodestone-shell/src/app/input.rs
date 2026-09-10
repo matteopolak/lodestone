@@ -223,6 +223,8 @@ pub(crate) enum KeyOutcome {
     /// Open the chat prompt. `command` pre-fills the `/` prefix.
     OpenChat { command: bool },
     OpenContainer,
+    /// Open the account-scoped Friends overlay over the current world.
+    OpenFriends,
     TogglePerspective,
     /// Select hotbar slot `0..=8`.
     SelectSlot(usize),
@@ -583,6 +585,8 @@ pub(crate) fn resolve_key(
         })
     } else if binds.is(InputAction::Inventory, code.into()) && pressed && gate.gameplay {
         Some(KeyOutcome::OpenContainer)
+    } else if binds.is(InputAction::Friends, code.into()) && pressed && gate.gameplay {
+        Some(KeyOutcome::OpenFriends)
     } else if binds.is(InputAction::TogglePerspective, code.into()) && pressed && gate.gameplay {
         Some(KeyOutcome::TogglePerspective)
     } else if hotbar_slot_for(binds, code).is_some() && pressed && gate.gameplay && gate.spectator {

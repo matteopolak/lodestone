@@ -292,6 +292,8 @@ pub enum InputAction {
     Command,
     /// Hold to show the player list.
     PlayerList,
+    /// Open the Friends overlay while playing. Vanilla's `key.friends`.
+    Friends,
     // -- misc -------------------------------------------------------------
     /// Vanilla's `key.screenshot` (vanilla's own persisted-options declarations, GLFW keysym `291` =
     /// F2, category `MISC`).
@@ -380,7 +382,7 @@ impl InputAction {
     /// declarations' own
     /// declaration order — so walking `ALL` filtered by [`Category::SORT_ORDER`]
     /// reproduces vanilla's Controls-screen ordering without a sort.
-    pub const ALL: [InputAction; 36] = [
+    pub const ALL: [InputAction; 37] = [
         InputAction::Forward,
         InputAction::Back,
         InputAction::Left,
@@ -406,6 +408,7 @@ impl InputAction {
         InputAction::Chat,
         InputAction::Command,
         InputAction::PlayerList,
+        InputAction::Friends,
         InputAction::Screenshot,
         InputAction::TogglePerspective,
         InputAction::Pause,
@@ -452,6 +455,7 @@ impl InputAction {
             InputAction::Chat => "key.chat",
             InputAction::Command => "key.command",
             InputAction::PlayerList => "key.playerlist",
+            InputAction::Friends => "key.friends",
             InputAction::Screenshot => "key.screenshot",
             InputAction::TogglePerspective => "key.togglePerspective",
             InputAction::Pause => "key.lodestone.pause",
@@ -499,9 +503,10 @@ impl InputAction {
             | InputAction::Hotbar7
             | InputAction::Hotbar8
             | InputAction::Hotbar9 => Category::Inventory,
-            InputAction::Chat | InputAction::Command | InputAction::PlayerList => {
-                Category::Multiplayer
-            }
+            InputAction::Chat
+            | InputAction::Command
+            | InputAction::PlayerList
+            | InputAction::Friends => Category::Multiplayer,
             InputAction::Screenshot | InputAction::TogglePerspective | InputAction::Pause => {
                 Category::Misc
             }
@@ -554,10 +559,11 @@ impl InputAction {
             InputAction::Hotbar7 => Binding::Key(Key::Digit7),
             InputAction::Hotbar8 => Binding::Key(Key::Digit8),
             InputAction::Hotbar9 => Binding::Key(Key::Digit9),
-            // vanilla's own persisted-options declarations — 84/47/258.
+            // vanilla's own persisted-options declarations — 84/47/258/79.
             InputAction::Chat => Binding::Key(Key::KeyT),
             InputAction::Command => Binding::Key(Key::Slash),
             InputAction::PlayerList => Binding::Key(Key::Tab),
+            InputAction::Friends => Binding::Key(Key::KeyO),
             // vanilla's own persisted-options declarations — 291.
             InputAction::Screenshot => Binding::Key(Key::F2),
             // vanilla's own persisted-options declarations — 294.
@@ -1676,6 +1682,7 @@ mod tests {
             71 => KeyCode::KeyG,
             72 => KeyCode::KeyH,
             78 => KeyCode::KeyN,
+            79 => KeyCode::KeyO,
             80 => KeyCode::KeyP,
             340 => KeyCode::ShiftLeft,
             341 => KeyCode::ControlLeft,
@@ -1700,6 +1707,7 @@ mod tests {
             (InputAction::Chat, 84, Category::Multiplayer),
             (InputAction::PlayerList, 258, Category::Multiplayer),
             (InputAction::Command, 47, Category::Multiplayer),
+            (InputAction::Friends, 79, Category::Multiplayer),
             (InputAction::Screenshot, 291, Category::Misc),
             (InputAction::TogglePerspective, 294, Category::Misc),
             (InputAction::Hotbar1, 49, Category::Inventory),

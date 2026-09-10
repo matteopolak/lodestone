@@ -2101,6 +2101,7 @@ fn default_playing_expectations() -> Vec<(KeyCode, KeyOutcome)> {
         (KeyCode::KeyT, KeyOutcome::OpenChat { command: false }),
         (KeyCode::Slash, KeyOutcome::OpenChat { command: true }),
         (KeyCode::Tab, KeyOutcome::PlayerList(true)),
+        (KeyCode::KeyO, KeyOutcome::OpenFriends),
         (KeyCode::F5, KeyOutcome::TogglePerspective),
         // F3 is the debug *modifier*, reporting both edges; the
         // overlay toggle happens on the release when no chord fired (see
@@ -2130,6 +2131,60 @@ fn the_default_bindings_dispatch_exactly_as_they_did_before_the_refactor() {
             "{code:?} regressed"
         );
     }
+}
+
+#[test]
+fn friends_hotkey_is_rebindable_and_only_resolves_during_gameplay() {
+    let mut binds = Keybinds::new();
+    binds.set(InputAction::Friends, Binding::Key(KeyCode::KeyY.into()));
+
+    assert_eq!(
+        resolve_key(&binds, playing(), Some(KeyCode::KeyY), true, false, None),
+        Some(KeyOutcome::OpenFriends)
+    );
+    assert_eq!(
+        resolve_key(&binds, playing(), Some(KeyCode::KeyO), true, false, None),
+        None,
+        "the default key must stop opening Friends after a rebind"
+    );
+    assert_eq!(
+        resolve_key(&binds, playing(), Some(KeyCode::KeyY), false, false, None),
+        None,
+        "releasing the binding must not reopen Friends"
+    );
+    assert_eq!(
+        resolve_key(&binds, KeyGate::default(), Some(KeyCode::KeyY), true, false, None),
+        None,
+        "the hotkey must not open Friends away from gameplay"
+    );
+    assert_eq!(
+        resolve_key(
+            &binds,
+            KeyGate { menu: true, gameplay: true, ..KeyGate::default() },
+            Some(KeyCode::KeyY),
+            true,
+            false,
+            None,
+        ),
+        Some(KeyOutcome::Menu),
+        "an open menu must retain keyboard focus"
+    );
+}
+
+#[test]
+fn friends_hotkey_effect_opens_the_real_overlay_and_returns_to_pause() {
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+    app.ui.begin(crate::menu::SessionKind::Multiplayer);
+    app.ui.session_ready();
+
+    app.apply_key_outcome(Some(KeyOutcome::OpenFriends), true, Some(KeyCode::KeyO), None);
+
+    assert_eq!(app.ui.screen(), Screen::Friends);
+    app.ui.close_friends();
+    assert_eq!(app.ui.screen(), Screen::Paused);
 }
 
 #[test]
