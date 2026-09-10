@@ -220,6 +220,7 @@ fn ring_distance(centre: (i32, i32), coord: (i32, i32)) -> i32 {
 /// is simply unresident), so a level computed past that point describes
 /// nothing a real ticket would ever produce and must not be compared to one.
 #[must_use]
+#[cfg(test)]
 pub(crate) const fn ticket_level_for_ring(base_level: i32, ring: i32) -> i32 {
     base_level + ring
 }

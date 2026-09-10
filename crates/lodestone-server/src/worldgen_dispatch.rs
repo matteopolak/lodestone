@@ -134,6 +134,7 @@ fn dispatcher() -> &'static Dispatcher {
 }
 
 /// The number of persistent world-generation workers.
+#[cfg(test)]
 #[must_use]
 pub(crate) fn worker_count() -> usize {
     dispatcher().workers

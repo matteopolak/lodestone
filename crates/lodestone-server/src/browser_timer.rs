@@ -70,6 +70,7 @@
 //! dependencies, same versions `crate::chunk::yield_to_browser` already pins)
 //! for the real macrotask.
 
+#[cfg(any(target_arch = "wasm32", test))]
 use std::time::Duration;
 
 /// This module's portable "now". `lodestone_time::Instant` is `web_time::
@@ -81,6 +82,7 @@ use std::time::Duration;
 /// wasm32 at runtime, and the latter is `tick.rs`'s one documented allowance
 /// under `scripts/wasm-check.sh`'s `tokio-instant-ban` rule, which this file
 /// is deliberately not a second exception to.
+#[cfg(any(target_arch = "wasm32", test))]
 pub(crate) type BrowserInstant = lodestone_time::Instant;
 
 /// Resolves after `duration` via a real browser macrotask, never
@@ -128,6 +130,7 @@ async fn browser_sleep(duration: Duration) {
 /// than one period, in which case the schedule rebases from `now` — so a
 /// caller that fails to poll this for an arbitrarily long stretch gets
 /// exactly one tick when it returns, never a burst of catch-up ticks.
+#[cfg(any(target_arch = "wasm32", test))]
 pub(crate) fn next_deadline(
     previous_deadline: BrowserInstant,
     period: Duration,
