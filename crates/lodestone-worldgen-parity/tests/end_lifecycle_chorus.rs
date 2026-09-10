@@ -10,6 +10,12 @@ const TARGET: (i32, i32) = (128, 130);
 const BANNER_TARGET: (i32, i32) = (283, 81);
 const CHORUS_SOURCE: (i32, i32) = (128, 131);
 const FOCUS_LOCAL: (i32, i32, i32) = (4, 67, 15);
+const CROSS_CHUNK_TARGET: (i32, i32) = (285, 79);
+const CROSS_CHUNK_CHORUS_SOURCE: (i32, i32) = (285, 79);
+const CROSS_CHUNK_FOCUS_LOCAL: (i32, i32, i32) = (13, 65, 15);
+// Captured independently from the external 26.2 End lifecycle stream.
+const CROSS_CHUNK_EXPECTED: &str =
+    "minecraft:chorus_plant[down=true,east=false,north=true,south=true,up=false,west=true]";
 
 fn source_window() -> Vec<(i32, i32)> {
     (TARGET.0 - 1..=TARGET.0 + 1)
@@ -77,6 +83,63 @@ fn withholding_the_chorus_source_is_a_live_negative_control() {
     let withheld_focus = focus_after_direct_sources(&withheld);
 
     assert!(complete_focus.starts_with("minecraft:chorus_plant["));
+    assert_eq!(withheld_focus, "minecraft:air");
+}
+
+fn cross_chunk_source_window() -> Vec<(i32, i32)> {
+    (CROSS_CHUNK_TARGET.0 - 1..=CROSS_CHUNK_TARGET.0 + 1)
+        .flat_map(|x| {
+            (CROSS_CHUNK_TARGET.1 - 1..=CROSS_CHUNK_TARGET.1 + 1).map(move |z| (x, z))
+        })
+        .collect()
+}
+
+fn cross_chunk_focus_after_target_replay(sources: &[(i32, i32)]) -> String {
+    let mut materializer = LifecycleMaterializer::new(end_chunk_source(SEED));
+    for chunk in cross_chunk_source_window() {
+        materializer.admit(chunk);
+    }
+    materializer.begin_target(CROSS_CHUNK_TARGET);
+    for (sequence, &source) in sources.iter().enumerate() {
+        materializer.complete_for_target(
+            CROSS_CHUNK_TARGET,
+            source,
+            LifecycleCompletion::Features,
+            sequence as u64,
+        );
+    }
+    materializer.finish_target(CROSS_CHUNK_TARGET);
+    materializer
+        .snapshot_for_packet(CROSS_CHUNK_TARGET)
+        .block_state(
+            CROSS_CHUNK_FOCUS_LOCAL.0,
+            CROSS_CHUNK_FOCUS_LOCAL.1,
+            CROSS_CHUNK_FOCUS_LOCAL.2,
+        )
+        .to_owned()
+}
+
+#[test]
+fn exact_end_cross_chunk_chorus_connection_uses_source_context() {
+    let sources = cross_chunk_source_window();
+    let focus = cross_chunk_focus_after_target_replay(&sources);
+    assert_eq!(
+        focus, CROSS_CHUNK_EXPECTED,
+        "the target's south connection must survive the source-centred End replay",
+    );
+}
+
+#[test]
+fn exact_end_cross_chunk_chorus_source_withheld_is_a_negative_control() {
+    let sources = cross_chunk_source_window();
+    let withheld = sources
+        .iter()
+        .copied()
+        .filter(|&source| source != CROSS_CHUNK_CHORUS_SOURCE)
+        .collect::<Vec<_>>();
+    let complete_focus = cross_chunk_focus_after_target_replay(&sources);
+    let withheld_focus = cross_chunk_focus_after_target_replay(&withheld);
+    assert_eq!(complete_focus, CROSS_CHUNK_EXPECTED);
     assert_eq!(withheld_focus, "minecraft:air");
 }
 

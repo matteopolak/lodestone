@@ -168,6 +168,16 @@ restored when the target finishes. The later target then replays the
 `(target, source)` completion, so global source deduplication cannot discard a
 write that belongs to the later packet. Writes into a source that has already
 entered FEATURES remain part of the retained source state.
+
+End uses the source's own decoration context for every source in a target's
+three-by-three wavefront. The target selects the retained packet column and
+the transaction boundary; it must not replace the source context used for
+biome filtering, random draws, or cross-border block-state connections. The
+regression at target `(285,79)`, local cell `(13,65,15)`, records the complete
+chorus-plant state with `south=true`; a control that withholds that source
+must leave the cell as air. This source-centred rule keeps a later neighbour's
+connection bit from being lost when the source and emitted target share a
+chunk boundary.
 For example, a short End control is:
 
 ```text
