@@ -276,6 +276,15 @@ codegen-units = 1
 # is in meshing" and knowing which part of meshing.
 debug = 2
 
+# Shipping artifacts use the same performance-oriented code generation as the
+# profiling-friendly release profile above, but do not carry DWARF or the
+# object-file symbol table. Keep this separate: the release profile is also
+# the input to the Samply/Instruments recipes, which need its debug metadata.
+[profile.release-dist]
+inherits = "release"
+strip = "symbols"
+debug = 0
+
 # Dev/test profile: measured 2026-08-04, full numbers and the honest limits in
 # docs/repo-tooling.md. Backtraces keep file:line (that is what
 # line-tables-only preserves); dep frames lose line info, which is the trade.

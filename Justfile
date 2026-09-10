@@ -356,6 +356,13 @@ wasm-check:
 wasm-size:
     ./scripts/wasm-size.sh
 
+# Native distribution build: preserves the normal release optimizer settings
+# while omitting debug metadata and the object-file symbol table. Use plain
+# `cargo build --release` for Samply/Instruments, which need its DWARF.
+[doc("build the stripped, performance-optimized native distribution binary")]
+release-dist package="lodestone-shell":
+    cargo build --profile release-dist -p {{package}}
+
 # Gate for scripts/profile-cost-table.py, the samply join the whole worldgen
 # perf record was measured through (docs/roadmap/benchmarks.md). It rotted
 # undetected across a samply upgrade because nothing ran it: the script had no

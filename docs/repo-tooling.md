@@ -88,6 +88,24 @@ and any doc or comment claiming the two are "kept in sync" is describing somethi
 config-precedence rules make impossible to verify by inspection — read the actual `rustc
 --version` a job reports, never a `toolchain:` value in the YAML.
 
+### Native release artifacts and binary size
+
+The default `release` profile is intentionally profiling-friendly: it keeps full
+DWARF (`debug = 2`) for the Samply/Instruments workflows. Shipping builds should
+use the separate `release-dist` profile instead:
+
+```bash
+cargo build --profile release-dist -p lodestone-shell --bin lodestone
+```
+
+`release-dist` inherits the normal release optimizer settings (including
+`opt-level = 3`, ThinLTO, and one codegen unit), so it does not trade runtime
+performance for size. It additionally sets `debug = 0` and `strip = "symbols"`.
+The latter removes debug metadata and the remaining object-file symbol table at
+link time; keep an unstripped `release` build when source-level profiling or
+symbolized crash diagnostics are needed. The resulting binary is under
+`target/release-dist/` (or the configured shared target directory).
+
 ### Shared local target, CI caching, and trimmed dev profiles
 
 Local builds deliberately share one global target. Cargo's exclusive target lock is the queue: many
