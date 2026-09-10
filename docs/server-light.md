@@ -152,6 +152,10 @@ rejects a lifecycle marker that has no retained light arrays. Persisted columns 
 after eviction and restart; admission and ticket policy remain the responsibility of the source/cache
 lifecycle that owns the column.
 
+The NBT field `LodestoneLightSections` records the retained light window when it differs from the
+terrain column's own section count (for example, a dimension-aware wire snapshot backed by a compact
+fixture column). Older saves omit the field and use the terrain count plus the two boundary sections.
+
 The bounded cache must therefore sit above a persistence-capable source whenever retained light is
 part of the serving contract. The focused `RegionChunkSource` control exercises a plural admission,
 evicts and reloads both footprint members, then mutates the centre and verifies that invalidation
