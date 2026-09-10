@@ -69,6 +69,15 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   content-addressed asset index and exposes the indexed bytes as a resource source.
   `AssetObjectHash` represents the validated address used for each object's
   two-character fanout directory and filename.
+- [Attack-range builder](./attack-range-builder.md) — `lodestone_model::AttackRange`
+  carries the six floating-point fields of an item's attack-range component and
+  exposes a named builder for constructing it. The builder removes same-typed
+  positional arguments from the normal decode path while the compatibility constructor
+  remains available to downstream callers.
+- [Auth JSON contracts](./auth-json-contracts.md) — `lodestone-auth` keeps the
+  account roster and its authentication request bodies as typed Serde documents. The
+  types make persisted metadata tolerant at the read boundary while keeping every
+  outbound field name explicit at the wire boundary.
 - [Autonomous navigation: `lodestone-nav` + `lodestone-autopilot`](./autonomous-navigation.md) —
   Two crates under [`crates/plugins/`](../crates/plugins/) implementing a
   Baritone-class client-side pathfinder: `lodestone-nav` is a version-free search core
@@ -118,6 +127,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   (composter/furnace/hopper/brewing stand), bone meal, and how entities/players (not
   just terrain) survive a world restart. Structure chests, block drops and loot tables
   live in [`docs/mining-and-drops.md`](./mining-and-drops.md).
+- [Blockstate JSON models](./blockstate-json.md) — `lodestone-assets::BlockStates`
+  reads blockstate resource-pack files into the typed `BlockStateDefinition` model
+  used by model selection and baking. The loader covers both property-keyed `variants`
+  and conditional `multipart` definitions.
 - [Books](./books.md) — Reading and writing in-game books: the writable-book editor
   and its signing flow, and the read-only screen for a signed book (plus a lectern's
   book display). All three share one texture, one word-wrap model, and one overlay
@@ -242,12 +255,6 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   heightfield visual horizon beyond the real streamed-chunk radius. It is a local
   integrated-Overworld feature, not a chunk cache: it cannot request, retain, or mesh
   ordinary chunks.
-- [End heightmap status oracle](./end-heightmap-status-oracle.md) —
-  `EndHeightmapStatusOracle` is a bounded external probe for the End generation
-  boundary that affects cross-chunk feature writes and the three client-visible
-  heightmaps. It runs the real 26.2 server with seed `42`, holds target chunk
-  `(280,78)` at its pre-feature stage, and records the target before and after each
-  explicitly requested neighbour reaches the feature stage.
 - [End light replay](./end-light-replay.md) — End light replay keeps an initial
   chunk packet tied to the light snapshot captured after its admitted footprint is
   settled. A block change invalidates every retained snapshot that could have read the
@@ -1039,6 +1046,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   the three bundled dimensions. It checks that every declared placement modifier
   survives parsing, in order, so an unrecognised record cannot quietly change the
   candidate-position stream.
+- [Worldgen root-placement hot path](./worldgen-root-hot-path.md) — Mangrove root
+  placement simulates four directional paths before committing any root blocks. The
+  implementation keeps the simulation's candidate and aggregate position order stable
+  while avoiding per-direction heap storage and transient state-name strings.
 - [Root-system world generation](./worldgen-root-system.md) — The root-system
   configured feature grows an elevated nested feature through a cave ceiling, replaces
   eligible material in the column below it, and scatters hanging roots around the
@@ -1054,6 +1065,12 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   dimension's density field into a packet-ready chunk. The table is shared by the
   three generators and is intended to be the vocabulary used by parity replay and
   production dispatch code.
+- [Global worldgen stage architecture](./worldgen-stages.md) — This document is the
+  cross-dimension contract for turning a world seed and a chunk coordinate into a
+  column, its retained intermediate products, and its serving sidecars. It makes the
+  order, dependency radius, mutable state, randomness scope, and resumable completion
+  status explicit for the Overworld, Nether, and End without merging their
+  dimension-specific generators.
 - [Structure generation](./worldgen-structures.md) — The structure engine: deciding
   which chunk gets which structure for a seed, and turning that decision into real
   blocks — jittered-grid and concentric-ring placement, `.nbt` structure templates
