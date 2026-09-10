@@ -6925,7 +6925,7 @@ mod tests {
             ));
             assert!(queues.fluid.schedule(
                 (2, 3, 4),
-                "lodestone:fluid".to_owned(),
+                crate::scheduled_tick::ScheduledTickKind::Fluid,
                 1_000_001,
                 crate::scheduled_tick::TickPriority::Low,
             ));
@@ -6984,7 +6984,7 @@ mod tests {
                     &crate::scheduled_tick::ScheduledTickKind::Torch,
                 ) && queues.fluid.has_scheduled(
                     (2, 3, 4),
-                    &"lodestone:fluid".to_owned(),
+                    &crate::scheduled_tick::ScheduledTickKind::Fluid,
                 )
             }));
         reopened.shutdown().await;
@@ -7433,7 +7433,7 @@ mod tests {
             ));
             assert!(queues.fluid.schedule(
                 (52, 6, -76),
-                "lodestone:fluid".to_owned(),
+                crate::scheduled_tick::ScheduledTickKind::Fluid,
                 21,
                 crate::scheduled_tick::TickPriority::Low,
             ));
@@ -7483,7 +7483,7 @@ mod tests {
         assert_eq!(block_tick.len(), 1);
         assert_eq!(block_tick[0].kind, "redstone:torch");
         assert_eq!(fluid_tick.len(), 1);
-        assert_eq!(fluid_tick[0].kind, "lodestone:fluid");
+        assert_eq!(fluid_tick[0].kind, crate::scheduled_tick::ScheduledTickKind::Fluid);
         let loaded = &loaded.column;
         assert_eq!(loaded.block_state(2, 3, 4), "minecraft:stone");
         assert_eq!(loaded.block_state(9, 14, 10), "minecraft:oak_log[axis=z]");

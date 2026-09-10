@@ -703,9 +703,9 @@ impl ScheduledTickHandle {
             .unwrap_or(i32::MAX),
             priority: tick.priority,
         };
-        let convert_fluid = |tick: &crate::scheduled_tick::ScheduledTick<String>| chunk_nbt::SavedTick {
+        let convert_fluid = |tick: &crate::scheduled_tick::ScheduledTick<crate::scheduled_tick::ScheduledTickKind>| chunk_nbt::SavedTick {
             pos: tick.pos,
-            kind: tick.kind.clone(),
+            kind: tick.kind.as_ref().to_owned(),
             delay: i32::try_from(
                 i64::try_from(tick.trigger_tick).unwrap_or(i64::MAX) - now,
             )
