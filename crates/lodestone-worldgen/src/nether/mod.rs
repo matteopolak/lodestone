@@ -1560,8 +1560,10 @@ impl NetherGenerator {
         .1
     }
 
-    /// Runs one source completion against the actual mutable resident region.
+    /// Runs one source completion against the target's actual mutable resident region.
     ///
+    /// The target owns the pre-decoration/read window while `source_x`/`source_z`
+    /// select the source body and `overrides` carries earlier authenticated writes.
     /// `resident_at` supplies the current state of each admitted chunk after
     /// all earlier completion events. Missing outer context falls back to the
     /// immutable pre-decoration prefix. This keeps occupancy and survival
@@ -1570,8 +1572,11 @@ impl NetherGenerator {
     #[must_use]
     pub fn parity_source_spills_with_resident(
         &self,
+        target_x: i32,
+        target_z: i32,
         source_x: i32,
         source_z: i32,
+        overrides: &[(i32, i32, i32, String)],
         mut resident_at: impl FnMut(i32, i32) -> Option<crate::dense_grid::DenseBlockGrid>,
     ) -> Vec<ParityDecorationSpill> {
         let mut resident: [Option<Arc<crate::dense_grid::DenseBlockGrid>>; 25] =
@@ -1583,17 +1588,17 @@ impl NetherGenerator {
                 ..=crate::feature::region_view::WIDE_RADIUS
             {
                 resident[crate::feature::region_view::wide_slot_of_offset(dx, dz)] =
-                    resident_at(source_x + dx, source_z + dz).map(Arc::new);
+                    resident_at(target_x + dx, target_z + dz).map(Arc::new);
             }
         }
-        let pre = self.pre_decoration_stage(source_x, source_z);
+        let pre = self.pre_decoration_stage(target_x, target_z);
         self.mixed_step7_stage_selected_with_resident(
-            source_x,
-            source_z,
+            target_x,
+            target_z,
             (*pre.0).clone(),
             &pre.1,
             Some((source_x, source_z)),
-            &[],
+            overrides,
             Some(&resident),
         )
         .1
@@ -3404,14 +3409,17 @@ mod tests {
             16,
             air,
         ));
-        let biome_quarts = std::array::from_fn(|index| {
-            if index == 0 {
-                "minecraft:crimson_forest".to_owned()
-            } else {
-                "minecraft:nether_wastes".to_owned()
-            }
-        });
-        let cells = Arc::new(biome_quarts);
+        let cells = Arc::new(crate::overworld::BiomeCells::from_fn(
+            0,
+            super::DECORATION_WINDOW_HEIGHT,
+            |qx, _qy, qz| {
+                if qx == 0 && qz == 0 {
+                    "minecraft:crimson_forest".to_owned()
+                } else {
+                    "minecraft:nether_wastes".to_owned()
+                }
+            },
+        ));
         let feature_biomes = [(
             "minecraft:crimson_fungi".to_owned(),
             ["minecraft:crimson_forest".to_owned()].into_iter().collect(),
@@ -3419,7 +3427,7 @@ mod tests {
         .into_iter()
         .collect();
         let feature_biomes = Arc::new(feature_biomes);
-        let grid = VegGrid::with_sources_and_flat_biomes_shared_zoomed(
+        let grid = VegGrid::with_sources_and_biomes_shared(
             Arc::clone(&interner),
             0,
             super::DECORATION_WINDOW_HEIGHT,
@@ -3430,7 +3438,6 @@ mod tests {
             |_, _| Some(Arc::clone(&source)),
             |dx, dz| (dx == 0 && dz == 0).then(|| Arc::clone(&cells)),
             Arc::clone(&feature_biomes),
-            super::nether_zoom_seed(42),
         );
 
         assert!(grid.biome_allows_placed_feature(

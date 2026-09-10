@@ -309,6 +309,14 @@ pub struct BiomeTable {
     id: u64,
 }
 
+/// Explicit history for one deterministic biome-search lifecycle. A cursor is
+/// owned by its generation unit and is never inferred from worker identity.
+#[derive(Debug, Clone, Copy)]
+pub struct BiomeSearchCursor {
+    table_id: u64,
+    leaf: Option<u32>,
+}
+
 impl BiomeTable {
     /// Builds the search structure over `points`, preserving row order.
     ///
@@ -347,6 +355,41 @@ impl BiomeTable {
     #[must_use]
     pub fn nearest_row(&self, target: &[i64; 7]) -> u32 {
         self.tree.nearest_row(target)
+    }
+
+    /// Starts a fresh indexed-search lifecycle owned by the caller.
+    #[must_use]
+    pub fn search_cursor(&self) -> BiomeSearchCursor {
+        BiomeSearchCursor {
+            table_id: self.id,
+            leaf: None,
+        }
+    }
+
+    /// The indexed answer using and updating an explicit lifecycle cursor.
+    #[must_use]
+    pub fn nearest_row_with_cursor(
+        &self,
+        target: &[i64; 7],
+        cursor: &mut BiomeSearchCursor,
+    ) -> u32 {
+        assert_eq!(cursor.table_id, self.id, "biome cursor belongs to another table");
+        let (row, leaf) = self.tree.nearest_row_with_candidate(target, cursor.leaf);
+        cursor.leaf = Some(leaf);
+        row
+    }
+
+    /// Updates a cursor from a previously memoised row without searching.
+    pub fn cursor_from_row(&self, cursor: &mut BiomeSearchCursor, row: u32) {
+        assert_eq!(cursor.table_id, self.id, "biome cursor belongs to another table");
+        cursor.leaf = self.tree.leaf_node_for_row(row);
+    }
+
+    /// Explicit stateless spelling used by diagnostics that compare a fresh
+    /// lookup against the lifecycle-aware production form.
+    #[must_use]
+    pub fn nearest_row_stateless(&self, target: &[i64; 7]) -> u32 {
+        self.nearest_row(target)
     }
 
     /// The nearest biome's id, via the tree — the drop-in replacement for
