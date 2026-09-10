@@ -9,7 +9,10 @@ description = "Version-free Minecraft client game-state layer: inventory, crafti
 [dependencies]
 lodestone-model = { workspace = true }
 uuid = { workspace = true }
-serde_json = { workspace = true, optional = true }
+bon = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true, features = ["raw_value"] }
+thiserror = { workspace = true, optional = true }
 # Live-oracle-only, feature-gated dependencies. These are SHARED infrastructure
 # crates (wire primitives + the transport), never version crates, so enabling
 # them cannot break version isolation (`cargo xtask check-isolation` stays
@@ -23,7 +26,7 @@ tokio = { workspace = true, optional = true }
 [features]
 # JSON loading of recipes/tags from Mojang generated data. Off by default so the
 # hermetic build carries no JSON dependency; enabled by the corpus test.
-json = ["dep:serde_json"]
+json = ["dep:bon", "dep:serde", "dep:serde_json", "dep:thiserror"]
 # Wires the predict->click->reconcile oracle against a live vanilla 26.2 server.
 # Off by default so `cargo test` stays hermetic and version-free; the test is
 # additionally `#[ignore]`d.

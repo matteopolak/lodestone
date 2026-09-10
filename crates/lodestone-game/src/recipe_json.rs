@@ -1,15 +1,21 @@
-//! JSON loading of recipes and tags from Mojang's generated data.
+//! Typed JSON loading of recipes and tags from generated datapack data.
 //!
 //! Gated behind the `json` cargo feature so the default build stays free of a
-//! JSON dependency. The parser works off `serde_json::Value` rather than a
-//! derived schema so that a single unexpected field never fails a whole-corpus
-//! load — it tolerates unknown keys and reports only genuinely unparseable
-//! recipes.
+//! JSON dependency. Text first crosses a typed DTO boundary: known recipe
+//! shapes, recursive ingredients, result stacks, and tag entries are all
+//! represented by Rust types. An unsupported recipe retains its original JSON
+//! object in a `RawValue` so a future caller can forward it without losing
+//! fields that this client does not understand.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use bon::bon;
 use lodestone_model::Identifier;
-use serde_json::Value;
+use serde::de;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::value::RawValue;
+use thiserror::Error;
 
 use crate::item::ItemStack;
 use crate::recipe::{
@@ -17,244 +23,843 @@ use crate::recipe::{
     ShapelessRecipe, TagEntry, TagResolver,
 };
 
-/// An error loading a recipe from JSON.
-#[derive(Debug, Clone, PartialEq, Eq)]
+pub use lodestone_model::ResourceKey;
+
+/// An error loading a recipe or tag document.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum LoadError {
     /// The `type` field was missing or not a string.
+    #[error("recipe has no `type`")]
     MissingType,
-    /// A required field was absent or malformed.
+    /// A required field was absent or malformed after typed decoding.
+    #[error("bad or missing field `{0}`")]
     BadField(&'static str),
     /// An identifier failed to parse.
+    #[error("invalid identifier `{0}`")]
     BadIdentifier(String),
     /// The bytes were not valid JSON at all.
+    #[error("malformed JSON: {0}")]
     Json(String),
 }
 
-impl std::fmt::Display for LoadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            LoadError::MissingType => write!(f, "recipe has no `type`"),
-            LoadError::BadField(field) => write!(f, "bad or missing field `{field}`"),
-            LoadError::BadIdentifier(s) => write!(f, "invalid identifier `{s}`"),
-            LoadError::Json(e) => write!(f, "malformed JSON: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for LoadError {}
-
-fn ident(s: &str) -> Result<Identifier, LoadError> {
+fn ident(s: &str) -> Result<ResourceKey, LoadError> {
     s.parse()
         .map_err(|_| LoadError::BadIdentifier(s.to_string()))
 }
 
-fn parse_ingredient(v: &Value) -> Result<Ingredient, LoadError> {
-    match v {
-        Value::String(s) => Ok(if let Some(tag) = s.strip_prefix('#') {
-            Ingredient::Tag(ident(tag)?)
-        } else {
-            Ingredient::Item(ident(s)?)
-        }),
-        Value::Array(items) => {
-            let opts = items
-                .iter()
-                .map(parse_ingredient)
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(Ingredient::Any(opts))
+fn serialize_key<S>(key: &ResourceKey, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str(&key.to_string())
+}
+
+/// The six recipe-book categories accepted by generated recipe documents.
+/// Unknown strings remain explicit so decoding a future category does not
+/// collapse the document into an untyped JSON value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecipeCategoryDocument {
+    /// Building blocks.
+    Building,
+    /// Redstone components.
+    Redstone,
+    /// Equipment.
+    Equipment,
+    /// Miscellaneous recipes.
+    Misc,
+    /// Food.
+    Food,
+    /// Furnace blocks.
+    Blocks,
+    /// A category introduced after this client was built.
+    Other(String),
+}
+
+impl RecipeCategoryDocument {
+    fn from_text(text: String) -> Self {
+        match text.as_str() {
+            "building" => Self::Building,
+            "redstone" => Self::Redstone,
+            "equipment" => Self::Equipment,
+            "misc" => Self::Misc,
+            "food" => Self::Food,
+            "blocks" => Self::Blocks,
+            _ => Self::Other(text),
         }
-        // Object form `{ "item": "..." }` (older/alternate schema).
-        Value::Object(map) => {
-            if let Some(Value::String(s)) = map.get("item") {
-                Ok(Ingredient::Item(ident(s)?))
-            } else if let Some(Value::String(s)) = map.get("tag") {
-                Ok(Ingredient::Tag(ident(s)?))
-            } else {
-                Err(LoadError::BadField("ingredient"))
+    }
+
+    fn as_text(&self) -> &str {
+        match self {
+            Self::Building => "building",
+            Self::Redstone => "redstone",
+            Self::Equipment => "equipment",
+            Self::Misc => "misc",
+            Self::Food => "food",
+            Self::Blocks => "blocks",
+            Self::Other(text) => text,
+        }
+    }
+
+    fn to_domain(&self) -> RecipeCategory {
+        RecipeCategory::from_json_str(self.as_text())
+    }
+}
+
+impl Serialize for RecipeCategoryDocument {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_text())
+    }
+}
+
+impl<'de> Deserialize<'de> for RecipeCategoryDocument {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self::from_text(String::deserialize(deserializer)?))
+    }
+}
+
+/// A recursive typed ingredient. A string beginning with `#` is a tag; a
+/// string without it is an item key. Arrays are alternatives and may contain
+/// further arrays or object-form item/tag entries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IngredientDocument {
+    /// A concrete item key.
+    Item(ResourceKey),
+    /// An item-tag key.
+    Tag(ResourceKey),
+    /// Any one of the nested alternatives.
+    Any(Vec<IngredientDocument>),
+}
+
+impl Serialize for IngredientDocument {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Item(key) => serialize_key(key, serializer),
+            Self::Tag(key) => serializer.serialize_str(&format!("#{key}")),
+            Self::Any(options) => options.serialize(serializer),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawIngredientDocument {
+    Text(String),
+    Alternatives(Vec<RawIngredientDocument>),
+    Object(RawIngredientObject),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawIngredientObject {
+    #[serde(default)]
+    item: Option<String>,
+    #[serde(default)]
+    tag: Option<String>,
+}
+
+fn ingredient_from_text(text: &str) -> Result<IngredientDocument, LoadError> {
+    if let Some(tag) = text.strip_prefix('#') {
+        Ok(IngredientDocument::Tag(ident(tag)?))
+    } else {
+        Ok(IngredientDocument::Item(ident(text)?))
+    }
+}
+
+fn ingredient_from_raw(raw: RawIngredientDocument) -> Result<IngredientDocument, LoadError> {
+    match raw {
+        RawIngredientDocument::Text(text) => ingredient_from_text(&text),
+        RawIngredientDocument::Alternatives(options) => options
+            .into_iter()
+            .map(ingredient_from_raw)
+            .collect::<Result<Vec<_>, _>>()
+            .map(IngredientDocument::Any),
+        RawIngredientDocument::Object(object) => match (object.item, object.tag) {
+            (Some(item), None) => Ok(IngredientDocument::Item(ident(&item)?)),
+            (None, Some(tag)) => Ok(IngredientDocument::Tag(ident(
+                tag.strip_prefix('#').unwrap_or(&tag),
+            )?)),
+            _ => Err(LoadError::BadField("ingredient")),
+        },
+    }
+}
+
+impl<'de> Deserialize<'de> for IngredientDocument {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        ingredient_from_raw(RawIngredientDocument::deserialize(deserializer)?)
+            .map_err(de::Error::custom)
+    }
+}
+
+/// A recipe result, accepted in the compact string form or the object form
+/// with an optional output count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResultDocument {
+    /// One item with the schema's implicit count of one.
+    Item(ResourceKey),
+    /// An item and an optional explicit count.
+    Stack {
+        /// Output item key.
+        id: ResourceKey,
+        /// Explicit count, or `None` when the JSON omitted it.
+        count: Option<i32>,
+    },
+}
+
+impl ResultDocument {
+    /// The output item key.
+    #[must_use]
+    pub fn id(&self) -> &ResourceKey {
+        match self {
+            Self::Item(id) | Self::Stack { id, .. } => id,
+        }
+    }
+
+    /// The effective output count.
+    #[must_use]
+    pub fn count(&self) -> i32 {
+        match self {
+            Self::Item(_) => 1,
+            Self::Stack { count, .. } => count.unwrap_or(1),
+        }
+    }
+}
+
+#[bon]
+impl ResultDocument {
+    /// Constructs an object-form result. The named builder keeps the two
+    /// same-domain fields explicit for programmatic callers; serde decoding
+    /// never uses it.
+    #[builder(start_fn = stack_builder)]
+    #[must_use]
+    pub fn stack(id: ResourceKey, count: Option<i32>) -> Self {
+        Self::Stack { id, count }
+    }
+}
+
+impl Serialize for ResultDocument {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Item(id) => serialize_key(id, serializer),
+            Self::Stack { id, count } => {
+                use serde::ser::SerializeStruct;
+                let mut object = serializer.serialize_struct("ResultDocument", 2)?;
+                object.serialize_field("id", &id.to_string())?;
+                if let Some(count) = count {
+                    object.serialize_field("count", count)?;
+                }
+                object.end()
             }
         }
-        _ => Err(LoadError::BadField("ingredient")),
     }
 }
 
-fn parse_result(v: &Value) -> Result<ItemStack, LoadError> {
-    match v {
-        Value::String(s) => Ok(ItemStack::new(ident(s)?, 1)),
-        Value::Object(map) => {
-            let id = map
-                .get("id")
-                .and_then(Value::as_str)
-                .ok_or(LoadError::BadField("result.id"))?;
-            let count = map.get("count").and_then(Value::as_i64).unwrap_or(1) as i32;
-            Ok(ItemStack::new(ident(id)?, count))
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawResultDocument {
+    Text(String),
+    Stack(RawResultStack),
+}
+
+#[derive(Debug, Deserialize)]
+struct RawResultStack {
+    id: String,
+    #[serde(default)]
+    count: Option<i32>,
+}
+
+impl<'de> Deserialize<'de> for ResultDocument {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match RawResultDocument::deserialize(deserializer)? {
+            RawResultDocument::Text(id) => Ok(Self::Item(ident(&id).map_err(de::Error::custom)?)),
+            RawResultDocument::Stack(stack) => Ok(Self::Stack {
+                id: ident(&stack.id).map_err(de::Error::custom)?,
+                count: stack.count,
+            }),
         }
-        _ => Err(LoadError::BadField("result")),
     }
 }
 
-/// Parses a single recipe from its JSON value.
-///
-/// # Errors
-///
-/// Returns [`LoadError`] if the recipe type is missing or a required field for
-/// the recognised type is malformed.
-pub fn parse_recipe(v: &Value) -> Result<Recipe, LoadError> {
-    let ty = v
-        .get("type")
-        .and_then(Value::as_str)
-        .ok_or(LoadError::MissingType)?;
-    let ty = ty.strip_prefix("minecraft:").unwrap_or(ty);
+/// One item-tag value. Object entries with a `required` flag are accepted and
+/// canonicalized to the same typed value; this client always treats a tag
+/// member as required when resolving it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TagValueDocument {
+    /// A concrete item member.
+    Item(ResourceKey),
+    /// A nested tag member.
+    Tag(ResourceKey),
+}
 
-    match ty {
-        "crafting_shaped" => parse_shaped(v).map(Recipe::Shaped),
-        "crafting_shapeless" => parse_shapeless(v).map(Recipe::Shapeless),
-        "smelting" | "blasting" | "smoking" | "campfire_cooking" => {
-            parse_cooking(ty, v).map(Recipe::Cooking)
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawTagValueDocument {
+    Text(String),
+    Object(RawTagObject),
+}
+
+#[derive(Debug, Deserialize)]
+struct RawTagObject {
+    id: String,
+    #[allow(dead_code)]
+    required: Option<bool>,
+}
+
+impl<'de> Deserialize<'de> for TagValueDocument {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let text = match RawTagValueDocument::deserialize(deserializer)? {
+            RawTagValueDocument::Text(text) => text,
+            RawTagValueDocument::Object(object) => object.id,
+        };
+        if let Some(tag) = text.strip_prefix('#') {
+            Ok(Self::Tag(ident(tag).map_err(de::Error::custom)?))
+        } else {
+            Ok(Self::Item(ident(&text).map_err(de::Error::custom)?))
         }
-        "stonecutting" => Ok(Recipe::Stonecutting {
-            ingredient: parse_ingredient(field(v, "ingredient")?)?,
-            result: parse_result(field(v, "result")?)?,
-        }),
-        "smithing_transform" => Ok(Recipe::SmithingTransform {
-            template: parse_ingredient(field(v, "template")?)?,
-            base: parse_ingredient(field(v, "base")?)?,
-            addition: parse_ingredient(field(v, "addition")?)?,
-            result: parse_result(field(v, "result")?)?,
-        }),
-        "smithing_trim" => Ok(Recipe::SmithingTrim {
-            template: parse_ingredient(field(v, "template")?)?,
-            base: parse_ingredient(field(v, "base")?)?,
-            addition: parse_ingredient(field(v, "addition")?)?,
-        }),
-        "crafting_transmute" => Ok(Recipe::Transmute {
-            input: parse_ingredient(field(v, "input")?)?,
-            material: parse_ingredient(field(v, "material")?)?,
-            result: parse_result(field(v, "result")?)?,
-        }),
-        other => Ok(Recipe::Special(other.to_string())),
     }
 }
 
-fn field<'a>(v: &'a Value, name: &'static str) -> Result<&'a Value, LoadError> {
-    v.get(name).ok_or(LoadError::BadField(name))
+impl Serialize for TagValueDocument {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Item(id) => serialize_key(id, serializer),
+            Self::Tag(id) => serializer.serialize_str(&format!("#{id}")),
+        }
+    }
 }
 
-fn parse_shaped(v: &Value) -> Result<ShapedRecipe, LoadError> {
-    let pattern_rows = field(v, "pattern")?
-        .as_array()
-        .ok_or(LoadError::BadField("pattern"))?;
-    let rows: Vec<&str> = pattern_rows
+/// A typed item-tag document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TagDocument {
+    /// Direct item or nested-tag members.
+    pub values: Vec<TagValueDocument>,
+    /// The optional pack-layer replacement marker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replace: Option<bool>,
+}
+
+/// A shaped recipe's typed body, without its top-level `type` discriminator.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ShapedRecipeDocument {
+    /// Recipe-book category, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<RecipeCategoryDocument>,
+    /// Optional grouping label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// Pattern rows, in row-major order.
+    pub pattern: Vec<String>,
+    /// Character-to-ingredient mapping.
+    pub key: BTreeMap<String, IngredientDocument>,
+    /// Output stack.
+    pub result: ResultDocument,
+    /// Whether mirrored matching is permitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror: Option<bool>,
+    /// Optional UI notification marker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_notification: Option<bool>,
+}
+
+/// A shapeless recipe's typed body, without its top-level `type` discriminator.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ShapelessRecipeDocument {
+    /// Recipe-book category, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<RecipeCategoryDocument>,
+    /// Optional grouping label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// Unordered ingredient multiset.
+    pub ingredients: Vec<IngredientDocument>,
+    /// Output stack.
+    pub result: ResultDocument,
+}
+
+/// One cooking recipe's typed body, without its top-level `type` discriminator.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CookingRecipeDocument {
+    /// Recipe-book category, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<RecipeCategoryDocument>,
+    /// Optional grouping label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// The single cooking input.
+    pub ingredient: IngredientDocument,
+    /// Output stack.
+    pub result: ResultDocument,
+    /// Experience payout, defaulting to zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experience: Option<f32>,
+    /// Cooking duration, defaulting by recipe kind.
+    #[serde(
+        rename = "cookingtime",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cooking_time: Option<i32>,
+}
+
+/// A stonecutting recipe's typed body.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StonecuttingRecipeDocument {
+    /// Input ingredient.
+    pub ingredient: IngredientDocument,
+    /// Output stack.
+    pub result: ResultDocument,
+}
+
+/// A smithing transform's typed body.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SmithingTransformRecipeDocument {
+    /// Upgrade template.
+    pub template: IngredientDocument,
+    /// Base item.
+    pub base: IngredientDocument,
+    /// Addition material.
+    pub addition: IngredientDocument,
+    /// Output stack.
+    pub result: ResultDocument,
+}
+
+#[bon]
+impl SmithingTransformRecipeDocument {
+    /// Constructs a transform body with named setters for its three
+    /// same-shaped ingredients. Deserialization uses the derived serde
+    /// implementation instead of this builder.
+    #[builder(start_fn = builder)]
+    #[must_use]
+    pub fn new(
+        template: IngredientDocument,
+        base: IngredientDocument,
+        addition: IngredientDocument,
+        result: ResultDocument,
+    ) -> Self {
+        Self {
+            template,
+            base,
+            addition,
+            result,
+        }
+    }
+}
+
+/// A smithing trim's typed body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SmithingTrimRecipeDocument {
+    /// Trim template.
+    pub template: IngredientDocument,
+    /// Trimmable base.
+    pub base: IngredientDocument,
+    /// Trim material.
+    pub addition: IngredientDocument,
+}
+
+#[bon]
+impl SmithingTrimRecipeDocument {
+    /// Constructs a trim body with named setters for its three same-shaped
+    /// ingredients. Deserialization uses the derived serde implementation.
+    #[builder(start_fn = builder)]
+    #[must_use]
+    pub fn new(
+        template: IngredientDocument,
+        base: IngredientDocument,
+        addition: IngredientDocument,
+    ) -> Self {
+        Self {
+            template,
+            base,
+            addition,
+        }
+    }
+}
+
+/// A transmutation recipe's typed body.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransmuteRecipeDocument {
+    /// Input item.
+    pub input: IngredientDocument,
+    /// Material consumed.
+    pub material: IngredientDocument,
+    /// Output stack.
+    pub result: ResultDocument,
+}
+
+/// A recipe type this client does not interpret. The complete raw object is
+/// retained so callers can forward it without losing future fields.
+#[derive(Debug, Clone)]
+pub struct UnsupportedRecipeDocument {
+    /// The source discriminator, including its namespace when supplied.
+    pub recipe_type: String,
+    /// The complete source object, retained as raw JSON.
+    pub raw: Box<RawValue>,
+}
+
+impl PartialEq for UnsupportedRecipeDocument {
+    fn eq(&self, other: &Self) -> bool {
+        self.recipe_type == other.recipe_type && self.raw.get() == other.raw.get()
+    }
+}
+
+impl UnsupportedRecipeDocument {
+    /// Returns the source JSON object exactly as retained by the decoder.
+    #[must_use]
+    pub fn raw_json(&self) -> &str {
+        self.raw.get()
+    }
+}
+
+/// A typed recipe document. Known variants carry only their schema fields;
+/// unsupported variants retain the complete source object.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RecipeDocument {
+    /// Shaped crafting.
+    Shaped(ShapedRecipeDocument),
+    /// Shapeless crafting.
+    Shapeless(ShapelessRecipeDocument),
+    /// Smelting.
+    Smelting(CookingRecipeDocument),
+    /// Blasting.
+    Blasting(CookingRecipeDocument),
+    /// Smoking.
+    Smoking(CookingRecipeDocument),
+    /// Campfire cooking.
+    CampfireCooking(CookingRecipeDocument),
+    /// Stonecutting.
+    Stonecutting(StonecuttingRecipeDocument),
+    /// Smithing transform.
+    SmithingTransform(SmithingTransformRecipeDocument),
+    /// Smithing trim.
+    SmithingTrim(SmithingTrimRecipeDocument),
+    /// Transmutation.
+    Transmute(TransmuteRecipeDocument),
+    /// An unhandled recipe kind.
+    Unsupported(UnsupportedRecipeDocument),
+}
+
+#[derive(Debug, Deserialize)]
+struct RecipeTypeProbe {
+    #[serde(rename = "type")]
+    recipe_type: Option<String>,
+}
+
+fn recipe_path(recipe_type: &str) -> &str {
+    recipe_type
+        .strip_prefix("minecraft:")
+        .unwrap_or(recipe_type)
+}
+
+impl<'de> Deserialize<'de> for RecipeDocument {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = Box::<RawValue>::deserialize(deserializer)?;
+        let probe: RecipeTypeProbe = serde_json::from_str(raw.get()).map_err(de::Error::custom)?;
+        let recipe_type = probe
+            .recipe_type
+            .ok_or_else(|| de::Error::custom("recipe has no `type`"))?;
+        let decoded = match recipe_path(&recipe_type) {
+            "crafting_shaped" => {
+                RecipeDocument::Shaped(serde_json::from_str(raw.get()).map_err(de::Error::custom)?)
+            }
+            "crafting_shapeless" => RecipeDocument::Shapeless(
+                serde_json::from_str(raw.get()).map_err(de::Error::custom)?,
+            ),
+            "smelting" => RecipeDocument::Smelting(
+                serde_json::from_str(raw.get()).map_err(de::Error::custom)?,
+            ),
+            "blasting" => RecipeDocument::Blasting(
+                serde_json::from_str(raw.get()).map_err(de::Error::custom)?,
+            ),
+            "smoking" => {
+                RecipeDocument::Smoking(serde_json::from_str(raw.get()).map_err(de::Error::custom)?)
+            }
+            "campfire_cooking" => RecipeDocument::CampfireCooking(
+                serde_json::from_str(raw.get()).map_err(de::Error::custom)?,
+            ),
+            "stonecutting" => RecipeDocument::Stonecutting(
+                serde_json::from_str(raw.get()).map_err(de::Error::custom)?,
+            ),
+            "smithing_transform" => RecipeDocument::SmithingTransform(
+                serde_json::from_str(raw.get()).map_err(de::Error::custom)?,
+            ),
+            "smithing_trim" => RecipeDocument::SmithingTrim(
+                serde_json::from_str(raw.get()).map_err(de::Error::custom)?,
+            ),
+            "crafting_transmute" => RecipeDocument::Transmute(
+                serde_json::from_str(raw.get()).map_err(de::Error::custom)?,
+            ),
+            _ => RecipeDocument::Unsupported(UnsupportedRecipeDocument { recipe_type, raw }),
+        };
+        Ok(decoded)
+    }
+}
+
+#[derive(Serialize)]
+struct TaggedDocument<'a, T: Serialize> {
+    #[serde(rename = "type")]
+    recipe_type: &'static str,
+    #[serde(flatten)]
+    body: &'a T,
+}
+
+impl Serialize for RecipeDocument {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Shaped(body) => TaggedDocument {
+                recipe_type: "minecraft:crafting_shaped",
+                body,
+            }
+            .serialize(serializer),
+            Self::Shapeless(body) => TaggedDocument {
+                recipe_type: "minecraft:crafting_shapeless",
+                body,
+            }
+            .serialize(serializer),
+            Self::Smelting(body) => TaggedDocument {
+                recipe_type: "minecraft:smelting",
+                body,
+            }
+            .serialize(serializer),
+            Self::Blasting(body) => TaggedDocument {
+                recipe_type: "minecraft:blasting",
+                body,
+            }
+            .serialize(serializer),
+            Self::Smoking(body) => TaggedDocument {
+                recipe_type: "minecraft:smoking",
+                body,
+            }
+            .serialize(serializer),
+            Self::CampfireCooking(body) => TaggedDocument {
+                recipe_type: "minecraft:campfire_cooking",
+                body,
+            }
+            .serialize(serializer),
+            Self::Stonecutting(body) => TaggedDocument {
+                recipe_type: "minecraft:stonecutting",
+                body,
+            }
+            .serialize(serializer),
+            Self::SmithingTransform(body) => TaggedDocument {
+                recipe_type: "minecraft:smithing_transform",
+                body,
+            }
+            .serialize(serializer),
+            Self::SmithingTrim(body) => TaggedDocument {
+                recipe_type: "minecraft:smithing_trim",
+                body,
+            }
+            .serialize(serializer),
+            Self::Transmute(body) => TaggedDocument {
+                recipe_type: "minecraft:crafting_transmute",
+                body,
+            }
+            .serialize(serializer),
+            Self::Unsupported(unsupported) => unsupported.raw.serialize(serializer),
+        }
+    }
+}
+
+impl AsRef<RecipeDocument> for RecipeDocument {
+    fn as_ref(&self) -> &RecipeDocument {
+        self
+    }
+}
+
+fn ingredient(document: &IngredientDocument) -> Ingredient {
+    match document {
+        IngredientDocument::Item(id) => Ingredient::Item(id.clone()),
+        IngredientDocument::Tag(id) => Ingredient::Tag(id.clone()),
+        IngredientDocument::Any(options) => {
+            Ingredient::Any(options.iter().map(ingredient).collect())
+        }
+    }
+}
+
+fn result(document: &ResultDocument) -> ItemStack {
+    ItemStack::new(document.id().clone(), document.count())
+}
+
+fn category(document: Option<&RecipeCategoryDocument>) -> RecipeCategory {
+    document.map_or(RecipeCategory::Misc, RecipeCategoryDocument::to_domain)
+}
+
+fn shaped(document: &ShapedRecipeDocument) -> Result<ShapedRecipe, LoadError> {
+    let height = document.pattern.len();
+    let width = document
+        .pattern
         .iter()
-        .map(|r| r.as_str().ok_or(LoadError::BadField("pattern")))
-        .collect::<Result<_, _>>()?;
-    let height = rows.len();
-    let width = rows.iter().map(|r| r.chars().count()).max().unwrap_or(0);
-
-    let key = field(v, "key")?
-        .as_object()
-        .ok_or(LoadError::BadField("key"))?;
-
+        .map(|row| row.chars().count())
+        .max()
+        .unwrap_or(0);
     let mut cells = Vec::with_capacity(width * height);
-    for row in &rows {
+    for row in &document.pattern {
         let chars: Vec<char> = row.chars().collect();
         for x in 0..width {
-            let c = chars.get(x).copied().unwrap_or(' ');
-            if c == ' ' {
+            let character = chars.get(x).copied().unwrap_or(' ');
+            if character == ' ' {
                 cells.push(None);
             } else {
-                let key_str = c.to_string();
-                let ing_val = key.get(&key_str).ok_or(LoadError::BadField("key char"))?;
-                cells.push(Some(parse_ingredient(ing_val)?));
+                let key = character.to_string();
+                let ingredient_document = document
+                    .key
+                    .get(&key)
+                    .ok_or(LoadError::BadField("key char"))?;
+                cells.push(Some(ingredient(ingredient_document)));
             }
         }
     }
-
-    let result = parse_result(field(v, "result")?)?;
-    let mut recipe = ShapedRecipe::new(width, height, cells, result).with_category(parse_category(v));
-    if v.get("show_notification").is_some() {
-        // no-op; kept for schema tolerance
-    }
-    if let Some(false) = v.get("mirror").and_then(Value::as_bool) {
+    let mut recipe = ShapedRecipe::new(width, height, cells, result(&document.result))
+        .with_category(category(document.category.as_ref()));
+    if document.mirror == Some(false) {
         recipe = recipe.without_mirror();
     }
     Ok(recipe)
 }
 
-fn parse_shapeless(v: &Value) -> Result<ShapelessRecipe, LoadError> {
-    let ings = field(v, "ingredients")?
-        .as_array()
-        .ok_or(LoadError::BadField("ingredients"))?;
-    let ingredients = ings
-        .iter()
-        .map(parse_ingredient)
-        .collect::<Result<Vec<_>, _>>()?;
-    let result = parse_result(field(v, "result")?)?;
-    Ok(ShapelessRecipe::new(ingredients, result).with_category(parse_category(v)))
+fn shapeless(document: &ShapelessRecipeDocument) -> ShapelessRecipe {
+    ShapelessRecipe::new(
+        document.ingredients.iter().map(ingredient).collect(),
+        result(&document.result),
+    )
+    .with_category(category(document.category.as_ref()))
 }
 
-fn parse_cooking(ty: &str, v: &Value) -> Result<CookingRecipe, LoadError> {
-    let kind = match ty {
-        "smelting" => CookingKind::Smelting,
-        "blasting" => CookingKind::Blasting,
-        "smoking" => CookingKind::Smoking,
-        _ => CookingKind::CampfireCooking,
-    };
+fn cooking(document: &CookingRecipeDocument, kind: CookingKind) -> CookingRecipe {
     let default_time = match kind {
         CookingKind::Smelting => 200,
         CookingKind::Blasting | CookingKind::Smoking => 100,
         CookingKind::CampfireCooking => 600,
     };
-    Ok(CookingRecipe {
+    CookingRecipe {
         kind,
-        ingredient: parse_ingredient(field(v, "ingredient")?)?,
-        result: parse_result(field(v, "result")?)?,
-        experience: v.get("experience").and_then(Value::as_f64).unwrap_or(0.0) as f32,
-        cooking_time: v
-            .get("cookingtime")
-            .and_then(Value::as_i64)
-            .map_or(default_time, |t| t as i32),
-        category: parse_category(v),
-    })
-}
-
-/// Parses a recipe's optional `"category"` field (present on 694 of 1585
-/// recipes in 26.2's own datapack — `dropper.json`'s `"category": "redstone"`
-/// is a representative example). Absent entirely defaults to
-/// [`RecipeCategory::Misc`], matching vanilla's own default.
-fn parse_category(v: &Value) -> RecipeCategory {
-    v.get("category")
-        .and_then(Value::as_str)
-        .map_or(RecipeCategory::Misc, RecipeCategory::from_json_str)
-}
-
-/// Parses a tag file's `values` list into [`TagEntry`] items.
-///
-/// Entries may be bare strings or `{ "id": ..., "required": ... }` objects; a
-/// leading `#` marks a nested tag reference.
-///
-/// # Errors
-///
-/// Returns [`LoadError`] if `values` is missing or an entry is malformed.
-pub fn parse_tag(v: &Value) -> Result<Vec<TagEntry>, LoadError> {
-    let values = field(v, "values")?
-        .as_array()
-        .ok_or(LoadError::BadField("values"))?;
-    let mut out = Vec::with_capacity(values.len());
-    for entry in values {
-        let s = match entry {
-            Value::String(s) => s.as_str(),
-            Value::Object(map) => map
-                .get("id")
-                .and_then(Value::as_str)
-                .ok_or(LoadError::BadField("tag entry id"))?,
-            _ => return Err(LoadError::BadField("tag entry")),
-        };
-        if let Some(tag) = s.strip_prefix('#') {
-            out.push(TagEntry::Tag(ident(tag)?));
-        } else {
-            out.push(TagEntry::Item(ident(s)?));
-        }
+        ingredient: ingredient(&document.ingredient),
+        result: result(&document.result),
+        experience: document.experience.unwrap_or(0.0),
+        cooking_time: document.cooking_time.unwrap_or(default_time),
+        category: category(document.category.as_ref()),
     }
-    Ok(out)
+}
+
+/// Parses a typed recipe document into the version-free recipe model.
+///
+/// The input is deliberately a DTO rather than an untyped JSON tree; callers
+/// that start with text should use [`parse_recipe_text`] or
+/// [`parse_recipe_document`].
+pub fn parse_recipe(document: impl AsRef<RecipeDocument>) -> Result<Recipe, LoadError> {
+    match document.as_ref() {
+        RecipeDocument::Shaped(document) => shaped(document).map(Recipe::Shaped),
+        RecipeDocument::Shapeless(document) => Ok(Recipe::Shapeless(shapeless(document))),
+        RecipeDocument::Smelting(document) => {
+            Ok(Recipe::Cooking(cooking(document, CookingKind::Smelting)))
+        }
+        RecipeDocument::Blasting(document) => {
+            Ok(Recipe::Cooking(cooking(document, CookingKind::Blasting)))
+        }
+        RecipeDocument::Smoking(document) => {
+            Ok(Recipe::Cooking(cooking(document, CookingKind::Smoking)))
+        }
+        RecipeDocument::CampfireCooking(document) => Ok(Recipe::Cooking(cooking(
+            document,
+            CookingKind::CampfireCooking,
+        ))),
+        RecipeDocument::Stonecutting(document) => Ok(Recipe::Stonecutting {
+            ingredient: ingredient(&document.ingredient),
+            result: result(&document.result),
+        }),
+        RecipeDocument::SmithingTransform(document) => Ok(Recipe::SmithingTransform {
+            template: ingredient(&document.template),
+            base: ingredient(&document.base),
+            addition: ingredient(&document.addition),
+            result: result(&document.result),
+        }),
+        RecipeDocument::SmithingTrim(document) => Ok(Recipe::SmithingTrim {
+            template: ingredient(&document.template),
+            base: ingredient(&document.base),
+            addition: ingredient(&document.addition),
+        }),
+        RecipeDocument::Transmute(document) => Ok(Recipe::Transmute {
+            input: ingredient(&document.input),
+            material: ingredient(&document.material),
+            result: result(&document.result),
+        }),
+        RecipeDocument::Unsupported(document) => Ok(Recipe::Special(
+            recipe_path(&document.recipe_type).to_string(),
+        )),
+    }
+}
+
+/// Decodes a recipe document from text without exposing an untyped JSON value.
+pub fn parse_recipe_document(text: &str) -> Result<RecipeDocument, LoadError> {
+    let probe: RecipeTypeProbe =
+        serde_json::from_str(text).map_err(|error| LoadError::Json(error.to_string()))?;
+    if probe.recipe_type.is_none() {
+        return Err(LoadError::MissingType);
+    }
+    serde_json::from_str(text).map_err(|error| LoadError::Json(error.to_string()))
+}
+
+/// Decodes a recipe from text into the version-free recipe model.
+pub fn parse_recipe_text(text: &str) -> Result<Recipe, LoadError> {
+    parse_recipe_document(text).and_then(parse_recipe)
+}
+
+/// Parses a typed tag document into tag resolver entries.
+pub fn parse_tag(document: impl AsRef<TagDocument>) -> Result<Vec<TagEntry>, LoadError> {
+    Ok(document
+        .as_ref()
+        .values
+        .iter()
+        .map(|entry| match entry {
+            TagValueDocument::Item(id) => TagEntry::Item(id.clone()),
+            TagValueDocument::Tag(id) => TagEntry::Tag(id.clone()),
+        })
+        .collect())
+}
+
+impl AsRef<TagDocument> for TagDocument {
+    fn as_ref(&self) -> &TagDocument {
+        self
+    }
+}
+
+/// Decodes a tag document from text.
+pub fn parse_tag_document(text: &str) -> Result<TagDocument, LoadError> {
+    serde_json::from_str(text).map_err(|error| LoadError::Json(error.to_string()))
+}
+
+/// Decodes a tag from text into resolver entries.
+pub fn parse_tag_text(text: &str) -> Result<Vec<TagEntry>, LoadError> {
+    parse_tag_document(text).and_then(parse_tag)
 }
 
 // ---------------------------------------------------------------------------
@@ -293,7 +898,7 @@ impl CorpusBuilder {
 
     /// Parses and stages one recipe document. Errors are recorded, not returned.
     pub fn push_recipe(&mut self, id: Identifier, json: &str) {
-        match parse_json(json).and_then(|v| parse_recipe(&v)) {
+        match parse_recipe_text(json) {
             Ok(recipe) => self.recipes.push((id, recipe)),
             Err(e) => self.failures.push((id.to_string(), e)),
         }
@@ -302,7 +907,7 @@ impl CorpusBuilder {
     /// Parses and stages one item-tag document. Errors are recorded, not
     /// returned.
     pub fn push_tag(&mut self, id: Identifier, json: &str) {
-        match parse_json(json).and_then(|v| parse_tag(&v)) {
+        match parse_tag_text(json) {
             Ok(entries) => self.tags.push((id, entries)),
             Err(e) => self.failures.push((id.to_string(), e)),
         }
@@ -339,10 +944,6 @@ impl CorpusBuilder {
         }
         book
     }
-}
-
-fn parse_json(text: &str) -> Result<Value, LoadError> {
-    serde_json::from_str(text).map_err(|e| LoadError::Json(e.to_string()))
 }
 
 /// Loads every recipe and item tag under a vanilla **datapack `data/` root**.

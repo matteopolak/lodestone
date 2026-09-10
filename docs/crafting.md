@@ -46,6 +46,17 @@ datapack's `data/` root **recursively** — a flat `read_dir` silently drops a
 third of 26.2's item tags, since tag ids are path-derived
 (`tags/item/enchantable/weapon.json` → `minecraft:enchantable/weapon`).
 
+The JSON boundary is typed before it reaches the model. `RecipeDocument` is a
+tagged recipe enum, while `IngredientDocument` is a recursive item/tag/choice
+tree and `ResultDocument` covers both the compact string and counted-object
+forms. `TagDocument` does the same for nested item tags. Use
+`parse_recipe_document`/`parse_tag_document` when the DTO is needed for
+inspection or forwarding, and `parse_recipe_text`/`parse_tag_text` when only
+the model entries are needed; none of these APIs accepts an untyped JSON
+value. An `UnsupportedRecipeDocument` retains the complete source object as
+raw JSON, so a newer recipe kind is visible and forwardable rather than being
+silently reduced to a type string.
+
 Slot order is the trap in the menus: window 0 is `0` result / `1..=4` craft /
 `5..=8` armour / `9..=35` main / `36..=44` hotbar / `45` off-hand, while a
 crafting table is `0` result / `1..=9` grid / `10..=36` main / `37..=45`
@@ -151,7 +162,7 @@ player persistence.
 ## Configuration
 
 Cargo feature `json` on `lodestone-game` (off by default) enables
-`recipe_json`; the shell enables it explicitly
+`recipe_json` and its typed serde/thiserror/bon boundary; the shell enables it explicitly
 (`lodestone-game = { workspace = true, features = ["json"] }"`) to load the
 real corpus from `client.jar` at GPU bring-up. Corpus tests read
 `.cache/mc/26.2/client-src/data` (gitignored) and are `#[ignore]`d.
@@ -159,7 +170,8 @@ real corpus from `client.jar` at GPU bring-up. Corpus tests read
 ## Dependencies
 
 `lodestone-model` (`Identifier`, `ClientEvent`, `ItemStack`, `Text`);
-`serde_json` (optional, feature `json`); `bevy_ecs` for the registration
+`serde`/`serde_json` (optional, feature `json`), `thiserror`, and `bon` for
+the typed document/error boundary; `bevy_ecs` for the registration
 resource. Nothing here is version-specific — recipes are `Identifier`-keyed,
 never numeric ids, so no protocol family is involved. Consumed by
 `lodestone-client` (`Menus`) and `lodestone-shell` (`container.rs`,
