@@ -180,7 +180,7 @@ Two independent outside constants pin codecs that a round trip could not:
 31,691 generated lines and 2,362 test lines. This is the largest measured
 founding cost among the implemented era crates.
 
-`cargo run -p xtask -- connectedness` reports **63/139 clientbound decoded, 62
+`cargo run -p xtask -- connectedness` reports **64/139 clientbound decoded, 63
 emitting, 0 decoded-but-stranded, 34/66 serverbound encoded, 63 arms examined**
 — and, importantly, zero arms it could not classify. That command hard-fails
 when it finds dispatch evidence it cannot parse, so the `CLIENTBOUND` table in
@@ -189,6 +189,24 @@ after its resource-name string, which is one of the two spellings the reader
 recognises. Restructuring that table behind a helper is the single easiest way
 to take this crate's score to 0/139 while leaving it working, which is what
 happened to the 1.20.6 era.
+
+### Death and respawn
+
+The hosted 774 cycle is a three-packet boundary. `V774ServerProtocol::decode`
+accepts the literal `client_command` action `0`; the server's death choke point
+uses `V774ServerProtocol::encode_player_combat_kill` to send the victim id and a
+network-NBT message; and `encode_respawn_with_teleport_id` sends the state-reset
+`respawn` followed by the absolute `player_position` correction. The adapter's
+`V774Adapter::handle_play_player_combat_kill` consumes the complete message and
+emits the shared death event, while its existing respawn handler clears the
+client death state.
+
+`tests/death_respawn.rs` keeps the two directions independent: the clientbound
+death body and serverbound perform-respawn body are literal wire controls, and
+the production encoder is checked against the same byte layouts. The exact
+payload check is important here because a health update alone does not clear a
+death screen, and a position correction alone does not rebuild the player
+state.
 
 ## How to change it
 

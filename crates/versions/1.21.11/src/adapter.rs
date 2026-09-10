@@ -35,7 +35,7 @@
 
 use std::sync::{Arc, LockResult, Mutex, MutexGuard, PoisonError};
 
-use lodestone_core::{Ctx, Decode, Encode, Reader, Writer};
+use lodestone_core::{Ctx, Decode, Encode, Reader, Writer, read_network_nbt};
 use lodestone_data::block_entity_types::block_entity_type;
 use lodestone_data::mob_effects::{mob_effect_name_for, MobEffectId};
 use lodestone_model::{
@@ -1100,6 +1100,22 @@ impl V774Adapter {
             game_mode: game_mode(body.world_state.game_mode as u8)?,
             previous_game_mode: None,
             last_death_location: None,
+        })])
+    }
+
+    /// `minecraft:player_combat_kill`. The body starts with the victim's
+    /// entity id and carries the death message as one network-NBT component.
+    fn handle_play_player_combat_kill(
+        _adapter: &V774Adapter,
+        _world: &mut dyn WorldSink,
+        payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        let mut reader = Reader::new(payload);
+        reader.var_i32().map_err(dec_err)?;
+        let component = read_network_nbt(&mut reader).map_err(dec_err)?;
+        reader.ensure_empty().map_err(dec_err)?;
+        Ok(vec![Directive::Emit(ClientEvent::Death {
+            message: Text::from_nbt(&component),
         })])
     }
 
@@ -2772,6 +2788,13 @@ static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = 
         ),
     ),
     (
+        "minecraft:player_combat_kill",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V774Adapter::handle_play_player_combat_kill,
+        ),
+    ),
+    (
         "minecraft:level_chunk_with_light",
         lodestone_core::dispatch::Handler::new(
             lodestone_core::ProtocolRange::ALL,
@@ -3390,11 +3413,6 @@ static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:player_combat_enter",
         "the combat tracker only drives the death screen's damage summary",
-    ),
-    lodestone_core::dispatch::IGNORED::new(
-        "minecraft:player_combat_kill",
-        "the death screen has no surface for this era; the respawn is driven by the health \
-         change and the client command",
     ),
     lodestone_core::dispatch::IGNORED::new(
         "minecraft:player_look_at",
