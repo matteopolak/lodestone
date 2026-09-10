@@ -7,6 +7,7 @@
 
 mod support;
 
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use lodestone_ecs::commands::{
@@ -14,7 +15,9 @@ use lodestone_ecs::commands::{
 };
 use lodestone_ecs::permissions::{PermissionDefault, PermissionSubject, Permissions};
 use lodestone_model::{ResourceKey, Rotation, Vec3};
-use lodestone_wasm_host::{Capability, CapabilitySet, PluginHost, WasmHostPlugin};
+use lodestone_wasm_host::{
+    reload_wasm_plugins, Capability, CapabilitySet, PluginHost, WasmHostPlugin,
+};
 use uuid::Uuid;
 
 fn command_capabilities() -> CapabilitySet {
@@ -40,6 +43,32 @@ fn client_app_with_guest(grant_commands: bool) -> lodestone_app::App {
     let mut app = lodestone_app::client_app();
     app.add_plugins(WasmHostPlugin::new(host));
     app
+}
+
+fn command_reload_root() -> PathBuf {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("command-registration-reload");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create command reload root");
+    root
+}
+
+fn install_command_guest(root: &Path, wasm: &Path) {
+    let plugin = root.join("command-fixture");
+    std::fs::create_dir_all(&plugin).expect("create command fixture directory");
+    std::fs::write(
+        plugin.join("plugin.toml"),
+        r#"
+name = "command-fixture"
+version = "0.1.0"
+abi = "lodestone:plugin@0.27.0"
+module = "command_fixture.wasm"
+priority = "normal"
+capabilities = ["log", "commands:register"]
+"#,
+    )
+    .expect("write command fixture manifest");
+    std::fs::copy(wasm, plugin.join("command_fixture.wasm"))
+        .expect("copy command fixture module");
 }
 
 #[test]
@@ -183,5 +212,49 @@ fn control_without_the_wasm_host_plugin_the_client_has_no_guest_command() {
             Err(lodestone_ecs::commands::CommandDispatchError::UnknownCommand { .. })
         ),
         "the client command registry must not manufacture the guest root"
+    );
+}
+
+/// Reload is a production registry transaction, not just a host-store swap:
+/// removing a guest must unregister only its roots, and adding it back must
+/// make the same roots executable through the real client command registry.
+#[test]
+fn a_wasm_command_reload_unregisters_and_reinstalls_guest_roots() {
+    let wasm = support::build_example_plugin(&["commands"]);
+    let root = command_reload_root();
+    install_command_guest(&root, &wasm);
+
+    let mut host = PluginHost::new(command_capabilities()).expect("engine");
+    let results = host.load_directory(&root);
+    assert_eq!(results.len(), 1, "the command fixture must be discovered");
+    results[0].as_ref().expect("the command fixture must load");
+
+    let mut app = lodestone_app::client_app();
+    app.add_plugins(WasmHostPlugin::new(host));
+    let source = CommandSource::console();
+    assert_eq!(
+        dispatch(app.world_mut(), &source, "/wp"),
+        Ok(CommandOutcome::Success(37)),
+        "the initial directory load must register the guest root"
+    );
+
+    std::fs::remove_dir_all(root.join("command-fixture")).expect("disable command fixture");
+    reload_wasm_plugins(&mut app, &root, &Default::default())
+        .expect("removing the guest is a valid reload");
+    assert!(
+        matches!(
+            dispatch(app.world_mut(), &source, "/wp"),
+            Err(lodestone_ecs::commands::CommandDispatchError::UnknownCommand { .. })
+        ),
+        "a successful reload must unregister retired guest roots"
+    );
+
+    install_command_guest(&root, &wasm);
+    reload_wasm_plugins(&mut app, &root, &Default::default())
+        .expect("reinstalling the guest is a valid reload");
+    assert_eq!(
+        dispatch(app.world_mut(), &source, "/wp"),
+        Ok(CommandOutcome::Success(37)),
+        "a replacement guest must re-register its alias through the real registry"
     );
 }
