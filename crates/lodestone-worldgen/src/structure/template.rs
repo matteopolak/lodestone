@@ -21,6 +21,7 @@
 //!             state = processors.process(world, state)?      <- may drop it
 //!             state = state.mirror(m).rotate(r)              <- vanilla's order
 //!             grid.set(world, state)                         <- clipped by the grid
+//!         after each template: reconcile typed attachment survival
 //! ```
 //!
 //! Two properties make this work chunk-at-a-time with no cross-chunk state, which
@@ -75,6 +76,10 @@ use std::io::Read as _;
 use std::sync::Arc;
 
 use lodestone_core::{Nbt, Reader};
+use lodestone_data::block::Block;
+use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey};
+use lodestone_data::block_states::StateId as CanonicalStateId;
+use lodestone_data::{block_survival, collision_shapes};
 use lodestone_worldgen_core::rng::{LegacyRandomSource, RandomSource, get_seed};
 
 use super::BoundingBox;
@@ -965,6 +970,7 @@ impl StructureTemplate {
             );
         }
         let mut written = 0;
+        let mut placed_positions = Vec::new();
         for block in processed {
             // A `GravityProcessor` moves a block, so re-test the clip.
             if !inside(block.pos) {
@@ -982,8 +988,10 @@ impl StructureTemplate {
                 on_block_entity(block.pos, type_id);
             }
             grid.set(block.pos[0], block.pos[1], block.pos[2], &canonical);
+            placed_positions.push(block.pos);
             written += 1;
         }
+        reconcile_structure_attachments(grid, &placed_positions);
         written
     }
 }
@@ -993,6 +1001,209 @@ fn block_entity_type_for_state(state: &str) -> Option<&'static str> {
         .and_then(lodestone_data::block_states::StateId::new)?;
     lodestone_data::block_entity_types::block_entity_type(state)
         .map(lodestone_data::block_entity_types::block_entity_type_name)
+}
+/// Support relationship for a block that may disappear when its neighbours
+/// are written after a structure template.
+#[derive(Debug, Clone, Copy)]
+enum AttachmentSupport {
+    Face,
+    Below,
+}
+
+fn attachment_support(block: Block) -> Option<AttachmentSupport> {
+    use AttachmentSupport::{Below, Face};
+    Some(match block {
+        Block::Ladder
+        | Block::WallTorch
+        | Block::RedstoneWallTorch
+        | Block::SoulWallTorch
+        | Block::CopperWallTorch
+        | Block::TripwireHook
+        | Block::OakWallSign
+        | Block::SpruceWallSign
+        | Block::BirchWallSign
+        | Block::AcaciaWallSign
+        | Block::CherryWallSign
+        | Block::JungleWallSign
+        | Block::DarkOakWallSign
+        | Block::PaleOakWallSign
+        | Block::MangroveWallSign
+        | Block::BambooWallSign
+        | Block::CrimsonWallSign
+        | Block::WarpedWallSign
+        | Block::OakWallHangingSign
+        | Block::SpruceWallHangingSign
+        | Block::BirchWallHangingSign
+        | Block::AcaciaWallHangingSign
+        | Block::CherryWallHangingSign
+        | Block::JungleWallHangingSign
+        | Block::DarkOakWallHangingSign
+        | Block::PaleOakWallHangingSign
+        | Block::MangroveWallHangingSign
+        | Block::CrimsonWallHangingSign
+        | Block::WarpedWallHangingSign
+        | Block::BambooWallHangingSign
+        | Block::SkeletonWallSkull
+        | Block::WitherSkeletonWallSkull
+        | Block::ZombieWallHead
+        | Block::PlayerWallHead
+        | Block::CreeperWallHead
+        | Block::DragonWallHead
+        | Block::PiglinWallHead
+        | Block::WhiteWallBanner
+        | Block::OrangeWallBanner
+        | Block::MagentaWallBanner
+        | Block::LightBlueWallBanner
+        | Block::YellowWallBanner
+        | Block::LimeWallBanner
+        | Block::PinkWallBanner
+        | Block::GrayWallBanner
+        | Block::LightGrayWallBanner
+        | Block::CyanWallBanner
+        | Block::PurpleWallBanner
+        | Block::BlueWallBanner
+        | Block::BrownWallBanner
+        | Block::GreenWallBanner
+        | Block::RedWallBanner
+        | Block::BlackWallBanner => Face,
+        Block::Rail
+        | Block::StonePressurePlate
+        | Block::OakPressurePlate
+        | Block::SprucePressurePlate
+        | Block::BirchPressurePlate
+        | Block::JunglePressurePlate
+        | Block::AcaciaPressurePlate
+        | Block::CherryPressurePlate
+        | Block::DarkOakPressurePlate
+        | Block::PaleOakPressurePlate
+        | Block::MangrovePressurePlate
+        | Block::BambooPressurePlate
+        | Block::LightWeightedPressurePlate
+        | Block::HeavyWeightedPressurePlate
+        | Block::CrimsonPressurePlate
+        | Block::WarpedPressurePlate
+        | Block::PolishedBlackstonePressurePlate => Below,
+        _ => return None,
+    })
+}
+
+fn canonical_state_at(grid: &DenseBlockGrid, pos: [i32; 3]) -> Option<CanonicalStateId> {
+    grid.interner().canonical_id(grid.get_id(pos[0], pos[1], pos[2]))
+}
+
+fn property(state: CanonicalStateId, key: PropertyKey) -> Option<BuiltinPropertyValue> {
+    Properties::from_state_id(state).get(key).and_then(|value| value.builtin_value())
+}
+
+fn adjacent(pos: [i32; 3], direction: BuiltinPropertyValue) -> [i32; 3] {
+    match direction {
+        BuiltinPropertyValue::North => [pos[0], pos[1], pos[2] - 1],
+        BuiltinPropertyValue::South => [pos[0], pos[1], pos[2] + 1],
+        BuiltinPropertyValue::East => [pos[0] + 1, pos[1], pos[2]],
+        BuiltinPropertyValue::West => [pos[0] - 1, pos[1], pos[2]],
+        _ => pos,
+    }
+}
+
+fn full_support_face(state: CanonicalStateId, face: BuiltinPropertyValue) -> bool {
+    collision_shapes::collision_boxes(state).iter().any(|box_| {
+        let full_x = box_.min[0] <= 0.0 && box_.max[0] >= 1.0;
+        let full_y = box_.min[1] <= 0.0 && box_.max[1] >= 1.0;
+        let full_z = box_.min[2] <= 0.0 && box_.max[2] >= 1.0;
+        match face {
+            BuiltinPropertyValue::North => full_x && full_y && box_.min[2] <= 0.0,
+            BuiltinPropertyValue::South => full_x && full_y && box_.max[2] >= 1.0,
+            BuiltinPropertyValue::East => full_y && full_z && box_.max[0] >= 1.0,
+            BuiltinPropertyValue::West => full_y && full_z && box_.min[0] <= 0.0,
+            _ => false,
+        }
+    })
+}
+
+fn attachment_survives(grid: &DenseBlockGrid, pos: [i32; 3], state: CanonicalStateId) -> bool {
+    let (min_x, min_y, min_z, size_x, size_y, size_z) = grid.bounds();
+    let inside = |candidate: [i32; 3]| {
+        candidate[0] >= min_x
+            && candidate[0] < min_x + size_x
+            && candidate[1] >= min_y
+            && candidate[1] < min_y + size_y
+            && candidate[2] >= min_z
+            && candidate[2] < min_z + size_z
+    };
+    let Some(support) = attachment_support(state.block()) else {
+        return true;
+    };
+    match support {
+        AttachmentSupport::Face => {
+            let Some(facing) = property(state, PropertyKey::Facing) else {
+                return true;
+            };
+            let support_pos = adjacent(pos, facing);
+            if !inside(support_pos) {
+                return true;
+            }
+            let support = canonical_state_at(grid, support_pos);
+            let opposite = match facing {
+                BuiltinPropertyValue::North => BuiltinPropertyValue::South,
+                BuiltinPropertyValue::South => BuiltinPropertyValue::North,
+                BuiltinPropertyValue::East => BuiltinPropertyValue::West,
+                BuiltinPropertyValue::West => BuiltinPropertyValue::East,
+                _ => return true,
+            };
+            support.is_some_and(|support| full_support_face(support, opposite))
+        }
+        AttachmentSupport::Below => {
+            let support_pos = [pos[0], pos[1] - 1, pos[2]];
+            inside(support_pos)
+                && canonical_state_at(grid, support_pos).is_some_and(block_survival::sturdy_up)
+        }
+    }
+}
+
+/// Finishes a template's placement lifecycle before the next piece runs.
+///
+/// The placed list and its boundary are revisited as a queue. Unsupported
+/// typed attachments become air and enqueue their neighbours, so a chain of
+/// attachments cannot retain a block whose support was removed. This is the
+/// survival portion of the broader neighbour-shape pass; connection-state
+/// recomputation remains a separate concern for blocks with mutable shapes.
+fn reconcile_structure_attachments(grid: &mut DenseBlockGrid, placed: &[[i32; 3]]) {
+    let mut pending = Vec::with_capacity(placed.len() * 7);
+    for &pos in placed {
+        pending.push(pos);
+        pending.extend([
+            [pos[0] - 1, pos[1], pos[2]],
+            [pos[0] + 1, pos[1], pos[2]],
+            [pos[0], pos[1] - 1, pos[2]],
+            [pos[0], pos[1] + 1, pos[2]],
+            [pos[0], pos[1], pos[2] - 1],
+            [pos[0], pos[1], pos[2] + 1],
+        ]);
+    }
+    while let Some(pos) = pending.pop() {
+        let Some(state) = canonical_state_at(grid, pos) else {
+            continue;
+        };
+        if matches!(state.block(), Block::Air | Block::CaveAir | Block::VoidAir)
+            || attachment_survives(grid, pos, state)
+        {
+            continue;
+        }
+        let air = grid
+            .interner()
+            .canonical_id(crate::interner::StateId::AIR)
+            .map(|state| grid.interner().id_of_canonical(state))
+            .expect("air is registered");
+        grid.set_id(pos[0], pos[1], pos[2], air);
+        pending.extend([
+            [pos[0] - 1, pos[1], pos[2]],
+            [pos[0] + 1, pos[1], pos[2]],
+            [pos[0], pos[1] - 1, pos[2]],
+            [pos[0], pos[1] + 1, pos[2]],
+            [pos[0], pos[1], pos[2] - 1],
+            [pos[0], pos[1], pos[2] + 1],
+        ]);
+    }
 }
 
 fn compound(value: &Nbt) -> Option<&Vec<(String, Nbt)>> {
@@ -1113,6 +1324,39 @@ mod tests {
         assert_eq!(
             state.canonical(),
             "minecraft:oak_trapdoor[facing=north,half=top,open=false]"
+        );
+    }
+    #[test]
+    fn attachment_survival_is_reconciled_per_template() {
+        let ladder = StructureTemplate::from_blocks(
+            [1, 1, 1],
+            vec![BlockState::parse("minecraft:ladder[facing=north,waterlogged=false]")],
+            vec![([0, 0, 0], 0)],
+        );
+        let support = StructureTemplate::from_blocks(
+            [1, 1, 1],
+            vec![BlockState::of("minecraft:stone")],
+            vec![([0, 0, 0], 0)],
+        );
+        let origin = |position| PlaceOrigin {
+            position,
+            reference: [0, 0, 0],
+            seed: 0,
+        };
+        let settings = PlaceSettings::default();
+
+        let mut unsupported = DenseBlockGrid::new(0, 0, -2, 3, 3, 5, "minecraft:air");
+        ladder.place(origin([1, 1, 0]), &settings, &mut unsupported);
+        assert_eq!(unsupported.get(1, 1, 0), "minecraft:air");
+        support.place(origin([1, 1, -1]), &settings, &mut unsupported);
+        assert_eq!(unsupported.get(1, 1, 0), "minecraft:air");
+
+        let mut supported = DenseBlockGrid::new(0, 0, -2, 3, 3, 5, "minecraft:air");
+        support.place(origin([1, 1, -1]), &settings, &mut supported);
+        ladder.place(origin([1, 1, 0]), &settings, &mut supported);
+        assert_eq!(
+            supported.get(1, 1, 0),
+            "minecraft:ladder[facing=north,waterlogged=false]"
         );
     }
 }
