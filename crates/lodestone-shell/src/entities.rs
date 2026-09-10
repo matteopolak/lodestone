@@ -154,9 +154,10 @@ use lodestone_entity::pose::{
     ADULT_LIMB_SCALE, BABY_LIMB_SCALE, LIMB_SWING_SMOOTHING, MAX_HEAD_YAW, WalkAnimation,
     clamp_head_to_body, walk_target_speed,
 };
+use lodestone_data::entity_type::EntityType;
 use lodestone_model::BlockStateRef;
 use lodestone_model::event::{EntityVariant, EquipmentSlot, Reported};
-use lodestone_model::{ResolvedText, Text};
+use lodestone_model::{EntityNetworkId, ResolvedText, Text};
 use lodestone_physics::{
     CollisionView, EntityDimensions, EntityMotion, MoveContext, PhysicsProfile, Vec3d, mth,
     move_entity,
@@ -390,6 +391,10 @@ struct EntityFacts {
     id: i32,
     /// The entity type's canonical path (e.g. `"pig"`), for model resolution.
     type_path: String,
+    /// The generated built-in identity resolved once at the ingest boundary.
+    /// `None` preserves custom/data-pack entity keys for string-keyed model
+    /// fallback without letting them masquerade as a closed-registry member.
+    entity_type: Option<EntityType>,
     /// Feet position in world space.
     feet: Vec3,
     /// Body yaw in degrees.
@@ -597,14 +602,14 @@ pub struct SheepWool {
 /// Narrows a snapshot's decoded variant to the sheep-wool payload
 /// [`EntityDraw::wool`] carries.
 ///
-/// Gated on the **resolved type path being exactly `"sheep"`**, never on
+/// Gated on the generated [`EntityType::Sheep`] identity, never on
 /// `AnimFamily::Quadruped` (shared by pig, cow and wolf) — the same pig/cow
 /// trap `docs/entity-rendering.md` documents for the armour attach applies
 /// here, worse, because wool has no gate at all inside the mesh geometry
 /// itself the way a humanoid check does.
 #[must_use]
-fn sheep_wool(type_path: &str, variant: Option<&EntityVariant>) -> Option<SheepWool> {
-    if type_path != "sheep" {
+fn sheep_wool(entity_type: Option<EntityType>, variant: Option<&EntityVariant>) -> Option<SheepWool> {
+    if entity_type != Some(EntityType::Sheep) {
         return None;
     }
     match variant {
@@ -625,38 +630,46 @@ fn sheep_wool(type_path: &str, variant: Option<&EntityVariant>) -> Option<SheepW
 /// path and draws them through the model pipeline instead.
 pub const ITEM_ENTITY_TYPE_PATH: &str = "item";
 
-/// Ballistic projectile entity paths whose client state is integrated locally.
+/// Ballistic projectile entity types whose client state is integrated locally.
 /// Their server entity types use a 20-tick update interval, so a normal network
 /// interpolation window would leave them frozen between corrections.
-fn is_ballistic_projectile(path: &str) -> bool {
-    matches!(path, "arrow" | "spectral_arrow" | "trident")
-}
-
-/// Projectile paths whose speed gains a direction-aligned amount each tick.
-///
-/// They are deliberately separate from [`is_ballistic_projectile`]: this family
-/// does not fall under gravity, and its power can change after spawning.
-fn is_accelerating_projectile(path: &str) -> bool {
+fn is_ballistic_projectile(entity_type: Option<EntityType>) -> bool {
     matches!(
-        path,
-        "fireball"
-            | "small_fireball"
-            | "dragon_fireball"
-            | "wither_skull"
-            | "wind_charge"
-            | "breeze_wind_charge"
+        entity_type,
+        Some(EntityType::Arrow | EntityType::SpectralArrow | EntityType::Trident)
     )
 }
 
-fn is_locally_simulated_projectile(path: &str) -> bool {
-    is_ballistic_projectile(path) || is_accelerating_projectile(path)
+/// Projectile types whose speed gains a direction-aligned amount each tick.
+///
+/// They are deliberately separate from [`is_ballistic_projectile`]: this family
+/// does not fall under gravity, and its power can change after spawning.
+fn is_accelerating_projectile(entity_type: Option<EntityType>) -> bool {
+    matches!(
+        entity_type,
+        Some(
+            EntityType::Fireball
+                | EntityType::SmallFireball
+                | EntityType::DragonFireball
+                | EntityType::WitherSkull
+                | EntityType::WindCharge
+                | EntityType::BreezeWindCharge
+        )
+    )
+}
+
+fn is_locally_simulated_projectile(entity_type: Option<EntityType>) -> bool {
+    is_ballistic_projectile(entity_type) || is_accelerating_projectile(entity_type)
 }
 
 /// The default acceleration power before a server update has named one.
 /// Wind charges are the zero-power exception; all other accelerating projectile
 /// types start at `0.1`.
-fn default_projectile_power(path: &str) -> f64 {
-    if matches!(path, "wind_charge" | "breeze_wind_charge") {
+fn default_projectile_power(entity_type: Option<EntityType>) -> f64 {
+    if matches!(
+        entity_type,
+        Some(EntityType::WindCharge | EntityType::BreezeWindCharge)
+    ) {
         0.0
     } else {
         0.1
@@ -666,8 +679,11 @@ fn default_projectile_power(path: &str) -> f64 {
 /// Inertia for the locally simulated accelerating-projectile family.
 /// Wind charges retain their motion exactly while the fireball family uses the
 /// ordinary `0.95` air multiplier.
-fn projectile_inertia(path: &str) -> f64 {
-    if matches!(path, "wind_charge" | "breeze_wind_charge") {
+fn projectile_inertia(entity_type: Option<EntityType>) -> f64 {
+    if matches!(
+        entity_type,
+        Some(EntityType::WindCharge | EntityType::BreezeWindCharge)
+    ) {
         1.0
     } else {
         0.95
@@ -1188,15 +1204,13 @@ impl EntityDraw {
 // The render-side component set
 // ---------------------------------------------------------------------------
 
-/// The entity type's canonical path, as [`resolve_entity_facts`] reported it.
+/// The render-facing identity resolved by [`resolve_entity_facts`].
 ///
 /// Distinct from `lodestone_ecs::entity::EntityKind` (a `ResourceKey`) because
-/// this is the bare path string `lodestone-render`'s model set is keyed by,
-/// while `EntityKind` is the network vocabulary. `EntitySnapshot`
-/// is gone, but collapsing these two into one component is a separate,
-/// larger change nothing here requires — `RenderKind` still exists
-/// specifically so this module needs no `ResourceKey`-shaped lookup on every
-/// extract.
+/// The generated identity is used by closed gameplay/render dispatch. The bare
+/// path remains beside it because resource packs and plugins may supply keys
+/// outside the built-in registry, and model lookup must preserve those rather
+/// than silently substituting a built-in value.
 ///
 /// `Arc<str>` rather than `String`: `extract_entity_draws` reads
 /// this component into a fresh `EntityDraw` every rendered frame for every
@@ -1206,7 +1220,12 @@ impl EntityDraw {
 /// happens once, in `spawn_track`/`update_track`, not once per frame per
 /// entity.
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
-pub struct RenderKind(pub Arc<str>);
+pub struct RenderKind {
+    /// Bare path retained for model/resource-pack lookup, including extensions.
+    pub path: Arc<str>,
+    /// Closed built-in identity used by gameplay/render dispatch.
+    pub entity_type: Option<EntityType>,
+}
 
 /// Uniform render scale (baby mobs are drawn smaller).
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
@@ -1773,11 +1792,11 @@ impl TrackedStack {
 /// entity consumers only need an item id, while a framed map must retain its
 /// data-component id to select the matching `MAP_ITEM_DATA` picture.
 #[derive(Resource, Debug, Default, Clone)]
-pub struct EntityMapIds(HashMap<i32, i32>);
+pub struct EntityMapIds(HashMap<EntityNetworkId, i32>);
 
 /// A snapshot of every entity whose current stack carries `minecraft:map_id`.
 #[must_use]
-pub fn entity_map_ids(world: &World) -> HashMap<i32, i32> {
+pub fn entity_map_ids(world: &World) -> HashMap<EntityNetworkId, i32> {
     world.resource::<EntityMapIds>().0.clone()
 }
 
@@ -1790,11 +1809,11 @@ pub fn entity_map_ids(world: &World) -> HashMap<i32, i32> {
 /// metadata can precede the snapshot poll). Pruned alongside the tracks, so a
 /// despawned drop leaves nothing behind.
 #[derive(Resource, Debug, Default)]
-pub struct ItemStacks(HashMap<i32, TrackedStack>);
+pub struct ItemStacks(HashMap<EntityNetworkId, TrackedStack>);
 
 /// Server entity id → the ECS entity holding its render components.
 #[derive(Resource, Debug, Default)]
-pub struct TrackIndex(HashMap<i32, Entity>);
+pub struct TrackIndex(HashMap<EntityNetworkId, Entity>);
 
 /// This frame's extracted draw list, written by [`extract_entity_draws`] and
 /// appended to by [`extract_pickup_draws`].
@@ -1859,7 +1878,7 @@ pub struct PickupAnimation {
     /// The collected item entity's id, kept only as the bob-phase key
     /// [`lodestone_render::entity::item_bob_offset`] hashes — the same phase the
     /// item had before it was picked up, so the copy does not visibly re-roll.
-    pub item_entity_id: i32,
+    pub item_entity_id: EntityNetworkId,
     /// Which item model to draw.
     pub item: ResourceLocation,
     /// The player-head profile skin selected when this render-state snapshot was
@@ -1885,7 +1904,7 @@ pub struct PickupAnimation {
     pub age_ticks: f32,
     /// The collecting entity's id. **Any** entity, not just the local player:
     /// vanilla animates a mob's pickup too.
-    pub collector_id: i32,
+    pub collector_id: EntityNetworkId,
     /// Whole ticks elapsed, `0..PICKUP_LIFE_TICKS`.
     pub life: f32,
 }
@@ -1947,7 +1966,11 @@ fn pickup_progress(life: f32, partial_tick: f32) -> f32 {
 /// ahead of `Sim::fold_entities`, so the track the server has stopped reporting
 /// is still present here and gone one call later — that ordering is the whole
 /// reason this is a function called from `poll_net` rather than a system.
-pub fn begin_item_pickup(world: &mut World, item_entity_id: i32, collector_id: i32) -> bool {
+pub fn begin_item_pickup(
+    world: &mut World,
+    item_entity_id: EntityNetworkId,
+    collector_id: EntityNetworkId,
+) -> bool {
     let Some(stack) = world
         .resource::<ItemStacks>()
         .0
@@ -2038,7 +2061,7 @@ pub fn extract_pickup_draws(
         };
         let feet = pickup.start.lerp(target, pickup_progress(pickup.life, partial_tick));
         out.0.push(EntityDraw {
-            id: pickup.item_entity_id,
+            id: pickup.item_entity_id.raw(),
             type_path: Arc::from(ITEM_ENTITY_TYPE_PATH),
             item: Some(pickup.item.clone()),
             item_model: None,
@@ -2124,13 +2147,13 @@ pub fn extract_pickup_draws(
 /// silently animate nothing for **every pickup the player makes**, which is all
 /// of them that matter.
 fn collector_target(
-    collector_id: i32,
+    collector_id: EntityNetworkId,
     index: &TrackIndex,
     poses: &Query<(&InterpFrom, &InterpTo, &InterpClock)>,
     locals: &Query<(&MinecraftEntityId, &PhysicsState), With<LocalPlayer>>,
 ) -> Option<Vec3> {
     for (id, state) in locals {
-        if id.0 == collector_id {
+        if EntityNetworkId::from_raw(id.0) == collector_id {
             let p = state.0.position;
             return Some(Vec3::new(
                 p.x as f32,
@@ -2874,7 +2897,7 @@ pub fn extract_entity_draws(
         // own `EntityDraw` with `item: Some(..)` by hand and so could not see
         // the producer refusing to supply one; `live_framed_item_wire.rs` is
         // the gate that obtains this value the way production does.
-        let stack = stacks.0.get(&id.0);
+        let stack = stacks.0.get(&EntityNetworkId::from_raw(id.0));
         // `0.0` for an id with no ingest entity (shouldn't happen — a render
         // track only exists once the entity has been spawned) or one that has
         // never swung (`AttackSwing` absent, like `HurtTime`).
@@ -2943,7 +2966,7 @@ pub fn extract_entity_draws(
             .get(id.0)
             .and_then(|entity| item_uses.get(entity).ok())
             .map(|item_use| *item_use);
-        let arm_pose = arm_pose_for(&kind.0, &equipment.0, item_use, aggressive, main_arm_left);
+        let arm_pose = arm_pose_for(&kind.path, &equipment.0, item_use, aggressive, main_arm_left);
         // Vanilla's own is-crouching check. `false` for an entity that has never reported
         // the pose accessor (`Pose` absent) — which is every entity that has
         // never left `STANDING`, since the server only sends metadata that
@@ -3031,7 +3054,7 @@ pub fn extract_entity_draws(
         // as a walking humanoid, which is the whole defect this chain closes:
         // a stand moved by a contraption swings its arms, and `merge_held_items`
         // hangs its item off that same swinging arm.
-        let armor_stand_pose = (kind.0.as_ref() == ARMOR_STAND_TYPE_PATH).then(|| {
+        let armor_stand_pose = (kind.entity_type == Some(EntityType::ArmorStand)).then(|| {
             index
                 .get(id.0)
                 .and_then(|entity| armor_stand_poses.get(entity).ok())
@@ -3052,7 +3075,7 @@ pub fn extract_entity_draws(
         // adapter withholds index 8's `INT` for those — which is the switch
         // `prepare_orbs` keys on. An orb whose value has not arrived yet is still
         // drawn, at sprite cell 0; see `EntityDraw::experience_orb_value`.
-        let experience_orb_value = if kind.0.as_ref() == EXPERIENCE_ORB_TYPE_PATH {
+        let experience_orb_value = if kind.entity_type == Some(EntityType::ExperienceOrb) {
             Some(
                 index
                     .get(id.0)
@@ -3062,7 +3085,7 @@ pub fn extract_entity_draws(
         } else {
             None
         };
-        let tnt_fuse = if kind.0.as_ref() == "tnt" {
+        let tnt_fuse = if kind.entity_type == Some(EntityType::Tnt) {
             index
                 .get(id.0)
                 .and_then(|entity| tnt_fuses.get(entity).ok())
@@ -3161,18 +3184,18 @@ pub fn extract_entity_draws(
             .map(|skin| skin.default_sheet)
             .or_else(|| {
                 index.get(id.0).and_then(|entity| variants.get(entity).ok()).and_then(|variant| {
-                    lodestone_render::entity_variant_sheet_for(&kind.0, &variant.0, tamed)
+                    lodestone_render::entity_variant_sheet_for(&kind.path, &variant.0, tamed)
                 })
             });
         out.0.push(EntityDraw {
             id: id.0,
-            type_path: Arc::clone(&kind.0),
+            type_path: Arc::clone(&kind.path),
             variant_sheet,
             // Only item entities use the selected definition on this scoped
             // world-item path. Frames and projectile stacks retain their base
             // ids until their own component-complete render-state work lands.
             item: stack.map(|s| {
-                if kind.0.as_ref() == ITEM_ENTITY_TYPE_PATH {
+                if kind.entity_type == Some(EntityType::Item) {
                     s.render_definition().clone()
                 } else {
                     s.id.clone()
@@ -3357,13 +3380,13 @@ fn new_item_physics(snap: &EntityFacts) -> ItemPhysics {
 fn new_projectile_physics(snap: &EntityFacts) -> ProjectilePhysics {
     let position = to_model_vec3(snap.feet);
     let velocity = snap.velocity.map(to_model_vec3).unwrap_or_default();
-    let sim = if is_accelerating_projectile(&snap.type_path) {
+    let sim = if is_accelerating_projectile(snap.entity_type) {
         ProjectileMotion::Accelerating(AcceleratingProjectile::new(
             position,
             velocity,
             snap.projectile_power
-                .unwrap_or_else(|| default_projectile_power(&snap.type_path)),
-            projectile_inertia(&snap.type_path),
+                .unwrap_or_else(|| default_projectile_power(snap.entity_type)),
+            projectile_inertia(snap.entity_type),
         ))
     } else {
         ProjectileMotion::Ballistic(Projectile::arrow(position, velocity))
@@ -3571,6 +3594,7 @@ fn resolve_entity_facts(
     };
 
     let type_key = entity.get::<EntityKind>()?.0.clone();
+    let entity_type = EntityType::from_resource_key(&type_key);
     let position = entity.get::<Position>()?.0;
     let rotation = entity.get::<Rotation>()?.0;
     let head_yaw = entity.get::<HeadYaw>()?.0;
@@ -3771,7 +3795,7 @@ fn resolve_entity_facts(
     // exception: vanilla's own armor-stand should-show-name check only checks
     // `isCustomNameVisible`, which is how invisible hologram stands retain
     // their text.
-    let is_player = type_key.path() == "player";
+    let is_player = entity_type == Some(EntityType::Player);
     let uuid = entity.get::<EntityUuid>().map(|uuid| uuid.0);
     let profile_name = entity
         .get::<PlayerProfileName>()
@@ -3801,7 +3825,7 @@ fn resolve_entity_facts(
         .as_deref()
         .and_then(|holder| scoreboard.and_then(|board| board.team_of(holder)));
     let local_team = local_player_name.and_then(|holder| scoreboard.and_then(|board| board.team_of(holder)));
-    let name_tag_visible = type_key.path() == "armor_stand"
+    let name_tag_visible = entity_type == Some(EntityType::ArmorStand)
         || team_allows_name_tag(target_team, local_team, flags.is_some_and(|bits| bits & 0x20 != 0));
     // Resolved as a styled `Text`, not a flattened plain string — a player's
     // tab-list `effective_name()` and a mob's `custom_name` metadata both
@@ -3873,6 +3897,7 @@ fn resolve_entity_facts(
     Some(EntityFacts {
         id,
         type_path: type_key.path().to_string(),
+        entity_type,
         feet: to_glam_vec3(position),
         yaw: body_yaw,
         head_yaw,
@@ -4074,9 +4099,9 @@ pub(crate) fn fold_entities_for_local(
             .get_entity(*entity)
             .ok()
             .filter(|entity_ref| entity_ref.contains::<LocalPlayer>())
-            .map(|_| *id)
+            .map(|_| EntityNetworkId::from_raw(*id))
     });
-    let mut seen: HashSet<i32> = HashSet::with_capacity(tracked.len());
+    let mut seen: HashSet<EntityNetworkId> = HashSet::with_capacity(tracked.len());
 
     for (id, ingest_entity) in tracked {
         let Ok(entity_ref) = world.get_entity(ingest_entity) else {
@@ -4095,7 +4120,8 @@ pub(crate) fn fold_entities_for_local(
         ) else {
             continue;
         };
-        seen.insert(id);
+        let network_id = EntityNetworkId::from_raw(id);
+        seen.insert(network_id);
 
         // **A recycled entity id must not inherit the previous tenant's stack.**
         // `ItemStacks` is keyed by server id alone, servers reuse ids freely,
@@ -4113,13 +4139,17 @@ pub(crate) fn fold_entities_for_local(
         // hazard is real and the type test was never the right instrument for
         // it: it answered "is this a drop?" when the question is "is this the
         // same entity the stack was reported for?".
-        if let Some(entity) = world.resource::<TrackIndex>().0.get(&facts.id).copied()
+        if let Some(entity) = world
+            .resource::<TrackIndex>()
+            .0
+            .get(&network_id)
+            .copied()
             && world
                 .get::<RenderKind>(entity)
-                .is_some_and(|kind| kind.0.as_ref() != facts.type_path)
+                .is_some_and(|kind| kind.path.as_ref() != facts.type_path)
         {
-            world.resource_mut::<ItemStacks>().0.remove(&facts.id);
-            world.resource_mut::<EntityMapIds>().0.remove(&facts.id);
+            world.resource_mut::<ItemStacks>().0.remove(&network_id);
+            world.resource_mut::<EntityMapIds>().0.remove(&network_id);
         }
 
         // Fold the reported identity first, so a drop is never drawn for a frame
@@ -4129,7 +4159,7 @@ pub(crate) fn fold_entities_for_local(
         match &facts.item {
             Reported::Reported(Some(item)) => {
                 world.resource_mut::<ItemStacks>().0.insert(
-                    facts.id,
+                    network_id,
                     TrackedStack {
                         id: item.clone(),
                         item_model: facts.item_model.clone(),
@@ -4142,21 +4172,21 @@ pub(crate) fn fold_entities_for_local(
                 );
                 match facts.item_map_id {
                     Some(map_id) => {
-                        world.resource_mut::<EntityMapIds>().0.insert(facts.id, map_id);
+                        world.resource_mut::<EntityMapIds>().0.insert(network_id, map_id);
                     }
                     None => {
-                        world.resource_mut::<EntityMapIds>().0.remove(&facts.id);
+                        world.resource_mut::<EntityMapIds>().0.remove(&network_id);
                     }
                 }
             }
             Reported::Reported(None) => {
-                world.resource_mut::<ItemStacks>().0.remove(&facts.id);
-                world.resource_mut::<EntityMapIds>().0.remove(&facts.id);
+                world.resource_mut::<ItemStacks>().0.remove(&network_id);
+                world.resource_mut::<EntityMapIds>().0.remove(&network_id);
             }
             Reported::Unreported => {}
         }
 
-        match world.resource::<TrackIndex>().0.get(&facts.id).copied() {
+        match world.resource::<TrackIndex>().0.get(&network_id).copied() {
             None => spawn_track(world, &facts),
             Some(entity) => update_track(world, entity, &facts),
         }
@@ -4164,7 +4194,7 @@ pub(crate) fn fold_entities_for_local(
 
     // Drop tracks for entities no longer reported — and the item stacks recorded
     // against them, or a long session leaks one entry per drop.
-    let stale: Vec<(i32, Entity)> = world
+    let stale: Vec<(EntityNetworkId, Entity)> = world
         .resource::<TrackIndex>()
         .0
         .iter()
@@ -4184,7 +4214,10 @@ pub(crate) fn fold_entities_for_local(
         .0
         .retain(|id, _| seen.contains(id));
     if let Some(mut effects) = world.get_resource_mut::<lodestone_ecs::EntityStatusEffects>() {
-        effects.retain_entity_ids(|id| seen.contains(&id) || local_network_id == Some(id));
+        effects.retain_entity_ids(|id| {
+            seen.contains(&EntityNetworkId::from_raw(id))
+                || local_network_id == Some(EntityNetworkId::from_raw(id))
+        });
     }
 }
 
@@ -4192,13 +4225,16 @@ pub(crate) fn fold_entities_for_local(
 /// ease are the same, and the clock starts *finished* so nothing eases from
 /// nowhere.
 fn spawn_track(world: &mut World, snap: &EntityFacts) {
-    let is_item = snap.type_path == ITEM_ENTITY_TYPE_PATH;
-    let is_projectile = is_locally_simulated_projectile(&snap.type_path);
-    let is_creeper = snap.type_path == "creeper";
+    let is_item = snap.entity_type == Some(EntityType::Item);
+    let is_projectile = is_locally_simulated_projectile(snap.entity_type);
+    let is_creeper = snap.entity_type == Some(EntityType::Creeper);
     let window = INTERP_WINDOW;
     let mut entity = world.spawn((
         MinecraftEntityId(snap.id),
-        RenderKind(Arc::from(snap.type_path.as_str())),
+        RenderKind {
+            path: Arc::from(snap.type_path.as_str()),
+            entity_type: snap.entity_type,
+        },
         RenderScale(snap.scale),
         InterpFrom {
             feet: snap.feet,
@@ -4227,7 +4263,7 @@ fn spawn_track(world: &mut World, snap: &EntityFacts) {
             RenderEquipmentSkin(snap.equipment_skin.clone()),
         ),
         RenderEquipmentTrim(snap.equipment_trim.clone()),
-        RenderWool(sheep_wool(&snap.type_path, snap.variant.as_ref())),
+        RenderWool(sheep_wool(snap.entity_type, snap.variant.as_ref())),
         RenderNameTag(snap.name_tag.clone()),
         RenderPlayerSkin(snap.player_skin.clone()),
         SwimRamp::IDLE,
@@ -4246,7 +4282,10 @@ fn spawn_track(world: &mut World, snap: &EntityFacts) {
         });
     }
     let entity = entity.id();
-    world.resource_mut::<TrackIndex>().0.insert(snap.id, entity);
+    world
+        .resource_mut::<TrackIndex>()
+        .0
+        .insert(EntityNetworkId::from_raw(snap.id), entity);
 }
 
 /// Fold a snapshot into an already-tracked entity.
@@ -4260,16 +4299,17 @@ fn update_track(world: &mut World, entity: Entity, snap: &EntityFacts) {
     let Ok(mut entity) = world.get_entity_mut(entity) else {
         return;
     };
-    let is_item = snap.type_path == ITEM_ENTITY_TYPE_PATH;
-    let is_projectile = is_locally_simulated_projectile(&snap.type_path);
+    let is_item = snap.entity_type == Some(EntityType::Item);
+    let is_projectile = is_locally_simulated_projectile(snap.entity_type);
 
     if let Some(mut kind) = entity.get_mut::<RenderKind>() {
         // `Arc<str>` has no `clone_from`-style in-place reuse the way `String`
         // did, and a reported type essentially never changes update to
         // update — so skip the allocation (and the `Mut` write, avoiding
         // needless Bevy change-detection churn) entirely when it has not.
-        if kind.0.as_ref() != snap.type_path.as_str() {
-            kind.0 = Arc::from(snap.type_path.as_str());
+        if kind.path.as_ref() != snap.type_path.as_str() {
+            kind.path = Arc::from(snap.type_path.as_str());
+            kind.entity_type = snap.entity_type;
         }
     }
     if let Some(mut scale) = entity.get_mut::<RenderScale>() {
@@ -4297,7 +4337,7 @@ fn update_track(world: &mut World, entity: Entity, snap: &EntityFacts) {
     }
     // Same reasoning as equipment, outside the `moved || turned` gate: a sheep
     // can be sheared, or a plugin can dye one, while it stands still.
-    let wool = sheep_wool(&snap.type_path, snap.variant.as_ref());
+    let wool = sheep_wool(snap.entity_type, snap.variant.as_ref());
     if let Some(mut render_wool) = entity.get_mut::<RenderWool>() {
         render_wool.0 = wool;
     }
@@ -4348,7 +4388,7 @@ fn update_track(world: &mut World, entity: Entity, snap: &EntityFacts) {
     // A power packet changes the *next* local tick without being a position or
     // velocity correction. Apply it before the ordinary snapshot gate so a
     // stationary server report cannot delay the visible change by a frame.
-    if is_accelerating_projectile(&snap.type_path)
+    if is_accelerating_projectile(snap.entity_type)
         && let Some(power) = snap.projectile_power
         && projectile_physics.is_some_and(|physics| physics.last_reported_power != Some(power))
         && let Some(mut physics) = entity.get_mut::<ProjectilePhysics>()
@@ -4717,7 +4757,7 @@ impl EntityInterpolator {
     /// Sets the count to `1` — the neutral value for a caller that only knows
     /// identity. See [`Self::set_item_stack_with_count`] to carry a real stack
     /// size through to [`EntityDraw::count`].
-    pub fn set_item_stack(&mut self, entity_id: i32, item: ResourceLocation) {
+    pub fn set_item_stack(&mut self, entity_id: EntityNetworkId, item: ResourceLocation) {
         self.set_item_stack_with_count(entity_id, item, 1);
     }
 
@@ -4729,7 +4769,12 @@ impl EntityInterpolator {
     /// [`EntityFacts::count`], which [`resolve_entity_facts`] reads straight
     /// off the wire's `ItemStack::count` — no model dependency needed to widen
     /// this far, per `docs/dropped-items.md`.
-    pub fn set_item_stack_with_count(&mut self, entity_id: i32, item: ResourceLocation, count: u32) {
+    pub fn set_item_stack_with_count(
+        &mut self,
+        entity_id: EntityNetworkId,
+        item: ResourceLocation,
+        count: u32,
+    ) {
         self.world.resource_mut::<ItemStacks>().0.insert(
             entity_id,
             TrackedStack {
@@ -4746,7 +4791,7 @@ impl EntityInterpolator {
 
     /// The item recorded for `entity_id`, if any.
     #[must_use]
-    pub fn item_stack(&self, entity_id: i32) -> Option<&ResourceLocation> {
+    pub fn item_stack(&self, entity_id: EntityNetworkId) -> Option<&ResourceLocation> {
         self.world
             .resource::<ItemStacks>()
             .0
@@ -4759,7 +4804,7 @@ impl EntityInterpolator {
     /// [`Self::set_item_stack_with_count`] and the live [`fold_entities`]
     /// chain ever record anything else.
     #[must_use]
-    pub fn item_count(&self, entity_id: i32) -> Option<u32> {
+    pub fn item_count(&self, entity_id: EntityNetworkId) -> Option<u32> {
         self.world
             .resource::<ItemStacks>()
             .0
@@ -4906,6 +4951,10 @@ mod tests {
         EntityFlags, EntityUuid, HeadYaw, OnGround, PlayerProfileName, Position, ProjectilePower,
         Rotation, Variant, Velocity,
     };
+
+    fn network_id(raw: i32) -> EntityNetworkId {
+        EntityNetworkId::from_raw(raw)
+    }
 
     /// Test-only ingest builder with the same field shape as a network
     /// snapshot. [`Self::apply`] spawns (or upserts) the
@@ -5065,6 +5114,28 @@ mod tests {
     ) -> EntityFacts {
         resolve_entity_facts(9, world.entity(entity), tab_list, None, None, &|_| None)
             .expect("bare_entity always carries the four required components")
+    }
+
+    #[test]
+    fn render_identity_narrows_builtin_and_preserves_custom_path() {
+        let mut world = World::new();
+        let builtin = bare_entity(&mut world);
+        let facts = facts_for(&world, builtin, &lodestone_game::tablist::TabList::new());
+        assert_eq!(facts.entity_type, Some(EntityType::Item));
+        assert_eq!(facts.type_path, "item");
+
+        let custom = world
+            .spawn((
+                EntityKind("example:clockwork_golem".parse().expect("valid custom key")),
+                Position(to_model_vec3(Vec3::ZERO)),
+                Rotation(lodestone_model::Rotation { yaw: 0.0, pitch: 0.0 }),
+                HeadYaw(0.0),
+            ))
+            .id();
+        let facts = facts_for(&world, custom, &lodestone_game::tablist::TabList::new());
+        assert_eq!(facts.entity_type, None);
+        assert_eq!(facts.type_path, "clockwork_golem");
+        assert!(!is_locally_simulated_projectile(facts.entity_type));
     }
 
     /// The gap this fix closed: `SET_ENTITY_MOTION`/`add_entity` already
@@ -7721,7 +7792,7 @@ mod tests {
             sheared: false,
         };
         assert_eq!(
-            sheep_wool("sheep", Some(&dyed)),
+            sheep_wool(Some(EntityType::Sheep), Some(&dyed)),
             Some(SheepWool {
                 color: 5,
                 sheared: false
@@ -7733,12 +7804,12 @@ mod tests {
         // never the family. A pig carrying the same variant (a plugin could
         // send this) must still grow no wool.
         assert_eq!(
-            sheep_wool("pig", Some(&dyed)),
+            sheep_wool(Some(EntityType::Pig), Some(&dyed)),
             None,
             "gating on family instead of type path would draw wool on a pig"
         );
         assert_eq!(
-            sheep_wool("sheep", None),
+            sheep_wool(Some(EntityType::Sheep), None),
             None,
             "no reported variant at all must not synthesise wool"
         );
@@ -7747,7 +7818,7 @@ mod tests {
         // `SheepWool::sheared`'s doc comment.
         assert_eq!(
             sheep_wool(
-                "sheep",
+                Some(EntityType::Sheep),
                 Some(&EntityVariant::Dyed {
                     color: 0,
                     sheared: true
@@ -7973,7 +8044,7 @@ mod tests {
         let snap = projectile_snap(17, "arrow", Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0));
         snap.apply(interp.world_mut());
         interp.update(0.0);
-        let tracked = interp.world().resource::<TrackIndex>().0[&17];
+        let tracked = interp.world().resource::<TrackIndex>().0[&network_id(17)];
         assert!(
             interp.world().entity(tracked).contains::<ProjectilePhysics>(),
             "an arrow track must own client-side ballistic state"
@@ -8024,7 +8095,7 @@ mod tests {
         interp.update(0.0);
         interp.update(0.05);
 
-        let tracked = interp.world().resource::<TrackIndex>().0[&18];
+        let tracked = interp.world().resource::<TrackIndex>().0[&network_id(18)];
         let powered = interp
             .world()
             .entity(tracked)
@@ -8089,7 +8160,7 @@ mod tests {
     #[test]
     fn a_reported_stack_reaches_the_draw() {
         let mut interp = EntityInterpolator::new();
-        interp.set_item_stack(9, stone());
+        interp.set_item_stack(network_id(9), stone());
         (item_snap(9, Vec3::new(1.0, 64.0, 2.0))).apply(interp.world_mut());
         interp.update(0.016);
         assert_eq!(interp.draws()[0].item, Some(stone()));
@@ -8123,12 +8194,12 @@ mod tests {
     #[test]
     fn set_item_stack_with_count_is_recorded_and_reachable() {
         let mut interp = EntityInterpolator::new();
-        interp.set_item_stack_with_count(9, stone(), 40);
-        assert_eq!(interp.item_stack(9), Some(&stone()));
-        assert_eq!(interp.item_count(9), Some(40));
+        interp.set_item_stack_with_count(network_id(9), stone(), 40);
+        assert_eq!(interp.item_stack(network_id(9)), Some(&stone()));
+        assert_eq!(interp.item_count(network_id(9)), Some(40));
         // The plain setter is documented as defaulting to the neutral count.
-        interp.set_item_stack(9, stone());
-        assert_eq!(interp.item_count(9), Some(1));
+        interp.set_item_stack(network_id(9), stone());
+        assert_eq!(interp.item_count(network_id(9)), Some(1));
     }
 
     #[test]
@@ -8137,7 +8208,7 @@ mod tests {
         // entity id (position, insertion order) makes every drop in a pile show
         // the first one's model.
         let mut interp = EntityInterpolator::new();
-        interp.set_item_stack(9, stone());
+        interp.set_item_stack(network_id(9), stone());
         (item_snap(9, Vec3::ZERO)).apply(interp.world_mut());
         (item_snap(10, Vec3::X)).apply(interp.world_mut());
         interp.update(0.016);
@@ -8170,7 +8241,7 @@ mod tests {
         // id comes back as a pig. Two folds, because one fold has no previous
         // tenant to inherit from and so cannot discriminate anything.
         let mut interp = EntityInterpolator::new();
-        interp.set_item_stack(1, stone());
+        interp.set_item_stack(network_id(1), stone());
         (item_snap(1, Vec3::ZERO)).apply(interp.world_mut());
         interp.update(0.016);
         assert_eq!(
@@ -8208,14 +8279,14 @@ mod tests {
         // block makes one, every one despawns after five minutes), so a stack
         // table that only grows is a real leak, not a theoretical one.
         let mut interp = EntityInterpolator::new();
-        interp.set_item_stack(9, stone());
+        interp.set_item_stack(network_id(9), stone());
         (item_snap(9, Vec3::ZERO)).apply(interp.world_mut());
         interp.update(0.016);
-        assert!(interp.item_stack(9).is_some());
+        assert!(interp.item_stack(network_id(9)).is_some());
         forget_all(interp.world_mut());
         interp.update(0.016);
         assert!(
-            interp.item_stack(9).is_none(),
+            interp.item_stack(network_id(9)).is_none(),
             "the stack must be pruned with the track it belonged to"
         );
     }
@@ -8589,7 +8660,7 @@ mod tests {
         (snap(COLLECTOR, collector_feet, 0.0)).apply(interp.world_mut());
         interp.update(0.0);
         assert!(
-            begin_item_pickup(interp.world_mut(), ITEM, COLLECTOR),
+            begin_item_pickup(interp.world_mut(), network_id(ITEM), network_id(COLLECTOR)),
             "the item was tracked with a reported stack, so a pickup must start"
         );
 
@@ -8695,7 +8766,11 @@ mod tests {
         interp.world_mut().entity_mut(ingest).insert(DisplayItem(Some(sword)));
 
         interp.update(0.0);
-        assert!(begin_item_pickup(interp.world_mut(), ITEM, COLLECTOR));
+        assert!(begin_item_pickup(
+            interp.world_mut(),
+            network_id(ITEM),
+            network_id(COLLECTOR),
+        ));
         forget(interp.world_mut(), ITEM);
         (snap(COLLECTOR, Vec3::X, 0.0)).apply(interp.world_mut());
         interp.update(TICK);
@@ -8756,7 +8831,11 @@ mod tests {
             Some(URL),
             "control: the ground item must already have its profile skin"
         );
-        assert!(begin_item_pickup(interp.world_mut(), ITEM, COLLECTOR));
+        assert!(begin_item_pickup(
+            interp.world_mut(),
+            network_id(ITEM),
+            network_id(COLLECTOR),
+        ));
 
         forget(interp.world_mut(), ITEM);
         (snap(COLLECTOR, Vec3::X, 0.0)).apply(interp.world_mut());
@@ -8821,7 +8900,11 @@ mod tests {
         (item_snap_with(ITEM, Vec3::ZERO, Some(stone()))).apply(interp.world_mut());
         (snap(COLLECTOR, collector_feet, 0.0)).apply(interp.world_mut());
         interp.update(0.0);
-        assert!(begin_item_pickup(interp.world_mut(), ITEM, COLLECTOR));
+        assert!(begin_item_pickup(
+            interp.world_mut(),
+            network_id(ITEM),
+            network_id(COLLECTOR),
+        ));
 
         // The server stops reporting the item the moment it is collected. That
         // absence must be represented explicitly; otherwise the item track
@@ -8863,11 +8946,11 @@ mod tests {
         (item_snap(7, Vec3::ZERO)).apply(interp.world_mut());
         interp.update(0.0);
         assert!(
-            !begin_item_pickup(interp.world_mut(), 7, 2),
+            !begin_item_pickup(interp.world_mut(), network_id(7), network_id(2)),
             "a tracked item with no reported stack has no model to fly"
         );
         assert!(
-            !begin_item_pickup(interp.world_mut(), 999, 2),
+            !begin_item_pickup(interp.world_mut(), network_id(999), network_id(2)),
             "an id with no track at all has no start point"
         );
         assert!(interp.world().resource::<PickupAnimations>().is_empty());
@@ -8886,7 +8969,11 @@ mod tests {
         let mut interp = EntityInterpolator::new();
         (item_snap_with(1, Vec3::ZERO, Some(stone()))).apply(interp.world_mut());
         interp.update(0.0);
-        assert!(begin_item_pickup(interp.world_mut(), 1, 4242));
+        assert!(begin_item_pickup(
+            interp.world_mut(),
+            network_id(1),
+            network_id(4242),
+        ));
         forget_all(interp.world_mut());
         interp.update(TICK);
         assert!(
