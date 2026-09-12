@@ -361,14 +361,34 @@ impl Sim {
         // the current session, but discard the previous dimension's high-water
         // observations so the overlay starts at the new resident set.
         self.terrain_progress.reset_observed();
+        // This cover is intentionally not the initial-world terrain screen:
+        // portal travel must hide the old dimension while its destination
+        // arrives, without showing a misleading generation count or grid.
+        self.dimension_transition_pending = true;
+        // The first-world screen is one-shot. Once a connected session changes
+        // dimension, even a timeout must not fall back to that labelled grid.
+        self.new_world_loading = false;
+        // The old join's timeout cannot be reused for the destination. A portal
+        // trip can happen long after the initial world was ready; if its clock
+        // were left expired, the destination overlay would dismiss immediately
+        // over an empty store. Restart the loading phase at this same edge.
+        self.restart_terrain_loading();
         // The other entities. Vanilla builds a whole new `ClientLevel` on
         // `handleRespawn`, which drops every entity in the old one; this is the
         // same call `end_session` uses, and it exempts the local player for the
         // reason its own doc gives (the driver holds that `Entity` across the
         // reset).
+        let local = self.local;
         self.write(|w| {
             crate::entities::reset_entity_tracks(w);
             lodestone_ecs::ingest::reset_ingest_entities(w);
+            // A new dimension cannot display an old block-destruction stage,
+            // even if the old-column notification arrived around the boundary.
+            if let Some(mut overlays) = w
+                .get_mut::<lodestone_ecs::session::SessionBlockDestruction>(local)
+            {
+                overlays.0.clear();
+            }
         });
         // Every GPU section this dimension ever uploaded, plus the in-flight mesh
         // jobs that would otherwise land in the new dimension carrying the old
@@ -514,6 +534,156 @@ mod tests {
             "the edge must be consumed — a Nether death is not a second trip"
         );
         assert_eq!(indexed_count(&sim), 1);
+    }
+
+    /// A portal reset must close the old column's settlement record before its
+    /// queued removals are drained. Otherwise a frame between the respawn packet
+    /// and the first destination mesh could observe the old column as settled
+    /// and release the loading overlay over destination terrain that has not
+    /// crossed the renderer hand-off yet.
+    #[test]
+    fn dimension_reset_keeps_loading_latched_until_destination_mesh_settles() {
+        use crate::menu::loading::{TerrainWait, is_level_ready};
+        use lodestone_world::{ChunkColumn, ColumnLight, Heightmaps, LoadedChunk, PaletteKind};
+
+        // Use the live/empty constructor and load one tiny column explicitly.
+        // The demo fixture schedules its whole generated world, which would
+        // make this reset test wait for unrelated worker jobs before it can
+        // inspect the transition latch.
+        let mut sim = Sim::new(crate::config::Config {
+            mode: crate::config::Mode::Window,
+            render_distance: 2,
+            ..crate::config::Config::default()
+        });
+        assert!(!sim.apply_respawn(Some(dim("minecraft:overworld"))));
+
+        let position = sim.player().position;
+        let (cx, cz) = (
+            (position.x.floor() as i32).div_euclid(16),
+            (position.z.floor() as i32).div_euclid(16),
+        );
+        let column = ChunkColumn::new(
+            0,
+            2,
+            PaletteKind::block_states(),
+            PaletteKind::biomes(),
+            crate::blocks::id::AIR,
+            0,
+        );
+        sim.chunk_world_write().write().load(
+            lodestone_world::ChunkPos::new(cx, cz),
+            LoadedChunk::new(column, ColumnLight::new(2), Heightmaps::new(), Vec::new()),
+        );
+        let store = sim.chunk_world();
+        let extent = store.extent().expect("the destination fixture has a build extent");
+        let keys: Vec<_> = (0..extent.section_count)
+            .map(|si| crate::mesher::SectionKey {
+                cx,
+                cz,
+                si,
+                min_y: extent.min_y,
+            })
+            .collect();
+        for key in keys.iter().copied() {
+            sim.mark_mesh_uploaded(key);
+        }
+        // Mirror the app's pre-reset GPU record so the test also drains the
+        // old-world removals after the transition edge.
+        sim.terrain_mut(|terrain| {
+            terrain.uploaded_sections.extend(keys.iter().copied());
+        });
+        assert!(
+            sim.column_mesh_settled(cx, cz),
+            "control: the old column really is settled before the portal reset"
+        );
+
+        sim.set_view_radius(0);
+        sim.mark_terrain_ready();
+        assert!(sim.terrain_progress.is_ready());
+
+        assert!(sim.apply_respawn(Some(dim("minecraft:the_nether"))));
+        // The renderer's old-column removals are intentionally still drained
+        // through the ordinary path; they must not restore the old readiness.
+        let removals = sim.terrain_mut(|terrain| terrain.drain_removals());
+        assert_eq!(removals.len(), keys.len(), "the transition queued old GPU sections");
+        assert!(
+            !sim.column_mesh_settled(cx, cz),
+            "old-world removals cannot count as destination mesh settlement"
+        );
+        assert!(
+            !sim.terrain_progress.is_ready(),
+            "the dimension reset must re-arm the producer latch"
+        );
+
+        let wait = TerrainWait {
+            own_column_loaded: true,
+            terrain_ready: Some(false),
+            elapsed: core::time::Duration::from_secs(1),
+            player_alive: true,
+            within_build_height: true,
+        };
+        assert!(
+            !is_level_ready(wait),
+            "an old column removal between respawn and the first destination mesh \
+             must never produce a Playing frame"
+        );
+    }
+
+    /// The terrain timeout belongs to each dimension, not to the lifetime of
+    /// the connection. This control makes the original-join clock expired
+    /// first, then proves a portal reset starts a new bounded wait before
+    /// destination terrain is ready.
+    #[test]
+    fn dimension_reset_restarts_an_expired_terrain_wait_clock() {
+        use crate::menu::loading::{is_level_ready, TerrainWait, CLIENT_WAIT_TIMEOUT};
+
+        let mut sim = Sim::new(crate::config::Config {
+            mode: crate::config::Mode::Window,
+            render_distance: 2,
+            ..crate::config::Config::default()
+        });
+        assert!(!sim.apply_respawn(Some(dim("minecraft:overworld"))));
+
+        // Negative control: before the transition, the synthetic join clock is
+        // already past its liveness bound, so the loading predicate would let
+        // the player through if this timestamp were reused.
+        sim.terrain_wait_started = Some(
+            crate::platform::Instant::now()
+                - CLIENT_WAIT_TIMEOUT
+                - core::time::Duration::from_secs(1),
+        );
+        assert!(is_level_ready(TerrainWait {
+            own_column_loaded: false,
+            terrain_ready: Some(false),
+            elapsed: CLIENT_WAIT_TIMEOUT + core::time::Duration::from_secs(1),
+            player_alive: true,
+            within_build_height: true,
+        }));
+
+        sim.reset_for_dimension_change();
+        assert_eq!(
+            sim.connect_phase(),
+            crate::menu::loading::ConnectPhase::LoadingTerrain,
+            "a dimension edge must put the connected session back in terrain loading"
+        );
+        let elapsed = sim
+            .terrain_wait_started
+            .expect("the transition starts a terrain wait clock")
+            .elapsed();
+        assert!(
+            elapsed < CLIENT_WAIT_TIMEOUT,
+            "the destination wait must start at the respawn edge, got {elapsed:?}"
+        );
+        assert!(
+            !is_level_ready(TerrainWait {
+                own_column_loaded: false,
+                terrain_ready: Some(false),
+                elapsed,
+                player_alive: true,
+                within_build_height: true,
+            }),
+            "an expired original join must not dismiss the destination loading screen"
+        );
     }
 
     #[test]

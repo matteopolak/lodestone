@@ -7166,30 +7166,10 @@ fn the_chunk_grid_draws_two_real_statuses_at_two_different_cells() {
     );
 }
 
-/// The grid must **fit the canvas at a large render distance** — the owner's
-/// report was that it ran off the top of the screen.
-///
-/// # The discriminating input is the radius, and only a big one discriminates
-///
-/// The geometry used to be `diameter(view_radius) * CHUNK_CELL_SIZE`, which
-/// grows without bound: 17 px at `render_distance = 8`, 130 px at the owner's
-/// 32, 258 px at 64. A small radius fits under *both* the broken and the fixed
-/// arithmetic, so a gate at the default distance would pass either way. These
-/// radii are the ones where the two answers differ.
-///
-/// # The canvas is the real floor, not a comfortable one
-///
-/// 320×240 is the smallest canvas `config::calculate_gui_scale` will ever
-/// produce (`config::MIN_SCALED_*`), so a grid that fits there fits every
-/// canvas the client can present — including the owner's, at `gui_scale` 5.
-///
-/// # Measured against the wrong hypothesis
-///
-/// Both hypotheses are evaluated below, not just the right one: at radius 32
-/// the uncapped grid's top edge lands at **y = -30** on a 240-tall canvas
-/// (30 px above it), while the capped one lands at **y = 30**. The gate asserts
-/// the fixed value and that the broken one really is off-canvas, so it cannot
-/// pass by the arithmetic having been restated wrongly in both places.
+/// The grid must fit the smallest canvas at the largest selectable render
+/// distance. The layout keeps the square centred and moves the label/bar above
+/// it, so a 32-radius selection should show the complete 65x65 cell square
+/// rather than silently cropping it to the middle.
 #[test]
 fn the_chunk_grid_fits_the_smallest_canvas_at_every_render_distance() {
     use crate::menu::loading::{MAX_GRID_RADIUS, TerrainChunkGrid};
@@ -7198,68 +7178,74 @@ fn the_chunk_grid_fits_the_smallest_canvas_at_every_render_distance() {
     const FLOOR_H: f32 = 240.0;
 
     /// The top edge of the grid a session streaming `view_radius` draws, in
-    /// canvas coordinates on a `height`-tall canvas. Derived from the same two
-    /// expressions `draw::build` evaluates (`chunk_grid_dy` and the grid's own
-    /// pixel side), never restated.
+    /// canvas coordinates on a `height`-tall canvas.
     fn grid_top(view_radius: u32, height: f32) -> f32 {
         let radius = TerrainChunkGrid::view_radius(view_radius);
         let side = TerrainChunkGrid::diameter(radius) as f32 * CHUNK_CELL_SIZE;
         (height * 0.5 + chunk_grid_dy(radius)).floor() - side * 0.5
     }
 
-    // The wrong hypothesis, computed from outside: the pre-fix geometry is the
-    // same expression with the cap removed.
-    fn uncapped_top(view_radius: u32, height: f32) -> f32 {
-        let side = TerrainChunkGrid::diameter(view_radius) as f32 * CHUNK_CELL_SIZE;
-        (height * 0.5 + chunk_grid_dy(view_radius)).floor() - side * 0.5
+    fn grid_bottom(view_radius: u32, height: f32) -> f32 {
+        let radius = TerrainChunkGrid::view_radius(view_radius);
+        let side = TerrainChunkGrid::diameter(radius) as f32 * CHUNK_CELL_SIZE;
+        grid_top(view_radius, height) + side
     }
 
-    // The owner's `render_distance = 32`, plus a larger one, plus the default.
-    //
-    // **Collected, not asserted in the loop.** An `assert!` inside the loop
-    // aborts on the first radius and leaves the other three as arguments rather
-    // than observations — the trap `CLAUDE.md` names. Under the neuter below,
-    // this reports all four.
+    // The selected maximum, a larger request (which must be clamped), and the
+    // ordinary default all need to stay inside the 240-pixel canvas floor.
     let mut bad: Vec<String> = Vec::new();
     for view_radius in [8u32, 32, 64, 1024] {
         let top = grid_top(view_radius, FLOOR_H);
-        let side = TerrainChunkGrid::diameter(TerrainChunkGrid::view_radius(view_radius)) as f32
-            * CHUNK_CELL_SIZE;
         if top < 0.0 {
             bad.push(format!(
                 "view_radius {view_radius}: top edge {top} on the {FLOOR_H}px canvas floor \
                  — off the top of the screen"
             ));
         }
-        // And it must still sit above the phase label rather than having been
-        // made to fit by collapsing onto it.
-        if top + side >= FLOOR_H * 0.5 {
+        if grid_bottom(view_radius, FLOOR_H) > FLOOR_H {
             bad.push(format!(
-                "view_radius {view_radius}: bottom edge {} overlaps the centred label block",
-                top + side
+                "view_radius {view_radius}: bottom edge {} is below the {FLOOR_H}px canvas",
+                grid_bottom(view_radius, FLOOR_H)
             ));
         }
     }
     assert!(bad.is_empty(), "the grid does not fit the canvas floor: {bad:#?}");
 
-    // Premise: the cap is doing something at these radii and nothing below it,
-    // so the small-distance case still draws its whole real square. **After**
-    // the layout arm, so a broken cap fails on the geometry it actually breaks
-    // rather than aborting the gate on a premise line.
+    // The player's selected distance is preserved up to the supported maximum;
+    // a server/fixture asking for more cannot make the square grow off-screen.
     assert_eq!(TerrainChunkGrid::view_radius(8), 8, "a small view is drawn whole");
+    assert_eq!(TerrainChunkGrid::view_radius(32), 32, "the selected maximum is drawn whole");
     assert_eq!(TerrainChunkGrid::view_radius(64), MAX_GRID_RADIUS);
+}
 
-    // The control: the pre-fix arithmetic really does fail this, so the gate is
-    // measuring the cap and not merely the canvas being generous. Radius 8 is
-    // deliberately included on the *passing* side — it fits under both
-    // hypotheses, which is why it cannot be the gate's only input.
-    assert!(uncapped_top(8, FLOOR_H) >= 0.0, "premise: radius 8 fit before the fix too");
-    assert!(
-        uncapped_top(32, FLOOR_H) < 0.0,
-        "premise: the uncapped grid at the owner's render distance must be off-canvas, \
-         got top {}",
-        uncapped_top(32, FLOOR_H)
-    );
+/// Every generation status has its own palette entry. A single grey/white
+/// fallback would make the grid look like a scalar counter even though each
+/// cell carries a typed status.
+#[test]
+fn the_chunk_status_palette_keeps_all_twelve_colours_distinct() {
+    use crate::menu::loading::ChunkCellStatus;
+
+    let statuses = [
+        ChunkCellStatus::Empty,
+        ChunkCellStatus::StructureStarts,
+        ChunkCellStatus::StructureReferences,
+        ChunkCellStatus::Biomes,
+        ChunkCellStatus::Noise,
+        ChunkCellStatus::Surface,
+        ChunkCellStatus::Carvers,
+        ChunkCellStatus::Features,
+        ChunkCellStatus::InitializeLight,
+        ChunkCellStatus::Light,
+        ChunkCellStatus::Spawn,
+        ChunkCellStatus::Full,
+    ];
+    let colours = statuses.map(chunk_cell_colour);
+    for (index, colour) in colours.iter().enumerate() {
+        assert!(
+            colours[index + 1..].iter().all(|other| other != colour),
+            "status palette entry {index} must not collapse into a neighbouring status"
+        );
+    }
 }
 
 /// A pack fixture for the two gates below: `name`, its description, and either a

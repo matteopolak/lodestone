@@ -541,6 +541,15 @@ pub struct Sim {
     /// alongside the tracker because the chunk-status grid needs a side
     /// length, not an area. `None` until the launcher or server declares one.
     expected_view_radius: Option<u32>,
+    /// Whether the labelled terrain-generation screen is armed for this
+    /// connection. Only a newly-created survival world uses it; existing
+    /// saves and remote servers use the ordinary connection phases.
+    new_world_loading: bool,
+    /// True between a cross-dimension respawn and the first settled destination
+    /// player column. This is deliberately separate from `new_world_loading`:
+    /// portal travel gets an opaque cover without the initial-world label,
+    /// count, or chunk grid.
+    dimension_transition_pending: bool,
     /// When the terrain-streaming phase began, for
     /// [`crate::menu::loading::CLIENT_WAIT_TIMEOUT`].
     ///

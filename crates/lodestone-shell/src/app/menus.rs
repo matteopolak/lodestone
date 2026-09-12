@@ -28,6 +28,22 @@ pub(super) fn shortcut_modifier_held(modifiers: ModifiersState, is_macos: bool) 
     }
 }
 
+/// Keep the labelled terrain phase scoped to a newly-created survival world.
+/// Servers may report the same wire phase while joining, but that must not
+/// opt a remote connection into the first-world screen.
+#[must_use]
+pub(super) const fn connection_phase_for_scope(
+    show_new_world_loading: bool,
+    phase: crate::menu::loading::ConnectPhase,
+) -> crate::menu::loading::ConnectPhase {
+    match (show_new_world_loading, phase) {
+        (false, crate::menu::loading::ConnectPhase::LoadingTerrain) => {
+            crate::menu::loading::ConnectPhase::Joining
+        }
+        (_, phase) => phase,
+    }
+}
+
 /// Build the connection screen from the current phase and any real terrain
 /// observations. Kept pure so the production handoff can be checked without a
 /// window or GPU: the returned frame is the same one `draw_menu` submits.
@@ -638,17 +654,27 @@ impl WindowApp {
     ///
     /// This is the production consumer for the real `Sim` observations: the
     /// frame goes through `MenuRenderer::render` below, where its bar and grid
-    /// become pixels. Multiplayer leaves the optional progress absent because
-    /// it has no trustworthy server-declared denominator.
+    /// become pixels. Existing saves and multiplayer leave the optional
+    /// progress absent because the labelled grid is a first-creation affordance.
     fn connecting_loading_frame(&mut self) -> crate::menu::render::MenuFrame<'static> {
         // A fast integrated server may have populated the client store before
         // the first simulation tick. Sample once here so the submitted frame
         // reflects that real work instead of an avoidable zero.
-        self.sim.observe_terrain_progress();
+        let show_new_world_loading = self.sim.shows_new_world_loading();
+        if show_new_world_loading {
+            self.sim.observe_terrain_progress();
+        }
+        // A remote server may use the same wire phase name for its own spawn
+        // work. Keep that implementation detail out of the first-world screen:
+        // only a newly-created survival world is allowed to display the
+        // labelled terrain-generation step.
+        let phase = connection_phase_for_scope(show_new_world_loading, self.sim.connect_phase());
         let mut frame = connection_loading_frame(
-            self.sim.connect_phase(),
-            self.sim.terrain_progress(),
-            self.sim.terrain_chunk_grid(),
+            phase,
+            show_new_world_loading.then(|| self.sim.terrain_progress()).flatten(),
+            show_new_world_loading
+                .then(|| self.sim.terrain_chunk_grid())
+                .flatten(),
         );
         // `frame_for` normally stamps these canvas-wide facts after dispatch.
         // Connecting is the one data-bearing path that builds its frame here,

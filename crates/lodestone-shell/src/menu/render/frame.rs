@@ -870,9 +870,8 @@ pub const PROGRESS_BAR_FG: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
 /// one thing that is a render decision rather than an observation: where its
 /// centre sits.
 ///
-/// See [`crate::menu::loading::ChunkCellStatus`]'s doc for why this draws
-/// only two of vanilla's twelve status colours, and [`chunk_cell_colour`] for
-/// the colours themselves.
+/// See [`crate::menu::loading::ChunkCellStatus`]'s doc for the typed status set
+/// and [`chunk_cell_colour`] for the complete palette.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChunkGridView {
     /// The real per-column data.
@@ -886,22 +885,62 @@ pub struct ChunkGridView {
 /// its own call site (`margin` is `0` there too, so cells sit flush).
 pub const CHUNK_CELL_SIZE: f32 = 2.0;
 
-/// `ChunkStatus.EMPTY`'s colour, `0x545454` — vanilla's own `COLORS` map, not
-/// invented.
+/// Empty generation status, `0x545454`.
 pub const CHUNK_CELL_EMPTY: [f32; 4] = [84.0 / 255.0, 84.0 / 255.0, 84.0 / 255.0, 1.0];
 
-/// `ChunkStatus.FULL`'s colour — opaque white, vanilla's own `COLORS` map.
+/// Structure-start status, `0x999999`.
+pub const CHUNK_CELL_STRUCTURE_STARTS: [f32; 4] =
+    [153.0 / 255.0, 153.0 / 255.0, 153.0 / 255.0, 1.0];
+
+/// Structure-reference status, `0x5F6191`.
+pub const CHUNK_CELL_STRUCTURE_REFERENCES: [f32; 4] =
+    [95.0 / 255.0, 97.0 / 255.0, 145.0 / 255.0, 1.0];
+
+/// Biome status, `0x80B252`.
+pub const CHUNK_CELL_BIOMES: [f32; 4] = [128.0 / 255.0, 178.0 / 255.0, 82.0 / 255.0, 1.0];
+
+/// Noise status, `0xD1D1D1`.
+pub const CHUNK_CELL_NOISE: [f32; 4] = [209.0 / 255.0, 209.0 / 255.0, 209.0 / 255.0, 1.0];
+
+/// Surface status, `0x726809`.
+pub const CHUNK_CELL_SURFACE: [f32; 4] = [114.0 / 255.0, 104.0 / 255.0, 9.0 / 255.0, 1.0];
+
+/// Carver status, `0x303572`.
+pub const CHUNK_CELL_CARVERS: [f32; 4] = [48.0 / 255.0, 53.0 / 255.0, 114.0 / 255.0, 1.0];
+
+/// Feature status, `0x21C600`.
+pub const CHUNK_CELL_FEATURES: [f32; 4] = [33.0 / 255.0, 198.0 / 255.0, 0.0, 1.0];
+
+/// Light-initialisation status, `0xCCCCCC`.
+pub const CHUNK_CELL_INITIALIZE_LIGHT: [f32; 4] =
+    [204.0 / 255.0, 204.0 / 255.0, 204.0 / 255.0, 1.0];
+
+/// Light status, `0xFFE0A0`.
+pub const CHUNK_CELL_LIGHT: [f32; 4] = [1.0, 224.0 / 255.0, 160.0 / 255.0, 1.0];
+
+/// Spawn status, `0xF26060`.
+pub const CHUNK_CELL_SPAWN: [f32; 4] = [242.0 / 255.0, 96.0 / 255.0, 96.0 / 255.0, 1.0];
+
+/// Fully generated status, `0xFFFFFF`.
 pub const CHUNK_CELL_FULL: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
-/// The colour vanilla's `COLORS` map draws a cell of the given status.
-///
-/// Only two arms because [`crate::menu::loading::ChunkCellStatus`] only has
-/// two variants — see that type's doc for why this client cannot observe the
-/// other ten of vanilla's statuses, and does not pretend to.
+/// The reference palette colour for a typed loading status.
 #[must_use]
 pub const fn chunk_cell_colour(status: crate::menu::loading::ChunkCellStatus) -> [f32; 4] {
     match status {
         crate::menu::loading::ChunkCellStatus::Empty => CHUNK_CELL_EMPTY,
+        crate::menu::loading::ChunkCellStatus::StructureStarts => CHUNK_CELL_STRUCTURE_STARTS,
+        crate::menu::loading::ChunkCellStatus::StructureReferences => {
+            CHUNK_CELL_STRUCTURE_REFERENCES
+        }
+        crate::menu::loading::ChunkCellStatus::Biomes => CHUNK_CELL_BIOMES,
+        crate::menu::loading::ChunkCellStatus::Noise => CHUNK_CELL_NOISE,
+        crate::menu::loading::ChunkCellStatus::Surface => CHUNK_CELL_SURFACE,
+        crate::menu::loading::ChunkCellStatus::Carvers => CHUNK_CELL_CARVERS,
+        crate::menu::loading::ChunkCellStatus::Features => CHUNK_CELL_FEATURES,
+        crate::menu::loading::ChunkCellStatus::InitializeLight => CHUNK_CELL_INITIALIZE_LIGHT,
+        crate::menu::loading::ChunkCellStatus::Light => CHUNK_CELL_LIGHT,
+        crate::menu::loading::ChunkCellStatus::Spawn => CHUNK_CELL_SPAWN,
         crate::menu::loading::ChunkCellStatus::Full => CHUNK_CELL_FULL,
     }
 }
