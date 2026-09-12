@@ -9,6 +9,18 @@ wholly custom entity type. Most of it lives under `crates/lodestone-server/src/m
 `crates/lodestone-server/src/natural_spawn.rs`, with entity-side timing state in
 `crates/lodestone-entity/src/ai/navigating_mob.rs`.
 
+The server-side implementation is intentionally split by responsibility under
+`crates/lodestone-server/src/mobs/`: `sim_config_spawn` constructs and populates
+the simulation, `sim_tick` owns per-tick owner batches, and the `sim_*` modules
+cover interactions, combat, persistence, lifecycle effects, and snapshots.
+`sim_mob` contains one-mob accessors and projection; `handle` contains the
+shared production wrappers; `collision` is the live shape-aware sweep.
+
+When extending mob behavior, put the public operation beside its consuming
+phase and keep cross-phase helpers `pub(super)` rather than moving state into
+the handle. The module-level `tests` file exercises the public simulation seam;
+new behavior should add a production-path test there or in the closest
+subsystem module.
 ## How it works
 
 ### Natural spawn cycle
