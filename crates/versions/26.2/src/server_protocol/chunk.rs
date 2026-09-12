@@ -1273,4 +1273,3 @@ impl ChunkEncoder for V770ServerProtocol {
         Ok(encode_chunk_in_dimension(cx, cz, column, dimension))
     }
 }
-
