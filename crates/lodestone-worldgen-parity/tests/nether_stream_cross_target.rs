@@ -1,41 +1,47 @@
 use lodestone_server::nether_chunk_source;
 use lodestone_worldgen_parity::lifecycle::{LifecycleCompletion, LifecycleMaterializer};
 
-/// A Nether feature source can write across the target boundary before that
-/// destination reaches FEATURES. The write is resident state, not a packet-
-/// local speculative edit; retaining it is what lets the next adjacent ticket
-/// observe the same block without replaying the source.
 #[test]
-fn cross_target_source_write_survives_target_boundary() {
-    let first_target = (90, 90);
-    let later_target = (91, 90);
+fn target_scoped_replay_retains_basalt_then_replaces_quartz() {
+    // These are the first three target tickets from the bounded stream witness.
+    // The two cells are independently observed packet states: (91,90)'s
+    // basalt at local (15,6,5), and (92,90)'s quartz at local (0,18,11).
+    let targets = [(90, 90), (91, 90), (92, 90)];
     let mut materializer = LifecycleMaterializer::new(nether_chunk_source(42));
     for z in 88..=92 {
-        for x in 88..=93 {
+        for x in 88..=94 {
             materializer.admit((x, z));
         }
     }
 
-    let mut sequence = 0;
-    for x in 89..=91 {
-        for z in 89..=91 {
-            materializer.complete_for_target(
-                first_target,
-                (x, z),
-                LifecycleCompletion::Features,
-                sequence,
-            );
-            sequence += 1;
+    let mut sequence = 0_u64;
+    for target in targets {
+        for source_x in target.0 - 1..=target.0 + 1 {
+            for source_z in target.1 - 1..=target.1 + 1 {
+                materializer.complete_for_target(
+                    target,
+                    (source_x, source_z),
+                    LifecycleCompletion::Features,
+                    sequence,
+                );
+                sequence += 1;
+            }
         }
+        materializer.finish_target(target);
     }
-    materializer.finish_target(first_target);
 
     assert_eq!(
         materializer
-            .resident_column(later_target)
-            .expect("later target was admitted")
+            .snapshot_for_packet((91, 90))
             .block_state(15, 6, 5),
         "minecraft:basalt[axis=y]",
-        "the (90,89) source's basalt write must remain resident for (91,90)",
+        "the 91,90 packet must retain its basalt witness",
+    );
+    assert_eq!(
+        materializer
+            .snapshot_for_packet((92, 90))
+            .block_state(0, 18, 11),
+        "minecraft:nether_quartz_ore",
+        "replaying the 92,90 source must not leave the prior target's basalt",
     );
 }
