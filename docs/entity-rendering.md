@@ -128,7 +128,7 @@ shared invisibility flag; armour stands are the intentional exception so an
 invisible named stand remains a hologram. `see_through` is the crouching
 visibility pass switch, and suppresses the depth-testless pass.
 
-Style (colour incl. hex, bold, italic, underline, strikethrough) walks a real `Text`/`TextSpan` tree, no legacy-string bridge, so hex colour survives. Bold redraws the glyph offset (not a font weight) and widens the advance. **No drop shadow** (vanilla passes `drawShadow = false` here). **`§k` (obfuscated) is not implemented** — needs per-frame resample state this renderer doesn't keep.
+Style (colour incl. hex, bold, italic, underline, strikethrough and obfuscated `§k`) walks a real `Text`/`TextSpan` tree, no legacy-string bridge, so hex colour survives. Bold redraws the glyph offset (not a font weight) and widens the advance. Obfuscated name-tag glyphs resample from a bounded same-advance pool on each draw while retaining the source advances and gaps. **No drop shadow** (the world-text path disables it here).
 
 `wgpu` has no equivalent of "this pipeline ignores the pass's depth attachment" while sharing a pass that has one (found via a validation error, not reasoned out in advance), so the see-through pass substitutes `Always` + no depth write for vanilla's "no depth attachment at all".
 
