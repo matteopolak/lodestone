@@ -145,18 +145,7 @@ impl BreakInputs {
         if speed > 1.0 {
             speed += self.mining_efficiency;
         }
-        if let Some(amp) = self.haste_amplifier {
-            speed *= 1.0 + (amp as f32 + 1.0) * 0.2;
-        }
-        if let Some(amp) = self.mining_fatigue {
-            let scale = match amp {
-                0 => 0.3,
-                1 => 0.09,
-                2 => 0.0027,
-                _ => 8.1e-4,
-            };
-            speed *= scale;
-        }
+        speed *= dig_speed_effect_multiplier(self.haste_amplifier, self.mining_fatigue);
         speed *= self.block_break_speed;
         if self.submerged {
             speed *= self.submerged_mining_speed;
@@ -214,6 +203,28 @@ impl BreakInputs {
         }
         Some(ticks)
     }
+}
+
+/// The combined Haste/Conduit Power and Mining Fatigue multiplier for digging.
+///
+/// The two effect families are independent modifiers: the Haste source is
+/// already reduced to the strongest active amplifier by the caller, while
+/// Mining Fatigue applies after it. Keeping this operation public lets the
+/// server's break validator and the client's predictor share the exact same
+/// f32 constants and ordering.
+#[must_use]
+pub fn dig_speed_effect_multiplier(
+    haste_amplifier: Option<u32>,
+    mining_fatigue: Option<u32>,
+) -> f32 {
+    let haste = haste_amplifier.map_or(1.0, |amp| 1.0 + (amp as f32 + 1.0) * 0.2);
+    let fatigue = mining_fatigue.map_or(1.0, |amp| match amp {
+        0 => 0.3,
+        1 => 0.09,
+        2 => 0.0027,
+        _ => 8.1e-4,
+    });
+    haste * fatigue
 }
 
 /// The in-progress dig, when the player is holding the attack button on a block.
@@ -868,6 +879,54 @@ mod tests {
                 "fatigue amp {amp}"
             );
         }
+    }
+
+    #[test]
+    fn digging_effect_fixtures_pin_exact_break_ticks() {
+        let base = BreakInputs {
+            hardness: 1.5,
+            correct_tool: true,
+            tool_speed: 8.0,
+            ..BreakInputs::default()
+        };
+        assert_eq!(base.ticks_to_break(), Some(6));
+
+        let haste_ii = BreakInputs {
+            haste_amplifier: Some(1),
+            ..base
+        };
+        assert_eq!(haste_ii.dig_speed(), 11.2);
+        assert_eq!(haste_ii.ticks_to_break(), Some(5));
+
+        let fatigue_i = BreakInputs {
+            mining_fatigue: Some(0),
+            ..base
+        };
+        assert_eq!(fatigue_i.dig_speed(), 2.4);
+        assert_eq!(fatigue_i.ticks_to_break(), Some(19));
+    }
+
+    #[test]
+    fn haste_amplifier_fixture_rejects_the_common_off_by_one_modifier() {
+        let correct = BreakInputs {
+            // This hardness is deliberately near the four/five-tick boundary:
+            // the correct 1.4 multiplier and the mistaken 1.2 multiplier must
+            // produce different observable timings.
+            hardness: 1.4,
+            correct_tool: true,
+            tool_speed: 8.0,
+            haste_amplifier: Some(1),
+            ..BreakInputs::default()
+        };
+        let wrong = BreakInputs {
+            // A mistaken `amplifier * 0.2` implementation would price Haste II
+            // as Haste I and leave the break at six ticks.
+            haste_amplifier: Some(0),
+            ..correct
+        };
+        assert_eq!(correct.ticks_to_break(), Some(4));
+        assert_eq!(wrong.ticks_to_break(), Some(5));
+        assert_ne!(correct.ticks_to_break(), wrong.ticks_to_break());
     }
 
     #[test]

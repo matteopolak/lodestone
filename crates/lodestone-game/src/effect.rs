@@ -29,6 +29,20 @@ pub struct StatusEffect {
     pub blend: bool,
 }
 
+/// The typed effect subset consumed by block-breaking prediction.
+///
+/// The wire/read-model boundary keeps canonical identifiers so unknown and
+/// future effects remain representable. Once inside this gameplay consumer,
+/// only these three roles matter: the two possible Haste sources are folded to
+/// their strongest amplifier and Mining Fatigue remains independent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DigSpeedEffects {
+    /// Strongest active Haste or Conduit Power amplifier, if any.
+    pub haste_amplifier: Option<u32>,
+    /// Active Mining Fatigue amplifier, if any.
+    pub mining_fatigue: Option<u32>,
+}
+
 impl StatusEffect {
     /// A visible, non-ambient effect with the given remaining duration.
     #[must_use]
@@ -144,6 +158,26 @@ impl ActiveEffects {
         self.effects.iter()
     }
 
+    /// Resolves the effect roles used by the digging-speed rule once at the
+    /// consumer boundary. Unrelated effects are deliberately ignored.
+    #[must_use]
+    pub fn dig_speed_effects(&self) -> DigSpeedEffects {
+        let mut result = DigSpeedEffects::default();
+        for effect in &self.effects {
+            match (effect.id.namespace(), effect.id.path()) {
+                ("minecraft", "haste") | ("minecraft", "conduit_power") => {
+                    let amplifier = u32::from(effect.amplifier);
+                    result.haste_amplifier = result.haste_amplifier.max(Some(amplifier));
+                }
+                ("minecraft", "mining_fatigue") => {
+                    result.mining_fatigue = Some(u32::from(effect.amplifier));
+                }
+                _ => {}
+            }
+        }
+        result
+    }
+
     /// Number of active effects.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -201,6 +235,24 @@ mod tests {
         fx.apply(StatusEffect::new(id("minecraft:haste"), 0, 40));
         fx.clear();
         assert!(fx.is_empty());
+    }
+
+    #[test]
+    fn dig_speed_effects_ignore_unrelated_status_effects() {
+        let mut fx = ActiveEffects::new();
+        fx.apply(StatusEffect::new(id("minecraft:speed"), 4, 200));
+        assert_eq!(fx.dig_speed_effects(), DigSpeedEffects::default());
+
+        fx.apply(StatusEffect::new(id("minecraft:haste"), 1, 200));
+        fx.apply(StatusEffect::new(id("minecraft:conduit_power"), 3, 200));
+        fx.apply(StatusEffect::new(id("minecraft:mining_fatigue"), 0, 200));
+        assert_eq!(
+            fx.dig_speed_effects(),
+            DigSpeedEffects {
+                haste_amplifier: Some(3),
+                mining_fatigue: Some(0),
+            }
+        );
     }
 
     #[test]

@@ -74,6 +74,7 @@ use lodestone_ecs::ecs::resource::Resource;
 use lodestone_ecs::ecs::schedule::IntoScheduleConfigs;
 use lodestone_client::{BlockPos, ClientAction, ClientHandle, Hand, Rotation};
 use lodestone_data::block_states::StateId;
+use lodestone_ecs::entity::Attributes;
 use lodestone_ecs::player::{
     ActionQueue, BreakIntent, BreakOutcome, BreakRejection, BreakStatus, Dead, Egress, Flying,
     LastFlyingSent, LastSprintingSent, LocalPlayer, MovementIntent, PhysicsState, PlaceIntent,
@@ -82,6 +83,7 @@ use lodestone_ecs::player::{
 use lodestone_ecs::session::{Abilities, HudEffects, ServerEntityId, SessionMenus};
 use lodestone_ecs::veto::{ActionVetoes, VerbContext, Verdict};
 use lodestone_ecs::{ChunkWorld, ChunkWorldWrite, FrameClock, GameTick, TickSet, VersionData};
+use lodestone_entity::attribute::attribute_value;
 use lodestone_game::mining::Mining;
 use lodestone_game::placement::{Placement, UseOnContext, UseOnDecision};
 use lodestone_model::{BlockFace, BlockStateRef, PlayerCommand};
@@ -95,7 +97,7 @@ use crate::raycast::{PickBox, RayHit, raycast};
 use crate::sim::{
     AudioEngine, HOTBAR_SLOTS, OFFHAND_NATIVE_INDEX, bare_handed_tool_mining,
     block_intersects_player, block_sound_seed, block_states_of, dig_break_inputs_with_effects,
-    face_from_normal, mining_effect_amplifiers,
+    face_from_normal,
     hit_cursor, orientation_for_placement, particle_face, placement_facts, state_for_placement,
     write_predicted_block,
 };
@@ -649,6 +651,89 @@ fn resolve_place_intent(
         .ok_or(PlaceRejection::UnreachableOrObstructed)
 }
 
+/// Reads the three server-fed attributes that alter block-breaking speed.
+///
+/// An absent snapshot means the registry default, not zero: `block_break_speed`
+/// and `submerged_mining_speed` default to `1.0` and `0.2`, while
+/// `mining_efficiency` defaults to `0.0`.
+#[must_use]
+pub(crate) fn mining_break_attributes(attributes: Option<&Attributes>) -> (f32, f32, f32) {
+    let key = |path: &str| {
+        lodestone_model::Identifier::new("minecraft", path).expect("valid attribute id")
+    };
+    let efficiency_key = key("mining_efficiency");
+    let break_speed_key = key("block_break_speed");
+    let submerged_key = key("submerged_mining_speed");
+    attributes.map_or((0.0, 1.0, 0.2), |attrs| {
+        (
+            attribute_value(&attrs.0, &efficiency_key) as f32,
+            attribute_value(&attrs.0, &break_speed_key) as f32,
+            attribute_value(&attrs.0, &submerged_key) as f32,
+        )
+    })
+}
+
+/// Resolves the typed digging-effect subset from the local player's HUD state.
+/// Haste and Conduit Power are collapsed to the stronger amplifier; Mining
+/// Fatigue remains an independent modifier. Unrelated effects never enter the
+/// break-time calculation.
+#[must_use]
+pub(crate) fn typed_mining_effect_amplifiers(
+    effects: Option<&HudEffects>,
+) -> (Option<u32>, Option<u32>) {
+    effects.map_or((None, None), |effects| {
+        let effects = effects.0.dig_speed_effects();
+        (effects.haste_amplifier, effects.mining_fatigue)
+    })
+}
+
+#[cfg(test)]
+mod mining_break_input_tests {
+    use super::*;
+
+    #[test]
+    fn server_attributes_reach_break_timing_with_registry_defaults() {
+        let key = |path: &str| {
+            lodestone_model::Identifier::new("minecraft", path).expect("valid attribute id")
+        };
+        let attributes = Attributes(vec![
+            lodestone_model::EntityAttributeSnapshot {
+                attribute: key("mining_efficiency"),
+                base: 26.0,
+                modifiers: Vec::new(),
+            },
+            lodestone_model::EntityAttributeSnapshot {
+                attribute: key("block_break_speed"),
+                base: 1.25,
+                modifiers: Vec::new(),
+            },
+            lodestone_model::EntityAttributeSnapshot {
+                attribute: key("submerged_mining_speed"),
+                base: 1.0,
+                modifiers: Vec::new(),
+            },
+        ]);
+        assert_eq!(mining_break_attributes(Some(&attributes)), (26.0, 1.25, 1.0));
+        assert_eq!(mining_break_attributes(None), (0.0, 1.0, 0.2));
+
+        let effects = HudEffects({
+            let mut active = lodestone_game::effect::ActiveEffects::new();
+            active.apply(lodestone_game::effect::StatusEffect::new(
+                key("haste"),
+                1,
+                200,
+            ));
+            active.apply(lodestone_game::effect::StatusEffect::new(
+                key("speed"),
+                4,
+                200,
+            ));
+            active
+        });
+        assert_eq!(typed_mining_effect_amplifiers(Some(&effects)), (Some(1), None));
+    }
+}
+
 /// Drive the live mining predictor one tick from the held attack button and the
 /// current target.
 ///
@@ -728,6 +813,7 @@ pub fn drive_mining(
             &mut BreakOutcome,
             Option<&Abilities>,
             Option<&HudEffects>,
+            Option<&Attributes>,
         ),
         With<LocalPlayer>,
     >,
@@ -735,7 +821,7 @@ pub fn drive_mining(
     if !(egress.in_world && egress.live) {
         return;
     }
-    let Ok((state, submersion, slot, dead, menus, intent, mut outcome, abilities, effects)) =
+    let Ok((state, submersion, slot, dead, menus, intent, mut outcome, abilities, effects, attributes)) =
         players.single_mut()
     else {
         return;
@@ -859,8 +945,10 @@ pub fn drive_mining(
     let tool = version
         .tool_mining(held.as_ref(), state_id)
         .unwrap_or_else(|| bare_handed_tool_mining(entry));
-    let (haste_amplifier, mining_fatigue) = mining_effect_amplifiers(effects);
-    let inputs = dig_break_inputs_with_effects(
+    let (haste_amplifier, mining_fatigue) = typed_mining_effect_amplifiers(effects);
+    let (mining_efficiency, block_break_speed, submerged_mining_speed) =
+        mining_break_attributes(attributes);
+    let mut inputs = dig_break_inputs_with_effects(
         entry,
         tool,
         id_value == id::AIR,
@@ -871,6 +959,9 @@ pub fn drive_mining(
         haste_amplifier,
         mining_fatigue,
     );
+    inputs.mining_efficiency = mining_efficiency;
+    inputs.block_break_speed = block_break_speed;
+    inputs.submerged_mining_speed = submerged_mining_speed;
 
     // The block-break veto is checked *before* `continue_` advances the dig
     // state machine. A denial aborts any live dig via the
