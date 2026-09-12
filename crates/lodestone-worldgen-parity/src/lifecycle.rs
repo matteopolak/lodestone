@@ -419,7 +419,7 @@ impl LifecycleWorldgenSource for OverworldChunkSource {
 
     fn feature_result_for_target(
         &self,
-        target: ChunkPos,
+        _target: ChunkPos,
         source: ChunkPos,
         overrides: &BTreeMap<AbsoluteCell, String>,
         _resident: &BTreeMap<ChunkPos, ChunkColumn>,
@@ -508,8 +508,15 @@ impl LifecycleWorldgenSource for NetherChunkSource {
         let spills = self
             .generator()
             .parity_source_spills_with_resident(
-                target.0,
-                target.1,
+                // The feature body is source-centred: the requested target
+                // decides which resident packet receives each absolute
+                // spill, but it must not move the generation region's
+                // origin. Keeping the source origin here preserves the
+                // source's immutable decoration seed and its neighbour read
+                // window when a dependency completes before the requested
+                // target.
+                source.0,
+                source.1,
                 source.0,
                 source.1,
                 &overrides,
