@@ -1535,7 +1535,6 @@ mod follow_range_tests {
         );
     }
 }
-
 /// Host-resolved persistent-anger deadline tests.
 #[cfg(test)]
 mod anger_tests {
@@ -5218,4 +5217,3 @@ mod goat_horn_tests {
         );
     }
 }
-

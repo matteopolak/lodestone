@@ -53,8 +53,8 @@ pub(super) const ITEM_DIMENSIONS: EntityDimensions = EntityDimensions::new(0.25,
 /// incremented per cell so the cost is a **counter** a gate can assert on rather
 /// than a duration, and `items_settled_probe_count` exposes it.
 pub(super) struct LiveBlockCollision<'a> {
-    block_state: &'a dyn Fn(i32, i32, i32) -> String,
-    probe_count: std::cell::Cell<u64>,
+    pub(super) block_state: &'a dyn Fn(i32, i32, i32) -> String,
+    pub(super) probe_count: std::cell::Cell<u64>,
 }
 
 impl CollisionView for LiveBlockCollision<'_> {
@@ -139,7 +139,7 @@ pub(super) fn settle_item(view: &dyn CollisionView, motion: &mut ItemMotion, bef
 /// ends up with the pre-swept-collision point test again. `motion` is the
 /// position/velocity/`on_ground` triple only — the caller has already applied whatever
 /// per-entity gravity and drag its own `tick` uses.
-fn settle_entity(
+pub(super) fn settle_entity(
     view: &dyn CollisionView,
     dimensions: EntityDimensions,
     motion: &mut ItemMotion,
@@ -576,4 +576,3 @@ mod live_mob_collision_tests {
         assert_eq!(snapshot.position.y, 1.0, "wall clipping must retain live floor support");
     }
 }
-

@@ -3,6 +3,31 @@
 use super::*;
 
 impl<'w> MobSim<'w> {
+    /// Attaches or detaches a lead between `mob_id` and the player `holder` —
+    /// vanilla's own generic entity-interact step's two leash-specific branches (excluding
+    /// its sneak-multi-attach branch; see this method's own "not
+    /// implemented" note).
+    ///
+    /// - If `mob_id` is already leashed to `holder`, detaches it (vanilla's
+    ///   own "current holder is this player" arm) and reports whether a
+    ///   `minecraft:lead` item should be spawned (`creative` mirrors
+    ///   vanilla's own "has infinite materials" check, which this sim has no game-mode
+    ///   state of its own to answer).
+    /// - Else, if `holding_lead` and the mob is not already held by a
+    ///   *player* (vanilla's own "current holder is not a player"
+    ///   guard — one player cannot steal another's leashed mob just by
+    ///   holding a lead), attaches it to `holder`, dropping any existing
+    ///   non-player leash first exactly as vanilla's own drop-leash call does
+    ///   before its own set-leashed-to call.
+    /// - Otherwise refuses: not leashable, no lead in hand, or out of
+    ///   [`LEASH_TOO_FAR_DIST`] (vanilla's own "can have a leash attached to"
+    ///   check's own snap-distance check).
+    ///
+    /// **Not implemented**: vanilla's sneak-right-click branch, which
+    /// re-parents *every* mob already leashed to `holder` onto whatever
+    /// entity was clicked, in one interaction. This only ever moves the one
+    /// `mob_id` named — a real gap for a player leashing several animals to
+    /// one another, not merely an unlikely input.
     pub fn try_leash(
         &mut self,
         mob_id: i32,
@@ -145,6 +170,32 @@ impl<'w> MobSim<'w> {
         (trader_id, llamas)
     }
 
+    /// A player right-clicked a mob with (or without) an item — vanilla's own
+    /// generic mob-interact dispatch reaching each species' own interaction
+    /// override, the single producer for taming, sitting,
+    /// feeding and breeding.
+    ///
+    /// # The dispatch order is the specification
+    ///
+    /// Vanilla's per-species interaction overrides are nested `if` chains that end in
+    /// their parent's own version, so *which arm wins* is as much a part of the port as
+    /// the constants are. Two orderings that both "tame a wolf" differ
+    /// observably: feeding a hurt tame wolf meat must heal it, **not** put it in
+    /// love, and only once it is at full health does the same item breed it
+    /// (the wolf's own interaction override's first arm, then its parent's
+    /// generic animal interaction). This method's arms are in that order and each one
+    /// names which vanilla interaction override it comes from, in prose.
+    ///
+    /// # What is deliberately not here
+    ///
+    /// Collar dyeing, wolf body armour and its repair, the parrot's poisonous
+    /// cookie, and mounting a tame horse. Each needs an item model this crate
+    /// does not have (dye components, equipment slots, damage values) or a
+    /// passenger model that does not exist.
+    ///
+    /// Returns [`InteractOutcome::Pass`] when nothing responded, which is the
+    /// caller's signal to fall through to whatever it does with an unconsumed
+    /// right-click.
     pub fn interact(
         &mut self,
         mob_id: i32,
@@ -578,7 +629,7 @@ impl<'w> MobSim<'w> {
     /// [`BREED_DISTANCE_SQR`](BREED_DISTANCE_SQR) (the breeding goal's own
     /// squared-distance check),
     /// so the nearest same-species adult inside that radius *is* the partner.
-    fn resolve_breeding(&mut self, bred: Vec<(i32, Vec3, ResourceKey)>) {
+    pub(super) fn resolve_breeding(&mut self, bred: Vec<(i32, Vec3, ResourceKey)>) {
         if bred.is_empty() {
             return;
         }

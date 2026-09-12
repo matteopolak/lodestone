@@ -974,7 +974,7 @@ impl<'w> SimMob<'w> {
     /// what a rebuild costs. `None` for a non-villager or an unemployed one
     /// (`Profession::None`), which get no economics at all, matching every
     /// other villager-only accessor in this file.
-    fn ensure_trades(&mut self) -> Option<&mut crate::villager_trade::VillagerTrades> {
+    pub(super) fn ensure_trades(&mut self) -> Option<&mut crate::villager_trade::VillagerTrades> {
         if self.profession == villager::Profession::None {
             self.trades = None;
             return None;
@@ -1003,7 +1003,7 @@ impl<'w> SimMob<'w> {
     /// reach a level-2..5 trade no matter how much it was traded with. A
     /// level change is picked up the next [`Self::ensure_trades`] call,
     /// which rebuilds the offer list to include the newly unlocked tier.
-    fn give_villager_xp(&mut self, xp: i32) {
+    pub(super) fn give_villager_xp(&mut self, xp: i32) {
         self.villager_xp += xp;
         self.villager_level = villager::level_up(self.villager_level, self.villager_xp);
     }
@@ -1184,13 +1184,3 @@ impl<'w> SimMob<'w> {
         }
     }
 }
-
-/// Wire identity for one tracked projectile.
-///
-/// [`ProjectileRegistry`]  deliberately stays version-free — its
-/// own doc comment says a caller's `id`/ballistic state is all it tracks — so
-/// the uuid and canonical entity-type key a spawn packet needs live here,
-/// exactly the split [`SimMob`] already makes between `NavigatingMob`'s
-/// version-free body and this crate's wire metadata.
-#[derive(Debug)]
-

@@ -253,4 +253,3 @@ impl EntitySource for MobHandle {
         self.with(|sim| sim.boss_bars())
     }
 }
-

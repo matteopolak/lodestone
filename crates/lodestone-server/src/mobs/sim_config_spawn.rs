@@ -804,32 +804,4 @@ impl<'w> MobSim<'w> {
         }
         None
     }
-
-    /// Advances every mob one tick: run its goals (which drive A\* and path
-    /// following through the [`MobController`] seam), then step the follower.
-    /// Each mob's `no_action_time` ages by one tick and is first cleared for any
-    /// persistent mob, or
-    /// one within its category's immune radius of a player from
-    /// [`set_players`](Self::set_players). See the body for why that reset lives
-    /// here rather than only in [`despawn_pass`](MobSim::despawn_pass), which
-    /// has no production caller and left the counter monotonic — permanently
-    /// disabling every idle-throttled goal five seconds into a world.
-    ///
-    /// A melee attack that connected this tick is resolved into a real
-    /// [`SimMob::apply_damage`] call against whichever mob its
-    /// [`attack_target_id`](SimMob::attack_target_id) names — the goal
-    /// scheduler only ever produces the *intent* to strike (a position, via
-    /// [`NavigatingMob::take_new_attacks`]); this is where that intent becomes
-    /// a real health change. Resolution runs in a second pass over collected
-    /// events, after every mob's own AI has ticked, so an attacker damaging
-    /// another mob never needs two simultaneous mutable borrows into the same
-    /// `Vec`. A mob whose health reaches `0.0` is removed at the end of the
-    /// tick that killed it.
-    /// One tick, settling dropped items against this sim's own terrain snapshot.
-    ///
-    /// **Production should call [`tick_with_terrain`](Self::tick_with_terrain)
-    /// instead**, and the difference is a real gameplay bug rather than a
-    /// preference: the snapshot only covers the 7×7 `mob_area` columns taken when
-    /// the world opened, so items dropped anywhere else fall straight through the
-    /// ground. See [`settle_item`]. This entry point stays for hermetic callers,
-    /// whose fixture world *is* the whole world they care about.
+}

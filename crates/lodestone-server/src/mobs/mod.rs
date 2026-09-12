@@ -445,6 +445,7 @@ mod sim_spawning;
 mod sim_entities;
 mod sim_persistence;
 mod sim_effects;
+mod sim_events;
 mod sim_snapshots;
 
 // No re-export: `ProjectileHit`/`projectile_damage_type`/`first_solid_along`
@@ -2075,6 +2076,7 @@ pub struct SimMob<'w> {
     rider: Option<i32>,
 }
 
+#[derive(Debug, Clone)]
 struct ProjectileMeta {
     uuid: Uuid,
     entity_type: ResourceKey,
