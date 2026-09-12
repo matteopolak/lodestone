@@ -4,7 +4,9 @@
 
 The particle system: how a decoded particle type becomes a physically-simulated, textured billboard on
 screen, and the special case of block-break debris, whose colour and texture are derived from the broken
-block itself rather than from a dedicated sprite.
+block itself rather than from a dedicated sprite. The shell facade delegates to
+`particles/events.rs` for event and ambient emission, `particles/lifecycle.rs` for
+simulation/extraction, and `particles/render.rs` for GPU uploads and draws.
 
 ## How it works
 
@@ -16,8 +18,9 @@ textures and differ only in playback order, e.g. ascending vs descending); `Beha
 tick/quad-size/layer override shared across every vanilla particle *class* it corresponds to (several
 registry types share one Java class and therefore one `Behaviour`); `emit` holds one function per class,
 transcribed from vanilla's own client-side particle package. `Particles::spawn_one`
-(`crates/lodestone-shell/src/particles.rs`) is the single place that maps a decoded registry name to an
-emitter call.
+(`crates/lodestone-shell/src/particles/events.rs`) is the single place that maps a decoded registry name
+to an emitter call. The public `particles` module remains the stable facade, while `lifecycle.rs` owns
+construction, ticking and extraction and `render.rs` owns the GPU pipeline.
 
 The emitter implementations are grouped under `crates/lodestone-particle/src/emit/` by effect family:
 block and item fragments, combat, social/UI effects, ambient/environmental effects, magic, water, foliage,
@@ -53,9 +56,10 @@ face's own texture: `grass_block` declares `#particle` as `block/dirt`), tinted 
 colour, and shaded by the light at its cell. Three layers own the parts: `lodestone-particle` emits an
 opaque `SpriteSource::BlockState(StateId)` with no atlas and no tint opinion; `lodestone-render`'s
 `block_models.rs` bakes each state's particle UV rect and tint once from the jar; `lodestone-shell`'s
-`particles.rs` joins the two and builds GPU instances.
+`particles/lifecycle.rs` joins the tables and builds extracted instances;
+`particles/render.rs` uploads and draws those instances.
 
-The shell is the generated-state ingress for both decoded block-particle options and local break effects.
+The shell's event module is the generated-state ingress for both decoded block-particle options and local break effects.
 The version-free `lodestone_model::BlockStateRef` tags a 26.2 global id as `Canonical`, while a legacy
 family or synchronized extension keeps its numeric value as `ProtocolLocal`; an overlapping small number
 must not accidentally become a 26.2 state just because it fits this build's table. The same tag reaches
@@ -151,5 +155,7 @@ palette (correct, since the demo palette has no colormaps or tinted blocks).
   block mesher.
 * `crates/versions/26.2` — `decode_particle_options`, the `LEVEL_PARTICLES` and block-destroy (`2001`)
   decodes that feed both the generic dispatch and the break-particle path.
-* `lodestone-shell` — `particles.rs` (dispatch, tint join, GPU instances) and `interact.rs`/`sim.rs` (the
-  break-particle emit sites, including local prediction for the player's own break).
+* `lodestone-shell` — `particles/events.rs` (dispatch, event consumers and ambient prediction),
+  `particles/lifecycle.rs` (engine/tables/extraction), and `particles/render.rs` (GPU instances), plus
+  `interact.rs`/`sim.rs` (the break-particle emit sites, including local prediction for the player's own
+  break).
