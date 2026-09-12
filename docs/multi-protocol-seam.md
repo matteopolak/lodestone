@@ -56,6 +56,17 @@ family wraps it back into its own `AdapterError` locally). Helpers whose **succe
 `lodestone-core` and the reverse edge would be a dependency cycle; they stay duplicated per
 family until `lodestone-model` itself moves those types down, which is a separate decision.
 
+### Hosting seam module layout
+
+`crates/lodestone-server/src/protocol.rs` remains the public compatibility façade, while its
+implementation is split into three private modules. `protocol/session.rs` owns version-free
+connection snapshots and value records; `protocol/packets.rs` owns the client-to-server packet
+and server directive vocabulary; and `protocol/codec.rs` owns the `ServerProtocol`/chunk-encoding
+traits and their forwarding implementations. The façade re-exports the same public names, so
+server systems and version crates keep their existing imports. The child modules depend on the
+existing core, model, chunk, and dimension types only; the split introduces no protocol-family
+dependency or module cycle.
+
 ### What the `vNNN` suffix denotes
 
 Package and feature names (`lodestone-v1-8`, feature `v1-8`; and the same pattern for `v1-9`,
