@@ -163,11 +163,11 @@ Rain and snow cadence is the other ambience source. `ShellAmbience` keeps the
 weather one-shot at the sampled landing block (block-centre coordinates), so
 `ShellAudio`/the mixer can apply listener distance and panning; it submits on
 `SoundCategory::Weather`, keeping the weather slider and runtime gain separate
-from biome ambience. The shell only supplies a landing sample when the listener
-column has exposed sky, so clear weather, covered positions, and unstreamed
-terrain do not manufacture a weather voice. The muffled-above variant still
-needs a real nearby heightmap sample and is intentionally not selected by the
-current listener-column probe.
+from biome ambience. The shell resolves the listener column's
+`MOTION_BLOCKING` heightmap: an unloaded column suppresses the event, while a
+landing above the listener selects the muffled-above variant and a landing at
+or below the listener selects the normal variant. Thus clear weather, covered
+positions, and unstreamed terrain do not manufacture an exposed weather voice.
 
 The mood (cave-ambience) trigger is **darkness, not depth** — the common
 wrong guess is "Y below sea level." Each tick, one block is sampled from a

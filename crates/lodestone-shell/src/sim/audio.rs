@@ -329,22 +329,14 @@ impl Sim {
                 ),
             }
         };
-        // Rain is only audible where the sky reaches the ear. `landing` is
-        // narrowed to the listener's own column rather than vanilla's random
-        // `rainParticlePosition`, which means the muffled `weather.rain.above`
-        // variant is never selected — reaching it needs a real `MOTION_BLOCKING`
-        // heightmap read, which nothing in the shell does yet
-        // (`app::weather`'s own doc records the same gap for `canSeeSky`).
-        let sky_at_ear = probe(glam::IVec3::new(
-            eye.x.floor() as i32,
-            eye.y.floor() as i32,
-            eye.z.floor() as i32,
-        ));
-        let landing = (sky_at_ear.sky != lodestone_sound::ambient::LightLevel::ZERO).then_some([
-            eye.x.floor() as i32,
-            eye.y.floor() as i32,
-            eye.z.floor() as i32,
-        ]);
+        // Rain is only audible where the sky reaches the ear. Use the live
+        // `MOTION_BLOCKING` heightmap for the listener's column, rather than
+        // treating a non-zero light sample at the eye as sky exposure. That
+        // gives the sound its real landing distance and lets the muffled
+        // `weather.rain.above` variant fire under a roof. An absent heightmap
+        // means the terrain is not streamed yet, so suppress the weather voice
+        // instead of inventing an exposed landing.
+        let (landing, roof_above) = self.weather_landing(eye);
 
         let taken = self.write(|w| w.resource_mut::<super::AmbienceState>().0.take());
         let Some(mut ambience) = taken else {
@@ -357,7 +349,7 @@ impl Sim {
                 ambient: &ambient,
                 weather,
                 landing,
-                roof_above: false,
+                roof_above,
             },
             &mut probe,
         );
@@ -389,6 +381,56 @@ impl Sim {
             .map_or_else(|| "overworld".to_string(), |d| d.path().to_string());
         let biome = self.standing_biome_name().unwrap_or_default();
         lodestone_sound::biome_ambient::ambient_sounds_at(&dimension, &biome)
+    }
+
+    /// Resolve the listener's weather source from the live column heightmap.
+    ///
+    /// The stored height is the first air block above the highest
+    /// `MOTION_BLOCKING` block, expressed relative to the dimension minimum;
+    /// adding `min_y` yields the absolute block where precipitation lands. A
+    /// height above the listener's feet block means the ear is covered. Both
+    /// values are kept separate because [`lodestone_render::RainAmbience::tick`]
+    /// uses the landing height for distance and the roof flag for its muffled
+    /// sound choice.
+    fn weather_landing(&self, eye: glam::DVec3) -> (Option<[i32; 3]>, bool) {
+        let x = eye.x.floor() as i32;
+        let z = eye.z.floor() as i32;
+        let eye_block_y = eye.y.floor() as i32;
+        let Some(net) = self.net.as_ref() else {
+            return (None, false);
+        };
+        let shared = net.shared_handle();
+        let Some(handle) = shared.get().cloned() else {
+            return (None, false);
+        };
+        let Some(dimensions) = handle.world_dimensions() else {
+            return (None, false);
+        };
+        let chunk = ChunkPos {
+            x: x.div_euclid(16),
+            z: z.div_euclid(16),
+        };
+        let Some(heightmap) = handle.column_heightmap(chunk) else {
+            return (None, false);
+        };
+        let landing_y = heightmap.get(x.rem_euclid(16) as usize, z.rem_euclid(16) as usize) as i32
+            + dimensions.min_y;
+        Self::weather_landing_from_height(x, z, eye_block_y, Some(landing_y))
+    }
+
+    /// Convert one absolute `MOTION_BLOCKING` height into the weather sound
+    /// source and the covered-ear flag. Kept pure so the two exposure controls
+    /// can be tested without constructing a connected client.
+    fn weather_landing_from_height(
+        x: i32,
+        z: i32,
+        eye_block_y: i32,
+        landing_y: Option<i32>,
+    ) -> (Option<[i32; 3]>, bool) {
+        let Some(landing_y) = landing_y else {
+            return (None, false);
+        };
+        (Some([x, landing_y, z]), landing_y > eye_block_y)
     }
 
     /// The three-slot [`BackgroundMusic`](lodestone_sound::music::BackgroundMusic)
@@ -766,6 +808,18 @@ pub(crate) fn block_sound_seed(block: [i32; 3], ticks: u64) -> i64 {
 #[cfg(test)]
 mod tests {
     use lodestone_model::event::{BlockStateRef, SoundCategory};
+
+    #[test]
+    fn weather_audio_source_uses_heightmap_exposure_controls() {
+        let open = Sim::weather_landing_from_height(4, -2, 65, Some(64));
+        assert_eq!(open, (Some([4, 64, -2]), false));
+
+        let covered = Sim::weather_landing_from_height(4, -2, 65, Some(70));
+        assert_eq!(covered, (Some([4, 70, -2]), true));
+
+        let unstreamed = Sim::weather_landing_from_height(4, -2, 65, None);
+        assert_eq!(unstreamed, (None, false));
+    }
 
     /// The eleven sliders reach the eleven buses, each one carrying **its own**
     /// value.
