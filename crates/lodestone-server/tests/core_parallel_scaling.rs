@@ -240,7 +240,10 @@ fn hash_overworld(digest: &mut Sha256, column: &lodestone_worldgen::overworld::G
     }
     hash_u64(digest, column.block_entities().len() as u64);
     for entity in column.block_entities() {
-        hash_str(digest, entity.type_id());
+        hash_str(
+            digest,
+            lodestone_data::block_entity_types::block_entity_type_name(entity.type_id()),
+        );
         let (x, y, z) = entity.position();
         hash_i32(digest, x);
         hash_i32(digest, y);
@@ -265,7 +268,13 @@ fn hash_overworld(digest: &mut Sha256, column: &lodestone_worldgen::overworld::G
                 hash_i64(digest, *loot_table_seed);
             }
             lodestone_worldgen::overworld::GeneratedBlockEntity::DungeonSpawner { entity_type, .. } => {
-                hash_str(digest, entity_type);
+                hash_str(
+                    digest,
+                    entity_type
+                        .builtin_or_none()
+                        .expect("generated spawner type is built-in")
+                        .name(),
+                );
             }
         }
     }
@@ -420,4 +429,151 @@ fn content_digest(states: &[&str]) -> [u8; 32] {
         hash_str(&mut digest, state);
     }
     digest.finalize().into()
+}
+
+#[test]
+#[ignore = "short release measurement of the production End spatial-batch seam"]
+fn end_spatial_batch_throughput() {
+    let positions = adjacent_coords();
+    let source = lodestone_server::end_chunk_source(SEED);
+    let started = Instant::now();
+    let columns = source.generate_batch(&positions);
+    let elapsed = started.elapsed().as_secs_f64();
+    assert_eq!(columns.len(), positions.len());
+    black_box(columns.iter().map(|column| column.solid_count()).sum::<usize>());
+    eprintln!(
+        "end spatial batch: {} columns in {:.3}s = {:.2} chunks/s",
+        positions.len(),
+        elapsed,
+        positions.len() as f64 / elapsed,
+    );
+}
+
+#[test]
+#[ignore = "short release phase split for the End spatial-batch seam"]
+fn end_spatial_batch_phase_profile() {
+    let positions = adjacent_coords();
+    let generator = end_generator(SEED);
+    let mut bases_done = None;
+    let started = Instant::now();
+    let columns = generator.columns_spatial_batch_observed(
+        &positions,
+        |dependencies, generator| generator.base_world_rectangle(&dependencies),
+        |dependencies, outputs| {
+            if outputs == 0 {
+                bases_done = Some((dependencies, started.elapsed()));
+            }
+        },
+    );
+    let elapsed = started.elapsed();
+    let (dependencies, base_elapsed) = bases_done.expect("base phase observed");
+    black_box(columns);
+    eprintln!(
+        "end spatial phases: dependencies={} bases={:.3}s ordered={:.3}s total={:.3}s",
+        dependencies,
+        base_elapsed.as_secs_f64(),
+        (elapsed - base_elapsed).as_secs_f64(),
+        elapsed.as_secs_f64(),
+    );
+}
+
+#[test]
+#[ignore = "short release measurement of overlapping End spatial batches"]
+fn end_overlapping_spatial_batch_throughput() {
+    let first = adjacent_coords();
+    let second = first.iter().map(|&(cx, cz)| (cx + 1, cz)).collect::<Vec<_>>();
+    let source = lodestone_server::end_chunk_source(SEED);
+    let cold_started = Instant::now();
+    let cold = source.generate_batch(&first);
+    let cold_elapsed = cold_started.elapsed().as_secs_f64();
+    let overlap_started = Instant::now();
+    let overlap = source.generate_batch(&second);
+    let overlap_elapsed = overlap_started.elapsed().as_secs_f64();
+    black_box((cold, overlap));
+    eprintln!(
+        "end overlapping batches: cold={:.2} chunks/s shifted-overlap={:.2} chunks/s",
+        first.len() as f64 / cold_elapsed,
+        second.len() as f64 / overlap_elapsed,
+    );
+}
+
+#[test]
+#[ignore = "bounded release roaming/cache-footprint measurement"]
+fn end_spatial_batch_cache_stays_bounded_while_roaming() {
+    let generator = end_generator(SEED);
+    for step in 0..80 {
+        let positions = adjacent_coords()
+            .into_iter()
+            .map(|(cx, cz)| (cx + step * 8, cz))
+            .collect::<Vec<_>>();
+        let columns = generator.columns_spatial_batch(&positions, |dependencies, generator| {
+            lodestone_server::run_worldgen_jobs(dependencies, |chunk @ (cx, cz)| {
+                (chunk, generator.base_world_for_batch(cx, cz))
+            })
+        });
+        black_box(columns);
+    }
+    let retained = generator.base_world_cache_len();
+    eprintln!("end spatial cache after roaming: retained={retained}");
+    assert!(retained <= 4_489 + 32, "End base cache exceeded its sharded bound: {retained}");
+}
+
+#[test]
+#[ignore = "short release measurement of shared rectangular End density"]
+fn end_rectangular_density_batch_throughput() {
+    let positions = adjacent_coords();
+    let generator = end_generator(SEED);
+    let mut dependencies = positions
+        .iter()
+        .flat_map(|&(cx, cz)| {
+            (-1..=1).flat_map(move |dx| (-1..=1).map(move |dz| (cx + dx, cz + dz)))
+        })
+        .collect::<Vec<_>>();
+    dependencies.sort_unstable();
+    dependencies.dedup();
+    let started = Instant::now();
+    let bases = generator.base_world_rectangle(&dependencies);
+    let elapsed = started.elapsed().as_secs_f64();
+    black_box(bases);
+    eprintln!(
+        "end rectangular density: {} bases in {:.3}s = {:.2} bases/s",
+        dependencies.len(), elapsed, dependencies.len() as f64 / elapsed,
+    );
+}
+
+
+#[test]
+#[ignore = "short release crossover sweep for End base strategies"]
+fn end_base_strategy_crossover() {
+    for side in [1_i32, 2, 4, 8] {
+        let outputs = (0..side)
+            .flat_map(|z| (0..side).map(move |x| (x, z)))
+            .collect::<Vec<_>>();
+        let mut dependencies = outputs
+            .iter()
+            .flat_map(|&(cx, cz)| {
+                (-1..=1).flat_map(move |dx| (-1..=1).map(move |dz| (cx + dx, cz + dz)))
+            })
+            .collect::<Vec<_>>();
+        dependencies.sort_unstable();
+        dependencies.dedup();
+
+        let rectangular = end_generator(SEED);
+        let started = Instant::now();
+        black_box(rectangular.base_world_rectangle(&dependencies));
+        let rectangular_seconds = started.elapsed().as_secs_f64();
+
+        let parallel = end_generator(SEED);
+        let started = Instant::now();
+        black_box(lodestone_server::run_worldgen_jobs(
+            dependencies.clone(),
+            |chunk @ (cx, cz)| (chunk, parallel.base_world_for_batch(cx, cz)),
+        ));
+        let parallel_seconds = started.elapsed().as_secs_f64();
+        eprintln!(
+            "end strategy outputs={} dependencies={} rectangle={:.4}s parallel={:.4}s ratio={:.3}",
+            outputs.len(), dependencies.len(), rectangular_seconds, parallel_seconds,
+            rectangular_seconds / parallel_seconds,
+        );
+    }
 }
