@@ -21,7 +21,6 @@ pub(crate) struct GravitySettle {
     /// [`gravity_tick::find_landing_y`]'s answer against the world as it is now.
     pub landing_y: i32,
 }
-
 /// `FallingBlock.tick`: whether the gravity block at world `(x, y, z)` is
 /// unsupported and should become a falling entity, and where it will land.
 ///
@@ -80,4 +79,3 @@ pub(crate) fn settle_gravity_at(
         landing_y,
     })
 }
-

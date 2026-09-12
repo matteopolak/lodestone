@@ -131,7 +131,7 @@ use crate::chunk::ChunkSource;
 use crate::gravity_tick;
 use crate::growth_tick;
 use crate::mob_spawn::SpawnRng;
-use crate::neighbor_update::{Direction, NeighborPropagator, Notification, UPDATE_ORDER};
+use crate::neighbor_update::{Direction, NeighborPropagator, Notification};
 use crate::redstone;
 use crate::redstone_diode;
 use crate::redstone_dispenser;
