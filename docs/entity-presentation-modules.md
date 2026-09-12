@@ -8,8 +8,9 @@ the existing `crate::entities::*` API.
 
 ## How it works
 
-`entities/mod.rs` owns ingest folding, track lifecycle, shared components and
-resources. `interpolation.rs` advances frame clocks, eases poses, and builds
+`entities/mod.rs` owns ingest folding, track lifecycle, and the shared wiring.
+`remote_body.rs` owns the client-side body-yaw state and tick system for remote
+players. `interpolation.rs` advances frame clocks, eases poses, and builds
 animation inputs. `physics.rs` integrates locally simulated dropped items and
 projectiles against the shared collision/profile inputs. `extraction.rs`
 converts ECS state to `EntityDraw` values and drives pickup flights.
