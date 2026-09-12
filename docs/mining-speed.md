@@ -15,9 +15,12 @@ the f32 accumulator so exact tick boundaries are preserved. The shell reads the 
 break-speed attributes from the local player's server-fed `Attributes` snapshots and
 resolves effect roles into `DigSpeedEffects`; unrelated effects are ignored.
 
-The server uses the same public effect multiplier when pricing a pending break. Its
-validator still has a documented tolerance for player state it does not track, so this
-shared arithmetic is not by itself a claim of complete anti-cheat parity.
+The server resolves its block and held-tool censuses into the same `BreakInputs`
+calculation before pricing a pending break. Its validator still has a documented
+packet-clock tolerance for player state it does not track, so this shared arithmetic
+is not by itself a claim of complete anti-cheat parity. Boundary checks count the
+start tick inclusively, while deferred completion requires the full accumulated
+fraction rather than merely accepting an early stop.
 
 ## How to change it
 
@@ -38,5 +41,5 @@ zero is level I.
 
 The calculation depends on `lodestone_game::mining`, `lodestone_data` block/tool censuses,
 `lodestone_entity` attribute folding, and the ECS `Attributes`/`HudEffects` components.
-The server's pending-break path consumes the shared game multiplier and its own validated
-effect store.
+The server's pending-break path consumes the shared game calculation and its own
+validated effect store.

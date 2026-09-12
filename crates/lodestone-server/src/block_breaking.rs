@@ -69,11 +69,12 @@
 //! bundle), which is why the two-line formula is restated here rather than
 //! shared.
 //!
-//! **Creative mode is not modelled**, here or anywhere in this crate: vanilla's
-//! `instabuild` branch destroys any block on `StartDestroy`, and a creative
-//! client that sends no `StopDestroy` for stone will find it does not break.
-//! That is a pre-existing gap (nothing in `lodestone-server` tracks a game
-//! mode), named rather than silently half-fixed.
+//! **Creative mode is a separate start-only path in `crate::server`:** it
+//! bypasses the hardness clock and produces no drops, while retaining the
+//! interaction-range, known-state, non-air, unbreakable-state, and
+//! plugin-proposal checks. This module remains responsible for the survival
+//! timing arithmetic; the caller supplies the mode after resolving the
+//! connection's authoritative game state.
 //!
 //! # Configuration
 //!
@@ -87,7 +88,7 @@
 //! global state id both censuses key on, and `lodestone_model` for the
 //! vocabulary. Names no packet and no protocol version.
 
-use lodestone_game::mining::efficiency_bonus;
+use lodestone_game::mining::{BreakInputs, efficiency_bonus};
 use lodestone_model::{BlockPos, ItemStack, Vec3};
 
 use crate::vitals::EYE_HEIGHT;
@@ -290,16 +291,19 @@ pub(crate) fn progress_per_tick_with_effects(
             .unwrap_or(0);
         mining.speed += efficiency_bonus(level);
     }
-    let divider = if mining.correct_tool { 30.0 } else { 100.0 };
-    // Zero hardness divides to `+inf`, which is the instant-break signal the
-    // caller tests with `>= 1.0` — exactly as vanilla's own float division does.
-    Some(
-        mining.speed / hardness / divider
-            * lodestone_game::mining::dig_speed_effect_multiplier(
-                haste_amplifier,
-                mining_fatigue,
-            ),
-    )
+    // Keep the baseline in the one typed game calculation consumed by the
+    // client predictor. The server supplies the same resolved block/tool
+    // values and its two typed effects; only the packet-clock tolerance is
+    // applied later by `PendingBreak::progress_at`.
+    let inputs = BreakInputs {
+        hardness,
+        correct_tool: mining.correct_tool,
+        tool_speed: mining.speed,
+        haste_amplifier,
+        mining_fatigue,
+        ..BreakInputs::default()
+    };
+    Some(inputs.progress_per_tick())
 }
 
 /// Whether `pos` is close enough to a player whose **feet** are at `feet` to be
@@ -329,6 +333,7 @@ pub(crate) fn within_interaction_range(feet: Option<Vec3>, pos: BlockPos) -> boo
 mod tests {
     use super::*;
     use lodestone_model::ItemEnchantment;
+    use lodestone_model::{BlockActionKind, BlockFace, ClientAction};
 
     fn enchanted_pickaxe(enchantment: &str, level: u32) -> ItemStack {
         let mut stack = ItemStack::new("minecraft:diamond_pickaxe".parse().unwrap(), 1);
@@ -415,6 +420,142 @@ mod tests {
         let plain_progress = progress_per_tick("minecraft:stone", Some(&plain)).unwrap();
         let fortune_progress = progress_per_tick("minecraft:stone", Some(&fortune)).unwrap();
         assert_eq!(fortune_progress, plain_progress);
+    }
+
+    /// The client and server must price the same fractional tick stream before
+    /// the server's packet-clock tolerance is applied. These expected values
+    /// are independent arithmetic from the fixture (stone hardness `1.5`,
+    /// bare-hand speed `1.0`, and the `30`/`100` divider), rather than a
+    /// round-trip through either implementation.
+    #[test]
+    fn client_and_server_agree_on_fractional_progress_and_tick_boundaries() {
+        let fixtures = [
+            (
+                "bare hand",
+                BreakInputs {
+                    hardness: 1.5,
+                    correct_tool: false,
+                    tool_speed: 1.0,
+                    ..BreakInputs::default()
+                },
+                None,
+                1.0f32 / (1.5 * 100.0),
+                Some(151),
+            ),
+            (
+                "Haste II plus Mining Fatigue I",
+                BreakInputs {
+                    hardness: 1.5,
+                    correct_tool: false,
+                    tool_speed: 1.0,
+                    haste_amplifier: Some(1),
+                    mining_fatigue: Some(0),
+                    ..BreakInputs::default()
+                },
+                Some((1u32, 0u32)),
+                (1.4 * 0.3) / (1.5 * 100.0),
+                Some(358),
+            ),
+        ];
+
+        for (label, client, effects, expected_progress, expected_ticks) in fixtures {
+            let server = progress_per_tick_with_effects(
+                "minecraft:stone",
+                None,
+                effects.map(|(haste, _)| haste),
+                effects.map(|(_, fatigue)| fatigue),
+            )
+            .expect("stone is in the server census");
+            assert_eq!(client.progress_per_tick(), expected_progress, "{label} client fixture");
+            assert_eq!(server, expected_progress, "{label} server fixture");
+            assert_eq!(server, client.progress_per_tick(), "{label} source agreement");
+            assert_eq!(client.ticks_to_break(), expected_ticks, "{label} tick boundary");
+
+            // Drive the actual client accumulator, then put its STOP on the
+            // server's authoritative packet clock. This is the production
+            // hand-off: the client decides when to send, and the server
+            // decides whether the elapsed fractional work is enough.
+            let mut machine = lodestone_game::mining::Mining::new();
+            let target = BlockPos::new(8, 64, 8);
+            machine.start(target, BlockFace::Up, &client, None);
+            let mut stop_tick = None;
+            for tick in 1..=expected_ticks.expect("fixture has a finite break") {
+                let actions = machine.continue_(target, BlockFace::Up, &client, None);
+                if actions.iter().any(|action| {
+                    matches!(
+                        action,
+                        ClientAction::BlockAction {
+                            action: BlockActionKind::StopDestroy,
+                            ..
+                        }
+                    )
+                }) {
+                    stop_tick = Some(tick);
+                    break;
+                }
+            }
+            let stop_tick = stop_tick.expect("client must emit STOP at its predicted boundary");
+            assert_eq!(stop_tick, expected_ticks.unwrap(), "{label} client STOP");
+            let pending = PendingBreak {
+                pos: target,
+                progress_per_tick: server,
+                start_tick: Some(100),
+                deferred: false,
+            };
+            assert!(
+                pending.may_break_at(Some(100 + u64::from(stop_tick))),
+                "{label} server must accept the client's STOP"
+            );
+        }
+    }
+
+    /// The Haste amplifier is zero-based. The pair is intentionally chosen so
+    /// an implementation that multiplies by `amplifier * 0.2` moves the
+    /// client's STOP one tick later; the server's typed source must preserve
+    /// the same distinction.
+    #[test]
+    fn haste_boundary_rejects_an_off_by_one_modifier() {
+        let correct = BreakInputs {
+            hardness: 1.5,
+            correct_tool: false,
+            tool_speed: 1.0,
+            haste_amplifier: Some(1),
+            ..BreakInputs::default()
+        };
+        let mistaken = BreakInputs {
+            haste_amplifier: Some(0),
+            ..correct
+        };
+        let server = progress_per_tick_with_effects("minecraft:stone", None, Some(1), None)
+            .expect("stone is in the server census");
+        assert_eq!(server, correct.progress_per_tick());
+        assert_eq!(correct.ticks_to_break(), Some(108));
+        assert_eq!(mistaken.ticks_to_break(), Some(125));
+        assert_ne!(correct.ticks_to_break(), mistaken.ticks_to_break());
+    }
+
+    /// Packet arrival is counted inclusively: a START and a STOP handled on
+    /// the same server tick have one elapsed sample, while a STOP two ticks
+    /// later has three. Pin both sides of the threshold so dropping the `+1`
+    /// changes an observed result and fails this detector.
+    #[test]
+    fn authoritative_stop_boundary_counts_the_start_tick() {
+        let start = 40;
+        let dig = PendingBreak {
+            pos: BlockPos::new(0, 64, 0),
+            progress_per_tick: 0.031,
+            start_tick: Some(start),
+            deferred: false,
+        };
+        assert!(!dig.may_break_at(Some(start + 1)));
+        assert!(dig.may_break_at(Some(start + 2)));
+
+        let deferred = PendingBreak {
+            deferred: true,
+            ..dig
+        };
+        assert!(!deferred.deferred_break_ready(Some(start + 3)));
+        assert!(deferred.deferred_break_ready(Some(start + 4)));
     }
 
     /// The headline gate: obsidian must not break on a back-to-back
