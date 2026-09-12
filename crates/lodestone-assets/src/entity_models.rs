@@ -203,7 +203,6 @@ pub use misc::*;
 use equines_felines::{cat_coat_texture, horse_color_texture, llama_color_texture, parrot_color_texture, wolf_coat_texture};
 use misc::mooshroom_color_texture;
 use monsters::scaled;
-use vehicles::boat_hull;
 
 fn player_wide() -> EntityModelDef {
     player_model(false)
@@ -882,7 +881,7 @@ mod tests {
     /// one side.
     #[test]
     fn the_water_patch_mirrors_the_hulls_own_bottom_plank() {
-        let hull = boat_hull();
+        let hull = vehicles::boat_hull();
         let bottom = hull
             .children
             .iter()
