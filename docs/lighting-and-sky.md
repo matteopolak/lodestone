@@ -180,6 +180,12 @@ alone cannot express "draw no sun", so before this landed the Nether had correct
 and clear colour but still rendered the overworld's sun and clouds overhead. Cloud
 opacity is gated separately, on the dimension's own cloud-colour alpha.
 
+The pure day-clock sampler and colour tracks live in
+`crates/lodestone-render/src/sky_time.rs`; `sky.rs` re-exports that API and owns the
+disc, celestial, star, and cloud geometry. Keeping timeline sampling independent
+from geometry makes the JVM-free math tests and the GPU submission layer share one
+authoritative source without adding a second clock or GPU resource boundary.
+
 The eight moon textures are selected by `lodestone_assets::MoonPhase`, not a raw
 integer. `moon_phase_for_time_of_day` resolves the day-clock boundary once, and the
 asset atlas accepts only the finite phase domain; its compact index is used only for
