@@ -498,7 +498,7 @@ impl EvalCache {
 }
 
 /// Per-column / per-Y scan state mirroring vanilla's own surface-rule scan context.
-struct Ctx<'a, 'b> {
+struct Ctx<'a, 'b, 'c> {
     block_x: i32,
     block_z: i32,
     surface_depth: i32,
@@ -508,22 +508,35 @@ struct Ctx<'a, 'b> {
     water_height: i32,
     stone_depth_above: i32,
     stone_depth_below: i32,
-    /// This position's biome id — consulted by [`Cond::BiomeIs`],
-    /// which only ever *compares* it.
-    ///
-    /// **Borrowed, not owned** (U21). It was a `String`, and both producers had
-    /// to clone into it: `build_surface`'s `biome_at` callback for each
-    /// rule-evaluated position and `top_material` once per call on the carver
-    /// path. Neither clone bought anything — the biome table this borrows from
-    /// outlives the scan in both cases.
-    biome: &'a str,
-    /// This column's biome's "cold enough to snow" answer — consulted by
-    /// [`Cond::Temperature`]. See [`crate::biome::cold_enough_to_snow`].
-    cold_enough_to_snow: bool,
+    /// The current position's biome answer, populated on first use by the
+    /// surface rule. The source is deliberately lazy: the reference scan asks
+    /// the biome manager only when a rule actually reaches a biome or
+    /// temperature condition, not for every stone block.
+    biome: Cell<Option<(&'a str, bool)>>,
+    /// The callback used by the normal chunk scan. `top_material` supplies a
+    /// fixed answer instead, so its context leaves this as `None`.
+    biome_at: Option<&'b dyn Fn(i32, i32, i32) -> (&'a str, bool)>,
     /// Per-call lazy condition storage. This is borrowed so concurrent
     /// generators never share cache state, while one scan can reuse X/Z
     /// values across all Y positions in its column.
-    cache: &'b mut EvalCache,
+    cache: &'c mut EvalCache,
+}
+
+impl<'a, 'b, 'c> Ctx<'a, 'b, 'c> {
+    fn biome(&self) -> (&'a str, bool) {
+        if let Some(value) = self.biome.get() {
+            return value;
+        }
+        let value = (self
+            .biome_at
+            .expect("surface rule requested a biome without a source"))(
+            self.block_x & 15,
+            self.block_y,
+            self.block_z & 15,
+        );
+        self.biome.set(Some(value));
+        value
+    }
 }
 
 /// The interpreter: instantiated noises + parsed rule tree, ready to build any
@@ -706,10 +719,9 @@ impl SurfaceSystem {
     ///   this method applies that clamp itself, so `pre` is never asked.
     /// * `heightmap` yields `WORLD_SURFACE_WG` at local `(x, z)`.
     /// * `biome_at` yields `(biome id, cold_enough_to_snow)` at local `(x, y, z)`
-    ///   — called for each stone position that reaches rule evaluation. A
-    ///   caller whose biome varies at quart (not block) resolution can cheaply
-    ///   answer from its precomputed cell context. The id is **borrowed** from
-    ///   the caller's own biome table (U21).
+    ///   when a rule actually needs the current biome. A caller whose biome
+    ///   varies at quart (not block) resolution can answer from a lazy cell
+    ///   context. The id is **borrowed** from the caller's own biome table.
     /// * `min_block_x`/`min_block_z` are the chunk's world-space origin.
     ///
     /// Returns a **sparse** [`SurfaceDiff`]: local `(x, y, z)` -> interned
@@ -739,6 +751,57 @@ impl SurfaceSystem {
         min_block_x: i32,
         min_block_z: i32,
     ) -> SurfaceDiff {
+        self.build_surface_reusing_with_column_biome(
+            SurfaceDiff::default(),
+            pre,
+            heightmap,
+            biome_at,
+            &|_, _, _| {},
+            min_block_x,
+            min_block_z,
+        )
+    }
+
+    /// [`Self::build_surface`] with caller-owned scratch storage. The map is
+    /// cleared before evaluation; only its allocation capacity is retained.
+    #[must_use]
+    pub fn build_surface_reusing<'b>(
+        &self,
+        out: SurfaceDiff,
+        pre: &dyn Fn(i32, i32, i32) -> PreState,
+        heightmap: &dyn Fn(i32, i32) -> i32,
+        biome_at: &dyn Fn(i32, i32, i32) -> (&'b str, bool),
+        min_block_x: i32,
+        min_block_z: i32,
+    ) -> SurfaceDiff {
+        self.build_surface_reusing_with_column_biome(
+            out,
+            pre,
+            heightmap,
+            biome_at,
+            &|_, _, _| {},
+            min_block_x,
+            min_block_z,
+        )
+    }
+
+    /// [`Self::build_surface_reusing`] with the separate per-column biome
+    /// lookup performed before that column's descending Y scan. This mirrors
+    /// the reference surface system's initial lookup, which is observable when
+    /// biome search keeps the previously selected tree leaf as its tie-break
+    /// candidate.
+    #[must_use]
+    pub(crate) fn build_surface_reusing_with_column_biome<'b>(
+        &self,
+        mut out: SurfaceDiff,
+        pre: &dyn Fn(i32, i32, i32) -> PreState,
+        heightmap: &dyn Fn(i32, i32) -> i32,
+        biome_at: &dyn Fn(i32, i32, i32) -> (&'b str, bool),
+        column_biome_at: &dyn Fn(i32, i32, i32),
+        min_block_x: i32,
+        min_block_z: i32,
+    ) -> SurfaceDiff {
+        out.clear();
         let y_lo = self.min_y;
         let y_hi = self.min_y + self.gen_depth; // exclusive
         let way_below_min_y = WAY_BELOW_MIN_Y;
@@ -762,7 +825,6 @@ impl SurfaceSystem {
         let corner_c3 =
             self.preliminary_surface_level((corner_cell_x + 1) << 4, (corner_cell_z + 1) << 4);
 
-        let mut out: SurfaceDiff = SurfaceDiff::default();
         let mut cache = EvalCache::new(self.xz_cache_slots, self.y_cache_slots);
 
         // Immutable classification source: vanilla only ever reads the original
@@ -800,12 +862,17 @@ impl SurfaceSystem {
                     water_height: NO_WATER,
                     stone_depth_above: 0,
                     stone_depth_below: 0,
-                    biome: "",
-                    cold_enough_to_snow: false,
+                    biome: Cell::new(None),
+                    biome_at: Some(biome_at),
                     cache: &mut cache,
                 };
 
                 let height = heightmap(x, z) + 1;
+                // This query is separate from rule evaluation. The reference
+                // scan performs it at the column's starting height before it
+                // descends through individual blocks; the result is discarded
+                // but its stateful biome-search side effect is observable.
+                column_biome_at(x, height, z);
                 let mut stone_above_depth = 0;
                 let mut water_height = NO_WATER;
                 let mut next_ceiling_stone_y = i32::MAX;
@@ -847,9 +914,7 @@ impl SurfaceSystem {
                         ctx.stone_depth_above = stone_above_depth;
                         ctx.stone_depth_below = stone_below_depth;
                         ctx.cache.begin_y();
-                        let (biome, cold_enough_to_snow) = biome_at(x, y, z);
-                        ctx.biome = biome;
-                        ctx.cold_enough_to_snow = cold_enough_to_snow;
+                        ctx.biome.take();
 
                         if old.state == self.default_block {
                             if let Some(state) = self.try_apply(&self.rule, heightmap, &mut ctx) {
@@ -863,23 +928,6 @@ impl SurfaceSystem {
         }
 
         out
-    }
-
-    /// Builds a surface through the caller-owned scratch seam. The established
-    /// scan remains the source of truth; the supplied map is accepted so
-    /// production and parity consumers can share one API while retaining the
-    /// allocation-reuse contract.
-    #[must_use]
-    pub fn build_surface_reusing<'b>(
-        &self,
-        _out: SurfaceDiff,
-        pre: &dyn Fn(i32, i32, i32) -> PreState,
-        heightmap: &dyn Fn(i32, i32) -> i32,
-        biome_at: &dyn Fn(i32, i32, i32) -> (&'b str, bool),
-        min_block_x: i32,
-        min_block_z: i32,
-    ) -> SurfaceDiff {
-        self.build_surface(pre, heightmap, biome_at, min_block_x, min_block_z)
     }
 
     /// `SurfaceSystem.topMaterial` — evaluate the surface rule for a single
@@ -926,8 +974,8 @@ impl SurfaceSystem {
             water_height: if under_fluid { block_y + 1 } else { NO_WATER },
             stone_depth_above: 1,
             stone_depth_below: 1,
-            biome,
-            cold_enough_to_snow,
+            biome: Cell::new(Some((biome, cold_enough_to_snow))),
+            biome_at: None,
             cache: &mut cache,
         };
         self.try_apply(&self.rule, heightmap, &mut ctx)
@@ -938,7 +986,7 @@ impl SurfaceSystem {
         &self,
         rule: &Rule,
         heightmap: &dyn Fn(i32, i32) -> i32,
-        ctx: &mut Ctx<'_, '_>,
+        ctx: &mut Ctx<'_, '_, '_>,
     ) -> Option<StateId> {
         match rule {
             Rule::Block(state) => Some(*state),
@@ -961,17 +1009,26 @@ impl SurfaceSystem {
         }
     }
 
-    fn test(&self, cond: &Cond, heightmap: &dyn Fn(i32, i32) -> i32, ctx: &mut Ctx<'_, '_>) -> bool {
+    fn test(
+        &self,
+        cond: &Cond,
+        heightmap: &dyn Fn(i32, i32) -> i32,
+        ctx: &mut Ctx<'_, '_, '_>,
+    ) -> bool {
         match cond {
             Cond::BiomeIs { list, cache } => {
                 if let Some(value) = ctx.cache.get_y(*cache) {
                     return value;
                 }
-                let value = list.iter().any(|b| b.as_str() == ctx.biome);
+                let value = list
+                    .iter()
+                    .any(|b| b.as_str() == ctx.biome().0);
                 ctx.cache.set_y(*cache, value);
                 value
             }
-            Cond::AbovePreliminarySurface => ctx.block_y >= ctx.min_surface_level,
+            Cond::AbovePreliminarySurface => {
+                ctx.block_y >= ctx.min_surface_level
+            }
             Cond::NoiseThreshold {
                 noise,
                 min,
@@ -1065,7 +1122,7 @@ impl SurfaceSystem {
                 if let Some(value) = ctx.cache.get_y(*cache) {
                     return value;
                 }
-                let value = ctx.cold_enough_to_snow;
+                let value = ctx.biome().1;
                 ctx.cache.set_y(*cache, value);
                 value
             }

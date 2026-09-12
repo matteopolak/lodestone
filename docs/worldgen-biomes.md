@@ -21,13 +21,13 @@ of vanilla's own climate-space R-tree (fan-out 6, built by vanilla's own splitti
 order is
 reproducible), not the brute-force reference next to it — the two structures agree on the minimum
 distance always, but resolve an exact **tie** differently, and vanilla's tree is the one a real
-server runs. A tie is the only place they can disagree, and it is real: vanilla's tie-break depends
-on the previous search on the same thread (a thread-local "last result" field on the tree), which this engine
-deliberately does not reproduce — a demand-ordered, potentially reordered generator cannot have
-history-dependent output. The fresh-instance answer (first leaf reached with no seed) is what's
-implemented; a per-source-chunk memo (thread-local, direct-mapped on the low bits of chunk
-coordinates, collision-free for any window the carver/ore drivers actually use) avoids repeating the
-search across a 17×17/3×3 neighbourhood walk.
+server runs. A tie is the only place they can disagree, and it is real: the tie-break depends
+on the previous search. Production retains the selected leaf in an explicit cursor owned by each
+column's pre-ore lifecycle, and the biome-cell stage preserves the reference section query order
+(`x`, local `y`, `z`) so a tied incumbent is reproducible within that lifecycle. The fresh-instance
+indexed answer remains an explicit negative control. A per-source-chunk memo (thread-local,
+direct-mapped on the low bits of chunk coordinates, collision-free for any window the carver/ore
+drivers actually use) avoids repeating the search across a 17×17/3×3 neighbourhood walk.
 
 **Sampling height matters and is per-consumer, not unified.** Carver and ore selection resolve a
 source chunk's biome at `y = 0`; vegetation resolves at the column's own generated surface height.
@@ -75,6 +75,13 @@ independent of the dimension's configured minimum Y, until it finds a lower non-
 The pre-surface classifier treats `air`, `cave_air` and `void_air` as the same empty class, while
 water and lava (including states with a level property) remain fluids.
 
+The surface lookup is stateful and follows the scan, not a prepass: for each column the initial
+height query runs first, then rule conditions request biome data lazily while `x`, `z`, and
+descending `y` advance. Climate targets are cached, but row ids are not reused because the indexed
+search's previous leaf is part of its tie-break state. Reusing a row cache or filling the footprint
+q-y-major changes boundary material; keep the cursor local to the pre-ore lifecycle and copy its
+final state into the later carve/ore stages.
+
 Performance-wise, the surface stage historically dominated worldgen's heap allocation (every probe
 built and cloned `String`s for `pre`/`biome_at`/matched-rule results); it is now interned end to end
 — `PreState` carries a `StateId` plus a cheap `PreClass` (air/fluid/stone) rather than deriving
@@ -84,6 +91,11 @@ order. Parsed condition sources also receive compact cache slots: X/Z predicates
 for one column, while biome, depth, water, vertical-gradient and 3-D noise predicates are refreshed
 for each scanned Y position. This preserves the context's lazy invalidation domains without mutable
 state in the shared rule tree.
+
+`SurfaceSystem::build_surface_reusing` accepts a cleared caller-owned diff so generation workers can
+retain the hash table's capacity between chunks. Nether uses one thread-local diff per worker and
+returns it only after fixed-order materialization; callers must never iterate the diff to determine
+palette order, and must not return the scratch map while any consumer still borrows it.
 
 ### Freeze-top-layer (snow and ice)
 
@@ -116,9 +128,10 @@ and need no repeated range fallback.
   answer is the wire cell, not the block biome accessor's answer. Keep the seed-derived fiddle and
   all three axes in `overworld::biome::zoomed_biome`; otherwise an underground feature can consume
   RNG on a candidate the reference rejects.
-- **Never seed the biome search.** A "pruning hint" reproducing vanilla's `lastResult` carry-over
-  makes output depend on search history, which is incompatible with a generator whose columns can be
-  requested in any order on any thread.
+- **Preserve the biome search lifecycle.** The indexed lookup retains its last leaf in the explicit
+  cursor owned by one column's pre-ore pipeline; do not replace production calls with the stateless
+  negative control or reorder the section's `x`, local `y`, `z` query walk. Worker identity is never
+  semantic state.
 - **A biome resolved per chunk position should go through the existing thread-local memo**, keyed by
   table identity as well as coordinates (two generators on one thread must never share biomes), not a
   second cache — see `docs/worldgen.md`'s memoisation guidance.

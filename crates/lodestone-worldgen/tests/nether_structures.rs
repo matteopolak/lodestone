@@ -505,24 +505,55 @@ fn a_fossils_dried_ghast_comes_from_a_positional_fork() {
         .unwrap_or_else(|| {
             panic!("no nether_fossil at {FOSSIL_GHAST_CHUNK:?} — the constant is stale")
         });
-    let blocks = start.pieces[0]
-        .blocks
-        .as_ref()
-        .expect("this fossil's coin flip came up heads and must carry a ghast");
-    assert_eq!(blocks.len(), 1, "exactly one dried ghast per fossil");
     assert!(
-        blocks[0].state.starts_with("minecraft:dried_ghast["),
-        "unexpected coded block: {}",
-        blocks[0].state
+        start.pieces[0].blocks.is_none(),
+        "the post-template ghast must not be decided by the start"
     );
-    // `y = fossilBB.minY()` — the box floor, not its centre and not the surface.
-    assert_eq!(blocks[0].pos[1], start.bounding_box.min[1]);
+    assert!(
+        matches!(
+            start.pieces[0].refine.as_ref(),
+            Some(lodestone_worldgen::structure::PieceRefinement::NetherFossilDriedGhast { .. })
+        ),
+        "the fossil must carry a placement-time ghast refinement"
+    );
 
     let names: HashSet<&str> = ["minecraft:dried_ghast"].into_iter().collect();
     let placed = count_blocks(&with, start.bounding_box, &names);
     let control = count_blocks(&without, start.bounding_box, &names);
     assert_eq!(control, 0, "the structureless control holds {control}");
     assert_eq!(placed, 1, "the world holds {placed} dried ghasts, expected 1");
+}
+
+/// The negative arm is a positional-head fossil whose chosen cell is already
+/// bone after the template; it must not emit a ghast over the template's own
+/// block. The positive placement is covered by the established ghast witness
+/// above, whose final-world count is independent of the start record.
+#[test]
+fn nether_fossil_dried_ghast_rejects_occupied_template_cells() {
+    let settings = settings();
+    let with = NetherGenerator::new(SEED, &settings, &NetherAssets::new());
+    let without = NetherGenerator::new(SEED, &settings, &NoStructures(NetherAssets::new()));
+    let start = with
+        .structure_starts_including_incomplete(4, -30)
+        .into_iter()
+        .find(|start| start.structure == "minecraft:nether_fossil")
+        .expect("occupied fossil witness start");
+    assert_eq!(start.pieces[0].bounding_box.min, [64, 96, -469]);
+    assert_eq!(start.pieces[0].bounding_box.max, [68, 100, -467]);
+
+    // The measured positional roll for this start chooses (66, 96, -469), a
+    // template bone cell. The post-template air predicate must reject it.
+    let occupied = with.column(4, -30);
+    assert_eq!(
+        occupied.block_state(2, 96, 11),
+        "minecraft:bone_block[axis=y]",
+        "the positional candidate is occupied by the fossil template"
+    );
+    assert_ne!(
+        without.column(4, -30).block_state(2, 96, 11),
+        "minecraft:bone_block[axis=y]",
+        "the structureless control must not manufacture the template cell"
+    );
 }
 
 fn bastion_start(

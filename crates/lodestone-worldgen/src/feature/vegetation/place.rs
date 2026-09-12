@@ -152,6 +152,20 @@ pub(super) fn place_block_column<R: RandomSource>(
     for (i, (_, provider)) in cfg.layers.iter().enumerate() {
         for _ in 0..layer_heights[i] {
             if let Some(state) = provider.get_state_id(grid, tags, random, place_pos) {
+                if std::env::var_os("LODESTONE_TRACE_CAVE_VINES").is_some()
+                    && grid.interner().name_of(state).starts_with("minecraft:cave_vines")
+                {
+                    eprintln!(
+                        "TRACE_CAVE_VINES write=({},{},{}) state={} origin=({},{},{})",
+                        place_pos.x,
+                        place_pos.y,
+                        place_pos.z,
+                        grid.interner().name_of(state),
+                        origin.x,
+                        origin.y,
+                        origin.z
+                    );
+                }
                 grid.set_id_if_in_bounds(place_pos.x, place_pos.y, place_pos.z, state);
             }
             place_pos = BlockPos {

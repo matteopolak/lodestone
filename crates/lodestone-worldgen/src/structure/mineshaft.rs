@@ -36,7 +36,7 @@
 //!     random.next_double()                     <- discarded; shifts the stream
 //!     Shaft::room(...)  +  add_children()      <- boxes only, depth <= 8
 //!     move_below_sea_level / mesa's surface pick
-//!     into_pieces(ctx, &mut random)             <- block-writing walk, in list order
+//!     into_pieces(ctx, world, &mut random)      <- block-writing walk, in list order
 //! ```
 //!
 //! # How to change it
@@ -68,21 +68,24 @@
 //!
 //! | reference behaviour | here | ledger row |
 //! |---|---|---|
-//! | terrain reads see only the pre-surface state exposed by [`StartContext`] | post-carve and post-feature material is unavailable during the walk | `mineshaft:pre_surface_world_reads` |
+//! | the eager tree's vertical shift reads the pre-surface heightmap | the start-time shift cannot see later surface or carve output | `mineshaft:pre_surface_world_reads` |
 //!
 //! # Dependencies
 //!
-//! [`StartContext`] for column heights and the four-way
-//! [`BlockKind`](crate::aquifer::BlockKind), and
+//! [`StartContext`] for column heights and start geometry, the receiving
+//! [`DenseBlockGrid`] for placement-time terrain reads, and the four-way
+//! [`BlockKind`](crate::aquifer::BlockKind) fallback, and
 //! [`super::template::BlockState`] for the mirror/rotate transform block placement
 //! applies.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use lodestone_worldgen_core::rng::RandomSource;
 
 use crate::aquifer::BlockKind;
+use crate::dense_grid::DenseBlockGrid;
 
 use super::coded::Facing;
 use super::template::{BlockState, Mirror, Rotation};
@@ -313,7 +316,7 @@ pub fn generate<R: RandomSource>(
     random: &mut R,
 ) -> (Vec<StructurePiece>, [i32; 3]) {
     let (shaft, dy) = grow_shaft(cx, cz, ctx, wood, random);
-    let pieces = into_pieces(shaft, ctx, blocking_biomes, random, None);
+    let pieces = into_pieces(shaft, ctx, blocking_biomes, random, None, None);
     (pieces, [cx * 16 + 8, MAGIC_START_Y + dy, cz * 16])
 }
 
@@ -323,12 +326,77 @@ pub fn generate<R: RandomSource>(
 /// predicate is evaluated by the chunk that actually receives a piece.  This
 /// preserves the per-chunk boundary of that predicate without changing start
 /// selection or the tree's RNG stream.
+#[cfg(test)]
 #[must_use]
 pub(crate) fn generate_for_chunk<TreeRandom: RandomSource, PlacementRandom: RandomSource>(
     cx: i32,
     cz: i32,
     decorating_chunk: (i32, i32),
     ctx: &dyn StartContext,
+    wood: Wood,
+    blocking_biomes: &std::collections::HashSet<String>,
+    tree_random: &mut TreeRandom,
+    placement_random: &mut PlacementRandom,
+) -> Vec<StructurePiece> {
+    generate_for_chunk_inner(
+        cx,
+        cz,
+        decorating_chunk,
+        ctx,
+        None,
+        wood,
+        blocking_biomes,
+        tree_random,
+        placement_random,
+    )
+}
+
+/// Replays one mineshaft against the receiving chunk's post-carve block field.
+///
+/// The tree still grows from [`StartContext`] so its persisted boxes and vertical
+/// shift remain start-stable. The second pass, however, is a world read: caves and
+/// fluids carved into the receiving chunk must participate in the liquid shell,
+/// support, and floor decisions. Keeping this seam here means the registry only
+/// needs to broker the already-materialized grid into the structure-specific replay.
+#[must_use]
+pub(crate) fn generate_for_chunk_with_world<
+    'a,
+    TreeRandom: RandomSource,
+    PlacementRandom: RandomSource,
+>(
+    cx: i32,
+    cz: i32,
+    decorating_chunk: (i32, i32),
+    ctx: &'a dyn StartContext,
+    world: &'a DenseBlockGrid,
+    wood: Wood,
+    blocking_biomes: &std::collections::HashSet<String>,
+    tree_random: &mut TreeRandom,
+    placement_random: &mut PlacementRandom,
+) -> Vec<StructurePiece> {
+    generate_for_chunk_inner(
+        cx,
+        cz,
+        decorating_chunk,
+        ctx,
+        Some(world),
+        wood,
+        blocking_biomes,
+        tree_random,
+        placement_random,
+    )
+}
+
+fn generate_for_chunk_inner<
+    'a,
+    TreeRandom: RandomSource,
+    PlacementRandom: RandomSource,
+>(
+    cx: i32,
+    cz: i32,
+    decorating_chunk: (i32, i32),
+    ctx: &'a dyn StartContext,
+    world: Option<&'a DenseBlockGrid>,
     wood: Wood,
     blocking_biomes: &std::collections::HashSet<String>,
     tree_random: &mut TreeRandom,
@@ -341,6 +409,7 @@ pub(crate) fn generate_for_chunk<TreeRandom: RandomSource, PlacementRandom: Rand
         blocking_biomes,
         placement_random,
         Some(DecoratingChunk::new(decorating_chunk.0, decorating_chunk.1)),
+        world,
     )
 }
 
@@ -826,8 +895,8 @@ fn room_children<R: RandomSource>(
     }
 }
 
-/// The world one `postProcess` pass reads and writes — pre-surface terrain with
-/// every block this start has already written laid over it.
+/// The world one placement replay reads and writes — the receiving chunk's
+/// post-carve terrain with every block this start has already written laid over it.
 ///
 /// # Why this is not simply a block list
 ///
@@ -866,7 +935,12 @@ impl DecoratingChunk {
 
 struct View<'a> {
     ctx: &'a dyn StartContext,
+    /// The receiving chunk's post-carve terrain. `None` is retained for the
+    /// start-time builder and unit fixtures that intentionally exercise the
+    /// pre-surface fallback.
+    world: Option<&'a DenseBlockGrid>,
     decorating_chunk: Option<DecoratingChunk>,
+    ocean_floor_heights: RefCell<HashMap<(i32, i32), i32>>,
     overlay: HashMap<[i32; 3], Arc<str>>,
     /// The current piece's own writes, in order. Drained at each piece boundary.
     emitted: Vec<CodedBlock>,
@@ -876,7 +950,23 @@ struct View<'a> {
 /// resolution any mineshaft predicate needs.
 enum Sample<'a> {
     Terrain(BlockKind),
+    World(&'a str),
     Written(&'a str),
+}
+
+fn base_name(state: &str) -> &str {
+    state.split_once('[').map_or(state, |(base, _)| base)
+}
+
+fn is_air_state(state: &str) -> bool {
+    matches!(
+        base_name(state),
+        "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
+    )
+}
+
+fn is_liquid_state(state: &str) -> bool {
+    matches!(base_name(state), "minecraft:water" | "minecraft:lava")
 }
 
 impl<'a> View<'a> {
@@ -891,7 +981,10 @@ impl<'a> View<'a> {
         }
         match self.overlay.get(&pos) {
             Some(state) => Sample::Written(state),
-            None => Sample::Terrain(self.ctx.block_kind_at(pos[0], pos[1], pos[2])),
+            None => self.world.map_or_else(
+                || Sample::Terrain(self.ctx.block_kind_at(pos[0], pos[1], pos[2])),
+                |world| Sample::World(world.get(pos[0], pos[1], pos[2])),
+            ),
         }
     }
 
@@ -901,9 +994,8 @@ impl<'a> View<'a> {
     fn is_air(&self, pos: [i32; 3]) -> bool {
         match self.sample(pos) {
             Sample::Terrain(kind) => kind == BlockKind::Air,
-            Sample::Written(state) => {
-                state.starts_with("minecraft:air") || state.starts_with("minecraft:cave_air")
-            }
+            Sample::World(state) => is_air_state(state),
+            Sample::Written(state) => is_air_state(state),
         }
     }
 
@@ -913,12 +1005,17 @@ impl<'a> View<'a> {
     fn is_liquid(&self, pos: [i32; 3]) -> bool {
         match self.sample(pos) {
             Sample::Terrain(kind) => matches!(kind, BlockKind::Water | BlockKind::Lava),
+            Sample::World(state) => is_liquid_state(state),
             Sample::Written(_) => false,
         }
     }
 
     fn is_lava(&self, pos: [i32; 3]) -> bool {
-        matches!(self.sample(pos), Sample::Terrain(BlockKind::Lava))
+        match self.sample(pos) {
+            Sample::Terrain(kind) => kind == BlockKind::Lava,
+            Sample::World(state) => base_name(state) == "minecraft:lava",
+            Sample::Written(_) => false,
+        }
     }
 
     /// Whether a structure may freely replace the block — air or fluid. (Glow
@@ -939,8 +1036,9 @@ impl<'a> View<'a> {
     fn is_sturdy_up(&self, pos: [i32; 3]) -> bool {
         match self.sample(pos) {
             Sample::Terrain(kind) => kind == BlockKind::Stone,
+            Sample::World(state) => !is_air_state(state) && !is_liquid_state(state),
             Sample::Written(state) => {
-                let name = state.split('[').next().unwrap_or(state);
+                let name = base_name(state);
                 matches!(
                     name,
                     "minecraft:oak_planks"
@@ -959,8 +1057,29 @@ impl<'a> View<'a> {
     fn is_block(&self, pos: [i32; 3], name: &str) -> bool {
         match self.sample(pos) {
             Sample::Terrain(_) => false,
-            Sample::Written(state) => state.split('[').next().unwrap_or(state) == name,
+            Sample::World(state) | Sample::Written(state) => base_name(state) == name,
         }
+    }
+
+    /// The receiving chunk's free ocean-floor height, with the start-time
+    /// heightmap as the fallback for the eager tree builder.
+    fn ocean_floor_free_height(&self, x: i32, z: i32) -> i32 {
+        let Some(world) = self.world else {
+            return free_height(self.ctx, x, z, HeightmapKind::OceanFloorWg);
+        };
+        if let Some(height) = self.ocean_floor_heights.borrow().get(&(x, z)) {
+            return *height;
+        }
+        let (_, min_y, _, _, height, _) = world.bounds();
+        let free = (min_y..min_y + height)
+            .rev()
+            .find_map(|y| {
+                (!is_air_state(world.get(x, y, z)) && !is_liquid_state(world.get(x, y, z)))
+                    .then_some(y + 1)
+            })
+            .unwrap_or(min_y);
+        self.ocean_floor_heights.borrow_mut().insert((x, z), free);
+        free
     }
 
     /// A mineshaft piece's replaceability override that protects a mineshaft's own
@@ -1026,7 +1145,7 @@ impl Place<'_, '_> {
         if !self.view.is_in_decorating_chunk(pos) {
             return false;
         }
-        pos[1] < free_height(self.view.ctx, pos[0], pos[2], HeightmapKind::OceanFloorWg)
+        pos[1] < self.view.ocean_floor_free_height(pos[0], pos[2])
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1367,17 +1486,20 @@ fn place_double_support(p: &mut Place<'_, '_>, x: i32, y: i32, z: i32) {
 
 /// Second pass: every piece's `postProcess`, in list order, against one shared
 /// [`View`].
-fn into_pieces<R: RandomSource>(
+fn into_pieces<'a, R: RandomSource>(
     shaft: Shaft,
-    ctx: &dyn StartContext,
+    ctx: &'a dyn StartContext,
     blocking_biomes: &std::collections::HashSet<String>,
     random: &mut R,
     decorating_chunk: Option<DecoratingChunk>,
+    world: Option<&'a DenseBlockGrid>,
 ) -> Vec<StructurePiece> {
     let wood = shaft.wood;
     let mut view = View {
         ctx,
+        world,
         decorating_chunk,
+        ocean_floor_heights: RefCell::new(HashMap::new()),
         overlay: HashMap::new(),
         emitted: Vec::new(),
     };
@@ -1765,7 +1887,9 @@ mod tests {
         let blocked = |decorating_chunk| {
             let mut view = View {
                 ctx: &ctx,
+                world: None,
                 decorating_chunk,
+                ocean_floor_heights: RefCell::new(HashMap::new()),
                 overlay: HashMap::new(),
                 emitted: Vec::new(),
             };
@@ -1783,6 +1907,52 @@ mod tests {
             !blocked(Some(DecoratingChunk::new(-249, 250))),
             "the (-249, 250) decorating chunk excludes the liquid from its (-249, 249) neighbour"
         );
+    }
+
+    /// The packet fixture is an external state control, not a serialization of
+    /// this module's own `View`. A receiving grid must expose its cave-air cells
+    /// to the placement walk, while the pre-surface fallback must still see the
+    /// same coordinates as solid terrain.
+    #[test]
+    fn external_packet_cave_air_reaches_the_placement_world_read() {
+        let fixture = include_str!("../../tests/support/mineshaft_world_reads_external.txt");
+        let mut world = DenseBlockGrid::new(-3984, -64, 4000, 16, 384, 16, "minecraft:stone");
+        let mut cells = Vec::new();
+        for line in fixture.lines().filter(|line| !line.starts_with('#')) {
+            let mut fields = line.split_whitespace();
+            let x = fields.next().expect("x").parse::<i32>().expect("integer x");
+            let y = fields.next().expect("y").parse::<i32>().expect("integer y");
+            let z = fields.next().expect("z").parse::<i32>().expect("integer z");
+            let state = fields.next().expect("state");
+            assert!(fields.next().is_none(), "one state per fixture row: {line}");
+            world.set(x, y, z, state);
+            cells.push(([x, y, z], state));
+        }
+        let ctx = Solid { surface: 70 };
+        let chunk = Some(DecoratingChunk::new(-249, 250));
+        let positive = View {
+            ctx: &ctx,
+            world: Some(&world),
+            decorating_chunk: chunk,
+            ocean_floor_heights: RefCell::new(HashMap::new()),
+            overlay: HashMap::new(),
+            emitted: Vec::new(),
+        };
+        let control = View {
+            ctx: &ctx,
+            world: None,
+            decorating_chunk: chunk,
+            ocean_floor_heights: RefCell::new(HashMap::new()),
+            overlay: HashMap::new(),
+            emitted: Vec::new(),
+        };
+        for (pos, state) in cells {
+            assert_eq!(state, "minecraft:cave_air");
+            assert!(positive.is_air(pos), "external state was not read at {pos:?}");
+            assert!(positive.is_replaceable(pos), "cave air must be replaceable at {pos:?}");
+            assert!(!control.is_air(pos), "pre-surface control must remain solid at {pos:?}");
+            assert!(!control.is_replaceable(pos), "pre-surface control must reject {pos:?}");
+        }
     }
 
     /// Tree reconstruction has to reproduce the start stream, but its block
@@ -1820,6 +1990,7 @@ mod tests {
             &HashSet::new(),
             &mut old_stream,
             Some(DecoratingChunk::new(decorating_chunk.0, decorating_chunk.1)),
+            None,
         );
         let old_blocks: Vec<_> = old
             .iter()
@@ -1855,7 +2026,9 @@ mod tests {
         };
         let mut view = View {
             ctx: &ctx,
+            world: None,
             decorating_chunk: Some(DecoratingChunk::new(0, 0)),
+            ocean_floor_heights: RefCell::new(HashMap::new()),
             overlay: HashMap::new(),
             emitted: Vec::new(),
         };
@@ -2082,7 +2255,9 @@ mod tests {
         let ctx = Solid { surface: 70 };
         let mut view = View {
             ctx: &ctx,
+            world: None,
             decorating_chunk: None,
+            ocean_floor_heights: RefCell::new(HashMap::new()),
             overlay: HashMap::new(),
             emitted: Vec::new(),
         };

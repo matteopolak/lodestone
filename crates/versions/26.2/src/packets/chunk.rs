@@ -205,8 +205,7 @@ fn decode_column(
     _ctx: Ctx,
     shape: &ChunkShape,
 ) -> lodestone_core::Result<ChunkColumn> {
-    let blob_len =
-        usize::try_from(r.var_i32()?).map_err(|_| lodestone_core::Error::UnexpectedEof)?;
+    let blob_len = usize::try_from(r.var_i32()?).map_err(|_| lodestone_core::Error::UnexpectedEof)?;
     let mut blob = r.take_reader(blob_len)?;
     let column = read_sections(&mut blob, shape)?;
     blob.ensure_empty()?;

@@ -61,6 +61,8 @@
 
 use std::collections::HashMap;
 
+use lodestone_data::entity_type::EntityTypeRef;
+
 use crate::rng::{LegacyRandomSource, RandomSource, WorldgenRandom};
 use crate::spawners::{BiomeSpawners, MobCategory};
 
@@ -68,8 +70,8 @@ use crate::spawners::{BiomeSpawners, MobCategory};
 /// unconditioned on light or ground legality. See the module doc.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GenerationSpawn {
-    /// A vanilla entity id, e.g. `"minecraft:sheep"`.
-    pub entity_type: String,
+    /// A validated built-in entity registry reference.
+    pub entity_type: EntityTypeRef,
     pub x: i32,
     pub y: i32,
     pub z: i32,
@@ -96,26 +98,21 @@ pub struct GenerationSpawn {
 /// vanilla-exact" for why this is real per-chunk determinism and not vanilla's
 /// own draw order.
 #[must_use]
-pub fn spawn_candidates_for_chunk<B, S, T>(
-    biome_at: B,
-    surface_y: S,
+pub fn spawn_candidates_for_chunk(
+    biome_at: impl Fn(usize, usize) -> String,
+    surface_y: impl Fn(usize, usize) -> i32,
     spawners_by_biome: &HashMap<String, BiomeSpawners>,
     seed: i64,
     cx: i32,
     cz: i32,
-) -> Vec<GenerationSpawn>
-where
-    B: Fn(usize, usize) -> T,
-    S: Fn(usize, usize) -> i32,
-    T: AsRef<str>,
-{
+) -> Vec<GenerationSpawn> {
     let mut random = WorldgenRandom::new(LegacyRandomSource::new(seed));
     random.set_decoration_seed(seed, cx * 16, cz * 16);
 
     let lx = random.next_int_bounded(16) as usize;
     let lz = random.next_int_bounded(16) as usize;
     let biome = biome_at(lx, lz);
-    let Some(spawners) = spawners_by_biome.get(biome.as_ref()) else {
+    let Some(spawners) = spawners_by_biome.get(&biome) else {
         return Vec::new();
     };
     let entries = spawners.for_category(MobCategory::Creature);
@@ -163,7 +160,7 @@ where
         let wlx = (wx - cx * 16) as usize;
         let wlz = (wz - cz * 16) as usize;
         out.push(GenerationSpawn {
-            entity_type: chosen.entity_type.clone(),
+            entity_type: chosen.entity_type,
             x: wx,
             y: surface_y(wlx, wlz),
             z: wz,
@@ -241,7 +238,9 @@ mod tests {
         );
         assert!(!out.is_empty(), "beach's non-empty creature list must place something");
         assert!(
-            out.iter().all(|s| s.entity_type == "minecraft:turtle"),
+            out.iter().all(|s| {
+                s.entity_type == lodestone_data::entity_type::EntityType::Turtle.into()
+            }),
             "turtle is the only creature entry; every placement must be one"
         );
         // beach.json: minCount 2, maxCount 5 — the range this fixture's own
@@ -301,7 +300,9 @@ mod tests {
             !out.is_empty(),
             "the detector must fire once ocean's creature list is non-empty"
         );
-        assert!(out.iter().all(|s| s.entity_type == "minecraft:cod"));
+        assert!(out.iter().all(|s| {
+            s.entity_type == lodestone_data::entity_type::EntityType::Cod.into()
+        }));
     }
 
     /// A biome with no entry in the table at all (never generated a document,

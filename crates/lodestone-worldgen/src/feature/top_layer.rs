@@ -102,13 +102,36 @@
 //!   "Known scope".
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+use lodestone_data::block_states::{BlockStateValue, StateId as CanonicalStateId};
 use lodestone_worldgen_core::hash::{FastMap, FastSet};
 use serde_json::Value;
 
 use crate::dense_grid::DenseBlockGrid;
+use crate::interner::{StateId, StateInterner};
 use crate::noise::ClimateNoise;
 use crate::stage_schedule::DecorationStep;
+
+#[cfg(test)]
+thread_local! {
+    static PREDICATE_STRING_FALLBACKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn bump_predicate_string_fallback() {
+    PREDICATE_STRING_FALLBACKS.with(|count| count.set(count.get().wrapping_add(1)));
+}
+
+#[cfg(test)]
+fn predicate_string_fallbacks() -> u64 {
+    PREDICATE_STRING_FALLBACKS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn reset_predicate_string_fallbacks() {
+    PREDICATE_STRING_FALLBACKS.with(|count| count.set(0));
+}
 
 /// Vanilla's own decoration-step ordinal — the eleventh
 /// and last decoration step. One past `VEGETAL_DECORATION`
@@ -232,7 +255,68 @@ pub struct SnowSupport {
 /// plus a short override list is two orders of magnitude smaller than a
 /// per-state map — while staying **exact**, because the overrides are complete
 /// rather than a curated subset.
-#[derive(Clone, Debug, Default)]
+/// The local-id cache for one [`StatePredicate`]. A fixed `u16` domain avoids
+/// touching the interner lock or reconstructing a state string in a repeated
+/// generation predicate. `resolved` is a watermark because generation can
+/// mint a new state after the cache was bound.
+#[derive(Debug)]
+struct PredicateIds {
+    instance: AtomicU64,
+    resolved: AtomicUsize,
+    builtin: Box<[AtomicU64]>,
+    answers: Box<[AtomicU64]>,
+}
+
+const LOCAL_ID_SPACE: usize = u16::MAX as usize + 1;
+const LOCAL_ID_WORDS: usize = LOCAL_ID_SPACE / 64;
+
+impl Default for PredicateIds {
+    fn default() -> Self {
+        Self {
+            // The interner starts at zero, so MAX is an unambiguous unbound
+            // marker.
+            instance: AtomicU64::new(u64::MAX),
+            resolved: AtomicUsize::new(0),
+            builtin: (0..LOCAL_ID_WORDS).map(|_| AtomicU64::new(0)).collect(),
+            answers: (0..LOCAL_ID_WORDS).map(|_| AtomicU64::new(0)).collect(),
+        }
+    }
+}
+
+impl PredicateIds {
+    fn clear(&self) {
+        for word in self.builtin.iter().chain(self.answers.iter()) {
+            word.store(0, Ordering::Relaxed);
+        }
+        self.resolved.store(0, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn set(&self, index: usize, answer: bool) {
+        let word = index / 64;
+        let bit = 1u64 << (index & 63);
+        self.builtin[word].fetch_or(bit, Ordering::Relaxed);
+        if answer {
+            self.answers[word].fetch_or(bit, Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    fn is_builtin(&self, index: usize) -> bool {
+        (self.builtin[index / 64].load(Ordering::Relaxed) & (1u64 << (index & 63))) != 0
+    }
+
+    #[inline]
+    fn answer(&self, index: usize) -> bool {
+        (self.answers[index / 64].load(Ordering::Relaxed) & (1u64 << (index & 63))) != 0
+    }
+}
+
+/// A state predicate retains its text maps as the extension fallback. The
+/// cache is not cloned: a clone may be used with another generator interner,
+/// and an unbound cache is always correct while a copied one could answer with
+/// the other interner's local IDs.
+#[derive(Debug)]
 pub struct StatePredicate {
     /// Answer for each block's default state, keyed by base name
     /// (`minecraft:water`). Absent means `false`.
@@ -248,6 +332,37 @@ pub struct StatePredicate {
     /// Every state whose answer differs from its block's default, keyed by full
     /// canonical state string (`minecraft:water[level=0]`).
     by_state: FastMap<String, bool>,
+    /// Built-in defaults parsed once into the generated state's typed domain.
+    /// Each entry is a block's canonical default state; all of that block's
+    /// states inherit the answer unless an exact typed override exists.
+    builtin_defaults: FastSet<CanonicalStateId>,
+    /// Exact built-in overrides parsed once from the resolver document.
+    builtin_states: FastMap<CanonicalStateId, bool>,
+    ids: PredicateIds,
+}
+
+impl Clone for StatePredicate {
+    fn clone(&self) -> Self {
+        Self {
+            by_block_default: self.by_block_default.clone(),
+            by_state: self.by_state.clone(),
+            builtin_defaults: self.builtin_defaults.clone(),
+            builtin_states: self.builtin_states.clone(),
+            ids: PredicateIds::default(),
+        }
+    }
+}
+
+impl Default for StatePredicate {
+    fn default() -> Self {
+        Self {
+            by_block_default: FastSet::default(),
+            by_state: FastMap::default(),
+            builtin_defaults: FastSet::default(),
+            builtin_states: FastMap::default(),
+            ids: PredicateIds::default(),
+        }
+    }
 }
 
 impl StatePredicate {
@@ -263,9 +378,23 @@ impl StatePredicate {
     /// a crate boundary for no gain.
     #[must_use]
     pub fn new(by_block_default: HashSet<String>, by_state: HashMap<String, bool>) -> Self {
+        let builtin_defaults = by_block_default
+            .iter()
+            .filter_map(|state| exact_builtin_state(state))
+            .map(|state| state.block().default_state())
+            .collect();
+        let builtin_states = by_state
+            .iter()
+            .filter_map(|(state, &answer)| {
+                exact_builtin_state(state).map(|state| (state, answer))
+            })
+            .collect();
         Self {
             by_block_default: by_block_default.into_iter().collect(),
             by_state: by_state.into_iter().collect(),
+            builtin_defaults,
+            builtin_states,
+            ids: PredicateIds::default(),
         }
     }
 
@@ -279,6 +408,73 @@ impl StatePredicate {
             return answer;
         }
         self.by_block_default.contains(base_id(state))
+    }
+
+    /// The built-in answer in the typed state domain. The text maps remain
+    /// authoritative for extension values; this is only called after a
+    /// canonical table ID has already proved the value is built-in.
+    #[inline]
+    fn builtin_answer(&self, state: CanonicalStateId) -> bool {
+        self.builtin_states
+            .get(&state)
+            .copied()
+            .unwrap_or_else(|| self.builtin_defaults.contains(&state.block().default_state()))
+    }
+
+    /// Binds this predicate to the states currently interned by `interner`.
+    /// Built-in states are answered by compact local-ID bitsets; extension
+    /// states deliberately remain on [`Self::test`] so plugin/data-pack
+    /// semantics cannot be confused with a built-in default.
+    ///
+    /// The call is cheap when no new IDs were interned and is intended once per
+    /// generation pass, never per cell. Late state synthesis is safe: IDs past
+    /// the watermark use the string fallback until the next bind.
+    pub fn bind(&self, interner: &StateInterner) {
+        let instance = interner.instance_id();
+        if self.ids.instance.load(Ordering::Acquire) != instance {
+            self.ids.clear();
+            self.ids.instance.store(instance, Ordering::Release);
+        }
+        let len = interner.len().min(LOCAL_ID_SPACE);
+        let done = self.ids.resolved.load(Ordering::Acquire);
+        if len <= done {
+            return;
+        }
+        for raw in done..len {
+            let id = StateId::from_raw(u16::try_from(raw).expect("local state id fits u16"));
+            // Extension values never get a bit, even if they have a matching
+            // base name. That keeps the exact string fallback as the extension
+            // compatibility boundary.
+            if let Some(canonical) = interner.canonical_id(id) {
+                self.ids.set(raw, self.builtin_answer(canonical));
+            }
+        }
+        self.ids.resolved.fetch_max(len, Ordering::Release);
+    }
+
+    /// Tests an interned state without resolving its spelling. Built-in IDs
+    /// are one bitset load; extension IDs and states interned after the last
+    /// bind use the pre-existing string semantics.
+    #[inline]
+    #[must_use]
+    pub fn test_id(&self, interner: &StateInterner, id: StateId) -> bool {
+        let index = id.index();
+        if self.ids.instance.load(Ordering::Acquire) == interner.instance_id()
+            && index < self.ids.resolved.load(Ordering::Acquire)
+            && self.ids.is_builtin(index)
+        {
+            return self.ids.answer(index);
+        }
+        #[cfg(test)]
+        bump_predicate_string_fallback();
+        self.test(interner.name_of(id))
+    }
+
+    #[cfg(test)]
+    fn cache_answers_builtin(&self, interner: &StateInterner, id: StateId) -> bool {
+        self.ids.instance.load(Ordering::Acquire) == interner.instance_id()
+            && id.index() < self.ids.resolved.load(Ordering::Acquire)
+            && self.ids.is_builtin(id.index())
     }
 
     /// `true` when nothing was supplied — the "no data supplied" convention
@@ -326,7 +522,25 @@ impl StatePredicate {
     }
 }
 
+/// Parses only an exact generated state. The forgiving `StateId::from_state_str`
+/// API intentionally accepts shorthand/default forms, but a predicate override
+/// with an unknown property must remain an extension fallback rather than being
+/// silently applied to the block's default state.
+fn exact_builtin_state(state: &str) -> Option<CanonicalStateId> {
+    BlockStateValue::parse(state).state_id()
+}
+
 impl SnowSupport {
+    /// Binds all per-state predicates to one generator's interner. This is a
+    /// construction/pass boundary; the repeated queries use local IDs only.
+    pub fn bind(&self, interner: &StateInterner) {
+        self.blocks_motion.bind(interner);
+        self.has_fluid_state.bind(interner);
+        self.water_source.bind(interner);
+        self.face_full_up.bind(interner);
+        self.snowy_property.bind(interner);
+    }
+
     /// Parses the whole `block_freeze_facts` document plus the two already-
     /// resolved tag sets.
     #[must_use]
@@ -363,6 +577,13 @@ impl SnowSupport {
     #[must_use]
     pub fn motion_blocking(&self, state: &str) -> bool {
         self.blocks_motion.test(state) || self.has_fluid_state.test(state)
+    }
+
+    /// ID form of [`Self::motion_blocking`] for the generation scan.
+    #[inline]
+    #[must_use]
+    pub fn motion_blocking_id(&self, interner: &StateInterner, state: StateId) -> bool {
+        self.blocks_motion.test_id(interner, state) || self.has_fluid_state.test_id(interner, state)
     }
 
     /// Vanilla's own snow-layer survival check, where
@@ -597,7 +818,7 @@ pub fn motion_blocking_first_free(
 ) -> i32 {
     let mut y = min_y + height - 1;
     while y >= min_y {
-        if support.motion_blocking(grid.get(x, y, z)) {
+        if support.motion_blocking_id(grid.interner(), grid.get_id(x, y, z)) {
             return y + 1;
         }
         y -= 1;
@@ -660,6 +881,9 @@ pub fn apply_freeze_top_layer<'b>(
     if support.is_empty() {
         return counts;
     }
+    // Resolve the generator's local IDs once before entering the 256-column
+    // scan. New states synthesized later still use the exact string fallback.
+    support.bind(grid.interner());
     let base_x = chunk_x * 16;
     let base_z = chunk_z * 16;
     let max_y = min_y + height - 1;
@@ -681,7 +905,10 @@ pub fn apply_freeze_top_layer<'b>(
             if inside_below && !warm_enough_to_rain(climate, noise, x, below_y, z, sea_level) {
                 // The block-light gate (`< 10`) is unconditionally true during
                 // worldgen — see this module's "Approximations, named".
-                if support.water_source.test(grid.get(x, below_y, z)) {
+                if support
+                    .water_source
+                    .test_id(grid.interner(), grid.get_id(x, below_y, z))
+                {
                     grid.set(x, below_y, z, ICE);
                     counts.ice += 1;
                 }
@@ -714,7 +941,11 @@ pub fn apply_freeze_top_layer<'b>(
             }
             grid.set(x, top_y, z, SNOW_LAYER);
             counts.snow += 1;
-            if inside_below && support.snowy_property.test(&below_state) {
+            if inside_below
+                && support
+                    .snowy_property
+                    .test_id(grid.interner(), grid.get_id(x, below_y, z))
+            {
                 grid.set(x, below_y, z, &with_snowy_true(&below_state));
                 counts.snowy_flips += 1;
             }
@@ -818,6 +1049,58 @@ mod tests {
         );
         assert!(!p.test("minecraft:water[level=1]"), "an override wins");
         assert!(!p.test("minecraft:stone"), "an unknown block is false");
+    }
+
+    #[test]
+    fn state_predicate_binds_builtins_but_preserves_extension_fallback() {
+        let mut defaults = HashSet::new();
+        defaults.insert("minecraft:water".to_owned());
+        defaults.insert("plugin:test_block".to_owned());
+        let predicate = StatePredicate::new(defaults, HashMap::new());
+        let interner = StateInterner::new();
+        let water = interner.id_of("minecraft:water");
+        let extension = interner.id_of("plugin:test_block");
+
+        predicate.bind(&interner);
+
+        assert!(predicate.cache_answers_builtin(&interner, water));
+        assert!(predicate.test_id(&interner, water));
+        assert!(!predicate.cache_answers_builtin(&interner, extension));
+        assert!(
+            predicate.test_id(&interner, extension),
+            "extension values must retain the string fallback semantics"
+        );
+
+        // Test-only thread-local instrumentation is the positive control for
+        // the hot-path claim: built-ins must not use the string fallback, while
+        // extensions must. It is thread-local so a full parallel test run does
+        // not race over the repository's process-wide structural counters.
+        reset_predicate_string_fallbacks();
+        predicate.bind(&interner);
+        assert!(predicate.test_id(&interner, water));
+        assert_eq!(predicate_string_fallbacks(), 0);
+        assert!(predicate.test_id(&interner, extension));
+        assert_eq!(predicate_string_fallbacks(), 1);
+    }
+
+    #[test]
+    fn state_predicate_late_builtin_state_is_correct_before_and_after_rebind() {
+        let mut defaults = HashSet::new();
+        defaults.insert("minecraft:stone".to_owned());
+        let predicate = StatePredicate::new(defaults, HashMap::new());
+        let interner = StateInterner::new();
+        let stone = interner.id_of("minecraft:stone");
+        predicate.bind(&interner);
+
+        let dirt = interner.id_of("minecraft:dirt");
+        assert!(!predicate.cache_answers_builtin(&interner, dirt));
+        assert!(!predicate.test_id(&interner, dirt));
+
+        predicate.bind(&interner);
+        assert!(predicate.cache_answers_builtin(&interner, dirt));
+        assert!(predicate.cache_answers_builtin(&interner, stone));
+        assert!(predicate.test_id(&interner, stone));
+        assert!(!predicate.test_id(&interner, dirt));
     }
 
     /// The height adjustment must be inert at or below `seaLevel + 17` and active

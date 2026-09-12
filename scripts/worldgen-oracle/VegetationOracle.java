@@ -373,7 +373,7 @@ public final class VegetationOracle {
 
         level = makeLevel();
 
-        int STEP = GenerationStep.Decoration.VEGETAL_DECORATION.ordinal();
+        int STEP = GenerationStep.Decoration.UNDERGROUND_DECORATION.ordinal();
 
         // ---- Pass 1: SINGLE (centre-only) vegetal decoration ----
         resetToPostOreBaseline();

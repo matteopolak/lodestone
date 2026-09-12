@@ -23,11 +23,14 @@
 //!
 //! ## How it works
 //!
-//! [`super::OverworldGenerator::biome_cells_stage`] walks `qy` outer, then `qz`,
-//! then `qx`, and takes one `ClimateSampler::target` + `BiomeTable::nearest` per
-//! cell. Ids are interned into a small per-column palette (`Vec<String>` plus
-//! `Vec<u16>`) because a column's 1,536 cells only ever hold a handful of
-//! distinct biomes — that keeps the struct at ~3 KB rather than 1,536 `String`s.
+//! [`super::OverworldGenerator::biome_cells_stage`] queries each section in
+//! `qx` outer, then local `qy`, then `qz` order, matching the reference section
+//! fill lifecycle. The resulting cells remain stored as `(qy, qz, qx)` and take
+//! one `ClimateSampler::target` + `BiomeTable::nearest` per cell. Typed biome
+//! identities are interned into a small per-column palette (`Vec<BiomeRef>` plus
+//! `Vec<u16>`), so the 1,536-cell hot path never constructs or compares biome
+//! strings. Names are materialised only by the explicit display/serialization
+//! compatibility accessor.
 //!
 //! **The surface array is derived from this grid, not sampled separately.** A
 //! quart's surface sample uses `y = (height >> 2) << 2`, which is already
@@ -57,11 +60,61 @@
 //! that a column's climate targets vary smoothly in Y — not a coarser grid, which
 //! would put the cave biomes back out of reach.
 
-/// One biome id per quart-position cell of a column. See the module doc.
+use lodestone_data::biomes::{BiomeRef, BuiltinBiome};
+
+/// The typed, private-storage palette used by [`BiomeCells`].
+///
+/// Built-in entries are one-byte generated enum values inside a four-byte
+/// [`BiomeRef`]. Names are not retained beside the palette: a generated biome
+/// can resolve its static name at the packet/display boundary, while an
+/// extension id must be resolved by the registry that owns that extension.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BiomePalette {
+    entries: Vec<BiomeRef>,
+}
+
+impl BiomePalette {
+    fn new() -> Self {
+        Self { entries: Vec::with_capacity(4) }
+    }
+
+    fn push_ref(&mut self, biome: BiomeRef) -> u16 {
+        if let Some(index) = self.entries.iter().position(|entry| *entry == biome) {
+            return index as u16;
+        }
+        let index = self.entries.len();
+        assert!(index <= u16::MAX as usize, "biome palette exceeds u16 index space");
+        self.entries.push(biome);
+        index as u16
+    }
+
+    /// Typed palette entries in first-use order.
+    #[must_use]
+    pub fn entries(&self) -> &[BiomeRef] {
+        &self.entries
+    }
+
+    /// Built-in names in first-use order for a packet or display boundary.
+    ///
+    /// Generated worldgen tables are strict built-ins, so this conversion is
+    /// allocation-free. A caller that admits extension ids must resolve those
+    /// ids through its own registry instead of calling this convenience view.
+    pub fn builtin_names(&self) -> impl ExactSizeIterator<Item = &'static str> + '_ {
+        self.entries.iter().map(|entry| {
+            entry
+                .builtin_or_none()
+                .expect("extension biome requires its owning registry at the name boundary")
+                .name()
+        })
+    }
+
+}
+
+/// One biome identity per quart-position cell of a column. See the module doc.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BiomeCells {
-    /// Distinct biome ids, in first-use order. Index 0 is always present.
-    palette: Vec<String>,
+    /// Distinct typed identities, in first-use order. Index 0 is always present.
+    palette: BiomePalette,
     /// `palette` indices, laid out `(qy * 4 + qz) * 4 + qx` — `qy` counting up
     /// from the column's own `min_y >> 2`. Same major-to-minor order as
     /// [`crate::overworld::GeneratedColumn`]'s block field, deliberately, so a
@@ -87,11 +140,26 @@ impl BiomeCells {
         self.min_y
     }
 
-    /// The distinct biome ids in this column, first-use order. A section encoder
-    /// wants this to build a palette without re-deduplicating.
+    /// The typed distinct biome identities in first-use order. A section
+    /// encoder should use this for identity work and resolve names only at its
+    /// own packet boundary.
     #[must_use]
-    pub fn palette(&self) -> &[String] {
+    pub fn palette_entries(&self) -> &[BiomeRef] {
+        self.palette.entries()
+    }
+
+    /// The typed palette, for a packet/region encoder that has a registry
+    /// mapping available. This deliberately does not expose any parallel
+    /// string storage.
+    #[must_use]
+    pub fn palette(&self) -> &BiomePalette {
         &self.palette
+    }
+
+    /// Explicit spelling for callers migrating from the old string slice.
+    #[must_use]
+    pub fn palette_view(&self) -> &BiomePalette {
+        self.palette()
     }
 
     /// Palette index at quart `(qx, qy, qz)`, clamped into range. `qy` counts from
@@ -104,20 +172,51 @@ impl BiomeCells {
         self.cells[(qy * 4 + qz) * 4 + qx]
     }
 
-    /// Biome id at quart `(qx, qy, qz)`.
+    /// Built-in biome name at quart `(qx, qy, qz)` for display/configuration
+    /// boundaries. Typed consumers should use [`Self::at_quart_ref`].
     #[must_use]
-    pub fn at_quart(&self, qx: usize, qy: usize, qz: usize) -> &str {
-        &self.palette[self.index_at_quart(qx, qy, qz) as usize]
+    pub fn at_quart(&self, qx: usize, qy: usize, qz: usize) -> &'static str {
+        self.at_quart_ref(qx, qy, qz)
+            .builtin_or_none()
+            .expect("extension biome requires its owning registry at the name boundary")
+            .name()
+    }
+
+    /// Typed biome identity at quart `(qx, qy, qz)`.
+    #[must_use]
+    pub fn at_quart_ref(&self, qx: usize, qy: usize, qz: usize) -> BiomeRef {
+        self.palette.entries()[self.index_at_quart(qx, qy, qz) as usize]
     }
 
     /// A single-biome column — the fallback for a generator with no climate
     /// table, and what a `ChunkColumn` with no generated data should hold.
     #[must_use]
     pub fn uniform(biome: &str, min_y: i32, height: i32) -> Self {
+        Self::uniform_strict(biome, min_y, height)
+    }
+
+    /// A strict built-in-only uniform column for production resource data.
+    /// Unknown and foreign names panic at this boundary rather than becoming a
+    /// silently accepted stringly-typed biome.
+    #[must_use]
+    pub fn uniform_strict(biome: &str, min_y: i32, height: i32) -> Self {
+        let builtin = BuiltinBiome::parse(biome).unwrap_or_else(|error| {
+            panic!("failed to parse generated biome resource: {error}")
+        });
+        Self::uniform_ref(BiomeRef::builtin(builtin), min_y, height)
+    }
+
+    /// A uniform column from a typed identity. Extension ids must be resolved
+    /// by the caller's registry when this value crosses a serialization
+    /// boundary; this constructor itself stores no name.
+    #[must_use]
+    pub fn uniform_ref(biome: BiomeRef, min_y: i32, height: i32) -> Self {
         let y_quarts = ((height + 3) / 4).max(1) as usize;
+        let mut palette = BiomePalette::new();
+        let index = palette.push_ref(biome);
         Self {
-            palette: vec![biome.to_string()],
-            cells: vec![0; y_quarts * 16],
+            palette,
+            cells: vec![index; y_quarts * 16],
             y_quarts,
             min_y,
         }
@@ -126,29 +225,22 @@ impl BiomeCells {
     /// Builds from a closure over every cell, interning as it goes. `f` is called
     /// once per cell in `(qy, qz, qx)` order — the same order the field is laid
     /// out in, so a caller whose sampler has any locality gets it.
+    #[cfg(test)]
     pub(crate) fn from_fn<F>(min_y: i32, height: i32, mut f: F) -> Self
     where
         F: FnMut(usize, usize, usize) -> String,
     {
         let y_quarts = ((height + 3) / 4).max(1) as usize;
-        let mut palette: Vec<String> = Vec::with_capacity(4);
+        let mut palette = BiomePalette::new();
         let mut cells = Vec::with_capacity(y_quarts * 16);
         for qy in 0..y_quarts {
             for qz in 0..4usize {
                 for qx in 0..4usize {
                     let name = f(qx, qy, qz);
-                    // Linear scan, not a HashMap: a column holds a handful of
-                    // distinct biomes (measured single digits), so the scan is
-                    // shorter than one hash — and this runs 1,536 times per
-                    // column, which is exactly where a SipHash would show up.
-                    let idx = match palette.iter().position(|p| *p == name) {
-                        Some(i) => i,
-                        None => {
-                            palette.push(name);
-                            palette.len() - 1
-                        }
-                    };
-                    cells.push(idx as u16);
+                    let biome = BuiltinBiome::from_name(&name)
+                        .expect("test biome names are generated built-ins");
+                    let idx = palette.push_ref(BiomeRef::builtin(biome));
+                    cells.push(idx);
                 }
             }
         }
@@ -158,5 +250,168 @@ impl BiomeCells {
             y_quarts,
             min_y,
         }
+    }
+
+    /// Builds the same storage layout while invoking the sampler in the
+    /// section's production order: section Y, then local X, local Y, local Z.
+    /// Palette interning still follows storage order so wire palette bytes stay
+    /// independent of the search traversal order.
+    #[cfg(test)]
+    pub(crate) fn from_fn_section_query_order<F>(min_y: i32, height: i32, mut f: F) -> Self
+    where
+        F: FnMut(usize, usize, usize) -> String,
+    {
+        let y_quarts = ((height + 3) / 4).max(1) as usize;
+        let mut names = vec![String::new(); y_quarts * 16];
+        for section_qy in (0..y_quarts).step_by(4) {
+            for qx in 0..4usize {
+                for local_y in 0..4usize {
+                    let qy = section_qy + local_y;
+                    if qy >= y_quarts {
+                        break;
+                    }
+                    for qz in 0..4usize {
+                        names[(qy * 4 + qz) * 4 + qx] = f(qx, qy, qz);
+                    }
+                }
+            }
+        }
+        let mut palette = BiomePalette::new();
+        let mut cells = Vec::with_capacity(names.len());
+        for name in names {
+            let biome = BuiltinBiome::from_name(&name)
+                .expect("test biome names are generated built-ins");
+            let idx = palette.push_ref(BiomeRef::builtin(biome));
+            cells.push(idx);
+        }
+        Self {
+            palette,
+            cells,
+            y_quarts,
+            min_y,
+        }
+    }
+
+    /// Builds the production storage layout from typed identities while
+    /// invoking the sampler in section query order. No per-cell string is
+    /// allocated or compared on this path.
+    pub fn from_fn_section_query_order_typed<F>(
+        min_y: i32,
+        height: i32,
+        mut f: F,
+    ) -> Self
+    where
+        F: FnMut(usize, usize, usize) -> BiomeRef,
+    {
+        let y_quarts = ((height + 3) / 4).max(1) as usize;
+        let mut values = vec![None; y_quarts * 16];
+        for section_qy in (0..y_quarts).step_by(4) {
+            for qx in 0..4usize {
+                for local_y in 0..4usize {
+                    let qy = section_qy + local_y;
+                    if qy >= y_quarts {
+                        break;
+                    }
+                    for qz in 0..4usize {
+                        values[(qy * 4 + qz) * 4 + qx] = Some(f(qx, qy, qz));
+                    }
+                }
+            }
+        }
+        let mut palette = BiomePalette::new();
+        let mut cells = Vec::with_capacity(values.len());
+        for value in values {
+            let value = value.expect("section query order visited every biome cell");
+            let idx = palette.push_ref(value);
+            cells.push(idx);
+        }
+        Self {
+            palette,
+            cells,
+            y_quarts,
+            min_y,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest as _, Sha256};
+
+    fn digest(cells: &BiomeCells) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update((cells.y_quarts() as u32).to_be_bytes());
+        hasher.update(cells.min_y().to_be_bytes());
+        for name in cells.palette_view().builtin_names() {
+            hasher.update((name.len() as u32).to_be_bytes());
+            hasher.update(name.as_bytes());
+        }
+        for qy in 0..cells.y_quarts() {
+            for qz in 0..4 {
+                for qx in 0..4 {
+                    hasher.update(cells.index_at_quart(qx, qy, qz).to_le_bytes());
+                }
+            }
+        }
+        format!("{:x}", hasher.finalize())
+    }
+
+    fn pattern(qx: usize, qy: usize, qz: usize) -> BuiltinBiome {
+        match (qx + qy * 3 + qz * 5) % 4 {
+            0 => BuiltinBiome::Plains,
+            1 => BuiltinBiome::DeepDark,
+            2 => BuiltinBiome::DripstoneCaves,
+            _ => BuiltinBiome::CherryGrove,
+        }
+    }
+
+    #[test]
+    fn typed_cells_match_legacy_palette_cell_and_digest() {
+        let legacy = BiomeCells::from_fn_section_query_order(-64, 384, |qx, qy, qz| {
+            pattern(qx, qy, qz).name().to_owned()
+        });
+        let typed = BiomeCells::from_fn_section_query_order_typed(-64, 384, |qx, qy, qz| {
+            BiomeRef::builtin(pattern(qx, qy, qz))
+        });
+
+        assert_eq!(legacy.palette_entries(), typed.palette_entries());
+        for qy in 0..legacy.y_quarts() {
+            for qz in 0..4 {
+                for qx in 0..4 {
+                    assert_eq!(legacy.index_at_quart(qx, qy, qz), typed.index_at_quart(qx, qy, qz));
+                }
+            }
+        }
+        assert_eq!(digest(&legacy), digest(&typed));
+        assert_eq!(
+            digest(&typed),
+            "e0cf3a91fce849e192e89fcf17dbdebbaeea475ba2e5c0c78e91cd8debf071b9"
+        );
+    }
+
+    #[test]
+    fn typed_palette_preserves_first_use_order_and_compact_indices() {
+        let cells = BiomeCells::from_fn_section_query_order_typed(-64, 8, |_, qy, _| {
+            if qy == 0 {
+                BiomeRef::builtin(BuiltinBiome::Plains)
+            } else {
+                BiomeRef::builtin(BuiltinBiome::DeepDark)
+            }
+        });
+        assert_eq!(
+            cells.palette_entries(),
+            &[
+                BiomeRef::builtin(BuiltinBiome::Plains),
+                BiomeRef::builtin(BuiltinBiome::DeepDark),
+            ]
+        );
+        assert_eq!(cells.index_at_quart(0, 0, 0), 0);
+        assert_eq!(cells.index_at_quart(0, 1, 0), 1);
+        assert_eq!(cells.at_quart_ref(0, 1, 0), BiomeRef::builtin(BuiltinBiome::DeepDark));
+        assert_eq!(
+            cells.palette_view().builtin_names().collect::<Vec<_>>(),
+            ["minecraft:plains", "minecraft:deep_dark"]
+        );
     }
 }

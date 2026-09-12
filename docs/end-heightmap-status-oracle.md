@@ -57,6 +57,5 @@ the runner's server properties. The probe requires the 26.2 cache and Apple `con
 ## Dependencies
 
 The probe uses the real 26.2 server jar and its libraries through `scripts/worldgen-oracle/run.sh`,
-the shared `LargeParityOracle` server lifecycle, and the JDK block and chunk APIs exposed by that
-jar. It has no dependency on the Rust crates or on a generated fixture.
-
+the shared `LargeParityOracle` server lifecycle, and the JDK block and chunk APIs exposed by that jar.
+It has no dependency on the Rust crates or on a generated fixture.

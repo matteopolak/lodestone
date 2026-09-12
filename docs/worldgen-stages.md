@@ -8,11 +8,10 @@ serving sidecars. It makes the order, dependency radius, mutable state,
 randomness scope, and resumable completion status explicit for the Overworld,
 Nether, and End without merging their dimension-specific generators.
 
-The document describes the current call graph and the proposed frontier
-model. The only runtime change represented here is the small, compile-checked
-schedule vocabulary in `lodestone_worldgen::stage_schedule`; the generalized
-frontier and descriptor/executor interfaces are design targets, not silently
-landed behavior.
+The document describes the current call graph and the frontier model. The End
+now exposes compile-checked descriptors and a metadata-only chunk frontier in
+`lodestone_worldgen::stage_schedule`; descriptor-driven executors and durable
+product storage remain design work, not silently landed behavior.
 
 ## How it works
 
@@ -37,7 +36,12 @@ The compile-checked constants `OVERWORLD`, `NETHER`, `END`, and `LIFECYCLE`
 are the single vocabulary shared by production dispatch, server scheduling,
 and parity replay. `StageCursor` only checks that a caller entered the named
 passes in order; it is not a durable completion record and it cannot replace
-the frontier described below.
+the frontier described below. End's `StageDescriptor` table is derived from
+`END.stages()` and records the measured structure scan and feature window
+contracts. `GenerationLevel` maps Terrain, Structures, Decorated, and Output
+to dimension-specific prefixes; the compact mask on `StageFrontier` is only an
+admission summary, while its fingerprinted records remain the validation
+authority.
 
 Canonical semantics are the reference execution. They define, for every
 source and feature entry, the input snapshot, seed scope, source completion
@@ -151,8 +155,8 @@ from the retained product without recomputing or silently skipping stages.
 
 ### Typed descriptors and executors
 
-The next layer above `StageSchedule` should be one descriptor per scheduled
-pass. The following is an interface sketch, not a second hand-maintained
+The layer above `StageSchedule` has one descriptor per End pass. The following
+is an interface sketch for the eventual executor, not a second hand-maintained
 schedule:
 
 ```rust
@@ -181,9 +185,9 @@ trait StageExecutor<Context> {
 }
 ```
 
-The actual Rust types should be introduced in the worldgen crate only after
-the descriptor fields can be filled from independently checked behavior. A
-descriptor must not be a stringly typed copy of the current loops:
+The End descriptor fields are now available in the worldgen crate and are
+covered by focused schedule tests. A descriptor must not be a stringly typed
+copy of the current loops:
 
 * `StageKey` identifies a dimension and a `ColumnStage` (and, for the mutable
   feature subgraph, a typed decoration step/source scope).
@@ -428,11 +432,12 @@ optimized execution plan is being tuned.
 ## Configuration
 
 The current schedule and lifecycle tables are compile-time constants and have
-no runtime flags. The public server tier remains `Shaped`/`Full`; the logical
-fidelity tiers and durable `StageFrontier` are not yet configuration options.
-Worker count, admission budget, cancellation, and persistence format belong to
-the eventual scheduler and must be included in the frontier's compatibility
-fingerprint when they affect observable order.
+no runtime flags. The public server tier remains `Shaped`/`Full`; End's
+`GenerationLevel` and metadata-only `StageFrontier` are available to an
+incremental scheduler, but durable product storage and executor selection are
+not yet configuration options. Worker count, admission budget, cancellation,
+and persistence format belong to the eventual scheduler and must be included
+in the frontier's compatibility fingerprint when they affect observable order.
 
 The shell's horizon controls select the query-only `HorizonSurfaceQuery` path.
 They do not change the worldgen stage schedule or make its preliminary result

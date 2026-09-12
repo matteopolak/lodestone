@@ -143,6 +143,7 @@ use crate::stage_schedule::{
     ChunkRequest, ColumnStage, DecorationStep, NETHER_DECORATION_STEPS,
     NETHER_FEATURE_WRITE_RADIUS, NETHER_SOURCES,
 };
+use lodestone_data::biomes::{BiomeRef, BuiltinBiome};
 
 thread_local! {
     static NETHER_HEIGHT_SCRATCH: RefCell<Option<crate::feature::RegionHeights>> =
@@ -204,9 +205,9 @@ pub struct NetherColumn {
     height: i32,
     palette: Vec<String>,
     blocks: Vec<u16>,
-    /// Biome id per horizontal quart, row-major `qz * 4 + qx` — the whole answer
+    /// Typed biome identity per horizontal quart, row-major `qz * 4 + qx` — the whole answer
     /// for this dimension, see the module doc's 2-D section.
-    biome_quarts: [String; 16],
+    biome_quarts: [BiomeRef; 16],
     placement_loot: Vec<CodedLoot>,
     /// Decoration writes in the dimension's upper 128 rows. The noise carrier
     /// remains 128 rows tall, but vegetation runs against the full 256-row
@@ -214,7 +215,7 @@ pub struct NetherColumn {
     decoration_spills: Vec<(i32, i32, i32, String)>,
 }
 
-type NetherBiomeQuarts = [u8; 16];
+type NetherBiomeQuarts = [BiomeRef; 16];
 
 type PreDecorationResult = (
     Arc<crate::dense_grid::DenseBlockGrid>,
@@ -526,10 +527,20 @@ impl NetherColumn {
         &self.palette[self.blocks[idx] as usize]
     }
 
-    /// The biome at horizontal quart `(qx, qz)`, both in `0..4`.
+    /// The typed biome at horizontal quart `(qx, qz)`, both in `0..4`.
     #[must_use]
-    pub fn biome_at_quart(&self, qx: usize, qz: usize) -> &str {
-        &self.biome_quarts[qz * 4 + qx]
+    pub fn biome_at_quart_ref(&self, qx: usize, qz: usize) -> BiomeRef {
+        self.biome_quarts[qz * 4 + qx]
+    }
+
+    /// The built-in biome name at horizontal quart `(qx, qz)`, for display or
+    /// packet/configuration boundaries.
+    #[must_use]
+    pub fn biome_at_quart(&self, qx: usize, qz: usize) -> &'static str {
+        self.biome_at_quart_ref(qx, qz)
+            .builtin_or_none()
+            .expect("extension biome requires its owning registry at the name boundary")
+            .name()
     }
 
     /// Coded containers created by the receiving chunk's structure-placement
@@ -549,7 +560,13 @@ impl NetherColumn {
 
     /// The biome covering local column `(lx, lz)`.
     #[must_use]
-    pub fn biome_at(&self, lx: usize, lz: usize) -> &str {
+    pub fn biome_at_ref(&self, lx: usize, lz: usize) -> BiomeRef {
+        self.biome_at_quart_ref(lx >> 2, lz >> 2)
+    }
+
+    /// The built-in biome name covering local column `(lx, lz)`.
+    #[must_use]
+    pub fn biome_at(&self, lx: usize, lz: usize) -> &'static str {
         self.biome_at_quart(lx >> 2, lz >> 2)
     }
 
@@ -570,7 +587,7 @@ impl NetherColumn {
 
     /// The raw parts, for a caller building a chunk packet or a region file.
     #[must_use]
-    pub fn into_raw(self) -> (i32, i32, Vec<String>, Vec<u16>, [String; 16]) {
+    pub fn into_raw(self) -> (i32, i32, Vec<String>, Vec<u16>, [BiomeRef; 16]) {
         (
             self.min_y,
             self.height,
@@ -624,7 +641,7 @@ pub struct NetherGenerator {
     /// Stable constructor-assigned indices for the dimension's possible
     /// biomes. A source neighbourhood is represented as a bitmask, avoiding
     /// string clones and an ordered-set allocation on every warm lookup.
-    biome_plan_bits: HashMap<String, u8>,
+    biome_plan_bits: HashMap<BiomeRef, u8>,
     biome_source_order: Arc<Vec<String>>,
     /// Ore bodies keyed by their placed-feature identity so the mixed
     /// dispatcher can recover standard and scattered entries from the global
@@ -1298,7 +1315,12 @@ impl NetherGenerator {
         let biome_plan_bits = biome_source_order
             .iter()
             .enumerate()
-            .map(|(index, biome)| (biome.clone(), index as u8))
+            .map(|(index, biome)| {
+                let typed = BuiltinBiome::parse(biome)
+                    .map(BiomeRef::builtin)
+                    .unwrap_or_else(|error| panic!("generated Nether biome is not built-in: {error}"));
+                (typed, index as u8)
+            })
             .collect();
         let feature_biomes = decoration_catalog.feature_biomes();
         let mut ore_definitions = HashMap::new();
@@ -1477,9 +1499,7 @@ impl NetherGenerator {
         // completes, after earlier source spills have been installed.
         let refs = self.structure_refs(cx, cz);
         let mut schedule = Self::stage_schedule().cursor_at(
-            Self::stage_schedule()
-                .index_of(ColumnStage::StructurePlacement)
-                .expect("Nether schedule must have a structure boundary"),
+            Self::stage_schedule().shaped_boundary_index(),
         );
         let (world, placement_loot) = schedule.run(ColumnStage::StructurePlacement, || {
             profile_stage("structure_place", || {
@@ -1497,7 +1517,7 @@ impl NetherGenerator {
             height: self.height,
             palette,
             blocks,
-            biome_quarts: self.biome_names_from_ids(&pre.2),
+                biome_quarts: *pre.2,
             placement_loot,
             decoration_spills,
             }
@@ -1523,7 +1543,7 @@ impl NetherGenerator {
             height: self.height,
             palette,
             blocks,
-            biome_quarts: self.biome_names_from_ids(&pre.2),
+            biome_quarts: *pre.2,
             placement_loot: Vec::new(),
             decoration_spills: Vec::new(),
         }
@@ -1561,10 +1581,8 @@ impl NetherGenerator {
         .1
     }
 
-    /// Runs one source completion against the target's actual mutable resident region.
+    /// Runs one source completion against the actual mutable resident region.
     ///
-    /// The target owns the pre-decoration/read window while `source_x`/`source_z`
-    /// select the source body and `overrides` carries earlier authenticated writes.
     /// `resident_at` supplies the current state of each admitted chunk after
     /// all earlier completion events. Missing outer context falls back to the
     /// immutable pre-decoration prefix. This keeps occupancy and survival
@@ -1726,7 +1744,6 @@ impl NetherGenerator {
         }
         let centre_pre = self.pre_decoration_stage(cx, cz);
         let centre_biomes = Arc::clone(&centre_pre.2);
-        let biome_names = Arc::clone(&self.biome_source_order);
         let feature_biomes = &self.feature_biomes;
         let zoom_seed = self.zoom_seed;
         let biome_quart_at = |block_x: i32, block_z: i32| {
@@ -1753,9 +1770,9 @@ impl NetherGenerator {
             }?;
             let qx = block_x.rem_euclid(16).div_euclid(4) as usize;
             let qz = block_z.rem_euclid(16).div_euclid(4) as usize;
-            biome_names
-                .get(source_biomes[qz * 4 + qx] as usize)
-                .map(String::as_str)
+            source_biomes[qz * 4 + qx]
+                .builtin_or_none()
+                .map(BuiltinBiome::name)
         };
         let biome_at = |pos: crate::feature::BlockPos| {
             let shifted_x = pos.x - 2;
@@ -1865,7 +1882,6 @@ impl NetherGenerator {
                         .map(|source| Arc::clone(&source.2))
                 }
             },
-            Arc::clone(&self.biome_source_order),
             grid_feature_biomes,
             zoom_seed,
         );
@@ -2136,9 +2152,7 @@ impl NetherGenerator {
         // completion, after earlier neighbouring sources have had a chance to
         // spill into the resident chunk.
         schedule.finish_prefix(
-            Self::stage_schedule()
-                .index_of(ColumnStage::StructurePlacement)
-                .expect("Nether schedule must have a structure boundary"),
+            Self::stage_schedule().shaped_boundary_index(),
         );
         (Arc::new(world), heights, Arc::new(biome_quarts))
     }
@@ -2158,7 +2172,11 @@ impl NetherGenerator {
             for dz in -1..=1 {
                 let pre = self.pre_decoration_stage(source_x + dx, source_z + dz);
                 for &biome in pre.2.iter() {
-                    key |= 1_u64 << biome;
+                    let bit = *self
+                        .biome_plan_bits
+                        .get(&biome)
+                        .expect("generated Nether biome is absent from the plan-bit table");
+                    key |= 1_u64 << bit;
                 }
             }
         }
@@ -2285,35 +2303,32 @@ impl NetherGenerator {
     /// code path `column` uses, not a reimplementation for the test.
     #[must_use]
     pub fn biome_quarts(&self, cx: i32, cz: i32) -> [String; 16] {
-        std::array::from_fn(|i| {
-            let qx = cx * 4 + (i % 4) as i32;
-            let qz = cz * 4 + (i / 4) as i32;
-            let target = self.climate.target(qx * 4, 0, qz * 4);
-            self.table.nearest(&target).to_string()
+        self.biome_quart_ids(cx, cz).map(|biome| {
+            biome
+                .builtin_or_none()
+                .expect("generated Nether biome is not built-in")
+                .name()
+                .to_owned()
         })
     }
 
-    /// The same quart answers as [`Self::biome_quarts`], represented by the
-    /// generator's immutable source-order ids for the pre-decoration cache.
-    /// These ids are not exposed at the column boundary; keeping that boundary
-    /// string-based preserves packet and fixture APIs while the hot cache keeps
-    /// only sixteen bytes per chunk.
+    /// The packet-ready horizontal answers without crossing the name boundary.
+    #[must_use]
+    pub fn biome_quarts_typed(&self, cx: i32, cz: i32) -> [BiomeRef; 16] {
+        self.biome_quart_ids(cx, cz)
+    }
+
+    /// The same quart answers as [`Self::biome_quarts`], represented by typed
+    /// identities for the pre-decoration cache.
     fn biome_quart_ids(&self, cx: i32, cz: i32) -> NetherBiomeQuarts {
         std::array::from_fn(|i| {
             let qx = cx * 4 + (i % 4) as i32;
             let qz = cz * 4 + (i / 4) as i32;
             let target = self.climate.target(qx * 4, 0, qz * 4);
-            let biome = self.table.nearest(&target);
-            *self
-                .biome_plan_bits
-                .get(biome)
+            let row = self.table.nearest_row(&target);
+            self.table
+                .biome_ref_at(row)
                 .expect("generated Nether biome is absent from the parameter table")
-        })
-    }
-
-    fn biome_names_from_ids(&self, ids: &NetherBiomeQuarts) -> [String; 16] {
-        std::array::from_fn(|index| {
-            self.biome_source_order[ids[index] as usize].clone()
         })
     }
 
@@ -3079,6 +3094,7 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use sha2::{Digest as _, Sha256};
+    use lodestone_data::biomes::{BiomeRef, BuiltinBiome};
 
     use super::{
         MixedEntryWriter, NetherGenerator, build_nether_feature_lists, decoration_random,
@@ -3396,11 +3412,15 @@ mod tests {
         .expect("parsing Nether settings");
         let generator = NetherGenerator::new(42, &settings, &assets);
         let expected = generator.biome_quarts(-2, -8);
+        let expected_typed = generator.biome_quarts_typed(-2, -8);
         let shaped = generator.column_shaped(-2, -8);
 
         for qz in 0..4 {
             for qx in 0..4 {
-                assert_eq!(shaped.biome_at_quart(qx, qz), expected[qz * 4 + qx]);
+                let index = qz * 4 + qx;
+                assert_eq!(shaped.biome_at_quart(qx, qz), expected[index]);
+                assert_eq!(shaped.biome_at_quart_ref(qx, qz), expected_typed[index]);
+                assert_eq!(expected_typed[index].builtin_or_none().unwrap().name(), expected[index]);
             }
         }
     }
@@ -3419,17 +3439,14 @@ mod tests {
             16,
             air,
         ));
-        let cells = Arc::new(crate::overworld::BiomeCells::from_fn(
-            0,
-            super::DECORATION_WINDOW_HEIGHT,
-            |qx, _qy, qz| {
-                if qx == 0 && qz == 0 {
-                    "minecraft:crimson_forest".to_owned()
-                } else {
-                    "minecraft:nether_wastes".to_owned()
-                }
-            },
-        ));
+        let biome_quarts = std::array::from_fn(|index| {
+            if index == 0 {
+                "minecraft:crimson_forest".to_owned()
+            } else {
+                "minecraft:nether_wastes".to_owned()
+            }
+        });
+        let cells = Arc::new(biome_quarts);
         let feature_biomes = [(
             "minecraft:crimson_fungi".to_owned(),
             ["minecraft:crimson_forest".to_owned()].into_iter().collect(),
@@ -3437,7 +3454,7 @@ mod tests {
         .into_iter()
         .collect();
         let feature_biomes = Arc::new(feature_biomes);
-        let grid = VegGrid::with_sources_and_biomes_shared(
+        let grid = VegGrid::with_sources_and_flat_biomes_shared_zoomed(
             Arc::clone(&interner),
             0,
             super::DECORATION_WINDOW_HEIGHT,
@@ -3448,6 +3465,7 @@ mod tests {
             |_, _| Some(Arc::clone(&source)),
             |dx, dz| (dx == 0 && dz == 0).then(|| Arc::clone(&cells)),
             Arc::clone(&feature_biomes),
+            super::nether_zoom_seed(42),
         );
 
         assert!(grid.biome_allows_placed_feature(
@@ -3470,7 +3488,13 @@ mod tests {
         ));
         assert!(!grid.biome_allows_placed_feature(None, 1, 200, 1));
 
-        let id_cells = Arc::new(std::array::from_fn(|index| u8::from(index != 0)));
+        let id_cells = Arc::new(std::array::from_fn(|index| {
+            BiomeRef::builtin(if index == 0 {
+                BuiltinBiome::CrimsonForest
+            } else {
+                BuiltinBiome::NetherWastes
+            })
+        }));
         let id_grid = VegGrid::with_sources_and_flat_biome_ids_shared_zoomed(
             Arc::clone(&interner),
             0,
@@ -3481,10 +3505,6 @@ mod tests {
             16,
             |_, _| Some(Arc::clone(&source)),
             |dx, dz| (dx == 0 && dz == 0).then(|| Arc::clone(&id_cells)),
-            Arc::new(vec![
-                "minecraft:crimson_forest".to_owned(),
-                "minecraft:nether_wastes".to_owned(),
-            ]),
             Arc::clone(&feature_biomes),
             super::nether_zoom_seed(42),
         );

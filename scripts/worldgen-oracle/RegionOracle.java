@@ -36,14 +36,23 @@ public final class RegionOracle {
         RandomState rs = RandomState.create(provider, NoiseGeneratorSettings.OVERWORLD, seed);
         NoiseRouter r = rs.router();
 
-        for (int x = 0; x < 16; x++) for (int z = 0; z < 16; z++){
+        int originX = 0;
+        int originZ = 0;
+        String target = System.getenv("ORACLE_TARGET_CHUNK");
+        if (target != null && !target.isBlank()) {
+            String[] parts = target.split(",", -1);
+            if (parts.length != 2) throw new IllegalArgumentException("ORACLE_TARGET_CHUNK must be cx,cz");
+            originX = Integer.parseInt(parts[0].trim()) * 16;
+            originZ = Integer.parseInt(parts[1].trim()) * 16;
+        }
+        for (int x = originX; x < originX + 16; x++) for (int z = originZ; z < originZ + 16; z++){
             pd("continents."+x+","+z, c(r.continents(), x, 0, z));
             pd("erosion."+x+","+z,    c(r.erosion(), x, 0, z));
             pd("ridges."+x+","+z,     c(r.ridges(), x, 0, z));
             pd("temperature."+x+","+z, c(r.temperature(), x, 0, z));
             pd("vegetation."+x+","+z,  c(r.vegetation(), x, 0, z));
         }
-        for (int x = 0; x < 16; x++) for (int y = Y_LO; y < Y_HI; y++) for (int z = 0; z < 16; z++){
+        for (int x = originX; x < originX + 16; x++) for (int y = Y_LO; y < Y_HI; y++) for (int z = originZ; z < originZ + 16; z++){
             pd("depth."+x+","+y+","+z, c(r.depth(), x, y, z));
             pd("fd."+x+","+y+","+z, c(r.finalDensity(), x, y, z));
         }

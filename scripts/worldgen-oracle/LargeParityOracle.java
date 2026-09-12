@@ -128,11 +128,11 @@ public final class LargeParityOracle {
      */
     static final byte[] STREAM_MAGIC = "LWS26S01".getBytes(StandardCharsets.US_ASCII);
     static final byte[] STREAM_DOMAIN = "lodestone.worldgen.streaming-parity/v2/light-free".getBytes(StandardCharsets.US_ASCII);
-    static final byte[] END_STREAM_DOMAIN = "lodestone.worldgen.streaming-parity/v3/end-lifecycle".getBytes(StandardCharsets.US_ASCII);
-    static final byte[] END_STREAM_EVENT_DOMAIN = "lodestone.worldgen.streaming-parity/end-lifecycle-event/v1".getBytes(StandardCharsets.US_ASCII);
+    static final byte[] END_STREAM_DOMAIN = "lodestone.worldgen.streaming-parity/v3/end-p06-lifecycle".getBytes(StandardCharsets.US_ASCII);
+    static final byte[] END_STREAM_EVENT_DOMAIN = "lodestone.worldgen.streaming-parity/end-p06-lifecycle-event/v1".getBytes(StandardCharsets.US_ASCII);
     static final int STREAM_HEADER_BYTES = 256;
     static final int STREAM_FORMAT_LIGHT_FREE = 7;
-    static final int STREAM_FORMAT_END_LIFECYCLE = 8;
+    static final int STREAM_FORMAT_END_P06_LIFECYCLE = 8;
     static final byte[] LIGHT_FREE_AUDIT_DOMAIN = "lodestone.worldgen.large-parity.audit/v7/light-free".getBytes(StandardCharsets.US_ASCII);
     static final byte[] RECORD_DOMAIN = "lodestone.worldgen.large-parity.chunk/v3/semantic".getBytes(StandardCharsets.US_ASCII);
     static final byte[] RECORD_DOMAIN_V4 = "lodestone.worldgen.large-parity.chunk/v4/semantic".getBytes(StandardCharsets.US_ASCII);
@@ -301,7 +301,7 @@ public final class LargeParityOracle {
         if ("stream".equals(out.mode)) {
             if (out.streamOut == null || out.streamOut.isBlank()) throw new IllegalArgumentException("stream requires --stream-out");
             if (!out.v6() && !out.v7()) throw new IllegalArgumentException("stream requires --raw-packet or --light-free");
-            if (END.equals(out.dimension) && !out.v7()) throw new IllegalArgumentException("End lifecycle stream requires --light-free");
+            if (END.equals(out.dimension) && !out.v6()) throw new IllegalArgumentException("End lifecycle stream requires --raw-packet");
             if (out.streamStartIndex < 0) throw new IllegalArgumentException("--start-index must be non-negative");
             if (out.streamStartIndex != 0) throw new IllegalArgumentException("stream is ephemeral; --start-index is not supported");
             if (out.out != null || out.resume || out.packetOut != null || out.packetAuditOut != null || out.recordOut != null) throw new IllegalArgumentException("stream mode accepts only --stream-out and --start-index output options");
@@ -320,7 +320,8 @@ public final class LargeParityOracle {
     static void usage() {
         System.out.println("materialize: LargeParityOracle --mode materialize [--dimension overworld|nether|end]");
         System.out.println("export:      LargeParityOracle --mode export --out /oracle/shard.lwp --cx LO HI --cz LO HI [--raw-packet|--light-free] [--dimension overworld|nether|end] [--resume] [--packet-out /oracle/chunk.bin] [--packet-audit-out /oracle/shard.packet-audit] [--record-out /oracle/chunk.record]");
-        System.out.println("stream:      LargeParityOracle --mode stream --stream-out /oracle-out/stream --cx LO HI --cz LO HI --light-free [--dimension overworld|nether|end]");
+        System.out.println("stream:      LargeParityOracle --mode stream --stream-out /oracle-out/stream --cx LO HI --cz LO HI --light-free [--dimension overworld|nether]");
+        System.out.println("stream:      LargeParityOracle --mode stream --stream-out /oracle-out/stream --cx LO HI --cz LO HI --raw-packet --dimension end");
         System.out.println("diagnostic:  LargeParityOracle --mode diagnostic --diagnostic-coordinates /oracle/coords.tsv --diagnostic-packet-dir /oracle/packets [--dimension overworld|nether|end]");
         System.out.println("control:     LargeParityOracle --provenance-selftest");
         System.out.println("control:     LargeParityOracle --determinism-selftest [--dimension overworld|nether|end]");
@@ -909,7 +910,7 @@ public final class LargeParityOracle {
     static byte[] streamHeader(Args a, long count) throws Exception {
         ByteBuffer b = ByteBuffer.allocate(STREAM_HEADER_BYTES).order(ByteOrder.BIG_ENDIAN);
         b.put(STREAM_MAGIC).putShort((short)1).putShort((short)STREAM_HEADER_BYTES).putShort((short)2).putShort((short)1).putInt(776).putLong(SEED);
-        int format = END.equals(a.dimension) ? STREAM_FORMAT_END_LIFECYCLE : (a.v7() ? STREAM_FORMAT_LIGHT_FREE : 6);
+        int format = END.equals(a.dimension) ? STREAM_FORMAT_END_P06_LIFECYCLE : (a.v7() ? STREAM_FORMAT_LIGHT_FREE : 6);
         byte[] domain = END.equals(a.dimension) ? END_STREAM_DOMAIN : STREAM_DOMAIN;
         b.putInt(a.loX).putInt(a.hiX).putInt(a.loZ).putInt(a.hiZ).putLong(count).putShort((short)DIGEST_BYTES).putShort((short)format);
         b.put(digest(domain)).put(digest(a.dimensionKey().getBytes(StandardCharsets.UTF_8)));
@@ -919,43 +920,38 @@ public final class LargeParityOracle {
         return b.array();
     }
 
-    static int lifecycleResidentStage(String name) {
-        String status = name.substring(name.lastIndexOf(':') + 1);
-        return switch (status) {
-            case "carvers" -> 0;
-            case "features" -> 1;
-            case "full", "initialize_light", "light" -> 2;
-            default -> throw new IllegalStateException("external lifecycle reported unsupported resident status: " + name);
-        };
-    }
-
-    static byte[] lifecycleEventPayload(List<EndHeightmapStatusOracle.LifecycleEvent> events) throws Exception {
+    /**
+     * Serialize the authenticated P06 End resident observations that belong
+     * to one raw packet frame.  The Rust side installs these values at the
+     * matching lifecycle boundary; it never derives them from the packet's
+     * final block field or from the light-free stream.
+     */
+    static byte[] endP06LifecyclePayload(List<EndP06LifecycleCapture.LifecycleEvent> events) throws Exception {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream(32 + events.size() * 32_000);
         DataOutputStream out = new DataOutputStream(bytes);
         out.write(END_STREAM_EVENT_DOMAIN);
         out.writeInt(events.size());
-        for (EndHeightmapStatusOracle.LifecycleEvent event : events) {
-            if (!"features".equals(event.stage)) throw new IllegalStateException("external lifecycle event is not FEATURES: " + event.stage);
+        for (EndP06LifecycleCapture.LifecycleEvent event : events) {
             out.writeLong(event.sequence);
             out.writeInt(event.source.x());
             out.writeInt(event.source.z());
-            out.writeByte(1);
+            out.writeByte(1); // FEATURES
             out.writeInt(event.residentTransitions.size());
-            for (EndHeightmapStatusOracle.LifecycleTransition transition : event.residentTransitions) {
+            for (EndP06LifecycleCapture.LifecycleTransition transition : event.residentTransitions) {
                 out.writeInt(transition.resident.x());
                 out.writeInt(transition.resident.z());
-                out.writeByte(lifecycleResidentStage(transition.stage));
+                out.writeByte(transition.stage);
                 if (transition.clientHeightmaps == null) {
                     out.writeByte(0);
-                } else {
-                    out.writeByte(1);
-                    if (transition.clientHeightmaps.length != 3) throw new IllegalStateException("external lifecycle map count differs");
-                    for (int map = 0; map < 3; map++) {
-                        if (transition.clientHeightmaps[map].length != 256) throw new IllegalStateException("external lifecycle map width differs");
-                        for (int value : transition.clientHeightmaps[map]) {
-                            if (value < 0 || value > 0xffff) throw new IllegalStateException("external lifecycle map cell exceeds u16: " + value);
-                            out.writeShort(value);
-                        }
+                    continue;
+                }
+                if (transition.clientHeightmaps.length != 3) throw new IllegalStateException("End P06 map count differs");
+                out.writeByte(1);
+                for (int map = 0; map < 3; map++) {
+                    if (transition.clientHeightmaps[map].length != 256) throw new IllegalStateException("End P06 map width differs");
+                    for (int value : transition.clientHeightmaps[map]) {
+                        if (value < 0 || value > 0xffff) throw new IllegalStateException("End P06 map cell exceeds u16: " + value);
+                        out.writeShort(value);
                     }
                 }
             }
@@ -998,36 +994,32 @@ public final class LargeParityOracle {
                 long eventSequence = 0;
                 for (long index = a.streamStartIndex; index < count; index++) {
                     int cx = a.loX + (int)(index % width), cz = a.loZ + (int)(index / width);
-                    List<EndHeightmapStatusOracle.LifecycleEvent> events = END.equals(a.dimension)
-                        ? EndHeightmapStatusOracle.captureLifecycleEvents(server, level, new ChunkPos(cx, cz), eventSequence)
+                    List<EndP06LifecycleCapture.LifecycleEvent> events = END.equals(a.dimension)
+                        ? EndP06LifecycleCapture.capture(server, level, new ChunkPos(cx, cz), eventSequence)
                         : List.of();
                     eventSequence += events.size();
                     byte[] packet = streamPacket(server, level, a, new ChunkPos(cx, cz));
-                    byte[] recordDigest = digest(packet);
-                    if (END.equals(a.dimension)) {
-                        byte[] eventPayload = lifecycleEventPayload(events);
-                        byte[] eventDigest = digest(eventPayload);
-                        long bodyLength = 8L + 4L + 4L + 4L + 4L + DIGEST_BYTES + DIGEST_BYTES + eventPayload.length + packet.length;
-                        if (bodyLength > Integer.MAX_VALUE) throw new IllegalStateException("stream lifecycle frame is too large at " + cx + "," + cz);
-                        out.writeInt((int)bodyLength);
-                        out.writeLong(index);
-                        out.writeInt(cx);
-                        out.writeInt(cz);
+                    byte[] eventPayload = END.equals(a.dimension) ? endP06LifecyclePayload(events) : null;
+                    byte[] eventDigest = eventPayload == null ? null : digest(eventPayload);
+                    byte[] full = digest(packet);
+                    long bodyLength = eventPayload == null
+                        ? 8L + 4L + 4L + 4L + DIGEST_BYTES + packet.length
+                        : 8L + 4L + 4L + 4L + 4L + DIGEST_BYTES + DIGEST_BYTES + eventPayload.length + packet.length;
+                    if (bodyLength > Integer.MAX_VALUE) throw new IllegalStateException("stream packet frame is too large at " + cx + "," + cz);
+                    out.writeInt((int)bodyLength);
+                    out.writeLong(index);
+                    out.writeInt(cx);
+                    out.writeInt(cz);
+                    if (eventPayload == null) {
+                        out.writeInt(packet.length);
+                        out.write(full);
+                        out.write(packet);
+                    } else {
                         out.writeInt(eventPayload.length);
                         out.writeInt(packet.length);
                         out.write(eventDigest);
-                        out.write(recordDigest);
+                        out.write(full);
                         out.write(eventPayload);
-                        out.write(packet);
-                    } else {
-                        long bodyLength = 8L + 4L + 4L + 4L + DIGEST_BYTES + packet.length;
-                        if (bodyLength > Integer.MAX_VALUE) throw new IllegalStateException("stream packet frame is too large at " + cx + "," + cz);
-                        out.writeInt((int)bodyLength);
-                        out.writeLong(index);
-                        out.writeInt(cx);
-                        out.writeInt(cz);
-                        out.writeInt(packet.length);
-                        out.write(recordDigest);
                         out.write(packet);
                     }
                     out.flush();

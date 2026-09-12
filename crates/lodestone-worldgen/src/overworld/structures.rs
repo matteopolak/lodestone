@@ -56,8 +56,7 @@ use lodestone_worldgen_core::rng::{
 use crate::aquifer::{AquiferSystem, BlockKind};
 use crate::structure::{
     CodedBlock, HeightmapKind, PieceRefinement, RingProbeCache, StartContext, StructureKind,
-    StructureStart,
-    VerticalPlacement,
+    StructureStart, VerticalPlacement,
 };
 
 use super::OverworldGenerator;
@@ -189,6 +188,10 @@ pub(super) struct StartSampler<'a> {
     /// takes `&self` (it is called from a `&dyn` behind the registry) and this is
     /// single-threaded per stage invocation.
     aquifers: RefCell<HashMap<(i32, i32), Arc<AquiferSystem>>>,
+    /// The biome tree's last-result candidate for the current structure
+    /// placement lifecycle. Ring relocation probes thousands of adjacent
+    /// quart cells; retaining the candidate matches the reference search
+    /// lifecycle and avoids restarting the tree from its root for every probe.
     biome_cursor: RefCell<Option<crate::biome::BiomeSearchCursor>>,
 }
 
@@ -197,7 +200,9 @@ impl StartSampler<'_> {
         StartSampler {
             generator,
             aquifers: RefCell::new(HashMap::new()),
-            biome_cursor: RefCell::new(generator.biome_search_cursor()),
+            biome_cursor: RefCell::new(
+                generator.biome_search_cursor(),
+            ),
         }
     }
 
@@ -611,6 +616,19 @@ fn maybe_add_portal_vine<R: RandomSource>(
 }
 
 impl OverworldGenerator {
+    fn compute_structure_starts(&self, cx: i32, cz: i32) -> Vec<Arc<StructureStart>> {
+        crate::counters::bump_structure_start();
+        let Some(registry) = &self.structures else {
+            return Vec::new();
+        };
+        let sampler = StartSampler::new(self);
+        registry
+            .starts_at(cx, cz, &sampler)
+            .into_iter()
+            .map(Arc::new)
+            .collect()
+    }
+
     /// Stage 0a: this chunk's structure starts, memoised.
     ///
     /// Empty (and allocation-free after the `Vec`'s own zero-capacity
@@ -627,16 +645,7 @@ impl OverworldGenerator {
                 // something narrower than `Other` (which also holds generator
                 // construction).
                 let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Structure);
-                crate::counters::bump_structure_start();
-                let Some(registry) = &self.structures else {
-                    return Vec::new();
-                };
-                let sampler = StartSampler::new(self);
-                registry
-                    .starts_at(cx, cz, &sampler)
-                    .into_iter()
-                    .map(Arc::new)
-                    .collect()
+                self.compute_structure_starts(cx, cz)
             })
     }
 
@@ -795,8 +804,11 @@ impl OverworldGenerator {
         let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Structure);
         let seed = registry.seed();
         let (bx, bz) = (cx * 16, cz * 16);
+        // Structure identifiers are owned by the cached starts and live for the
+        // whole placement pass. Borrow them as map keys so each chunk does not
+        // clone the identifier merely to seed its local random stream.
         let mut feature_randoms: HashMap<
-            String,
+            &str,
             crate::rng::WorldgenRandom<crate::rng::XoroshiroRandomSource>,
         > = HashMap::new();
         let mineshaft_sampler = StartSampler::new(self);
@@ -810,10 +822,10 @@ impl OverworldGenerator {
         // index within the decoration step. Every start of that structure then
         // shares it, while each start reconstructs its own retained tree.
         let mut mineshaft_randoms: HashMap<
-            String,
+            &str,
             WorldgenRandom<XoroshiroRandomSource>,
         > = HashMap::new();
-        let mut portal_randoms: HashMap<String, WorldgenRandom<XoroshiroRandomSource>> = HashMap::new();
+        let mut portal_randoms: HashMap<&str, WorldgenRandom<XoroshiroRandomSource>> = HashMap::new();
         for (_, _, start) in structure_entries {
             if !start.pieces_complete {
                 continue;
@@ -822,7 +834,7 @@ impl OverworldGenerator {
                 .structure(&start.structure)
                 .is_some_and(|definition| matches!(definition.kind, StructureKind::Mineshaft { .. }));
             if is_mineshaft && start.bounding_box.intersects_xz(bx, bz, bx + 15, bz + 15) {
-                let mineshaft_random = mineshaft_randoms.entry(start.structure.clone()).or_insert_with(|| {
+                let mineshaft_random = mineshaft_randoms.entry(start.structure.as_str()).or_insert_with(|| {
                     let (step, index) = registry
                         .runtime_decoration_key(&start.structure)
                         .expect("mineshaft structure has a decoration key");
@@ -836,6 +848,7 @@ impl OverworldGenerator {
                     cx,
                     cz,
                     &mineshaft_sampler,
+                    &world,
                     mineshaft_random,
                 ) {
                     for block in blocks {
@@ -897,7 +910,7 @@ impl OverworldGenerator {
                         let Some((step, index)) = registry.feature_placement_key(&start.structure) else {
                             continue;
                         };
-                        let random = feature_randoms.entry(start.structure.clone()).or_insert_with(|| {
+                        let random = feature_randoms.entry(start.structure.as_str()).or_insert_with(|| {
                             let mut random = crate::rng::WorldgenRandom::new(
                                 crate::rng::XoroshiroRandomSource::new(0),
                             );
@@ -929,7 +942,7 @@ impl OverworldGenerator {
                         let Some((step, index)) = registry.feature_placement_key(&start.structure) else {
                             continue;
                         };
-                        let random = portal_randoms.entry(start.structure.clone()).or_insert_with(|| {
+                        let random = portal_randoms.entry(start.structure.as_str()).or_insert_with(|| {
                             let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
                             let decoration_seed = random.set_decoration_seed(seed, bx, bz);
                             random.set_feature_seed(decoration_seed, index as i32, step);
@@ -946,9 +959,8 @@ impl OverworldGenerator {
                             features_cannot_replace,
                         );
                     }
-                    Some(PieceRefinement::FortressPlacement { .. })
-                    | Some(PieceRefinement::NetherFossilDriedGhast { .. }) => {}
-                    None => {}
+                    Some(PieceRefinement::FortressPlacement { .. }) | None => {}
+                    Some(PieceRefinement::NetherFossilDriedGhast { .. }) => {}
                 }
             }
         }
@@ -970,11 +982,33 @@ impl OverworldGenerator {
     /// chunk, by the fill. A slot for it would be a third stage carrying no work.
     pub(super) fn beardifier_for(&self, cx: i32, cz: i32) -> crate::structure::beardifier::Beardifier {
         use crate::structure::beardifier::Beardifier;
-        if self.structures.is_none() {
+        let Some(registry) = &self.structures else {
             return Beardifier::empty();
+        };
+        let sampler = StartSampler::new(self);
+        let mut starts = Vec::new();
+        for (sx, sz) in registry.origin_candidates_in(
+            cx - REFS_RADIUS,
+            cx + REFS_RADIUS,
+            cz - REFS_RADIUS,
+            cz + REFS_RADIUS,
+            &sampler,
+        ) {
+            starts.extend(
+                self.structure_starts_stage(sx, sz)
+                    .iter()
+                    .filter(|start| {
+                        start.pieces_complete
+                            && start.terrain_adaptation
+                                != crate::structure::TerrainAdjustment::None
+                            && start
+                                .adjusted_bounding_box()
+                                .is_close_to_chunk(cx, cz, BEARD_REACH)
+                    })
+                    .cloned(),
+            );
         }
-        let refs = self.structure_refs_stage(cx, cz);
-        Beardifier::for_chunk(cx, cz, refs.adaptation_bearing().map(std::convert::AsRef::as_ref))
+        Beardifier::for_chunk(cx, cz, starts.iter().map(std::convert::AsRef::as_ref))
     }
 
     /// This chunk's pre-surface shape field (`fillFromNoise`'s output, stage 1)

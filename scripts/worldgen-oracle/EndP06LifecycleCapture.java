@@ -93,9 +93,9 @@ final class EndP06LifecycleCapture {
     private static int stage(ChunkAccess chunk) {
         String status = chunk.getPersistedStatus().getName();
         return switch (status) {
-            case "carvers" -> 0;
-            case "features" -> 1;
-            case "full", "initialize_light", "light" -> 2;
+            case "minecraft:carvers" -> 0;
+            case "minecraft:features" -> 1;
+            case "minecraft:full", "minecraft:initialize_light", "minecraft:light" -> 2;
             default -> throw new IllegalStateException(
                 "external End lifecycle reported unsupported resident status: " + status);
         };

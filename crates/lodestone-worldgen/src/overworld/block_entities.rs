@@ -33,6 +33,9 @@
 //! None. The server boundary consumes this typed list when it adopts a generated
 //! column and turns each entry into the appropriate block-entity record.
 
+use lodestone_data::block_entity_types::BlockEntityType;
+use lodestone_data::entity_type::EntityTypeRef;
+
 /// One block entity a generated column carries, with its **absolute** world
 /// position.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,7 +79,7 @@ pub enum GeneratedBlockEntity {
         y: i32,
         z: i32,
         /// The resource id selected by the feature's final bounded draw.
-        entity_type: String,
+        entity_type: EntityTypeRef,
     },
 }
 
@@ -91,13 +94,14 @@ impl GeneratedBlockEntity {
         }
     }
 
-    /// The block-entity registry id, for the wire array's type field.
+    /// The validated block-entity registry id. Conversion to its textual NBT
+    /// spelling or protocol ordinal belongs at the server boundary.
     #[must_use]
-    pub fn type_id(&self) -> &'static str {
+    pub const fn type_id(&self) -> BlockEntityType {
         match self {
-            GeneratedBlockEntity::Beehive { .. } => "minecraft:beehive",
-            GeneratedBlockEntity::DungeonChest { .. } => "minecraft:chest",
-            GeneratedBlockEntity::DungeonSpawner { .. } => "minecraft:mob_spawner",
+            GeneratedBlockEntity::Beehive { .. } => BlockEntityType::BEEHIVE,
+            GeneratedBlockEntity::DungeonChest { .. } => BlockEntityType::CHEST,
+            GeneratedBlockEntity::DungeonSpawner { .. } => BlockEntityType::MOB_SPAWNER,
         }
     }
 }

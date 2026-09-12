@@ -581,21 +581,22 @@ pub fn light_free_record(
     w.bytes(dimension.name().as_bytes());
 
     let predicates = [1, 4, 5];
-    let retained_heightmaps = column.client_heightmaps_raw();
     w.i32(predicates.len() as i32);
-    for (map_index, type_id) in predicates.into_iter().enumerate() {
+    for type_id in predicates {
         w.i32(type_id as i32);
         for z in 0..16i32 {
             for x in 0..16i32 {
-                let height = retained_heightmaps
-                    .as_ref()
-                    .map(|maps| i32::from(maps[map_index][x as usize + z as usize * 16]) + column.min_y)
-                    .unwrap_or_else(|| {
-                        (column.min_y..column.min_y + column.height)
-                            .rev()
-                            .find(|&y| lodestone_v26_2::server_protocol::client_heightmap_includes(type_id, column.resolved_block_state_id(x, y, z)))
-                            .map_or(column.min_y, |y| y + 1)
-                    });
+                let height = if let Some(map) = column
+                    .client_heightmaps()
+                    .and_then(|maps| maps.get(type_id))
+                {
+                    column.min_y + map.get(x as usize, z as usize) as i32
+                } else {
+                    (column.min_y..column.min_y + column.height)
+                        .rev()
+                        .find(|&y| lodestone_v26_2::server_protocol::client_heightmap_includes(type_id, column.resolved_block_state_id(x, y, z)))
+                        .map_or(column.min_y, |y| y + 1)
+                };
                 w.i32(height);
             }
         }

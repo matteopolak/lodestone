@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Compare the external JVM oracle and Lodestone through an ephemeral stream.
 #
-# Each frame is a light-free content record: terrain, biomes, heightmaps and
-# block entities. Light and packet framing are deliberately outside this gate.
+# Overworld and Nether frames are light-free content records. End frames carry
+# raw packet bytes plus an authenticated resident-lifecycle sidecar so its
+# packet heightmaps are compared at the same boundary as the external server.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -104,9 +105,14 @@ trap cleanup EXIT INT TERM
 # producer/consumer back-pressure and disappears on exit.
 mkfifo "$stream_window"
 
+oracle_format=(--light-free)
+if [[ "$dimension" = end ]]; then
+  oracle_format=(--raw-packet)
+fi
+
 LODESTONE_ORACLE_OUTPUT_ROOT="$work/oracle-out" \
   bash "$HERE/run.sh" LargeParityOracle \
-    --mode stream --light-free --dimension "$dimension" \
+    --mode stream "${oracle_format[@]}" --dimension "$dimension" \
     --cx "$cx0" "$cx1" --cz "$cz0" "$cz1" \
     --stream-out /oracle-out/stream \
     >"$oracle_log" 2>&1 &

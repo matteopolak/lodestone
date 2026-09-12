@@ -30,11 +30,13 @@
 //!
 //! A read is *routed* rather than pre-copied:
 //!
-//! 1. the **overlay** — a sparse `HashMap` of writes this decoration pass has
-//!    made. Consulted first, so a feature placed earlier in the step is visible
-//!    to a later one, exactly as a shared mutable block field would be. This is
-//!    the property vanilla's incremental heightmaps depend on, and the reason the
-//!    overlay cannot be replaced by a post-pass merge.
+//! 1. the **overlay** — a bounded direct-address page directory of writes this
+//!    decoration pass has made. Local coordinates are packed into a compact key;
+//!    each page cell carries an epoch stamp so a recycled view does not need to
+//!    clear every page. Consulted first, so a feature placed earlier in the step
+//!    is visible to a later one, exactly as a shared mutable block field would
+//!    be. This is the property incremental heightmaps depend on, and the reason
+//!    the overlay cannot be replaced by a post-pass merge.
 //! 2. the **source grid that owns that column** — [`source_slot`] maps a
 //!    centre-relative local `(lx, lz)` to one of the nine chunks, and the read
 //!    goes straight into that chunk's own `DenseBlockGrid` at absolute
@@ -115,7 +117,8 @@
 //! [`crate::interner`] for the `StateId`↔`&str` shim `get`/`set` still need.
 //! There is still **no shared buffer pool** — see [`scratch`], which is the
 //! `thread_local` free-list this module's own doc named as the only acceptable
-//! form of reuse here, installed by Unit 19. A pool behind a lock would
+//! form of reuse here, installed by Unit 19. The direct page storage is owned by
+//! one view at a time and only recycled on that same thread. A pool behind a lock would
 //! re-create exactly the contention [`crate::overworld::store`] exists to
 //! delete, and `4307b59` is the scar for getting that wrong.
 
@@ -155,16 +158,12 @@ pub(crate) use scratch::{Overlay, WriteLog};
 ///
 /// # How to change it, and the two traps
 ///
-/// * **A recycled `HashMap` has a different capacity, and therefore a different
-///   iteration order, from a fresh one.** That is only safe because neither
-///   consumer observes iteration order: `VegGrid`'s map is private to its module
-///   and reached solely through `get`/`insert` (never iterated at all), and
-///   [`RegionView::centre_writes_in_scan_order`] sorts by the full key precisely
-///   so order cannot be observed — see the ordering argument on
-///   [`lodestone_worldgen_core::hash::fast`], and `crate::overworld`'s module doc
-///   for the palette-order bug this repo has already shipped once. **Before
-///   letting anything else share this free-list, establish that half of the
-///   argument at the new consumer**, exactly as a `FastMap` swap would require.
+/// * **The overlay is not an iteration-ordered container.** It is a bounded
+///   direct-address page directory whose cells carry an epoch stamp. The only
+///   consumer that exports overlay contents,
+///   [`RegionView::centre_writes_in_scan_order`], sorts by the full key before
+///   the palette fold-back, so page allocation order cannot become observable.
+///   [`VegGrid`] likewise consumes the separate insertion-order [`WriteLog`].
 /// * **Take-and-return, never borrow across a body.** [`Overlay`] and
 ///   [`WriteLog`] own their buffer and hand it back in `Drop`, so a nested or
 ///   re-entrant construction gets a *fresh* (merely allocating) buffer instead of
@@ -172,8 +171,6 @@ pub(crate) use scratch::{Overlay, WriteLog};
 ///   scratch uses, and for the same reason.
 mod scratch {
     use std::cell::{Cell, RefCell};
-
-    use lodestone_worldgen_core::hash::FastMap;
 
     use crate::interner::StateId;
 
@@ -194,8 +191,29 @@ mod scratch {
     /// a cache's clothes.
     const KEEP: usize = 4;
 
+    const PAGE_X: usize = 4;
+    const PAGE_Z: usize = 4;
+    const PAGE_Y: usize = 16;
+    const PAGE_X_SHIFT: u32 = PAGE_X.trailing_zeros();
+    const PAGE_Z_SHIFT: u32 = PAGE_Z.trailing_zeros();
+    const PAGE_Y_SHIFT: u32 = PAGE_Y.trailing_zeros();
+    const PAGE_X_MASK: usize = PAGE_X - 1;
+    const PAGE_Z_MASK: usize = PAGE_Z - 1;
+    const PAGE_Y_MASK: usize = PAGE_Y - 1;
+    const XZ_BITS: u32 = 10;
+    const Y_BITS: u32 = 12;
+    const XZ_MASK: u32 = (1 << XZ_BITS) - 1;
+    const Y_MASK: u32 = (1 << Y_BITS) - 1;
+    const DEFAULT_MIN_XZ: i32 = -32;
+    const DEFAULT_MAX_XZ: i32 = 48;
+    /// The default covers the largest current vegetation footprint (`-32..48`)
+    /// and all supported generator heights. RegionView constructors still pass
+    /// their narrower read window explicitly.
+    const DEFAULT_MIN_Y: i32 = -64;
+    const DEFAULT_HEIGHT: i32 = 448;
+
     thread_local! {
-        static MAPS: RefCell<Vec<FastMap<Key, StateId>>> = const { RefCell::new(Vec::new()) };
+        static OVERLAYS: RefCell<Vec<Storage>> = const { RefCell::new(Vec::new()) };
         static LOGS: RefCell<Vec<Vec<Key>>> = const { RefCell::new(Vec::new()) };
         /// Takes that found the free-list empty and had to build a container from
         /// scratch. `const`-initialised so reading it cannot itself allocate.
@@ -211,74 +229,281 @@ mod scratch {
         static MISSES: Cell<u64> = const { Cell::new(0) };
     }
 
-    /// A sparse `(local) -> StateId` overlay whose backing map is recycled
-    /// through this thread's free-list.
-    ///
-    /// Cleared on **return** rather than on take, so a buffer sitting in the
-    /// free-list holds no keys: a stale entry can never be read by whoever takes
-    /// it next, which is the property that makes reuse invisible.
+    #[derive(Clone, Copy, Debug)]
+    struct EntryCell {
+        generation: u32,
+        state: StateId,
+    }
+
+    #[derive(Debug)]
+    struct Page {
+        cells: [EntryCell; PAGE_X * PAGE_Y * PAGE_Z],
+    }
+
+    impl Page {
+        fn new() -> Self {
+            Self {
+                cells: [EntryCell { generation: 0, state: StateId::AIR };
+                    PAGE_X * PAGE_Y * PAGE_Z],
+            }
+        }
+    }
+
+    /// A direct-address directory of lazily allocated pages. The directory is
+    /// bounded by the view's coordinate window; a cell's packed local offset
+    /// addresses one page and one slot without hashing. Pages and cells stay in
+    /// the per-thread scratch free-list after a view drops. On reuse the
+    /// generation advances and stale cells are ignored without clearing every
+    /// page.
+    #[derive(Debug)]
+    struct Storage {
+        min_x: i32,
+        max_x: i32,
+        min_y: i32,
+        max_y: i32,
+        min_z: i32,
+        max_z: i32,
+        x_pages: usize,
+        z_pages: usize,
+        y_pages: usize,
+        generation: u32,
+        pages: Vec<Option<Box<Page>>>,
+        keys: Vec<u32>,
+    }
+
+    impl Storage {
+        fn new(min_x: i32, max_x: i32, min_y: i32, height: i32, min_z: i32, max_z: i32) -> Self {
+            let storage = Self {
+                min_x,
+                max_x,
+                min_y,
+                max_y: min_y + height,
+                min_z,
+                max_z,
+                x_pages: 0,
+                z_pages: 0,
+                y_pages: 0,
+                generation: 0,
+                pages: Vec::new(),
+                keys: Vec::new(),
+            };
+            storage
+        }
+
+        fn reconfigure(
+            &mut self,
+            min_x: i32,
+            max_x: i32,
+            min_y: i32,
+            height: i32,
+            min_z: i32,
+            max_z: i32,
+        ) {
+            assert!(max_x > min_x && max_z > min_z && height > 0);
+            assert!(max_x - min_x <= (1 << XZ_BITS));
+            assert!(max_z - min_z <= (1 << XZ_BITS));
+            assert!(height <= (1 << Y_BITS));
+            let x_pages = ((max_x - min_x) as usize).div_ceil(PAGE_X);
+            let z_pages = ((max_z - min_z) as usize).div_ceil(PAGE_Z);
+            let y_pages = (height as usize).div_ceil(PAGE_Y);
+            if self.x_pages != x_pages || self.z_pages != z_pages || self.y_pages != y_pages {
+                self.pages.clear();
+                self.pages.resize_with(x_pages * z_pages * y_pages, || None);
+                self.x_pages = x_pages;
+                self.z_pages = z_pages;
+                self.y_pages = y_pages;
+            }
+            self.min_x = min_x;
+            self.max_x = max_x;
+            self.min_y = min_y;
+            self.max_y = min_y + height;
+            self.min_z = min_z;
+            self.max_z = max_z;
+            let next_generation = self.generation.wrapping_add(1);
+            if next_generation == 0 {
+                for page in self.pages.iter_mut().flatten() {
+                    for cell in page.cells.iter_mut() {
+                        cell.generation = 0;
+                    }
+                }
+                self.generation = 1;
+            } else {
+                self.generation = next_generation;
+            }
+            self.keys.clear();
+        }
+
+        fn pack(&self, &(lx, y, lz): &Key) -> Option<u32> {
+            if !(self.min_x..self.max_x).contains(&lx)
+                || !(self.min_y..self.max_y).contains(&y)
+                || !(self.min_z..self.max_z).contains(&lz)
+            {
+                return None;
+            }
+            Some(self.pack_unchecked(&(lx, y, lz)))
+        }
+
+        #[inline]
+        fn pack_unchecked(&self, &(lx, y, lz): &Key) -> u32 {
+            let x = (lx - self.min_x) as u32;
+            let y = (y - self.min_y) as u32;
+            let z = (lz - self.min_z) as u32;
+            x | (z << XZ_BITS) | (y << (XZ_BITS * 2))
+        }
+
+        fn unpack(&self, packed: u32) -> Key {
+            let x = packed & XZ_MASK;
+            let z = (packed >> XZ_BITS) & XZ_MASK;
+            let y = (packed >> (XZ_BITS * 2)) & Y_MASK;
+            (self.min_x + x as i32, self.min_y + y as i32, self.min_z + z as i32)
+        }
+
+        fn location(&self, packed: u32) -> (usize, usize) {
+            let x = (packed & XZ_MASK) as usize;
+            let z = ((packed >> XZ_BITS) & XZ_MASK) as usize;
+            let y = ((packed >> (XZ_BITS * 2)) & Y_MASK) as usize;
+            let page = ((x >> PAGE_X_SHIFT) * self.z_pages + (z >> PAGE_Z_SHIFT))
+                * self.y_pages
+                + (y >> PAGE_Y_SHIFT);
+            let cell = (y & PAGE_Y_MASK) * PAGE_X * PAGE_Z
+                + (z & PAGE_Z_MASK) * PAGE_X
+                + (x & PAGE_X_MASK);
+            (page, cell)
+        }
+
+        fn get_packed(&self, packed: u32) -> Option<StateId> {
+            let (page, cell) = self.location(packed);
+            let page = self.pages.get(page)?.as_ref()?;
+            let cell = &page.cells[cell];
+            (cell.generation == self.generation).then_some(cell.state)
+        }
+
+        #[cfg(test)]
+        fn raw_get_packed(&self, packed: u32) -> Option<StateId> {
+            let (page, cell) = self.location(packed);
+            let page = self.pages.get(page)?.as_ref()?;
+            Some(page.cells[cell].state)
+        }
+
+        #[inline]
+        fn insert_in_bounds(&mut self, key: Key, state: StateId) {
+            debug_assert!(
+                self.pack(&key).is_some(),
+                "overlay key is outside its configured bounds"
+            );
+            self.insert_packed(self.pack_unchecked(&key), state);
+        }
+
+        fn insert_packed(&mut self, packed: u32, state: StateId) {
+            let (page_index, cell_index) = self.location(packed);
+            let page = self.pages[page_index].get_or_insert_with(|| Box::new(Page::new()));
+            let cell = &mut page.cells[cell_index];
+            let is_new = cell.generation != self.generation;
+            cell.generation = self.generation;
+            cell.state = state;
+            if is_new {
+                self.keys.push(packed);
+            }
+        }
+    }
+
+    /// The overlay owns one storage instance. It is deliberately not `Sync` or
+    /// shared: a view's direct pages belong to the thread running that view.
     #[derive(Debug)]
     pub(crate) struct Overlay {
-        /// `Option` only so [`Drop`] can move the map out. Every method sees it
-        /// as present; `expect` is unreachable outside `Drop`.
-        map: Option<FastMap<Key, StateId>>,
+        storage: Option<Storage>,
     }
 
     impl Default for Overlay {
         fn default() -> Self {
-            let recycled = MAPS
+            Self::with_bounds(
+                DEFAULT_MIN_XZ,
+                DEFAULT_MAX_XZ,
+                DEFAULT_MIN_Y,
+                DEFAULT_HEIGHT,
+            )
+        }
+    }
+
+    impl Overlay {
+        pub(crate) fn with_bounds(min_x: i32, max_x: i32, min_y: i32, height: i32) -> Self {
+            let recycled = OVERLAYS
                 .try_with(|free| free.try_borrow_mut().ok().and_then(|mut f| f.pop()))
                 .ok()
                 .flatten();
             if recycled.is_none() {
                 bump_miss();
             }
-            Self { map: Some(recycled.unwrap_or_default()) }
-        }
-    }
-
-    impl Overlay {
-        fn map(&self) -> &FastMap<Key, StateId> {
-            self.map.as_ref().expect("overlay map is only taken in Drop")
+            let mut storage = recycled.unwrap_or_else(|| {
+                Storage::new(min_x, max_x, min_y, height, min_x, max_x)
+            });
+            storage.reconfigure(min_x, max_x, min_y, height, min_x, max_x);
+            Self { storage: Some(storage) }
         }
 
-        fn map_mut(&mut self) -> &mut FastMap<Key, StateId> {
-            self.map.as_mut().expect("overlay map is only taken in Drop")
+        fn storage(&self) -> &Storage {
+            self.storage.as_ref().expect("overlay storage is only taken in Drop")
         }
 
+        fn storage_mut(&mut self) -> &mut Storage {
+            self.storage.as_mut().expect("overlay storage is only taken in Drop")
+        }
+
+        #[cfg(test)]
         pub(crate) fn get(&self, key: &Key) -> Option<StateId> {
-            self.map().get(key).copied()
+            self.storage().pack(key).and_then(|packed| self.storage().get_packed(packed))
         }
 
-        pub(crate) fn insert(&mut self, key: Key, state: StateId) {
-            self.map_mut().insert(key, state);
+        #[inline]
+        pub(crate) fn get_in_bounds(&self, key: &Key) -> Option<StateId> {
+            let storage = self.storage();
+            debug_assert!(
+                storage.pack(key).is_some(),
+                "overlay key is outside its configured bounds"
+            );
+            storage.get_packed(storage.pack_unchecked(key))
         }
 
-        /// Number of **distinct** cells written — `HashMap::len`, unchanged, so
-        /// overwriting a cell does not grow it.
+        #[inline]
+        pub(crate) fn insert_in_bounds(&mut self, key: Key, state: StateId) {
+            self.storage_mut().insert_in_bounds(key, state);
+        }
+
+        /// Number of **distinct** cells written. An overwrite updates its stamped
+        /// cell in place and does not append another packed key.
         pub(crate) fn len(&self) -> usize {
-            self.map().len()
+            self.storage().keys.len()
         }
 
-        /// Every entry. Only for a consumer that imposes a total order of its own
-        /// — see this module's doc.
-        pub(crate) fn iter(&self) -> impl Iterator<Item = (&Key, &StateId)> {
-            self.map().iter()
+        /// Every current entry. Consumers impose a total order before exporting
+        /// values; page allocation order is never observable.
+        pub(crate) fn iter(&self) -> impl Iterator<Item = (Key, StateId)> + '_ {
+            let storage = self.storage();
+            storage.keys.iter().filter_map(move |&packed| {
+                storage.get_packed(packed).map(|state| (storage.unpack(packed), state))
+            })
+        }
+
+        #[cfg(test)]
+        pub(crate) fn raw_get(&self, key: &Key) -> Option<StateId> {
+            let storage = self.storage();
+            storage.pack(key).and_then(|packed| storage.raw_get_packed(packed))
         }
     }
 
     impl Drop for Overlay {
         fn drop(&mut self) {
-            let Some(mut map) = self.map.take() else {
+            let Some(mut storage) = self.storage.take() else {
                 return;
             };
-            // `clear` keeps the capacity — that is the whole point — and is what
-            // makes the next taker's view identical to a fresh map's.
-            map.clear();
-            let _ = MAPS.try_with(|free| {
+            // Keep pages and their stamped cells. `reconfigure` advances the
+            // generation on the next take, so retaining them avoids a full clear
+            // while stale values remain unreadable.
+            storage.keys.clear();
+            let _ = OVERLAYS.try_with(|free| {
                 if let Ok(mut f) = free.try_borrow_mut() {
                     if f.len() < KEEP {
-                        f.push(map);
+                        f.push(storage);
                     }
                 }
             });
@@ -354,9 +579,9 @@ mod scratch {
     /// free-list served the buffer" from "the count happened to be low".
     #[must_use]
     pub(crate) fn free_list_lengths() -> (usize, usize) {
-        let maps = MAPS.with(|f| f.borrow().len());
+        let overlays = OVERLAYS.with(|f| f.borrow().len());
         let logs = LOGS.with(|f| f.borrow().len());
-        (maps, logs)
+        (overlays, logs)
     }
 
     fn bump_miss() {
@@ -376,7 +601,7 @@ mod scratch {
     /// Drops every buffer this thread is holding. The control half of the
     /// allocation gate — see [`super::drain_scratch_free_lists`].
     pub(crate) fn drain_free_lists() {
-        MAPS.with(|f| f.borrow_mut().clear());
+        OVERLAYS.with(|f| f.borrow_mut().clear());
         LOGS.with(|f| f.borrow_mut().clear());
     }
 }
@@ -446,13 +671,20 @@ pub const WIDE_RADIUS: i32 = 2;
 /// terrain and height queries widen together rather than disagreeing at the
 /// outer source edge.
 #[must_use]
+#[inline]
 pub fn wide_source_slot(lx: i32, lz: i32) -> Option<usize> {
-    let dx = lx.div_euclid(16);
-    let dz = lz.div_euclid(16);
-    if !(-WIDE_RADIUS..=WIDE_RADIUS).contains(&dx) || !(-WIDE_RADIUS..=WIDE_RADIUS).contains(&dz) {
+    const MIN: i32 = -WIDE_RADIUS * 16;
+    const MAX: i32 = (WIDE_RADIUS + 1) * 16;
+    if !(MIN..MAX).contains(&lx) || !(MIN..MAX).contains(&lz) {
         return None;
     }
-    Some(wide_slot_of_offset(dx, dz))
+    // The read window is chunk-aligned. Once the bounds check proves that the
+    // coordinates are in it, shifts replace the two floor divisions without
+    // changing the negative-coordinate convention (`MIN` is -32). Keep this
+    // helper pure so every source-table filler and reader shares the same map.
+    let x = ((lx - MIN) >> 4) as usize;
+    let z = ((lz - MIN) >> 4) as usize;
+    Some(x * (WIDE_RADIUS as usize * 2 + 1) + z)
 }
 
 /// The slot index for chunk offset `(dx, dz)` ∈ `[-`[`WIDE_RADIUS`]`, `[`WIDE_RADIUS`]`]²`.
@@ -469,7 +701,7 @@ pub(crate) fn wide_slot_of_offset(dx: i32, dz: i32) -> usize {
 /// How many slots [`wide_source_slot`] can return — `(2 · WIDE_RADIUS + 1)²`.
 pub(crate) const WIDE_SLOTS: usize = ((WIDE_RADIUS * 2 + 1) * (WIDE_RADIUS * 2 + 1)) as usize;
 
-/// How many recycled buffers of each shape (overlay map, write log) this thread
+/// How many recycled buffers of each shape (overlay pages, write log) this thread
 /// currently holds — for a gate that needs to tell "the free-list served this
 /// buffer" apart from "the count happened to be low".
 #[must_use]
@@ -533,19 +765,13 @@ pub struct RegionView<'a> {
     /// few thousand cells per column against a 884,736-cell region, which is
     /// the whole reason the region does not need materialising.
     ///
-    /// [`Overlay`]: a [`lodestone_worldgen_core::hash::FastMap`] whose buffer is
-    /// recycled through [`scratch`]'s per-thread free-list. Not the default
-    /// hasher: this was the single hottest hash consumer in the whole pipeline
-    /// when U17 profiled it — **39.5% of all SipHash time**, because ore
-    /// placement probes it on every read and inserts on every write — and
-    /// `reserve_rehash` showed up on top of that at 6.8% as it grew, which is the
-    /// half U19's recycling removes (a reused buffer is already at capacity).
-    ///
-    /// Both re-hashing it *and* recycling it are safe for the same single reason:
-    /// [`Self::centre_writes_in_scan_order`] sorts by the full key rather than
-    /// trusting iteration order — see the ordering argument on
-    /// [`lodestone_worldgen_core::hash::fast`], and the doc on that method,
-    /// which was already written to defend against exactly this.
+    /// [`Overlay`]: a bounded direct-address page directory whose local
+    /// coordinates are packed into a `u32`; each cell carries a generation
+    /// stamp, and the view's pages are recycled through [`scratch`]'s per-thread
+    /// free-list. Pages are allocated lazily, so the sparse write set does not
+    /// materialise the full region. [`Self::centre_writes_in_scan_order`] sorts
+    /// by the full key before palette fold-back; page or insertion order is never
+    /// allowed to reach served bytes.
     overlay: Overlay,
     /// Reused ordering buffer for the mixed ore/vegetation bridge. The bridge
     /// consumes the ordered values before the next call, so retaining this
@@ -592,7 +818,7 @@ impl<'a> RegionView<'a> {
             origin_z: centre_cz * 16,
             min_y,
             height,
-            overlay: Overlay::default(),
+            overlay: Overlay::with_bounds(REGION_MIN, REGION_MAX, min_y, height),
             scan_order: Vec::new(),
             write_log: WriteLog::default(),
             interner,
@@ -627,7 +853,12 @@ impl<'a> RegionView<'a> {
             origin_z: centre_cz * 16,
             min_y,
             height,
-            overlay: Overlay::default(),
+            overlay: Overlay::with_bounds(
+                super::ORE_READ_MIN,
+                super::ORE_READ_MAX,
+                min_y,
+                height,
+            ),
             scan_order: Vec::new(),
             write_log: WriteLog::default(),
             interner,
@@ -636,7 +867,7 @@ impl<'a> RegionView<'a> {
 
     /// A view over **one** grid that is already addressed in centre-relative
     /// region-local coordinates — the shape a parity fixture builds, since a
-    /// fixture is naturally one sparse `HashMap` over the whole region rather
+    /// fixture is naturally one sparse local grid over the whole region rather
     /// than nine per-chunk fields.
     ///
     /// Every slot points at that same grid with `origin = (0, 0)`, so a read
@@ -654,7 +885,7 @@ impl<'a> RegionView<'a> {
             origin_z: 0,
             min_y,
             height,
-            overlay: Overlay::default(),
+            overlay: Overlay::with_bounds(REGION_MIN, REGION_MAX, min_y, height),
             scan_order: Vec::new(),
             write_log: WriteLog::default(),
             interner: Arc::clone(grid.interner()),
@@ -705,7 +936,7 @@ impl<'a> RegionView<'a> {
         if !self.in_read_region(lx, y, lz) {
             return StateId::AIR;
         }
-        if let Some(id) = self.overlay.get(&(lx, y, lz)) {
+        if let Some(id) = self.overlay.get_in_bounds(&(lx, y, lz)) {
             // Counted here as well as in [`Self::get`] so `ore_probe`'s
             // `region_reads_overlay` stays one number across §12.149's change of read
             // path: `try_place_ore` used to reach the overlay through `get` and now
@@ -733,7 +964,7 @@ impl<'a> RegionView<'a> {
         if !self.in_read_region(lx, y, lz) {
             return "minecraft:air";
         }
-        if let Some(id) = self.overlay.get(&(lx, y, lz)) {
+        if let Some(id) = self.overlay.get_in_bounds(&(lx, y, lz)) {
             super::ore_probe::bump_region_read_overlay(1);
             return self.interner.name_of(id);
         }
@@ -750,7 +981,7 @@ impl<'a> RegionView<'a> {
         if !self.in_region(lx, y, lz) {
             return false;
         }
-        self.overlay.insert((lx, y, lz), state);
+        self.overlay.insert_in_bounds((lx, y, lz), state);
         self.write_log.push((lx, y, lz));
         true
     }
@@ -770,7 +1001,7 @@ impl<'a> RegionView<'a> {
         if !self.in_read_region(lx, y, lz) {
             return false;
         }
-        self.overlay.insert((lx, y, lz), state);
+        self.overlay.insert_in_bounds((lx, y, lz), state);
         true
     }
 
@@ -804,7 +1035,7 @@ impl<'a> RegionView<'a> {
         self.scan_order.clear();
         let overlay = &self.overlay;
         self.scan_order.extend(self.write_log.iter_from(cursor).filter_map(
-            |&(lx, y, lz)| overlay.get(&(lx, y, lz)).map(|id| (lx, y, lz, id)),
+            |&(lx, y, lz)| overlay.get_in_bounds(&(lx, y, lz)).map(|id| (lx, y, lz, id)),
         ));
         self.scan_order
             .sort_unstable_by_key(|&(lx, y, lz, _)| (lx, lz, y));
@@ -823,7 +1054,7 @@ impl<'a> RegionView<'a> {
         let mut out: Vec<(i32, i32, i32, StateId)> = self
             .overlay
             .iter()
-            .map(|(&(lx, y, lz), &id)| (lx, y, lz, id))
+            .map(|((lx, y, lz), id)| (lx, y, lz, id))
             .collect();
         out.sort_unstable_by_key(|&(lx, y, lz, _)| (lx, lz, y));
         out
@@ -841,7 +1072,7 @@ impl<'a> RegionView<'a> {
         self.scan_order.extend(
             self.overlay
                 .iter()
-                .map(|(&(lx, y, lz), &id)| (lx, y, lz, id)),
+                .map(|((lx, y, lz), id)| (lx, y, lz, id)),
         );
         self.scan_order
             .sort_unstable_by_key(|&(lx, y, lz, _)| (lx, lz, y));
@@ -870,17 +1101,15 @@ impl<'a> RegionView<'a> {
     ///   cell, and the subsequence of new states seen in `(y, lz, lx)` order is
     ///   the same whether the walk visits the unchanged cells or skips them.
     ///
-    /// Sorting is by the full key over a `HashMap`'s unique keys, so the order is
-    /// total and does not depend on iteration order — the `RandomState` trap
-    /// `crate::overworld`'s module doc records is avoided by construction rather
-    /// than by hoping the map iterates the same way twice.
+    /// Sorting is by the full key over the overlay's unique packed keys, so the
+    /// order is total and does not depend on page allocation or recycling order.
     #[must_use]
     pub fn centre_writes_in_scan_order(&self) -> Vec<(i32, i32, i32, StateId)> {
         let mut out: Vec<(i32, i32, i32, StateId)> = self
             .overlay
             .iter()
             .filter(|((lx, _, lz), _)| (0..16).contains(lx) && (0..16).contains(lz))
-            .map(|(&(lx, y, lz), &id)| (lx, y, lz, id))
+            .map(|((lx, y, lz), id)| (lx, y, lz, id))
             .collect();
         out.sort_unstable_by_key(|&(lx, y, lz, _)| (y, lz, lx));
         out
@@ -1053,14 +1282,16 @@ mod tests {
     /// The control half matters as much as the claim. Without the second
     /// assertion — that the buffer really was the recycled one — this test passes
     /// identically against a free-list that never hands anything back, which is
-    /// the *premise-false* shape: it would be testing `HashMap::new()`.
+    /// the *premise-false* shape: it would be testing a fresh page directory.
     #[test]
     fn a_recycled_overlay_is_empty_and_is_really_the_recycled_one() {
         scratch::drain_free_lists();
+        let bounds = (-4, 8, 0, 64);
+        let stale = StateId::from_raw(7);
         {
-            let mut first = Overlay::default();
+            let mut first = Overlay::with_bounds(bounds.0, bounds.1, bounds.2, bounds.3);
             for y in 0..64 {
-                first.insert((1, y, 2), StateId::AIR);
+                first.insert_in_bounds((1, y, 2), stale);
             }
             assert_eq!(first.len(), 64);
         }
@@ -1073,14 +1304,234 @@ mod tests {
              emptiness assertion below is about a brand-new map and proves nothing \
              about recycling",
         );
-        let second = Overlay::default();
+        let second = Overlay::with_bounds(bounds.0, bounds.1, bounds.2, bounds.3);
         assert_eq!(second.len(), 0, "a recycled overlay must carry no stale keys");
+        assert_eq!(
+            second.raw_get(&(1, 7, 2)),
+            Some(stale),
+            "control: the recycled page must still physically contain the old value, or the \
+             epoch test below could pass because the page was cleared rather than stamped",
+        );
         assert_eq!(
             second.get(&(1, 7, 2)),
             None,
-            "a key written through the previous holder must not be visible",
+            "a key written through the previous holder must be hidden by the new generation",
         );
         assert_eq!(scratch::free_list_lengths().0, 0, "the take must consume it");
+    }
+
+    /// A new view may use a different local origin with the same page shape.
+    /// The packed offset can therefore alias a physical slot from the previous
+    /// view; only the generation stamp must distinguish the two coordinates.
+    #[test]
+    fn a_reused_page_does_not_alias_when_bounds_rebase_the_packed_key() {
+        scratch::drain_free_lists();
+        let stale = StateId::from_raw(19);
+        {
+            let mut first = Overlay::with_bounds(-4, 8, 0, 16);
+            first.insert_in_bounds((-3, 0, -3), stale);
+        }
+        assert_eq!(scratch::free_list_lengths().0, 1);
+
+        let second = Overlay::with_bounds(0, 12, 0, 16);
+        // (-3, 0, -3) from the old view and (1, 0, 1) in this view have the same
+        // packed offset. The raw control proves that the page was reused rather
+        // than newly allocated, while the stamped lookup must still miss.
+        assert_eq!(second.raw_get(&(1, 0, 1)), Some(stale));
+        assert_eq!(second.get(&(1, 0, 1)), None);
+    }
+
+    /// A nested or re-entrant view must not borrow the outer view's storage.
+    /// With the free-list empty while `outer` is live, the inner view allocates
+    /// its own storage; both values remain visible to their original owners.
+    #[test]
+    fn nested_views_keep_independent_overlay_storage() {
+        scratch::drain_free_lists();
+        let outer_key = (-3, 0, -3);
+        let inner_key = (1, 0, 1);
+        let outer_state = StateId::from_raw(23);
+        let inner_state = StateId::from_raw(29);
+        let mut outer = Overlay::with_bounds(-4, 8, 0, 16);
+        outer.insert_in_bounds(outer_key, outer_state);
+        {
+            let mut inner = Overlay::with_bounds(-4, 8, 0, 16);
+            inner.insert_in_bounds(inner_key, inner_state);
+            assert_eq!(inner.get(&inner_key), Some(inner_state));
+            assert_eq!(outer.get(&outer_key), Some(outer_state));
+            assert_eq!(outer.get(&inner_key), None);
+        }
+        assert_eq!(outer.get(&outer_key), Some(outer_state));
+        assert_eq!(outer.get(&inner_key), None);
+    }
+
+    /// Recycling is thread-local: a worker must not consume a page directory
+    /// returned by another worker, even when both use the same bounds.
+    #[test]
+    fn overlay_recycling_stays_on_the_current_thread() {
+        scratch::drain_free_lists();
+        {
+            let mut owner = Overlay::with_bounds(-4, 8, 0, 16);
+            owner.insert_in_bounds((-3, 0, -3), StateId::from_raw(31));
+        }
+        assert_eq!(scratch::free_list_lengths().0, 1);
+
+        std::thread::spawn(|| {
+            scratch::drain_free_lists();
+            assert_eq!(scratch::free_list_lengths().0, 0);
+            {
+                let mut worker = Overlay::with_bounds(-4, 8, 0, 16);
+                worker.insert_in_bounds((1, 0, 1), StateId::from_raw(37));
+            }
+            assert_eq!(scratch::free_list_lengths().0, 1);
+        })
+        .join()
+        .expect("the thread-local recycling control must complete");
+
+        assert_eq!(scratch::free_list_lengths().0, 1);
+    }
+
+    /// The direct overlay and the former fast map must have the same final
+    /// content, independent of page allocation order. The digest is over the
+    /// full coordinate key and state id after sorting, so a coordinate truncation
+    /// or a stale-page hit cannot hide behind equal lengths.
+    #[test]
+    fn direct_overlay_matches_fast_map_content_digest() {
+        use lodestone_worldgen_core::hash::FastMap;
+        use sha2::{Digest, Sha256};
+
+        fn digest(entries: &[(i32, i32, i32, StateId)]) -> [u8; 32] {
+            let mut hash = Sha256::new();
+            for &(lx, y, lz, id) in entries {
+                hash.update(lx.to_le_bytes());
+                hash.update(y.to_le_bytes());
+                hash.update(lz.to_le_bytes());
+                hash.update(id.raw().to_le_bytes());
+            }
+            hash.finalize().into()
+        }
+
+        // Computed independently from the deterministic key/state stream and
+        // checked in as a content oracle, rather than deriving the expected
+        // digest from the implementation under test.
+        const EXPECTED_DIGEST: [u8; 32] = [
+            0xfa, 0x51, 0x5e, 0x76, 0x8d, 0xd0, 0xa1, 0x51, 0x09, 0x89, 0x82, 0x22, 0x3e, 0x35,
+            0x4c, 0xea, 0x34, 0x16, 0x4f, 0x48, 0xc0, 0xd2, 0x8c, 0x0d, 0x10, 0x47, 0x41, 0x85,
+            0x5b, 0xa5, 0xd2, 0x8a,
+        ];
+
+        let mut overlay = Overlay::with_bounds(-16, 32, -64, 384);
+        let mut reference: FastMap<(i32, i32, i32), StateId> = FastMap::default();
+        for i in 0..1_200i32 {
+            let key = ((i * 17).rem_euclid(48) - 16, (i * 13).rem_euclid(384) - 64, (i * 29).rem_euclid(48) - 16);
+            let state = StateId::from_raw((i as u16 % 97) + 1);
+            overlay.insert_in_bounds(key, state);
+            reference.insert(key, state);
+        }
+        // Seeded cells use the same overlay but are intentionally not represented
+        // in RegionView's write log; content parity still includes them.
+        let seeded = (-15, 7, 31);
+        let seeded_state = StateId::from_raw(333);
+        overlay.insert_in_bounds(seeded, seeded_state);
+        reference.insert(seeded, seeded_state);
+
+        let mut got: Vec<_> = overlay
+            .iter()
+            .map(|((lx, y, lz), id)| (lx, y, lz, id))
+            .collect();
+        let mut expected: Vec<_> = reference
+            .iter()
+            .map(|(&(lx, y, lz), &id)| (lx, y, lz, id))
+            .collect();
+        got.sort_unstable_by_key(|&(lx, y, lz, _)| (lx, lz, y));
+        expected.sort_unstable_by_key(|&(lx, y, lz, _)| (lx, lz, y));
+        assert_eq!(got.len(), 385, "the parity stream must collapse repeated keys predictably");
+        assert_eq!(got, expected, "direct pages changed final overlay content");
+        assert_eq!(digest(&got), EXPECTED_DIGEST, "direct overlay content digest changed");
+        assert_eq!(digest(&expected), EXPECTED_DIGEST, "FastMap baseline content digest changed");
+    }
+
+    /// A release-only comparison against the former `FastMap<Key, StateId>`
+    /// container. Both arms execute the same warmed mixed read/write stream and
+    /// return a checksum so the optimizer cannot discard the work. This is a
+    /// diagnostic benchmark, not a direction-only gate: run it on a quiet host
+    /// and record the printed medians when comparing machines or revisions.
+    #[test]
+    #[ignore = "performance measurement; run with --release --ignored --nocapture"]
+    fn benchmark_direct_overlay_against_fast_map() {
+        use std::hint::black_box;
+        use std::time::{Duration, Instant};
+
+        use lodestone_worldgen_core::hash::FastMap;
+
+        const OPS: usize = 32_768;
+        const TRIALS: usize = 7;
+        let keys: Vec<_> = (0..OPS)
+            .map(|i| {
+                let i = i as i32;
+                (
+                    (i * 17).rem_euclid(80) - 32,
+                    (i * 13).rem_euclid(448) - 64,
+                    (i * 29).rem_euclid(80) - 32,
+                )
+            })
+            .collect();
+        let states: Vec<_> = (0..OPS)
+            .map(|i| StateId::from_raw((i as u16 % 251) + 1))
+            .collect();
+
+        fn direct_round(keys: &[(i32, i32, i32)], states: &[StateId]) -> u64 {
+            let mut overlay = Overlay::with_bounds(-32, 48, -64, 448);
+            let mut checksum = 0u64;
+            for (i, (&key, &state)) in keys.iter().zip(states).enumerate() {
+                if i % 4 == 0 {
+                    overlay.insert_in_bounds(key, state);
+                } else {
+                    checksum = checksum.wrapping_add(
+                        overlay.get_in_bounds(&key).map_or(0, |state| state.raw() as u64),
+                    );
+                }
+            }
+            black_box(checksum ^ overlay.len() as u64)
+        }
+
+        fn fast_map_round(keys: &[(i32, i32, i32)], states: &[StateId]) -> u64 {
+            let mut map: FastMap<(i32, i32, i32), StateId> = FastMap::default();
+            let mut checksum = 0u64;
+            for (i, (&key, &state)) in keys.iter().zip(states).enumerate() {
+                if i % 4 == 0 {
+                    map.insert(key, state);
+                } else {
+                    checksum = checksum.wrapping_add(
+                        map.get(&key).map_or(0, |state| state.raw() as u64),
+                    );
+                }
+            }
+            black_box(checksum ^ map.len() as u64)
+        }
+
+        let direct_warm = direct_round(&keys, &states);
+        let fast_map_warm = fast_map_round(&keys, &states);
+        assert_eq!(direct_warm, fast_map_warm, "benchmark arms must consume identical results");
+
+        let mut direct_elapsed = Duration::ZERO;
+        let mut fast_map_elapsed = Duration::ZERO;
+        for _ in 0..TRIALS {
+            let start = Instant::now();
+            let direct = black_box(direct_round(&keys, &states));
+            direct_elapsed += start.elapsed();
+            let start = Instant::now();
+            let fast_map = black_box(fast_map_round(&keys, &states));
+            fast_map_elapsed += start.elapsed();
+            assert_eq!(direct, fast_map, "benchmark arms diverged during a trial");
+        }
+
+        let direct_ns = direct_elapsed.as_nanos() / TRIALS as u128;
+        let fast_map_ns = fast_map_elapsed.as_nanos() / TRIALS as u128;
+        println!(
+            "region_overlay benchmark: ops={OPS} trials={TRIALS} direct_ns_per_round={direct_ns} fast_map_ns_per_round={fast_map_ns} direct_ns_per_op={} fast_map_ns_per_op={}",
+            direct_ns / OPS as u128,
+            fast_map_ns / OPS as u128,
+        );
     }
 
     /// The same contract for the write log, and additionally that write **order**
@@ -1120,13 +1571,13 @@ mod tests {
         scratch::drain_free_lists();
         let overlays: Vec<Overlay> = (0..32).map(|_| Overlay::default()).collect();
         drop(overlays);
-        let (maps, _) = scratch::free_list_lengths();
+        let (overlays, _) = scratch::free_list_lengths();
         assert!(
-            maps <= 4,
-            "32 overlays were dropped and the free-list kept {maps} of them; a \
+            overlays <= 4,
+            "32 overlays were dropped and the free-list kept {overlays} of them; a \
              thread-local cache with no bound is a leak wearing a cache's clothes",
         );
-        assert!(maps > 0, "control: it must keep at least one, or reuse never happens");
+        assert!(overlays > 0, "control: it must keep at least one, or reuse never happens");
     }
 
     fn chunk_grid(interner: &Arc<StateInterner>, cx: i32, cz: i32, state: &str) -> DenseBlockGrid {
@@ -1465,8 +1916,14 @@ mod tests {
         assert_eq!(view.get(-17, 4, 0), "minecraft:stone");
         let gold = interner.id_of("minecraft:gold_ore");
         assert!(view.seed_read_id(-17, 4, 0, gold));
+        assert_eq!(view.write_log_len(), 0, "seeded read context must not enter the write log");
         assert_eq!(view.get(-17, 4, 0), "minecraft:gold_ore");
         assert!(!view.seed_read_id(crate::feature::ORE_READ_MIN - 1, 4, 0, gold));
+        assert!(view.set_id(0, 4, 0, gold));
+        assert_eq!(view.write_log_len(), 1, "set_id must append after a seeded read");
+        view.with_write_log_since_scan_order(0, |writes| {
+            assert_eq!(writes, &[(0, 4, 0, gold)]);
+        });
     }
 
     /// An overlay write shadows the source underneath it, and a later read in the

@@ -63,6 +63,18 @@ for placement_var in SOURCE_X SOURCE_Z PLACED_FEATURE FEATURE_INDEX FEATURE_STEP
     WORLD_ENV+=( -e "ORACLE_${placement_var}=${!host_var}" )
   fi
 done
+for feature_var in GLOBAL_FEATURES ACTUAL_FEATURES ALL_STEP6 FEATURE_FILTER FOCUS; do
+  host_var="LODESTONE_ORACLE_${feature_var}"
+  if [ -n "${!host_var:-}" ]; then
+    WORLD_ENV+=( -e "ORACLE_${feature_var}=${!host_var}" )
+  fi
+done
+if [ -n "${LODESTONE_ORACLE_PRELOAD:-}" ]; then
+  WORLD_ENV+=( -e "ORACLE_PRELOAD=$LODESTONE_ORACLE_PRELOAD" )
+fi
+if [ -n "${LODESTONE_ORACLE_ORDER:-}" ]; then
+  WORLD_ENV+=( -e "ORACLE_ORDER=$LODESTONE_ORACLE_ORDER" )
+fi
 if [ "${LODESTONE_ORACLE_STOP_STAGE_PROBE:-}" = 1 ]; then
   WORLD_ENV+=( -e STOP_STAGE_PROBE=1 )
 fi
@@ -165,11 +177,11 @@ container run "${CONTAINER_ARGS[@]}" eclipse-temurin:25-jdk bash -c '
     fi
     printf 'eula=true\n' > /work/eula.txt
     cp /oracle/'"$CLASS"'.java /work/
-    if [ '"$CLASS"' = EndHeightmapStatusOracle ] || [ '"$CLASS"' = LargeParityOracle ]; then
+    if [ '"$CLASS"' = LargeParityOracle ]; then
       cp /oracle/LargeParityOracle.java /work/
-      cp /oracle/EndHeightmapStatusOracle.java /work/
-      javac -cp "$CP" -d /work /work/LargeParityOracle.java /work/EndHeightmapStatusOracle.java
-    elif [ '"$CLASS"' = NetherPlacementOracle ] || [ '"$CLASS"' = NetherColumnOracle ] || [ '"$CLASS"' = NetherStageOracle ] || [ '"$CLASS"' = NetherFeatureAdmissionOracle ] || [ '"$CLASS"' = NetherFeatureCellsOracle ] || [ '"$CLASS"' = NetherBlobPlacementOracle ] || [ '"$CLASS"' = OverworldFeatureTraceOracle ] || [ '"$CLASS"' = OverworldReplayFeaturesOracle ]; then
+      cp /oracle/EndP06LifecycleCapture.java /work/
+      javac -cp "$CP" -d /work /work/LargeParityOracle.java /work/EndP06LifecycleCapture.java
+    elif [ '"$CLASS"' = NetherPlacementOracle ] || [ '"$CLASS"' = NetherColumnOracle ] || [ '"$CLASS"' = NetherStageOracle ] || [ '"$CLASS"' = NetherFeatureAdmissionProbe ] || [ '"$CLASS"' = NetherFeatureAdmissionOracle ] || [ '"$CLASS"' = NetherFeatureCellsOracle ] || [ '"$CLASS"' = NetherBlobPlacementOracle ] || [ '"$CLASS"' = OverworldFeatureTraceOracle ] || [ '"$CLASS"' = OverworldStatusOracle ] || [ '"$CLASS"' = OverworldRegionReplayOracle ] || [ '"$CLASS"' = OverworldFeatureSourceOracle ] || [ '"$CLASS"' = OverworldLifecycleChestOracle ] || [ '"$CLASS"' = OverworldReplayFeaturesOracle ]; then
       cp /oracle/LargeParityOracle.java /work/
       javac -cp "$CP" -d /work /work/LargeParityOracle.java /work/'"$CLASS"'.java
     else

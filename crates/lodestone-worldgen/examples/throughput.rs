@@ -196,7 +196,10 @@ fn hash_overworld_column(digest: &mut Sha256, column: &lodestone_worldgen::overw
     }
     hash_u64(digest, column.block_entities().len() as u64);
     for entity in column.block_entities() {
-        hash_str(digest, entity.type_id());
+        hash_str(
+            digest,
+            lodestone_data::block_entity_types::block_entity_type_name(entity.type_id()),
+        );
         let (x, y, z) = entity.position();
         hash_i32(digest, x);
         hash_i32(digest, y);
@@ -222,7 +225,13 @@ fn hash_overworld_column(digest: &mut Sha256, column: &lodestone_worldgen::overw
             }
             lodestone_worldgen::overworld::GeneratedBlockEntity::DungeonSpawner {
                 entity_type, ..
-            } => hash_str(digest, entity_type),
+            } => hash_str(
+                digest,
+                entity_type
+                    .builtin_or_none()
+                    .expect("generated spawner type is built-in")
+                    .name(),
+            ),
         }
     }
 }
@@ -549,6 +558,21 @@ fn main() {
             let generator = Generator::new(dimension, seed);
             let cold = run_pass(&generator, mode, &coords);
             let warm = run_pass(&generator, mode, &coords);
+            if cold.content_digest != warm.content_digest {
+                for &(cx, cz) in &coords {
+                    let one = [(cx, cz)];
+                    let cold_generator = Generator::new(dimension, seed);
+                    let cold_chunk = generated_content_digest(&cold_generator, mode, &one);
+                    let warm_chunk = generated_content_digest(&generator, mode, &one);
+                    if cold_chunk != warm_chunk {
+                        eprintln!(
+                            "content divergence at ({cx},{cz}): cold={} warm={}",
+                            format_digest(cold_chunk),
+                            format_digest(warm_chunk),
+                        );
+                    }
+                }
+            }
             assert_eq!(
                 cold.content_digest, warm.content_digest,
                 "cold and warm {}/{} generated-content digests differ; generation is not deterministic",

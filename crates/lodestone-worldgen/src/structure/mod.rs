@@ -167,7 +167,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 use lodestone_worldgen_core::rng::{
-    LegacyRandomSource, PositionalRandomFactory, RandomSource, WorldgenRandom, XoroshiroRandomSource,
+    LegacyRandomSource, RandomSource, WorldgenRandom, XoroshiroRandomSource,
 };
 use serde_json::Value;
 
@@ -189,6 +189,78 @@ fn structure_random(seed: i64, cx: i32, cz: i32) -> StructureRandom {
     let mut random = WorldgenRandom::new(LegacyRandomSource::new(0));
     random.set_large_feature_seed(seed, cx, cz);
     random
+}
+
+/// Walk a structure set's weighted entries, retrying candidates rejected by
+/// the start predicate while preserving the per-attempt random stream.
+///
+/// Bundled sets are small, so rejected entries are represented by a bit mask
+/// instead of repeatedly cloning and removing from the registry vector. The
+/// fallback keeps the old vector walk for unusually large datapack-defined
+/// sets. `try_candidate` receives the selected structure id and returns the
+/// completed value when that candidate is valid.
+fn choose_weighted_entry<T, F>(
+    entries: &[(String, i32)],
+    random: &mut StructureRandom,
+    mut try_candidate: F,
+) -> Option<T>
+where
+    F: FnMut(&str) -> Option<T>,
+{
+    if entries.len() <= u64::BITS as usize {
+        let mut rejected = 0u64;
+        let mut remaining = entries.len();
+        let mut total: i32 = entries.iter().map(|(_, weight)| *weight).sum();
+        while remaining > 0 {
+            let mut choice = random.next_int_bounded(total);
+            let mut index = 0usize;
+            for (candidate, (_, weight)) in entries.iter().enumerate() {
+                if rejected & (1u64 << candidate) != 0 {
+                    continue;
+                }
+                choice -= *weight;
+                if choice < 0 {
+                    index = candidate;
+                    break;
+                }
+            }
+            if let Some(value) = try_candidate(&entries[index].0) {
+                return Some(value);
+            }
+            rejected |= 1u64 << index;
+            remaining -= 1;
+            total -= entries[index].1;
+            if total <= 0 {
+                break;
+            }
+        }
+    } else {
+        let mut options = entries.to_vec();
+        let mut total: i32 = options.iter().map(|(_, weight)| *weight).sum();
+        while !options.is_empty() {
+            let mut choice = random.next_int_bounded(total);
+            let mut index = 0usize;
+            for (_, weight) in &options {
+                choice -= *weight;
+                if choice < 0 {
+                    break;
+                }
+                index += 1;
+            }
+            // A faithful walk indexes with the loop counter, which lands one
+            // past the last option only if the weights do not sum to `total`.
+            let index = index.min(options.len() - 1);
+            if let Some(value) = try_candidate(&options[index].0) {
+                return Some(value);
+            }
+            total -= options[index].1;
+            options.remove(index);
+            if total <= 0 {
+                break;
+            }
+        }
+    }
+    None
 }
 
 /// The bundled structure-set registration order, read from the game's own
@@ -427,9 +499,13 @@ pub enum HeightmapKind {
     OceanFloorWg,
 }
 
-/// Per-build cache for deterministic climate targets inspected by a structure
-/// placement search. The biome lookup itself remains uncached so the caller's
-/// search cursor continues to observe the complete probe order.
+/// Per-build cache for the climate target at a quart cell inspected by a
+/// concentric-ring relocation search.
+///
+/// The cache is deliberately owned by one ring-index build. It is not shared
+/// between generators or worker threads, and it stores only the deterministic
+/// climate target: the biome-tree lookup still runs for every probe, retaining
+/// its cursor history and tie-breaking behaviour.
 #[derive(Debug, Default)]
 pub struct RingProbeCache {
     targets: HashMap<(i32, i32, i32), [i64; 7]>,
@@ -459,8 +535,12 @@ pub trait StartContext {
     fn first_occupied_height(&self, x: i32, z: i32, heightmap: HeightmapKind) -> i32;
     /// The biome id at a quart cell `(qx, qy, qz)`.
     fn biome_at_quart(&self, qx: i32, qy: i32, qz: i32) -> String;
-    /// Whether the biome at a quart belongs to `allowed`. Implementors with a
-    /// borrowed biome table may override this to avoid a temporary `String`.
+    /// Whether the biome at a quart cell belongs to `allowed`.
+    ///
+    /// The default preserves the string-returning compatibility seam. A
+    /// generator that can borrow its biome table may override this to avoid a
+    /// temporary allocation in broad placement searches such as concentric
+    /// ring relocation.
     fn biome_in_set_at_quart(
         &self,
         qx: i32,
@@ -470,8 +550,10 @@ pub trait StartContext {
     ) -> bool {
         allowed.contains(&self.biome_at_quart(qx, qy, qz))
     }
-    /// Cached form used by broad placement searches. The default preserves the
-    /// original callback behavior for generic contexts.
+    /// Whether the biome at a quart cell belongs to `allowed`, reusing the
+    /// climate target in `cache` when this context can expose one cheaply.
+    /// The default keeps third-party contexts source-compatible and preserves
+    /// their existing lookup path.
     fn biome_in_set_at_quart_cached(
         &self,
         qx: i32,
@@ -482,11 +564,15 @@ pub trait StartContext {
     ) -> bool {
         self.biome_in_set_at_quart(qx, qy, qz, allowed)
     }
-    /// Optional batch climate-target seam for contexts that can evaluate the
-    /// immutable sampler independently of the structure predicate.
+    /// Batch-samples climate targets for concentric-ring probes when the
+    /// context can evaluate its immutable climate sampler independently. The
+    /// default keeps generic contexts on the callback path.
     fn ring_probe_targets(&self, _quart_cells: &[(i32, i32, i32)]) -> Option<Vec<[i64; 7]>> {
         None
     }
+    /// Whether this context supports the batch target seam above. Keeping the
+    /// capability explicit avoids constructing and sorting a large probe list
+    /// for generic contexts that use the compatibility callback path.
     fn supports_ring_probe_batch(&self) -> bool {
         false
     }
@@ -664,8 +750,8 @@ pub struct StructurePiece {
     /// [`DenseBlockGrid`](crate::dense_grid::DenseBlockGrid) as
     /// [`crate::overworld::OverworldGenerator::structure_place_stage`] writes it,
     /// rather than [`Self::blocks`]'s eager start-time list. `None` for every
-    /// piece above; [`PieceRefinement::BuriedTreasureChest`] and
-    /// [`PieceRefinement::RuinedPortalTerrain`] are its users — see their own
+    /// piece above; the buried-treasure, fossil-ghast and ruined-portal passes
+    /// are its users — see their own
     /// docs for why those material-sensitive passes cannot run at start time.
     pub refine: Option<PieceRefinement>,
 }
@@ -713,7 +799,9 @@ pub enum PieceRefinement {
     /// deferred-placement walk runs) — only the chest's *placement* is
     /// deferred, not its start.
     BuriedTreasureChest,
-    /// The dried-ghast roll for a Nether fossil, tested after template writes.
+    /// The dried-ghast roll for a Nether fossil. Its candidate must be tested
+    /// after the fossil template has written its own blocks and carved terrain
+    /// is present in the receiving chunk.
     NetherFossilDriedGhast { seed: i64 },
     /// The post-template terrain growth around a ruined portal.
     ///
@@ -1737,7 +1825,6 @@ impl StructureKind {
             return Some(nether_fossil_pieces(
                 position,
                 seed,
-                ctx,
                 templates,
                 &mut *random,
             ));
@@ -2150,19 +2237,12 @@ fn shipwreck_pieces<R: RandomSource>(
 /// box centre, not from the structure's stream, so it costs the stream nothing and is
 /// a pure function of `(seed, box)`.
 ///
-/// # Why the ghast is a coded block on a template piece
-///
-/// A faithful air test would run against the world *after* the template placed, and it is
-/// the one read this engine cannot make at start time. It does not have to:
-/// `structure_place_stage` writes `blocks` **before** `placement`, so the ghast is
-/// laid down and then overwritten wherever the template has a block of its own —
-/// which is exactly the set of positions an after-the-fact air test would have
-/// rejected. What is left to test here is the *terrain* being air, which
-/// [`StartContext::block_kind_at`] answers.
+/// The candidate is retained as a placement refinement: only after the template
+/// has written its blocks can the air predicate distinguish an open cell from
+/// one occupied by the fossil itself.
 fn nether_fossil_pieces<R: RandomSource>(
     position: [i32; 3],
     seed: i64,
-    ctx: &dyn StartContext,
     templates: &TemplateStore,
     random: &mut R,
 ) -> Vec<StructurePiece> {
@@ -2180,38 +2260,9 @@ fn nether_fossil_pieces<R: RandomSource>(
         waterlogging: true,
     };
     let mut piece = template_piece("minecraft:nefos", name, template, position, settings);
-    let box_ = piece.bounding_box;
-    // A positional fork of the world seed, forked again at the fossil box's
-    // centre — `min + (max - min + 1) / 2` on each axis.
-    let centre = [
-        box_.min[0] + (box_.max[0] - box_.min[0] + 1) / 2,
-        box_.min[1] + (box_.max[1] - box_.min[1] + 1) / 2,
-        box_.min[2] + (box_.max[2] - box_.min[2] + 1) / 2,
-    ];
-    let mut ghast = LegacyRandomSource::new(seed)
-        .fork_positional()
-        .at(centre[0], centre[1], centre[2]);
-    if ghast.next_float() < 0.5 {
-        let x = box_.min[0] + ghast.next_int_bounded(box_.max[0] - box_.min[0] + 1);
-        let y = box_.min[1];
-        let z = box_.min[2] + ghast.next_int_bounded(box_.max[2] - box_.min[2] + 1);
-        // The `nextInt`s are spent whether or not the position turns out to be air,
-        // so the terrain test comes after them.
-        if ctx.block_kind_at(x, y, z) == BlockKind::Air {
-            // The dried ghast block's own default state, rotated by a *third*
-            // draw from the same fork — the block's own rotation, rather than
-            // the piece's.
-            let facing_rotation = Rotation::random(&mut ghast);
-            let state = template::BlockState::parse(
-                "minecraft:dried_ghast[facing=north,hydration=0,waterlogged=false]",
-            )
-            .rotate(facing_rotation);
-            piece.blocks = Some(Arc::new(vec![CodedBlock {
-                pos: [x, y, z],
-                state: state.canonical(),
-            }]));
-        }
-    }
+    // The positional stream is deterministic at start time, but the candidate
+    // air test is against the post-template, post-carving receiving chunk.
+    piece.refine = Some(PieceRefinement::NetherFossilDriedGhast { seed });
     vec![piece]
 }
 
@@ -3115,17 +3166,19 @@ impl StructureRegistry {
         chunk_x: i32,
         chunk_z: i32,
         ctx: &dyn StartContext,
+        world: &crate::dense_grid::DenseBlockGrid,
         placement_random: &mut WorldgenRandom<XoroshiroRandomSource>,
     ) -> Option<Vec<CodedBlock>> {
         let StructureKind::Mineshaft { wood, blocking } = &self.structures.get(&start.structure)?.kind else {
             return None;
         };
         let mut tree_random = structure_random(self.seed, start.chunk_x, start.chunk_z);
-        let pieces = mineshaft::generate_for_chunk(
+        let pieces = mineshaft::generate_for_chunk_with_world(
             start.chunk_x,
             start.chunk_z,
             (chunk_x, chunk_z),
             ctx,
+            world,
             *wood,
             blocking,
             &mut tree_random,
@@ -3293,10 +3346,75 @@ impl StructureRegistry {
             .get_or_init(|| build_ring_positions(sets, seed, ctx))
     }
 
-    /// Eagerly materialises the registry-wide placement index used by
-    /// concentric-ring sets. Random-spread-only registries make this a cheap
-    /// no-op; callers that will query starts repeatedly can move the first
-    /// ring-search cost into generator construction.
+    /// Returns the possible structure origins in an inclusive chunk box, with
+    /// concentric-ring candidates resolved through this generator's biome
+    /// sampler.
+    ///
+    /// Random-spread placements contribute at most one origin per placement
+    /// cell. Ring placements instead use the same lazily materialised,
+    /// biome-relocated list as [`Self::starts_at`]. This is therefore an exact
+    /// inverse of the placement-origin gate, not an approximation that drops
+    /// strongholds or scans every chunk in the rectangle.
+    #[must_use]
+    pub fn origin_candidates_in(
+        &self,
+        min_x: i32,
+        max_x: i32,
+        min_z: i32,
+        max_z: i32,
+        ctx: &dyn StartContext,
+    ) -> Vec<(i32, i32)> {
+        if min_x > max_x || min_z > max_z {
+            return Vec::new();
+        }
+        let ring_positions = self.ring_positions_for_context(ctx);
+        let mut origins = Vec::new();
+        for set in &self.sets {
+            match &set.placement.kind {
+                PlacementKind::RandomSpread { spacing, .. } if *spacing > 0 => {
+                    let spacing = *spacing;
+                    let min_cell_x = min_x.div_euclid(spacing) - 1;
+                    let max_cell_x = max_x.div_euclid(spacing) + 1;
+                    let min_cell_z = min_z.div_euclid(spacing) - 1;
+                    let max_cell_z = max_z.div_euclid(spacing) + 1;
+                    for cell_x in min_cell_x..=max_cell_x {
+                        for cell_z in min_cell_z..=max_cell_z {
+                            let Some(origin) = set.placement.potential_structure_chunk(
+                                self.seed,
+                                cell_x * spacing,
+                                cell_z * spacing,
+                            ) else {
+                                continue;
+                            };
+                            if (min_x..=max_x).contains(&origin.0)
+                                && (min_z..=max_z).contains(&origin.1)
+                            {
+                                origins.push(origin);
+                            }
+                        }
+                    }
+                }
+                PlacementKind::ConcentricRings { .. } => {
+                    if let Some(positions) = ring_positions.get(&set.id) {
+                        origins.extend(positions.iter().copied().filter(|(x, z)| {
+                            (min_x..=max_x).contains(x) && (min_z..=max_z).contains(z)
+                        }));
+                    }
+                }
+                PlacementKind::RandomSpread { .. } | PlacementKind::Unsupported(_) => {}
+            }
+        }
+        origins.sort_unstable();
+        origins.dedup();
+        origins
+    }
+
+    /// Initialises any generator-wide, biome-dependent placement index.
+    ///
+    /// Concentric-ring relocation can inspect thousands of biome cells. A
+    /// caller that knows it will query starts repeatedly should pay that cost
+    /// once during generator construction rather than charging the first chunk
+    /// request. Random-spread-only registries make this an empty map build.
     pub fn prepare_origin_index(&self, ctx: &dyn StartContext) {
         let _ = self.ring_positions_for_context(ctx);
     }
@@ -3442,31 +3560,10 @@ impl StructureRegistry {
             // once per attempt.
             let mut random = WorldgenRandom::new(LegacyRandomSource::new(0));
             random.set_large_feature_seed(self.seed, cx, cz);
-            let mut options = set.entries.clone();
-            let mut total: i32 = options.iter().map(|(_, w)| *w).sum();
-            while !options.is_empty() {
-                let mut choice = random.next_int_bounded(total);
-                let mut index = 0usize;
-                for (_, weight) in &options {
-                    choice -= *weight;
-                    if choice < 0 {
-                        break;
-                    }
-                    index += 1;
-                }
-                // A faithful walk indexes with the loop counter, which lands
-                // one past the last option only if the weights do not sum to
-                // `total` — impossible here, but clamped rather than panicking.
-                let index = index.min(options.len() - 1);
-                if let Some(start) = self.try_start(&options[index].0, cx, cz, ctx) {
-                    out.push(start);
-                    break;
-                }
-                total -= options[index].1;
-                options.remove(index);
-                if total <= 0 {
-                    break;
-                }
+            if let Some(start) = choose_weighted_entry(&set.entries, &mut random, |structure_id| {
+                self.try_start(structure_id, cx, cz, ctx)
+            }) {
+                out.push(start);
             }
         }
         out
@@ -3694,9 +3791,40 @@ fn build_ring_positions(
             Vec::new()
         } else {
             let preferred: HashSet<String> = preferred_biomes.iter().cloned().collect();
-            placement::ring_positions(seed, *distance, *spread, *count, |random, x, z| {
-                preferred_ring_chunk(random, x, z, &preferred, &mut cache, ctx)
-            })
+            if ctx.supports_ring_probe_batch() {
+                let candidates = placement::ring_candidates(seed, *distance, *spread, *count);
+                let quart_cells: Vec<_> = candidates
+                    .iter()
+                    .flat_map(|(_, initial_x, initial_z)| {
+                        let center_x = initial_x * 4 + 2;
+                        let center_z = initial_z * 4 + 2;
+                        (-28..=28).flat_map(move |offset_z| {
+                            (-28..=28).map(move |offset_x| {
+                                (center_x + offset_x, 0, center_z + offset_z)
+                            })
+                        })
+                    })
+                    .collect();
+                let mut quart_cells = quart_cells;
+                quart_cells.sort_unstable();
+                quart_cells.dedup();
+                if let Some(targets) = ctx.ring_probe_targets(&quart_cells) {
+                    for (&(qx, qy, qz), target) in quart_cells.iter().zip(targets) {
+                        cache.insert_target(qx, qy, qz, target);
+                    }
+                }
+                candidates
+                    .into_iter()
+                    .map(|(mut random, x, z)| {
+                        preferred_ring_chunk(&mut random, x, z, &preferred, &mut cache, ctx)
+                            .unwrap_or((x, z))
+                    })
+                    .collect()
+            } else {
+                placement::ring_positions(seed, *distance, *spread, *count, |random, x, z| {
+                    preferred_ring_chunk(random, x, z, &preferred, &mut cache, ctx)
+                })
+            }
         };
         out.insert(set.id.clone(), positions);
     }
@@ -3738,6 +3866,147 @@ fn preferred_ring_chunk(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reference implementation for the weighted walk. This deliberately
+    /// retains the old clone-and-remove representation so the production
+    /// mask walk can be checked against an independent control.
+    fn choose_weighted_entry_reference<T, F>(
+        entries: &[(String, i32)],
+        random: &mut StructureRandom,
+        mut try_candidate: F,
+    ) -> Option<T>
+    where
+        F: FnMut(&str) -> Option<T>,
+    {
+        let mut options = entries.to_vec();
+        let mut total: i32 = options.iter().map(|(_, weight)| *weight).sum();
+        while !options.is_empty() {
+            let mut choice = random.next_int_bounded(total);
+            let mut index = 0usize;
+            for (_, weight) in &options {
+                choice -= *weight;
+                if choice < 0 {
+                    break;
+                }
+                index += 1;
+            }
+            let index = index.min(options.len() - 1);
+            if let Some(value) = try_candidate(&options[index].0) {
+                return Some(value);
+            }
+            total -= options[index].1;
+            options.remove(index);
+            if total <= 0 {
+                break;
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn weighted_entry_mask_matches_reference_for_all_small_rejections() {
+        const SEEDS: &[(i64, i32, i32)] = &[
+            (0, 0, 0),
+            (42, 7, -3),
+            (-195_764_831, -11, 19),
+            (i64::MAX, 12_345, -54_321),
+        ];
+
+        for entry_count in 0..=7 {
+            for weight_mode in 0..4 {
+                let entries: Vec<_> = (0..entry_count)
+                    .map(|index| {
+                        let weight = match weight_mode {
+                            0 => 1,
+                            1 => index as i32 + 1,
+                            2 => ((index * 17 + 3) % 11 + 1) as i32,
+                            _ => if index % 2 == 0 { 1 } else { 31 },
+                        };
+                        (format!("candidate-{index}"), weight)
+                    })
+                    .collect();
+                for accept_mask in 0..(1u16 << entry_count) {
+                    for &(seed, cx, cz) in SEEDS {
+                        let mut actual_random = WorldgenRandom::new(LegacyRandomSource::new(0));
+                        actual_random.set_large_feature_seed(seed, cx, cz);
+                        let mut reference_random =
+                            WorldgenRandom::new(LegacyRandomSource::new(0));
+                        reference_random.set_large_feature_seed(seed, cx, cz);
+                        let mut actual_draws = 0;
+                        let mut reference_draws = 0;
+
+                        let actual = choose_weighted_entry(
+                            &entries,
+                            &mut actual_random,
+                            |candidate| {
+                                actual_draws += 1;
+                                let index = candidate
+                                    .strip_prefix("candidate-")
+                                    .expect("test candidate id")
+                                    .parse::<usize>()
+                                    .expect("test candidate index");
+                                (accept_mask & (1u16 << index) != 0).then_some(index)
+                            },
+                        );
+                        let reference = choose_weighted_entry_reference(
+                            &entries,
+                            &mut reference_random,
+                            |candidate| {
+                                reference_draws += 1;
+                                let index = candidate
+                                    .strip_prefix("candidate-")
+                                    .expect("test candidate id")
+                                    .parse::<usize>()
+                                    .expect("test candidate index");
+                                (accept_mask & (1u16 << index) != 0).then_some(index)
+                            },
+                        );
+                        assert_eq!(actual, reference, "entry_count={entry_count} weight_mode={weight_mode} mask={accept_mask:#x} seed={seed} chunk=({cx},{cz})");
+                        assert_eq!(actual_draws, reference_draws, "callback count diverged for entry_count={entry_count} weight_mode={weight_mode} mask={accept_mask:#x} seed={seed} chunk=({cx},{cz})");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn weighted_entry_large_set_keeps_reference_fallback() {
+        let entries: Vec<_> = (0..65)
+            .map(|index| (format!("candidate-{index}"), (index % 7 + 1) as i32))
+            .collect();
+        for accepted in [None, Some(0usize), Some(32), Some(64)] {
+            let mut actual_random = WorldgenRandom::new(LegacyRandomSource::new(0));
+            actual_random.set_large_feature_seed(-195_764_831, 19, -7);
+            let mut reference_random = WorldgenRandom::new(LegacyRandomSource::new(0));
+            reference_random.set_large_feature_seed(-195_764_831, 19, -7);
+            let mut actual_draws = 0;
+            let mut reference_draws = 0;
+            let actual = choose_weighted_entry(&entries, &mut actual_random, |candidate| {
+                actual_draws += 1;
+                let index = candidate
+                    .strip_prefix("candidate-")
+                    .expect("test candidate id")
+                    .parse::<usize>()
+                    .expect("test candidate index");
+                (accepted == Some(index)).then_some(index)
+            });
+            let reference = choose_weighted_entry_reference(
+                &entries,
+                &mut reference_random,
+                |candidate| {
+                    reference_draws += 1;
+                    let index = candidate
+                        .strip_prefix("candidate-")
+                        .expect("test candidate id")
+                        .parse::<usize>()
+                        .expect("test candidate index");
+                    (accepted == Some(index)).then_some(index)
+                },
+            );
+            assert_eq!(actual, reference, "accepted={accepted:?}");
+            assert_eq!(actual_draws, reference_draws, "callback count diverged for accepted={accepted:?}");
+        }
+    }
 
     /// The target-chunk structure stream follows the runtime registry, whose
     /// resource entries are sorted lexically rather than by bootstrap call order.
@@ -3853,6 +4122,55 @@ mod tests {
             .random_spread_origins_in(-25, 25, -25, 25)
             .expect("random-spread registry should have an index");
         assert_eq!(actual, expected, "cell enumeration changed membership or order");
+    }
+
+    #[test]
+    fn context_origin_index_matches_random_spread_placement_chunks() {
+        struct NoWorld;
+        impl StartContext for NoWorld {
+            fn first_occupied_height(&self, _x: i32, _z: i32, _h: HeightmapKind) -> i32 {
+                63
+            }
+            fn biome_at_quart(&self, _qx: i32, _qy: i32, _qz: i32) -> String {
+                "minecraft:plains".into()
+            }
+            fn sea_level(&self) -> i32 {
+                63
+            }
+        }
+
+        let set = StructureSetDef {
+            id: "minecraft:test_random_spread".to_owned(),
+            placement: Placement::parse(&serde_json::json!({
+                "type": "minecraft:random_spread",
+                "salt": 17,
+                "separation": 5,
+                "spacing": 13,
+                "spread_type": "triangular"
+            })),
+            entries: Vec::new(),
+        };
+        let registry = StructureRegistry {
+            seed: -195_764_831,
+            sets: vec![set],
+            ring_positions: OnceLock::new(),
+            set_index: HashMap::new(),
+            structures: HashMap::new(),
+            structure_order: Vec::new(),
+            templates: TemplateStore::default(),
+            pools: PoolStore::default(),
+            unsupported: BTreeMap::new(),
+        };
+        let expected = (-80..=80)
+            .flat_map(|x| (-80..=80).map(move |z| (x, z)))
+            .filter(|&(x, z)| {
+                registry.sets[0]
+                    .placement
+                    .is_placement_chunk(registry.seed, x, z)
+            })
+            .collect::<Vec<_>>();
+        let actual = registry.origin_candidates_in(-80, 80, -80, 80, &NoWorld);
+        assert_eq!(actual, expected, "context index changed random-spread membership");
     }
 
     #[test]
@@ -4000,6 +4318,11 @@ mod tests {
         let sparse_starts = sparse_registry.starts_at(1, -3, &sparse);
         assert_eq!(sparse_starts.len(), 1);
         assert_eq!(sparse_starts[0].structure, "minecraft:stronghold");
+        assert_eq!(
+            sparse_registry.origin_candidates_in(-8, 8, -8, 8, &sparse),
+            vec![(1, -3)],
+            "the inverse index must retain the biome-relocated ring origin"
+        );
         assert!(!sparse_registry.starts_at(0, -4, &sparse).iter().any(|start| {
             start.structure == "minecraft:stronghold"
         }));

@@ -105,7 +105,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
-use lodestone_data::biomes::BuiltinBiome;
+use lodestone_data::biomes::{BiomeRef, BuiltinBiome};
+use lodestone_data::block_entity_types::BlockEntityType;
 
 use crate::aquifer::{AquiferSystem, BlockKind};
 use crate::dense_grid::DenseBlockGrid;
@@ -227,6 +228,14 @@ impl EndBiomeSource {
         })
     }
 
+    /// The same chunk answers in their generated enum representation.
+    #[must_use]
+    pub fn chunk_quarts_typed(&self, cx: i32, cz: i32) -> [BuiltinBiome; 16] {
+        std::array::from_fn(|i| {
+            self.biome_at_quart_typed(cx * 4 + (i % 4) as i32, 0, cz * 4 + (i / 4) as i32)
+        })
+    }
+
     /// The block-position biome used by placement modifiers.
     ///
     /// Packet quarts store the raw source answer, while a block lookup first
@@ -270,7 +279,9 @@ pub struct EndColumn {
     world_height: i32,
     palette: Vec<String>,
     blocks: Vec<u16>,
-    biome_quarts: [&'static str; 16],
+    /// Typed biome identity per horizontal quart, resolved to a resource name
+    /// only by the explicit string accessors below.
+    biome_quarts: [BiomeRef; 16],
     /// Client heightmaps retained when the feature stage starts.  The packet
     /// path must use these snapshots rather than rescanning the final served
     /// 3x3 decoration result: a neighbouring feature can write terrain into
@@ -295,8 +306,9 @@ pub struct EndColumn {
 pub struct EndBlockEntityEvent {
     /// Absolute block position of the state write.
     pub position: [i32; 3],
-    /// Registry key of the block-entity type created by the state write.
-    pub type_id: String,
+    /// Validated registry id of the block-entity type created by the state
+    /// write. Textual NBT conversion belongs at the server boundary.
+    pub type_id: BlockEntityType,
 }
 
 impl EndColumn {
@@ -324,16 +336,36 @@ impl EndColumn {
         &self.palette[self.blocks[idx] as usize]
     }
 
-    /// The biome at horizontal quart `(qx, qz)`, both in `0..4`.
+    /// Typed biome identity at horizontal quart `(qx, qz)`, both in `0..4`.
     #[must_use]
-    pub fn biome_at_quart(&self, qx: usize, qz: usize) -> &'static str {
+    pub fn biome_at_quart_typed(&self, qx: usize, qz: usize) -> BiomeRef {
         self.biome_quarts[qz * 4 + qx]
     }
 
-    /// The biome covering local column `(lx, lz)`.
+    /// Built-in biome name at horizontal quart `(qx, qz)`, both in `0..4`.
+    /// This is a display/packet-boundary adapter; worldgen identity work
+    /// should use [`Self::biome_at_quart_typed`].
+    #[must_use]
+    pub fn biome_at_quart(&self, qx: usize, qz: usize) -> &'static str {
+        self.biome_at_quart_typed(qx, qz)
+            .builtin_or_none()
+            .expect("End output biome is not a generated built-in")
+            .name()
+    }
+
+    /// Typed biome identity covering local column `(lx, lz)`.
+    #[must_use]
+    pub fn biome_at_typed(&self, lx: usize, lz: usize) -> BiomeRef {
+        self.biome_at_quart_typed(lx >> 2, lz >> 2)
+    }
+
+    /// Built-in biome name covering local column `(lx, lz)`.
     #[must_use]
     pub fn biome_at(&self, lx: usize, lz: usize) -> &'static str {
-        self.biome_at_quart(lx >> 2, lz >> 2)
+        self.biome_at_typed(lx, lz)
+            .builtin_or_none()
+            .expect("End output biome is not a generated built-in")
+            .name()
     }
 
     /// The End's motion-blocking heightmap for the final served block field.
@@ -384,7 +416,7 @@ impl EndColumn {
 
     /// The raw parts, for a caller building a chunk packet or a region file.
     #[must_use]
-    pub fn into_raw(self) -> (i32, i32, Vec<String>, Vec<u16>, [&'static str; 16]) {
+    pub fn into_raw(self) -> (i32, i32, Vec<String>, Vec<u16>, [BiomeRef; 16]) {
         (
             self.min_y,
             self.world_height,
@@ -714,11 +746,38 @@ impl EndGenerator {
     /// then decoration. No End biome names a carver.
     #[must_use]
     pub fn column(&self, cx: i32, cz: i32) -> EndColumn {
-        let mut schedule = Self::stage_schedule().cursor_at(
-            Self::stage_schedule()
-                .index_of(crate::stage_schedule::ColumnStage::Features)
-                .expect("End schedule must have a features boundary"),
-        );
+        self.column_inner(cx, cz, None)
+    }
+
+    /// Generate a column while recording the typed stage keys actually
+    /// admitted by the End executor. The trace is diagnostic only; the same
+    /// scalar path and the normal `column` path share all generation code.
+    #[must_use]
+    pub fn column_with_trace(
+        &self,
+        cx: i32,
+        cz: i32,
+        trace: &mut Vec<crate::stage_schedule::StageKey>,
+    ) -> EndColumn {
+        self.column_inner(cx, cz, Some(trace))
+    }
+
+    fn column_inner(
+        &self,
+        cx: i32,
+        cz: i32,
+        trace: Option<&mut Vec<crate::stage_schedule::StageKey>>,
+    ) -> EndColumn {
+        // The immutable source is already retained through the shaped prefix.
+        // Advancing the same typed executor over that prefix makes the
+        // resumable path explicit without re-running cached work.
+        let mut schedule = match trace {
+            Some(trace) => Self::stage_schedule().executor_with_trace(trace),
+            None => Self::stage_schedule().executor(),
+        };
+        for &stage in Self::stage_schedule().stages_for(crate::stage_schedule::GenerationTarget::Shaped) {
+            schedule.enter(stage);
+        }
         let (world, client_heightmaps, gateways) = schedule.run(
             crate::stage_schedule::ColumnStage::Features,
             || self.decoration_region(cx, cz),
@@ -743,7 +802,10 @@ impl EndGenerator {
         gateways: Vec<decorate::EndGateway>,
         block_entity_events: Vec<EndBlockEntityEvent>,
     ) -> EndColumn {
-        let biome_quarts = self.biomes.chunk_quarts(cx, cz);
+        let biome_quarts = self
+            .biomes
+            .chunk_quarts_typed(cx, cz)
+            .map(BiomeRef::builtin);
         let (palette, blocks) = world.into_palette_and_blocks_box(
             cx * 16,
             self.min_y,
@@ -839,10 +901,8 @@ impl EndGenerator {
                         );
                     }
                 }
-                let mut schedule = Self::stage_schedule().cursor_at(
-                    Self::stage_schedule()
-                        .index_of(crate::stage_schedule::ColumnStage::Features)
-                        .expect("End schedule must have a features boundary"),
+                let mut schedule = Self::stage_schedule().executor_at(
+                    Self::stage_schedule().shaped_boundary_index(),
                 );
                 let gateways = schedule.run(crate::stage_schedule::ColumnStage::Features, || {
                     self.decoration.apply_region(
@@ -1065,7 +1125,7 @@ impl EndGenerator {
         chunks
             .iter()
             .map(|&(cx, cz)| {
-                let mut schedule = Self::stage_schedule().cursor();
+                let mut schedule = Self::stage_schedule().executor();
                 schedule.enter(crate::stage_schedule::ColumnStage::Fill);
                 let field = crate::compose::fill_column(
                     &aquifer,
@@ -1103,9 +1163,7 @@ impl EndGenerator {
                     self.structure_place_stage(cx, cz, self.widen_world(world));
                 schedule.enter(crate::stage_schedule::ColumnStage::StructurePlacement);
                 schedule.finish_prefix(
-                    Self::stage_schedule()
-                        .index_of(crate::stage_schedule::ColumnStage::Features)
-                        .expect("End schedule must have a features boundary"),
+                    Self::stage_schedule().shaped_boundary_index(),
                 );
                 let base = Arc::new(EndBaseWorld {
                     world,
@@ -1201,7 +1259,7 @@ impl EndGenerator {
     fn base_world(&self, cx: i32, cz: i32) -> (DenseBlockGrid, Vec<EndBlockEntityEvent>) {
         let base_x = cx * 16;
         let base_z = cz * 16;
-        let mut schedule = Self::stage_schedule().cursor();
+        let mut schedule = Self::stage_schedule().executor();
         schedule.enter(crate::stage_schedule::ColumnStage::Fill);
         let aquifer = self.build_fill(cx, cz);
         // `Beardifier::empty()` rather than an `Option`: it takes
@@ -1237,9 +1295,7 @@ impl EndGenerator {
         let placed = self.structure_place_stage(cx, cz, self.widen_world(world));
         schedule.enter(crate::stage_schedule::ColumnStage::StructurePlacement);
         schedule.finish_prefix(
-            Self::stage_schedule()
-                .index_of(crate::stage_schedule::ColumnStage::Features)
-                .expect("End schedule must have a features boundary"),
+            Self::stage_schedule().shaped_boundary_index(),
         );
         placed
     }
@@ -1281,11 +1337,10 @@ impl EndGenerator {
     /// Structure placement records this before a later write can replace the
     /// state, so the packet seam does not have to infer history from the final
     /// palette.
-    fn block_entity_type_for_state(state: &str) -> Option<&'static str> {
+    fn block_entity_type_for_state(state: &str) -> Option<BlockEntityType> {
         let state = lodestone_data::block_states::state_id(state)
             .and_then(lodestone_data::block_states::StateId::new)?;
         lodestone_data::block_entity_types::block_entity_type(state)
-            .map(lodestone_data::block_entity_types::block_entity_type_name)
     }
 
     /// Places every complete End-city piece intersecting this chunk after
@@ -1321,7 +1376,7 @@ impl EndGenerator {
                     if let Some(blocks) = &piece.blocks {
                         for block in blocks.iter() {
                             if let Some(type_id) = Self::block_entity_type_for_state(&block.state) {
-                                if type_id != "minecraft:ender_chest"
+                                if type_id != BlockEntityType::ENDER_CHEST
                                     && (min_x..min_x + 16).contains(&block.pos[0])
                                     && (min_z..min_z + 16).contains(&block.pos[2])
                                     && world.bounds().1 <= block.pos[1]
@@ -1329,7 +1384,7 @@ impl EndGenerator {
                                 {
                                     block_entity_events.push(EndBlockEntityEvent {
                                         position: block.pos,
-                                        type_id: type_id.to_owned(),
+                                        type_id,
                                     });
                                 }
                             }
@@ -1337,18 +1392,15 @@ impl EndGenerator {
                         }
                     }
                     if let Some(placement) = &piece.placement {
-                        let mut record_event = |position: [i32; 3], type_id: &'static str| {
-                            if type_id != "minecraft:ender_chest" {
+                        let mut record_event = |position: [i32; 3], type_id: BlockEntityType| {
+                            if type_id != BlockEntityType::ENDER_CHEST {
                                 if block_entity_events
                                     .iter()
                                     .any(|event| event.position == position && event.type_id == type_id)
                                 {
                                     return;
                                 }
-                                block_entity_events.push(EndBlockEntityEvent {
-                                    position,
-                                    type_id: type_id.to_owned(),
-                                });
+                                block_entity_events.push(EndBlockEntityEvent { position, type_id });
                             }
                         };
                         let origin = crate::structure::template::PlaceOrigin {
@@ -1721,10 +1773,13 @@ mod tests {
         let source = EndBiomeSource::new(-195_764_831);
         for (cx, cz) in [(100, 100), (-137, 244), (65, 0), (-2000, 1500)] {
             let quarts = source.chunk_quarts(cx, cz);
+            let typed = source.chunk_quarts_typed(cx, cz);
             assert!(
                 quarts.iter().all(|b| *b == quarts[0]),
                 "chunk ({cx},{cz}) is not uniform: {quarts:?}"
             );
+            assert!(typed.iter().all(|b| *b == typed[0]));
+            assert!(typed.iter().zip(quarts).all(|(typed, name)| typed.name() == name));
         }
     }
 

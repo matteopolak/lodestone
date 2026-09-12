@@ -11,12 +11,17 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use lodestone_server::{ChunkColumn, NetherChunkSource, OverworldChunkSource, end_chunk_source, nether_chunk_source, overworld_chunk_source};
+use lodestone_core::Reader;
+use lodestone_server::{ChunkColumn, EndChunkSource, NetherChunkSource, OverworldChunkSource, end_chunk_source, nether_chunk_source, overworld_chunk_source};
 use lodestone_worldgen_parity::lifecycle::{
     FEATURES_SOURCE_RADIUS, FEATURES_WRITE_RADIUS, LifecycleCompletion, LifecycleMaterializer,
-    LifecycleFeatureResult, LifecycleReplayEvent, LifecycleResidentStage, LifecycleResidentTransition,
-    LifecycleWorldgenSource,
+    LifecycleReplayEvent, LifecycleResidentStage,
+    LifecycleResidentTransition, LifecycleWorldgenSource,
 };
+use lodestone_server::{ServerDirective, ServerProtocol};
+use lodestone_server::dimension::Dimension as ServerDimension;
+use lodestone_v26_2::V770ServerProtocol;
+use lodestone_v26_2::packets::chunk::{ChunkShape, LevelChunkWithLight};
 
 #[allow(dead_code)]
 mod support { pub mod large_parity_manifest; }
@@ -25,13 +30,13 @@ const HEADER_BYTES: usize = 256;
 const DIGEST_BYTES: usize = 32;
 const STREAM_MAGIC: &[u8; 8] = b"LWS26S01";
 const STREAM_DOMAIN: &[u8] = b"lodestone.worldgen.streaming-parity/v2/light-free";
-const END_STREAM_DOMAIN: &[u8] = b"lodestone.worldgen.streaming-parity/v3/end-lifecycle";
-const END_STREAM_EVENT_DOMAIN: &[u8] = b"lodestone.worldgen.streaming-parity/end-lifecycle-event/v1";
+const END_STREAM_DOMAIN: &[u8] = b"lodestone.worldgen.streaming-parity/v3/end-p06-lifecycle";
+const END_STREAM_EVENT_DOMAIN: &[u8] = b"lodestone.worldgen.streaming-parity/end-p06-lifecycle-event/v1";
 const PROTOCOL: u32 = 776;
 const SEED: i64 = 42;
 const MAX_FRAME_BYTES: u32 = 16 * 1024 * 1024;
 const STREAM_FORMAT_LIGHT_FREE: u16 = 7;
-const STREAM_FORMAT_END_LIFECYCLE: u16 = 8;
+const STREAM_FORMAT_END_P06_LIFECYCLE: u16 = 8;
 const DEFAULT_ORDERED_STREAM_BATCH_SIZE: usize = 1;
 const DEFAULT_END_STREAM_BATCH_SIZE: usize = 64;
 
@@ -107,7 +112,7 @@ fn parse_stream_header(raw: &[u8]) -> StreamHeader {
     let format = u16_at(raw, 54);
     let domain = match format {
         STREAM_FORMAT_LIGHT_FREE => STREAM_DOMAIN,
-        STREAM_FORMAT_END_LIFECYCLE => END_STREAM_DOMAIN,
+        STREAM_FORMAT_END_P06_LIFECYCLE => END_STREAM_DOMAIN,
         other => panic!("unsupported stream format {other}"),
     };
     assert_eq!(&raw[56..88], support::large_parity_manifest::sha256(domain).as_slice(), "stream domain");
@@ -120,10 +125,10 @@ fn parse_stream_header(raw: &[u8]) -> StreamHeader {
     let payload_digest = raw[192..224].try_into().unwrap();
     assert!(raw[224..].iter().all(|byte| *byte == 0), "stream header reserved bytes are non-zero");
     assert!(start <= count, "stream start is in bounds");
-    if format == STREAM_FORMAT_END_LIFECYCLE {
-        assert_eq!(dimension, StreamDimension::End, "End lifecycle format must name the End dimension");
+    if format == STREAM_FORMAT_END_P06_LIFECYCLE {
+        assert_eq!(dimension, StreamDimension::End, "End P06 lifecycle format must name the End dimension");
     } else {
-        assert_ne!(dimension, StreamDimension::End, "End streams must carry lifecycle transitions");
+        assert_ne!(dimension, StreamDimension::End, "End streams must carry P06 lifecycle transitions");
     }
     StreamHeader { cx0, cx1, cz0, cz1, count, start, format, dimension, payload_digest }
 }
@@ -137,22 +142,38 @@ struct Frame {
     lifecycle_events: Vec<LifecycleReplayEvent>,
 }
 
-fn parse_end_lifecycle_events(bytes: &[u8], target_x: i32, target_z: i32) -> Vec<LifecycleReplayEvent> {
+/// Decode the P06 resident sidecar before it reaches the materializer.  The
+/// sidecar is authenticated by the frame digest and carries the raw resident
+/// heightmap values observed at each FEATURES boundary; no final terrain scan
+/// is involved.
+fn parse_end_p06_lifecycle_events(
+    bytes: &[u8],
+    target_x: i32,
+    target_z: i32,
+) -> Vec<LifecycleReplayEvent> {
     fn take<'a>(bytes: &'a [u8], cursor: &mut usize, width: usize) -> &'a [u8] {
-        let end = cursor.checked_add(width).expect("lifecycle event cursor overflow");
-        let slice = bytes.get(*cursor..end).expect("truncated lifecycle event payload");
+        let end = cursor.checked_add(width).expect("P06 lifecycle cursor overflow");
+        let slice = bytes
+            .get(*cursor..end)
+            .expect("truncated P06 lifecycle event payload");
         *cursor = end;
         slice
     }
     fn read_u8(bytes: &[u8], cursor: &mut usize) -> u8 { take(bytes, cursor, 1)[0] }
-    fn read_u32(bytes: &[u8], cursor: &mut usize) -> u32 { u32::from_be_bytes(take(bytes, cursor, 4).try_into().unwrap()) }
-    fn read_i32(bytes: &[u8], cursor: &mut usize) -> i32 { i32::from_be_bytes(take(bytes, cursor, 4).try_into().unwrap()) }
-    fn read_u64(bytes: &[u8], cursor: &mut usize) -> u64 { u64::from_be_bytes(take(bytes, cursor, 8).try_into().unwrap()) }
+    fn read_u32(bytes: &[u8], cursor: &mut usize) -> u32 {
+        u32::from_be_bytes(take(bytes, cursor, 4).try_into().unwrap())
+    }
+    fn read_i32(bytes: &[u8], cursor: &mut usize) -> i32 {
+        i32::from_be_bytes(take(bytes, cursor, 4).try_into().unwrap())
+    }
+    fn read_u64(bytes: &[u8], cursor: &mut usize) -> u64 {
+        u64::from_be_bytes(take(bytes, cursor, 8).try_into().unwrap())
+    }
 
-    assert!(bytes.starts_with(END_STREAM_EVENT_DOMAIN), "End lifecycle event domain");
+    assert!(bytes.starts_with(END_STREAM_EVENT_DOMAIN), "P06 lifecycle event domain");
     let mut cursor = END_STREAM_EVENT_DOMAIN.len();
     let event_count = read_u32(bytes, &mut cursor) as usize;
-    assert_eq!(event_count, 9, "End lifecycle event count");
+    assert_eq!(event_count, 9, "End P06 lifecycle event count");
     let expected_sources = (-1..=1)
         .flat_map(|x| (-1..=1).map(move |z| (target_x + x, target_z + z)))
         .collect::<BTreeSet<_>>();
@@ -161,58 +182,70 @@ fn parse_end_lifecycle_events(bytes: &[u8], target_x: i32, target_z: i32) -> Vec
     let mut events = Vec::with_capacity(event_count);
     for event_index in 0..event_count {
         let sequence = read_u64(bytes, &mut cursor);
-        if let Some(previous) = previous_sequence { assert!(previous < sequence, "End lifecycle event sequence is not increasing"); }
+        if let Some(previous) = previous_sequence {
+            assert!(previous < sequence, "P06 lifecycle event sequence is not increasing");
+        }
         previous_sequence = Some(sequence);
         let source = (read_i32(bytes, &mut cursor), read_i32(bytes, &mut cursor));
         let expected_source = (
             target_x + (event_index / 3) as i32 - 1,
             target_z + (event_index % 3) as i32 - 1,
         );
-        assert_eq!(source, expected_source, "End lifecycle source order");
-        assert!(expected_sources.contains(&source), "End lifecycle source is outside its target wavefront");
-        assert!(seen_sources.insert(source), "End lifecycle source is repeated");
-        assert_eq!(read_u8(bytes, &mut cursor), 1, "End lifecycle completion stage");
+        assert_eq!(source, expected_source, "End P06 lifecycle source order");
+        assert!(expected_sources.contains(&source), "P06 source outside target wavefront");
+        assert!(seen_sources.insert(source), "P06 lifecycle source is repeated");
+        assert_eq!(read_u8(bytes, &mut cursor), 1, "P06 lifecycle completion stage");
         let transition_count = read_u32(bytes, &mut cursor) as usize;
         let expected_transition_count = usize::from(source != (target_x, target_z)) + 1;
-        assert_eq!(transition_count, expected_transition_count, "End lifecycle transition count");
+        assert_eq!(transition_count, expected_transition_count, "P06 lifecycle transition count");
         let mut seen_residents = BTreeSet::new();
         let mut resident_transitions = Vec::with_capacity(transition_count);
-        let mut source_transition = false;
-        let mut target_transition = false;
+        let mut saw_source = false;
+        let mut saw_target = false;
         for _ in 0..transition_count {
             let resident = (read_i32(bytes, &mut cursor), read_i32(bytes, &mut cursor));
-            assert!((resident.0 - target_x).abs() <= 2 && (resident.1 - target_z).abs() <= 2, "End lifecycle resident is outside the admitted halo");
-            assert!(seen_residents.insert(resident), "End lifecycle resident is repeated in one event");
-            if resident == source { source_transition = true; }
-            if resident == (target_x, target_z) { target_transition = true; }
+            assert!(
+                (resident.0 - target_x).abs() <= 2 && (resident.1 - target_z).abs() <= 2,
+                "P06 resident outside target admission halo",
+            );
+            assert!(seen_residents.insert(resident), "P06 resident is repeated in one event");
+            saw_source |= resident == source;
+            saw_target |= resident == (target_x, target_z);
             let stage = match read_u8(bytes, &mut cursor) {
                 0 => LifecycleResidentStage::Carvers,
                 1 => LifecycleResidentStage::Features,
                 2 => LifecycleResidentStage::Full,
-                other => panic!("unsupported End lifecycle resident stage {other}"),
+                other => panic!("unsupported P06 lifecycle resident stage {other}"),
             };
-            let maps = match read_u8(bytes, &mut cursor) {
+            let client_heightmaps = match read_u8(bytes, &mut cursor) {
                 0 => None,
                 1 => {
                     let mut maps = [[0u16; 256]; 3];
                     for map in &mut maps {
                         for cell in map {
                             let value = u16_at(take(bytes, &mut cursor, 2), 0);
-                            assert!(value <= 256, "End lifecycle map cell exceeds End column height");
+                            assert!(value <= 256, "P06 lifecycle map cell exceeds End height");
                             *cell = value;
                         }
                     }
                     Some(maps)
                 }
-                other => panic!("unsupported End lifecycle map presence {other}"),
+                other => panic!("unsupported P06 lifecycle map presence {other}"),
             };
-            resident_transitions.push(LifecycleResidentTransition { resident, stage, client_heightmaps: maps });
+            resident_transitions.push(LifecycleResidentTransition {
+                resident,
+                stage,
+                client_heightmaps,
+            });
         }
-        assert!(source_transition, "End lifecycle event omits its source resident");
-        assert!(target_transition, "End lifecycle event omits its target resident");
+        assert!(saw_source, "P06 lifecycle event omits its source resident");
+        assert!(saw_target, "P06 lifecycle event omits its target resident");
         assert!(
-            resident_transitions.iter().any(|transition| transition.resident == source && transition.stage >= LifecycleResidentStage::Features),
-            "End lifecycle source did not reach FEATURES",
+            resident_transitions.iter().any(|transition| {
+                transition.resident == source
+                    && transition.stage >= LifecycleResidentStage::Features
+            }),
+            "P06 source did not reach FEATURES",
         );
         events.push(LifecycleReplayEvent {
             source,
@@ -221,12 +254,16 @@ fn parse_end_lifecycle_events(bytes: &[u8], target_x: i32, target_z: i32) -> Vec
             resident_transitions,
         });
     }
-    assert_eq!(seen_sources, expected_sources, "End lifecycle stream omits a source");
-    assert_eq!(cursor, bytes.len(), "End lifecycle event payload has trailing bytes");
+    assert_eq!(seen_sources, expected_sources, "P06 lifecycle stream omits a source");
+    assert_eq!(cursor, bytes.len(), "P06 lifecycle event payload has trailing bytes");
     events
 }
 
-fn read_frame(reader: &mut BufReader<File>, complete: &std::path::Path, format: u16) -> Option<Frame> {
+fn read_frame(
+    reader: &mut BufReader<File>,
+    complete: &std::path::Path,
+    format: u16,
+) -> Option<Frame> {
     fn read_when_available(reader: &mut BufReader<File>, bytes: &mut [u8], complete: &std::path::Path) {
         let mut filled = 0;
         while filled < bytes.len() {
@@ -245,7 +282,7 @@ fn read_frame(reader: &mut BufReader<File>, complete: &std::path::Path, format: 
     let length = u32::from_be_bytes(length);
     if length == 0 { return None; }
     assert!(length <= MAX_FRAME_BYTES, "stream frame is too large: {length}");
-    let minimum = if format == STREAM_FORMAT_END_LIFECYCLE {
+    let minimum = if format == STREAM_FORMAT_END_P06_LIFECYCLE {
         8 + 4 + 4 + 4 + 4 + DIGEST_BYTES + DIGEST_BYTES
     } else {
         8 + 4 + 4 + 4 + DIGEST_BYTES
@@ -253,31 +290,58 @@ fn read_frame(reader: &mut BufReader<File>, complete: &std::path::Path, format: 
     assert!(length as usize >= minimum, "stream frame is truncated");
     let mut body = vec![0u8; length as usize];
     read_when_available(reader, &mut body, complete);
-    let (record, digest, lifecycle_events) = if format == STREAM_FORMAT_END_LIFECYCLE {
+    let (record, digest, lifecycle_events) = if format == STREAM_FORMAT_END_P06_LIFECYCLE {
         let event_len = u32_at(&body, 16) as usize;
         let record_len = u32_at(&body, 20) as usize;
         let payload_start = 88usize;
         let expected_len = payload_start
             .checked_add(event_len)
             .and_then(|offset| offset.checked_add(record_len))
-            .expect("stream frame length overflow");
-        assert_eq!(body.len(), expected_len, "End lifecycle frame lengths");
+            .expect("P06 lifecycle frame length overflow");
+        assert_eq!(body.len(), expected_len, "P06 lifecycle frame lengths");
         let event_digest: [u8; DIGEST_BYTES] = body[24..56].try_into().unwrap();
         let digest: [u8; DIGEST_BYTES] = body[56..88].try_into().unwrap();
         let event_payload = &body[payload_start..payload_start + event_len];
         let record = body[payload_start + event_len..].to_vec();
-        assert_eq!(support::large_parity_manifest::sha256(event_payload), event_digest, "stream event digest");
-        assert_eq!(support::large_parity_manifest::sha256(&record), digest, "stream frame record digest");
-        (record, digest, parse_end_lifecycle_events(event_payload, i32_at(&body, 8), i32_at(&body, 12)))
+        assert_eq!(
+            support::large_parity_manifest::sha256(event_payload),
+            event_digest,
+            "P06 lifecycle event digest",
+        );
+        assert_eq!(
+            support::large_parity_manifest::sha256(&record),
+            digest,
+            "P06 lifecycle frame record digest",
+        );
+        (
+            record,
+            digest,
+            parse_end_p06_lifecycle_events(event_payload, i32_at(&body, 8), i32_at(&body, 12)),
+        )
     } else {
         let record_len = u32_at(&body, 16) as usize;
-        assert_eq!(body.len(), 8 + 4 + 4 + 4 + DIGEST_BYTES + record_len, "stream frame record length");
+        assert_eq!(
+            body.len(),
+            8 + 4 + 4 + 4 + DIGEST_BYTES + record_len,
+            "stream frame record length",
+        );
         let digest: [u8; DIGEST_BYTES] = body[20..52].try_into().unwrap();
         let record = body[52..].to_vec();
-        assert_eq!(support::large_parity_manifest::sha256(&record), digest, "stream frame record digest");
+        assert_eq!(
+            support::large_parity_manifest::sha256(&record),
+            digest,
+            "stream frame record digest",
+        );
         (record, digest, Vec::new())
     };
-    Some(Frame { index: u64_at(&body, 0), cx: i32_at(&body, 8), cz: i32_at(&body, 12), digest, record, lifecycle_events })
+    Some(Frame {
+        index: u64_at(&body, 0),
+        cx: i32_at(&body, 8),
+        cz: i32_at(&body, 12),
+        digest,
+        record,
+        lifecycle_events,
+    })
 }
 
 enum OrderedLifecycleMaterializer {
@@ -327,37 +391,27 @@ fn overworld_stream_completion_order(targets: &[(i32, i32)]) -> Vec<((i32, i32),
     lifecycle_completion_wavefront(targets)
 }
 
-type EndLifecycleEvents = BTreeMap<(i32, i32), Vec<LifecycleReplayEvent>>;
-
 #[derive(Default)]
 struct StreamLifecycleState {
     /// The live oracle leaves dependency chunks resident after removing the
     /// requested centre ticket. Keep that state across bounded frame batches.
     admitted: BTreeSet<(i32, i32)>,
-    /// End source bodies are globally retained after their first authenticated
-    /// completion. Overworld and Nether are target-scoped: their source bodies
-    /// read the requested target's neighbourhood, and a cross-target write is
-    /// rolled back at the prior target boundary before the later target
-    /// replays that source.
+    /// A source FEATURES body is executed once, at the first target ticket
+    /// that admits it.  Its writes are then retained in the shared resident
+    /// columns and become visible to later packet targets; rerunning it for a
+    /// second target would apply a different read window over already-live
+    /// state and diverge from the stream lifecycle.
     completed: BTreeSet<(i32, i32)>,
-    target_completed: BTreeSet<((i32, i32), (i32, i32))>,
 }
+
+type EndP06LifecycleEvents = BTreeMap<(i32, i32), Vec<LifecycleReplayEvent>>;
 
 fn lifecycle_columns(
     dimension: StreamDimension,
     targets: &[(i32, i32)],
     materializer: Option<&mut OrderedLifecycleMaterializer>,
     state: &mut StreamLifecycleState,
-) -> Vec<ChunkColumn> {
-    lifecycle_columns_with_events(dimension, targets, materializer, state, None)
-}
-
-fn lifecycle_columns_with_events(
-    dimension: StreamDimension,
-    targets: &[(i32, i32)],
-    materializer: Option<&mut OrderedLifecycleMaterializer>,
-    state: &mut StreamLifecycleState,
-    end_events: Option<&EndLifecycleEvents>,
+    end_events: Option<&EndP06LifecycleEvents>,
 ) -> Vec<ChunkColumn> {
     let timings = matches!(std::env::var("LODESTONE_LARGE_PARITY_STREAM_TIMINGS").as_deref(), Ok("1" | "true" | "yes" | "on"));
     let started = timings.then(Instant::now);
@@ -368,14 +422,13 @@ fn lifecycle_columns_with_events(
         timings: bool,
         persistent: bool,
         state: &mut StreamLifecycleState,
-        end_events: Option<&EndLifecycleEvents>,
+        end_events: Option<&EndP06LifecycleEvents>,
     ) -> Vec<ChunkColumn> {
         let admissions = lifecycle_admissions(targets);
         if !persistent {
             materializer.reset_for_lifecycle_replay();
             state.admitted.clear();
             state.completed.clear();
-            state.target_completed.clear();
         }
         let prepare_started = Instant::now();
         materializer.prepare_lifecycle_replay(&admissions);
@@ -390,20 +443,16 @@ fn lifecycle_columns_with_events(
         let admit_ms = admit_started.elapsed().as_millis();
         let complete_started = Instant::now();
         let completion_order = if dimension == StreamDimension::End {
-            end_events
-                .map(|events| {
-                    targets
+            targets
+                .iter()
+                .flat_map(|target| {
+                    end_events
+                        .and_then(|events| events.get(target))
+                        .unwrap_or_else(|| panic!("P06 End stream has no lifecycle events for target {target:?}"))
                         .iter()
-                        .flat_map(|target| {
-                            events
-                                .get(target)
-                                .unwrap_or_else(|| panic!("End lifecycle stream has no events for target {target:?}"))
-                                .iter()
-                                .map(move |event| (*target, event.source))
-                        })
-                        .collect::<Vec<_>>()
+                        .map(move |event| (*target, event.source))
                 })
-                .unwrap_or_else(|| lifecycle_completion_wavefront(targets))
+                .collect::<Vec<_>>()
         } else {
             match dimension {
                 StreamDimension::Overworld => overworld_stream_completion_order(targets),
@@ -411,7 +460,7 @@ fn lifecycle_columns_with_events(
                 StreamDimension::End => unreachable!(),
             }
         };
-        let target_scoped = matches!(dimension, StreamDimension::Overworld | StreamDimension::Nether);
+        let target_scoped = dimension != StreamDimension::End;
         let mut active_target = None;
         for (sequence, (target, source)) in completion_order.into_iter().enumerate() {
             if target_scoped && active_target != Some(target) {
@@ -421,38 +470,22 @@ fn lifecycle_columns_with_events(
                 materializer.begin_target(target);
                 active_target = Some(target);
             }
-            let should_complete = match dimension {
-                StreamDimension::Overworld | StreamDimension::Nether => {
-                    state.target_completed.insert((target, source))
-                }
-                StreamDimension::End => state.completed.insert(source),
-            };
-            if should_complete {
+            if state.completed.insert(source) {
                 if dimension == StreamDimension::End {
                     let event = end_events
                         .and_then(|events| events.get(&target))
                         .and_then(|events| events.iter().find(|event| event.source == source))
-                        .unwrap_or_else(|| panic!("End lifecycle stream has no event for target {target:?}, source {source:?}"));
-                    materializer.complete_for_target_with_residents(
-                        target,
+                        .unwrap_or_else(|| panic!("P06 End stream has no event for target {target:?}, source {source:?}"));
+                    materializer.complete_observing_with_residents(
                         event.source,
                         event.stage,
                         event.sequence,
                         &event.resident_transitions,
-                    );
-                } else if target_scoped {
-                    materializer.complete_for_target(
-                        target,
-                        source,
-                        LifecycleCompletion::Features,
-                        sequence as u64,
+                        |_| {},
                     );
                 } else {
-                    // End source bodies are globally retained: the same source
-                    // must not be replayed for every packet target, and End
-                    // does not open a target transaction, so its resident
-                    // spills remain available to later packets.
-                    materializer.complete(
+                    materializer.complete_for_target(
+                        target,
                         source,
                         LifecycleCompletion::Features,
                         sequence as u64,
@@ -460,8 +493,10 @@ fn lifecycle_columns_with_events(
                 }
             }
         }
-        if let Some(target) = active_target {
-            materializer.finish_target(target);
+        if target_scoped {
+            if let Some(target) = active_target {
+                materializer.finish_target(target);
+            }
         }
         let complete_ms = complete_started.elapsed().as_millis();
         let columns = targets
@@ -492,6 +527,45 @@ fn lifecycle_columns_with_events(
     };
     if let Some(started) = started { eprintln!("stream timings: {:?} batch={}ms", dimension, started.elapsed().as_millis()); }
     columns
+}
+
+fn end_p06_packet_payload(
+    materializer: &LifecycleMaterializer<EndChunkSource>,
+    target: (i32, i32),
+) -> Vec<u8> {
+    let column = materializer.snapshot_for_packet(target);
+    let mut neighbours = Vec::with_capacity(8);
+    for dz in -1..=1 {
+        for dx in -1..=1 {
+            if (dx, dz) == (0, 0) {
+                continue;
+            }
+            let neighbour = (target.0 + dx, target.1 + dz);
+            let column = materializer
+                .resident_column(neighbour)
+                .unwrap_or_else(|| panic!("End P06 target {target:?} is missing packet-light neighbour {neighbour:?}"));
+            neighbours.push((dx, dz, column.clone()));
+        }
+    }
+    let directive = V770ServerProtocol
+        .try_encode_chunk_with_neighbours_in_dimension(
+            target.0,
+            target.1,
+            &column,
+            &neighbours,
+            ServerDimension::End,
+        )
+        .expect("End P06 source-aware packet encoding");
+    match directive {
+        ServerDirective::Send { packet_id, payload } => {
+            assert_eq!(
+                packet_id,
+                lodestone_v26_2::packet_ids::play::clientbound::LEVEL_CHUNK_WITH_LIGHT,
+            );
+            payload
+        }
+        other => panic!("End P06 packet encoder returned {other:?} at {target:?}"),
+    }
 }
 
 #[test]
@@ -566,26 +640,47 @@ fn nether_completion_wavefront_preserves_resident_neighbour_writes() {
 }
 
 #[test]
-fn overworld_stream_replays_dependencies_per_target() {
+fn nether_target_context_preserves_source_95_89_basalt_witness() {
+    let target = (95, 90);
+    let mut materializer = LifecycleMaterializer::new(nether_chunk_source(SEED));
+    for admission in lifecycle_admissions(&[target]) {
+        materializer.admit(admission);
+    }
+    for (sequence, (requested_target, source)) in
+        lifecycle_completion_wavefront(&[target]).into_iter().enumerate()
+    {
+        materializer.complete_for_target(
+            requested_target,
+            source,
+            LifecycleCompletion::Features,
+            sequence as u64,
+        );
+    }
+    materializer.finish_target(target);
+
+    assert_eq!(
+        materializer
+            .snapshot_for_packet(target)
+            .block_state(10, 7, 2),
+        "minecraft:basalt[axis=y]",
+        "source (95,89) must place basalt at target (95,90) before packet capture",
+    );
+}
+
+#[test]
+fn overworld_stream_state_deduplicates_completed_dependencies() {
     let mut state = StreamLifecycleState::default();
     let first = lifecycle_completion_wavefront(&[(0, 0)]);
     for &(_, source) in &first {
-        assert!(state.target_completed.insert(((0, 0), source)));
+        assert!(state.completed.insert(source));
     }
     let second = lifecycle_completion_wavefront(&[(1, 0)]);
-    let replayed = second
+    let unseen = second
         .into_iter()
-        .filter(|&(target, source)| state.target_completed.insert((target, source)))
+        .filter(|&(_, source)| state.completed.insert(source))
         .collect::<Vec<_>>();
-    assert_eq!(replayed.len(), 9);
-    assert_eq!(
-        &replayed[..3],
-        &[
-            ((1, 0), (0, -1)),
-            ((1, 0), (0, 0)),
-            ((1, 0), (0, 1)),
-        ],
-    );
+    assert_eq!(unseen.len(), 3);
+    assert_eq!(&unseen[..3], &[((1, 0), (2, -1)), ((1, 0), (2, 0)), ((1, 0), (2, 1))]);
 }
 
 #[test]
@@ -604,6 +699,7 @@ fn nether_stream_replays_prior_targets_before_magma_gravel_target() {
             &[target],
             materializer.as_mut(),
             &mut state,
+            None,
         );
         if target == (5, 3) {
             observed = Some(columns[0].block_state(15, 32, 15).to_owned());
@@ -615,57 +711,6 @@ fn nether_stream_replays_prior_targets_before_magma_gravel_target() {
         Some("minecraft:magma_block"),
         "the eighth row-major target must retain the magma spill from its earlier source completion",
     );
-}
-
-#[test]
-fn nether_stream_target_sequence_preserves_basalt_witness() {
-    let targets = (90..=95).map(|x| (x, 90)).collect::<Vec<_>>();
-    let mut materializer = Some(OrderedLifecycleMaterializer::Nether(
-        LifecycleMaterializer::new(nether_chunk_source(SEED)),
-    ));
-    let mut state = StreamLifecycleState::default();
-    let mut witness = None;
-    for target in targets {
-        let columns = lifecycle_columns(
-            StreamDimension::Nether,
-            &[target],
-            materializer.as_mut(),
-            &mut state,
-        );
-        if target == (95, 90) {
-            witness = Some(columns[0].block_state(10, 7, 2).to_owned());
-        }
-    }
-    assert_eq!(
-        witness.as_deref(),
-        Some("minecraft:basalt[axis=y]"),
-        "the x=90..95 target sequence must retain basalt from source (95,89)",
-    );
-}
-
-#[test]
-fn target_scoped_stream_state_replays_nether_sources_and_keeps_end_global() {
-    let mut state = StreamLifecycleState::default();
-    let first = lifecycle_completion_wavefront(&[(0, 0)]);
-    for &(_, source) in &first {
-        assert!(state.target_completed.insert(((0, 0), source)));
-    }
-    let second = lifecycle_completion_wavefront(&[(1, 0)]);
-    let replayed = second
-        .iter()
-        .filter(|&&(target, source)| state.target_completed.insert((target, source)))
-        .count();
-    assert_eq!(replayed, 9, "Nether source completions are target-scoped");
-
-    let mut end_state = StreamLifecycleState::default();
-    for &(_, source) in &first {
-        assert!(end_state.completed.insert(source));
-    }
-    let retained = second
-        .iter()
-        .filter(|&&(_, source)| end_state.completed.insert(source))
-        .count();
-    assert_eq!(retained, 3, "End keeps only its three newly admitted sources globally");
 }
 
 fn diagnostics_enabled() -> bool {
@@ -743,6 +788,75 @@ fn records_match_without_heightmaps(expected: &[u8], actual: &[u8], dimension: S
 }
 
 fn hex(bytes: &[u8]) -> String { bytes.iter().map(|byte| format!("{byte:02x}")).collect() }
+
+fn diagnose_end_raw_packet(expected: &[u8], actual: &[u8]) {
+    let decode = |payload: &[u8]| {
+        let mut reader = Reader::new(payload);
+        let packet = LevelChunkWithLight::decode(
+            &mut reader,
+            &ChunkShape::nether_or_end_1_21(),
+        )
+        .expect("raw End packet must decode for diagnostics");
+        reader.ensure_empty().expect("raw End packet has no trailing bytes");
+        packet
+    };
+    let expected = decode(expected);
+    let actual = decode(actual);
+    eprintln!(
+        "P06 decoded packet coords: expected=({}, {}) actual=({}, {})",
+        expected.x, expected.z, actual.x, actual.z,
+    );
+    for type_id in [1, 4, 5] {
+        let expected_map = expected
+            .heightmaps
+            .get(type_id)
+            .expect("expected End packet heightmap");
+        let actual_map = actual
+            .heightmaps
+            .get(type_id)
+            .expect("actual End packet heightmap");
+        let first = (0..16).flat_map(|z| (0..16).map(move |x| (x, z))).find_map(|(x, z)| {
+            let left = expected_map.get(x, z);
+            let right = actual_map.get(x, z);
+            (left != right).then_some((x, z, left, right))
+        });
+        eprintln!("P06 heightmap type={type_id} first_diff={first:?}");
+    }
+    let mut block_differences = 0usize;
+    let mut first_block_difference = None;
+    for y in 0..256 {
+        for z in 0..16 {
+            for x in 0..16 {
+                let left = expected.column.get_block(x, y, z);
+                let right = actual.column.get_block(x, y, z);
+                if left != right {
+                    block_differences += 1;
+                    first_block_difference.get_or_insert((x, y, z, left, right));
+                }
+            }
+        }
+    }
+    let mut biome_differences = 0usize;
+    let mut first_biome_difference = None;
+    for y in (0..256).step_by(4) {
+        for z in 0..4 {
+            for x in 0..4 {
+                let left = expected.column.get_biome(x, y, z);
+                let right = actual.column.get_biome(x, y, z);
+                if left != right {
+                    biome_differences += 1;
+                    first_biome_difference.get_or_insert((x, y, z, left, right));
+                }
+            }
+        }
+    }
+    eprintln!(
+        "P06 decoded columns: block_differences={block_differences} first_block={first_block_difference:?} biome_differences={biome_differences} first_biome={first_biome_difference:?} block_entities=({}, {}) light_equal={}",
+        expected.block_entities.len(),
+        actual.block_entities.len(),
+        expected.light == actual.light,
+    );
+}
 
 fn mismatch_component(record: &[u8], offset: usize, dimension: StreamDimension) -> &'static str {
     let Some(layout) = light_free_record_layout(record, dimension) else { return "malformed"; };
@@ -916,103 +1030,6 @@ fn v7_diagnostics_parse_each_literal_record_independently() {
     assert!(!records_match_without_heightmaps(&expected, &actual, StreamDimension::Nether));
 }
 
-struct TransitionOnlySource;
-
-impl LifecycleWorldgenSource for TransitionOnlySource {
-    fn shaped_column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
-        ChunkColumn::new(0, 256)
-    }
-
-    fn feature_result(
-        &self,
-        _source: (i32, i32),
-        _overrides: &std::collections::BTreeMap<(i32, i32, i32), String>,
-        _resident: &std::collections::BTreeMap<(i32, i32), ChunkColumn>,
-    ) -> LifecycleFeatureResult {
-        LifecycleFeatureResult::default()
-    }
-}
-
-fn put_u16(bytes: &mut Vec<u8>, value: u16) { bytes.extend_from_slice(&value.to_be_bytes()); }
-fn put_u32(bytes: &mut Vec<u8>, value: u32) { bytes.extend_from_slice(&value.to_be_bytes()); }
-fn put_i32(bytes: &mut Vec<u8>, value: i32) { bytes.extend_from_slice(&value.to_be_bytes()); }
-fn put_u64(bytes: &mut Vec<u8>, value: u64) { bytes.extend_from_slice(&value.to_be_bytes()); }
-
-fn literal_end_lifecycle_payload(target: (i32, i32), focus: u16) -> (Vec<u8>, usize) {
-    let sources = (-1..=1)
-        .flat_map(|x| (-1..=1).map(move |z| (target.0 + x, target.1 + z)))
-        .collect::<Vec<_>>();
-    let mut bytes = END_STREAM_EVENT_DOMAIN.to_vec();
-    put_u32(&mut bytes, sources.len() as u32);
-    let mut target_focus_offset = None;
-    for (sequence, source) in sources.into_iter().enumerate() {
-        put_u64(&mut bytes, sequence as u64);
-        put_i32(&mut bytes, source.0);
-        put_i32(&mut bytes, source.1);
-        bytes.push(1);
-        put_u32(&mut bytes, if source == target { 1 } else { 2 });
-        let mut write_transition = |resident: (i32, i32), stage: u8, value: u16| {
-            put_i32(&mut bytes, resident.0);
-            put_i32(&mut bytes, resident.1);
-            bytes.push(stage);
-            bytes.push(1);
-            for map in 0..3 {
-                for cell in 0..256 {
-                    if resident == target && map == 0 && cell == 255 {
-                        target_focus_offset = Some(bytes.len());
-                    }
-                    put_u16(&mut bytes, value);
-                }
-            }
-        };
-        write_transition(source, 1, if source == target { focus } else { 58 });
-        if source != target {
-            write_transition(target, 1, focus);
-        }
-    }
-    (bytes, target_focus_offset.expect("literal transition target cell"))
-}
-
-fn replay_literal_end_events(events: &[LifecycleReplayEvent], target: (i32, i32)) -> u16 {
-    let mut materializer = LifecycleMaterializer::new(TransitionOnlySource);
-    for z in target.1 - 2..=target.1 + 2 {
-        for x in target.0 - 2..=target.0 + 2 {
-            materializer.admit((x, z));
-        }
-    }
-    for event in events {
-        materializer.complete_for_target_with_residents(
-            target,
-            event.source,
-            event.stage,
-            event.sequence,
-            &event.resident_transitions,
-        );
-    }
-    materializer
-        .resident_column(target)
-        .expect("literal target admission")
-        .client_heightmaps_raw()
-        .expect("literal target map transition")[0][255]
-}
-
-#[test]
-fn end_lifecycle_transition_bytes_change_materialized_result() {
-    let target = (0, 0);
-    let (payload, focus_offset) = literal_end_lifecycle_payload(target, 56);
-    let before = parse_end_lifecycle_events(&payload, target.0, target.1);
-    let before_result = replay_literal_end_events(&before, target);
-
-    let mut mutated = payload;
-    mutated[focus_offset..focus_offset + 2].copy_from_slice(&57u16.to_be_bytes());
-    let after = parse_end_lifecycle_events(&mutated, target.0, target.1);
-    let after_result = replay_literal_end_events(&after, target);
-
-    assert_ne!(before_result, after_result, "mutating authenticated resident map bytes must change replay output");
-    assert_eq!(before_result, 56);
-    assert_eq!(after_result, 57);
-}
-
 #[test]
 #[ignore = "requires scripts/worldgen-oracle/stream-parity.sh and the external 26.2 oracle"]
 fn stream_external_oracle_matches_lodestone() {
@@ -1040,7 +1057,11 @@ fn stream_external_oracle_matches_lodestone() {
     assert_eq!(stream_header.dimension, expected_dimension, "stream dimension selection");
     assert_eq!(
         stream_header.format,
-        if stream_header.dimension == StreamDimension::End { STREAM_FORMAT_END_LIFECYCLE } else { STREAM_FORMAT_LIGHT_FREE },
+        if stream_header.dimension == StreamDimension::End {
+            STREAM_FORMAT_END_P06_LIFECYCLE
+        } else {
+            STREAM_FORMAT_LIGHT_FREE
+        },
         "stream format for selected dimension",
     );
     assert_eq!(stream_header.start, 0, "ephemeral stream has no persistent resume cursor");
@@ -1059,18 +1080,9 @@ fn stream_external_oracle_matches_lodestone() {
         .filter(|&value| value != 0)
         .unwrap_or(default_batch_size);
     let mut pending = Vec::with_capacity(batch_size);
-    let mut next_event_sequence = 0u64;
     loop {
         match read_frame(&mut reader, &complete, stream_header.format) {
-            Some(frame) => {
-                if stream_header.dimension == StreamDimension::End {
-                    for event in &frame.lifecycle_events {
-                        assert_eq!(event.sequence, next_event_sequence, "End lifecycle event sequence");
-                        next_event_sequence = next_event_sequence.checked_add(1).expect("End lifecycle sequence overflow");
-                    }
-                }
-                pending.push(frame);
-            }
+            Some(frame) => pending.push(frame),
             None => {
                 if pending.is_empty() { break; }
             }
@@ -1078,15 +1090,18 @@ fn stream_external_oracle_matches_lodestone() {
         if pending.len() < batch_size && compared + (pending.len() as u64) < stream_header.count { continue; }
         let coordinates = pending.iter().map(|frame| (frame.cx, frame.cz)).collect::<Vec<_>>();
         let end_events = if stream_header.dimension == StreamDimension::End {
-            let mut events = EndLifecycleEvents::new();
+            let mut events = EndP06LifecycleEvents::new();
             for frame in &pending {
-                assert!(events.insert((frame.cx, frame.cz), frame.lifecycle_events.clone()).is_none(), "duplicate End lifecycle frame coordinate");
+                assert!(
+                    events.insert((frame.cx, frame.cz), frame.lifecycle_events.clone()).is_none(),
+                    "duplicate P06 End lifecycle frame coordinate",
+                );
             }
             Some(events)
         } else {
             None
         };
-        let actual_columns = lifecycle_columns_with_events(
+        let actual_columns = lifecycle_columns(
             stream_header.dimension,
             &coordinates,
             materializer.as_mut(),
@@ -1099,21 +1114,67 @@ fn stream_external_oracle_matches_lodestone() {
             let expected_cx = stream_header.cx0 + (index % width) as i32;
             let expected_cz = stream_header.cz0 + (index / width) as i32;
             assert_eq!((frame.cx, frame.cz), (expected_cx, expected_cz), "stream coordinate order");
-            let actual = support::large_parity_manifest::light_free_record(
-                &column,
-                frame.cx,
-                frame.cz,
-                stream_header.dimension.manifest_dimension(),
-            );
+            let actual = if stream_header.format == STREAM_FORMAT_END_P06_LIFECYCLE {
+                let end_materializer = match materializer.as_ref().expect("End materializer") {
+                    OrderedLifecycleMaterializer::End(materializer) => materializer,
+                    _ => panic!("P06 End stream selected a non-End materializer"),
+                };
+                end_p06_packet_payload(end_materializer, (frame.cx, frame.cz))
+            } else {
+                support::large_parity_manifest::light_free_record(
+                    &column,
+                    frame.cx,
+                    frame.cz,
+                    stream_header.dimension.manifest_dimension(),
+                )
+            };
             let actual_digest = support::large_parity_manifest::sha256(&actual);
             if actual_digest != frame.digest {
-                if defer_heightmaps() && records_match_without_heightmaps(&frame.record, &actual, stream_header.dimension) {
+                if stream_header.format == STREAM_FORMAT_LIGHT_FREE
+                    && defer_heightmaps()
+                    && records_match_without_heightmaps(&frame.record, &actual, stream_header.dimension)
+                {
                     eprintln!("stream parity: deferred heightmap-only mismatch at ({},{})", frame.cx, frame.cz);
                     compared += 1;
                     continue;
                 }
                 if diagnostics_enabled() {
                     let first = frame.record.iter().zip(&actual).position(|(left, right)| left != right);
+                    let kind = if stream_header.format == STREAM_FORMAT_END_P06_LIFECYCLE {
+                        "P06 packet"
+                    } else {
+                        "stream payload"
+                    };
+                    if stream_header.format == STREAM_FORMAT_END_P06_LIFECYCLE {
+                        eprintln!(
+                            "P06 packet mismatch at ({},{}): expected_len={} actual_len={} first_diff={first:?} expected={} actual={}",
+                            frame.cx,
+                            frame.cz,
+                            frame.record.len(),
+                            actual.len(),
+                            hex(&frame.digest),
+                            hex(&actual_digest),
+                        );
+                    }
+                    if stream_header.format != STREAM_FORMAT_LIGHT_FREE {
+                        eprintln!(
+                            "{kind} first differing bytes: expected={:?} actual={:?}",
+                            frame.record.get(first.unwrap_or(0)..first.unwrap_or(0).saturating_add(16)),
+                            actual.get(first.unwrap_or(0)..first.unwrap_or(0).saturating_add(16)),
+                        );
+                    }
+                    if stream_header.format != STREAM_FORMAT_LIGHT_FREE {
+                        // The packet path has no light-free component parser;
+                        // keep the authenticated byte offset visible for a
+                        // bounded raw-packet control without dumping shaders
+                        // or the complete payload.
+                        if let Some(first) = first {
+                            eprintln!("{kind} first differing byte offset={first}");
+                        }
+                        if stream_header.format == STREAM_FORMAT_END_P06_LIFECYCLE {
+                            diagnose_end_raw_packet(&frame.record, &actual);
+                        }
+                    }
                     let component = first.map_or("unknown", |offset| mismatch_component(&frame.record, offset, stream_header.dimension));
                     eprintln!("stream mismatch at ({},{}), component={component}, first differing byte {:?}, expected={}, actual={}", frame.cx, frame.cz, first, hex(&frame.digest), hex(&actual_digest));
                     if component == "terrain" {
@@ -1152,7 +1213,12 @@ fn stream_external_oracle_matches_lodestone() {
                         eprintln!("first terrain cell from column: {:?}", first_terrain_difference_from_column(&frame.record, &column, stream_header.dimension));
                     }
                 }
-                panic!("stream content parity mismatch at ({},{}) index {}", frame.cx, frame.cz, index);
+                let kind = if stream_header.format == STREAM_FORMAT_END_P06_LIFECYCLE {
+                    "P06 packet"
+                } else {
+                    "light-free content"
+                };
+                panic!("stream {kind} parity mismatch at ({},{}) index {}", frame.cx, frame.cz, index);
             }
             compared += 1;
             if compared % 256 == 0 || compared == stream_header.count { eprintln!("stream parity: compared {compared}/{} chunks", stream_header.count); }

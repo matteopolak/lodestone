@@ -11,8 +11,8 @@
 //! the game data's own row order run through vanilla's own splitting heuristic —
 //! nothing here re-derives a bucketing scheme of its own.
 //!
-//! **The search is now a literal port too**, with exactly one documented
-//! omission: vanilla's own last-result field. Vanilla's own subtree-search
+//! **The search is now a literal port too**, including vanilla's own last-result
+//! field. Vanilla's own subtree-search
 //! routine, restated without its Java syntax, is:
 //!
 //! ```text
@@ -30,8 +30,9 @@
 //! ```
 //!
 //! and vanilla's own top-level search routine seeds `candidate` from its own
-//! last-result field, a `ThreadLocal`
-//! holding *the previous search's leaf*, then stores the new one.
+//! last-result field, a `ThreadLocal` holding *the previous search's leaf*, then
+//! stores the new one. The port keeps that history in an explicit cursor owned by
+//! one generation lifecycle, so worker assignment cannot become semantic state.
 //!
 //! ## What `lastResult` can and cannot do — traced, not guessed
 //!
@@ -60,19 +61,11 @@
 //!
 //! ## Therefore: which vanilla behaviour this implements
 //!
-//! **Implemented — the fresh-instance answer:** vanilla's traversal with
-//! `candidate == null`, i.e. *the first leaf in vanilla's pruned DFS child order
-//! achieving the minimum distance*. That is what a freshly constructed
-//! `ParameterList` returns, what vanilla's very first sample after load returns,
-//! and the only reading of "what vanilla does" that is a function of the target.
-//!
-//! **Deliberately not implemented — `lastResult` carry-over.** Reproducing it
-//! would make a served chunk's biome depend on which chunk that worker thread
-//! generated previously, so one seed would produce different worlds across runs
-//! and `parallel_generation_is_deterministic_and_matches_serial` plus the
-//! byte-identity gates would be measuring a coin flip. No seeding of any kind
-//! happens here — not even a pruning-only hint, because under vanilla's
-//! incumbent-wins-a-tie rule a hint that ties *is* the answer.
+//! Production uses the same lifecycle history: each query seeds the traversal
+//! from the previous query's selected leaf, and the selected leaf becomes the
+//! next seed. Query order is therefore part of a generation lifecycle and must
+//! remain fixed inside the staged pipeline. The public stateless helper is kept
+//! as a negative control for fixtures and diagnostics.
 //!
 //! # The theorem, restated for vanilla's tie-break
 //!
@@ -258,8 +251,8 @@ fn bucketize(ids: &[u32]) -> Vec<Vec<u32>> {
     buckets
 }
 
-/// Vanilla's `Climate.RTree`, with vanilla's own search minus `lastResult`. See
-/// the module doc for exactly which behaviour that is and which it is not.
+/// Vanilla's `Climate.RTree`, including its lifecycle cached last result. See
+/// the module doc for the exact lifecycle and tie behavior.
 #[derive(Debug)]
 pub(crate) struct BiomeTree {
     nodes: Vec<Node>,
@@ -328,23 +321,73 @@ impl BiomeTree {
         me
     }
 
-    /// Vanilla's own R-tree node distance routine `distance(target)`: the summed squared per-axis
-    /// distance from `target` to this node's span. For a leaf this is exactly
-    /// `BiomeParameterPoint::fitness`; for a subtree it is a lower bound on every
-    /// leaf beneath it (module doc).
+    /// The exact node distance: all seven i64 per-axis squared terms.
+    ///
+    /// Search uses this uncapped form only where it must retain the selected
+    /// distance (the incumbent seed and the single-leaf root). Child visits use
+    /// [`Self::bound`] instead, because a child whose partial sum reaches the
+    /// incumbent can be pruned without evaluating the remaining axes.
     #[inline]
-    fn bound(&self, id: u32, target: &[i64; DIMENSIONS]) -> i64 {
+    fn distance(&self, id: u32, target: &[i64; DIMENSIONS]) -> i64 {
         let space = &self.nodes[id as usize].space;
-        let mut sum = 0i64;
-        for i in 0..DIMENSIONS {
-            let d = space[i].distance(target[i]);
-            sum += d * d;
+        let d0 = space[0].distance(target[0]);
+        let d1 = space[1].distance(target[1]);
+        let d2 = space[2].distance(target[2]);
+        let d3 = space[3].distance(target[3]);
+        let d4 = space[4].distance(target[4]);
+        let d5 = space[5].distance(target[5]);
+        let d6 = space[6].distance(target[6]);
+        d0 * d0 + d1 * d1 + d2 * d2 + d3 * d3 + d4 * d4 + d5 * d5 + d6 * d6
+    }
+
+    /// A node distance capped at `cutoff`, preserving the strict pruning rule.
+    ///
+    /// The return value is exact when it is below `cutoff`; once a partial sum
+    /// reaches the cutoff, returning the cutoff is sufficient because callers
+    /// descend only for `best_dist > child_bound`. In particular, equality
+    /// returns the cutoff and therefore still prunes a tied child, preserving
+    /// the incumbent-wins-ties traversal semantics. The terms remain seven
+    /// independent i64 squares; only the suffix after a proven prune is skipped.
+    #[inline]
+    fn bound(&self, id: u32, target: &[i64; DIMENSIONS], cutoff: i64) -> i64 {
+        let space = &self.nodes[id as usize].space;
+        let d0 = space[0].distance(target[0]);
+        let mut sum = d0 * d0;
+        if sum >= cutoff {
+            return cutoff;
         }
+        let d1 = space[1].distance(target[1]);
+        sum += d1 * d1;
+        if sum >= cutoff {
+            return cutoff;
+        }
+        let d2 = space[2].distance(target[2]);
+        sum += d2 * d2;
+        if sum >= cutoff {
+            return cutoff;
+        }
+        let d3 = space[3].distance(target[3]);
+        sum += d3 * d3;
+        if sum >= cutoff {
+            return cutoff;
+        }
+        let d4 = space[4].distance(target[4]);
+        sum += d4 * d4;
+        if sum >= cutoff {
+            return cutoff;
+        }
+        let d5 = space[5].distance(target[5]);
+        sum += d5 * d5;
+        if sum >= cutoff {
+            return cutoff;
+        }
+        let d6 = space[6].distance(target[6]);
+        sum += d6 * d6;
         sum
     }
 
-    /// The nearest biome's table row, by **vanilla's own search with no
-    /// `lastResult`** — the fresh-instance answer (module doc).
+    /// The nearest biome's table row, by the indexed search with no cached
+    /// incumbent — the stateless negative-control answer (module doc).
     ///
     /// Bumps the biome-search counters: one search, plus the number of
     /// `Node::distance` evaluations it really performed. That second number is the
@@ -354,49 +397,20 @@ impl BiomeTree {
         self.search(target, None).0
     }
 
-    /// Search with the caller's cached leaf as the incumbent and return both
-    /// the selected row and leaf node. The leaf is retained by
-    /// [`BiomeSearchCursor`](super::BiomeSearchCursor) so the next lookup can
-    /// reproduce the same lifecycle without relying on worker identity.
+    /// Search with the cached incumbent supplied by the caller, returning both
+    /// the table row and the selected leaf node so the caller can retain the
+    /// exact history for the next query.
     pub(crate) fn nearest_row_with_candidate(
         &self,
         target: &[i64; DIMENSIONS],
         candidate: Option<u32>,
     ) -> (u32, u32) {
-        let mut evaluations = 0u64;
-        let mut best_dist = i64::MAX;
-        let mut best_node = NONE;
-        if let Some(seed) = candidate {
-            if (seed as usize) < self.nodes.len() && self.nodes[seed as usize].is_leaf() {
-                best_dist = self.bound(seed, target);
-                best_node = seed;
-                evaluations += 1;
-            }
-        }
-        if self.nodes[self.root as usize].is_leaf() {
-            let distance = self.bound(self.root, target);
-            evaluations += 1;
-            if best_dist > distance {
-                best_node = self.root;
-            }
-        } else {
-            self.visit(
-                self.root,
-                target,
-                &mut best_dist,
-                &mut best_node,
-                &mut evaluations,
-            );
-        }
-        debug_assert_ne!(best_node, NONE, "the tree always has at least one leaf");
-        crate::counters::bump_biome_search(evaluations);
-        (self.nodes[best_node as usize].row, best_node)
+        let (node, _) = self.search_node(target, candidate);
+        (self.nodes[node as usize].row, node)
     }
 
-    /// Vanilla's search with an explicit `candidate` in place of its `ThreadLocal`
-    /// — the seeded form, kept **only** so a gate can demonstrate that seeding
-    /// changes the returned row (and never the distance). Production always passes
-    /// `None`; see the module doc for why.
+    /// Vanilla's search with an explicit candidate in place of its lifecycle
+    /// cached incumbent — the seeded form used by tie controls.
     pub(crate) fn nearest_row_seeded(
         &self,
         target: &[i64; DIMENSIONS],
@@ -422,8 +436,8 @@ impl BiomeTree {
     /// recomputes. Neither is a semantic change; the counter counts the
     /// evaluations this form actually performs.
     fn search(&self, target: &[i64; DIMENSIONS], candidate: Option<u32>) -> (u32, i64) {
-        let (best_node, best_dist) = self.search_node(target, candidate);
-        (self.nodes[best_node as usize].row, best_dist)
+        let (node, distance) = self.search_node(target, candidate);
+        (self.nodes[node as usize].row, distance)
     }
 
     fn search_node(&self, target: &[i64; DIMENSIONS], candidate: Option<u32>) -> (u32, i64) {
@@ -432,7 +446,7 @@ impl BiomeTree {
         let mut best_node = NONE;
         if let Some(seed) = candidate {
             if (seed as usize) < self.nodes.len() && self.nodes[seed as usize].is_leaf() {
-                best_dist = self.bound(seed, target);
+                best_dist = self.distance(seed, target);
                 best_node = seed;
                 evaluations += 1;
             }
@@ -440,7 +454,7 @@ impl BiomeTree {
         // A single-row table's root is itself the leaf; vanilla's
         // `root.search(...)` returns it directly.
         if self.nodes[self.root as usize].is_leaf() {
-            let d = self.bound(self.root, target);
+            let d = self.distance(self.root, target);
             evaluations += 1;
             if best_dist > d {
                 best_dist = d;
@@ -471,7 +485,7 @@ impl BiomeTree {
         let end = first + node.child_count as usize;
         for slot in first..end {
             let child = self.children[slot];
-            let child_bound = self.bound(child, target);
+            let child_bound = self.bound(child, target, *best_dist);
             *evaluations += 1;
             if *best_dist > child_bound {
                 if self.nodes[child as usize].is_leaf() {
@@ -701,6 +715,48 @@ mod tests {
                 "hull containment must hold at n = {n}"
             );
         }
+    }
+
+    #[test]
+    fn cutoff_bound_is_exact_below_cutoff_and_clamped_after_partial_sum() {
+        let tree = BiomeTree::build(&spread_table(37));
+        let target = [1234, -2345, 3456, 0, 0, 0, 0];
+        let mut saw_partial_cutoff = false;
+        for id in 0..tree.node_count() as u32 {
+            let exact = tree.distance(id, &target);
+            assert_eq!(
+                tree.bound(id, &target, exact.saturating_add(1)),
+                exact,
+                "a cutoff above the exact seven-term distance must not change it for node {id}"
+            );
+            assert_eq!(
+                tree.bound(id, &target, exact),
+                exact,
+                "an equal cutoff must remain equal so strict pruning keeps its semantics"
+            );
+            if exact > 1 {
+                let cutoff = exact - 1;
+                assert_eq!(
+                    tree.bound(id, &target, cutoff),
+                    cutoff,
+                    "a partial sum above the cutoff must return the cutoff for node {id}"
+                );
+                saw_partial_cutoff = true;
+            }
+        }
+        assert!(
+            saw_partial_cutoff,
+            "the control must exercise a real cutoff rather than only exact distances"
+        );
+    }
+
+    #[test]
+    fn visit_prunes_equal_child_bound_and_keeps_first_tied_row() {
+        let first = point([(0, 0); DIMENSIONS]);
+        let second = point([(0, 0); DIMENSIONS]);
+        let tree = BiomeTree::build(&[first, second]);
+        let target = [0; DIMENSIONS];
+        assert_eq!(tree.nearest_row_and_distance(&target), (0, 0));
     }
 
     #[test]

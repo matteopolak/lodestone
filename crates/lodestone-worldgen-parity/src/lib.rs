@@ -39,6 +39,37 @@ use std::fmt::Write as _;
 
 pub mod lifecycle;
 
+/// The structure-terrain scope of a reference record.
+///
+/// A composed stage oracle deliberately supplies no structure starts, so its
+/// beard term is empty. The authenticated packet/content manifests are
+/// generated from the production world and therefore carry the real
+/// structure-beard scope in their header provenance. Keeping this as an enum
+/// makes a scope mismatch impossible to hide behind a block-field diff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StructureBeardScope {
+    Empty,
+    ProductionReal,
+}
+
+impl StructureBeardScope {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::ProductionReal => "production-real",
+        }
+    }
+
+    fn parse(raw: &str) -> Self {
+        match raw {
+            "empty" => Self::Empty,
+            "production-real" => Self::ProductionReal,
+            other => panic!("unknown structure beard scope {other:?}"),
+        }
+    }
+}
+
 /// One pipeline stage's full `16 x height x 16` block field for one chunk,
 /// indexed by local `(lx, y, lz)` with `lx, lz` in `0..16` and `y` in
 /// `min_y..min_y + height`. Missing positions read as `"minecraft:air"`
@@ -102,6 +133,8 @@ pub struct ChunkFixture {
     pub min_y: i32,
     pub height: i32,
     pub sea_level: i32,
+    /// Whether the reference includes production structure terrain adaptation.
+    pub beard_scope: StructureBeardScope,
     /// `(biome_id, sampled_height)` per quart, row-major `qz*4+qx`, matching
     /// [`lodestone_worldgen::overworld::OverworldGenerator::biome_stage`]'s
     /// convention (`crates/lodestone-worldgen/src/overworld.rs`).
@@ -143,6 +176,7 @@ pub fn parse_raw_dump(text: &str) -> Vec<ChunkFixture> {
     let mut min_y = 0i32;
     let mut height = 0i32;
     let mut sea_level = 0i32;
+    let mut beard_scope = None;
     let mut biome_quarts: [(String, i32); 16] = std::array::from_fn(|_| (String::new(), 0));
     let mut postsurface = BlockField::new(0, 0);
     let mut postcarve = BlockField::new(0, 0);
@@ -187,6 +221,7 @@ pub fn parse_raw_dump(text: &str) -> Vec<ChunkFixture> {
                     postfeatures.height = height;
                 }
                 "meta.seaLevel" => sea_level = rest.trim().parse().expect("seaLevel"),
+                "meta.beardScope" => beard_scope = Some(StructureBeardScope::parse(rest.trim())),
                 "meta.done" => {
                     out.push(ChunkFixture {
                         seed,
@@ -195,6 +230,9 @@ pub fn parse_raw_dump(text: &str) -> Vec<ChunkFixture> {
                         min_y,
                         height,
                         sea_level,
+                        beard_scope: beard_scope
+                            .take()
+                            .expect("meta.beardScope must precede meta.done"),
                         biome_quarts: biome_quarts.clone(),
                         postsurface: std::mem::replace(&mut postsurface, BlockField::new(0, 0)),
                         postcarve: std::mem::replace(&mut postcarve, BlockField::new(0, 0)),
@@ -235,6 +273,7 @@ pub fn encode_compact(fixtures: &[ChunkFixture]) -> String {
         writeln!(out, "minY {}", f.min_y).unwrap();
         writeln!(out, "height {}", f.height).unwrap();
         writeln!(out, "seaLevel {}", f.sea_level).unwrap();
+        writeln!(out, "beardScope {}", f.beard_scope.as_str()).unwrap();
         for (i, (id, y)) in f.biome_quarts.iter().enumerate() {
             writeln!(out, "biome {} {} {} {}", i % 4, i / 4, id, y).unwrap();
         }
@@ -305,6 +344,12 @@ pub fn parse_compact(text: &str) -> Vec<ChunkFixture> {
             .trim()
             .parse()
             .expect("seaLevel int");
+        let line = lines.next().expect("beardScope line");
+        let beard_scope = StructureBeardScope::parse(
+            line.strip_prefix("beardScope ")
+                .expect("beardScope prefix")
+                .trim(),
+        );
 
         let mut biome_quarts: [(String, i32); 16] = std::array::from_fn(|_| (String::new(), 0));
         for _ in 0..16 {
@@ -365,6 +410,7 @@ pub fn parse_compact(text: &str) -> Vec<ChunkFixture> {
             min_y,
             height,
             sea_level,
+            beard_scope,
             biome_quarts,
             postsurface,
             postcarve,
@@ -577,6 +623,7 @@ meta.chunkZ 0
 meta.minY -64
 meta.height 8
 meta.seaLevel 63
+meta.beardScope empty
 biome.0,0 minecraft:plains 5
 biome.1,0 minecraft:plains 5
 biome.2,0 minecraft:plains 5

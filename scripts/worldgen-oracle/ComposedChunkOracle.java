@@ -218,6 +218,7 @@ public final class ComposedChunkOracle {
         sb.append("meta.minY ").append(minY).append('\n');
         sb.append("meta.height ").append(height).append('\n');
         sb.append("meta.seaLevel ").append(seaLevel).append('\n');
+        sb.append("meta.beardScope empty\n");
 
         int[] quartHeight = new int[16];
         for (int qz = 0; qz < 4; qz++) {
@@ -440,13 +441,18 @@ public final class ComposedChunkOracle {
         HolderLookup.Provider provider = VanillaRegistries.createLookup();
 
         long seed = 42L;
-        // Two named chunks, matching the coordinates other oracles in this
-        // directory already use (`carver_parity`'s "ocean chunk (0,0)" /
-        // "land chunk (-120,-120)"), so this fixture set is drawn from
-        // already-characterised, non-degenerate columns rather than an
-        // untested pick.
-        dumpChunk(provider, seed, 0, 0);
-        dumpChunk(provider, seed, -120, -120);
+        // The committed fixture coordinates remain the default; a bounded
+        // diagnostic may select one additional chunk without changing the
+        // fixture contract.
+        String target = System.getenv("ORACLE_TARGET_CHUNK");
+        if (target == null || target.isBlank()) {
+            dumpChunk(provider, seed, 0, 0);
+            dumpChunk(provider, seed, -120, -120);
+        } else {
+            String[] parts = target.split(",", -1);
+            if (parts.length != 2) throw new IllegalArgumentException("ORACLE_TARGET_CHUNK must be cx,cz");
+            dumpChunk(provider, seed, Integer.parseInt(parts[0].trim()), Integer.parseInt(parts[1].trim()));
+        }
 
         System.out.print(sb);
     }

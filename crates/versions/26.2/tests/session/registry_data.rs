@@ -111,6 +111,14 @@ fn real_dimension_types_resolve_the_fields_that_were_hardcoded_before_288() {
         Some(0x0a_0a_0a),
         "overworld.json's minecraft:visual/ambient_light_color is \"#0a0a0a\""
     );
+    assert_eq!(overworld.fog_color, Some(0x00c0_d8ff));
+    assert_eq!(overworld.sky_color, Some(0x0078_a7ff));
+    assert_eq!(overworld.cloud_color, Some(0xccff_ffff));
+    assert_eq!(overworld.sky_light_factor, None);
+    assert!(overworld
+        .environment_attributes
+        .iter()
+        .any(|(key, _)| key == "minecraft:audio/ambient_sounds"));
     assert_eq!(overworld.default_clock.as_deref(), Some("minecraft:overworld"));
 
     // `.../the_nether.json`. The three fields this client used to guess by name,
@@ -143,6 +151,10 @@ fn real_dimension_types_resolve_the_fields_that_were_hardcoded_before_288() {
          treating the two dimensions as sharing one ambient floor under-lights \
          the Nether"
     );
+    assert_eq!(nether.fog_color, None);
+    assert_eq!(nether.sky_color, None);
+    assert_eq!(nether.cloud_color, None);
+    assert_eq!(nether.sky_light_factor, Some(0.0));
     assert_eq!(
         nether.default_clock, None,
         "the Nether has fixed time and therefore no clock of its own"
@@ -169,6 +181,10 @@ fn real_dimension_types_resolve_the_fields_that_were_hardcoded_before_288() {
         Some(0x3f_47_3f),
         "the_end.json's minecraft:visual/ambient_light_color is \"#3f473f\""
     );
+    assert_eq!(end.fog_color, Some(0x0018_1318));
+    assert_eq!(end.sky_color, Some(0x0000_0000));
+    assert_eq!(end.cloud_color, None);
+    assert_eq!(end.sky_light_factor, Some(0.0));
     assert_eq!(end.default_clock.as_deref(), Some("minecraft:the_end"));
 
     // `.../overworld_caves.json` — same window as the overworld but with a

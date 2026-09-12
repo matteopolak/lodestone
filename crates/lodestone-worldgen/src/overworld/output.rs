@@ -5,6 +5,7 @@
 //! Moved here verbatim from `overworld.rs` by U16 Phase A.
 
 use super::OverworldGenerator;
+use lodestone_data::biomes::{BiomeRef, BuiltinBiome};
 
 /// Which stages a [`GeneratedColumn`] carries — the wire-facing tag
 /// `docs/plans/progressive-chunk-generation.md`'s Stage 1 asks for.
@@ -52,6 +53,36 @@ impl OverworldGenerator {
         biome_cells: super::BiomeCells,
         block_entities: Vec<super::block_entities::GeneratedBlockEntity>,
     ) -> GeneratedColumn {
+        let biome_quarts = biome_quarts.map(|(name, cold)| {
+            let biome = BuiltinBiome::parse(&name)
+                .unwrap_or_else(|error| panic!("generated biome is not built-in: {error}"));
+            (BiomeRef::builtin(biome), cold)
+        });
+        self.intern_from_dense_typed(
+            cx,
+            cz,
+            stage,
+            world,
+            biome_quarts,
+            biome_cells,
+            block_entities,
+        )
+    }
+
+    /// Adopts the dense field when the biome stage already carries typed
+    /// identities. The string-taking adapter above remains only for the
+    /// resource/configuration seam while callers migrate; this is the
+    /// allocation-free production hand-off.
+    pub(super) fn intern_from_dense_typed(
+        &self,
+        cx: i32,
+        cz: i32,
+        stage: GenStage,
+        world: crate::dense_grid::DenseBlockGrid,
+        biome_quarts: [(BiomeRef, bool); 16],
+        biome_cells: super::BiomeCells,
+        block_entities: Vec<super::block_entities::GeneratedBlockEntity>,
+    ) -> GeneratedColumn {
         let _stage_guard = crate::counters::StageGuard::enter(crate::counters::Stage::Intern);
         debug_assert_eq!(world.bounds().3, 16, "centre chunk width must be 16");
         debug_assert_eq!(world.bounds().4, self.height, "centre chunk height must match the generator's");
@@ -66,6 +97,14 @@ impl OverworldGenerator {
         // server-side consumer re-validates. Gated on `stage` — see this
         // function's own doc for why `Shaped` must never produce one.
         let spawn_candidates = if matches!(stage, GenStage::Full) {
+            let biome_names: [String; 16] = std::array::from_fn(|i| {
+                biome_quarts[i]
+                    .0
+                    .builtin_or_none()
+                    .expect("generation spawns require a built-in biome name")
+                    .name()
+                    .to_owned()
+            });
             let height = self.height;
             let min_y = self.min_y;
             let surface_y_at = |lx: usize, lz: usize| -> i32 {
@@ -77,8 +116,8 @@ impl OverworldGenerator {
                 }
                 min_y
             };
-            let biome_at = |lx: usize, lz: usize| -> &str {
-                biome_quarts[(lz >> 2) * 4 + (lx >> 2)].0.as_str()
+            let biome_at = |lx: usize, lz: usize| -> String {
+                biome_names[(lz >> 2) * 4 + (lx >> 2)].clone()
             };
             crate::spawn_stage::spawn_candidates_for_chunk(
                 biome_at,
@@ -116,7 +155,7 @@ impl OverworldGenerator {
             height: self.height,
             palette,
             blocks,
-            biome_quarts: biome_quarts.map(|(name, _)| name),
+            biome_quarts: biome_quarts.map(|(biome, _)| biome),
             biome_cells,
             block_entities,
             motion_blocking,
@@ -319,7 +358,7 @@ pub struct GeneratedColumn {
     height: i32,
     palette: Vec<String>,
     blocks: Vec<u16>,
-    /// Biome id per horizontal quart, row-major `qz * 4 + qx` —
+    /// Typed biome identity per horizontal quart, row-major `qz * 4 + qx` —
     /// see [`OverworldGenerator::biome_stage`]. **The surface answer**: this is
     /// the direct surface-height quart answer used by output consumers such as
     /// decoration. Surface material has a separate zoomed nearby-cell context
@@ -328,7 +367,7 @@ pub struct GeneratedColumn {
     /// It is *not* the biome of the column: broadcasting
     /// it vertically is what made `lush_caves`/`dripstone_caves`/`deep_dark`
     /// unreachable. Read [`Self::biome_cells`] for anything that has a `y`.
-    biome_quarts: [String; 16],
+    biome_quarts: [BiomeRef; 16],
     /// The full 4×4×4 biome grid — the authoritative per-cell answer,
     /// and what a per-section biome container on the wire or in a region file
     /// must be built from. See [`super::biome_cells`].
@@ -415,26 +454,36 @@ impl GeneratedColumn {
         self.blocks.iter().filter(|b| **b != 0).count()
     }
 
-    /// Biome id at local `(lx, lz)` in `0..16` — quart
+    /// Typed biome identity at local `(lx, lz)` in `0..16` — quart
     /// resolution, broadcast vertically (see [`OverworldGenerator::biome_stage`]),
     /// so the same answer comes back for every `y` at this `(lx, lz)`.
     ///
     /// # Panics
     /// Panics if `lx`/`lz` are not in `0..16`.
     #[must_use]
-    pub fn biome_state(&self, lx: usize, lz: usize) -> &str {
+    pub fn biome_state_ref(&self, lx: usize, lz: usize) -> BiomeRef {
         assert!(lx < 16 && lz < 16, "biome_state coordinates out of range");
-        &self.biome_quarts[(lz >> 2) * 4 + (lx >> 2)]
+        self.biome_quarts[(lz >> 2) * 4 + (lx >> 2)]
+    }
+
+    /// Built-in biome name at local `(lx, lz)` for display/configuration
+    /// boundaries. Typed consumers should use [`Self::biome_state_ref`].
+    #[must_use]
+    pub fn biome_state(&self, lx: usize, lz: usize) -> &'static str {
+        self.biome_state_ref(lx, lz)
+            .builtin_or_none()
+            .expect("extension biome requires its owning registry at the name boundary")
+            .name()
     }
 
     /// Distinct biome count in this column (telemetry / anti-vacuity — a
     /// chunk straddling a biome boundary should report more than one).
     #[must_use]
     pub fn distinct_biome_count(&self) -> usize {
-        let mut seen: Vec<&str> = Vec::with_capacity(16);
-        for name in &self.biome_quarts {
-            if !seen.contains(&name.as_str()) {
-                seen.push(name.as_str());
+        let mut seen: Vec<BiomeRef> = Vec::with_capacity(16);
+        for &biome in &self.biome_quarts {
+            if !seen.contains(&biome) {
+                seen.push(biome);
             }
         }
         seen.len()
@@ -445,7 +494,7 @@ impl GeneratedColumn {
     /// indexes into `palette` (`palette[0] == "minecraft:air"`), `ly = y -
     /// min_y`, and `biome_quarts[qz * 4 + qx]` is this column's biome id for
     /// horizontal quart `(qx, qz)`, constant across `y`.
-    ///    /// The full per-cell biome grid. **Read this, not [`Self::biome_quarts_ref`],
+    /// The full per-cell biome grid. **Read this, not [`Self::biome_state_ref`],
     /// for anything that has a `y`** — a per-section biome container, a region-file
     /// `biomes` palette, underground tint/fog, or a spawn rule.
     ///
@@ -522,7 +571,7 @@ impl GeneratedColumn {
     /// re-interning every block. The index layout is stable and part of the
     /// contract.
     #[must_use]
-    pub fn into_raw(self) -> (i32, i32, Vec<String>, Vec<u16>, [String; 16]) {
+    pub fn into_raw(self) -> (i32, i32, Vec<String>, Vec<u16>, [BiomeRef; 16]) {
         (
             self.min_y,
             self.height,

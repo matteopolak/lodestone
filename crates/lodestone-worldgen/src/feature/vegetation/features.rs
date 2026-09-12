@@ -83,7 +83,6 @@ impl CompatBlockPosSet {
         true
     }
 
-    #[cfg(test)]
     fn hash(pos: BlockPos) -> i32 {
         pos.y
             .wrapping_add(pos.z.wrapping_mul(31))
@@ -91,16 +90,13 @@ impl CompatBlockPosSet {
             .wrapping_add(pos.x)
     }
 
-    #[cfg(test)]
     fn spread(hash: i32) -> u32 {
         let hash = hash as u32;
         hash ^ (hash >> 16)
     }
 
-    #[cfg(test)]
     fn bucket(hash: u32, capacity: usize) -> usize { hash as usize & (capacity - 1) }
 
-    #[cfg(test)]
     fn bucket_capacity(&self) -> usize {
         let mut capacity = 16;
         while self.entries.len() > capacity * 3 / 4 {
@@ -116,7 +112,6 @@ impl CompatBlockPosSet {
     /// Reconstruct the bucket traversal that would be the wrong production
     /// order. This is test-only negative-control evidence: it must differ from
     /// the insertion log for a collision-heavy input.
-    #[cfg(test)]
     fn bucket_order(&self) -> Vec<BlockPos> {
         let capacity = self.bucket_capacity();
         let mut buckets = vec![Vec::new(); capacity];
@@ -2958,6 +2953,23 @@ pub(super) fn place_vegetation_patch_with_seed<R: RandomSource>(
             grid.set_if_in_bounds(p.x, p.y, p.z, "minecraft:water".to_string());
         }
         surface = kept;
+    }
+    if std::env::var_os("LODESTONE_TRACE_CAVE_VINES").is_some()
+        && surface
+            .members
+            .contains(&BlockPos { x: 4, y: 11, z: 8 })
+    {
+        eprintln!(
+            "TRACE_PATCH origin=({},{},{}) radius=({},{}) entries={} insertion={:?} bucket={:?}",
+            pos.x,
+            pos.y,
+            pos.z,
+            x_radius,
+            z_radius,
+            surface.entries.len(),
+            surface.order(),
+            surface.bucket_order()
+        );
     }
     for p in surface {
         if cfg.vegetation_chance > 0.0
