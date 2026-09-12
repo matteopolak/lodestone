@@ -68,6 +68,15 @@ adapter-to-ingest fixture in
 bytes and checks the resulting component, so a decoder that emits nothing or a
 route that stops before ECS state cannot pass.
 
+The server-side facade keeps `V770ServerProtocol` and its single
+`ServerProtocol` implementation in `src/server_protocol.rs`, while private
+siblings group the phase work: `serverbound.rs` contains strict decode
+primitives, `clientbound.rs` contains small hand-written outbound bodies,
+`registry.rs` owns captured Configuration registry payloads, and `chunk.rs`
+owns terrain conversion, light settlement, and the `ChunkEncoder` boundary.
+The public type and source-based wiring tools therefore keep their historical
+path while the large implementation is navigable by protocol direction.
+
 ## How to change it
 
 Keep `encode_column_body` and `LevelChunkWithLight::decode` in matching wire
@@ -105,6 +114,13 @@ dimension shape comes from the synchronized dimension type: its minimum Y and
 height choose the section count and heightmap bit width. The current host maps
 the standard overworld window and the shared Nether/End window in
 `shape_for_column`.
+
+When adding a packet helper, place strict serverbound readers in
+`src/server_protocol/serverbound.rs` and raw clientbound bodies in
+`src/server_protocol/clientbound.rs`; keep the trait dispatch in the facade so
+`cargo xtask connectedness` can continue to classify every serverbound arm.
+Chunk and light changes belong in `chunk.rs`, and captured Configuration bytes
+belong in `registry.rs`.
 
 ## Dependencies
 
