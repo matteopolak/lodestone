@@ -43,9 +43,8 @@
 //! instrumented, not that every literal `50` in the crate now points at one
 //! constant.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::ops::RangeInclusive;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -67,6 +66,15 @@ use crate::scheduled_tick::{
 use crate::sleep::{SleepEvent, SleepFeed, SleepState, SleepVote};
 use crate::weather::{WeatherFeed, WeatherState};
 use lodestone_model::BlockPos;
+mod tick_clock;
+pub use self::tick_clock::{
+    OwnerTickStats, PhaseStats, TickClock, TickPhase, TickStats, WorstPhaseWindow,
+    TICK_HISTORY_LEN,
+};
+pub(crate) use self::tick_clock::{
+    PHASE_SOFT_BUDGET, TICK_PHASE_COUNT, TICK_PHASE_NAMES,
+};
+
 
 /// The natural-spawn driver's RNG seed. A fixed literal, like every other seed
 /// in this module (`RANDOM_TICK_POSITION_SEED` and friends): the world seed is
@@ -130,65 +138,6 @@ pub(crate) const TICK_PERIOD: Duration = Duration::from_millis(MILLIS_PER_TICK);
 /// documented reason exactly like this one's.
 pub(crate) type PlayTimerInstant = tokio::time::Instant;
 
-/// Rolling-average window for [`TickStats::mspt_avg_ms`] — matches vanilla's
-/// own `tickTimesNanos` ring buffer size
-/// (`private final long[] tickTimesNanos = new long[100];`).
-pub const TICK_HISTORY_LEN: usize = 100;
-
-/// One coarse phase of [`run_tick_loop`]'s body, for per-phase timing.
-///
-/// Deliberately three, not finer. The back two thirds of the tick body run
-/// inside `scheduled.with`'s closure — block-tick drain, fire/redstone/fluid
-/// propagation, random ticks, falling blocks, vehicles, TNT, minecarts,
-/// dragons — which holds the scheduled-tick queue mutex across its whole
-/// extent (see that closure's own doc comment, and this module's own record
-/// of the self-deadlock a re-entrant call into that same mutex caused). A
-/// phase boundary here is a bare timestamp with no lock taken and nothing
-/// called back into `scheduled`, so it cannot deadlock; splitting the third
-/// phase further would mean scattering timestamps through ~1,000 lines of
-/// mob/redstone logic another agent may be editing concurrently, which is a
-/// collision risk this instrument does not need to take just to answer
-/// "which third of the tick dominates". If a future pass wants a finer split
-/// of that phase, do it from *inside* `scheduled.with` once no other agent
-/// holds this file, not by widening the lock-safety argument above.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum TickPhase {
-    /// World border tick, dropped-item settling against live terrain, mob
-    /// removal (peaceful), the natural spawn cycle, the despawn pass,
-    /// patrols, wandering traders, detonations, block drops, mob grazing,
-    /// vocalisations, projectile block hits, spawner blocks.
-    MobsAndItems = 0,
-    /// The weather cycle (`WeatherState::tick`) and the night-skip vote.
-    WeatherAndSleep = 1,
-    /// Everything inside `scheduled.with`: the scheduled block-tick drain,
-    /// fire/redstone/fluid propagation, random ticks, falling blocks,
-    /// vehicles, TNT, minecarts, dragons. Most direct `world.column()` calls
-    /// live here; a chunk-boundary block tick can trigger real worldgen, so it
-    /// is the phase a keep-alive-timeout-shaped stall (see this module's own doc
-    /// for the incident this instrument exists to catch a repeat of) would
-    /// usually show up in. Bounded area passes use resident-only reads.
-    ScheduledAndPhysics = 2,
-}
-
-/// [`TickPhase`] variant count — keep in sync with the enum by construction
-/// (every array below is sized off this, not off a second literal).
-const TICK_PHASE_COUNT: usize = 3;
-
-/// [`TickPhase`] names in discriminant order, for a report that wants to
-/// join a phase index back to a label.
-pub(crate) const TICK_PHASE_NAMES: [&str; TICK_PHASE_COUNT] =
-    ["mobs_and_items", "weather_and_sleep", "scheduled_and_physics"];
-
-/// Above this, one phase in one tick counts as "over budget" rather than
-/// only contributing a sample to that phase's percentile record — 20% of
-/// the 50ms tick period. One threshold shared by all three phases rather
-/// than three tuned constants: nothing has established a real per-phase
-/// budget yet, and an unjustified separate number per phase would be
-/// exactly the "predict the plausible round number" failure this crate's
-/// own evidence-standard rules warn about. Revisit once real per-phase
-/// percentiles from a loaded server exist to derive one from.
-const PHASE_SOFT_BUDGET: Duration = Duration::from_millis(MILLIS_PER_TICK / 5);
 
 /// A slow phase is worth an operator-facing trace once it consumes a complete
 /// tick period. The ordinary clock still records every phase, while this higher
@@ -267,75 +216,6 @@ fn resident_tick_column<S: ChunkSource + ?Sized>(
         .or_else(|| source.is_column_resident(cx, cz).then(|| source.column(cx, cz)))
 }
 
-/// The single largest [`TickPhase`] duration a [`TickClock`] has ever
-/// recorded, and which phase and (approximately) which tick it was — "the
-/// worst unserviced window, named", as opposed to a rolling percentile that
-/// forgets anything older than [`TICK_HISTORY_LEN`] samples.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WorstPhaseWindow {
-    pub phase: TickPhase,
-    pub micros: u64,
-    /// [`TickClock::tick_count`] read at the moment this was recorded. Every
-    /// phase for a given tick is recorded before that tick's own
-    /// `record_tick` call increments the counter, so this is "the tick
-    /// index this phase belonged to", not off by a whole tick — but it is a
-    /// diagnostic label, not a value anything asserts equality on.
-    pub tick_count: u64,
-}
-
-/// A percentile summary of one [`TickPhase`]'s recorded durations — the
-/// tail, not the mean, per this crate's own "measure the tail" rule: a
-/// keep-alive timeout here was once diagnosed from an average that hid the
-/// one window that actually mattered.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PhaseStats {
-    pub phase: TickPhase,
-    /// How many samples this is derived from — at most [`TICK_HISTORY_LEN`],
-    /// because the ring buffer drops the oldest sample past that.
-    pub sample_count: u64,
-    /// Total samples recorded for this phase since the clock was created.
-    /// Unlike [`Self::sample_count`], this counter is never limited by the
-    /// percentile record window.
-    pub total_sample_count: u64,
-    pub p50_ms: f64,
-    pub p95_ms: f64,
-    pub p99_ms: f64,
-    pub max_ms: f64,
-    /// Total ticks (not bounded by the ring buffer — a plain running
-    /// counter) where this phase exceeded [`PHASE_SOFT_BUDGET`].
-    pub over_budget_count: u64,
-}
-
-/// Cumulative work observed at the chunk-owner boundaries of the live tick
-/// loop. These are counts, not timings: a profile can join them to a phase
-/// sample without treating a machine-dependent duration as an invariant.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct OwnerTickStats {
-    /// Selected chunk owners that completed the random-tick pass. This counts
-    /// ownership visits, not block changes: an empty column still consumed the
-    /// owner's deterministic random-number draws.
-    pub random_tick_owned_chunks: u64,
-    /// Selected chunk owners that completed the thunder-decision pass. This
-    /// counts ownership visits, not lightning bolts: most visits make no
-    /// strike decision visible to a client.
-    pub thunder_owned_chunks: u64,
-    /// Due scheduled block ticks handed to the central drain.
-    pub scheduled_block_ticks: u64,
-    /// Due scheduled fluid ticks handed to the central drain.
-    pub scheduled_fluid_ticks: u64,
-    /// Block-entity owner batches returned to the central world writer.
-    pub block_entity_batches: u64,
-    /// Visible block-entity effects contained in those batches.
-    pub block_entity_effects: u64,
-    /// Mob-spawner owner batches accepted by the central entity writer.
-    pub spawner_batches: u64,
-    /// Entity creation attempts restored from those batches.
-    pub spawner_attempts: u64,
-    /// Ambient entity-effect owner batches returned to the central publisher.
-    pub entity_effect_batches: u64,
-    /// Ambient entity effects contained in those batches.
-    pub entity_effects: u64,
-}
 
 /// Vanilla's own per-queue drain cap, `ServerLevel.MAX_SCHEDULED_TICKS_PER_TICK`
 /// — see `crate::scheduled_tick`'s module doc for the
@@ -1057,265 +937,6 @@ impl TickDriver {
     }
 }
 
-/// MSPT/TPS/overrun accounting for one [`run_tick_loop`].
-///
-/// Every field is an [`AtomicU64`] (plus a [`Mutex`]-guarded ring buffer for
-/// the rolling average) rather than anything requiring `&mut` — the loop
-/// writes every tick, and a caller (a test, or eventually a debug HUD/command)
-/// reads concurrently through a shared `Arc<TickClock>` with no `.await` and
-/// no lock contention on the hot path beyond the ring buffer push.
-#[derive(Debug)]
-pub struct TickClock {
-    tick_count: AtomicU64,
-    last_mspt_micros: AtomicU64,
-    overrun_count: AtomicU64,
-    history: Mutex<VecDeque<u64>>,
-    /// Per-[`TickPhase`] rolling duration record, same shape and cap as
-    /// `record` above, indexed by the phase's discriminant.
-    phase_history: [Mutex<VecDeque<u64>>; TICK_PHASE_COUNT],
-    /// Per-phase cumulative sample counts. This remains separate from the
-    /// bounded histories so callers can prove a long-running clock reached
-    /// each recorder even after its percentile window fills.
-    phase_sample_count: [AtomicU64; TICK_PHASE_COUNT],
-    /// Per-phase "exceeded [`PHASE_SOFT_BUDGET`]" counts — a counter, not a
-    /// duration, so it stays cheap and load-invariant to read even after
-    /// millions of ticks, unlike re-deriving it from the (bounded) record.
-    phase_over_budget: [AtomicU64; TICK_PHASE_COUNT],
-    owner_stats: [AtomicU64; 10],
-    /// The largest single phase duration ever recorded, and which phase.
-    worst_phase: Mutex<Option<WorstPhaseWindow>>,
-}
-
-impl Default for TickClock {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl TickClock {
-    /// A fresh clock: zero ticks, zero overruns, empty record.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            tick_count: AtomicU64::new(0),
-            last_mspt_micros: AtomicU64::new(0),
-            overrun_count: AtomicU64::new(0),
-            history: Mutex::new(VecDeque::with_capacity(TICK_HISTORY_LEN)),
-            phase_history: std::array::from_fn(|_| Mutex::new(VecDeque::with_capacity(TICK_HISTORY_LEN))),
-            phase_sample_count: [const { AtomicU64::new(0) }; TICK_PHASE_COUNT],
-            phase_over_budget: [const { AtomicU64::new(0) }; TICK_PHASE_COUNT],
-            owner_stats: [const { AtomicU64::new(0) }; 10],
-            worst_phase: Mutex::new(None),
-        }
-    }
-
-    /// Records one completed world tick's wall-clock duration. Called exactly
-    /// once per iteration of [`run_tick_loop`]'s body — never once per
-    /// *skipped* tick, which is the whole point of the overrun handling this
-    /// module implements: a tick that never ran (forgiven backlog) is never
-    /// recorded here, so `tick_count` after `run_tick_loop` has been driven
-    /// for `N` real ticks is exactly `N`, even across an overrun.
-    pub(crate) fn record_tick(&self, elapsed: Duration) {
-        let micros = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
-        self.tick_count.fetch_add(1, Ordering::Relaxed);
-        self.last_mspt_micros.store(micros, Ordering::Relaxed);
-        let mut history = self.history.lock().expect("tick history lock poisoned");
-        if history.len() == TICK_HISTORY_LEN {
-            history.pop_front();
-        }
-        history.push_back(micros);
-    }
-
-    /// Records one overload event — the loop fell more than
-    /// [`overload_threshold`] behind schedule and forgave the backlog rather
-    /// than bursting through it. Rate-limited by [`overload_warning_interval`]
-    /// at the call site, so this increments at most once per warning, not
-    /// once per skipped tick.
-    pub(crate) fn record_overrun(&self) {
-        self.overrun_count.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Records one [`TickPhase`]'s wall-clock duration for the tick
-    /// currently in progress.
-    ///
-    /// Every production call site is a bare timestamp taken outside any
-    /// lock this loop holds and outside `scheduled.with`'s closure — see
-    /// [`TickPhase`]'s own doc for why that boundary is load-bearing rather
-    /// than incidental. This function itself only ever locks its own
-    /// `phase_history`/`worst_phase` mutexes, neither of which any other
-    /// code in this module locks transitively, so calling it cannot
-    /// self-deadlock the way a call into `scheduled` from inside its own
-    /// closure would.
-    pub(crate) fn record_phase(&self, phase: TickPhase, elapsed: Duration) {
-        let micros = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
-        let idx = phase as usize;
-        self.phase_sample_count[idx].fetch_add(1, Ordering::Relaxed);
-        {
-            let mut history = self.phase_history[idx]
-                .lock()
-                .expect("tick phase history lock poisoned");
-            if history.len() == TICK_HISTORY_LEN {
-                history.pop_front();
-            }
-            history.push_back(micros);
-        }
-        if elapsed > PHASE_SOFT_BUDGET {
-            self.phase_over_budget[idx].fetch_add(1, Ordering::Relaxed);
-        }
-        let mut worst = self.worst_phase.lock().expect("worst tick phase lock poisoned");
-        if worst.is_none_or(|w| micros > w.micros) {
-            *worst = Some(WorstPhaseWindow { phase, micros, tick_count: self.tick_count() });
-        }
-    }
-
-    /// Adds work performed at the tick loop's owner hand-off boundaries.
-    pub(crate) fn record_owner_work(&self, stats: OwnerTickStats) {
-        for (counter, value) in self.owner_stats.iter().zip([
-            stats.random_tick_owned_chunks,
-            stats.thunder_owned_chunks,
-            stats.scheduled_block_ticks,
-            stats.scheduled_fluid_ticks,
-            stats.block_entity_batches,
-            stats.block_entity_effects,
-            stats.spawner_batches,
-            stats.spawner_attempts,
-            stats.entity_effect_batches,
-            stats.entity_effects,
-        ]) {
-            counter.fetch_add(value, Ordering::Relaxed);
-        }
-    }
-
-    /// Snapshot the owner-boundary work accumulated since this clock started.
-    #[must_use]
-    pub fn owner_stats(&self) -> OwnerTickStats {
-        let read = |index: usize| self.owner_stats[index].load(Ordering::Relaxed);
-        OwnerTickStats {
-            random_tick_owned_chunks: read(0),
-            thunder_owned_chunks: read(1),
-            scheduled_block_ticks: read(2),
-            scheduled_fluid_ticks: read(3),
-            block_entity_batches: read(4),
-            block_entity_effects: read(5),
-            spawner_batches: read(6),
-            spawner_attempts: read(7),
-            entity_effect_batches: read(8),
-            entity_effects: read(9),
-        }
-    }
-
-    /// A percentile summary of `phase`'s recorded durations — see
-    /// [`PhaseStats`]. Sorts a clone of the ring buffer (bounded at
-    /// [`TICK_HISTORY_LEN`] samples), so this is cheap enough for a debug command
-    /// or a test to call, but it is not itself called from the tick loop.
-    #[must_use]
-    pub fn phase_stats(&self, phase: TickPhase) -> PhaseStats {
-        let idx = phase as usize;
-        let mut samples: Vec<u64> = {
-            let history = self.phase_history[idx]
-                .lock()
-                .expect("tick phase history lock poisoned");
-            history.iter().copied().collect()
-        };
-        samples.sort_unstable();
-        let sample_count = samples.len();
-        let percentile = |p: f64| -> f64 {
-            if sample_count == 0 {
-                return 0.0;
-            }
-            let rank = ((p * sample_count as f64).ceil() as usize).clamp(1, sample_count) - 1;
-            samples[rank] as f64 / 1000.0
-        };
-        PhaseStats {
-            phase,
-            sample_count: sample_count as u64,
-            total_sample_count: self.phase_sample_count[idx].load(Ordering::Relaxed),
-            p50_ms: percentile(0.50),
-            p95_ms: percentile(0.95),
-            p99_ms: percentile(0.99),
-            max_ms: samples.last().copied().unwrap_or(0) as f64 / 1000.0,
-            over_budget_count: self.phase_over_budget[idx].load(Ordering::Relaxed),
-        }
-    }
-
-    /// The largest single [`TickPhase`] duration this clock has ever
-    /// recorded, and which phase — `None` before the first phase is
-    /// recorded.
-    #[must_use]
-    pub fn worst_phase_window(&self) -> Option<WorstPhaseWindow> {
-        *self.worst_phase.lock().expect("worst tick phase lock poisoned")
-    }
-
-    /// Total real (never skipped) ticks this clock has recorded.
-    #[must_use]
-    pub fn tick_count(&self) -> u64 {
-        self.tick_count.load(Ordering::Relaxed)
-    }
-
-    /// Total overload events recorded — see [`record_overrun`](Self::record_overrun).
-    #[must_use]
-    pub fn overrun_count(&self) -> u64 {
-        self.overrun_count.load(Ordering::Relaxed)
-    }
-
-    /// A snapshot of every figure this clock tracks.
-    #[must_use]
-    pub fn stats(&self) -> TickStats {
-        let history = self.history.lock().expect("tick history lock poisoned");
-        let sample_count = history.len() as u64;
-        let sum_micros: u64 = history.iter().sum();
-        let mspt_avg_ms = if sample_count == 0 {
-            0.0
-        } else {
-            (sum_micros as f64 / sample_count as f64) / 1000.0
-        };
-        let mspt_ms = self.last_mspt_micros.load(Ordering::Relaxed) as f64 / 1000.0;
-        // Vanilla never reports faster than 20 TPS even when the average tick
-        // is well under 50ms — the tick *period* is the floor a full tick
-        // cannot beat, matching the server's own debug-HUD TPS derivation
-        // (`1000.0 / max(50.0, averageTickTimeMillis)`).
-        let tps = 1000.0 / mspt_avg_ms.max(MILLIS_PER_TICK as f64);
-        TickStats {
-            tick_count: self.tick_count(),
-            mspt_ms,
-            mspt_avg_ms,
-            tps,
-            overrun_count: self.overrun_count(),
-            mobs_and_items: self.phase_stats(TickPhase::MobsAndItems),
-            weather_and_sleep: self.phase_stats(TickPhase::WeatherAndSleep),
-            scheduled_and_physics: self.phase_stats(TickPhase::ScheduledAndPhysics),
-            owner_work: self.owner_stats(),
-            worst_phase_window: self.worst_phase_window(),
-        }
-    }
-}
-
-/// A point-in-time snapshot of [`TickClock`]'s accounting.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct TickStats {
-    /// Real world ticks run so far (never counts a skipped/forgiven tick).
-    pub tick_count: u64,
-    /// The most recently completed tick's own duration, in milliseconds.
-    pub mspt_ms: f64,
-    /// The rolling average over the last (up to) 100 ticks, in milliseconds.
-    pub mspt_avg_ms: f64,
-    /// `1000.0 / max(50.0, mspt_avg_ms)` — capped at 20, vanilla-style.
-    pub tps: f64,
-    /// How many times the loop has fallen more than ~2s behind schedule and
-    /// forgiven the backlog. Zero across a healthy run; see
-    /// [`run_tick_loop`]'s own doc comment for what a nonzero count means.
-    pub overrun_count: u64,
-    /// Snapshot of the first tick phase's percentile summary.
-    pub mobs_and_items: PhaseStats,
-    /// Snapshot of the second tick phase's percentile summary.
-    pub weather_and_sleep: PhaseStats,
-    /// Snapshot of the scheduled and physics phase's percentile summary.
-    pub scheduled_and_physics: PhaseStats,
-    /// Cumulative scheduled and chunk-owner work from this live tick loop.
-    pub owner_work: OwnerTickStats,
-    /// Largest phase duration seen since this clock was created.
-    pub worst_phase_window: Option<WorstPhaseWindow>,
-}
 
 /// `GameRules.MAX_COMMAND_SEQUENCE_LENGTH`'s default (`65536`) — this crate
 /// has no gamerule store for it yet, so the `TICK_COMMAND_BLOCK` arm below
