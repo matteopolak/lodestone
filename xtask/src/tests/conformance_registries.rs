@@ -912,4 +912,3 @@ reason = "fixture has no shipped binary root"
         assert!(std::fs::read_to_string(&generated_path)?.contains("PROTOCOL_VERSION: i32 = 777"));
         Ok(())
     }
-

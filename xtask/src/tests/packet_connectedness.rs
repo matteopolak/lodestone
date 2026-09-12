@@ -783,4 +783,3 @@ impl ServerProtocol for V999ServerProtocol {
         assert!(report.render().contains("decode-but-stranded 1 [MYSTERY_ACTION]"));
         Ok(())
     }
-

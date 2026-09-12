@@ -1362,4 +1362,3 @@ live-v1 = ["lodestone-registry/v1"]
             self.dir.path()
         }
     }
-
