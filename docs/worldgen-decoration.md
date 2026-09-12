@@ -107,12 +107,10 @@ distinction is observable at seed 42, target `(2,0)`, where world `(5,-62,0)` mu
 the complete source event stream.
 
 Collections traversed while consuming that random stream must have explicit order. Vegetation patches
-use `CompatBlockPosSet` for successful surface positions: its 16-bucket table and 0.75 load factor
-provide fast duplicate checks, while a separate compact entry list preserves successful insertion
-order for iteration. Resizing the membership table therefore cannot change which surface cell gets
-which nested random draw. Iterating buckets, or using Rust's randomly seeded `HashSet` directly,
-would assign the same draws to different cells and change generated blocks between implementations
-(or runs).
+use `CompatBlockPosSet` for successful surface positions: its compact membership index and insertion
+log reconstruct the reference `HashSet`'s 16-bucket table, 0.75 growth threshold, spread function
+and bucket traversal. This gives each surface cell the same nested random draw while avoiding Rust's
+randomized `HashSet` iteration, which would change generated blocks between runs.
 
 Placement modifiers (count, in_square, heightmap, biome, rarity_filter,
 surface_water_depth_filter, noise_threshold_count, random_offset, block_predicate_filter,
