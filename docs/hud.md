@@ -83,6 +83,10 @@ tick counter (nothing forwards the server's real tick count this deep into the H
 substitute divided into 50ms steps stands in for it — the same trade the chat caret's blink already
 makes):
 
+The survival-vitals projection helpers and atlas-backed draw path live together in
+`hud/vitals.rs`; `hud.rs` retains frame orchestration and re-exports the public armour/heart
+helpers, so callers do not need to know about the split.
+
 - **Regeneration wave**: while the active-effects projection contains regeneration, one health
   container is lifted by 2 logical pixels per display tick. The index wraps at `ceil(max health + 5)`
   half-points, and is computed separately from the health-change blink and critical-health jitter, so
@@ -193,8 +197,9 @@ should be added.
 
 ## Dependencies
 
-- `crates/lodestone-shell/src/hud.rs` and `hud/{anim,tab_panel,toasts,vanilla_font,item_icon}.rs` — layout,
-  Tab geometry, toast rendering, animation state machines, and the vanilla font draw path.
+- `crates/lodestone-shell/src/hud.rs` and `hud/{anim,item_icon,tab_panel,toasts,vanilla_font,vitals}.rs` — layout,
+  frame assembly, Tab geometry, toast rendering, animation state machines, survival-vitals
+  projection/drawing, and the vanilla font draw path.
 - `crates/lodestone-shell/src/tablist.rs`, `scoreboard.rs` — the tab-list and sidebar projections.
 - `lodestone-game` — `tablist::TabList`, `scoreboard::Scoreboard`, `player_state::HeldItemHighlight`,
   the folded state every projection above reads.
