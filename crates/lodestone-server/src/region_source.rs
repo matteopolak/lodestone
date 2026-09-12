@@ -2201,7 +2201,8 @@ impl WorldSaveHandle {
                 (extras.block_ticks.len() + extras.fluid_ticks.len()) as u64,
                 Ordering::Relaxed,
             );
-            let nbt = chunk_nbt::column_to_nbt_with(cx, cz, &column, extras);
+            let nbt = chunk_nbt::column_to_nbt_with(cx, cz, &column, extras)
+                .map_err(Error::Schema)?;
             let mut writer = Writer::default();
             write_named_nbt(&mut writer, "", &nbt).map_err(Error::Nbt)?;
             let compressed = SCHEME.compress(&writer.into_vec()).map_err(Error::Anvil)?;
@@ -2673,6 +2674,61 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create scratch world dir");
         dir
+    }
+
+    fn write_status_fixture(source: &RegionChunkSource<Flat>, status: Option<&str>) {
+        let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
+        column.set_block(1, 70, 1, MARKER);
+        let mut nbt = chunk_nbt::column_to_nbt(0, 0, &column).expect("full fixture encodes");
+        let Nbt::Compound(fields) = &mut nbt else {
+            panic!("encoded chunk root must be a compound");
+        };
+        fields.retain(|(name, _)| name != "Status");
+        if let Some(status) = status {
+            fields.push(("Status".to_owned(), Nbt::String(status.to_owned())));
+        }
+        let mut writer = Writer::default();
+        write_named_nbt(&mut writer, "", &nbt).expect("encode fixture NBT");
+        let compressed = SCHEME
+            .compress(&writer.into_vec())
+            .expect("compress fixture NBT");
+        let built = build_region(&[ChunkToWrite {
+            chunk_x: 0,
+            chunk_z: 0,
+            compressed,
+            scheme: SCHEME,
+            timestamp: 0,
+        }])
+        .expect("build fixture region");
+        std::fs::write(source.state.region_dir.join("r.0.0.mca"), built.bytes)
+            .expect("write fixture region");
+    }
+
+    #[test]
+    fn partial_status_is_absent_and_falls_back_to_complete_generation() {
+        for (label, status) in [("carved", Some("minecraft:carved")), ("missing", None)] {
+            let dir = tempdir(&format!("partial-status-{label}"));
+            let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT)
+                .expect("open world");
+            write_status_fixture(&source, status);
+
+            let column = source.column(0, 0);
+            assert_eq!(
+                column.generation_stage(),
+                crate::chunk::ChunkGenerationStage::Full,
+                "schema rejection must never promote partial disk terrain to Full"
+            );
+            assert_ne!(
+                column.block_state(1, 70, 1),
+                MARKER,
+                "rejected partial disk terrain must fall back to the generator"
+            );
+            assert_eq!(
+                source.state.stats.loaded_from_disk.load(Ordering::Relaxed),
+                0,
+                "a rejected schema is not counted as a disk load"
+            );
+        }
     }
 
     /// A plural light admission must remain authoritative after the bounded

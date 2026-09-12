@@ -1890,7 +1890,10 @@ fn our_fresh_world_survives_a_vanilla_load_and_save() {
     let mut ours: BTreeMap<(i32, i32), Nbt> = BTreeMap::new();
     for &(cx, cz) in &coords {
         let column = lodestone_server::ChunkSource::column(&source, cx, cz);
-        ours.insert((cx, cz), chunk_nbt::column_to_nbt(cx, cz, &column));
+        ours.insert(
+            (cx, cz),
+            chunk_nbt::column_to_nbt(cx, cz, &column).expect("full column must encode"),
+        );
     }
 
     // --- the hard precondition -------------------------------------------
@@ -2150,7 +2153,8 @@ fn a_real_vanilla_world_survives_our_load_and_save() {
         let extras = chunk_nbt::extras_from_nbt(original);
         ours.insert(
             (cx, cz),
-            chunk_nbt::column_to_nbt_with(cx, cz, &column, &extras),
+            chunk_nbt::column_to_nbt_with(cx, cz, &column, &extras)
+                .expect("full column must encode"),
         );
     }
     let rewritten_interior: BTreeMap<(i32, i32), Nbt> = coords

@@ -10,6 +10,7 @@ use lodestone_core::Nbt;
 use lodestone_world::{Heightmap, LightData};
 
 use crate::{
+    chunk::RetainedLightStatus,
     chunk_nbt::{ChunkExtras, SavedTick},
     scheduled_tick::PersistedScheduledTick,
     world_storage::NativeChunkRecord,
@@ -132,6 +133,13 @@ pub enum Error {
         /// The decision required by the record's current report.
         required: ExportAuthorization,
     },
+    /// A dependency-initialized light snapshot cannot be paired with the
+    /// native record's separate canonical light payload for export.
+    #[error("Anvil export requires centre-settled light, not dependency-initialized storage")]
+    DependencyLightNotFinal,
+    /// The typed column cannot be represented as a complete persisted chunk.
+    #[error("Anvil export rejected the chunk schema: {0}")]
+    Schema(#[source] crate::chunk_nbt::Error),
     /// The typed column does not describe a positive Anvil height window.
     #[error("native chunk height {height} is not positive")]
     InvalidHeight {
@@ -227,14 +235,22 @@ pub fn export_chunk(
             required,
         });
     }
+    if record.column.retained_light_status() == Some(RetainedLightStatus::DependencyInitialized) {
+        return Err(Error::DependencyLightNotFinal);
+    }
 
     let extras = ChunkExtras {
         block_entities: record.column.block_entities().to_vec(),
         block_ticks: export_ticks(&record.block_scheduled_ticks, TickQueue::Block, game_time)?,
         fluid_ticks: export_ticks(&record.fluid_scheduled_ticks, TickQueue::Fluid, game_time)?,
     };
-    let mut chunk =
-        crate::chunk_nbt::column_to_nbt_with(column_x, column_z, &record.column, &extras);
+    let mut chunk = crate::chunk_nbt::column_to_nbt_with(
+        column_x,
+        column_z,
+        &record.column,
+        &extras,
+    )
+    .map_err(Error::Schema)?;
     write_motion_blocking(&mut chunk, record)?;
     write_light(&mut chunk, record)?;
     Ok(ChunkExportResult { chunk, report })
@@ -387,4 +403,31 @@ fn section_fields_mut(chunk: &mut Nbt, section_y: i32) -> &mut Vec<(String, Nbt)
         unreachable!("new and chunk_nbt sections are compounds")
     };
     fields
+}
+
+#[cfg(test)]
+mod tests {
+    use lodestone_world::ColumnLight;
+
+    use super::{Error, ExportAuthorization, export_chunk};
+    use crate::chunk::{ChunkColumn, RetainedLightStatus};
+    use crate::world_storage::NativeChunkRecord;
+
+    #[test]
+    fn dependency_light_cannot_be_exported_with_a_native_payload() {
+        let mut column = ChunkColumn::new(0, 16);
+        let light = ColumnLight::new(column.section_count());
+        column.set_retained_light_with_status(light.clone(), RetainedLightStatus::DependencyInitialized);
+        let record = NativeChunkRecord {
+            column,
+            light,
+            block_scheduled_ticks: Vec::new(),
+            fluid_scheduled_ticks: Vec::new(),
+        };
+
+        assert!(matches!(
+            export_chunk(0, 0, &record, 0, Some(ExportAuthorization::Lossless)),
+            Err(Error::DependencyLightNotFinal)
+        ));
+    }
 }
