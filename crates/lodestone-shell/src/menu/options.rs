@@ -4815,7 +4815,10 @@ mod tests {
             "Render Distance",
             LiveOption::RenderDistance,
         );
-        let range = SliderRange { min: 2, max: 32 };
+        let range = SliderRange {
+            min: crate::config::MIN_RENDER_DISTANCE as i32,
+            max: crate::config::MAX_RENDER_DISTANCE as i32,
+        };
         o.render_distance = 8;
         assert_eq!(
             rd.slider_fraction(&o),
@@ -4828,10 +4831,18 @@ mod tests {
             Some(range.to_slider_value(12)),
             "8 and 12 must be distinguishable, or this proves nothing"
         );
-        o.render_distance = 32;
+        o.render_distance = crate::config::MAX_RENDER_DISTANCE;
         assert_eq!(rd.slider_fraction(&o), Some(1.0), "the max pins to the end");
-        o.render_distance = 2;
+        o.render_distance = crate::config::MIN_RENDER_DISTANCE;
         assert_eq!(rd.slider_fraction(&o), Some(0.0), "and the min to the start");
+
+        // The selectable endpoint is visible on the row, while a value beyond
+        // the typed config bound is kept on the track rather than drawing an
+        // off-screen handle. Config loading rejects that same value to the
+        // default (see `Options::from_json`), so persistence and presentation
+        // cannot turn 257 into a new selectable distance.
+        o.render_distance = crate::config::MAX_RENDER_DISTANCE + 1;
+        assert_eq!(rd.slider_fraction(&o), Some(1.0));
 
         // The other wrong hypothesis, and the reason `unit_double` says `None`
         // for this option: reading a chunk count as a `UnitDouble` would clamp
