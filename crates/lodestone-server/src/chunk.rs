@@ -4425,6 +4425,32 @@ impl ChunkSource for EndChunkSource {
         self.generate(cx, cz)
     }
 
+    fn column_at(&self, cx: i32, cz: i32, stage: ChunkGenerationStage) -> ChunkColumn {
+        let edits = self.edits.lock().expect("chunk edit cache lock poisoned");
+        if let Some(edited) = edits.get(&(cx, cz)) {
+            return edited.clone();
+        }
+        drop(edits);
+        match stage {
+            ChunkGenerationStage::Shaped => {
+                let mut column = self.shaped_column(cx, cz);
+                column.generation_stage = ChunkGenerationStage::Shaped;
+                column
+            }
+            ChunkGenerationStage::Full => self.column(cx, cz),
+        }
+    }
+
+    fn packet_generation_stage(
+        &self,
+        stage: ChunkGenerationStage,
+    ) -> Option<ChunkGenerationStage> {
+        // End decoration writes into neighbouring columns. A shaped source
+        // must therefore be upgraded before packet encoding, or the packet
+        // could omit a cross-column feature that the full source owns.
+        (stage == ChunkGenerationStage::Shaped).then_some(ChunkGenerationStage::Full)
+    }
+
     fn columns(&self, coords: &[(i32, i32)]) -> Vec<ChunkColumn> {
         self.generate_batch(coords)
     }
