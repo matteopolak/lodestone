@@ -19,6 +19,31 @@ case "${GIT_INDEX_FILE-}" in
 esac
 
 repo=$(git rev-parse --show-toplevel)
+git_dir=$(git -C "$repo" rev-parse --absolute-git-dir)
+lock_dir=$git_dir/private-index-commit.lock
+lock_held=false
+
+cleanup_lock() {
+    if [ "$lock_held" = true ]; then
+        rmdir "$lock_dir" 2>/dev/null || true
+        lock_held=false
+    fi
+}
+
+trap 'exit 1' HUP INT TERM
+trap cleanup_lock EXIT
+
+attempt=0
+while ! mkdir "$lock_dir" 2>/dev/null; do
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge 600 ]; then
+        echo "refusing private-index commit: publication lock is held too long" >&2
+        exit 1
+    fi
+    sleep 0.1
+done
+lock_held=true
+
 current_head=$(git -C "$repo" rev-parse HEAD)
 base_commit=$(git -C "$repo" rev-parse "$base^{commit}")
 
