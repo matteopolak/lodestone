@@ -1,4 +1,4 @@
-use super::*;
+use super::{MenuNav, *};
 
 impl MenuNav {
     /// The account list: entirely delegated to [`accounts::AccountsNav`],
@@ -8,7 +8,7 @@ impl MenuNav {
     /// other outcome (selecting an account, starting/cancelling a sign-in,
     /// removing an account) is a self-contained mutation `AccountsNav`
     /// already applied by the time this returns.
-    fn key_accounts(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+    pub(super) fn key_accounts(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         use crate::menu::accounts::AccountsSignal;
         match self.accounts.handle_key(key) {
             AccountsSignal::Back => self.leave_accounts(ui),
@@ -26,7 +26,7 @@ impl MenuNav {
     ///
     /// Both exits (Escape and the Cancel button) go through here, so they cannot
     /// disagree about where "back" is.
-    fn leave_accounts(&mut self, ui: &mut UiState) {
+    pub(super) fn leave_accounts(&mut self, ui: &mut UiState) {
         ui.close_accounts();
         if self.ownership_gate_blocks(ui) {
             self.ownership = 0;
@@ -38,7 +38,7 @@ impl MenuNav {
     /// highlighted button, Escape resumes play (same as [`UiState::on_escape`]
     /// from [`Screen::Paused`] — spelled out here too rather than falling
     /// through to a catch-all, now that this screen has its own arm).
-    fn key_paused(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+    pub(super) fn key_paused(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         match key {
             MenuKey::Up => {
                 let buttons = self.pause_buttons();
@@ -145,7 +145,7 @@ impl MenuNav {
     /// `false`: the only way off this screen is a
     /// click. Every sibling `key_*` above calls `ui.on_escape()` for
     /// `MenuKey::Escape`; this one is the one screen that must not.
-    fn key_death(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+    pub(super) fn key_death(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         match key {
             MenuKey::Up => {
                 self.death = wrap_prev(self.death, DEATH_BUTTONS.len());
@@ -177,7 +177,7 @@ impl MenuNav {
     /// (this screen's content is a short placeholder, not vanilla's real
     /// auto-scrolling poem, so there is no long scroll a stray keypress needs
     /// to skip past).
-    fn key_credits(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+    pub(super) fn key_credits(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         match key {
             MenuKey::Enter | MenuKey::Escape => {
                 ui.quit_to_title();
@@ -193,7 +193,7 @@ impl MenuNav {
     /// one); Escape always leaves for the pause menu, since nothing on this
     /// screen has a "cancel a pending state" step the way a Key Binds capture
     /// does.
-    fn key_social(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+    pub(super) fn key_social(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         match key {
             MenuKey::Up => {
                 self.social.step(false);
@@ -220,7 +220,7 @@ impl MenuNav {
     /// intents to the private service worker. While the profile-name prompt is
     /// active, it receives printable keys before screen navigation so the
     /// existing `FriendMutation::SendByName` service path has a real producer.
-    fn key_friends(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+    pub(super) fn key_friends(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         if self.friends.is_adding() {
             self.friends.handle_add_key(key);
             return MenuAction::None;
@@ -241,7 +241,7 @@ impl MenuNav {
 
     /// What a [`crate::menu::social::SocialOutcome`] means at the `UiState`
     /// level — mirrors [`Self::apply_key_binds`]'s shape.
-    fn apply_social(
+    pub(super) fn apply_social(
         &mut self,
         ui: &mut UiState,
         outcome: crate::menu::social::SocialOutcome,
@@ -270,7 +270,7 @@ impl MenuNav {
     /// and Escape is handled by the screen itself, not by a focused child, so
     /// it is unconditional — which also means there is always a keyboard way
     /// out even before the first Tab.
-    fn key_statistics(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+    pub(super) fn key_statistics(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         match key {
             MenuKey::Up => {
                 self.stats.step(false);
@@ -307,7 +307,7 @@ impl MenuNav {
     /// and hover granting focus is itself a bug this repo has already fixed
     /// once on the server list. So the click grants focus directly and hover
     /// still grants none.
-    fn click_statistics(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
+    pub(super) fn click_statistics(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
         if row != crate::menu::stats::DONE_ROW {
             return MenuAction::None;
         }
@@ -320,12 +320,12 @@ impl MenuNav {
     /// [`crate::menu::server_links::ServerLinksNav::click_row`] decides what
     /// the row *means*; this turns that answer into a [`MenuAction`], the
     /// same split [`Self::click_list`]/[`Self::apply_confirm`] already make.
-    fn click_server_links(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
+    pub(super) fn click_server_links(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
         let outcome = self.server_links.click_row(row);
         self.apply_server_links(ui, outcome)
     }
 
-    fn key_server_links(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+    pub(super) fn key_server_links(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         match key {
             MenuKey::Escape => {
                 let outcome = self.server_links.escape();
@@ -339,7 +339,7 @@ impl MenuNav {
     /// the one place that answer is turned into a screen change or a browser
     /// open, so [`Self::click_server_links`] and [`Self::key_server_links`]
     /// cannot disagree about what a given outcome does.
-    fn apply_server_links(
+    pub(super) fn apply_server_links(
         &mut self,
         ui: &mut UiState,
         outcome: crate::menu::server_links::ServerLinksOutcome,
@@ -379,7 +379,7 @@ impl MenuNav {
     /// and saves immediately — the same eager-persistence rule as the server
     /// list (see the module docs): there is no guaranteed clean-shutdown hook,
     /// so a setting that only saved on exit would be the setting a crash loses.
-    fn cycle_gui_scale(&mut self, delta: i32) {
+    pub(super) fn cycle_gui_scale(&mut self, delta: i32) {
         // The cycle is `AUTO_GUI_SCALE..=MAX_MANUAL_GUI_SCALE`; `AUTO_GUI_SCALE`
         // is `0`, so `rem_euclid` already lands there without naming it.
         let span = MAX_MANUAL_GUI_SCALE as i32 + 1;
@@ -391,14 +391,14 @@ impl MenuNav {
 
     /// Flips vanilla's View Bobbing option and saves immediately, same
     /// eager-persistence rule as [`MenuNav::cycle_gui_scale`].
-    fn toggle_view_bobbing(&mut self) {
+    pub(super) fn toggle_view_bobbing(&mut self) {
         self.options.view_bobbing = !self.options.view_bobbing;
         self.persist_options();
     }
 
     /// Flips `options.showSubtitles` and saves immediately, same
     /// eager-persistence rule as [`MenuNav::toggle_view_bobbing`].
-    fn toggle_show_subtitles(&mut self) {
+    pub(super) fn toggle_show_subtitles(&mut self) {
         self.options.show_subtitles = !self.options.show_subtitles;
         self.persist_options();
     }
@@ -406,32 +406,32 @@ impl MenuNav {
     /// Flips `key.sneak`'s hold/toggle mode and saves
     /// immediately, same eager-persistence rule as
     /// [`MenuNav::cycle_gui_scale`].
-    fn toggle_toggle_sneak(&mut self) {
+    pub(super) fn toggle_toggle_sneak(&mut self) {
         self.options.toggle_sneak = !self.options.toggle_sneak;
         self.persist_options();
     }
 
     /// As [`MenuNav::toggle_toggle_sneak`], for `key.sprint`.
-    fn toggle_toggle_sprint(&mut self) {
+    pub(super) fn toggle_toggle_sprint(&mut self) {
         self.options.toggle_sprint = !self.options.toggle_sprint;
         self.persist_options();
     }
 
     /// As [`MenuNav::toggle_toggle_sneak`], for `key.attack`.
-    fn toggle_toggle_attack(&mut self) {
+    pub(super) fn toggle_toggle_attack(&mut self) {
         self.options.toggle_attack = !self.options.toggle_attack;
         self.persist_options();
     }
 
     /// As [`MenuNav::toggle_toggle_sneak`], for `key.use`.
-    fn toggle_toggle_use(&mut self) {
+    pub(super) fn toggle_toggle_use(&mut self) {
         self.options.toggle_use = !self.options.toggle_use;
         self.persist_options();
     }
 
     /// Flips `options.autoJump` and saves immediately, same
     /// eager-persistence rule as [`MenuNav::toggle_toggle_sneak`].
-    fn toggle_auto_jump(&mut self) {
+    pub(super) fn toggle_auto_jump(&mut self) {
         self.options.auto_jump = !self.options.auto_jump;
         self.persist_options();
     }
@@ -441,7 +441,7 @@ impl MenuNav {
     /// the same bounds `menu::options::INT_RANGE_SLIDERS` places the handle
     /// with, so the value a click can reach and the track it draws on cannot
     /// disagree. `0` is the "OFF" endpoint (double-tap sprint disabled).
-    fn step_sprint_window(&mut self, delta: i32) {
+    pub(super) fn step_sprint_window(&mut self, delta: i32) {
         const MIN: u8 = 0;
         const MAX: u8 = 10;
         let span = (MAX - MIN + 1) as i32;
@@ -452,19 +452,19 @@ impl MenuNav {
     }
 
     /// Flips `options.invertMouseX` and saves immediately.
-    fn toggle_invert_mouse_x(&mut self) {
+    pub(super) fn toggle_invert_mouse_x(&mut self) {
         self.options.invert_mouse_x = !self.options.invert_mouse_x;
         self.persist_options();
     }
 
     /// As [`MenuNav::toggle_invert_mouse_x`], for Y.
-    fn toggle_invert_mouse_y(&mut self) {
+    pub(super) fn toggle_invert_mouse_y(&mut self) {
         self.options.invert_mouse_y = !self.options.invert_mouse_y;
         self.persist_options();
     }
 
     /// Flips `options.discreteMouseScroll` and saves immediately.
-    fn toggle_discrete_mouse_scroll(&mut self) {
+    pub(super) fn toggle_discrete_mouse_scroll(&mut self) {
         self.options.discrete_mouse_scroll = !self.options.discrete_mouse_scroll;
         self.persist_options();
     }
@@ -474,7 +474,7 @@ impl MenuNav {
     /// [`crate::config::MIN_MOUSE_WHEEL_SENSITIVITY`] and
     /// [`crate::config::MAX_MOUSE_WHEEL_SENSITIVITY`] inclusive,
     /// and saves immediately.
-    fn cycle_mouse_wheel_sensitivity(&mut self, delta: i32) {
+    pub(super) fn cycle_mouse_wheel_sensitivity(&mut self, delta: i32) {
         use crate::config::{
             MAX_MOUSE_WHEEL_SENSITIVITY, MIN_MOUSE_WHEEL_SENSITIVITY, MOUSE_WHEEL_SENSITIVITY_STEP,
         };
@@ -497,7 +497,7 @@ impl MenuNav {
 
     /// Writes the options to disk, recording (not swallowing) any failure —
     /// mirrors [`MenuNav::persist`].
-    fn persist_options(&mut self) {
+    pub(super) fn persist_options(&mut self) {
         self.options_save_error = match self.options.save_to(&self.options_path) {
             Ok(()) => None,
             Err(e) => Some(format!(
@@ -507,7 +507,7 @@ impl MenuNav {
         };
     }
 
-    fn delete_selected(&mut self) -> MenuAction {
+    pub(super) fn delete_selected(&mut self) -> MenuAction {
         match self.list.remove(self.server) {
             Some(gone) => {
                 self.persist();
@@ -522,7 +522,7 @@ impl MenuNav {
     /// keeps the scroll window consistent with wherever that leaves it —
     /// a delete can otherwise strand the scroll offset past the new, shorter
     /// list's end.
-    fn clamp_server(&mut self) {
+    pub(super) fn clamp_server(&mut self) {
         if self.server >= self.list.len() {
             self.server = self.list.len().saturating_sub(1);
         }
@@ -530,7 +530,7 @@ impl MenuNav {
     }
 
     /// Writes the list to disk, recording (not swallowing) any failure.
-    fn persist(&mut self) {
+    pub(super) fn persist(&mut self) {
         self.save_error = match self.list.save_to(&self.path) {
             Ok(()) => None,
             Err(e) => Some(format!("could not save {}: {e}", self.path.display())),

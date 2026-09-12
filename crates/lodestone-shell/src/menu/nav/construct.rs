@@ -1,3 +1,5 @@
+use super::{MenuNav, *};
+
 impl MenuNav {
     /// Loads the saved server list, options and account metadata from their
     /// real locations.
@@ -126,7 +128,7 @@ impl MenuNav {
     /// account ownership proof; a deliberately confined build has no remote
     /// join surface and can therefore play locally without online credentials.
     #[must_use]
-    fn singleplayer_permit(&self) -> Option<SingleplayerPermit> {
+    pub(super) fn singleplayer_permit(&self) -> Option<SingleplayerPermit> {
         #[cfg(feature = "multiplayer")]
         {
             self.entitlement().map(SingleplayerPermit::Entitled)
@@ -189,7 +191,7 @@ impl MenuNav {
     /// to survive an entry path nobody has written yet, and a refusal that
     /// visibly lands on the gate is the right answer for one, where a panic and
     /// a silent `MenuAction::None` are both wrong.
-    fn refuse_unowned(&mut self, ui: &mut UiState) -> MenuAction {
+    pub(super) fn refuse_unowned(&mut self, ui: &mut UiState) -> MenuAction {
         tracing::warn!(
             target: "auth",
             screen = ?ui.screen(),
@@ -217,7 +219,7 @@ impl MenuNav {
     ///
     /// Escape is **Quit**, not an unwind: there is no screen behind the gate to
     /// back out to, and an Escape that did nothing would read as a frozen game.
-    fn key_ownership(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+    pub(super) fn key_ownership(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         match key {
             MenuKey::Up => {
                 self.ownership = wrap_prev(self.ownership, OWNERSHIP_BUTTONS.len());
@@ -246,7 +248,7 @@ impl MenuNav {
     }
 
     /// A click on rendered row `row` of [`Screen::Ownership`].
-    fn click_ownership(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
+    pub(super) fn click_ownership(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
         if row >= OWNERSHIP_BUTTONS.len() {
             return MenuAction::None;
         }

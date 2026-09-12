@@ -1,4 +1,4 @@
-use super::*;
+use super::{MenuNav, *};
 
 impl MenuNav {
     /// Handles one key for the current screen, mutating `ui` for navigation and
@@ -139,7 +139,7 @@ impl MenuNav {
         }
     }
 
-    fn key_main(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+    pub(super) fn key_main(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         match key {
             MenuKey::Up => {
                 self.main = step_enabled(self.main, MAIN_BUTTONS.len(), false, &|i| {
@@ -242,7 +242,7 @@ impl MenuNav {
         }
     }
 
-    fn key_list(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+    pub(super) fn key_list(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         match key {
             MenuKey::Up => {
                 self.server = wrap_prev(self.server, self.list.len());
@@ -316,7 +316,7 @@ impl MenuNav {
     /// through to real focus traversal, and the horizontal arrows would move the
     /// caret if `app.rs` produced them (it does not yet — see
     /// [`focus::KeyEvent::from_menu_key`]).
-    fn key_edit(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+    pub(super) fn key_edit(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         match self.form.handle_key(key) {
             FormOutcome::Handled => MenuAction::None,
             FormOutcome::Cancel => self.cancel_edit(ui),
@@ -329,7 +329,7 @@ impl MenuNav {
     /// screen ([`FormOutcome::Cancel`]) — shared by [`key_edit`](Self::key_edit)
     /// and [`Self::click`]'s [`CANCEL_ROW`] arm so the button and the key do
     /// the exact same thing rather than two copies that could drift apart.
-    fn cancel_edit(&mut self, ui: &mut UiState) -> MenuAction {
+    pub(super) fn cancel_edit(&mut self, ui: &mut UiState) -> MenuAction {
         ui.close_server_edit();
         MenuAction::None
     }
@@ -339,7 +339,7 @@ impl MenuNav {
     /// arm (vanilla's `CommonComponents.GUI_DONE`,
     /// vanilla's own manage-server screen rendering) for the same reason
     /// [`Self::cancel_edit`] is shared.
-    fn save_entry(&mut self, ui: &mut UiState) -> MenuAction {
+    pub(super) fn save_entry(&mut self, ui: &mut UiState) -> MenuAction {
         if !self.form.is_valid() {
             // Refuse rather than saving a row that cannot be dialed. Vanilla
             // reaches the same outcome by disabling the Done button instead
@@ -381,7 +381,7 @@ impl MenuNav {
     /// arrive as [`MenuKey::Edit`] and are forwarded with the rest of the
     /// edit keys, in the same arm, since `from_menu_key` hands that variant's
     /// event straight back.
-    fn key_command_block(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+    pub(super) fn key_command_block(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         let Some(state) = self.command_block.as_mut() else {
             return MenuAction::None;
         };
@@ -450,7 +450,7 @@ impl MenuNav {
     /// arm and [`Self::key_command_block`]'s `Enter` arm, matching
     /// [`Self::save_entry`]/[`Self::cancel_edit`]'s "button and key do the
     /// same thing" rule.
-    fn activate_command_block_row(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
+    pub(super) fn activate_command_block_row(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
         use command_block::CommandBlockRow;
         let Some(cb_row) = command_block::COMMAND_BLOCK_ROWS.get(row).copied() else {
             // `PREVIOUS_OUTPUT_ROW` and anything past it: not a control, see
@@ -509,7 +509,7 @@ impl MenuNav {
     /// navigation: there is no suggestion popup, no toggle row, nothing Tab
     /// would do. See [`sign_edit::SignEditState::next_line`]/[`previous_line`
     /// ](sign_edit::SignEditState::previous_line).
-    fn key_sign_edit(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+    pub(super) fn key_sign_edit(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         let Some(state) = self.sign_edit.as_mut() else {
             return MenuAction::None;
         };
@@ -564,7 +564,7 @@ impl MenuNav {
     /// activation this screen has (a click on a line field is caret placement,
     /// like [`CommandBlockRow::Command`] above, not something this method
     /// expresses). Shared by [`Self::click`]'s `SignEdit` arm.
-    fn activate_sign_edit_row(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
+    pub(super) fn activate_sign_edit_row(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
         if row != sign_edit_row::DONE {
             return MenuAction::None;
         }
@@ -584,7 +584,7 @@ impl MenuNav {
     /// `Screen.keyPressed`'s un-overridden default for every vanilla screen
     /// that has no explicit `onClose` — same reasoning
     /// [`Screen::BookEdit`]'s own doc gives.
-    fn key_spectator_menu(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+    pub(super) fn key_spectator_menu(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         if key == MenuKey::Escape {
             self.close_spectator_menu(ui);
         }
@@ -601,7 +601,7 @@ impl MenuNav {
     /// does nothing while signing (there is no multi-line field there to
     /// insert into; Finalize is a click-only affordance, like `SignEdit`'s
     /// own Done).
-    fn key_book_edit(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+    pub(super) fn key_book_edit(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         let Some(state) = self.book_edit.as_mut() else {
             return MenuAction::None;
         };
@@ -657,7 +657,7 @@ impl MenuNav {
     /// [`book_edit::BookEditState::signing`], since the two layouts use
     /// disjoint row tables (`page_row`/`sign_row`). Shared by [`Self::click`]'s
     /// `BookEdit` arm.
-    fn activate_book_edit_row(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
+    pub(super) fn activate_book_edit_row(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
         let Some(state) = self.book_edit.as_mut() else {
             return MenuAction::None;
         };
@@ -721,7 +721,7 @@ impl MenuNav {
     /// otherwise unused on this screen, so nothing is shadowed by taking
     /// them. Wiring the real pair means adding them to [`MenuKey`], which is
     /// a keyboard-layer change and not this screen's to make.
-    fn key_book_view(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+    pub(super) fn key_book_view(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         match key {
             MenuKey::Escape => {
                 let window_id = self.book_view.as_ref().and_then(book_view::BookViewState::lectern_window_id);
@@ -791,7 +791,7 @@ impl MenuNav {
     /// `enabled` flag, so a click that arrives against a stale frame cannot
     /// walk off either end — `BookViewScreen` achieves the same by hiding
     /// the buttons outright (`updateButtonVisibility`).
-    fn activate_book_view_row(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
+    pub(super) fn activate_book_view_row(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
         let Some(state) = self.book_view.as_mut() else {
             return MenuAction::None;
         };
@@ -823,7 +823,7 @@ impl MenuNav {
     /// [`spectator_menu::SpectatorMenuState::activate`], which already knows
     /// whether `row` means "expand a category", "go back", or "teleport".
     /// Shared by [`Self::click`]'s `SpectatorMenu` arm.
-    fn activate_spectator_menu_row(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
+    pub(super) fn activate_spectator_menu_row(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
         match self.spectator_menu.activate(row) {
             spectator_menu::SpectatorMenuOutcome::None => MenuAction::None,
             spectator_menu::SpectatorMenuOutcome::Teleport(target) => {
@@ -842,7 +842,7 @@ impl MenuNav {
     /// Escape, then the focused widget, then Tab and the arrows as navigation —
     /// is what makes the search box coexist with keyboard traversal rather than
     /// fight it.
-    fn key_world_select(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+    pub(super) fn key_world_select(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         let outcome = self.world_select.handle_key(key);
         self.apply_world_select(ui, outcome)
     }
@@ -853,7 +853,7 @@ impl MenuNav {
     /// [`Self::create_world`] on entry (the same "fresh screen, not a
     /// resumed one" rule every other `open_*`/`reset` pair in this file
     /// follows), so it is a method now.
-    fn apply_world_select(
+    pub(super) fn apply_world_select(
         &mut self,
         ui: &mut UiState,
         outcome: crate::menu::world_select::WorldSelectOutcome,
@@ -919,7 +919,7 @@ impl MenuNav {
     /// [`crate::menu::confirm::ConfirmNav::handle_key`], which is vanilla's
     /// `ConfirmScreen.keyPressed` order — including its Escape branch, which is
     /// `callback.accept(false)` rather than `onClose`.
-    fn key_confirm(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+    pub(super) fn key_confirm(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         let outcome = self.confirm.handle_key(key);
         self.apply_confirm(ui, outcome)
     }
@@ -942,7 +942,7 @@ impl MenuNav {
     /// second kind of confirmation cannot be opened and then silently do nothing
     /// when the player says yes — the island shape, in the one place where the
     /// island would be a *missing destructive action* rather than an unused one.
-    fn apply_confirm(
+    pub(super) fn apply_confirm(
         &mut self,
         ui: &mut UiState,
         outcome: crate::menu::confirm::ConfirmOutcome,
@@ -983,7 +983,7 @@ impl MenuNav {
     /// follows [`crate::menu::confirm::ConfirmNav::handle_key`]'s own order —
     /// including its Escape branch, which answers Decline rather than a bare
     /// close.
-    fn key_resource_pack_prompt(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+    pub(super) fn key_resource_pack_prompt(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         let Some(prompt) = &mut self.resource_pack_prompt else {
             return MenuAction::None;
         };
@@ -1002,7 +1002,7 @@ impl MenuNav {
     /// racing the overlay's own close) cannot resubmit it — the same
     /// "already handled" shape [`Screen::Death`]'s respawn button relies on
     /// `Sim::respawn`'s own idempotence for, done here at the source instead.
-    fn apply_resource_pack_prompt(
+    pub(super) fn apply_resource_pack_prompt(
         &mut self,
         ui: &mut UiState,
         outcome: crate::menu::confirm::ResourcePackPromptOutcome,

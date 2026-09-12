@@ -1,4 +1,4 @@
-use super::*;
+use super::{MenuNav, *};
 
 impl MenuNav {
     /// The saved servers.

@@ -1,4 +1,4 @@
-use super::*;
+use super::{MenuNav, *};
 
 impl MenuNav {
     /// The World Creation screen. Every key is routed through
@@ -6,7 +6,7 @@ impl MenuNav {
     /// already implements vanilla's `Screen.keyPressed` order (Escape, then
     /// the focused field, then Tab/arrow navigation, then Enter on whatever
     /// is focused) — this arm only decides what leaving the screen means.
-    fn key_create_world(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+    pub(super) fn key_create_world(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         let outcome = self.create_world.handle_key(key);
         self.apply_create_world(ui, outcome)
     }
@@ -19,7 +19,7 @@ impl MenuNav {
     /// for the identical reason: `begin_singleplayer` must stay able to show
     /// a launch failure over a screen the player recognises rather than over
     /// a screen that has already navigated away.
-    fn apply_create_world(
+    pub(super) fn apply_create_world(
         &mut self,
         ui: &mut UiState,
         outcome: crate::menu::create_world::CreateWorldOutcome,
@@ -154,7 +154,7 @@ impl MenuNav {
     /// asserted the old binding were rewritten rather than deleted: the behaviour
     /// they protected (a scale that cycles and reaches `options.json`) is still
     /// asserted, through the new path.
-    fn key_settings(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+    pub(super) fn key_settings(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         // Key Binds has its own cursor and its own outcome type —
         // see `hover`'s matching guard for why this is a separate arm rather
         // than a branch inside the match below.
@@ -190,7 +190,7 @@ impl MenuNav {
     }
 
     /// [`Self::key_settings`]'s Key Binds half.
-    fn key_key_binds(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+    pub(super) fn key_key_binds(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         let outcome = match key {
             MenuKey::Up => {
                 self.settings.key_binds_mut().step(false);
@@ -222,7 +222,7 @@ impl MenuNav {
     /// asks to close the whole tree if its page stack is ever unexpectedly
     /// empty, and that has to reach the *real* `ui.close_settings()` or the
     /// fallback would silently do nothing to a state nobody can see.
-    fn apply_key_binds(
+    pub(super) fn apply_key_binds(
         &mut self,
         ui: &mut UiState,
         outcome: crate::menu::key_binds::KeyBindsOutcome,
@@ -257,7 +257,7 @@ impl MenuNav {
     /// box regardless of where that cursor is — see
     /// [`crate::menu::language::LanguageNav`]'s module doc on why the two are
     /// independent.
-    fn key_language(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+    pub(super) fn key_language(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         let outcome = match key {
             MenuKey::Up => {
                 self.settings.language_mut().step(false);
@@ -291,7 +291,7 @@ impl MenuNav {
     /// mirrors [`Self::apply_key_binds`]'s reason for living here (it can
     /// reach the real `ui.close_settings()` fallback [`SettingsNav::
     /// leave_language`]'s doc names, not a throwaway one).
-    fn apply_language(
+    pub(super) fn apply_language(
         &mut self,
         ui: &mut UiState,
         outcome: crate::menu::language::LanguageOutcome,
@@ -308,7 +308,7 @@ impl MenuNav {
 
     /// [`Self::key_settings`]'s Telemetry half. Up/Down/Enter/
     /// Escape only — no text field on this page, unlike Language.
-    fn key_telemetry(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+    pub(super) fn key_telemetry(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         let outcome = match key {
             MenuKey::Up => {
                 self.settings.telemetry_mut().step(false);
@@ -330,7 +330,7 @@ impl MenuNav {
     /// these outcomes: `TelemetryNav::activate` performs it directly (see
     /// that module's own doc), so the only thing this ever asks for is
     /// leaving the page.
-    fn apply_telemetry(
+    pub(super) fn apply_telemetry(
         &mut self,
         ui: &mut UiState,
         outcome: crate::menu::telemetry::TelemetryOutcome,
@@ -348,7 +348,7 @@ impl MenuNav {
     /// [`Self::key_settings`]'s Resource Packs half. Up/Down/
     /// Enter/Escape only — no text field, same shape as
     /// [`Self::key_telemetry`].
-    fn key_packs(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+    pub(super) fn key_packs(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         let outcome = match key {
             MenuKey::Up => {
                 self.settings.packs_mut().step(false);
@@ -367,7 +367,7 @@ impl MenuNav {
 
     /// What a [`crate::menu::packs::PacksOutcome`] asks of the shell —
     /// mirrors [`Self::apply_telemetry`].
-    fn apply_packs(
+    pub(super) fn apply_packs(
         &mut self,
         ui: &mut UiState,
         outcome: crate::menu::packs::PacksOutcome,
@@ -395,7 +395,7 @@ impl MenuNav {
     /// what owns the [`Options`] and the file it is written to — and because the
     /// **eager persistence** rule is a `MenuNav` rule (see the module docs): a
     /// setting that only saved on exit is the setting a crash loses.
-    fn apply_settings(
+    pub(super) fn apply_settings(
         &mut self,
         ui: &mut UiState,
         outcome: crate::menu::options::SettingsOutcome,
@@ -639,7 +639,7 @@ impl MenuNav {
     /// `menu::options::SOUND` and is caught by
     /// `sound_rows_index_the_category_they_name`, not something a player can
     /// provoke mid-session.
-    fn step_sound_volume(&mut self, index: u8, delta: i32) {
+    pub(super) fn step_sound_volume(&mut self, index: u8, delta: i32) {
         let slot = index as usize;
         if slot >= self.options.sound_volumes.len() {
             return;
@@ -660,7 +660,7 @@ impl MenuNav {
     /// vanilla's `IntRange(30, 110)` — the same pair
     /// `menu::options::INT_RANGE_SLIDERS` places the handle with, so the value a
     /// click can reach and the track it draws on cannot disagree.
-    fn step_fov(&mut self, delta: i32) {
+    pub(super) fn step_fov(&mut self, delta: i32) {
         use crate::config::{MAX_FOV, MIN_FOV};
         let span = (MAX_FOV - MIN_FOV + 1) as i32;
         let offset = self.options.fov as i32 - MIN_FOV as i32;
@@ -681,7 +681,7 @@ impl MenuNav {
     /// than sticking, which cannot happen through
     /// [`crate::config::cloud_status_from_name`] but keeps the `position` lookup
     /// honest about being fallible.
-    fn cycle_cloud_status(&mut self, delta: i32) {
+    pub(super) fn cycle_cloud_status(&mut self, delta: i32) {
         use lodestone_render::CloudStatus;
         const ORDER: [CloudStatus; 3] = [CloudStatus::Off, CloudStatus::Fast, CloudStatus::Fancy];
         let index = ORDER
@@ -701,7 +701,7 @@ impl MenuNav {
     /// No consumer push: `app/redraw.rs` copies the field onto
     /// `HudFrame::attack_indicator` every frame, the same way it already copies
     /// the eight chat options.
-    fn cycle_attack_indicator(&mut self, delta: i32) {
+    pub(super) fn cycle_attack_indicator(&mut self, delta: i32) {
         use crate::config::AttackIndicator;
         const ORDER: [AttackIndicator; 3] = [
             AttackIndicator::Off,
@@ -723,7 +723,7 @@ impl MenuNav {
     ///
     /// No consumer push: `app/redraw.rs` hands the field to
     /// `Sim::set_particle_level` every presented frame.
-    fn cycle_particle_level(&mut self, delta: i32) {
+    pub(super) fn cycle_particle_level(&mut self, delta: i32) {
         use crate::config::ParticleLevel;
         const ORDER: [ParticleLevel; 3] = [
             ParticleLevel::All,
@@ -745,7 +745,7 @@ impl MenuNav {
     /// [`Self::step_render_distance`]'s reason: this is a click-only control
     /// (a *drag* goes through [`Self::set_live_slider`] instead), and a value
     /// parked at "Unlimited" has to be able to come back down.
-    fn step_framerate_limit(&mut self, delta: i32) {
+    pub(super) fn step_framerate_limit(&mut self, delta: i32) {
         use crate::config::{MIN_FRAMERATE_LIMIT, UNLIMITED_FRAMERATE_CUTOFF};
         let buckets = (UNLIMITED_FRAMERATE_CUTOFF - MIN_FRAMERATE_LIMIT) / 10 + 1;
         let offset = (self.options.framerate_limit - MIN_FRAMERATE_LIMIT) / 10;
@@ -764,7 +764,7 @@ impl MenuNav {
     /// which is what actually rebuilds the atlas — this function only owns
     /// the menu-side value and its wrap, exactly as
     /// [`Self::set_live_slider`]'s own `MipmapLevels` arm does for a drag.
-    fn step_mipmap_levels(&mut self, delta: i32) {
+    pub(super) fn step_mipmap_levels(&mut self, delta: i32) {
         let max = lodestone_render::texture::BLOCK_ATLAS_MIP_LEVELS as i32;
         let span = max + 1;
         let offset = self.options.mipmap_levels as i32;
@@ -779,7 +779,7 @@ impl MenuNav {
     /// `WindowApp::sync_vsync_present_mode`, which polls this field every
     /// presented frame rather than being pushed from here — see that method's
     /// doc for why a poll is the safe shape against a GPU setter.
-    fn toggle_enable_vsync(&mut self) {
+    pub(super) fn toggle_enable_vsync(&mut self) {
         self.options.enable_vsync = !self.options.enable_vsync;
         self.persist_options();
     }
@@ -787,7 +787,7 @@ impl MenuNav {
     /// Cycles `inactivityFpsLimit` through its two declared states
     /// (`Minimized`, `Afk`) and wraps, then persists. Same shape as
     /// [`Self::cycle_cloud_status`], two states instead of three.
-    fn cycle_inactivity_fps_limit(&mut self, delta: i32) {
+    pub(super) fn cycle_inactivity_fps_limit(&mut self, delta: i32) {
         use crate::config::InactivityFpsLimit;
         const ORDER: [InactivityFpsLimit; 2] =
             [InactivityFpsLimit::Minimized, InactivityFpsLimit::Afk];
@@ -801,7 +801,7 @@ impl MenuNav {
     }
 
     /// Cycles the three Friends activity visibility levels and persists them.
-    fn cycle_share_presence(&mut self, delta: i32) {
+    pub(super) fn cycle_share_presence(&mut self, delta: i32) {
         use crate::config::PresenceSharing;
         const ORDER: [PresenceSharing; 3] = [
             PresenceSharing::All,
@@ -826,7 +826,7 @@ impl MenuNav {
     /// `CUSTOM` case, so applying `Custom` is a real call that writes nothing
     /// — not a skipped call. [`Self::apply_graphics_preset`] mirrors that
     /// shape rather than special-casing `Custom` at this call site.
-    fn step_graphics_preset(&mut self, delta: i32) {
+    pub(super) fn step_graphics_preset(&mut self, delta: i32) {
         use crate::config::GraphicsPreset;
         let index = GraphicsPreset::ORDER
             .iter()
@@ -867,7 +867,7 @@ impl MenuNav {
     /// and then hand-tweaking Render Distance leaves the Preset row reading
     /// "Fast" even though the value it placed has moved — a known,
     /// documented gap rather than a silent one.
-    fn apply_graphics_preset(&mut self) {
+    pub(super) fn apply_graphics_preset(&mut self) {
         use crate::config::GraphicsPreset;
         use lodestone_render::CloudStatus;
         match self.options.graphics_preset {
@@ -894,7 +894,7 @@ impl MenuNav {
     /// rule as [`Self::toggle_chat_colors`]. See
     /// [`crate::config::Options::cutout_leaves`]'s doc for the render-side
     /// consumer and why toggling it forces a remesh.
-    fn toggle_cutout_leaves(&mut self) {
+    pub(super) fn toggle_cutout_leaves(&mut self) {
         self.options.cutout_leaves = !self.options.cutout_leaves;
         self.persist_options();
     }
@@ -904,7 +904,7 @@ impl MenuNav {
     /// [`MenuNav::toggle_cutout_leaves`]. `app/redraw.rs` reads it into
     /// `RenderState::set_entity_shadows_enabled` every presented frame, so no
     /// further threading is needed beyond the mutation here.
-    fn toggle_entity_shadows(&mut self) {
+    pub(super) fn toggle_entity_shadows(&mut self) {
         self.options.entity_shadows = !self.options.entity_shadows;
         self.persist_options();
     }
@@ -918,7 +918,7 @@ impl MenuNav {
     /// No consumer push is needed — `app::weather::weather_columns_for_frame`
     /// reads the field off `MenuNav::options` once per presented frame, exactly
     /// as `cutout_leaves` and `entity_shadows` are polled.
-    fn step_weather_radius(&mut self, delta: i32) {
+    pub(super) fn step_weather_radius(&mut self, delta: i32) {
         use crate::config::{MAX_WEATHER_RADIUS, MIN_WEATHER_RADIUS};
         let span = MAX_WEATHER_RADIUS - MIN_WEATHER_RADIUS + 1;
         let offset = self.options.weather_radius - MIN_WEATHER_RADIUS;
@@ -934,7 +934,7 @@ impl MenuNav {
     /// `app/redraw.rs` hands the field to `Sim::set_blend_radius` every
     /// presented frame, whose own equality guard is what stops that poll
     /// re-meshing the world every frame.
-    fn step_biome_blend_radius(&mut self, delta: i32) {
+    pub(super) fn step_biome_blend_radius(&mut self, delta: i32) {
         use crate::config::{MAX_BIOME_BLEND_RADIUS, MIN_BIOME_BLEND_RADIUS};
         let span = MAX_BIOME_BLEND_RADIUS - MIN_BIOME_BLEND_RADIUS + 1;
         let offset = self.options.biome_blend_radius - MIN_BIOME_BLEND_RADIUS;
@@ -949,7 +949,7 @@ impl MenuNav {
     /// The wrap is what makes `0` (OFF) reachable again after a click walks the
     /// value up to 10, which matters more here than on most rows: the two ends
     /// of this slider are the only two states most players will want.
-    fn step_menu_background_blurriness(&mut self, delta: i32) {
+    pub(super) fn step_menu_background_blurriness(&mut self, delta: i32) {
         use crate::config::{MAX_MENU_BACKGROUND_BLURRINESS, MIN_MENU_BACKGROUND_BLURRINESS};
         let min = MIN_MENU_BACKGROUND_BLURRINESS as i32;
         let span = MAX_MENU_BACKGROUND_BLURRINESS as i32 - min + 1;
@@ -971,7 +971,7 @@ impl MenuNav {
     /// The bounds are `config`'s, which are vanilla's `IntRange(2, 32)` — the same
     /// pair `menu::options::INT_RANGE_SLIDERS` places the handle with, so the
     /// value a click can reach and the track it draws on cannot disagree.
-    fn step_render_distance(&mut self, delta: i32) {
+    pub(super) fn step_render_distance(&mut self, delta: i32) {
         use crate::config::{MAX_RENDER_DISTANCE, MIN_RENDER_DISTANCE};
         let span = (MAX_RENDER_DISTANCE - MIN_RENDER_DISTANCE + 1) as i32;
         let offset = self.options.render_distance as i32 - MIN_RENDER_DISTANCE as i32;
@@ -987,7 +987,7 @@ impl MenuNav {
     /// representation the redraw path may populate. The 16-chunk quantum is
     /// one coarse cell, so every reachable nonzero value has a meaningful
     /// visual effect instead of paying for a fraction of a cell.
-    fn step_horizon_distance(&mut self, delta: i32) {
+    pub(super) fn step_horizon_distance(&mut self, delta: i32) {
         use crate::config::MAX_HORIZON_DISTANCE_CHUNKS;
         const STEP: i32 = 16;
         let buckets = MAX_HORIZON_DISTANCE_CHUNKS as i32 / STEP + 1;
@@ -1019,7 +1019,7 @@ impl MenuNav {
     /// (`LiveOption::unit_double_mut`, `LiveOption::int_range`), never from a
     /// restated range: a slider whose drag and whose handle disagreed about the
     /// bounds would land the handle somewhere the value cannot be.
-    fn set_live_slider(&mut self, live: LiveOption, fraction: f32) -> bool {
+    pub(super) fn set_live_slider(&mut self, live: LiveOption, fraction: f32) -> bool {
         let f = fraction.clamp(0.0, 1.0);
         // The eight `UnitDouble` options plus `sensitivity`: the fraction *is*
         // the value, so this needs no conversion at all.
@@ -1138,7 +1138,7 @@ impl MenuNav {
     /// tidying: it now carries the Damage Tilt and Panorama Scroll Speed rows on
     /// the Accessibility page too, and a name claiming otherwise is how the next
     /// reader concludes there is no generic stepper and writes a second one.
-    fn step_unit_double_option(
+    pub(super) fn step_unit_double_option(
         &mut self,
         field: impl FnOnce(&mut Options) -> &mut f32,
         delta: i32,
@@ -1149,7 +1149,7 @@ impl MenuNav {
     }
 
     /// Flips `options.chat.color`, the one non-slider chat option.
-    fn toggle_chat_colors(&mut self) {
+    pub(super) fn toggle_chat_colors(&mut self) {
         self.options.chat_colors = !self.options.chat_colors;
         self.persist_options();
     }

@@ -1,4 +1,4 @@
-use super::*;
+use super::{MenuNav, *};
 
 /// The frame that is **actually on screen**, however it got there — the one
 /// source `app.rs`'s mouse hit-test (`menu_row_at`) may consult.
@@ -480,7 +480,7 @@ pub fn routes_menu_input(ui: &UiState) -> bool {
 /// Returns `i` unchanged when nothing in `0..len` is enabled. Neither real
 /// button set can be in that state, but the loop bound is what keeps a future
 /// all-disabled set from spinning forever rather than being a latent hang.
-fn step_enabled(i: usize, len: usize, forward: bool, enabled: &dyn Fn(usize) -> bool) -> usize {
+pub(super) fn step_enabled(i: usize, len: usize, forward: bool, enabled: &dyn Fn(usize) -> bool) -> usize {
     if len == 0 {
         return 0;
     }
@@ -498,11 +498,11 @@ fn step_enabled(i: usize, len: usize, forward: bool, enabled: &dyn Fn(usize) -> 
     i
 }
 
-fn wrap_next(i: usize, len: usize) -> usize {
+pub(super) fn wrap_next(i: usize, len: usize) -> usize {
     if len == 0 { 0 } else { (i + 1) % len }
 }
 
-fn wrap_prev(i: usize, len: usize) -> usize {
+pub(super) fn wrap_prev(i: usize, len: usize) -> usize {
     if len == 0 {
         0
     } else if i == 0 {

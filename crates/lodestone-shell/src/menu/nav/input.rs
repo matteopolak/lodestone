@@ -1,4 +1,4 @@
-use super::*;
+use super::{MenuNav, *};
 
 impl MenuNav {
     /// Moves the highlight to row `row` of the current screen, as a mouse hover
@@ -428,7 +428,7 @@ impl MenuNav {
     /// footer: `click_row` returns `false` for them (and for the sign-in and
     /// name-editor frames, which draw no list), and the fall-through below is
     /// the unchanged path.
-    fn click_accounts(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
+    pub(super) fn click_accounts(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
         if !self.accounts.click_row(row) {
             self.hover(ui, row);
             return self.key(ui, MenuKey::Enter);
@@ -460,7 +460,7 @@ impl MenuNav {
     /// see `super::world_select::WorldSelectNav::hovered`, which *does* need one,
     /// because on that screen a hovered row must not steal focus from the search
     /// field.
-    fn hover_list(&mut self, row: usize) {
+    pub(super) fn hover_list(&mut self, row: usize) {
         if row < self.list.len() {
             // Moving from the footer onto a row must put the button highlight
             // out, or it stays burnt in on whichever button was last crossed.
@@ -482,7 +482,7 @@ impl MenuNav {
     /// missing "because `app.rs` reports one click at a time with no interval";
     /// [`super::focus::DoubleClickTracker`] supplies the interval, and the claim
     /// outlived the gap by longer than it was true.
-    fn click_list(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
+    pub(super) fn click_list(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
         if row < self.list.len() {
             self.server = row;
             self.list_button = None;
@@ -555,7 +555,7 @@ impl MenuNav {
     /// The selection **follows the row**, matching vanilla's
     /// `scrollToEntry(children.get(newIndex))`: the entry the player grabbed stays
     /// the selected one, so a second click on the same arrow keeps moving it.
-    fn swap_rows(&mut self, from: usize, to: usize) -> MenuAction {
+    pub(super) fn swap_rows(&mut self, from: usize, to: usize) -> MenuAction {
         if !self.list.swap(from, to) {
             return MenuAction::None;
         }
@@ -570,7 +570,7 @@ impl MenuNav {
 
     /// What one footer button does. Each one is the mouse's route to something the
     /// keyboard can already do, except Direct Connection, which is inactive.
-    fn activate_list_button(&mut self, ui: &mut UiState, button: ServerListButton) -> MenuAction {
+    pub(super) fn activate_list_button(&mut self, ui: &mut UiState, button: ServerListButton) -> MenuAction {
         match button {
             ServerListButton::Select => {
                 let Some(auth) = self.entitlement() else {

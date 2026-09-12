@@ -1,4 +1,4 @@
-use super::*;
+use super::{MenuNav, *};
 
 impl MenuNav {
     /// Whether the pause menu should offer its own Open to LAN row at all —

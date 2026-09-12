@@ -1,4 +1,4 @@
-use super::*;
+use super::{MenuNav, *};
 
 impl MenuNav {
     /// The scrolling list on the screen `ui` is showing, or `None` when that screen
@@ -324,7 +324,7 @@ impl MenuNav {
     /// order, exactly as `scrollToEntry` does, so this is the minimum move that
     /// brings the row fully into the band — an arrow press off the bottom edge
     /// advances by one row's 36 px, not by a whole window.
-    fn scroll_server_to_show(&mut self) {
+    pub(super) fn scroll_server_to_show(&mut self) {
         let row_h = super::render::SERVER_LIST_ITEM_H;
         let window_px = super::render::server_list_window_rows() as f32 * row_h;
         let row_top = self.server as f32 * row_h;
@@ -368,7 +368,7 @@ impl MenuNav {
     /// Returns `(rel_x, rel_y, size)`, so the caller passes the same `size` the
     /// draw blits at rather than restating vanilla's 32.
     #[must_use]
-    fn entry_icon_cursor(&self, row: usize) -> Option<(f32, f32, f32)> {
+    pub(super) fn entry_icon_cursor(&self, row: usize) -> Option<(f32, f32, f32)> {
         let (x, y, canvas_w, canvas_h) = self.menu_cursor?;
         // A canvas is only known once a frame has been hit-tested; a zero one
         // would put every row at the same place.
