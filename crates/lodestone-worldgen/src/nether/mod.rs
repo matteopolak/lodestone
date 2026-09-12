@@ -140,7 +140,8 @@ use crate::structure::{
 };
 use crate::surface::{PreState, SurfaceDiff, SurfaceSystem, identity_canon};
 use crate::stage_schedule::{
-    ColumnStage, DecorationStep, NETHER_DECORATION_STEPS,
+    ChunkRequest, ColumnStage, DecorationStep, NETHER_DECORATION_STEPS,
+    NETHER_FEATURE_WRITE_RADIUS, NETHER_SOURCES,
 };
 
 thread_local! {
@@ -1908,19 +1909,28 @@ impl NetherGenerator {
         let mut suppressed_huge = HashSet::new();
         // The ordinary one-column API has no external admission stream. Keep
         // its historical x-major source dispatch explicit; lifecycle replay
-        // supplies captured completion order one source at a time, so it does
-        // not use this unconstrained fallback permutation.
-        let source_order = [
-            (-1, -1),
-            (-1, 0),
-            (-1, 1),
-            (0, -1),
-            (0, 0),
-            (0, 1),
-            (1, -1),
-            (1, 0),
-            (1, 1),
-        ];
+        // supplies captured completion order one source at a time. That path
+        // resolves the central admission-dependent schedule, even though the
+        // selected source makes the remaining candidate order observationally
+        // irrelevant for that one completion.
+        let source_order = if selected_source.is_some() {
+            NETHER_SOURCES.order_for(
+                ChunkRequest::single(cx, cz, NETHER_FEATURE_WRITE_RADIUS),
+                (cx, cz),
+            )
+        } else {
+            [
+                (-1, -1),
+                (-1, 0),
+                (-1, 1),
+                (0, -1),
+                (0, 0),
+                (0, 1),
+                (1, -1),
+                (1, 0),
+                (1, 1),
+            ]
+        };
         for (dx, dz) in source_order {
             let source_x = cx + dx;
             let source_z = cz + dz;

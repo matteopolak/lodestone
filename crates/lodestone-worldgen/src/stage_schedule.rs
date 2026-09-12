@@ -526,6 +526,25 @@ impl SourceSchedule {
     pub const fn completion(self) -> SourceCompletion {
         self.completion
     }
+
+    /// Resolve this schedule's source order for one admitted request.
+    ///
+    /// Fixed schedules copy their declared candidate offsets. Admission-based
+    /// schedules derive the order from the request's wavefront, so callers do
+    /// not need a second three-by-three loop (or a coordinate-specific
+    /// permutation) in a production dispatcher.
+    #[must_use]
+    pub fn order_for(self, request: ChunkRequest, center: (i32, i32)) -> [(i32, i32); 9] {
+        match self.completion {
+            SourceCompletion::Fixed(offsets) => {
+                assert_eq!(offsets.len(), 9, "source schedule must declare nine candidates");
+                std::array::from_fn(|index| offsets[index])
+            }
+            SourceCompletion::AdmissionDependent => {
+                request.source_completion_order(center).offsets()
+            }
+        }
+    }
 }
 
 pub(crate) const OVERWORLD_SOURCE_OFFSETS: &[(i32, i32); 9] = &[
