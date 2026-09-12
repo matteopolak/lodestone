@@ -183,5 +183,3 @@ pub const EMPTY_ARMOR_SLOT_SHIELD: &str = "container/slot/shield";
 /// `EMPTY_SLOT_LAPIS_LAZULI`. See [`EMPTY_ARMOR_SLOT_HELMET`] for why this is
 /// a constant rather than inferred from the slot index.
 pub const EMPTY_SLOT_LAPIS_LAZULI: &str = "container/slot/lapis_lazuli";
-
-
