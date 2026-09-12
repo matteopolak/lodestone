@@ -140,7 +140,14 @@ use lodestone_model::{
     ResourceKey, ResourcePackResponseKind, Rotation, Text, TextContent, Vec3, Vec3f,
     WrittenBookContent,
 };
-use lodestone_data::{block::Block, block_items, block_states::BlockStateValue, item::Item, potion::PotionId};
+use lodestone_model::command_tree::CommandSuggestionEntry;
+use lodestone_data::{
+    block::Block,
+    block_items,
+    block_states::BlockStateValue,
+    item::Item,
+    potion::PotionId,
+};
 use lodestone_net::{Connection, NetError, Transport};
 // Encryption half: the server-side RSA keypair/decrypt and the
 // verify-token generator. Native-only for the same reason `crate::access` is
@@ -160,8 +167,8 @@ use crate::brewing::{Bottle, BottleKind, is_ingredient};
 use crate::composter::{InsertOutcome, compostable_chance};
 use crate::command::{CommandCaller, CommandDispatch, CommandSession};
 use crate::chunk::{
-    AIR, ChunkColumn, ColumnLightSettlementError, ChunkSource, generate_columns_offloaded,
-    is_air_or_fluid, is_water,
+    AIR, ChunkColumn, ChunkGenerationStage, ColumnLightSettlementError, ChunkSource,
+    generate_columns_offloaded, is_air_or_fluid, is_water,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::chunk::generate_columns_parallel;
@@ -333,13 +340,15 @@ const TIME_SYNC_INTERVAL: Duration = Duration::from_millis(1_000);
 /// [`ViewTracker::max_radius`].
 ///
 /// **Derived, not chosen.** The shell's render-distance slider tops out at
-/// `config::MAX_RENDER_DISTANCE = 32` chunks and
+/// `config::MAX_RENDER_DISTANCE = 256` chunks and
 /// `Session::set_render_distance` sends `render_distance + 1` (the outermost
 /// streamed ring can never be meshed, so asking for exactly `render_distance`
 /// loses the last visible ring) — so `33` is the largest value a real client on
-/// this project can ask for, and vanilla's own client-information view-distance
-/// field
-/// is documented as `2..=32` on [`ServerBound::ClientInformationChanged`].
+/// this project can ask for. The initial join field is a VarInt and therefore
+/// carries the resulting `257`-chunk stream radius. Live client-information
+/// updates are a signed byte in every supported protocol, so they can advertise
+/// at most `127`; the shell keeps that wire limit explicit when sending an
+/// update rather than allowing a wrapping conversion.
 ///
 /// This is a *sanity* bound rather than a memory policy: the wire field is an
 /// `i8`, so without it a malformed packet asking for `127` would try to stream
@@ -348,7 +357,7 @@ const TIME_SYNC_INTERVAL: Duration = Duration::from_millis(1_000);
 /// `chunk_store::integrated_capacity_for_view_radius` for whose memory is being
 /// spent, and this module's own note on what the store's capacity does *not*
 /// follow.
-pub const MAX_CLIENT_VIEW_RADIUS: i32 = 33;
+pub const MAX_CLIENT_VIEW_RADIUS: i32 = 257;
 
 /// Milliseconds per tick at vanilla's normal 20 TPS, used to convert
 /// wall-clock elapsed time into the tick-based `game_time`
@@ -843,6 +852,18 @@ impl<'a, S: ChunkSource + 'static> SourceRef<'a, S> {
         }
     }
 
+    /// Admits a set of columns before a synchronous consumer touches them.
+    ///
+    /// The integrated source is the `Shared` arm, so the actual `column()`
+    /// calls run on the world-generation worker pool. Keeping this broker on
+    /// `SourceRef` makes the ordering explicit at each connection boundary:
+    /// the future does not resolve until every requested coordinate has had a
+    /// chance to enter the source's resident cache, while an already-resident
+    /// coordinate remains a cheap cache hit.
+    async fn admit_columns(self, coords: Vec<(i32, i32)>) {
+        let _ = self.generate(coords).await;
+    }
+
     /// Resolves a fresh world's initial spawn without blocking the connection
     /// runtime when its terrain is shared with an integrated server.
     ///
@@ -852,26 +873,24 @@ impl<'a, S: ChunkSource + 'static> SourceRef<'a, S> {
     /// the shell's current-thread runtime. Calling it directly there prevents
     /// the same runtime from progressing the first chunk stream until the
     /// entire spawn search completes. Keep the borrowed arm as the synchronous
-    /// control path while sending production shared sources through the same
-    /// blocking pool as [`Self::generate`].
+    /// control path while sending production shared sources through the
+    /// world-generation dispatcher as [`Self::generate`] does.
     async fn find_initial_spawn(self) -> crate::world_spawn::WorldSpawn {
         match self {
             Self::Borrowed(source) => crate::world_spawn::find_initial_spawn(source),
             Self::Shared(source) => {
                 let source = Arc::clone(source);
-                tokio::task::spawn_blocking(move || {
+                crate::spawn::spawn_worldgen(move || {
                     crate::world_spawn::find_initial_spawn(&*source)
                 })
                 .await
-                .expect("initial spawn blocking task panicked")
             }
             Self::Dimension(source) => {
                 let source = Arc::clone(source);
-                tokio::task::spawn_blocking(move || {
+                crate::spawn::spawn_worldgen(move || {
                     crate::world_spawn::find_initial_spawn(&*source)
                 })
                 .await
-                .expect("initial spawn blocking task panicked")
             }
         }
     }
@@ -898,6 +917,7 @@ struct PortalTrip {
 /// fallback is required for generator-backed sources whose column has not yet
 /// been hydrated into a registry. Checking the block state first prevents a
 /// stale sidecar from teleporting through a gateway block that was removed.
+#[cfg(test)]
 fn end_gateway_destination<S: ChunkSource + ?Sized>(
     source: &S,
     block_entities: &BlockEntityHandle,
@@ -912,6 +932,103 @@ fn end_gateway_destination<S: ChunkSource + ?Sized>(
     configured.and_then(|(exit, exact)| {
         crate::portal::end_gateway_arrival_in_world(source, exit, exact)
     })
+}
+
+/// Reads the gateway sidecar after the contact column is known resident. The
+/// exit is returned separately so the async connection path can admit the
+/// bounded arrival footprint before the resident-only search runs.
+fn end_gateway_exit_resident<S: ChunkSource + ?Sized>(
+    source: &S,
+    block_entities: &BlockEntityHandle,
+    pos: BlockPos,
+) -> Option<(BlockPos, bool)> {
+    let state = resident_block_state(source, pos.x, pos.y, pos.z)?;
+    if !crate::portal::is_end_gateway(&state) {
+        return None;
+    }
+    block_entities
+        .with(|registry| registry.get(pos).and_then(BlockEntity::gateway_destination))
+        .or_else(|| {
+            source
+                .block_entity(pos.x, pos.y, pos.z)
+                .and_then(|entity| entity.gateway_destination())
+        })
+}
+
+/// The production gateway decision after the contact and arrival footprints
+/// have been admitted. Unlike the compatibility helper above, this path never
+/// falls back to a generating source read.
+fn resolve_end_gateway_contact_resident<S: ChunkSource + ?Sized>(
+    source: &S,
+    block_entities: &BlockEntityHandle,
+    pos: BlockPos,
+    dimension: crate::dimension::Dimension,
+    cooldown: u8,
+    is_player: bool,
+    mounted: bool,
+) -> Option<EndGatewayTeleport> {
+    if cooldown != 0 || mounted || !end_gateway_contact_allowed(dimension, is_player) {
+        return None;
+    }
+    let (exit, exact) = end_gateway_exit_resident(source, block_entities, pos)?;
+    crate::portal::end_gateway_arrival_in_resident_world(source, exit, exact).map(|position| {
+        EndGatewayTeleport {
+            position,
+            dimension,
+            cooldown: END_GATEWAY_CONTACT_COOLDOWN,
+        }
+    })
+}
+
+async fn admit_end_gateway_arrival<S: ChunkSource + 'static>(
+    source: SourceRef<'_, S>,
+    block_entities: &BlockEntityHandle,
+    pos: BlockPos,
+) {
+    let Some((exit, _exact)) = end_gateway_exit_resident(source.get(), block_entities, pos) else {
+        return;
+    };
+    source
+        .admit_columns(crate::portal::end_gateway_required_columns(exit))
+        .await;
+}
+
+/// Resolves an already-admitted destination without reopening a cold portal
+/// search. A missing resident portal is a valid result here: the ordinary
+/// resolver then plans a new portal using the footprint the caller just
+/// admitted.
+fn resolve_destination_after_admission<S: ChunkSource + ?Sized>(
+    destination: &S,
+    from: crate::dimension::Dimension,
+    to: crate::dimension::Dimension,
+    index: Option<&crate::portal::PortalIndex>,
+    approximate: BlockPos,
+    player_pos: (f64, f64, f64),
+    source_axis: crate::portal::Axis,
+) -> Option<crate::portal::PortalDestination> {
+    if let Some(existing) = crate::portal::find_exit_portal_resident(
+        destination,
+        to,
+        index,
+        approximate,
+    ) {
+        let axis = crate::portal::Axis::from_state(&destination.block_state(
+            existing.x,
+            existing.y,
+            existing.z,
+        ));
+        let (corner, _, _) = crate::portal::largest_rectangle_around(destination, existing, axis);
+        return Some(crate::portal::PortalDestination {
+            position: Vec3::new(
+                f64::from(corner.x) + 0.5,
+                f64::from(corner.y),
+                f64::from(corner.z) + 0.5,
+            ),
+            created: None,
+            dimension: to,
+        });
+    }
+    crate::portal::resolve_destination(destination, from, to, index, player_pos, source_axis)
 }
 
 fn end_gateway_contact_allowed(dimension: crate::dimension::Dimension, is_player: bool) -> bool {
@@ -935,6 +1052,7 @@ struct EndGatewayTeleport {
     cooldown: u8,
 }
 
+#[cfg(test)]
 fn resolve_end_gateway_contact<S: ChunkSource + ?Sized>(
     source: &S,
     block_entities: &BlockEntityHandle,
@@ -997,15 +1115,15 @@ fn dimension_scoped_handles(travelled: Option<&Arc<dyn ChunkSource>>) -> Dimensi
 ///
 /// # The order of the packets is the whole correctness argument
 ///
-/// 1. **Forget every loaded column.** The client keeps chunks in a store with no
-///    bulk-clear operation, so `forget_chunk` empties it before the destination
-///    dimension supplies terrain and height metadata.
-/// 2. **The dimension change pair** (`respawn` + the placement teleport). This is
+/// 1. **The dimension change pair** (`respawn` + the placement teleport). This is
 ///    what re-frames the client's chunk window: it resolves the destination
 ///    `dimension_type` holder id and installs that dimension's `min_y` and section
 ///    count. Every chunk sent before it would be decoded against the prior window.
-/// 3. **The destination cache centre, then the chunks.** Both must follow (2), for the same
-///    reason.
+/// 2. **Forget every loaded column.** The client keeps chunks in a store with no
+///    bulk-clear operation, so `forget_chunk` empties the old view after the
+///    destination window has been installed.
+/// 3. **The destination cache centre, then the chunks.** Both must follow the
+///    transition and forget sequence, for the same reason.
 ///
 /// # Why the view tracker is rebuilt rather than recentred
 ///
@@ -1062,10 +1180,33 @@ where
     // `crate::portal::PortalIndex`. Read through the source already in hand rather
     // than the destination's, because both answer with the same store.
     let index = current.get().portal_index().cloned();
+    let Some((scaled_x, scaled_y, scaled_z)) = crate::dimension::scaled_destination(
+        from,
+        to,
+        player_pos.0,
+        player_pos.1,
+        player_pos.2,
+    ) else {
+        return Ok(None);
+    };
+    let approximate = BlockPos::new(scaled_x, scaled_y, scaled_z);
+    let required = crate::portal::find_exit_portal_required_columns(
+        to,
+        index.as_ref(),
+        approximate,
+    );
+    match sibling.as_ref() {
+        Some(owned) => {
+            let _ = generate_columns_offloaded(Arc::clone(owned), required).await;
+        }
+        None => current.admit_columns(required).await,
+    }
     // The exit portal axis comes from the block containing the player. Carry
     // `entry` here so the generated portal keeps that orientation.
-    let source_axis =
-        crate::portal::Axis::from_state(&current.get().block_state(entry.x, entry.y, entry.z));
+    let Some(entry_state) = resident_block_state(current.get(), entry.x, entry.y, entry.z) else {
+        return Ok(None);
+    };
+    let source_axis = crate::portal::Axis::from_state(&entry_state);
     // # Why the outbound leg is offloaded and the return leg is not
     //
     // `resolve_destination` is synchronous CPU work whose *reads* may each generate a
@@ -1086,33 +1227,35 @@ where
         #[cfg(not(target_arch = "wasm32"))]
         Some(owned) => {
             let index = index.clone();
-            tokio::task::spawn_blocking(move || {
-                crate::portal::resolve_destination(
+            crate::spawn::spawn_worldgen(move || {
+                resolve_destination_after_admission(
                     &*owned,
                     from,
                     to,
                     index.as_ref(),
+                    approximate,
                     player_pos,
                     source_axis,
                 )
             })
             .await
-            .expect("portal destination search panicked")
         }
         #[cfg(target_arch = "wasm32")]
-        Some(owned) => crate::portal::resolve_destination(
+        Some(owned) => resolve_destination_after_admission(
             &*owned,
             from,
             to,
             index.as_ref(),
+            approximate,
             player_pos,
             source_axis,
         ),
-        None => crate::portal::resolve_destination(
+        None => resolve_destination_after_admission(
             destination,
             from,
             to,
             index.as_ref(),
+            approximate,
             player_pos,
             source_axis,
         ),
@@ -1147,11 +1290,11 @@ where
         return Ok(None);
     }
 
-    for &(cx, cz) in &view.loaded {
-        apply(conn, state, proto.encode_forget_chunk(cx, cz)).await?;
-    }
     for directive in change {
         apply(conn, state, directive).await?;
+    }
+    for &(cx, cz) in &view.loaded {
+        apply(conn, state, proto.encode_forget_chunk(cx, cz)).await?;
     }
 
     let centre_cx = (arrival.x / 16.0).floor() as i32;
@@ -1203,11 +1346,11 @@ where
 /// a linked-position search over the End's terrain and could as easily strand
 /// a player over the void as land them on solid ground.
 ///
-/// The packet sequence — forget every loaded column, the dimension-change
-/// pair, the destination cache centre, the rebuilt view and join stream — is
-/// otherwise identical to [`travel_through_portal`]'s, because it is the same
-/// client-side contract regardless of which portal type triggered it; see
-/// that function's own doc comment for why each step is ordered the way it
+/// The packet sequence — the dimension-change pair, forget every loaded
+/// column, the destination cache centre, the rebuilt view and join stream —
+/// is otherwise identical to [`travel_through_portal`]'s, because it is the
+/// same client-side contract regardless of which portal type triggered it;
+/// see that function's own doc comment for why each step is ordered the way it
 /// is.
 ///
 /// An End portal inside the End has no destination in this world model. The
@@ -1245,7 +1388,11 @@ where
     // commits a freshly built Nether portal before telling the client
     // anything — so the chunk stream below already carries the platform the
     // player is about to be standing on.
-    crate::portal::ensure_end_platform(destination, platform_origin);
+    let platform_columns = crate::portal::end_platform_required_columns(platform_origin);
+    let _ = generate_columns_offloaded(Arc::clone(&sibling), platform_columns).await;
+    if !crate::portal::ensure_end_platform_if_resident(destination, platform_origin) {
+        return Ok(None);
+    }
 
     // The one remaining hop `docs/dragon-fight.md` names: the first
     // connection to reach a fresh End (this session — see
@@ -1261,6 +1408,21 @@ where
         let init = mobs.with(|sim| {
             sim.init_end_dragon_fight(seed, Vec3::new(0.0, 64.0, 0.0), to.min_y())
         });
+        let mut admission = HashSet::new();
+        for write in &init.block_writes {
+            admission.extend(column_admission_footprint(
+                write.x.div_euclid(16),
+                write.z.div_euclid(16),
+                1,
+            ));
+        }
+        if !admission.is_empty() {
+            let _ = generate_columns_offloaded(
+                Arc::clone(&sibling),
+                admission.into_iter().collect(),
+            )
+            .await;
+        }
         for write in &init.block_writes {
             destination.set_block(write.x, write.y, write.z, &write.state);
         }
@@ -1276,11 +1438,11 @@ where
         return Ok(None);
     }
 
-    for &(cx, cz) in &view.loaded {
-        apply(conn, state, proto.encode_forget_chunk(cx, cz)).await?;
-    }
     for directive in change {
         apply(conn, state, directive).await?;
+    }
+    for &(cx, cz) in &view.loaded {
+        apply(conn, state, proto.encode_forget_chunk(cx, cz)).await?;
     }
 
     let centre_cx = (arrival.x / 16.0).floor() as i32;
@@ -1334,6 +1496,16 @@ where
 struct ViewTracker {
     center: (i32, i32),
     loaded: HashSet<(i32, i32)>,
+    /// The highest generation stage this connection has claimed for each
+    /// loaded coordinate. `loaded` is intentionally an owed set (it is seeded
+    /// before the deferred stream drains), so this map follows the same
+    /// reservation boundary: once an upgrade is queued, a second movement
+    /// cannot enqueue another copy of it.
+    sent_stages: HashMap<(i32, i32), ChunkGenerationStage>,
+    /// The optional moving complete-generation band. `None` preserves the
+    /// historic all-full stream used by borrowed and cross-dimension joins;
+    /// `Some` is the progressive shared-source path.
+    generation_band: Option<((i32, i32), i32)>,
     /// The connection's *current* effective view radius — starts at the radius
     /// the connection joined with (`serve_connection`'s own `view_radius`
     /// parameter) and can shrink or grow within
@@ -1367,6 +1539,24 @@ struct ViewTracker {
     max_radius: i32,
 }
 
+/// Resolves the two-stage streaming policy for one coordinate. The arithmetic
+/// is intentionally local to the server-side ledger so the tracker and the
+/// scheduler can be tested independently while sharing the same Chebyshev band
+/// definition.
+fn stage_for_band(
+    band: Option<((i32, i32), i32)>,
+    coord: (i32, i32),
+) -> ChunkGenerationStage {
+    match band {
+        Some(((cx, cz), radius))
+            if (coord.0 - cx).abs().max((coord.1 - cz).abs()) > radius =>
+        {
+            ChunkGenerationStage::Shaped
+        }
+        _ => ChunkGenerationStage::Full,
+    }
+}
+
 /// The directives produced by one [`ViewTracker`] update, split by whether
 /// they are subject to the chunk-batch flow-control gate
 /// (`ServerBound::ChunkBatchAcknowledged`) — see
@@ -1397,6 +1587,11 @@ struct ViewUpdate {
     /// the same streaming pipeline the join uses, one column per pass of the
     /// `select!` loop.
     added: Vec<(i32, i32)>,
+    /// Loaded columns whose sent stage was `Shaped` but which have entered the
+    /// complete-generation band. These are whole-column resends, not block
+    /// updates, so the client's normal `World::load`/remesh path replaces the
+    /// partial terrain and schedules all of its meshes.
+    upgrades: Vec<(i32, i32)>,
 }
 
 impl ViewTracker {
@@ -1411,18 +1606,58 @@ impl ViewTracker {
     /// sent and a ceiling under it would make the connection's very first live
     /// settings packet shrink a view nobody asked to shrink.
     fn new(center: (i32, i32), view_radius: i32, max_view_radius: i32) -> Self {
+        Self::new_with_generation_band(center, view_radius, max_view_radius, None)
+    }
+
+    /// Seeds a tracker for a progressive join. Columns inside `full_radius`
+    /// are recorded as `Full`; the rest are recorded as `Shaped`, matching the
+    /// stages the join pipeline requests. A later recenter can therefore
+    /// distinguish a genuinely new column from an already-loaded partial one.
+    fn new_banded(
+        center: (i32, i32),
+        view_radius: i32,
+        max_view_radius: i32,
+        full_radius: i32,
+    ) -> Self {
+        Self::new_with_generation_band(
+            center,
+            view_radius,
+            max_view_radius,
+            Some((center, full_radius)),
+        )
+    }
+
+    fn new_with_generation_band(
+        center: (i32, i32),
+        view_radius: i32,
+        max_view_radius: i32,
+        generation_band: Option<((i32, i32), i32)>,
+    ) -> Self {
         let mut loaded = HashSet::new();
         for dz in -view_radius..=view_radius {
             for dx in -view_radius..=view_radius {
                 loaded.insert((center.0 + dx, center.1 + dz));
             }
         }
+        let sent_stages = loaded
+            .iter()
+            .copied()
+            .map(|coord| (coord, stage_for_band(generation_band, coord)))
+            .collect();
         Self {
             center,
             loaded,
+            sent_stages,
+            generation_band,
             radius: view_radius,
             max_radius: max_view_radius.max(view_radius),
         }
+    }
+
+    /// The stage a streamed coordinate is owed under the current band. A
+    /// tracker without a band is the all-full compatibility path.
+    fn stage_for(&self, coord: (i32, i32)) -> ChunkGenerationStage {
+        stage_for_band(self.generation_band, coord)
     }
 
     /// The square `[-self.radius, self.radius]²` window around `center`.
@@ -1469,6 +1704,40 @@ impl ViewTracker {
         added
     }
 
+    /// Loaded columns that remain in `next` but have just crossed into the
+    /// complete-generation band. The result is sorted with the same nearest-
+    /// first key as new additions, making both request classes deterministic.
+    fn upgrade_columns(
+        &self,
+        next: &HashSet<(i32, i32)>,
+        centre: (i32, i32),
+        facing: Option<f32>,
+    ) -> Vec<(i32, i32)> {
+        let Some((_, _)) = self.generation_band else {
+            return Vec::new();
+        };
+        let mut upgrades: Vec<(i32, i32)> = self
+            .loaded
+            .intersection(next)
+            .copied()
+            .filter(|coord| {
+                self.sent_stages
+                    .get(coord)
+                    .copied()
+                    .unwrap_or(ChunkGenerationStage::Shaped)
+                    < ChunkGenerationStage::Full
+                    && stage_for_band(
+                        self.generation_band.map(|(_, radius)| (centre, radius)),
+                        *coord,
+                    ) == ChunkGenerationStage::Full
+            })
+            .collect();
+        upgrades.sort_unstable_by_key(|&coord| {
+            crate::join_scheduler::view_order_key(centre, facing, coord)
+        });
+        upgrades
+    }
+
     /// Recomputes the view for a new player chunk position `(cx, cz)` at the
     /// tracker's current [`radius`](Self::radius), returning the directives
     /// that bring the client's tracked chunks back in sync — and returning
@@ -1509,13 +1778,29 @@ impl ViewTracker {
             immediate.push(proto.encode_forget_chunk(x, z));
         }
         let added = self.added_columns(&next, (cx, cz), facing);
+        let upgrades = self.upgrade_columns(&next, (cx, cz), facing);
+        let next_band = self
+            .generation_band
+            .map(|(_, radius)| ((cx, cz), radius));
 
         self.center = (cx, cz);
         self.loaded = next;
+        self.generation_band = next_band;
+        for coord in &forgotten {
+            self.sent_stages.remove(coord);
+        }
+        for &coord in &added {
+            self.sent_stages
+                .insert(coord, stage_for_band(next_band, coord));
+        }
+        for &coord in &upgrades {
+            self.sent_stages.insert(coord, ChunkGenerationStage::Full);
+        }
         ViewUpdate {
             immediate,
             forgotten,
             added,
+            upgrades,
         }
     }
 
@@ -1567,13 +1852,24 @@ impl ViewTracker {
         // Centred on the tracker's own centre, which by definition did not move
         // here — a render-distance change is the one view update with no new pose.
         let added = self.added_columns(&next, self.center, facing);
+        let upgrades = self.upgrade_columns(&next, self.center, facing);
 
         self.radius = radius;
         self.loaded = next;
+        for coord in &forgotten {
+            self.sent_stages.remove(coord);
+        }
+        for &coord in &added {
+            self.sent_stages.insert(coord, self.stage_for(coord));
+        }
+        for &coord in &upgrades {
+            self.sent_stages.insert(coord, ChunkGenerationStage::Full);
+        }
         ViewUpdate {
             immediate,
             forgotten,
             added,
+            upgrades,
         }
     }
 }
@@ -1743,20 +2039,31 @@ where
     // Asked, not attempted: a stream that refused *after* taking the coordinates
     // would leave the fallback below with nothing to send. See
     // `JoinChunkStream::accepts_enqueue`.
-    let stream = stream.filter(|stream| stream.accepts_enqueue());
     if let Some(stream) = stream {
-        // Withdraw before enqueueing, and unconditionally — a shrink forgets columns
-        // and adds none, and those still owed must be dropped just the same. See
-        // `ColumnPipeline::cancel`.
-        stream.cancel(&update.forgotten);
-        stream.enqueue(update.added);
-        return Ok(());
+        if stream.accepts_enqueue() {
+            // Withdraw before enqueueing, and unconditionally — a shrink forgets columns
+            // and adds none, and those still owed must be dropped just the same. See
+            // `ColumnPipeline::cancel`.
+            stream.cancel(&update.forgotten);
+            stream.enqueue(update.added);
+            stream.enqueue_full(update.upgrades);
+            return Ok(());
+        }
+        // Borrowed/ringed streams cannot accept new work. Remove an upgrade from
+        // their still-buffered old stream before the direct full resend below;
+        // otherwise the stale shaped payload could arrive after the upgrade and
+        // downgrade the client again. The windowed arm returned above keeps both
+        // classes in one queue and never reaches this branch.
+        let upgrades: HashSet<(i32, i32)> = update.upgrades.iter().copied().collect();
+        stream.cancel(&upgrades);
     }
-    if update.added.is_empty() {
+    if update.added.is_empty() && update.upgrades.is_empty() {
         return Ok(());
     }
     let mut batch = vec![proto.begin_chunk_batch()];
-    let count = update.added.len() as i32;
+    let mut requested = update.added;
+    requested.extend(update.upgrades);
+    let count = requested.len() as i32;
     // Only a one-column protocol can offload (a borrowed source is not `'static'`):
     // cross-column and retained-initial protocols must settle their source state inline.
     let offloaded = if proto.uses_cross_column_light() || proto.retains_initial_column_light() {
@@ -1766,7 +2073,7 @@ where
             SourceRef::Shared(src) => {
                 crate::chunk::generate_and_encode_columns_offloaded(
                     Arc::clone(src),
-                    update.added.clone(),
+                    requested.clone(),
                     proto.chunk_encoder(),
                 )
                 .await
@@ -1774,7 +2081,7 @@ where
             SourceRef::Dimension(src) => {
                 crate::chunk::generate_and_encode_columns_offloaded(
                     Arc::clone(src),
-                    update.added.clone(),
+                    requested.clone(),
                     proto.chunk_encoder(),
                 )
                 .await
@@ -1788,8 +2095,17 @@ where
             return return_chunk_encode_error(conn, proto, state, None, error).await;
         }
         None => {
-            let columns = source.generate(update.added.clone()).await;
-            for (&(x, z), column) in update.added.iter().zip(columns.iter()) {
+            let columns = source.generate(requested.clone()).await;
+            for (&(x, z), column) in requested.iter().zip(columns.iter()) {
+                if proto.uses_cross_column_light() || proto.retains_initial_column_light() {
+                    source
+                        .admit_columns(column_admission_footprint(
+                            x,
+                            z,
+                            i32::from(proto.uses_cross_column_light()),
+                        ))
+                        .await;
+                }
                 match encode_chunk_with_source(proto, source.get(), x, z, column) {
                     Ok(directive) => batch.push(directive),
                     Err(error) => {
@@ -2591,7 +2907,8 @@ pub fn encode_chunk_with_source<P: ServerProtocol>(
         .dimension()
         .unwrap_or(crate::dimension::Dimension::Overworld);
     if !proto.retains_initial_column_light() {
-        return proto.try_encode_chunk_in_dimension(cx, cz, column, dimension);
+        let packet_column = column_for_initial_encode(column);
+        return proto.try_encode_chunk_in_dimension(cx, cz, &packet_column, dimension);
     }
     // The initial packet must be based on a complete, settled 3×3 footprint.
     // Prefer the source's current centre copy because another admission may
@@ -2600,9 +2917,7 @@ pub fn encode_chunk_with_source<P: ServerProtocol>(
     // that this copy remains current after the potentially expensive light
     // computation.
     let neighbour_offsets = light_neighbour_offsets(proto.uses_cross_column_light());
-    let mut fallback = source
-        .resident_column(cx, cz)
-        .unwrap_or_else(|| column.clone());
+    let mut fallback = resident_column(source, cx, cz).unwrap_or_else(|| column.clone());
     for attempt in 0..=LIGHT_SETTLEMENT_OPTIMISTIC_RETRIES {
         let mut captured_neighbours = Vec::new();
         let exclusive = attempt == LIGHT_SETTLEMENT_OPTIMISTIC_RETRIES;
@@ -2636,10 +2951,11 @@ pub fn encode_chunk_with_source<P: ServerProtocol>(
                         .map(|&(dx, dz)| (dx, dz, source.column(cx + dx, cz + dz)))
                         .collect();
                 }
+                let packet_column = column_for_initial_encode(&centre);
                 return proto.try_encode_chunk_with_neighbours_in_dimension(
                     cx,
                     cz,
-                    &centre,
+                    &packet_column,
                     &captured_neighbours,
                     dimension,
                 );
@@ -2651,10 +2967,11 @@ pub fn encode_chunk_with_source<P: ServerProtocol>(
                         .map(|&(dx, dz)| (dx, dz, source.column(cx + dx, cz + dz)))
                         .collect();
                 }
+                let packet_column = column_for_initial_encode(&fallback);
                 return proto.try_encode_chunk_with_neighbours_in_dimension(
                     cx,
                     cz,
-                    &fallback,
+                    &packet_column,
                     &captured_neighbours,
                     dimension,
                 );
@@ -2668,9 +2985,7 @@ pub fn encode_chunk_with_source<P: ServerProtocol>(
                 // A dependency write completed after capture. Retry from the
                 // current source view so the next light snapshot describes the
                 // newer blocks rather than the rejected one.
-                fallback = source
-                    .resident_column(cx, cz)
-                    .unwrap_or_else(|| source.column(cx, cz));
+                fallback = resident_column(source, cx, cz).unwrap_or_else(|| column.clone());
             }
             Err(ColumnLightSettlementError::Conflict) => {
                 return Err(ChunkEncodeError::new(
@@ -2680,6 +2995,18 @@ pub fn encode_chunk_with_source<P: ServerProtocol>(
         }
     }
     unreachable!("the bounded initial-light settlement loop always returns")
+}
+
+/// Gives a direct initial-packet encoder only a centre-settled retained light
+/// snapshot. The source settlement path is the authority for promoting a
+/// dependency-initialized column; a `NoLight` result must not let a direct
+/// encoder mistake that intermediate storage for the final centre answer.
+fn column_for_initial_encode(column: &ChunkColumn) -> ChunkColumn {
+    let mut column = column.clone();
+    if column.retained_light().is_some() && column.centre_settled_light().is_none() {
+        column.clear_retained_light();
+    }
+    column
 }
 
 const LIGHT_SETTLEMENT_OPTIMISTIC_RETRIES: usize = 3;
@@ -2694,7 +3021,67 @@ fn light_neighbour_offsets(cross_column: bool) -> Vec<(i32, i32)> {
         .collect()
 }
 
-fn encode_column<P: ServerProtocol, S: ChunkSource + 'static>(
+/// Coordinates that a synchronous consumer may touch after admitting one
+/// centre. Radius one covers the target column, a face-adjacent placement, and
+/// the complete retained-light neighbourhood used by initial packet encoding.
+fn column_admission_footprint(cx: i32, cz: i32, radius: i32) -> Vec<(i32, i32)> {
+    (-radius..=radius)
+        .flat_map(|dz| (-radius..=radius).map(move |dx| (cx + dx, cz + dz)))
+        .collect()
+}
+
+/// The part of [`column_admission_footprint`] still missing after a streaming
+/// worker has already produced the centre column.
+///
+/// Initial retained-light encoding needs the complete three-by-three footprint,
+/// but the join pipeline hands this path a fully generated centre. Asking the
+/// source for that centre again is redundant work on sources that do not retain
+/// generated columns, and a needless resident-cache lookup on sources that do.
+/// Preserve the footprint's row-major ordering while excluding only `(cx, cz)`.
+fn column_admission_neighbours(cx: i32, cz: i32, radius: i32) -> Vec<(i32, i32)> {
+    column_admission_footprint(cx, cz, radius)
+        .into_iter()
+        .filter(|&pos| pos != (cx, cz))
+        .collect()
+}
+
+/// Returns the block position whose column an inbound world action owns.
+///
+/// The packet branch awaits this broker before entering its existing
+/// synchronous handlers. A packet is never discarded when the source is cold;
+/// admission only establishes the ordering that lets the handler run without
+/// making a generation call on the connection task.
+fn action_target(packet: &ServerBound) -> Option<BlockPos> {
+    match packet {
+        ServerBound::BlockAction { pos, .. }
+        | ServerBound::UseItemOn { pos, .. }
+        | ServerBound::SetCommandBlock { pos, .. }
+        | ServerBound::PickItemFromBlock { pos, .. } => Some(*pos),
+        _ => None,
+    }
+}
+
+/// Admits the owned action footprint before the packet handler reads or
+/// mutates terrain. This is intentionally one awaited operation in front of
+/// the `match packet`: packet order is therefore preserved even when a cold
+/// source takes a worker turn to generate its target and neighbours.
+async fn admit_action_footprint<S: ChunkSource + 'static>(
+    source: SourceRef<'_, S>,
+    packet: &ServerBound,
+) {
+    let Some(pos) = action_target(packet) else {
+        return;
+    };
+    source
+        .admit_columns(column_admission_footprint(
+            pos.x.div_euclid(16),
+            pos.z.div_euclid(16),
+            1,
+        ))
+        .await;
+}
+
+async fn encode_column<P: ServerProtocol, S: ChunkSource + 'static>(
     proto: &P,
     source: SourceRef<'_, S>,
     cx: i32,
@@ -2702,6 +3089,37 @@ fn encode_column<P: ServerProtocol, S: ChunkSource + 'static>(
     trace: Option<&JoinTrace>,
     payload: crate::join_scheduler::ColumnPayload,
 ) -> Result<ServerDirective, ChunkEncodeError> {
+    let payload = match payload {
+        crate::join_scheduler::ColumnPayload::Encoded(directive) => {
+            crate::join_scheduler::ColumnPayload::Encoded(directive)
+        }
+        crate::join_scheduler::ColumnPayload::Column(column) => {
+            let column = match source
+                .get()
+                .packet_generation_stage(column.generation_stage())
+            {
+                Some(required) if required > column.generation_stage() => source
+                    .generate(vec![(cx, cz)])
+                    .await
+                    .into_iter()
+                    .next()
+                    .expect("one packet admission coordinate yields one column"),
+                _ => column,
+            };
+            crate::join_scheduler::ColumnPayload::Column(column)
+        }
+    };
+    if matches!(&payload, crate::join_scheduler::ColumnPayload::Column(_))
+        && (proto.uses_cross_column_light() || proto.retains_initial_column_light())
+    {
+        source
+            .admit_columns(column_admission_neighbours(
+                cx,
+                cz,
+                i32::from(proto.uses_cross_column_light()),
+            ))
+            .await;
+    }
     match payload {
         crate::join_scheduler::ColumnPayload::Encoded(directive) => Ok(directive),
         crate::join_scheduler::ColumnPayload::Column(column) => {
@@ -2710,6 +3128,68 @@ fn encode_column<P: ServerProtocol, S: ChunkSource + 'static>(
                 if let Some(trace) = trace {
                     trace.mark("encoded", cx, cz);
                 }
+            }
+            directive
+        }
+    }
+}
+
+/// Owned-source counterpart used by the deferred native join branch.
+///
+/// `serve_play` recreates its `SourceRef` borrow on every loop iteration because
+/// portal travel can replace the active dimension. A future kept across a
+/// `select!` pass therefore cannot borrow that local reference: the next pass
+/// must be free to promote a pending travel. Cloning the already-shared source
+/// handle gives the admission future an independent lifetime while preserving
+/// the same generation and source-aware encoding semantics.
+async fn encode_column_owned<P: ServerProtocol>(
+    proto: &P,
+    source: Arc<dyn ChunkSource>,
+    cx: i32,
+    cz: i32,
+    trace: Option<Arc<JoinTrace>>,
+    payload: crate::join_scheduler::ColumnPayload,
+) -> Result<ServerDirective, ChunkEncodeError> {
+    let payload = match payload {
+        crate::join_scheduler::ColumnPayload::Encoded(directive) => {
+            crate::join_scheduler::ColumnPayload::Encoded(directive)
+        }
+        crate::join_scheduler::ColumnPayload::Column(column) => {
+            let column = match source.packet_generation_stage(column.generation_stage()) {
+                Some(required) if required > column.generation_stage() => generate_columns_offloaded(
+                    Arc::clone(&source),
+                    vec![(cx, cz)],
+                )
+                .await
+                .into_iter()
+                .next()
+                .expect("one packet admission coordinate yields one column"),
+                _ => column,
+            };
+            crate::join_scheduler::ColumnPayload::Column(column)
+        }
+    };
+    if matches!(&payload, crate::join_scheduler::ColumnPayload::Column(_))
+        && (proto.uses_cross_column_light() || proto.retains_initial_column_light())
+    {
+        let _ = generate_columns_offloaded(
+            Arc::clone(&source),
+            column_admission_neighbours(
+                cx,
+                cz,
+                i32::from(proto.uses_cross_column_light()),
+            ),
+        )
+        .await;
+    }
+    match payload {
+        crate::join_scheduler::ColumnPayload::Encoded(directive) => Ok(directive),
+        crate::join_scheduler::ColumnPayload::Column(column) => {
+            let directive = encode_chunk_with_source(proto, &*source, cx, cz, &column);
+            if directive.is_ok()
+                && let Some(trace) = trace.as_ref()
+            {
+                trace.mark("encoded", cx, cz);
             }
             directive
         }
@@ -3073,8 +3553,8 @@ where
     .await
 }
 
-/// [`serve_connection_shared`], plus a host-installed command
-/// dispatcher (the host-installed command dispatcher).
+/// The shared mob-event connection path plus a host-installed command
+/// dispatcher.
 ///
 /// The singleplayer-shaped counterpart to
 /// [`serve_connection_with_commands`]: `_shared` is the off-core-thread chunk
@@ -3920,6 +4400,15 @@ where
                 // which is exactly a fresh world; the first join resolves it and the
                 // next autosave writes it. See
                 // `WorldStateHandle::world_spawn`.
+                if let Some(stored) = world.world_spawn() {
+                    source
+                        .admit_columns(column_admission_footprint(
+                            (stored.pos.x.floor() as i32).div_euclid(16),
+                            (stored.pos.z.floor() as i32).div_euclid(16),
+                            1,
+                        ))
+                        .await;
+                }
                 let spawn = match world.world_spawn() {
                     Some(stored)
                         if crate::world_spawn::is_spawn_position_clear(
@@ -3983,6 +4472,7 @@ where
                 //
                 // An in-memory world answers `None` and every existing caller
                 // therefore behaves exactly as before.
+                let home_source = source;
                 #[cfg(not(target_arch = "wasm32"))]
                 let saved_player = player_store(source.get()).and_then(|store| {
                     match store.read(login_uuid.unwrap_or_default()) {
@@ -4047,6 +4537,13 @@ where
                     // spawn. A locator restored into a sibling dimension is
                     // deliberately skipped because its source is not the home
                     // Overworld terrain.
+                    source
+                        .admit_columns(column_admission_footprint(
+                            (candidate.x.floor() as i32).div_euclid(16),
+                            (candidate.z.floor() as i32).div_euclid(16),
+                            1,
+                        ))
+                        .await;
                     if restored_dimension_source.is_none()
                         && !crate::world_spawn::is_spawn_position_clear(source.get(), candidate)
                     {
@@ -4252,7 +4749,9 @@ where
                             crate::join_scheduler::DEFAULT_FULL_GENERATION_RADIUS,
                         )
                         .with_trace(join_trace.clone())
-                        .encoding_with(if proto.uses_cross_column_light() {
+                        .encoding_with(if proto.uses_cross_column_light()
+                            || proto.retains_initial_column_light()
+                        {
                             None
                         } else {
                             proto.chunk_encoder()
@@ -4281,7 +4780,8 @@ where
                                 cz,
                                 join_trace.as_deref(),
                                 payload,
-                            ) {
+                            )
+                            .await {
                                 Ok(directive) => directive,
                                 Err(error) => {
                                     return return_chunk_encode_error(
@@ -4467,7 +4967,22 @@ where
                 // the square is streamed at the first value, while
                 // `ClientInformationChanged` may request any value up to
                 // `ViewTracker::max_radius`.
-                let view = ViewTracker::new((spawn_cx, spawn_cz), view_radius, max_view_radius);
+                // Shared progressive sources start with a shaped far band, so
+                // the tracker seeds the same stage ledger the join pipeline
+                // used. Sources that require a complete packet (or retain the
+                // legacy borrowed/ringed path) keep the all-full ledger.
+                let view = match source {
+                    SourceRef::Shared(src)
+                        if src
+                            .packet_generation_stage(ChunkGenerationStage::Shaped)
+                            .is_none() => ViewTracker::new_banded(
+                        (spawn_cx, spawn_cz),
+                        view_radius,
+                        max_view_radius,
+                        crate::join_scheduler::DEFAULT_FULL_GENERATION_RADIUS,
+                    ),
+                    _ => ViewTracker::new((spawn_cx, spawn_cz), view_radius, max_view_radius),
+                };
                 // `player_uuid`, `permission_level` and
                 // `builtins` are the bindings the `COMMANDS` send above already
                 // derived, reused rather than recomputed — the tree the client was
@@ -4551,6 +5066,7 @@ where
                     conn,
                     proto,
                     source,
+                    home_source,
                     entities,
                     state,
                     initial_teleport_id,
@@ -5033,12 +5549,18 @@ where
     )
     .await?;
 
+    // A lectern is a one-slot reader, not a generic container with a player
+    // inventory tail.  The client-side menu has the same one-slot shape; if
+    // the tail were appended the book would be offset and ordinary clicks
+    // could reach inventory slots that the reader never displays.
     let mut items = own_slots.clone();
-    for native in 9..=35 {
-        items.push(inventory.native(native).cloned());
-    }
-    for native in 0..=8 {
-        items.push(inventory.native(native).cloned());
+    if menu != "minecraft:lectern" {
+        for native in 9..=35 {
+            items.push(inventory.native(native).cloned());
+        }
+        for native in 0..=8 {
+            items.push(inventory.native(native).cloned());
+        }
     }
 
     let mut opened = OpenContainer {
@@ -5049,12 +5571,10 @@ where
         // restricted `may_place`/`max_stack_size` (`MenuKind::Beacon`'s own
         // doc) — everything else here keyed on the block entity's own
         // `menu_name()`, matching this function's one caller.
-        shape: if menu == "minecraft:beacon" {
-            MenuKind::Beacon
-        } else {
-            MenuKind::Container {
-                size: own_slots.len(),
-            }
+        shape: match menu {
+            "minecraft:beacon" => MenuKind::Beacon,
+            "minecraft:lectern" => MenuKind::Lectern,
+            _ => MenuKind::Container { size: own_slots.len() },
         },
         container_size: own_slots.len(),
         state_id: 0,
@@ -5309,10 +5829,11 @@ where
 /// Applies one block-breaking phase for the three destroy-action ordinals.
 ///
 /// This production path **validates** the break rather than trusting it: see
-/// [`crate::block_breaking`] for the destroy-progress arithmetic, the tolerance
-/// it deliberately carries, and what is still not modelled (creative mode and
-/// spawn protection). Two behaviours follow from it, and they are opposite ends
-/// of the same missing computation:
+/// [`crate::block_breaking`] for the destroy-progress arithmetic and the
+/// tolerance it deliberately carries. Creative mode has a separate start-only
+/// path that bypasses timing while retaining target validity and proposal
+/// protection. Two survival behaviours follow from the timing computation, and
+/// they are opposite ends of the same missing computation:
 ///
 /// * **`StartDestroy` can break the block by itself.** When destroy progress
 ///   reaches `1.0` on the first tick, a zero-hardness block needs no follow-up
@@ -5337,6 +5858,11 @@ where
 /// record would let a later container click mutate a container whose block no
 /// longer exists. If [`OpenContainer`] points at the broken position, it is
 /// cleared as well; the client receives no synthetic close frame.
+///
+/// When an integrated world has a proposal owner, the earned break is first
+/// submitted as a Paper-shaped `BlockBreak` proposal. A denied or unavailable
+/// proposal sends the authoritative state back to this connection and leaves
+/// the source, drops, block-entity registry, and block-tick feed untouched.
 #[allow(clippy::too_many_arguments)]
 async fn apply_block_action<T, P, S>(
     conn: &mut Connection<T>,
@@ -5398,6 +5924,17 @@ where
         BlockActionKind::StartDestroy => {
             let target = source.block_state(pos.x, pos.y, pos.z);
             let per_tick = crate::block_breaking::progress_per_tick(&target, held);
+            // Creative bypasses the hardness clock only for a known, present,
+            // breakable block. Air, an unbreakable state, and an unknown state
+            // are invalid targets and must not become a write merely because
+            // the caller has instant-build abilities.
+            if creative
+                && (crate::random_tick::is_air_variant(&target)
+                    || per_tick.is_none_or(|per| per <= 0.0))
+            {
+                *pending_break = None;
+                return Ok(());
+            }
             // `None` is a state neither census knows — our gap, not a cheat, so
             // it is priced as an ordinary progressive dig that the `None`-clock
             // branch of `may_break_at` will accept on any `StopDestroy`.
@@ -5407,6 +5944,19 @@ where
                 // Creative takes the same exit for *every* block, which is what
                 // makes a creative dig instant rather than merely fast.
                 *pending_break = None;
+                if !adjudicate_block_break(
+                    conn,
+                    proto,
+                    source,
+                    state,
+                    world,
+                    pos,
+                    breaker,
+                )
+                .await?
+                {
+                    return Ok(());
+                }
                 destroy_block(
                     conn,
                     proto,
@@ -5466,6 +6016,9 @@ where
                 *pending_break = dig.defer();
                 return Ok(());
             }
+            if !adjudicate_block_break(conn, proto, source, state, world, pos, breaker).await? {
+                return Ok(());
+            }
             destroy_block(
                 conn,
                 proto,
@@ -5489,6 +6042,54 @@ where
         }
     }
     Ok(())
+}
+
+/// Gives the tick-owned Paper event path the final say immediately before a
+/// connection-side break writes its replacement. The proposal payload uses a
+/// validated state id instead of a raw registry string; an unrecognised state
+/// stays on the existing direct path because there is no safe event payload to
+/// expose for it.
+async fn adjudicate_block_break<T, P, S>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: &S,
+    wire_state: &mut State,
+    world: &crate::world_state::WorldStateHandle,
+    pos: BlockPos,
+    breaker: uuid::Uuid,
+) -> Result<bool, ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource + ?Sized,
+{
+    let current = source.block_state(pos.x, pos.y, pos.z);
+    let Some(block_state) = lodestone_data::block_states::StateId::from_state_str(&current) else {
+        return Ok(true);
+    };
+    let Some(proposals) = world.proposal_handle() else {
+        return Ok(true);
+    };
+    let allowed = matches!(
+        proposals.block_break(pos, block_state, breaker).await,
+        Ok(crate::ecs::ServerProposalAction::BlockBreak {
+            pos: resolved_pos,
+            state: resolved_state,
+            breaker: resolved_breaker,
+        }) if resolved_pos == pos && resolved_state == block_state && resolved_breaker == breaker
+    );
+    if !allowed {
+        // A client may have predicted the break while the proposal waited for
+        // the next tick. Correct it with the source's current authoritative
+        // state, without publishing a world mutation or a synthetic break.
+        apply(
+            conn,
+            wire_state,
+            proto.encode_block_update(pos.x, pos.y, pos.z, &current),
+        )
+        .await?;
+    }
+    Ok(allowed)
 }
 
 /// The [`crate::fluid::FluidEnv`] for the column `pos` falls in — the
@@ -5997,7 +6598,7 @@ where
                 exclusive,
                 &mut compute,
             ) {
-                Ok(column) => break 'settle (column.clone(), column.retained_light().cloned()),
+                Ok(column) => break 'settle (column.clone(), column.centre_settled_light().cloned()),
                 Err(ColumnLightSettlementError::NoLight)
                 | Err(ColumnLightSettlementError::MissingFootprint) => {
                     break 'settle (fallback, None)
@@ -6040,7 +6641,8 @@ where
     // module uses — the batch accounting counts these directives, so a bare
     // `encode_chunk` outside one leaves the client's accounting short.
     apply(conn, state, proto.begin_chunk_batch()).await?;
-    let directive = match proto.try_encode_chunk_in_dimension(cx, cz, &column, dimension) {
+    let packet_column = column_for_initial_encode(&column);
+    let directive = match proto.try_encode_chunk_in_dimension(cx, cz, &packet_column, dimension) {
         Ok(directive) => directive,
         Err(error) => return return_chunk_encode_error(conn, proto, state, Some(0), error).await,
     };
@@ -6063,12 +6665,12 @@ fn resident_light_neighbourhood<S>(
 where
     S: ChunkSource + ?Sized,
 {
-    let column = source.resident_column(cx, cz)?;
+    let column = resident_column(source, cx, cz)?;
     let mut neighbours = Vec::new();
     for dz in -radius..=radius {
         for dx in -radius..=radius {
             if (dx, dz) != (0, 0) {
-                neighbours.push((dx, dz, source.resident_column(cx + dx, cz + dz)?));
+                neighbours.push((dx, dz, resident_column(source, cx + dx, cz + dz)?));
             }
         }
     }
@@ -6098,7 +6700,7 @@ where
         .unwrap_or(crate::dimension::Dimension::Overworld);
     let (column, light) = if proto.retains_initial_column_light() {
         let neighbour_offsets = light_neighbour_offsets(proto.uses_cross_column_light());
-        let Some(mut fallback) = source.resident_column(cx, cz) else {
+        let Some(mut fallback) = resident_column(source, cx, cz) else {
             return Ok(());
         };
         'settle: {
@@ -6126,11 +6728,11 @@ where
                 exclusive,
                 &mut compute,
             ) {
-                Ok(column) => break 'settle (column.clone(), column.retained_light().cloned()),
+                Ok(column) => break 'settle (column.clone(), column.centre_settled_light().cloned()),
                 Err(ColumnLightSettlementError::MissingFootprint) => return Ok(()),
                 Err(ColumnLightSettlementError::NoLight) => break 'settle (fallback, None),
                 Err(ColumnLightSettlementError::Conflict) if !exclusive => {
-                    let Some(current) = source.resident_column(cx, cz) else {
+                    let Some(current) = resident_column(source, cx, cz) else {
                         return Ok(());
                     };
                     fallback = current;
@@ -6161,7 +6763,8 @@ where
     // The lightweight path is optional per protocol family. The already-cloned
     // centre column keeps the compatible full-column fallback non-generating.
     apply(conn, state, proto.begin_chunk_batch()).await?;
-    let directive = match proto.try_encode_chunk_in_dimension(cx, cz, &column, dimension) {
+    let packet_column = column_for_initial_encode(&column);
+    let directive = match proto.try_encode_chunk_in_dimension(cx, cz, &packet_column, dimension) {
         Ok(directive) => directive,
         Err(error) => return return_chunk_encode_error(conn, proto, state, Some(0), error).await,
     };
@@ -7444,6 +8047,9 @@ async fn apply_use_item_on<T, P, S>(
     // or piston placed while looking down points up). `None` on the same
     // terms as `player_yaw`.
     player_pitch: Option<f32>,
+    // Whether this click used the secondary-use (sneak) input. A block item
+    // held while sneaking bypasses the clicked container's own use.
+    sneaking: bool,
     // The placing player, for the place sound's `except` argument (see the
     // `block_placed` call below).
     placer: uuid::Uuid,
@@ -7536,8 +8142,19 @@ where
         }
     });
 
+    // Secondary use is what lets a block item pass through a clicked chest (or
+    // other block entity with a menu) and place into the adjacent cell. Keep
+    // the ordinary empty-hand sneak click as a menu open: only a real block
+    // item has the alternate placement meaning.
+    let hand_native_for_use = if hand == 1 {
+        crate::inventory::OFFHAND_NATIVE
+    } else {
+        usize::from(inventory.selected_hotbar_slot())
+    };
+    let holding_block_item = selected_placement_item(inventory, hand_native_for_use)
+        .is_some_and(|item| block_items::block_placed_by(item).is_some());
     let existing_menu = block_entities.with(|reg| reg.get(pos).and_then(BlockEntity::menu_name));
-    if let Some(menu) = existing_menu {
+    if let Some(menu) = existing_menu.filter(|_| !sneaking || !holding_block_item) {
         return open_container_screen(
             conn,
             proto,
@@ -7831,7 +8448,7 @@ where
                     let mut pending: ScheduledTickQueue<ScheduledTickKind> = ScheduledTickQueue::new();
                     pending.schedule(
                         (pos.x, pos.y, pos.z),
-                        ScheduledTickKind::ButtonRelease,
+                        crate::hand_use::TICK_BUTTON,
                         delay,
                         crate::scheduled_tick::TickPriority::Normal,
                     );
@@ -8122,6 +8739,10 @@ where
     // Every cell the placement's neighbour fan-out rewrote —
     // empty unless a placement actually happened below.
     let mut changed: Vec<(BlockPos, String)> = Vec::new();
+    // Every cell a multi-cell attempt claimed before the atomic legality gate.
+    // Re-sending these cells on rejection clears any optimistic partner half
+    // the client may have shown, just as the primary and clicked cells do.
+    let mut attempted_cells: Vec<BlockPos> = Vec::new();
     // Paired with the `block_update` packets in the notify loop below — see
     // `moving_piston_records`.
     let mut piston_records: Vec<(BlockPos, lodestone_core::Nbt)> = Vec::new();
@@ -8149,12 +8770,36 @@ where
                 cursor,
                 yaw: player_yaw,
                 pitch: player_pitch,
+                sneaking,
             };
-            let (state, extra) =
-                match placed_block_state(block_name, &ctx, |p| source.block_state(p.x, p.y, p.z).into()) {
-                    Some(placed) => (placed.state, placed.extra),
-                    None => (BlockStateValue::parse(block_name), Vec::new()),
-                };
+            let placement = match placed_block_state(block_name, &ctx, |p| {
+                source.block_state(p.x, p.y, p.z).into()
+            }) {
+                Some(placement) => placement,
+                None => crate::block_placement::Placement {
+                    state: BlockStateValue::parse(block_name),
+                    extra: Vec::new(),
+                },
+            };
+            let placement = crate::block_placement::apply_waterlogging(
+                placement,
+                target,
+                |p| source.block_state(p.x, p.y, p.z).into(),
+            );
+            let target_replaceable = is_air_or_fluid(&target_state) || doubling_slab;
+            let occupied: Vec<(BlockPos, &str)> = std::iter::once((target, placement.state.as_str()))
+                .chain(placement.extra.iter().map(|(p, state)| (*p, state.as_str())))
+                .collect();
+            for (cell, _) in &occupied {
+                if !attempted_cells.contains(cell) {
+                    attempted_cells.push(*cell);
+                }
+            }
+            let in_build_height = occupied.iter().all(|(p, _)| {
+                source
+                    .column(p.x.div_euclid(16), p.z.div_euclid(16))
+                    .contains_y(p.y)
+            });
             // Vanilla's own block-item can-place → level unobstructed check: a placement that
             // would collide with the placer's own body is refused, not
             // written — see `placement_obstructs_placer`'s own doc for what
@@ -8163,8 +8808,21 @@ where
             // in that case, the same conservative-elsewhere-but-permissive-
             // here direction `is_legal_bed_respawn` documents for the same
             // gap.
-            let obstructed = player_pos.is_some_and(|feet| placement_obstructs_placer(target, &state, feet));
-            if !obstructed {
+            let obstructed = player_pos.is_some_and(|feet| {
+                occupied
+                    .iter()
+                    .any(|(p, state)| placement_obstructs_placer(*p, state, feet))
+            });
+            let placement_legal = in_build_height
+                && crate::block_placement::validate_placement(
+                    &placement,
+                    target,
+                    target_replaceable,
+                    |p| source.block_state(p.x, p.y, p.z).into(),
+                )
+                && !obstructed;
+            if placement_legal {
+                let crate::block_placement::Placement { state, extra } = placement;
             if let Some((entity_block, mut entity)) = block_entity_for_item(item.name()) {
                 // The two sources must agree on the block name, or we would
                 // register a furnace at a position holding some other block.
@@ -8253,21 +8911,27 @@ where
             // Block placement notifies neighboring cells so redstone state can
             // react immediately. Without this fan-out, dust beside a powered
             // line stays at `power=0`.
-            let (mut fanout, scheduled) = propagate_placement_with_entities(source, target, Some(block_entities));
-            changed.append(&mut fanout);
-            piston_records.extend(moving_piston_records(&scheduled));
-            // Delayed reactions are returned through the scheduled-tick queue
-            // owned by the world tick loop. Publish that queue even when the
-            // synchronous fan-out changed no cells.
-            block_ticks.request_scheduled_ticks(scheduled);
-            // And the same seeding hook `destroy_block` performs, for the same
-            // reason: a block placed into a flow, or beside a source, has to
-            // start it re-evaluating. See `crate::fluid::ticks_after_edit`.
-            block_ticks.request_fluid_scheduled_ticks(crate::fluid::ticks_after_edit(
-                source,
-                fluid_env_at(source, target),
-                target,
-            ));
+            let mut owned_cells = Vec::with_capacity(extra.len() + 1);
+            owned_cells.push(target);
+            owned_cells.extend(extra.iter().map(|(p, _)| *p));
+            for cell in owned_cells {
+                let (mut fanout, scheduled) =
+                    propagate_placement_with_entities(source, cell, Some(block_entities));
+                changed.append(&mut fanout);
+                piston_records.extend(moving_piston_records(&scheduled));
+                // Delayed reactions are returned through the scheduled-tick queue
+                // owned by the world tick loop. Publish that queue even when the
+                // synchronous fan-out changed no cells.
+                block_ticks.request_scheduled_ticks(scheduled);
+                // A fluid at any owned cell needs the same edit notification as
+                // the primary cell. The queue deduplicates repeated neighbours,
+                // so this remains one logical wake-up per position.
+                block_ticks.request_fluid_scheduled_ticks(crate::fluid::ticks_after_edit(
+                    source,
+                    fluid_env_at(source, cell),
+                    cell,
+                ));
+            }
             // Sand and gravel schedule a gravity check two ticks out. Other
             // placed blocks produce no entry in this feed.
             //
@@ -8312,15 +8976,12 @@ where
         )
         .await?;
     }
-    // `pos`/`neighbour` first (the clicked face and the placed cell, which the
-    // client predicted), then every cell the fan-out actually rewrote. Deduped
-    // because `target` is always one of the first two.
-    let mut notify: Vec<BlockPos> = vec![pos, neighbour];
-    for (p, _) in &changed {
-        if !notify.contains(p) {
-            notify.push(*p);
-        }
-    }
+    // `pos`/`neighbour` first (the clicked face and the placed cell), then every
+    // cell owned by the attempted placement, then every cell the fan-out
+    // actually rewrote. This includes partner cells after rejection, so a
+    // client prediction cannot leave a ghost upper half behind. Deduped because
+    // `target` is always one of the first two.
+    let notify = placement_update_positions(pos, neighbour, &attempted_cells, &changed);
     for p in notify {
         let current = source.block_state(p.x, p.y, p.z);
         let directive = proto.encode_block_update(p.x, p.y, p.z, &current);
@@ -8343,6 +9004,32 @@ where
             .await?;
     }
     Ok(())
+}
+
+/// Return the authoritative block-update positions for one use-on attempt.
+///
+/// The clicked and adjacent cells are always present, while attempted partner
+/// cells are included even when the atomic placement gate rejects the write.
+/// Fan-out changes are appended last. Keeping this ordering in one production
+/// helper makes the correction contract testable without a socket fixture.
+fn placement_update_positions(
+    clicked: BlockPos,
+    neighbour: BlockPos,
+    attempted: &[BlockPos],
+    changed: &[(BlockPos, String)],
+) -> Vec<BlockPos> {
+    let mut notify = vec![clicked, neighbour];
+    for pos in attempted {
+        if !notify.contains(pos) {
+            notify.push(*pos);
+        }
+    }
+    for (pos, _) in changed {
+        if !notify.contains(pos) {
+            notify.push(*pos);
+        }
+    }
+    notify
 }
 
 /// Converts scheduled piston ticks into block-entity update payloads.
@@ -9022,6 +9709,35 @@ fn apply_container_clicked<P: ServerProtocol>(
     // Which menu, and where its non-player slots live.
     let mut open = open_container;
 
+    // Lectern slot zero is a read-only display. It is intentionally handled
+    // before the generic click state machine, whose `Container` slot kind is
+    // otherwise placeable. A forged click receives the authoritative one-slot
+    // content rather than being allowed to write arbitrary items into the
+    // block entity.
+    if window_id != 0
+        && open
+            .as_ref()
+            .is_some_and(|tracked| tracked.window_id == window_id && tracked.shape == MenuKind::Lectern)
+    {
+        let tracked = open.as_mut().expect("lectern predicate checked Some");
+        let own = block_entities.with(|reg| {
+            reg.get(tracked.pos)
+                .map(BlockEntity::container_slots)
+                .unwrap_or_default()
+        });
+        let items = read_menu(&MenuLayout::lectern(), inventory, None, &own);
+        let state_id = tracked.next_state_id();
+        return (
+            Some(proto.encode_container_content(
+                tracked.window_id,
+                state_id,
+                &items,
+                inventory.click_state().carried.as_ref(),
+            )),
+            Vec::new(),
+        );
+    }
+
     // The workstation economy (anvil/grindstone/smithing) is a
     // second positionless-scratch shape alongside the crafting table, but its
     // cells live in `PlayerInventory::workstation` (a flat cell vector) rather
@@ -9071,6 +9787,7 @@ fn apply_container_clicked<P: ServerProtocol>(
         }
         match tracked.shape {
             MenuKind::CraftingTable => (MenuLayout::crafting_table(), Some(tracked.pos), true),
+            MenuKind::Lectern => (MenuLayout::lectern(), Some(tracked.pos), false),
             _ => (
                 MenuLayout::container(tracked.container_size),
                 Some(tracked.pos),
@@ -9693,6 +10410,109 @@ fn apply_set_beacon<P: ServerProtocol>(
             crate::beacon::encode_beacon_effect(secondary),
         ),
     ]
+}
+
+/// Applies one lectern reader button against the block entity that owns the
+/// open window. Page changes are data-only updates (the book remains in slot
+/// zero); taking the book clears the authoritative slot and resets the page,
+/// then adds the exact stack to the player's inventory. A full inventory
+/// refuses the take, so the server never loses a book it cannot deliver.
+fn apply_lectern_button_click<P: ServerProtocol>(
+    proto: &P,
+    block_entities: &BlockEntityHandle,
+    inventory: &mut PlayerInventory,
+    tracked: Option<&mut OpenContainer>,
+    window_id: i32,
+    button_id: i32,
+    can_take: bool,
+) -> Vec<ServerDirective> {
+    let Some(tracked) = tracked else { return Vec::new() };
+    if tracked.window_id != window_id || tracked.shape != MenuKind::Lectern {
+        return Vec::new();
+    }
+    let pos = tracked.pos;
+    let Some((book, current_page)) = block_entities.with(|reg| match reg.get(pos) {
+        Some(BlockEntity::Lectern(lectern)) => lectern.book.clone().map(|book| (book, lectern.page)),
+        _ => None,
+    }) else {
+        return Vec::new();
+    };
+    let page_count = book
+        .components
+        .written_book_content
+        .as_ref()
+        .map_or(0, |content| content.pages.len())
+        .max(book.components.writable_book_content.as_ref().map_or(0, Vec::len));
+    let page_count = page_count.max(1);
+    let current_page = current_page
+        .max(0)
+        .min(i32::try_from(page_count - 1).unwrap_or(i32::MAX));
+
+    let next_page = match button_id {
+        1 => current_page.saturating_sub(1),
+        2 => current_page.saturating_add(1).min(i32::try_from(page_count - 1).unwrap_or(i32::MAX)),
+        id if id >= 100 => (id - 100).max(0).min(i32::try_from(page_count - 1).unwrap_or(i32::MAX)),
+        3 => {
+            if !can_take {
+                return Vec::new();
+            }
+            // The lectern holds one book. `add` therefore either accepts it
+            // in full or returns it untouched; restore the authoritative slot
+            // if an inventory cannot accept it.
+            let before_inventory = inventory.clone();
+            if inventory.add(book.clone()).1.is_some() {
+                return Vec::new();
+            }
+            let changed = block_entities.with(|reg| {
+                let Some(BlockEntity::Lectern(lectern)) = reg.get_mut(pos) else {
+                    return false;
+                };
+                lectern.book = None;
+                lectern.page = 0;
+                true
+            });
+            if !changed {
+                // This should only be reachable if another world operation
+                // removed the block entity between the snapshot and write.
+                // Put the book back rather than deleting the player's item.
+                let _ = inventory.take_matching(|item| item == &book);
+                return Vec::new();
+            }
+            let mut directives = Vec::new();
+            // The book can land in any player-storage slot, not necessarily
+            // the selected hotbar slot. Publish each changed native slot in
+            // window-0 menu coordinates so the visible inventory agrees with
+            // the server immediately after the lectern action.
+            for native in 0..crate::inventory::PLAYER_NATIVE_SIZE {
+                if before_inventory.native(native) != inventory.native(native)
+                    && let Some(menu_slot) = window_zero_menu_slot(native)
+                {
+                    directives.push(proto.encode_container_slot(
+                        0,
+                        0,
+                        menu_slot,
+                        inventory.native(native),
+                    ));
+                }
+            }
+            let state_id = tracked.next_state_id();
+            directives.extend([
+                proto.encode_container_slot(tracked.window_id, state_id, 0, None),
+                proto.encode_container_data(tracked.window_id, 0, 0),
+            ]);
+            return directives;
+        }
+        _ => return Vec::new(),
+    };
+    if next_page == current_page {
+        return Vec::new();
+    }
+    block_entities.with(|reg| {
+        if let Some(BlockEntity::Lectern(lectern)) = reg.get_mut(pos) {
+            lectern.page = next_page;
+        }
+    });
+    vec![proto.encode_container_data(tracked.window_id, 0, next_page)]
 }
 
 /// [`ServerBound::ContainerButtonClick`]'s consumer —
@@ -10748,6 +11568,17 @@ fn apply_attack(
     });
 }
 
+/// Records the main-hand animation implied by a serverbound attack packet.
+///
+/// Every hosted protocol uses a main-hand attack action. The connection that
+/// sent it already animates locally, so only a multiplayer registry needs the
+/// event; singleplayer has no remote observer.
+fn record_attack_swing(players: Option<&PlayerRegistry>, player_entity_id: i32) {
+    if let Some(registry) = players {
+        registry.swing(player_entity_id, lodestone_model::Hand::Main);
+    }
+}
+
 /// Resolves `ServerBound::SpectatorAction`'s target against this crate's two
 /// id-keyed entity sources — the mob simulation and the player registry —
 /// and returns the entity id to attach the camera to, or `None` when any of
@@ -10997,41 +11828,128 @@ fn recipe_book_snapshot(inventory: &PlayerInventory) -> Vec<crate::crafting::Rec
 /// fall simulation begins only after that marker, and is re-armed after a
 /// respawn. Other unmodeled packets remain [`ServerBound::Ignored`] in
 /// `State::Play`.
-/// The three world-derived facts [`FallSample`] needs, read off the terrain the
-/// player is standing in.
+/// Reads the two cells needed by fall tracking without admitting terrain.
 ///
-/// # Which cell each one reads, and why
-///
-/// * `in_water` — the cell at the player's **feet**. The complete fluid-height
-///   test covers the whole bounding box; the feet cell is the earliest
-///   part of that box to touch a water surface on the way down, which is the
-///   moment the cancellation must fire. Reading the *eye* instead (which
-///   `crate::vitals` correctly does for drowning, a different question) would
-///   delay the cancellation by the player's height and let a shallow-water landing
-///   still hurt.
-/// * `fall_resetting` — the same feet cell, since a climbable is something the
-///   player is *inside*.
-/// * `block_damage_modifier` — the cell **below** the feet, at `y - 0.2`, using
-///   a `0.2` epsilon below the support boundary.
-///   A plain `y - 1` is wrong for a player standing exactly on a block boundary.
-///
-/// One `ChunkSource::block_state` call per cell, two cells — and `block_state` is
-/// the cheap single-cell read `ChunkStore` overrides, not a column regeneration
-/// This runs once per movement packet, alongside `view.recenter`.
-fn fall_sample<S: ChunkSource + ?Sized>(source: &S, x: f64, y: f64, z: f64, on_ground: bool) -> FallSample {
+/// Movement and status packets arrive on the same task that drives the
+/// integrated connection. A missing resident cell therefore means "try again
+/// after the view stream catches up", not "ask the source to generate a
+/// column now". Production packet/timer paths use this gate.
+fn resident_fall_sample<S: ChunkSource + ?Sized>(
+    source: &S,
+    x: f64,
+    y: f64,
+    z: f64,
+    on_ground: bool,
+) -> Option<FallSample> {
     let bx = x.floor() as i32;
     let bz = z.floor() as i32;
-    let feet = source.block_state(bx, y.floor() as i32, bz);
-    let below = source.block_state(bx, (y - 0.2).floor() as i32, bz);
-    FallSample {
+    let feet = resident_block_state(source, bx, y.floor() as i32, bz)?;
+    let below = resident_block_state(source, bx, (y - 0.2).floor() as i32, bz)?;
+    Some(FallSample {
         y,
         on_ground,
-        // `is_water`, deliberately — **not** `is_air_or_fluid`. Lava does not
-        // cancel a fall in vanilla; see `crate::fall`'s module doc.
         in_water: is_water(&feet),
         fall_resetting: crate::fall::is_fall_damage_resetting(&feet),
         block_damage_modifier: crate::fall::block_damage_modifier(&below),
+    })
+}
+
+/// Returns a canonical state string only when its owning column is retained.
+/// This deliberately has no fallback to [`ChunkSource::block_state`]: callers
+/// in the packet/timer loop must be able to distinguish an absent column from
+/// an air block and defer the probe without causing cold generation.
+fn resident_block_state<S: ChunkSource + ?Sized>(source: &S, x: i32, y: i32, z: i32) -> Option<String> {
+    match source.try_resident_block_state_id(x, y, z) {
+        Some(crate::chunk_store::TryResident::Present(state)) => {
+            Some(lodestone_data::block_states::StateId::canonical_state(state))
+        }
+        Some(crate::chunk_store::TryResident::Busy)
+        | Some(crate::chunk_store::TryResident::Absent) => None,
+        None => source
+            .resident_block_state_id(x, y, z)
+            .map(lodestone_data::block_states::StateId::canonical_state),
     }
+}
+
+/// Captures a resident column through the source's atomic try gate when it has
+/// one. `Busy` and `Absent` both defer the caller; only legacy sources that do
+/// not expose the gate use the older resident snapshot method.
+fn resident_column<S: ChunkSource + ?Sized>(source: &S, cx: i32, cz: i32) -> Option<ChunkColumn> {
+    match source.try_resident_column(cx, cz) {
+        Some(crate::chunk_store::TryResident::Present(column)) => Some(column),
+        Some(crate::chunk_store::TryResident::Busy)
+        | Some(crate::chunk_store::TryResident::Absent) => None,
+        None => source.resident_column(cx, cz),
+    }
+}
+
+/// Recomputes a beacon pyramid only from retained cells. A failed layer is a
+/// complete answer (`Some(0..=3)`); a missing cell in a layer that otherwise
+/// passes defers the periodic effect probe instead of entering the generating
+/// beacon helper.
+fn resident_beacon_levels<S: ChunkSource + ?Sized>(
+    source: &S,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> Option<u8> {
+    let mut levels = 0u8;
+    for step in 1..=4i32 {
+        let ly = y - step;
+        let mut layer_ok = true;
+        'layer: for lx in (x - step)..=(x + step) {
+            for lz in (z - step)..=(z + step) {
+                let state = resident_block_state(source, lx, ly, lz)?;
+                let base = state.split('[').next().unwrap_or(&state);
+                if !crate::beacon::BASE_BLOCKS.contains(&base) {
+                    layer_ok = false;
+                    break 'layer;
+                }
+            }
+        }
+        if !layer_ok {
+            break;
+        }
+        levels = u8::try_from(step).unwrap_or(4);
+    }
+    Some(levels)
+}
+
+/// Checks a beacon beam without allowing a cold column to enter the 20 Hz
+/// connection task. `None` means the complete scan is not resident yet;
+/// `Some(false)` is a resident obstruction and is therefore a real answer.
+fn resident_beam_unobstructed<S: ChunkSource + ?Sized>(
+    source: &S,
+    x: i32,
+    y: i32,
+    z: i32,
+    scan_height: i32,
+) -> Option<bool> {
+    let max_y = source
+        .dimension()
+        .map(crate::dimension::Dimension::max_y)
+        .or_else(|| {
+            resident_column(source, x.div_euclid(16), z.div_euclid(16))
+                .map(|column| column.min_y + column.height - 1)
+        })
+        .unwrap_or(y.saturating_add(scan_height));
+    for dy in 1..=scan_height {
+        if y.saturating_add(dy) > max_y {
+            break;
+        }
+        let state = resident_block_state(source, x, y + dy, z)?;
+        let base = state.split('[').next().unwrap_or(&state);
+        if base == "minecraft:bedrock" {
+            continue;
+        }
+        let transparent = lodestone_data::block_states::state_id(&state)
+            .and_then(lodestone_data::block_states::StateId::new)
+            .map_or(true, |id| lodestone_data::light_props::dampening(id) < 15);
+        if !transparent {
+            return Some(false);
+        }
+    }
+    Some(true)
 }
 
 /// Publishes the player's post-damage health, **and the death notification when
@@ -11221,9 +12139,9 @@ async fn fall_status_sample<T, P, S>(
     conn: &mut Connection<T>,
     state: &mut State,
     proto: &P,
-    // Read the terrain at the player's feet for water, climbable, and landing
-    // block facts. `.get()` performs two single-cell
-    // reads, not a batch — see `SourceRef::get`.
+    // Read the retained terrain at the player's feet for water, climbable, and
+    // landing block facts. A missing cell defers this sample until a later
+    // packet; it must not turn a movement/status probe into cold generation.
     source: &S,
     player_pos: &Option<(f64, f64, f64)>,
     fall: &mut FallTracker,
@@ -11255,7 +12173,10 @@ where
     let Some((x, y, z)) = *player_pos else {
         return Ok(());
     };
-    if let Some(raw) = fall.on_player_moved(fall_sample(source, x, y, z, on_ground))
+    let Some(sample) = resident_fall_sample(source, x, y, z, on_ground) else {
+        return Ok(());
+    };
+    if let Some(raw) = fall.on_player_moved(sample)
         && !invulnerable
         && vitals.apply_fall_damage(raw as f32).is_some()
     {
@@ -11430,6 +12351,10 @@ async fn dispatch_play_packet<T, P, S>(
     next_window_id: &mut i32,
     mobs: &MobHandle,
     sprinting: &mut bool,
+    // Retained between input packets because the client sends a new bitset
+    // only when movement input changes. Placement reads this secondary-use
+    // state to bypass a clicked container while placing a block beside it.
+    sneaking: &mut bool,
     awaiting_chunk_batch_ack: &mut bool,
     pending_chunk_batches: &mut VecDeque<Vec<ServerDirective>>,
     // The connection's live column stream, where the caller has one to lend. A
@@ -11612,6 +12537,13 @@ where
         return Ok(());
     }
 
+    // Admit target, neighbour, and retained-light columns before any action
+    // arm below performs its existing synchronous reads/writes. Awaiting here
+    // keeps packets ordered and, for the integrated `Shared` source, moves
+    // every cold `column()` call off this connection task. A cold admission is
+    // never a reason to drop the packet.
+    admit_action_footprint(source, &packet).await;
+
     match packet {
         ServerBound::KeepAlive { id } => {
             if *pending_keep_alive == Some(id) {
@@ -11765,8 +12697,9 @@ where
             )
             .await?;
 
-            if *client_loaded && let Some(raw) =
-                fall.on_player_moved(fall_sample(source.get(), x, y, z, on_ground))
+            if *client_loaded
+                && let Some(sample) = resident_fall_sample(source.get(), x, y, z, on_ground)
+                && let Some(raw) = fall.on_player_moved(sample)
                 && !Abilities::for_mode(*game_mode).invulnerable
                 && vitals.apply_fall_damage(raw as f32).is_some()
             {
@@ -11939,6 +12872,7 @@ where
                 // arrives — placement then uses the block's default state.
                 player_rot.map(|rotation| rotation.yaw),
                 player_rot.map(|rotation| rotation.pitch),
+                *sneaking,
                 player_uuid,
                 inventory,
                 block_entities,
@@ -12417,22 +13351,50 @@ where
         // refusal rules.
         ServerBound::ContainerButtonClick { window_id, button_id } => {
             let creative = *game_mode == GameMode::Creative;
+            let lectern = open_container
+                .as_ref()
+                .is_some_and(|open| open.window_id == window_id && open.shape == MenuKind::Lectern);
+            if let Some(pos) = open_container
+                .as_ref()
+                .filter(|open| open.window_id == window_id)
+                .map(|open| open.pos)
+            {
+                source
+                    .admit_columns(column_admission_footprint(
+                        pos.x.div_euclid(16),
+                        pos.z.div_euclid(16),
+                        1,
+                    ))
+                    .await;
+            }
             // Drawn unconditionally, whether or not the click succeeds — the
             // same "one draw per attempt" reasoning `apply_use_item_on`'s own
             // composter roll already documents.
             let fresh_seed = i64::from(drops_rng.next_int(i32::MAX));
-            let directives = apply_container_button_click(
-                proto,
-                inventory,
-                open_container.as_mut(),
-                window_id,
-                button_id,
-                source.get(),
-                experience,
-                creative,
-                fresh_seed,
-                world.crafting_hooks(),
-            );
+            let directives = if lectern {
+                apply_lectern_button_click(
+                    proto,
+                    block_entities,
+                    inventory,
+                    open_container.as_mut(),
+                    window_id,
+                    button_id,
+                    !matches!(*game_mode, GameMode::Adventure | GameMode::Spectator),
+                )
+            } else {
+                apply_container_button_click(
+                    proto,
+                    inventory,
+                    open_container.as_mut(),
+                    window_id,
+                    button_id,
+                    source.get(),
+                    experience,
+                    creative,
+                    fresh_seed,
+                    world.crafting_hooks(),
+                )
+            };
             // A no-op when the click was refused (`experience` untouched, so
             // this resends the same level/points it already holds) — cheaper
             // to call unconditionally than to thread a "did it actually spend
@@ -12440,6 +13402,17 @@ where
             republish_experience(players, player_uuid, experience);
             for directive in directives {
                 apply(conn, state, directive).await?;
+            }
+            if lectern {
+                // Keep the timer-driven diff baseline aligned immediately;
+                // otherwise the next 50 ms tick would resend the same book
+                // removal/page value after this authoritative action.
+                if let Some(open) = open_container.as_ref() {
+                    let (slots, data) = container_state(block_entities, open.pos);
+                    container_sync.slots = slots;
+                    container_sync.data = data;
+                }
+                republish_inventory(players, player_uuid, inventory);
             }
         }
         // A crafter's per-slot enable/disable toggle.
@@ -12466,6 +13439,12 @@ where
             }
         }
         ServerBound::Attack { entity_id } => {
+            // An attack packet also starts the main-hand swing animation. The
+            // local client renders its own arm immediately, but every other
+            // connection learns that animation through the shared swing log.
+            // Record it even when the target is unknown: the wire action is a
+            // swing first, while damage validation is a separate concern.
+            record_attack_swing(players, player_entity_id);
             apply_attack(
                 mobs,
                 *player_pos,
@@ -12896,6 +13875,7 @@ where
         }
         ServerBound::PlayerInput { sprint, shift, jump } => {
             *sprinting = sprint;
+            *sneaking = shift;
             // A jump request starts the camel dash when the mount accepts it.
             if jump {
                 mobs.with(|sim| sim.trigger_camel_dash(player_entity_id));
@@ -13098,6 +14078,41 @@ where
                 &commands.caller,
             ) {
                 Some(outcome) => {
+                    // Command effects are still one ordered packet action, but
+                    // their block coordinates are resolved only after the
+                    // command tree runs. Admit every owned target and its
+                    // light neighbours before applying the effects so a
+                    // `/setblock` or `/fill` cannot re-enter cold terrain on
+                    // the connection task.
+                    let mut effect_columns = HashSet::new();
+                    for directed in &outcome.effects {
+                        if directed.target != player_uuid {
+                            continue;
+                        }
+                        let mut admit = |x: i32, z: i32| {
+                            effect_columns.extend(column_admission_footprint(
+                                x.div_euclid(16),
+                                z.div_euclid(16),
+                                1,
+                            ));
+                        };
+                        match &directed.effect {
+                            crate::commands::Effect::SetBlock { pos: (x, _y, z), .. } => {
+                                admit(*x, *z);
+                            }
+                            crate::commands::Effect::Fill { positions, .. } => {
+                                for &(x, _y, z) in positions {
+                                    admit(x, z);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    if !effect_columns.is_empty() {
+                        chunk_source
+                            .admit_columns(effect_columns.into_iter().collect())
+                            .await;
+                    }
                     for directed in outcome.effects {
                         if directed.target != player_uuid {
                             if let Some(registry) = players {
@@ -13193,10 +14208,27 @@ where
         // `crate::commands::ServerCommands::suggest_response` for the
         // start/length arithmetic and the `/`-stripping this delegates to it,
         // gated by `commands.permission_level` — the same resolved-once level
-        // `ChatCommand` above uses.
+        // `ChatCommand` above uses. A host registry is consulted only when the
+        // built-in tree has no visible candidate, preserving root precedence
+        // while making plugin completions reach the same production path as
+        // plugin execution.
         ServerBound::CommandSuggestion { id, command } => {
-            let response =
+            let mut response =
                 commands.builtins.suggest_response(id, &command, commands.permission_level);
+            // Built-ins retain precedence. If they have no visible completion,
+            // ask the host's permission-aware registry for the plugin roots and
+            // branches that the same authenticated caller may use. The helper
+            // above already computed the wire token range, so plugin results
+            // cannot disagree with client replacement offsets.
+            if response.suggestions.is_empty() && commands.dispatch.is_installed() {
+                let caller = commands.plugin_caller();
+                response.suggestions = commands
+                    .dispatch
+                    .suggest(&caller, &command)
+                    .into_iter()
+                    .map(|text| CommandSuggestionEntry { text, tooltip: None })
+                    .collect();
+            }
             apply(conn, state, proto.encode_command_suggestions(&response)).await?;
         }
         // A game-mode request is answered with directives for the mode the
@@ -13636,6 +14668,10 @@ async fn serve_play<T, P, S, E>(
     conn: &mut Connection<T>,
     proto: &P,
     source: SourceRef<'_, S>,
+    // The primary source the connection joined from.  `source` may already
+    // be a restored Nether/End sibling; portal return must still resolve back
+    // through the primary world's sibling graph.
+    home_source: SourceRef<'_, S>,
     entities: &E,
     mut state: State,
     initial_teleport_id: Option<i32>,
@@ -13800,6 +14836,10 @@ where
     // see `apply_attack`'s own doc comment for the one thing it feeds
     // (the melee knockback sprint bonus).
     let mut sprinting = false;
+    // This connection's last-known secondary-use (sneak) input. Block
+    // placement uses it to bypass a clicked container, so shift-right-clicking
+    // a chest can place a block beside it instead of opening the chest.
+    let mut sneaking = false;
     // This connection's in-progress bow draw — see this parameter's
     // own comment on `dispatch_play_packet`.
     let mut bow_draw: Option<BowDraw> = None;
@@ -13976,7 +15016,14 @@ where
     // the whole of one `select!`, so an arm that discovered a trip cannot write it.
     // `pending_travel` is where the arm parks the new source; the top of the next
     // iteration promotes it.
-    let mut travelled: Option<Arc<dyn ChunkSource>> = None;
+    // A reconnect may arrive with a dimension-specific source already selected.
+    // Preserve it as the active source from the first tick; otherwise the join
+    // packets announce the restored dimension while subsequent probes read
+    // from the primary world until another portal transition occurs.
+    let mut travelled: Option<Arc<dyn ChunkSource>> = match source {
+        SourceRef::Dimension(restored) => Some(Arc::clone(restored)),
+        SourceRef::Borrowed(_) | SourceRef::Shared(_) => None,
+    };
     // `Some(None)` is a pending trip *home*, `Some(Some(..))` a pending trip out, and
     // `None` no pending trip at all. One variable rather than a flag beside an
     // `Option`, so "no trip" and "a trip back to the overworld" cannot be confused —
@@ -13987,6 +15034,22 @@ where
     // `apply_client_command`'s `dimension_reset` doc. Read and cleared
     // immediately after every `dispatch_play_packet` call in this loop.
     let mut dimension_reset: Option<Vec3> = None;
+    // Source-aware encoding can admit a cold three-by-three light footprint.
+    // Keep that future in the select loop rather than awaiting it in the join
+    // branch, so socket packets and keep-alive timers remain serviceable while
+    // the generation dispatcher prepares the next frame.
+    let mut pending_join_encode: Option<
+        std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            ((i32, i32), ServerDirective),
+                            ChunkEncodeError,
+                        >,
+                    > + Send + '_
+                >,
+        >,
+    > = None;
 
     loop {
         if let Some(next) = pending_travel.take() {
@@ -13995,9 +15058,10 @@ where
         // Shadowing the `source` parameter is what makes a dimension change reach
         // every arm at once — the view stream, the block reads, the fall sampler and
         // the drowning probe all take `source`, and none of them has to know that
-        // portals exist. `home` keeps the original, which is where a return trip
-        // lands.
-        let home = source;
+        // portals exist. `home_source` keeps the primary world, which is where
+        // a return trip lands even after a restart restored this connection in
+        // a sibling dimension.
+        let home = home_source;
         let source = match travelled.as_ref() {
             Some(other) => SourceRef::Dimension(other),
             None => home,
@@ -14012,6 +15076,53 @@ where
             .unwrap_or(block_entities);
         let block_ticks = dimension_handles.block_ticks.as_ref().unwrap_or(block_ticks);
         tokio::select! {
+            // Finish the source-aware encode that was started by the join arm.
+            // The future owns only the source reference and the payload, so it
+            // remains safe to leave it pending while packet/timer arms win the
+            // race. Keeping this as a separate branch is what prevents a cold
+            // neighbour admission from becoming an unserviceable connection
+            // pass.
+            encoded = std::future::poll_fn(|cx| match pending_join_encode.as_mut() {
+                Some(future) => std::future::Future::poll(future.as_mut(), cx),
+                None => std::task::Poll::Pending,
+            }), if pending_join_encode.is_some() => {
+                watch.enter();
+                // Remove the completed future before handling its result. The
+                // select branch has already polled it to readiness, so polling
+                // it a second time would violate the Future contract.
+                let _ = pending_join_encode.take();
+                let ((cx, cz), directive) = match encoded {
+                    Ok(encoded) => encoded,
+                    Err(error) => {
+                        return return_chunk_encode_error(
+                            conn,
+                            proto,
+                            &mut state,
+                            if join_batch_open { Some(join_batch_size) } else { None },
+                            error,
+                        )
+                        .await;
+                    }
+                };
+                if !join_batch_open {
+                    apply(conn, &mut state, proto.begin_chunk_batch()).await?;
+                    join_batch_open = true;
+                    join_batch_size = 0;
+                }
+                apply(conn, &mut state, directive).await?;
+                if let Some(trace) = join_trace.as_ref() {
+                    trace.mark("delivered", cx, cz);
+                }
+                chunks_sent += 1;
+                join_batch_size += 1;
+                if join_batch_size as usize >= JOIN_STREAM_BATCH_COLUMNS
+                    || join_stream.is_done()
+                {
+                    apply(conn, &mut state, proto.end_chunk_batch(join_batch_size)).await?;
+                    join_batch_open = false;
+                }
+                watch.pass("join_encode");
+            }
             // Stream the deferred join view (`JOIN_PRESTREAM_RADIUS`) while this
             // loop services digs, damage, and container clicks.
             //
@@ -14024,7 +15135,7 @@ where
             chunk = tokio::time::timeout(
                 crate::join_scheduler::JOIN_STREAM_SERVICE_BUDGET,
                 join_stream.next(source),
-            ), if !join_stream.is_done() => {
+            ), if pending_join_encode.is_none() && !join_stream.is_done() => {
                 watch.enter();
                 let chunk = match chunk {
                     // A worker can legitimately take hundreds of milliseconds
@@ -14050,44 +15161,75 @@ where
                     }
                 };
                 if let Some(((cx, cz), payload)) = chunk {
-                    if !join_batch_open {
-                        apply(conn, &mut state, proto.begin_chunk_batch()).await?;
-                        join_batch_open = true;
-                        join_batch_size = 0;
-                    }
-                    let directive = match encode_column(
-                        proto,
-                        source,
-                        cx,
-                        cz,
-                        join_trace.as_deref(),
-                        payload,
-                    ) {
-                        Ok(directive) => directive,
-                        Err(error) => {
-                            return return_chunk_encode_error(
-                                conn,
-                                proto,
-                                &mut state,
-                                if join_batch_open { Some(join_batch_size) } else { None },
-                                error,
-                            )
-                            .await;
+                    let owned_source: Option<Arc<dyn ChunkSource>> = match source {
+                        SourceRef::Shared(source) => {
+                            let source: Arc<dyn ChunkSource> = source.clone();
+                            Some(source)
                         }
+                        SourceRef::Dimension(source) => Some(Arc::clone(source)),
+                        SourceRef::Borrowed(_) => None,
                     };
-                    apply(conn, &mut state, directive).await?;
-                    if let Some(trace) = join_trace.as_ref() {
-                        trace.mark("delivered", cx, cz);
-                    }
-                    chunks_sent += 1;
-                    join_batch_size += 1;
-                    // Close on a full batch or on the last column, whichever comes
-                    // first — the tail batch is short, exactly like vanilla's.
-                    if join_batch_size as usize >= JOIN_STREAM_BATCH_COLUMNS
-                        || join_stream.is_done()
-                    {
-                        apply(conn, &mut state, proto.end_chunk_batch(join_batch_size)).await?;
-                        join_batch_open = false;
+                    if let Some(owned_source) = owned_source {
+                        // Do not await source admission in this select arm. The
+                        // owned future is polled by its own branch on subsequent
+                        // passes, while this loop continues accepting packets and
+                        // timers.
+                        let trace = join_trace.clone();
+                        pending_join_encode = Some(Box::pin(async move {
+                            encode_column_owned(
+                                proto,
+                                owned_source,
+                                cx,
+                                cz,
+                                trace,
+                                payload,
+                            )
+                            .await
+                            .map(|directive| ((cx, cz), directive))
+                        }));
+                    } else {
+                        // Borrowed sources exist for protocol-level controls and
+                        // cannot outlive this loop iteration. They retain the
+                        // original inline path; production integrated sources
+                        // always take one of the owned arms above.
+                        let directive = match encode_column(
+                            proto,
+                            source,
+                            cx,
+                            cz,
+                            join_trace.as_deref(),
+                            payload,
+                        )
+                        .await {
+                            Ok(directive) => directive,
+                            Err(error) => {
+                                return return_chunk_encode_error(
+                                    conn,
+                                    proto,
+                                    &mut state,
+                                    if join_batch_open { Some(join_batch_size) } else { None },
+                                    error,
+                                )
+                                .await;
+                            }
+                        };
+                        if !join_batch_open {
+                            apply(conn, &mut state, proto.begin_chunk_batch()).await?;
+                            join_batch_open = true;
+                            join_batch_size = 0;
+                        }
+                        apply(conn, &mut state, directive).await?;
+                        if let Some(trace) = join_trace.as_ref() {
+                            trace.mark("delivered", cx, cz);
+                        }
+                        chunks_sent += 1;
+                        join_batch_size += 1;
+                        if join_batch_size as usize >= JOIN_STREAM_BATCH_COLUMNS
+                            || join_stream.is_done()
+                        {
+                            apply(conn, &mut state, proto.end_chunk_batch(join_batch_size)).await?;
+                            join_batch_open = false;
+                        }
                     }
                 }
                 watch.pass("join_stream");
@@ -14149,6 +15291,7 @@ where
                     &mut next_window_id,
                     mobs,
                     &mut sprinting,
+                    &mut sneaking,
                     &mut awaiting_chunk_batch_ack,
                     &mut pending_chunk_batches,
                     // The live stream this loop's own `select!` branch drains, lent
@@ -14237,6 +15380,10 @@ where
                                 .collect()
                         })
                         .collect();
+                    // A pending frame belongs to the old dimension's stream;
+                    // cancel it before replacing that stream and promoting the
+                    // return trip on the next loop pass.
+                    pending_join_encode = None;
                     join_stream = crate::join_scheduler::JoinChunkStream::ringed(rings);
                     if join_batch_open {
                         apply(conn, &mut state, proto.end_chunk_batch(join_batch_size)).await?;
@@ -14578,29 +15725,50 @@ where
                         Some(u64::try_from(ticks_since(play_start)).unwrap_or(0)),
                     )
                 }) {
-                    pending_break = None;
-                    let current = source.get().block_state(dig.pos.x, dig.pos.y, dig.pos.z);
-                    if !crate::random_tick::is_air_variant(&current) {
-                        destroy_block(
-                            conn,
-                            proto,
-                            source.get(),
-                            &mut state,
-                            block_entities,
-                            &mut open_container,
-                            &mut container_sync,
-                            mobs,
-                            &mut drops_rng,
-                            inventory.selected_item(),
-                            block_ticks,
-                            player_uuid,
-                            !matches!(game_mode, GameMode::Creative) && world.block_drops(),
-                            world.block_drops(),
-                            dig.pos,
-                            &mut advancements,
-                            (!matches!(game_mode, GameMode::Creative)).then_some(&mut vitals),
-                        )
-                        .await?;
+                    // A timer probe must not turn a cold deferred break into
+                    // synchronous generation. Keep the pending break intact;
+                    // the next tick retries after the view stream admits it.
+                    if let Some(current) = resident_block_state(
+                        source.get(),
+                        dig.pos.x,
+                        dig.pos.y,
+                        dig.pos.z,
+                    ) {
+                        pending_break = None;
+                        if !crate::random_tick::is_air_variant(&current) {
+                            let allowed = adjudicate_block_break(
+                                conn,
+                                proto,
+                                source.get(),
+                                &mut state,
+                                world,
+                                dig.pos,
+                                player_uuid,
+                            )
+                            .await?;
+                            if allowed {
+                                destroy_block(
+                                conn,
+                                proto,
+                                source.get(),
+                                &mut state,
+                                block_entities,
+                                &mut open_container,
+                                &mut container_sync,
+                                mobs,
+                                &mut drops_rng,
+                                inventory.selected_item(),
+                                block_ticks,
+                                player_uuid,
+                                !matches!(game_mode, GameMode::Creative) && world.block_drops(),
+                                world.block_drops(),
+                                dig.pos,
+                                &mut advancements,
+                                (!matches!(game_mode, GameMode::Creative)).then_some(&mut vitals),
+                                )
+                                .await?;
+                            }
+                        }
                     }
                 }
 
@@ -14934,42 +16102,45 @@ where
                         }
                     }
 
-                    let eye_state = source.get().block_state(
+                    if let Some(eye_state) = resident_block_state(
+                        source.get(),
                         x.floor() as i32,
                         (y + EYE_HEIGHT).floor() as i32,
                         z.floor() as i32,
-                    );
-                    // `!invulnerable &&`: a creative player's air bar does not
-                    // deplete and they never drown. Suppressed here rather than
-                    // at the damage below because `PlayerVitals` is mode-free by
-                    // design, and a depleting bar that can never hurt is worse
-                    // than no bar at all.
-                    let outcome = tick_player_air_supply(
-                        &mut vitals,
-                        is_water(&eye_state),
-                        invulnerable,
-                        &effects,
-                    );
-                    if let Some(air) = outcome.air_changed {
-                        apply(conn, &mut state, proto.encode_air_supply_update(air)).await?;
-                    }
-                    if outcome.damage.is_some() {
-                        publish_health(
-                            conn,
-                            &mut state,
-                            proto,
-                            &vitals,
+                    ) {
+                        // `!invulnerable &&`: a creative player's air bar does not
+                        // deplete and they never drown. Suppressed here rather than
+                        // at the damage below because `PlayerVitals` is mode-free by
+                        // design, and a depleting bar that can never hurt is worse
+                        // than no bar at all. A missing resident cell defers the
+                        // complete air probe rather than treating it as air.
+                        let outcome = tick_player_air_supply(
+                            &mut vitals,
+                            is_water(&eye_state),
+                            invulnerable,
                             &effects,
-                            Vec3::new(x, y, z),
-                            // Self-facing, per `publish_health`'s own call sites.
-                            LOCAL_PLAYER_ENTITY_ID,
-                            &username,
-                            crate::vitals::DeathCause::Drown,
-                            &mut advancements,
-                            player_uuid,
-                            Some(crate::vitals::HurtDirection::PURE_ROLL),
-                        )
-                        .await?;
+                        );
+                        if let Some(air) = outcome.air_changed {
+                            apply(conn, &mut state, proto.encode_air_supply_update(air)).await?;
+                        }
+                        if outcome.damage.is_some() {
+                            publish_health(
+                                conn,
+                                &mut state,
+                                proto,
+                                &vitals,
+                                &effects,
+                                Vec3::new(x, y, z),
+                                // Self-facing, per `publish_health`'s own call sites.
+                                LOCAL_PLAYER_ENTITY_ID,
+                                &username,
+                                crate::vitals::DeathCause::Drown,
+                                &mut advancements,
+                                player_uuid,
+                                Some(crate::vitals::HurtDirection::PURE_ROLL),
+                            )
+                            .await?;
+                        }
                     }
 
                     // hostile-mob melee damage against this
@@ -15080,23 +16251,24 @@ where
                 // is the same — the fire goes out and nothing hurts — and this crate
                 // has no per-entity-type immunity table to consult.
                 if let Some((x, y, z)) = player_pos {
-                    let feet = source.get().block_state(
+                    if let Some(feet) = resident_block_state(
+                        source.get(),
                         x.floor() as i32,
                         y.floor() as i32,
                         z.floor() as i32,
-                    );
-                    let standing_in = crate::burning::BurnSource::for_block(&feet);
-                    let creative = Abilities::for_mode(game_mode).invulnerable;
-                    // Fire Resistance refuses the damage and leaves the counter
-                    // running — see `crate::burning`'s doc for why that is not the
-                    // same as putting the fire out.
-                    let resistant = effects
-                        .amplifier_of("minecraft:fire_resistance")
-                        .is_some();
-                    if let Some(source_kind) = standing_in
-                        && !creative
-                    {
-                        match source_kind {
+                    ) {
+                        let standing_in = crate::burning::BurnSource::for_block(&feet);
+                        let creative = Abilities::for_mode(game_mode).invulnerable;
+                        // Fire Resistance refuses the damage and leaves the counter
+                        // running — see `crate::burning`'s doc for why that is not the
+                        // same as putting the fire out.
+                        let resistant = effects
+                            .amplifier_of("minecraft:fire_resistance")
+                            .is_some();
+                        if let Some(source_kind) = standing_in
+                            && !creative
+                        {
+                            match source_kind {
                             // Vanilla's own fire-block ignite routine — the player ramp, which is
                             // why running across one fire block can leave you unburnt.
                             // One draw per contact tick, from this connection's own
@@ -15111,26 +16283,27 @@ where
                                 burn.ignite_for_ticks(crate::burning::LAVA_IGNITE_TICKS);
                             }
                         }
-                    }
-                    let out = burn.tick(standing_in, creative, resistant);
-                    if out.damage > 0.0 {
-                        vitals.apply_effect_damage(out.damage);
-                        publish_health(
-                            conn,
-                            &mut state,
-                            proto,
-                            &vitals,
-                            &effects,
-                            Vec3::new(x, y, z),
-                            // Self-facing, per `publish_health`'s own call sites.
-                            LOCAL_PLAYER_ENTITY_ID,
-                            &username,
-                            crate::vitals::DeathCause::OnFire,
-                            &mut advancements,
-                            player_uuid,
-                            Some(crate::vitals::HurtDirection::PURE_ROLL),
-                        )
-                        .await?;
+                        }
+                        let out = burn.tick(standing_in, creative, resistant);
+                        if out.damage > 0.0 {
+                            vitals.apply_effect_damage(out.damage);
+                            publish_health(
+                                conn,
+                                &mut state,
+                                proto,
+                                &vitals,
+                                &effects,
+                                Vec3::new(x, y, z),
+                                // Self-facing, per `publish_health`'s own call sites.
+                                LOCAL_PLAYER_ENTITY_ID,
+                                &username,
+                                crate::vitals::DeathCause::OnFire,
+                                &mut advancements,
+                                player_uuid,
+                                Some(crate::vitals::HurtDirection::PURE_ROLL),
+                            )
+                            .await?;
+                        }
                     }
                 }
 
@@ -15164,10 +16337,24 @@ where
                         // own (possibly stale — `BeaconData::levels`'s own
                         // doc) stored field: effect application must not
                         // outlive a pyramid the player has since broken.
-                        let levels = crate::beacon::beacon_levels(source.get(), pos.x, pos.y, pos.z);
-                        if levels == 0
-                            || !crate::beacon::beam_unobstructed(source.get(), pos.x, pos.y, pos.z, 384)
-                        {
+                        let Some(levels) = resident_beacon_levels(
+                            source.get(),
+                            pos.x,
+                            pos.y,
+                            pos.z,
+                        ) else {
+                            continue;
+                        };
+                        let Some(beam_unobstructed) = resident_beam_unobstructed(
+                            source.get(),
+                            pos.x,
+                            pos.y,
+                            pos.z,
+                            384,
+                        ) else {
+                            continue;
+                        };
+                        if levels == 0 || !beam_unobstructed {
                             continue;
                         }
                         let (range, application) =
@@ -15308,6 +16495,35 @@ where
                 // `home`, so any connected player's timer can apply the queue.
                 for death in mobs.with(|sim| sim.take_dragon_deaths()) {
                     if let Some(destination) = home.get().sibling(crate::dimension::Dimension::End) {
+                        // The death queue is drained from this connection's
+                        // 20 Hz timer, so its writes must not be the first
+                        // access to a cold End column. Admit every target and
+                        // its retained-light neighbours before the existing
+                        // ordered write sequence below.
+                        let mut admission = HashSet::new();
+                        let mut admit_position = |pos: BlockPos| {
+                            admission.extend(column_admission_footprint(
+                                pos.x.div_euclid(16),
+                                pos.z.div_euclid(16),
+                                1,
+                            ));
+                        };
+                        for (pos, _) in &death.exit_portal_blocks {
+                            admit_position(*pos);
+                        }
+                        for (pos, _) in &death.gateway_blocks {
+                            admit_position(*pos);
+                        }
+                        if death.outcome.place_dragon_egg {
+                            admit_position(death.origin);
+                        }
+                        if !admission.is_empty() {
+                            let _ = generate_columns_offloaded(
+                                Arc::clone(&destination),
+                                admission.into_iter().collect(),
+                            )
+                            .await;
+                        }
                         for (pos, state) in &death.exit_portal_blocks {
                             destination.set_block(pos.x, pos.y, pos.z, state);
                         }
@@ -15317,12 +16533,30 @@ where
                             // column that contains player-built blocks uses
                             // its actual top surface.
                             let mut egg_y = death.origin.y + 33;
-                            while egg_y > death.origin.y
-                                && destination.block_state(death.origin.x, egg_y, death.origin.z) == "minecraft:air"
-                            {
-                                egg_y -= 1;
+                            let mut resident_scan = true;
+                            while egg_y > death.origin.y {
+                                match resident_block_state(
+                                    &*destination,
+                                    death.origin.x,
+                                    egg_y,
+                                    death.origin.z,
+                                ) {
+                                    Some(state) if state == "minecraft:air" => egg_y -= 1,
+                                    Some(_) => break,
+                                    None => {
+                                        resident_scan = false;
+                                        break;
+                                    }
+                                }
                             }
-                            destination.set_block(death.origin.x, egg_y + 1, death.origin.z, "minecraft:dragon_egg");
+                            if resident_scan {
+                                destination.set_block(
+                                    death.origin.x,
+                                    egg_y + 1,
+                                    death.origin.z,
+                                    "minecraft:dragon_egg",
+                                );
+                            }
                         }
                         // `death.gateway_blocks` contains the positions from
                         // `outcome.spawn_gateway`'s formula and its shuffled
@@ -15482,15 +16716,31 @@ where
                     // current movement seam can update the player and view, but
                     // has no atomic vehicle relocation operation; leave the
                     // pair in place rather than splitting passenger state.
-                    if let Some(teleport) = resolve_end_gateway_contact(
+                    if resident_column(
                         source.get(),
-                        block_entities,
-                        contact,
-                        source.dimension(),
-                        end_gateway_cooldown,
-                        true,
-                        player_has_mount(mobs, player_entity_id),
-                    ) {
+                        contact.x.div_euclid(16),
+                        contact.z.div_euclid(16),
+                    )
+                    .is_some()
+                    {
+                        admit_end_gateway_arrival(source, block_entities, contact).await;
+                    }
+                    if resident_column(
+                        source.get(),
+                        contact.x.div_euclid(16),
+                        contact.z.div_euclid(16),
+                    )
+                    .is_some()
+                        && let Some(teleport) = resolve_end_gateway_contact_resident(
+                            source.get(),
+                            block_entities,
+                            contact,
+                            source.dimension(),
+                            end_gateway_cooldown,
+                            true,
+                            player_has_mount(mobs, player_entity_id),
+                        )
+                    {
                         let destination = teleport.position;
                         debug_assert_eq!(teleport.dimension, source.dimension());
                         let rotation = player_rot.unwrap_or_default();
@@ -15546,7 +16796,24 @@ where
                 // three blocks tall; using the eye cell would miss the bottom row.
                 if let Some((x, y, z)) = player_pos {
                     let feet = BlockPos::new(x.floor() as i32, y.floor() as i32, z.floor() as i32);
-                    let feet_state = source.get().block_state(feet.x, feet.y, feet.z);
+                    let feet_state = match resident_block_state(source.get(), feet.x, feet.y, feet.z) {
+                        Some(state) => state,
+                        None => {
+                            // A restored dimension can finish its join stream before the
+                            // player's exact saved cell has entered the resident cache. Admit
+                            // that one column before deciding that the player is not in a
+                            // portal; otherwise a restart strands a player in a persisted
+                            // portal with no transition attempt.
+                            source
+                                .admit_columns(vec![(feet.x.div_euclid(16), feet.z.div_euclid(16))])
+                                .await;
+                            let Some(state) = resident_block_state(source.get(), feet.x, feet.y, feet.z) else {
+                                watch.pass("vitals_tick");
+                                continue;
+                            };
+                            state
+                        }
+                    };
                     // End and Nether portals share one counter, so a player
                     // cannot accumulate two transitions simultaneously.
                     let in_end_portal = crate::portal::is_end_portal(&feet_state);
@@ -15556,7 +16823,7 @@ where
                     // from this server's ignition path. Remember the cell when a player
                     // actually enters it so the world's POI index (and its persistence
                     // path) can serve the same portal on the return trip without a
-                    // broad cold-terrain scan.
+                    // broad cold-world scan.
                     if !in_end_portal && standing_in.is_some() {
                         if let Some(index) = source.get().portal_index() {
                             index.insert(source.dimension(), feet);
@@ -15576,7 +16843,10 @@ where
                     }
                     .max(0);
                     if let Some(entry) = portal.tick(standing_in, transition) {
-                        let entry_state = source.get().block_state(entry.x, entry.y, entry.z);
+                        let Some(entry_state) = resident_block_state(source.get(), entry.x, entry.y, entry.z) else {
+                            watch.pass("vitals_tick");
+                            continue;
+                        };
                         let trip = if crate::portal::is_end_portal(&entry_state) {
                             // There is no destination for an End portal that
                             // is already inside the End, so leave that case
@@ -15627,8 +16897,53 @@ where
                                 trip.position.y,
                                 trip.position.z,
                             ));
+                            // Commit the destination to the cancellation-safe
+                            // player snapshot before handing the source to the
+                            // next loop iteration.  Integrated shutdown may
+                            // cancel this task immediately after the portal
+                            // packets are written; publishing the old
+                            // `source.dimension()` here would then restore the
+                            // player in the Overworld despite having completed
+                            // a Nether trip.
+                            let destination_dimension = trip
+                                .source
+                                .as_ref()
+                                .and_then(|destination| destination.dimension())
+                                .unwrap_or_else(|| home_source.dimension());
+                            live_publish_player(
+                                live_save,
+                                player_store.as_ref(),
+                                player_uuid,
+                                player_pos,
+                                player_rot,
+                                world_spawn,
+                                &vitals,
+                                game_mode,
+                                &inventory,
+                                &experience,
+                                &preserved_player_fields,
+                                destination_dimension,
+                            );
+                            #[cfg(not(target_arch = "wasm32"))]
+                            publish_native_player(
+                                native_player,
+                                live_save,
+                                player_pos,
+                                player_rot,
+                                world_spawn,
+                                destination_dimension,
+                                game_mode,
+                                &vitals,
+                                &experience,
+                                &inventory,
+                            );
                             portal.begin_cooldown();
                             pending_travel = Some(trip.source);
+                            // Any deferred frame belongs to the outgoing
+                            // dimension. Drop it before the destination stream
+                            // starts so an old chunk cannot be emitted after
+                            // the dimension-change packet.
+                            pending_join_encode = None;
                             // The deferred join stream uses a fresh batch, so close
                             // any batch left open by the outgoing dimension.
                             if join_batch_open {
@@ -16230,79 +17545,88 @@ where
             }
         }
 
-        let eye_state = source.get().block_state(
+        if let Some(eye_state) = resident_block_state(
+            source.get(),
             x.floor() as i32,
             (y + EYE_HEIGHT).floor() as i32,
             z.floor() as i32,
-        );
-        // `!invulnerable &&` keeps creative players from depleting air or
-        // drowning.
-        let outcome = tick_player_air_supply(
-            vitals,
-            is_water(&eye_state),
-            invulnerable,
-            effects,
-        );
-        if let Some(air) = outcome.air_changed {
-            apply(conn, state, proto.encode_air_supply_update(air)).await?;
-        }
-        if outcome.damage.is_some() {
-            publish_health(
-                conn,
-                state,
-                proto,
+        ) {
+            // `!invulnerable &&` keeps creative players from depleting air or
+            // drowning. A missing resident cell defers this probe until a later
+            // timer or movement packet.
+            let outcome = tick_player_air_supply(
                 vitals,
+                is_water(&eye_state),
+                invulnerable,
                 effects,
-                Vec3::new(x, y, z),
-                LOCAL_PLAYER_ENTITY_ID,
-                username,
-                crate::vitals::DeathCause::Drown,
-                advancements,
-                player_uuid,
-                Some(crate::vitals::HurtDirection::PURE_ROLL),
-            )
-            .await?;
+            );
+            if let Some(air) = outcome.air_changed {
+                apply(conn, state, proto.encode_air_supply_update(air)).await?;
+            }
+            if outcome.damage.is_some() {
+                publish_health(
+                    conn,
+                    state,
+                    proto,
+                    vitals,
+                    effects,
+                    Vec3::new(x, y, z),
+                    LOCAL_PLAYER_ENTITY_ID,
+                    username,
+                    crate::vitals::DeathCause::Drown,
+                    advancements,
+                    player_uuid,
+                    Some(crate::vitals::HurtDirection::PURE_ROLL),
+                )
+                .await?;
+            }
         }
     }
 
     // Burning reads the block at the player's feet, updates burn state, and
     // publishes health when damage applies.
     if let Some((x, y, z)) = player_pos {
-        let feet = source.get().block_state(x.floor() as i32, y.floor() as i32, z.floor() as i32);
-        let standing_in = crate::burning::BurnSource::for_block(&feet);
-        let creative = Abilities::for_mode(game_mode).invulnerable;
-        let resistant = effects.amplifier_of("minecraft:fire_resistance").is_some();
-        if let Some(source_kind) = standing_in
-            && !creative
-        {
-            match source_kind {
-                crate::burning::BurnSource::Fire | crate::burning::BurnSource::SoulFire => {
-                    let ramp = 1 + i32::from(burn_rng.next_f32() < 0.5);
-                    burn.fire_ignite(true, ramp);
-                }
-                crate::burning::BurnSource::Lava => {
-                    burn.ignite_for_ticks(crate::burning::LAVA_IGNITE_TICKS);
+        if let Some(feet) = resident_block_state(
+            source.get(),
+            x.floor() as i32,
+            y.floor() as i32,
+            z.floor() as i32,
+        ) {
+            let standing_in = crate::burning::BurnSource::for_block(&feet);
+            let creative = Abilities::for_mode(game_mode).invulnerable;
+            let resistant = effects.amplifier_of("minecraft:fire_resistance").is_some();
+            if let Some(source_kind) = standing_in
+                && !creative
+            {
+                match source_kind {
+                    crate::burning::BurnSource::Fire | crate::burning::BurnSource::SoulFire => {
+                        let ramp = 1 + i32::from(burn_rng.next_f32() < 0.5);
+                        burn.fire_ignite(true, ramp);
+                    }
+                    crate::burning::BurnSource::Lava => {
+                        burn.ignite_for_ticks(crate::burning::LAVA_IGNITE_TICKS);
+                    }
                 }
             }
-        }
-        let out = burn.tick(standing_in, creative, resistant);
-        if out.damage > 0.0 {
-            vitals.apply_effect_damage(out.damage);
-            publish_health(
-                conn,
-                state,
-                proto,
-                vitals,
-                effects,
-                Vec3::new(x, y, z),
-                LOCAL_PLAYER_ENTITY_ID,
-                username,
-                crate::vitals::DeathCause::OnFire,
-                advancements,
-                player_uuid,
-                Some(crate::vitals::HurtDirection::PURE_ROLL),
-            )
-            .await?;
+            let out = burn.tick(standing_in, creative, resistant);
+            if out.damage > 0.0 {
+                vitals.apply_effect_damage(out.damage);
+                publish_health(
+                    conn,
+                    state,
+                    proto,
+                    vitals,
+                    effects,
+                    Vec3::new(x, y, z),
+                    LOCAL_PLAYER_ENTITY_ID,
+                    username,
+                    crate::vitals::DeathCause::OnFire,
+                    advancements,
+                    player_uuid,
+                    Some(crate::vitals::HurtDirection::PURE_ROLL),
+                )
+                .await?;
+            }
         }
     }
 
@@ -16328,8 +17652,19 @@ where
                 .collect()
         });
         for (pos, primary, secondary) in candidates {
-            let levels = crate::beacon::beacon_levels(source.get(), pos.x, pos.y, pos.z);
-            if levels == 0 || !crate::beacon::beam_unobstructed(source.get(), pos.x, pos.y, pos.z, 384) {
+            let Some(levels) = resident_beacon_levels(source.get(), pos.x, pos.y, pos.z) else {
+                continue;
+            };
+            let Some(beam_unobstructed) = resident_beam_unobstructed(
+                source.get(),
+                pos.x,
+                pos.y,
+                pos.z,
+                384,
+            ) else {
+                continue;
+            };
+            if levels == 0 || !beam_unobstructed {
                 continue;
             }
             let (range, application) =
@@ -16645,7 +17980,8 @@ where
                 cz,
                 join_trace.as_deref(),
                 payload,
-            ) {
+            )
+            .await {
                 Ok(directive) => directive,
                 Err(error) => {
                     return return_chunk_encode_error(
@@ -16777,6 +18113,7 @@ where
             &mut next_window_id,
             mobs,
             &mut sprinting,
+            &mut sneaking,
             &mut awaiting_chunk_batch_ack,
             &mut pending_chunk_batches,
             // `None`: this loop drains the join stream inline, so no deferred
@@ -16936,6 +18273,283 @@ mod tests {
     use lodestone_model::{Rotation, Vec3};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use uuid::Uuid;
+
+    #[test]
+    fn streamed_centre_admission_requests_only_its_missing_neighbours() {
+        let neighbours = column_admission_neighbours(7, -3, 1);
+        assert_eq!(neighbours.len(), 8);
+        assert!(!neighbours.contains(&(7, -3)));
+
+        let expected: HashSet<_> = column_admission_footprint(7, -3, 1)
+            .into_iter()
+            .filter(|&pos| pos != (7, -3))
+            .collect();
+        assert_eq!(neighbours.into_iter().collect::<HashSet<_>>(), expected);
+
+        assert!(
+            column_admission_neighbours(7, -3, 0).is_empty(),
+            "one-column protocols already received their centre from the stream"
+        );
+    }
+
+    struct NetherPacketAdmissionProtocol;
+
+    impl ServerProtocol for NetherPacketAdmissionProtocol {
+        fn decode(&self, _state: State, _packet_id: i32, _payload: &[u8]) -> ServerBound {
+            ServerBound::Ignored
+        }
+
+        fn login_success(&self, _username: &str, _uuid: Uuid) -> Vec<ServerDirective> {
+            Vec::new()
+        }
+
+        fn begin_configuration(&self) -> Vec<ServerDirective> {
+            Vec::new()
+        }
+
+        fn begin_play(&self, _view_radius: i32) -> Vec<ServerDirective> {
+            Vec::new()
+        }
+
+        fn begin_chunk_batch(&self) -> ServerDirective {
+            ServerDirective::None
+        }
+
+        fn encode_chunk(&self, _cx: i32, _cz: i32, column: &ChunkColumn) -> ServerDirective {
+            ServerDirective::Send {
+                packet_id: 1,
+                payload: vec![u8::from(
+                    column.block_state(0, 2, 12) == "minecraft:gravel",
+                )],
+            }
+        }
+
+        fn end_chunk_batch(&self, _batch_size: i32) -> ServerDirective {
+            ServerDirective::None
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn shaped_nether_packet_admission_includes_the_source_ore_spill() {
+        let source = Arc::new(crate::chunk_store::ChunkStore::with_capacity(
+            crate::worldgen_data::nether_chunk_source(42),
+            32,
+        ));
+        let shaped = source.column_at(
+            2,
+            7,
+            crate::chunk::ChunkGenerationStage::Shaped,
+        );
+        assert_eq!(
+            shaped.generation_stage(),
+            crate::chunk::ChunkGenerationStage::Shaped,
+            "live view admission must retain the shaped stage until packet encoding"
+        );
+        assert_ne!(
+            shaped.block_state(0, 2, 12),
+            "minecraft:gravel",
+            "the shaped target starts without the source's border ore"
+        );
+
+        let directive = encode_column(
+            &NetherPacketAdmissionProtocol,
+            SourceRef::Shared(&source),
+            2,
+            7,
+            None,
+            crate::join_scheduler::ColumnPayload::Column(shaped),
+        )
+        .await
+        .expect("the shaped target should encode after full admission");
+        let payload = match directive {
+            ServerDirective::Send { payload, .. } => payload,
+            other => panic!("unexpected Nether packet directive: {other:?}"),
+        };
+        assert_eq!(
+            payload,
+            vec![1],
+            "the packet must include source (1,7)'s gravel spill at target (2,7)"
+        );
+
+        let resident = source
+            .resident_column(2, 7)
+            .expect("packet admission must retain the upgraded target");
+        assert_eq!(
+            resident.generation_stage(),
+            crate::chunk::ChunkGenerationStage::Full,
+            "packet admission must replace the shaped cache entry with its full result"
+        );
+        assert_eq!(resident.block_state(0, 2, 12), "minecraft:gravel");
+    }
+
+    #[test]
+    fn attack_records_a_main_hand_swing_for_remote_connections() {
+        let registry = PlayerRegistry::new();
+        let mut cursor = registry.swing_cursor();
+
+        record_attack_swing(Some(&registry), 42);
+
+        assert_eq!(
+            registry.swings_since(&mut cursor),
+            vec![crate::players::SwingEvent {
+                entity_id: 42,
+                hand: lodestone_model::Hand::Main,
+            }],
+            "an attack must reach the remote animation broadcast as a main-hand swing"
+        );
+    }
+
+    #[test]
+    fn attack_has_no_singleplayer_broadcast_sink() {
+        let registry = PlayerRegistry::new();
+        let mut cursor = registry.swing_cursor();
+
+        record_attack_swing(None, 42);
+
+        assert!(
+            registry.swings_since(&mut cursor).is_empty(),
+            "the singleplayer path must not manufacture a remote swing event"
+        );
+    }
+
+    struct ActionAdmissionProbe {
+        column_threads: std::sync::Mutex<Vec<std::thread::ThreadId>>,
+        admitted: std::sync::Mutex<HashSet<(i32, i32)>>,
+        events: std::sync::Mutex<Vec<&'static str>>,
+    }
+
+    impl ActionAdmissionProbe {
+        fn new(runtime_thread: std::thread::ThreadId) -> Self {
+            let _ = runtime_thread;
+            Self {
+                column_threads: std::sync::Mutex::new(Vec::new()),
+                admitted: std::sync::Mutex::new(HashSet::new()),
+                events: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl ChunkSource for ActionAdmissionProbe {
+        fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+            self.column_threads
+                .lock()
+                .expect("column probe lock")
+                .push(std::thread::current().id());
+            self.admitted
+                .lock()
+                .expect("admission probe lock")
+                .insert((cx, cz));
+            self.events.lock().expect("event probe lock").push("column");
+            ChunkColumn::new(0, 256)
+        }
+
+        fn block_state(&self, x: i32, _y: i32, z: i32) -> String {
+            let chunk = (x.div_euclid(16), z.div_euclid(16));
+            assert!(
+                self.admitted
+                    .lock()
+                    .expect("admission probe lock")
+                    .contains(&chunk),
+                "an action read must run only after its target column is admitted"
+            );
+            self.events.lock().expect("event probe lock").push("action");
+            "minecraft:air".to_owned()
+        }
+
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::DEFAULT_BIOME.to_owned()
+        }
+
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+
+        fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
+            self.admitted
+                .lock()
+                .expect("admission probe lock")
+                .contains(&(cx, cz))
+                .then(|| ChunkColumn::new(0, 256))
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn action_admission_offloads_cold_columns_and_orders_the_read() {
+        let runtime_thread = std::thread::current().id();
+        let source = Arc::new(ActionAdmissionProbe::new(runtime_thread));
+        let source_ref = SourceRef::Shared(&source);
+        let packet = ServerBound::BlockAction {
+            action: BlockActionKind::AbortDestroy,
+            pos: BlockPos::new(17, 64, -1),
+            face: BlockFace::North,
+            sequence: 0,
+        };
+
+        admit_action_footprint(source_ref, &packet).await;
+        assert!(
+            source_ref.get().resident_column(1, -1).is_some(),
+            "the target must be resident before the synchronous action read"
+        );
+        source_ref.get().block_state(17, 64, -1);
+
+        let threads = source
+            .column_threads
+            .lock()
+            .expect("column probe lock")
+            .clone();
+        assert!(!threads.is_empty(), "the cold action must admit at least one column");
+        assert!(
+            threads.iter().all(|thread| *thread != runtime_thread),
+            "cold action generation must not run on the connection runtime thread"
+        );
+        let events = source.events.lock().expect("event probe lock").clone();
+        let action = events
+            .iter()
+            .position(|event| *event == "action")
+            .expect("the action read must be observed");
+        assert!(
+            events[..action].iter().all(|event| *event == "column"),
+            "the action read must follow every admission event"
+        );
+    }
+
+    #[test]
+    fn resident_fall_probe_defers_a_cold_column_without_generation() {
+        let source = ColdColumnSource {
+            column_reads: AtomicUsize::new(0),
+            store_calls: AtomicUsize::new(0),
+            resident: false,
+            center_only: false,
+        };
+
+        assert!(
+            resident_fall_sample(&source, 0.5, 64.0, 0.5, false).is_none(),
+            "a cold movement probe must defer rather than synthesize terrain"
+        );
+        assert_eq!(
+            source.column_reads.load(Ordering::Relaxed),
+            0,
+            "resident-only movement probes must never call a cold source's column"
+        );
+    }
+
+    #[test]
+    fn resident_beacon_probes_defer_a_cold_column_without_generation() {
+        let source = ColdColumnSource {
+            column_reads: AtomicUsize::new(0),
+            store_calls: AtomicUsize::new(0),
+            resident: false,
+            center_only: false,
+        };
+
+        assert!(resident_beacon_levels(&source, 0, 64, 0).is_none());
+        assert!(resident_beam_unobstructed(&source, 0, 64, 0, 384).is_none());
+        assert_eq!(
+            source.column_reads.load(Ordering::Relaxed),
+            0,
+            "resident-only beacon probes must never call a cold source's column"
+        );
+    }
 
     #[test]
     fn client_tick_boundary_clears_stale_launch_momentum() {
@@ -17354,7 +18968,7 @@ mod tests {
     /// centre cache entry.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn retained_dependency_light_survives_later_full_serialization() {
+    fn retained_dependency_requires_later_centre_admission() {
         let world_dir = tempfile::tempdir().expect("create dependency retained-light world");
         let region = crate::region_source::RegionChunkSource::new(
             OneColumnSource,
@@ -17394,22 +19008,50 @@ mod tests {
             .cloned()
             .expect("the source batch must retain the dependency snapshot");
         assert_eq!(retained_dependency, dependency_light);
+        assert_eq!(
+            source
+                .column(1, 0)
+                .retained_light_status(),
+            Some(crate::chunk::RetainedLightStatus::DependencyInitialized)
+        );
 
-        let mut expected = lodestone_core::Writer::default();
-        dependency_light.encode(&mut expected);
         let later_column = source.column(1, 0);
         let later = encode_chunk_with_source(&protocol, &source, 1, 0, &later_column)
-            .expect("serialize the retained dependency as a later full column");
+            .expect("admit the retained dependency as the later centre");
         let payload = match later {
             ServerDirective::Send { payload, .. } => payload,
-            other => panic!("later dependency encode emitted {other:?}"),
+            other => panic!("later centre encode emitted {other:?}"),
         };
+        let settled = source
+            .column(1, 0)
+            .centre_settled_light()
+            .cloned()
+            .expect("later centre admission must promote the snapshot");
+        let mut expected = lodestone_core::Writer::default();
+        settled.encode(&mut expected);
         assert_eq!(payload, expected.as_slice());
         assert_eq!(
             computes.load(Ordering::Acquire),
-            1,
-            "later full serialization must consume the retained snapshot verbatim"
+            2,
+            "later centre admission must not consume dependency storage as final"
         );
+    }
+
+    #[test]
+    fn unsettled_retained_light_is_removed_before_a_full_column_fallback() {
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_retained_light_with_status(
+            lodestone_world::ColumnLight::new(column.section_count()),
+            crate::chunk::RetainedLightStatus::DependencyInitialized,
+        );
+
+        let packet_column = column_for_initial_encode(&column);
+
+        assert!(
+            packet_column.retained_light().is_none(),
+            "a dependency snapshot must not reach a full-column encoder"
+        );
+        assert_eq!(packet_column.retained_light_status(), None);
     }
 
     /// A legacy family that does not consume retained snapshots must keep the
@@ -17850,6 +19492,7 @@ mod tests {
                 immediate: Vec::new(),
                 forgotten: HashSet::new(),
                 added: vec![(0, 0)],
+                upgrades: Vec::new(),
             },
             &mut awaiting_ack,
             &mut pending,
@@ -18667,6 +20310,105 @@ mod tests {
 
     fn stack(item: &str, count: u32) -> ItemStack {
         ItemStack::new(item.parse().expect("valid resource key"), count)
+    }
+
+    fn lectern_book(pages: usize) -> ItemStack {
+        let mut book = stack("minecraft:written_book", 1);
+        book.components.written_book_content = Some(WrittenBookContent {
+            title: "Test".to_owned(),
+            author: "Tester".to_owned(),
+            generation: 0,
+            pages: (0..pages).map(|page| Text::literal(format!("Page {page}"))).collect(),
+            resolved: true,
+        });
+        book
+    }
+
+    #[test]
+    fn lectern_button_pages_and_take_are_authoritative() {
+        let block_entities = BlockEntityHandle::new();
+        let pos = BlockPos::new(3, 64, -2);
+        block_entities.with(|reg| {
+            reg.insert(pos, BlockEntity::Lectern(crate::block_entities::LecternData {
+                book: Some(lectern_book(4)),
+                page: 0,
+            }));
+        });
+        let mut inventory = PlayerInventory::new();
+        let mut open = OpenContainer {
+            window_id: 7,
+            pos,
+            shape: MenuKind::Lectern,
+            container_size: 1,
+            state_id: 0,
+        };
+
+        let page = apply_lectern_button_click(
+            &ContainerTagProto,
+            &block_entities,
+            &mut inventory,
+            Some(&mut open),
+            7,
+            2,
+            true,
+        );
+        assert_eq!(page.len(), 1, "next-page action must publish one data property");
+        assert_eq!(block_entities.with(|reg| match reg.get(pos) {
+            Some(BlockEntity::Lectern(lectern)) => lectern.page,
+            _ => -1,
+        }), 1);
+
+        let taken = apply_lectern_button_click(
+            &ContainerTagProto,
+            &block_entities,
+            &mut inventory,
+            Some(&mut open),
+            7,
+            3,
+            true,
+        );
+        assert_eq!(taken.len(), 3, "take-book must update inventory, slot, and page");
+        assert!(block_entities.with(|reg| match reg.get(pos) {
+            Some(BlockEntity::Lectern(lectern)) => lectern.book.is_none() && lectern.page == 0,
+            _ => false,
+        }));
+        assert_eq!(inventory.native(0).map(|book| book.item.to_string()), Some("minecraft:written_book".to_owned()));
+    }
+
+    #[test]
+    fn lectern_take_refuses_when_inventory_has_no_room() {
+        let block_entities = BlockEntityHandle::new();
+        let pos = BlockPos::new(3, 64, -2);
+        block_entities.with(|reg| {
+            reg.insert(pos, BlockEntity::Lectern(crate::block_entities::LecternData {
+                book: Some(lectern_book(1)),
+                page: 0,
+            }));
+        });
+        let mut inventory = PlayerInventory::new();
+        for native in 0..37 {
+            inventory.set_native(native, Some(stack("minecraft:stone", 64)));
+        }
+        let mut open = OpenContainer {
+            window_id: 7,
+            pos,
+            shape: MenuKind::Lectern,
+            container_size: 1,
+            state_id: 0,
+        };
+        assert!(apply_lectern_button_click(
+            &ContainerTagProto,
+            &block_entities,
+            &mut inventory,
+            Some(&mut open),
+            7,
+            3,
+            true,
+        ).is_empty());
+        assert!(block_entities.with(|reg| match reg.get(pos) {
+            Some(BlockEntity::Lectern(lectern)) => lectern.book.is_some(),
+            _ => false,
+        }));
     }
 
     #[test]
@@ -21086,43 +22828,52 @@ mod tests {
             },
             yaw,
             pitch: Some(0.0),
+            sneaking: false,
         };
         let air = |_: BlockPos| WorldState::from("minecraft:air");
         let state = |block: &str, yaw: Option<f32>| {
-            placed_block_state(block, &looking(yaw), air).map(|placed| placed.state)
+            placed_block_state(block, &looking(yaw), air).map(|placed| placed.state.into_string())
         };
         // Looking north (yaw 180): a repeater and comparator face the player —
         // south — while an observer watches north.
         assert_eq!(
             state("minecraft:repeater", Some(180.0)),
-            Some(BlockStateValue::parse(
-                "minecraft:repeater[facing=south,delay=1,locked=false,powered=false]",
-            ))
+            Some("minecraft:repeater[facing=south,delay=1,locked=false,powered=false]".to_owned())
         );
         assert_eq!(
             state("minecraft:comparator", Some(180.0)),
-            Some(BlockStateValue::parse(
-                "minecraft:comparator[facing=south,mode=compare,powered=false,output=0]",
-            ))
+            Some("minecraft:comparator[facing=south,mode=compare,powered=false,output=0]".to_owned())
         );
         assert_eq!(
             state("minecraft:observer", Some(180.0)),
-            Some(BlockStateValue::parse(
-                "minecraft:observer[facing=north,powered=false]",
-            ))
+            Some("minecraft:observer[facing=north,powered=false]".to_owned())
         );
         // Looking east (yaw -90): a repeater faces west.
         assert_eq!(
             state("minecraft:repeater", Some(-90.0)),
-            Some(BlockStateValue::parse(
-                "minecraft:repeater[facing=west,delay=1,locked=false,powered=false]",
-            ))
+            Some("minecraft:repeater[facing=west,delay=1,locked=false,powered=false]".to_owned())
         );
         // Blocks without any orientation keep the bare census name.
         assert_eq!(state("minecraft:dirt", Some(0.0)), None);
         // And no yaw reported yet keeps the bare name for the directional
         // families too.
         assert_eq!(state("minecraft:repeater", None), None);
+    }
+
+    #[test]
+    fn rejected_two_cell_placement_still_sends_the_partner_correction() {
+        let clicked = BlockPos::new(4, 64, 4);
+        let target = BlockPos::new(4, 65, 4);
+        let upper = BlockPos::new(4, 66, 4);
+        let changed = Vec::new();
+        let updates = placement_update_positions(clicked, target, &[target, upper], &changed);
+        assert_eq!(updates, vec![clicked, target, upper]);
+
+        // The accepted path's fan-out may mention the same positions repeatedly,
+        // but the wire still carries one update per cell.
+        let changed = vec![(upper, "minecraft:air".to_owned()), (target, "minecraft:air".to_owned())];
+        let updates = placement_update_positions(clicked, target, &[target, upper], &changed);
+        assert_eq!(updates, vec![clicked, target, upper]);
     }
 
     // -----------------------------------------------------------------

@@ -328,7 +328,8 @@ async fn stream_view_then_reshrink_and_regrow(view_radius: i32) -> Observation {
 ///
 /// The two differ in exactly one thing that matters here: `IntegratedServer::bind`
 /// builds its store with `chunk_store::capacity_for_view_radius` (capped at
-/// [`MAX_CAPACITY`]) while `open_in_memory` uses the uncapped integrated policy.
+/// [`MAX_CAPACITY`]) while `open_in_memory` uses the integrated policy, which
+/// shares that upper bound for extreme distances.
 /// So this is how a *capped* store is measured through the real streaming path —
 /// see [`past_the_hosted_capacity_cap_the_view_cannot_stay_resident`].
 async fn stream_view_over_lan(view_radius: i32) -> Observation {

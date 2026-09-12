@@ -65,9 +65,9 @@ needs from them):
 - **Tick loop, `TickPhase`** (`crates/lodestone-server/src/tick.rs`): three phases, split at lock
   boundaries rather than at even time or complexity — see
   ["Why three phases, and why the split matters for regionisation"](#why-three-phases-and-why-the-split-matters-for-regionisation)
-  below. `ScheduledAndPhysics` is the only phase that can call `world.column()` (a block tick
-  crossing a chunk boundary can trigger worldgen), which makes it the phase a keep-alive-timeout-
-  shaped stall — this repo's own recorded incident — would show up in.
+  below. `ScheduledAndPhysics` owns the resident-gated cross-column reads (a block tick crossing a
+  chunk boundary must defer while its footprint is cold), which makes it the phase a
+  keep-alive-timeout-shaped stall — this repo's own recorded incident — would show up in.
 - **Worldgen, per-stage percentiles** (`crates/lodestone-worldgen/src/profile.rs`): ten-stage
   split of `OverworldGenerator::column`, aggregated into p50/p95/p99/max and a dominant-stage
   ranking.
@@ -245,9 +245,11 @@ The required sequencing holds; this is the same list annotated with what is actu
    measured 75.521 ms serial and 57.086 ms with four lanes. Exploration and
    redstone phases still need separate evidence before they use this executor.
 6. **Decide — bounded region execution is worthwhile for proven-disjoint work.**
-   Entity pushing is the first consumer. Remaining entity phases, scheduled and
-   block-entity partitioning, and moving-entity ownership transfer are tracked as
-   separate follow-ups rather than holding this substrate issue open indefinitely.
+   Entity pushing is the first concurrent consumer. Moving-entity ownership now
+   has a bounded source-stop/destination-start slice for dropped items (see
+   `docs/entity-ownership-transfer.md`); remaining entity kinds, scheduled and
+   block-entity partitioning, and durable asynchronous hand-off remain separate
+   follow-ups rather than holding this substrate issue open indefinitely.
 
 ## Risks and gotchas
 

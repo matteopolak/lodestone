@@ -1,10 +1,11 @@
-//! Structure chests: the loot the template engine places but cannot fill.
+//! Structure block-entity sidecars: loot containers and fixed mob spawners.
 //!
 //! # What it is
 //!
 //! Shipwrecks, ocean ruins, igloos and End cities generate for real (`lodestone-worldgen`'s
 //! `structure` S2 unit), and every one of them arrived with an *empty* chest —
-//! or, for an ocean ruin, no chest at all. This module is vanilla's
+//! or, for an ocean ruin, no chest at all. Mineshaft corridors and Nether fortress halls also
+//! emit fixed-entity spawners. This module is vanilla's
 //! template post-processing data-marker pass plus the four
 //! structure-specific marker handlers it dispatches to, run on the server side of the
 //! seam: it finds each piece's `structure_block` DATA markers, resolves the loot
@@ -106,6 +107,7 @@ use lodestone_worldgen::structure::StructureStart;
 use lodestone_worldgen::structure::template::transform;
 
 use crate::block_entities::{BlockEntity, CONTAINER_9X3_SIZE};
+use crate::chunk::ChunkColumn;
 use crate::loot::{LootContext, LootTableSet};
 use crate::mob_spawner::SpawnerState;
 use crate::mob_spawn::SpawnRng;
@@ -310,41 +312,91 @@ pub fn chests_for_chunk(
 
 /// Generated spawner payloads for structure pieces that reach `(cx, cz)`.
 ///
-/// Block lists deliberately keep block state separate from their runtime
-/// payloads.  A spawner block therefore needs this server-side bridge just as
+/// Structure generation deliberately keeps block state separate from runtime
+/// payloads. A spawner block therefore needs this server-side bridge just as
 /// a coded chest needs [`chests_for_chunk`]: clients receive the entity state
 /// in the chunk packet, and the server tick owns the live state thereafter.
+/// The entity type is selected from the structure piece kind, not from a
+/// coordinate or from the receiving chunk. Positions come from the final
+/// receiving column's block field, which is the same output the structure
+/// placement pass emitted after its orientation and world-sensitive replay.
+/// Reading that field here avoids replaying a parallel transform that can
+/// disagree with the block that actually won last-write-wins placement.
 #[must_use]
 pub fn spawners_for_chunk(
+    column: &ChunkColumn,
     starts: &[std::sync::Arc<StructureStart>],
     cx: i32,
     cz: i32,
 ) -> Vec<(BlockPos, BlockEntity)> {
-    let blaze = "minecraft:blaze"
-        .parse::<ResourceKey>()
-        .expect("bundled blaze entity key is valid");
+    let pieces: Vec<(&lodestone_worldgen::structure::BoundingBox, ResourceKey)> = starts
+        .iter()
+        .flat_map(|start| {
+            start
+                .pieces
+                .iter()
+                .map(|piece| (start.structure.as_str(), piece))
+        })
+        .filter_map(|(structure_id, piece)| {
+            spawner_entity_type(structure_id, &piece.id).map(|entity_type| {
+                (&piece.bounding_box, entity_type)
+            })
+        })
+        .collect();
+    if pieces.is_empty() {
+        return Vec::new();
+    }
+
     let mut out = Vec::new();
-    for start in starts {
-        for piece in &start.pieces {
-            // The spawner hall owns this payload.  Checking its emitted block
-            // too makes the sidecar fail closed if the piece writer changes:
-            // a packet can never carry a blaze spawner where generation did
-            // not put a spawner block.
-            if piece.id != "minecraft:nemt" {
-                continue;
-            }
-            let Some(blocks) = piece.blocks.as_ref() else {
-                continue;
-            };
-            for block in blocks.iter().filter(|block| block.state == "minecraft:spawner") {
-                let pos = BlockPos::new(block.pos[0], block.pos[1], block.pos[2]);
-                if pos.x.div_euclid(16) == cx && pos.z.div_euclid(16) == cz {
-                    out.push((pos, BlockEntity::Spawner(SpawnerState::generated(blaze.clone()))));
+    for local_z in 0..16 {
+        for local_x in 0..16 {
+            for y in column.min_y..column.min_y + column.height {
+                if column
+                    .block_state(local_x, y, local_z)
+                    .split('[')
+                    .next()
+                    != Some("minecraft:spawner")
+                {
+                    continue;
                 }
+                let pos = BlockPos::new(cx * 16 + local_x, y, cz * 16 + local_z);
+                let Some((_, entity_type)) = pieces.iter().find(|(box_, _)| {
+                    (box_.min[0]..=box_.max[0]).contains(&pos.x)
+                        && (box_.min[1]..=box_.max[1]).contains(&pos.y)
+                        && (box_.min[2]..=box_.max[2]).contains(&pos.z)
+                }) else {
+                    continue;
+                };
+                if out.iter().any(|(existing, _)| *existing == pos) {
+                    continue;
+                }
+                out.push((
+                    pos,
+                    BlockEntity::Spawner(SpawnerState::generated(entity_type.clone())),
+                ));
             }
         }
     }
     out
+}
+
+/// Structure-piece families whose placement emits a fixed mob spawner. The
+/// final column supplies position truth; this table supplies only the entity
+/// payload that the structure's own generator chose.
+fn spawner_entity_type(structure_id: &str, piece_id: &str) -> Option<ResourceKey> {
+    match (structure_id, piece_id) {
+        ("minecraft:mineshaft" | "minecraft:mineshaft_mesa", "minecraft:mscorridor") => Some(
+            "minecraft:cave_spider"
+                .parse()
+                .expect("bundled mineshaft spawner entity key is valid"),
+        ),
+        ("minecraft:fortress", "minecraft:nemt") => Some(
+            "minecraft:blaze"
+                .parse()
+                .expect("bundled fortress spawner entity key is valid"),
+        ),
+        _ => None,
+    }
 }
 
 /// The per-chest roll seed: the chest's own coordinates, so a regenerated column
@@ -1060,6 +1112,136 @@ mod tests {
             Some("minecraft:blaze"),
             "the packet sidecar must carry the spawner hall's entity id"
         );
+    }
+
+    /// Literal control for the receiving-chunk path: the external spawner
+    /// record at world `(12, 8, 30)` has the ordinary timing defaults and a
+    /// cave-spider `SpawnData` entry. The synthetic start keeps the expected
+    /// payload independent of the packet encoder and proves that the piece
+    /// family, rather than a coordinate special case, selects the entity.
+    #[test]
+    fn mineshaft_corridor_spawner_preserves_external_payload() {
+        use lodestone_worldgen::structure::{BoundingBox, CodedBlock, StructurePiece, TerrainAdjustment};
+
+        let position = BlockPos::new(12, 8, 30);
+        let mut column = ChunkColumn::new(-64, 384);
+        // The final receiving block is deliberately different from the stale
+        // eager-piece coordinate below. The sidecar must follow this emitted
+        // block for every orientation, not the piece's parallel replay.
+        column.set_block(12, 8, 14, "minecraft:spawner");
+        let start = StructureStart {
+            structure: "minecraft:mineshaft".to_owned(),
+            chunk_x: 0,
+            chunk_z: 1,
+            references: 0,
+            bounding_box: BoundingBox {
+                min: [12, 8, 30],
+                max: [14, 10, 32],
+            },
+            pieces: vec![StructurePiece {
+                id: "minecraft:mscorridor".to_owned(),
+                bounding_box: BoundingBox {
+                    min: [12, 8, 30],
+                    max: [14, 10, 32],
+                },
+                orientation: None,
+                gen_depth: 0,
+                template: None,
+                placement: None,
+                extra_placements: Vec::new(),
+                blocks: Some(std::sync::Arc::new(vec![CodedBlock {
+                    pos: [13, position.y, position.z],
+                    state: "minecraft:spawner".to_owned(),
+                }])),
+                loot: Vec::new(),
+                beard: None,
+                refine: None,
+            }],
+            terrain_adaptation: TerrainAdjustment::None,
+            pieces_complete: true,
+        };
+
+        let records = spawners_for_chunk(&column, &[std::sync::Arc::new(start.clone())], 0, 1);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0, position);
+        let BlockEntity::Spawner(state) = &records[0].1 else {
+            panic!("mineshaft corridor spawner must be typed state");
+        };
+        let (delay, min_delay, max_delay, count, nearby, player_range, range, potentials, next) =
+            state.saved_fields();
+        assert_eq!(
+            (delay, min_delay, max_delay, count, nearby, player_range, range),
+            (20, 200, 800, 4, 6, 16, 4)
+        );
+        assert!(potentials.is_empty());
+        assert_eq!(
+            next.and_then(|data| data.entity_type.as_ref())
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("minecraft:cave_spider")
+        );
+
+        // The normal source calls this census after structure attachment. A
+        // correctly positioned typed record suppresses the state-only empty
+        // fallback at the same block, so the served column has one record,
+        // not a typed east-shifted record plus an `Nbt::End` duplicate.
+        let mut served = column.clone();
+        served.set_block_entities(records.clone());
+        served.populate_missing_block_entity_states(0, 1);
+        assert_eq!(served.block_entities().len(), 1);
+        assert!(matches!(
+            &served.block_entities()[0].1,
+            BlockEntity::Spawner(_)
+        ));
+
+        // Orientation is metadata on the piece, but the final emitted block
+        // remains the authority. Exercise all four horizontal values so a
+        // future sidecar cannot accidentally reintroduce a one-axis transform.
+        for orientation in [None, Some(0), Some(1), Some(2), Some(3)] {
+            let mut oriented = start.clone();
+            oriented.pieces[0].orientation = orientation;
+            let records = spawners_for_chunk(
+                &column,
+                &[std::sync::Arc::new(oriented)],
+                0,
+                1,
+            );
+            assert_eq!(records.iter().map(|(pos, _)| *pos).collect::<Vec<_>>(), vec![position]);
+        }
+
+        // Negative control: an arbitrary piece with the same block state does
+        // not acquire a payload merely because it happens to share the test
+        // coordinate.
+        let mut unknown = StructureStart {
+            structure: "minecraft:mineshaft".to_owned(),
+            chunk_x: 0,
+            chunk_z: 1,
+            references: 0,
+            bounding_box: BoundingBox {
+                min: [12, 8, 30],
+                max: [14, 10, 32],
+            },
+            pieces: Vec::new(),
+            terrain_adaptation: TerrainAdjustment::None,
+            pieces_complete: true,
+        };
+        unknown.pieces.push(StructurePiece {
+            id: "minecraft:msroom".to_owned(),
+            bounding_box: unknown.bounding_box,
+            orientation: None,
+            gen_depth: 0,
+            template: None,
+            placement: None,
+            extra_placements: Vec::new(),
+            blocks: Some(std::sync::Arc::new(vec![CodedBlock {
+                pos: [position.x, position.y, position.z],
+                state: "minecraft:spawner".to_owned(),
+            }])),
+            loot: Vec::new(),
+            beard: None,
+            refine: None,
+        });
+        assert!(spawners_for_chunk(&column, &[std::sync::Arc::new(unknown)], 0, 1).is_empty());
     }
 
     /// The grid-resolved fortress chest sidecar reaches the same production

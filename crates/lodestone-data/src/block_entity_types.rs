@@ -68,6 +68,18 @@ pub const NO_BLOCK_ENTITY: u16 = u16::MAX;
 pub struct BlockEntityType(u32);
 
 impl BlockEntityType {
+    /// The built-in type ids used by world-generation sidecars. These are
+    /// named constants rather than repeated registry-name parsing at every
+    /// generated-column boundary; the generated name table remains the source
+    /// of truth for their numeric values.
+    pub const CHEST: Self = Self(1);
+    /// The generated beehive sidecar type.
+    pub const BEEHIVE: Self = Self(33);
+    /// The generated monster-spawner sidecar type.
+    pub const MOB_SPAWNER: Self = Self(9);
+    /// The player-owned ender-chest type, which generated sidecars omit.
+    pub const ENDER_CHEST: Self = Self(3);
+
     /// Validates a raw registry id at a wire or import boundary.
     #[must_use]
     pub const fn new(raw: u32) -> Option<Self> {
@@ -160,6 +172,23 @@ mod tests {
         assert_eq!(
             block_entity_type_id("minecraft:not_a_real_block_entity"),
             None
+        );
+    }
+
+    #[test]
+    fn generated_sidecar_constants_are_registry_entries() {
+        assert_eq!(block_entity_type_name(BlockEntityType::CHEST), "minecraft:chest");
+        assert_eq!(
+            block_entity_type_name(BlockEntityType::BEEHIVE),
+            "minecraft:beehive"
+        );
+        assert_eq!(
+            block_entity_type_name(BlockEntityType::MOB_SPAWNER),
+            "minecraft:mob_spawner"
+        );
+        assert_eq!(
+            block_entity_type_name(BlockEntityType::ENDER_CHEST),
+            "minecraft:ender_chest"
         );
     }
 }

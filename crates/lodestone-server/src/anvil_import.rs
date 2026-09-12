@@ -562,14 +562,24 @@ fn prepare_chunk(
         });
     }
 
-    // `column_from_nbt` is the existing, version-free Anvil chunk decoder. It
-    // restores only the block/biome state and intentionally does not attach
-    // block entities, structures, or source tick queues.
-    let mut column = chunk_nbt::column_from_nbt(chunk, min_y, height).map_err(Error::Chunk)?;
+    // The strict region-source decoder rejects an earlier generation status so
+    // incomplete saved terrain falls back to generation. Import is different:
+    // this explicit conversion boundary has already reviewed the source and
+    // intentionally accepts any structurally valid status while restoring only
+    // block/biome state; block entities, structures, and source tick queues
+    // remain outside the native record.
+    let mut column =
+        chunk_nbt::column_from_nbt_for_import(chunk, min_y, height).map_err(Error::Chunk)?;
     if let Some(heights) = motion_blocking_from_nbt(chunk, height)? {
         column.set_motion_blocking(heights);
     }
     let light = light_from_nbt(chunk, min_y, column.section_count())?;
+    // Native records are final-only. The Anvil input may carry a retained
+    // dependency snapshot from an earlier source admission, but this import
+    // boundary has no admission context and stores `light` separately as the
+    // canonical native payload. Drop the attached lifecycle marker so the two
+    // representations cannot disagree on reload.
+    column.clear_retained_light();
     Ok(PreparedChunk {
         column_x,
         column_z,

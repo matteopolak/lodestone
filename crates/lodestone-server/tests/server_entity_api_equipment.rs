@@ -6,7 +6,7 @@
 
 use std::str::FromStr;
 
-use lodestone_model::{EquipmentSlot, ItemStack, ResourceKey, Vec3};
+use lodestone_model::{EntityNetworkId, EquipmentSlot, ItemStack, ResourceKey, Vec3};
 use lodestone_server::entity_api::{EntityLifecycleCursor, EntityLifecycleEvent};
 use lodestone_server::{
     EntityMutation, EntityMutationResult, MobHandle, PlayerRegistry, ServerEntityApi,
@@ -18,7 +18,7 @@ fn player_observation_copies_authoritative_equipment_slots() {
     let players = PlayerRegistry::new();
     let uuid = Uuid::from_u128(7);
     let ticket = players.join("EquipmentObserver", uuid, Vec3::new(1.0, 2.0, 3.0));
-    let player_id = ticket.entity_id();
+    let player_id = EntityNetworkId::from_wire(ticket.entity_id()).expect("player id is a wire id");
 
     let mut inventory = lodestone_server::PlayerInventory::new();
     inventory.set_native(
@@ -119,7 +119,7 @@ fn lifecycle_cursor_reports_authoritative_spawn_and_despawn_edges() {
         Vec3::new(4.0, 8.0, 4.0),
     );
     let ticket = players.join("LifecycleObserver", Uuid::from_u128(8), Vec3::new(0.0, 2.0, 0.0));
-    let player_id = ticket.entity_id();
+    let player_id = EntityNetworkId::from_wire(ticket.entity_id()).expect("player id is a wire id");
 
     let events = cursor.poll(&api);
     assert_eq!(events.len(), 2);

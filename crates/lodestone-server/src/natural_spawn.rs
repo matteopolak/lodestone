@@ -800,7 +800,7 @@ impl NaturalSpawner {
             .map(|s| {
                 s.for_category(worldgen_category(category))
                     .iter()
-                    .map(|e| e.entity_type.as_str())
+                    .filter_map(|e| e.entity_type.builtin_or_none().map(|id| id.name()))
                     .collect()
             })
             .unwrap_or_default()
@@ -1044,8 +1044,9 @@ impl NaturalSpawner {
         for entry in entries {
             roll -= entry.weight.max(0);
             if roll < 0 {
-                let key = ResourceKey::from_str(&entry.entity_type).ok()?;
-                let rule = spawn_rule(key.path())?;
+                let entity_type = entry.entity_type.builtin_or_none()?;
+                let key = ResourceKey::from_str(entity_type.name()).ok()?;
+                let rule = spawn_rule(entity_type.path())?;
                 return Some((rule, key, entry.min_count, entry.max_count));
             }
         }
@@ -1070,10 +1071,13 @@ impl NaturalSpawner {
     ) -> Vec<SpawnCandidate> {
         let mut out = Vec::new();
         for c in candidates {
-            let Ok(key) = ResourceKey::from_str(&c.entity_type) else {
+            let Some(entity_type) = c.entity_type.builtin_or_none() else {
                 continue;
             };
-            let Some(rule) = spawn_rule(key.path()) else {
+            let Ok(key) = ResourceKey::from_str(entity_type.name()) else {
+                continue;
+            };
+            let Some(rule) = spawn_rule(entity_type.path()) else {
                 continue;
             };
             if self.permits(rule, c.x, c.y, c.z) {
@@ -1331,8 +1335,9 @@ mod tests {
                 for entry in spawners.for_category(category) {
                     let path = entry
                         .entity_type
-                        .strip_prefix("minecraft:")
-                        .unwrap_or(&entry.entity_type);
+                        .builtin_or_none()
+                        .expect("bundled biome entity type is built-in")
+                        .path();
                     if spawn_rule(path).is_none() {
                         missing.push(path.to_string());
                     }

@@ -100,6 +100,7 @@ mod messages;
 pub(crate) mod plugin;
 pub mod paper_events;
 pub mod proposals;
+pub mod world_snapshot;
 pub(crate) mod schedules;
 mod scheduler;
 
@@ -117,6 +118,9 @@ pub use schedules::{GameTick, IngestSet, NetIngest, ServerBoot, TickSet};
 pub use scheduler::{
     DEFAULT_ASYNC_HAND_BACK_CAPACITY, ServerAsyncTaskError, ServerAsyncTaskId, ServerTaskId,
     ServerTaskScheduler, run_server_tasks,
+};
+pub use world_snapshot::{
+    MAX_WORLD_SNAPSHOT_POSITIONS, ServerWorldSnapshot, WorldSnapshotError,
 };
 
 /// Builder for the server's `World`: install plugins here, then call

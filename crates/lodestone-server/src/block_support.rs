@@ -31,7 +31,7 @@
 //! | torches (floor), rails, snow layers, carpets, pressure plates, redstone wire, diodes (repeaters/comparators), sugar cane, cactus, bamboo, sea pickles, standing signs, banners | `pos.below()` | [`SupportKind::Below`] |
 //! | wall torches, ladders, wall signs, wall hanging signs, wall banners, tripwire hooks, cocoa, amethyst clusters, wall coral fans | the wall the block is attached to, opposite its facing | [`SupportKind::AttachedFacing`] |
 //! | buttons, levers, grindstone | the `face`/`facing` mount | [`SupportKind::AttachFace`] |
-//! | doors, double plants (tall grass, sunflower, ...), pitcher crop | lower: below; upper: the lower half | [`SupportKind::DoubleBlock`] |
+//! | doors, double plants (tall grass, sunflower, ...), pitcher crop, small dripleaf | lower: below; upper: the lower half | [`SupportKind::DoubleBlock`] |
 //! | beds | the partner half | [`SupportKind::BedPart`] |
 //! | ceiling hanging signs, hanging roots, cave vines, weeping vines (plant part) | `pos.above()` | [`SupportKind::Hanging`] |
 //! | lanterns | `hanging` decides above vs below | [`SupportKind::HangingOrBelow`] |
@@ -475,7 +475,7 @@ static SUPPORT_KINDS: &[(&str, SupportKind)] = &[
     ("minecraft:short_dry_grass", SupportKind::Below),
     ("minecraft:short_grass", SupportKind::Below),
     ("minecraft:small_amethyst_bud", SupportKind::AttachedFacing),
-    ("minecraft:small_dripleaf", SupportKind::Below),
+    ("minecraft:small_dripleaf", SupportKind::DoubleBlock),
     ("minecraft:snow", SupportKind::Below),
     ("minecraft:soul_lantern", SupportKind::HangingOrBelow),
     ("minecraft:soul_torch", SupportKind::Below),
@@ -655,6 +655,19 @@ mod tests {
                 Requirement::Partner {
                     pos: BlockPos::new(p.x, p.y - 1, p.z),
                     block: "minecraft:oak_door".to_string(),
+                    property: "half",
+                    value: "lower",
+                },
+            ),
+            // Small dripleaf has the same upper/lower partner rule as the
+            // other two-cell plants, even though its lower half also carries
+            // direction and water state.
+            (
+                "small dripleaf upper half",
+                "minecraft:small_dripleaf[half=upper,facing=north,waterlogged=false]",
+                Requirement::Partner {
+                    pos: BlockPos::new(p.x, p.y - 1, p.z),
+                    block: "minecraft:small_dripleaf".to_string(),
                     property: "half",
                     value: "lower",
                 },

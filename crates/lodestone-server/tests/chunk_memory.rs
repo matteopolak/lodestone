@@ -209,3 +209,71 @@ fn the_packed_grid_costs_a_fraction_of_the_flat_one_on_a_real_column() {
         reference.variety().1
     );
 }
+
+/// Built-in state text is immutable registry data, not column-local data.  A
+/// retained column still exposes its original `&str` palette for persistence,
+/// but the allocation handed to hot redstone lookups must be shared across
+/// columns; otherwise every streamed column owns a second copy of every state
+/// string just to avoid allocating during a lookup.
+#[test]
+fn built_in_block_state_arc_storage_is_shared_between_columns() {
+    use std::sync::Arc;
+
+    let mut first = ChunkColumn::new(0, 16);
+    let mut second = ChunkColumn::new(0, 16);
+    first.set_block(0, 0, 0, "minecraft:stone");
+    second.set_block(0, 0, 0, "minecraft:stone");
+
+    let first_state = first.block_state_arc(0, 0, 0);
+    let second_state = second.block_state_arc(0, 0, 0);
+    assert_eq!(first_state.as_ref(), "minecraft:stone");
+    assert_eq!(second_state.as_ref(), "minecraft:stone");
+    assert!(
+        Arc::ptr_eq(&first_state, &second_state),
+        "built-in state text must use the process-wide canonical allocation"
+    );
+}
+
+/// Plugin/data-pack state text is outside the generated registry and therefore
+/// remains column-owned.  The sharing optimisation must not silently coerce
+/// it to air or return a canonical built-in string.
+#[test]
+fn custom_block_state_arc_storage_keeps_column_text() {
+    use std::sync::Arc;
+
+    let mut first = ChunkColumn::new(0, 16);
+    let mut second = ChunkColumn::new(0, 16);
+    let custom = "example:custom_block[property=value]";
+    first.set_block(0, 0, 0, custom);
+    second.set_block(0, 0, 0, custom);
+
+    let first_state = first.block_state_arc(0, 0, 0);
+    let second_state = second.block_state_arc(0, 0, 0);
+    assert_eq!(first_state.as_ref(), custom);
+    assert_eq!(second_state.as_ref(), custom);
+    assert!(
+        !Arc::ptr_eq(&first_state, &second_state),
+        "unknown state text must remain owned by each column"
+    );
+}
+
+/// The all-air control has a known storage shape: every section is uniform and
+/// therefore owns no packed cell buffer, while the biome grid still has one
+/// `u16` per horizontal quart. This catches a census that accidentally counts
+/// logical cells as resident bytes or silently drops the non-block buffers.
+#[test]
+fn memory_census_all_air_control_counts_capacity_not_logical_cells() {
+    let column = ChunkColumn::new(0, 384);
+    let census = column.memory_census();
+
+    assert!(
+        census.blocks_bytes > 0 && census.blocks_bytes < 4096,
+        "uniform air owns only the small section spine, not packed cell buffers: {} bytes",
+        census.blocks_bytes
+    );
+    assert_eq!(census.biome_cells_bytes, 96 * 16 * 2);
+    assert!(
+        census.logical_total() < 16 * 16 * 384 * 2,
+        "the census must not report a dense logical grid for an all-air column"
+    );
+}

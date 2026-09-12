@@ -584,47 +584,37 @@ async fn real_protocol_nether_payload_and_restart_return_round_trip() {
                 GameLogin::decode(&mut reader, CTX).expect("decode restarted game login")
             })
             .expect("restarted real join must include a game login");
-        assert_eq!(
-            game_login.dimension,
-            Dimension::Nether.key(),
-            "restart must restore the player's saved Nether dimension"
-        );
+        // The initial login frame establishes the primary world's registry;
+        // a saved non-primary dimension follows it with the ordinary respawn
+        // frame before any destination chunks are sent.
+        assert_eq!(game_login.dimension, Dimension::Overworld.key());
 
-        let mut saw_nether_chunk = false;
-        while !saw_nether_chunk {
-            let (packet_id, payload) = tokio::time::timeout(
-                Duration::from_secs(120),
-                client.read_packet(),
-            )
-            .await
-            .expect("restarted Nether chunk timeout")
-            .expect("restarted Nether chunk read")
-            .expect("restarted Nether chunk packet");
-            if packet_id == play::clientbound::LEVEL_CHUNK_WITH_LIGHT {
-                let mut header = Reader::new(&payload);
-                let cx = header.i32().expect("restarted Nether chunk x");
-                let cz = header.i32().expect("restarted Nether chunk z");
-                if (cx, cz) == TARGET_CHUNK {
-                    let chunk = decode_real_chunk(&payload, &ChunkShape::nether_or_end_1_21());
-                    assert_bedrock_shell(&chunk, &expected);
-                    saw_nether_chunk = true;
+        let respawn = initial
+            .iter()
+            .find(|(packet_id, _)| *packet_id == play::clientbound::RESPAWN)
+            .map(|(_, payload)| {
+                let mut reader = Reader::new(payload);
+                Respawn::decode(&mut reader, CTX).expect("decode restarted Nether respawn")
+            })
+            .expect("restart must emit a Nether respawn");
+        assert_eq!(respawn.dimension, Dimension::Nether.key());
+        let restarted_target = initial
+            .iter()
+            .find(|(packet_id, payload)| {
+                if *packet_id != play::clientbound::LEVEL_CHUNK_WITH_LIGHT {
+                    return false;
                 }
-            } else if packet_id == play::clientbound::PLAYER_POSITION {
-                let (teleport_id, _) = decode_player_position(&payload);
-                let mut ack = Writer::default();
-                ack.var_i32(teleport_id);
-                client
-                    .write_packet(play::serverbound::ACCEPT_TELEPORTATION, ack.as_slice())
-                    .await
-                    .expect("accept restarted teleport");
-            }
+                let mut reader = Reader::new(payload);
+                matches!((reader.i32(), reader.i32()), (Ok(cx), Ok(cz)) if (cx, cz) == TARGET_CHUNK)
+            })
+            .map(|(_, payload)| decode_real_chunk(payload, &ChunkShape::nether_or_end_1_21()))
+            .expect("restart must stream the saved Nether target chunk");
+        assert_bedrock_shell(&restarted_target, &expected);
+        let return_position = nether_portal_position.expect("first trip captured portal position");
+        for _ in 0..12 {
+            move_real(&mut client, return_position).await;
+            tokio::time::sleep(Duration::from_millis(75)).await;
         }
-
-        move_real(
-            &mut client,
-            nether_portal_position.expect("first trip captured portal position"),
-        )
-        .await;
         let mut saw_overworld = false;
         let mut saw_overworld_chunk = false;
         while !saw_overworld_chunk {
@@ -722,6 +712,8 @@ async fn production_portal_trip_serves_external_nether_bedrock_payload() {
 
     let expected = oracle_bedrock_masks(TARGET_CHUNK.0, TARGET_CHUNK.1);
     let mut saw_dimension_change = false;
+    let mut saw_forget_after_dimension_change = false;
+    let mut saw_cache_center_after_dimension_change = false;
     let mut saw_target = false;
     let mut packets = 0usize;
     while !saw_target {
@@ -747,6 +739,16 @@ async fn production_portal_trip_serves_external_nether_bedrock_payload() {
                 let _ = packet_reader.f64().expect("destination z");
                 let _ = packet_reader.u8().expect("destination mode");
                 saw_dimension_change = true;
+            }
+            FORGET_CHUNK if saw_dimension_change => {
+                saw_forget_after_dimension_change = true;
+            }
+            CHUNK_CACHE_CENTER if saw_dimension_change => {
+                assert!(
+                    saw_forget_after_dimension_change,
+                    "the transition must precede old-view forgets, and forgets must precede the destination cache center"
+                );
+                saw_cache_center_after_dimension_change = true;
             }
             CHUNK => {
                 let mut packet_reader = Reader::new(&packet);
@@ -784,6 +786,14 @@ async fn production_portal_trip_serves_external_nether_bedrock_payload() {
     }
 
     assert!(saw_dimension_change, "portal trip emitted no dimension change");
+    assert!(
+        saw_forget_after_dimension_change,
+        "portal transition emitted no old-view forget after the dimension change"
+    );
+    assert!(
+        saw_cache_center_after_dimension_change,
+        "portal transition emitted no destination cache center"
+    );
     let (packet_id, payload) = tokio::time::timeout(Duration::from_secs(120), client.read_packet())
         .await
         .expect("Nether batch end timeout")

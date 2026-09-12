@@ -93,15 +93,15 @@ fn explicit_multi_region_export_publishes_reopenable_terrain_in_coordinate_order
     write_chunk(&storage, 32, 0, "minecraft:gold_block", false);
     write_chunk(&storage, 0, 0, "minecraft:diamond_block", false);
 
-    let input = WorldExportInput::new(
-        vec![ChunkCoordinate { x: 32, z: 0 }, ChunkCoordinate { x: 0, z: 0 }],
-        0,
-        16,
-        400,
-        CompressionScheme::Zlib,
-        1_700_000_000,
-    )
-    .expect("fixture selection is valid");
+    let input = WorldExportInput::builder()
+        .chunks(vec![ChunkCoordinate { x: 32, z: 0 }, ChunkCoordinate { x: 0, z: 0 }])
+        .min_y(0)
+        .height(16)
+        .game_time(400)
+        .compression(CompressionScheme::Zlib)
+        .timestamp(1_700_000_000)
+        .build()
+        .expect("fixture selection is valid");
     let report = preflight_world_export(&storage, &input).expect("selected chunks preflight");
     assert_eq!(
         report
@@ -223,15 +223,15 @@ fn explicit_snapshot_exports_its_reviewed_selection_after_later_native_writes() 
     .expect("open native fixture store");
     write_chunk(&storage, 0, 0, "minecraft:diamond_block", false);
     write_chunk(&storage, 32, 0, "minecraft:gold_block", false);
-    let input = WorldExportInput::new(
-        vec![ChunkCoordinate { x: 0, z: 0 }],
-        0,
-        16,
-        400,
-        CompressionScheme::Zlib,
-        1_700_000_000,
-    )
-    .expect("one selected chunk is valid");
+    let input = WorldExportInput::builder()
+        .chunks(vec![ChunkCoordinate { x: 0, z: 0 }])
+        .min_y(0)
+        .height(16)
+        .game_time(400)
+        .compression(CompressionScheme::Zlib)
+        .timestamp(1_700_000_000)
+        .build()
+        .expect("one selected chunk is valid");
     let snapshot = snapshot_world_export(&storage, &input)
         .expect("capture the explicit reviewed selection");
     let report = preflight_native_world_export(&snapshot);
@@ -301,15 +301,15 @@ fn later_conversion_failure_does_not_create_a_published_or_staging_world() {
     .expect("open native fixture store");
     write_chunk(&storage, 0, 0, "minecraft:diamond_block", false);
     write_chunk(&storage, 32, 0, "minecraft:gold_block", true);
-    let input = WorldExportInput::new(
-        vec![ChunkCoordinate { x: 0, z: 0 }, ChunkCoordinate { x: 32, z: 0 }],
-        0,
-        16,
-        0,
-        CompressionScheme::Zlib,
-        1,
-    )
-    .expect("fixture selection is valid");
+    let input = WorldExportInput::builder()
+        .chunks(vec![ChunkCoordinate { x: 0, z: 0 }, ChunkCoordinate { x: 32, z: 0 }])
+        .min_y(0)
+        .height(16)
+        .game_time(0)
+        .compression(CompressionScheme::Zlib)
+        .timestamp(1)
+        .build()
+        .expect("fixture selection is valid");
     let report = preflight_world_export(&storage, &input).expect("tick loss preflights");
     assert_eq!(report.unsupported_count(), 1, "the queued tick needs review");
     let destination = scratch("failed-publish");
@@ -350,15 +350,15 @@ fn stale_aggregate_authorization_refuses_before_creating_an_output_world() {
     .expect("open native fixture store");
     write_chunk(&storage, 0, 0, "minecraft:diamond_block", false);
     write_chunk(&storage, 32, 0, "minecraft:gold_block", false);
-    let input = WorldExportInput::new(
-        vec![ChunkCoordinate { x: 0, z: 0 }, ChunkCoordinate { x: 32, z: 0 }],
-        0,
-        16,
-        0,
-        CompressionScheme::Zlib,
-        1,
-    )
-    .expect("fixture selection is valid");
+    let input = WorldExportInput::builder()
+        .chunks(vec![ChunkCoordinate { x: 0, z: 0 }, ChunkCoordinate { x: 32, z: 0 }])
+        .min_y(0)
+        .height(16)
+        .game_time(0)
+        .compression(CompressionScheme::Zlib)
+        .timestamp(1)
+        .build()
+        .expect("fixture selection is valid");
     let reviewed = preflight_world_export(&storage, &input).expect("lossless source preflights");
     let authorization = reviewed.decide(WorldExportLossDecision::ProceedAndDiscardUnsupported);
 

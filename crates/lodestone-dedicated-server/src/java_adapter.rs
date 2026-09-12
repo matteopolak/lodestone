@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use lodestone_jvm_bridge::adapter::{
     AdapterEvent, AdapterHost, BlockStateWrite, PlayerGameMode, PlayerIdentity,
-    PlayerInventorySlot, PlayerSnapshot,
+    PlayerInventorySlot, PlayerSnapshot, PlayerTeleportRequest,
 };
 use lodestone_jvm_bridge::native_surface::OperatorBlockStateMember;
 use lodestone_jvm_bridge::paper::{
@@ -57,6 +57,41 @@ fn propose_resident_block_state_batch(
             .block_on(server.set_resident_block_states_proposed(writes, notify_listeners))
             .map_err(|refusal| format!("resident block batch proposal refused: {refusal}"))
     })
+}
+
+/// Applies one copied Java player request through the live registry and the
+/// same entity mutation boundary used by native plugins. The helper takes only
+/// cloneable server capabilities so its test can prove the directed effect
+/// without starting a JVM or borrowing a connection.
+fn apply_player_teleport(
+    entity_api: &lodestone_server::ServerEntityApi,
+    players: &lodestone_server::PlayerRegistry,
+    request: PlayerTeleportRequest,
+) -> Result<(), String> {
+    let uuid = uuid::Uuid::from_bytes(request.uuid);
+    let Some(player_id) = players
+        .candidates()
+        .into_iter()
+        .find(|player| player.uuid == uuid)
+        .and_then(|player| lodestone_model::EntityNetworkId::from_wire(player.entity_id))
+    else {
+        return Err(format!("player {uuid} is not connected"));
+    };
+    match entity_api.mutate(
+        player_id,
+        lodestone_server::EntityMutation::Teleport {
+            position: lodestone_model::Vec3::new(request.x, request.y, request.z),
+            rotation: None,
+        },
+    ) {
+        lodestone_server::EntityMutationResult::Applied => Ok(()),
+        lodestone_server::EntityMutationResult::UnknownEntity => {
+            Err(format!("player {uuid} is not connected"))
+        }
+        lodestone_server::EntityMutationResult::Unsupported => {
+            Err(format!("player {uuid} cannot be teleported"))
+        }
+    }
 }
 
 const MAX_PENDING_BLOCK_CHANGE_EVENTS: usize = 64;
@@ -447,6 +482,16 @@ impl JavaAdapter {
                 })
                 .ok_or_else(|| format!("player {uuid} is not connected"))
         });
+        self.host.service_pending_player_teleports(64, |request: PlayerTeleportRequest| {
+            let Some(players) = server.players() else {
+                return Err("player registry is unavailable".to_owned());
+            };
+            let Some(entity_api) = server.entity_api() else {
+                let uuid = uuid::Uuid::from_bytes(request.uuid);
+                return Err(format!("player {uuid} entity API is unavailable"));
+            };
+            apply_player_teleport(&entity_api, players, request)
+        });
         self.host.service_pending_player_inventory_slots(64, |query| {
             let native_slot = usize::try_from(query.native_slot).map_err(|_| {
                 format!("native inventory slot {} is negative", query.native_slot)
@@ -761,6 +806,43 @@ mod tests {
         assert!(error.contains("invalid Paper bootstrap configuration"), "{error}");
         assert!(error.contains("Paper server jar"), "{error}");
         assert!(error.len() < 4096, "Paper configuration error must stay bounded");
+    }
+
+    #[test]
+    fn player_teleport_request_reaches_the_directed_effect_queue() {
+        let players = lodestone_server::PlayerRegistry::new();
+        let uuid = uuid::Uuid::from_bytes([7; 16]);
+        let ticket = players.join(
+            "Alice",
+            uuid,
+            lodestone_model::Vec3::new(12.5, 64.0, -9.25),
+        );
+        let entity_api = lodestone_server::ServerEntityApi::new(
+            lodestone_server::MobHandle::default(),
+            players.clone(),
+        );
+        let request = PlayerTeleportRequest {
+            uuid: [7; 16],
+            x: 1.25,
+            y: 65.5,
+            z: -4.75,
+        };
+        assert_eq!(apply_player_teleport(&entity_api, &players, request), Ok(()));
+        assert_eq!(
+            players.take_effects(uuid),
+            vec![lodestone_server::commands::Effect::Teleport {
+                x: 1.25,
+                y: 65.5,
+                z: -4.75,
+                yaw: None,
+                pitch: None,
+            }],
+        );
+        drop(ticket);
+        assert_eq!(
+            apply_player_teleport(&entity_api, &players, request),
+            Err(format!("player {uuid} is not connected")),
+        );
     }
 
     #[test]

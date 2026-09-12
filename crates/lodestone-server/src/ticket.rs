@@ -519,6 +519,20 @@ impl TicketStore {
         positions.into_iter().map(|(pos, _)| pos).collect()
     }
 
+    /// Every currently-resident position without imposing a priority order.
+    ///
+    /// Cache eviction only needs membership, not generation priority. Keeping
+    /// this unsorted form separate avoids paying an unnecessary sort when a
+    /// high-radius store is selecting an LRU victim.
+    #[must_use]
+    pub fn resident_positions(&self) -> Vec<(i32, i32)> {
+        self.loading_levels
+            .iter()
+            .filter(|&(_, &level)| level <= MAX_LEVEL)
+            .map(|(&pos, _)| pos)
+            .collect()
+    }
+
     #[cfg(test)]
     fn active_ticket_count(&self) -> usize {
         self.tickets.len()
@@ -595,6 +609,12 @@ impl TicketStoreHandle {
     #[must_use]
     pub fn resident_positions_by_level(&self) -> Vec<(i32, i32)> {
         self.lock().resident_positions_by_level()
+    }
+
+    /// Every currently-resident position without imposing a priority order.
+    #[must_use]
+    pub fn resident_positions(&self) -> Vec<(i32, i32)> {
+        self.lock().resident_positions()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, TicketStore> {

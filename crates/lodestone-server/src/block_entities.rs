@@ -84,6 +84,7 @@ pub enum BlockEntityKind {
     Sign,
     HangingSign,
     Beacon,
+    Lectern,
     Crafter,
     /// A key not known by this build, including a plugin-defined key.
     Extension(String),
@@ -111,6 +112,7 @@ impl BlockEntityKind {
             "minecraft:sign" => Self::Sign,
             "minecraft:hanging_sign" => Self::HangingSign,
             "minecraft:beacon" => Self::Beacon,
+            "minecraft:lectern" => Self::Lectern,
             "minecraft:crafter" => Self::Crafter,
             _ => Self::Extension(name.to_owned()),
         }
@@ -168,6 +170,7 @@ impl BlockEntityKind {
             Self::Sign => "minecraft:sign",
             Self::HangingSign => "minecraft:hanging_sign",
             Self::Beacon => "minecraft:beacon",
+            Self::Lectern => "minecraft:lectern",
             Self::Crafter => "minecraft:crafter",
             Self::Extension(_) => return None,
         })
@@ -293,6 +296,9 @@ pub enum BlockEntity {
     /// detection, effect-selection validation and periodic-application
     /// arithmetic this variant's own state feeds.
     Beacon(BeaconData),
+    /// `minecraft:lectern`: one displayed book and its selected zero-based
+    /// page. Page changes are menu button actions, not ordinary slot writes.
+    Lectern(LecternData),
     /// `minecraft:crafter` — a 9-slot grid plus its per-slot enabled/disabled
     /// bitmask (`indices 0..9`). **Not modelled**: the actual auto-crafting
     /// trigger (redstone-pulse tick, recipe matching, result dispensing into
@@ -315,6 +321,15 @@ pub enum BlockEntity {
         /// own write surface.
         disabled: [bool; 9],
     },
+}
+
+/// The persistent state exposed by a lectern menu.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LecternData {
+    /// The book displayed on the lectern, if any.
+    pub book: Option<ItemStack>,
+    /// The selected zero-based page.
+    pub page: i32,
 }
 
 /// A placed beacon's pyramid tier, selected powers and payment item —
@@ -521,6 +536,12 @@ impl BlockEntity {
             disabled: [false; 9],
         }
     }
+
+    /// A fresh empty lectern with no displayed book.
+    #[must_use]
+    pub fn lectern() -> Self {
+        BlockEntity::Lectern(LecternData::default())
+    }
 }
 
 impl BlockEntity {
@@ -579,6 +600,7 @@ impl BlockEntity {
                 }
             }
             BlockEntity::Beacon(_) => BlockEntityKind::Beacon,
+            BlockEntity::Lectern(_) => BlockEntityKind::Lectern,
             BlockEntity::Crafter { .. } => BlockEntityKind::Crafter,
         }
     }
@@ -600,7 +622,7 @@ impl BlockEntity {
             BlockEntity::Crafter { slots, .. } => Some(slots.as_mut_slice()),
             BlockEntity::EndGateway { .. } | BlockEntity::Composter(_) | BlockEntity::Furnace(_) | BlockEntity::BrewingStand(_)
             | BlockEntity::Opaque { .. } | BlockEntity::CommandBlock(_)
-            | BlockEntity::Spawner(_) | BlockEntity::Sign(_) | BlockEntity::Beacon(_) => {
+            | BlockEntity::Spawner(_) | BlockEntity::Sign(_) | BlockEntity::Beacon(_) | BlockEntity::Lectern(_) => {
                 None
             }
         }
@@ -667,6 +689,7 @@ impl BlockEntity {
             // answers, not a menu.
             | BlockEntity::Sign(_) => None,
             BlockEntity::Beacon(_) => Some("minecraft:beacon"),
+            BlockEntity::Lectern(_) => Some("minecraft:lectern"),
             // Vanilla's own menu-type registry key for the 3x3 crafter.
             BlockEntity::Crafter { .. } => Some("minecraft:crafter_3x3"),
         }
@@ -687,6 +710,7 @@ impl BlockEntity {
             BlockEntity::Container { slots, .. } => slots.clone(),
             // `BeaconMenu`'s single payment slot (`PAYMENT_SLOT = 0`).
             BlockEntity::Beacon(b) => vec![b.payment.clone()],
+            BlockEntity::Lectern(l) => vec![l.book.clone()],
             // `CrafterMenu.addSlots`'s own `x + y * 3` order — already this
             // array's own indexing.
             BlockEntity::Crafter { slots, .. } => slots.to_vec(),
@@ -747,6 +771,11 @@ impl BlockEntity {
                     b.payment = item;
                 }
             }
+            BlockEntity::Lectern(l) => {
+                if slot == 0 {
+                    l.book = item;
+                }
+            }
             // Writing *any* item into a slot —
             // even setting it back to empty, per vanilla's own unconditional
             // check before the write — re-enables it if it was disabled.
@@ -769,6 +798,7 @@ impl BlockEntity {
             BlockEntity::Hopper(_) => 5,
             BlockEntity::Container { slots, .. } => slots.len(),
             BlockEntity::Beacon(_) => 1,
+            BlockEntity::Lectern(_) => 1,
             BlockEntity::Crafter { slots, .. } => slots.len(),
             BlockEntity::EndGateway { .. } | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) | BlockEntity::Opaque { .. }
             | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => 0,
@@ -849,7 +879,7 @@ impl BlockEntity {
             }
             BlockEntity::EndGateway { .. } | BlockEntity::Hopper(_) | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_)
             | BlockEntity::Container { .. } | BlockEntity::Opaque { .. }
-            | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) => {
+            | BlockEntity::CommandBlock(_) | BlockEntity::Spawner(_) | BlockEntity::Sign(_) | BlockEntity::Lectern(_) => {
                 Vec::new()
             }
         }
@@ -908,7 +938,7 @@ impl BlockEntity {
             // follows from not having a driver here.
             // No `craftingTicksRemaining` countdown here — see this variant's
             // own doc comment for why the trigger itself is out of scope.
-            BlockEntity::Crafter { .. } => None,
+            BlockEntity::Crafter { .. } | BlockEntity::Lectern(_) => None,
             BlockEntity::EndGateway { .. } | BlockEntity::Container { .. } | BlockEntity::Opaque { .. } | BlockEntity::CommandBlock(_)
             | BlockEntity::Spawner(_) | BlockEntity::Sign(_) | BlockEntity::Beacon(_) => None,
         }
@@ -988,6 +1018,7 @@ enum PlacedBlockEntity {
     Container { size: usize },
     CommandBlock,
     Beacon,
+    Lectern,
     Crafter,
     Sign { hanging: bool },
 }
@@ -1007,6 +1038,7 @@ impl PlacedBlockEntity {
                 BlockEntity::CommandBlock(crate::command_block::CommandBlockData::new())
             }
             PlacedBlockEntity::Beacon => BlockEntity::Beacon(BeaconData::default()),
+            PlacedBlockEntity::Lectern => BlockEntity::lectern(),
             PlacedBlockEntity::Crafter => BlockEntity::crafter(),
             PlacedBlockEntity::Sign { hanging } => BlockEntity::Sign(SignData {
                 hanging,
@@ -1058,6 +1090,7 @@ fn placed_block_entity_for_item(item: &str) -> Option<(&'static str, PlacedBlock
             PlacedBlockEntity::Container { size: CONTAINER_3X3_SIZE },
         ),
         "minecraft:beacon" => ("minecraft:beacon", PlacedBlockEntity::Beacon),
+        "minecraft:lectern" => ("minecraft:lectern", PlacedBlockEntity::Lectern),
         "minecraft:crafter" => ("minecraft:crafter", PlacedBlockEntity::Crafter),
         "minecraft:command_block" => ("minecraft:command_block", PlacedBlockEntity::CommandBlock),
         "minecraft:chain_command_block" => (

@@ -38,6 +38,9 @@
 //! **Destination.** [`find_exit_portal`] looks for an existing portal near the
 //! scaled arrival point; [`create_portal`] builds a fresh 2×3 one when there is
 //! none, in a spot chosen the way the real portal-forcer create rule chooses it.
+//! Synchronous server paths use the resident-only companions and their explicit
+//! required-column footprints for return searches, inexact End gateways and the
+//! fixed End platform, so a cold lookup defers instead of starting generation.
 //!
 //! # How to change it
 //!
@@ -75,12 +78,12 @@
 //! [`crate::ChunkSource`] and [`crate::dimension`]. No protocol: the packets a
 //! trip produces are `crate::server`'s business.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use lodestone_model::{BlockPos, Vec3};
 
-use crate::chunk::ChunkSource;
+use crate::chunk::{ChunkColumn, ChunkSource, is_air_or_fluid};
 use crate::dimension::Dimension;
 use crate::neighbor_update::Direction;
 use crate::redstone::{base_name, direction_from_str, direction_to_str, get_bool_property, get_str_property};
@@ -931,6 +934,86 @@ pub const FALLBACK_SCAN_RADIUS: i32 = 8;
 /// Vertical reach of the same fallback, measured from the scaled arrival `y`.
 pub const FALLBACK_Y_REACH: i32 = 16;
 
+/// The chunk columns a portal search may read before it can return an answer.
+///
+/// This is the admission footprint for [`find_exit_portal_resident`].  It
+/// includes both the columns containing indexed candidates and the bounded
+/// fallback square.  Returning the complete footprint, rather than discovering
+/// missing columns one block read at a time, lets the server ask its chunk
+/// scheduler to make the whole search resident before entering the synchronous
+/// destination path.
+///
+/// The order is deterministic: indexed candidates are added in index order,
+/// followed by the fallback square's `dx`/`dz` walk.  Callers must not use the
+/// order as a destination tie-breaker; [`find_exit_portal_resident`] keeps the
+/// actual search order and distance comparison separate.
+#[must_use]
+pub fn find_exit_portal_required_columns(
+    dimension: Dimension,
+    index: Option<&PortalIndex>,
+    origin: BlockPos,
+) -> Vec<(i32, i32)> {
+    let radius = search_radius(dimension);
+    let mut seen = HashSet::new();
+    let mut columns = Vec::new();
+    let mut add = |x: i32, z: i32| {
+        let chunk = (x.div_euclid(16), z.div_euclid(16));
+        if seen.insert(chunk) {
+            columns.push(chunk);
+        }
+    };
+
+    if let Some(index) = index {
+        for pos in index.cells(dimension) {
+            if (pos.x - origin.x).abs() <= radius && (pos.z - origin.z).abs() <= radius {
+                add(pos.x, pos.z);
+            }
+        }
+    }
+
+    for dx in -FALLBACK_SCAN_RADIUS..=FALLBACK_SCAN_RADIUS {
+        for dz in -FALLBACK_SCAN_RADIUS..=FALLBACK_SCAN_RADIUS {
+            add(origin.x + dx, origin.z + dz);
+        }
+    }
+    columns
+}
+
+/// Clones a complete resident footprint without touching a cold source.
+///
+/// `ChunkSource::resident_column` is deliberately the only source method used
+/// here.  In particular, do not replace the call with `column` after checking
+/// `is_column_resident`: the two calls are separate on an evicting cache, and a
+/// miss between them would re-introduce synchronous generation into a server
+/// tick.
+fn resident_columns<S: ChunkSource + ?Sized>(
+    source: &S,
+    coordinates: &[(i32, i32)],
+) -> Option<HashMap<(i32, i32), ChunkColumn>> {
+    let mut columns = HashMap::with_capacity(coordinates.len());
+    for &(cx, cz) in coordinates {
+        let column = source.resident_column(cx, cz)?;
+        columns.insert((cx, cz), column);
+    }
+    Some(columns)
+}
+
+/// Reads one block state from a previously captured resident footprint.
+///
+/// The returned reference is tied to the snapshot map, not to the source, so a
+/// bounded search cannot accidentally call the source's generating
+/// `block_state` implementation.
+fn resident_block_state<'a>(
+    columns: &'a HashMap<(i32, i32), ChunkColumn>,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> Option<&'a str> {
+    columns
+        .get(&(x.div_euclid(16), z.div_euclid(16)))
+        .map(|column| column.block_state(x.rem_euclid(16), y, z.rem_euclid(16)))
+}
+
 /// The search radius for arriving in `dimension`.
 #[must_use]
 pub fn search_radius(dimension: Dimension) -> i32 {
@@ -1011,6 +1094,63 @@ pub fn find_exit_portal<S: ChunkSource + ?Sized>(
     best.map(|(_, _, pos)| pos)
 }
 
+/// The resident-only counterpart to [`find_exit_portal`].
+///
+/// It has the same indexed-candidate order, bounded fallback walk, radius
+/// filter, stale-index revalidation, and distance/height tie-break.  The one
+/// intentional difference is admission: every column in
+/// [`find_exit_portal_required_columns`] must already be available through
+/// [`ChunkSource::resident_column`].  If even one is cold this returns `None`
+/// without calling [`ChunkSource::column`] or [`ChunkSource::block_state`].
+/// Callers that need to distinguish "not resident yet" from "no portal found"
+/// should check the required footprint first and defer until it is loaded.
+///
+/// The all-or-nothing admission is load-bearing.  Skipping a cold indexed
+/// candidate would allow a farther candidate to win, and skipping a cold
+/// fallback column would allow the result to depend on which part of the
+/// footprint happened to be loaded.  Once the required columns are resident,
+/// this function returns exactly the same candidate as [`find_exit_portal`].
+#[must_use]
+pub fn find_exit_portal_resident<S: ChunkSource + ?Sized>(
+    world: &S,
+    dimension: Dimension,
+    index: Option<&PortalIndex>,
+    origin: BlockPos,
+) -> Option<BlockPos> {
+    let required = find_exit_portal_required_columns(dimension, index, origin);
+    let columns = resident_columns(world, &required)?;
+    let radius = search_radius(dimension);
+    let mut best: Option<(i64, i32, BlockPos)> = None;
+
+    if let Some(index) = index {
+        for pos in index.cells(dimension) {
+            if (pos.x - origin.x).abs() <= radius && (pos.z - origin.z).abs() <= radius {
+                consider_resident_portal_cell(&columns, origin, pos, &mut best);
+            }
+        }
+    }
+    if let Some((_, _, pos)) = best {
+        return Some(pos);
+    }
+
+    let scan = FALLBACK_SCAN_RADIUS;
+    let y_lo = (origin.y - FALLBACK_Y_REACH).max(dimension.min_y());
+    let y_hi = (origin.y + FALLBACK_Y_REACH).min(dimension.max_placeable_y());
+    for dx in -scan..=scan {
+        for dz in -scan..=scan {
+            for y in y_lo..=y_hi {
+                consider_resident_portal_cell(
+                    &columns,
+                    origin,
+                    BlockPos::new(origin.x + dx, y, origin.z + dz),
+                    &mut best,
+                );
+            }
+        }
+    }
+    best.map(|(_, _, pos)| pos)
+}
+
 /// Folds one candidate cell into [`find_exit_portal`]'s running best.
 ///
 /// **The `is_portal` re-read is the load-bearing line.** Both callers feed
@@ -1025,6 +1165,37 @@ fn consider_portal_cell<S: ChunkSource + ?Sized>(
     best: &mut Option<(i64, i32, BlockPos)>,
 ) {
     if !is_portal(&world.block_state(pos.x, pos.y, pos.z)) {
+        return;
+    }
+    let dx = i64::from(pos.x - origin.x);
+    let dy = i64::from(pos.y - origin.y);
+    let dz = i64::from(pos.z - origin.z);
+    let dist = dx * dx + dy * dy + dz * dz;
+    let better = match best {
+        None => true,
+        Some((best_dist, best_y, _)) => {
+            dist < *best_dist || (dist == *best_dist && pos.y < *best_y)
+        }
+    };
+    if better {
+        *best = Some((dist, pos.y, pos));
+    }
+}
+
+/// The snapshot equivalent of [`consider_portal_cell`].
+fn consider_resident_portal_cell(
+    columns: &HashMap<(i32, i32), ChunkColumn>,
+    origin: BlockPos,
+    pos: BlockPos,
+    best: &mut Option<(i64, i32, BlockPos)>,
+) {
+    let Some(state) = resident_block_state(columns, pos.x, pos.y, pos.z) else {
+        // `resident_columns` admitted every required chunk, so this is only
+        // possible for an out-of-footprint coordinate introduced by an
+        // arithmetic overflow.  Fail closed rather than reaching a generator.
+        return;
+    };
+    if !is_portal(state) {
         return;
     }
     let dx = i64::from(pos.x - origin.x);
@@ -1459,6 +1630,59 @@ pub fn end_gateway_arrival(exit: BlockPos, exact: bool) -> Option<Vec3> {
     ))
 }
 
+/// Horizontal search radius for an inexact End-gateway exit.
+pub const END_GATEWAY_SEARCH_RADIUS: i32 = 5;
+
+/// Walks an inexact gateway's probe positions in the same ring order used by
+/// [`end_gateway_arrival_in_world`].
+fn for_each_end_gateway_probe(exit: BlockPos, mut visit: impl FnMut(i32, i32)) {
+    for radius in 0i32..=END_GATEWAY_SEARCH_RADIUS {
+        for dx in -radius..=radius {
+            for dz in -radius..=radius {
+                if radius != 0 && dx.abs() != radius && dz.abs() != radius {
+                    continue;
+                }
+                visit(exit.x + dx, exit.z + dz);
+            }
+        }
+    }
+}
+
+/// The distinct chunk columns an inexact End-gateway search can inspect.
+///
+/// The returned coordinates are an explicit admission footprint for
+/// [`end_gateway_arrival_in_resident_world`].  The probe walk is still over
+/// block coordinates in a radius-5 square; deduplication here only avoids
+/// asking the chunk scheduler to load the same column more than once.
+#[must_use]
+pub fn end_gateway_required_columns(exit: BlockPos) -> Vec<(i32, i32)> {
+    let mut seen = HashSet::new();
+    let mut columns = Vec::new();
+    for_each_end_gateway_probe(exit, |x, z| {
+        let chunk = (x.div_euclid(16), z.div_euclid(16));
+        if seen.insert(chunk) {
+            columns.push(chunk);
+        }
+    });
+    columns
+}
+
+/// Whether `column` has two clear body cells at `(x, y, z)` and a full support
+/// face below them, using the same fail-closed predicates as the ordinary
+/// gateway search.  This takes a captured column so a resident-only search
+/// never falls back to a generating source read.
+fn is_standable_in_resident_column(column: &ChunkColumn, x: i32, y: i32, z: i32) -> bool {
+    let local_x = x.rem_euclid(16);
+    let local_z = z.rem_euclid(16);
+    let feet = column.block_state(local_x, y, local_z);
+    let head = column.block_state(local_x, y + 1, local_z);
+    let below = column.block_state(local_x, y - 1, local_z);
+    is_air_or_fluid(feet)
+        && is_air_or_fluid(head)
+        && lodestone_data::block_states::StateId::from_state_str(below)
+            .is_some_and(lodestone_data::snow_support::face_full_up)
+}
+
 /// Resolves a gateway exit against the destination terrain.
 ///
 /// Exact exits retain their configured Y and do not inspect terrain. Inexact
@@ -1476,7 +1700,7 @@ pub fn end_gateway_arrival_in_world<S: ChunkSource + ?Sized>(
         return Some(arrival);
     }
 
-    for radius in 0i32..=5 {
+    for radius in 0i32..=END_GATEWAY_SEARCH_RADIUS {
         for dx in -radius..=radius {
             for dz in -radius..=radius {
                 if radius != 0 && dx.abs() != radius && dz.abs() != radius {
@@ -1503,6 +1727,52 @@ pub fn end_gateway_arrival_in_world<S: ChunkSource + ?Sized>(
         }
     }
     None
+}
+
+/// The resident-only counterpart to [`end_gateway_arrival_in_world`].
+///
+/// Exact exits retain the same no-terrain fast path.  Inexact exits first
+/// admit the complete radius-5 footprint through [`ChunkSource::resident_column`]
+/// and then run the same ring and descending-Y order against those snapshots.
+/// A cold column therefore returns `None` without calling `column` or
+/// `block_state`; once the footprint is resident, the returned point is the
+/// same deterministic point as the ordinary helper.
+#[must_use]
+pub fn end_gateway_arrival_in_resident_world<S: ChunkSource + ?Sized>(
+    source: &S,
+    exit: BlockPos,
+    exact: bool,
+) -> Option<Vec3> {
+    if let Some(arrival) = end_gateway_arrival(exit, exact) {
+        return Some(arrival);
+    }
+
+    let required = end_gateway_required_columns(exit);
+    let columns = resident_columns(source, &required)?;
+    let mut result = None;
+    for_each_end_gateway_probe(exit, |x, z| {
+        if result.is_some() {
+            return;
+        }
+        let Some(column) = columns.get(&(x.div_euclid(16), z.div_euclid(16))) else {
+            return;
+        };
+        let top = column.min_y + column.height - 2;
+        if top < column.min_y {
+            return;
+        }
+        for y in (column.min_y..=top).rev() {
+            if is_standable_in_resident_column(column, x, y, z) {
+                result = Some(Vec3::new(
+                    f64::from(x) + 0.5,
+                    f64::from(y),
+                    f64::from(z) + 0.5,
+                ));
+                return;
+            }
+        }
+    });
+    result
 }
 
 /// The blocks [`ensure_end_platform`] writes for the fixed 5×5×4 obsidian
@@ -1535,6 +1805,29 @@ pub fn end_platform_writes(origin: BlockPos) -> Vec<(BlockPos, &'static str)> {
     writes
 }
 
+/// The distinct chunk columns touched by [`end_platform_writes`].
+///
+/// The platform is only 5×5 blocks, but its fixed position can straddle a
+/// chunk seam.  Callers that are about to repair it should admit this complete
+/// footprint before entering a synchronous server path.
+#[must_use]
+pub fn end_platform_required_columns(origin: BlockPos) -> Vec<(i32, i32)> {
+    let mut seen = HashSet::new();
+    let mut columns = Vec::new();
+    for dz in -2..=2 {
+        for dx in -2..=2 {
+            let chunk = (
+                (origin.x + dx).div_euclid(16),
+                (origin.z + dz).div_euclid(16),
+            );
+            if seen.insert(chunk) {
+                columns.push(chunk);
+            }
+        }
+    }
+    columns
+}
+
 /// Builds (or repairs) the End's fixed arrival platform through `world`,
 /// skipping any cell that already holds the target block — vanilla's own
 /// block-state-already-matches guard on the real end-platform-create rule,
@@ -1552,6 +1845,51 @@ pub fn ensure_end_platform<S: ChunkSource + ?Sized>(world: &S, origin: BlockPos)
             world.set_block(pos.x, pos.y, pos.z, block);
         }
     }
+}
+
+/// Repairs the fixed End platform only when every touched column is already
+/// resident, returning `false` when the caller must defer and load the columns
+/// named by [`end_platform_required_columns`].
+///
+/// Unlike [`ensure_end_platform`], this helper reads the captured columns
+/// directly and never calls the source's generating `block_state` method.  The
+/// writes are therefore safe to run after the server has admitted the footprint
+/// and are a no-op for cells that already hold their target state.  `true`
+/// means the repair pass ran (including the case where every target already
+/// matched); `false` means no write was attempted.
+#[must_use]
+pub fn ensure_end_platform_if_resident<S: ChunkSource + ?Sized>(
+    world: &S,
+    origin: BlockPos,
+) -> bool {
+    let required = end_platform_required_columns(origin);
+    let Some(columns) = resident_columns(world, &required) else {
+        return false;
+    };
+    for (pos, block) in end_platform_writes(origin) {
+        let key = (pos.x.div_euclid(16), pos.z.div_euclid(16));
+        let Some(column) = columns.get(&key) else {
+            // The footprint was generated by the same geometry, so this can
+            // only be an arithmetic overflow or a future geometry mismatch.
+            // Never turn the defensive failure into a cold read.
+            return false;
+        };
+        if column.block_state(pos.x.rem_euclid(16), pos.y, pos.z.rem_euclid(16)) != block {
+            world.set_block(pos.x, pos.y, pos.z, block);
+        }
+    }
+    true
+}
+
+/// Alias for callers that prefer the resident adjective over the conditional
+/// verb.  It has the same all-or-nothing admission and return value as
+/// [`ensure_end_platform_if_resident`].
+#[must_use]
+pub fn ensure_end_platform_resident<S: ChunkSource + ?Sized>(
+    world: &S,
+    origin: BlockPos,
+) -> bool {
+    ensure_end_platform_if_resident(world, origin)
 }
 
 /// Where a trip **into** the End lands — the real get-portal-destination rule's
@@ -1847,6 +2185,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap as Map;
     use std::sync::Mutex as Lock;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A block-map world, so the frame tests exercise the search and nothing else.
     struct FlatWorld(Lock<Map<(i32, i32, i32), String>>);
@@ -1897,6 +2236,105 @@ mod tests {
         }
         fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
             self.put(x, y, z, name);
+        }
+    }
+
+    /// A source that makes a cold read observable.  The resident-only helpers
+    /// below must return before any of these generating or point-read methods
+    /// are reached.
+    struct ColdLookupWorld {
+        column_calls: AtomicUsize,
+        block_state_calls: AtomicUsize,
+        set_calls: AtomicUsize,
+    }
+
+    impl ColdLookupWorld {
+        fn new() -> Self {
+            Self {
+                column_calls: AtomicUsize::new(0),
+                block_state_calls: AtomicUsize::new(0),
+                set_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl ChunkSource for ColdLookupWorld {
+        fn column(&self, _cx: i32, _cz: i32) -> crate::chunk::ChunkColumn {
+            self.column_calls.fetch_add(1, Ordering::Relaxed);
+            crate::chunk::ChunkColumn::new(0, 256)
+        }
+        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+            self.block_state_calls.fetch_add(1, Ordering::Relaxed);
+            "minecraft:air".to_owned()
+        }
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::DEFAULT_BIOME.to_owned()
+        }
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+            self.set_calls.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// A finite resident-column source used to prove the same destination
+    /// answers as the generating helpers without permitting a fallback read.
+    struct ResidentLookupWorld {
+        columns: Lock<Map<(i32, i32), crate::chunk::ChunkColumn>>,
+        column_calls: AtomicUsize,
+        block_state_calls: AtomicUsize,
+        set_calls: AtomicUsize,
+    }
+
+    impl ResidentLookupWorld {
+        fn with_columns(columns: impl IntoIterator<Item = (i32, i32)>) -> Self {
+            let mut map = Map::new();
+            for coordinate in columns {
+                map.insert(coordinate, crate::chunk::ChunkColumn::new(0, 256));
+            }
+            Self {
+                columns: Lock::new(map),
+                column_calls: AtomicUsize::new(0),
+                block_state_calls: AtomicUsize::new(0),
+                set_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn put(&self, x: i32, y: i32, z: i32, state: &str) {
+            let mut columns = self.columns.lock().unwrap();
+            columns
+                .entry((x.div_euclid(16), z.div_euclid(16)))
+                .or_insert_with(|| crate::chunk::ChunkColumn::new(0, 256))
+                .set_block(x.rem_euclid(16), y, z.rem_euclid(16), state);
+        }
+    }
+
+    impl ChunkSource for ResidentLookupWorld {
+        fn column(&self, cx: i32, cz: i32) -> crate::chunk::ChunkColumn {
+            self.column_calls.fetch_add(1, Ordering::Relaxed);
+            self.columns
+                .lock()
+                .unwrap()
+                .get(&(cx, cz))
+                .cloned()
+                .unwrap_or_else(|| crate::chunk::ChunkColumn::new(0, 256))
+        }
+        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+            self.block_state_calls.fetch_add(1, Ordering::Relaxed);
+            self.columns
+                .lock()
+                .unwrap()
+                .get(&(x.div_euclid(16), z.div_euclid(16)))
+                .map(|column| column.block_state(x.rem_euclid(16), y, z.rem_euclid(16)).to_owned())
+                .unwrap_or_else(|| "minecraft:air".to_owned())
+        }
+        fn resident_column(&self, cx: i32, cz: i32) -> Option<crate::chunk::ChunkColumn> {
+            self.columns.lock().unwrap().get(&(cx, cz)).cloned()
+        }
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::DEFAULT_BIOME.to_owned()
+        }
+        fn set_block(&self, x: i32, y: i32, z: i32, state: &str) {
+            self.set_calls.fetch_add(1, Ordering::Relaxed);
+            self.put(x, y, z, state);
         }
     }
 
@@ -2433,6 +2871,41 @@ mod tests {
         );
     }
 
+    /// A cold inexact gateway must defer before asking the source for even one
+    /// column.  The ordinary helper above intentionally exercises generation;
+    /// this negative control is for the resident-only server path.
+    #[test]
+    fn resident_gateway_search_never_generates_a_cold_radius_five_footprint() {
+        let world = ColdLookupWorld::new();
+        assert_eq!(
+            end_gateway_arrival_in_resident_world(&world, BlockPos::new(0, 20, 0), false),
+            None
+        );
+        assert_eq!(world.column_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(world.block_state_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(world.set_calls.load(Ordering::Relaxed), 0);
+    }
+
+    /// Once the radius-5 footprint is resident, the snapshot search keeps the
+    /// ordinary helper's deterministic ring/height choice without falling back
+    /// to source reads.
+    #[test]
+    fn resident_gateway_search_preserves_the_first_safe_neighbour() {
+        let exit = BlockPos::new(0, 20, 0);
+        let world = ResidentLookupWorld::with_columns(end_gateway_required_columns(exit));
+        for y in 0..256 {
+            world.put(0, y, 0, "minecraft:stone");
+        }
+        world.put(1, 0, 0, "minecraft:stone");
+
+        assert_eq!(
+            end_gateway_arrival_in_resident_world(&world, exit, false),
+            Some(Vec3::new(1.5, 1.0, 0.5))
+        );
+        assert_eq!(world.column_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(world.block_state_calls.load(Ordering::Relaxed), 0);
+    }
+
     /// `is_end_portal_frame` matches any facing/eye combination, unlike
     /// [`is_end_portal`]'s bare equality.
     #[test]
@@ -2477,6 +2950,72 @@ mod tests {
             "minecraft:air",
             "and the arrival cell itself must be clear, not embedded in the platform"
         );
+    }
+
+    /// A cold fixed End platform must defer before reading or writing any of its
+    /// 5x5 footprint.  This is the negative control for the old
+    /// `ensure_end_platform` path, whose point reads could synchronously create
+    /// the destination columns.
+    #[test]
+    fn resident_end_platform_repair_never_generates_a_cold_footprint() {
+        let world = ColdLookupWorld::new();
+        assert!(!ensure_end_platform_if_resident(&world, BlockPos::new(100, 49, 0)));
+        assert_eq!(world.column_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(world.block_state_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(world.set_calls.load(Ordering::Relaxed), 0);
+    }
+
+    /// A resident fixed platform is repaired from column snapshots and writes
+    /// only cells whose target state differs, retaining the existing platform
+    /// idempotence guarantee without point reads through the source.
+    #[test]
+    fn resident_end_platform_repair_writes_only_after_full_admission() {
+        let origin = BlockPos::new(100, 49, 0);
+        let world = ResidentLookupWorld::with_columns(end_platform_required_columns(origin));
+        assert!(ensure_end_platform_if_resident(&world, origin));
+        assert_eq!(world.column_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(world.block_state_calls.load(Ordering::Relaxed), 0);
+
+        let platform = world
+            .resident_column(6, 0)
+            .expect("the platform footprint includes its centre chunk");
+        assert_eq!(platform.block_state(4, 48, 0), "minecraft:obsidian");
+        assert_eq!(platform.block_state(4, 49, 0), "minecraft:air");
+    }
+
+    /// A return search over a cold source must not turn the fallback radius into
+    /// an implicit generator call.  The normal `find_exit_portal` remains the
+    /// compatibility path for callers that explicitly admit/generate terrain.
+    #[test]
+    fn resident_return_portal_search_never_generates_a_cold_footprint() {
+        let world = ColdLookupWorld::new();
+        let origin = BlockPos::new(44, 70, -10);
+        assert_eq!(
+            find_exit_portal_resident(&world, Dimension::Nether, None, origin),
+            None
+        );
+        assert_eq!(world.column_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(world.block_state_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(world.set_calls.load(Ordering::Relaxed), 0);
+    }
+
+    /// With the bounded fallback footprint resident, the return search keeps the
+    /// ordinary helper's closest-portal answer and tie-break.
+    #[test]
+    fn resident_return_portal_search_preserves_the_fallback_answer() {
+        let origin = BlockPos::new(44, 70, -10);
+        let world = ResidentLookupWorld::with_columns(
+            find_exit_portal_required_columns(Dimension::Nether, None, origin),
+        );
+        let portal = BlockPos::new(40, 71, -12);
+        world.put(portal.x, portal.y, portal.z, "minecraft:nether_portal[axis=x]");
+
+        assert_eq!(
+            find_exit_portal_resident(&world, Dimension::Nether, None, origin),
+            Some(portal)
+        );
+        assert_eq!(world.column_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(world.block_state_calls.load(Ordering::Relaxed), 0);
     }
 
     /// The 12 rim cells of a ring anchored at `(min_x, min_z, y)`, paired with

@@ -11,6 +11,7 @@ use lodestone_server::ecs::{
     PaperEventPriority, PaperEventRegistrationError, ServerApp, ServerProposalAction,
     ServerProposalQueue,
 };
+use uuid::Uuid;
 
 fn key(value: &str) -> ResourceKey {
     value.parse().expect("test resource key")
@@ -25,7 +26,8 @@ fn assert_census_status(kind: PaperEventKind) {
         PaperEventKind::EntitySpawn
         | PaperEventKind::EntityDespawn
         | PaperEventKind::ResidentBlockChange
-        | PaperEventKind::PlayerInteract => assert!(kind.supported()),
+        | PaperEventKind::PlayerInteract
+        | PaperEventKind::BlockBreak => assert!(kind.supported()),
         PaperEventKind::InventoryClick => assert!(!kind.supported()),
     }
 }
@@ -261,6 +263,82 @@ fn player_interact_runs_every_priority_and_refuses_monitor_mutation() {
             listener: "monitor",
             reason: PaperEventFailureReason::MonitorMutation,
         }]
+    );
+}
+
+#[test]
+fn block_break_listener_cancellation_reaches_the_proposal_result() {
+    let target = BlockPos::new(4, 64, 6);
+    let block = state("minecraft:stone");
+    let breaker = Uuid::from_u128(0x729);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let server = ServerApp::bootstrap_with(|app| {
+        app.add_plugins(StagedSpawn {
+            listeners: Arc::new({
+                let seen = Arc::clone(&seen);
+                move |events| {
+                    let seen = Arc::clone(&seen);
+                    events
+                        .register(
+                            PaperEventKind::BlockBreak,
+                            PaperEventPriority::Normal,
+                            "cancel-break",
+                            move |event| {
+                                let PaperEvent::BlockBreak {
+                                    pos,
+                                    state,
+                                    breaker: event_breaker,
+                                    ..
+                                } = event
+                                else {
+                                    unreachable!("event kind was filtered at registration");
+                                };
+                                assert_eq!(*pos, target);
+                                assert_eq!(*state, block);
+                                assert_eq!(*event_breaker, breaker);
+                                event.cancel();
+                                seen.lock().expect("break listener lock").push("cancel");
+                            },
+                        )
+                        .expect("block break is supported");
+
+                    let seen = Arc::clone(&seen);
+                    events
+                        .register(
+                            PaperEventKind::BlockBreak,
+                            PaperEventPriority::Monitor,
+                            "observe-break",
+                            move |event| {
+                                assert!(event.is_cancelled());
+                                seen.lock().expect("break monitor lock").push("monitor");
+                            },
+                        )
+                        .expect("block break is supported");
+                }
+            }),
+            action: Some(ServerProposalAction::BlockBreak {
+                pos: target,
+                state: block,
+                breaker,
+            }),
+        });
+    });
+    let mut world = server.into_world();
+    world.run_schedule(GameTick);
+
+    let outcome = world
+        .resource_mut::<ServerProposalQueue>()
+        .take_resolutions()
+        .pop()
+        .expect("staged block-break proposal resolution")
+        .outcome;
+    assert!(matches!(
+        outcome,
+        Err(lodestone_server::ecs::ProposalRefusal::Denied)
+    ));
+    assert_eq!(
+        *seen.lock().expect("break listener observations lock"),
+        vec!["cancel", "monitor"]
     );
 }
 

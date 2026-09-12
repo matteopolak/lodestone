@@ -5,6 +5,7 @@
 //! the same central merge functions used by the tick path. The duplicate and
 //! missing controls prove that a partial completion cannot be published.
 
+use std::collections::BTreeSet;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use lodestone_model::{BlockPos, ItemStack};
@@ -98,6 +99,48 @@ fn scheduled_owner_handoff_restores_order_and_rejects_non_exact_completion() {
     let mut duplicate = batches.clone();
     duplicate.push(duplicate.first().expect("two owner batches").clone());
     assert_rejects_completion(|| merge_due_owner_batches(duplicate));
+}
+
+#[test]
+fn scheduled_owner_batches_are_a_disjoint_cover_across_chunk_boundaries() {
+    fn queue() -> ChunkScheduledTickQueue<&'static str> {
+        let mut q = ChunkScheduledTickQueue::new();
+        assert!(q.schedule((-17, 0, -1), "negative", 10, TickPriority::Normal));
+        assert!(q.schedule((-16, 0, 0), "west", 10, TickPriority::High));
+        assert!(q.schedule((15, 0, 0), "origin", 10, TickPriority::Low));
+        assert!(q.schedule((16, 0, 0), "east", 10, TickPriority::Normal));
+        assert!(q.schedule((31, 0, 16), "north-east", 10, TickPriority::Normal));
+        q
+    }
+
+    let mut expected_queue = queue();
+    let expected = expected_queue.drain_due(10, usize::MAX);
+    let expected_keys: BTreeSet<_> = expected.iter().map(|tick| (tick.pos, tick.kind)).collect();
+    let mut owner_queue = queue();
+    let batches = owner_queue.drain_due_owner_batches(10, usize::MAX);
+
+    let mut seen = BTreeSet::new();
+    for batch in &batches {
+        for assignment in batch.assignments() {
+            let tick = assignment.tick();
+            let owner = ScheduledTickOwner::Chunk {
+                cx: tick.pos.0.div_euclid(16),
+                cz: tick.pos.2.div_euclid(16),
+            };
+            assert_eq!(batch.owner, owner, "a tick must stay with its target chunk");
+            assert!(
+                seen.insert((tick.pos, tick.kind)),
+                "one selected tick must not overlap two owner batches"
+            );
+        }
+    }
+    assert_eq!(seen, expected_keys, "owner batches must cover every selected tick exactly once");
+    let merged = merge_due_owner_batches(batches);
+    assert_eq!(
+        merged.iter().map(|tick| (tick.pos, tick.kind)).collect::<Vec<_>>(),
+        expected.iter().map(|tick| (tick.pos, tick.kind)).collect::<Vec<_>>(),
+        "central merge must restore the world-wide drain order"
+    );
 }
 
 fn stack(item: &str, count: u32) -> ItemStack {

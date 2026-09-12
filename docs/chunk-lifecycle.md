@@ -21,21 +21,22 @@ overwrites a faster one that already landed; and eviction is lossless, because a
 is written through to the wrapped source *first*; dropping a cache entry only ever costs a future
 regeneration, never a lost edit.
 
-Capacity is a question of whose memory is being spent: singleplayer's cache is effectively
-uncapped (the player's own render-distance choice, and the cost of capping it is regenerating the
-ground under their own feet), while a hosted (LAN/dedicated) world caps it, since that memory is
-an operator's, spent on behalf of players who did not choose the setting. Capacity derives from the
-streamed view size plus a fixed reserve for concurrent scans, and it only ever grows to follow a
-live render-distance increase mid-session — never shrinks back down — because shrinking would evict
-exactly the columns nearest the player (the innermost, least-recently-touched ring), turning a
-slider nudge into a visible regeneration stall.
+Capacity is a question of whose memory is being spent: singleplayer's cache follows the streamed
+view through the ordinary supported range, while both singleplayer and hosted worlds use a
+measured upper bound for the extreme 256-chunk option. Retaining the complete 265,225-column
+square would cost several gigabytes before meshes and wire buffers; the join scheduler therefore
+streams it incrementally while the cache saturates at its bounded ceiling. Capacity derives from
+the streamed view size plus a fixed reserve for concurrent scans, and it only ever grows to follow
+a live render-distance increase mid-session — never shrinks back down — because shrinking would
+evict exactly the columns nearest the player (the innermost, least-recently-touched ring), turning
+a slider nudge into a visible regeneration stall.
 
 Tools that need this same hosted retention boundary construct it with
 `lodestone_server::retained_chunk_source_for_view_radius`. It accepts any `ChunkSource` and returns
 only another `ChunkSource`, deliberately keeping `ChunkStore` private. Use it when a tool materializes
 or encodes a finite generated area and must preserve resident columns between requests; pass the
 same hosted view radius as its consumer. It is not the integrated-server constructor: that path uses
-the local player's uncapped policy through `IntegratedServer`.
+the local player's bounded integrated policy through `IntegratedServer`.
 
 ### Chunk tickets: residency independent of any one connection's view
 
@@ -92,6 +93,10 @@ packet and needs no special client decoder.
 The tier is monotone. A full or edited column satisfies a shaped request, while a later full
 request upgrades a shaped cache entry with the lock released; no path downgrades a column. Disk
 columns also win over a shaped request, so saved player changes cannot disappear at distance.
+Persistence is stricter than streaming: Anvil chunk NBT accepts only the exact
+`Status = "minecraft:full"` marker, and shaped columns are rejected before encoding. A missing or
+earlier-generation marker is treated as an absent disk column by `RegionChunkSource`, so the source
+regenerates a complete column rather than promoting partial terrain to `Full`.
 `ColumnPipeline::with_generation_band` computes the band in Chebyshev chunk distance and defaults
 to all-full until its caller opts in. `DEFAULT_FULL_GENERATION_RADIUS` is 8: it contains the
 simulation and interaction areas with margin, but is not an allocation cap.

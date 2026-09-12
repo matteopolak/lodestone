@@ -13,7 +13,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use lodestone_core::State;
-use lodestone_model::{ResourceKey, Rotation, Vec3};
+use lodestone_model::{EntityNetworkId, ResourceKey, Rotation, Vec3};
 use lodestone_net::Connection;
 use lodestone_server::{
     ChunkColumn, ChunkSource, EntityMutation, EntityMutationResult, EntityObservation,
@@ -181,12 +181,13 @@ async fn typed_mutations_use_authoritative_stores_and_reach_protocol_egress() {
         nudge(&mut client).await;
     }
 
-    let player_id = players
+    let player_wire_id = players
         .candidates()
         .into_iter()
         .next()
         .expect("the joined player must be registered")
         .entity_id;
+    let player_id = EntityNetworkId::from_wire(player_wire_id).expect("player id is a wire id");
     let EntityObservation { uuid, .. } = api.observe(player_id).expect("player observation");
     assert_eq!(
         api.mutate(
@@ -198,7 +199,14 @@ async fn typed_mutations_use_authoritative_stores_and_reach_protocol_egress() {
         ),
         EntityMutationResult::Applied
     );
-    assert_eq!(players.candidates().into_iter().find(|p| p.uuid == uuid).map(|p| p.entity_id), Some(player_id));
+    assert_eq!(
+        players
+            .candidates()
+            .into_iter()
+            .find(|p| p.uuid == uuid)
+            .map(|p| EntityNetworkId::from_wire(p.entity_id).expect("player id is a wire id")),
+        Some(player_id)
+    );
     let teleport_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while seen.teleports.lock().expect("teleport witness lock").is_empty() {
         assert!(tokio::time::Instant::now() < teleport_deadline, "player teleport never reached protocol egress");
@@ -213,6 +221,20 @@ async fn typed_mutations_use_authoritative_stores_and_reach_protocol_egress() {
         nudge(&mut client).await;
     }
 
-    assert_eq!(api.mutate(i32::MAX, EntityMutation::Despawn), EntityMutationResult::UnknownEntity);
+    assert_eq!(
+        api.mutate(
+            EntityNetworkId::from_wire(i32::MAX).expect("max wire id"),
+            EntityMutation::Despawn,
+        ),
+        EntityMutationResult::UnknownEntity
+    );
+    assert_eq!(
+        api.mutate(
+            EntityNetworkId::plugin(-1).expect("plugin id"),
+            EntityMutation::Despawn,
+        ),
+        EntityMutationResult::UnknownEntity,
+        "a plugin-owned id must not enter the server-owned stores"
+    );
     server.shutdown().await;
 }

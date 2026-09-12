@@ -93,6 +93,39 @@ where
     Task::Thread(Some(thread))
 }
 
+/// Runs one finite, CPU-bound world-generation operation without occupying the
+/// async runtime's worker.
+///
+/// Native callers use the process-wide world-generation dispatcher rather than
+/// Tokio's blocking pool. The dispatcher keeps generation within the shared
+/// Rayon budget and returns its result through a Tokio oneshot, which also wakes
+/// a current-thread runtime reliably after the worker has returned. Browser
+/// callers have no native worker pool, so the same operation runs inline; the
+/// browser-facing generation paths that can process several columns use their
+/// own per-column task yield instead.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn spawn_worldgen<F, T>(job: F) -> T
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    crate::worldgen_dispatch::spawn(job)
+        .await
+        .await
+        .expect("worldgen worker panicked")
+}
+
+/// Browser counterpart of [`spawn_worldgen`]. There is no native worker pool
+/// on `wasm32`; callers that need to remain responsive must yield between
+/// separate operations rather than trying to create a blocking task here.
+#[cfg(target_arch = "wasm32")]
+pub(crate) async fn spawn_worldgen<F, T>(job: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    job()
+}
+
 /// A handle to a spawned server task, owned by
 /// [`IntegratedServer`](crate::IntegratedServer).
 ///
@@ -123,4 +156,30 @@ where
 {
     wasm_bindgen_futures::spawn_local(fut);
     Task
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use super::spawn_worldgen;
+
+    /// The result handoff must wake a current-thread runtime after the native
+    /// worker has returned. A direct `spawn_blocking` call in this path is the
+    /// failure shape this wrapper prevents from becoming a join stall.
+    #[tokio::test(flavor = "current_thread")]
+    async fn worldgen_result_is_observed_after_worker_return() {
+        let returned = Arc::new(AtomicBool::new(false));
+        let worker_returned = Arc::clone(&returned);
+
+        let result = spawn_worldgen(move || {
+            worker_returned.store(true, Ordering::Release);
+            7_u8
+        })
+        .await;
+
+        assert!(returned.load(Ordering::Acquire));
+        assert_eq!(result, 7);
+    }
 }

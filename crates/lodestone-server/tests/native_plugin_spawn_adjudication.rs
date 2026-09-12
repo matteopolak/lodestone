@@ -3,7 +3,7 @@
 
 use bevy_app::{App, Plugin};
 use bevy_ecs::message::MessageReader;
-use bevy_ecs::prelude::ResMut;
+use bevy_ecs::prelude::{Res, ResMut, Resource};
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use lodestone_core::State;
 use lodestone_data::block_states::StateId;
@@ -112,18 +112,28 @@ impl Plugin for SpawnPolicy {
     }
 }
 
-struct BlockPolicy;
+#[derive(Resource, Clone)]
+struct ObservedBlockRead(std::sync::Arc<Mutex<Option<StateId>>>);
+
+struct BlockPolicy {
+    observed: std::sync::Arc<Mutex<Option<StateId>>>,
+}
 
 impl Plugin for BlockPolicy {
     fn build(&self, app: &mut App) {
+        app.insert_resource(ObservedBlockRead(self.observed.clone()));
         app.add_systems(GameTick, decide_blocks.in_set(TickSet::Adjudicate));
     }
 }
 
 fn decide_blocks(
+    snapshot: Res<lodestone_server::ecs::ServerWorldSnapshot>,
+    observed: Res<ObservedBlockRead>,
     mut proposals: MessageReader<ServerProposal>,
     mut decisions: ResMut<ServerProposalDecisions>,
 ) {
+    let value = snapshot.read_block(BlockPos::new(2, 4, 3));
+    *observed.0.lock().expect("observation lock") = value;
     for proposal in proposals.read() {
         match &proposal.action {
             ServerProposalAction::SetResidentBlock { pos, .. } if pos.x == 1 => {
@@ -257,8 +267,11 @@ async fn native_plugins_deny_or_prioritize_replacement_before_integrated_spawn()
 /// retained source, not merely resolve a verdict in an isolated ECS app.
 #[tokio::test]
 async fn native_plugin_block_mutations_are_adjudicated_then_reach_the_authoritative_source() {
+    let observed = std::sync::Arc::new(Mutex::new(None));
     let server_app = ServerApp::bootstrap_with(|app| {
-        app.add_plugins(BlockPolicy);
+        app.add_plugins(BlockPolicy {
+            observed: observed.clone(),
+        });
     });
     let (server, client) = IntegratedServer::open_in_memory_with_mobs_and_server_app(
         SilentProtocol,
@@ -279,6 +292,11 @@ async fn native_plugin_block_mutations_are_adjudicated_then_reach_the_authoritat
         server.resident_block_state_id(1, 4, 3),
         Some(state("minecraft:air")),
         "a denied proposal must leave the authoritative source unchanged"
+    );
+    assert_eq!(
+        *observed.lock().expect("observation lock"),
+        Some(state("minecraft:air")),
+        "the native plugin must read the same resident source through its bounded snapshot"
     );
 
     server

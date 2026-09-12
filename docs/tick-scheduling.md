@@ -34,10 +34,11 @@ collected before any callback runs — so a tick scheduled while processing this
 itself run in the same batch. A second schedule for a position/kind pair already pending is a silent
 no-op, matching vanilla's dedup behavior for the same case.
 
-The live block and fluid queues use `ScheduledTickKind` variants. The family-level `TICK_*` names
-remain the canonical names at the persistence and legacy-fixture boundary, and the typed parser is
-the only place that translates those names back into built-in variants; new producers should
-schedule the typed key directly. The connection feed carries that key without a text conversion.
+The live block queue uses `ScheduledTickKind` variants. The family-level `TICK_*` names remain the
+canonical names at the persistence and legacy-fixture boundary, and the typed parser is the only
+place that translates those names back into built-in variants; new producers should schedule the
+typed key directly. The fluid queue is still string-keyed because it is an explicit compatibility
+lane, not part of the block queue's typed dispatch.
 
 Both halves are physically partitioned by chunk column. `ChunkScheduledTickQueue` routes each tick to
 the column that owns its position, while its outer owner assigns one shared insertion sequence and
@@ -68,6 +69,12 @@ Later edits use the ordinary placement/neighbor scheduling path. The tick-area l
 columns have been admitted, so a moving player does not repeatedly rescan or requeue an ocean. The
 fluid environment is selected from the loop's dimension: Nether lava keeps its faster drop-off and
 delay, while overworld and End use the regular rules with each source's actual build-height extent.
+
+The live drain is resident-only. Before a block or fluid callback enters a world-coordinate probe,
+the tick loop admits the required column footprint from retained snapshots; a cold or busy footprint
+puts the due record back at its original trigger tick. Mob, block-entity, lightning, and falling-block
+handoffs use the same retry boundary, so a streaming handoff can delay visible work but cannot make it
+disappear or synchronously start generation on the clock thread.
 
 ### Neighbor-update propagation
 
@@ -148,8 +155,8 @@ after this repo's own history of a real timeout being misdiagnosed from a mean t
 window that mattered. The tick loop is split into a small number of coarse phases at boundaries
 chosen specifically to avoid adding a timing checkpoint inside the one region that already holds the
 scheduled-tick lock across a large span of code — only one phase covers that whole region, since it
-is also the only phase that can trigger a real chunk generation mid-tick and is therefore the one
-most likely to show a real stall. World generation is profiled per internal stage (shape, carving,
+contains the resident-gated cross-column work most likely to expose a stall if a future caller
+accidentally bypasses the boundary. World generation is profiled per internal stage (shape, carving,
 ore placement, vegetation, and so on) as percentiles across a batch of columns, bypassing the
 generator's own internal caches so every profiled column pays its full, uncached cost rather than
 some columns landing on a cache hit that makes a stage look artificially cheap. Both instruments are

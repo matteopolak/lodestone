@@ -39,14 +39,15 @@
 //! two vertical cases short-circuit before the cursor is read, which is why
 //! [`upper_half`] can use `cursor.y` directly.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use lodestone_data::block_states::{self, BlockStateValue};
 use lodestone_model::{BlockFace, BlockPos, Vec3f};
 
+use crate::chunk::is_air_or_fluid;
 use crate::neighbor_update::Direction;
-use crate::redstone::{base_name, direction_to_str, get_str_property, WorldState};
+use crate::redstone::{base_name, direction_to_str, get_str_property, with_property, WorldState};
 
 /// Everything a placement decision can read: where it landed, how it was
 /// clicked, and where the player was looking.
@@ -65,8 +66,9 @@ pub(crate) struct PlaceContext {
     /// Whether the player is holding the secondary-use (sneak) input.
     ///
     /// A sneaking right-click deliberately bypasses a container's own use so
-    /// a block can be placed against its side. It also suppresses chest
-    /// pairing: the player can place a single chest beside an existing chest.
+    /// a block can be placed against its side. It suppresses ordinary chest
+    /// pairing, while retaining the side-click arrangement used to choose a
+    /// compatible half beside an existing single chest.
     pub sneaking: bool,
 }
 
@@ -77,6 +79,106 @@ pub(crate) struct PlaceContext {
 pub(crate) struct Placement {
     pub state: BlockStateValue,
     pub extra: Vec<(BlockPos, BlockStateValue)>,
+}
+
+/// Adds the fluid state that belongs to every cell owned by a placement.
+///
+/// A placement state is intentionally assembled as a partial property string:
+/// the block-state resolver fills registered defaults at the numeric boundary.
+/// Waterlogging is different because it is read from the world at each owned
+/// position, so it must be written before the state reaches storage. The source
+/// check also keeps a flowing cell from being mistaken for a placeable water
+/// source.
+pub(crate) fn apply_waterlogging<F>(mut placement: Placement, primary: BlockPos, block_at: F) -> Placement
+where
+    F: Fn(BlockPos) -> WorldState,
+{
+    let add = |pos: BlockPos, state: BlockStateValue| {
+        let Some(id) = state.state_id() else {
+            return state;
+        };
+        let waterloggable = id
+            .properties()
+            .iter()
+            .any(|&(key, _)| key == "waterlogged");
+        if !waterloggable {
+            return state;
+        }
+        let waterlogged = crate::fluid::fluid_state_of(&block_at(pos))
+            .is_some_and(|fluid| fluid.kind == crate::fluid::FluidKind::Water && fluid.is_source());
+        BlockStateValue::parse(&with_property(
+            state.as_str(),
+            "waterlogged",
+            if waterlogged { "true" } else { "false" },
+        ))
+    };
+
+    placement.state = add(primary, placement.state);
+    placement.extra = placement
+        .extra
+        .into_iter()
+        .map(|(pos, state)| (pos, add(pos, state)))
+        .collect();
+    placement
+}
+
+/// Validates every cell a placement would own before any one of them is
+/// mutated. The world callback is read again through a hypothetical view that
+/// includes all planned states, which makes a two-cell block's partner check
+/// atomic instead of dependent on write order.
+pub(crate) fn validate_placement<F>(
+    placement: &Placement,
+    primary: BlockPos,
+    primary_replaceable: bool,
+    block_at: F,
+) -> bool
+where
+    F: Fn(BlockPos) -> WorldState,
+{
+    let mut planned = HashMap::with_capacity(placement.extra.len() + 1);
+    if planned.insert(primary, &placement.state).is_some() {
+        return false;
+    }
+
+    if !primary_replaceable {
+        return false;
+    }
+
+    let mut occupied = HashSet::with_capacity(placement.extra.len() + 1);
+    occupied.insert(primary);
+    for (pos, state) in &placement.extra {
+        if !occupied.insert(*pos) {
+            return false;
+        }
+        let current = block_at(*pos);
+        if !is_air_or_fluid(&current) && !can_retype_container(&current, state.as_str()) {
+            return false;
+        }
+        planned.insert(*pos, state);
+    }
+
+    let hypothetical = |pos: BlockPos| {
+        planned
+            .get(&pos)
+            .map(|state| WorldState::from(state.as_str()))
+            .unwrap_or_else(|| block_at(pos))
+    };
+    planned
+        .iter()
+        .all(|(pos, state)| crate::block_support::survives(*pos, state.as_str(), hypothetical))
+}
+
+/// A paired container is the one intentional exception to the usual
+/// replaceable-cell rule: its existing single half is re-typed as the other
+/// half of the new arrangement. No other occupied cell may be overwritten by
+/// a multi-cell placement.
+fn can_retype_container(existing: &str, replacement: &str) -> bool {
+    base_name(existing) == base_name(replacement)
+        && get_str_property(existing, "type") == Some("single")
+        && matches!(
+            get_str_property(replacement, "type"),
+            Some("left" | "right")
+        )
 }
 
 impl Placement {
@@ -177,6 +279,30 @@ where
             vec![(
                 facing.relative(ctx.target),
                 format!("{block}[facing={},part=head]", direction_to_str(facing)),
+            )],
+        ));
+    }
+
+    if block == "minecraft:small_dripleaf" {
+        let facing = horizontal_look(ctx)?.opposite();
+        let facing = direction_to_str(facing);
+        return Some(Placement::with_extra(
+            format!("{block}[facing={facing},half=lower]"),
+            vec![
+                (
+                    Direction::Up.relative(ctx.target),
+                    format!("{block}[facing={facing},half=upper]"),
+                ),
+            ],
+        ));
+    }
+
+    if DOUBLE_CELL_PLANTS.contains(&block) {
+        return Some(Placement::with_extra(
+            format!("{block}[half=lower]"),
+            vec![(
+                Direction::Up.relative(ctx.target),
+                format!("{block}[half=upper]"),
             )],
         ));
     }
@@ -506,41 +632,90 @@ fn chest_state<F>(block: &str, ctx: &PlaceContext, block_at: &F) -> Option<Place
 where
     F: Fn(BlockPos) -> WorldState,
 {
-    let facing = horizontal_look(ctx)?.opposite();
-    // `candidatePartnerFacing`: a same-block, still-single chest one step over.
-    // Secondary use intentionally skips this scan: it is the control that lets
-    // a player place a single chest beside an existing container.
-    if ctx.sneaking {
-        return Some(Placement::just(format!(
-            "{block}[facing={},type=single]",
-            direction_to_str(facing)
-        )));
+    let mut facing = horizontal_look(ctx)?.opposite();
+    let mut kind = "single";
+    let mut partner_pos: Option<(BlockPos, &str)> = None;
+
+    // A side click while secondary-use is active can deliberately line up a
+    // new half with an existing single container behind the clicked face. A
+    // top or bottom click has no such arrangement and remains a single chest.
+    if ctx.sneaking
+        && let Some(clicked_face) = horizontal_face(ctx.face)
+        && let Some((candidate_pos, candidate_facing)) =
+            candidate_partner(block, ctx.target, clicked_face.opposite(), block_at)
+        && !same_axis(candidate_facing, clicked_face)
+    {
+        facing = candidate_facing;
+        kind = if facing.counterclockwise() == clicked_face.opposite() {
+            "right"
+        } else {
+            "left"
+        };
+        partner_pos = Some((candidate_pos, if kind == "left" { "right" } else { "left" }));
     }
-    let partner = |side: Direction| -> Option<(BlockPos, Direction)> {
-        let p = side.relative(ctx.target);
-        let state = block_at(p);
-        if base_name(&state) != block || get_str_property(&state, "type") != Some("single") {
-            return None;
+
+    // Ordinary use scans both sides for a same-facing single container. Sneak
+    // use intentionally skips this ordinary pairing scan.
+    if kind == "single" && !ctx.sneaking {
+        let partner = |side: Direction| -> Option<(BlockPos, Direction)> {
+            let p = side.relative(ctx.target);
+            let state = block_at(p);
+            if base_name(&state) != block || get_str_property(&state, "type") != Some("single") {
+                return None;
+            }
+            let f = crate::redstone::direction_from_str(get_str_property(&state, "facing")?);
+            (f == facing).then_some((p, side))
+        };
+        match partner(facing.clockwise()) {
+            Some((p, _)) => {
+                kind = "left";
+                partner_pos = Some((p, "right"));
+            }
+            None => {
+                if let Some((p, _)) = partner(facing.counterclockwise()) {
+                    kind = "right";
+                    partner_pos = Some((p, "left"));
+                }
+            }
         }
-        let f = crate::redstone::direction_from_str(get_str_property(&state, "facing")?);
-        (f == facing).then_some((p, side))
-    };
+    }
+
     let facing_str = direction_to_str(facing);
-    let (kind, partner_kind, partner_pos) = match partner(facing.clockwise()) {
-        Some((p, _)) => ("left", "right", Some(p)),
-        None => match partner(facing.counterclockwise()) {
-            Some((p, _)) => ("right", "left", Some(p)),
-            None => ("single", "single", None),
-        },
-    };
     let mut extra = Vec::new();
-    if let Some(p) = partner_pos {
+    if let Some((p, partner_kind)) = partner_pos {
         extra.push((p, format!("{block}[facing={facing_str},type={partner_kind}]")));
     }
     Some(Placement::with_extra(
         format!("{block}[facing={facing_str},type={kind}]"),
         extra,
     ))
+}
+
+fn candidate_partner<F>(
+    block: &str,
+    pos: BlockPos,
+    side: Direction,
+    block_at: &F,
+) -> Option<(BlockPos, Direction)>
+where
+    F: Fn(BlockPos) -> WorldState,
+{
+    let partner_pos = side.relative(pos);
+    let state = block_at(partner_pos);
+    if base_name(&state) != block || get_str_property(&state, "type") != Some("single") {
+        return None;
+    }
+    let facing = crate::redstone::direction_from_str(get_str_property(&state, "facing")?);
+    Some((partner_pos, facing))
+}
+
+fn same_axis(a: Direction, b: Direction) -> bool {
+    matches!(
+        (a, b),
+        (Direction::North | Direction::South, Direction::North | Direction::South)
+            | (Direction::East | Direction::West, Direction::East | Direction::West)
+            | (Direction::Up | Direction::Down, Direction::Up | Direction::Down)
+    )
 }
 
 /// The upper/lower-half decision every `Half`-bearing block shares —
@@ -652,6 +827,18 @@ fn wall_variant(block: &str, face: BlockFace) -> Option<&'static str> {
     }
     None
 }
+
+/// Two-cell vegetation shares the `half=lower|upper` state shape but cannot be
+/// separated from ordinary half-bearing blocks by the census alone.
+const DOUBLE_CELL_PLANTS: &[&str] = &[
+    "minecraft:large_fern",
+    "minecraft:lilac",
+    "minecraft:peony",
+    "minecraft:pitcher_plant",
+    "minecraft:rose_bush",
+    "minecraft:sunflower",
+    "minecraft:tall_grass",
+];
 
 /// Which placement family a block belongs to, read off the block-state census.
 #[derive(Debug, Clone, Copy, Default)]
@@ -916,6 +1103,17 @@ mod tests {
                 BlockStateValue::parse("minecraft:red_bed[facing=north,part=head]")
             )]
         );
+
+        let dripleaf = placement(
+            "minecraft:small_dripleaf",
+            &ctx(BlockFace::Up, 0.0, 0.0),
+            air,
+        )
+        .unwrap();
+        assert_eq!(dripleaf.extra.len(), 1);
+        assert!(dripleaf.state.contains("half=lower"), "{}", dripleaf.state);
+        assert!(dripleaf.state.contains("facing=north"), "{}", dripleaf.state);
+        assert!(dripleaf.extra[0].1.contains("half=upper"), "{}", dripleaf.extra[0].1);
     }
 
     /// A chest placed beside a single chest of the same facing pairs, and the
@@ -958,6 +1156,133 @@ mod tests {
         let placed = placement("minecraft:chest", &sneaking, neighbour).unwrap();
         assert_eq!(placed.state, "minecraft:chest[facing=south,type=single]");
         assert!(placed.extra.is_empty(), "sneak placement must not re-type its neighbour");
+    }
+
+    #[test]
+    fn a_sneak_side_click_uses_the_perpendicular_single_container() {
+        // The clicked face is north. The candidate searched behind the target
+        // is south-facing, so the side click selects the compatible right half.
+        let target = BlockPos::new(0, 64, 0);
+        let candidate = BlockPos::new(0, 64, 1);
+        let neighbour = move |p: BlockPos| {
+            if p == candidate {
+                WorldState::from("minecraft:chest[facing=east,type=single]")
+            } else {
+                WorldState::from("minecraft:air")
+            }
+        };
+        let mut sneaking = PlaceContext {
+            target,
+            face: BlockFace::North,
+            cursor: Vec3f { x: 0.5, y: 0.5, z: 0.5 },
+            yaw: Some(180.0),
+            pitch: Some(0.0),
+            sneaking: true,
+        };
+        let placed = placement("minecraft:chest", &sneaking, neighbour).unwrap();
+        assert_eq!(placed.state, "minecraft:chest[facing=east,type=right]");
+        assert_eq!(placed.extra.len(), 1);
+        assert_eq!(placed.extra[0].0, candidate);
+        assert_eq!(placed.extra[0].1, "minecraft:chest[facing=east,type=left]");
+
+        // The ordinary top-face path remains the single-chest control above.
+        sneaking.face = BlockFace::Up;
+        let ordinary = placement("minecraft:chest", &sneaking, neighbour).unwrap();
+        assert_eq!(ordinary.state, "minecraft:chest[facing=south,type=single]");
+        assert!(ordinary.extra.is_empty());
+    }
+
+    #[test]
+    fn waterlogging_is_derived_per_owned_cell_and_flowing_water_is_rejected() {
+        let target = BlockPos::new(0, 64, 0);
+        let mut context = ctx(BlockFace::Up, 0.0, 180.0);
+        let wet = placement("minecraft:oak_slab", &context, |pos| {
+            if pos == target {
+                WorldState::from("minecraft:water[level=0]")
+            } else {
+                WorldState::from("minecraft:air")
+            }
+        })
+        .unwrap();
+        let wet = apply_waterlogging(wet, target, |pos| {
+            if pos == target {
+                WorldState::from("minecraft:water[level=0]")
+            } else {
+                WorldState::from("minecraft:air")
+            }
+        });
+        assert_eq!(wet.state, "minecraft:oak_slab[type=bottom,waterlogged=true]");
+
+        context.target = BlockPos::new(1, 64, 0);
+        let flowing = placement("minecraft:oak_slab", &context, |pos| {
+            if pos == context.target {
+                WorldState::from("minecraft:water[level=1]")
+            } else {
+                WorldState::from("minecraft:air")
+            }
+        })
+        .unwrap();
+        let flowing = apply_waterlogging(flowing, context.target, |pos| {
+            if pos == context.target {
+                WorldState::from("minecraft:water[level=1]")
+            } else {
+                WorldState::from("minecraft:air")
+            }
+        });
+        assert_eq!(flowing.state, "minecraft:oak_slab[type=bottom,waterlogged=false]");
+
+        let multi = placement(
+            "minecraft:small_dripleaf",
+            &ctx(BlockFace::Up, 0.0, 0.0),
+            air,
+        )
+        .unwrap();
+        let multi = apply_waterlogging(multi, target, |pos| {
+            if pos.y == target.y + 1 {
+                WorldState::from("minecraft:water[level=0]")
+            } else {
+                WorldState::from("minecraft:air")
+            }
+        });
+        assert!(multi.state.as_str().contains("waterlogged=false"));
+        assert!(multi.extra[0].1.as_str().contains("waterlogged=true"));
+    }
+
+    #[test]
+    fn validation_is_atomic_for_support_and_every_extra_cell() {
+        let target = BlockPos::new(0, 64, 0);
+        let upper = BlockPos::new(0, 65, 0);
+        let door = placement("minecraft:oak_door", &ctx(BlockFace::Up, 0.0, 180.0), |pos| {
+            if pos == BlockPos::new(0, 63, 0) {
+                WorldState::from("minecraft:stone")
+            } else {
+                WorldState::from("minecraft:air")
+            }
+        })
+        .unwrap();
+        assert!(validate_placement(&door, target, true, |pos| {
+            if pos == BlockPos::new(0, 63, 0) {
+                WorldState::from("minecraft:stone")
+            } else {
+                WorldState::from("minecraft:air")
+            }
+        }));
+        assert!(!validate_placement(&door, target, true, |pos| {
+            if pos == upper {
+                WorldState::from("minecraft:stone")
+            } else if pos == BlockPos::new(0, 63, 0) {
+                WorldState::from("minecraft:stone")
+            } else {
+                WorldState::from("minecraft:air")
+            }
+        }));
+        assert!(!validate_placement(&door, target, true, |pos| {
+            if pos == BlockPos::new(0, 63, 0) {
+                WorldState::from("minecraft:air")
+            } else {
+                WorldState::from("minecraft:air")
+            }
+        }));
     }
 
     /// Pillars still take their axis from the clicked face, with no yaw at all.

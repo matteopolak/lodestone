@@ -6,13 +6,15 @@
 //! [`crate::PlayerRegistry`], and it also implements [`crate::EntitySource`]
 //! so the same handles can be passed directly to a serving constructor.
 //!
-//! The API intentionally keeps the existing network id representation at its
-//! boundary. A future canonical id wrapper can replace that field without
-//! changing the operation or observation shapes.
+//! The API uses [`lodestone_model::EntityNetworkId`] for every plugin-facing
+//! entity reference. Raw integers remain at the mob/player stores and at the
+//! [`crate::EntitySource`] protocol boundary; callers crossing in from those
+//! surfaces must classify a wire id explicitly with
+//! [`lodestone_model::EntityNetworkId::from_wire`].
 
 use std::collections::HashMap;
 
-use lodestone_model::{EntityEquipment, ResourceKey, Rotation, Vec3};
+use lodestone_model::{EntityEquipment, EntityNetworkId, ResourceKey, Rotation, Vec3};
 use uuid::Uuid;
 
 use crate::commands::Effect;
@@ -25,7 +27,7 @@ use crate::server::EntitySource;
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntityObservation {
     /// The entity's network id within this server session.
-    pub id: i32,
+    pub id: EntityNetworkId,
     /// The entity's stable identity.
     pub uuid: Uuid,
     /// The canonical entity type.
@@ -66,7 +68,7 @@ pub enum EntityLifecycleEvent {
 /// deliberately do not create an unbounded event log here.
 #[derive(Debug, Default)]
 pub struct EntityLifecycleCursor {
-    known: HashMap<i32, EntityObservation>,
+    known: HashMap<EntityNetworkId, EntityObservation>,
 }
 
 impl EntityLifecycleCursor {
@@ -159,9 +161,10 @@ impl ServerEntityApi {
     /// Copy the requested entity's current identity, motion and health fields.
     /// No lock guard or internal entity reference escapes this call.
     #[must_use]
-    pub fn observe(&self, id: i32) -> Option<EntityObservation> {
+    pub fn observe(&self, id: EntityNetworkId) -> Option<EntityObservation> {
+        let raw_id = server_entity_raw(id)?;
         if let Some(observation) = self.mobs.with(|sim| {
-            sim.get(id).map(|mob| EntityObservation {
+            sim.get(raw_id).map(|mob| EntityObservation {
                 id,
                 uuid: mob.uuid(),
                 entity_type: mob.entity_type().clone(),
@@ -179,9 +182,9 @@ impl ServerEntityApi {
         self.players
             .candidates()
             .into_iter()
-            .find(|player| player.entity_id == id)
+            .find(|player| player.entity_id == raw_id)
             .map(|player| EntityObservation {
-                id,
+                id: server_entity_id(raw_id),
                 uuid: player.uuid,
                 entity_type: "minecraft:player"
                     .parse()
@@ -208,7 +211,7 @@ impl ServerEntityApi {
             .with(|sim| {
                 sim.iter()
                     .map(|mob| EntityObservation {
-                        id: mob.id(),
+                        id: server_entity_id(mob.id()),
                         uuid: mob.uuid(),
                         entity_type: mob.entity_type().clone(),
                         position: mob.position(),
@@ -222,7 +225,7 @@ impl ServerEntityApi {
             });
         observations.extend(self.players.candidates().into_iter().map(|player| {
             EntityObservation {
-                id: player.entity_id,
+                id: server_entity_id(player.entity_id),
                 uuid: player.uuid,
                 entity_type: "minecraft:player"
                     .parse()
@@ -245,7 +248,10 @@ impl ServerEntityApi {
     /// Apply one typed operation against the authoritative mob or player store.
     /// Player-facing operations are queued rather than run under a foreign
     /// connection borrow; the owning connection then emits the protocol frame.
-    pub fn mutate(&self, id: i32, mutation: EntityMutation) -> EntityMutationResult {
+    pub fn mutate(&self, id: EntityNetworkId, mutation: EntityMutation) -> EntityMutationResult {
+        let Some(id) = server_entity_raw(id) else {
+            return EntityMutationResult::UnknownEntity;
+        };
         let player_exists = self.player_exists(id);
         match mutation {
             EntityMutation::ApplyKnockback(impulse) => self.mobs.with(|sim| {
@@ -333,9 +339,8 @@ impl ServerEntityApi {
 
     /// Spawn a mob into the same simulation the entity source streams.
     #[must_use]
-    pub fn spawn(&self, entity_type: ResourceKey, position: Vec3) -> i32 {
-        self.mobs
-            .with(|sim| sim.spawn_species(entity_type, position).id())
+    pub fn spawn(&self, entity_type: ResourceKey, position: Vec3) -> EntityNetworkId {
+        self.mobs.with(|sim| server_entity_id(sim.spawn_species(entity_type, position).id()))
     }
 
     fn player(&self, id: i32) -> Option<crate::commands::PlayerCandidate> {
@@ -352,6 +357,20 @@ impl ServerEntityApi {
     fn mob_exists(&self, id: i32) -> bool {
         self.mobs.with(|sim| sim.get(id).is_some())
     }
+}
+
+/// Converts a server-owned id at the store boundary without admitting a local
+/// plugin id or a value that cannot be represented by the server's `i32` maps.
+fn server_entity_raw(id: EntityNetworkId) -> Option<i32> {
+    match id {
+        EntityNetworkId::Server(raw) => i32::try_from(raw).ok(),
+        EntityNetworkId::Plugin(_) => None,
+    }
+}
+
+/// Classifies an id produced by the authoritative server stores.
+fn server_entity_id(raw: i32) -> EntityNetworkId {
+    EntityNetworkId::from_wire(raw).expect("server entity ids must be non-negative")
 }
 
 impl EntitySource for ServerEntityApi {

@@ -18,19 +18,24 @@ owned state, preserves a richer payload at an unchanged position, and removes a
 stale built-in record when a later write replaced the block. The resident replay
 map is not mutated by this finalization.
 
-End structure templates have the same ordering hazard for face attachments:
-template placement can report a banner entity before attachment survival turns
-the unsupported banner into air. `ChunkColumn::from_end` validates those events
-against the completed block field, and `ChunkColumn::reconcile_generated_block_entity_states`
-performs the same strict state-owner check after source sidecars and later
-feature writes. This keeps generated records for replaced blocks out of ordinary
-End columns and leaves unclaimed plugin extension records on the general
-reconciliation path. A surviving wall banner therefore retains its template
-payload in a direct End source column; the End lifecycle packet boundary
-intentionally filters those structure-owned records, so its external packet
-can carry the banner block without a banner entity. An orphaned event does not
-become an entity merely because placement reported it before the final state
-pass.
+End structure templates perform their attachment-support update after each
+piece is clipped to the receiving chunk. The shared template placer repeats
+that update until stable, so a ladder or wall-mounted block whose support lies
+outside the clipped grid is removed, while a supported control remains. The
+End-city banner events carry their patterned payload into the packet sidecar;
+the source does not synthesize a banner record from a bare state write. Any
+retained event is still validated against the completed block field by
+`ChunkColumn::from_end`, and
+`ChunkColumn::reconcile_generated_block_entity_states` performs the same
+strict state-owner check after source sidecars and later feature writes.
+
+The generated sidecar products are disjoint typed values: worldgen emits
+`EntityTypeRef` for a spawner's selected mob and `BlockEntityType` for the
+block-entity registry entry. `ChunkColumn` keeps those ids typed while it
+validates state ownership; the server converts them to `BlockEntityKind` for
+runtime records and to registry-name strings only when writing NBT or a
+protocol payload. JSON parsing is the only string-to-entity boundary in the
+worldgen parser.
 
 ## How to change it
 
@@ -38,7 +43,7 @@ Add a structure-piece family to `spawner_entity_type` when its generator emits a
 
 ## Configuration
 
-There are no environment variables or flags. Structure references and piece ids come from the world generator; entity ids are literal resource keys validated by `ResourceKey` parsing.
+There are no environment variables or flags. Structure references and piece ids come from the world generator; generated mob ids are validated `EntityTypeRef` values and generated block-entity ids are validated `BlockEntityType` values.
 
 ## Dependencies
 

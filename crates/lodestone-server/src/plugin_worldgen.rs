@@ -141,6 +141,25 @@ impl ChunkSource for PluginChunkSource {
             .or_insert_with(|| self.generate_column(cx, cz));
         column.set_block(lx, y, lz, name);
     }
+
+    fn try_store_resident_edit(
+        &self,
+        cx: i32,
+        cz: i32,
+        column: &ChunkColumn,
+    ) -> Option<crate::chunk_store::TryResidentEdit> {
+        let mut edits = match self.edits.try_lock() {
+            Ok(edits) => edits,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Some(crate::chunk_store::TryResidentEdit::Busy);
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                panic!("plugin chunk edit cache lock poisoned")
+            }
+        };
+        edits.insert((cx, cz), column.clone());
+        Some(crate::chunk_store::TryResidentEdit::Applied)
+    }
 }
 
 #[cfg(test)]

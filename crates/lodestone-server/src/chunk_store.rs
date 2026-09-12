@@ -81,6 +81,20 @@
 //!   bounded at all — `docs/plans/chunk-lifecycle.md`'s U6 needs a much more
 //!   careful rule ("refuse to drop an edited column") because *it* drops the
 //!   authoritative copy, where this only drops a cache.
+//! - **Tick access is an atomic try operation, not a residency pre-check.**
+//!   [`ChunkWriteGates`] protects the interval in which generation, light
+//!   settlement, and block mutation update a coordinate. Tick-side callers use
+//!   [`ChunkStore::try_resident_column`],
+//!   [`ChunkStore::try_resident_block_state_id`], and
+//!   [`ChunkStore::try_set_block`] to claim that gate without waiting; they get
+//!   `Busy` while a generation owns it and `Absent` for a cold coordinate.
+//!   The object-safe [`ChunkSource`] seam returns these same results inside
+//!   `Some`; `None` means a legacy source has no atomic try capability and may
+//!   keep its existing fallback. A source without a mutation-only edit ledger
+//!   returns `Unsupported`, so tick code defers rather than reporting a
+//!   cache-local edit as durable.
+//!   The older `is_column_resident` plus blocking read/write pair remains for
+//!   callers that explicitly accept loading.
 //!
 //! # The memory this costs, and how to change it
 //!
@@ -169,12 +183,16 @@
 //!
 //! # Two policies, because the ceiling is a question about whose memory it is
 //!
-//! The ceiling is **not** applied to singleplayer. `render_distance` 32 sizes the
-//! store at 4,539 columns, i.e. **139.2 MiB — measured directly** by
+//! The hosted ceiling is also used as a **bounded upper bound** for extreme
+//! singleplayer distances. `render_distance` 32 still sizes the store at 4,539
+//! columns, i.e. **139.2 MiB — measured directly** by
 //! `measure_rss_at_the_singleplayer_slider_maximum` rather than extrapolated: the
 //! packed representation uses 139.2 MiB at this capacity, versus 867 MiB for the
 //! dense representation — the memory of the person who moved the
-//! slider. Truncating the cache under a view they are already being streamed only buys
+//! slider. At the selectable 256-chunk extreme, retaining the complete
+//! 265,225-column square would be several gigabytes, so the integrated policy
+//! saturates at the measured cache ceiling and lets the join scheduler stream
+//! incrementally. Truncating the cache under a view they are already being streamed only buys
 //! them re-generation of the ground under their feet (see
 //! [`integrated_capacity_for_view_radius`] for why *innermost* rings are what a
 //! short capacity drops). A hosted server spends an operator's memory on behalf
@@ -182,7 +200,7 @@
 //!
 //! | path | constructor | policy |
 //! |---|---|---|
-//! | singleplayer (`open_in_memory*`) | `ChunkStore::for_integrated_view_radius` | uncapped, floored at [`DEFAULT_CAPACITY`] |
+//! | singleplayer (`open_in_memory*`) | `ChunkStore::for_integrated_view_radius` | bounded, floored at [`DEFAULT_CAPACITY`] and capped at [`MAX_CAPACITY`] |
 //! | open-to-LAN (`IntegratedServer::bind`) | `ChunkStore::for_view_radius` | capped at [`MAX_CAPACITY`] |
 //!
 //! Packing in `crate::chunk_blocks` reduces the per-column cost rather than the
@@ -216,7 +234,7 @@
 //! ms it removes, and it needs **zero edits to `tick.rs`** — the most
 //! contended file in this cluster, with concurrent redstone work in it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::Entry as MapEntry;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
@@ -424,8 +442,8 @@ pub const MAX_CAPACITY: usize =
 /// this derived capacity, and what `IntegratedServer::bind` (open-to-LAN) calls.
 ///
 /// Singleplayer uses [`integrated_capacity_for_view_radius`] instead, which is
-/// this derivation without the ceiling; read that function for why the fork
-/// exists.
+/// this derivation with the same measured upper bound; read that function for
+/// why the fork exists.
 ///
 /// `view_columns(view_radius) + CONCURRENT_SCAN_COLUMNS`, clamped to
 /// `DEFAULT_CAPACITY ..= MAX_CAPACITY`. Each of those three terms is load-bearing
@@ -459,18 +477,19 @@ pub const fn capacity_for_view_radius(view_radius: i32) -> usize {
     }
 }
 
-/// [`capacity_for_view_radius`] **without the [`MAX_CAPACITY`] ceiling** — the
-/// integrated (singleplayer) policy.
+/// [`capacity_for_view_radius`] with the measured [`MAX_CAPACITY`] as a
+/// bounded upper limit — the integrated (singleplayer) policy.
 ///
-/// # Why the ceiling does not apply here
+/// # Why the hosted derivation differs here
 ///
 /// A hosted server's render distance is the *operator's* budget spent on behalf
 /// of players who did not choose it, so capping it is right. Singleplayer is the
 /// opposite: the person paying for the memory is the person who moved the slider,
-/// and the slider goes to 32. Refusing to hold the view they asked for buys them
-/// nothing — the columns are streamed and meshed either way; only the *cache*
-/// under them is truncated, so the cost of the cap is re-generation of ground
-/// they are currently looking at.
+/// and the slider goes to 32. At the selectable 256-chunk extreme, retaining the
+/// complete square would make an unbounded memory commitment, so the cache
+/// saturates at [`MAX_CAPACITY`] while the wire stream continues incrementally.
+/// The cost above the measured fully-resident range is bounded re-generation,
+/// not an allocation proportional to the full view.
 ///
 /// # Memory cost by representation
 ///
@@ -510,7 +529,13 @@ pub const fn integrated_capacity_for_view_radius(view_radius: i32) -> usize {
     // nothing downstream clamps it: a wrap would produce a *tiny* capacity that
     // looks like a thrashing cache rather than like arithmetic.
     let want = view_columns(view_radius).saturating_add(CONCURRENT_SCAN_COLUMNS);
-    if want < DEFAULT_CAPACITY { DEFAULT_CAPACITY } else { want }
+    if want < DEFAULT_CAPACITY {
+        DEFAULT_CAPACITY
+    } else if want > MAX_CAPACITY {
+        MAX_CAPACITY
+    } else {
+        want
+    }
 }
 
 /// One retained column plus the stamp that orders eviction.
@@ -525,14 +550,14 @@ struct Entry {
 /// mid-session ([`ChunkStore::set_retention_radius`], the capacity policy).
 ///
 /// The store has to *remember* which of the two policies built it, because the two
-/// differ (`MAX_CAPACITY` ceiling or not) and "whose memory is this" does not
+/// differ in their floor/ceiling policy and "whose memory is this" does not
 /// change when the slider moves. A third arm is needed for the explicit-capacity
 /// constructor, which must never resize at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CapacityPolicy {
     /// [`capacity_for_view_radius`] — the hosted (open-to-LAN) ceiling applies.
     Hosted,
-    /// [`integrated_capacity_for_view_radius`] — singleplayer, uncapped.
+    /// [`integrated_capacity_for_view_radius`] — singleplayer, bounded.
     Integrated,
     /// A capacity named outright by [`ChunkStore::with_capacity`], which a radius
     /// change must **not** override.
@@ -591,13 +616,25 @@ impl Cache {
     /// from in here would call out into the source while holding this mutex,
     /// which is both a lock-ordering hazard and a way to put the source's own
     /// work on the critical section every miss pays.
-    fn evict_down_to_capacity(&mut self) -> Vec<(i32, i32)> {
+    ///
+    /// Ticket-resident entries are protected even when they are the oldest
+    /// cache entries. A periodic ticket sweep is too late for this check: a
+    /// capacity miss can happen between sweeps, and unloading a still-ticketed
+    /// column would make the next tick or packet path regenerate it. If every
+    /// entry is pinned, the cache may temporarily exceed its soft capacity;
+    /// preserving the ticket invariant is more important than dropping the
+    /// authoritative resident value.
+    fn evict_down_to_capacity(
+        &mut self,
+        ticket_resident: &HashSet<(i32, i32)>,
+    ) -> Vec<(i32, i32)> {
         let capacity = self.capacity;
         let mut evicted = Vec::new();
         while self.columns.len() > capacity {
             let Some(victim) = self
                 .columns
                 .iter()
+                .filter(|(key, _)| !ticket_resident.contains(*key))
                 .min_by_key(|(_, entry)| entry.last_used)
                 .map(|(&key, _)| key)
             else {
@@ -636,24 +673,49 @@ struct ChunkWriteSnapshot {
     observations: Vec<ChunkWriteObservation>,
 }
 
+/// The result of a resident-only read attempt.
+///
+/// `Busy` is distinct from `Absent`: a coordinate can be resident immediately
+/// before a generation or mutation claims its write gate, and a caller that
+/// observes only `Option` would re-check the cache and then fall through to a
+/// blocking `column`/`set_block` call. Tick code uses this three-way result to
+/// defer either case without entering generation.
 #[derive(Debug, PartialEq, Eq)]
 pub enum TryResident<T> {
+    /// A writer owns one of the coordinate gates (or the short cache lock was
+    /// unavailable), so the caller should retry later.
     Busy,
+    /// No complete resident snapshot exists at the requested coordinate.
     Absent,
+    /// A resident snapshot was captured while the coordinate gate was held.
     Present(T),
 }
 
+/// The result of attempting to retain a block-edit snapshot in a source's
+/// mutation-only edit ledger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TryResidentEdit {
+    /// The source's edit ledger is contended; no source or cache state changed.
     Busy,
+    /// The source retained this exact post-edit snapshot durably.
     Applied,
 }
 
+/// The result of a resident-only block mutation attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TryBlockMutation {
+    /// A generation, light settlement, or other write currently owns the
+    /// target footprint. No state was changed.
     Busy,
+    /// The target is resident, but its source has no nonblocking edit ledger.
+    /// No state was changed; the caller may defer to the ordinary blocking
+    /// mutation path when that is acceptable.
     Unsupported,
+    /// The target column is not resident (or the requested `y` is outside its
+    /// height). No state was changed and no generation was started.
     Absent,
+    /// The resident cache and the source's mutation-only edit ledger both
+    /// accepted the same post-edit snapshot.
     Applied,
 }
 
@@ -755,6 +817,53 @@ impl ChunkWriteGates {
                 bump_revision,
             };
         }
+    }
+
+    /// Attempts to claim one or more coordinate gates without waiting.
+    ///
+    /// The canonical set is checked and claimed while the gate-table mutex is
+    /// held, so a caller gets an all-or-nothing answer: it cannot observe a
+    /// resident column and then race a generation that claims the same
+    /// coordinate before the snapshot is taken. `None` means at least one
+    /// coordinate is currently held; no condition-variable wait or generation
+    /// is performed.
+    fn try_acquire_many<'a>(
+        &'a self,
+        chunks: &[(i32, i32)],
+        bump_revision: bool,
+    ) -> Option<ChunkWriteLease<'a>> {
+        let mut canonical = chunks.to_vec();
+        canonical.sort_unstable();
+        canonical.dedup();
+        let mut state = self
+            .state
+            .lock()
+            .expect("chunk write-gate table poisoned");
+        state.retain(|_, gate| gate.strong_count() != 0);
+        let records = canonical
+            .iter()
+            .map(|&chunk| (chunk, Self::state_for_locked(&mut state, chunk)))
+            .collect::<Vec<_>>();
+        if records
+            .iter()
+            .any(|(_, record)| record.held.load(Ordering::Acquire))
+        {
+            return None;
+        }
+        let states = records
+            .into_iter()
+            .map(|(_, record)| record)
+            .collect::<Vec<_>>();
+        for record in &states {
+            record.held.store(true, Ordering::Release);
+        }
+        drop(state);
+        Some(ChunkWriteLease {
+            gates: self,
+            coordinates: canonical,
+            states,
+            bump_revision,
+        })
     }
 
     /// Runs one same-coordinate cache/source write while holding its gate.
@@ -971,6 +1080,20 @@ impl<S> ChunkStore<S> {
         self.lock().columns.len()
     }
 
+    /// Sum of the packed block buffers retained in the cache.
+    ///
+    /// This deliberately excludes palettes and map overhead: it is a stable
+    /// lower-bound counter for comparing retention regimes without turning a
+    /// measurement helper into a second memory model.
+    #[cfg(test)]
+    pub(crate) fn retained_blocks_heap_bytes(&self) -> usize {
+        self.lock()
+            .columns
+            .values()
+            .map(|entry| entry.column.blocks_heap_bytes())
+            .sum()
+    }
+
     /// The store's **current** eviction bound. [`set_retention_radius`](Self::set_retention_radius)
     /// can move it after construction.
     #[cfg(test)]
@@ -1102,7 +1225,26 @@ impl<S: ChunkSource> ChunkStore<S> {
                 });
             }
         }
-        let evicted = cache.evict_down_to_capacity();
+        let needs_eviction = cache.columns.len() > cache.capacity;
+        drop(guard);
+
+        // Snapshot ticket residency only when this insertion actually crossed
+        // the bound. The common hit/miss path below capacity must not allocate
+        // a full propagated-ticket set for every generated column.
+        let ticket_resident = needs_eviction
+            .then(|| {
+                self.tickets
+                    .resident_positions()
+                    .into_iter()
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
+        let mut guard = self.lock();
+        let evicted = if guard.columns.len() > guard.capacity {
+            guard.evict_down_to_capacity(&ticket_resident)
+        } else {
+            Vec::new()
+        };
         drop(guard);
         drop(gate);
         // Outside the lock, deliberately: see `evict_down_to`. This is what
@@ -1132,6 +1274,35 @@ impl<S: ChunkSource> ChunkStore<S> {
         let entry = cache.columns.get_mut(&(cx, cz))?;
         entry.last_used = stamp;
         Some(f(&entry.column))
+    }
+
+    /// Reads one cache entry without waiting for the cache mutex.
+    ///
+    /// Resident-only tick access already owns the coordinate write gate, which
+    /// closes the important generation race. `try_lock` also keeps the helper
+    /// honest if a short eviction or mutation is holding the cache mutex: the
+    /// caller gets `Busy` rather than turning a supposedly nonblocking probe
+    /// into an unbounded wait.
+    fn try_read<R>(
+        &self,
+        cx: i32,
+        cz: i32,
+        f: impl FnOnce(&ChunkColumn) -> R,
+    ) -> Result<Option<R>, ()> {
+        let mut guard = match self.cache.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::WouldBlock) => return Err(()),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                panic!("chunk store lock poisoned")
+            }
+        };
+        let cache = &mut *guard;
+        let stamp = cache.next_stamp();
+        let Some(entry) = cache.columns.get_mut(&(cx, cz)) else {
+            return Ok(None);
+        };
+        entry.last_used = stamp;
+        Ok(Some(f(&entry.column)))
     }
 
     /// How many cache ops [`maybe_tick_tickets`](Self::maybe_tick_tickets)
@@ -1480,9 +1651,185 @@ impl<S: ChunkSource> ChunkStore<S> {
             .ok_or(ColumnLightSettlementError::MissingFootprint)?;
         Ok((updates, settled_centre))
     }
+
+    fn snapshot_is_centre_settled(
+        snapshot: &ChunkWriteSnapshot,
+        centre: (i32, i32),
+    ) -> bool {
+        snapshot
+            .observations
+            .iter()
+            .find(|observation| observation.chunk == centre)
+            .is_some_and(|observation| {
+                observation.column.retained_light_status()
+                    == Some(crate::chunk::RetainedLightStatus::CentreSettled)
+            })
+    }
+
+    /// Captures a retained column without waiting or starting generation.
+    ///
+    /// The coordinate gate is claimed before the cache is inspected, so this
+    /// is one atomic admission boundary rather than the racy pair
+    /// `is_column_resident` followed by `resident_column`. A concurrent
+    /// generation or mutation returns [`TryResident::Busy`]; a cold coordinate
+    /// returns [`TryResident::Absent`]. The existing blocking
+    /// [`ChunkSource::resident_column`] implementation remains available to
+    /// callers that explicitly want its ordinary behavior.
+    pub(crate) fn try_resident_column(
+        &self,
+        cx: i32,
+        cz: i32,
+    ) -> TryResident<ChunkColumn> {
+        let Some(lease) = self.write_gates.try_acquire_many(&[(cx, cz)], false) else {
+            return TryResident::Busy;
+        };
+        let result = match self.try_read(cx, cz, ChunkColumn::clone) {
+            Err(()) => TryResident::Busy,
+            Ok(Some(column)) => TryResident::Present(column),
+            Ok(None) => self
+                .source
+                .resident_column(cx, cz)
+                .map_or(TryResident::Absent, TryResident::Present),
+        };
+        drop(lease);
+        result
+    }
+
+    /// Reads one resident block state without waiting or starting generation.
+    ///
+    /// This returns a state snapshot rather than a borrowed cell because the
+    /// cache lock must be released before the caller can do any tick work. The
+    /// coordinate gate and the cache lock are both part of the admission
+    /// boundary, so a result cannot be invalidated between the residency check
+    /// and the cell read.
+    pub(crate) fn try_resident_block_state_id(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> TryResident<lodestone_data::block_states::StateId> {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        let Some(lease) = self.write_gates.try_acquire_many(&[(cx, cz)], false) else {
+            return TryResident::Busy;
+        };
+        let result = match self.try_read(cx, cz, |column| {
+            let local_y = i64::from(y) - i64::from(column.min_y);
+            (0..i64::from(column.height))
+                .contains(&local_y)
+                .then(|| column.resolved_block_state_id(lx, y, lz))
+        }) {
+            Err(()) => TryResident::Busy,
+            Ok(None) | Ok(Some(None)) => self
+                .source
+                .resident_block_state_id(x, y, z)
+                .map_or(TryResident::Absent, TryResident::Present),
+            Ok(Some(Some(state))) => TryResident::Present(state),
+        };
+        drop(lease);
+        result
+    }
+
+    /// Attempts a resident block mutation without waiting or starting a cold
+    /// generation.
+    ///
+    /// The whole 3×3 retained-light footprint is claimed atomically before the
+    /// target is inspected. `Busy` therefore covers a generation, source edit
+    /// ledger, or neighbour settlement that would otherwise make a tick-side
+    /// `set_block` wait on a condition variable. `Absent` leaves the world
+    /// untouched. On a resident target, the source's mutation-only edit ledger
+    /// accepts the post-edit snapshot before the cache commits it, so
+    /// `Applied` is durable across cache eviction. A source without that
+    /// nonblocking edit capability returns `Unsupported` and leaves both layers
+    /// unchanged; it is deliberately not sent through the blocking writer,
+    /// which could re-enter generation.
+    pub(crate) fn try_set_block(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        name: &str,
+    ) -> TryBlockMutation {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        let coordinates = Self::light_coordinates(cx, cz, &RETAINED_LIGHT_NEIGHBOUR_OFFSETS);
+        let Some(lease) = self.write_gates.try_acquire_many(&coordinates, true) else {
+            return TryBlockMutation::Busy;
+        };
+
+        let result = {
+            let mut guard = match self.cache.try_lock() {
+                Ok(guard) => guard,
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    drop(lease);
+                    return TryBlockMutation::Busy;
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    panic!("chunk store lock poisoned")
+                }
+            };
+            let cache = &mut *guard;
+            let stamp = cache.next_stamp();
+            let Some(entry) = cache.columns.get_mut(&(cx, cz)) else {
+                drop(guard);
+                drop(lease);
+                return TryBlockMutation::Absent;
+            };
+            if y < entry.column.min_y || y >= entry.column.min_y + entry.column.height {
+                drop(guard);
+                drop(lease);
+                return TryBlockMutation::Absent;
+            }
+            let mut retained = entry.column.clone();
+            retained.set_block(lx, y, lz, name);
+            retained.clear_retained_light();
+
+            // Keep the cache lock while the typed hook commits the source edit
+            // so a successful source write cannot be observed with an old
+            // resident cache entry. The hook contract is try-only: source
+            // implementations use short `try_lock` sections and never call
+            // back into this store.
+            let Some(retention) = self
+                .source
+                .try_store_resident_edit(cx, cz, &retained)
+            else {
+                drop(guard);
+                drop(lease);
+                return TryBlockMutation::Unsupported;
+            };
+            if retention == TryResidentEdit::Busy {
+                drop(guard);
+                drop(lease);
+                return TryBlockMutation::Busy;
+            }
+
+            entry.column = retained;
+            entry.last_used = stamp;
+            // The changed column invalidates every retained-light snapshot in
+            // the footprint. Do this while the same short cache lock is held
+            // instead of calling the blocking helper, so the try path never
+            // waits for a second cache lock.
+            for &coordinate in &coordinates {
+                if let Some(entry) = cache.columns.get_mut(&coordinate) {
+                    entry.column.clear_retained_light();
+                }
+            }
+            TryBlockMutation::Applied
+        };
+        drop(lease);
+        result
+    }
 }
 
 impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
+    fn columns(&self, coords: &[(i32, i32)]) -> Vec<ChunkColumn> {
+        coords.iter().map(|&(cx, cz)| self.column(cx, cz)).collect()
+    }
+
     fn resident_block_state_id(&self, x: i32, y: i32, z: i32) -> Option<lodestone_data::block_states::StateId> {
         self.read(x.div_euclid(16), z.div_euclid(16), |column| {
             let local_y = i64::from(y) - i64::from(column.min_y);
@@ -1490,7 +1837,9 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
                 return None;
             }
             Some(column.resolved_block_state_id(x.rem_euclid(16), y, z.rem_euclid(16)))
-        }).flatten()
+        })
+        .flatten()
+        .or_else(|| self.source.resident_block_state_id(x, y, z))
     }
 
     /// Prefer the retained authoritative copy, then preserve the wrapped
@@ -1498,6 +1847,42 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
     fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
         self.read(cx, cz, ChunkColumn::clone)
             .or_else(|| self.source.resident_column(cx, cz))
+    }
+
+    fn try_resident_column(
+        &self,
+        cx: i32,
+        cz: i32,
+    ) -> Option<crate::chunk_store::TryResident<ChunkColumn>> {
+        Some(ChunkStore::try_resident_column(self, cx, cz))
+    }
+
+    fn try_resident_block_state_id(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> Option<crate::chunk_store::TryResident<lodestone_data::block_states::StateId>> {
+        Some(ChunkStore::try_resident_block_state_id(self, x, y, z))
+    }
+
+    fn try_set_block(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        name: &str,
+    ) -> Option<crate::chunk_store::TryBlockMutation> {
+        Some(ChunkStore::try_set_block(self, x, y, z, name))
+    }
+
+    fn try_store_resident_edit(
+        &self,
+        cx: i32,
+        cz: i32,
+        column: &ChunkColumn,
+    ) -> Option<crate::chunk_store::TryResidentEdit> {
+        self.source.try_store_resident_edit(cx, cz, column)
     }
 
     /// Replaces the cached column with the caller's complete snapshot and
@@ -1593,9 +1978,7 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
                 .expect("the centre snapshot is always requested")
                 .column
                 .clone();
-            if current.retained_light_status()
-                == Some(crate::chunk::RetainedLightStatus::CentreSettled)
-            {
+            if Self::snapshot_is_centre_settled(&snapshot, centre) {
                 return Ok(current);
             }
         }
@@ -1622,10 +2005,7 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
                 centre,
                 neighbour_offsets,
             )?;
-            if !replace_existing
-                && centre_column.retained_light_status()
-                    == Some(crate::chunk::RetainedLightStatus::CentreSettled)
-            {
+            if !replace_existing && Self::snapshot_is_centre_settled(&snapshot, centre) {
                 drop(lease);
                 return Ok(centre_column);
             }
@@ -1656,10 +2036,7 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
             centre,
             neighbour_offsets,
         )?;
-        if !replace_existing
-            && centre_column.retained_light_status()
-                == Some(crate::chunk::RetainedLightStatus::CentreSettled)
-        {
+        if !replace_existing && Self::snapshot_is_centre_settled(&snapshot, centre) {
             return Ok(centre_column);
         }
         let Some(settlement) = compute(&centre_column, &neighbours) else {
@@ -1735,6 +2112,13 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         self.read(cx, cz, ChunkColumn::clone)
             .filter(|column| column.generation_stage() >= stage)
             .unwrap_or_else(|| self.source.column_at(cx, cz, stage))
+    }
+
+    fn packet_generation_stage(
+        &self,
+        stage: crate::chunk::ChunkGenerationStage,
+    ) -> Option<crate::chunk::ChunkGenerationStage> {
+        self.source.packet_generation_stage(stage)
     }
 
     /// One block, without regenerating or cloning a column.
@@ -2399,6 +2783,229 @@ mod tests {
         );
     }
 
+    /// A residency check followed by a separate mutation is not an admission
+    /// boundary: a cold generation can claim the coordinate between the two
+    /// calls and make the tick thread wait on the condition variable. The try
+    /// APIs claim the gate first, so they return `Busy` immediately and the
+    /// ordinary blocking control remains visibly parked until the lease drops.
+    #[test]
+    fn try_resident_access_returns_busy_without_waiting_on_generation_lease() {
+        let store = Arc::new(ChunkStore::new(CountingSource::new()));
+        let _ = store.column(0, 0);
+        let lease = store.write_gates.acquire_many(&[(0, 0)], true);
+
+        let started = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(AtomicBool::new(false));
+        std::thread::scope(|scope| {
+            let blocking_store = Arc::clone(&store);
+            let blocking_started = Arc::clone(&started);
+            let blocking_finished = Arc::clone(&finished);
+            let blocking = scope.spawn(move || {
+                blocking_started.store(true, Ordering::Release);
+                let _ = blocking_store.column(0, 0);
+                blocking_finished.store(true, Ordering::Release);
+            });
+
+            while !started.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            // Give the blocking control a chance to enter `acquire_many`. The
+            // held lease makes its final state deterministic even if this loop
+            // observes the flag before the waiter reaches the condition
+            // variable.
+            for _ in 0..128 {
+                if finished.load(Ordering::Acquire) {
+                    break;
+                }
+                std::thread::yield_now();
+            }
+            assert!(
+                !finished.load(Ordering::Acquire),
+                "the blocking column control must remain parked while the generation lease is held"
+            );
+
+            let started_at = lodestone_time::Instant::now();
+            assert!(
+                matches!(store.as_ref().try_resident_column(0, 0), TryResident::Busy),
+                "a resident snapshot must report the held generation gate instead of waiting"
+            );
+            assert!(
+                matches!(
+                    store.as_ref().try_resident_block_state_id(0, 0, 0),
+                    TryResident::Busy
+                ),
+                "a resident block read must share the coordinate admission boundary"
+            );
+            assert_eq!(
+                store.as_ref().try_set_block(0, 0, 0, "minecraft:stone"),
+                TryBlockMutation::Busy,
+                "a resident mutation must report the held generation gate instead of waiting"
+            );
+            let erased: Arc<dyn ChunkSource> = store.clone();
+            assert!(matches!(
+                erased.try_resident_column(0, 0),
+                Some(TryResident::Busy)
+            ));
+            assert!(matches!(
+                erased.try_resident_block_state_id(0, 0, 0),
+                Some(TryResident::Busy)
+            ));
+            assert!(matches!(
+                erased.try_set_block(0, 0, 0, "minecraft:stone"),
+                Some(TryBlockMutation::Busy)
+            ));
+            assert!(
+                started_at.elapsed() < std::time::Duration::from_millis(100),
+                "try resident access took {:?} while a generation lease was held",
+                started_at.elapsed()
+            );
+
+            drop(lease);
+            blocking
+                .join()
+                .expect("the blocking access control must not panic");
+            assert!(
+                finished.load(Ordering::Acquire),
+                "the blocking column must proceed once the generation lease is released"
+            );
+        });
+    }
+
+    /// A cold coordinate is an explicit `Absent`, not an invitation to enter
+    /// the blocking miss path. Once the column is resident, the same API can
+    /// mutate its cached cell and the snapshot read sees the applied state.
+    /// The edit-ledger control below then evicts that cache entry and proves
+    /// the applied state is still present when the source reloads it.
+    #[test]
+    fn try_resident_mutation_is_absent_when_cold_and_applies_when_resident() {
+        struct DurableEditSource {
+            generated: Arc<AtomicU64>,
+            edits: Arc<Mutex<HashMap<(i32, i32), ChunkColumn>>>,
+        }
+
+        impl ChunkSource for DurableEditSource {
+            fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+                if let Some(column) = self
+                    .edits
+                    .lock()
+                    .expect("durable edit ledger lock poisoned")
+                    .get(&(cx, cz))
+                    .cloned()
+                {
+                    return column;
+                }
+                self.generated.fetch_add(1, Ordering::Relaxed);
+                ChunkColumn::new(0, 16)
+            }
+
+            fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+                self.column(x.div_euclid(16), z.div_euclid(16))
+                    .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
+                    .to_owned()
+            }
+
+            fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+                self.column(x.div_euclid(16), z.div_euclid(16))
+                    .biome_state_at(x.rem_euclid(16), y, z.rem_euclid(16))
+                    .to_owned()
+            }
+
+            fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+                let mut edits = self
+                    .edits
+                    .lock()
+                    .expect("durable edit ledger lock poisoned");
+                edits
+                    .entry((x.div_euclid(16), z.div_euclid(16)))
+                    .or_insert_with(|| ChunkColumn::new(0, 16))
+                    .set_block(x.rem_euclid(16), y, z.rem_euclid(16), name);
+            }
+
+            fn try_store_resident_edit(
+                &self,
+                cx: i32,
+                cz: i32,
+                column: &ChunkColumn,
+            ) -> Option<crate::chunk_store::TryResidentEdit> {
+                let mut edits = match self.edits.try_lock() {
+                    Ok(edits) => edits,
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        return Some(crate::chunk_store::TryResidentEdit::Busy);
+                    }
+                    Err(std::sync::TryLockError::Poisoned(_)) => {
+                        panic!("durable edit ledger lock poisoned")
+                    }
+                };
+                edits.insert((cx, cz), column.clone());
+                Some(crate::chunk_store::TryResidentEdit::Applied)
+            }
+        }
+
+        let generated = Arc::new(AtomicU64::new(0));
+        let edits = Arc::new(Mutex::new(HashMap::new()));
+        let source = DurableEditSource {
+            generated: Arc::clone(&generated),
+            edits: Arc::clone(&edits),
+        };
+        let store = ChunkStore::with_capacity(source, 1);
+
+        assert_eq!(
+            store.try_set_block(0, 0, 0, "minecraft:stone"),
+            TryBlockMutation::Absent,
+            "a cold coordinate must not generate just to apply a tick-side mutation"
+        );
+        assert!(matches!(
+            store.try_resident_column(0, 0),
+            TryResident::Absent
+        ));
+        assert!(matches!(
+            store.try_resident_block_state_id(0, 0, 0),
+            TryResident::Absent
+        ));
+        assert_eq!(generated.load(Ordering::Relaxed), 0);
+
+        let _ = store.column(0, 0);
+        assert_eq!(
+            store.try_set_block(0, 0, 0, "minecraft:stone"),
+            TryBlockMutation::Applied,
+            "a resident coordinate should accept the nonblocking mutation"
+        );
+        assert_eq!(
+            store.try_resident_block_state_id(0, 0, 0),
+            TryResident::Present(
+                lodestone_data::block_states::StateId::new(1)
+                    .expect("stone has the stable state id 1")
+            )
+        );
+        assert_eq!(
+            store.block_state(0, 0, 0),
+            "minecraft:stone",
+            "the blocking read must preserve the successfully applied resident mutation"
+        );
+        assert_eq!(generated.load(Ordering::Relaxed), 1);
+
+        let _ = store.column(1, 0);
+        assert_eq!(store.evicted(), 1, "capacity one must evict the edited resident");
+        assert_eq!(
+            store.block_state(0, 0, 0),
+            "minecraft:stone",
+            "an Applied try mutation must survive resident-cache eviction through the edit ledger"
+        );
+        assert_eq!(
+            generated.load(Ordering::Relaxed),
+            2,
+            "the reload should generate only the untouched column; the edited column must come from the ledger"
+        );
+
+        let unsupported = ChunkStore::new(CountingSource::new());
+        let _ = unsupported.column(0, 0);
+        assert_eq!(
+            unsupported.try_set_block(0, 0, 0, "minecraft:stone"),
+            TryBlockMutation::Unsupported,
+            "a source with no nonblocking edit ledger must refuse rather than report cache-local Applied"
+        );
+    }
+
     #[test]
     fn resident_block_read_never_generates_and_forwards_through_wrappers() {
         let counting = CountingSource::new();
@@ -2533,6 +3140,47 @@ mod tests {
         );
     }
 
+    /// A roaming session must converge back to the configured bound rather
+    /// than accumulating one cache high-water mark per centre. This uses the
+    /// three user-facing render-distance regimes and a small column fixture so
+    /// it remains a normal regression, not a release-only memory tool.
+    #[test]
+    fn roaming_retention_returns_to_the_configured_bound() {
+        for view_radius in [9, 17, 33] {
+            let capacity = integrated_capacity_for_view_radius(view_radius);
+            let store = ChunkStore::for_integrated_view_radius(CountingSource::new(), view_radius);
+            let touch_square = |centre: i32| {
+                for cz in -view_radius..=view_radius {
+                    for cx in -view_radius..=view_radius {
+                        let _ = store.column(centre + cx, centre + cz);
+                    }
+                }
+            };
+
+            touch_square(0);
+            touch_square(10_000);
+            touch_square(0);
+
+            assert_eq!(
+                store.len(),
+                capacity,
+                "view radius {view_radius} retained {} columns after roaming, not its bound {capacity}",
+                store.len()
+            );
+            assert!(
+                store.evicted() > 0,
+                "view radius {view_radius} never exercised eviction while roaming"
+            );
+            println!(
+                "roamed view_radius={view_radius} capacity={} resident={} evicted={} packed_block_bytes={}",
+                capacity,
+                store.len(),
+                store.evicted(),
+                store.retained_blocks_heap_bytes()
+            );
+        }
+    }
+
     /// The policy at its **boundaries**, which is the part of it a
     /// behavioural gate cannot reach.
     ///
@@ -2617,6 +3265,24 @@ mod tests {
             MAX_CAPACITY,
             "an absurd radius must saturate onto the cap; a wrap here would present \
              as a thrashing cache rather than as an overflow"
+        );
+    }
+
+    /// The 256-chunk selectable distance must remain a streaming request, not
+    /// an instruction to retain its complete 265,225-column square. The
+    /// integrated cache grows through the measured bound and then saturates.
+    #[test]
+    fn extreme_render_distance_keeps_integrated_retention_bounded() {
+        let max_render_view_radius = 257;
+        assert_eq!(
+            view_columns(max_render_view_radius),
+            265_225,
+            "256 render chunks plus the mesher ring is a 513x513 stream"
+        );
+        assert_eq!(
+            integrated_capacity_for_view_radius(max_render_view_radius),
+            MAX_CAPACITY,
+            "the integrated cache must not scale allocation with the full extreme view"
         );
     }
 
@@ -2790,6 +3456,31 @@ mod tests {
         }
     }
 
+    /// Reuses one calibrated full-height column while still returning an owned
+    /// clone per cache admission. This keeps the roaming RSS measurement about
+    /// retained columns rather than repeatedly rebuilding the fixture itself.
+    struct SharedTouchedSource(Arc<ChunkColumn>);
+
+    impl ChunkSource for SharedTouchedSource {
+        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            self.0.as_ref().clone()
+        }
+
+        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+            self.0
+                .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
+                .to_owned()
+        }
+
+        fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+            self.0
+                .biome_state_at(x.rem_euclid(16), y, z.rem_euclid(16))
+                .to_owned()
+        }
+
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    }
+
     /// Fills a store to `capacity` and holds it, so an external
     /// `/usr/bin/time -l` reading attributes the peak RSS to retention.
     fn fill_and_hold(capacity: usize, touch: usize) -> ChunkStore<TouchedSource> {
@@ -2910,6 +3601,54 @@ mod tests {
             (capacity as i32 / 1024) * 16 * REAL_HEIGHT * 16 * 2 / 1024,
         );
         std::hint::black_box(&store);
+    }
+
+    /// Measures the retained packed block bytes after a view roams to a distant
+    /// centre and returns. The three radii are run in one process so
+    /// `/usr/bin/time -l` reports the peak RSS while the printed counters prove
+    /// that the final resident set is still exactly the configured bound.
+    ///
+    /// ```text
+    /// /usr/bin/time -l cargo test --release -p lodestone-server --lib -- --ignored \
+    ///     --nocapture --exact chunk_store::tests::measure_rss_after_roaming
+    /// ```
+    /// Set `LODESTONE_RETENTION_RADIUS` to one of `9`, `17`, or `33` to run a
+    /// single regime in a fresh process and make the external RSS value
+    /// comparable without allocator high-water reuse from the other regimes.
+    #[test]
+    #[ignore = "measurement tool; run in --release under /usr/bin/time -l"]
+    fn measure_rss_after_roaming() {
+        let source = Arc::new(touched_column(REAL_MIN_Y, REAL_HEIGHT));
+        let radii = std::env::var("LODESTONE_RETENTION_RADIUS")
+            .ok()
+            .and_then(|value| value.parse::<i32>().ok())
+            .map_or_else(|| vec![9, 17, 33], |radius| vec![radius]);
+        for view_radius in radii {
+            let capacity = integrated_capacity_for_view_radius(view_radius);
+            let store = ChunkStore::for_integrated_view_radius(
+                SharedTouchedSource(Arc::clone(&source)),
+                view_radius,
+            );
+            let touch_square = |centre: i32| {
+                for cz in -view_radius..=view_radius {
+                    for cx in -view_radius..=view_radius {
+                        let _ = store.column(centre + cx, centre + cz);
+                    }
+                }
+            };
+            touch_square(0);
+            touch_square(10_000);
+            touch_square(0);
+            assert_eq!(store.len(), capacity);
+            println!(
+                "rss_roamed view_radius={view_radius} capacity={} resident={} evicted={} packed_block_bytes={}",
+                capacity,
+                store.len(),
+                store.evicted(),
+                store.retained_blocks_heap_bytes()
+            );
+            std::hint::black_box(&store);
+        }
     }
 
     /// The premise everything else rests on: what a **real** composed column
@@ -3083,6 +3822,34 @@ mod tests {
                 .retained_light(),
             Some(&unrelated_light)
         );
+    }
+
+    /// The settlement centre is a distinct entry from its dependency
+    /// snapshots. The diagnostic iterator must expose only the latter and
+    /// preserve their relative offsets and values without cloning them.
+    #[test]
+    fn settlement_dependency_iteration_excludes_centre() {
+        let mut centre = lodestone_world::ColumnLight::new(0);
+        *centre.sky_mut(0) = lodestone_world::LightData::Uniform(3);
+        let mut west = lodestone_world::ColumnLight::new(0);
+        *west.block_mut(0) = lodestone_world::LightData::Uniform(7);
+        let mut south = lodestone_world::ColumnLight::new(0);
+        *south.sky_mut(1) = lodestone_world::LightData::Uniform(11);
+
+        let settlement = ColumnLightSettlement::with_neighbours(
+            centre.clone(),
+            [(-1, 0, west.clone()), (0, 1, south.clone())],
+        )
+        .expect("the two dependency offsets are distinct and in the 3x3 footprint");
+
+        assert_eq!(settlement.centre_light(), &centre);
+        let dependencies = settlement.dependency_lights().collect::<Vec<_>>();
+        assert_eq!(dependencies.len(), 2);
+        assert_eq!(dependencies[0], ((-1, 0), &west));
+        assert_eq!(dependencies[1], ((0, 1), &south));
+        assert!(dependencies
+            .iter()
+            .all(|(offset, _)| *offset != (0, 0)));
     }
 
     /// An allocated-zero dependency is storage, not a settled centre result.
@@ -3304,6 +4071,103 @@ mod tests {
             )
             .expect("centre-settled snapshot must use the fast path");
         assert_eq!(skipped_calls, 0);
+    }
+
+    /// Reusing a centre-settled snapshot as a neighbour must not downgrade its
+    /// lifecycle stage. A neighbouring batch may return the retained value for
+    /// that coordinate, but the coordinate has already completed its own
+    /// centre admission and remains eligible for the fast path.
+    #[test]
+    fn batch_admission_preserves_settled_dependency_status() {
+        let store = ChunkStore::with_capacity(CountingSource::new(), 16);
+        let centre = store.column(0, 0);
+        let mut first_compute = |column: &ChunkColumn,
+                                 _neighbours: &[(i32, i32, ChunkColumn)]| {
+            let mut centre_light = lodestone_world::ColumnLight::new(column.section_count());
+            *centre_light.sky_mut(0) = lodestone_world::LightData::Uniform(4);
+            let mut dependency_light = lodestone_world::ColumnLight::new(column.section_count());
+            *dependency_light.sky_mut(0) = lodestone_world::LightData::Uniform(9);
+            ColumnLightSettlement::with_neighbours(
+                centre_light,
+                [(1, 0, dependency_light)],
+            )
+        };
+        store
+            .settle_resident_column_lights_with_neighbours(
+                0,
+                0,
+                &centre,
+                &[(1, 0)],
+                false,
+                false,
+                true,
+                &mut first_compute,
+            )
+            .expect("initial batch admission");
+
+        let dependency = store
+            .resident_column(1, 0)
+            .expect("the dependency remains resident");
+        let mut dependency_compute = |column: &ChunkColumn,
+                                      _neighbours: &[(i32, i32, ChunkColumn)]| {
+            Some(ColumnLightSettlement::centre(
+                lodestone_world::ColumnLight::new(column.section_count()),
+            ))
+        };
+        store
+            .settle_resident_column_lights_with_neighbours(
+                1,
+                0,
+                &dependency,
+                &[(-1, 0)],
+                false,
+                false,
+                true,
+                &mut dependency_compute,
+            )
+            .expect("dependency centre admission");
+        assert_eq!(
+            store
+                .resident_column(1, 0)
+                .expect("settled dependency remains resident")
+                .retained_light_status(),
+            Some(crate::chunk::RetainedLightStatus::CentreSettled)
+        );
+
+        let settled_dependency = store
+            .resident_column(1, 0)
+            .expect("settled dependency snapshot");
+        let dependency_light = settled_dependency
+            .retained_light()
+            .cloned()
+            .expect("settled dependency retains its light");
+        let mut neighbouring_compute = |column: &ChunkColumn,
+                                        _neighbours: &[(i32, i32, ChunkColumn)]| {
+            ColumnLightSettlement::with_neighbours(
+                lodestone_world::ColumnLight::new(column.section_count()),
+                [(1, 0, dependency_light.clone())],
+            )
+        };
+        store
+            .settle_resident_column_lights_with_neighbours(
+                0,
+                0,
+                &centre,
+                &[(1, 0)],
+                false,
+                true,
+                true,
+                &mut neighbouring_compute,
+            )
+            .expect("forced neighbouring batch admission");
+        assert_eq!(
+            store
+                .resident_column(1, 0)
+                .expect("reused dependency remains resident")
+                .retained_light_status(),
+            Some(crate::chunk::RetainedLightStatus::CentreSettled),
+            "a reused settled dependency must not be downgraded to initialized-only"
+        );
     }
 
     /// A retained light refresh and a block mutation for one coordinate must
@@ -4633,6 +5497,40 @@ mod tests {
             unloaded_log.lock().expect("unloaded log poisoned").is_empty(),
             "nothing was ever removed, so nothing may be unloaded — a control that fires here \
              means eviction is not actually gated on ticket removal"
+        );
+    }
+
+    /// LRU pressure must not unload a column that is still covered by a
+    /// loading/simulation ticket. The ticket sweep runs periodically, so this
+    /// deliberately fills a capacity-one store between sweeps; checking only
+    /// `newly_unresident` there would leave a window in which the ordinary LRU
+    /// path drops the live ticket's column.
+    #[test]
+    fn lru_pressure_protects_ticket_resident_columns() {
+        let counting = CountingSource::new();
+        let unloaded_log = Arc::clone(&counting.unloaded);
+        let store = ChunkStore::with_capacity(counting, 1);
+
+        store.set_forced_ticket(1, (0, 0));
+        let _ = store.column(0, 0);
+        assert_eq!(
+            store.ticket_status(0, 0),
+            crate::ticket::ChunkStatus::Full,
+            "the precondition must establish ticket residency before capacity pressure"
+        );
+
+        // The second miss occurs before the next periodic ticket check. The
+        // ticketed centre is older, so an unprotected LRU would evict it.
+        let _ = store.column(1, 0);
+
+        assert!(
+            store.is_column_resident(0, 0),
+            "an active ticket must keep its resident column in the cache"
+        );
+        assert_eq!(
+            unloaded_log.lock().expect("unloaded log poisoned").as_slice(),
+            &[],
+            "capacity pressure must not send an unload for a ticket-resident column"
         );
     }
 

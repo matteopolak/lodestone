@@ -1107,35 +1107,13 @@ impl<S: ChunkSource> RegionChunkSource<S> {
         let mut column =
             chunk_nbt::column_from_nbt(&nbt, self.state.min_y, self.state.height).ok()?;
         normalize_imported_end_light_storage(&mut column, self.state.dimension);
-        let mut extras = chunk_nbt::extras_from_nbt(&nbt);
+        let extras = chunk_nbt::extras_from_nbt(&nbt);
         // The column carries its own copy so `encode_chunk` can put them on the
         // wire. The chunk payload includes these entities so clients see the
         // same state as the tick-loop registry. The registry remains the
         // authority for saving, because a live furnace takes precedence over
         // the disk copy.
         column.set_block_entities(extras.block_entities.clone());
-        // Repair any block-entity-owning state this saved chunk's own NBT
-        // never recorded — see `ChunkColumn::missing_block_entity_states`'s
-        // own doc for why that gap exists (`block_entity_for_item` only
-        // covers the dozen types this crate simulates) and what it costs a
-        // client: a skull, banner, jukebox, … with a correct state and no
-        // record draws nothing at all until an unrelated later block update.
-        // `Nbt::End` matches what a real save/load round trip already
-        // produces for a block-entity type this crate does not otherwise
-        // model (`chunk_nbt::block_entity_from_nbt`'s own catch-all arm).
-        let missing = column.missing_block_entity_states(cx, cz, &extras.block_entities);
-        if !missing.is_empty() {
-            for (pos, type_name) in missing {
-                extras.block_entities.push((
-                    pos,
-                    crate::block_entities::BlockEntity::Opaque {
-                        id: type_name.to_owned().into(),
-                        nbt: lodestone_core::Nbt::End,
-                    },
-                ));
-            }
-            column.set_block_entities(extras.block_entities.clone());
-        }
         let restored = self.restore_block_entities(&extras);
         let ticks = self
             .state
@@ -1254,6 +1232,10 @@ fn normalize_imported_end_light_storage(column: &mut ChunkColumn, dimension: Dim
 }
 
 impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
+    fn columns(&self, coords: &[(i32, i32)]) -> Vec<ChunkColumn> {
+        coords.iter().map(|&(cx, cz)| self.column(cx, cz)).collect()
+    }
+
     /// The one implementor that answers `Some`: this source *is* the world on
     /// disk, so these are the registries whose contents a save writes.
     fn world_registries(&self) -> Option<crate::chunk::WorldRegistries> {
@@ -1338,6 +1320,13 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
         }
         self.state.stats.generated.fetch_add(1, Ordering::Relaxed);
         self.inner.column_at(cx, cz, stage)
+    }
+
+    fn packet_generation_stage(
+        &self,
+        stage: crate::chunk::ChunkGenerationStage,
+    ) -> Option<crate::chunk::ChunkGenerationStage> {
+        self.inner.packet_generation_stage(stage)
     }
 
     fn prepare_packet_replay(&self, targets: &[(i32, i32)]) -> Option<usize> {
@@ -1435,6 +1424,66 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
             .expect("world dirty lock poisoned")
             .insert((cx, cz));
         true
+    }
+
+    /// Retains only a block-edit snapshot through try-locks. Unlike
+    /// `store_resident_column`, this path is never used for light settlement,
+    /// so a generated column becomes an authoritative edit only when a block
+    /// actually changed. The invalidation, edit, and dirty records are claimed
+    /// together before any record is changed; a contended lock therefore
+    /// returns `Busy` without a partial source update.
+    fn try_store_resident_edit(
+        &self,
+        cx: i32,
+        cz: i32,
+        column: &ChunkColumn,
+    ) -> Option<crate::chunk_store::TryResidentEdit> {
+        let mut invalidated = match self.state.invalidated_light.try_lock() {
+            Ok(invalidated) => invalidated,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Some(crate::chunk_store::TryResidentEdit::Busy);
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                panic!("world light-invalidation lock poisoned")
+            }
+        };
+        let mut edits = match self.state.edits.try_lock() {
+            Ok(edits) => edits,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Some(crate::chunk_store::TryResidentEdit::Busy);
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                panic!("world edit lock poisoned")
+            }
+        };
+        let mut dirty = match self.state.dirty.try_lock() {
+            Ok(dirty) => dirty,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Some(crate::chunk_store::TryResidentEdit::Busy);
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                panic!("world dirty lock poisoned")
+            }
+        };
+        let epoch = self
+            .state
+            .next_light_invalidation
+            .fetch_add(1, Ordering::AcqRel);
+        for snapshot_cz in cz - 1..=cz + 1 {
+            for snapshot_cx in cx - 1..=cx + 1 {
+                let coordinate = (snapshot_cx, snapshot_cz);
+                invalidated.insert(coordinate, epoch);
+                if let Some(existing) = edits.get_mut(&coordinate) {
+                    if existing.retained_light().is_some() {
+                        existing.clear_retained_light();
+                        dirty.insert(coordinate);
+                    }
+                }
+            }
+        }
+        edits.insert((cx, cz), column.clone());
+        dirty.insert((cx, cz));
+        Some(crate::chunk_store::TryResidentEdit::Applied)
     }
 
     /// Clears saved light snapshots whose 3x3 dependency footprint contains a
@@ -2280,6 +2329,8 @@ impl WorldSaveJob {
 /// a severed wire fails three, a broken sweep fails all four.
 #[cfg(test)]
 mod tests {
+    use lodestone_core::Nbt;
+
     use super::*;
     use crate::chunk_store::ChunkStore;
 
@@ -3160,26 +3211,14 @@ mod tests {
         );
     }
 
-    /// The reported regression: a block whose state owns a block entity
-    /// (a wither skeleton skull) with a correct state on disk and **no**
-    /// block-entity NBT at all — exactly the shape a chunk saved before
-    /// `ChunkColumn::missing_block_entity_states` existed already carries,
-    /// and exactly the shape the old placement path (`set_block` alone, no
-    /// registry insert) produced for any type `block_entity_for_item` did
-    /// not cover. Reproduced directly with `set_block` rather than through
-    /// `apply_use_item_on`, which lives in `crate::server` and is not
-    /// reachable from here — `set_block` writes only the state, which is
-    /// the one property this fixture needs from the old buggy path.
-    ///
-    /// The fresh `RegionChunkSource` over the same directory is a fresh
-    /// server process reading the world back: the "joined and it was
-    /// already invisible" scenario the owner reported, not a same-session
-    /// resend — the discriminating input is a block entity missing from the
-    /// chunk as first loaded, not one that could still be patched up by a
-    /// later in-memory write.
+    /// A saved chunk's block-entity list is authoritative, even when a block
+    /// state owns a block-entity type. Generated structure blocks can be
+    /// present in a partial or imported chunk before their feature-side record
+    /// exists; inventing an empty record on load turns that omission into a
+    /// visible sidecar.
     #[test]
-    fn a_skull_state_with_no_saved_block_entity_gets_one_synthesized_on_load() {
-        let dir = tempdir("skull-repair");
+    fn a_skull_state_with_no_saved_block_entity_stays_omitted_on_load() {
+        let dir = tempdir("skull-omission");
         const SKULL: &str = "minecraft:wither_skeleton_skull";
         {
             let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT)
@@ -3192,17 +3231,11 @@ mod tests {
             .expect("reopen world");
         let column = source.column(0, 0);
         let pos = BlockPos::new(1, 70, 1);
-        let entity_type = column
+        let has_entity = column
             .block_entities()
             .iter()
-            .find(|(p, _)| *p == pos)
-            .map(|(_, e)| e.type_id());
-        assert_eq!(
-            entity_type,
-            Some("minecraft:skull"),
-            "a skull state with no on-disk record must get an empty one synthesized on load, \
-             or the client never learns to draw it at all"
-        );
+            .any(|(p, _)| *p == pos);
+        assert!(!has_entity, "a missing on-disk record must remain omitted after load");
     }
 
     /// The negative control: a state that owns **no** block-entity type
