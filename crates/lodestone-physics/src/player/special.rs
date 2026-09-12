@@ -548,4 +548,3 @@ fn set_sprint_and_modify_input(
         profile.sneaking_speed,
     )
 }
-

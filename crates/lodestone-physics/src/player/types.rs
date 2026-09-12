@@ -710,5 +710,3 @@ impl PlayerState {
         self.dimensions().bounding_box(self.position)
     }
 }
-
-
