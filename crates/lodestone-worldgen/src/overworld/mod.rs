@@ -1288,6 +1288,11 @@ impl OverworldGenerator {
         let _view = self.store.open_view((cx, cz), STRUCTURE_CLOSURE_RADIUS);
         let base_x = cx * 16;
         let base_z = cz * 16;
+        // Keep the timing-only path on the same named order as `column` and
+        // `pre_ore_stage_uncached`. The timestamps below intentionally split
+        // some stages differently, but they must never become a second source
+        // of truth for which operation precedes which.
+        let mut schedule = Self::stage_schedule().cursor();
 
         let t_aquifer_start = lodestone_time::Instant::now();
         let aquifer = self.build_aquifer(cx, cz);
@@ -1295,7 +1300,11 @@ impl OverworldGenerator {
         // of its own: for a chunk with no adaptation-bearing start in reach this is
         // a store read and an empty `Vec`, and the per-block cost it can add lands
         // in `shape` where it belongs.
+        schedule.enter(crate::stage_schedule::ColumnStage::StructureStarts);
+        schedule.enter(crate::stage_schedule::ColumnStage::StructureReferences);
         let beard = self.beardifier_for(cx, cz);
+        schedule.enter(crate::stage_schedule::ColumnStage::StructureInfluence);
+        schedule.enter(crate::stage_schedule::ColumnStage::Fill);
         let t_shape_start = lodestone_time::Instant::now();
         let field = self.fill_stage(&aquifer, base_x, base_z, &beard);
         let heights = self.heights_from_field(&field);
@@ -1308,12 +1317,14 @@ impl OverworldGenerator {
         // grid is sampled and the 16 surface quarts are read out of it, so this
         // timing bucket now covers 96x the samples it used to. That is the point
         // of measuring it here.
+        schedule.enter(crate::stage_schedule::ColumnStage::Biomes);
         let biome_cells = self.biome_cells_stage(
             base_x,
             base_z,
             biome_cursor.as_mut().map(|cursor| cursor),
         );
         let biome_quarts = self.biome_stage(&biome_cells, &heights);
+        schedule.enter(crate::stage_schedule::ColumnStage::Surface);
         let t_surface_start = lodestone_time::Instant::now();
         let surface_diff = self.surface_stage(
             &field,
@@ -1322,8 +1333,10 @@ impl OverworldGenerator {
             base_z,
             biome_cursor.as_mut().map(|cursor| cursor),
         );
+        schedule.enter(crate::stage_schedule::ColumnStage::Materialize);
         let t_materialize_start = lodestone_time::Instant::now();
         let world = self.materialize_world(&field, surface_diff, base_x, base_z);
+        schedule.enter(crate::stage_schedule::ColumnStage::Carvers);
         let t_carve_start = lodestone_time::Instant::now();
         let world = self.carve_stage(
             cx,
@@ -1339,8 +1352,10 @@ impl OverworldGenerator {
         // The same stage `pre_ore_stage_uncached` runs; timed inside the carve
         // bucket rather than given one of its own, because for a chunk with no
         // structure in reach it is a single early return.
+        schedule.enter(crate::stage_schedule::ColumnStage::StructurePlacement);
         let world = self.structure_place_stage(cx, cz, world);
         let feature_heights = self.ore_heights_from_world(&world);
+        schedule.enter(crate::stage_schedule::ColumnStage::Features);
         let t_features_start = lodestone_time::Instant::now();
         let (world, block_entities) = self.features_stage_uncached(
             cx,
@@ -1354,7 +1369,9 @@ impl OverworldGenerator {
         // than folding another stage into `intern`: `top_layer_stage` is the
         // first stage cheap enough that its cost had to be *measured* to be
         // believed, and `docs/plans/worldgen-parity.md` §6 predicts <5% for it.
+        schedule.enter(crate::stage_schedule::ColumnStage::TopLayer);
         let (world, _) = self.top_layer_stage(cx, cz, world, &biome_quarts);
+        schedule.enter(crate::stage_schedule::ColumnStage::Output);
         let t_intern_start = lodestone_time::Instant::now();
         let col = self.intern_from_dense(
             cx,
@@ -1367,7 +1384,7 @@ impl OverworldGenerator {
         );
         let t_end = lodestone_time::Instant::now();
 
-        (
+        let result = (
             col,
             StageTimes {
                 aquifer: t_shape_start - t_aquifer_start,
@@ -1381,6 +1398,10 @@ impl OverworldGenerator {
                 top_layer: t_intern_start - t_top_layer_start,
                 intern: t_end - t_intern_start,
             },
-        )
+        );
+        // Keep this assertion after the result is built so it also covers any
+        // future output-side work added to the timed path.
+        schedule.finish();
+        result
     }
 }
