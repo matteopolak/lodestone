@@ -50,4 +50,12 @@ if ! git -C "$repo" update-ref refs/heads/main "$commit" "$current_head"; then
     exit 1
 fi
 
+unset GIT_INDEX_FILE
+for path in "$@"; do
+    if ! git -C "$repo" reset -q "$commit" -- "$path"; then
+        echo "published commit $commit but could not reconcile the shared index for $path" >&2
+        exit 1
+    fi
+done
+
 printf '%s\n' "$commit"

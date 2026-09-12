@@ -55,9 +55,12 @@ current=$(git -C "$fixture" rev-parse HEAD)
 GIT_INDEX_FILE=$private_index git -C "$fixture" read-tree "$current"
 blob=$(git -C "$fixture" hash-object -w "$fixture/owned.txt")
 GIT_INDEX_FILE=$private_index git -C "$fixture" update-index --cacheinfo 100644 "$blob" owned.txt
+printf 'unselected staged\n' > "$fixture/unselected.txt"
+git -C "$fixture" add unselected.txt
 (cd "$fixture" && GIT_INDEX_FILE=$private_index "$guard" "$current" "safe commit" owned.txt) >/dev/null
 
 test "$(git -C "$fixture" log -1 --format=%s)" = "safe commit"
 test "$(git -C "$fixture" show HEAD:owned.txt)" = "agent edit"
 test "$(git -C "$fixture" show HEAD:concurrent.txt)" = "concurrent edit"
+test "$(git -C "$fixture" diff --cached --name-only)" = unselected.txt
 echo "private-index pathspec and stale-base controls passed"
