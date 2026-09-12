@@ -119,6 +119,9 @@ the helper reads selected blobs from the private index and never stages or rewri
 publication it resets only the selected paths in the shared index to the new commit, because advancing
 the branch leaves an otherwise-clean shared index anchored to the old tree and falsely reports those
 paths as staged. Unselected staged paths are preserved.
+Publication and that shared-index reconciliation are serialized by a short-lived repository lock, so
+an earlier helper cannot reset paths back over a later private-index commit. A helper that waits too long
+for the lock fails rather than publishing without reconciliation.
 
 The pre-commit hook rejects `git commit -- <paths>` (and `--only`) in this checkout. Git implements those
 forms by constructing a temporary `next-index-*.lock` from the working tree, so a selected file can carry
@@ -126,8 +129,9 @@ another agent's dirty hunks even when the path list looks narrow. Build the priv
 publish it through the helper instead; this makes the committed tree an auditable set of exact blobs.
 
 Run `scripts/test-private-index-commit.sh` for all controls: a pathspec commit must be rejected, an
-intentionally stale private index must fail without changing the branch, while a rebuilt index must retain
-the concurrently landed file.
+intentionally stale private index must fail without changing the branch, a rebuilt index must retain the
+concurrently landed file, and two interleaved private commits must leave the shared index at the later
+commit while preserving an unrelated staged path.
 
 ### Shared local target, CI caching, and trimmed dev profiles
 
