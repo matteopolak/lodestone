@@ -399,7 +399,7 @@ impl<'w> MobSim<'w> {
     /// Ticks between gossip-spread passes. The whole-pass throttle is
     /// intentionally separate from the per-pair gossip values; it keeps the
     /// radius-bounded scan deterministic and bounded.
-    const GOSSIP_SPREAD_INTERVAL_TICKS: u64 = 100;
+    pub(super) const GOSSIP_SPREAD_INTERVAL_TICKS: u64 = 100;
     /// How close two villagers must be to gossip this pass. This crate uses an
     /// explicit squared radius so the pair scan remains bounded.
     const GOSSIP_SPREAD_RADIUS_SQR: f64 = 64.0; // 8 blocks
@@ -612,7 +612,7 @@ impl<'w> MobSim<'w> {
         self.tick_item_owner_batches_with_workers(block_state, workers)
     }
 
-    fn tick_item_owner_batches_with_workers(
+    pub(super) fn tick_item_owner_batches_with_workers(
         &self,
         block_state: &(dyn Fn(i32, i32, i32) -> String + Sync),
         worker_count: usize,
@@ -1479,7 +1479,7 @@ impl<'w> MobSim<'w> {
         self.tick_entity_push_owner_batches_with_workers(workers)
     }
 
-    fn tick_entity_push_owner_batches_with_workers(
+    pub(super) fn tick_entity_push_owner_batches_with_workers(
         &self,
         worker_count: usize,
     ) -> Vec<EntityPushOwnerBatch> {
@@ -1634,7 +1634,7 @@ impl<'w> MobSim<'w> {
         self.tick_burning_owner_batches_with_workers(workers)
     }
 
-    fn tick_burning_owner_batches_with_workers(
+    pub(super) fn tick_burning_owner_batches_with_workers(
         &self,
         worker_count: usize,
     ) -> Vec<BurnTickOwnerBatch> {
@@ -1774,7 +1774,7 @@ impl<'w> MobSim<'w> {
     ///   holder that is not really gone (a reconnecting player, in
     ///   particular) — the safer of the two wrong answers, but still a
     ///   simplification worth naming.
-    fn tick_leashes(&mut self) {
+    pub(super) fn tick_leashes(&mut self) {
         let batches = self.tick_leash_owner_batches();
         self.apply_leash_owner_batches(batches);
     }
@@ -1800,7 +1800,7 @@ impl<'w> MobSim<'w> {
         self.tick_leash_owner_batches_with_workers(workers)
     }
 
-    fn tick_leash_owner_batches_with_workers(
+    pub(super) fn tick_leash_owner_batches_with_workers(
         &self,
         worker_count: usize,
     ) -> Vec<LeashTickOwnerBatch> {
