@@ -31,11 +31,13 @@ Rain vs. snow is decided per column from the block's biome climate
 are `rain > 0.2`/`thunder > 0.9`; the effective thunder level used everywhere is
 `raw_thunder × rain` (vanilla's own effective-thunder-level accessor), never the raw wire value alone.
 
-Rain/snow droplets, fog/sky/lightmap darkening and the lightning flash all reach
-pixels. Not reaching pixels: rain ambience sound (no play hook on `Sim`'s audio), the
-bolt's own procedural geometry (a seeded branching quad strip — unbuilt), and
-locally-predicted rain splash particles (a server-sent one draws fine; a local one
-needs per-column terrain height/`canSeeSky` this client doesn't track).
+Rain/snow droplets, fog/sky/lightmap darkening, the lightning flash, and the
+lightning bolt's seeded branching quad strip all reach pixels. Rain/snow ambience
+also reaches `ShellAudio`: the exposed landing sample supplies the positional
+source, `SoundCategory::Weather` supplies the category-volume control, and a missing
+or covered landing suppresses the event. Not reaching pixels: locally-predicted rain
+splash particles (a server-sent one draws fine; a local one needs per-column terrain
+height/`canSeeSky` this client doesn't track).
 
 Load-bearing constants: rain/snow max alpha `1.0`/`0.8`; distance fade
 `lerp(min(d²/r², 1), max_alpha, 0.5) * intensity`; sky rain darken `×(1 − r·0.5, 1 −

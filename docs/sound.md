@@ -159,6 +159,16 @@ lookup finds cave mood in **zero** biomes (concluding it doesn't exist); a
 dimension-only lookup gives every Nether biome cave mood and none of its own
 loop. `biome_ambient::ambient_sounds_at(dimension, biome)` composes both.
 
+Rain and snow cadence is the other ambience source. `ShellAmbience` keeps the
+weather one-shot at the sampled landing block (block-centre coordinates), so
+`ShellAudio`/the mixer can apply listener distance and panning; it submits on
+`SoundCategory::Weather`, keeping the weather slider and runtime gain separate
+from biome ambience. The shell only supplies a landing sample when the listener
+column has exposed sky, so clear weather, covered positions, and unstreamed
+terrain do not manufacture a weather voice. The muffled-above variant still
+needs a real nearby heightmap sample and is intentionally not selected by the
+current listener-column probe.
+
 The mood (cave-ambience) trigger is **darkness, not depth** — the common
 wrong guess is "Y below sea level." Each tick, one block is sampled from a
 17³ cube around the player's eye: any sky light *drains* moodiness, and

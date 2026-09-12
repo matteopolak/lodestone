@@ -82,7 +82,7 @@ pub(crate) struct AmbienceInput<'a> {
 /// One thing an ambience tick decided should happen.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum AmbienceEvent {
-    /// A positional one-shot: cave mood, an ambient addition, or rain.
+    /// A positional one-shot: cave mood, an ambient addition, or weather.
     OneShot {
         /// Namespace-stripped event key.
         name: Cow<'static, str>,
@@ -92,6 +92,10 @@ pub(crate) enum AmbienceEvent {
         volume: f32,
         /// Pitch.
         pitch: f32,
+        /// The mixer bus for this event. Weather is kept separate from the
+        /// biome/dimension ambient bus so the user's weather volume control
+        /// applies to rain and snow independently.
+        category: lodestone_model::event::SoundCategory,
     },
     /// Start a looping, head-relative voice at volume 0.
     LoopStart(Cow<'static, str>),
@@ -226,6 +230,7 @@ impl ShellAmbience {
                     position: input.eye,
                     volume: 1.0,
                     pitch: 1.0,
+                    category: lodestone_model::event::SoundCategory::Ambient,
                 });
             }
         }
@@ -238,6 +243,7 @@ impl ShellAmbience {
                 position: play.position,
                 volume: 1.0,
                 pitch: 1.0,
+                category: lodestone_model::event::SoundCategory::Ambient,
             });
         }
 
@@ -248,9 +254,10 @@ impl ShellAmbience {
         // argument, so drawing it here keeps the call shape single-branch.
         let roll = self.rng.next_i32_bound(RAIN_ROLL_BOUND).max(0) as u32;
         if let Some(weather) = input.weather
+            && let Some(landing) = input.landing
             && let Some(sound) = self.rain.tick(
                 weather,
-                input.landing,
+                Some(landing),
                 input.eye.y,
                 input.roof_above,
                 roll,
@@ -258,12 +265,17 @@ impl ShellAmbience {
         {
             events.push(AmbienceEvent::OneShot {
                 name: Cow::Borrowed(sound.name),
-                // Vanilla plays this at the *listener*, relative, not at the
-                // landing block — vanilla's own ambient-sound trigger passes the camera
-                // position.
-                position: input.eye,
+                // Keep the selected landing block as the source. The sound
+                // mixer then supplies listener distance and panning, while the
+                // weather category keeps its own volume control.
+                position: DVec3::new(
+                    f64::from(landing[0]) + 0.5,
+                    f64::from(landing[1]) + 0.5,
+                    f64::from(landing[2]) + 0.5,
+                ),
                 volume: sound.volume,
                 pitch: sound.pitch,
+                category: lodestone_model::event::SoundCategory::Weather,
             });
         }
     }
@@ -304,9 +316,10 @@ impl ShellAmbience {
                     position,
                     volume,
                     pitch,
+                    category,
                 } => audio.play_sound(
                     name,
-                    lodestone_model::event::SoundCategory::Ambient,
+                    *category,
                     position.as_vec3(),
                     *volume,
                     *pitch,
@@ -531,5 +544,69 @@ mod tests {
             &mut dark,
         );
         assert!(events.is_empty(), "a dry sky must be silent: {events:?}");
+    }
+
+    /// Weather events retain their landing source and bus all the way to the
+    /// submission boundary. The source is deliberately not the eye: the audio
+    /// mixer can then apply its listener distance/pan and the Weather slider
+    /// remains independent from biome ambience.
+    #[test]
+    fn rain_ambience_uses_landing_position_and_weather_category() {
+        let ambient = AmbientSounds::EMPTY;
+        let mut weather = WeatherState::clear();
+        weather.apply_rain_level(1.0);
+        let mut ambience = ShellAmbience::new(0);
+        let events = ambience.tick(
+            40,
+            &AmbienceInput {
+                eye: DVec3::new(12.25, 70.0, -4.75),
+                ambient: &ambient,
+                weather: Some(&weather),
+                landing: Some([12, 70, -5]),
+                roof_above: false,
+            },
+            &mut dark,
+        );
+        let rain = events
+            .iter()
+            .find_map(|event| match event {
+                AmbienceEvent::OneShot {
+                    name,
+                    position,
+                    category,
+                    ..
+                } if name == "weather.rain" => Some((*position, *category)),
+                _ => None,
+            })
+            .expect("rain should emit at least one event in 40 ticks");
+        assert_eq!(rain.0, DVec3::new(12.5, 70.5, -4.5));
+        assert_eq!(rain.1, lodestone_model::event::SoundCategory::Weather);
+    }
+
+    #[test]
+    fn covered_or_unstreamed_landing_suppresses_weather_audio() {
+        let ambient = AmbientSounds::EMPTY;
+        let mut weather = WeatherState::clear();
+        weather.apply_rain_level(1.0);
+        let mut ambience = ShellAmbience::new(0);
+        let events = ambience.tick(
+            40,
+            &AmbienceInput {
+                eye: DVec3::new(0.0, 70.0, 0.0),
+                ambient: &ambient,
+                weather: Some(&weather),
+                landing: None,
+                roof_above: true,
+            },
+            &mut dark,
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                AmbienceEvent::OneShot { category, .. }
+                    if *category == lodestone_model::event::SoundCategory::Weather
+            )),
+            "without an exposed landing sample, no weather sound may be submitted: {events:?}"
+        );
     }
 }
