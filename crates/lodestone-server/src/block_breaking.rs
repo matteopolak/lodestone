@@ -19,12 +19,13 @@
 //!   `StartDestroy` + `StopDestroy` pair back to back broke obsidian, or
 //!   bedrock, from any distance.
 //!
-//! This module is the shared arithmetic both fixes need: vanilla's
-//! `BlockBehaviour.getDestroyProgress` over the jar-derived
-//! [`lodestone_data::hardness`] table and the
+//! This module is the shared arithmetic both fixes need: break progress over
+//! the jar-derived [`lodestone_data::hardness`] table and the
 //! [`lodestone_data::tool::mining`] tool census the *client's* mining predictor
-//! already reads. The issue's own framing — the same table sitting one crate
-//! away from the server that ought to be checking it — is the whole fix.
+//! already reads. Efficiency is folded from the held stack through the server's
+//! typed enchantment registry before the divider is applied. The issue's own
+//! framing — the same table sitting one crate away from the server that ought
+//! to be checking it — is the whole fix.
 //!
 //! # How it works
 //!
@@ -50,21 +51,18 @@
 //!
 //! # How to change it, and the gotchas
 //!
-//! **This is deliberately a *plausible* check, not an exact port, and
-//! [`UNTRACKED_SPEED_HEADROOM`] is why.** Vanilla's `getDestroyProgress` reads
-//! the whole player: Efficiency, Haste, Mining Fatigue, Aqua Affinity, the
+//! **This is still a *plausible* check, not a complete port, and
+//! [`UNTRACKED_SPEED_HEADROOM`] is why.** The validator now accounts for the
+//! held item's Efficiency level. Haste, Mining Fatigue, Aqua Affinity, the
 //! `block_break_speed` attribute, whether the eyes are in water and whether the
-//! feet are on the ground. This crate tracks *none* of those — it has no
-//! attribute map, no effect list and no game-mode state. A strict port would
-//! therefore reject legitimate breaks by a player with an enchanted tool, which
-//! is a far worse bug than the one being fixed. So the server's estimate is
-//! multiplied by a fixed headroom that comfortably exceeds any real speed-up
-//! (Efficiency V on a matching tool is ~4.3x, Haste II a further 1.6x) before
-//! the comparison. The check still rejects the thing the issue is about by
-//! orders of magnitude — see the tests at the bottom of this file.
+//! feet are on the ground remain outside this server seam, so the estimate is
+//! multiplied by fixed headroom before the comparison. This keeps legitimate
+//! digs accepted while the remaining omissions are being wired as typed player
+//! state rather than silently treating them as absent.
 //!
-//! If the server ever grows real per-player attributes and effects, feed them in
-//! and drop the headroom; the shape of [`progress_per_tick`] is already vanilla's.
+//! If the server grows real per-player attributes and effects, feed them into
+//! the same calculation and reduce the headroom; the shape of
+//! [`progress_per_tick`] is already the shared game's formula.
 //! `lodestone-game`'s `BreakInputs` is the full-fidelity client-side twin and is
 //! the thing to mirror — this crate does not depend on it (see
 //! `Cargo.toml`'s note on keeping the *client* vocabulary out of the browser
@@ -89,6 +87,7 @@
 //! global state id both censuses key on, and `lodestone_model` for the
 //! vocabulary. Names no packet and no protocol version.
 
+use lodestone_game::mining::efficiency_bonus;
 use lodestone_model::{BlockPos, ItemStack, Vec3};
 
 use crate::vitals::EYE_HEIGHT;
@@ -235,7 +234,7 @@ impl PendingBreak {
     }
 }
 
-/// Vanilla `BlockBehaviour.getDestroyProgress` for `block_state` in `held`'s
+/// The break progress for `block_state` in `held`'s
 /// hands, as a fraction of the block accrued per server tick.
 ///
 /// `block_state` is a `ChunkSource::block_state` string (a bare name, or one
@@ -259,7 +258,25 @@ pub(crate) fn progress_per_tick(block_state: &str, held: Option<&ItemStack>) -> 
     if hardness < 0.0 {
         return Some(0.0);
     }
-    let mining = lodestone_data::tool::mining(held, state_id);
+    let mut mining = lodestone_data::tool::mining(held, state_id);
+    // Efficiency is represented as the typed `mining_efficiency` contribution
+    // to dig speed. The stack stores session-local enchantment ids, so resolve
+    // the id through the server-owned registry rather than comparing an id
+    // guessed from a protocol fixture. A non-tool enchantment must not help:
+    // the contribution is applied only when the tool census says the item is
+    // faster than a bare hand.
+    if mining.speed > 1.0
+        && let Some(efficiency_id) = crate::enchantment_data::id_of("minecraft:efficiency")
+    {
+        let level = held
+            .into_iter()
+            .flat_map(|stack| stack.components.enchantments.iter())
+            .filter(|enchantment| enchantment.id == efficiency_id)
+            .map(|enchantment| enchantment.level)
+            .max()
+            .unwrap_or(0);
+        mining.speed += efficiency_bonus(level);
+    }
     let divider = if mining.correct_tool { 30.0 } else { 100.0 };
     // Zero hardness divides to `+inf`, which is the instant-break signal the
     // caller tests with `>= 1.0` — exactly as vanilla's own float division does.
@@ -292,6 +309,16 @@ pub(crate) fn within_interaction_range(feet: Option<Vec3>, pos: BlockPos) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lodestone_model::ItemEnchantment;
+
+    fn enchanted_pickaxe(enchantment: &str, level: u32) -> ItemStack {
+        let mut stack = ItemStack::new("minecraft:diamond_pickaxe".parse().unwrap(), 1);
+        stack.components.enchantments.push(ItemEnchantment {
+            id: crate::enchantment_data::id_of(enchantment).unwrap_or(123_456),
+            level,
+        });
+        stack
+    }
 
     /// The bug the owner reported: a zero-hardness block must be an instant
     /// break, so `StartDestroy` alone is enough. Bare-handed, because that is how
@@ -340,6 +367,35 @@ mod tests {
             ..dig
         };
         assert!(!doomed.deferred_break_ready(Some(100_000)));
+    }
+
+    /// Efficiency is part of the authoritative server price, not only a
+    /// client-side display hint. The expected values are independent arithmetic
+    /// from the census inputs: stone hardness `1.5`, diamond-pick speed `8`,
+    /// correct-tool divider `30`, and Efficiency V's `5*5+1 = 26` contribution.
+    #[test]
+    fn efficiency_changes_progress_by_its_typed_bonus() {
+        let plain = enchanted_pickaxe("minecraft:unbreaking", 3);
+        let efficient = enchanted_pickaxe("minecraft:efficiency", 5);
+        let plain_progress = progress_per_tick("minecraft:stone", Some(&plain)).unwrap();
+        let efficient_progress = progress_per_tick("minecraft:stone", Some(&efficient)).unwrap();
+        let expected_plain = 8.0 / (1.5 * 30.0);
+        let expected_efficient = (8.0 + 26.0) / (1.5 * 30.0);
+        assert!((plain_progress - expected_plain).abs() < 1e-6, "plain={plain_progress}");
+        assert!((efficient_progress - expected_efficient).abs() < 1e-6, "efficient={efficient_progress}");
+        assert!(efficient_progress > plain_progress * 4.0);
+    }
+
+    /// A different enchantment is a negative control for the detector: a
+    /// generic enchantment on the same tool must not accidentally grant mining
+    /// speed merely because the stack is enchanted.
+    #[test]
+    fn unrelated_enchantment_does_not_change_mining_progress() {
+        let plain = ItemStack::new("minecraft:diamond_pickaxe".parse().unwrap(), 1);
+        let fortune = enchanted_pickaxe("minecraft:fortune", 3);
+        let plain_progress = progress_per_tick("minecraft:stone", Some(&plain)).unwrap();
+        let fortune_progress = progress_per_tick("minecraft:stone", Some(&fortune)).unwrap();
+        assert_eq!(fortune_progress, plain_progress);
     }
 
     /// The headline gate: obsidian must not break on a back-to-back

@@ -66,6 +66,16 @@ unresolvable. `mining_efficiency`/`haste_amplifier`/`mining_fatigue`/
 `block_break_speed` remain at their defaults — no enchantment, potion or
 attribute input is modelled on this path yet.
 
+The authoritative server-side validator has one additional typed input wired:
+`crates/lodestone-server/src/block_breaking.rs::progress_per_tick` resolves the
+Efficiency level from the held stack through `enchantment_data` and adds
+`level² + 1` only to a tool whose census speed is above hand speed. The
+unrelated-enchantment control is intentional: merely carrying an enchanted
+stack must not change timing. Potion effects, player break-speed attributes,
+underwater state and on-ground state remain follow-up inputs; until they are
+available to that validator, its documented headroom preserves legitimate
+breaks while still rejecting implausible instant stops.
+
 Creative block breaking is instant and arms a five-tick client-side delay for
 held input. Progressive survival breaks use the same delay after their `STOP`
 action, while survival blocks whose break progress is already instant (grass,
