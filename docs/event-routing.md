@@ -7,13 +7,25 @@ event routers claim each `ClientEvent` variant, so that adding a variant and for
 it is a compile error rather than a silent nothing — the *island* defect class this repo's
 architecture rules name as its most expensive recurring bug.
 
+## Module layout
+
+The public `lodestone_model::event::*` surface is re-exported from the small
+`event.rs` facade. Payload definitions are grouped in `event/chat.rs` (chat,
+signing, and player identity), `event/entity.rs` (movement, metadata, equipment,
+and player lists), `event/world.rs` (dimensions, block-state provenance, and
+particles), `event/scoreboard.rs` (sounds, scoreboard, teams, and boss bars),
+and `event/session.rs` (recipe, map, advancement, and server-link payloads).
+`event/client.rs` owns the `ClientEvent` carrier enum; `event/routing.rs` owns
+`Route`, `route`, and their exhaustive tests. The facade reexports all of these
+items, so moving a definition between domains does not change downstream paths.
+
 ## How it works
 
 `ClientEvent` is `#[non_exhaustive]`, so no crate outside `lodestone-model` can write an
 exhaustive match over it — every downstream consumer necessarily ends in a wildcard arm, and
 before this table existed a new variant compiled with **zero** routing arms anywhere and
 reached nothing. `route(event: &ClientEvent) -> Route` is a single exhaustive match (no
-wildcard arm) living beside the enum, inside the one crate that can write one:
+wildcard arm) living in the event module's `routing.rs`, inside the one crate that can write one:
 
 ```rust
 pub struct Route {
@@ -167,9 +179,11 @@ None. No features, no environment variables.
 
 ## Dependencies
 
-- `crates/lodestone-model/src/event.rs` — `Route`, `route`, and the table; also
-  `include_str!`s this very file to check the island count against its own source, so this
-  file's path and the exact `**N of 137**` phrasing are load-bearing, not decorative.
+- `crates/lodestone-model/src/event/client.rs` — `ClientEvent` and its clientbound carriers.
+- `crates/lodestone-model/src/event/routing.rs` — `Route`, `route`, and the table; its
+  `include_str!` checks the routing source and client enum against the island count, so
+  these paths and the exact `**N of 137**` phrasing are load-bearing, not decorative.
+- `crates/lodestone-model/src/event.rs` — the stable facade that reexports every event-domain item.
 - `crates/lodestone-ecs/src/ingest.rs`, `session.rs` — `handles_event`, each a one-line
   derivation of `route(e).ingest` / `route(e).session`.
 - `crates/lodestone-shell/src/net.rs` — the `debug_assert!` in `forward`'s catch-all.
