@@ -2561,7 +2561,7 @@ mod tests {
     }
 
     #[test]
-    fn executor_applies_option_gates_and_rejects_order_drift() {
+    fn executor_applies_option_gates() {
         let options = PipelineOptions::new(false, true);
         let mut executor = OVERWORLD_PIPELINE.executor_with_options(options);
         for stage in OVERWORLD_PIPELINE.stages() {
@@ -2573,12 +2573,13 @@ mod tests {
             assert_eq!(result.is_some(), OVERWORLD.stage_enabled(*stage, options));
         }
         executor.finish();
+    }
 
-        let order_drift = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut executor = OVERWORLD_PIPELINE.executor();
-            executor.enter(ColumnStage::Fill);
-        }));
-        assert!(order_drift.is_err());
+    #[test]
+    #[should_panic(expected = "generation stage out of order")]
+    fn executor_rejects_order_drift() {
+        let mut executor = OVERWORLD_PIPELINE.executor();
+        executor.enter(ColumnStage::Fill);
     }
 
     #[test]
