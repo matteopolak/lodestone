@@ -41,34 +41,41 @@ There are four intentionally separate typed schedules:
   the numeric value needed by the seed derivation. External numeric values are
   decoded once at the data boundary.
 
-`StageExecutor` is the production guard for pipelines whose prefix and suffix
-live in different helper methods: an executor can resume at a cached-prefix
-boundary, asserts the next named stage in every build, and can optionally
-append typed stage keys to a borrowed diagnostic trace without logging source
-code. `StageCursor` remains for dimensions not yet migrated. `StageGate` and
-`StageOption` record which data-dependent passes may be no-ops. The source
-guard `cargo xtask check-worldgen-schedule` checks that production entrypoints
-obtain their cursor from the matching central schedule and that all three
-dimension schedules retain their typed gate metadata.
+`DimensionPipeline` is the executable contract for one dimension. It derives
+its descriptors, prefixes, and production `StageExecutor` from the schedule's
+single `stages` slice, so a second pass-order list cannot drift. An executor can
+resume at a cached-prefix boundary, asserts the next named stage in every
+build, and can optionally append typed stage keys to a borrowed diagnostic
+trace without logging source code. `StageCursor` remains available to
+unmigrated helpers. `StageGate` and `StageOption` record which data-dependent
+passes may be no-ops, while `PipelineOptions` changes only whether a gated
+operation runs; the stage still advances in the same order. The source guard
+`cargo xtask check-worldgen-schedule` checks that production entrypoints obtain
+their executor from the matching central schedule and that all three dimension
+schedules retain their typed gate metadata.
 
-The End also has one `StageDescriptor` for every entry in `END`. A descriptor
-names typed prerequisites and products, its read/write radius, seed scope,
-resident-write barrier, and cancellation boundary. `StageSchedule::descriptors`
-derives the descriptor order from the same `stages` slice; there is no second
-pass list to drift. The current measured End contracts are a zero-radius pure
-prefix, a 16-chunk structure-placement read window, and a radius-one,
-source-ordered feature transaction for the nine source columns. Structure
-starts, structure blocks, block-entity events, decoration spills, gateways,
-and the three client heightmaps remain explicit products or sidecars.
+Every dimension now has one `StageDescriptor` for every entry in its schedule.
+A descriptor names typed products and sidecars, a conservative read/write
+radius, seed scope, resident-write barrier, and cancellation boundary.
+`StageSchedule::descriptors` derives descriptor order from the same `stages`
+slice; there is no second pass list to drift. An absent pass is rejected by
+dimension-qualified lookup (for example, Nether cannot obtain the
+Overworld-only top layer, and End cannot obtain carvers). End's independently
+measured contracts retain the detailed structure, gateway, spill, and heightmap
+declarations; the Overworld and Nether descriptors use the same typed hand-off
+vocabulary while their dimension-specific footprints are refined.
 
 `StageFrontier` is the chunk-level resumable record. It admits only the next
 stage in the central order, checks the descriptor's required products and
 sidecars, and rejects a foreign dimension or schedule version before mutating
-the retained prefix. It records fingerprints and retention declarations but
-does not own the generator's product store; a caller persists those products
-alongside the frontier record. `GenerationTarget::{Shaped,Full}` derives the
-public prefix or complete stage slice from the same schedule, so a server or
-test entrypoint cannot copy a shaped list by hand.
+the retained prefix. Its `PipelineIdentity` combines dimension, schedule
+version, and option fingerprint, so a cached far-column prefix cannot be
+resumed under another dimension or option set. It records fingerprints and
+retention declarations but does not own the generator's product store; a
+caller persists those products alongside the frontier record.
+`GenerationTarget::{Shaped,Full}` derives the public prefix or complete stage
+slice from the same schedule, so a server or test entrypoint cannot copy a
+shaped list by hand.
 
 `RetainedStageFrontier` is the first production ownership seam for that
 eventual cache. It keeps typed product and sidecar handles beside the ordered
@@ -80,11 +87,11 @@ retention boundary; callers use generic typed insertion and downcast accessors.
 The current executor hook is deliberately small so each dimension can wire its
 existing generator without introducing a second worldgen implementation.
 
-The schedules and End descriptors describe pass order and the named
-request-order vocabulary. They do not perform generation or replace
-dimension-specific dependency logic. Overworld and Nether currently expose
-cursor/gate metadata only; their descriptor footprints should be added after
-independent measurements rather than guessed from End.
+The schedules and descriptors describe pass order and the named request-order
+vocabulary. They do not perform generation or replace dimension-specific
+dependency logic. For distant chunks, construct the executor at the first
+unfinished index and advance the same stage cursor as the player approaches;
+do not add a separate far-generation pipeline.
 The Nether production dispatcher resolves `NETHER_SOURCES::order_for` from the
 same `ChunkRequest` used by the replay plan, so a schedule change cannot
 silently leave one comparator with a copied tile loop. The scalar one-column
@@ -130,22 +137,26 @@ request whose source window crosses a tile boundary is a useful control: it
 must produce a different local source permutation than a request wholly inside
 one tile.
 
-When extending the End pipeline, update the descriptor for the existing stage
-in `END`; do not create a parallel descriptor order. If a new retained product
-or sidecar is needed, add its enum variant, include it in the descriptor, and
-add a frontier test that proves a record missing it is rejected atomically.
-Keep `StageFrontier` as metadata until the executor can persist and restore the
-corresponding product at the same boundary. In particular, a descriptor does
-not authorize rerunning feature sources against a mutable resident region
-without the source-order and transaction guarantees named by its barrier.
+When extending a dimension pipeline, update the descriptor for the existing
+stage in that dimension's schedule; do not create a parallel descriptor order.
+If a new retained product or sidecar is needed, add its enum variant, include
+it in the descriptor, and add a frontier test that proves a record missing it
+is rejected atomically. `StageFrontier` remains the identity and validation
+record until the executor can persist and restore the corresponding product at
+the same boundary. In particular, a descriptor does not authorize rerunning
+feature sources against a mutable resident region without the source-order and
+transaction guarantees named by its barrier.
 
 ## Configuration
 
-The schedules have no runtime configuration. They are compile-time constants;
-`StageExecutor` validates entered stages in every build and has no trace
-allocation unless explicitly requested. `StageSchedule::validate` checks that
-each gate names one scheduled stage and appears once. `LifecycleSchedule::validate` also checks that dependencies point
-strictly backward and that packet finalization remains terminal.
+The canonical schedules and descriptors are compile-time constants. Runtime
+configuration is represented by `PipelineOptions::{structures,decorations}`;
+the default enables both. `StageExecutor` validates entered stages in every
+build and has no trace allocation unless explicitly requested.
+`StageSchedule::validate` checks that each gate names one scheduled stage,
+appears once, and has a descriptor whose typed key matches the dimension.
+`LifecycleSchedule::validate` also checks that dependencies point strictly
+backward and that packet finalization remains terminal.
 
 ## Dependencies
 
