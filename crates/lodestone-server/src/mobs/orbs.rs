@@ -11,8 +11,9 @@ use uuid::Uuid;
 
 use super::{
     EntityHandoffToken, MobSim, OrbState, PLAYER_EYE_HEIGHT, VOID_DESPAWN_DEPTH, dist_sqr,
-    settle_entity, within_box,
+    within_box,
 };
+use super::collision::settle_entity;
 
 // ---------------------------------------------------------------------------
 // `ExperienceOrb` — every constant below is transcribed from that class

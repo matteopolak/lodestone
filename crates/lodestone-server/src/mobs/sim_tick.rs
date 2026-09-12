@@ -3,6 +3,26 @@
 use super::*;
 
 impl<'w> MobSim<'w> {
+    /// Advances every mob one tick: run its goals (which drive A\* and path
+    /// following through the [`MobController`] seam), then step the follower.
+    /// Each mob's `no_action_time` ages by one tick and is first cleared for any
+    /// persistent mob, or
+    /// one within its category's immune radius of a player from
+    /// [`set_players`](Self::set_players). See the body for why that reset lives
+    /// here rather than only in [`despawn_pass`](MobSim::despawn_pass), which
+    /// has no production caller and left the counter monotonic — permanently
+    /// disabling every idle-throttled goal five seconds into a world.
+    ///
+    /// A melee attack that connected this tick is resolved into a real
+    /// [`SimMob::apply_damage`] call against whichever mob its
+    /// [`attack_target_id`](SimMob::attack_target_id) names — the goal
+    /// scheduler only ever produces the *intent* to strike (a position, via
+    /// [`NavigatingMob::take_new_attacks`]); this is where that intent becomes
+    /// a real health change. Resolution runs in a second pass over collected
+    /// events, after every mob's own AI has ticked, so an attacker damaging
+    /// another mob never needs two simultaneous mutable borrows into the same
+    /// `Vec`. A mob whose health reaches `0.0` is removed at the end of the
+    /// tick that killed it.
     pub fn tick(&mut self) {
         let world = self.world;
         self.tick_with_terrain(&|x, y, z| world.block_state(x, y, z).to_owned());
@@ -2368,55 +2388,4 @@ impl<'w> MobSim<'w> {
         }
     }
 
-    /// A player right-clicked a mob with (or without) an item — vanilla's own
-    /// generic mob-interact dispatch reaching each species' own interaction
-    /// override, the single producer for taming, sitting,
-    /// feeding and breeding.
-    ///
-    /// # The dispatch order is the specification
-    ///
-    /// Vanilla's per-species interaction overrides are nested `if` chains that end in
-    /// their parent's own version, so *which arm wins* is as much a part of the port as
-    /// the constants are. Two orderings that both "tame a wolf" differ
-    /// observably: feeding a hurt tame wolf meat must heal it, **not** put it in
-    /// love, and only once it is at full health does the same item breed it
-    /// (the wolf's own interaction override's first arm, then its parent's
-    /// generic animal interaction). This method's arms are in that order and each one
-    /// names which vanilla interaction override it comes from, in prose.
-    ///
-    /// # What is deliberately not here
-    ///
-    /// Collar dyeing, wolf body armour and its repair, the parrot's poisonous
-    /// cookie, and mounting a tame horse. Each needs an item model this crate
-    /// does not have (dye components, equipment slots, damage values) or a
-    /// passenger model that does not exist.
-    ///
-    /// Returns [`InteractOutcome::Pass`] when nothing responded, which is the
-    /// caller's signal to fall through to whatever it does with an unconsumed
-    /// right-click.
-    /// Attaches or detaches a lead between `mob_id` and the player `holder` —
-    /// vanilla's own generic entity-interact step's two leash-specific branches (excluding
-    /// its sneak-multi-attach branch; see this method's own "not
-    /// implemented" note).
-    ///
-    /// - If `mob_id` is already leashed to `holder`, detaches it (vanilla's
-    ///   own "current holder is this player" arm) and reports whether a
-    ///   `minecraft:lead` item should be spawned (`creative` mirrors
-    ///   vanilla's own "has infinite materials" check, which this sim has no game-mode
-    ///   state of its own to answer).
-    /// - Else, if `holding_lead` and the mob is not already held by a
-    ///   *player* (vanilla's own "current holder is not a player"
-    ///   guard — one player cannot steal another's leashed mob just by
-    ///   holding a lead), attaches it to `holder`, dropping any existing
-    ///   non-player leash first exactly as vanilla's own drop-leash call does
-    ///   before its own set-leashed-to call.
-    /// - Otherwise refuses: not leashable, no lead in hand, or out of
-    ///   [`LEASH_TOO_FAR_DIST`] (vanilla's own "can have a leash attached to"
-    ///   check's own snap-distance check).
-    ///
-    /// **Not implemented**: vanilla's sneak-right-click branch, which
-    /// re-parents *every* mob already leashed to `holder` onto whatever
-    /// entity was clicked, in one interaction. This only ever moves the one
-    /// `mob_id` named — a real gap for a player leashing several animals to
-    /// one another, not merely an unlikely input.
 }

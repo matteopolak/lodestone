@@ -97,8 +97,6 @@ impl<'w> MobSim<'w> {
             self.post_vibration(position, VibrationEvent::EntityDie, Some(id));
         }
     }
-}
-
     /// Posts one vibration for a producer. The optional `source` identifies
     /// the entity responsible when the producer has one; see
     /// [`PostedVibration::source`]'s own doc.
@@ -539,3 +537,4 @@ impl<'w> MobSim<'w> {
                 .set_shoulder_dismount_ticks(0);
         }
     }
+}
