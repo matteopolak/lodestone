@@ -62,6 +62,12 @@ pub(crate) struct PlaceContext {
     pub yaw: Option<f32>,
     /// Player pitch in degrees; `None` before the first packet carrying angles.
     pub pitch: Option<f32>,
+    /// Whether the player is holding the secondary-use (sneak) input.
+    ///
+    /// A sneaking right-click deliberately bypasses a container's own use so
+    /// a block can be placed against its side. It also suppresses chest
+    /// pairing: the player can place a single chest beside an existing chest.
+    pub sneaking: bool,
 }
 
 /// The outcome of a placement: the state for the clicked cell plus any other
@@ -494,15 +500,22 @@ where
     if keeps_left { "left" } else { "right" }
 }
 
-/// `ChestBlock.getStateForPlacement` minus the sneak-placement
-/// branch (this crate does not carry the client's sneak state), plus the
-/// partner's own re-typing that vanilla performs through `updateShape`.
+/// `ChestBlock.getStateForPlacement`, plus the partner's own re-typing that
+/// vanilla performs through `updateShape`.
 fn chest_state<F>(block: &str, ctx: &PlaceContext, block_at: &F) -> Option<Placement>
 where
     F: Fn(BlockPos) -> WorldState,
 {
     let facing = horizontal_look(ctx)?.opposite();
     // `candidatePartnerFacing`: a same-block, still-single chest one step over.
+    // Secondary use intentionally skips this scan: it is the control that lets
+    // a player place a single chest beside an existing container.
+    if ctx.sneaking {
+        return Some(Placement::just(format!(
+            "{block}[facing={},type=single]",
+            direction_to_str(facing)
+        )));
+    }
     let partner = |side: Direction| -> Option<(BlockPos, Direction)> {
         let p = side.relative(ctx.target);
         let state = block_at(p);
@@ -749,6 +762,7 @@ mod tests {
             },
             yaw: Some(yaw),
             pitch: Some(0.0),
+            sneaking: false,
         }
     }
 
@@ -924,6 +938,26 @@ mod tests {
             placed.extra,
             vec![(west, BlockStateValue::parse("minecraft:chest[facing=south,type=right]"))]
         );
+    }
+
+    /// Secondary use bypasses chest pairing so a player can place a single
+    /// chest beside an existing container. Ordinary use keeps the pairing
+    /// behaviour above.
+    #[test]
+    fn a_sneak_click_keeps_a_chest_single() {
+        let west = BlockPos::new(-1, 64, 0);
+        let neighbour = move |p: BlockPos| {
+            if p == west {
+                WorldState::from("minecraft:chest[facing=south,type=single]")
+            } else {
+                WorldState::from("minecraft:air")
+            }
+        };
+        let mut sneaking = ctx(BlockFace::Up, 0.0, 180.0);
+        sneaking.sneaking = true;
+        let placed = placement("minecraft:chest", &sneaking, neighbour).unwrap();
+        assert_eq!(placed.state, "minecraft:chest[facing=south,type=single]");
+        assert!(placed.extra.is_empty(), "sneak placement must not re-type its neighbour");
     }
 
     /// Pillars still take their axis from the clicked face, with no yaw at all.
