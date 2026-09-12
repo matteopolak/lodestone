@@ -995,6 +995,7 @@ impl Sim {
             // `AnimInput::armor_stand_pose`. Stated explicitly, like `arm_pose`
             // above, rather than spread from `AnimInput::REST`.
             armor_stand_pose: None,
+            armor_stand_yaw_deg: 0.0,
             // The local player is never a vehicle either. Stated explicitly for
             // the same reason `armor_stand_pose` above is.
             boat_hurt: lodestone_render::entity_anim::BoatHurt::REST,
