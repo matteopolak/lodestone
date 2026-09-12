@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use lodestone_server::{
-    BlockEntity, ChunkColumn, ChunkGenerationStage, ChunkSource, EndChunkSource, NetherChunkSource,
+    ChunkColumn, ChunkGenerationStage, ChunkSource, EndChunkSource, NetherChunkSource,
     OverworldChunkSource,
 };
 use lodestone_worldgen::overworld::{GeneratedBlockEntity, OverworldGenerator};
@@ -74,7 +74,7 @@ pub type LifecycleClientHeightmaps = [[u16; 256]; 3];
 /// boundary.
 ///
 /// `client_heightmaps` is the exact map seed to install before the source
-/// body runs.  It is intentionally independent from the resident block field:
+/// body runs. It is intentionally independent from the resident block field:
 /// an external chunk may instantiate a map, or replace two map cells at its
 /// own FEATURES boundary, without a captured block transition in that band.
 /// The materializer then maintains the installed maps through ordinary
@@ -284,7 +284,7 @@ pub trait LifecycleWorldgenSource {
     /// Return the source's exact lifecycle map seed for one resident column.
     ///
     /// This is a source boundary, not a reconstruction from the resident
-    /// block field.  Captures that carry an authenticated
+    /// block field. Captures that carry an authenticated
     /// [`LifecycleResidentTransition`] take precedence; this hook keeps older
     /// captures and direct controls on the same no-rescan path.
     fn lifecycle_client_heightmaps(
@@ -303,11 +303,11 @@ pub trait LifecycleWorldgenSource {
         _resident: &BTreeMap<ChunkPos, ChunkColumn>,
     ) -> LifecycleFeatureResult;
 
-    /// Run one source's FEATURES body for a requested target packet.
-    ///
-    /// The default is source-centred: the target owns only the surrounding
-    /// retention transaction. Dimensions whose production dispatcher needs a
-    /// target-centred resident read window may override this seam explicitly.
+    /// Run one source's FEATURES body for a requested target packet.  The
+    /// source controls its decoration seed, while the requested target owns
+    /// the read context and resident view.  Direct completion controls retain
+    /// the historical source-centred default; authenticated target replay
+    /// supplies this distinction explicitly.
     fn feature_result_for_target(
         &self,
         _target: ChunkPos,
@@ -316,6 +316,16 @@ pub trait LifecycleWorldgenSource {
         resident: &BTreeMap<ChunkPos, ChunkColumn>,
     ) -> LifecycleFeatureResult {
         self.feature_result(source, overrides, resident)
+    }
+
+    /// Whether writes emitted while replaying a target are part of the
+    /// resident world's durable source state even when their destination has
+    /// not reached FEATURES yet. End decoration is source-owned and its
+    /// cross-chunk plant writes must remain visible to the later destination
+    /// packet; dimensions with target-local speculative writes retain the
+    /// default rollback behavior.
+    fn target_spills_persist(&self) -> bool {
+        false
     }
 
     /// Run any source-local stage after FEATURES. The Nether has no such
@@ -346,9 +356,9 @@ pub trait LifecycleWorldgenSource {
     fn attach_source_sidecars(&self, _source: ChunkPos, _column: &mut ChunkColumn) {}
 
     /// Finalize the detached packet snapshot after every admitted source has
-    /// completed. Sources may keep richer runtime/save sidecars in their
-    /// resident columns while the wire view selects only the records observed
-    /// at that dimension's authenticated packet boundary.
+    /// completed. Sources may keep richer runtime sidecars in their resident
+    /// columns while the wire view uses the state-owned records that existed
+    /// before gameplay-only payload generation.
     fn finalize_packet_snapshot(&self, _target: ChunkPos, _column: &mut ChunkColumn) {}
 }
 
@@ -387,6 +397,37 @@ impl LifecycleWorldgenSource for OverworldChunkSource {
         let result = self.generator().parity_source_decoration_with_overrides(
             source.0,
             source.1,
+            source.0,
+            source.1,
+            &overrides,
+        );
+        LifecycleFeatureResult {
+            spills: result
+                .spills
+                .into_iter()
+                .map(|spill| LifecycleSpill {
+                    source: spill.source,
+                    position: spill.position,
+                    state: spill.state,
+                    transient: false,
+                })
+                .collect(),
+            block_entities: result.block_entities,
+            end_gateways: Vec::new(),
+        }
+    }
+
+    fn feature_result_for_target(
+        &self,
+        target: ChunkPos,
+        source: ChunkPos,
+        overrides: &BTreeMap<AbsoluteCell, String>,
+        _resident: &BTreeMap<ChunkPos, ChunkColumn>,
+    ) -> LifecycleFeatureResult {
+        let overrides = override_vec(overrides);
+        let result = self.generator().parity_source_decoration_with_overrides(
+            target.0,
+            target.1,
             source.0,
             source.1,
             &overrides,
@@ -545,6 +586,35 @@ impl LifecycleWorldgenSource for EndChunkSource {
         }
     }
 
+    fn feature_result_for_target(
+        &self,
+        _target: ChunkPos,
+        source: ChunkPos,
+        overrides: &BTreeMap<AbsoluteCell, String>,
+        _resident: &BTreeMap<ChunkPos, ChunkColumn>,
+    ) -> LifecycleFeatureResult {
+        let overrides = override_vec(overrides);
+        let result = self.generator().parity_source_decoration_with_overrides(
+            source.0,
+            source.1,
+            &overrides,
+        );
+        LifecycleFeatureResult {
+            spills: result.spills.into_iter().map(|spill| LifecycleSpill {
+                source: spill.source,
+                position: spill.position,
+                state: spill.state,
+                transient: false,
+            }).collect(),
+            block_entities: Vec::new(),
+            end_gateways: result.gateways,
+        }
+    }
+
+    fn target_spills_persist(&self) -> bool {
+        true
+    }
+
     fn attach_end_gateways(
         &self,
         column: &mut ChunkColumn,
@@ -557,21 +627,8 @@ impl LifecycleWorldgenSource for EndChunkSource {
         self.attach_structures(column, source.0, source.1);
     }
 
-    fn finalize_packet_snapshot(&self, _target: ChunkPos, column: &mut ChunkColumn) {
-        // End structure placement carries banner and container creation events
-        // in the direct source column for persistence and save-sidecar tests.
-        // The external End lifecycle packet boundary does not publish those
-        // structure-owned records; retain only feature-owned gateway metadata
-        // that was attached during the replay itself.  This is deliberately a
-        // lifecycle-only view: EndChunkSource::column remains the direct
-        // four-banner control.
-        let gateways = column
-            .block_entities()
-            .iter()
-            .filter(|(_, entity)| matches!(entity, BlockEntity::EndGateway { .. }))
-            .cloned()
-            .collect();
-        column.set_block_entities(gateways);
+    fn finalize_packet_snapshot(&self, target: ChunkPos, column: &mut ChunkColumn) {
+        self.finalize_packet_snapshot_for_packet(column, target.0, target.1);
     }
 
 }
@@ -603,13 +660,12 @@ pub fn top_layer_spills(
 /// Stateful resident-column materializer for one authenticated lifecycle
 /// capture.
 ///
-/// `complete` runs one globally unique FEATURES event. Target-scoped
-/// completions, used by the ordered stream replay, are keyed by both target
-/// and source: the same source may be evaluated again when a later target
-/// requests a different read window. Each emitted transition is applied to the
-/// resident destination column. The caller admits the complete halo before
-/// replay so a source may write to a neighbour whose explicit ticket appears
-/// later in the capture.
+/// `complete` runs one FEATURES event. Targeted replay may run the same source
+/// for several requested targets: the source body keeps its own decoration
+/// seed, while the target supplies the resident read window. Each emitted
+/// transition is applied to the resident destination column. The caller admits
+/// the complete halo before replay so a source may write to a neighbour whose
+/// explicit ticket appears later in the capture.
 pub struct LifecycleMaterializer<S> {
     source: S,
     resident: BTreeMap<ChunkPos, ChunkColumn>,
@@ -632,12 +688,14 @@ pub struct LifecycleMaterializer<S> {
     /// ownership boundary; the later target replays the source instead of
     /// inheriting speculative state from an earlier request.
     active_target: Option<ChunkPos>,
-    /// Resident chunks that have crossed their FEATURES boundary in the
-    /// retained lifecycle. A source becomes mutable when its own completion
-    /// starts; writes into it before that point are then promoted with the
-    /// source instead of being restored as future-target speculation.
+    /// Chunks whose status is currently mutable for the packet lifecycle.
+    /// Shaped columns may be resident before their target ticket reaches this
+    /// boundary, but feature writes must not mutate them early.
     mutable_targets: BTreeSet<ChunkPos>,
-    temporary_spills: BTreeMap<AbsoluteCell, (ChunkPos, String, Option<String>)>,
+    /// Temporary writes to resident dependencies during the active target
+    /// transaction. They are visible to later source bodies in that
+    /// transaction and rolled back before the next target is finalized.
+    temporary_spills: BTreeMap<AbsoluteCell, (ChunkPos, Option<String>, Option<String>)>,
     overrides: BTreeMap<AbsoluteCell, String>,
 }
 
@@ -646,7 +704,10 @@ impl<S> std::fmt::Debug for LifecycleMaterializer<S> {
         formatter
             .debug_struct("LifecycleMaterializer")
             .field("resident_columns", &self.resident.len())
-            .field("resident_stages", &self.resident_stages)
+            .field(
+                "resident_stages",
+                &self.resident_stages,
+            )
             .field(
                 "completions",
                 &(self.completions.len() + self.target_completions.len()),
@@ -718,6 +779,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 &event.resident_transitions,
             );
         }
+        self.finish_target(plan.target());
     }
 
     /// Admit one shaped resident column.
@@ -803,13 +865,6 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         );
     }
 
-    /// Apply one target-scoped completion. When wrapped by [`Self::begin_target`]
-    /// and [`Self::finish_target`], writes into other destinations are a
-    /// packet-local read context and are rolled back before the next target
-    /// unless an authenticated resident boundary makes that destination
-    /// state-owned.
-    /// Calling this directly keeps the historical persistent materializer
-    /// behavior used by narrow spill controls.
     pub fn complete_for_target(
         &mut self,
         target: ChunkPos,
@@ -817,21 +872,8 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         stage: LifecycleCompletion,
         sequence: u64,
     ) {
-        assert!(
-            self.active_target.is_none() || self.active_target == Some(target),
-            "lifecycle target {:?} was not finished before starting {:?}",
-            self.active_target,
-            target,
-        );
-        self.complete_observing_for_target(
-            target,
-            source,
-            stage,
-            sequence,
-            &[],
-            true,
-            |_| {},
-        );
+        self.begin_target(target);
+        self.complete_observing_for_target(target, source, stage, sequence, &[], true, |_| {});
     }
 
     /// Apply one target-scoped completion with externally observed resident
@@ -846,12 +888,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         sequence: u64,
         resident_transitions: &[LifecycleResidentTransition],
     ) {
-        assert!(
-            self.active_target.is_none() || self.active_target == Some(target),
-            "lifecycle target {:?} was not finished before starting {:?}",
-            self.active_target,
-            target,
-        );
+        self.begin_target(target);
         self.complete_observing_for_target(
             target,
             source,
@@ -863,16 +900,14 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         );
     }
 
-    /// Start one ordered target wavefront. All source bodies completed until
-    /// [`Self::finish_target`] share the target's read context, including
-    /// temporary neighbour writes.
+    /// Marks a packet target mutable and starts its packet-local transaction.
     pub fn begin_target(&mut self, target: ChunkPos) {
         assert!(
             self.resident.contains_key(&target),
             "lifecycle target {target:?} was not admitted before completion"
         );
         assert!(
-            self.active_target.is_none(),
+            self.active_target.is_none() || self.active_target == Some(target),
             "lifecycle target {:?} was not finished before starting {:?}",
             self.active_target,
             target,
@@ -881,40 +916,25 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         self.mutable_targets.insert(target);
     }
 
-    /// Finish one ordered target wavefront, restoring writes whose destination
-    /// has not crossed an authenticated ownership boundary. The next target
-    /// must replay its own source wavefront, so no global source-completion set
-    /// can suppress that replay.
+    /// Ends a packet-local transaction, restoring incidental writes to future
+    /// targets while retaining all writes to targets whose status is mutable.
     pub fn finish_target(&mut self, target: ChunkPos) {
-        // Legacy callers that use `complete_for_target` as a persistent
-        // source-replay helper do not open a transaction. Keep that narrow
-        // API compatible: there is no temporary state to restore until
-        // `begin_target` has been called explicitly.
-        if self.active_target.is_none() {
-            assert!(
-                self.temporary_spills.is_empty(),
-                "lifecycle temporary spills exist without an active target"
-            );
-            return;
-        }
-        assert_eq!(
-            self.active_target,
-            Some(target),
-            "finished lifecycle target out of order"
-        );
+        assert_eq!(self.active_target, Some(target), "finished lifecycle target out of order");
         let temporary_spills = std::mem::take(&mut self.temporary_spills);
         for (position, (destination, previous, previous_override)) in temporary_spills {
-            if let Some(column) = self.resident.get_mut(&destination) {
-                column.set_block(
-                    position.0.rem_euclid(16),
-                    position.1,
-                    position.2.rem_euclid(16),
-                    &previous,
-                );
+            if let Some(previous) = previous {
+                if let Some(column) = self.resident.get_mut(&destination) {
+                    column.set_block(
+                        position.0.rem_euclid(16),
+                        position.1,
+                        position.2.rem_euclid(16),
+                        &previous,
+                    );
+                }
             }
             match previous_override {
-                Some(state) => {
-                    self.overrides.insert(position, state);
+                Some(value) => {
+                    self.overrides.insert(position, value);
                 }
                 None => {
                     self.overrides.remove(&position);
@@ -952,7 +972,11 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         if stage == LifecycleCompletion::Full {
             return;
         }
-        if target_scoped && self.active_target == Some(target) {
+        // A source that reaches FEATURES is itself mutable even when it was
+        // admitted as a dependency of another packet.  Its own writes must
+        // persist in that resident column; only writes crossing into a later
+        // status boundary are transaction-local.
+        if target_scoped {
             self.mutable_targets.insert(source);
             // A preceding source may have written into this column before it
             // entered FEATURES. That write is now part of the retained
@@ -967,13 +991,12 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         // incrementally through `ChunkColumn::set_block` below.
         self.ensure_client_heightmaps(source);
 
-        // The source owns the decoration seed and origin. The target is a
-        // materialization transaction; only dimensions with an explicit
-        // production read-window override may use it to construct a resident
-        // view. Overworld and End retain the source-centred default.
-        let result = self
-            .source
-            .feature_result_for_target(target, source, &self.overrides, &self.resident);
+        let result = self.source.feature_result_for_target(
+            target,
+            source,
+            &self.overrides,
+            &self.resident,
+        );
         for spill in &result.spills {
             assert_eq!(
                 spill.source, source,
@@ -1010,55 +1033,58 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         for entity in &result.block_entities {
             let (x, _y, z) = entity.position();
             let destination = (x.div_euclid(16), z.div_euclid(16));
+            // A feature can create a block entity while writing a future
+            // dependency. The external lifecycle leaves that entity as a
+            // deferred sidecar when the dependency has already crossed
+            // FEATURES; the initial chunk record enumerates only entities
+            // materialized while the requested centre is being completed. A
+            // target-scoped replay has no later source event to promote such
+            // a deferred record, so attaching it merely because the
+            // destination is mutable would make a future packet report an
+            // entity the external record omits. Direct source completion
+            // retains the historical source-owned behavior because it has no
+            // target transaction.
+            if target_scoped && destination != target {
+                continue;
+            }
             let Some(column) = self.resident.get_mut(&destination) else {
                 continue;
             };
             column.add_generated_block_entities(std::slice::from_ref(entity));
         }
         for spill in result.spills {
-            observe(&spill);
             let destination = (
                 spill.position.0.div_euclid(16),
                 spill.position.2.div_euclid(16),
             );
+            // A target completion is a packet-local transaction.  The source
+            // dispatcher may inspect the full resident window and report
+            // writes outside the target, but those writes belong to the
+            // corresponding target's own completion.  Retaining them here
+            // would let a dependency source mutate a future packet before its
+            // status transition, and the later source completion could no
+            // longer reproduce the target-local read context.
             if target_scoped
-                && self.active_target == Some(target)
+                && !self.source.target_spills_persist()
                 && !self.mutable_targets.contains(&destination)
             {
+                let previous = self.resident.get(&destination).map(|column| {
+                    column
+                        .block_state(
+                            spill.position.0.rem_euclid(16),
+                            spill.position.1,
+                            spill.position.2.rem_euclid(16),
+                        )
+                        .to_owned()
+                });
+                let previous_override = self.overrides.get(&spill.position).cloned();
                 self.temporary_spills
                     .entry(spill.position)
-                    .or_insert_with(|| {
-                        (
-                            destination,
-                            self.resident
-                                .get(&destination)
-                                .map(|column| {
-                                    column
-                                        .block_state(
-                                            spill.position.0.rem_euclid(16),
-                                            spill.position.1,
-                                            spill.position.2.rem_euclid(16),
-                                        )
-                                        .to_owned()
-                                })
-                                .unwrap_or_else(|| "minecraft:air".to_owned()),
-                            self.overrides.get(&spill.position).cloned(),
-                        )
-                    });
+                    .or_insert((destination, previous, previous_override));
             }
-            // Keep every source write in the read-after-write map, including
-            // writes outside the admitted destination rectangle.  The
-            // materializer admits only the packet target's bounded halo, but
-            // a source on that halo's edge can spill one chunk farther.  A
-            // target transaction exposes that write to later sources in the
-            // same wavefront; `finish_target` removes it before the next
-            // target, which then replays the source that owns the write.
+            observe(&spill);
             self.overrides.insert(spill.position, spill.state.clone());
             if self.resident.contains_key(&destination) {
-                // The external lifecycle materializes a destination's client
-                // maps before applying a cross-chunk write, even though that
-                // destination remains in CARVERS until its own completion.
-                // Initialize once; `set_block` then updates only this XZ cell.
                 self.ensure_client_heightmaps(destination);
                 let column = self
                     .resident
@@ -1090,36 +1116,29 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             }
         }
         for spill in post_features_spills {
-            observe(&spill);
             let destination = (
                 spill.position.0.div_euclid(16),
                 spill.position.2.div_euclid(16),
             );
             if target_scoped
-                && self.active_target == Some(target)
+                && !self.source.target_spills_persist()
                 && !self.mutable_targets.contains(&destination)
             {
+                let previous = self.resident.get(&destination).map(|column| {
+                    column
+                        .block_state(
+                            spill.position.0.rem_euclid(16),
+                            spill.position.1,
+                            spill.position.2.rem_euclid(16),
+                        )
+                        .to_owned()
+                });
+                let previous_override = self.overrides.get(&spill.position).cloned();
                 self.temporary_spills
                     .entry(spill.position)
-                    .or_insert_with(|| {
-                        (
-                            destination,
-                            self.resident
-                                .get(&destination)
-                                .map(|column| {
-                                    column
-                                        .block_state(
-                                            spill.position.0.rem_euclid(16),
-                                            spill.position.1,
-                                            spill.position.2.rem_euclid(16),
-                                        )
-                                        .to_owned()
-                                })
-                                .unwrap_or_else(|| "minecraft:air".to_owned()),
-                            self.overrides.get(&spill.position).cloned(),
-                        )
-                    });
+                    .or_insert((destination, previous, previous_override));
             }
+            observe(&spill);
             self.overrides.insert(spill.position, spill.state.clone());
             if self.resident.contains_key(&destination) {
                 self.ensure_client_heightmaps(destination);
@@ -1247,8 +1266,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         // A later source completion can write a state-owned block entity into
         // this target after the target's own sidecar hook ran. Finalize only
         // the detached packet snapshot so the resident lifecycle remains the
-        // authenticated replay state and dimension-specific sidecar policy is
-        // applied only to the emitted view.
+        // authenticated replay state and richer generated payloads survive.
         self.source.finalize_packet_snapshot(target, &mut snapshot);
         if let Some(heightmaps) = retained_heightmaps {
             snapshot.install_client_heightmaps_raw(heightmaps);
@@ -1273,6 +1291,8 @@ mod tests {
     }
 
     struct StateOnlySpillSource;
+
+    struct GeneratedEntitySpillSource;
 
     struct HeightmapLifecycleSource;
 
@@ -1304,9 +1324,7 @@ mod tests {
             let (position, state) = match source {
                 (0, 0) => ((16, 0, 0), "minecraft:stone"),
                 (1, 0) => ((32, 0, 0), "minecraft:dirt"),
-                _ => {
-                    return LifecycleFeatureResult::default();
-                }
+                _ => return LifecycleFeatureResult::default(),
             };
             LifecycleFeatureResult {
                 spills: vec![LifecycleSpill {
@@ -1353,6 +1371,46 @@ mod tests {
         }
     }
 
+    impl LifecycleWorldgenSource for GeneratedEntitySpillSource {
+        fn shaped_column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            ChunkColumn::new(0, 8)
+        }
+
+        fn lifecycle_client_heightmaps(
+            &self,
+            _cx: i32,
+            _cz: i32,
+        ) -> Option<LifecycleClientHeightmaps> {
+            test_heightmaps()
+        }
+
+        fn feature_result(
+            &self,
+            source: ChunkPos,
+            _overrides: &BTreeMap<AbsoluteCell, String>,
+            _resident: &BTreeMap<ChunkPos, ChunkColumn>,
+        ) -> LifecycleFeatureResult {
+            if source != (0, 0) {
+                return LifecycleFeatureResult::default();
+            }
+            LifecycleFeatureResult {
+                spills: vec![LifecycleSpill {
+                    source,
+                    position: (16, 4, 0),
+                    state: "minecraft:spawner".to_owned(),
+                    transient: false,
+                }],
+                block_entities: vec![GeneratedBlockEntity::DungeonSpawner {
+                    x: 16,
+                    y: 4,
+                    z: 0,
+                    entity_type: lodestone_data::entity_type::EntityType::Zombie.into(),
+                }],
+                end_gateways: Vec::new(),
+            }
+        }
+    }
+
     impl LifecycleWorldgenSource for HeightmapLifecycleSource {
         fn shaped_column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
             let mut column = ChunkColumn::new(0, 8);
@@ -1379,9 +1437,9 @@ mod tests {
             _resident: &BTreeMap<ChunkPos, ChunkColumn>,
         ) -> LifecycleFeatureResult {
             let position = match source {
-                // The first source writes into the unprimed east neighbour.
-                // The second source later writes back into the already-primed
-                // west neighbour.
+                // The first source writes into itself and the unprimed east
+                // neighbour. The second source later writes back into the
+                // already-primed west neighbour.
                 (0, 0) => (16, 4, 0),
                 (1, 0) => (0, 6, 0),
                 _ => return LifecycleFeatureResult::default(),
@@ -1507,7 +1565,11 @@ mod tests {
             .expect("admitted target")
             .client_heightmaps()
             .expect("cross-chunk write must materialize target maps");
-        let actual = (maps.get(1).unwrap().get(2, 0), maps.get(4).unwrap().get(2, 0), maps.get(5).unwrap().get(2, 0));
+        let actual = (
+            maps.get(1).unwrap().get(2, 0),
+            maps.get(4).unwrap().get(2, 0),
+            maps.get(5).unwrap().get(2, 0),
+        );
         assert_eq!(actual, (68, 58, 58), "heightmaps use the encoded top+1 convention");
     }
 
@@ -1528,7 +1590,10 @@ mod tests {
         }
     }
 
-    fn end_map_focus(materializer: &LifecycleMaterializer<lodestone_server::EndChunkSource>, target: ChunkPos) -> (u32, u32, u32) {
+    fn end_map_focus(
+        materializer: &LifecycleMaterializer<lodestone_server::EndChunkSource>,
+        target: ChunkPos,
+    ) -> (u32, u32, u32) {
         let maps = materializer
             .resident_column(target)
             .expect("admitted End target")
@@ -1543,9 +1608,9 @@ mod tests {
 
     #[test]
     fn end_authenticated_canonical_five_by_five_map_transition_is_literal() {
-        // These cells are the externally captured raw-map values (+1 encoded
-        // for the retained Rust representation), not values derived from the
-        // final block field.  The focus-band oracle reported no Y=57 write.
+        // These cells are externally captured raw-map values (+1 encoded for
+        // the retained Rust representation), not values derived from the
+        // final block field. The focus-band oracle reported no Y=57 write.
         let target = (280, 78);
         let source_chunk = lodestone_server::end_chunk_source(42);
         let carvers_seed = end_oracle_transition(
@@ -1628,17 +1693,6 @@ mod tests {
     }
 
     #[test]
-    fn state_only_spill_does_not_invent_a_lifecycle_block_entity() {
-        let mut materializer = LifecycleMaterializer::new(StateOnlySpillSource);
-        materializer.admit((0, 0));
-        materializer.complete((0, 0), LifecycleCompletion::Features, 0);
-
-        let column = materializer.resident_column((0, 0)).expect("admitted source column");
-        assert_eq!(column.block_state(4, 14, 1), "minecraft:spawner");
-        assert!(column.block_entities().is_empty());
-    }
-
-    #[test]
     fn target_scoped_completion_replays_a_source_after_cross_target_rollback() {
         let mut materializer = LifecycleMaterializer::new(TargetReplaySource);
         materializer.admit((0, 0));
@@ -1683,6 +1737,40 @@ mod tests {
             "minecraft:stone",
             "the later target must replay the source whose write it owns",
         );
+    }
+
+    #[test]
+    fn state_only_spill_does_not_invent_a_lifecycle_block_entity() {
+        let mut materializer = LifecycleMaterializer::new(StateOnlySpillSource);
+        materializer.admit((0, 0));
+        materializer.complete((0, 0), LifecycleCompletion::Features, 0);
+
+        let column = materializer.resident_column((0, 0)).expect("admitted source column");
+        assert_eq!(column.block_state(4, 14, 1), "minecraft:spawner");
+        assert!(column.block_entities().is_empty());
+    }
+
+    #[test]
+    fn future_target_entity_spill_is_deferred_but_current_target_is_materialized() {
+        let mut future = LifecycleMaterializer::new(GeneratedEntitySpillSource);
+        future.admit((0, 0));
+        future.admit((1, 0));
+        future.complete_for_target((0, 0), (0, 0), LifecycleCompletion::Features, 0);
+        future.finish_target((0, 0));
+        assert_eq!(future.resident_column((1, 0)).unwrap().block_state(0, 4, 0), "minecraft:air");
+        assert!(
+            future.resident_column((1, 0)).unwrap().block_entities().is_empty(),
+            "a future dependency must not expose a deferred generated entity in its packet state",
+        );
+
+        let mut current = LifecycleMaterializer::new(GeneratedEntitySpillSource);
+        current.admit((0, 0));
+        current.admit((1, 0));
+        current.complete_for_target((1, 0), (0, 0), LifecycleCompletion::Features, 0);
+        current.finish_target((1, 0));
+        let column = current.resident_column((1, 0)).unwrap();
+        assert_eq!(column.block_state(0, 4, 0), "minecraft:spawner");
+        assert_eq!(column.block_entities().len(), 1);
     }
 
     impl LifecycleWorldgenSource for SpillSource {
