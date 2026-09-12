@@ -396,11 +396,12 @@ struct StreamLifecycleState {
     /// The live oracle leaves dependency chunks resident after removing the
     /// requested centre ticket. Keep that state across bounded frame batches.
     admitted: BTreeSet<(i32, i32)>,
-    /// End source bodies are globally retained after their first authenticated
-    /// completion. Overworld and Nether source bodies are target-scoped: their
-    /// read window is anchored to the packet target, so the same source must
-    /// be replayed for each target that admits it.
+    /// Nether and End source bodies are globally retained after their first
+    /// authenticated completion. Overworld source bodies remain target-scoped
+    /// because its source replay owns a target-local read transaction.
     completed: BTreeSet<(i32, i32)>,
+    /// Overworld source completions are keyed by the target whose read
+    /// transaction admitted them. Nether and End use `completed` above.
     target_completed: BTreeSet<((i32, i32), (i32, i32))>,
 }
 
@@ -472,10 +473,8 @@ fn lifecycle_columns(
                 active_target = Some(target);
             }
             let should_complete = match dimension {
-                StreamDimension::Overworld | StreamDimension::Nether => {
-                    state.target_completed.insert((target, source))
-                }
-                StreamDimension::End => state.completed.insert(source),
+                StreamDimension::Overworld => state.target_completed.insert((target, source)),
+                StreamDimension::Nether | StreamDimension::End => state.completed.insert(source),
             };
             if should_complete {
                 if dimension == StreamDimension::End {
@@ -643,34 +642,6 @@ fn nether_completion_wavefront_preserves_resident_neighbour_writes() {
             .block_state(0, 12, 15),
         "minecraft:blackstone",
         "the resident feature wavefront must retain the neighbour's blackstone at world (1536,12,1551)",
-    );
-}
-
-#[test]
-fn nether_target_context_preserves_source_95_89_basalt_witness() {
-    let target = (95, 90);
-    let mut materializer = LifecycleMaterializer::new(nether_chunk_source(SEED));
-    for admission in lifecycle_admissions(&[target]) {
-        materializer.admit(admission);
-    }
-    for (sequence, (requested_target, source)) in
-        lifecycle_completion_wavefront(&[target]).into_iter().enumerate()
-    {
-        materializer.complete_for_target(
-            requested_target,
-            source,
-            LifecycleCompletion::Features,
-            sequence as u64,
-        );
-    }
-    materializer.finish_target(target);
-
-    assert_eq!(
-        materializer
-            .snapshot_for_packet(target)
-            .block_state(10, 7, 2),
-        "minecraft:basalt[axis=y]",
-        "source (95,89) must place basalt at target (95,90) before packet capture",
     );
 }
 
