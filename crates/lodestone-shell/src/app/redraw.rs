@@ -1223,7 +1223,7 @@ impl WindowApp {
         // zero rain level, and the light sample below is the one world lock this
         // costs, so a clear frame pays nothing.
         {
-            let (columns, rain_columns) = weather_state
+            let (columns, rain_columns, splash) = weather_state
                 .as_ref()
                 .filter(|w| w.any_precipitation())
                 .map(|w| {
@@ -1270,17 +1270,34 @@ impl WindowApp {
                     // option this function reads — the call already took a
                     // radius and was handed
                     // `lodestone_render::DEFAULT_WEATHER_RADIUS`.
-                    weather_columns_for_frame(
+                    let candidate = lodestone_render::weather::rain_splash_position(
+                        w,
+                        self.nav.options().weather_radius,
+                        tick,
+                        [
+                            f64::from(camera.position.x),
+                            f64::from(camera.position.y),
+                            f64::from(camera.position.z),
+                        ],
+                        &probe,
+                    );
+                    let (columns, rain_columns) = weather_columns_for_frame(
                         w,
                         &camera,
                         tick,
                         self.sim.interp_alpha(),
                         self.nav.options().weather_radius,
                         &probe,
-                    )
+                    );
+                    (columns, rain_columns, candidate)
                 })
-                .unwrap_or_default();
+                .unwrap_or_else(|| (Vec::new(), 0, None));
             render.prepare_weather(device, queue, &columns, rain_columns, &camera);
+            let splash = self
+                .weather
+                .as_ref()
+                .and_then(|tracker| tracker.splash_for_tick(tick, splash));
+            self.sim.emit_weather_splash(splash);
         }
         // The underwater/fire overlay pass's per-frame input. `eye_in_water` is
         // the *same* `PhysicsState` predicate the

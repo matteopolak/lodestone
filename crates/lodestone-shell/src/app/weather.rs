@@ -63,6 +63,7 @@ const LIGHTNING_FLASH_HOLD: Duration = Duration::from_millis(
 pub(super) struct WeatherTracker {
     cell: crate::net::SharedWeather,
     flash: std::sync::Mutex<(u64, Option<Instant>)>,
+    splash_tick: std::sync::Mutex<Option<i64>>,
 }
 
 impl WeatherTracker {
@@ -70,7 +71,30 @@ impl WeatherTracker {
         Self {
             cell,
             flash: std::sync::Mutex::new((0, None)),
+            splash_tick: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Return the local impact candidate only once for each simulation tick.
+    ///
+    /// Redraw can run many times between fixed ticks; keeping this edge here
+    /// prevents one candidate from becoming a frame-rate-scaled particle
+    /// emitter. The candidate itself is still computed from the frame's probe,
+    /// so terrain and biome updates are observed at the presentation boundary.
+    pub(super) fn splash_for_tick(
+        &self,
+        tick: i64,
+        candidate: Option<[f64; 3]>,
+    ) -> Option<[f64; 3]> {
+        let mut last = self
+            .splash_tick
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *last == Some(tick) {
+            return None;
+        }
+        *last = Some(tick);
+        candidate
     }
 
     /// This frame's weather.
@@ -690,6 +714,23 @@ mod tests {
         let mut weather = WeatherState::clear();
         weather.apply_rain_level(1.0);
         weather
+    }
+
+    #[test]
+    fn local_splash_candidate_is_consumed_once_per_fixed_tick() {
+        let tracker = WeatherTracker::new(Arc::new(crate::net::WeatherCell::default()));
+        let candidate = Some([1.25, 63.01, -2.75]);
+        assert_eq!(tracker.splash_for_tick(4, candidate), candidate);
+        assert_eq!(
+            tracker.splash_for_tick(4, Some([9.0, 63.01, 9.0])),
+            None,
+            "rendering multiple frames in one fixed tick must not multiply particles"
+        );
+        assert_eq!(
+            tracker.splash_for_tick(5, candidate),
+            candidate,
+            "the next fixed tick gets one fresh candidate"
+        );
     }
 
     fn camera(x: f32, y: f32, z: f32) -> lodestone_render::Camera {

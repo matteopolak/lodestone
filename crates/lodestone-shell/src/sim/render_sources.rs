@@ -1163,6 +1163,19 @@ impl Sim {
         })
     }
 
+    /// Submit one predicted local rain impact.
+    ///
+    /// The candidate is chosen by the app's weather probe, but the particle
+    /// engine remains owned by `Sim`; this keeps the weather/session/render
+    /// chain from bypassing the normal particle upload path.
+    pub(crate) fn emit_weather_splash(&mut self, position: Option<[f64; 3]>) {
+        if let Some([x, y, z]) = position {
+            self.particles_mut(|particles| {
+                particle_emit::rain(particles.engine_mut(), x, y, z)
+            });
+        }
+    }
+
     /// Advance the particle simulation one 20 Hz tick.
     ///
     /// Particles collide against the same view the player does, so debris rests

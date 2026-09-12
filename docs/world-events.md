@@ -35,9 +35,12 @@ Rain/snow droplets, fog/sky/lightmap darkening, the lightning flash, and the
 lightning bolt's seeded branching quad strip all reach pixels. Rain/snow ambience
 also reaches `ShellAudio`: the exposed landing sample supplies the positional
 source, `SoundCategory::Weather` supplies the category-volume control, and a missing
-or covered landing suppresses the event. Not reaching pixels: locally-predicted rain
-splash particles (a server-sent one draws fine; a local one needs per-column terrain
-height/`canSeeSky` this client doesn't track).
+or covered landing suppresses the event. Local rain impacts are predicted once per
+20 Hz tick through the same weather probe: a known `MOTION_BLOCKING` landing at or
+below the camera is required for sky exposure, and the biome climate at that
+landing must resolve to rain. Unknown chunks, covered positions, snow biomes, and
+clear or faint ramping weather produce no local splash; accepted impacts enter the
+normal particle atlas and GPU upload path.
 
 Load-bearing constants: rain/snow max alpha `1.0`/`0.8`; distance fade
 `lerp(min(d²/r², 1), max_alpha, 0.5) * intensity`; sky rain darken `×(1 − r·0.5, 1 −
