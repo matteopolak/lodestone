@@ -121,7 +121,6 @@ fn a_kick_reason_keeps_the_server_s_colours_through_frame_and_draw() {
         "the draw dropped these colours: {missing:?}"
     );
 }
-
 /// The control for the test above: a reason with **no** colour must draw in
 /// `FG_BAD` and produce no gold or red quad, so the two `has(...)` assertions
 /// there are not satisfied by a draw that emits every colour, or by an atlas
@@ -910,4 +909,3 @@ fn the_tab_label_is_vertically_centred_not_flush_against_the_tabs_own_top() {
          centred-but-offset-collapsed regression from a correct draw"
     );
 }
-

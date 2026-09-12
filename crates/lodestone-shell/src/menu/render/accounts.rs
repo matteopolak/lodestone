@@ -82,7 +82,6 @@ fn each_account_row_draws_its_own_skins_face_not_one_shared_head() {
     );
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
-
 /// The hat layer is half of a Minecraft face: vanilla's `PlayerFaceRenderer`
 /// blits `(8, 8)` and then `(40, 8)` **over** it, so a skin whose character is
 /// its helmet or hair is unrecognisable from the base layer alone.
@@ -1016,4 +1015,3 @@ fn an_account_row_straddling_the_band_is_clipped_not_drawn_over_the_footer() {
          only that the list is not drawing"
     );
 }
-

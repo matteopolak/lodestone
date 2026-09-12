@@ -63,7 +63,6 @@ fn the_loading_bar_fill_tracks_the_real_column_count() {
         "a zero-column view must draw no green fill"
     );
 }
-
 /// The loading screen's chunk-status grid reaches geometry as
 /// **real per-cell colour**, not a uniform block that merely proves the grid
 /// drew *something*.
@@ -265,4 +264,3 @@ fn the_chunk_status_palette_keeps_all_twelve_colours_distinct() {
         );
     }
 }
-

@@ -109,7 +109,6 @@ fn a_settings_row_is_cut_at_the_bands_bottom_rather_than_painted_over_the_footer
          button is not a list row"
     );
 }
-
 /// **The reported bug** (2026-08-09): *"some settings menus (like the Music &
 /// Sounds) still overlaps buttons at the bottom … in vanilla the button(s) anchored
 /// at the bottom have their own section, with a horizontal bar separating it … the
@@ -974,4 +973,3 @@ fn the_search_box_draws_as_a_field_inside_its_own_slot() {
          above cannot disagree"
     );
 }
-

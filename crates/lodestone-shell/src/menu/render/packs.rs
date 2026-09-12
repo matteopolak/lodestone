@@ -96,7 +96,6 @@ fn a_resource_pack_row_draws_its_icon_and_description_not_a_centred_button_label
         assert_eq!(painted, 0.0, "the built-in pack row must draw no {what} either");
     }
 }
-
 /// The two reorder buttons carry a **triangle**, and it points the way the button
 /// says it does.
 ///
@@ -419,4 +418,3 @@ fn the_hover_scrim_is_painted_under_the_icon_overlay_sprites() {
         (ix, iy, iw, ih)
     );
 }
-

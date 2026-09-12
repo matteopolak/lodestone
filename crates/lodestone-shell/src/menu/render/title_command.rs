@@ -8,7 +8,6 @@ fn a_server_list_tooltip_snaps_its_box_to_the_same_origin_as_its_text() {
         (112.0, 68.0)
     );
 }
-
 #[cfg(not(feature = "multiplayer"))]
 #[test]
 fn title_frame_renders_the_multiplayer_disabled_tooltip_on_hover() {
@@ -447,4 +446,3 @@ fn credits_frame_has_one_live_row_a_title_and_a_body() {
         "the Done button must resolve on-canvas: ({rx}, {ry}) {rw}x{rh}"
     );
 }
-
