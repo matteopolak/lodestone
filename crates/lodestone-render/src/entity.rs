@@ -2061,7 +2061,16 @@ mod tests {
         assert_eq!(flipped.part_transforms.len(), base.part_transforms.len());
         let head = models.get("zombie").unwrap().skeleton.index_of("head").unwrap();
         assert_ne!(flipped.part_transforms[head], base.part_transforms[head]);
-        assert!(flipped.aabb_min.y < base.aabb_min.y);
+        // The source placement order is scale, body yaw, translate by
+        // `(bounding_box_height + 0.1) / scale`, rotate Z by 180 degrees,
+        // then the model flip and -1.501 lift. For the generated zombie mesh
+        // this predicts `64.01775..66.049` in world Y. The lower edge is
+        // slightly above the ordinary lower edge because the baked model's
+        // local Y extent is not exactly the reported 1.95-block box height;
+        // asserting a direction alone would encode the wrong invariant.
+        assert!((flipped.aabb_min.y - 64.01775).abs() < 1e-4);
+        assert!((flipped.aabb_max.y - 66.049).abs() < 1e-4);
+        assert!(flipped.aabb_min.y > base.aabb_min.y);
         assert!(flipped.aabb_max.y > base.aabb_max.y);
 
         // Control: applying the same helper with an ordinary model transform
