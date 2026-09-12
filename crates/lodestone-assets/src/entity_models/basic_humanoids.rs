@@ -8,7 +8,6 @@ pub fn zombie_model() -> EntityModelDef {
         root: humanoid_root(0.0),
     }
 }
-
 /// Vanilla's own skeleton model: the humanoid mesh with thin (2×12×2) arms and legs, sheet
 /// 64×32. Arms keep the humanoid pose; legs move to `±2.0`.
 pub fn skeleton_model() -> EntityModelDef {
@@ -136,4 +135,3 @@ pub fn spider_model() -> EntityModelDef {
         root,
     }
 }
-

@@ -1428,4 +1428,3 @@ pub fn armadillo_model() -> EntityModelDef {
 // into `EntityTexture`/`EntityVariant`, ready for whoever implements the
 // second render pass to call directly.
 // ============================================================================
-

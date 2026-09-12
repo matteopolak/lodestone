@@ -17,7 +17,6 @@ pub fn pig_model() -> EntityModelDef {
         root,
     }
 }
-
 /// Vanilla's own cow model (its own base-cow-model construction): four-box head (head, snout, two horns),
 /// two-box body (body + udder), four full-length legs, sheet 64×64.
 pub fn cow_model() -> EntityModelDef {
@@ -271,4 +270,3 @@ pub fn chicken_model() -> EntityModelDef {
         root,
     }
 }
-

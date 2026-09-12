@@ -40,7 +40,6 @@ pub fn end_crystal_model() -> EntityModelDef {
         root,
     }
 }
-
 /// vanilla's own armor stand model's body-layer construction: starts from vanilla's own humanoid model's mesh construction
 /// but overrides head/body/arms/legs entirely with armor-stand-specific boxes
 /// and adds `right_body_stick`/`left_body_stick`/`shoulder_stick`/`base_plate`.
@@ -132,4 +131,3 @@ pub fn armor_stand_model() -> EntityModelDef {
         root,
     }
 }
-
