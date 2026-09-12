@@ -338,15 +338,3 @@ pub fn huge_explosion(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, size:
     };
     engine.add(p);
 }
-
-/// Vanilla's own water-drop particle — the splash a raindrop makes where it
-/// lands, and the base class [`splash`]'s own splash particle extends.
-///
-/// **This is not the falling rain.** The streaks are vanilla's own
-/// weather-effect renderer's textured columns, which live in the renderer and never become particles;
-/// this is the pop on impact, which the server sends as `minecraft:rain`.
-///
-/// The one number that separates it from [`splash`] is `gravity`: `0.06` here
-/// against the splash's `0.04`, and the splash additionally replaces the whole
-/// velocity when the packet's is purely horizontal. Copying [`splash`] and
-/// leaving the gravity alone gives raindrops that hang in the air.

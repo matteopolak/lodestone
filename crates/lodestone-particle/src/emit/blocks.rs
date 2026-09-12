@@ -22,9 +22,7 @@
 use super::*;
 
 use crate::rng::JavaRandom;
-use crate::{
-    Behaviour, DripKind, DripPhase, Layer, Particle, ParticleEngine, Sheet, SpriteSource,
-};
+use crate::{Behaviour, Particle, ParticleEngine, Sheet, SpriteSource};
 use lodestone_data::block_states::StateId;
 use lodestone_physics::Aabb;
 
