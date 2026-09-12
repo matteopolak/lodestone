@@ -174,6 +174,10 @@ const IDX_HEALTH: u8 = 9;
 /// [`TrackedEntity::mob`].
 const IDX_MOB_FLAGS: u8 = 15;
 const IDX_BABY: u8 = 16;
+/// The player model-layer visibility byte at index 16. Bit `0x01` enables the
+/// cape layer; it is surfaced only for player-like entity types because the
+/// same index is the age flag on ageable mobs.
+const IDX_PLAYER_MODEL_CUSTOMIZATION: u8 = 16;
 // Class-specific indices that alias the same numbers across mobs, so they are
 // only meaningful once the entity's concrete type is known (see `MetadataClass`).
 //
@@ -485,6 +489,8 @@ const IDX_TEXT_STYLE_FLAGS: u8 = 27;
 /// also tracks wardens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetadataClass {
+    /// A player-like entity whose index-16 byte controls optional model layers.
+    Avatar,
     Sheep,
     /// Any horse-family subclass — horse, donkey, mule, llama,
     /// trader llama, skeleton horse, zombie horse, camel — not just plain
@@ -593,6 +599,7 @@ pub enum MetadataClass {
 /// `None`; its self-identifying variants (if any) still resolve by serializer.
 pub fn metadata_class(entity_type: &str) -> Option<MetadataClass> {
     match entity_type {
+        "minecraft:player" | "minecraft:mannequin" => Some(MetadataClass::Avatar),
         "minecraft:sheep" => Some(MetadataClass::Sheep),
         "minecraft:horse"
         | "minecraft:donkey"
@@ -1187,6 +1194,11 @@ pub fn read_entity_metadata(
             (IDX_POSE, Value::Pose(p)) => md.pose = Some(pose_from_id(p)),
             (IDX_HEALTH, Value::Float(f)) => md.health = Some(f),
             (IDX_BABY, Value::Bool(b)) => md.baby = Some(b),
+            (IDX_PLAYER_MODEL_CUSTOMIZATION, Value::Byte(b))
+                if class == Some(MetadataClass::Avatar) =>
+            {
+                md.player_model_customization = Some(b as u8);
+            }
             // Sheep pack wool colour and the sheared flag into one byte; only a
             // sheep uses index 18 for a byte, hence the class guard.
             (IDX_SHEEP_WOOL, Value::Byte(b)) if class == Some(MetadataClass::Sheep) => {
@@ -1521,6 +1533,14 @@ mod tests {
         }
     }
 
+    fn an_avatar() -> TrackedEntity {
+        TrackedEntity {
+            class: Some(MetadataClass::Avatar),
+            living: true,
+            mob: false,
+        }
+    }
+
     /// An armour stand: living, not a `Mob`, and — the fact that lets index 15
     /// resolve to `armor_stand_flags` instead of being dropped — its own
     /// [`MetadataClass::ArmorStand`].
@@ -1777,6 +1797,39 @@ mod tests {
             md.variant,
             Some(EntityVariant::Keyed("minecraft:cold".parse().unwrap()))
         );
+    }
+
+    #[test]
+    fn decodes_avatar_model_customization_byte() {
+        let mut bytes = Vec::new();
+        bytes.push(IDX_PLAYER_MODEL_CUSTOMIZATION);
+        bytes.extend(varint(SER_BYTE));
+        bytes.push(0x01);
+        bytes.push(EOF_MARKER);
+
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, an_avatar())
+            .expect("decode avatar customization")
+            .metadata;
+        reader.ensure_empty().expect("empty");
+        assert_eq!(md.player_model_customization, Some(0x01));
+    }
+
+    #[test]
+    fn avatar_customization_byte_does_not_leak_into_ageable_mob_state() {
+        let mut bytes = Vec::new();
+        bytes.push(IDX_PLAYER_MODEL_CUSTOMIZATION);
+        bytes.extend(varint(SER_BYTE));
+        bytes.push(0x01);
+        bytes.push(EOF_MARKER);
+
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, a_mob())
+            .expect("decode non-avatar customization")
+            .metadata;
+        reader.ensure_empty().expect("empty");
+        assert_eq!(md.player_model_customization, None);
+        assert_eq!(md.baby, None);
     }
 
     /// The control this module's style fix exists to satisfy: a nested,
@@ -3167,6 +3220,8 @@ mod tests {
 
     #[test]
     fn metadata_class_only_classifies_ambiguous_mobs() {
+        assert_eq!(metadata_class("minecraft:player"), Some(MetadataClass::Avatar));
+        assert_eq!(metadata_class("minecraft:mannequin"), Some(MetadataClass::Avatar));
         assert_eq!(metadata_class("minecraft:sheep"), Some(MetadataClass::Sheep));
         assert_eq!(metadata_class("minecraft:horse"), Some(MetadataClass::Horse));
         assert_eq!(metadata_class("minecraft:donkey"), Some(MetadataClass::Horse));

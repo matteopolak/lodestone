@@ -6,7 +6,9 @@
 //! fortress foundation below it.
 
 use lodestone_server::nether_chunk_source;
-use lodestone_worldgen_parity::lifecycle::{LifecycleCompletion, LifecycleMaterializer};
+use lodestone_worldgen_parity::lifecycle::{
+    LifecycleCompletion, LifecycleMaterializer,
+};
 
 const TARGET: (i32, i32) = (0, 1);
 const SOURCE: (i32, i32) = (-1, 1);
@@ -158,90 +160,34 @@ fn resident_completion_order_is_observable_in_full_and_split_dispatchers() {
 }
 
 #[test]
-fn nether_target_context_preserves_source_95_89_basalt_witness() {
-    const TARGET: (i32, i32) = (95, 90);
-    const SOURCE: (i32, i32) = (95, 89);
-    const WORLD: (i32, i32, i32) = (1530, 7, 1442);
+fn later_source_reads_the_prior_sources_resident_replacement() {
+    const TARGET: (i32, i32) = (93, 90);
+    const PRIOR_SOURCE: (i32, i32) = (92, 90);
+    const LATER_SOURCE: (i32, i32) = (94, 90);
+    const WORLD: (i32, i32, i32) = (1503, 23, 1441);
 
     let mut materializer = LifecycleMaterializer::new(nether_chunk_source(42));
-    for x in 93..=97 {
+    for x in 91..=95 {
         for z in 88..=92 {
             materializer.admit((x, z));
         }
     }
-    materializer.begin_target(TARGET);
-    materializer.complete_for_target(TARGET, SOURCE, LifecycleCompletion::Features, 0);
-    let witness = materializer
+    materializer.complete(PRIOR_SOURCE, LifecycleCompletion::Features, 0);
+    let before = materializer
         .resident_column(TARGET)
-        .expect("target was admitted before source completion")
+        .expect("target was admitted before prior completion")
         .block_state(WORLD.0.rem_euclid(16), WORLD.1, WORLD.2.rem_euclid(16))
         .to_owned();
-    materializer.finish_target(TARGET);
-    assert_eq!(
-        witness,
-        "minecraft:basalt[axis=y]",
-        "target-scoped source (95,89) must place the basalt witness",
-    );
-    assert_eq!(
-        materializer
-            .resident_column(TARGET)
-            .expect("target remains resident after completion")
-            .block_state(WORLD.0.rem_euclid(16), WORLD.1, WORLD.2.rem_euclid(16)),
-        "minecraft:basalt[axis=y]",
-        "the current target promotes its source spill at the transaction boundary",
-    );
-}
-
-#[test]
-fn nether_target_transaction_rolls_back_future_spill_then_promotes_current_target() {
-    const FUTURE: (i32, i32) = (95, 90);
-    const SOURCE: (i32, i32) = (95, 89);
-
-    let mut materializer = LifecycleMaterializer::new(nether_chunk_source(42));
-    for x in 93..=97 {
-        for z in 88..=92 {
-            materializer.admit((x, z));
-        }
-    }
-    let shaped = materializer
-        .resident_column(FUTURE)
-        .expect("future target was admitted")
-        .block_state(10, 7, 2)
-        .to_owned();
-    assert_eq!(shaped, "minecraft:lava[level=0]");
-
-    materializer.begin_target((94, 90));
-    materializer.complete_for_target((94, 90), SOURCE, LifecycleCompletion::Features, 0);
-    let during = materializer
-        .resident_column(FUTURE)
-        .expect("future target remains resident")
-        .block_state(10, 7, 2)
-        .to_owned();
-    materializer.finish_target((94, 90));
+    materializer.complete(LATER_SOURCE, LifecycleCompletion::Features, 1);
     let after = materializer
-        .resident_column(FUTURE)
-        .expect("future target remains resident after rollback")
-        .block_state(10, 7, 2)
-        .to_owned();
-    assert_eq!(
-        during,
-        "minecraft:basalt[axis=y]",
-        "the earlier target sees the transient source spill",
-    );
-    assert_eq!(
-        after, shaped,
-        "the future target is restored at the earlier target boundary",
-    );
+        .resident_column(TARGET)
+        .expect("target remains resident after later completion")
+        .block_state(WORLD.0.rem_euclid(16), WORLD.1, WORLD.2.rem_euclid(16));
 
-    materializer.begin_target(FUTURE);
-    materializer.complete_for_target(FUTURE, SOURCE, LifecycleCompletion::Features, 1);
-    materializer.finish_target(FUTURE);
+    assert_eq!(before, "minecraft:basalt", "the control source must install basalt first");
     assert_eq!(
-        materializer
-            .resident_column(FUTURE)
-            .expect("promoted target remains resident")
-            .block_state(10, 7, 2),
-        "minecraft:basalt[axis=y]",
-        "replaying the source when its destination is current promotes the spill",
+        after,
+        "minecraft:basalt",
+        "the later blackstone blob must read and preserve the resident basalt replacement",
     );
 }

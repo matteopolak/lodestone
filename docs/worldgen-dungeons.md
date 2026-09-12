@@ -21,12 +21,26 @@ draw. Each of two chest attempts has three random candidates; a candidate is
 accepted only when it is empty and has one solid horizontal neighbour. Its
 chest state faces away from that neighbour, and the next random long becomes
 the `LootTableSeed` for `minecraft:chests/simple_dungeon`. The final bounded
-draw selects skeleton, zombie, zombie, or spider for the spawner.
+draw selects skeleton, zombie, zombie, or spider for the spawner. The selected
+value is stored as a generated `EntityTypeRef`, not an owned registry-name
+string. The enclosing generated sidecar reports its `BlockEntityType`
+separately (`mob_spawner`); NBT and protocol names are made only by the server
+boundary.
 
 The placement driver retains the feature's raw step/index seed and runs the
 normal 3×3 source pass. `VegGrid` records absolute block-entity positions and
 the Overworld fold-back filters them to the served chunk, which preserves
 spills into receiving columns without a coordinate-specific exception.
+
+The compiled-server fixture at
+`crates/lodestone-worldgen/tests/support/monster_room_feature_external.txt`
+checks the accepted room's final block digest, material counts, chest loot
+seeds, and spawner position. `MonsterRoomFeatureOracle` supplies that fixture;
+its sealed-room case is a negative control proving the early gate rejects a
+room before any write. All 55 biome documents reachable from the Overworld
+parameter table list this placed feature, so the feature is in scope for the
+authenticated Overworld parity roots even when a particular seed has no room
+inside its 51×51 or 101×101 sample.
 
 ## How to change it
 
@@ -34,7 +48,10 @@ The parser arm is in `feature/vegetation/config.rs`; the placement body and
 draw order are in `feature/vegetation/dungeon.rs`. Add a new generated entity
 variant in `overworld/block_entities.rs` and extend the server bridge in
 `lodestone-server/src/chunk_nbt.rs` together so the compiler catches an
-unhandled wire form. Keep protected-block checks on materialized wall and
+unhandled wire form. Keep each generated mob selection in the entity registry
+enum, and each generated block-entity id in `BlockEntityType`; do not
+reintroduce owned strings between those products and their server boundary.
+Keep protected-block checks on materialized wall and
 interior writes; preserve the feature's deliberately unchecked lower-wall air
 write. Keep random draws adjacent to the successful operation they describe. The
 production anchor test in `lodestone-server/src/worldgen_data.rs` is useful

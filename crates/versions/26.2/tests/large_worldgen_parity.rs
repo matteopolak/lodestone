@@ -3035,6 +3035,7 @@ fn light_free_target_matches_serial_lifecycle() {
             source,
             stage: LifecycleCompletion::Features,
             sequence: sequence as u64,
+            resident_transitions: Vec::new(),
         })
         .collect::<Vec<_>>();
     let plan = LifecycleReplayPlan::for_target(target, &admissions, &events)
@@ -3206,6 +3207,7 @@ fn nether_lifecycle_halo_keeps_first_row_source_effects_outside_output() {
             source,
             stage: LifecycleCompletion::Features,
             sequence: sequence as u64,
+            resident_transitions: Vec::new(),
         })
         .collect::<Vec<_>>();
     let plan = LifecycleReplayPlan::for_target(target, &admissions, &events)
@@ -3831,6 +3833,7 @@ fn lifecycle_replay_events(capture: &LifecycleCapture) -> Vec<LifecycleReplayEve
         source: event.source,
         stage: event.stage,
         sequence: event.completion_sequence,
+        resident_transitions: Vec::new(),
     }).collect()
 }
 

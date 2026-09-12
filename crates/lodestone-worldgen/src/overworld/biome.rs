@@ -26,36 +26,67 @@ pub(super) struct DynamicBiome {
     pub(super) temperatures: std::collections::HashMap<String, f32>,
 }
 
-/// Read-only biome answers for the surface scan's expanded block footprint.
+/// Lazy biome answers for the surface scan's expanded block footprint.
 ///
 /// The wire grid is indexed directly by quart coordinates. Surface rules use a
-/// nearby-corner selection instead, so this context precomputes the extra
-/// border cells once and keeps the per-block rule callback allocation-free.
-pub(super) struct SurfaceBiomeContext {
+/// nearby-corner selection instead, so this context keeps the extra border
+/// cells and climate targets in typed caches while resolving the stateful tree
+/// search on every reference lookup. The lookup sequence therefore follows
+/// the surface walk's `x`, `z`, descending-`y` order, rather than a separate
+/// qy-major prepass.
+pub(super) struct SurfaceBiomeContext<'a> {
     min_qx: i32,
     min_qy: i32,
     min_qz: i32,
     width: usize,
     height: usize,
     depth: usize,
-    cells: Vec<String>,
+    /// Last row ids returned for each quart. The stateful cursor means a row
+    /// cannot be reused as a cache entry: querying the same climate point again
+    /// is observable when a later search starts from a different leaf.
+    cells: Vec<Option<u32>>,
+    /// Climate targets are pure for a quart coordinate, so retaining them
+    /// avoids repeating the sampler arithmetic while still running the tree
+    /// search for every reference biome lookup.
+    targets: Vec<Option<[i64; 7]>>,
+    climate: Option<&'a ClimateSampler>,
+    table: Option<&'a BiomeTable>,
+    fallback: &'a str,
     zoom_seed: i64,
+    cursor: Option<BiomeSearchCursor>,
 }
 
-impl SurfaceBiomeContext {
+impl<'a> SurfaceBiomeContext<'a> {
     fn index(&self, qx: i32, qy: i32, qz: i32) -> usize {
         let x = usize::try_from(qx - self.min_qx).expect("surface biome x is precomputed");
         let y = usize::try_from(qy - self.min_qy).expect("surface biome y is precomputed");
         let z = usize::try_from(qz - self.min_qz).expect("surface biome z is precomputed");
-        assert!(x < self.width && y < self.height && z < self.depth, "surface biome lookup escaped its precomputed footprint");
+        assert!(
+            x < self.width && y < self.height && z < self.depth,
+            "surface biome lookup escaped its precomputed footprint"
+        );
         (y * self.depth + z) * self.width + x
     }
 
-    fn quart(&self, qx: i32, qy: i32, qz: i32) -> &str {
-        &self.cells[self.index(qx, qy, qz)]
+    fn quart(&mut self, qx: i32, qy: i32, qz: i32) -> &'a str {
+        let index = self.index(qx, qy, qz);
+        let row = match (&self.climate, &self.table, &mut self.cursor) {
+            (Some(climate), Some(table), Some(cursor)) => {
+                let target = self.targets[index].unwrap_or_else(|| {
+                    let target = climate.target(qx * 4, qy * 4, qz * 4);
+                    self.targets[index] = Some(target);
+                    target
+                });
+                table.nearest_row_with_cursor(&target, cursor)
+            }
+            (None, None, None) => 0,
+            _ => panic!("surface biome context has incomplete dynamic state"),
+        };
+        self.cells[index] = Some(row);
+        self.table.map_or(self.fallback, |table| table.biome_at(row))
     }
 
-    pub(super) fn at_block(&self, x: i32, y: i32, z: i32) -> &str {
+    pub(super) fn at_block(&mut self, x: i32, y: i32, z: i32) -> &'a str {
         let shifted_x = x - 2;
         let shifted_y = y - 2;
         let shifted_z = z - 2;
@@ -90,6 +121,17 @@ impl SurfaceBiomeContext {
             if selected & 2 == 0 { parent_y } else { parent_y + 1 },
             if selected & 1 == 0 { parent_z } else { parent_z + 1 },
         )
+    }
+
+    /// Performs the reference surface system's initial per-column lookup. The
+    /// selected answer is not needed by the caller, but the query advances the
+    /// stateful search cursor before the descending block scan begins.
+    pub(super) fn touch_block(&mut self, x: i32, y: i32, z: i32) {
+        let _ = self.at_block(x, y, z);
+    }
+
+    pub(super) fn into_cursor(self) -> Option<BiomeSearchCursor> {
+        self.cursor
     }
 }
 
@@ -184,7 +226,11 @@ where
 /// Resolves the same seed-fiddled quart corner for a vertically invariant
 /// biome source. The callback receives the selected chunk and local quart.
 pub(crate) fn zoomed_biome_flat<T, F>(
-    zoom_seed: i64, x: i32, y: i32, z: i32, source_at: F,
+    zoom_seed: i64,
+    x: i32,
+    y: i32,
+    z: i32,
+    source_at: F,
 ) -> Option<T>
 where
     F: Fn(i32, i32, usize, usize) -> Option<T>,
@@ -211,14 +257,18 @@ where
         let dy = if y_low { fract_y } else { fract_y - 1.0 };
         let dz = if z_low { fract_z } else { fract_z - 1.0 };
         let distance = fiddled_distance(zoom_seed, qx, qy, qz, dx, dy, dz);
-        if best > distance { selected = corner; best = distance; }
+        if best > distance {
+            selected = corner;
+            best = distance;
+        }
     }
     let qx = if selected & 4 == 0 { parent_x } else { parent_x + 1 };
     let qz = if selected & 1 == 0 { parent_z } else { parent_z + 1 };
     let block_x = qx * 4;
     let block_z = qz * 4;
     source_at(
-        block_x.div_euclid(16), block_z.div_euclid(16),
+        block_x.div_euclid(16),
+        block_z.div_euclid(16),
         block_x.rem_euclid(16).div_euclid(4) as usize,
         block_z.rem_euclid(16).div_euclid(4) as usize,
     )
@@ -237,7 +287,12 @@ impl OverworldGenerator {
     /// Precomputes the raw quart cells that the surface scan's zoomed biome
     /// lookup can select. The extra one-cell border comes from shifting the
     /// block position before choosing between adjacent corners.
-    pub(super) fn surface_biome_context(&self, base_x: i32, base_z: i32) -> SurfaceBiomeContext {
+    pub(super) fn surface_biome_context(
+        &self,
+        base_x: i32,
+        base_z: i32,
+        cursor: Option<BiomeSearchCursor>,
+    ) -> SurfaceBiomeContext<'_> {
         let min_qx = (base_x - 2) >> 2;
         let max_qx = ((base_x + 15 - 2) >> 2) + 1;
         let min_qz = (base_z - 2) >> 2;
@@ -247,21 +302,7 @@ impl OverworldGenerator {
         let width = usize::try_from(max_qx - min_qx + 1).expect("surface biome x footprint");
         let height = usize::try_from(max_qy - min_qy + 1).expect("surface biome y footprint");
         let depth = usize::try_from(max_qz - min_qz + 1).expect("surface biome z footprint");
-        let mut cells = Vec::with_capacity(width * height * depth);
-        for qy in min_qy..=max_qy {
-            for qz in min_qz..=max_qz {
-                for qx in min_qx..=max_qx {
-                    let biome = match &self.dynamic_biome {
-                        Some(dynamic) => {
-                            let target = dynamic.climate.target(qx * 4, qy * 4, qz * 4);
-                            dynamic.table.nearest(&target)
-                        }
-                        None => self.fallback_biome.as_str(),
-                    };
-                    cells.push(biome.to_string());
-                }
-            }
-        }
+        let cells = vec![None; width * height * depth];
         SurfaceBiomeContext {
             min_qx,
             min_qy,
@@ -270,7 +311,12 @@ impl OverworldGenerator {
             height,
             depth,
             cells,
+            targets: vec![None; width * height * depth],
+            climate: self.dynamic_biome.as_ref().map(|dynamic| &dynamic.climate),
+            table: self.dynamic_biome.as_ref().map(|dynamic| &dynamic.table),
+            fallback: &self.fallback_biome,
             zoom_seed: zoom_seed(self.seed),
+            cursor,
         }
     }
 
@@ -331,9 +377,9 @@ impl OverworldGenerator {
     ) -> BiomeCells {
         let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Biome);
         let Some(dynamic) = &self.dynamic_biome else {
-            return BiomeCells::uniform(&self.fallback_biome, self.min_y, self.height);
+            return BiomeCells::uniform_strict(&self.fallback_biome, self.min_y, self.height);
         };
-        BiomeCells::from_fn(self.min_y, self.height, |qx, qy, qz| {
+        BiomeCells::from_fn_section_query_order_typed(self.min_y, self.height, |qx, qy, qz| {
             // Quart *corner*, not centre — the convention `biome_stage`'s own
             // comment records as having matched a real dark_forest/river boundary
             // where the centre convention did not. Applied to Y as well, which is
@@ -343,11 +389,16 @@ impl OverworldGenerator {
             let target = dynamic
                 .climate
                 .target(base_x + qx as i32 * 4, y, base_z + qz as i32 * 4);
-            let row = cursor.as_deref_mut().map_or_else(
-                || dynamic.table.nearest_row(&target),
-                |cursor| dynamic.table.nearest_row_with_cursor(&target, cursor),
+            let row = dynamic.table.nearest_row_with_cursor(
+                &target,
+                cursor
+                    .as_deref_mut()
+                    .expect("dynamic biome stage requires a search cursor"),
             );
-            dynamic.table.biome_at(row).to_string()
+            dynamic
+                .table
+                .biome_ref_at(row)
+                .expect("strict worldgen table contains only generated built-in biomes")
         })
     }
 
@@ -370,9 +421,52 @@ impl OverworldGenerator {
     pub fn source_biome_tiebreak(&self, source_cx: i32, source_cz: i32) -> Option<(&str, &str)> {
         let d = self.dynamic_biome.as_ref()?;
         let target = d.climate.target(source_cx * 16, 0, source_cz * 16);
-        let tree = d.table.nearest_row(&target);
+        let tree = d.table.nearest_row_stateless(&target);
         let brute = crate::biome::nearest_row_brute_force(&d.table, &target);
         Some((d.table.biome_at(tree), d.table.biome_at(brute)))
+    }
+
+    /// Replays the production 4×4 horizontal query order through one requested
+    /// quart layer and returns `(stateful, stateless)` for that cell. This is a
+    /// parity fixture: the first component includes the lifecycle cursor's
+    /// previous-leaf history, while the second is the fresh indexed negative control.
+    #[must_use]
+    pub fn biome_cell_search_fixture(
+        &self,
+        cx: i32,
+        cz: i32,
+        qx: usize,
+        qy: usize,
+        qz: usize,
+    ) -> Option<(&str, &str)> {
+        if qx >= 4 || qz >= 4 {
+            return None;
+        }
+        let d = self.dynamic_biome.as_ref()?;
+        let mut cursor = d.table.search_cursor();
+        let mut stateful = None;
+        for section_layer in (0..=qy).step_by(4) {
+            for x in 0..4usize {
+                for local_y in 0..4usize {
+                    let layer = section_layer + local_y;
+                    if layer > qy {
+                        break;
+                    }
+                    for z in 0..4usize {
+                        let y = self.min_y + layer as i32 * 4;
+                        let target = d.climate.target(cx * 16 + x as i32 * 4, y, cz * 16 + z as i32 * 4);
+                    let row = d.table.nearest_row_with_cursor(&target, &mut cursor);
+                        if layer == qy && x == qx && z == qz {
+                            stateful = Some(d.table.biome_at(row));
+                        }
+                    }
+                }
+            }
+        }
+        let y = self.min_y + qy as i32 * 4;
+        let target = d.climate.target(cx * 16 + qx as i32 * 4, y, cz * 16 + qz as i32 * 4);
+        let stateless = d.table.biome_at(d.table.nearest_row_stateless(&target));
+        Some((stateful.expect("requested quart was visited"), stateless))
     }
 
     /// The same question for the 16 **surface** quarts of one chunk — the biome a
@@ -399,7 +493,7 @@ impl OverworldGenerator {
             let lz = qz * 4;
             let y = (heights[(lz * 16 + lx) as usize] >> 2) << 2;
             let target = d.climate.target(base_x + lx, y, base_z + lz);
-            let tree = d.table.nearest_row(&target);
+            let tree = d.table.nearest_row_stateless(&target);
             let brute = crate::biome::nearest_row_brute_force(&d.table, &target);
             if d.table.biome_at(tree) != d.table.biome_at(brute) {
                 differing += 1;
@@ -438,13 +532,18 @@ impl OverworldGenerator {
     /// scan. The signature is unchanged — still `-> &str` borrowed from `self` —
     /// which is why `carve_stage` and `ore_stage` needed no edit: the memo stores
     /// a **table row**, and the row indexes back into this generator's own table.
-    pub(super) fn biome_for_carver_source(&self, source_cx: i32, source_cz: i32) -> &str {
+    pub(super) fn biome_for_carver_source(
+        &self,
+        source_cx: i32,
+        source_cz: i32,
+        _cursor: &mut BiomeSearchCursor,
+    ) -> &str {
         match &self.dynamic_biome {
             None => self.fallback_biome.as_str(),
             Some(d) => {
                 let row = crate::biome::memo::source_row(d.table.id(), source_cx, source_cz, || {
                     let target = d.climate.target(source_cx * 16, 0, source_cz * 16);
-                    d.table.nearest_row(&target)
+                    d.table.nearest_row_stateless(&target)
                 });
                 d.table.biome_at(row)
             }

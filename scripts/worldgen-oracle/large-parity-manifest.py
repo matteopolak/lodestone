@@ -11,6 +11,10 @@ LIGHT_FREE_AUDIT_MAGIC = b"LWP26A07"
 HEADER = 256
 WIDTH = 32
 RAW_WIDTH = 2
+# Header bytes 70..72 record the terrain-adaptation scope. Authenticated
+# full-world records use the production scope; the composed stage oracle keeps
+# its empty scope in its separate text fixture schema.
+STRUCTURE_BEARD_SCOPE_PRODUCTION_REAL = 0
 DOMAIN = b"lodestone.worldgen.large-parity.manifest/v3/semantic"
 DOMAIN_V4 = b"lodestone.worldgen.large-parity.manifest/v4/semantic"
 DOMAIN_V5 = b"lodestone.worldgen.large-parity.manifest/v5/semantic"
@@ -91,7 +95,7 @@ def make_header(version, dim, sx0, sx1, sz0, sz1, count, frozen, payload_digest)
             raise ValueError(f"unsupported dimension {dim!r}") from error
     header = struct.pack(FMT, magic, version, HEADER, 2, schema, 776, 42,
                          grid_min, grid_max, grid_min, grid_max, sx0, sx1, sz0, sz1,
-                         count, width, 0, hashlib.sha256(domain).digest(), frozen,
+                         count, width, STRUCTURE_BEARD_SCOPE_PRODUCTION_REAL, hashlib.sha256(domain).digest(), frozen,
                          payload_digest)
     return header[:168] + dim_digest + header[200:] if version != 3 else header
 
@@ -114,7 +118,7 @@ def _parse_header(path, raw_header, payload_size):
     valid_v6 = (magic == MAGIC_V6 and version == 6 and schema == 6)
     valid_v7 = (magic == MAGIC_V7 and version == 7 and schema == 7)
     expected_width = RAW_WIDTH if (valid_v6 or valid_v7) else WIDTH
-    if not (valid_v3 or valid_v4 or valid_v5 or valid_v6 or valid_v7) or (size, algorithm, protocol, seed, width, reserved) != (HEADER, 2, 776, 42, expected_width, 0):
+    if not (valid_v3 or valid_v4 or valid_v5 or valid_v6 or valid_v7) or (size, algorithm, protocol, seed, width, reserved) != (HEADER, 2, 776, 42, expected_width, STRUCTURE_BEARD_SCOPE_PRODUCTION_REAL):
         raise ValueError(f"{path}: unsupported parity manifest header")
     grid_min, grid_max = (RAW_GRID_MIN, RAW_GRID_MAX) if (valid_v6 or valid_v7) else (GRID_MIN, GRID_MAX)
     if (gx0, gx1, gz0, gz1) != (grid_min, grid_max, grid_min, grid_max):
@@ -161,7 +165,7 @@ def _parse_packet_audit_header(path, raw_header, payload_size, manifest_header, 
      gz1, sx0, sx1, sz0, sz1, count, width, reserved, domain, frozen,
      payload_digest) = h
     if (magic, version, size, algorithm, schema, protocol, seed, width, reserved) != (
-        PACKET_AUDIT_MAGIC, 6, HEADER, 3, 6, 776, 42, WIDTH, 0
+        PACKET_AUDIT_MAGIC, 6, HEADER, 3, 6, 776, 42, WIDTH, STRUCTURE_BEARD_SCOPE_PRODUCTION_REAL
     ):
         raise ValueError(f"{path}: packet-audit header identity differs")
     if (gx0, gx1, gz0, gz1) != (RAW_GRID_MIN, RAW_GRID_MAX, RAW_GRID_MIN, RAW_GRID_MAX):
@@ -250,7 +254,7 @@ def make_packet_audit_header(manifest_header, manifest_dimension, payload_digest
     header = struct.pack(
         FMT, PACKET_AUDIT_MAGIC, 6, HEADER, 3, 6, 776, 42,
         RAW_GRID_MIN, RAW_GRID_MAX, RAW_GRID_MIN, RAW_GRID_MAX,
-        sx0, sx1, sz0, sz1, count, WIDTH, 0,
+        sx0, sx1, sz0, sz1, count, WIDTH, STRUCTURE_BEARD_SCOPE_PRODUCTION_REAL,
         hashlib.sha256(PACKET_AUDIT_DOMAIN).digest(), manifest_header[19],
         payload_digest,
     )
@@ -363,7 +367,7 @@ def _parse_light_free_audit_header(path, raw_header, payload_size, manifest_head
      gz1, sx0, sx1, sz0, sz1, count, width, reserved, domain, frozen,
      payload_digest) = h
     if (magic, version, size, algorithm, schema, protocol, seed, width, reserved) != (
-        LIGHT_FREE_AUDIT_MAGIC, 7, HEADER, 3, 7, 776, 42, WIDTH, 0
+        LIGHT_FREE_AUDIT_MAGIC, 7, HEADER, 3, 7, 776, 42, WIDTH, STRUCTURE_BEARD_SCOPE_PRODUCTION_REAL
     ):
         raise ValueError(f"{path}: light-free audit header identity differs")
     if (gx0, gx1, gz0, gz1) != (RAW_GRID_MIN, RAW_GRID_MAX, RAW_GRID_MIN, RAW_GRID_MAX):
@@ -410,7 +414,7 @@ def make_light_free_audit_header(manifest_header, manifest_dimension, payload_di
     header = struct.pack(
         FMT, LIGHT_FREE_AUDIT_MAGIC, 7, HEADER, 3, 7, 776, 42,
         RAW_GRID_MIN, RAW_GRID_MAX, RAW_GRID_MIN, RAW_GRID_MAX,
-        sx0, sx1, sz0, sz1, count, WIDTH, 0,
+        sx0, sx1, sz0, sz1, count, WIDTH, STRUCTURE_BEARD_SCOPE_PRODUCTION_REAL,
         hashlib.sha256(LIGHT_FREE_AUDIT_DOMAIN).digest(), manifest_header[19],
         payload_digest,
     )
@@ -677,7 +681,7 @@ def selftest():
         legacy_payload = bytes([0x11]) * WIDTH * legacy_count
         legacy_header = struct.pack(FMT, MAGIC, 3, HEADER, 2, 3, 776, 42,
                                     GRID_MIN, GRID_MAX, GRID_MIN, GRID_MAX, GRID_MIN, 0,
-                                    GRID_MIN, GRID_MAX, legacy_count, WIDTH, 0,
+                                    GRID_MIN, GRID_MAX, legacy_count, WIDTH, STRUCTURE_BEARD_SCOPE_PRODUCTION_REAL,
                                     hashlib.sha256(DOMAIN).digest(), frozen,
                                     hashlib.sha256(legacy_payload).digest())
         assert make_header(3, "overworld", GRID_MIN, 0, GRID_MIN, GRID_MAX,
@@ -775,18 +779,37 @@ def selftest():
             payload = bytes([value, value ^ 0x5A]) * count
             path.write_bytes(make_header(6, "nether", sx0, sx1, RAW_GRID_MIN, RAW_GRID_MAX,
                                          count, raw_frozen, hashlib.sha256(payload).digest()) + payload)
+        def make_v6_audit(manifest):
+            """Build the required P06 full-digest sidecar for a synthetic shard."""
+            header, payload, dim = read(manifest)
+            audit = bytearray()
+            for offset in range(0, len(payload), RAW_WIDTH):
+                suffix = hashlib.sha256(f"audit-{offset}".encode()).digest()[RAW_WIDTH:]
+                audit.extend(payload[offset:offset + RAW_WIDTH] + suffix)
+            audit = bytes(audit)
+            packet_audit_path(manifest).write_bytes(
+                make_packet_audit_header(header, dim, hashlib.sha256(audit).digest()) + audit
+            )
         make_v6(v6_left, RAW_GRID_MIN, 0, 0x61); make_v6(v6_right, 1, RAW_GRID_MAX, 0xA2)
+        make_v6_audit(v6_left); make_v6_audit(v6_right)
         merge(v6_full, [v6_left, v6_right]); v6_header, v6_payload, v6_dim = read(v6_full)
         assert v6_dim == "nether" and v6_header[1] == 6 and v6_header[16] == RAW_WIDTH
         assert len(v6_payload) == RAW_GRID_COUNT * RAW_WIDTH
         assert raw_packet_hash(b"packet body") == hashlib.sha256(b"packet body").digest()[:2]
         v6_copy = directory / "raw-copy.lwp"; v6_copy.write_bytes(v6_full.read_bytes())
+        packet_audit_path(v6_copy).write_bytes(packet_audit_path(v6_full).read_bytes())
         accepted_v6 = directory / "raw-accepted.lwp"; accept(accepted_v6, v6_full, v6_copy)
+        assert packet_audit_path(accepted_v6).read_bytes() == packet_audit_path(v6_full).read_bytes()
         reproducible(v6_full, v6_copy)
         changed = bytearray(v6_copy.read_bytes()); changed[HEADER + 1] ^= 1; v6_copy.write_bytes(changed)
         try: read(v6_copy)
         except ValueError as error: assert "checksum" in str(error)
         else: raise AssertionError("v6 payload corruption was accepted")
+        missing_audit = directory / "raw-missing-audit.lwp"
+        missing_audit.write_bytes(v6_full.read_bytes())
+        try: validate([missing_audit])
+        except ValueError as error: assert "sidecar" in str(error)
+        else: raise AssertionError("v6 manifest without its sidecar was accepted")
         bad_dim = directory / "raw-bad-dimension.lwp"
         bad = bytearray(v6_full.read_bytes()); bad[168] ^= 1; bad_dim.write_bytes(bad)
         try: read(bad_dim)

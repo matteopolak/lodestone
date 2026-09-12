@@ -160,16 +160,12 @@ terrain fixture deliberately stops before later writers, so it is not evidence t
 the served `ChunkColumn`; it resolves referenced origins again for template-owned container payloads
 before the column reaches packet encoding or region persistence. This source attachment is separate
 from block placement so a city can remain visible while its save metadata and container sidecars are
-still checked independently. Patterned black banners are template block states with a separate
-component payload, so a direct source column also materializes their missing banner records. End
-lifecycle replay keeps those structure records in its resident save-sidecar state, but its detached
-packet snapshot filters structure-owned records at the authenticated status boundary; the external
-lifecycle stream therefore carries the banner blocks without emitting banner entities.
-The End's retained motion-blocking heightmap is taken from the final served
-column, after intersecting city pieces and the three-by-three decoration pass.
-This is the same content boundary as the three client heightmaps: a later
-writer that adds a taller block must be reflected in the map sent with the
-chunk. The focused external control is
+still checked independently. Patterned black banners remain template block states and carry their
+pattern payload as packet sidecars; lifecycle replay invokes the same source-sidecar hook after
+FEATURES. The End generator captures its three client heightmaps from the copied three-by-three
+base region before the later decoration pass, matching the staged lifecycle boundary; feature
+writes that cross into an already-live resident update that resident's maps through the lifecycle
+materializer. The focused external control is
 `scripts/worldgen-oracle/stream-parity.sh --dimension end --cx -2 2 --cz -2 2`,
 which compares terrain, biomes, heightmaps, and block entities while
 deliberately excluding light.

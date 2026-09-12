@@ -60,8 +60,9 @@
 //!
 //! The disagreement is exclusively about **which of several tied rows** to take;
 //! neither search ever finds a different nearest *distance*. [`tree`]'s module doc
-//! traces that, and why vanilla's own last-result carry-over is the one part of its
-//! search that cannot be reproduced here.
+//! traces that, including the last-result carry-over now used by the production
+//! lookup. The history is carried by an explicit generation cursor, while the
+//! stateless indexed helper remains available as an explicit negative control.
 //!
 //! # The y = 0 trap
 //!
@@ -135,6 +136,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
+use lodestone_data::biomes::{BiomeRef, BuiltinBiome};
 
 use crate::density::{Builder, Context, Density};
 
@@ -275,8 +277,9 @@ pub fn nearest_biome<'a>(table: &'a [BiomeParameterPoint], target: &[i64; 7]) ->
 /// Monotonic id source for [`BiomeTable::id`] — see [`memo`] for why the memo's
 /// key has to carry table identity as well as chunk position. Starts at 1 so
 /// zero can be [`memo`]'s empty-slot sentinel.
+static NEXT: AtomicU64 = AtomicU64::new(1);
+
 fn next_table_id() -> u64 {
-    static NEXT: AtomicU64 = AtomicU64::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
@@ -305,12 +308,16 @@ fn next_table_id() -> u64 {
 pub struct BiomeTable {
     points: Vec<BiomeParameterPoint>,
     tree: tree::BiomeTree,
+    /// Built-in identity for each row when the resource names resolve. A
+    /// `None` entry is retained for small synthetic tables used by search
+    /// tests; production resource loading uses [`Self::new_strict`].
+    builtin_biomes: Vec<Option<BuiltinBiome>>,
     /// Unique per constructed table — [`memo`]'s tag component.
     id: u64,
 }
 
-/// Explicit history for one deterministic biome-search lifecycle. A cursor is
-/// owned by its generation unit and is never inferred from worker identity.
+/// Explicit history for one deterministic biome-search lifecycle. The cursor
+/// is owned by its generation unit and is never inferred from worker identity.
 #[derive(Debug, Clone, Copy)]
 pub struct BiomeSearchCursor {
     table_id: u64,
@@ -326,34 +333,51 @@ impl BiomeTable {
     #[must_use]
     pub fn new(points: Vec<BiomeParameterPoint>) -> Self {
         let tree = tree::BiomeTree::build(&points);
+        let builtin_biomes = points
+            .iter()
+            .map(|point| BuiltinBiome::from_name(&point.biome))
+            .collect();
         Self {
             points,
             tree,
+            builtin_biomes,
             id: next_table_id(),
         }
     }
 
-    /// Builds a table at a resource-loading boundary and rejects unknown
-    /// built-in biome names before generation starts.
+    /// Builds a table at a resource-loading boundary and rejects any name that
+    /// is not one of this build's generated built-in biomes. Dynamic entries
+    /// must be admitted by an explicit extension registry before they reach a
+    /// worldgen table; they are never silently coerced into a built-in.
     #[must_use]
     pub fn new_strict(points: Vec<BiomeParameterPoint>) -> Self {
-        if let Some((row, point)) = points
+        let table = Self::new(points);
+        if let Some((row, _)) = table
+            .builtin_biomes
             .iter()
             .enumerate()
-            .find(|(_, point)| !lodestone_data::biomes::is_biome(&point.biome))
+            .find(|(_, biome)| biome.is_none())
         {
-            panic!("unknown built-in biome {:?} at parameter row {row}", point.biome);
+            panic!(
+                "unknown built-in biome {:?} at parameter row {row}",
+                table.points[row].biome
+            );
         }
-        Self::new(points)
+        table
     }
 
-    /// The nearest biome's table row, via vanilla's own indexed search
-    /// (its parameter-list value lookup) with no cached-last-result seeding — the
-    /// fresh-instance answer. Always at the same minimum squared distance as
-    /// [`nearest_row_brute_force`]; the *row* differs from it wherever two rows tie
-    /// on that distance. See [`tree`]'s module doc.
+    /// The stateless indexed answer. Production generation uses
+    /// [`Self::nearest_row_with_cursor`] with an explicit lifecycle cursor.
     #[must_use]
     pub fn nearest_row(&self, target: &[i64; 7]) -> u32 {
+        self.tree.nearest_row(target)
+    }
+
+    /// The fresh-instance indexed answer, with no cached history. This is the
+    /// negative control for parity fixtures and diagnostics; production callers
+    /// use [`Self::nearest_row`] so query history is preserved.
+    #[must_use]
+    pub fn nearest_row_stateless(&self, target: &[i64; 7]) -> u32 {
         self.tree.nearest_row(target)
     }
 
@@ -379,21 +403,16 @@ impl BiomeTable {
         row
     }
 
-    /// Updates a cursor from a previously memoised row without searching.
+    /// Updates a cursor from a previously memoised row without re-running the
+    /// search. This preserves the reference lookup history when a source-chunk
+    /// memo supplies the same row on a later query.
     pub fn cursor_from_row(&self, cursor: &mut BiomeSearchCursor, row: u32) {
         assert_eq!(cursor.table_id, self.id, "biome cursor belongs to another table");
         cursor.leaf = self.tree.leaf_node_for_row(row);
     }
 
-    /// Explicit stateless spelling used by diagnostics that compare a fresh
-    /// lookup against the lifecycle-aware production form.
-    #[must_use]
-    pub fn nearest_row_stateless(&self, target: &[i64; 7]) -> u32 {
-        self.nearest_row(target)
-    }
-
-    /// The nearest biome's id, via the tree — the drop-in replacement for
-    /// [`nearest_biome`] on the production path.
+    /// The nearest biome's id via a fresh indexed lookup. Production pipelines
+    /// use [`Self::nearest_row_with_cursor`] so tie history is explicit.
     #[must_use]
     pub fn nearest(&self, target: &[i64; 7]) -> &str {
         &self.points[self.nearest_row(target) as usize].biome
@@ -408,6 +427,16 @@ impl BiomeTable {
     #[must_use]
     pub fn biome_at(&self, row: u32) -> &str {
         &self.points[row as usize].biome
+    }
+
+    /// The compact typed identity at a row, if that row names a generated
+    /// built-in. The `None` case is intentional for synthetic tables; strict
+    /// production tables reject it during construction.
+    #[must_use]
+    pub fn biome_ref_at(&self, row: u32) -> Option<BiomeRef> {
+        self.builtin_biomes
+            .get(row as usize)
+            .and_then(|biome| biome.map(BiomeRef::builtin))
     }
 
     /// This table's memo identity — see [`memo`].
@@ -466,11 +495,8 @@ impl BiomeTable {
         self.tree.nearest_row_and_distance(target)
     }
 
-    /// Vanilla's search with an explicit `candidate` standing in for its
-    /// thread-local cached last result. **Not the production path** — production always
-    /// searches unseeded (see [`tree`]'s module doc for why that cached seed is
-    /// deliberately not reproduced). Exposed so a gate can demonstrate that a
-    /// tying seed really does change the returned row.
+    /// Indexed search with an explicit candidate, exposed for tie controls and
+    /// tests. Production uses the per-worker history in [`Self::nearest_row`].
     #[must_use]
     pub fn nearest_row_seeded(&self, target: &[i64; 7], candidate: Option<u32>) -> u32 {
         self.tree.nearest_row_seeded(target, candidate)
@@ -578,7 +604,7 @@ pub fn parse_table(value: &Value) -> Vec<BiomeParameterPoint> {
 /// into an iterator of them.
 #[must_use]
 pub fn usable_overworld_table(table: Vec<BiomeParameterPoint>) -> BiomeTable {
-    BiomeTable::new(table)
+    BiomeTable::new_strict(table)
 }
 
 /// Parses the embedded per-biome `temperature` map (`{"minecraft:plains":
@@ -763,6 +789,25 @@ mod tests {
         assert_eq!(table[0].params[6], Parameter { min: 0, max: 0 }, "offset");
         assert_eq!(table[1].biome, "minecraft:deep_frozen_ocean");
         assert_eq!(table[1].params[6], Parameter { min: 7, max: 7 }, "offset");
+    }
+
+    #[test]
+    fn consecutive_target_reuses_the_current_tied_incumbent() {
+        let point = |value: i64, biome: &str| BiomeParameterPoint {
+            params: [Parameter { min: value, max: value }; 7],
+            biome: biome.to_owned(),
+        };
+        let table = BiomeTable::new(vec![
+            point(0, "minecraft:first"),
+            point(2, "minecraft:second"),
+        ]);
+        let mut cursor = table.search_cursor();
+        let tie = [1; 7];
+        assert_eq!(table.nearest_row_with_cursor(&[2; 7], &mut cursor), 1);
+        assert_eq!(table.nearest_row_with_cursor(&tie, &mut cursor), 1);
+        // The previous answer is the current tied incumbent, so a consecutive
+        // repeat must return it without changing the stateful answer.
+        assert_eq!(table.nearest_row_with_cursor(&tie, &mut cursor), 1);
     }
 
     /// `usable_overworld_table` used to filter `UNSUPPORTED_SURFACE_BIOMES`

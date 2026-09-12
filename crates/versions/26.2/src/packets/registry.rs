@@ -57,9 +57,9 @@
 //!
 //! # Scope: what is parsed, and what is only counted
 //!
-//! [`ClientRegistries`] keeps typed [`DimensionType`]s, the ordered
-//! `world_clock` names, and one attribute off each biome
-//! ([`ClientRegistries::biome_sky_colors`]). For every other registry it keeps
+//! [`ClientRegistries`] keeps typed [`DimensionType`]s (including their
+//! complete environment-attribute maps), the ordered `world_clock` names, and
+//! one attribute off each biome ([`ClientRegistries::biome_sky_colors`]). For every other registry it keeps
 //! only the ordered **names** — the id ↔ name mapping, the part that is
 //! universally useful and costs a `Vec<String>`. Their NBT payloads are
 //! **dropped**, not retained. When something does read one (damage types for
@@ -185,13 +185,10 @@ impl Decode for RegistryData {
 /// systems this client does not have. They stay in the raw NBT and are dropped.
 /// Add a field here when something reads it, not before.
 ///
-/// `attributes` is no longer fully in that list: it is a generic, many-keyed
-/// attribute map (vanilla's own environment-attributes structure; fog colour,
-/// ambient sounds, bed rules, dripstone
-/// particles, …) and only one key of it — `minecraft:visual/ambient_light_color`
-/// — has a consumer, so only that one key is lifted out (see
-/// [`Self::ambient_light_color`]). The rest of the compound stays in the raw
-/// NBT and is dropped, exactly like the five fields above.
+/// `attributes` is a generic, many-keyed environment-attribute map. The visual
+/// fog, sky, cloud, ambient-light and sky-light-factor values are lifted for
+/// current render consumers, while the complete compound is retained so
+/// unknown extensions and future gameplay attributes are not discarded.
 ///
 /// # Two field names that are *not* what older records say
 ///
@@ -262,6 +259,17 @@ pub struct DimensionType {
     /// explicitly, so `None` in practice means a non-vanilla dimension that
     /// genuinely did not set one, not a decode failure.
     pub ambient_light_color: Option<u32>,
+    /// Complete environment attributes, retained so unknown data-pack keys do
+    /// not disappear at the protocol boundary.
+    pub environment_attributes: Vec<(String, Nbt)>,
+    /// Dimension-level visual fog colour, packed RGB.
+    pub fog_color: Option<u32>,
+    /// Dimension-level visual sky colour, packed RGB.
+    pub sky_color: Option<u32>,
+    /// Dimension-level visual cloud colour, packed ARGB.
+    pub cloud_color: Option<u32>,
+    /// Dimension-level sky-light factor, when finite on the wire.
+    pub sky_light_factor: Option<f32>,
     /// The `minecraft:world_clock` entry this dimension's day/night cycle
     /// follows, when it has one.
     ///
@@ -297,6 +305,10 @@ impl DimensionType {
                 "dimension_type entry is not an NBT compound".to_owned(),
             ));
         };
+        let environment_attributes = match field(fields, "attributes") {
+            Some(Nbt::Compound(attributes)) => attributes.clone(),
+            _ => Vec::new(),
+        };
         Ok(Self {
             has_fixed_time: optional_bool(fields, "has_fixed_time")?.unwrap_or(false),
             has_skylight: required_bool(fields, "has_skylight")?,
@@ -308,6 +320,11 @@ impl DimensionType {
             logical_height: required_i32(fields, "logical_height")?,
             ambient_light: required_f32(fields, "ambient_light")?,
             ambient_light_color: dimension_ambient_light_color(fields),
+            fog_color: dimension_color_attribute(&environment_attributes, "minecraft:visual/fog_color", false),
+            sky_color: dimension_color_attribute(&environment_attributes, "minecraft:visual/sky_color", false),
+            cloud_color: dimension_color_attribute(&environment_attributes, "minecraft:visual/cloud_color", true),
+            sky_light_factor: dimension_float_attribute(&environment_attributes, "minecraft:visual/sky_light_factor"),
+            environment_attributes,
             default_clock: match field(fields, "default_clock") {
                 None => None,
                 Some(Nbt::String(name)) => Some(name.clone()),
@@ -671,12 +688,52 @@ fn dimension_ambient_light_color(fields: &[(String, Nbt)]) -> Option<u32> {
     }
 }
 
+/// Resolves one environment attribute's value, including the modifier form
+/// used by data packs (`{ modifier, argument }`).
+fn environment_attribute<'a>(attributes: &'a [(String, Nbt)], name: &str) -> Option<&'a Nbt> {
+    match field(attributes, name)? {
+        Nbt::Compound(entry) => field(entry, "argument"),
+        value => Some(value),
+    }
+}
+
+/// Reads a finite floating-point environment attribute. Non-finite wire data
+/// is retained in `environment_attributes` but withheld from typed consumers.
+fn dimension_float_attribute(attributes: &[(String, Nbt)], name: &str) -> Option<f32> {
+    let value = environment_attribute(attributes, name)?;
+    let value = match value {
+        Nbt::Float(value) => *value,
+        Nbt::Double(value) => *value as f32,
+        Nbt::Int(value) => *value as f32,
+        _ => return None,
+    };
+    value.is_finite().then_some(value)
+}
+
+/// Reads a packed RGB or ARGB color attribute. The cloud attribute is ARGB
+/// (`#AARRGGBB`); the other visual colors are six-digit RGB values.
+fn dimension_color_attribute(
+    attributes: &[(String, Nbt)],
+    name: &str,
+    argb: bool,
+) -> Option<u32> {
+    match environment_attribute(attributes, name)? {
+        Nbt::String(value) => parse_hex_color(value, argb),
+        Nbt::Int(value) => Some(*value as u32),
+        _ => None,
+    }
+}
+
 /// Parses vanilla's own six-digit hex-color form: a leading `#` and exactly
 /// six hex digits. Both requirements are vanilla's own, so
 /// anything else is a value we should decline rather than guess at.
 fn parse_hex_rgb(text: &str) -> Option<u32> {
+    parse_hex_color(text, false)
+}
+
+fn parse_hex_color(text: &str, argb: bool) -> Option<u32> {
     let digits = text.strip_prefix('#')?;
-    if digits.len() != 6 {
+    if digits.len() != if argb { 8 } else { 6 } {
         return None;
     }
     u32::from_str_radix(digits, 16).ok()
@@ -878,5 +935,46 @@ mod tests {
         )]))
         .expect_err("a missing required field must not default");
         assert!(err.to_string().contains("has_skylight"), "got {err}");
+    }
+
+    #[test]
+    fn dimension_attributes_preserve_unknown_keys_and_reject_non_finite_typed_values() {
+        let value = Nbt::Compound(vec![
+            ("has_skylight".to_owned(), Nbt::Byte(1)),
+            ("has_ceiling".to_owned(), Nbt::Byte(0)),
+            ("has_ender_dragon_fight".to_owned(), Nbt::Byte(0)),
+            ("coordinate_scale".to_owned(), Nbt::Double(1.0)),
+            ("min_y".to_owned(), Nbt::Int(-64)),
+            ("height".to_owned(), Nbt::Int(384)),
+            ("logical_height".to_owned(), Nbt::Int(384)),
+            ("ambient_light".to_owned(), Nbt::Float(0.0)),
+            (
+                "attributes".to_owned(),
+                Nbt::Compound(vec![
+                    (
+                        "minecraft:visual/sky_light_factor".to_owned(),
+                        Nbt::Float(f32::NAN),
+                    ),
+                    (
+                        "mypack:visual/warp_color".to_owned(),
+                        Nbt::String("opaque-extension".to_owned()),
+                    ),
+                ]),
+            ),
+        ]);
+        let parsed = DimensionType::from_nbt(&value).expect("required fields are valid");
+        assert_eq!(parsed.sky_light_factor, None);
+        assert_eq!(parsed.environment_attributes.len(), 2);
+        assert!(matches!(
+            parsed.environment_attributes[0].1,
+            Nbt::Float(value) if value.is_nan()
+        ));
+        assert_eq!(
+            parsed.environment_attributes[1],
+            (
+                "mypack:visual/warp_color".to_owned(),
+                Nbt::String("opaque-extension".to_owned())
+            )
+        );
     }
 }

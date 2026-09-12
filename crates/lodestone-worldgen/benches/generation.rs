@@ -1714,7 +1714,8 @@ fn bench_steady_state_and_cold(_c: &mut Criterion) {
     let cold_generator = make_embedded_generator(SEED);
     counters::reset();
     let t0 = Instant::now();
-    let cold_column = cold_generator.column(0, 0);
+    let (cold_column, cold_allocs, cold_allocs_by_stage) =
+        measure_allocs_by_stage(|| cold_generator.column(0, 0));
     let c_cold_us = t0.elapsed().as_secs_f64() * 1e6;
     let cold_snapshot = counters::snapshot();
     black_box(cold_column.non_air_count());
@@ -1925,6 +1926,7 @@ fn bench_steady_state_and_cold(_c: &mut Criterion) {
     println!("  C_ss   (median of 100 interior) : {c_ss_us:>12.1} us   target <= 1000 us (GOAL, not gate)");
     println!("  C_ss   p95 interior             : {p95:>12.1} us");
     println!("  C_cold (first column, fresh)    : {c_cold_us:>12.1} us   target <= 8000 us");
+    println!("  cold heap allocs/column          : {cold_allocs:>12}");
     println!("  whole {SIDE}x{SIDE} sweep            : {sweep_s:>12.3} s");
     println!("  steady-state heap allocs/column : {steady_allocs:>12}   target 0 from hot path + O(1) output");
     println!(
@@ -1959,6 +1961,20 @@ fn bench_steady_state_and_cold(_c: &mut Criterion) {
         }
     }
     if counters::enabled() {
+        println!("  -- cold allocs by stage (needs gen-counters) --");
+        let mut cold_ranked: Vec<(usize, u64)> =
+            cold_allocs_by_stage.iter().copied().enumerate().collect();
+        cold_ranked.sort_by(|a, b| b.1.cmp(&a.1));
+        for (stage, n) in cold_ranked {
+            if n == 0 {
+                continue;
+            }
+            let pct = 100.0 * n as f64 / cold_allocs.max(1) as f64;
+            println!(
+                "     {:<14} {n:>10}  ({pct:>5.1}%)",
+                counters::STAGE_NAMES[stage]
+            );
+        }
         println!("\n  -- counters for the single COLD column (C_cold) --");
         print_counters(&cold_snapshot, 1);
     }

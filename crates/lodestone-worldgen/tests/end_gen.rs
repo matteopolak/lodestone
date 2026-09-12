@@ -144,6 +144,27 @@ fn generator(seed: i64) -> EndGenerator {
     EndGenerator::new(seed, &settings("end"), &EndAssets::new())
 }
 
+#[test]
+fn end_placement_biome_zoom_matches_external_boundary_witnesses() {
+    let generator = generator(42);
+    for line in include_str!("support/end_placement_biome_jvm.txt").lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.split_whitespace();
+        assert_eq!(fields.next(), Some("block"), "malformed placement-biome fixture: {line}");
+        let mut coordinates = fields.next().expect("placement-biome coordinates").split(',');
+        let x = coordinates.next().expect("x").parse().expect("integer x");
+        let y = coordinates.next().expect("y").parse().expect("integer y");
+        let z = coordinates.next().expect("z").parse().expect("integer z");
+        assert!(coordinates.next().is_none(), "extra coordinate: {line}");
+        let expected = fields.next().expect("placement-biome value");
+        assert!(fields.next().is_none(), "trailing placement-biome fixture data: {line}");
+        assert_eq!(generator.biome_at_block(x, y, z), expected, "placement biome at ({x},{y},{z})");
+    }
+}
+
 /// The fixed End platform comes from the End biome's placed-feature document,
 /// not from portal arrival.  It has to appear even when the serving path asks
 /// for its chunk before any player crosses a portal.
@@ -251,6 +272,19 @@ fn end_city_pieces_are_composed_into_end_columns() {
         assert_eq!(z.div_euclid(16), cz, "fixture control must lie in served city chunk");
         assert_eq!(column.block_state(x.rem_euclid(16) as usize, y, z.rem_euclid(16) as usize), fields[4], "city control ({x}, {y}, {z})");
     }
+}
+
+/// End-city pieces can extend above the noise-generated 128-row terrain. This
+/// literal witness came from the live Java stream at seed 42; keeping it above
+/// the noise ceiling prevents a 256-row served column from silently clipping
+/// the structure back to air.
+#[test]
+fn end_city_upper_window_piece_survives_structure_clipping() {
+    let column = generator(42).column(283, 86);
+    assert_eq!(column.height(), 128);
+    assert_eq!(column.block_state(12, 133, 0), "minecraft:purpur_pillar[axis=z]");
+    assert_eq!(column.block_state(12, 175, 0), "minecraft:air");
+    assert_eq!(column.block_state(12, 255, 0), "minecraft:air");
 }
 
 #[derive(Debug)]
@@ -761,6 +795,58 @@ fn columns_are_byte_identical_regardless_of_order_or_generator_instance() {
     }
 }
 
+/// The batch path is an execution strategy, not a second End implementation:
+/// requested coordinates stay in caller order and every returned packet field
+/// remains byte-identical to scalar generation.
+#[test]
+fn scalar_and_spatial_batch_columns_are_byte_identical_in_requested_order() {
+    let coords = [(0, 0), (1, 0), (0, 1), (1, 1)];
+    let scalar = generator(SEED);
+    let expected = coords
+        .iter()
+        .map(|&(cx, cz)| scalar.column(cx, cz).into_raw())
+        .collect::<Vec<_>>();
+    let batch = generator(SEED);
+    let actual = batch
+        .columns_batch(&coords)
+        .into_iter()
+        .map(|column| column.into_raw())
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected, "batch changed End output or request order");
+}
+
+/// The real scalar End path exposes the one canonical stage sequence.
+#[test]
+fn end_executor_trace_is_canonical() {
+    let mut trace = Vec::new();
+    let _ = generator(SEED).column_with_trace(0, 0, &mut trace);
+    let stages = trace.into_iter().map(|key| key.stage()).collect::<Vec<_>>();
+    assert_eq!(
+        stages,
+        [
+            lodestone_worldgen::stage_schedule::ColumnStage::Fill,
+            lodestone_worldgen::stage_schedule::ColumnStage::Biomes,
+            lodestone_worldgen::stage_schedule::ColumnStage::Surface,
+            lodestone_worldgen::stage_schedule::ColumnStage::Materialize,
+            lodestone_worldgen::stage_schedule::ColumnStage::StructureStarts,
+            lodestone_worldgen::stage_schedule::ColumnStage::StructurePlacement,
+            lodestone_worldgen::stage_schedule::ColumnStage::Features,
+            lodestone_worldgen::stage_schedule::ColumnStage::Output,
+        ]
+    );
+
+}
+
+/// Negative control for the production detector. This deliberately enters
+/// `Output` before `Fill`; the schedule must reject it rather than accepting a
+/// divergent execution order.
+#[test]
+#[should_panic(expected = "generation stage out of order")]
+fn end_executor_rejects_out_of_order_entry() {
+    let mut executor = EndGenerator::stage_schedule().executor();
+    executor.enter(lodestone_worldgen::stage_schedule::ColumnStage::Output);
+}
+
 /// The bounded End-city-start memo is shared by concurrent callers, but its
 /// lock and eviction path must not make output depend on which worker wins a
 /// cold miss. Compare independent raw columns rather than only non-air counts,
@@ -832,4 +918,26 @@ fn the_end_has_no_bedrock_and_its_surface_rule_cannot_change_a_block() {
         nether.contains("vertical_gradient"),
         "the Nether's rule should carry the construct this test reads the absence of"
     );
+}
+
+#[test]
+fn end_heightmap_witness_predicts_final_terrain_top_from_density() {
+    let generator = generator(SEED_B);
+    let field = generator.shape_field(280, 78);
+    let index = |y: i32| ((y * 16) * 16 + 2) as usize;
+    let top = (0..generator.height())
+        .rev()
+        .find(|&y| field[index(y)] == BlockKind::Stone)
+        .expect("witness column has solid terrain");
+    assert_eq!(top, 57);
+    assert_eq!(field[index(58)], BlockKind::Air);
+
+    let heights = lodestone_worldgen::compose::solid_top_heights(
+        &field,
+        generator.min_y(),
+        generator.height(),
+        0,
+    );
+    assert_eq!(heights[2], 57);
+    assert_eq!(heights[2] + 1, 58);
 }

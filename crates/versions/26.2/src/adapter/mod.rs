@@ -722,6 +722,11 @@ fn dimension_type_info(name: &str, value: &DimensionType) -> Option<DimensionTyp
         logical_height: value.logical_height,
         ambient_light: value.ambient_light,
         ambient_light_color: value.ambient_light_color,
+        environment_attributes: value.environment_attributes.clone(),
+        fog_color: value.fog_color,
+        sky_color: value.sky_color,
+        cloud_color: value.cloud_color,
+        sky_light_factor: value.sky_light_factor,
     })
 }
 

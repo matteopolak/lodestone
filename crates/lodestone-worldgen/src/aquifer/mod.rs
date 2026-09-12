@@ -202,6 +202,40 @@ fn quantize(value: f64, resolution: i32) -> i32 {
     floor(value / f64::from(resolution)) * resolution
 }
 
+/// Per-thread cache storage retained between adjacent aquifer instances.
+///
+/// The aquifer is deliberately rebuilt for each chunk because its sampler
+/// bounds and cell coordinates belong to that chunk. Its three mutable caches
+/// are not part of the returned world, though, so retaining their backing
+/// storage avoids repeating large vector/map allocations on every fill.
+#[derive(Default)]
+struct AquiferScratch {
+    aquifer: Vec<Option<FluidStatus>>,
+    locations: Vec<Option<(i32, i32, i32)>>,
+    prelim: HashMap<(i32, i32), i32>,
+}
+
+thread_local! {
+    static AQUIFER_SCRATCH: RefCell<Vec<AquiferScratch>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+fn take_aquifer_scratch() -> AquiferScratch {
+    AQUIFER_SCRATCH.with(|slot| slot.borrow_mut().pop().unwrap_or_default())
+}
+
+fn return_aquifer_scratch(mut scratch: AquiferScratch) {
+    scratch.aquifer.clear();
+    scratch.locations.clear();
+    scratch.prelim.clear();
+    AQUIFER_SCRATCH.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.len() < 2 {
+            slot.push(scratch);
+        }
+    });
+}
+
 /// The overworld density-noise fill with aquifers.
 ///
 /// Construct once per chunk with [`AquiferSystem::new`], then read blocks with
@@ -441,6 +475,11 @@ impl AquiferSystem {
         let grid_size_z = max_grid_z - min_grid_z + 1;
         let total = (grid_size_x * grid_size_y * grid_size_z) as usize;
 
+        let mut scratch = take_aquifer_scratch();
+        scratch.aquifer.resize(total, None);
+        scratch.locations.resize(total, None);
+        scratch.prelim.clear();
+
         let mut system = Self {
             final_density,
             erosion,
@@ -460,9 +499,9 @@ impl AquiferSystem {
             grid_size_x,
             grid_size_z,
             skip_sampling_above_y: 0,
-            aquifer_cache: RefCell::new(vec![None; total]),
-            location_cache: RefCell::new(vec![None; total]),
-            prelim_cache: RefCell::new(HashMap::new()),
+            aquifer_cache: RefCell::new(scratch.aquifer),
+            location_cache: RefCell::new(scratch.locations),
+            prelim_cache: RefCell::new(scratch.prelim),
         };
 
         let max_prelim = system.max_preliminary_surface_level(
@@ -515,19 +554,38 @@ impl AquiferSystem {
     ) -> Self {
         let min_block_x = chunk_x * 16;
         let min_block_z = chunk_z * 16;
-        Self::disabled_bounded(final_density_node, slots, sea_level, default_fluid,
-            min_y, height, (min_block_x, min_block_x + 15),
-            (min_block_z, min_block_z + 15), cell_width, cell_height)
+        Self::disabled_bounded(
+            final_density_node,
+            slots,
+            sea_level,
+            default_fluid,
+            min_y,
+            height,
+            (min_block_x, min_block_x + 15),
+            (min_block_z, min_block_z + 15),
+            cell_width,
+            cell_height,
+        )
     }
 
-    /// Disabled aquifer over an explicit inclusive horizontal block rectangle.
+    /// Disabled aquifer over an explicit horizontal block rectangle. This is
+    /// the batch counterpart of [`Self::disabled`]: it uses one density scratch
+    /// for adjacent chunks so interpolation corners on their boundaries are
+    /// evaluated once. Point evaluation and floating-point operation order are
+    /// unchanged.
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn disabled_bounded(
-        final_density_node: Program, slots: usize, sea_level: i32,
-        default_fluid: BlockKind, min_y: i32, height: i32,
-        x_bounds: (i32, i32), z_bounds: (i32, i32),
-        cell_width: i32, cell_height: i32,
+        final_density_node: Program,
+        slots: usize,
+        sea_level: i32,
+        default_fluid: BlockKind,
+        min_y: i32,
+        height: i32,
+        x_bounds: (i32, i32),
+        z_bounds: (i32, i32),
+        cell_width: i32,
+        cell_height: i32,
     ) -> Self {
         let final_density = NoiseChunkSampler::from_program(
             final_density_node,
@@ -601,10 +659,11 @@ impl AquiferSystem {
     pub fn block_at_beard(&self, x: i32, y: i32, z: i32, beard: f64) -> BlockKind {
         crate::counters::bump_block_at();
         let density = self.final_density.final_density(x, y, z) + beard;
-        match self.compute_substance(x, y, z, density) {
+        let block = match self.compute_substance(x, y, z, density) {
             None => BlockKind::Stone,
             Some(fluid) => fluid.to_block(),
-        }
+        };
+        block
     }
 
     /// Vanilla's own world-carver carve-state lookup's aquifer branch:
@@ -1029,6 +1088,17 @@ impl AquiferSystem {
             }
         }
         fluid_type
+    }
+}
+
+impl Drop for AquiferSystem {
+    fn drop(&mut self) {
+        let scratch = AquiferScratch {
+            aquifer: std::mem::take(self.aquifer_cache.get_mut()),
+            locations: std::mem::take(self.location_cache.get_mut()),
+            prelim: std::mem::take(self.prelim_cache.get_mut()),
+        };
+        return_aquifer_scratch(scratch);
     }
 }
 

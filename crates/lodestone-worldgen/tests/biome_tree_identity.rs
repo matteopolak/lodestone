@@ -50,7 +50,7 @@
 
 use std::path::PathBuf;
 
-use lodestone_worldgen::biome::{BiomeParameterPoint, BiomeTable, nearest_row_brute_force};
+use lodestone_worldgen::biome::{BiomeParameterPoint, BiomeTable, Parameter, nearest_row_brute_force};
 
 /// Row count of the real overworld table — `BiomeOracle table`'s own measurement.
 const REAL_TABLE_ROWS: usize = 7594;
@@ -395,8 +395,8 @@ fn a_tying_seed_changes_the_returned_row() {
     assert_ne!(unseeded, seeded);
     eprintln!(
         "[U9 lastResult] at {target:?}: unseeded returns row {unseeded}, a tying seed returns \
-         row {seeded} — vanilla's search is history-dependent, so this port implements the \
-         fresh-instance (unseeded) answer only"
+         row {seeded} — vanilla's search is history-dependent, so production must retain the \
+         selected leaf per worker"
     );
 }
 
@@ -646,9 +646,8 @@ fn the_tiebreak_moves_exactly_the_eight_recorded_source_biomes_and_no_surface_qu
 /// Ground truth: `scripts/worldgen-oracle/BiomeOracle.java sample 42 <x> 0 <z>`, run
 /// **once per coordinate in its own JVM process**. That is not incidental — within a
 /// single process vanilla's own indexed-search value lookup for sample *N* is seeded by sample *N−1*'s
-/// leaf via its own cached last-result, so only the first sample of a process is the
-/// fresh-instance answer this port implements. A batched oracle run would have
-/// produced history-contaminated expectations.
+/// leaf via its own cached last-result. This fixture intentionally uses fresh
+/// samples for the stateless negative control.
 ///
 /// Each row asserts **both** directions, which is what makes it a characterisation of
 /// the divergence rather than a one-sided check:
@@ -692,5 +691,98 @@ fn vanilla_tree_fixture_at_the_eight_divergent_source_chunks() {
             "({cx}, {cz}) is in this fixture because the two vanilla searches disagree there; \
              a row where they agree cannot discriminate between the two tie-breaks"
         );
+    }
+}
+
+/// The full-grid fixture that exposed cached tie history in the authenticated
+/// P07 target: after the production horizontal query order reaches
+/// `(-800, -64, -796)`, the cached incumbent selects ocean, while the same
+/// target searched from a fresh tree selects beach.
+#[test]
+fn production_query_order_reproduces_the_external_p07_tie() {
+    let generator = lodestone_server::overworld_generator(42);
+    let (stateful, stateless) = generator
+        .biome_cell_search_fixture(-50, -50, 0, 0, 1)
+        .expect("embedded overworld must carry a real climate table");
+    assert_eq!(stateful, "minecraft:ocean");
+    assert_eq!(stateless, "minecraft:beach");
+}
+
+#[test]
+fn cached_tie_history_is_cursor_local() {
+    let point = |value: i64, biome: &str| BiomeParameterPoint {
+        params: [Parameter { min: value, max: value }; 7],
+        biome: biome.to_owned(),
+    };
+    let table = std::sync::Arc::new(BiomeTable::new(vec![
+        point(0, "minecraft:first"),
+        point(2, "minecraft:second"),
+    ]));
+    let tie = [1; 7];
+    assert_eq!(table.nearest_row_stateless(&tie), 0);
+    let mut cursor = table.search_cursor();
+    assert_eq!(table.nearest_row_with_cursor(&[2; 7], &mut cursor), 1);
+    assert_eq!(table.nearest_row_with_cursor(&tie, &mut cursor), 1, "a tying cached incumbent wins");
+    let fresh_worker = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut cursor = table.search_cursor();
+            table.nearest_row_with_cursor(&tie, &mut cursor)
+        })
+        .join()
+        .expect("worker search must not panic")
+    })
+    ;
+    assert_eq!(fresh_worker, 0, "history must not cross worker threads");
+}
+
+/// Each column owns its cursor, so worker count and completion order cannot
+/// change a tied answer. This models the scheduler control directly: the same
+/// column tasks are assigned to 1, 2, 4, and 8 workers in forward and shuffled
+/// order, then restored by task id before comparison.
+#[test]
+fn cursor_results_are_stable_across_worker_assignment_and_completion_order() {
+    let point = |value: i64, biome: &str| BiomeParameterPoint {
+        params: [Parameter { min: value, max: value }; 7],
+        biome: biome.to_owned(),
+    };
+    let table = std::sync::Arc::new(BiomeTable::new(vec![
+        point(0, "minecraft:first"),
+        point(2, "minecraft:second"),
+    ]));
+    let tasks = (0..32usize).collect::<Vec<_>>();
+    let shuffled = (0..32usize).map(|i| (i * 17) % 32).collect::<Vec<_>>();
+
+    let run = |workers: usize, order: &[usize]| {
+        std::thread::scope(|scope| {
+            let handles = (0..workers)
+                .map(|worker| {
+                    let table = std::sync::Arc::clone(&table);
+                    scope.spawn(move || {
+                        order
+                            .iter()
+                            .copied()
+                            .filter(|task| task % workers == worker)
+                            .map(|task| {
+                                let mut cursor = table.search_cursor();
+                                let seed = if task % 2 == 0 { [2; 7] } else { [0; 7] };
+                                let _ = table.nearest_row_with_cursor(&seed, &mut cursor);
+                                (task, table.nearest_row_with_cursor(&[1; 7], &mut cursor))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut result = handles
+                .into_iter()
+                .flat_map(|handle| handle.join().expect("worker must not panic"))
+                .collect::<Vec<_>>();
+            result.sort_unstable_by_key(|(task, _)| *task);
+            result
+        })
+    };
+
+    let expected = run(1, &tasks);
+    for workers in [2, 4, 8] {
+        assert_eq!(run(workers, &shuffled), expected, "worker assignment changed cursor results at {workers}");
     }
 }

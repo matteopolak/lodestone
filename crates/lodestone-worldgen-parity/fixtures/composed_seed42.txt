@@ -3,6 +3,7 @@ chunk 0 0
 minY -64
 height 384
 seaLevel 63
+beardScope empty
 biome 0 0 minecraft:dark_forest 42
 biome 1 0 minecraft:dark_forest 49
 biome 2 0 minecraft:dark_forest 52
@@ -9126,6 +9127,7 @@ chunk -120 -120
 minY -64
 height 384
 seaLevel 63
+beardScope empty
 biome 0 0 minecraft:eroded_badlands 100
 biome 1 0 minecraft:eroded_badlands 99
 biome 2 0 minecraft:eroded_badlands 94

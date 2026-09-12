@@ -11,6 +11,7 @@ publish = false
 workspace = true
 
 [dependencies]
+lodestone-data = { workspace = true }
 lodestone-worldgen = { path = "../lodestone-worldgen" }
 # The bundled singleplayer generator (`overworld_generator`) — the exact
 # generator the integrated server serves over the wire today. Depending on it

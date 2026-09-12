@@ -77,6 +77,7 @@
 
 use std::collections::BTreeMap;
 
+use lodestone_data::entity_type::{EntityType, EntityTypeRef};
 use serde_json::Value;
 
 /// Vanilla's own mob-category enum, in
@@ -167,10 +168,8 @@ impl MobCategory {
 /// `MobSpawnSettings.SpawnerData` it wraps.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpawnerEntry {
-    /// `type` — an entity id (`minecraft:sheep`). Kept as a string because this
-    /// crate has no entity registry and must not grow one; a consumer resolves
-    /// it against `lodestone-entity`.
-    pub entity_type: String,
+    /// `type` — a validated built-in entity registry reference.
+    pub entity_type: EntityTypeRef,
     /// The `WeightedList` weight, **not** a `SpawnerData` field — see this
     /// module's "How to change it".
     pub weight: i32,
@@ -205,9 +204,9 @@ pub struct BiomeSpawners {
     /// empty entry rather than omitted, so [`Self::for_category`] cannot confuse
     /// "declared empty" with "absent".
     spawners: BTreeMap<MobCategory, Vec<SpawnerEntry>>,
-    /// `spawn_costs`, keyed by entity id. Non-empty for exactly 5 of the 66
+    /// `spawn_costs`, keyed by entity registry reference. Non-empty for exactly 5 of the 66
     /// bundled biomes (all Nether); every overworld biome ships `{}`.
-    spawn_costs: BTreeMap<String, MobSpawnCost>,
+    spawn_costs: BTreeMap<EntityTypeRef, MobSpawnCost>,
 }
 
 impl BiomeSpawners {
@@ -219,13 +218,13 @@ impl BiomeSpawners {
 
     /// The spawn cost for an entity id, if this biome declares one.
     #[must_use]
-    pub fn spawn_cost(&self, entity_type: &str) -> Option<MobSpawnCost> {
-        self.spawn_costs.get(entity_type).copied()
+    pub fn spawn_cost(&self, entity_type: EntityTypeRef) -> Option<MobSpawnCost> {
+        self.spawn_costs.get(&entity_type).copied()
     }
 
     /// Every declared spawn cost, entity id -> cost.
     #[must_use]
-    pub fn spawn_costs(&self) -> &BTreeMap<String, MobSpawnCost> {
+    pub fn spawn_costs(&self) -> &BTreeMap<EntityTypeRef, MobSpawnCost> {
         &self.spawn_costs
     }
 
@@ -256,9 +255,9 @@ impl BiomeSpawners {
 ///
 /// # Panics
 /// Panics on a malformed document (a non-object `spawners`, a non-string `type`,
-/// a `spawn_costs` entry missing `charge`/`energy_budget`, or an unknown
-/// category key). These are embedded generated assets — a shape error is a
-/// build-time defect, not untrusted input.
+/// an unknown entity type, a `spawn_costs` entry missing `charge`/`energy_budget`,
+/// or an unknown category key). These are embedded generated assets — a shape
+/// error is a build-time defect, not untrusted input.
 #[must_use]
 pub fn parse_biome_spawners(document: &Value) -> BiomeSpawners {
     let mut spawners: BTreeMap<MobCategory, Vec<SpawnerEntry>> = BTreeMap::new();
@@ -270,10 +269,13 @@ pub fn parse_biome_spawners(document: &Value) -> BiomeSpawners {
                 .expect("spawners category is an array")
                 .iter()
                 .map(|entry| SpawnerEntry {
-                    entity_type: entry["type"]
-                        .as_str()
-                        .expect("spawner entry type is a string")
-                        .to_owned(),
+                    entity_type: EntityType::from_name(
+                        entry["type"]
+                            .as_str()
+                            .expect("spawner entry type is a string"),
+                    )
+                    .map(EntityTypeRef::from)
+                    .unwrap_or_else(|| panic!("unsupported entity type in spawner entry")),
                     weight: i32::try_from(entry["weight"].as_i64().expect("spawner entry weight"))
                         .expect("spawner weight fits i32"),
                     min_count: i32::try_from(
@@ -292,8 +294,11 @@ pub fn parse_biome_spawners(document: &Value) -> BiomeSpawners {
     let mut spawn_costs = BTreeMap::new();
     if let Some(map) = document.get("spawn_costs").and_then(Value::as_object) {
         for (entity_type, cost) in map {
+            let entity_type = EntityType::from_name(entity_type)
+                .map(EntityTypeRef::from)
+                .unwrap_or_else(|| panic!("unsupported entity type in spawn cost: {entity_type}"));
             spawn_costs.insert(
-                entity_type.clone(),
+                entity_type,
                 MobSpawnCost {
                     energy_budget: cost["energy_budget"]
                         .as_f64()
@@ -348,7 +353,7 @@ mod tests {
         assert!(parsed.is_empty());
         assert_eq!(parsed.entry_count(), 0);
         assert_eq!(parsed.for_category(MobCategory::Monster), &[]);
-        assert_eq!(parsed.spawn_cost("minecraft:pig"), None);
+        assert_eq!(parsed.spawn_cost(EntityType::Pig.into()), None);
         assert_eq!(parse_biome_spawners(&Value::Null), BiomeSpawners::default());
     }
 
@@ -386,16 +391,16 @@ mod tests {
         // Declaration order inside a category is preserved: sheep before pig.
         let creature = parsed.for_category(MobCategory::Creature);
         assert_eq!(creature.len(), 2);
-        assert_eq!(creature[0].entity_type, "minecraft:sheep");
+        assert_eq!(creature[0].entity_type, EntityType::Sheep.into());
         assert_eq!(creature[0].weight, 12);
         assert_eq!(creature[0].min_count, 4);
         assert_eq!(creature[0].max_count, 4);
-        assert_eq!(creature[1].entity_type, "minecraft:pig");
+        assert_eq!(creature[1].entity_type, EntityType::Pig.into());
 
         assert_eq!(
             parsed.for_category(MobCategory::Monster)[0],
             SpawnerEntry {
-                entity_type: "minecraft:zombie".to_owned(),
+                entity_type: EntityType::Zombie.into(),
                 weight: 95,
                 min_count: 1,
                 max_count: 4,
@@ -404,12 +409,14 @@ mod tests {
         // A declared-but-empty category is empty, not absent-and-guessed.
         assert_eq!(parsed.for_category(MobCategory::Misc), &[]);
 
-        let cost = parsed.spawn_cost("minecraft:skeleton").expect("skeleton cost");
+        let cost = parsed
+            .spawn_cost(EntityType::Skeleton.into())
+            .expect("skeleton cost");
         // `energy_budget` and `charge` are read by name; a positional
         // transcription of the record would swap these two.
         assert!((cost.energy_budget - 0.15).abs() < 1e-12);
         assert!((cost.charge - 0.7).abs() < 1e-12);
-        assert_eq!(parsed.spawn_cost("minecraft:ghast"), None);
+        assert_eq!(parsed.spawn_cost(EntityType::Ghast.into()), None);
     }
 
     /// The `max` column, against vanilla's own per-category constructor arguments.

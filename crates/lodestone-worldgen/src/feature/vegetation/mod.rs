@@ -487,6 +487,19 @@ fn place_placed_feature_with_seed<R: RandomSource>(
     grid: &mut VegGrid,
     tags: &VegTags,
 ) {
+    if std::env::var_os("LODESTONE_TRACE_CAVE_VINES").is_some()
+        && origin.x.abs_diff(4) <= 1
+        && origin.z.abs_diff(8) <= 1
+        && origin.y.abs_diff(10) <= 12
+    {
+        eprintln!(
+            "TRACE_CAVE_VINES start id={:?} origin=({},{},{})",
+            placed.registry_id,
+            origin.x,
+            origin.y,
+            origin.z
+        );
+    }
     fn recurse<R: RandomSource>(
         random: &mut R,
         mods: &[VegPlacement],

@@ -158,6 +158,21 @@ impl BaseStateFacts {
             Self::Extension => true,
         }
     }
+
+    /// Whether this state contributes to the live motion-blocking heightmap.
+    /// Fluids contribute there even though they are excluded from the ocean
+    /// floor heightmap.
+    #[inline]
+    pub const fn is_motion_blocking(self) -> bool {
+        match self {
+            Self::Builtin {
+                is_air,
+                is_fluid,
+                blocks_motion,
+            } => !is_air && (is_fluid || blocks_motion),
+            Self::Extension => true,
+        }
+    }
 }
 
 /// Interner state behind the lock. Split out so the recursive base-name intern
@@ -331,13 +346,6 @@ impl StateInterner {
             .canonical_of[id.index()]
     }
 
-    /// The local id for a validated canonical state. Resident columns cross
-    /// this boundary once per distinct palette state, not once per block.
-    #[must_use]
-    pub fn id_of_canonical(&self, id: CanonicalStateId) -> StateId {
-        self.id_of(&id.canonical_state())
-    }
-
     /// Resolves the base state's typed facts from generated canonical tables.
     ///
     /// This is a palette-boundary operation: callers should cache the result
@@ -368,6 +376,18 @@ impl StateInterner {
             blocks_motion: lodestone_data::block_solidity::blocks_motion(canonical),
         }
     }
+
+    /// The local id for a validated canonical state.
+    ///
+    /// Lifecycle replay keeps resident chunks in the server's canonical-id
+    /// representation. Converting at the boundary once per palette entry lets
+    /// the feature engine consume that resident state without formatting and
+    /// reparsing every block in the neighbourhood.
+    #[must_use]
+    pub fn id_of_canonical(&self, id: CanonicalStateId) -> StateId {
+        self.id_of(&id.canonical_state())
+    }
+
 
     /// The id of `id`'s base name — `"minecraft:oak_log[axis=y]"` maps to the
     /// id of `"minecraft:oak_log"`, and a property-less state maps to itself.
@@ -468,6 +488,8 @@ mod tests {
             .and_then(CanonicalStateId::new)
             .expect("stone is a built-in state");
         let local = interner.id_of_canonical(canonical);
+
+        assert_eq!(interner.name_of(local), "minecraft:stone");
         assert_eq!(interner.canonical_id(local), Some(canonical));
         assert_eq!(interner.id_of_canonical(canonical), local);
     }

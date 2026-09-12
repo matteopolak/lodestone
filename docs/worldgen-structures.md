@@ -32,22 +32,17 @@ exist yet at start time). Stronghold writes are a fourth, ordered post-surface l
 selector boxes skip a candidate only when the current state is air, while later decorations remain
 unconditional. Keeping the guarded and unguarded writes in one list preserves their source order.
 
-Each template completes a typed attachment-survival pass before the next piece is placed. The pass
-revisits the written positions and their boundary, removes unsupported face attachments (including
-ladders, wall signs, wall torches and wall banners) and below-supported rails and pressure plates,
-then propagates removals to adjacent candidates. It uses generated block-state properties, collision
-shapes and support predicates rather than parsing state names in the placement loop. Face support is
-looked up on the side opposite the attachment's `Facing` value. The generated support facts preserve
-the distinction between legacy-solid support used by wall signs and banners and a full sturdy face
-used by ladders, wall torches and tripwire hooks. A support outside the clipped template grid is
-treated as absent rather than inventing a cross-chunk support, so a boundary attachment is removed
-unless its support is written in the same grid. This is the survival part of the neighbour-shape
-lifecycle; connection-state recomputation for fences, walls, panes, stairs and rails remains a
-separate extension point.
+Fortress starts retain both their eager `Arc<Vec<CodedBlock>>` piece output and a typed runtime
+descriptor containing piece kind, facing, chest decision, and end-cap seed. Placement reuses the
+eager blocks and runs only the terrain-dependent support columns and chest-facing/loot finalization;
+it must not regenerate the random piece tree. Starts produced without that descriptor retain the
+legacy replay fallback, which is useful when extending persisted or fixture-created start formats.
 
 Concentric-ring sets are generator-wide: `StructureRegistry` resolves the placement set's preferred
 biome holder-set, searches the 112-block square around each initial candidate at quart resolution,
-and caches the relocated chunk list for `starts_at`. The resulting list is consumed by the same
+and caches the relocated chunk list for `starts_at`. During each ring set's build, each unique probe
+coordinate's immutable climate target is sampled once (in parallel on native targets), while each
+biome-tree lookup and its cursor history still runs in probe order. The resulting list is consumed by the same
 structure-set gates as random-spread sets, so a ring candidate reaches the ordinary biome check,
 piece generator and placement stages instead of stopping at parsed placement data.
 
@@ -94,14 +89,15 @@ inline unions because those registry payloads have their own polymorphic
 schemas; they are handed to their existing parsers unchanged.
 
 Mineshaft starts eagerly retain their complete tree and bounding boxes, because the vertical shift
-depends on the finished tree. Their block-writing walk is replayed for the decorating chunk instead:
-the liquid-shell refusal is clipped to that chunk before the piece writes. This matters at a chunk
-border, where water just outside the current chunk must not discard a corridor that is otherwise
+depends on the finished tree. Their block-writing walk is replayed for the decorating chunk against
+that chunk's post-surface, post-carve block grid: the liquid-shell refusal and support/floor probes
+see cave air, fluids and surface material already present when the piece writes. This matters at a
+chunk border, where water just outside the current chunk must not discard a corridor that is otherwise
 valid inside it. Reconstructing the tree uses the owning start's stream, while its block walk uses
 the target chunk's `underground_structures` decoration stream at the structure's captured
 runtime-registry index within that step. That keeps the tree stable and makes probabilistic corridor
-output follow the chunk that receives it. The remaining pre-surface reads stay explicitly recorded in
-the structure ledger.
+output follow the chunk that receives it. The remaining pre-surface read is the eager tree's vertical
+shift, and stays explicitly recorded in the structure ledger.
 
 A ruined portal combines the latter two forms: the template first writes the frame, then its
 placement-time refinement grows the netherrack skirt and downward columns and adds optional vines or
@@ -143,14 +139,16 @@ registry parsed but cannot fully generate, with a reason — read it rather than
 A structure on the ledger still gets a start when placement and biome say so, but with no children
 and is filtered out of what actually reaches a chunk (a start with no children is invalid). Nether `fortress`
 now builds its recursive coded piece tree, and Overworld `mansion` places its seeded shell, corridors, rooms and roofs;
-entity data markers remain a server-side consumer concern. End-city chest markers now resolve to the bundled treasure
-table in the server-side structure pass. `end_city` has its
+entity data markers remain a server-side consumer concern. End-city chest markers resolve to the bundled treasure
+table in the server-side structure pass. After preserving those filled containers and patterned banner payloads, the
+same attachment pass materializes any remaining state-owned block entities; this includes template chest blocks with
+no loot marker, which must still reach the packet as empty containers. `end_city` has its
 piece generator and is consumed by the End dimension's structure stage. Both ruined-portal variants build a template
 piece and run their post-template terrain refinement in their dimension's placement stage. Narrow per-structure deviations have their own ledger keys (for example,
 a decoration step whose RNG is position- rather than
 chunk-order-seeded). Coded chest facing is resolved from the receiving grid immediately before its write,
-so the reorientation does not spend or shift the coded loot seed stream. Mineshaft block replay is already clipped per decorating chunk; its remaining
-mineshaft-specific ledger row is the pre-surface world-read limitation. Template containers whose loot table lives in their own NBT, coded containers,
+so the reorientation does not spend or shift the coded loot seed stream. Mineshaft block replay is already clipped per decorating chunk and reads the
+receiving post-carve grid; its remaining mineshaft-specific ledger row is the eager tree's pre-surface vertical-shift read. Template containers whose loot table lives in their own NBT, coded containers,
 buried-treasure chests, and resolved pool feature elements are server- and placement-stage connected.
 The desert-pyramid roof's world-seeded positional picks are wired through structure generation;
 these completed paths must stay off the ledger. A stale
@@ -170,7 +168,11 @@ text current when you close or narrow a gap.
 - **Adding a jigsaw structure**: verify block NBT survives template parsing (a jigsaw block's whole
   configuration — pool, target, joint — lives in the block's own NBT compound, which an ordinary
   placement loop would discard) and that the assembly RNG order matches vanilla's shuffle exactly,
-  including that the element list is **weight-expanded before** the shuffle.
+  including that the element list is **weight-expanded before** the shuffle. The short-lived
+  `JigsawBlockInfo` values keep `name`, `pool`, and `target` backed by that retained NBT through
+  `JigsawText`; valid `front` and `top` orientations stay typed through assembly as well, while
+  malformed orientation text retains its legacy fallback. Preserve the field defaults and do not
+  turn those reads back into per-scan string copies.
 - **A piece that needs a *material* distinction not available at start time** (buried treasure's
   chest walk) is the case for `PieceRefinement`, run at placement time against the real grid — reach
   for the eager-blocks path first and only use this when the piece's own logic genuinely needs

@@ -65,8 +65,11 @@
 //!   an early `return` would change every later structure at that seed.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fmt;
+use std::ops::Deref;
 use std::sync::Arc;
 
+use lodestone_core::Nbt;
 use lodestone_worldgen_core::rng::{
     LegacyRandomSource, PositionalRandomFactory, RandomSource,
 };
@@ -77,7 +80,7 @@ use super::feature_placement::FeaturePlacement;
 use super::pool::{PoolElement, PoolStore, Projection, place_settings, shuffle};
 use super::processor::ColumnHeights;
 use super::template::{
-    BlockNbt, Rotation, TemplateBlockInfo, direction_step, nbt_int, nbt_string, opposite_direction,
+    BlockNbt, Rotation, TemplateBlockInfo, nbt_int, nbt_string,
 };
 use super::{
     BoundingBox, HeightmapKind, PiecePlacement, PieceRefinement, StartContext, StructurePiece, free_height,
@@ -93,6 +96,197 @@ pub enum JointType {
     Rollable,
 }
 
+/// A jigsaw connection direction, kept typed through assembly.
+///
+/// The six directions emitted by a valid block-state orientation are enum
+/// values, so scanning a jigsaw no longer allocates two short strings or
+/// compares those strings at every candidate. `Other` preserves the previous
+/// behavior for malformed orientation text: it owns the original spelling and
+/// only participates in the same-text fallback comparison.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JigsawDirection {
+    North,
+    East,
+    South,
+    West,
+    Up,
+    Down,
+    Other(String),
+}
+
+impl JigsawDirection {
+    fn parse(value: &str) -> Self {
+        match value {
+            "north" => Self::North,
+            "east" => Self::East,
+            "south" => Self::South,
+            "west" => Self::West,
+            "up" => Self::Up,
+            "down" => Self::Down,
+            other => Self::Other(other.to_owned()),
+        }
+    }
+
+    /// Returns the serialized spelling without allocating.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::North => "north",
+            Self::East => "east",
+            Self::South => "south",
+            Self::West => "west",
+            Self::Up => "up",
+            Self::Down => "down",
+            Self::Other(value) => value,
+        }
+    }
+
+    fn step(&self) -> [i32; 3] {
+        match self {
+            Self::North => [0, 0, -1],
+            Self::South => [0, 0, 1],
+            Self::West => [-1, 0, 0],
+            Self::East => [1, 0, 0],
+            Self::Up => [0, 1, 0],
+            Self::Down => [0, -1, 0],
+            Self::Other(_) => [0, 0, 0],
+        }
+    }
+
+    fn is_vertical(&self) -> bool {
+        matches!(self, Self::Up | Self::Down)
+    }
+
+    /// Whether `self` equals the old string helper's opposite of `target`.
+    fn is_opposite(&self, target: &Self) -> bool {
+        match (self, target) {
+            (Self::North, Self::South)
+            | (Self::South, Self::North)
+            | (Self::East, Self::West)
+            | (Self::West, Self::East)
+            | (Self::Up, Self::Down)
+            | (Self::Down, Self::Up) => true,
+            (Self::Other(left), Self::Other(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
+/// A jigsaw text value that borrows its contents from the template NBT.
+///
+/// A template already owns the strings in its retained NBT compound. Copying
+/// each `name`, `pool`, and `target` into a fresh `String` for every rotated
+/// scan made the short-lived block-info vector pay three heap allocations per
+/// jigsaw. The NBT compound is kept alive by an `Arc`; the value stores its
+/// validated field index and reads the existing string in place.
+///
+/// `Owned` is retained for callers constructing a [`JigsawBlockInfo`] directly;
+/// decoded template scans use only `Nbt` or `Static`.
+#[derive(Clone)]
+pub enum JigsawText {
+    /// A string entry in a retained template NBT compound.
+    Nbt {
+        nbt: Arc<BlockNbt>,
+        index: usize,
+        default: &'static str,
+    },
+    /// One of the fixed defaults used when a field is missing or malformed.
+    Static(&'static str),
+    /// An explicitly constructed value, for API callers and tests.
+    Owned(String),
+}
+
+impl JigsawText {
+    fn from_nbt(nbt: Option<&Arc<BlockNbt>>, key: &'static str, default: &'static str) -> Self {
+        let Some(nbt) = nbt else {
+            return Self::Static(default);
+        };
+        let Some(index) = nbt.iter().position(|(field, _)| field == key) else {
+            return Self::Static(default);
+        };
+        if !matches!(nbt[index].1, Nbt::String(_)) {
+            return Self::Static(default);
+        }
+        Self::Nbt {
+            nbt: Arc::clone(nbt),
+            index,
+            default,
+        }
+    }
+
+    /// The value without allocating.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Nbt {
+                nbt,
+                index,
+                default,
+            } => nbt
+                .get(*index)
+                .and_then(|(_, value)| match value {
+                    Nbt::String(value) => Some(value.as_str()),
+                    _ => None,
+                })
+                .unwrap_or(default),
+            Self::Static(value) => value,
+            Self::Owned(value) => value,
+        }
+    }
+}
+
+impl Deref for JigsawText {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl fmt::Debug for JigsawText {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_tuple("JigsawText").field(&self.as_str()).finish()
+    }
+}
+
+impl PartialEq for JigsawText {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl Eq for JigsawText {}
+
+impl PartialEq<str> for JigsawText {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for JigsawText {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<String> for JigsawText {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl From<String> for JigsawText {
+    fn from(value: String) -> Self {
+        Self::Owned(value)
+    }
+}
+
+impl From<&str> for JigsawText {
+    fn from(value: &str) -> Self {
+        Self::Owned(value.to_owned())
+    }
+}
+
 /// One jigsaw block of an element — vanilla's own
 /// structure-template jigsaw-block-info type.
 #[derive(Debug, Clone)]
@@ -102,17 +296,17 @@ pub struct JigsawBlockInfo {
     pub pos: [i32; 3],
     /// `front()` of the rotated `orientation`, i.e. the direction the connection
     /// points.
-    pub front: String,
+    pub front: JigsawDirection,
     /// `top()` of the rotated `orientation`.
-    pub top: String,
+    pub top: JigsawDirection,
     /// `joint`, defaulting by front axis (`getDefaultJointType`).
     pub joint: JointType,
     /// `name`.
-    pub name: String,
+    pub name: JigsawText,
     /// `pool` — the pool this connection draws its neighbour from.
-    pub pool: String,
+    pub pool: JigsawText,
     /// `target` — the `name` the neighbour's jigsaw must carry.
-    pub target: String,
+    pub target: JigsawText,
     /// `placement_priority`, the queue order a child is expanded in.
     pub placement_priority: i32,
     /// `selection_priority`, the order this block is *tried* in within its piece.
@@ -130,21 +324,20 @@ impl JigsawBlockInfo {
         let (front, top) = info
             .state
             .front_and_top()
-            .map_or(("north".to_string(), "up".to_string()), |(f, t)| {
-                (f.to_string(), t.to_string())
+            .map_or((JigsawDirection::North, JigsawDirection::Up), |(f, t)| {
+                (JigsawDirection::parse(f), JigsawDirection::parse(t))
             });
-        let empty: BlockNbt = Vec::new();
-        let nbt = info.nbt.as_deref().unwrap_or(&empty);
+        let nbt = info.nbt.as_ref();
         // `getDefaultJointType`: a horizontal front defaults to ALIGNED, a
         // vertical one to ROLLABLE. Every village connection is horizontal, so an
         // implementation that defaulted everything to ROLLABLE would attach
         // upside-down houses and still look like it worked.
-        let default_joint = if front == "up" || front == "down" {
+        let default_joint = if front.is_vertical() {
             JointType::Rollable
         } else {
             JointType::Aligned
         };
-        let joint = match nbt_string(nbt, "joint") {
+        let joint = match nbt.and_then(|nbt| nbt_string(nbt, "joint")) {
             Some("rollable") => JointType::Rollable,
             Some("aligned") => JointType::Aligned,
             _ => default_joint,
@@ -154,11 +347,11 @@ impl JigsawBlockInfo {
             front,
             top,
             joint,
-            name: nbt_string(nbt, "name").unwrap_or("minecraft:empty").to_string(),
-            pool: nbt_string(nbt, "pool").unwrap_or("minecraft:empty").to_string(),
-            target: nbt_string(nbt, "target").unwrap_or("minecraft:empty").to_string(),
-            placement_priority: nbt_int(nbt, "placement_priority").unwrap_or(0),
-            selection_priority: nbt_int(nbt, "selection_priority").unwrap_or(0),
+            name: JigsawText::from_nbt(nbt, "name", "minecraft:empty"),
+            pool: JigsawText::from_nbt(nbt, "pool", "minecraft:empty"),
+            target: JigsawText::from_nbt(nbt, "target", "minecraft:empty"),
+            placement_priority: nbt.map_or(0, |nbt| nbt_int(nbt, "placement_priority").unwrap_or(0)),
+            selection_priority: nbt.map_or(0, |nbt| nbt_int(nbt, "selection_priority").unwrap_or(0)),
         }
     }
 
@@ -169,12 +362,12 @@ impl JigsawBlockInfo {
     pub fn feature_default(position: [i32; 3]) -> Self {
         Self {
             pos: position,
-            front: "down".to_string(),
-            top: "south".to_string(),
+            front: JigsawDirection::Down,
+            top: JigsawDirection::South,
             joint: JointType::Rollable,
-            name: "minecraft:bottom".to_string(),
-            pool: "minecraft:empty".to_string(),
-            target: "minecraft:empty".to_string(),
+            name: JigsawText::Static("minecraft:bottom"),
+            pool: JigsawText::Static("minecraft:empty"),
+            target: JigsawText::Static("minecraft:empty"),
             placement_priority: 0,
             selection_priority: 0,
         }
@@ -187,7 +380,7 @@ impl JigsawBlockInfo {
     /// way round and not both ways.
     #[must_use]
     pub fn can_attach(&self, target: &Self) -> bool {
-        self.front == opposite_direction(&target.front)
+        self.front.is_opposite(&target.front)
             && (self.joint == JointType::Rollable || self.top == target.top)
             && self.target == target.name
     }
@@ -793,7 +986,7 @@ pub fn begin<R: RandomSource>(
         Some(name) => {
             let blocks =
                 centre_element.shuffled_jigsaw_blocks(position, centre_rotation, &mut random);
-            blocks.iter().find(|b| &b.name == name)?.pos
+            blocks.iter().find(|b| b.name.as_str() == name)?.pos
         }
     };
     let local_anchor = [
@@ -971,8 +1164,7 @@ impl Placer<'_> {
         let source_jigsaws =
             source_element.shuffled_jigsaw_blocks(source_position, source_rotation, random);
         for source_jigsaw in &source_jigsaws {
-            let source_front = source_jigsaw.front.as_str();
-            let step = direction_step(source_front);
+            let step = source_jigsaw.front.step();
             let source_jigsaw_pos = source_jigsaw.pos;
             let target_jigsaw_pos = [
                 source_jigsaw_pos[0] + step[0],
@@ -1047,7 +1239,7 @@ impl Placer<'_> {
                         target_jigsaws
                             .iter()
                             .map(|j| {
-                                let step = direction_step(&j.front);
+                                let step = j.front.step();
                                 let ahead =
                                     [j.pos[0] + step[0], j.pos[1] + step[1], j.pos[2] + step[2]];
                                 if !is_inside(hack_box, ahead) {
@@ -1316,6 +1508,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn block_info_text_reuses_retained_nbt_strings() {
+        let nbt = Arc::new(vec![
+            ("name".to_string(), Nbt::String("test:name".to_string())),
+            ("pool".to_string(), Nbt::String("test:pool".to_string())),
+            ("target".to_string(), Nbt::String("test:target".to_string())),
+            ("joint".to_string(), Nbt::String("rollable".to_string())),
+        ]);
+        let info = JigsawBlockInfo::of(TemplateBlockInfo {
+            pos: [1, 2, 3],
+            state: super::super::template::BlockState::parse(
+                "minecraft:jigsaw[orientation=east_up]",
+            ),
+            local: [0, 0, 0],
+            nbt: Some(Arc::clone(&nbt)),
+        });
+
+        assert_eq!(info.name.as_str(), "test:name");
+        assert_eq!(info.pool.as_str(), "test:pool");
+        assert_eq!(info.target.as_str(), "test:target");
+        assert_eq!(info.joint, JointType::Rollable);
+        assert!(matches!(info.name, JigsawText::Nbt { .. }));
+        assert!(matches!(info.pool, JigsawText::Nbt { .. }));
+        assert!(matches!(info.target, JigsawText::Nbt { .. }));
+        assert_eq!(Arc::strong_count(&nbt), 4, "the three fields must share the retained NBT allocation");
+
+        let duplicate = Arc::new(vec![
+            ("name".to_string(), Nbt::Int(1)),
+            ("name".to_string(), Nbt::String("ignored".to_string())),
+        ]);
+        assert_eq!(
+            JigsawText::from_nbt(Some(&duplicate), "name", "minecraft:empty").as_str(),
+            "minecraft:empty",
+            "first-match NBT semantics must remain unchanged for malformed duplicates",
+        );
+    }
+
+    #[test]
     fn feature_elements_survive_nested_list_conversion_in_document_order() {
         struct Context;
 
@@ -1402,15 +1631,23 @@ mod tests {
     fn jigsaw(front: &str, top: &str, name: &str, target: &str, joint: JointType) -> JigsawBlockInfo {
         JigsawBlockInfo {
             pos: [0, 0, 0],
-            front: front.to_string(),
-            top: top.to_string(),
+            front: JigsawDirection::parse(front),
+            top: JigsawDirection::parse(top),
             joint,
-            name: name.to_string(),
-            pool: "minecraft:empty".to_string(),
-            target: target.to_string(),
+            name: name.into(),
+            pool: "minecraft:empty".into(),
+            target: target.into(),
             placement_priority: 0,
             selection_priority: 0,
         }
+    }
+
+    #[test]
+    fn unknown_direction_keeps_same_text_fallback() {
+        let source = jigsaw("custom_front", "custom_top", "minecraft:a", "minecraft:b", JointType::Aligned);
+        let target = jigsaw("custom_front", "custom_top", "minecraft:b", "minecraft:a", JointType::Aligned);
+        assert!(source.can_attach(&target));
+        assert_eq!(source.front.step(), [0, 0, 0]);
     }
 
     /// `canAttach`'s three conditions, each falsified independently — including

@@ -22,7 +22,9 @@
 //! chunk" number; ore/vegetation features and structures are still missing
 //! from it (see the crate doc comment).
 
-use lodestone_worldgen_parity::{ChunkFixture, diff_field, parse_compact};
+use lodestone_worldgen_parity::{ChunkFixture, StructureBeardScope, diff_field, parse_compact};
+use lodestone_worldgen::structure::beardifier::{Beardifier, PieceBeard};
+use lodestone_worldgen::structure::{BoundingBox, StructurePiece, StructureStart, TerrainAdjustment};
 
 fn fixtures() -> Vec<ChunkFixture> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -71,7 +73,59 @@ fn fixtures_are_non_vacuous() {
             f.chunk_x,
             f.chunk_z
         );
+        assert_eq!(
+            f.beard_scope,
+            StructureBeardScope::Empty,
+            "composed fixture must be compared only with an empty-beard pipeline"
+        );
     }
+}
+
+/// Scope control: an empty structure-terrain term and a non-empty term are
+/// observably different inputs to the shape stage. This is deliberately a
+/// synthetic start so the control remains valid even when the selected seed
+/// happens not to place an adaptation-bearing structure at the target.
+#[test]
+fn control_empty_and_non_empty_beard_scopes_do_not_compare_equal() {
+    let generator = lodestone_server::overworld_generator(42);
+    let bounding_box = BoundingBox::from_corners([0, 64, 0], [7, 70, 7]);
+    let start = StructureStart {
+        structure: "minecraft:parity_scope_control".to_string(),
+        chunk_x: 0,
+        chunk_z: 0,
+        references: 0,
+        bounding_box,
+        pieces: vec![StructurePiece {
+            id: "minecraft:parity_scope_piece".to_string(),
+            bounding_box,
+            orientation: None,
+            gen_depth: 0,
+            template: None,
+            placement: None,
+            extra_placements: Vec::new(),
+            blocks: None,
+            loot: Vec::new(),
+            beard: Some(PieceBeard {
+                rigid: true,
+                ground_level_delta: 0,
+                junctions: Vec::new(),
+            }),
+            refine: None,
+        }],
+        terrain_adaptation: TerrainAdjustment::BeardThin,
+        pieces_complete: true,
+    };
+    let non_empty = Beardifier::for_chunk(0, 0, std::iter::once(&start));
+    assert!(!non_empty.is_empty(), "control start must produce a beard term");
+
+    let empty_shape = generator.shape_field_with_beard(0, 0, &Beardifier::empty());
+    let non_empty_shape = generator.shape_field_with_beard(0, 0, &non_empty);
+    let changed = empty_shape
+        .iter()
+        .zip(non_empty_shape.iter())
+        .filter(|(empty, non_empty)| empty != non_empty)
+        .count();
+    assert!(changed > 0, "empty and non-empty beard scopes unexpectedly matched");
 }
 
 /// Control: diffing a fixture against itself must be exactly zero mismatches

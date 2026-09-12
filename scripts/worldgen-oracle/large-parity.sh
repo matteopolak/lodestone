@@ -73,7 +73,9 @@ else
 fi
 
 while :; do
-  LODESTONE_ORACLE_EPOCH_TILES="$EPOCH_TILES" "$HERE/run.sh" LargeParityOracle "${ARGS[@]}"
+  LODESTONE_ORACLE_EPOCH_TILES="$EPOCH_TILES" \
+    LODESTONE_ORACLE_PAUSE_WHEN_EMPTY_SECONDS="${LODESTONE_ORACLE_PAUSE_WHEN_EMPTY_SECONDS:-1}" \
+    "$HERE/run.sh" LargeParityOracle "${ARGS[@]}"
   if [ -f "$LODESTONE_ORACLE_WORLD_ROOT/$freeze_stamp" ]; then
     break
   fi

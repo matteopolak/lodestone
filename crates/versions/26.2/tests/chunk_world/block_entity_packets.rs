@@ -91,8 +91,8 @@ fn nether_fortress_loot_and_spawner_sidecars_reach_the_chunk_packet() {
             .block_entities
             .iter()
             .filter(|record| record.type_id == 1)
-            .all(|record| record.nbt == Nbt::Compound(Vec::new())),
-        "container update tags carry no persisted loot fields"
+        .all(|record| record.nbt == Nbt::End),
+        "container update tags carry no persisted loot fields and use the null network tag"
     );
 }
 
@@ -107,7 +107,7 @@ fn generated_spawner_sidecars_survive_each_dimension_packet_shape() {
             x: position.x,
             y: position.y,
             z: position.z,
-            entity_type: "minecraft:blaze".to_owned(),
+            entity_type: lodestone_data::entity_type::EntityType::CaveSpider.into(),
         };
         source.add_generated_block_entities(std::slice::from_ref(&generated));
 
@@ -120,8 +120,102 @@ fn generated_spawner_sidecars_survive_each_dimension_packet_shape() {
         assert_eq!(record.type_id, 9, "spawner registry id in {dimension:?}");
         assert!(compound_field(&record.nbt, "id").is_none());
         assert!(compound_field(&record.nbt, "SpawnPotentials").is_none());
-        assert!(compound_field(&record.nbt, "SpawnData").is_some());
+        assert_eq!(compound_field(&record.nbt, "Delay"), Some(&Nbt::Short(20)));
+        assert_eq!(
+            compound_field(&record.nbt, "MinSpawnDelay"),
+            Some(&Nbt::Short(200))
+        );
+        assert_eq!(
+            compound_field(&record.nbt, "MaxSpawnDelay"),
+            Some(&Nbt::Short(800))
+        );
+        assert_eq!(compound_field(&record.nbt, "SpawnCount"), Some(&Nbt::Short(4)));
+        assert_eq!(
+            compound_field(&record.nbt, "MaxNearbyEntities"),
+            Some(&Nbt::Short(6))
+        );
+        assert_eq!(
+            compound_field(&record.nbt, "RequiredPlayerRange"),
+            Some(&Nbt::Short(16))
+        );
+        assert_eq!(compound_field(&record.nbt, "SpawnRange"), Some(&Nbt::Short(4)));
+        let spawn_data = compound_field(&record.nbt, "SpawnData").expect("spawner SpawnData");
+        let expected_entity = Nbt::Compound(vec![(
+            "id".to_owned(),
+            Nbt::String("minecraft:cave_spider".to_owned()),
+        )]);
+        assert_eq!(
+            compound_field(spawn_data, "entity"),
+            Some(&expected_entity)
+        );
     }
+}
+
+/// External packet captures stabilize the block-entity list by the compact
+/// local XZ header, then Y and registry id. Keep this literal three-record
+/// control because a source-side insertion sequence (chest, chest, spawner)
+/// is not the packet's canonical sequence (chest, spawner, chest).
+#[test]
+fn generated_overworld_block_entities_use_stable_packet_order_and_nbt_keys() {
+    let mut source = ChunkColumn::new(Dimension::Overworld.min_y(), Dimension::Overworld.height());
+    source.set_block(2, -24, 12, "minecraft:chest[facing=east,type=single,waterlogged=false]");
+    source.set_block(5, -24, 12, "minecraft:spawner");
+    source.set_block(6, -24, 14, "minecraft:chest[facing=north,type=single,waterlogged=false]");
+
+    let chest_a = GeneratedBlockEntity::DungeonChest {
+        x: 34,
+        y: -24,
+        z: -20,
+        facing: "east".to_owned(),
+        loot_table: "minecraft:chests/simple_dungeon".to_owned(),
+        loot_table_seed: 1,
+    };
+    let chest_b = GeneratedBlockEntity::DungeonChest {
+        x: 38,
+        y: -24,
+        z: -18,
+        facing: "north".to_owned(),
+        loot_table: "minecraft:chests/simple_dungeon".to_owned(),
+        loot_table_seed: 2,
+    };
+    let spawner = GeneratedBlockEntity::DungeonSpawner {
+        x: 37,
+        y: -24,
+        z: -20,
+        entity_type: lodestone_data::entity_type::EntityType::CaveSpider.into(),
+    };
+    // Deliberately use the generation insertion order; the encoder owns the
+    // stable packet order and must not depend on this Vec order.
+    source.add_generated_block_entities(&[chest_a, chest_b, spawner]);
+
+    let packet = decode_encoded_chunk_at(2, -2, Dimension::Overworld, &source);
+    let records = packet
+        .block_entities
+        .iter()
+        .map(|record| (record.rel_x, record.y, record.rel_z, record.type_id))
+        .collect::<Vec<_>>();
+    assert_eq!(records, vec![(2, -24, 12, 1), (5, -24, 12, 9), (6, -24, 14, 1)]);
+    assert_eq!(packet.block_entities[0].nbt, Nbt::End);
+    assert_eq!(packet.block_entities[2].nbt, Nbt::End);
+
+    let Nbt::Compound(fields) = &packet.block_entities[1].nbt else {
+        panic!("generated spawner update must carry a compound payload");
+    };
+    let names = fields.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        vec![
+            "Delay",
+            "MaxNearbyEntities",
+            "MaxSpawnDelay",
+            "MinSpawnDelay",
+            "RequiredPlayerRange",
+            "SpawnCount",
+            "SpawnData",
+            "SpawnRange",
+        ],
+        "compound keys follow the external packet control's canonical UTF-8 order"
+    );
 }
 
 #[test]
@@ -151,9 +245,67 @@ fn generated_beehive_and_dungeon_chest_sidecars_reach_the_overworld_packet() {
     records.sort_unstable_by_key(|record| record.type_id);
 
     assert_eq!(records[0].type_id, 1, "dungeon chest registry id");
-    assert_eq!(records[0].nbt, Nbt::Compound(Vec::new()));
+    assert_eq!(records[0].nbt, Nbt::End);
     assert_eq!(records[1].type_id, 33, "beehive registry id");
-    assert_eq!(records[1].nbt, Nbt::Compound(Vec::new()));
+    assert_eq!(records[1].nbt, Nbt::End);
+}
+
+#[test]
+fn metadata_only_furnace_fallback_uses_the_literal_null_update_tag() {
+    let position = BlockPos::new(2, 70, 2);
+    let mut source = ChunkColumn::new(Dimension::Overworld.min_y(), Dimension::Overworld.height());
+    source.set_block(
+        position.x,
+        position.y,
+        position.z,
+        "minecraft:furnace[facing=north,lit=false]",
+    );
+    source.set_block_entities(vec![
+        (
+            position,
+            BlockEntity::Opaque {
+                id: "minecraft:furnace".to_owned().into(),
+                nbt: Nbt::Compound(vec![
+                    (
+                        "id".to_owned(),
+                        Nbt::String("minecraft:furnace".to_owned()),
+                    ),
+                    ("x".to_owned(), Nbt::Int(position.x)),
+                    ("y".to_owned(), Nbt::Int(position.y)),
+                    ("z".to_owned(), Nbt::Int(position.z)),
+                    ("keepPacked".to_owned(), Nbt::Byte(0)),
+                    ("components".to_owned(), Nbt::Compound(Vec::new())),
+                ]),
+            },
+        ),
+    ]);
+
+    let packet = decode_encoded_chunk(Dimension::Overworld, &source);
+    assert_eq!(packet.block_entities.len(), 1);
+    assert_eq!(packet.block_entities[0].type_id, 0, "furnace registry id");
+    assert_eq!(packet.block_entities[0].nbt, Nbt::End);
+}
+
+#[test]
+fn state_owned_potent_sulfur_uses_registry_slot_48_and_an_empty_update_tag() {
+    let mut source = ChunkColumn::new(Dimension::Overworld.min_y(), Dimension::Overworld.height());
+    source.set_block(4, 14, 1, "minecraft:potent_sulfur");
+    source.populate_missing_block_entity_states(-25, -25);
+
+    let packet = decode_encoded_chunk_at(-25, -25, Dimension::Overworld, &source);
+    assert_eq!(packet.block_entities.len(), 1);
+    let record = &packet.block_entities[0];
+    assert_eq!((record.rel_x, record.y, record.rel_z), (4, 14, 1));
+    assert_eq!(record.type_id, 48);
+    assert_eq!(record.nbt, Nbt::End);
+
+    // Negative control: the adjacent ordinary sulfur state owns no block
+    // entity and must not create a trailing packet record.
+    let mut control = ChunkColumn::new(Dimension::Overworld.min_y(), Dimension::Overworld.height());
+    control.set_block(4, 14, 1, "minecraft:sulfur");
+    control.populate_missing_block_entity_states(-25, -25);
+    let packet = decode_encoded_chunk_at(-25, -25, Dimension::Overworld, &control);
+    assert!(packet.block_entities.is_empty());
 }
 
 #[test]

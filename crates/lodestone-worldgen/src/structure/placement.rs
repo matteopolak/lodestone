@@ -335,6 +335,25 @@ pub fn ring_positions<F>(
 where
     F: FnMut(&mut lodestone_worldgen_core::rng::XoroshiroRandomSource, i32, i32) -> Option<(i32, i32)>,
 {
+    ring_candidates(concentric_rings_seed, distance, spread, count)
+        .into_iter()
+        .map(|(mut random, initial_x, initial_z)| {
+            biome_pick(&mut random, initial_x, initial_z)
+                .unwrap_or((initial_x, initial_z))
+        })
+        .collect()
+}
+
+/// Produces the concentric-ring candidates and their per-position random
+/// streams before any biome relocation work. Keeping this draw-only half
+/// separate lets a caller batch immutable climate sampling while retaining the
+/// original callback order for biome selection and reservoir draws.
+pub fn ring_candidates(
+    concentric_rings_seed: i64,
+    distance: i32,
+    spread: i32,
+    count: i32,
+) -> Vec<(lodestone_worldgen_core::rng::XoroshiroRandomSource, i32, i32)> {
     use lodestone_worldgen_core::rng::XoroshiroRandomSource;
 
     if count == 0 {
@@ -361,14 +380,11 @@ where
         // `(lo, hi)` constructor with no seed upgrade, hence `from_128bit`
         // rather than `new`. Spelled out here rather than added to the
         // `RandomSource` trait, which no other caller needs.
-        let mut forked = XoroshiroRandomSource::from_128bit(
+        let forked = XoroshiroRandomSource::from_128bit(
             random.next_long(),
             random.next_long(),
         );
-        out.push(
-            biome_pick(&mut forked, initial_x, initial_z)
-                .unwrap_or((initial_x, initial_z)),
-        );
+        out.push((forked, initial_x, initial_z));
         angle += std::f64::consts::PI * 2.0 / f64::from(spread);
         position_in_circle += 1;
         if position_in_circle == spread {

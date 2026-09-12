@@ -201,12 +201,27 @@ public final class CarverOracle {
                     random.setLargeFeatureSeed(seed + index, sourcePos.x(), sourcePos.z());
                     boolean started = carver.isStartChunk(random);
                     if (started) {
+                        String[] beforeCarve = new String[16 * 16 * 36];
+                        for (int x = 0; x < 16; x++)
+                            for (int z = 0; z < 16; z++)
+                                for (int y = -25; y <= 10; y++)
+                                    beforeCarve[x + z * 16 + (y + 25) * 256] = canon(chunk.getBlockState(snapPos.set(x, y, z)));
                         try {
                             carver.carve(context, chunk, biomeGetter, random, aquifer, sourcePos, mask);
                         } catch (Throwable t) {
                             carveExceptions++;
                             if (carveExceptions <= 3) sb.append("meta.carveEx ").append(t).append('\n');
                         }
+                        for (int x = 0; x < 16; x++)
+                            for (int z = 0; z < 16; z++)
+                                for (int y = -25; y <= 10; y++) {
+                                    String after = canon(chunk.getBlockState(snapPos.set(x, y, z)));
+                                    String before = beforeCarve[x + z * 16 + (y + 25) * 256];
+                                    if (!after.equals(before))
+                                        sb.append("write.").append(dx).append(',').append(dz).append(',').append(index)
+                                          .append(' ').append(x).append(',').append(y).append(',').append(z)
+                                          .append(' ').append(before).append(" -> ").append(after).append('\n');
+                                }
                     }
                     sb.append("start.").append(dx).append(',').append(dz).append(',').append(index)
                       .append(' ').append(started ? 1 : 0).append('\n');

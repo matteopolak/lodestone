@@ -148,6 +148,32 @@ neighbourhood (carve's 17×17, ore/vegetation's 3×3) is served through the stag
 stage after decoration operates on the same per-chunk `DenseBlockGrid`, addressed by interned `StateId`s
 rather than block-state strings.
 
+Terrain adaptation does not build the complete 17×17 reference product that placement and persistence
+need. `StructureRegistry::origin_candidates_in` inverses random-spread cells and consults the same
+biome-relocated concentric-ring list as the complete start walk, then the beardifier evaluates only
+those sparse origins. Each surviving origin still resolves through the ordinary memoised start slot;
+there is no second start computation and no separate RNG path. Full references remain unchanged for
+piece placement and saved chunk metadata. Biome relocation for the concentric-ring index is prepared
+while the generator is constructed, keeping that one-time search outside the first requested chunk.
+
+The Nether's 3×3 mixed ore/vegetation driver completes source chunks in z-major order with x changing
+fastest. That ordering is part of the generated result: overlapping features can accept only the
+original state, so whichever source writes first can prevent a later source from replacing the cell.
+
+### Vegetation leaf-distance post-processing
+
+After a tree writes its roots, trunk, foliage and decorators, `place_tree` runs the leaf-distance pass
+over the bounding box of those writes. The pass seeds bucket zero from the trunk positions and walks
+only log and distance-carrying leaf states. Its per-distance worklists preserve source position-set
+hashing, resize and iteration order. Positions are marked filled when popped, so stale entries remain
+observable and can rewrite a leaf after an earlier, smaller distance; this is intentionally not a
+shortest-path queue with a visited-on-enqueue set.
+
+When changing this pass, start with the focused external-value control in `feature/vegetation/tree.rs`
+before running a large parity comparison. Keep the `VegTags` membership checks and `StateId` rewrite
+path on the hot loop; block-state strings are only used when constructing test fixtures. The `bbox`
+must continue to include every write from the one tree, while only trunk positions seed propagation.
+
 ### Memoisation: the staged store
 
 `overworld/store.rs`'s `StagedStore` gives every `(chunk, stage)` pair a `OnceLock`-backed slot inside
@@ -157,6 +183,15 @@ request overlapping 3×3-of-3×3 neighbourhoods. Eviction is scoped to the in-fl
 capacity-FIFO), because a FIFO cache that evicts a still-needed neighbour turns into silent recompute;
 the retention ceiling and pin radius are derived from the widest driver's closure (currently radius 10,
 1,369-chunk worst case) and must be re-derived whenever a stage's neighbourhood widens.
+When a session moves beyond that ceiling, reclaiming partitions eligible entries around the oldest
+excess instead of sorting the entire store on every insert. The shard lock and `Arc`-liveness checks
+are still repeated before each removal, so this changes only reclaim's cost (`O(n log n)` to `O(n)`)
+and never which generated stage value is selected. Its candidate scratch buffer is retained per worker
+thread, so repeated view movement does not allocate a new candidate vector each time. View pinning
+also groups its coordinates by shard and uses one `Entry` probe per key; a warm view therefore avoids
+both the old 441-lock pin/unpin pattern and the old double hash probes. A newly visible view publishes
+its resident-entry count with one atomic update after all shard inserts, avoiding one contended counter
+operation per coordinate while preserving the same retention and eviction boundary.
 
 ### Cost attribution
 

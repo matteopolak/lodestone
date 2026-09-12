@@ -79,6 +79,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.TreeMap;
+import java.util.stream.Stream;
+import com.mojang.datafixers.util.Pair;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.packs.PackLocationInfo;
 import net.minecraft.server.packs.PackResources;
@@ -112,6 +114,9 @@ import net.minecraft.world.level.biome.BiomeManager;
 import net.minecraft.world.level.biome.Biomes;
 import net.minecraft.world.level.biome.FeatureSorter;
 import net.minecraft.world.level.biome.FixedBiomeSource;
+import net.minecraft.world.level.biome.Climate;
+import net.minecraft.world.level.biome.MultiNoiseBiomeSource;
+import net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterList;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.Property;
@@ -371,8 +376,27 @@ public final class FeatureOracle {
         }
 
         // ---- Feature list (fixed biome, so identical for all 9 sources) ----
+        List<Holder<Biome>> featureBiomes = List.of(biomeHolder);
+        if ("1".equals(System.getenv("ORACLE_ACTUAL_FEATURES"))) {
+            Map<MultiNoiseBiomeSourceParameterList.Preset, Climate.ParameterList<ResourceKey<Biome>>> presets =
+                MultiNoiseBiomeSourceParameterList.knownPresets();
+            Climate.ParameterList<ResourceKey<Biome>> keyTable =
+                presets.get(MultiNoiseBiomeSourceParameterList.Preset.OVERWORLD);
+            List<Pair<Climate.ParameterPoint, Holder<Biome>>> resolved = new java.util.ArrayList<>();
+            HolderLookup.RegistryLookup<Biome> lookup = provider.lookupOrThrow(Registries.BIOME);
+            for (Pair<Climate.ParameterPoint, ResourceKey<Biome>> row : keyTable.values()) {
+                resolved.add(Pair.of(row.getFirst(), lookup.getOrThrow(row.getSecond())));
+            }
+            MultiNoiseBiomeSource actual = MultiNoiseBiomeSource.createFromList(
+                new Climate.ParameterList<>(resolved));
+            featureBiomes = List.copyOf(actual.possibleBiomes());
+        }
+        if ("1".equals(System.getenv("ORACLE_GLOBAL_FEATURES"))) {
+            featureBiomes = new java.util.ArrayList<>();
+            provider.lookupOrThrow(Registries.BIOME).listElements().forEach(featureBiomes::add);
+        }
         List<FeatureSorter.StepFeatureData> perStep = FeatureSorter.buildFeaturesPerStep(
-            List.of(biomeHolder), b -> b.value().getGenerationSettings().features(), true);
+            featureBiomes, b -> b.value().getGenerationSettings().features(), true);
         int STEP = GenerationStep.Decoration.UNDERGROUND_ORES.ordinal();
 
         HolderLookup.RegistryLookup<PlacedFeature> pfLookup = provider.lookupOrThrow(Registries.PLACED_FEATURE);
@@ -383,6 +407,22 @@ public final class FeatureOracle {
         List<PlacedFeature> feats = sfd.features();
 
         WorldGenLevel level = makeLevel();
+        boolean traceAllStep6 = "1".equals(System.getenv("ORACLE_ALL_STEP6"));
+        String traceFeatureFilter = System.getenv("ORACLE_FEATURE_FILTER");
+        if (traceAllStep6) {
+            for (int i = 0; i < feats.size(); i++) {
+                ConfiguredFeature<?, ?> cf = feats.get(i).feature().value();
+                System.out.println("step6def " + i + " " + pfIds.getOrDefault(feats.get(i), "?")
+                    + " " + cf.feature().getClass().getSimpleName());
+            }
+        }
+        String traceFocusRaw = System.getenv("ORACLE_FOCUS");
+        BlockPos traceFocus = null;
+        if (traceFocusRaw != null && !traceFocusRaw.isBlank()) {
+            String[] parts = traceFocusRaw.split(",", -1);
+            if (parts.length != 3) throw new IllegalArgumentException("ORACLE_FOCUS must be x,y,z");
+            traceFocus = new BlockPos(Integer.parseInt(parts[0]), Integer.parseInt(parts[1]), Integer.parseInt(parts[2]));
+        }
 
         // ---- The real 3x3 driver: each of the 9 source chunks gets its OWN
         // origin and OWN decorationSeed (vanilla's `applyBiomeDecoration` is
@@ -409,16 +449,66 @@ public final class FeatureOracle {
                 int order = 0;
                 for (int i = 0; i < feats.size(); i++) {
                     PlacedFeature pf = feats.get(i);
+                    BlockState traceBefore = traceFocus == null ? null : centre.getBlockState(traceFocus);
                     fRandom.setFeatureSeed(decorationSeed, i, STEP);
                     ConfiguredFeature<?, ?> cf = pf.feature().value();
-                    if (cf.feature() instanceof OreFeature) {
+                    String pid = pfIds.getOrDefault(pf, "?");
+                    boolean featureFilterMatches = traceFeatureFilter == null || traceFeatureFilter.isBlank()
+                        || pid.equals(traceFeatureFilter);
+                    if (isCentre && traceAllStep6) {
+                        sb.append("step6def.").append(i).append(' ').append(pid).append(' ')
+                          .append(cf.feature().getClass().getSimpleName()).append('\n');
+                    }
+                    boolean selected = featureFilterMatches && (traceAllStep6 || cf.feature() instanceof OreFeature);
+                    if (selected) {
                         if (isCentre) {
-                            String pid = pfIds.getOrDefault(pf, "?");
                             sb.append("oredef.").append(order).append(' ').append(pid).append(' ').append(i).append('\n');
                             order++;
                         }
-                        pf.placeWithBiomeCheck(level, generator, fRandom, origin);
+                        if (traceAllStep6 && (pid.equals("minecraft:disk_clay") || pid.equals("minecraft:ore_clay"))) {
+                            net.minecraft.world.level.levelgen.placement.PlacementContext pc =
+                                new net.minecraft.world.level.levelgen.placement.PlacementContext(
+                                    level, generator, java.util.Optional.of(pf));
+                            Stream<BlockPos> placements = Stream.of(origin);
+                            for (net.minecraft.world.level.levelgen.placement.PlacementModifier modifier : pf.placement()) {
+                                placements = placements.flatMap(candidatePos -> modifier.getPositions(pc, fRandom, candidatePos));
+                            }
+                            for (BlockPos placement : placements.toList()) {
+                                BlockState candidate = level.getBlockState(placement);
+                                sb.append(pid.equals("minecraft:ore_clay") ? "oreclaypos " : "diskpos ")
+                                  .append(sourcePos.x()).append(',').append(sourcePos.z())
+                                  .append(' ').append(placement.getX()).append(',').append(placement.getY()).append(',').append(placement.getZ())
+                                  .append(' ').append(canon(candidate)).append(' ')
+                                  .append(candidate.getFluidState().isEmpty() ? "dry" : "fluid")
+                                  .append(' ').append(level.getBiome(placement).unwrapKey().orElseThrow().identifier())
+                                  .append('\n');
+                                BlockState beforeTarget = traceFocus == null ? null : centre.getBlockState(traceFocus);
+                                cf.place(level, generator, fRandom, placement);
+                                if (traceFocus != null) {
+                                    BlockState afterTarget = centre.getBlockState(traceFocus);
+                                    if (!afterTarget.equals(beforeTarget)) {
+                                        sb.append("trace.feature ").append(sourcePos.x()).append(',').append(sourcePos.z())
+                                          .append(' ').append(i).append(' ').append(canon(beforeTarget))
+                                          .append(" -> ").append(canon(afterTarget)).append('\n');
+                                    }
+                                }
+                            }
+                        } else {
+                            pf.placeWithBiomeCheck(level, generator, fRandom, origin);
+                        }
+                        if (traceFocus != null) {
+                            BlockState traceAfter = centre.getBlockState(traceFocus);
+                            if (!traceAfter.equals(traceBefore)) {
+                                sb.append("trace.feature ").append(sourcePos.x()).append(',').append(sourcePos.z())
+                                  .append(' ').append(i).append(' ').append(canon(traceBefore))
+                                  .append(" -> ").append(canon(traceAfter)).append('\n');
+                            }
+                        }
                     }
+                }
+                if (traceFocus != null) {
+                    sb.append("trace.source ").append(sourcePos.x()).append(',').append(sourcePos.z())
+                      .append(' ').append(canon(centre.getBlockState(traceFocus))).append('\n');
                 }
                 if (isCentre) centreOreOrder = order;
             }
@@ -524,6 +614,19 @@ public final class FeatureOracle {
                     // bounded by the ore blob's own geometry, not by an
                     // artificial cap here.
                     return chunkAt(cx, cz);
+                }
+                case "getBlockState": {
+                    BlockPos bp = (BlockPos) a[0];
+                    return chunkAt(bp.getX() >> 4, bp.getZ() >> 4).getBlockState(bp);
+                }
+                case "getFluidState": {
+                    BlockPos bp = (BlockPos) a[0];
+                    return chunkAt(bp.getX() >> 4, bp.getZ() >> 4).getFluidState(bp);
+                }
+                case "setBlock": {
+                    BlockPos bp = (BlockPos) a[0];
+                    chunkAt(bp.getX() >> 4, bp.getZ() >> 4).setBlockState(bp, (BlockState) a[1]);
+                    return Boolean.TRUE;
                 }
                 case "getBiome":
                     return biomeHolder;
