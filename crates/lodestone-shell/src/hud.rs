@@ -4476,6 +4476,9 @@ struct HudAnim {
     /// The wall-tick index this frame resolved to (see `hud/anim::wall_tick`)
     /// — the input the pure per-container/per-pip jitter functions need.
     tick: i64,
+    /// The health-container index lifted by the active regeneration wave.
+    /// `None` is the settled position when regeneration is absent.
+    regeneration_heart_index: Option<usize>,
     /// Per-hotbar-slot pop amount, vanilla's `5.0 → 0.0` scale, `0.0` =
     /// settled/idle (see `hud/anim::HotbarPop`).
     hotbar_pop: [f32; 9],
@@ -4487,11 +4490,23 @@ struct HudAnim {
     xp_flash: f32,
 }
 
+/// Whether the HUD's active-effect projection contains regeneration. The
+/// projection is already the production fold used by the top-right effect
+/// overlay, so the heart wave shares the same identity and visibility gate.
+fn regeneration_active(effects: Option<&[crate::effects::HudEffectIcon]>) -> bool {
+    effects.is_some_and(|effects| {
+        effects
+            .iter()
+            .any(|effect| effect.icon == "mob_effect/regeneration")
+    })
+}
+
 impl HudAnim {
     const NONE: Self = Self {
         heart_blink: false,
         display_health: i32::MIN, // unused while `heart_blink` is false and jitter is skipped
         tick: 0,
+        regeneration_heart_index: None,
         hotbar_pop: [0.0; 9],
         xp_flash: 0.0,
     };
@@ -4754,10 +4769,14 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
             for column in 0..10 {
                 let i = row * 10 + column;
                 let x = hx + column as f32 * step;
-                let y = if critical {
+                let y = (if critical {
                     row_y + anim::heart_jitter(anim.tick, i)
                 } else {
                     row_y
+                }) - if anim.regeneration_heart_index == Some(i) {
+                    2.0
+                } else {
+                    0.0
                 };
                 b.sprite(container, x, y, icon, icon, white);
                 // The "ghost" of health about to be lost uses the same global
@@ -7251,6 +7270,13 @@ impl HudRenderer {
         // state machine it feeds is otherwise a pure function of that integer.
         let tick = anim::wall_tick(self.anim_start);
         let (heart_blink, display_health) = self.heart_anim.tick(tick, frame.health.unwrap_or(0.0));
+        let regeneration_heart_index = anim::regeneration_heart_index(
+            tick,
+            regeneration_active(frame.effects),
+            frame.max_health,
+            frame.health.unwrap_or(0.0).max(0.0).ceil() as i32,
+            display_health,
+        );
         // `Option`, not `.unwrap_or(&[])`. Collapsing "the hotbar is hidden
         // this frame" and "the hotbar is genuinely empty" into the same empty
         // slice is exactly what made returning from a deeper menu (Options)
@@ -7262,6 +7288,7 @@ impl HudRenderer {
             heart_blink,
             display_health,
             tick,
+            regeneration_heart_index,
             hotbar_pop,
             xp_flash,
         };
@@ -10249,6 +10276,23 @@ mod tests {
             empty.verts, full.verts,
             "full vs empty must recolour the pips, not just redraw them"
         );
+    }
+
+    #[test]
+    fn regeneration_effect_projection_arms_only_the_wave() {
+        let ordinary = crate::effects::HudEffectIcon {
+            icon: "mob_effect/speed".to_owned(),
+            background: crate::effects::HUD_EFFECT_BACKGROUND_SPRITE,
+            alpha: 1.0,
+            beneficial: true,
+        };
+        let regeneration = crate::effects::HudEffectIcon {
+            icon: "mob_effect/regeneration".to_owned(),
+            ..ordinary.clone()
+        };
+        assert!(!regeneration_active(Some(&[ordinary])));
+        assert!(regeneration_active(Some(&[regeneration])));
+        assert!(!regeneration_active(None));
     }
 
     #[test]

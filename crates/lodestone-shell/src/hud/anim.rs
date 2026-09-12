@@ -2,10 +2,10 @@
 //! class — see
 //! `docs/hud-animations.md` for the full citation-by-citation notes.
 //!
-//! This module carries all three of real vanilla animations: the
-//! heart row's flash (blink) and critical-health jitter on a health change,
-//! the hunger-row wobble while saturation is empty, and the hotbar item
-//! "pop" when a stack lands in a slot.
+//! This module carries the HUD's client-only animations: the heart row's
+//! regeneration wave, flash (blink) and critical-health jitter on a health
+//! change, the hunger-row wobble while saturation is empty, and the hotbar
+//! item "pop" when a stack lands in a slot.
 //!
 //! ## Why a wall clock, not the server's game tick
 //!
@@ -148,6 +148,32 @@ impl HeartAnim {
 /// by `(tick, container)` instead — see the module doc.
 pub(super) fn heart_jitter(tick: i64, container: usize) -> f32 {
     jitter(tick, 0xBEEF_0000_u64 ^ container as u64, 2) as f32
+}
+
+/// The health-container index lifted by the regeneration wave at `tick`.
+///
+/// The wave walks once per display tick through the health containers, with a
+/// period based on the larger of the current and displayed health plus five
+/// half-points. `None` is the settled position when regeneration is absent.
+/// Keeping this independent from [`heart_jitter`] and the blink state matters:
+/// regeneration may be active while the player is critically hurt or while a
+/// recent damage/heal flash is still settling.
+pub(super) fn regeneration_heart_index(
+    tick: i64,
+    regeneration: bool,
+    max_health: Option<f32>,
+    current_health: i32,
+    display_health: i32,
+) -> Option<usize> {
+    if !regeneration {
+        return None;
+    }
+    let max_health = max_health
+        .unwrap_or(20.0)
+        .max(current_health as f32)
+        .max(display_health as f32);
+    let period = (max_health + 5.0).ceil().max(1.0) as i64;
+    Some(tick.rem_euclid(period) as usize)
 }
 
 /// The hunger-row wobble while saturation is empty. A zero-saturation display
@@ -456,6 +482,28 @@ mod tests {
             let (blink, display) = h.tick(t, 20.0);
             assert_eq!((blink, display), (false, 20), "tick {t} must be idle");
         }
+    }
+
+    #[test]
+    fn regeneration_wave_advances_independently_of_blink_and_jitter() {
+        assert_eq!(regeneration_heart_index(0, false, Some(20.0), 20, 20), None);
+        assert_eq!(regeneration_heart_index(0, true, Some(20.0), 20, 20), Some(0));
+        assert_eq!(regeneration_heart_index(1, true, Some(20.0), 20, 20), Some(1));
+        assert_eq!(
+            regeneration_heart_index(25, true, Some(20.0), 20, 20),
+            Some(0),
+            "the wave period is ceil(max health + 5), not the ten-heart row length"
+        );
+        assert_eq!(
+            regeneration_heart_index(0, true, Some(40.0), 4, 20),
+            Some(0),
+            "the wave uses the larger health ceiling when an attribute or ghost row exists"
+        );
+        assert_eq!(
+            regeneration_heart_index(-1, true, Some(20.0), 20, 20),
+            Some(24),
+            "display ticks wrap rather than producing an invalid negative container index"
+        );
     }
 
     #[test]

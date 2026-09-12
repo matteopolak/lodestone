@@ -135,6 +135,7 @@ pub mod entity_types;
 pub mod face_occlusion;
 pub mod hardness;
 pub mod item;
+pub mod item_rarity;
 pub mod item_prototypes;
 pub mod light_props;
 pub mod menus;
