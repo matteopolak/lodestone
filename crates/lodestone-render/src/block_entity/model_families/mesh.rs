@@ -158,4 +158,3 @@ use lodestone_assets::entity::{EntityModelDef, PartPose, bake_entity_parts};
 
 use crate::entity::{PartRange, push_part_quads};
 use crate::models::ModelVertex;
-
