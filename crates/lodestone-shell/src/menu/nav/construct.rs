@@ -254,6 +254,4 @@ impl MenuNav {
         self.key_ownership(ui, MenuKey::Enter)
     }
 
-    /// The saved servers.
-    #[must_use]
 }

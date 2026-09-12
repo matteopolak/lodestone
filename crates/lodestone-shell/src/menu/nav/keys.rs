@@ -1,6 +1,8 @@
 use super::*;
 
 impl MenuNav {
+    /// Handles one key for the current screen, mutating `ui` for navigation and
+    /// returning the action the app must perform.
     pub fn key(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         // **The gate reconcile**, and it is here rather than at each play verb
         // because this is one of the two places every keystroke passes through.
@@ -1045,9 +1047,4 @@ impl MenuNav {
         self.resource_pack_answered_id = None;
     }
 
-    /// The World Creation screen. Every key is routed through
-    /// [`crate::menu::create_world::CreateWorldNav::handle_key`], which
-    /// already implements vanilla's `Screen.keyPressed` order (Escape, then
-    /// the focused field, then Tab/arrow navigation, then Enter on whatever
-    /// is focused) — this arm only decides what leaving the screen means.
 }

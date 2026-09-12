@@ -1,6 +1,35 @@
 use super::*;
 
 impl MenuNav {
+    /// The scrolling list on the screen `ui` is showing, or `None` when that screen
+    /// has none.
+    ///
+    /// ## Why this is one function and not a field per screen
+    ///
+    /// This is the **generic hook** the scrollbar draw and the mouse wheel both ask.
+    /// Before it existed, `render::draw` called `server_scroll_list` by name and
+    /// `app`'s wheel arm was gated on `Screen::ServerList`, so exactly one screen
+    /// could have a bar or respond to the wheel — and a second screen adopting
+    /// `ScrollList` would have had correct geometry, green tests and zero pixels.
+    /// Both consumers now go through here, so *declaring* a list is all a screen has
+    /// to do.
+    ///
+    /// Each arm delegates to the screen's own `*_list_spec`, which derives the band
+    /// and the pitch from the same constants that screen's draw uses. This function
+    /// therefore holds no geometry of its own — it is a router, and the thing it is
+    /// routing is the answer to "which screen is up".
+    ///
+    /// ## How to add a screen
+    ///
+    /// Add an arm, and make sure the screen's offset is stored in **pixels**. A
+    /// screen whose offset is a row index cannot be added honestly: it would report a
+    /// `scroll` that is always a multiple of the row height, which is exactly the
+    /// snap-to-row stepping the wheel work removed. `menu/stats.rs`,
+    /// `menu/social.rs`, `menu/language.rs`, `menu/key_binds.rs` and
+    /// `menu/options.rs` all still hold a `first: usize` entry index and are
+    /// therefore **not** here yet; converting the field is the prerequisite, not an
+    /// afterthought.
+    #[must_use]
     pub fn active_list(&self, ui: &super::UiState) -> Option<super::widget::ListSpec> {
         match ui.screen() {
             super::Screen::ServerList => Some(super::render::server_list_spec(
@@ -465,13 +494,4 @@ impl MenuNav {
         self.has_singleplayer_server = value;
     }
 
-    /// Whether the pause menu should offer its own Open to LAN row at all —
-    /// vanilla's `hasSingleplayerServer()` branch,
-    /// **not** [`Self::is_lan_published`] alone: a multiplayer session has
-    /// nothing local to publish and must take the same collapsed,
-    /// full-width-Options shape a *published* singleplayer world does, even
-    /// though [`Self::lan_published`] reads `false` in both the multiplayer
-    /// and the not-yet-published-singleplayer case and cannot tell them
-    /// apart on its own.
-    #[must_use]
 }

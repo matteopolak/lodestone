@@ -1,6 +1,19 @@
 use super::*;
 
 impl MenuNav {
+    /// Moves the highlight to row `row` of the current screen, as a mouse hover
+    /// would. Out-of-range rows are ignored rather than clamped: the caller
+    /// hit-tests against the rendered rects, so "no row here" must not silently
+    /// move the selection to a different one.
+    ///
+    /// A **disabled** row is still hovered, matching vanilla exactly:
+    /// `AbstractWidget::extractRenderState` sets `isHovered` from geometry alone
+    /// and never consults `active`, while
+    /// `WidgetSprites::get(active, focused)` returns `button_disabled` whichever
+    /// way `focused` went — so a greyed-out button
+    /// under the cursor looks greyed-out, not highlighted. The half that matters
+    /// is the *click*: `key_main`/`key_paused` refuse Enter on a disabled button,
+    /// which is why moving the highlight onto one here is safe.
     pub fn hover(&mut self, ui: &UiState, row: usize) {
         // The gate takes `&UiState`, so unlike `key`/`click` this cannot
         // reconcile the screen — it aims the gate's own cursor instead. Without
@@ -598,6 +611,4 @@ impl MenuNav {
         }
     }
 
-    /// Handles one key for the current screen, mutating `ui` for navigation and
-    /// returning the action the app must perform.
 }
