@@ -94,11 +94,17 @@ pub struct VegGrid {
     /// `HashMap` that then held 884,736 live entries. Production now supplies the
     /// nine grids as [`VegGrid::sources`] and this map holds **only what
     /// decoration wrote** (a few thousand cells), with a miss falling through to
-    /// the source chunk that owns the column. [`Self::seed_id`] still writes here,
-    /// which is what keeps every parity fixture — naturally one hand-written
-    /// sparse map with no source grids at all — working unchanged against the
-    /// identical read path.
+    /// the source chunk that owns the column. [`Self::seed_id`] still writes
+    /// fixture cells here (and mirrors their baseline into the separate WG
+    /// snapshot), which keeps every parity fixture — naturally one hand-written
+    /// sparse map with no source grids at all — on the identical read path.
     blocks: Overlay,
+    /// Baseline cells supplied by source-less fixtures. Production grids read
+    /// their immutable terrain through `sources`; compact fixtures instead
+    /// seed this sparse snapshot before decoration so the world-surface WG
+    /// lane cannot mistake the absent source for an all-air column or observe
+    /// a later live-overlay write.
+    seeded_baseline: Option<Overlay>,
     /// The **25** source chunks of `centre ± `[`WIDE_RADIUS`] a read falls through
     /// to, indexed by [`wide_source_slot`] over this grid's **local** coordinates.
     /// Empty for every fixture/unit-test constructor (a miss then answers air,
@@ -267,6 +273,7 @@ impl VegGrid {
         let column_count = local_width * local_width;
         Self {
             blocks: Overlay::with_bounds(local_lo, local_hi, min_y, height),
+            seeded_baseline: None,
             sources: std::array::from_fn(|_| None),
             biome_sources: None,
             flat_biome_sources: None,
@@ -813,11 +820,31 @@ impl VegGrid {
 
     /// Seeds one column position (absolute world coordinates) from the post-ore
     /// composed grid, by interned id — the zero-allocation seeding path.
+    /// Source-less fixtures retain a second sparse copy for the immutable WG
+    /// heightmap; source-backed production grids continue to read that lane
+    /// from their source snapshot.
     pub fn seed_id(&mut self, x: i32, y: i32, z: i32, state: StateId) {
         let (lx, lz) = self.to_local_exact(x, z);
         if self.in_bounds_local(lx, lz) && y >= self.min_y && y < self.min_y + self.height {
             self.blocks.insert_in_bounds((lx, y, lz), state);
             self.invalidate_height_caches(lx, lz);
+            if self.seeded_baseline.is_some() || self.sources.iter().all(Option::is_none) {
+                // Source-less fixtures store their immutable baseline in a
+                // separate sparse snapshot. Seeding after a prior probe must
+                // invalidate the WG lane; ordinary decoration writes
+                // intentionally do not, because that lane is immutable for
+                // the pass.
+                let local_lo = self.local_lo;
+                let local_hi = self.local_hi;
+                let min_y = self.min_y;
+                let height = self.height;
+                let baseline = self.seeded_baseline.get_or_insert_with(|| {
+                    Overlay::with_bounds(local_lo, local_hi, min_y, height)
+                });
+                baseline.insert_in_bounds((lx, y, lz), state);
+                let cache_index = self.height_cache_index(lx, lz);
+                self.height_cache[cache_index].get_mut()[1] = HEIGHT_CACHE_UNSET;
+            }
         }
     }
 
@@ -945,7 +972,21 @@ impl VegGrid {
         }
         let source = self.source_grid(lx, lz);
         for y in (self.min_y..self.min_y + self.height).rev() {
-            if !self.is_air_id(self.source_id_from_grid(source, lx, y, lz)) {
+            // Production grids have a source chunk, whose immutable terrain
+            // must win over this pass's overlay. Compact parity/unit fixtures
+            // have no source and seed that same baseline into a sparse
+            // snapshot, so they need the equivalent fallback here rather
+            // than reading an all-air synthetic source or the live overlay.
+            let id = source.map_or_else(
+                || {
+                    self.seeded_baseline
+                        .as_ref()
+                        .and_then(|baseline| baseline.get_in_bounds(&(lx, y, lz)))
+                        .unwrap_or(StateId::AIR)
+                },
+                |source| source.get_id(self.origin_x + lx, y, self.origin_z + lz),
+            );
+            if !self.is_air_id(id) {
                 let height = y + 1;
                 self.cache_height(lx, lz, 1, height);
                 return height;
@@ -1247,6 +1288,29 @@ mod heightmap_tests {
         assert_eq!(grid.height_world_surface_wg(witness.0, witness.2), 121);
         assert_eq!(grid.height_world_surface(witness.0, witness.2), 121);
         assert_eq!(short_grass, grid.interner().id_of("minecraft:short_grass").raw());
+    }
+
+    #[test]
+    fn source_less_seeded_baseline_drives_world_surface_wg_without_live_overlay() {
+        let mut grid = VegGrid::with_footprint(0, 16, 0, 0, 0, 1);
+        let dirt = grid.interner().id_of("minecraft:dirt");
+
+        // Compact external fixtures have no source grids; seed their immutable
+        // terrain before decoration. The expected height is the occupied row
+        // plus one, independent of the implementation's cache or scan.
+        grid.seed_id(0, 4, 0, dirt);
+
+        // Wrong-rule control: the live heightmap sees a later decoration write,
+        // while WORLD_SURFACE_WG must retain the pre-decoration baseline even
+        // when its first probe occurs after that write.
+        assert!(grid.set_id_if_in_bounds(0, 8, 0, dirt));
+        assert_eq!(grid.height_world_surface(0, 0), 9);
+        assert_eq!(grid.height_world_surface_wg(0, 0), 5);
+
+        // Seeding a changed baseline after a cached probe must invalidate the
+        // fixture's WG lane without making ordinary overlay writes do so.
+        grid.seed_id(0, 10, 0, dirt);
+        assert_eq!(grid.height_world_surface_wg(0, 0), 11);
     }
 
     #[test]
