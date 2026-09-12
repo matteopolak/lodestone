@@ -98,7 +98,8 @@ use crate::sim::{
     AudioEngine, HOTBAR_SLOTS, OFFHAND_NATIVE_INDEX, bare_handed_tool_mining,
     block_intersects_player, block_sound_seed, block_states_of, dig_break_inputs_with_effects,
     face_from_normal,
-    hit_cursor, orientation_for_placement, particle_face, placement_facts, state_for_placement,
+    hit_cursor, orientation_for_placement, particle_face, placement_facts,
+    state_for_extra_placement, state_for_placement,
     write_predicted_block,
 };
 
@@ -1380,6 +1381,18 @@ pub fn drive_placement(
         outcome.status = PlaceStatus::SentUnpredicted;
         return;
     };
+    let extra_state_id = if prediction.extra.is_empty() {
+        None
+    } else {
+        state_for_extra_placement(&name, &states, orientation, &prediction.state)
+    };
+    if !prediction.extra.is_empty() && extra_state_id.is_none() {
+        // A two-cell prediction is all-or-nothing locally. Keeping only the
+        // primary half would create a client-only support arrangement the
+        // server can never accept.
+        outcome.status = PlaceStatus::SentUnpredicted;
+        return;
+    }
     let pos = prediction.pos;
     let block = [pos.x, pos.y, pos.z];
     // The write, then the re-mesh that makes it visible — Item 2's whole
@@ -1388,8 +1401,20 @@ pub fn drive_placement(
     {
         let mut world = write.write();
         write_predicted_block(&mut *world, block, state_id);
+        if let Some(extra_state_id) = extra_state_id {
+            for extra in &prediction.extra {
+                write_predicted_block(
+                    &mut *world,
+                    [extra.x, extra.y, extra.z],
+                    extra_state_id,
+                );
+            }
+        }
     }
     terrain.remesh_around(&chunk_world, block);
+    for extra in &prediction.extra {
+        terrain.remesh_around(&chunk_world, [extra.x, extra.y, extra.z]);
+    }
     // The placement sound, predicted locally for the same reason
     // `Sim::use_item_live`'s does — vanilla's own block-item place excludes
     // the placing player from the server's broadcast, so our copy has to come

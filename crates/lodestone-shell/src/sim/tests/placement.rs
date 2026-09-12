@@ -13,6 +13,18 @@ mod placement_oracle {
     pub const OAK_LOG_Y: u32 = 137;
     /// `stone` — the one propertyless case.
     pub const STONE: u32 = 1;
+    /// `oak_door[facing=south,half=lower,hinge=left,open=false,powered=false]`.
+    pub const OAK_DOOR_LOWER: u32 = 5682;
+    /// The corresponding upper cell.
+    pub const OAK_DOOR_UPPER: u32 = 5674;
+    /// `white_bed[facing=south,occupied=false,part=foot]`.
+    pub const WHITE_BED_FOOT: u32 = 1938;
+    /// The corresponding head cell.
+    pub const WHITE_BED_HEAD: u32 = 1937;
+    /// `small_dripleaf[facing=north,half=lower,waterlogged=false]`.
+    pub const SMALL_DRIPLEAF_LOWER: u32 = 30399;
+    /// The corresponding upper cell.
+    pub const SMALL_DRIPLEAF_UPPER: u32 = 30397;
 }
 
 /// The production seam, not a re-spelling of it — [`predicted_placement_state`]
@@ -87,6 +99,76 @@ fn placement_states_resolve_to_the_jar_oracle() {
     );
 }
 
+#[test]
+fn two_cell_states_resolve_both_cells_from_one_prediction() {
+    let door = block_states_of("minecraft:oak_door").expect("door is in the census");
+    let door_placed = PlacedState {
+        facing: Some(BlockFace::South),
+        ..PlacedState::default()
+    };
+    assert_eq!(
+        orientation_for_placement("minecraft:oak_door", &door),
+        Some(OrientationKind::Door)
+    );
+    assert_eq!(
+        state_for_placement(
+            "minecraft:oak_door",
+            &door,
+            OrientationKind::Door,
+            &door_placed,
+        ),
+        Some(placement_oracle::OAK_DOOR_LOWER)
+    );
+    assert_eq!(
+        state_for_extra_placement(
+            "minecraft:oak_door",
+            &door,
+            OrientationKind::Door,
+            &door_placed,
+        ),
+        Some(placement_oracle::OAK_DOOR_UPPER)
+    );
+
+    let bed = block_states_of("minecraft:white_bed").expect("bed is in the census");
+    let bed_placed = PlacedState {
+        facing: Some(BlockFace::South),
+        ..PlacedState::default()
+    };
+    assert_eq!(
+        state_for_placement("minecraft:white_bed", &bed, OrientationKind::Bed, &bed_placed),
+        Some(placement_oracle::WHITE_BED_FOOT)
+    );
+    assert_eq!(
+        state_for_extra_placement("minecraft:white_bed", &bed, OrientationKind::Bed, &bed_placed),
+        Some(placement_oracle::WHITE_BED_HEAD)
+    );
+
+    let dripleaf = block_states_of("minecraft:small_dripleaf").expect("dripleaf is in the census");
+    let dripleaf_placed = PlacedState {
+        facing: Some(BlockFace::North),
+        half: Some(Half::Bottom),
+        ..PlacedState::default()
+    };
+    assert_eq!(
+        state_for_placement(
+            "minecraft:small_dripleaf",
+            &dripleaf,
+            OrientationKind::SmallDripleaf,
+            &dripleaf_placed,
+        ),
+        Some(placement_oracle::SMALL_DRIPLEAF_LOWER)
+    );
+    assert_eq!(
+        state_for_extra_placement(
+            "minecraft:small_dripleaf",
+            &dripleaf,
+            OrientationKind::SmallDripleaf,
+            &dripleaf_placed,
+        ),
+        Some(placement_oracle::SMALL_DRIPLEAF_UPPER)
+    );
+}
+
 /// The declines, and why each one is a decline rather than a guess. Without
 /// these the resolver would look "complete" while writing states the server
 /// immediately contradicts.
@@ -96,8 +178,6 @@ fn unclassifiable_placements_decline_rather_than_guess() {
         // A 4-way `facing` the census cannot tell from a chest's, and vanilla
         // points it *toward* the player.
         ("minecraft:ladder", "FacingHorizontal is not classified"),
-        // Two cells, a hinge and an upper/lower half.
-        ("minecraft:oak_door", "multi-block placement"),
         // `shape` comes from the neighbouring rails.
         ("minecraft:rail", "neighbour-derived shape"),
         // `persistent` is set *true* for a player-placed leaf, so the

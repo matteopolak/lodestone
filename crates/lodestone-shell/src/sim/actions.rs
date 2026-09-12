@@ -1456,25 +1456,23 @@ impl Sim {
             (&decision, &placeable)
         {
             if let Some(state) = state_for_placement(name, states, *orientation, &prediction.state) {
-                let pos = prediction.pos;
-                self.predict_block([pos.x, pos.y, pos.z], state);
-                // Vanilla's placement sound is the tail of its own block-item
-                // place path
-                //, which passes the placing player as
-                // its own sound-play's **excluded** entity — so the server broadcasts it
-                // to everyone but us, and our own copy is predicted locally by
-                // vanilla's own client-side sound-play, whose exclusion test is inverted
-                // (it plays only for the excluded entity, on the client that is
-                // the local player).
-                // It therefore hangs off the prediction, exactly as vanilla's
-                // does: no prediction, no sound, and no double-play either.
-                //
-                // Tied to the *predicted state* rather than to the item, because
-                // the sound is the placed state's own sound type — a waterlogged or
-                // half-slab placement can be a different sound type from the
-                // block's default state.
-                if let Some(state) = lodestone_data::block_states::StateId::new(state) {
-                    self.play_block_place_sound([pos.x, pos.y, pos.z], state);
+                let extra_state = if prediction.extra.is_empty() {
+                    None
+                } else {
+                    state_for_extra_placement(name, states, *orientation, &prediction.state)
+                };
+                if prediction.extra.is_empty() || extra_state.is_some() {
+                    let pos = prediction.pos;
+                    self.predict_block([pos.x, pos.y, pos.z], state);
+                    if let Some(extra_state) = extra_state {
+                        for extra in &prediction.extra {
+                            self.predict_block([extra.x, extra.y, extra.z], extra_state);
+                        }
+                    }
+                    // Placement sound is tied to the primary predicted state.
+                    if let Some(state) = lodestone_data::block_states::StateId::new(state) {
+                        self.play_block_place_sound([pos.x, pos.y, pos.z], state);
+                    }
                 }
             }
         }

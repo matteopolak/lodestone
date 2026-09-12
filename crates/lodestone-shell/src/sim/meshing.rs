@@ -434,7 +434,9 @@ impl Sim {
                 .0
                 .pending()
                 .iter()
-                .map(|prediction| prediction.pos)
+                .flat_map(|prediction| {
+                    std::iter::once(prediction.pos).chain(prediction.extra.iter().copied())
+                })
                 .collect()
         });
         // The common case by far — one `O(1)` read, and a `/fill` of 4096 cells
