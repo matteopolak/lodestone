@@ -74,9 +74,12 @@ impl BuiltinBiome {
     /// Number of built-in entries in this generated table.
     pub const COUNT: u8 = table::BUILTINS.len() as u8;
 
-    /// Resolves a generated registry id without allocating.
+    /// Resolves the canonical built-in identity id without allocating.
+    ///
+    /// This id is the generated enum's stable internal identity. It is not a
+    /// protocol registry ordinal and must not be used as a wire id.
     #[must_use]
-    pub fn from_registry_id(id: u32) -> Option<Self> {
+    pub fn from_canonical_id(id: u32) -> Option<Self> {
         table::BUILTINS.get(id as usize).copied()
     }
 
@@ -124,7 +127,7 @@ impl BiomeRef {
     /// Splits this packed identity into its generated or extension arm.
     #[must_use]
     pub fn kind(self) -> BiomeKind {
-        match BuiltinBiome::from_registry_id(self.0) {
+        match BuiltinBiome::from_canonical_id(self.0) {
             Some(biome) => BiomeKind::Builtin(biome),
             None => BiomeKind::Extension(ExtensionId(self.0 - BuiltinBiome::COUNT as u32)),
         }

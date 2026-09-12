@@ -166,6 +166,12 @@ fn biome_ref_is_a_compact_identity_with_an_explicit_extension_arm() {
 }
 
 #[test]
+fn canonical_identity_is_not_presented_as_a_wire_registry_ordinal() {
+    assert_eq!(BuiltinBiome::from_canonical_id(BuiltinBiome::Plains as u32), Some(BuiltinBiome::Plains));
+    assert_eq!(BuiltinBiome::from_canonical_id(u32::MAX), None);
+}
+
+#[test]
 fn strict_builtin_parse_rejects_unknown_and_foreign_names() {
     assert_eq!(BuiltinBiome::parse("minecraft:plains"), Ok(BuiltinBiome::Plains));
     assert!(BuiltinBiome::parse("minecraft:not_a_biome").is_err());
