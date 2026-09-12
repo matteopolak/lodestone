@@ -300,6 +300,14 @@ protocol, which is not a second copy of the canonical census.
   each test file's own header carries the exact invocation. The hermetic potion base-id table
   uses `LODESTONE_REGEN=1 cargo test -p lodestone-data --test potion_effect_ids
   committed_table_matches_the_committed_fixture -- --nocapture` (without `--ignored`).
+- **Large generated arrays use compile-time include shards.** The path-type table keeps its
+  public `STATE_PATH_TYPE` static and exact indexing API in `generated/path_types.rs`, while
+  the generator emits fixed 1,024-state contiguous files named `path_types_0000.rs` and onward.
+  A const assembler copies those arrays into the final static, so sharding changes source-file
+  size only: there is no heap allocation, lookup indirection, or runtime initialization. The
+  ignored drift guard derives the complete expected shard set from the dump, compares every
+  shard byte-for-byte, and rejects both missing and extra/stale shards. Regeneration removes
+  only obsolete files with that exact reserved prefix.
 - **A generated census keyed by a built-in registry must reuse that registry's canonical
   names.** For example, the blast/fire facts use a `Block` registry-id → fact-index
   mapping; they do not repeat block names beside the facts. Its generator checks that
