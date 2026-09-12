@@ -40,7 +40,7 @@ pub fn on_screen_frame<'a>(
     ui: &UiState,
     nav: &MenuNav,
     death_message: Option<&[lodestone_model::text::InteractiveTextSpan]>,
-    statuses: &super::status::StatusCache,
+    statuses: &crate::menu::status::StatusCache,
     favicons: &mut super::render::FaviconCache,
 ) -> Option<super::render::MenuFrame<'a>> {
     if ui.is_paused() {

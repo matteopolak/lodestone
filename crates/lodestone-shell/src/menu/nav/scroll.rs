@@ -43,7 +43,7 @@ impl MenuNav {
                 let accounts = self.accounts();
                 if matches!(
                     accounts.sign_in_view(),
-                    super::accounts::SignInView::Idle
+                    crate::menu::accounts::SignInView::Idle
                 ) {
                     Some(super::render::accounts_list_spec(
                         accounts.rows().len(),
@@ -64,8 +64,8 @@ impl MenuNav {
             }
             // Statistics uses a pixel offset, which is the
             // prerequisite this arm exists to assert — see `ListSpec`'s doc.
-            super::Screen::Statistics => Some(super::stats::list_spec(
-                super::stats::GENERAL_STATS.len(),
+            super::Screen::Statistics => Some(crate::menu::stats::list_spec(
+                crate::menu::stats::GENERAL_STATS.len(),
                 self.stats.scroll(),
             )),
             // Key Binds uses a pixel offset. **Keyed on the settings *page*, not
@@ -76,7 +76,7 @@ impl MenuNav {
             super::Screen::Settings
                 if self.settings.page() == crate::menu::options::SettingsPage::KeyBinds =>
             {
-                Some(super::key_binds::list_spec(
+                Some(crate::menu::key_binds::list_spec(
                     self.settings.key_binds().scroll(),
                 ))
             }
@@ -89,7 +89,7 @@ impl MenuNav {
                 if self.settings.page() == crate::menu::options::SettingsPage::Language =>
             {
                 let lang = self.settings.language();
-                Some(super::language::list_spec(
+                Some(crate::menu::language::list_spec(
                     lang.entries().len(),
                     lang.scroll(),
                 ))
@@ -104,7 +104,7 @@ impl MenuNav {
                 if self.settings.page() == crate::menu::options::SettingsPage::ResourcePacks =>
             {
                 let packs = self.settings.packs();
-                Some(super::packs::list_spec(
+                Some(crate::menu::packs::list_spec(
                     packs.focused_len(),
                     packs.scroll(),
                 ))
@@ -112,15 +112,15 @@ impl MenuNav {
             // Social Interactions is the only
             // user of `RowBand::Inset` — its rows are full-width, so no constant
             // `row_w` could place its scrollbar; see `social::list_spec`).
-            super::Screen::Social => Some(super::social::list_spec(
+            super::Screen::Social => Some(crate::menu::social::list_spec(
                 self.social.entries().len(),
                 self.social.scroll(),
             )),
-            super::Screen::Friends => Some(super::friends::list_spec(
+            super::Screen::Friends => Some(crate::menu::friends::list_spec(
                 self.friends.view().snapshot.as_ref().map_or(0, |snapshot| match self.friends.tab() {
-                    super::friends::FriendsTab::Friends => snapshot.friends.len(),
-                    super::friends::FriendsTab::Pending => snapshot.incoming.len() + snapshot.outgoing.len(),
-                    super::friends::FriendsTab::Settings => 0,
+                    crate::menu::friends::FriendsTab::Friends => snapshot.friends.len(),
+                    crate::menu::friends::FriendsTab::Pending => snapshot.incoming.len() + snapshot.outgoing.len(),
+                    crate::menu::friends::FriendsTab::Settings => 0,
                 }),
                 self.friends.scroll(),
             )),
