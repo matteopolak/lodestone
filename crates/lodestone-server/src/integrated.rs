@@ -82,6 +82,13 @@ use crate::tick::run_primary_tick_loop_with_weather;
 use crate::sleep::{SleepFeed, SleepVote};
 use crate::weather::{WeatherFeed, WeatherState};
 
+#[cfg(not(target_arch = "wasm32"))]
+mod integrated_lan;
+#[cfg(not(target_arch = "wasm32"))]
+pub use integrated_lan::{LanConfig, LanDiscovery, PublishConfig};
+#[cfg(not(target_arch = "wasm32"))]
+use integrated_lan::spawn_lan_discovery;
+
 /// Save handles for dimensions that are constructed lazily after the primary
 /// world opens. The primary save path owns its handle directly; siblings need a
 /// shared registry because their `RegionChunkSource` only exists after the
@@ -1327,129 +1334,6 @@ pub struct IntegratedServer {
     /// method's own doc comment.
     #[cfg(not(target_arch = "wasm32"))]
     publish_task: Option<Task>,
-}
-
-/// Everything an open-to-LAN host can configure.
-///
-/// This is the configuration surface for RCON, the query listener,
-/// resource-pack pushes, plugin channels, and commands. The constructors pass
-/// these options to the listener and connection setup paths.
-///
-/// `Default` enables the query listener and leaves the other optional services
-/// off. [`IntegratedServer::bind`] uses this configuration through
-/// [`IntegratedServer::open_to_lan`].
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Debug, Default)]
-pub struct LanConfig {
-    /// The server's own view-distance cap. Every connection's requested
-    /// distance is clamped to it.
-    pub view_radius: i32,
-    /// Start an RCON listener. `None` — the default — leaves the port
-    /// closed. The password is in the config; a `port` of `0` lets the OS
-    /// choose, and the chosen address comes back from `local_rcon_addr`.
-    pub rcon: Option<crate::rcon::RconConfig>,
-    /// Serve the GameSpy4/UT3 query protocol on the same port's UDP space
-    /// is enabled by default, matching [`IntegratedServer::bind`].
-    pub query: bool,
-    /// Announce this world on the LAN discovery multicast group so it appears
-    /// in a standard client's multiplayer list without being typed in. Off by
-    /// default — it is a broadcast, and a caller should opt in.
-    pub discovery: Option<LanDiscovery>,
-    /// The command dispatcher every accepted connection's `/`-commands reach
-    /// `CommandDispatch::none()` by default, which **refuses** rather
-    /// than permits.
-    pub commands: crate::command::CommandDispatch,
-    /// Server-initiated resource-pack pushes.
-    pub resource_packs: crate::server::ResourcePackPushFeed,
-    /// The wire-level plugin-channel registry.
-    pub plugin_channels: crate::plugin_channels::PluginChannelRegistry,
-    /// Ops, whitelist and the two ban lists this host enforces at join.
-    ///
-    /// The `Default` is empty: nobody is banned, nobody is an operator and the
-    /// whitelist is off — which is what `bind` has always done, so no existing
-    /// caller changes behaviour. A host that wants real access control loads the
-    /// four JSON files with `AccessHandle::load(world_dir)` and passes the result;
-    /// the same handle is shared by every accepted connection, so an op granted on
-    /// one is an op on the next.
-    pub access: crate::access::AccessHandle,
-    /// Online-mode encryption plus session-server ownership verification
-    /// (see `docs/server-online-mode.md`). `None` — the default —
-    /// keeps every connection offline:
-    /// the client's self-reported username/uuid are trusted as-is, no
-    /// encryption is offered, and no request ever reaches Mojang. `Some`
-    /// switches every connection this listener accepts into the real
-    /// RSA/AES-128-CFB8 handshake via
-    /// [`serve_connection_with_online_mode`](crate::server::serve_connection_with_online_mode).
-    ///
-    /// This is the config surface's own knob — the "config flag an operator
-    /// can actually set" that doc named as the one missing piece — not a
-    /// second one: there is no `server.properties`-style file anywhere in
-    /// this crate (`RconConfig`/`QueryConfig`/`AccessHandle` are all
-    /// in-process structs a caller builds, same as this one), so a field
-    /// here alongside `rcon`/`access`/`commands` is the established shape
-    /// rather than a parallel mechanism. `IntegratedServer::open_in_memory*`
-    /// (singleplayer) never reads this field at all — those constructors
-    /// call the plain `_shared` wrapper directly, which always passes `None`
-    /// internally — so singleplayer cannot authenticate no matter what a LAN
-    /// host is configured with.
-    pub online_mode: Option<OnlineModeConfig>,
-}
-
-/// How to announce a LAN world on the standard discovery multicast group.
-///
-/// Compatible clients listen on UDP `224.0.2.60:4445` for a
-/// `[MOTD]<name>[/MOTD][AD]<port>[/AD]` string and re-broadcast every 1.5 s.
-/// That literal format is the whole protocol — there is no handshake and no reply.
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Debug, Clone)]
-pub struct LanDiscovery {
-    /// The world name shown in the multiplayer list's LAN section.
-    pub motd: String,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl LanDiscovery {
-    /// The discovery multicast group and port.
-    pub const GROUP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(224, 0, 2, 60);
-    /// See [`GROUP`](Self::GROUP).
-    pub const PORT: u16 = 4445;
-    /// The discovery broadcast interval.
-    pub const INTERVAL: std::time::Duration = std::time::Duration::from_millis(1500);
-
-    /// The exact datagram body the client parses.
-    #[must_use]
-    pub fn payload(&self, port: u16) -> String {
-        format!("[MOTD]{}[/MOTD][AD]{port}[/AD]", self.motd)
-    }
-}
-
-/// Per-connection configuration for [`IntegratedServer::publish_with_config`]
-/// — the subset of [`LanConfig`] that is meaningful for a *second* listener
-/// added to a running world, rather than for building one from
-/// scratch.
-///
-/// `Default` keeps commands refused, leaves bans and the whitelist empty, and
-/// keeps every connection offline. See
-/// [`publish_with_config`](IntegratedServer::publish_with_config)'s own doc
-/// comment for why that unread-field shape was a real gap, not a deliberate
-/// simplification.
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Debug, Default)]
-pub struct PublishConfig {
-    /// Ops, whitelist and the two ban lists this listener enforces at join.
-    /// The `Default` is empty, exactly [`LanConfig::access`]'s own default.
-    pub access: crate::access::AccessHandle,
-    /// The command dispatcher every accepted connection's `/`-commands reach,
-    /// for a root the built-in tree does not own. `CommandDispatch::none()`
-    /// by default, which **refuses** rather than permits — the built-in tree
-    /// itself (`/gamerule`, `/gamemode`, …) is unaffected either way, since
-    /// it is consulted first regardless of this field.
-    pub commands: crate::command::CommandDispatch,
-    /// Online-mode encryption plus session-server ownership verification
-    /// `None` — the default — keeps every connection offline,
-    /// matching every other constructor's default. See
-    /// [`LanConfig::online_mode`]'s own doc comment for what `Some` does.
-    pub online_mode: Option<OnlineModeConfig>,
 }
 
 impl IntegratedServer {
@@ -5363,51 +5247,6 @@ impl Drop for IntegratedServer {
             publish_task.abort();
         }
     }
-}
-
-/// Spawns vanilla's `LanServerPinger`: one `[MOTD]…[/MOTD][AD]port[/AD]`
-/// datagram to the discovery multicast group every 1.5 s, until shutdown.
-///
-/// `None` (with a warning) if the UDP socket cannot be created or the group
-/// cannot be reached — a world nobody can discover is still a world you can join
-/// by typing the address, so this is not worth failing `open_to_lan` for.
-///
-/// The send is `try_send_to`-shaped rather than awaited-with-backpressure: a
-/// datagram nobody is listening for must never hold up the loop, and a dropped
-/// ping is re-sent 1.5 s later by construction.
-#[cfg(not(target_arch = "wasm32"))]
-fn spawn_lan_discovery(shutdown: &Arc<ShutdownSignal>, discovery: &LanDiscovery, port: u16) -> Option<Task> {
-    let socket = match std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)) {
-        Ok(socket) => socket,
-        Err(err) => {
-            tracing::warn!("LAN discovery disabled (UDP bind failed): {err}");
-            return None;
-        }
-    };
-    if let Err(err) = socket.set_nonblocking(true) {
-        tracing::warn!("LAN discovery disabled (non-blocking mode failed): {err}");
-        return None;
-    }
-    let socket = match tokio::net::UdpSocket::from_std(socket) {
-        Ok(socket) => socket,
-        Err(err) => {
-            tracing::warn!("LAN discovery disabled (socket registration failed): {err}");
-            return None;
-        }
-    };
-    let target = std::net::SocketAddrV4::new(LanDiscovery::GROUP, LanDiscovery::PORT);
-    let payload = discovery.payload(port);
-    Some(spawn_tick_task(shutdown, async move {
-        let mut ticker = tokio::time::interval(LanDiscovery::INTERVAL);
-        loop {
-            ticker.tick().await;
-            if let Err(err) = socket.send_to(payload.as_bytes(), target).await {
-                // Logged at debug: a laptop with no route to the multicast group
-                // would otherwise warn every 1.5 s forever.
-                tracing::debug!("LAN discovery ping failed: {err}");
-            }
-        }
-    }))
 }
 
 /// The gate: **world open must generate nothing at all.**
