@@ -232,23 +232,3 @@ pub fn animated_ambient(
     };
     engine.add(p);
 }
-
-/// Vanilla's own fly-towards-position particle — the enchanting-table glyphs
-/// (`enchant`, over [`Sheet::Enchant`]'s twenty-six Standard Galactic letters)
-/// and the conduit's homing mote (`nautilus`). Vanilla's own enchant and
-/// nautilus providers are byte-identical apart from the sprite set.
-///
-/// `xd/yd/zd` are an **offset**, not a velocity: the caller passes the point the
-/// mote should fly *from*, relative to `x/y/z`, and the constructor immediately
-/// teleports the particle to `pos + offset` so its first drawn frame is already
-/// out at the bookshelf. Getting this backwards puts every glyph inside the
-/// table. [`Behaviour::FlyTowardsPosition`] documents the flight curve.
-///
-/// The frame is drawn once at construction (`sprite.get(random)` — a uniform
-/// pick, not an age ramp), which is what makes a bookshelf emit a spread of
-/// different letters rather than the whole shelf spelling the same one.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "mirrors vanilla's own fly-towards-position particle constructor argument for \
-              argument, plus the sheet its provider supplies"
-)]
