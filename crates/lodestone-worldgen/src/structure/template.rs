@@ -927,7 +927,13 @@ impl StructureTemplate {
             // The grid clips writes, but a processor chain is not free — skip the
             // whole block when it cannot land here anyway, unless a whole-piece
             // processor forbids it.
-            if !whole_piece && !inside(world) {
+            let in_support_halo = world[0] >= min_x - 1
+                && world[0] <= min_x + size_x
+                && world[1] >= min_y
+                && world[1] < min_y + size_y
+                && world[2] >= min_z - 1
+                && world[2] <= min_z + size_z;
+            if !whole_piece && !in_support_halo {
                 continue;
             }
             let Some(state) = palette.get(block.state as usize) else {
@@ -971,11 +977,8 @@ impl StructureTemplate {
         }
         let mut written = 0;
         let mut placed_positions = Vec::new();
+        let mut boundary_states = Vec::new();
         for block in processed {
-            // A `GravityProcessor` moves a block, so re-test the clip.
-            if !inside(block.pos) {
-                continue;
-            }
             let mut final_state = block.state.into_mirror(settings.mirror).into_rotate(settings.rotation);
             if settings.waterlogging
                 && final_state.is_waterloggable_and_dry()
@@ -984,6 +987,17 @@ impl StructureTemplate {
                 final_state.properties.insert("waterlogged".into(), "true".into());
             }
             let canonical = final_state.canonical();
+            // A `GravityProcessor` moves a block, so re-test the clip. Keep
+            // one-block-halo states only as support evidence for an attached
+            // block at the boundary; they are never written to this grid.
+            if !inside(block.pos) {
+                if let Some(state) = lodestone_data::block_states::state_id(&canonical)
+                    .and_then(lodestone_data::block_states::StateId::new)
+                {
+                    boundary_states.push((block.pos, state));
+                }
+                continue;
+            }
             if let Some(type_id) = block_entity_type_for_state(&canonical) {
                 on_block_entity(block.pos, type_id);
             }
@@ -991,7 +1005,7 @@ impl StructureTemplate {
             placed_positions.push(block.pos);
             written += 1;
         }
-        reconcile_structure_attachments(grid, &placed_positions);
+        reconcile_structure_attachments(grid, &placed_positions, &boundary_states);
         written
     }
 }
@@ -1101,7 +1115,12 @@ fn full_support_face(state: CanonicalStateId, face: BuiltinPropertyValue) -> boo
     })
 }
 
-fn attachment_survives(grid: &DenseBlockGrid, pos: [i32; 3], state: CanonicalStateId) -> bool {
+fn attachment_survives(
+    grid: &DenseBlockGrid,
+    pos: [i32; 3],
+    state: CanonicalStateId,
+    boundary_states: &[([i32; 3], CanonicalStateId)],
+) -> bool {
     let (min_x, min_y, min_z, size_x, size_y, size_z) = grid.bounds();
     let inside = |candidate: [i32; 3]| {
         candidate[0] >= min_x
@@ -1128,7 +1147,38 @@ fn attachment_survives(grid: &DenseBlockGrid, pos: [i32; 3], state: CanonicalSta
             };
             let support_pos = adjacent(pos, opposite);
             if !inside(support_pos) {
-                return false;
+                if !matches!(
+                    state.block(),
+                    Block::WhiteWallBanner
+                        | Block::OrangeWallBanner
+                        | Block::MagentaWallBanner
+                        | Block::LightBlueWallBanner
+                        | Block::YellowWallBanner
+                        | Block::LimeWallBanner
+                        | Block::PinkWallBanner
+                        | Block::GrayWallBanner
+                        | Block::LightGrayWallBanner
+                        | Block::CyanWallBanner
+                        | Block::PurpleWallBanner
+                        | Block::BlueWallBanner
+                        | Block::BrownWallBanner
+                        | Block::GreenWallBanner
+                        | Block::RedWallBanner
+                        | Block::BlackWallBanner
+                ) {
+                    return false;
+                }
+                let Some(support) = boundary_states
+                    .iter()
+                    .find_map(|&(candidate, support)| (candidate == support_pos).then_some(support))
+                else {
+                    return false;
+                };
+                return if solid {
+                    block_solidity::legacy_solid(support)
+                } else {
+                    full_support_face(support, facing)
+                };
             }
             let support = canonical_state_at(grid, support_pos);
             support.is_some_and(|support| {
@@ -1154,7 +1204,11 @@ fn attachment_survives(grid: &DenseBlockGrid, pos: [i32; 3], state: CanonicalSta
 /// attachments cannot retain a block whose support was removed. This is the
 /// survival portion of the broader neighbour-shape pass; connection-state
 /// recomputation remains a separate concern for blocks with mutable shapes.
-fn reconcile_structure_attachments(grid: &mut DenseBlockGrid, placed: &[[i32; 3]]) {
+fn reconcile_structure_attachments(
+    grid: &mut DenseBlockGrid,
+    placed: &[[i32; 3]],
+    boundary_states: &[([i32; 3], CanonicalStateId)],
+) {
     let mut pending = Vec::with_capacity(placed.len() * 7);
     for &pos in placed {
         pending.push(pos);
@@ -1172,7 +1226,7 @@ fn reconcile_structure_attachments(grid: &mut DenseBlockGrid, placed: &[[i32; 3]
             continue;
         };
         if matches!(state.block(), Block::Air | Block::CaveAir | Block::VoidAir)
-            || attachment_survives(grid, pos, state)
+            || attachment_survives(grid, pos, state, boundary_states)
         {
             continue;
         }
