@@ -25,6 +25,18 @@ def write_shard(path, version, sx0, sx1, sz0, sz1, frozen, salt):
         sx0, sx1, sz0, sz1, len(records), frozen,
         hashlib.sha256(payload).digest(),
     ) + payload)
+    if version == 6:
+        header, payload, dimension = manifest.read(path)
+        audit = b"".join(
+            payload[offset:offset + manifest.RAW_WIDTH]
+            + hashlib.sha256(f"audit:{salt}:{offset}".encode()).digest()[manifest.RAW_WIDTH:]
+            for offset in range(0, len(payload), manifest.RAW_WIDTH)
+        )
+        manifest.packet_audit_path(path).write_bytes(
+            manifest.make_packet_audit_header(
+                header, dimension, hashlib.sha256(audit).digest()
+            ) + audit
+        )
 
 
 def reference_merge(paths):
@@ -113,6 +125,18 @@ class LargeParityManifestTests(unittest.TestCase):
             self.assertEqual(payload[:2], first)
             self.assertEqual(payload[2:4], next_x)
             self.assertEqual(payload[manifest.RAW_GRID_SIDE * 2:manifest.RAW_GRID_SIDE * 2 + 2], next_z)
+
+    def test_non_production_structure_beard_scope_is_rejected(self):
+        with tempfile.TemporaryDirectory(prefix="large-parity-test-") as directory:
+            path = Path(directory) / "scope.lwp"
+            frozen = hashlib.sha256(b"scope-world").digest()
+            write_shard(path, 6, manifest.RAW_GRID_MIN, manifest.RAW_GRID_MIN,
+                        manifest.RAW_GRID_MIN, manifest.RAW_GRID_MIN, frozen, "scope")
+            raw = bytearray(path.read_bytes())
+            raw[70:72] = (1).to_bytes(2, "big")
+            path.write_bytes(raw)
+            with self.assertRaisesRegex(ValueError, "unsupported parity manifest header"):
+                manifest.read(path)
 
 
 if __name__ == "__main__":
