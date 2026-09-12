@@ -400,12 +400,17 @@ impl ShellAudio {
         pitch: f32,
         seed: i64,
     ) {
-        self.record_caption(name, pos);
-        if let Err(e) = self
+        match self
             .engine
-            .play_sound(name, category, pos, volume, pitch, seed)
+            .play_sound_with_subtitle(name, category, pos, volume, pitch, seed)
         {
-            self.report_failure(name, &e);
+            Ok(Some(playback)) => {
+                if let Some(key) = playback.subtitle {
+                    self.subtitles.push(&key, pos, caption_now_ms());
+                }
+            }
+            Ok(None) => {}
+            Err(e) => self.report_failure(name, &e),
         }
     }
 
@@ -421,9 +426,15 @@ impl ShellAudio {
         pitch: f32,
         seed: i64,
     ) {
-        self.record_caption(name, pos);
-        match self.engine.play_sound(name, category, pos, volume, pitch, seed) {
-            Ok(Some(handle)) => {
+        match self
+            .engine
+            .play_sound_with_subtitle(name, category, pos, volume, pitch, seed)
+        {
+            Ok(Some(playback)) => {
+                if let Some(key) = playback.subtitle {
+                    self.subtitles.push(&key, pos, caption_now_ms());
+                }
+                let handle = playback.handle;
                 let engine = &self.engine;
                 self.server_sounds
                     .prune_finished(|handle| engine.with_mixer(|mixer| mixer.is_active(handle)));
@@ -447,11 +458,10 @@ impl ShellAudio {
             .stop_matching(name, category, |handle| engine.stop_voice(handle));
     }
 
-    /// Record this sound's caption, if its event declares a `subtitles` key.
-    ///
-    /// Called before the engine, not after: a resolve failure (a missing `.ogg`)
-    /// still means the event fired, and vanilla's own listener hook likewise runs
-    /// off the *submission* rather than off successful decode.
+    /// Record a head-relative sound's caption, if its event declares a
+    /// `subtitles` key. Positioned sounds use the engine's shared audibility
+    /// result instead, so this helper remains unconditional only for relative
+    /// sources whose range is infinite.
     fn record_caption(&mut self, name: &str, pos: Vec3) {
         if let Some(key) = self.engine.subtitle(name) {
             let key = key.to_string();
@@ -597,12 +607,17 @@ impl ShellAudio {
         pitch: f32,
         seed: i64,
     ) {
-        self.record_caption(name, pos);
-        if let Err(e) = self
+        match self
             .engine
-            .play_entity_sound(name, category, pos, volume, pitch, seed)
+            .play_sound_with_subtitle(name, category, pos, volume, pitch, seed)
         {
-            self.report_failure(name, &e);
+            Ok(Some(playback)) => {
+                if let Some(key) = playback.subtitle {
+                    self.subtitles.push(&key, pos, caption_now_ms());
+                }
+            }
+            Ok(None) => {}
+            Err(e) => self.report_failure(name, &e),
         }
     }
 
@@ -847,14 +862,19 @@ impl AudioState {
         volume: f32,
         pitch: f32,
         seed: i64,
-    ) -> Option<lodestone_sound::PlayHandle> {
-        self.record_caption(name, pos);
+    ) -> Option<lodestone_sound::SoundPlayback> {
         match self
             .resolver
             .resolve_instance(name, category, pos, volume, pitch, seed)
         {
             Ok(Some(instance)) => {
-                Some(self.mixer.borrow_mut().play(instance))
+                let subtitle = self
+                    .resolver
+                    .subtitle(name)
+                    .filter(|_| self.mixer.borrow().is_audible(&instance))
+                    .map(str::to_owned);
+                let handle = self.mixer.borrow_mut().play(instance);
+                Some(lodestone_sound::SoundPlayback { handle, subtitle })
             }
             // Vanilla's silent "empty sound" (unknown event / zero weight) —
             // not an error, matching `SoundResolver`'s own contract.
@@ -1183,7 +1203,11 @@ impl ShellAudio {
     ) {
         AUDIO_STATE.with(|cell| {
             if let Some(state) = cell.borrow_mut().as_mut() {
-                let _ = state.play(name, category, pos, volume, pitch, seed);
+                if let Some(playback) = state.play(name, category, pos, volume, pitch, seed)
+                    && let Some(key) = playback.subtitle
+                {
+                    state.subtitles.push(&key, pos, caption_now_ms());
+                }
             }
         });
     }
@@ -1201,13 +1225,16 @@ impl ShellAudio {
     ) {
         AUDIO_STATE.with(|cell| {
             if let Some(state) = cell.borrow_mut().as_mut()
-                && let Some(handle) = state.play(name, category, pos, volume, pitch, seed)
+                && let Some(playback) = state.play(name, category, pos, volume, pitch, seed)
             {
+                if let Some(key) = playback.subtitle {
+                    state.subtitles.push(&key, pos, caption_now_ms());
+                }
                 let mixer = Rc::clone(&state.mixer);
                 state
                     .server_sounds
                     .prune_finished(|handle| mixer.borrow().is_active(handle));
-                state.server_sounds.record(handle, name, category);
+                state.server_sounds.record(playback.handle, name, category);
             }
         });
     }
@@ -1431,8 +1458,11 @@ impl ShellAudio {
         seed: i64,
     ) {
         AUDIO_STATE.with(|cell| {
-            if let Some(state) = cell.borrow_mut().as_mut() {
-                let _ = state.play(name, category, pos, volume, pitch, seed);
+            if let Some(state) = cell.borrow_mut().as_mut()
+                && let Some(playback) = state.play(name, category, pos, volume, pitch, seed)
+                && let Some(key) = playback.subtitle
+            {
+                state.subtitles.push(&key, pos, caption_now_ms());
             }
         });
     }

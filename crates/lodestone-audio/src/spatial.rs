@@ -110,6 +110,37 @@ impl Spatialization {
             self.instance_volume.max(1.0) * self.attenuation_distance
         }
     }
+
+    /// The distance gain used by the mixer for this source.
+    ///
+    /// Stereo sources are not spatialised by the output path, so they retain a
+    /// gain of `1` even when positioned far away. This distinction is important
+    /// to callers deciding whether an event should produce an accessibility
+    /// caption: the decision must follow the rendered source, not a second
+    /// approximation of its range policy.
+    pub fn distance_gain(&self, listener: &Listener, source_is_mono: bool) -> f32 {
+        if !source_is_mono || self.relative || self.attenuation == Attenuation::None {
+            1.0
+        } else {
+            let distance = (self.position - listener.position).length();
+            attenuation_gain(distance, self.range())
+        }
+    }
+
+    /// Whether this source contributes a non-zero signal for the given bus gain.
+    ///
+    /// This is the boolean form of the same gain chain used by [`Voice`]: a
+    /// muted category, an empty/fully attenuated mono source, and nothing else
+    /// are silent. Keep this next to [`distance_gain`](Self::distance_gain) so
+    /// subtitle emission and playback cannot acquire different range rules.
+    pub fn is_audible(
+        &self,
+        listener: &Listener,
+        source_is_mono: bool,
+        bus_gain: f32,
+    ) -> bool {
+        bus_gain > 0.0 && self.distance_gain(listener, source_is_mono) > 0.0
+    }
 }
 
 /// OpenAL `AL_LINEAR_DISTANCE` gain with reference 0 and rolloff 1:

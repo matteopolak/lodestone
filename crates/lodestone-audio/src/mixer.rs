@@ -112,6 +112,22 @@ impl Mixer {
         &mut self.volumes
     }
 
+    /// Whether a resolved source contributes a non-zero signal right now.
+    ///
+    /// The listener, category/master/runtime volume and positional policy are
+    /// read from the same state that [`render`](Self::render) uses. Callers
+    /// such as the sound-subtitle overlay can therefore suppress captions for
+    /// out-of-range or muted sources without creating a second attenuation
+    /// implementation.
+    pub fn is_audible(&self, instance: &SoundInstance) -> bool {
+        instance.pcm.frames() > 0
+            && instance.spatialization().is_audible(
+                &self.listener,
+                instance.pcm.is_mono(),
+                self.volumes.gain(instance.category, instance.volume),
+            )
+    }
+
     /// The number of currently active voices.
     pub fn voice_count(&self) -> usize {
         self.voices.len()
@@ -274,6 +290,55 @@ mod tests {
         m.render(&mut out);
         let c = std::f32::consts::FRAC_1_SQRT_2;
         assert!((out[0] - 0.5 * c).abs() < 1e-6, "{}", out[0]);
+    }
+
+    #[test]
+    fn audibility_uses_listener_range_source_volume_and_category_gain() {
+        let mut m = Mixer::new(48_000);
+        let listener = Listener::default();
+        m.set_listener(listener);
+
+        let positioned = |distance: f32, volume: f32| SoundInstance {
+            volume,
+            position: listener.position + listener.forward * distance,
+            ..SoundInstance::positional(
+                mono(48_000, vec![1.0; 8]),
+                SoundCategory::Blocks,
+                Vec3::ZERO,
+            )
+        };
+
+        // A normal-volume source uses the raw 16-block attenuation distance:
+        // near is audible, the exact edge has zero gain, and outside is silent.
+        assert!(m.is_audible(&positioned(1.0, 1.0)));
+        assert!(!m.is_audible(&positioned(16.0, 1.0)));
+        assert!(!m.is_audible(&positioned(20.0, 1.0)));
+
+        // Source volume above one extends the same range used by playback.
+        assert!(m.is_audible(&positioned(20.0, 2.0)));
+
+        // A muted category makes even a co-located source silent, so it must
+        // not produce a caption either.
+        m.volumes_mut().set_user(SoundCategory::Blocks, 0.0);
+        assert!(!m.is_audible(&positioned(1.0, 1.0)));
+    }
+
+    #[test]
+    fn relative_and_stereo_sources_ignore_listener_range_like_playback() {
+        let m = Mixer::new(48_000);
+        let far = Vec3::new(0.0, 0.0, -1000.0);
+        let relative = SoundInstance {
+            position: far,
+            ..relative_instance(mono(48_000, vec![1.0; 8]))
+        };
+        assert!(m.is_audible(&relative));
+
+        let stereo = SoundInstance::positional(
+            Arc::new(PcmBuffer::from_interleaved(48_000, 2, vec![1.0; 16]).unwrap()),
+            SoundCategory::Blocks,
+            far,
+        );
+        assert!(m.is_audible(&stereo));
     }
 
     #[test]
