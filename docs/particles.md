@@ -19,6 +19,12 @@ transcribed from vanilla's own client-side particle package. `Particles::spawn_o
 (`crates/lodestone-shell/src/particles.rs`) is the single place that maps a decoded registry name to an
 emitter call.
 
+The emitter implementations are grouped under `crates/lodestone-particle/src/emit/` by effect family:
+block and item fragments, combat, social/UI effects, ambient/environmental effects, magic, water, foliage,
+fire, and newer special effects. `emit.rs` is intentionally a small compatibility facade that re-exports
+these functions, so callers keep the stable `emit::name` paths while each family remains independently
+reviewable.
+
 The wire path is: a clientbound level-particles packet decode → `ClientEvent::Particles` →
 `NetUpdate::Particles` in `sim.rs` → `Particles::spawn_particles` → `spawn_one`'s dispatch. Any type
 wired into that dispatch renders correctly for **any** producer of that packet (a `/particle` command, a
