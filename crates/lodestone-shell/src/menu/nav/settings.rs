@@ -1157,4 +1157,3 @@ impl MenuNav {
     /// removing an account) is a self-contained mutation `AccountsNav`
     /// already applied by the time this returns.
 }
-

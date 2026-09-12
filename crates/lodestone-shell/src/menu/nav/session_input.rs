@@ -529,4 +529,3 @@ impl MenuNav {
             Err(e) => Some(format!("could not save {}: {e}", self.path.display())),
         };
 }
-

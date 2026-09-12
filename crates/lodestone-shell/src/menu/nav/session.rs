@@ -228,4 +228,3 @@ impl MenuNav {
     /// is the *click*: `key_main`/`key_paused` refuse Enter on a disabled button,
     /// which is why moving the highlight onto one here is safe.
 }
-
