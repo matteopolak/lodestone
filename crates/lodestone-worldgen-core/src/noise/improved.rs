@@ -192,9 +192,25 @@ impl ImprovedNoise {
 
 
     /// Samples the noise at `(x, y, z)` (the `yScale = yFudge = 0` path).
+    #[inline]
     #[must_use]
     pub fn noise(&self, px: f64, py: f64, pz: f64) -> f64 {
-        self.noise_scaled(px, py, pz, 0.0, 0.0)
+        // Keep the common zero-scale path independent of `noise_scaled`'s
+        // y-fudge branch. `PerlinNoise` reaches this method for every ordinary
+        // octave, so routing through the general entry point made every sample
+        // carry a branch and the dead fudge arithmetic. The coordinate/floor
+        // and interpolation order is intentionally identical to the
+        // `y_scale == 0.0` arm below; only the dispatch overhead is removed.
+        let x = px + self.xo;
+        let y = py + self.yo;
+        let z = pz + self.zo;
+        let xf = floor(x);
+        let yf = floor(y);
+        let zf = floor(z);
+        let xr = x - f64::from(xf);
+        let yr = y - f64::from(yf);
+        let zr = z - f64::from(zf);
+        self.sample_and_lerp(xf, yf, zf, xr, yr, zr, yr)
     }
 
     /// The full `noise(x, y, z, yScale, yFudge)` used by the blended noise.
@@ -410,6 +426,61 @@ mod tests {
             fractional > 19_000,
             "only {fractional}/20000 sample positions had all three lerp factors \
              non-zero; this fixture is not exercising the reduction tree"
+        );
+    }
+
+    #[test]
+    fn zero_scale_entry_is_bit_identical_to_scaled_entry() {
+        let n = fixture();
+        let mut s: u64 = 0xD1B5_4A32_19C7_EF03;
+        let mut next = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+
+        let exact_inputs = [
+            (0.0, 0.0, 0.0),
+            (-n.xo, -n.yo, -n.zo),
+            (1.0 - n.xo, -1.0 - n.yo, 2.0 - n.zo),
+            (-256.0 - n.xo, 128.0 - n.yo, -512.0 - n.zo),
+        ];
+        for (px, py, pz) in exact_inputs {
+            assert_eq!(
+                n.noise(px, py, pz).to_bits(),
+                n.noise_scaled(px, py, pz, 0.0, 0.0).to_bits(),
+                "zero-scale noise path diverged on lattice input ({px}, {py}, {pz})"
+            );
+        }
+
+        let mut fractional = 0usize;
+        for _ in 0..20_000 {
+            let px = next() * 2_000.0 - 1_000.0;
+            let py = next() * 500.0 - 250.0;
+            let pz = next() * 2_000.0 - 1_000.0;
+            let result = n.noise(px, py, pz);
+            let reference = n.noise_scaled(px, py, pz, 0.0, 0.0);
+            assert_eq!(
+                result.to_bits(),
+                reference.to_bits(),
+                "zero-scale noise path diverged at ({px}, {py}, {pz}): \
+                 {result:e} vs {reference:e}"
+            );
+
+            let x = px + n.xo;
+            let y = py + n.yo;
+            let z = pz + n.zo;
+            if x.fract() != 0.0 && y.fract() != 0.0 && z.fract() != 0.0 {
+                fractional += 1;
+            }
+        }
+
+        // Guard against a degenerate coordinate fixture that only exercises
+        // the no-interpolation case and would make this equivalence vacuous.
+        assert!(
+            fractional > 19_000,
+            "only {fractional}/20000 sample positions had fractional coordinates"
         );
     }
 
