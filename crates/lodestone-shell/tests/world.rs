@@ -33,6 +33,8 @@ mod partial_connectivity_hall_holes;
 mod per_quad_render_layer;
 #[path = "world/sky_pixels.rs"]
 mod sky_pixels;
+#[path = "world/terrain_emission_partial_face.rs"]
+mod terrain_emission_partial_face;
 #[path = "world/translucent_alpha_cutout_pixels.rs"]
 mod translucent_alpha_cutout_pixels;
 #[path = "world/uneven_terrain_holes.rs"]

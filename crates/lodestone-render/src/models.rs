@@ -717,20 +717,14 @@ pub trait ModelSectionView {
     }
 
     /// Whether ambient occlusion applies to the block at section-local
-    /// `(x, y, z)`, or its quads should fall back to flat per-face light —
-    /// vanilla's block-model tesselation function choosing between
-    /// its smooth-ambient-occlusion path and its flat path:
-    /// `this.ambientOcclusion && blockState.getLightEmission() == 0 &&
-    /// parts.getFirst().useAmbientOcclusion()`.
+    /// `(x, y, z)`, or its quads should fall back to flat per-face light. The
+    /// live view supplies the complete state-level predicate: renderer smooth
+    /// lighting, zero state emission, and the model's own AO flag.
     ///
-    /// `this.ambientOcclusion` is the renderer-wide "Smooth Lighting" video
-    /// option, which this client has no equivalent setting for (smooth
-    /// lighting is always on), so this method only needs to answer the
-    /// remaining two, block-specific conditions. It currently answers only
-    /// the model half (`useAmbientOcclusion`, the JSON `ambientocclusion`
-    /// property) — see
-    /// [`BlockModels::ambient_occlusion`](crate::BlockModels::ambient_occlusion)
-    /// for why the light-emission half is not applied yet.
+    /// Smooth lighting is always enabled in this client, so this method only
+    /// needs to answer the two block-specific conditions. A registry-backed
+    /// view delegates to [`BlockModels::ambient_occlusion`](crate::BlockModels::ambient_occlusion),
+    /// which combines the baked model flag with the state emission table.
     ///
     /// Defaults to `true`, matching the JSON default and the overwhelming
     /// majority of blocks — existing [`ModelSectionView`] implementations
@@ -863,6 +857,303 @@ fn axis_of(v: [i32; 3]) -> usize {
     }
 }
 
+/// One of the six extents used to turn a partial face into four bilinear
+/// weights. The complementary forms are deliberately named instead of
+/// computed at the call site: each face's table below can then be checked
+/// against its orientation without hiding a sign reversal in arithmetic.
+#[derive(Debug, Clone, Copy)]
+enum ShapeFactor {
+    MinX,
+    MaxX,
+    MinY,
+    MaxY,
+    MinZ,
+    MaxZ,
+    OneMinusMinX,
+    OneMinusMaxX,
+    OneMinusMinY,
+    OneMinusMaxY,
+    OneMinusMinZ,
+    OneMinusMaxZ,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ShapePair(ShapeFactor, ShapeFactor);
+
+impl ShapeFactor {
+    fn value(self, min: [f32; 3], max: [f32; 3]) -> f32 {
+        match self {
+            Self::MinX => min[0],
+            Self::MaxX => max[0],
+            Self::MinY => min[1],
+            Self::MaxY => max[1],
+            Self::MinZ => min[2],
+            Self::MaxZ => max[2],
+            Self::OneMinusMinX => 1.0 - min[0],
+            Self::OneMinusMaxX => 1.0 - max[0],
+            Self::OneMinusMinY => 1.0 - min[1],
+            Self::OneMinusMaxY => 1.0 - max[1],
+            Self::OneMinusMinZ => 1.0 - min[2],
+            Self::OneMinusMaxZ => 1.0 - max[2],
+        }
+    }
+}
+
+/// The four shape weights for each logical output vertex, in the order of the
+/// four canonical corner samples produced by [`temp_corner_signs`]. The
+/// factors are products of the quad's min/max extents, so a slab, stair, or
+/// rotated corner-cut face is interpolated by its actual occupied rectangle
+/// rather than whichever cube corner happens to be nearest its vertex.
+const fn shape_pairs(face: Face) -> [[ShapePair; 4]; 4] {
+    use ShapeFactor::*;
+    match face {
+        Face::NegY => [
+            [
+                ShapePair(OneMinusMinX, MaxZ),
+                ShapePair(OneMinusMinX, OneMinusMaxZ),
+                ShapePair(MinX, OneMinusMaxZ),
+                ShapePair(MinX, MaxZ),
+            ],
+            [
+                ShapePair(OneMinusMinX, MinZ),
+                ShapePair(OneMinusMinX, OneMinusMinZ),
+                ShapePair(MinX, OneMinusMinZ),
+                ShapePair(MinX, MinZ),
+            ],
+            [
+                ShapePair(OneMinusMaxX, MinZ),
+                ShapePair(OneMinusMaxX, OneMinusMinZ),
+                ShapePair(MaxX, OneMinusMinZ),
+                ShapePair(MaxX, MinZ),
+            ],
+            [
+                ShapePair(OneMinusMaxX, MaxZ),
+                ShapePair(OneMinusMaxX, OneMinusMaxZ),
+                ShapePair(MaxX, OneMinusMaxZ),
+                ShapePair(MaxX, MaxZ),
+            ],
+        ],
+        Face::PosY => [
+            [
+                ShapePair(MaxX, MaxZ),
+                ShapePair(MaxX, OneMinusMaxZ),
+                ShapePair(OneMinusMaxX, OneMinusMaxZ),
+                ShapePair(OneMinusMaxX, MaxZ),
+            ],
+            [
+                ShapePair(MaxX, MinZ),
+                ShapePair(MaxX, OneMinusMinZ),
+                ShapePair(OneMinusMaxX, OneMinusMinZ),
+                ShapePair(OneMinusMaxX, MinZ),
+            ],
+            [
+                ShapePair(MinX, MinZ),
+                ShapePair(MinX, OneMinusMinZ),
+                ShapePair(OneMinusMinX, OneMinusMinZ),
+                ShapePair(OneMinusMinX, MinZ),
+            ],
+            [
+                ShapePair(MinX, MaxZ),
+                ShapePair(MinX, OneMinusMaxZ),
+                ShapePair(OneMinusMinX, OneMinusMaxZ),
+                ShapePair(OneMinusMinX, MaxZ),
+            ],
+        ],
+        Face::NegZ => [
+            [
+                ShapePair(MaxY, OneMinusMinX),
+                ShapePair(MaxY, MinX),
+                ShapePair(OneMinusMaxY, MinX),
+                ShapePair(OneMinusMaxY, OneMinusMinX),
+            ],
+            [
+                ShapePair(MaxY, OneMinusMaxX),
+                ShapePair(MaxY, MaxX),
+                ShapePair(OneMinusMaxY, MaxX),
+                ShapePair(OneMinusMaxY, OneMinusMaxX),
+            ],
+            [
+                ShapePair(MinY, OneMinusMaxX),
+                ShapePair(MinY, MaxX),
+                ShapePair(OneMinusMinY, MaxX),
+                ShapePair(OneMinusMinY, OneMinusMaxX),
+            ],
+            [
+                ShapePair(MinY, OneMinusMinX),
+                ShapePair(MinY, MinX),
+                ShapePair(OneMinusMinY, MinX),
+                ShapePair(OneMinusMinY, OneMinusMinX),
+            ],
+        ],
+        Face::PosZ => [
+            [
+                ShapePair(MaxY, OneMinusMinX),
+                ShapePair(OneMinusMaxY, OneMinusMinX),
+                ShapePair(OneMinusMaxY, MinX),
+                ShapePair(MaxY, MinX),
+            ],
+            [
+                ShapePair(MinY, OneMinusMinX),
+                ShapePair(OneMinusMinY, OneMinusMinX),
+                ShapePair(OneMinusMinY, MinX),
+                ShapePair(MinY, MinX),
+            ],
+            [
+                ShapePair(MinY, OneMinusMaxX),
+                ShapePair(OneMinusMinY, OneMinusMaxX),
+                ShapePair(OneMinusMinY, MaxX),
+                ShapePair(MinY, MaxX),
+            ],
+            [
+                ShapePair(MaxY, OneMinusMaxX),
+                ShapePair(OneMinusMaxY, OneMinusMaxX),
+                ShapePair(OneMinusMaxY, MaxX),
+                ShapePair(MaxY, MaxX),
+            ],
+        ],
+        Face::NegX => [
+            [
+                ShapePair(MaxY, MaxZ),
+                ShapePair(MaxY, OneMinusMaxZ),
+                ShapePair(OneMinusMaxY, OneMinusMaxZ),
+                ShapePair(OneMinusMaxY, MaxZ),
+            ],
+            [
+                ShapePair(MaxY, MinZ),
+                ShapePair(MaxY, OneMinusMinZ),
+                ShapePair(OneMinusMaxY, OneMinusMinZ),
+                ShapePair(OneMinusMaxY, MinZ),
+            ],
+            [
+                ShapePair(MinY, MinZ),
+                ShapePair(MinY, OneMinusMinZ),
+                ShapePair(OneMinusMinY, OneMinusMinZ),
+                ShapePair(OneMinusMinY, MinZ),
+            ],
+            [
+                ShapePair(MinY, MaxZ),
+                ShapePair(MinY, OneMinusMaxZ),
+                ShapePair(OneMinusMinY, OneMinusMaxZ),
+                ShapePair(OneMinusMinY, MaxZ),
+            ],
+        ],
+        Face::PosX => [
+            [
+                ShapePair(OneMinusMinY, MaxZ),
+                ShapePair(OneMinusMinY, OneMinusMaxZ),
+                ShapePair(MinY, OneMinusMaxZ),
+                ShapePair(MinY, MaxZ),
+            ],
+            [
+                ShapePair(OneMinusMinY, MinZ),
+                ShapePair(OneMinusMinY, OneMinusMinZ),
+                ShapePair(MinY, OneMinusMinZ),
+                ShapePair(MinY, MinZ),
+            ],
+            [
+                ShapePair(OneMinusMaxY, MinZ),
+                ShapePair(OneMinusMaxY, OneMinusMinZ),
+                ShapePair(MaxY, OneMinusMinZ),
+                ShapePair(MaxY, MinZ),
+            ],
+            [
+                ShapePair(OneMinusMaxY, MaxZ),
+                ShapePair(OneMinusMaxY, OneMinusMaxZ),
+                ShapePair(MaxY, OneMinusMaxZ),
+                ShapePair(MaxY, MaxZ),
+            ],
+        ],
+    }
+}
+
+/// Maps each logical weight row to the actual order of the baked quad's four
+/// vertices. The model asset winding differs by face, so keeping this small
+/// remap explicit prevents a partial-face fix from changing full-cube winding.
+const fn shape_output_remap(face: Face) -> [usize; 4] {
+    match face {
+        Face::NegY | Face::PosZ => [0, 1, 2, 3],
+        Face::PosY => [2, 3, 0, 1],
+        Face::NegZ | Face::NegX => [3, 0, 1, 2],
+        Face::PosX => [1, 2, 3, 0],
+    }
+}
+
+/// The four canonical corner samples in the order expected by
+/// [`shape_pairs`]. Their signs are relative to [`face_uv_axes`], not world
+/// axes, which keeps all six orientations on one interpolation path.
+const fn temp_corner_signs(face: Face) -> [(i32, i32); 4] {
+    match face {
+        Face::NegX => [(1, 1), (-1, 1), (-1, -1), (1, -1)],
+        Face::PosX => [(-1, 1), (-1, -1), (1, -1), (1, 1)],
+        Face::NegY => [(-1, 1), (-1, -1), (1, -1), (1, 1)],
+        Face::PosY => [(1, 1), (-1, 1), (-1, -1), (1, -1)],
+        Face::NegZ => [(1, -1), (1, 1), (-1, 1), (-1, -1)],
+        Face::PosZ => [(-1, -1), (1, -1), (1, 1), (-1, 1)],
+    }
+}
+
+/// Returns the shape weights when the quad occupies only part of its face.
+/// Full unit faces and zero-area synthetic fixtures deliberately return
+/// `None`, preserving the established nearest-corner sampler byte-for-byte.
+fn partial_face_weights(face: Face, positions: &[[f32; 3]; 4]) -> Option<[[f32; 4]; 4]> {
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    for position in positions {
+        for axis in 0..3 {
+            // A headless screen-space fixture may deliberately use positions
+            // outside the block (for example `-1..1` clip coordinates). Those
+            // are not block-shape extents and must keep the old sampler; real
+            // baked geometry is confined to the unit block apart from tiny
+            // floating-point noise at its boundaries.
+            if position[axis] < -1.0e-4 || position[axis] > 1.0001 {
+                return None;
+            }
+            min[axis] = min[axis].min(position[axis]);
+            max[axis] = max[axis].max(position[axis]);
+        }
+    }
+    if (0..3).any(|axis| !min[axis].is_finite() || !max[axis].is_finite()) {
+        return None;
+    }
+    let (u, v) = face_uv_axes(face);
+    let u_axis = axis_of(u);
+    let v_axis = axis_of(v);
+    // The old sampler is the only useful answer for a degenerate test quad;
+    // multiplying shape factors for a zero-width face would erase its light.
+    if max[u_axis] - min[u_axis] <= 1.0e-6 || max[v_axis] - min[v_axis] <= 1.0e-6 {
+        return None;
+    }
+    let partial = min[u_axis] >= 1.0e-4
+        || min[v_axis] >= 1.0e-4
+        || max[u_axis] <= 0.9999
+        || max[v_axis] <= 0.9999;
+    if !partial {
+        return None;
+    }
+
+    let pairs = shape_pairs(face);
+    let remap = shape_output_remap(face);
+    let mut weights = [[0.0; 4]; 4];
+    for logical in 0..4 {
+        let output = remap[logical];
+        for sample in 0..4 {
+            let ShapePair(a, b) = pairs[logical][sample];
+            weights[output][sample] = a.value(min, max) * b.value(min, max);
+        }
+    }
+    Some(weights)
+}
+
+/// A point at one of the four unit cube corners of `face`; only its in-plane
+/// components matter to [`quad_corner_sample`].
+fn canonical_corner(face: Face, su: i32, sv: i32) -> [f32; 3] {
+    let (u, v) = face_uv_axes(face);
+    let mut point = [0.0; 3];
+    point[axis_of(u)] = if su > 0 { 1.0 } else { 0.0 };
+    point[axis_of(v)] = if sv > 0 { 1.0 } else { 0.0 };
+    point
+}
+
 /// Rounds a `0..=15` light average to the nearest representable nibble.
 fn round_level(v: f32) -> u8 {
     v.round().clamp(0.0, 15.0) as u8
@@ -892,14 +1183,12 @@ fn round_level(v: f32) -> u8 {
 ///   vanilla keys it on view-blocking / light dampening rather than on shade
 ///   brightness.
 ///
-/// **Not ported**: vanilla weights these four samples by how much of the
-/// quad's actual face area is nearest each cube corner, which matters for a
-/// quad that doesn't span a full block face (a stair or slab). This always
-/// takes the corner nearest the vertex outright — exactly what the full-cube
-/// demo mesher ([`crate::mesh`]) does too, just generalised to a vertex
-/// position that may not land exactly on a cube corner. Also not ported:
-/// vanilla's `translucentN` hidden-diagonal substitution, which only affects
-/// non-cube models' interior faces.
+/// For a partial face, [`quad_corner_samples`] keeps those same four samples
+/// but blends them with weights derived from the quad's actual in-plane
+/// extents. Full unit faces retain the nearest-corner behavior exactly. The
+/// hidden-diagonal substitution used by the reference renderer is still not
+/// needed here: the live culling predicate already removes the interior faces
+/// for which that substitution matters.
 fn quad_corner_sample(
     view: &dyn ModelSectionView,
     np: [i32; 3],
@@ -954,6 +1243,50 @@ fn quad_corner_sample(
     (ao, (sky << 4) | block)
 }
 
+/// Samples all four cube-corner lighting values and, for a partial face,
+/// distributes them by the face-shape weights. The full-face branch delegates
+/// to [`quad_corner_sample`] one vertex at a time so the pre-existing lighting
+/// and AO values remain unchanged for ordinary cubes.
+fn quad_corner_samples(
+    view: &dyn ModelSectionView,
+    np: [i32; 3],
+    face: Face,
+    positions: &[[f32; 3]; 4],
+    centre_light: u8,
+) -> [(f32, u8); 4] {
+    let Some(weights) = partial_face_weights(face, positions) else {
+        return std::array::from_fn(|index| {
+            quad_corner_sample(view, np, face, positions[index], centre_light)
+        });
+    };
+
+    let samples = temp_corner_signs(face).map(|(su, sv)| {
+        quad_corner_sample(view, np, face, canonical_corner(face, su, sv), centre_light)
+    });
+    let mut output = [(1.0, centre_light); 4];
+    let mut logical = 0;
+    while logical < 4 {
+        let vertex = shape_output_remap(face)[logical];
+        let mut ao = 0.0;
+        let mut sky = 0.0;
+        let mut block = 0.0;
+        let mut sample = 0;
+        while sample < 4 {
+            let weight = weights[vertex][sample];
+            ao += samples[sample].0 * weight;
+            sky += f32::from(samples[sample].1 >> 4) * weight;
+            block += f32::from(samples[sample].1 & 0xF) * weight;
+            sample += 1;
+        }
+        output[vertex] = (
+            ao.clamp(0.0, 1.0),
+            (round_level(sky) << 4) | round_level(block),
+        );
+        logical += 1;
+    }
+    output
+}
+
 /// Mesh the non-cube geometry of a section, emitting each visible baked quad
 /// once, never merged. A boundary quad is culled when its `cullface` neighbour
 /// fully occludes it; a recognized inset face is additionally culled when its
@@ -962,15 +1295,16 @@ fn quad_corner_sample(
 /// # Smooth lighting and ambient occlusion
 ///
 /// Each vertex gets its own AO factor and smoothed light from
-/// [`quad_corner_sample`], keyed on the cell the quad's face opens into
-/// ([`ModelSectionView::face_light_at`]) and the vertex's own position within
-/// that face. The AO factor rides in the per-vertex `ao` slot alongside the
-/// constant per-face directional shade (multiplied together — see
-/// `emit_baked_quad`); the shader already multiplies `ao * light_term` per
-/// vertex in gamma space (`4e8f058`'s rule), so a finer-grained `ao` is a
-/// drop-in, no shader change needed. When the two AO values on one diagonal of
-/// a quad disagree, the quad is triangulated along the other diagonal
-/// (vanilla's anisotropy fix), matching `crate::mesh::emit_quad`.
+/// [`quad_corner_samples`], keyed on the cell the quad's face opens into
+/// ([`ModelSectionView::face_light_at`]) and the quad's actual shape. Full unit
+/// faces use [`quad_corner_sample`] directly; partial faces blend the same four
+/// corner samples by their in-plane extents. The AO factor rides in the
+/// per-vertex `ao` slot alongside the constant per-face directional shade
+/// (multiplied together — see `emit_baked_quad`); the shader already multiplies
+/// `ao * light_term` per vertex in gamma space, so finer-grained AO needs no
+/// shader change. When the two AO values on one diagonal of a quad disagree,
+/// the quad is triangulated along the other diagonal (the anisotropy fix),
+/// matching `crate::mesh::emit_quad`.
 ///
 /// The fluid path ([`mesh_fluids`]) stays flat by design — see its own docs.
 ///
@@ -1016,11 +1350,9 @@ pub fn mesh_models_layers(view: &dyn ModelSectionView) -> (ModelMesh, ModelMesh)
                 if quads.is_empty() {
                     continue;
                 }
-                // Per *block*, matching vanilla: `tesselateBlock` picks AO or
-                // flat once per block (`parts.getFirst().useAmbientOcclusion()`),
-                // not per quad, so every quad of a `"ambientocclusion": false`
-                // model (or, once light emission is threaded through, a torch or
-                // glowstone) renders flat together.
+                // Per *block*: the view picks AO or flat once per block, not per
+                // quad, so every quad of an `"ambientocclusion": false` model
+                // or a nonzero-emission state renders flat together.
                 let ao_enabled = view.ambient_occlusion_at(x, y, z);
                 // Vanilla's `state.isCollisionShapeFullBlock(level, pos)` clause
                 // of vanilla's block-model-lighter planarity check. We have no
@@ -1110,8 +1442,7 @@ pub fn mesh_models_layers(view: &dyn ModelSectionView) -> (ModelMesh, ModelMesh)
                     };
                     let corners = if ao_enabled {
                         let face = face_of_direction(quad.direction);
-                        [0, 1, 2, 3]
-                            .map(|i| quad_corner_sample(view, np, face, quad.positions[i], light))
+                        quad_corner_samples(view, np, face, &quad.positions, light)
                     } else {
                         // `tesselateFlat`: uniform light, no per-corner AO — the
                         // same fallback the fluid path uses.
@@ -2538,6 +2869,122 @@ mod tests {
              proves nothing. Got {:?}",
             control.vertices.iter().map(|v| v.ao).collect::<Vec<_>>()
         );
+    }
+
+    /// A partial top face must blend the four canonical corner samples by its
+    /// occupied rectangle. The deliberately nearest-corner calculation below
+    /// is the detector control: it produces a different value for the same
+    /// vertex and would have been the pre-fix mesh output.
+    #[test]
+    fn partial_face_lighting_uses_shape_weights_at_the_vertex_location() {
+        struct OneCornerShade;
+        impl ModelSectionView for OneCornerShade {
+            fn quads_at(&self, _x: usize, _y: usize, _z: usize) -> &[BakedQuad] {
+                &[]
+            }
+            fn occludes_at(&self, _x: i32, _y: i32, _z: i32) -> bool {
+                false
+            }
+            fn ao_occludes_at(&self, x: i32, y: i32, z: i32) -> bool {
+                [x, y, z] == [9, 9, 8]
+            }
+        }
+
+        let positions = [
+            [0.25, 1.0, 0.25],
+            [0.25, 1.0, 0.75],
+            [0.75, 1.0, 0.75],
+            [0.75, 1.0, 0.25],
+        ];
+        let view = OneCornerShade;
+        let weighted = quad_corner_samples(
+            &view,
+            [8, 9, 8],
+            Face::PosY,
+            &positions,
+            0xF0,
+        );
+
+        // The +X,+Z output vertex is 0.75 of the way toward both cube edges.
+        // Two of the four corner samples contain the one shade occluder (0.8)
+        // and the other two are bright (1.0), so the independent bilinear
+        // prediction is .8 * (.75) + 1.0 * (.25) = .85.
+        assert!((weighted[2].0 - 0.85).abs() < 1e-6, "got {:?}", weighted[2]);
+
+        // Negative control: the old nearest-corner rule sees only the first
+        // sample at this location. It must disagree with the shape-weighted
+        // result, proving the chosen geometry and occluder are observable.
+        let nearest = positions.map(|position| {
+            quad_corner_sample(&view, [8, 9, 8], Face::PosY, position, 0xF0)
+        });
+        assert!((nearest[2].0 - 0.8).abs() < 1e-6);
+        assert!(
+            (weighted[2].0 - nearest[2].0).abs() > 0.04,
+            "wrong nearest-corner control unexpectedly agrees: weighted={weighted:?} nearest={nearest:?}"
+        );
+    }
+
+    #[test]
+    fn full_face_lighting_keeps_the_nearest_corner_path_byte_exact() {
+        let view = SingleOccluder { at: [7, 9, 8] };
+        let quad = full_face(Direction::Up);
+        let old = quad.positions.map(|position| {
+            quad_corner_sample(&view, [8, 9, 8], Face::PosY, position, 0xF0)
+        });
+        let current = quad_corner_samples(
+            &view,
+            [8, 9, 8],
+            Face::PosY,
+            &quad.positions,
+            0xF0,
+        );
+        assert_eq!(current, old);
+    }
+
+    /// Every face orientation uses the same shape-weighted path. This control
+    /// exercises the rotated/corner-cut orientations independently of a GPU
+    /// projection: all four bilinear rows must conserve their complete sample
+    /// weight even when the face is inset on both axes.
+    #[test]
+    fn partial_face_weights_conserve_all_orientations() {
+        for face in Face::ALL {
+            let direction = match face {
+                Face::NegX => Direction::West,
+                Face::PosX => Direction::East,
+                Face::NegY => Direction::Down,
+                Face::PosY => Direction::Up,
+                Face::NegZ => Direction::North,
+                Face::PosZ => Direction::South,
+            };
+            let (fixed, plane) = face_plane(direction);
+            let (a, b) = match fixed {
+                0 => (1usize, 2usize),
+                1 => (0, 2),
+                _ => (0, 1),
+            };
+            let corner = |ca: f32, cb: f32| {
+                let mut p = [0.0; 3];
+                p[fixed] = plane;
+                p[a] = ca;
+                p[b] = cb;
+                p
+            };
+            let positions = [
+                corner(0.2, 0.35),
+                corner(0.2, 0.8),
+                corner(0.7, 0.8),
+                corner(0.7, 0.35),
+            ];
+            let weights = partial_face_weights(face, &positions)
+                .unwrap_or_else(|| panic!("inset face was not recognized: {face:?}"));
+            for (vertex, row) in weights.iter().enumerate() {
+                let total: f32 = row.iter().sum();
+                assert!(
+                    (total - 1.0).abs() < 1e-6,
+                    "{face:?} vertex {vertex} weights do not conserve: {row:?}"
+                );
+            }
+        }
     }
 
     #[test]
