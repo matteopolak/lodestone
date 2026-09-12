@@ -2198,6 +2198,91 @@ mod tests {
         }
     }
 
+    #[test]
+    fn armor_stand_base_plate_counter_rotates_with_the_entity() {
+        let models = EntityModelSet::load();
+        let mesh = models.get("armor_stand").expect("armor stand mesh");
+        let base_plate = mesh
+            .skeleton
+            .index_of("base_plate")
+            .expect("armor stand base plate");
+        let pose = lodestone_model::ArmorStandPose::VANILLA_DEFAULT;
+        let at = |yaw| {
+            EntityInstance::new(
+                "armor_stand",
+                mesh,
+                Vec3::new(5.0, 70.0, 5.0),
+                yaw,
+                1.0,
+                &AnimInput {
+                    armor_stand_pose: Some(pose),
+                    ..AnimInput::REST
+                },
+            )
+            .part_transforms[base_plate]
+        };
+        let facing_north = at(0.0);
+        let facing_east = at(90.0);
+        let max_delta = facing_north
+            .to_cols_array()
+            .into_iter()
+            .zip(facing_east.to_cols_array())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f32::max);
+        assert!(
+            max_delta < 1.0e-5,
+            "the world-facing base plate changed under a 90 degree body turn; max matrix delta={max_delta}"
+        );
+    }
+
+    #[test]
+    fn armor_stand_pose_culling_box_contains_every_posed_vertex() {
+        let models = EntityModelSet::load();
+        let mesh = models.get("armor_stand").expect("armor stand mesh");
+        let pose = lodestone_model::ArmorStandPose {
+            right_arm: lodestone_model::Vec3f::new(137.0, -23.0, 41.0),
+            left_leg: lodestone_model::Vec3f::new(-89.0, 17.0, -31.0),
+            ..lodestone_model::ArmorStandPose::VANILLA_DEFAULT
+        };
+        let inst = EntityInstance::new(
+            "armor_stand",
+            mesh,
+            Vec3::new(5.0, 70.0, 5.0),
+            37.0,
+            1.0,
+            &AnimInput {
+                armor_stand_pose: Some(pose),
+                ..AnimInput::REST
+            },
+        );
+        let rest_box = transformed_aabb(&inst.transform, mesh.local_min, mesh.local_max);
+        let differs_from_rest = (inst.aabb_min - rest_box.0).length() > 1.0e-3
+            || (inst.aabb_max - rest_box.1).length() > 1.0e-3;
+        assert!(
+            differs_from_rest,
+            "a discriminating non-rest pose must change the culling box; posed={:?}..{:?}, rest={:?}..{:?}",
+            inst.aabb_min,
+            inst.aabb_max,
+            rest_box.0,
+            rest_box.1
+        );
+        for (part, range) in mesh.parts.iter().enumerate() {
+            let transform = inst.part_transforms[part];
+            let start = range.vertex_start as usize;
+            let end = start + range.vertex_count as usize;
+            for vertex in &mesh.vertices[start..end] {
+                let world = transform.transform_point3(Vec3::from(vertex.position));
+                assert!(
+                    world.cmpge(inst.aabb_min - Vec3::splat(1.0e-4)).all()
+                        && world.cmple(inst.aabb_max + Vec3::splat(1.0e-4)).all(),
+                    "posed vertex {world:?} escaped armor-stand AABB {:?}..{:?}",
+                    inst.aabb_min,
+                    inst.aabb_max
+                );
+            }
+        }
+    }
+
     fn frustum_looking_down_pos_z() -> Frustum {
         use crate::camera::Camera;
         Camera {

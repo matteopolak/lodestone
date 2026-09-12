@@ -30,10 +30,10 @@
 //!
 //! The formulas are transcribed from the decompiled 26.2 client with the *state*
 //! we actually track: body/head rotation, walk phase and amplitude, attack
-//! progress and age. Vanilla's pose variations that depend on state we do not
-//! yet decode — swimming, crouching, riding, fall-flying, per-arm item poses,
-//! chicken wing flap speed — are deliberately absent rather than guessed. They
-//! slot into the same functions when the state arrives.
+//! progress, age, swim/crouch/riding state, fall-flying motion, and the
+//! per-entity item and armor-stand pose inputs. Chicken wing flap speed remains
+//! absent because the protocol does not currently provide its oscillator state;
+//! it is deliberately not guessed.
 //!
 //! One pose-setup **override** is ported rather than just the base families:
 //! the zombie family's raised arms ([`HumanoidArms::Zombie`]). It is not a
@@ -504,7 +504,7 @@ pub fn boat_hurt_roll_degrees(hurt: BoatHurt) -> f32 {
 /// This mirrors the subset of vanilla's per-entity render state that we track;
 /// it is deliberately a plain value type so posing is a pure function and can be
 /// unit-tested without a GPU, a world or a clock.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AnimInput {
     /// Head yaw **relative to the body**, in degrees, matching vanilla's own
     /// per-frame value of the same meaning.
@@ -524,6 +524,15 @@ pub struct AnimInput {
     /// Continuous age in ticks, driving idle bob, matching vanilla's own
     /// counter of the same meaning.
     pub age_ticks: f32,
+    /// Whether the player's cape model layer is enabled.
+    ///
+    /// Missing protocol customization data uses the visible default. The
+    /// render layer checks this before submitting cape geometry.
+    pub cape_visible: bool,
+    /// Whether the entity is currently in the fall-flying pose.
+    pub fall_flying: bool,
+    /// Per-tick motion in blocks, used to choose the fall-flying wing target.
+    pub motion: Vec3,
     /// Vanilla's aggressive-mob flag, which raises a zombie's arms from
     /// `-PI/2.25` to `-PI/1.5`.
     ///
@@ -639,6 +648,11 @@ pub struct AnimInput {
     /// this crate does take the skip, where the discarded terms provably have no
     /// such residue.
     pub armor_stand_pose: Option<lodestone_model::ArmorStandPose>,
+    /// Absolute body yaw in degrees for an armor stand's base plate.
+    ///
+    /// The plate counter-rotates against the whole-entity yaw so it remains
+    /// aligned to the world while the stand's body pose turns.
+    pub armor_stand_yaw_deg: f32,
     /// A vehicle's rocking state (vanilla's hurt triple), [`BoatHurt::REST`]
     /// for every entity that is not a boat, raft or minecart. Read by the boat
     /// placement, never by [`Skeleton::pose`] — see [`BoatHurt`].
@@ -654,6 +668,9 @@ impl AnimInput {
         limb_swing_amount: 0.0,
         attack_anim: 0.0,
         age_ticks: 0.0,
+        cape_visible: true,
+        fall_flying: false,
+        motion: Vec3::ZERO,
         aggressive: false,
         arm_pose: ArmPose::Empty,
         arm_pose_left_hand: false,
@@ -661,8 +678,15 @@ impl AnimInput {
         is_passenger: false,
         swim_amount: 0.0,
         armor_stand_pose: None,
+        armor_stand_yaw_deg: 0.0,
         boat_hurt: BoatHurt::REST,
     };
+}
+
+impl Default for AnimInput {
+    fn default() -> Self {
+        Self::REST
+    }
 }
 
 /// How a humanoid rig holds its arms for the item it is using — vanilla's
@@ -798,6 +822,7 @@ struct Slots {
     left_middle_front_leg: Option<usize>,
     right_wing: Option<usize>,
     left_wing: Option<usize>,
+    base_plate: Option<usize>,
     /// The three armour-stand-only parts vanilla's armour-stand pose setup drives
     /// from the *body* pose alongside `body` itself. No other model in the
     /// corpus declares them, so they resolve to `None` everywhere else and cost
@@ -850,6 +875,7 @@ impl Skeleton {
             left_middle_front_leg: find("left_middle_front_leg"),
             right_wing: find("right_wing"),
             left_wing: find("left_wing"),
+            base_plate: find("base_plate"),
             right_body_stick: find("right_body_stick"),
             left_body_stick: find("left_body_stick"),
             shoulder_stick: find("shoulder_stick"),
@@ -1377,7 +1403,7 @@ impl Skeleton {
         // a part's translation, so the crouch's `y` offsets and the attack
         // swing's arm orbit survive underneath exactly as they do there.
         if let Some(pose) = input.armor_stand_pose {
-            self.pose_armor_stand(poses, pose);
+            self.pose_armor_stand(poses, pose, input.armor_stand_yaw_deg);
         }
     }
 
@@ -1394,22 +1420,14 @@ impl Skeleton {
     /// lacking the sticks (any armour layer built on this rig) simply resolves
     /// those slots to `None`.
     ///
-    /// # What is deliberately not ported
-    ///
-    /// Vanilla's armour-stand pose setup also sets `basePlate.yRot = -state.yRot`,
-    /// cancelling the stand's body rotation so the plate stays world-aligned.
-    /// That needs the entity's **absolute** yaw, which [`AnimInput`] does not
-    /// carry — it holds head yaw *relative to the body*, by contract — and the
-    /// whole-entity yaw is applied downstream by
-    /// [`entity_model_matrix`](crate::entity::entity_model_matrix), outside this
-    /// module. So the plate rotates with the stand here where vanilla holds it
-    /// square. Left as a stated gap rather than approximated from the head yaw,
-    /// which is a different angle and would be wrong by exactly the amount the
-    /// head is turned.
-    ///
     /// Angles arrive in degrees (the wire's units, and the builder's) and are
     /// converted once, here, next to the model space that consumes them.
-    fn pose_armor_stand(&self, poses: &mut [PartPose], pose: lodestone_model::ArmorStandPose) {
+    fn pose_armor_stand(
+        &self,
+        poses: &mut [PartPose],
+        pose: lodestone_model::ArmorStandPose,
+        yaw_deg: f32,
+    ) {
         let s = &self.slots;
         // Named pairs, never a positional list: six same-typed triples in a row
         // is the shape a transposition survives every round trip, and the only
@@ -1433,6 +1451,9 @@ impl Skeleton {
                 poses[i].y_rot = rotation.y * DEG;
                 poses[i].z_rot = rotation.z * DEG;
             }
+        }
+        if let Some(i) = s.base_plate {
+            poses[i].y_rot = -yaw_deg * DEG;
         }
     }
 

@@ -182,6 +182,9 @@ pub(super) fn render_anim(
     swim_amount: f32,
     armor_stand_pose: Option<lodestone_model::ArmorStandPose>,
     boat_hurt: lodestone_render::entity_anim::BoatHurt,
+    cape_visible: bool,
+    fall_flying: bool,
+    motion: Vec3,
 ) -> AnimInput {
     let body = render_yaw(from, to, clock);
     let head = clamp_head_to_body(body, render_head_yaw(from, to, clock), MAX_HEAD_YAW);
@@ -199,7 +202,11 @@ pub(super) fn render_anim(
         is_passenger,
         swim_amount,
         armor_stand_pose,
+        armor_stand_yaw_deg: 0.0,
         boat_hurt,
+        cape_visible,
+        fall_flying,
+        motion,
     }
 }
 

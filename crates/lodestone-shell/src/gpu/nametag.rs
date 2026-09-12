@@ -835,6 +835,20 @@ fn entity_base_height(type_path: &str) -> f32 {
         .unwrap_or(FALLBACK_HEIGHT)
 }
 
+/// The vertical name anchor for one draw. Marker armor stands have no visible
+/// body height, so their name starts at the stand's feet instead of floating at
+/// the ordinary stand height.
+#[must_use]
+fn entity_name_height(draw: &EntityDraw) -> f32 {
+    if draw.type_path.as_ref() == "armor_stand"
+        && draw.armor_stand.is_some_and(|flags| flags.marker)
+    {
+        0.0
+    } else {
+        entity_base_height(&draw.type_path) * draw.scale
+    }
+}
+
 /// Turns one local rect into two triangles (six vertices, no index buffer) in
 /// world space, billboarded with the frame's shared `right`/`up` basis —
 /// every nametag this frame shares the same basis, matching vanilla's single
@@ -914,7 +928,7 @@ fn push_entity_quads(
         return;
     }
 
-    let height = entity_base_height(&draw.type_path) * draw.scale;
+    let height = entity_name_height(draw);
     let anchor = draw.feet + Vec3::new(0.0, height + ATTACHMENT_PADDING, 0.0);
 
     // `NameTag::text` is a real `Text` (`crate::entities`' tab-list/
@@ -1745,6 +1759,25 @@ mod tests {
     fn entity_base_height_matches_the_jvm_dump_for_a_discriminating_pair() {
         assert!((entity_base_height("chicken") - 0.7).abs() < 1e-3);
         assert!((entity_base_height("enderman") - 2.9).abs() < 1e-3);
+    }
+
+    #[test]
+    fn marker_armor_stand_name_anchor_uses_feet_and_normal_stand_keeps_height() {
+        let mut marker = named_pig(Text::literal("Marker"), true);
+        marker.type_path = std::sync::Arc::from("armor_stand");
+        marker.armor_stand = Some(lodestone_ecs::entity::ArmorStandFlags {
+            marker: true,
+            ..Default::default()
+        });
+        assert_eq!(entity_name_height(&marker), 0.0);
+
+        let mut ordinary = marker.clone();
+        ordinary.armor_stand = Some(Default::default());
+        assert!(entity_name_height(&ordinary) > 0.0);
+        assert_eq!(
+            entity_name_height(&ordinary),
+            entity_base_height("armor_stand") * ordinary.scale
+        );
     }
 
     /// A hermetic bitmap-font fixture with an explicit declared `height`

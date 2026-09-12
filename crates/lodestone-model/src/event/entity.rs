@@ -312,6 +312,10 @@ pub struct EntityMetadataUpdate {
     /// / invisible / glowing / fall-flying), when present. Bit meanings are
     /// stable across modern versions.
     pub flags: Option<u8>,
+    /// The optional player model-layer visibility byte, when present. Bit
+    /// `0x01` enables the cape layer; the remaining bits are other model-layer
+    /// toggles that this client does not currently consume.
+    pub player_model_customization: Option<u8>,
     /// The **living-entity** flags byte (using-item / which hand / spin attack),
     /// when present and when the entity is known to be a living entity. Decode
     /// through `lodestone_entity::metadata::LivingEntityFlags` (a downstream
@@ -790,6 +794,7 @@ impl EntityMetadataUpdate {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.flags.is_none()
+            && self.player_model_customization.is_none()
             && self.living_flags.is_none()
             && self.mob_flags.is_none()
             && self.armor_stand_flags.is_none()
@@ -1230,4 +1235,3 @@ pub struct PlayerListEntry {
     /// merge rule as the other per-action fields on this struct.
     pub hat_visible: Option<bool>,
 }
-

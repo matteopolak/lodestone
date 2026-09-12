@@ -44,16 +44,16 @@ invalid, rather than exposing a separate "just replace the texture" path. Custom
 
 ### Capes
 
-Cape visibility is not unconditional: it is driven by a per-player option
-(`DATA_PLAYER_MODE_CUSTOMISATION`'s "show cape" bit) that **this client does not yet decode for
-remote players**, so every remote player currently draws as if they always allow it. The mesh is
-posed off the wearer's own `body` part matrix — the same attach discipline armour uses (below) —
-and its sway is a real per-tick-lagged position, not a fixed plane: every tracked entity carries the
-lag state unconditionally (cheaper than gating it by render kind), chasing the entity's true
-position at a fixed fraction per tick and snapping instantly on a teleport-sized jump. Batched by
-cape **texture URL**, matching the skin key. **Elytra takes over the chest slot and suppresses the
-cape**: the cape draw and the elytra draw both gate on the identical "is the chest item literally
-`elytra`" check, and if the two predicates ever diverge a wearer can lose the cape and gain no wings.
+Cape visibility is driven by the per-player model-layer byte. Its cape bit reaches
+`AnimInput::cape_visible`; an unreported byte keeps the visible default, while an explicit clear
+skips cape submission before texture lookup. The mesh is posed off the wearer's own `body` part
+matrix — the same attach discipline armour uses (below) — and its sway is a real per-tick-lagged
+position, not a fixed plane: every tracked entity carries the lag state unconditionally (cheaper
+than gating it by render kind), chasing the entity's true position at a fixed fraction per tick and
+snapping instantly on a teleport-sized jump. Batched by cape **texture URL**, matching the skin
+key. **Elytra takes over the chest slot and suppresses the cape**: the cape draw and the elytra draw
+both gate on the identical "is the chest item literally `elytra`" check, and if the two predicates
+ever diverge a wearer can lose the cape and gain no wings.
 
 ### Third-person body
 
@@ -137,10 +137,10 @@ the fold must merge per-part rather than replace the whole pose, in wire order (
 same stand in one batch must not both read the same stale base). The extract step gates on the
 entity **type** (`armor_stand`), not the presence of a pose
 component — reading the component alone leaves every default-posed stand animating, the same
-island shape as any other "component absent ⇒ skip" mistake. Two small known gaps: the base plate
-should cancel the stand's own body yaw to stay screen-aligned but currently rotates with it (only
-head-relative yaw reaches that call site), and the rest-pose bounding box is a few degrees off
-since the default splay isn't baked into the skeleton the way a zombie's fixed arm angle is.
+island shape as any other "component absent ⇒ skip" mistake. The base plate receives the
+entity-level counter-rotation so it stays world-aligned, and culling uses the transformed vertices
+of the selected pose rather than a rest-only box. Marker stands also anchor names at their feet
+and are excluded from interaction targeting; ordinary stands retain the normal body-height anchor.
 
 ### Elytra
 
@@ -152,13 +152,16 @@ rotation is the left wing's with two of its three angles negated (mirror symmetr
 the model's reflection rather than a fact to memorise per port.
 
 The draw gate is the same "chest item is literally `elytra`" check the cape pass uses to suppress
-itself — the two predicates must never diverge. The texture is the jar's default sheet, or the
-wearer's own cape texture when they have one (vanilla prefers a player's cape sheet for elytra) —
-unwired currently, since that field does not exist yet on the remote-skin record. **The pose is
-presently always the "standing" resting triple** — correct while a wearer stands,
-walks or runs, visibly wrong mid-glide or mid-crouch (the wings should fold/spread further), since
-no per-tick lerped animation state exists yet and no fall-flying or crouch flag reaches the draw
-call at all. A known, disclosed first cut, not a discovered bug.
+itself — the two predicates must never diverge. The texture preference is an installed custom
+elytra sheet, then an installed visible cape sheet, then the built-in sheet. Profile parsing and
+the URL-keyed fetch/install path retain the custom elytra identity so the wing mesh binds it without
+confusing it with the base skin.
+
+The production draw receives fall-flying, crouching, and movement state through `AnimInput`.
+`elytra_target_rotations` chooses the deterministic branch (fall-flying takes precedence over
+crouching and descending motion changes the flight target), while the mirrored wing transform
+applies the target and crouch offset to each body attachment. Missing state remains the explicit
+rest/zero-motion default, so an unreported player does not inherit a stale transition.
 
 ## How to change it
 

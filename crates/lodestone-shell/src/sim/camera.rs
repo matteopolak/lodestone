@@ -771,6 +771,16 @@ impl Sim {
         } else {
             crate::remote_skins::request(&skin.url);
         }
+        // The body draw is synthetic rather than part of the extracted remote
+        // entity list, so its additional wearable sheets do not pass through
+        // `app::redraw`'s per-entity request collection. Route them here with
+        // the same idempotent URL cache as the skin itself.
+        if let Some(url) = skin.cape.as_deref() {
+            crate::remote_skins::request(url);
+        }
+        if let Some(url) = skin.elytra.as_deref() {
+            crate::remote_skins::request(url);
+        }
         crate::remote_skins::set_local(id, &skin);
         Some(skin)
     }
@@ -971,6 +981,15 @@ impl Sim {
             // one is the *arm-stroke* input, which reads the same interpolated
             // number but through `AnimInput` rather than `EntityDraw`.
             swim_amount: interp.swim_amount_o + (interp.swim_amount - interp.swim_amount_o) * partial_tick,
+            // The local body has no remote model-customization component, so
+            // the unreported state keeps the visible default.
+            cape_visible: true,
+            fall_flying: interp.fall_flying,
+            motion: glam::Vec3::new(
+                interp.velocity.x as f32,
+                interp.velocity.y as f32,
+                interp.velocity.z as f32,
+            ),
             // The local player is never an armour stand, and `None` here is the
             // field's own meaning of "not one" rather than a gap — see
             // `AnimInput::armor_stand_pose`. Stated explicitly, like `arm_pose`

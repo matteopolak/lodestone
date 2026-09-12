@@ -947,11 +947,16 @@ impl Sim {
         let search_limit = block_hit.map_or(ENTITY_REACH, |hit| hit.distance.min(ENTITY_REACH));
 
         let target = self.write(|w| {
-            let mut state = w.query::<(&Position, &EntityKind, &MinecraftEntityId)>();
+            let mut state = w.query::<(
+                &Position,
+                &EntityKind,
+                &MinecraftEntityId,
+                Option<&lodestone_ecs::entity::ArmorStandFlags>,
+            )>();
             let version = w.resource::<VersionData>();
             state
                 .iter(w)
-                .filter_map(|(pos, kind, id)| {
+                .filter_map(|(pos, kind, id, armor_stand)| {
                     let feet = Vec3d::new(pos.0.x, pos.0.y, pos.0.z);
                     // Cheap pre-filter before the exact ray-vs-box test: an
                     // entity whose *feet* are already further than the search
@@ -973,6 +978,11 @@ impl Sim {
                     // `crate::interact::entity_type_can_be_picked` for the
                     // kick, the citations and the eight override families.
                     if !crate::interact::entity_type_can_be_picked(&kind.0) {
+                        return None;
+                    }
+                    if kind.0.path() == "armor_stand"
+                        && armor_stand.is_some_and(|flags| flags.marker)
+                    {
                         return None;
                     }
                     let facts = version.entity_facts(&kind.0)?;

@@ -155,6 +155,19 @@ fn armor_stand_draw(feet: glam::Vec3, invisible: bool, name_tag: Option<NameTag>
     }
 }
 
+fn armor_stand_with_flags(
+    feet: glam::Vec3,
+    flags: lodestone_ecs::entity::ArmorStandFlags,
+) -> EntityDraw {
+    let mut draw = armor_stand_draw(feet, false, None);
+    draw.anim = AnimInput {
+        armor_stand_pose: Some(lodestone_model::ArmorStandPose::VANILLA_DEFAULT),
+        ..AnimInput::REST
+    };
+    draw.armor_stand = Some(flags);
+    draw
+}
+
 #[test]
 #[ignore = "requires a GPU adapter"]
 fn an_invisible_named_armor_stand_draws_no_body_but_still_draws_its_tag() {
@@ -248,4 +261,69 @@ fn an_invisible_named_armor_stand_draws_no_body_but_still_draws_its_tag() {
          the diff pixels are not accounted for by the tag alone, so the body-rect-only \
          assertion above may have gotten lucky rather than actually proving the body is gone"
     );
+}
+
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn armor_stand_base_plate_metadata_changes_only_the_feet_pixels() {
+    let ctx = GpuContext::new_headless_blocking().expect(
+        "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU — do NOT treat a skip as a pass",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let mut target = HeadlessTarget::new(device, W, H, format);
+    let state = RenderState::new(device, queue, format, W, H, None);
+    let camera = camera();
+    let feet = glam::Vec3::new(0.0, 0.0, 6.0);
+    let all_visible = armor_stand_with_flags(
+        feet,
+        lodestone_ecs::entity::ArmorStandFlags {
+            show_arms: true,
+            ..Default::default()
+        },
+    );
+    let no_base_plate = armor_stand_with_flags(
+        feet,
+        lodestone_ecs::entity::ArmorStandFlags {
+            show_arms: true,
+            no_base_plate: true,
+            ..Default::default()
+        },
+    );
+    let unchanged = armor_stand_with_flags(
+        feet,
+        lodestone_ecs::entity::ArmorStandFlags {
+            show_arms: true,
+            no_base_plate: false,
+            ..Default::default()
+        },
+    );
+
+    let mut shoot = |draw: &EntityDraw| -> (Vec<u8>, lodestone::gpu::RenderStats) {
+        let frame = target.acquire().expect("headless acquire");
+        let stats = state.render(
+            device,
+            queue,
+            frame.view(),
+            &camera,
+            None,
+            std::slice::from_ref(draw),
+        );
+        (target.read_texels(device, queue), stats)
+    };
+    let (all_visible_px, all_visible_stats) = shoot(&all_visible);
+    let (no_base_plate_px, no_base_plate_stats) = shoot(&no_base_plate);
+    let (unchanged_px, unchanged_stats) = shoot(&unchanged);
+    assert_eq!(all_visible_stats.entities_drawn, 1);
+    assert_eq!(no_base_plate_stats.entities_drawn, 1);
+    assert_eq!(unchanged_stats.entities_drawn, 1);
+    assert_eq!(all_visible_px, unchanged_px, "an explicit clear must preserve the base plate");
+
+    let bbox = diff_bbox(&all_visible_px, &no_base_plate_px, W)
+        .expect("no_base_plate must remove a visible base-plate pixel region");
+    eprintln!("base-plate metadata diff bbox: {bbox:?}");
+    assert!(bbox.4 >= 4, "base-plate diff is too small to identify the plate: {bbox:?}");
+    assert!(bbox.2 > H / 2, "base-plate diff escaped the feet half of the frame: {bbox:?}");
 }

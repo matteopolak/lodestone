@@ -53,7 +53,8 @@ use crate::entity::{
     DisplayBrightness, DisplayItem, DisplayItemContext, DisplayLeftRotation, DisplayLineWidth,
     DisplayRightRotation, DisplayScale, DisplayStyleFlags, DisplayText, DisplayTextOpacity,
     DisplayTranslation,
-    EntityFlags, EntityIndex, EntityKind, EntityUuid, Equipment, ExperienceOrbValue, TntFuse,
+    EntityFlags, EntityIndex, EntityKind, EntityUuid, Equipment, ExperienceOrbValue,
+    PlayerModelCustomization, TntFuse,
     FallingBlockState, HeadYaw, Health, HurtTime, ItemFrameRotation, Leashed, MinecraftEntityId,
     FireworkFlags, PaintingVariant, PlayerProfileName,
     MobState, OnGround,
@@ -974,6 +975,9 @@ pub fn apply_entity_metadata(
         let mut entity = commands.entity(entity);
         if let Some(flags) = metadata.flags {
             entity.insert(EntityFlags(flags));
+        }
+        if let Some(customization) = metadata.player_model_customization {
+            entity.insert(PlayerModelCustomization(customization));
         }
         // `Reported::Reported(_)` — including `Reported(None)` — is the server
         // speaking about the field, so the component appears (possibly empty).

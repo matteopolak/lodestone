@@ -587,8 +587,8 @@ impl RenderState {
         // The elytra wings — the layer the cape pass suppresses itself for,
         // over the same instances and for the same reason as everything
         // above: no buffer creation mid-pass. See
-        // `RenderState::prepare_elytra`'s doc, including why its pose is the
-        // resting triple for every wearer until the animation state lands.
+        // `RenderState::prepare_elytra`'s doc, including how its target is
+        // selected from fall-flying, crouching, and movement state.
         let elytra_batches = self.prepare_elytra(device, queue, camera, entities, &mut stats);
 
         // Paintings, over the same entity slice and for the same reason as

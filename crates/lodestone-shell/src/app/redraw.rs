@@ -1195,7 +1195,10 @@ impl WindowApp {
                     entity_draws
                         .iter()
                         .filter_map(|draw| draw.player_skin.as_ref()?.cape.as_deref()),
-                ),
+                )
+                .chain(entity_draws.iter().filter_map(|draw| {
+                    draw.player_skin.as_ref()?.elytra.as_deref()
+                })),
         );
         render.install_pending_player_skins(device, queue);
         // Extraction lives in `Sim` because resolving each particle's light
