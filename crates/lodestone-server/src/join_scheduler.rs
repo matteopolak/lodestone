@@ -105,6 +105,8 @@ use crate::chunk::{ChunkColumn, ChunkGenerationStage, ChunkSource};
 use crate::protocol::{ChunkEncodeError, ChunkEncoder, ServerDirective};
 use crate::server::{JoinTrace, SourceRef};
 
+mod join_order;
+
 /// What one pipeline slot hands back: either the wire bytes, already encoded on
 /// the worker that generated the column, or the column itself for a caller with
 /// no off-task encoder.
@@ -178,7 +180,7 @@ const YAW_SECTORS: f32 = 16.0;
 /// ring walk it replaced.
 #[must_use]
 fn ring_distance(centre: (i32, i32), coord: (i32, i32)) -> i32 {
-    (coord.0 - centre.0).abs().max((coord.1 - centre.1).abs())
+    join_order::ring_distance(centre, coord)
 }
 
 /// This module's own generation priority, expressed as a `crate::ticket`
@@ -234,22 +236,7 @@ pub(crate) const fn ticket_level_for_ring(base_level: i32, ring: i32) -> i32 {
 /// either way.
 #[must_use]
 fn in_frustum(centre: (i32, i32), yaw_degrees: f32, coord: (i32, i32)) -> bool {
-    if ring_distance(centre, coord) <= 1 {
-        return true;
-    }
-    let yaw = yaw_degrees.to_radians();
-    // Minecraft's yaw: 0 looks towards +Z, 90 towards −X.
-    let (fx, fz) = (-yaw.sin(), yaw.cos());
-    let (dx, dz) = (
-        (coord.0 - centre.0) as f32,
-        (coord.1 - centre.1) as f32,
-    );
-    let len = (dx * dx + dz * dz).sqrt();
-    if len == 0.0 {
-        return true;
-    }
-    let cosine = (fx * dx + fz * dz) / len;
-    cosine >= FRUSTUM_HALF_ANGLE_DEGREES.to_radians().cos()
+    join_order::in_frustum(centre, yaw_degrees, coord)
 }
 
 /// The pending-column ordering: **distance first, in-frustum bonus second**.
@@ -278,20 +265,14 @@ fn priority_key(
     coord: (i32, i32),
     given_index: u32,
 ) -> (i32, u8, u32) {
-    let (ring, penalty) = distance_and_penalty(centre, facing, coord);
-    (ring, penalty, given_index)
+    join_order::priority_key(centre, facing, coord, given_index)
 }
 
 /// [`priority_key`]'s first two components, which are the ordering proper — the
 /// third is only a tie-break, and a caller with no "given order" needs its own.
 #[must_use]
 fn distance_and_penalty(centre: (i32, i32), facing: Option<f32>, coord: (i32, i32)) -> (i32, u8) {
-    let penalty = match facing {
-        Some(yaw) if in_frustum(centre, yaw, coord) => 0,
-        Some(_) => 1,
-        None => 0,
-    };
-    (ring_distance(centre, coord), penalty)
+    join_order::distance_and_penalty(centre, facing, coord)
 }
 
 /// [`priority_key`] for a caller ordering a *set* rather than draining a queue —
@@ -308,8 +289,7 @@ pub(crate) fn view_order_key(
     facing: Option<f32>,
     coord: (i32, i32),
 ) -> (i32, u8, i32, i32) {
-    let (ring, penalty) = distance_and_penalty(centre, facing, coord);
-    (ring, penalty, coord.0, coord.1)
+    join_order::view_order_key(centre, facing, coord)
 }
 
 /// How a [`ColumnQueue`] decides what to hand out next.
