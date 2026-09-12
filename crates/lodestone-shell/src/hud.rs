@@ -22,6 +22,7 @@ mod font;
 pub(crate) mod item_icon;
 pub mod locator;
 mod tab_panel;
+mod toasts;
 pub mod vanilla_font;
 
 pub use font::glyph_rows;
@@ -32,6 +33,7 @@ use tab_panel::{
     TAB_SCREEN_INSET, TAB_TOP,
 };
 pub use vanilla_font::VanillaFont;
+use toasts::{draw_advancement_toast, draw_friends_toast, draw_recipe_toast};
 /// The hotbar's per-slot draw record. The container screen builds the same
 /// record for every menu slot, so the type itself lives in [`item_icon`]; this
 /// is the name the hotbar has always used for it.
@@ -1118,22 +1120,12 @@ const FLOATS_PER_VERTEX: usize = 6;
 /// so the existing colour pipeline is untouched.
 pub(crate) const SPRITE_FLOATS_PER_VERTEX: usize = 8;
 
-/// Vanilla's `recipe.toast.title` (`assets/minecraft/lang/en_us.json`, read
-/// from the real `client.jar` rather than transcribed from memory — note the
-/// parenthesised plural, which a paraphrase loses).
+/// Toast-local strings and sprites are kept as public HUD constants because
+/// the app layer owns queueing and supplies the corresponding view records.
 pub const RECIPE_TOAST_TITLE: &str = "New Recipe(s) Unlocked!";
-/// Vanilla's `recipe.toast.description`, same source.
 pub const RECIPE_TOAST_DESCRIPTION: &str = "Check your recipe book";
-/// `RecipeToast.BACKGROUND_SPRITE` — `toast/recipe`,
-/// which really is present in 26.2's GUI atlas
-/// (`assets/minecraft/textures/gui/sprites/toast/recipe.png`), so the sprite
-/// path is reachable rather than permanently falling back.
 pub const RECIPE_TOAST_SPRITE: &str = "toast/recipe";
-/// Friends service toast background. A missing GUI-atlas sprite falls back to
-/// the same opaque dark plate used by [`FriendsToastView`]'s draw path.
 pub const FRIENDS_TOAST_SPRITE: &str = "friends/toast_background";
-/// `ToastManager`'s slide duration in milliseconds — the bare `600L` at
-/// vanilla's own toast-manager type (it has no named constant there).
 pub const RECIPE_TOAST_SLIDE_MS: u64 = 600;
 
 /// One recipe-unlock toast to draw this frame, resolved from
@@ -4278,101 +4270,6 @@ fn draw_chat_hover_tooltip(b: &mut Builder, tooltip: &ChatHoverTooltip) {
             1.0,
             [1.0, 1.0, 1.0],
             1.0,
-        );
-    }
-}
-
-fn draw_recipe_toast(b: &mut Builder, toast: &RecipeToastView) {
-    let (tx, ty, tw, th) = recipe_toast_rect(b.w, toast.visible_portion);
-
-    // `blitSprite(BACKGROUND_SPRITE, 0, 0, width(), height())`
-    //.
-    let quads = b.gui_geometry(RECIPE_TOAST_SPRITE, tx, ty, tw, th);
-    if quads.is_empty() {
-        // Jar-less: vanilla's toast art is an opaque light panel, so a flat
-        // fill keeps the text legible rather than leaving it on the world.
-        b.rect_px(tx, ty, tw, th, [0.86, 0.86, 0.86, 1.0]);
-    } else {
-        for q in quads {
-            b.push_sprite_quad(q, [1.0, 1.0, 1.0, 1.0]);
-        }
-    }
-
-    // `-11534256 == 0xFF500050` and `-16777216 == 0xFF000000`
-    //. Unscaled, and unshadowed (the trailing
-    // `false`).
-    const TITLE_COLOUR: [f32; 4] = [0x50 as f32 / 255.0, 0.0, 0x50 as f32 / 255.0, 1.0];
-    const DESCRIPTION_COLOUR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
-    b.text(RECIPE_TOAST_TITLE, tx + 30.0, ty + 7.0, 1.0, TITLE_COLOUR);
-    b.text(
-        RECIPE_TOAST_DESCRIPTION,
-        tx + 30.0,
-        ty + 18.0,
-        1.0,
-        DESCRIPTION_COLOUR,
-    );
-
-    // The station badge is drawn under `pose().scale(0.6)`, which scales the
-    // *position* as well as the size — so `fakeItem(categoryItem, 3, 3)` lands
-    // at `(1.8, 1.8)` with a `9.6px` icon, not at `(3, 3)` with a small one.
-    // Transcribing this as `(3, 3)` is the same class of mistake as reading a
-    // Java record's positional fields in the wrong order.
-    const ICON: f32 = 16.0;
-    const STATION_SCALE: f32 = 0.6;
-    b.item_icon(
-        &toast.station,
-        tx + 3.0 * STATION_SCALE,
-        ty + 3.0 * STATION_SCALE,
-        ICON * STATION_SCALE,
-    );
-    // `fakeItem(unlockedItem, 8, 8)`, unscaled.
-    b.item_icon(&toast.unlocked, tx + 8.0, ty + 8.0, ICON);
-}
-
-/// Draw one advancement-completion toast. Cited on [`AdvancementToastView`].
-fn draw_advancement_toast(b: &mut Builder, toast: &AdvancementToastView) {
-    let (tx, ty, tw, th) = recipe_toast_rect(b.w, toast.visible_portion);
-
-    let quads = b.gui_geometry(ADVANCEMENT_TOAST_SPRITE, tx, ty, tw, th);
-    if quads.is_empty() {
-        // Jar-less: vanilla's advancement toast art is a dark plate with a light
-        // border, so a dark fill keeps the yellow heading and white title legible.
-        b.rect_px(tx, ty, tw, th, [0.05, 0.05, 0.08, 0.94]);
-    } else {
-        for q in quads {
-            b.push_sprite_quad(q, [1.0, 1.0, 1.0, 1.0]);
-        }
-    }
-
-    b.text(&toast.heading, tx + 30.0, ty + 7.0, 1.0, toast.heading_colour);
-    b.text(&toast.title, tx + 30.0, ty + 18.0, 1.0, [1.0, 1.0, 1.0, 1.0]);
-    if let Some(icon) = &toast.icon {
-        // `fakeItem(iconItem, 8, 8)`, unscaled.
-        b.item_icon(icon, tx + 8.0, ty + 8.0, 16.0);
-    }
-}
-
-fn draw_friends_toast(b: &mut Builder, toast: &FriendsToastView) {
-    let (tx, ty, tw, _) = recipe_toast_rect(b.w, toast.visible_portion);
-    let lines = b.wrap_legacy(&toast.message, tw - 7.0 - 4.0, 1.0);
-    let content_h = lines.len().max(2) as f32 * 11.0;
-    let th = 7.0 + content_h + 3.0;
-    let quads = b.gui_geometry(FRIENDS_TOAST_SPRITE, tx, ty, tw, th);
-    if quads.is_empty() {
-        b.rect_px(tx, ty, tw, th, [0.05, 0.05, 0.08, 0.94]);
-    } else {
-        for quad in quads {
-            b.push_sprite_quad(quad, [1.0, 1.0, 1.0, 1.0]);
-        }
-    }
-    let text_y = ty + 7.0 + (content_h - lines.len() as f32 * 11.0) * 0.5;
-    for (index, line) in lines.iter().enumerate() {
-        b.text(
-            line,
-            tx + 7.0,
-            text_y + index as f32 * 11.0,
-            1.0,
-            [1.0, 1.0, 1.0, 1.0],
         );
     }
 }

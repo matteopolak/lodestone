@@ -6,7 +6,8 @@ The game HUD: the bottom-centre vitals cluster (hotbar, XP bar, hearts, hunger, 
 action bar), the vitals' cosmetic animations, the Tab player-list overlay, the scoreboard sidebar, and
 the held-item name tooltip. Unlike the menu screens (see [`ui-framework.md`](./ui-framework.md)), the
 HUD is not a widget tree — it is rebuilt fresh from live game state every frame, so its layout is a set
-of pure functions of that state rather than a set of persistent objects with their own lifecycle.
+of pure functions of that state rather than a set of persistent objects with their own lifecycle. Short-
+lived recipe, advancement, and Friends notifications use a shared toast draw pass.
 
 ## How it works
 
@@ -192,8 +193,8 @@ should be added.
 
 ## Dependencies
 
-- `crates/lodestone-shell/src/hud.rs` and `hud/{anim,tab_panel,vanilla_font,item_icon}.rs` — layout,
-  Tab geometry, animation state machines, and the vanilla font draw path.
+- `crates/lodestone-shell/src/hud.rs` and `hud/{anim,tab_panel,toasts,vanilla_font,item_icon}.rs` — layout,
+  Tab geometry, toast rendering, animation state machines, and the vanilla font draw path.
 - `crates/lodestone-shell/src/tablist.rs`, `scoreboard.rs` — the tab-list and sidebar projections.
 - `lodestone-game` — `tablist::TabList`, `scoreboard::Scoreboard`, `player_state::HeldItemHighlight`,
   the folded state every projection above reads.
