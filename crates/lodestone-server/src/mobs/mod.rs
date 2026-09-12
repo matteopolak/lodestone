@@ -439,6 +439,7 @@ mod handle;
 pub use handle::{LiveMobSource, MobHandle};
 mod sim_config_spawn;
 mod sim_tick;
+mod sim_tick_perception;
 mod sim_interactions;
 mod sim_combat;
 mod sim_spawning;
