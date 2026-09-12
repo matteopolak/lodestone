@@ -312,20 +312,43 @@ enum QueueOrder {
 /// Pops from the back of `pending`, so `pending` is always stored worst-first.
 #[derive(Debug)]
 pub(crate) struct ColumnQueue {
-    /// `(coord, given_index)`, worst priority first: [`pop`](Self::pop) takes the
-    /// last element.
-    pending: Vec<((i32, i32), u32)>,
+    /// `(request, given_index)`, worst priority first: [`pop`](Self::pop) takes
+    /// the last element. The explicit full flag is what lets a band-crossing
+    /// upgrade share this queue without sending a second, accidentally shaped
+    /// copy of a coordinate that was already pending.
+    pending: Vec<(QueuedColumn, u32)>,
     order: QueueOrder,
+}
+
+/// One coordinate waiting for the generation worker.
+///
+/// Ordinary entries follow the pipeline's moving generation band. An upgrade
+/// entry pins the request to [`ChunkGenerationStage::Full`], even when its
+/// coordinate was originally queued as a far, shaped column. Keeping this bit
+/// on the queue entry (rather than on a second queue) preserves one ordering and
+/// one flow-control path for both kinds of packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QueuedColumn {
+    coord: (i32, i32),
+    force_full: bool,
 }
 
 impl ColumnQueue {
     /// A queue that hands `coords` back in exactly the order given.
     #[must_use]
     pub(crate) fn as_given(coords: Vec<(i32, i32)>) -> Self {
-        let mut pending: Vec<((i32, i32), u32)> = coords
+        let mut pending: Vec<(QueuedColumn, u32)> = coords
             .into_iter()
             .enumerate()
-            .map(|(i, c)| (c, u32::try_from(i).unwrap_or(u32::MAX)))
+            .map(|(i, coord)| {
+                (
+                    QueuedColumn {
+                        coord,
+                        force_full: false,
+                    },
+                    u32::try_from(i).unwrap_or(u32::MAX),
+                )
+            })
             .collect();
         pending.reverse();
         Self {
@@ -413,9 +436,9 @@ impl ColumnQueue {
             .map(|&(_, i)| i)
             .max()
             .map_or(0, |max| max.saturating_add(1));
-        let mut appended: Vec<((i32, i32), u32)> = Vec::with_capacity(coords.len());
+        let mut appended: Vec<(QueuedColumn, u32)> = Vec::with_capacity(coords.len());
         for coord in coords {
-            appended.push((coord, index));
+            appended.push((QueuedColumn { coord, force_full: false }, index));
             index = index.saturating_add(1);
         }
         // `pending` is stored worst-first and `pop` takes the last element, so
@@ -424,6 +447,48 @@ impl ColumnQueue {
         appended.reverse();
         self.pending.splice(0..0, appended);
         self.sort();
+    }
+
+    /// Appends explicit full-generation requests, upgrading a matching pending
+    /// entry in place. A coordinate already being generated is left in flight;
+    /// the new full entry is then sent after it, so the client still ends at the
+    /// highest requested stage without making the worker pool cancellable.
+    pub(crate) fn extend_full(&mut self, coords: Vec<(i32, i32)>) -> usize {
+        if coords.is_empty() {
+            return 0;
+        }
+        let mut index = self
+            .pending
+            .iter()
+            .map(|&(_, i)| i)
+            .max()
+            .map_or(0, |max| max.saturating_add(1));
+        let mut appended = Vec::new();
+        for coord in coords {
+            if let Some((entry, _)) = self
+                .pending
+                .iter_mut()
+                .find(|(entry, _)| entry.coord == coord)
+            {
+                entry.force_full = true;
+                continue;
+            }
+            appended.push((
+                QueuedColumn {
+                    coord,
+                    force_full: true,
+                },
+                index,
+            ));
+            index = index.saturating_add(1);
+        }
+        let added = appended.len();
+        // `pending` is worst-first and `pop` takes the last element. Preserve
+        // the caller's deterministic upgrade order within equal priorities.
+        appended.reverse();
+        self.pending.splice(0..0, appended);
+        self.sort();
+        added
     }
 
     /// Drops every still-pending column in `dropped`, returning how many went.
@@ -435,13 +500,24 @@ impl ColumnQueue {
             return 0;
         }
         let before = self.pending.len();
-        self.pending.retain(|&(coord, _)| !dropped.contains(&coord));
+        self.pending
+            .retain(|&(entry, _)| !dropped.contains(&entry.coord));
         before - self.pending.len()
     }
 
     /// The next column to generate, or `None` when the queue is empty.
+    #[cfg(test)]
     pub(crate) fn pop(&mut self) -> Option<(i32, i32)> {
-        self.pending.pop().map(|(coord, _)| coord)
+        self.pop_request().map(|(coord, _)| coord)
+    }
+
+    /// Removes and returns the next coordinate together with its explicit-stage
+    /// bit. The coordinate-only [`pop`](Self::pop) remains for queue tests and
+    /// callers that do not need to inspect the worker request.
+    fn pop_request(&mut self) -> Option<((i32, i32), bool)> {
+        self.pending
+            .pop()
+            .map(|(entry, _)| (entry.coord, entry.force_full))
     }
 
     /// The best pending coordinate without handing it to a worker.
@@ -451,8 +527,17 @@ impl ColumnQueue {
     /// deterministic queue instead of popping it and having to reconstruct its
     /// priority metadata after backpressure.
     #[must_use]
+    #[cfg(test)]
     pub(crate) fn peek(&self) -> Option<(i32, i32)> {
-        self.pending.last().map(|&(coord, _)| coord)
+        self.peek_request().map(|(coord, _)| coord)
+    }
+
+    /// The best pending coordinate and its explicit full-generation bit.
+    #[must_use]
+    fn peek_request(&self) -> Option<((i32, i32), bool)> {
+        self.pending
+            .last()
+            .map(|&(entry, _)| (entry.coord, entry.force_full))
     }
 
     /// How many columns have not been handed out yet.
@@ -469,7 +554,8 @@ impl ColumnQueue {
         // reversed key would need a negation that `u32` cannot express, so the
         // comparison is reversed instead.
         self.pending.sort_unstable_by(|a, b| {
-            priority_key(centre, facing, b.0, b.1).cmp(&priority_key(centre, facing, a.0, a.1))
+            priority_key(centre, facing, b.0.coord, b.1)
+                .cmp(&priority_key(centre, facing, a.0.coord, a.1))
         });
     }
 }
@@ -616,9 +702,12 @@ pub struct ColumnPipeline<S> {
     /// order they finish in. Pairing them here (rather than indexing a `coords`
     /// vector) is what lets the spawn order itself be dynamic.
     #[cfg(not(target_arch = "wasm32"))]
-    inflight: VecDeque<((i32, i32), crate::worldgen_dispatch::DispatchHandle<Result<ColumnPayload, ChunkEncodeError>>)>,
+    inflight: VecDeque<(
+        ((i32, i32), ChunkGenerationStage),
+        crate::worldgen_dispatch::DispatchHandle<Result<ColumnPayload, ChunkEncodeError>>,
+    )>,
     #[cfg(target_arch = "wasm32")]
-    inflight: VecDeque<((i32, i32), ColumnPayload)>,
+    inflight: VecDeque<((i32, i32), ChunkGenerationStage, ColumnPayload)>,
 }
 
 impl<S> std::fmt::Debug for ColumnPipeline<S> {
@@ -779,6 +868,15 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
         self.queue.extend(coords);
     }
 
+    /// Enqueues columns that have crossed into the complete-generation band.
+    /// They share the queue, worker budget, and wire flow-control path with
+    /// newly visible columns, but their job stage is pinned to `Full` even when
+    /// the moving band changes again before the worker starts.
+    pub(crate) fn enqueue_full(&mut self, coords: Vec<(i32, i32)>) {
+        let added = self.queue.extend_full(coords);
+        self.total += added;
+    }
+
     /// Withdraws still-pending columns the client has been told to forget,
     /// returning how many were withdrawn.
     ///
@@ -848,14 +946,18 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
         // time-to-first-chunk fix. See the module doc.
         let target = if self.primed { self.window } else { 1 };
         while self.inflight.len() < target {
-            let Some((cx, cz)) = self.queue.peek() else {
+            let Some(((cx, cz), force_full)) = self.queue.peek_request() else {
                 break;
             };
             let source = Arc::clone(&self.source);
             let dimension = source
                 .dimension()
                 .unwrap_or(crate::dimension::Dimension::Overworld);
-            let stage = self.generation_stage_for((cx, cz));
+            let stage = if force_full {
+                ChunkGenerationStage::Full
+            } else {
+                self.generation_stage_for((cx, cz))
+            };
             // **Protocol encode happens here, on the worker, not on the caller's
             // task** — that is the whole point of `encoder`. The column is dropped
             // inside the closure, so the connection task never even sees the
@@ -899,16 +1001,19 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
                     continue;
                 }
             };
-            let popped = self.queue.pop();
-            debug_assert_eq!(popped, Some((cx, cz)));
-            self.inflight.push_back(((cx, cz), result));
+            let popped = self.queue.pop_request();
+            debug_assert_eq!(popped, Some(((cx, cz), force_full)));
+            self.inflight.push_back((((cx, cz), stage), result));
         }
-        let (pos, handle) = self
-            .inflight
-            .front_mut()
-            .expect("the top-up above spawns at least one column while any remain");
-        let pos = *pos;
-        let payload = handle.await.expect("worldgen Rayon worker panicked")?;
+        let (pos, payload) = {
+            let ((pos, _stage), handle) = self
+                .inflight
+                .front_mut()
+                .expect("the top-up above spawns at least one column while any remain");
+            let pos = *pos;
+            let payload = handle.await.expect("worldgen Rayon worker panicked")?;
+            (pos, payload)
+        };
         self.inflight.pop_front();
         self.emitted += 1;
         self.primed = true;
@@ -921,10 +1026,15 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
         if self.remaining() == 0 {
             return Ok(None);
         }
-        let Some((cx, cz)) = self.queue.pop() else {
+        let Some(((cx, cz), force_full)) = self.queue.pop_request() else {
             return Ok(None);
         };
-        let column = self.source.column_at(cx, cz, self.generation_stage_for((cx, cz)));
+        let stage = if force_full {
+            ChunkGenerationStage::Full
+        } else {
+            self.generation_stage_for((cx, cz))
+        };
+        let column = self.source.column_at(cx, cz, stage);
         if let Some(trace) = self.trace.as_ref() {
             trace.mark("generated", cx, cz);
         }
@@ -1012,16 +1122,48 @@ impl<S: ChunkSource + 'static> JoinChunkStream<S> {
         }
     }
 
+    /// Hands explicit full-generation upgrades to the same windowed pipeline
+    /// used for ordinary view additions. The ringed arm cannot retain a
+    /// borrowed source across the loop, so its caller takes the bounded
+    /// fallback path instead.
+    pub(crate) fn enqueue_full(&mut self, coords: Vec<(i32, i32)>) {
+        if let Self::Windowed(pipeline) = self {
+            pipeline.enqueue_full(coords);
+        }
+    }
+
     /// Withdraws still-pending columns the client has been told to forget — see
     /// [`ColumnPipeline::cancel`], which owns the reasoning and the in-flight caveat.
     ///
-    /// A no-op on the [`Ringed`](Self::Ringed) arm, whose unit of work is a whole
-    /// ring: withdrawing one column would split a batch that arm exists to keep
-    /// intact, and it serves the `&S`-shaped tests where nothing moves.
+    /// The ringed arm removes pending and already-buffered entries in place.
+    /// Its generation is synchronous, so there is no worker result to cancel;
+    /// filtering here prevents a borrowed-source stream from re-sending a
+    /// column that a movement update has already forgotten or upgraded.
     pub(crate) fn cancel(&mut self, dropped: &std::collections::HashSet<(i32, i32)>) -> usize {
         match self {
             Self::Windowed(pipeline) => pipeline.cancel(dropped),
-            Self::Drained | Self::Ringed { .. } => 0,
+            Self::Drained => 0,
+            Self::Ringed {
+                rings,
+                ready,
+                remaining,
+            } => {
+                if dropped.is_empty() {
+                    return 0;
+                }
+                let before = *remaining;
+                for ring in rings.iter_mut() {
+                    ring.retain(|coord| !dropped.contains(coord));
+                }
+                ready.retain(|(coord, _)| !dropped.contains(coord));
+                let after = rings.iter().map(Vec::len).sum::<usize>() + ready.len();
+                *remaining = after;
+                let removed = before.saturating_sub(after);
+                if *remaining == 0 {
+                    *self = Self::Drained;
+                }
+                removed
+            }
         }
     }
 
@@ -1974,6 +2116,61 @@ mod tests {
                 ((0, 0), ChunkGenerationStage::Shaped),
             ],
             "the near band must follow the current player chunk instead of the join chunk"
+        );
+    }
+
+    /// A column that is already waiting in the shaped queue must be promoted in
+    /// place when the player enters its complete-generation band. This is the
+    /// boundary case that matters for a moving view: adding a second request for
+    /// the same coordinate would let the old shaped payload overtake the full
+    /// one, while dropping the queued entry would leave a hole in the stream.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pending_far_column_is_promoted_to_full_without_duplication() {
+        let source = Arc::new(StageRecordingSource {
+            requests: Mutex::new(Vec::new()),
+        });
+        let mut pipeline = ColumnPipeline::prioritised(
+            Arc::clone(&source),
+            vec![(0, 0), (2, 0)],
+            1,
+            (0, 0),
+            None,
+        )
+        .with_generation_band((0, 0), 0);
+
+        // The first column is the only one generated before the player moves.
+        assert_eq!(
+            pipeline
+                .next()
+                .await
+                .expect("stage-recording source cannot fail")
+                .expect("the centre column must be emitted")
+                .0,
+            (0, 0)
+        );
+
+        // The far column is still pending. Promote it explicitly, as
+        // ViewTracker does when it crosses from shaped to full.
+        pipeline.enqueue_full(vec![(2, 0)]);
+        assert_eq!(pipeline.remaining(), 1, "promotion must not duplicate work");
+        assert_eq!(
+            pipeline
+                .next()
+                .await
+                .expect("stage-recording source cannot fail")
+                .expect("the promoted column must be emitted")
+                .0,
+            (2, 0)
+        );
+        assert!(pipeline.next().await.expect("stream cannot fail").is_none());
+
+        assert_eq!(
+            *source.requests.lock().expect("stage request log lock poisoned"),
+            vec![
+                ((0, 0), ChunkGenerationStage::Full),
+                ((2, 0), ChunkGenerationStage::Full),
+            ],
+            "a queued far column must be regenerated exactly once at the promoted stage"
         );
     }
 
