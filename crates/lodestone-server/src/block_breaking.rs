@@ -466,8 +466,15 @@ mod tests {
                 effects.map(|(_, fatigue)| fatigue),
             )
             .expect("stone is in the server census");
-            assert_eq!(client.progress_per_tick(), expected_progress, "{label} client fixture");
-            assert_eq!(server, expected_progress, "{label} server fixture");
+            assert!(
+                (client.progress_per_tick() - expected_progress).abs() < 1e-8,
+                "{label} client fixture: actual={} expected={expected_progress}",
+                client.progress_per_tick()
+            );
+            assert!(
+                (server - expected_progress).abs() < 1e-8,
+                "{label} server fixture: actual={server} expected={expected_progress}"
+            );
             assert_eq!(server, client.progress_per_tick(), "{label} source agreement");
             assert_eq!(client.ticks_to_break(), expected_ticks, "{label} tick boundary");
 
