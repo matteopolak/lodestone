@@ -1,6 +1,11 @@
 use super::*;
 
 impl MenuNav {
+    /// The World Creation screen. Every key is routed through
+    /// [`crate::menu::create_world::CreateWorldNav::handle_key`], which
+    /// already implements vanilla's `Screen.keyPressed` order (Escape, then
+    /// the focused field, then Tab/arrow navigation, then Enter on whatever
+    /// is focused) — this arm only decides what leaving the screen means.
     fn key_create_world(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         let outcome = self.create_world.handle_key(key);
         self.apply_create_world(ui, outcome)
@@ -1149,11 +1154,4 @@ impl MenuNav {
         self.persist_options();
     }
 
-    /// The account list: entirely delegated to [`accounts::AccountsNav`],
-    /// which owns the row highlight, the scroll window and the sign-in state
-    /// machine. This arm's only job is translating its
-    /// [`accounts::AccountsSignal::Back`] into leaving the screen — every
-    /// other outcome (selecting an account, starting/cancelling a sign-in,
-    /// removing an account) is a self-contained mutation `AccountsNav`
-    /// already applied by the time this returns.
 }

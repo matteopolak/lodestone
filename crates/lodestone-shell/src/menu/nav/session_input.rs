@@ -1,6 +1,13 @@
 use super::*;
 
 impl MenuNav {
+    /// The account list: entirely delegated to [`accounts::AccountsNav`],
+    /// which owns the row highlight, the scroll window and the sign-in state
+    /// machine. This arm's only job is translating its
+    /// [`accounts::AccountsSignal::Back`] into leaving the screen — every
+    /// other outcome (selecting an account, starting/cancelling a sign-in,
+    /// removing an account) is a self-contained mutation `AccountsNav`
+    /// already applied by the time this returns.
     fn key_accounts(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         use crate::menu::accounts::AccountsSignal;
         match self.accounts.handle_key(key) {
@@ -528,4 +535,5 @@ impl MenuNav {
             Ok(()) => None,
             Err(e) => Some(format!("could not save {}: {e}", self.path.display())),
         };
+    }
 }

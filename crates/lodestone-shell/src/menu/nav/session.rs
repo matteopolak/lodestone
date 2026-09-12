@@ -1,6 +1,15 @@
 use super::*;
 
 impl MenuNav {
+    /// Whether the pause menu should offer its own Open to LAN row at all —
+    /// vanilla's `hasSingleplayerServer()` branch,
+    /// **not** [`Self::is_lan_published`] alone: a multiplayer session has
+    /// nothing local to publish and must take the same collapsed,
+    /// full-width-Options shape a *published* singleplayer world does, even
+    /// though [`Self::lan_published`] reads `false` in both the multiplayer
+    /// and the not-yet-published-singleplayer case and cannot tell them
+    /// apart on its own.
+    #[must_use]
     pub fn open_to_lan_available(&self) -> bool {
         MULTIPLAYER_ENABLED && self.has_singleplayer_server && !self.lan_published
     }
@@ -214,17 +223,4 @@ impl MenuNav {
         ui.open_resource_pack_prompt();
     }
 
-    /// Moves the highlight to row `row` of the current screen, as a mouse hover
-    /// would. Out-of-range rows are ignored rather than clamped: the caller
-    /// hit-tests against the rendered rects, so "no row here" must not silently
-    /// move the selection to a different one.
-    ///
-    /// A **disabled** row is still hovered, matching vanilla exactly:
-    /// `AbstractWidget::extractRenderState` sets `isHovered` from geometry alone
-    /// and never consults `active`, while
-    /// `WidgetSprites::get(active, focused)` returns `button_disabled` whichever
-    /// way `focused` went — so a greyed-out button
-    /// under the cursor looks greyed-out, not highlighted. The half that matters
-    /// is the *click*: `key_main`/`key_paused` refuse Enter on a disabled button,
-    /// which is why moving the highlight onto one here is safe.
 }
