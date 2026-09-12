@@ -44,6 +44,7 @@ use lodestone_worldgen::overworld::{GeneratedColumn, OverworldGenerator};
 use crate::block_entities::{BlockEntity, BlockEntityKind};
 use crate::chunk_blocks::SectionedBlocks;
 
+#[path = "chunk_worldgen.rs"]
 mod chunk_worldgen;
 pub use chunk_worldgen::WorldgenChunkSource;
 

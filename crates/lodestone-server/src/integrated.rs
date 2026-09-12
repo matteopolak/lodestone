@@ -83,6 +83,7 @@ use crate::sleep::{SleepFeed, SleepVote};
 use crate::weather::{WeatherFeed, WeatherState};
 
 #[cfg(not(target_arch = "wasm32"))]
+#[path = "integrated_lan.rs"]
 mod integrated_lan;
 #[cfg(not(target_arch = "wasm32"))]
 pub use integrated_lan::{LanConfig, LanDiscovery, PublishConfig};
