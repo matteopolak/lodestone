@@ -31,6 +31,12 @@ replaying per-cell would mean re-resolving each of a column's ~98,000 cells agai
 column-wide palette one string comparison at a time, when the region file already hands over
 almost all of that structure pre-computed.
 
+The retained `ChunkColumn` and production `ChunkSource` implementations remain in the server's
+chunk module. The deliberately limited `WorldgenChunkSource` used by transport/seam tests lives
+in `chunk_worldgen.rs`: it point-samples a density node into stone-or-air and has no edit ledger,
+surface rules, fluid generation, or biome variation. Keeping that source separate makes it harder
+for a test fixture to become an accidental production terrain path.
+
 ### Wire encoding: real per-cell state, resolved as integers, not strings
 
 The server's terrain data is real block variety end to end (grass, dirt, ores, water, whatever the
