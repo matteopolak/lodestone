@@ -125,56 +125,28 @@ use lodestone_world::{ChunkPos, SignText, World};
 use lodestone_core::{Nbt, NbtTag};
 use lodestone_javarandom::JavaRandom;
 
-use crate::{
-    gpu::{DebugLineVertex, push_box},
-    net::{SharedHandle, entity_light_at},
+use crate::net::{SharedHandle, entity_light_at};
+
+mod snapshot;
+pub(crate) use snapshot::BlockEntityFrameSnapshot;
+pub(crate) use snapshot::block_entity_frame_snapshot;
+use snapshot::BlockEntityFrameCandidate;
+
+mod scanner;
+pub(crate) use scanner::{can_render_structure_boxes, structure_block_outline_vertices, structure_block_vertices};
+use scanner::structure_box;
+
+mod render_inputs;
+pub(crate) use render_inputs::{
+    bell_spawns_from_snapshot, chest_spawns_from_snapshot,
+    conduit_spawns_from_snapshot, copper_golem_statue_spawns_from_snapshot,
+    enchanting_table_spawns_from_snapshot, lectern_spawns_from_snapshot,
+    shulker_spawns_from_snapshot,
 };
 
 #[cfg(test)]
 fn known_state_id(raw: u32) -> StateId {
     StateId::new(raw).expect("test state id is in the canonical census")
-}
-
-#[cfg(test)]
-mod frame_snapshot_tests {
-    use super::*;
-
-    fn first_state(name: &str) -> StateId {
-        (0..lodestone_data::block_states::STATE_COUNT)
-            .find(|&id| lodestone_data::block_states::block_name(id) == Some(name))
-            .and_then(StateId::new)
-            .unwrap_or_else(|| panic!("missing state for {name}"))
-    }
-
-    #[test]
-    fn one_frame_snapshot_feeds_multiple_state_driven_renderers_without_a_handle() {
-        let chest_pos = [1, 64, 2];
-        let bell_pos = [3, 64, 4];
-        let snapshot = BlockEntityFrameSnapshot {
-            candidates: vec![
-                BlockEntityFrameCandidate {
-                    pos: chest_pos,
-                    state_id: first_state("minecraft:chest"),
-                    light: 0xab,
-                },
-                BlockEntityFrameCandidate {
-                    pos: bell_pos,
-                    state_id: first_state("minecraft:bell"),
-                    light: 0xcd,
-                },
-            ],
-        };
-
-        let chests = chest_spawns_from_snapshot(&snapshot, &ChestLids::new(), 0.0);
-        let bells = bell_spawns_from_snapshot(&snapshot, &BellShakes::new(), 0.0);
-
-        assert_eq!(chests.len(), 1);
-        assert_eq!(chests[0].pos, chest_pos);
-        assert_eq!(chests[0].light, 0xab);
-        assert_eq!(bells.len(), 1);
-        assert_eq!(bells[0].pos, bell_pos);
-        assert_eq!(bells[0].light, 0xcd);
-    }
 }
 
 /// Vanilla's per-renderer cutoff: its own view-distance accessor
@@ -186,327 +158,6 @@ mod frame_snapshot_tests {
 /// because the center-of-block offset is the difference between a chest popping in
 /// at 64.0 and at 63.1.
 pub const VIEW_DISTANCE: f32 = 64.0;
-
-/// One state-driven block entity captured for a single rendered frame.
-///
-/// The block state and packed entity light are resolved while the chunk world
-/// is held under one read lock. The render-specific filters below can therefore
-/// share this record without rescanning every loaded chunk or reacquiring the
-/// world once per visible object.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct BlockEntityFrameCandidate {
-    pos: [i32; 3],
-    state_id: StateId,
-    light: u8,
-}
-
-/// Camera-scoped immutable input shared by the state-driven block-entity
-/// renderers in one frame.
-///
-/// NBT-dependent families deliberately do not use this first slice: signs,
-/// heads, banners and item-bearing block entities still parse their typed NBT
-/// in their existing gathers. Keeping raw NBT out of this snapshot makes its
-/// hot-path records compact and avoids cloning arbitrary payload trees merely
-/// to save a chunk scan.
-#[derive(Debug, Default)]
-pub(crate) struct BlockEntityFrameSnapshot {
-    candidates: Vec<BlockEntityFrameCandidate>,
-}
-
-fn packed_light_in_chunk(
-    chunk: &lodestone_world::LoadedChunk,
-    block: [i32; 3],
-    dimensions: Option<lodestone_client::WorldDimensions>,
-    sky_default: SkyDefault,
-) -> u8 {
-    let Some(dimensions) = dimensions else {
-        return lodestone_render::ENTITY_FULLBRIGHT;
-    };
-    let section = (block[1] - dimensions.min_y).div_euclid(16);
-    if section < 0 || section >= dimensions.section_count() as i32 {
-        return lodestone_render::ENTITY_FULLBRIGHT;
-    }
-    let section = section as usize;
-    let x = block[0].rem_euclid(16) as usize;
-    let y = (block[1] - dimensions.min_y).rem_euclid(16) as usize;
-    let z = block[2].rem_euclid(16) as usize;
-    let sky = chunk
-        .light
-        .section_sky_light(section, x, y, z)
-        .unwrap_or(match sky_default {
-            SkyDefault::Full => 15,
-            SkyDefault::None => 0,
-        });
-    let block = chunk
-        .light
-        .section_block_light(section, x, y, z)
-        .unwrap_or(0);
-    (sky << 4) | block
-}
-
-/// Captures the state and light needed by every state-only block-entity
-/// renderer for this camera position.
-///
-/// This is the one place on the render path that calls `loaded_chunks()` and
-/// takes the chunk-world read lock for those renderers. The result has no world
-/// borrow and can safely live in all of the renderer-owned `'static` closures
-/// installed for the rest of the frame.
-#[must_use]
-pub(crate) fn block_entity_frame_snapshot(
-    handle: &SharedHandle,
-    eye: Vec3,
-) -> Option<BlockEntityFrameSnapshot> {
-    let client = handle.get()?;
-    let dimensions = client.world_dimensions();
-    let player = client.player();
-    let sky_default = crate::mesher::sky_default_for_dimension(
-        player.dimension.as_ref(),
-        player.dimension_type.as_ref(),
-    );
-    let chunks = client.loaded_chunks();
-    let store = client.chunk_world();
-    let world = store.read();
-    let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
-    let mut candidates = Vec::new();
-    for model_pos in chunks {
-        let pos = ChunkPos {
-            x: model_pos.x,
-            z: model_pos.z,
-        };
-        let Some(chunk) = world.get(pos) else {
-            continue;
-        };
-        for entity in &chunk.block_entities {
-            let block = [
-                pos.x * 16 + i32::from(entity.rel_x),
-                i32::from(entity.y),
-                pos.z * 16 + i32::from(entity.rel_z),
-            ];
-            let centre = Vec3::new(
-                block[0] as f32 + 0.5,
-                block[1] as f32 + 0.5,
-                block[2] as f32 + 0.5,
-            );
-            if centre.distance_squared(eye) > cutoff {
-                continue;
-            }
-            let raw_state_id = chunk.column.get_block(
-                usize::from(entity.rel_x),
-                block[1],
-                usize::from(entity.rel_z),
-            );
-            let Some(state_id) = StateId::new(raw_state_id) else {
-                continue;
-            };
-            candidates.push(BlockEntityFrameCandidate {
-                pos: block,
-                state_id,
-                light: packed_light_in_chunk(chunk, block, dimensions, sky_default),
-            });
-        }
-    }
-    Some(BlockEntityFrameSnapshot { candidates })
-}
-
-const STRUCTURE_BLOCK_VIEW_DISTANCE: f32 = 96.0;
-const STRUCTURE_BOX_COLOR: [f32; 4] = [0.9, 0.9, 0.9, 1.0];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct StructureBox {
-    min: [i32; 3],
-    max: [i32; 3],
-}
-
-/// `Some(None)` means the field is absent, while `None` means that a present
-/// field has the wrong wire tag.  Structure Block's codec supplies defaults
-/// only for absence; treating malformed tags as defaults can manufacture an
-/// overlay for corrupt block-entity data.
-fn nbt_int_field(fields: &[(String, lodestone_core::Nbt)], key: &str) -> Option<Option<i32>> {
-    match fields.iter().find(|(name, _)| name == key).map(|(_, value)| value) {
-        Some(lodestone_core::Nbt::Int(value)) => Some(Some(*value)),
-        None => Some(None),
-        Some(_) => None,
-    }
-}
-
-fn nbt_string_field<'a>(
-    fields: &'a [(String, lodestone_core::Nbt)],
-    key: &str,
-) -> Option<Option<&'a str>> {
-    match fields.iter().find(|(name, _)| name == key).map(|(_, value)| value) {
-        Some(lodestone_core::Nbt::String(value)) => Some(Some(value)),
-        None => Some(None),
-        Some(_) => None,
-    }
-}
-
-fn nbt_bool_field(fields: &[(String, lodestone_core::Nbt)], key: &str) -> Option<Option<bool>> {
-    match fields.iter().find(|(name, _)| name == key).map(|(_, value)| value) {
-        Some(lodestone_core::Nbt::Byte(value)) => Some(Some(*value != 0)),
-        None => Some(None),
-        Some(_) => None,
-    }
-}
-
-fn structure_box(block: [i32; 3], nbt: &lodestone_core::Nbt) -> Option<StructureBox> {
-    let lodestone_core::Nbt::Compound(fields) = nbt else {
-        return None;
-    };
-    let mode = nbt_string_field(fields, "mode")?.unwrap_or("DATA");
-    let show_bounding_box = nbt_bool_field(fields, "showboundingbox")?.unwrap_or(true);
-    if mode != "SAVE" && (mode != "LOAD" || !show_bounding_box) {
-        return None;
-    }
-
-    let origin = [
-        nbt_int_field(fields, "posX")?.unwrap_or(0).clamp(-48, 48),
-        nbt_int_field(fields, "posY")?.unwrap_or(1).clamp(-48, 48),
-        nbt_int_field(fields, "posZ")?.unwrap_or(0).clamp(-48, 48),
-    ];
-    let size = [
-        nbt_int_field(fields, "sizeX")?.unwrap_or(0).clamp(0, 48),
-        nbt_int_field(fields, "sizeY")?.unwrap_or(0).clamp(0, 48),
-        nbt_int_field(fields, "sizeZ")?.unwrap_or(0).clamp(0, 48),
-    ];
-    if size.iter().any(|axis| *axis < 1) {
-        return None;
-    }
-
-    let (x_diff, z_diff) = match nbt_string_field(fields, "mirror")?.unwrap_or("NONE") {
-        "LEFT_RIGHT" => (size[0], -size[2]),
-        "FRONT_BACK" => (-size[0], size[2]),
-        _ => (size[0], size[2]),
-    };
-    let (x0, z0, x1, z1) = match nbt_string_field(fields, "rotation")?.unwrap_or("NONE") {
-        "CLOCKWISE_90" => {
-            let x0 = if z_diff < 0 { origin[0] } else { origin[0] + 1 };
-            let z0 = if x_diff < 0 { origin[2] + 1 } else { origin[2] };
-            (x0, z0, x0 - z_diff, z0 + x_diff)
-        }
-        "CLOCKWISE_180" => {
-            let x0 = if x_diff < 0 { origin[0] } else { origin[0] + 1 };
-            let z0 = if z_diff < 0 { origin[2] } else { origin[2] + 1 };
-            (x0, z0, x0 - x_diff, z0 - z_diff)
-        }
-        "COUNTERCLOCKWISE_90" => {
-            let x0 = if z_diff < 0 { origin[0] + 1 } else { origin[0] };
-            let z0 = if x_diff < 0 { origin[2] } else { origin[2] + 1 };
-            (x0, z0, x0 + z_diff, z0 - x_diff)
-        }
-        _ => {
-            let x0 = if x_diff < 0 { origin[0] + 1 } else { origin[0] };
-            let z0 = if z_diff < 0 { origin[2] + 1 } else { origin[2] };
-            (x0, z0, x0 + x_diff, z0 + z_diff)
-        }
-    };
-
-    Some(StructureBox {
-        min: [block[0] + x0.min(x1), block[1] + origin[1], block[2] + z0.min(z1)],
-        max: [block[0] + x0.max(x1), block[1] + origin[1] + size[1], block[2] + z0.max(z1)],
-    })
-}
-
-#[must_use]
-pub(crate) fn can_render_structure_boxes(
-    permission_level: u8,
-    instabuild: bool,
-    spectator: bool,
-) -> bool {
-    spectator || (instabuild && permission_level >= 2)
-}
-
-#[must_use]
-pub(crate) fn structure_block_outline_vertices(
-    block: [i32; 3],
-    nbt: &lodestone_core::Nbt,
-) -> Vec<DebugLineVertex> {
-    let Some(bounds) = structure_box(block, nbt) else {
-        return Vec::new();
-    };
-    let mut vertices = Vec::with_capacity(24);
-    push_box(
-        &mut vertices,
-        bounds.min.map(|axis| axis as f32),
-        bounds.max.map(|axis| axis as f32),
-        STRUCTURE_BOX_COLOR,
-    );
-    vertices
-}
-
-#[must_use]
-fn structure_block_vertices_from_loaded_world(
-    world: &World,
-    chunks: impl IntoIterator<Item = ChunkPos>,
-    eye: Vec3,
-    permission_level: u8,
-    instabuild: bool,
-    spectator: bool,
-) -> Vec<DebugLineVertex> {
-    if !can_render_structure_boxes(permission_level, instabuild, spectator) {
-        return Vec::new();
-    }
-    let cutoff = STRUCTURE_BLOCK_VIEW_DISTANCE * STRUCTURE_BLOCK_VIEW_DISTANCE;
-    let mut vertices = Vec::new();
-    for chunk_pos in chunks {
-        let Some(chunk) = world.get(chunk_pos) else {
-            continue;
-        };
-        for entity in &chunk.block_entities {
-            let block = [
-                chunk_pos.x * 16 + i32::from(entity.rel_x),
-                i32::from(entity.y),
-                chunk_pos.z * 16 + i32::from(entity.rel_z),
-            ];
-            let centre = Vec3::new(
-                block[0] as f32 + 0.5,
-                block[1] as f32 + 0.5,
-                block[2] as f32 + 0.5,
-            );
-            // `Vec3.closerThan` is a strict `<` comparison: the exact 96-block
-            // boundary is outside Structure Block's renderer range.
-            if centre.distance_squared(eye) >= cutoff {
-                continue;
-            }
-            let state_id = chunk.column.get_block(
-                usize::from(entity.rel_x),
-                block[1],
-                usize::from(entity.rel_z),
-            );
-            if lodestone_data::block_states::block_name(state_id) != Some("minecraft:structure_block") {
-                continue;
-            }
-            vertices.extend(structure_block_outline_vertices(block, &entity.nbt));
-        }
-    }
-    vertices
-}
-
-#[must_use]
-pub(crate) fn structure_block_vertices(
-    handle: &SharedHandle,
-    eye: Vec3,
-    permission_level: u8,
-    instabuild: bool,
-    spectator: bool,
-) -> Vec<DebugLineVertex> {
-    let Some(client) = handle.get() else {
-        return Vec::new();
-    };
-    let store = client.chunk_world();
-    let chunks = client.loaded_chunks();
-    let world = store.read();
-    structure_block_vertices_from_loaded_world(
-        &world,
-        chunks.into_iter().map(|chunk| ChunkPos {
-            x: chunk.x,
-            z: chunk.z,
-        }),
-        eye,
-        permission_level,
-        instabuild,
-        spectator,
-    )
-}
 
 /// Vanilla's `ChestLidController` ramp, per tick.
 const LID_SPEED: f32 = 0.1;
@@ -1895,27 +1546,6 @@ pub fn chest_spawns(
 }
 
 #[must_use]
-pub(crate) fn chest_spawns_from_snapshot(
-    snapshot: &BlockEntityFrameSnapshot,
-    lids: &ChestLids,
-    partial_tick: f32,
-) -> Vec<ChestSpawn> {
-    let mut out = Vec::new();
-    for candidate in &snapshot.candidates {
-        let block = candidate.pos;
-        if let Some(spawn) = chest_spawn(
-            block,
-            candidate.state_id,
-            lids.openness(block, partial_tick),
-            candidate.light,
-        ) {
-            out.push(spawn);
-        }
-    }
-    out.sort_by_key(|s| s.pos);
-    out
-}
-
 /// Reads a skull/head block state's orientation — `rotation` (`0..16`, floor
 /// placement) or `facing` (wall placement) — into the renderer's fields.
 ///
@@ -2184,27 +1814,6 @@ pub fn bell_spawns(
 }
 
 #[must_use]
-pub(crate) fn bell_spawns_from_snapshot(
-    snapshot: &BlockEntityFrameSnapshot,
-    shakes: &BellShakes,
-    partial_tick: f32,
-) -> Vec<BellSpawn> {
-    let mut out = Vec::new();
-    for candidate in &snapshot.candidates {
-        if let Some(spawn) = bell_spawn(
-            candidate.pos,
-            candidate.state_id,
-            candidate.light,
-            shakes,
-            partial_tick,
-        ) {
-            out.push(spawn);
-        }
-    }
-    out.sort_by_key(|s| s.pos);
-    out
-}
-
 /// Resolves a block state id into `(dye colour, facing)` for a shulker box, or
 /// `None` if the state is not one.
 ///
@@ -2271,19 +1880,6 @@ pub fn shulker_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<ShulkerSpawn> {
 }
 
 #[must_use]
-pub(crate) fn shulker_spawns_from_snapshot(
-    snapshot: &BlockEntityFrameSnapshot,
-) -> Vec<ShulkerSpawn> {
-    let mut out = Vec::new();
-    for candidate in &snapshot.candidates {
-        if let Some(spawn) = shulker_spawn(candidate.pos, candidate.state_id, candidate.light) {
-            out.push(spawn);
-        }
-    }
-    out.sort_by_key(|s| s.pos);
-    out
-}
-
 /// One candidate resolved into a [`LecternSpawn`], or `None` if the state at
 /// that position is not a lectern **with a book in it**.
 ///
@@ -2337,19 +1933,6 @@ pub fn lectern_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<LecternSpawn> {
 }
 
 #[must_use]
-pub(crate) fn lectern_spawns_from_snapshot(
-    snapshot: &BlockEntityFrameSnapshot,
-) -> Vec<LecternSpawn> {
-    let mut out = Vec::new();
-    for candidate in &snapshot.candidates {
-        if let Some(spawn) = lectern_spawn(candidate.pos, candidate.state_id, candidate.light) {
-            out.push(spawn);
-        }
-    }
-    out.sort_by_key(|s| s.pos);
-    out
-}
-
 /// Whether a block state is an enchanting table.
 ///
 /// One block, no properties that matter: an enchanting table has **no `facing`**
@@ -2440,32 +2023,6 @@ pub fn enchanting_table_spawns(
         return Vec::new();
     };
     enchanting_table_spawns_from_snapshot(&snapshot, books, partial_tick)
-}
-
-#[must_use]
-pub(crate) fn enchanting_table_spawns_from_snapshot(
-    snapshot: &BlockEntityFrameSnapshot,
-    books: &EnchantingTableBooks,
-    partial_tick: f32,
-) -> Vec<lodestone_render::EnchantingTableSpawn> {
-    let mut out = Vec::new();
-    for candidate in &snapshot.candidates {
-        if !is_enchanting_table(candidate.state_id.raw()) {
-            continue;
-        }
-        let block = candidate.pos;
-        let (y_rot, time, open, flip) = books.state(block, partial_tick).unwrap_or_default();
-        out.push(lodestone_render::EnchantingTableSpawn {
-            pos: block,
-            y_rot,
-            time,
-            open,
-            flip,
-            light: candidate.light,
-        });
-    }
-    out.sort_by_key(|s| s.pos);
-    out
 }
 
 /// The `facing` yaw of a campfire block, or `None` for any other block.
@@ -3597,25 +3154,6 @@ pub fn conduit_spawns(
         return Vec::new();
     };
     conduit_spawns_from_snapshot(&snapshot, ticks, partial_tick)
-}
-
-#[must_use]
-pub(crate) fn conduit_spawns_from_snapshot(
-    snapshot: &BlockEntityFrameSnapshot,
-    ticks: &ConduitTicks,
-    partial_tick: f32,
-) -> Vec<ConduitSpawn> {
-    let mut out = Vec::new();
-    for candidate in &snapshot.candidates {
-        if candidate.state_id.name() != "minecraft:conduit" {
-            continue;
-        }
-        if let Some(spawn) = ticks.resolve(candidate.pos, partial_tick, candidate.light) {
-            out.push(spawn);
-        }
-    }
-    out.sort_by_key(|s| s.pos);
-    out
 }
 
 /// Vanilla's own piston-moving-block-entity tick's ramp: `progress += 0.5F` per tick, so with
@@ -7101,24 +6639,6 @@ pub fn copper_golem_statue_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<Coppe
         return Vec::new();
     };
     copper_golem_statue_spawns_from_snapshot(&snapshot)
-}
-
-#[must_use]
-pub(crate) fn copper_golem_statue_spawns_from_snapshot(
-    snapshot: &BlockEntityFrameSnapshot,
-) -> Vec<CopperGolemStatueSpawn> {
-    let mut out = Vec::new();
-    for candidate in &snapshot.candidates {
-        if let Some(spawn) = copper_golem_statue_spawn(
-            candidate.pos,
-            candidate.state_id.raw(),
-            candidate.light,
-        ) {
-            out.push(spawn);
-        }
-    }
-    out.sort_by_key(|s| s.pos);
-    out
 }
 
 #[cfg(test)]
