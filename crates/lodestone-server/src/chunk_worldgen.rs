@@ -8,7 +8,7 @@
 
 use lodestone_worldgen::density::{Context, Density};
 
-use crate::chunk::{ChunkColumn, ChunkSource, AIR, DEFAULT_BIOME, STONE};
+use crate::chunk::{ChunkColumn, ChunkSource, AIR, STONE};
 
 /// A solidity-only [`ChunkSource`] backed by a bare density node.
 ///
@@ -76,7 +76,7 @@ impl ChunkSource for WorldgenChunkSource {
 
     /// This source stamps no biome data of its own (a solidity-only
     /// transport-test source — see [`block_state`](Self::block_state)'s own
-    /// doc), so every cell reads [`DEFAULT_BIOME`] via
+    /// doc), so every cell reads [`crate::chunk::DEFAULT_BIOME`] via
     /// [`ChunkColumn::new`]'s own default, through the one path that column
     /// actually exists on: `column()`, not a point-sampled shortcut like
     /// `block_state`'s (there is no density-shaped biome field to sample).
