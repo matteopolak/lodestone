@@ -584,6 +584,12 @@ impl OverworldGenerator {
         &crate::stage_schedule::OVERWORLD
     }
 
+    /// The executable stage contract used by production column generation.
+    #[must_use]
+    pub const fn stage_pipeline() -> &'static crate::stage_schedule::DimensionPipeline {
+        &crate::stage_schedule::OVERWORLD_PIPELINE
+    }
+
     /// Builds the generator for `seed` from a noise-settings `Value` and a
     /// [`Resolver`] that supplies the density functions, noises, carvers,
     /// features and tags it references.
@@ -1079,8 +1085,8 @@ impl OverworldGenerator {
         // writes, so production enters the same dispatcher used by lifecycle
         // replay rather than composing an ore result with a later vegetation
         // pass.
-        let mut schedule = Self::stage_schedule().cursor_at(
-            Self::stage_schedule().shaped_boundary_index(),
+        let mut schedule = Self::stage_pipeline().executor_at(
+            Self::stage_pipeline().schedule().shaped_boundary_index(),
         );
         let (world, block_entities) = schedule.run(
             crate::stage_schedule::ColumnStage::Features,
