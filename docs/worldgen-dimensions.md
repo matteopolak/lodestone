@@ -107,6 +107,12 @@ random stream before constructing its simplex sampler; its Java-style truncating
 intermediates, and mixed-width boundary predicates are all load-bearing. `EndGenerator` carries that
 source through fill, surface, materialization, and the served quart-biome grid.
 
+At the server boundary, `EndChunkSource::column_at` maps `Shaped` to the generator's immutable
+fill/surface/structure prefix and `Full` to the complete decorated column. End decoration owns a
+three-by-three write window, so `EndChunkSource::packet_generation_stage` upgrades a shaped packet
+request to `Full`; otherwise a source write crossing into the target could be absent from the packet.
+Keep that upgrade policy explicit if the End's write radius or packet lifecycle changes.
+
 The End has no fluid at all (its sea level and fluid-level settings make the disabled aquifer's fluid
 picker return air everywhere, regardless of what `default_fluid` names) and no bedrock (its surface
 rule is a same-value no-op and, unlike the Nether, contains no `vertical_gradient` construct at all —
