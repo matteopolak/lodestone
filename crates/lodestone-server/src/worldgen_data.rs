@@ -857,6 +857,25 @@ impl crate::chunk::ChunkSource for FlatChunkSource {
             .or_insert_with(|| self.generate(cx, cz));
         column.set_block(lx, y, lz, name);
     }
+
+    fn try_store_resident_edit(
+        &self,
+        cx: i32,
+        cz: i32,
+        column: &crate::chunk::ChunkColumn,
+    ) -> Option<crate::chunk_store::TryResidentEdit> {
+        let mut edits = match self.edits.try_lock() {
+            Ok(edits) => edits,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Some(crate::chunk_store::TryResidentEdit::Busy);
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                panic!("chunk edit cache lock poisoned")
+            }
+        };
+        edits.insert((cx, cz), column.clone());
+        Some(crate::chunk_store::TryResidentEdit::Applied)
+    }
 }
 
 /// Builds the [`FlatChunkSource`] for `settings` — the server/worldgen
@@ -1100,6 +1119,25 @@ impl crate::chunk::ChunkSource for DebugChunkSource {
             .entry((cx, cz))
             .or_insert_with(|| self.generate(cx, cz));
         column.set_block(lx, y, lz, name);
+    }
+
+    fn try_store_resident_edit(
+        &self,
+        cx: i32,
+        cz: i32,
+        column: &crate::chunk::ChunkColumn,
+    ) -> Option<crate::chunk_store::TryResidentEdit> {
+        let mut edits = match self.edits.try_lock() {
+            Ok(edits) => edits,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Some(crate::chunk_store::TryResidentEdit::Busy);
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                panic!("chunk edit cache lock poisoned")
+            }
+        };
+        edits.insert((cx, cz), column.clone());
+        Some(crate::chunk_store::TryResidentEdit::Applied)
     }
 }
 
@@ -4270,6 +4308,41 @@ mod single_biome_and_debug_world_selection {
             .expect("the all-biome control still contains seagrass");
         assert_eq!(wrong_index, 104, "the all-biome control must remain distinguishable");
         assert_ne!(wrong_index, index, "full registry enumeration is not the source's feature order");
+    }
+
+    #[test]
+    fn overworld_source_order_keeps_lush_cave_vines_at_global_index_28() {
+        use lodestone_worldgen::{
+            biome::{parse_table, usable_overworld_table},
+            compose::build_decoration_catalog,
+            density::Resolver,
+        };
+
+        let resolver = super::embedded_resolver();
+        let mut source_order = Vec::new();
+        for point in usable_overworld_table(parse_table(&resolver.biome_parameters())) {
+            if !source_order.contains(&point.biome) {
+                source_order.push(point.biome);
+            }
+        }
+        let catalog = build_decoration_catalog(&resolver, &source_order);
+        let selected = catalog.select(["minecraft:lush_caves"]);
+        let (step, index, _) = selected
+            .iter()
+            .find(|(step, _, placed)| {
+                *step == 9 && placed.registry_id.as_deref() == Some("minecraft:cave_vines")
+            })
+            .expect("lush caves must select cave_vines");
+        let adjacent: Vec<_> = selected
+            .iter()
+            .filter(|(candidate_step, candidate_index, _)| {
+                *candidate_step == *step && (*candidate_index).abs_diff(*index) <= 2
+            })
+            .map(|(_, candidate_index, placed)| {
+                (*candidate_index, placed.registry_id.as_deref().unwrap_or("<inline>"))
+            })
+            .collect();
+        assert_eq!(*index, 28, "adjacent selected features: {adjacent:?}");
     }
 
     #[test]

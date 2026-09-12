@@ -61,6 +61,15 @@ pub enum ServerProposalAction {
         hand: Hand,
         using_secondary_action: bool,
     },
+    /// A player has earned a block break and the connection is about to apply
+    /// the authoritative replacement. The block state is carried so a
+    /// listener can identify the target without reading the world or causing
+    /// a cold-column load.
+    BlockBreak {
+        pos: BlockPos,
+        state: StateId,
+        breaker: Uuid,
+    },
     /// Replace an ordered resident block batch atomically through
     /// `IntegratedServer`.
     ///
@@ -195,6 +204,17 @@ impl ServerProposalHandle {
             writes,
             notify_listeners,
         }).await
+    }
+
+    /// Submit a validated player block break and await its adjudicated action.
+    pub async fn block_break(
+        &self,
+        pos: BlockPos,
+        state: StateId,
+        breaker: Uuid,
+    ) -> Result<ServerProposalAction, ProposalRefusal> {
+        self.submit(ServerProposalAction::BlockBreak { pos, state, breaker })
+            .await
     }
 }
 

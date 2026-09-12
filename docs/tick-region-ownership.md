@@ -56,7 +56,10 @@ owner. `tick::apply_scheduled_tick_owner_batches` is the sole central consumer
 for both block and fluid callbacks: it requires a complete, unique owner set,
 then restores every global drain slot before a callback can mutate the world.
 Thus an owner finishing first cannot move its tick ahead of an earlier
-`(trigger, priority, insertion)` entry. `BlockEntityRegistry::tick_plan`
+`(trigger, priority, insertion)` entry. The scheduled-queue unit gate also
+checks that the owner batches form a disjoint cover of a mixed negative,
+boundary, and positive-coordinate drain, so a grouping change cannot silently
+overlap or drop a selected tick. `BlockEntityRegistry::tick_plan`
 assigns its tick-start snapshot to chunk owners. Resident non-hopper batches
 run from immutable clones through the bounded executor on native worlds once
 their scene reaches 128 entries; the registry lock is held only for the
@@ -65,7 +68,10 @@ hoppers remain serial because their vertical mutable container relation has no
 cross-owner hand-off yet. `tick::apply_block_entity_effect_batches` is the
 sole world writer: it validates the complete tick-start batch set, restores its
 serial slots after independent completion, then applies and publishes furnace
-changes in the established order. The ambient entity-effect phase uses the
+changes in the established order. A companion registry gate checks that
+chunk-local batches cover every tick-start block entity exactly once, including
+coordinates on both sides of zero and at chunk boundaries. The ambient
+entity-effect phase uses the
 same shape: `MobSim::take_ambient_sound_effect_batches` groups each emitted
 effect under `EntityTickOwner::Chunk`, and
 `tick::apply_entity_effect_batches` is the only publisher to the connection
@@ -308,6 +314,14 @@ Keep `FollowArea` as the producer until the live tick loop obtains its work
 through another production-consumed boundary. Any new producer must remove
 duplicates before constructing a plan and preserve a deliberate visit order;
 bypassing that check makes duplicate random ticks possible.
+
+Moving entities have a separate source-stop/destination-start barrier in
+[`docs/entity-ownership-transfer.md`](./entity-ownership-transfer.md). The
+first consumer is dropped-item motion: its owner is carried in live state,
+crossing completions name both owners and an epoch, and the central writer
+admits the destination only after replacing the state. Extend that barrier for
+another entity kind before allowing its region owner to publish across a chunk
+edge.
 
 Run `cargo test -p lodestone-server --test tick_region_owner_parity -j2` after
 changing random-tick owner assignment or its central publication boundary. Keep

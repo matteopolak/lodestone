@@ -903,6 +903,10 @@ fn column_from_nbt_with_status(
         }
     }
 
+    if retained_light.is_none() && retained_light_status.is_some() {
+        return Err(bad("LodestoneLightStatus"));
+    }
+
     if let Some(light) = retained_light {
         column.set_retained_light_with_status(
             light,
@@ -1273,9 +1277,9 @@ const RECIPES_USED_FIELD: &str = "lodestone:recipes_used";
 #[must_use]
 pub fn generated_block_entity(entity: &GeneratedBlockEntity) -> (BlockPos, BlockEntity) {
     let (x, y, z) = entity.position();
-    let id = entity.type_id().to_owned();
+    let id = lodestone_data::block_entity_types::block_entity_type_name(entity.type_id());
     let mut fields: Vec<(String, Nbt)> = vec![
-        ("id".to_owned(), Nbt::String(id.clone())),
+        ("id".to_owned(), Nbt::String(id.to_owned())),
         ("x".to_owned(), Nbt::Int(x)),
         ("y".to_owned(), Nbt::Int(y)),
         ("z".to_owned(), Nbt::Int(z)),
@@ -1323,6 +1327,9 @@ pub fn generated_block_entity(entity: &GeneratedBlockEntity) -> (BlockPos, Block
         }
         GeneratedBlockEntity::DungeonSpawner { entity_type, .. } => {
             let key = entity_type
+                .builtin_or_none()
+                .expect("generated dungeon spawner uses a built-in entity type")
+                .name()
                 .parse()
                 .expect("generated dungeon spawner entity type is a valid resource key");
             return (
@@ -1334,7 +1341,7 @@ pub fn generated_block_entity(entity: &GeneratedBlockEntity) -> (BlockPos, Block
     (
         BlockPos::new(x, y, z),
         BlockEntity::Opaque {
-            id: crate::block_entities::BlockEntityKind::from_name(&id),
+            id: crate::block_entities::BlockEntityKind::from_registry_type(entity.type_id()),
             nbt: Nbt::Compound(fields),
         },
     )
@@ -1606,6 +1613,26 @@ pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
             }
             ("minecraft:beacon", fields)
         }
+        BlockEntity::Lectern(lectern) => {
+            let page_count = lectern.book.as_ref().map_or(1, |book| {
+                book.components
+                    .written_book_content
+                    .as_ref()
+                    .map_or(0, |content| content.pages.len())
+                    .max(book.components.writable_book_content.as_ref().map_or(0, Vec::len))
+                    .max(1)
+            });
+            (
+                "minecraft:lectern",
+                vec![
+                    ("Items".to_owned(), items_to_nbt(&[lectern.book.clone()])),
+                    (
+                        "Page".to_owned(),
+                        Nbt::Int(lectern.page.max(0).min(i32::try_from(page_count - 1).unwrap_or(i32::MAX))),
+                    ),
+                ],
+            )
+        }
         // The crafter stores `Items`, `disabled_slots` (an int array of the
         // disabled indices), and `triggered` (always `0`, see this variant's
         // own doc for why nothing here ever sets it). `crafting_ticks_remaining`
@@ -1652,15 +1679,16 @@ pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
 /// save-only metadata.
 ///
 /// The default 26.2 update tag is empty for the container, furnace, hopper,
-/// brewing-stand and crafter families. Generated chests and beehives are
-/// therefore represented by an empty packet payload even though their full
-/// save records retain deferred loot or occupants. Spawners and End gateways
-/// override that default and expose the fields needed by a client to render
-/// their state. Signs and beacons likewise expose their modeled custom fields;
-/// opaque records are stripped of save metadata as a conservative passthrough.
+/// brewing-stand and crafter families. The packet encoder represents that empty
+/// update as the network `TAG_End` null tag; generated chests and beehives use
+/// the same representation even though their full save records retain deferred
+/// loot or occupants. Spawners and End gateways override that default and
+/// expose the fields needed by a client to render their state. Signs and
+/// beacons likewise expose their modeled custom fields; opaque records are
+/// stripped of save metadata as a conservative passthrough.
 #[must_use]
 pub fn block_entity_update_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
-    match entity {
+    let update = match entity {
         BlockEntity::EndGateway { exit, exact } => {
             let mut fields = vec![("Age".to_owned(), Nbt::Long(0))];
             if let Some(exit) = exit {
@@ -1690,7 +1718,7 @@ pub fn block_entity_update_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
                     .collect(),
             )
         }
-        BlockEntity::Sign(_) | BlockEntity::Beacon(_) => {
+        BlockEntity::Sign(_) | BlockEntity::Beacon(_) | BlockEntity::Lectern(_) => {
             strip_block_entity_metadata(block_entity_to_nbt(pos, entity))
         }
         BlockEntity::Opaque { id, nbt } => {
@@ -1700,9 +1728,10 @@ pub fn block_entity_update_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
             if matches!(id.as_str(), "minecraft:chest" | "minecraft:trapped_chest" | "minecraft:barrel" | "minecraft:beehive") {
                 Nbt::Compound(Vec::new())
             } else if id.as_str() == "minecraft:banner" {
-                // Banner patterns/components are packet data, not save-only
-                // metadata. Retain them while removing the positional wrapper.
-                strip_block_entity_position(nbt.clone())
+                // Banner patterns are component data, not save metadata. Keep
+                // the default empty components compound alongside the pattern
+                // list because the packet update includes both fields.
+                strip_block_entity_metadata_preserving_components(nbt.clone())
             } else {
                 strip_block_entity_metadata(nbt.clone())
             }
@@ -1714,6 +1743,66 @@ pub fn block_entity_update_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
         | BlockEntity::Composter(_)
         | BlockEntity::CommandBlock(_)
         | BlockEntity::Crafter { .. } => Nbt::Compound(Vec::new()),
+    };
+
+    // The chunk packet carries an optional update tag. The reference encoder
+    // writes a null tag (network `TAG_End`) when the block entity's update
+    // compound is empty; an empty compound is not the wire representation of
+    // "no update data". Keep this normalization at the shared projection
+    // boundary so every no-data variant, including opaque records stripped to
+    // metadata, follows the same rule while data-bearing spawners, signs and
+    // gateways remain untouched. Container save data is deliberately not an
+    // update payload, so an empty container projection is normalized too.
+    match update {
+        Nbt::Compound(fields) if fields.is_empty() => Nbt::End,
+        update => update,
+    }
+}
+
+#[cfg(test)]
+mod block_entity_update_tests {
+    use super::block_entity_update_nbt;
+    use crate::block_entities::BlockEntity;
+    use crate::furnace::{Furnace, FurnaceKind};
+    use lodestone_core::Nbt;
+    use lodestone_model::BlockPos;
+
+    #[test]
+    fn empty_update_tags_use_network_end() {
+        let pos = BlockPos::new(2, 70, -2);
+        assert_eq!(
+            block_entity_update_nbt(
+                pos,
+                &BlockEntity::Furnace(Furnace::new(FurnaceKind::Furnace)),
+            ),
+            Nbt::End,
+            "an empty furnace update compound is a null network tag"
+        );
+        assert_eq!(
+            block_entity_update_nbt(pos, &BlockEntity::container("minecraft:chest")),
+            Nbt::End,
+            "an empty chest update compound is a null network tag"
+        );
+
+        let opaque = BlockEntity::Opaque {
+            id: crate::block_entities::BlockEntityKind::Furnace,
+            nbt: Nbt::Compound(vec![
+                (
+                    "id".to_owned(),
+                    Nbt::String("minecraft:furnace".to_owned()),
+                ),
+                ("x".to_owned(), Nbt::Int(pos.x)),
+                ("y".to_owned(), Nbt::Int(pos.y)),
+                ("z".to_owned(), Nbt::Int(pos.z)),
+                ("keepPacked".to_owned(), Nbt::Byte(0)),
+                ("components".to_owned(), Nbt::Compound(Vec::new())),
+            ]),
+        };
+        assert_eq!(
+            block_entity_update_nbt(pos, &opaque),
+            Nbt::End,
+            "the generic metadata-only fallback also emits a null network tag"
+        );
     }
 }
 
@@ -1731,7 +1820,7 @@ fn strip_block_entity_metadata(nbt: Nbt) -> Nbt {
     )
 }
 
-fn strip_block_entity_position(nbt: Nbt) -> Nbt {
+fn strip_block_entity_metadata_preserving_components(nbt: Nbt) -> Nbt {
     let Nbt::Compound(fields) = nbt else {
         return nbt;
     };
@@ -1974,6 +2063,24 @@ pub(crate) fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)
                 .and_then(crate::beacon::BeaconPower::from_key),
             payment: None,
         }),
+        "minecraft:lectern" => {
+            let book = items_from_nbt(field(nbt, "Items"), 1).into_iter().next().flatten();
+            let page_count = book.as_ref().map_or(1, |book| {
+                book.components
+                    .written_book_content
+                    .as_ref()
+                    .map_or(0, |content| content.pages.len())
+                    .max(book.components.writable_book_content.as_ref().map_or(0, Vec::len))
+                    .max(1)
+            });
+            BlockEntity::Lectern(crate::block_entities::LecternData {
+                book,
+                page: int_field(nbt, "Page")
+                    .unwrap_or(0)
+                    .max(0)
+                    .min(i32::try_from(page_count - 1).unwrap_or(i32::MAX)),
+            })
+        },
         // The inverse of the `BlockEntity::Crafter` write arm above.
         // `crafting_ticks_remaining`/`triggered` are read off disk but
         // dropped, matching that arm's own reasoning for never writing them
@@ -2497,6 +2604,28 @@ mod retained_light_tests {
         assert!(
             matches!(error, Error::InvalidLight { actual: 1, .. }),
             "unexpected malformed-light error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn retained_light_status_without_light_is_rejected() {
+        let nbt = Nbt::Compound(vec![
+            ("Status".to_owned(), Nbt::String("minecraft:full".to_owned())),
+            ("LodestoneLightStatus".to_owned(), Nbt::Byte(1)),
+            (
+                "sections".to_owned(),
+                Nbt::List {
+                    element_type: NbtTag::Compound,
+                    elements: Vec::new(),
+                },
+            ),
+        ]);
+
+        let error = column_from_nbt(&nbt, 0, 16)
+            .expect_err("a lifecycle marker without retained light must fail closed");
+        assert!(
+            matches!(error, Error::BadField { ref field } if field == "LodestoneLightStatus"),
+            "unexpected lifecycle-marker error: {error:?}"
         );
     }
 

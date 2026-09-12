@@ -89,10 +89,12 @@ shaped column saves.** Stage 0 exists because building this design on the 62% fi
 be building on a number this repo has already replaced once.
 
 **Client ceiling facts** (for the honest-maximum question): shell render distance is
-`MIN_RENDER_DISTANCE = 2` to `MAX_RENDER_DISTANCE = 32` (`shell/src/config.rs`), server
-view radius = render distance + 1, clamped per-connection in
-`ViewTracker::set_view_radius`. Server-side residency is **31.1 KiB/column packed,
-measured** (139.2 MiB at the slider max — residency figures, not per-frame). Client mesh
+`MIN_RENDER_DISTANCE = 2` to `MAX_RENDER_DISTANCE = 256` (`shell/src/config.rs`), server
+view radius = render distance + 1. The initial join field carries that radius as a VarInt;
+live client-information updates remain limited by their signed-byte wire field and therefore
+advertise at most 127. Server-side residency is **31.1 KiB/column packed, measured** (139.2 MiB
+at the former 32-chunk range; the bounded cache ceiling remains in force at 256 — residency
+figures, not per-frame). Client mesh
 VRAM at render distance 8 is ~67 MB live (residency). Meshing is **96.3% of the client
 chunk path** (~63 M instructions/column post-optimisation). The terrain draw now has a real
 distance ∩ frustum ∩ occlusion cull (`TerrainCull` in `gpu/frame.rs` — the older "no cull"

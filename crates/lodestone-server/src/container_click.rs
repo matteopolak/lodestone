@@ -153,6 +153,9 @@ pub enum MenuKind {
     /// reject the wrong item or a second item; only multi-item shift-click
     /// routing differs.
     Beacon,
+    /// A lectern's single displayed-book slot. The visible reader uses a
+    /// dedicated button action; ordinary placement is never permitted.
+    Lectern,
 }
 
 /// Which workstation an [`MenuKind::ItemCombiner`] is — the anvil and
@@ -272,6 +275,15 @@ impl MenuLayout {
         }
     }
 
+    /// A read-only lectern content menu containing only the displayed book.
+    #[must_use]
+    pub fn lectern() -> Self {
+        Self {
+            kind: MenuKind::Lectern,
+            slots: vec![SlotKind::Container(0)],
+        }
+    }
+
     /// Total menu slots.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -317,6 +329,7 @@ impl MenuLayout {
             Some(SlotKind::Container(idx)) => match self.kind {
                 // The beacon payment slot accepts only registered payment items.
                 MenuKind::Beacon => idx == 0 && crate::beacon::is_beacon_payment_item(&item.item.to_string()),
+                MenuKind::Lectern => false,
                 _ => true,
             },
         }
@@ -454,6 +467,7 @@ impl MenuLayout {
                     vec![(0, 1, false)]
                 }
             }
+            MenuKind::Lectern => Vec::new(),
         }
     }
 }

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use bevy_ecs::prelude::Resource;
 use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockFace, BlockPos, Hand, ResourceKey, Vec3};
+use uuid::Uuid;
 
 use super::proposals::{ProposalVerdict, ServerProposalAction};
 
@@ -24,6 +25,8 @@ pub enum PaperEventKind {
     ResidentBlockChange,
     /// A player interaction against a block face.
     PlayerInteract,
+    /// A player break that passed the server's destroy-progress checks.
+    BlockBreak,
     /// An inventory click, which has no proposal owner yet.
     InventoryClick,
 }
@@ -38,6 +41,7 @@ impl PaperEventKind {
                 | Self::EntityDespawn
                 | Self::ResidentBlockChange
                 | Self::PlayerInteract
+                | Self::BlockBreak
         )
     }
 }
@@ -95,6 +99,17 @@ pub enum PaperEvent {
         /// Whether the proposal has been cancelled.
         cancelled: bool,
     },
+    /// A validated player block break, before the world mutation.
+    BlockBreak {
+        /// The target block position.
+        pos: BlockPos,
+        /// The state being broken.
+        state: StateId,
+        /// The account that earned the break.
+        breaker: Uuid,
+        /// Whether the proposal has been cancelled.
+        cancelled: bool,
+    },
 }
 
 impl PaperEvent {
@@ -106,6 +121,7 @@ impl PaperEvent {
             Self::EntityDespawn { .. } => PaperEventKind::EntityDespawn,
             Self::ResidentBlockChange { .. } => PaperEventKind::ResidentBlockChange,
             Self::PlayerInteract { .. } => PaperEventKind::PlayerInteract,
+            Self::BlockBreak { .. } => PaperEventKind::BlockBreak,
         }
     }
 
@@ -115,7 +131,8 @@ impl PaperEvent {
             Self::EntitySpawn { cancelled, .. }
             | Self::EntityDespawn { cancelled, .. }
             | Self::ResidentBlockChange { cancelled, .. }
-            | Self::PlayerInteract { cancelled, .. } => *cancelled = true,
+            | Self::PlayerInteract { cancelled, .. }
+            | Self::BlockBreak { cancelled, .. } => *cancelled = true,
         }
     }
 
@@ -126,7 +143,8 @@ impl PaperEvent {
             Self::EntitySpawn { cancelled, .. }
             | Self::EntityDespawn { cancelled, .. }
             | Self::ResidentBlockChange { cancelled, .. }
-            | Self::PlayerInteract { cancelled, .. } => *cancelled,
+            | Self::PlayerInteract { cancelled, .. }
+            | Self::BlockBreak { cancelled, .. } => *cancelled,
         }
     }
 
@@ -160,6 +178,12 @@ impl PaperEvent {
                 using_secondary_action: *using_secondary_action,
                 cancelled: false,
             }),
+            ServerProposalAction::BlockBreak { pos, state, breaker } => Some(Self::BlockBreak {
+                pos: *pos,
+                state: *state,
+                breaker: *breaker,
+                cancelled: false,
+            }),
             ServerProposalAction::NaturalSpawnMob { .. }
             | ServerProposalAction::SetPlayerGameMode { .. }
             | ServerProposalAction::SetResidentBlockBatch { .. } => None,
@@ -187,6 +211,9 @@ impl PaperEvent {
                 hand,
                 using_secondary_action,
             },
+            Self::BlockBreak { pos, state, breaker, .. } => {
+                ServerProposalAction::BlockBreak { pos, state, breaker }
+            }
         }
     }
 }

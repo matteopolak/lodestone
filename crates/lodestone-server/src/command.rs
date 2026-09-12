@@ -301,6 +301,16 @@ pub trait CommandSink: Send + Sync {
     /// the player's connection with it.
     fn run(&self, caller: &CommandCaller, command: &str) -> CommandResponse;
 
+    /// Return permission-filtered completions for a partially typed command.
+    ///
+    /// The default is an empty result so an existing host that only implements
+    /// execution keeps compiling and never leaks a command it cannot resolve.
+    /// The connection layer owns the wire offsets; this method only returns the
+    /// replacement texts for the current token.
+    fn suggest(&self, _caller: &CommandCaller, _input: &str) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Run a terminal plugin command with the source produced by `/execute`.
     ///
     /// The default is deliberately fail-closed so existing hosts retain their
@@ -366,6 +376,16 @@ impl CommandDispatch {
             Some(sink) => sink.run(caller, command),
             None => CommandResponse::refused(UNKNOWN_COMMAND),
         }
+    }
+
+    /// Return host completions for `input`, or no completions when no sink is
+    /// installed. A missing suggestion implementation fails closed just like
+    /// a missing command execution sink.
+    #[must_use]
+    pub fn suggest(&self, caller: &CommandCaller, input: &str) -> Vec<String> {
+        self.sink
+            .as_ref()
+            .map_or_else(Vec::new, |sink| sink.suggest(caller, input))
     }
 
     /// Run a terminal command with its rewritten `/execute` source, or refuse

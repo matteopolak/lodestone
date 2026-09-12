@@ -280,6 +280,8 @@ mod item_use;
 /// barrier `4307b59` reinstated. `pub` because its gates measure in-flight
 /// concurrency through it from `tests/`, which `pub(crate)` cannot reach.
 pub mod join_scheduler;
+/// The bounded centre-plus-neighbours admission contract for an initial join.
+pub mod join_readiness;
 /// Whether a block edit changed the light a cell emits, and therefore whether
 /// its column has to be re-sent (`docs/server-block-light-updates.md`). Read that
 /// module's doc before touching light anywhere: it records what
@@ -564,8 +566,8 @@ pub use brewing::{
 };
 pub use chunk::{
     ChunkColumn, ChunkGenerationStage, ColumnLightSettlement, ColumnLightSettlementError,
-    ChunkSource, EndChunkSource, NetherChunkSource, OverworldChunkSource, RetainedLightStatus,
-    WorldgenChunkSource, run_worldgen_jobs,
+    ChunkColumnMemory, ChunkSource, EndChunkSource, NetherChunkSource, OverworldChunkSource,
+    RetainedLightStatus, WorldgenChunkSource, run_worldgen_jobs,
 };
 // `chunk_store::ChunkStore` itself stays crate-private (its methods
 // are `pub(crate)` and `IntegratedServer` is the only thing that should build
@@ -607,7 +609,10 @@ pub use hopper::{
 pub use integrated::{BlockMutationRefusal, IntegratedServer};
 #[cfg(not(target_arch = "wasm32"))]
 pub use integrated::PlayerGameModeRefusal;
-pub use entity_api::{EntityMutation, EntityMutationResult, EntityObservation, ServerEntityApi};
+pub use entity_api::{
+    EntityLifecycleCursor, EntityLifecycleEvent, EntityMutation, EntityMutationResult,
+    EntityObservation, ServerEntityApi,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use integrated::{LanConfig, LanDiscovery, PublishConfig};
 #[cfg(not(target_arch = "wasm32"))]

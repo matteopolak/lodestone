@@ -22,6 +22,9 @@ pub(super) const FISHING_ROLL_SEED: u64 = 0x4649_5348_5F52_4F44;
 /// `FishingHook.MAX_OUT_OF_WATER_TIME`.
 const MAX_OUT_OF_WATER_TIME: i32 = 10;
 
+/// Dense-scene cutoff measured by `measure_dense_fishing_owner_workers`.
+const FISHING_OWNER_PARALLEL_THRESHOLD: usize = 2_048;
+
 /// `FishingHook.life >= 1200` — twenty seconds resting on solid ground
 /// (never in water) discards the bobber; the fallback despawn since this sim
 /// has no per-connection "is the owner still holding a rod and within 1024
@@ -29,8 +32,8 @@ const MAX_OUT_OF_WATER_TIME: i32 = 10;
 /// §5 for why that half of `shouldStopFishing` is not ported here).
 const HOOK_MAX_GROUND_LIFE: i32 = 1200;
 
-/// The two bobber states this server can produce: flight until the hook reaches
-/// water, then the bobbing/fishing state.
+/// Fishing bobber state machine. Entity collisions are outside this simulation,
+/// so only flight and water bobbing are reachable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FishHookState {
     Flying,
@@ -91,6 +94,7 @@ impl FishingTickOwner {
 #[derive(Debug, Clone)]
 pub(crate) struct FishingTickOwnerBatch {
     owner: FishingTickOwner,
+    plan: u64,
     expected_batch_count: usize,
     effects: Vec<FishingTickEffect>,
 }
@@ -102,6 +106,30 @@ struct FishingTickEffect {
     id: i32,
     bobber: FishingBobber,
     discard: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FishingCatchRandomPlan {
+    None,
+    Bite { nibble: i32, dip: f64 },
+    Lure { fish_angle: f32, time_until_hooked: i32 },
+    Reset { time_until_lured: i32 },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FishingRandomPlan {
+    damp_roll: Option<f32>,
+    bite_rolls: Option<(f64, f64)>,
+    catching: FishingCatchRandomPlan,
+}
+
+#[derive(Debug, Clone)]
+struct FishingTickInput {
+    owner: FishingTickOwner,
+    serial: usize,
+    id: i32,
+    bobber: FishingBobber,
+    random: FishingRandomPlan,
 }
 
 /// One catch's proceeds: what [`MobSim::retrieve_fishing_bobber`] has
@@ -368,9 +396,7 @@ impl<'w> MobSim<'w> {
         owner_luck: i32,
     ) -> Option<FishingRetrieve> {
         let bobber = self.fishing_bobbers.remove(&id)?;
-        // Not reachable by this port (see the struct's own doc): a bobber
-        // never enters an entity-hooked state here, so the `dmg = 5` (a
-        // player) / `3` (an item) branch never fires. Only the loot-roll and
+        // Entity-hit damage is outside this simulation; only the loot-roll and
         // on-ground branches are live.
         let rod_damage = if bobber.nibble > 0 {
             let total_luck = bobber.luck + owner_luck;
@@ -452,39 +478,94 @@ impl<'w> MobSim<'w> {
 
     /// Produces owner completions from cloned tick-start bobber state.
     ///
-    /// The fishing RNG remains serial in entity-id order because bobbing and
-    /// bite decisions share one stream. Owners return only changed copies;
-    /// the live map is written by the central apply step.
+    /// Random draws are planned in entity-id order before any owner worker
+    /// starts. The terrain scan and state transition then run from that
+    /// immutable random plan, so the shared fishing stream stays serial while
+    /// the expensive open-water work can use bounded native lanes.
     pub(crate) fn tick_fishing_owner_batches(&mut self) -> Vec<FishingTickOwnerBatch> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let workers = if self.fishing_bobbers.len() >= FISHING_OWNER_PARALLEL_THRESHOLD {
+            std::thread::available_parallelism()
+                .map(std::num::NonZero::get)
+                .unwrap_or(1)
+                .min(4)
+        } else {
+            1
+        };
+        #[cfg(target_arch = "wasm32")]
+        let workers = 1;
+        self.tick_fishing_owner_batches_with_workers(workers)
+    }
+
+    fn tick_fishing_owner_batches_with_workers(
+        &mut self,
+        worker_count: usize,
+    ) -> Vec<FishingTickOwnerBatch> {
+        self.fishing_owner_plan = self
+            .fishing_owner_plan
+            .checked_add(1)
+            .expect("fishing owner plan generation must not wrap");
         let world = self.world;
         let mut ids: Vec<i32> = self.fishing_bobbers.keys().copied().collect();
         ids.sort_unstable();
-        let mut batches = Vec::<FishingTickOwnerBatch>::new();
+        let mut jobs = Vec::<(FishingTickOwner, Vec<FishingTickInput>)>::new();
         for (serial, id) in ids.into_iter().enumerate() {
-            let mut bobber = self
+            let bobber = self
                 .fishing_bobbers
                 .get(&id)
                 .cloned()
                 .expect("a tick-start fishing id must remain live while planning");
             let owner = FishingTickOwner::for_position(bobber.position);
-            let discard = Self::tick_fishing_bobber(world, &mut self.fishing_rng, &mut bobber);
-            let effect = FishingTickEffect {
+            let random = plan_fishing_random(world, &bobber, &mut self.fishing_rng);
+            let input = FishingTickInput {
                 owner,
                 serial,
                 id,
                 bobber,
-                discard,
+                random,
             };
-            if let Some(batch) = batches.iter_mut().find(|batch| batch.owner == owner) {
-                batch.effects.push(effect);
+            if let Some((_, inputs)) = jobs.iter_mut().find(|(candidate, _)| *candidate == owner) {
+                inputs.push(input);
             } else {
-                batches.push(FishingTickOwnerBatch {
-                    owner,
-                    expected_batch_count: 0,
-                    effects: vec![effect],
-                });
+                jobs.push((owner, vec![input]));
             }
         }
+        self.run_fishing_owner_batches(world, self.fishing_owner_plan, jobs, worker_count)
+    }
+
+    fn run_fishing_owner_batches(
+        &self,
+        world: &ChunkWorld,
+        plan: u64,
+        jobs: Vec<(FishingTickOwner, Vec<FishingTickInput>)>,
+        worker_count: usize,
+    ) -> Vec<FishingTickOwnerBatch> {
+        let mut batches = crate::tick_region::run_bounded_owner_jobs(
+            jobs,
+            worker_count,
+            &|(owner, inputs)| {
+                let effects = inputs
+                    .into_iter()
+                    .map(|input| {
+                        let mut bobber = input.bobber;
+                        let discard = Self::tick_fishing_bobber(world, &mut bobber, input.random);
+                        FishingTickEffect {
+                            owner: input.owner,
+                            serial: input.serial,
+                            id: input.id,
+                            bobber,
+                            discard,
+                        }
+                    })
+                    .collect();
+                FishingTickOwnerBatch {
+                    owner,
+                    plan,
+                    expected_batch_count: 0,
+                    effects,
+                }
+            },
+        );
         let batch_count = batches.len();
         for batch in &mut batches {
             batch.expected_batch_count = batch_count;
@@ -498,12 +579,26 @@ impl<'w> MobSim<'w> {
         batches: Vec<FishingTickOwnerBatch>,
     ) {
         if batches.is_empty() {
-            assert!(
-                self.fishing_bobbers.is_empty(),
+            assert_eq!(
+                self.fishing_bobbers.len(),
+                0,
                 "fishing owner completion must retain every live tick-start bobber"
+            );
+            assert!(
+                self.fishing_owner_plan >= self.fishing_applied_owner_plan,
+                "fishing owner completion plan must not move backwards"
             );
             return;
         }
+        let plan = batches[0].plan;
+        assert_eq!(
+            plan, self.fishing_owner_plan,
+            "fishing owner completion must name the latest tick-start plan"
+        );
+        assert!(
+            plan > self.fishing_applied_owner_plan,
+            "fishing owner completion may not replay an applied plan"
+        );
         let effects = merge_fishing_tick_owner_batches(batches);
         assert_eq!(
             effects.len(),
@@ -528,12 +623,13 @@ impl<'w> MobSim<'w> {
                 self.fishing_bobbers.insert(effect.id, effect.bobber);
             }
         }
+        self.fishing_applied_owner_plan = plan;
     }
 
     fn tick_fishing_bobber(
         world: &ChunkWorld,
-        rng: &mut SpawnRng,
         b: &mut FishingBobber,
+        random: FishingRandomPlan,
     ) -> bool {
             if b.on_ground {
                 b.life += 1;
@@ -568,7 +664,9 @@ impl<'w> MobSim<'w> {
                     if force.abs() < 0.01 {
                         force += force.signum() * 0.1;
                     }
-                    let damp_roll = rng.next_f32();
+                    let damp_roll = random
+                        .damp_roll
+                        .expect("bobbing tick must carry its planned damping draw");
                     b.velocity = Vec3::new(
                         movement.x * 0.9,
                         movement.y - force * f64::from(damp_roll) * 0.2,
@@ -584,11 +682,12 @@ impl<'w> MobSim<'w> {
                     if in_water {
                         b.out_of_water_time = (b.out_of_water_time - 1).max(0);
                         if b.biting {
-                            let r1 = f64::from(rng.next_f32());
-                            let r2 = f64::from(rng.next_f32());
+                            let (r1, r2) = random
+                                .bite_rolls
+                                .expect("biting bobber must carry its planned motion draws");
                             b.velocity = Vec3::new(b.velocity.x, b.velocity.y - 0.1 * r1 * r2, b.velocity.z);
                         }
-                        catching_fish(b, rng);
+                        catching_fish(b, random.catching);
                     } else {
                         b.out_of_water_time = (b.out_of_water_time + 1).min(MAX_OUT_OF_WATER_TIME);
                     }
@@ -647,15 +746,84 @@ impl<'w> MobSim<'w> {
     }
 }
 
+fn plan_fishing_random(
+    world: &ChunkWorld,
+    b: &FishingBobber,
+    rng: &mut SpawnRng,
+) -> FishingRandomPlan {
+    // The serial implementation returns before reading the water cell or
+    // consuming a draw when this tick is the final grounded tick. Preserve
+    // that stream position before dispatching the cloned state.
+    if b.on_ground && b.life >= HOOK_MAX_GROUND_LIFE - 1 {
+        return FishingRandomPlan {
+            damp_roll: None,
+            bite_rolls: None,
+            catching: FishingCatchRandomPlan::None,
+        };
+    }
+    let bx = b.position.x.floor() as i32;
+    let by = b.position.y.floor() as i32;
+    let bz = b.position.z.floor() as i32;
+    let fluid = crate::fluid::fluid_state_of(world.block_state(bx, by, bz));
+    let is_water = fluid.is_some_and(|f| f.kind == crate::fluid::FluidKind::Water);
+    let damp_roll = (b.state == FishHookState::Bobbing).then(|| rng.next_f32());
+    let bite_rolls = if b.state == FishHookState::Bobbing && is_water && b.biting {
+        Some((f64::from(rng.next_f32()), f64::from(rng.next_f32())))
+    } else {
+        None
+    };
+    let catching = if b.state != FishHookState::Bobbing || !is_water {
+        FishingCatchRandomPlan::None
+    } else if b.nibble > 0 {
+        FishingCatchRandomPlan::None
+    } else if b.time_until_hooked > 0 {
+        if b.time_until_hooked - 1 <= 0 {
+            FishingCatchRandomPlan::Bite {
+                nibble: 20 + rng.next_int(21),
+                dip: 0.4 * f64::from(0.6 + rng.next_f32() * 0.4),
+            }
+        } else {
+            FishingCatchRandomPlan::None
+        }
+    } else if b.time_until_lured > 0 {
+        if b.time_until_lured - 1 <= 0 {
+            FishingCatchRandomPlan::Lure {
+                fish_angle: rng.next_f32() * 360.0,
+                time_until_hooked: 20 + rng.next_int(61),
+            }
+        } else {
+            FishingCatchRandomPlan::None
+        }
+    } else {
+        FishingCatchRandomPlan::Reset {
+            time_until_lured: 100 + rng.next_int(501),
+        }
+    };
+    FishingRandomPlan {
+        damp_roll,
+        bite_rolls,
+        catching,
+    }
+}
+
 fn merge_fishing_tick_owner_batches(
     mut batches: Vec<FishingTickOwnerBatch>,
 ) -> Vec<FishingTickEffect> {
-    let expected_batch_count = batches
+    let first = batches
         .first()
         .map(|batch| batch.expected_batch_count)
         .expect("fishing owner completion must contain every tick-start owner batch");
+    let plan = batches
+        .first()
+        .expect("fishing owner completion must contain every tick-start owner batch")
+        .plan;
+    let expected_batch_count = first;
     let mut owners = std::collections::HashSet::new();
     for batch in &batches {
+        assert_eq!(
+            batch.plan, plan,
+            "fishing owner completions must originate from one tick-start plan"
+        );
         assert_eq!(
             batch.expected_batch_count, expected_batch_count,
             "fishing owner completions must originate from one tick-start plan"
@@ -750,7 +918,7 @@ fn calculate_open_water(world: &ChunkWorld, x: i32, y: i32, z: i32) -> bool {
 /// [`MobSim::tick_fishing_bobbers`]'s own doc). `fishingSpeed` is therefore
 /// always vanilla's own unmodified `1`. Every RNG draw and every
 /// duration/threshold below is transcribed as written.
-fn catching_fish(b: &mut FishingBobber, rng: &mut SpawnRng) {
+fn catching_fish(b: &mut FishingBobber, random: FishingCatchRandomPlan) {
     let fishing_speed = 1;
     if b.nibble > 0 {
         b.nibble -= 1;
@@ -767,19 +935,31 @@ fn catching_fish(b: &mut FishingBobber, rng: &mut SpawnRng) {
             // downward yank (`-0.4F * nextFloat(0.6, 1.0)`) — folded in here
             // rather than through a metadata round-trip, since this sim has
             // no client to notify and applies its own state directly.
-            b.nibble = 20 + rng.next_int(21);
+            let FishingCatchRandomPlan::Bite { nibble, dip } = random else {
+                panic!("a bite transition must carry its planned random values");
+            };
+            b.nibble = nibble;
             b.biting = true;
-            let dip = 0.4 * f64::from(0.6 + rng.next_f32() * 0.4);
             b.velocity = Vec3::new(b.velocity.x, -dip, b.velocity.z);
         }
     } else if b.time_until_lured > 0 {
         b.time_until_lured -= fishing_speed;
         if b.time_until_lured <= 0 {
-            b.fish_angle = rng.next_f32() * 360.0;
-            b.time_until_hooked = 20 + rng.next_int(61);
+            let FishingCatchRandomPlan::Lure {
+                fish_angle,
+                time_until_hooked,
+            } = random
+            else {
+                panic!("a lure transition must carry its planned random values");
+            };
+            b.fish_angle = fish_angle;
+            b.time_until_hooked = time_until_hooked;
         }
     } else {
-        b.time_until_lured = 100 + rng.next_int(501);
+        let FishingCatchRandomPlan::Reset { time_until_lured } = random else {
+            panic!("a lure reset must carry its planned random value");
+        };
+        b.time_until_lured = time_until_lured;
         b.time_until_lured -= b.lure_speed;
     }
 }
@@ -891,6 +1071,228 @@ mod fishing_tests {
         let mut batches = sim.tick_fishing_owner_batches();
         batches[1] = batches[0].clone();
         let _ = merge_fishing_tick_owner_batches(batches);
+    }
+
+    #[test]
+    #[should_panic(expected = "latest tick-start plan")]
+    fn fishing_owner_completion_rejects_a_stale_plan() {
+        let mut sim = owner_fixture();
+        let stale = sim.tick_fishing_owner_batches();
+        let _current = sim.tick_fishing_owner_batches();
+        sim.apply_fishing_tick_owner_batches(stale);
+    }
+
+    #[test]
+    #[should_panic(expected = "may not replay")]
+    fn fishing_owner_completion_rejects_a_replayed_plan() {
+        let mut sim = owner_fixture();
+        let batches = sim.tick_fishing_owner_batches();
+        sim.apply_fishing_tick_owner_batches(batches.clone());
+        sim.apply_fishing_tick_owner_batches(batches);
+    }
+
+    fn dense_fishing_fixture(count: usize) -> MobSim<'static> {
+        let world = Box::leak(Box::new(ChunkWorld::new(-128, 8_192)));
+        for index in 0..count {
+            let x = [-0.5_f64, 16.5, 32.5, 48.5][index % 4];
+            let z = f64::from((index / 4) as u32) * 16.5 + 0.5;
+            for dx in -2..=2 {
+                for dz in -2..=2 {
+                    world.set_block((x.floor() as i32) + dx, 19, (z.floor() as i32) + dz, "minecraft:water");
+                    world.set_block((x.floor() as i32) + dx, 20, (z.floor() as i32) + dz, "minecraft:water");
+                }
+            }
+        }
+        let mut sim = MobSim::new(&*world);
+        for index in 0..count {
+            let x = [-0.5_f64, 16.5, 32.5, 48.5][index % 4];
+            let z = f64::from((index / 4) as u32) * 16.5 + 0.5;
+            sim.fishing_bobbers.insert(
+                index as i32 + 1,
+                FishingBobber {
+                    uuid: Uuid::from_u128(index as u128 + 1),
+                    owner: index as i32 + 10_000,
+                    position: Vec3::new(x, 20.0, z),
+                    velocity: Vec3::new(0.0, 0.0, 0.0),
+                    state: FishHookState::Bobbing,
+                    life: 0,
+                    out_of_water_time: 0,
+                    nibble: 1,
+                    time_until_lured: 0,
+                    time_until_hooked: 0,
+                    fish_angle: 0.0,
+                    open_water: false,
+                    biting: false,
+                    on_ground: false,
+                    luck: 0,
+                    lure_speed: 0,
+                },
+            );
+        }
+        sim
+    }
+
+    fn fishing_state(sim: &MobSim<'_>) -> Vec<(i32, Vec3, Vec3, i32, i32, i32, f32, bool, bool)> {
+        let mut state: Vec<_> = sim
+            .fishing_bobbers
+            .iter()
+            .map(|(&id, b)| {
+                (
+                    id,
+                    b.position,
+                    b.velocity,
+                    b.nibble,
+                    b.time_until_lured,
+                    b.time_until_hooked,
+                    b.fish_angle,
+                    b.open_water,
+                    b.biting,
+                )
+            })
+            .collect();
+        state.sort_unstable_by_key(|(id, ..)| *id);
+        state
+    }
+
+    #[test]
+    fn fishing_owner_workers_match_one_lane_with_interleaved_owners() {
+        let mut serial = dense_fishing_fixture(256);
+        let serial_batches = serial.tick_fishing_owner_batches_with_workers(1);
+        serial.apply_fishing_tick_owner_batches(serial_batches);
+
+        let mut parallel = dense_fishing_fixture(256);
+        let parallel_batches = parallel.tick_fishing_owner_batches_with_workers(4);
+        parallel.apply_fishing_tick_owner_batches(parallel_batches);
+
+        assert_eq!(fishing_state(&parallel), fishing_state(&serial));
+    }
+
+    #[test]
+    fn fishing_owner_workers_preserve_random_state_transitions() {
+        let world = Box::leak(Box::new(ChunkWorld::new(-128, 128)));
+        for index in 0..4 {
+            let x = [-0.5_f64, 16.5, 32.5, 48.5][index];
+            for dx in -2..=2 {
+                for dz in -2..=2 {
+                    world.set_block(x.floor() as i32 + dx, 19, dz, "minecraft:water");
+                    world.set_block(x.floor() as i32 + dx, 20, dz, "minecraft:water");
+                }
+            }
+        }
+        let mut serial = MobSim::new(&*world);
+        let mut parallel = MobSim::new(&*world);
+        for (index, (nibble, time_until_lured, time_until_hooked, biting)) in [
+            (0, 0, 1, true),
+            (0, 1, 0, false),
+            (0, 0, 0, false),
+            (1, 0, 0, false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let x = [-0.5_f64, 16.5, 32.5, 48.5][index];
+            let bobber = FishingBobber {
+                uuid: Uuid::from_u128(index as u128 + 1),
+                owner: index as i32 + 100,
+                position: Vec3::new(x, 20.0, 0.5),
+                velocity: Vec3::new(0.0, 0.0, 0.0),
+                state: FishHookState::Bobbing,
+                life: 0,
+                out_of_water_time: 0,
+                nibble,
+                time_until_lured,
+                time_until_hooked,
+                fish_angle: 0.0,
+                open_water: false,
+                biting,
+                on_ground: false,
+                luck: 0,
+                lure_speed: 0,
+            };
+            serial.fishing_bobbers.insert(index as i32 + 1, bobber.clone());
+            parallel.fishing_bobbers.insert(index as i32 + 1, bobber);
+        }
+        let serial_batches = serial.tick_fishing_owner_batches_with_workers(1);
+        serial.apply_fishing_tick_owner_batches(serial_batches);
+        let parallel_batches = parallel.tick_fishing_owner_batches_with_workers(4);
+        parallel.apply_fishing_tick_owner_batches(parallel_batches);
+
+        assert_eq!(fishing_state(&parallel), fishing_state(&serial));
+        assert_eq!(serial.fishing_rng.next_f32(), parallel.fishing_rng.next_f32());
+    }
+
+    #[test]
+    fn final_grounded_tick_does_not_consume_a_random_draw() {
+        let world = Box::leak(Box::new(ChunkWorld::new(-16, 64)));
+        let mut sim = MobSim::new(&*world);
+        sim.fishing_bobbers.insert(
+            1,
+            FishingBobber {
+                uuid: Uuid::from_u128(1),
+                owner: 1,
+                position: Vec3::new(0.0, 20.0, 0.0),
+                velocity: Vec3::new(0.0, 0.0, 0.0),
+                state: FishHookState::Bobbing,
+                life: HOOK_MAX_GROUND_LIFE - 1,
+                out_of_water_time: 0,
+                nibble: 0,
+                time_until_lured: 0,
+                time_until_hooked: 0,
+                fish_angle: 0.0,
+                open_water: false,
+                biting: false,
+                on_ground: true,
+                luck: 0,
+                lure_speed: 0,
+            },
+        );
+        let batches = sim.tick_fishing_owner_batches_with_workers(4);
+        sim.apply_fishing_tick_owner_batches(batches);
+        assert!(sim.fishing_bobbers.is_empty());
+        let mut expected = SpawnRng::new(FISHING_ROLL_SEED);
+        assert_eq!(sim.fishing_rng.next_f32(), expected.next_f32());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "focused native measurement for the production cutoff"]
+    fn measure_dense_fishing_owner_workers() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        // Prime the code paths so one-time codegen and allocator costs do not
+        // determine the cutoff. Each sample starts from a fresh fixture because
+        // one tick mutates every bobber; three samples make the threshold a
+        // measured trend rather than a single scheduler result.
+        let mut warmup = dense_fishing_fixture(1_024);
+        let warmup_batches = warmup.tick_fishing_owner_batches_with_workers(4);
+        warmup.apply_fishing_tick_owner_batches(warmup_batches);
+        for count in [256, 512, 1_024, 2_048, 4_096] {
+            let mut serial_nanos = 0_u128;
+            let mut parallel_nanos = 0_u128;
+            for _ in 0..3 {
+                let mut serial = dense_fishing_fixture(count);
+                let started = Instant::now();
+                let batches = serial.tick_fishing_owner_batches_with_workers(1);
+                serial.apply_fishing_tick_owner_batches(batches);
+                black_box(fishing_state(&serial));
+                serial_nanos += started.elapsed().as_nanos();
+
+                let mut parallel = dense_fishing_fixture(count);
+                let started = Instant::now();
+                let batches = parallel.tick_fishing_owner_batches_with_workers(4);
+                parallel.apply_fishing_tick_owner_batches(batches);
+                black_box(fishing_state(&parallel));
+                parallel_nanos += started.elapsed().as_nanos();
+            }
+            let serial_ms = serial_nanos as f64 / 3.0 / 1_000_000.0;
+            let parallel_ms = parallel_nanos as f64 / 3.0 / 1_000_000.0;
+
+            println!(
+                "dense_fishing owners=4 bobbers={count} serial_ms={serial_ms:.3} parallel_ms={parallel_ms:.3} speedup={:.3}",
+                serial_ms / parallel_ms
+            );
+        }
     }
 
     /// **The three declared weights sum to 100 and split exactly as

@@ -63,14 +63,14 @@ use crate::server::{
     EntitySource, NoEntities, serve_connection_shared,
     serve_connection_with_mob_events_and_commands_shared,
 };
-// `OnlineModeConfig`/`serve_connection_with_online_mode` are themselves
+// `serve_connection_with_online_mode` is itself
 // `#[cfg(not(target_arch = "wasm32"))]`-gated in `server.rs` (the online-mode path is
 // native-only — see `OnlineModeConfig`'s own doc comment on why: the
 // session-server check is an HTTPS call, and singleplayer's browser build has
 // no such dependency to link). `open_to_lan`/`LanConfig`, this import's only
 // user, already carry the identical gate, so this cannot desync from them.
 #[cfg(not(target_arch = "wasm32"))]
-use crate::server::{OnlineModeConfig, serve_connection_with_online_mode};
+use crate::server::serve_connection_with_online_mode;
 use crate::spawn::{Task, spawn};
 use crate::tick::{BlockTickFeed, ExplosionFeed, TickClock, TickStats};
 // `ChunkStore::tickets()`'s return type, threaded from
@@ -1055,7 +1055,7 @@ fn save_native_dirty_chunks(context: &NativeSaveContext) -> Result<usize, crate:
         .dimension()
         .unwrap_or(crate::dimension::Dimension::Overworld);
     let mut lights = Vec::with_capacity(snapshots.len());
-    for snapshot in &snapshots {
+    for snapshot in &mut snapshots {
         if snapshot.column.motion_blocking().is_none() {
             return Err(crate::world_storage::Error::Chunk(
                 crate::world_storage::ChunkRecordError::MissingMotionBlockingHeightmap,
@@ -1063,7 +1063,7 @@ fn save_native_dirty_chunks(context: &NativeSaveContext) -> Result<usize, crate:
         }
         let light = snapshot
             .column
-            .retained_light()
+            .centre_settled_light()
             .filter(|light| light.light_section_count() == snapshot.column.section_count() + 2)
             .cloned()
             .or_else(|| {
@@ -1092,6 +1092,11 @@ fn save_native_dirty_chunks(context: &NativeSaveContext) -> Result<usize, crate:
                 crate::world_storage::ChunkRecordError::MissingComputedLight,
             ));
         };
+        // Native storage is deliberately final-only: the canonical light is
+        // carried in `NativeDirtyChunkRecord::light`, and the attached source
+        // snapshot must not smuggle dependency-initialized lifecycle metadata
+        // into a record that reloads as centre-settled.
+        snapshot.column.clear_retained_light();
         lights.push(light);
     }
     let records = snapshots.iter().zip(&lights).map(|(snapshot, light)| {
@@ -1526,7 +1531,7 @@ impl IntegratedServer {
         #[cfg(target_arch = "wasm32")]
         let server_tick = server_app.witness();
         #[cfg(target_arch = "wasm32")]
-        let server_world = server_app.into_world();
+        let mut server_world = server_app.into_world();
         #[cfg(target_arch = "wasm32")]
         let tick_clock = Arc::clone(&clock);
         #[cfg(target_arch = "wasm32")]
@@ -2281,6 +2286,12 @@ impl IntegratedServer {
         // it (via `ticking`, below) to hand a Nether/End sibling's tick loop
         // the same anchor set this connection publishes into.
         let world_state = crate::world_state::WorldStateHandle::new();
+        // Install the same bounded ingress that the tick task will own before
+        // the connection task is spawned. The connection reaches it through
+        // `WorldStateHandle`, so no second proposal queue can sit beside the
+        // authoritative Paper dispatch window.
+        let spawn_proposals = server_app.proposal_handle();
+        world_state.set_proposal_handle(spawn_proposals.clone());
         // Sibling dimensions are lazy. A persistent world therefore needs a
         // registry that can receive each dimension's save handle when its
         // source is first built, before autosave or shutdown flushes it.
@@ -2343,10 +2354,12 @@ impl IntegratedServer {
         // this task fills it in. Two things make that cheap rather than merely
         // moved:
         //
-        // * `generate_columns_offloaded`  fans the batch out
-        //   over scoped threads **and** runs it on the blocking pool, so it
-        //   neither serialises nor blocks the core thread the connection task
-        //   and `run_tick_loop` share.
+        // * `generate_columns_offloaded` submits the batch to the persistent,
+        //   bounded worldgen-dispatch Rayon pool, so it neither serialises nor
+        //   blocks the core thread the connection task and `run_tick_loop`
+        //   share. Admission is bounded across connections; it does not create
+        //   a new scoped thread set or an unbounded blocking-pool queue per
+        //   seed batch.
         // * it reads through the shared `source` store above, so every one of
         //   these columns is either already resident from the connection's
         //   initial view (`mob_area` is a subset of it in production) or becomes
@@ -2610,8 +2623,13 @@ impl IntegratedServer {
         // `crate::ecs`'s module doc — the primary tick-loop variant owns a
         // `World`, not an `App`.
         let server_tick = server_app.witness();
-        let spawn_proposals = server_app.proposal_handle();
-        let server_world = server_app.into_world();
+        let mut server_world = server_app.into_world();
+        // The browser tick world receives a copied, resident-only view over
+        // the same source this server serves. The view is installed before
+        // the world enters the tick task; it never exposes a source guard or
+        // a generation-capable read to plugin code.
+        let snapshot_source: Arc<dyn ChunkSource> = source.clone();
+        server_world.insert_resource(crate::ecs::ServerWorldSnapshot::new(snapshot_source));
         // Cloned out here rather than inside the `async move` below: an
         // `Arc::clone(&x)` *inside* the block moves `x` into the coroutine, so
         // `clock` would no longer be available for the `Self` literal further
@@ -4161,6 +4179,7 @@ impl IntegratedServer {
         let server_app = crate::ecs::ServerApp::bootstrap();
         let server_tick = server_app.witness();
         let spawn_proposals = server_app.proposal_handle();
+        lan_world_state.set_proposal_handle(spawn_proposals.clone());
         let server_world = server_app.into_world();
         // Every one of these is cloned out *here* rather than inside the
         // `async move` below: a `.clone()` inside the block moves the original
@@ -5162,6 +5181,7 @@ impl IntegratedServer {
         // the rare one.
         #[cfg(not(target_arch = "wasm32"))]
         let entity_owners = self.entity_owned_uuids.take();
+        #[cfg(not(target_arch = "wasm32"))]
         if let (Some(storage), Some(mobs)) = (self.entity_storage.take(), self.mobs.take()) {
             let saved = mobs.with(|sim| sim.saved_entities());
             let count = saved.len();
@@ -5458,7 +5478,7 @@ mod tests {
                 .expect("native lifecycle source lock poisoned")
                 .set_generation_spawns_for_test(vec![
                     lodestone_worldgen::spawn_stage::GenerationSpawn {
-                        entity_type: "minecraft:cow".to_owned(),
+                        entity_type: lodestone_data::entity_type::EntityType::Cow.into(),
                         x: 4,
                         y: 5,
                         z: 4,

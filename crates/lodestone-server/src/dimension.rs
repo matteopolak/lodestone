@@ -478,12 +478,52 @@ impl<S: std::fmt::Debug> std::fmt::Debug for DimensionalSource<S> {
 }
 
 impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
+    fn columns(&self, coords: &[(i32, i32)]) -> Vec<ChunkColumn> {
+        self.primary.columns(coords)
+    }
+
     fn resident_block_state_id(&self, x: i32, y: i32, z: i32) -> Option<lodestone_data::block_states::StateId> {
         self.primary.resident_block_state_id(x, y, z)
     }
 
     fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
         self.primary.resident_column(cx, cz)
+    }
+
+    fn try_resident_column(
+        &self,
+        cx: i32,
+        cz: i32,
+    ) -> Option<crate::chunk_store::TryResident<ChunkColumn>> {
+        self.primary.try_resident_column(cx, cz)
+    }
+
+    fn try_resident_block_state_id(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> Option<crate::chunk_store::TryResident<lodestone_data::block_states::StateId>> {
+        self.primary.try_resident_block_state_id(x, y, z)
+    }
+
+    fn try_set_block(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        name: &str,
+    ) -> Option<crate::chunk_store::TryBlockMutation> {
+        self.primary.try_set_block(x, y, z, name)
+    }
+
+    fn try_store_resident_edit(
+        &self,
+        cx: i32,
+        cz: i32,
+        column: &ChunkColumn,
+    ) -> Option<crate::chunk_store::TryResidentEdit> {
+        self.primary.try_store_resident_edit(cx, cz, column)
     }
 
     fn store_resident_column(&self, cx: i32, cz: i32, column: &ChunkColumn) -> bool {
@@ -574,6 +614,13 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
         stage: crate::chunk::ChunkGenerationStage,
     ) -> ChunkColumn {
         self.primary.column_at(cx, cz, stage)
+    }
+
+    fn packet_generation_stage(
+        &self,
+        stage: crate::chunk::ChunkGenerationStage,
+    ) -> Option<crate::chunk::ChunkGenerationStage> {
+        self.primary.packet_generation_stage(stage)
     }
 
     fn block_state(&self, x: i32, y: i32, z: i32) -> String {

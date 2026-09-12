@@ -232,6 +232,11 @@ pub struct WorldStateHandle {
     /// entry point already receives this handle. See
     /// `crate::commands::function_store`'s module doc.
     functions: crate::commands::function_store::FunctionHandle,
+    /// The optional tick-owned proposal ingress shared with connection tasks.
+    /// It is a sibling of the persisted scalar state because the sender is a
+    /// runtime capability, not world data. Compatibility connection wrappers
+    /// leave it absent; integrated worlds install the handle before serving.
+    proposals: Arc<Mutex<Option<crate::ecs::ServerProposalHandle>>>,
 }
 
 impl WorldStateHandle {
@@ -250,6 +255,26 @@ impl WorldStateHandle {
     pub fn with<R>(&self, f: impl FnOnce(&mut WorldState) -> R) -> R {
         let _order = crate::lock_order::acquire(crate::lock_order::LockClass::WorldState);
         f(&mut self.state.lock().expect("world state lock poisoned"))
+    }
+
+    /// Installs the tick owner's bounded proposal ingress for this world.
+    ///
+    /// Connections clone the handle at the action boundary and never retain
+    /// the mutex across an await. A second installation replaces the old
+    /// sender, which is useful only while a constructor is assembling a world
+    /// and avoids exposing a mutable ECS resource to a connection task.
+    pub fn set_proposal_handle(&self, handle: crate::ecs::ServerProposalHandle) {
+        *self.proposals.lock().expect("world proposal lock poisoned") = Some(handle);
+    }
+
+    /// Returns the tick owner's bounded proposal ingress, if this world has
+    /// one. `None` is the deliberate compatibility-wrapper path.
+    #[must_use]
+    pub fn proposal_handle(&self) -> Option<crate::ecs::ServerProposalHandle> {
+        self.proposals
+            .lock()
+            .expect("world proposal lock poisoned")
+            .clone()
     }
 
     /// This world's player-anchor set — where [`crate::tick_area::FollowArea`] reads

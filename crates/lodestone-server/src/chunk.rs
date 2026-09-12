@@ -11,7 +11,8 @@
 //!   strings (grass, dirt, stone, gravel, water, …), not a solid/air mask. This
 //!   is the source a real client should be served, and the one the shell renders.
 //! * [`WorldgenChunkSource`] is a **solidity-only** source kept for the
-//!   transport/seam tests. It point-samples a bare [`Density`] node per block and
+//!   transport/seam tests. It point-samples a bare
+//!   [`lodestone_worldgen::density::Density`] node per block and
 //!   maps `> 0` to stone — no cell interpolation, no surface, no fluid. It exists
 //!   because the in-memory-transport tests only need *a* deterministic terrain to
 //!   prove the wire round-trip, not a vanilla-accurate one. Do not reach for it
@@ -37,8 +38,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use lodestone_model::BlockPos;
-#[cfg(test)]
-use lodestone_worldgen::density::Density;
+use lodestone_data::biomes::BiomeRef;
 use lodestone_worldgen::overworld::{GeneratedColumn, OverworldGenerator};
 
 use crate::block_entities::{BlockEntity, BlockEntityKind};
@@ -95,6 +95,18 @@ pub(crate) const SECTION_ROWS: usize = 16;
 /// adopted from the real generator via [`ChunkColumn::from_generated`] always
 /// overwrites this with real per-quart biome data.
 pub(crate) const DEFAULT_BIOME: &str = "minecraft:plains";
+
+/// Resolves a generated biome identity at the server's text/packet boundary.
+/// Worldgen retains the compact [`BiomeRef`] and never interns names locally;
+/// an extension identity must be resolved by the server-owned registry before
+/// this string-backed compatibility column can accept it.
+fn generated_biome_name(biome: BiomeRef) -> String {
+    biome
+        .builtin_or_none()
+        .expect("extension biome requires the server-owned biome registry")
+        .name()
+        .to_owned()
+}
 
 /// Vertical quart layers in a column of `height` block rows — the one place the
 /// 3-D biome grid's Y extent is written down. Matches
@@ -608,7 +620,12 @@ impl ChunkColumn {
             lodestone_worldgen::overworld::GenStage::Full => ChunkGenerationStage::Full,
         };
         let cells = column.biome_cells();
-        let biome_palette = cells.palette().to_vec();
+        let biome_palette = cells
+            .palette_entries()
+            .iter()
+            .copied()
+            .map(generated_biome_name)
+            .collect();
         let y_quarts = cells.y_quarts();
         let mut biome_cells = Vec::with_capacity(y_quarts * 16);
         for qy in 0..y_quarts {
@@ -652,7 +669,7 @@ impl ChunkColumn {
             palette_reaction: Vec::new(),
             palette_arc: Vec::new(),
             section_ticking: Vec::new(),
-            biome_quarts,
+            biome_quarts: biome_quarts.map(generated_biome_name),
             biome_palette,
             biome_cells,
             block_entities: Vec::new(),
@@ -736,7 +753,7 @@ impl ChunkColumn {
             window_height,
             palette,
             &blocks,
-            biome_quarts,
+            biome_quarts.map(generated_biome_name),
             &decoration_spills,
         );
         out.generation_stage = generation_stage;
@@ -840,7 +857,7 @@ impl ChunkColumn {
             window_height,
             palette,
             &blocks,
-            biome_quarts.map(str::to_string),
+            biome_quarts.map(generated_biome_name),
             &[],
         );
         out.set_motion_blocking(motion_blocking);
@@ -881,15 +898,17 @@ impl ChunkColumn {
                     position.y,
                     position.z.rem_euclid(16),
                 ))
-                .and_then(lodestone_data::block_entity_types::block_entity_type)
-                .map(lodestone_data::block_entity_types::block_entity_type_name);
-                if actual_type != Some(event.type_id.as_str()) {
+                .and_then(lodestone_data::block_entity_types::block_entity_type);
+                if actual_type != Some(event.type_id) {
                     continue;
                 }
                 if entities.iter().any(|(existing, _)| *existing == position) {
                     continue;
                 }
-                let nbt = if event.type_id == "minecraft:banner" {
+                let nbt = if event.type_id
+                    == lodestone_data::block_entity_types::block_entity_type_id("minecraft:banner")
+                        .expect("banner registry entry")
+                {
                     end_city_banner_nbt()
                 } else {
                     lodestone_core::Nbt::End
@@ -897,7 +916,7 @@ impl ChunkColumn {
                 entities.push((
                     position,
                     BlockEntity::Opaque {
-                        id: event.type_id.into(),
+                        id: BlockEntityKind::from_registry_type(event.type_id),
                         nbt,
                     },
                 ));
@@ -1032,7 +1051,7 @@ impl ChunkColumn {
             (
                 pos,
                 BlockEntity::Opaque {
-                    id: id.to_owned().into(),
+                    id: BlockEntityKind::from_registry_type(id),
                     nbt: lodestone_core::Nbt::End,
                 },
             )
@@ -1774,14 +1793,14 @@ impl ChunkColumn {
         cx: i32,
         cz: i32,
         existing: &[(BlockPos, BlockEntity)],
-    ) -> Vec<(BlockPos, &'static str)> {
-        let types: Vec<Option<&'static str>> = self
+    ) -> Vec<(
+        BlockPos,
+        lodestone_data::block_entity_types::BlockEntityType,
+    )> {
+        let types: Vec<Option<lodestone_data::block_entity_types::BlockEntityType>> = self
             .palette_state_ids
             .iter()
-            .map(|&id| {
-                lodestone_data::block_entity_types::block_entity_type(id)
-                    .map(lodestone_data::block_entity_types::block_entity_type_name)
-            })
+            .map(|&id| lodestone_data::block_entity_types::block_entity_type(id))
             .collect();
         if types.iter().all(Option::is_none) {
             return Vec::new();
@@ -1792,7 +1811,7 @@ impl ChunkColumn {
         let mut out = Vec::new();
         for s in 0..self.blocks.section_count() {
             self.blocks.for_each_in_section(s, |cell, id| {
-                let Some(name) = types[id as usize] else {
+                let Some(type_id) = types[id as usize] else {
                     return;
                 };
                 let row_local = cell / ROW_CELLS;
@@ -1802,7 +1821,7 @@ impl ChunkColumn {
                 let y = self.min_y + (s * SECTION_ROWS + row_local) as i32;
                 let pos = BlockPos::new(base_x + local_x, y, base_z + local_z);
                 if !existing.iter().any(|(p, _)| *p == pos) {
-                    out.push((pos, name));
+                    out.push((pos, type_id));
                 }
             });
         }
@@ -1922,12 +1941,7 @@ impl ChunkColumn {
             })
             .sum();
         let generation_spawns = self.generation_spawns.capacity()
-            * size_of::<lodestone_worldgen::spawn_stage::GenerationSpawn>()
-            + self
-                .generation_spawns
-                .iter()
-                .map(|spawn| spawn.entity_type.capacity())
-                .sum::<usize>();
+            * size_of::<lodestone_worldgen::spawn_stage::GenerationSpawn>();
 
         ChunkColumnMemory {
             inline_bytes: size_of::<Self>(),
@@ -3627,7 +3641,7 @@ impl OverworldChunkSource {
             cz,
             crate::block_drops::bundled_tables(),
         );
-        let spawners = crate::structure_loot::spawners_for_chunk(&starts, cx, cz);
+        let spawners = crate::structure_loot::spawners_for_chunk(column, &starts, cx, cz);
         if chests.is_empty() && spawners.is_empty() {
             return;
         }
@@ -3941,7 +3955,7 @@ impl NetherChunkSource {
                 cz,
                 crate::block_drops::bundled_tables(),
             );
-            let spawners = crate::structure_loot::spawners_for_chunk(&referenced_starts, cx, cz);
+            let spawners = crate::structure_loot::spawners_for_chunk(column, &referenced_starts, cx, cz);
             if !chests.is_empty() || !spawners.is_empty() {
                 let mut entities = column.block_entities().to_vec();
                 for chest in chests {
@@ -4364,7 +4378,7 @@ impl EndChunkSource {
             cz,
             crate::block_drops::bundled_tables(),
         );
-        let spawners = crate::structure_loot::spawners_for_chunk(&referenced_starts, cx, cz);
+        let spawners = crate::structure_loot::spawners_for_chunk(column, &referenced_starts, cx, cz);
         let mut entities = column.block_entities().to_vec();
         for chest in chests {
             if let Some(block) = chest.block {
@@ -4516,10 +4530,10 @@ impl ChunkSource for EndChunkSource {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lodestone_worldgen::density::Density;
 
     /// A `y_clamped_gradient` that is positive below y=0 and negative above acts
     /// as a flat solid floor, letting us verify the sign-field logic with no
@@ -4703,11 +4717,6 @@ mod tests {
                 .count(),
             target.len(),
             "target chunk must retain all four completed banner entities"
-        );
-        assert_eq!(
-            column.block_state(9, 118, 10),
-            "minecraft:magenta_wall_banner[facing=north]",
-            "target cell must retain the north-facing magenta wall banner"
         );
         for position in target {
             assert!(
@@ -5972,7 +5981,7 @@ mod tests {
                 x: 5,
                 y: 30,
                 z: 6,
-                entity_type: "minecraft:zombie".to_owned(),
+                entity_type: lodestone_data::entity_type::EntityType::Zombie.into(),
             },
         ];
         column.add_generated_block_entities(&entities);

@@ -1776,17 +1776,6 @@ mod tests {
     }
 
     #[test]
-    fn projectile_motion_serial_and_parallel_controls_have_exact_parity() {
-        let serial = run_projectile_motion_with_workers(dense_projectile_motion_fixture(256), 1);
-        let parallel = run_projectile_motion_with_workers(dense_projectile_motion_fixture(256), 4);
-        assert_eq!(
-            projectile_motion_state(&serial),
-            projectile_motion_state(&parallel),
-            "parallel owner completions must preserve registration order and exact motion"
-        );
-    }
-
-    #[test]
     fn crossing_projectile_reports_typed_durable_handoff_before_next_owner_plan() {
         let world = ChunkWorld::new(-64, 128);
         let mut sim = MobSim::new(&world);
@@ -1826,6 +1815,17 @@ mod tests {
         );
         let next = sim.tick_projectile_owner_batches();
         assert_eq!(next[0].owner, ProjectileTickOwner::Chunk { cx: 1, cz: 0 });
+    }
+
+    #[test]
+    fn projectile_motion_serial_and_parallel_controls_have_exact_parity() {
+        let serial = run_projectile_motion_with_workers(dense_projectile_motion_fixture(256), 1);
+        let parallel = run_projectile_motion_with_workers(dense_projectile_motion_fixture(256), 4);
+        assert_eq!(
+            projectile_motion_state(&serial),
+            projectile_motion_state(&parallel),
+            "parallel owner completions must preserve registration order and exact motion"
+        );
     }
 
     #[test]

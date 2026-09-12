@@ -69,6 +69,7 @@ lodestone-time = { workspace = true }
 # follow-up rather than a prerequisite. See `src/ecs/schedules.rs`'s own doc.
 bevy_app = { workspace = true }
 bevy_ecs = { workspace = true }
+bon = { workspace = true }
 # The Brigadier argument tree the server's own built-in commands parse against
 # (issue #48, `src/commands.rs`). Safe to depend on where `lodestone-ecs` is
 # not, and the distinction is the whole reason `src/command.rs`'s seam exists:

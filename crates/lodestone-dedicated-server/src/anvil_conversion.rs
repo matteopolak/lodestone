@@ -744,15 +744,15 @@ fn execute_export(launch: &ConversionLaunch, storage: &WorldStorage) -> Result<S
         launch.chunks.clone()
     };
     let selected_count = chunks.len();
-    let input = WorldExportInput::new(
-        chunks,
-        launch.min_y.expect("validated export min Y"),
-        launch.height.expect("validated export height"),
-        launch.game_time.expect("validated export game time"),
-        launch.compression.expect("validated export compression"),
-        launch.timestamp.expect("validated export timestamp"),
-    )
-    .map_err(|error| format!("invalid export selection: {error}"))?;
+    let input = WorldExportInput::builder()
+        .chunks(chunks)
+        .min_y(launch.min_y.expect("validated export min Y"))
+        .height(launch.height.expect("validated export height"))
+        .game_time(launch.game_time.expect("validated export game time"))
+        .compression(launch.compression.expect("validated export compression"))
+        .timestamp(launch.timestamp.expect("validated export timestamp"))
+        .build()
+        .map_err(|error| format!("invalid export selection: {error}"))?;
     let report = preflight_world_export(storage, &input)
         .map_err(|error| format!("export preflight failed: {error}"))?;
     let token = review_token(launch, &report);

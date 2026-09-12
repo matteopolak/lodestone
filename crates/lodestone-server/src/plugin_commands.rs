@@ -195,6 +195,11 @@ impl crate::CommandSink for ServerCommandSink {
             Err(error) => crate::CommandResponse::refused(error.to_string()),
         }
     }
+
+    fn suggest(&self, caller: &CommandCaller, input: &str) -> Vec<String> {
+        self.registry
+            .suggest(&ServerCommandSource::new(caller.clone()), &self.permissions, input)
+    }
 }
 
 /// A command under construction.
@@ -903,6 +908,11 @@ mod tests {
         let dispatch = Arc::new(registry).into_dispatch(Arc::new(permissions));
         assert!(dispatch.is_installed());
         assert!(dispatch.run(&source(0).caller, "t 2").is_ran());
+        assert_eq!(
+            dispatch.suggest(&source(0).caller, "/to"),
+            vec!["tools".to_owned()],
+            "the production dispatch adapter must expose permission-filtered suggestions"
+        );
     }
 
     #[test]

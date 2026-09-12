@@ -47,6 +47,10 @@
 use lodestone_model::BlockPos;
 
 use crate::redstone::with_property;
+use crate::scheduled_tick::ScheduledTickKind;
+
+/// The typed scheduled-tick key a pressed button uses to release itself.
+pub const TICK_BUTTON: ScheduledTickKind = ScheduledTickKind::ButtonRelease;
 
 /// The button's ticks-to-stay-pressed for the stone family: `20`. This also
 /// covers `polished_blackstone_button`, which uses the stone timing family.
@@ -63,9 +67,8 @@ pub struct HandUse {
     /// Every `(position, new state)` the click rewrites. One entry for a
     /// trapdoor/gate/lever/button, **two** for a door (both halves move together).
     pub changes: Vec<(BlockPos, String)>,
-    /// A delay in ticks after which a `ButtonRelease` scheduled tick should
-    /// fire at `pos` to release a pressed button, or `None` for the other four
-    /// families.
+    /// A delay in ticks after which the `TICK_BUTTON` key should fire at `pos` to release
+    /// a pressed button, or `None` for the other four families.
     pub release_after: Option<u64>,
 }
 
@@ -205,8 +208,8 @@ pub fn hand_use(
     })
 }
 
-/// The state a released button returns to — `powered=false`. The tick loop
-/// calls this when a `ButtonRelease` entry comes due.
+/// The state a released button returns to — `powered=false`. `tick::run_tick_loop`
+/// calls this when a [`TICK_BUTTON`] entry comes due.
 ///
 /// `None` when the button is already unpowered, so a duplicate scheduled tick
 /// cannot publish a redundant block update (the same `Option` shape every
@@ -266,6 +269,16 @@ mod tests {
 
     fn pos(x: i32, y: i32, z: i32) -> BlockPos {
         BlockPos::new(x, y, z)
+    }
+
+    #[test]
+    fn button_release_key_is_typed_and_does_not_alias_an_extension() {
+        assert_eq!(TICK_BUTTON, ScheduledTickKind::ButtonRelease);
+        assert_eq!(TICK_BUTTON.name(), "lodestone:button_release");
+        assert_ne!(
+            TICK_BUTTON,
+            ScheduledTickKind::Extension("lodestone:button_release".to_owned())
+        );
     }
 
     #[test]

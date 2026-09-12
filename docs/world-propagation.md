@@ -90,6 +90,15 @@ chunk-forget/respawn/re-stream sequence so any vanilla-protocol client tears dow
 correctly — this sequence is required even though the client keeps its own local teardown logic, since
 it's the only thing a non-Lodestone client can act on.
 
+Portal terrain reads have a resident-only boundary for synchronous server work. The return search uses
+`find_exit_portal_required_columns` to describe its indexed candidates plus bounded fallback square, then
+`find_exit_portal_resident` reads captured resident columns without calling a cold source. Inexact End
+gateway contact follows the same pattern with `end_gateway_required_columns` and
+`end_gateway_arrival_in_resident_world`; fixed End-platform repair uses
+`end_platform_required_columns` and `ensure_end_platform_if_resident`. A missing footprint is a defer,
+not a reason to generate a column from inside a tick. Once the footprint is resident, the helpers keep
+the ordinary search order and tie-breaks, so admission changes latency but not the chosen destination.
+
 End portals reuse the same per-tick counter/cooldown machinery but fire on the very first tick (the
 Nether's delay is that block's own override of a default of zero) and have no coordinate scale or
 destination search — the destination is a fixed platform. A 12-frame ring, correctly filled with eyes of
@@ -143,4 +152,3 @@ Bubble columns have no configuration — the four constants are fixed vanilla li
 - `lodestone-v26-2`'s `server_protocol` — the wire encoding for dimension changes; the mapping from a
   dimension to its registry holder id is a property of the protocol family, not of `dimension`/`portal`
   themselves.
-

@@ -10,6 +10,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use bon::bon;
 use lodestone_anvil::{
     CompressionScheme,
     region::{build_region_from_nbt, region_and_local},
@@ -32,7 +33,8 @@ pub struct ChunkCoordinate {
 
 /// The complete, explicit input contract for a native terrain export.
 ///
-/// The selected chunk coordinates are sorted by this constructor. A caller
+/// The selected chunk coordinates are sorted by this builder (and its
+/// compatibility constructor). A caller
 /// supplies the vertical extent needed to reopen typed native records, plus
 /// every output-affecting value: tick conversion time, compression, and region
 /// timestamp. No current clock or native-store enumeration participates.
@@ -46,8 +48,14 @@ pub struct WorldExportInput {
     timestamp: u32,
 }
 
+#[bon]
 impl WorldExportInput {
     /// Validates and canonicalizes a selected terrain batch.
+    ///
+    /// This positional compatibility wrapper remains available for downstream
+    /// callers. New code should use [`WorldExportInput::builder`] so each
+    /// output-affecting value is identified by name.
+    #[builder(start_fn = builder)]
     pub fn new(
         mut chunks: Vec<ChunkCoordinate>,
         min_y: i32,
@@ -294,7 +302,8 @@ pub fn preflight_world_export(
 /// decode, then owns the resulting records. A later incremental native write
 /// cannot replace a selected column before [`export_native_world_snapshot`]
 /// publishes it. The supplied input remains the snapshot's complete output
-/// contract and was already validated by [`WorldExportInput::new`].
+/// contract and was already validated by [`WorldExportInput::builder`]
+/// (or the compatibility [`WorldExportInput::new`] wrapper).
 pub fn snapshot_world_export(
     storage: &WorldStorage,
     input: &WorldExportInput,
@@ -355,14 +364,14 @@ pub fn snapshot_native_world_export(
             )
         })
         .collect::<Vec<_>>();
-    let input = WorldExportInput::new(
-        selected.iter().map(|(coordinate, _)| *coordinate).collect(),
-        min_y,
-        height,
-        game_time,
-        compression,
-        timestamp,
-    )?;
+    let input = WorldExportInput::builder()
+        .chunks(selected.iter().map(|(coordinate, _)| *coordinate).collect())
+        .min_y(min_y)
+        .height(height)
+        .game_time(game_time)
+        .compression(compression)
+        .timestamp(timestamp)
+        .build()?;
     Ok(NativeWorldExportSnapshot { input, selected })
 }
 
@@ -544,32 +553,56 @@ mod tests {
 
     #[test]
     fn selection_sorts_coordinates_and_rejects_duplicates() {
-        let input = WorldExportInput::new(
-            vec![
+        let input = WorldExportInput::builder()
+            .chunks(vec![
                 ChunkCoordinate { x: 32, z: 0 },
                 ChunkCoordinate { x: 0, z: 0 },
-            ],
-            0,
-            16,
-            0,
-            CompressionScheme::Zlib,
-            1,
-        )
-        .expect("distinct section-aligned selection is valid");
+            ])
+            .min_y(0)
+            .height(16)
+            .game_time(0)
+            .compression(CompressionScheme::Zlib)
+            .timestamp(1)
+            .build()
+            .expect("distinct section-aligned selection is valid");
         assert_eq!(
             input.chunks(),
             &[ChunkCoordinate { x: 0, z: 0 }, ChunkCoordinate { x: 32, z: 0 }]
         );
         assert!(matches!(
-            WorldExportInput::new(
-                vec![ChunkCoordinate { x: 0, z: 0 }, ChunkCoordinate { x: 0, z: 0 }],
-                0,
-                16,
-                0,
-                CompressionScheme::Zlib,
-                1,
-            ),
+            WorldExportInput::builder()
+                .chunks(vec![ChunkCoordinate { x: 0, z: 0 }, ChunkCoordinate { x: 0, z: 0 }])
+                .min_y(0)
+                .height(16)
+                .game_time(0)
+                .compression(CompressionScheme::Zlib)
+                .timestamp(1)
+                .build(),
             Err(Error::DuplicateChunk { .. })
         ));
+    }
+
+    #[test]
+    fn named_builder_is_independent_of_setter_order_and_matches_compatibility_wrapper() {
+        let expected = WorldExportInput::new(
+            vec![ChunkCoordinate { x: 7, z: -3 }],
+            -32,
+            384,
+            123_456,
+            CompressionScheme::Zlib,
+            1_700_000_123,
+        )
+        .expect("distinct section-aligned selection is valid");
+        let actual = WorldExportInput::builder()
+            .timestamp(1_700_000_123)
+            .compression(CompressionScheme::Zlib)
+            .game_time(123_456)
+            .height(384)
+            .min_y(-32)
+            .chunks(vec![ChunkCoordinate { x: 7, z: -3 }])
+            .build()
+            .expect("named fields are valid in any setter order");
+
+        assert_eq!(actual, expected);
     }
 }

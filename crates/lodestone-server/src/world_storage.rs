@@ -190,10 +190,12 @@ pub struct NativeDirtyEntityChunk {
 ///
 /// A native chunk replacement is deliberately one value rather than a family
 /// of partial writers. `ChunkColumn` owns blocks, biomes, heightmaps, and
-/// resident block entities; `ColumnLight` owns the canonical light sections;
-/// and `ScheduledTickHandle` owns the pending block and fluid queues. Requiring
-/// all three at this boundary prevents a later save from replacing a complete
-/// record with a terrain-only snapshot.
+/// resident block entities; `ColumnLight` owns the canonical, centre-settled
+/// light sections; and `ScheduledTickHandle` owns the pending block and fluid
+/// queues. Requiring all three at this boundary prevents a later save from
+/// replacing a complete record with a terrain-only snapshot. Dependency-
+/// initialized light is not a native record: it must be settled or omitted
+/// before this boundary.
 #[derive(Clone, Copy, Debug)]
 pub struct NativeDirtyChunkRecord<'a> {
     /// The chunk's horizontal column X coordinate.
@@ -467,6 +469,8 @@ pub enum ChunkRecordError {
     UnexpectedLightSectionY { expected: i32, actual: i32 },
     /// A source column names a biome not available in this built-in census.
     UnsupportedBiome(String),
+    /// Native storage accepts only final centre-settled light snapshots.
+    DependencyLightNotFinal,
     /// The production world source did not provide its complete derived
     /// motion-blocking heightmap for a dirty column.
     MissingMotionBlockingHeightmap,
@@ -582,6 +586,9 @@ impl fmt::Display for ChunkRecordError {
                 write!(formatter, "expected light section Y {expected}, found {actual}")
             }
             Self::UnsupportedBiome(name) => write!(formatter, "unsupported built-in biome {name}"),
+            Self::DependencyLightNotFinal => {
+                formatter.write_str("dependency-initialized light is not a final native snapshot")
+            }
             Self::MissingMotionBlockingHeightmap => {
                 formatter.write_str("dirty production column has no motion-blocking heightmap")
             }
@@ -1590,6 +1597,11 @@ impl WorldStorage {
         };
         let mut writes = Vec::new();
         for dirty in dirty {
+            if dirty.column.retained_light_status()
+                == Some(crate::chunk::RetainedLightStatus::DependencyInitialized)
+            {
+                return Err(Error::Chunk(ChunkRecordError::DependencyLightNotFinal));
+            }
             let ticks = dirty
                 .scheduled
                 .snapshot_column(dirty.column_x, dirty.column_z);
@@ -1686,7 +1698,10 @@ fn decode_native_chunk(
     // serving source. Keep the decoded light beside the terrain as well as in
     // the typed record, so an initial packet consumes the persisted snapshot
     // instead of recomputing it after restart.
-    column.set_retained_light(light.clone());
+    column.set_retained_light_with_status(
+        light.clone(),
+        crate::chunk::RetainedLightStatus::CentreSettled,
+    );
     Ok(NativeChunkRecord {
         column,
         light,
@@ -3751,6 +3766,11 @@ mod tests {
             "a native reload must attach persisted light to the serving column"
         );
         assert_eq!(
+            snapshot[0].record.column.retained_light_status(),
+            Some(crate::chunk::RetainedLightStatus::CentreSettled),
+            "native reload must attach only final light lifecycle state"
+        );
+        assert_eq!(
             snapshot[1].record.column.block_state(3, 4, 5),
             "minecraft:stone"
         );
@@ -3795,6 +3815,35 @@ mod tests {
         ));
         drop(storage);
         std::fs::remove_dir_all(directory).expect("remove native test segment");
+    }
+
+    #[test]
+    fn native_chunk_write_rejects_dependency_initialized_light() {
+        let unique = lodestone_time::epoch_duration().as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "lodestone-native-chunk-dependency-light-{}-{unique}",
+            std::process::id()
+        ));
+        let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: directory.clone(),
+        })
+        .expect("open native store");
+        let mut column = crate::chunk::ChunkColumn::new(0, 16);
+        let light = lodestone_world::ColumnLight::new(column.section_count());
+        column.set_retained_light_with_status(
+            light.clone(),
+            crate::chunk::RetainedLightStatus::DependencyInitialized,
+        );
+        let scheduled = crate::scheduled_tick::ScheduledTickHandle::new();
+
+        assert!(matches!(
+            storage.write_dirty_chunk(NativeDirtyChunkRecord::new(
+                0, 0, &column, &light, &scheduled,
+            )),
+            Err(Error::Chunk(ChunkRecordError::DependencyLightNotFinal))
+        ));
+        drop(storage);
+        std::fs::remove_dir_all(directory).expect("remove native dependency-light segment");
     }
 
     #[test]
