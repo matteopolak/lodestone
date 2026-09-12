@@ -74,7 +74,7 @@ pub enum Axis {
 }
 
 /// The vertical half a slab or stair occupies (`Half` / `SlabType` bottom vs
-/// top). Double slabs and waterlogging are out of scope (see [`OrientationKind`]).
+/// top). Two-cell families reuse `Bottom`/`Top` as their lower/upper marker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Half {
     /// Lower half — the default for a top-face click or a lower hit.
@@ -291,9 +291,12 @@ pub fn resolve_target(
 ///   (furnaces, chests, pumpkins, most "faces the player" blocks),
 ///   [`FacingAll`](Self::FacingAll) (dispensers, droppers, observers, pistons)
 ///   and [`Stairs`](Self::Stairs) (facing + half).
+/// * **Resolved as a conservative two-cell pair:** doors, beds, tall plants
+///   and small dripleaves. The second position is recorded in the prediction
+///   ledger so an authoritative update can settle both cells.
 /// * **Not resolved (falls back to the block's default state):** stair *shape*
 ///   (inner/outer corners, which depends on neighbouring stairs, not geometry),
-///   waterlogging, multi-part blocks (doors, beds, tall flowers), rotation-16
+///   waterlogging, rotation-16
 ///   blocks (signs, banners on 16-step yaw), wall-vs-floor variants, and any
 ///   state a block computes from its neighbours. A driver placing one of these
 ///   should use the default state and let the server's authoritative block
@@ -322,6 +325,14 @@ pub enum OrientationKind {
     /// Shape (corners) is left at the straight default and corrected by the
     /// server.
     Stairs,
+    /// A door: lower half at the target and upper half one cell above.
+    Door,
+    /// A bed: foot at the target and head one cell along its facing.
+    Bed,
+    /// A two-cell plant with lower and upper halves.
+    DoublePlant,
+    /// A small dripleaf, which combines a two-cell pair with horizontal facing.
+    SmallDripleaf,
 }
 
 /// The geometry-derived block state a placement resolves. Every field is
@@ -330,8 +341,8 @@ pub enum OrientationKind {
 /// block's other properties at their defaults.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PlacedState {
-    /// The `facing` property, for the horizontal- and all-facing kinds and
-    /// stairs.
+    /// The `facing` property, for horizontal/all-facing kinds, stairs, beds,
+    /// doors and small dripleaves.
     pub facing: Option<BlockFace>,
     /// The `axis` property, for pillars.
     pub axis: Option<Axis>,
@@ -407,6 +418,33 @@ pub fn resolve_state(
             half: Some(half_from_hit(face, cursor_y)),
             ..PlacedState::default()
         },
+        OrientationKind::Door | OrientationKind::Bed | OrientationKind::DoublePlant => PlacedState {
+            facing: (!matches!(orientation, OrientationKind::DoublePlant))
+                .then_some(horizontal_from_yaw(rotation.yaw)),
+            half: matches!(orientation, OrientationKind::Door)
+                .then_some(Half::Bottom),
+            ..PlacedState::default()
+        },
+        OrientationKind::SmallDripleaf => PlacedState {
+            facing: Some(opposite(horizontal_from_yaw(rotation.yaw))),
+            half: Some(Half::Bottom),
+            ..PlacedState::default()
+        },
+    }
+}
+
+/// The additional cell a two-cell placement owns, if any.
+#[must_use]
+pub fn extra_positions(target: BlockPos, orientation: OrientationKind, facing: Option<BlockFace>) -> Vec<BlockPos> {
+    match orientation {
+        OrientationKind::Door
+        | OrientationKind::DoublePlant
+        | OrientationKind::SmallDripleaf => vec![offset(target, BlockFace::Up)],
+        OrientationKind::Bed => facing
+            .map(|face| offset(target, face))
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -450,6 +488,10 @@ pub struct PlacePrediction {
     pub block: Identifier,
     /// The geometry-derived state the placement resolved.
     pub state: PlacedState,
+    /// Other cells owned by the same placement. These are recorded even when
+    /// the driver cannot resolve their complete state locally, so an update to
+    /// either half retires the same authoritative action.
+    pub extra: Vec<BlockPos>,
 }
 
 /// The result of reconciling a placement against the server's authoritative
@@ -557,6 +599,7 @@ impl Placement {
             pos: target.pos,
             block,
             state,
+            extra: extra_positions(target.pos, ctx.orientation, state.facing),
         };
         self.pending.push(prediction.clone());
         UseOnDecision::Place { action, prediction }
@@ -603,7 +646,7 @@ impl Placement {
     ) -> PlaceReconciliation {
         let mut corrected = false;
         self.pending.retain(|p| {
-            if p.pos == pos {
+            if p.pos == pos || p.extra.contains(&pos) {
                 if server_block != Some(&p.block) {
                     corrected = true;
                 }
@@ -905,6 +948,50 @@ mod tests {
         );
         assert_eq!(s.facing, Some(BlockFace::South));
         assert_eq!(s.half, Some(Half::Top));
+    }
+
+    #[test]
+    fn two_cell_predictions_record_the_partner_position() {
+        let ground = BlockPos::new(10, 64, 10);
+        let lower = BlockPos::new(10, 65, 10);
+        let upper = BlockPos::new(10, 66, 10);
+        let world = FakeWorld {
+            replaceable: vec![lower, upper],
+            ..FakeWorld::default()
+        };
+        let mut machine = Placement::new();
+        let mut door = ctx(ground, BlockFace::Up);
+        door.placing = Some(id("oak_door"));
+        door.orientation = OrientationKind::Door;
+        let UseOnDecision::Place { prediction, .. } = machine.use_on(&door, &world) else {
+            panic!("a door with both cells open must predict");
+        };
+        assert_eq!(prediction.extra, vec![upper]);
+        assert_eq!(extra_positions(lower, OrientationKind::Door, prediction.state.facing), vec![upper]);
+
+        let correction = machine.reconcile(upper, None);
+        assert!(correction.corrected, "an authoritative empty partner corrects the pair");
+        assert!(machine.pending().is_empty());
+    }
+
+    #[test]
+    fn bed_partner_follows_the_resolved_horizontal_facing() {
+        let ground = BlockPos::new(2, 64, 2);
+        let foot = BlockPos::new(2, 65, 2);
+        let head = BlockPos::new(2, 65, 3);
+        let world = FakeWorld {
+            replaceable: vec![foot, head],
+            ..FakeWorld::default()
+        };
+        let mut machine = Placement::new();
+        let mut bed = ctx(ground, BlockFace::Up);
+        bed.placing = Some(id("white_bed"));
+        bed.orientation = OrientationKind::Bed;
+        let UseOnDecision::Place { prediction, .. } = machine.use_on(&bed, &world) else {
+            panic!("a bed with both cells open must predict");
+        };
+        assert_eq!(prediction.state.facing, Some(BlockFace::South));
+        assert_eq!(prediction.extra, vec![head]);
     }
 
     #[test]

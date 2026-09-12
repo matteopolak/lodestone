@@ -504,6 +504,39 @@ pub(crate) fn block_states_of(block: &str) -> Option<BlockStates> {
 /// of sending `use_item_on` and waiting.
 pub(crate) fn orientation_for_placement(block: &str, states: &BlockStates) -> Option<OrientationKind> {
     let path = block.strip_prefix("minecraft:").unwrap_or(block);
+    // These families own a second cell. Their property signatures distinguish
+    // the pair, while the game-layer geometry still supplies its direction.
+    if path == "small_dripleaf"
+        && states.domain("facing").is_some_and(|d| d.len() == 4)
+        && states
+            .domain("half")
+            .is_some_and(|d| d.contains(&"lower") && d.contains(&"upper"))
+    {
+        return Some(OrientationKind::SmallDripleaf);
+    }
+    if path.ends_with("_door")
+        && states.domain("facing").is_some_and(|d| d.len() == 4)
+        && states.domain("hinge").is_some()
+        && states
+            .domain("half")
+            .is_some_and(|d| d.contains(&"lower") && d.contains(&"upper"))
+    {
+        return Some(OrientationKind::Door);
+    }
+    if states
+        .domain("part")
+        .is_some_and(|d| d.contains(&"foot") && d.contains(&"head"))
+        && states.domain("facing").is_some_and(|d| d.len() == 4)
+    {
+        return Some(OrientationKind::Bed);
+    }
+    if DOUBLE_CELL_PLANTS.contains(&path)
+        && states
+            .domain("half")
+            .is_some_and(|d| d.contains(&"lower") && d.contains(&"upper"))
+    {
+        return Some(OrientationKind::DoublePlant);
+    }
     // A pillar's axis is the clicked face's axis (`RotatedPillarBlock`). A
     // 2-value `axis` is `nether_portal`, which is not placed by an item.
     if let Some(axis) = states.domain("axis") {
@@ -557,6 +590,49 @@ pub(crate) fn state_for_placement(
     orientation: OrientationKind,
     placed: &PlacedState,
 ) -> Option<u32> {
+    state_for_placement_with_overrides(block, states, orientation, placed, None, None)
+}
+
+/// Resolve the state for the partner cell of a two-cell placement. The target
+/// uses the ordinary placement values; the partner differs only by its
+/// upper/lower or foot/head marker.
+pub(crate) fn state_for_extra_placement(
+    block: &str,
+    states: &BlockStates,
+    orientation: OrientationKind,
+    placed: &PlacedState,
+) -> Option<u32> {
+    match orientation {
+        OrientationKind::Door
+        | OrientationKind::DoublePlant
+        | OrientationKind::SmallDripleaf => state_for_placement_with_overrides(
+            block,
+            states,
+            orientation,
+            placed,
+            Some("upper"),
+            None,
+        ),
+        OrientationKind::Bed => state_for_placement_with_overrides(
+            block,
+            states,
+            orientation,
+            placed,
+            None,
+            Some("head"),
+        ),
+        _ => None,
+    }
+}
+
+fn state_for_placement_with_overrides(
+    block: &str,
+    states: &BlockStates,
+    orientation: OrientationKind,
+    placed: &PlacedState,
+    extra_half: Option<&'static str>,
+    extra_part: Option<&'static str>,
+) -> Option<u32> {
     let path = block.strip_prefix("minecraft:").unwrap_or(block);
     let mut wanted: Vec<(&'static str, &'static str)> = Vec::with_capacity(states.domains.len());
     for (name, domain) in &states.domains {
@@ -568,6 +644,9 @@ pub(crate) fn state_for_placement(
                         | OrientationKind::FacingHorizontal
                         | OrientationKind::FacingHorizontalOpposite
                         | OrientationKind::Stairs
+                        | OrientationKind::Door
+                        | OrientationKind::Bed
+                        | OrientationKind::SmallDripleaf
                 ) =>
             {
                 face_property(placed.facing?)
@@ -575,6 +654,15 @@ pub(crate) fn state_for_placement(
             "axis" if orientation == OrientationKind::Pillar => axis_property(placed.axis?),
             "type" if orientation == OrientationKind::Slab => half_property(placed.half?),
             "half" if orientation == OrientationKind::Stairs => half_property(placed.half?),
+            "half"
+                if matches!(
+                    orientation,
+                    OrientationKind::Door
+                        | OrientationKind::DoublePlant
+                        | OrientationKind::SmallDripleaf
+                ) => extra_half.unwrap_or("lower"),
+            "hinge" if orientation == OrientationKind::Door => "left",
+            "part" if orientation == OrientationKind::Bed => extra_part.unwrap_or("foot"),
             // `StairBlock.getStateForPlacement` computes `shape` from the
             // neighbouring stairs; `straight` is the no-neighbour answer and is
             // what every one of the 64 stair blocks defaults to. The server
@@ -614,6 +702,17 @@ pub(crate) fn state_for_placement(
         .copied()
         .find(|&id| lodestone_data::block_states::properties(id) == Some(wanted.as_slice()))
 }
+
+/// The blocks represented by a lower and upper state at adjacent positions.
+const DOUBLE_CELL_PLANTS: &[&str] = &[
+    "large_fern",
+    "lilac",
+    "peony",
+    "pitcher_plant",
+    "rose_bush",
+    "sunflower",
+    "tall_grass",
+];
 
 /// The block-state id a right-click on `block` predicts, given the
 /// geometry-derived [`PlacedState`] [`lodestone_game::placement::Placement::use_on`] resolved — or `None`
