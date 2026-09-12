@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Diff the Java movement oracle's per-tick bit patterns against the checked-in
-golden traces (`tests/support/golden_traces.rs`). Reports the exact scenario,
+golden trace shards (`tests/support/golden_traces/*.rs`). Reports the exact scenario,
 tick, and component of the first divergence, or confirms bit-for-bit agreement.
 
 The golden traces are what the Rust crate is asserted against (golden.rs), so
@@ -12,23 +12,27 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-GOLDEN = HERE.parent / "tests" / "support" / "golden_traces.rs"
+GOLDEN_DIR = HERE.parent / "tests" / "support" / "golden_traces"
 JAVA = HERE / "move_java.txt"
 
 COMPONENTS = ["pos.x", "pos.y", "pos.z", "vel.x", "vel.y", "vel.z"]
 
 
 def load_golden():
-    text = GOLDEN.read_text()
     scenarios = {}
-    for m in re.finditer(r"pub static GOLDEN_(\w+):\s*\[GoldenTick;\s*\d+\]\s*=\s*\[(.*?)\];", text, re.S):
-        name = m.group(1).lower()
-        ticks = []
-        for tm in re.finditer(r"pos:\s*\[([^\]]*)\],\s*vel:\s*\[([^\]]*)\]", m.group(2)):
-            pos = [int(x, 16) for x in re.findall(r"0x[0-9a-fA-F]+", tm.group(1))]
-            vel = [int(x, 16) for x in re.findall(r"0x[0-9a-fA-F]+", tm.group(2))]
-            ticks.append(pos + vel)
-        scenarios[name] = ticks
+    for path in sorted(GOLDEN_DIR.glob("*.rs")):
+        for m in re.finditer(
+            r"pub static GOLDEN_(\w+):\s*\[GoldenTick;\s*\d+\]\s*=\s*\[(.*?)\];",
+            path.read_text(),
+            re.S,
+        ):
+            name = m.group(1).lower()
+            ticks = []
+            for tm in re.finditer(r"pos:\s*\[([^\]]*)\],\s*vel:\s*\[([^\]]*)\]", m.group(2)):
+                pos = [int(x, 16) for x in re.findall(r"0x[0-9a-fA-F]+", tm.group(1))]
+                vel = [int(x, 16) for x in re.findall(r"0x[0-9a-fA-F]+", tm.group(2))]
+                ticks.append(pos + vel)
+            scenarios[name] = ticks
     return scenarios
 
 

@@ -37,6 +37,11 @@ for path in "$@"; do
     esac
     index_entry=$(git -C "$repo" ls-files --stage -- "$path")
     if [ -z "$index_entry" ]; then
+        head_entry=$(git -C "$repo" ls-tree --name-only HEAD -- "$path")
+        staged_deletion=$(git -C "$repo" diff --cached --name-only --diff-filter=D -- "$path")
+        if [ -n "$head_entry" ] && [ "$staged_deletion" = "$path" ]; then
+            continue
+        fi
         echo "refusing unselected path: $path is absent from the private index" >&2
         exit 1
     fi
