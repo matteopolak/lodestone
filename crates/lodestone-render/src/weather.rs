@@ -756,6 +756,60 @@ pub fn extract_columns(
     columns
 }
 
+/// Find one deterministic local rain impact for this game tick.
+///
+/// The falling-column pass is intentionally dense, but impacts are a particle
+/// consumer and should be sparse: one candidate per tick keeps the particle
+/// engine bounded while still giving the player a continuously moving local
+/// witness. A candidate is accepted only when the column has a known landing
+/// height at or below the camera (the sky-exposed side of the heightmap), the
+/// landing is within the configured weather radius, and the biome at that
+/// landing is rain rather than snow. Unknown terrain is skipped instead of
+/// inventing a floor while chunks are still streaming.
+#[must_use]
+pub fn rain_splash_position(
+    weather: &WeatherState,
+    radius: i32,
+    game_time: i64,
+    camera: [f64; 3],
+    probe: &dyn WeatherProbe,
+) -> Option<[f64; 3]> {
+    if !weather.is_raining() {
+        return None;
+    }
+    let radius = radius.clamp(1, HALF_RAIN_TABLE_SIZE - 1);
+    let cam_x = camera[0].floor() as i32;
+    let cam_y = camera[1].floor() as i32;
+    let cam_z = camera[2].floor() as i32;
+    let mut random = ColumnRandom::new(
+        column_seed(cam_x, cam_z).wrapping_add(game_time as i32),
+    );
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "the configured radius is at most the fixed weather table size"
+    )]
+    let span = (radius * 2 + 1) as f32;
+    // A bounded rejection loop avoids a second world-wide scan and still finds
+    // an open column when a small roof covers part of the local square.
+    for _ in 0..64 {
+        let x = cam_x + (random.next_f32() * span) as i32 - radius;
+        let z = cam_z + (random.next_f32() * span) as i32 - radius;
+        let Some(landing) = probe.column_top(x, z) else {
+            continue;
+        };
+        if landing < cam_y - radius || landing > cam_y {
+            continue;
+        }
+        if probe.precipitation(x, landing, z) != Precipitation::Rain {
+            continue;
+        }
+        let offset_x = f64::from(random.next_f32()) * 0.8 + 0.1;
+        let offset_z = f64::from(random.next_f32()) * 0.8 + 0.1;
+        return Some([f64::from(x) + offset_x, f64::from(landing) + 0.01, f64::from(z) + offset_z]);
+    }
+    None
+}
+
 /// Vanilla's rain max alpha, from the weather-effect renderer's instance builder.
 pub const RAIN_MAX_ALPHA: f32 = 1.0;
 
@@ -1288,6 +1342,76 @@ mod tests {
             (above[0].bottom_y, above[0].top_y),
             (59, 69),
             "camera_y ± radius, both already above the terrain"
+        );
+    }
+
+    /// Local impacts use the same three production inputs as the column pass:
+    /// active rain, a real landing height, and biome precipitation at that
+    /// landing. Each negative control must be paired with the open rainy probe
+    /// so an empty result cannot pass because the detector never ran.
+    #[test]
+    fn local_rain_splash_requires_active_rain_exposure_terrain_and_rain_biome() {
+        struct Probe {
+            landing: Option<i32>,
+            precipitation: Precipitation,
+        }
+        impl WeatherProbe for Probe {
+            fn column_top(&self, _x: i32, _z: i32) -> Option<i32> {
+                self.landing
+            }
+
+            fn precipitation(&self, _x: i32, _y: i32, _z: i32) -> Precipitation {
+                self.precipitation
+            }
+
+            fn light(&self, _x: i32, _y: i32, _z: i32) -> f32 {
+                1.0
+            }
+        }
+
+        let mut rainy = WeatherState::clear();
+        rainy.apply_rain_level(1.0);
+        let open = Probe {
+            landing: Some(63),
+            precipitation: Precipitation::Rain,
+        };
+        let position = rain_splash_position(&rainy, 3, 7, [0.5, 64.5, 0.5], &open);
+        assert!(position.is_some(), "an exposed rainy landing must produce a candidate");
+        let position = position.expect("the positive control above must fire");
+        assert_eq!(position[1], 63.01, "the particle starts at the terrain landing height");
+        assert!((-3.0..=4.0).contains(&position[0]));
+        assert!((-3.0..=4.0).contains(&position[2]));
+
+        let covered = Probe {
+            landing: Some(65),
+            precipitation: Precipitation::Rain,
+        };
+        assert!(
+            rain_splash_position(&rainy, 3, 7, [0.5, 64.5, 0.5], &covered).is_none(),
+            "a landing above the camera is covered and must not splash locally"
+        );
+
+        let snow = Probe {
+            landing: Some(63),
+            precipitation: Precipitation::Snow,
+        };
+        assert!(
+            rain_splash_position(&rainy, 3, 7, [0.5, 64.5, 0.5], &snow).is_none(),
+            "snow biome precipitation must not emit a rain splash"
+        );
+
+        let mut clear = WeatherState::clear();
+        clear.apply_rain_level(0.0);
+        assert!(
+            rain_splash_position(&clear, 3, 7, [0.5, 64.5, 0.5], &open).is_none(),
+            "clear weather must not query or emit a local splash"
+        );
+
+        let mut ramping = WeatherState::clear();
+        ramping.apply_rain_level(0.2);
+        assert!(
+            rain_splash_position(&ramping, 3, 7, [0.5, 64.5, 0.5], &open).is_none(),
+            "local impacts use the active-rain threshold, not the faint render ramp"
         );
     }
 
