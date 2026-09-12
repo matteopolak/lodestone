@@ -26,6 +26,8 @@ impl MobEffectId {
     /// typed constants avoids string comparisons in the hot physics path.
     pub const SPEED: Self = Self(0);
     pub const SLOWNESS: Self = Self(1);
+    pub const HASTE: Self = Self(2);
+    pub const MINING_FATIGUE: Self = Self(3);
     pub const STRENGTH: Self = Self(4);
     pub const INSTANT_HEALTH: Self = Self(5);
     pub const INSTANT_DAMAGE: Self = Self(6);

@@ -279,6 +279,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   animation, and falling sand/gravel. All of it ports vanilla 26.2 behaviour rather
   than approximating it, and most of it is reached only through the `VersionAdapter`
   seam so it degrades cleanly when no version family is compiled in.
+- [Entity presentation modules](./entity-presentation-modules.md) — The shell-side
+  entity presentation code turns network-backed ECS tracks into render-ready entity
+  draws. It is split into cohesive modules while retaining the existing
+  `crate::entities::*` API.
 - [Entity rendering](./entity-rendering.md) — The path from "the server says there
   is an entity at (x, y, z)" to a posed, textured, lit mob (or sprite, or nametag) on
   screen, plus two systems that ride on the same entity data: picking (what the
@@ -356,7 +360,8 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   name tooltip. Unlike the menu screens (see [`ui-framework.md`](./ui-framework.md)),
   the HUD is not a widget tree — it is rebuilt fresh from live game state every
   frame, so its layout is a set of pure functions of that state rather than a set of
-  persistent objects with their own lifecycle.
+  persistent objects with their own lifecycle. Short- lived recipe, advancement, and
+  Friends notifications use a shared toast draw pass.
 - [Integrated connection admission](./integrated-connection-admission.md) —
   Integrated connection admission keeps terrain generation away from the connection
   runtime while preserving packet order. Cold action targets, retained-light
@@ -379,6 +384,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   Bukkit/Spigot/Paper plugin jars** against this server, with **zero cost when no Java
   plugin is loaded**. The crate's JVM runtime boundary is opt-in; the complete plugin
   bridge remains future work.
+- [Join column ordering](./join-column-ordering.md) — The join scheduler chooses a
+  deterministic order for chunk columns that are still owed to a connection. The same
+  distance-first and frustum-aware key is used when a moving player reveals a new set
+  of columns.
 - [Join-stage tracing](./join-tracing.md) — The optional join trace records the
   initial chunk timeline across the integrated server and shell: generation, packet
   encoding, socket delivery, client receipt, remesh scheduling, and completed mesh
@@ -433,6 +442,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   lives in [`docs/blocks.md`](./blocks.md)), and the whole chain that turns a broken
   block or a dead mob into real item entities: the server-side loot-table engine, its
   bundled corpus of vanilla tables, and generated structures' pre-filled chests.
+- [Mining speed](./mining-speed.md) — Mining speed is the shared break-progress
+  calculation used by the client predictor and the integrated server's block-break
+  validator. It combines block hardness, held-tool speed, typed Haste/Conduit Power
+  and Mining Fatigue, and the player's break-speed attributes.
 - [Mob AI](./mob-ai.md) — Server-side mob AI and simulation: the per-species goal
   roster and priority scheduler, brain-style target acquisition for villager-class
   mobs, entity and block perception (what a goal is allowed to know about the world),
@@ -865,6 +878,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   into animation scheduling and per-sprite sampling metadata. The decoded result feeds
   atlas frame tables and mipmap generation without carrying a JSON tree into those
   consumers.
+- [Server tick clock](./tick-clock.md) — `lodestone_server::tick_clock` owns the
+  shared timing and accounting boundary for the integrated server's world tick. It
+  keeps tick duration, phase timing, owner-handoff counts, and overload counters
+  independent from simulation code.
 - [Tick region ownership](./tick-region-ownership.md) —
   `lodestone_server::tick_region::TickRegionPlan` makes the ownership of every chunk
   selected for a server tick explicit. The current plan assigns every selected chunk
@@ -1014,6 +1031,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   shell, corridors, room dividers, doors, carpets, stairs, secret rooms, furnishings,
   and roof layers all reach the normal template placement stage; entity data markers
   remain a server-side consumer concern.
+- [Ocean monument room graph](./worldgen-monument.md) — The ocean monument generator
+  builds one fixed shell plus an internal room graph. The graph stage creates the
+  46-cell arena, wires the special entry/core/roof/wing nodes, and selects a shuffled
+  set of room footprints for the later block-writing stage.
 - [Nether fortress generation](./worldgen-nether-fortress.md) — The Nether fortress
   generator constructs the entire recursive bridge-and-castle piece tree for a placed
   start. Its output is a set of oriented, collision-free bounding boxes plus eager

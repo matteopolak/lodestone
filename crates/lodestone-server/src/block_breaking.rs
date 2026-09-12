@@ -246,6 +246,19 @@ impl PendingBreak {
 /// * `0.0` — unbreakable (`hardness == -1.0`), so no tick count ever breaks it.
 #[must_use]
 pub(crate) fn progress_per_tick(block_state: &str, held: Option<&ItemStack>) -> Option<f32> {
+    progress_per_tick_with_effects(block_state, held, None, None)
+}
+
+/// The server-side form of [`progress_per_tick`] with the two typed digging
+/// effects already resolved. The client and server both call the shared game
+/// multiplier, so an effect changes the same f32 quantity at both ends.
+#[must_use]
+pub(crate) fn progress_per_tick_with_effects(
+    block_state: &str,
+    held: Option<&ItemStack>,
+    haste_amplifier: Option<u32>,
+    mining_fatigue: Option<u32>,
+) -> Option<f32> {
     // `_or_default`, not the exact lookup: both censuses read below are keyed by
     // state id but carry a per-*block* value, and a bare name like
     // `"minecraft:sugar_cane"` is not in the exact index at all (every state of
@@ -280,7 +293,13 @@ pub(crate) fn progress_per_tick(block_state: &str, held: Option<&ItemStack>) -> 
     let divider = if mining.correct_tool { 30.0 } else { 100.0 };
     // Zero hardness divides to `+inf`, which is the instant-break signal the
     // caller tests with `>= 1.0` — exactly as vanilla's own float division does.
-    Some(mining.speed / hardness / divider)
+    Some(
+        mining.speed / hardness / divider
+            * lodestone_game::mining::dig_speed_effect_multiplier(
+                haste_amplifier,
+                mining_fatigue,
+            ),
+    )
 }
 
 /// Whether `pos` is close enough to a player whose **feet** are at `feet` to be
