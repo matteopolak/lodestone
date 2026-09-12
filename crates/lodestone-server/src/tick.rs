@@ -66,6 +66,7 @@ use crate::scheduled_tick::{
 use crate::sleep::{SleepEvent, SleepFeed, SleepState, SleepVote};
 use crate::weather::{WeatherFeed, WeatherState};
 use lodestone_model::BlockPos;
+#[path = "tick_clock.rs"]
 mod tick_clock;
 pub use self::tick_clock::{
     OwnerTickStats, PhaseStats, TickClock, TickPhase, TickStats, WorstPhaseWindow,

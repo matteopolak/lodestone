@@ -105,6 +105,7 @@ use crate::chunk::{ChunkColumn, ChunkGenerationStage, ChunkSource};
 use crate::protocol::{ChunkEncodeError, ChunkEncoder, ServerDirective};
 use crate::server::{JoinTrace, SourceRef};
 
+#[path = "join_order.rs"]
 mod join_order;
 
 /// What one pipeline slot hands back: either the wire bytes, already encoded on
