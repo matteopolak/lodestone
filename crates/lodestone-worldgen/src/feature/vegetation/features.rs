@@ -111,16 +111,22 @@ impl CompatBlockPosSet {
         self.entries.clone()
     }
 
-    /// Reconstruct the reference hash-table traversal. The table starts at 16
-    /// buckets, grows at a 0.75 load factor, and mixes the 32-bit position hash
-    /// by XORing it with its unsigned 16-bit shift before masking the index.
-    fn bucket_order(&self) -> Vec<BlockPos> {
+    /// Sort the entries into the reference hash-table traversal. The table
+    /// starts at 16 buckets, grows at a 0.75 load factor, and mixes the 32-bit
+    /// position hash by XORing it with its unsigned 16-bit shift before
+    /// masking the index. The stable sort preserves insertion order within a
+    /// bucket and reuses the existing entry allocation.
+    fn sort_bucket_order(&mut self) {
         let capacity = self.bucket_capacity();
-        let mut buckets = vec![Vec::new(); capacity];
-        for &pos in &self.entries {
-            buckets[Self::bucket(Self::spread(Self::hash(pos)), capacity)].push(pos);
-        }
-        buckets.into_iter().flatten().collect()
+        self.entries.sort_by_key(|pos| Self::bucket(Self::spread(Self::hash(*pos)), capacity));
+    }
+
+    #[cfg(test)]
+    fn bucket_order(&self) -> Vec<BlockPos> {
+        let mut entries = self.entries.clone();
+        let capacity = self.bucket_capacity();
+        entries.sort_by_key(|pos| Self::bucket(Self::spread(Self::hash(*pos)), capacity));
+        entries
     }
 }
 
@@ -128,7 +134,10 @@ impl IntoIterator for CompatBlockPosSet {
     type Item = BlockPos;
     type IntoIter = std::vec::IntoIter<BlockPos>;
 
-    fn into_iter(self) -> Self::IntoIter { self.bucket_order().into_iter() }
+    fn into_iter(mut self) -> Self::IntoIter {
+        self.sort_bucket_order();
+        self.entries.into_iter()
+    }
 }
 
 /// `level.getSeaLevel()` for the overworld. Only [`place_blue_ice`] reads it.
@@ -2951,7 +2960,8 @@ pub(super) fn place_vegetation_patch_with_seed<R: RandomSource>(
         {
             kept.insert(p);
         }
-        for p in kept.bucket_order() {
+        kept.sort_bucket_order();
+        for &p in &kept.entries {
             grid.set_if_in_bounds(p.x, p.y, p.z, "minecraft:water".to_string());
         }
         surface = kept;
