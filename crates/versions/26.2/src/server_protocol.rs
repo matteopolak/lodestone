@@ -164,6 +164,16 @@ use chunk::*;
 use registry::*;
 use serverbound::*;
 
+/// Returns the authoritative inclusion predicate for one of the three
+/// client-visible heightmap registry ids. This remains public because the
+/// parity manifest shares the exact predicate used by the chunk encoder.
+pub fn client_heightmap_includes(
+    type_id: u32,
+    state: lodestone_data::block_states::StateId,
+) -> bool {
+    chunk::client_heightmap_includes(type_id, state)
+}
+
 /// The `sea_level` field both the join `login` packet and the post-death
 /// `respawn` packet carry.
 ///
