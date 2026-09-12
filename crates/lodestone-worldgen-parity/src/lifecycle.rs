@@ -419,7 +419,7 @@ impl LifecycleWorldgenSource for OverworldChunkSource {
 
     fn feature_result_for_target(
         &self,
-        _target: ChunkPos,
+        target: ChunkPos,
         source: ChunkPos,
         overrides: &BTreeMap<AbsoluteCell, String>,
         _resident: &BTreeMap<ChunkPos, ChunkColumn>,
@@ -498,7 +498,7 @@ impl LifecycleWorldgenSource for NetherChunkSource {
 
     fn feature_result_for_target(
         &self,
-        target: ChunkPos,
+        _target: ChunkPos,
         source: ChunkPos,
         overrides: &BTreeMap<AbsoluteCell, String>,
         resident: &BTreeMap<ChunkPos, ChunkColumn>,
