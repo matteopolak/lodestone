@@ -2076,7 +2076,7 @@ pub struct SimMob<'w> {
     rider: Option<i32>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct ProjectileMeta {
     uuid: Uuid,
     entity_type: ResourceKey,
@@ -3170,7 +3170,7 @@ fn falling_block_entity_type() -> ResourceKey {
 }
 
 mod collision;
-use collision::{LiveBlockCollision, ITEM_DIMENSIONS, VOID_DESPAWN_DEPTH, settle_item, settle_mob};
+use collision::{LiveBlockCollision, VOID_DESPAWN_DEPTH, settle_item, settle_mob};
 /// The entity-type key every dropped item streams as.
 ///
 /// `minecraft:item` is the entity type; the *stack* is metadata. Naming the key

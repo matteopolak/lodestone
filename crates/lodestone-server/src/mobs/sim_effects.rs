@@ -112,7 +112,7 @@ impl<'w> MobSim<'w> {
     /// tick must be audible this same tick, not one tick late — the same
     /// reasoning [`tick_orbs`](Self::tick_orbs) already gives for reading
     /// `tick_count` before its own increment.
-    fn resolve_vibrations(&mut self) {
+    pub(super) fn resolve_vibrations(&mut self) {
         let posted = std::mem::take(&mut self.posted_vibrations);
         for mob in &mut self.mobs {
             mob.nearest_vibration = if is_vibration_listener(mob.entity_type.path()) {
@@ -156,7 +156,7 @@ impl<'w> MobSim<'w> {
     ///
     /// **Disclosed narrowing**: this simulation has no access to the shared
     /// block-mutation rule at this seam, so every eligible allay picks up.
-    fn allay_pick_up_items(&mut self) {
+    pub(super) fn allay_pick_up_items(&mut self) {
         struct Candidate {
             mob_index: usize,
             position: Vec3,
@@ -220,7 +220,7 @@ impl<'w> MobSim<'w> {
     ///
     /// **Not delivered to a liked player as a fallback** because no player
     /// delivery target is available in this simulation seam.
-    fn allay_deliver_items(&mut self) {
+    pub(super) fn allay_deliver_items(&mut self) {
         struct Delivery {
             mob_index: usize,
             drop_position: Vec3,
@@ -409,7 +409,7 @@ impl<'w> MobSim<'w> {
     ///
     /// **Disclosed simplification**: no random relocation occurs before the
     /// drop. The item spawns at the cat's current position.
-    fn resolve_cat_gifts(&mut self, gift_requests: Vec<i32>) {
+    pub(super) fn resolve_cat_gifts(&mut self, gift_requests: Vec<i32>) {
         if gift_requests.is_empty() {
             return;
         }
@@ -458,7 +458,7 @@ impl<'w> MobSim<'w> {
     /// other mob, and [`Self::tick_shoulder_dismounts`] is what brings it
     /// back.
     ///
-    fn resolve_shoulder_mounts(&mut self, shoulder_requests: Vec<i32>) {
+    pub(super) fn resolve_shoulder_mounts(&mut self, shoulder_requests: Vec<i32>) {
         for id in shoulder_requests {
             let Some(m) = self.get(id) else { continue };
             let Some(MobOwner::Player(uuid)) = m.owner else {
@@ -498,7 +498,7 @@ impl<'w> MobSim<'w> {
     /// own owner-sleep feed). The other four need per-player physical state
     /// (fall distance, ability flags, block-at-feet) this crate's player
     /// census does not carry.
-    fn tick_shoulder_dismounts(&mut self) {
+    pub(super) fn tick_shoulder_dismounts(&mut self) {
         if self.shoulder_riders.is_empty() {
             return;
         }
