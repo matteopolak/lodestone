@@ -43,7 +43,13 @@ The panel background is real vanilla art — `ContainerBackground` stitches the 
 `textures/gui/container/*.png` sheets (these are hand-placed sub-rect blits at native size, not
 `GuiScaling`-driven sprites, and are not part of `GuiAtlas`). With no background attached, a flat
 programmatic fill and per-slot wells draw instead, and the title label switches ink color to stay
-legible against whichever surface is behind it. The full-canvas dim gradient behind any open container
+legible against whichever surface is behind it. The model's source is split by responsibility:
+`lodestone-game/src/menu.rs` owns the mutable container projection and click state,
+`menu/layout.rs` owns the public layout descriptors and empty-slot icon constants, and
+`menu/tests.rs` contains the negative-control click tests. Keep layout descriptors additive to
+`Menu`; consumers import the same re-exported types as before.
+
+The full-canvas dim gradient behind any open container
 panel matches the in-game screen's full-canvas gradient (distinct from the pause menu's tiled
 background) and always draws, independent of whether real background art is attached. Its source
 colour is true black with straight alpha (`192/255` at the top and `208/255` at the bottom), and
