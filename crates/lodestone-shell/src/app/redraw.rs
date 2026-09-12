@@ -484,7 +484,17 @@ impl WindowApp {
         }
         for meshed in self.sim.drain_meshes() {
             render.upload_section(device, queue, meshed.key, &meshed.mesh);
+            // `Sim::drain_meshes` has only crossed the CPU scheduler boundary.
+            // A loading gate may advance after the renderer has received this
+            // section, so acknowledge the hand-off after the upload call rather
+            // than treating a worker result or a global pending count as ready.
+            self.sim.mark_mesh_uploaded(meshed.key);
         }
+        // Empty sections have no upload call to acknowledge. Re-check after both
+        // drains so an all-air player column can settle through its explicit
+        // `SnapshotOutcome::Empty` records, and so the final non-air upload in
+        // this frame can release the overlay before the frame is presented.
+        self.sim.refresh_terrain_readiness();
         self.frame_profile.mark(FramePhase::MeshUpload, Instant::now());
 
         let (w, h) = target.size();
@@ -2612,12 +2622,23 @@ impl WindowApp {
         // after it already wears the new pack. Moving this above the reload
         // would present one frame of the old atlas and reinstate the flash.
         //
-        // The bar and the count line only appear when the terrain half is what
-        // is holding *and* there is a real denominator to divide by (the
-        // session declared a view radius); with neither, this stays the bare
-        // phase label it always was, because a progress bar wired to nothing is
-        // worse than no bar.
+        // The initial-world bar and status grid only appear when the newly
+        // created survival session owns a real denominator. Existing saves and
+        // remote joins stay on a bare connection label, while a portal uses
+        // the separate opaque cover above.
         if self.ui.is_playing()
+            && self.sim.dimension_transition_pending()
+            && let Some(menu) = self.menu.as_mut()
+        {
+            // Portal travel has a separate opaque cover. It deliberately has
+            // no initial-world progress bar or chunk grid: the old dimension
+            // is being replaced, not generated for the first time.
+            let loading_frame = crate::menu::render::loading_frame(
+                crate::menu::loading::ConnectPhase::Joining.label(),
+            );
+            menu.render_overlay(device, queue, frame.view(), &loading_frame, w, h);
+            menu_overlays_drawn += 1;
+        } else if self.ui.is_playing()
             && let Some(wait) = self.sim.world_wait()
             && let Some(menu) = self.menu.as_mut()
         {

@@ -1052,35 +1052,24 @@ pub fn loading_frame(text: &str) -> MenuFrame<'static> {
     }
 }
 
-/// The phase label pushed up to make room for the bar. Vanilla's own text sits
-/// 12 px above its bar (`LevelLoadingScreen`: bar at `textTop + 12`), and the
-/// label's own line height is 9, so -14 puts the same gap under the text.
-const LOADING_LABEL_DY: f32 = -14.0;
+/// The reference client uses a 9-pixel text line and places its 2-pixel bar
+/// twelve pixels below that line. When a status grid is present, the label is
+/// lifted above the grid by the grid's full logical height plus three text
+/// lines; without a grid it uses the ordinary 50-pixel fallback.
+const LOADING_TEXT_LINE: f32 = 9.0;
+const LOADING_TEXT_LINES_ABOVE_GRID: f32 = 3.0;
+const LOADING_FALLBACK_LABEL_DY: f32 = -50.0;
+const LOADING_BAR_OFFSET: f32 = 12.0;
 
-/// The count line, one line under the bar.
-const LOADING_DETAIL_DY: f32 = 8.0;
-
-/// The `en_us` grey vanilla uses for the secondary line under a progress bar
-/// (`0xFFA0A0A0`) — dimmer than the phase name so the phase reads first.
-const LOADING_DETAIL: [f32; 4] = [160.0 / 255.0, 160.0 / 255.0, 160.0 / 255.0, 1.0];
-
-/// As [`loading_frame`], but with vanilla's `LevelLoadingScreen` progress bar
-/// and a raw count line under it.
+/// As [`loading_frame`], but with the terrain progress bar and optional status
+/// grid.
 ///
-/// This is the terrain-streaming half of the loading screen, and the *only*
-/// screen in this file that draws a number. The number has to be real: it is
-/// the client's own loaded-column count over the view square the server is
-/// going to send (see [`crate::menu::loading::TerrainProgress`]), and the bar
-/// cannot reach the end, because the screen is dismissed by the combined
-/// `Sim::world_wait` predicate and not by the bar filling. A bar that could read
-/// as complete while the screen was still up would turn an honest freeze into a
-/// false reassurance.
-///
-/// `detail` is drawn dimmer than the phase name so a glance reads the phase
-/// first and the count second — the count is for diagnosing a stall ("stuck at
-/// 37/441"), not for watching. The connection path may use this same builder
-/// before login for singleplayer, where the denominator was declared by the
-/// launcher and the count is still a real client observation.
+/// The numerator is a real client observation over the selected view square
+/// (see [`crate::menu::loading::TerrainProgress`]), and the bar cannot reach
+/// the end because the screen is dismissed by the combined `Sim::world_wait`
+/// predicate rather than by the bar filling. The grid carries spatial status;
+/// a separate count label would duplicate telemetry and does not belong in the
+/// compact reference layout.
 #[must_use]
 pub fn loading_frame_with_progress(
     text: &str,
@@ -1089,44 +1078,38 @@ pub fn loading_frame_with_progress(
     loading_frame_with_progress_and_grid(text, progress, None)
 }
 
-/// The gap between the chunk grid's bottom edge and the phase label below it,
-/// in logical pixels. The grid is stacked above the label, progress bar, and
-/// count block; keep this spacing positive so the grid never overlaps any of
-/// those elements. [`chunk_grid_dy`] derives its centre from this constant.
-const CHUNK_GRID_GAP: f32 = 6.0;
-
-/// The chunk grid's vertical centre for a grid of the given `radius`, in the
-/// same "logical pixels from screen centre" convention [`MenuProgress::dy`]
-/// uses — placed so its bottom edge sits `CHUNK_GRID_GAP` above the phase
-/// label, for any radius.
-///
-/// A free function, not inlined into [`loading_frame_with_progress_and_grid`],
-/// so a layout gate can compute the same value the frame was built with
-/// instead of restating the arithmetic as a second, driftable copy.
+/// The chunk grid's vertical centre. The reference screen centres the square
+/// on the canvas and moves the label/bar above it; keeping this as a function
+/// gives geometry tests one shared source of truth.
 #[must_use]
-pub fn chunk_grid_dy(radius: u32) -> f32 {
-    let half =
-        crate::menu::loading::TerrainChunkGrid::diameter(radius) as f32 * super::CHUNK_CELL_SIZE
-            * 0.5;
-    LOADING_LABEL_DY - CHUNK_GRID_GAP - half
+pub const fn chunk_grid_dy(_radius: u32) -> f32 {
+    0.0
 }
 
-/// As [`loading_frame_with_progress`], but also carrying vanilla's
-/// `LevelLoadingScreen` chunk-status grid when one is available.
+/// As [`loading_frame_with_progress`], but also carrying a typed chunk-status
+/// grid when one is available.
 ///
-/// `grid` is `None` under exactly the conditions
-/// `Sim::terrain_chunk_grid` returns `None` for — no session, or no declared
-/// view radius yet — and a `None` here draws nothing extra, same as
-/// [`loading_frame_with_progress`] always did. The grid is genuinely real
-/// per-column state (see [`crate::menu::loading::ChunkCellStatus`]'s doc for
-/// what makes it so and why it has only two colours), never a scalar dressed
-/// up to look spatial.
+/// `grid` is `None` when the producer has no selected view yet; a `None` here
+/// draws the reference 50-pixel fallback label/bar. The grid is genuinely real
+/// per-column state, never a scalar dressed up to look spatial.
 #[must_use]
 pub fn loading_frame_with_progress_and_grid(
     text: &str,
     progress: crate::menu::loading::TerrainProgress,
     grid: Option<crate::menu::loading::TerrainChunkGrid>,
 ) -> MenuFrame<'static> {
+    let (label_dy, bar_dy) = match grid.as_ref() {
+        Some(grid) => {
+            // The reference computes textTop from `radius * 2`, while the
+            // grid itself is `(radius * 2 + 1) * 2` pixels wide. Preserve that
+            // one-cell distinction; using the full side here shifts the label
+            // an extra cell upward at every distance.
+            let label = -(grid.radius as f32 * super::CHUNK_CELL_SIZE)
+                - LOADING_TEXT_LINES_ABOVE_GRID * LOADING_TEXT_LINE;
+            (label, label + LOADING_BAR_OFFSET)
+        }
+        None => (LOADING_FALLBACK_LABEL_DY, LOADING_FALLBACK_LABEL_DY + LOADING_BAR_OFFSET),
+    };
     MenuFrame {
         vanilla: true,
         // Default `MenuBackdrop::Panorama`, as [`loading_frame`] explains.
@@ -1135,24 +1118,15 @@ pub fn loading_frame_with_progress_and_grid(
                 text: text.to_string(),
                 origin: Origin::Centre,
                 dx: 0.0,
-                dy: LOADING_LABEL_DY,
+                dy: label_dy,
                 align: Align::Centre,
                 colour: LABEL,
-                scale: 1.0,
-            },
-            MenuLabel {
-                text: progress.detail(),
-                origin: Origin::Centre,
-                dx: 0.0,
-                dy: LOADING_DETAIL_DY,
-                align: Align::Centre,
-                colour: LOADING_DETAIL,
                 scale: 1.0,
             },
         ],
         progress: Some(super::MenuProgress {
             fraction: progress.fraction(),
-            dy: 0.0,
+            dy: bar_dy,
         }),
         chunk_grid: grid.map(|grid| super::ChunkGridView {
             dy: chunk_grid_dy(grid.radius),

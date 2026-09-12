@@ -2134,10 +2134,10 @@ impl MeshScheduler {
         self.pending
     }
 
-    /// Drop `key`'s entry from [`Self::latest_generation`] — a section this
-    /// session will never mesh again (its column left the view) has nothing
-    /// left to compare a completion against, and there is no reason to keep
-    /// growing the map for the life of the session.
+    /// Drop `key`'s current generation. Any completion already in flight is no
+    /// longer authoritative until a later [`Self::submit`] records a new
+    /// generation. This is used both when a newer snapshot supersedes an older
+    /// one and when a column leaves the view.
     pub fn forget_generation(&mut self, key: &SectionKey) {
         self.latest_generation.remove(key);
     }
@@ -2364,12 +2364,14 @@ impl MeshScheduler {
         self.queue.len() + self.ready.len()
     }
 
-    /// No-op here: the browser scheduler is a strict FIFO `VecDeque` on one
-    /// thread, so a section is always meshed in submission order and never
-    /// needs the native pool's staleness map — see
-    /// `MeshScheduler::forget_generation`'s native counterpart, and
-    /// `Self::drain`'s own doc for why ordering cannot invert in this arm.
-    pub fn forget_generation(&mut self, _key: &SectionKey) {}
+    /// Remove queued or completed-but-undrained work for a section that has
+    /// been superseded. FIFO ordering prevents completion inversion, but it
+    /// does not prevent an older entry from being returned after a newer empty
+    /// or deferred snapshot has made it obsolete.
+    pub fn forget_generation(&mut self, key: &SectionKey) {
+        self.queue.retain(|snapshot| snapshot.key != *key);
+        self.ready.retain(|meshed| meshed.key != *key);
+    }
 
     /// Mesh for at most [`BROWSER_MESH_BUDGET`] and return what got finished.
     ///
@@ -2829,6 +2831,19 @@ pub struct TerrainMesh {
     /// Sections whose geometry vanished (all-air after an edit, or a column that
     /// unloaded) and must be dropped from the GPU. Drained by the app each frame.
     pub pending_removals: Vec<SectionKey>,
+    /// Sections whose latest non-empty mesh was handed to the renderer. This is
+    /// deliberately separate from [`Self::uploaded_sections`]: that set records
+    /// the scheduler result as soon as the app drains it so a deferred neighbour
+    /// may be rebuilt, while this set advances only after `RenderState` receives
+    /// the result. The loading gate must use the latter boundary, or one frame
+    /// can be presented with a CPU result that has not reached the GPU yet.
+    rendered_sections: HashSet<SectionKey>,
+    /// Sections whose latest snapshot explicitly returned [`SnapshotOutcome::Empty`].
+    /// An all-air section is a settled result, but only after the snapshot path
+    /// says so; deriving emptiness from a resident-column count would let a
+    /// decoded column release the loading screen before its sections were
+    /// examined.
+    empty_sections: HashSet<SectionKey>,
     /// Every `SectionKey` this session has handed out for GPU upload and that has
     /// not yet come back out through a removal.
     ///
@@ -2893,6 +2908,8 @@ impl TerrainMesh {
             light_dirty_sections: BTreeSet::new(),
             relight_workload: RelightWorkload::default(),
             pending_removals: Vec::new(),
+            rendered_sections: HashSet::new(),
+            empty_sections: HashSet::new(),
             uploaded_sections: HashSet::new(),
             drops: 0,
             non_air_empty_columns: 0,
@@ -2932,16 +2949,34 @@ impl TerrainMesh {
     fn route(&mut self, key: SectionKey, outcome: SnapshotOutcome, force: bool) -> bool {
         match outcome {
             SnapshotOutcome::Ready(snap) => {
+                // Supersede an older snapshot before queueing this one. Native
+                // workers use the generation map to discard the old completion;
+                // the browser scheduler removes the old FIFO entry here.
+                self.scheduler.forget_generation(&key);
+                self.rendered_sections.remove(&key);
+                self.empty_sections.remove(&key);
                 self.scheduler.submit(snap);
                 true
             }
             // A single empty section is routine (sky/void sections have no
             // geometry): drop it from the GPU, no alarm.
             SnapshotOutcome::Empty => {
+                // An older non-empty result must not arrive after this explicit
+                // empty result and re-settle the section through
+                // `mark_mesh_uploaded`.
+                self.scheduler.forget_generation(&key);
+                self.rendered_sections.remove(&key);
+                self.empty_sections.insert(key);
                 self.pending_removals.push(key);
                 false
             }
             SnapshotOutcome::Deferred(snap) => {
+                // The current snapshot is either queued again (when existing
+                // GPU geometry makes that useful) or remains unresolved. In
+                // both cases an older queued result is no longer authoritative.
+                self.scheduler.forget_generation(&key);
+                self.rendered_sections.remove(&key);
+                self.empty_sections.remove(&key);
                 if force || self.uploaded_sections.contains(&key) {
                     self.scheduler.submit(snap);
                     true
@@ -2954,6 +2989,16 @@ impl TerrainMesh {
                 }
             }
         }
+    }
+
+    /// Forget the prior settlement observations for a column that has just been
+    /// decoded again. The old GPU geometry may remain until the normal remesh
+    /// drain, but it cannot satisfy the new column's initial loading milestone.
+    pub fn reset_column_readiness(&mut self, cx: i32, cz: i32) {
+        self.rendered_sections
+            .retain(|key| key.cx != cx || key.cz != cz);
+        self.empty_sections
+            .retain(|key| key.cx != cx || key.cz != cz);
     }
 
     /// Re-snapshot and re-schedule every section of the column at `(cx, cz)`.
@@ -3093,6 +3138,7 @@ impl TerrainMesh {
 
     fn mesh_column_inner(&mut self, store: &ChunkWorld, cx: i32, cz: i32, force: bool) {
         if !self.policy.id_spaces_agree {
+            self.reset_column_readiness(cx, cz);
             self.id_space_mismatch_columns += 1;
             self.drops += 1;
             if self.id_space_mismatch_columns.is_power_of_two() {
@@ -3263,6 +3309,10 @@ impl TerrainMesh {
         // `mesh_column` that will early-return anyway.
         self.dirty_columns.remove((cx, cz));
         self.forced_columns.remove(&(cx, cz));
+        self.rendered_sections
+            .retain(|key| key.cx != cx || key.cz != cz);
+        self.empty_sections
+            .retain(|key| key.cx != cx || key.cz != cz);
         let gone: Vec<SectionKey> = self
             .uploaded_sections
             .iter()
@@ -3396,6 +3446,47 @@ impl TerrainMesh {
         meshes
     }
 
+    /// Record the renderer hand-off for one completed mesh.
+    ///
+    /// `drain_meshes` intentionally records only the CPU-side scheduler result
+    /// in [`Self::uploaded_sections`], because the scheduler needs that fact to
+    /// decide whether a deferred rebuild is allowed. The loading screen has a
+    /// stricter boundary: it may clear only after the app has called
+    /// `RenderState::upload_section`. `Sim::mark_mesh_uploaded` is the shell
+    /// facade used by the frame loop immediately after that call.
+    pub fn mark_mesh_uploaded(&mut self, key: SectionKey) {
+        self.empty_sections.remove(&key);
+        self.rendered_sections.insert(key);
+    }
+
+    /// Whether every section in one decoded column has reached a settled result.
+    ///
+    /// This is intentionally per-column and per-section. A non-empty section
+    /// must be in [`Self::rendered_sections`], proving both CPU meshing and the
+    /// renderer hand-off; an empty section must be in [`Self::empty_sections`],
+    /// proving the snapshot path explicitly classified it as empty. Any section
+    /// absent from both sets is still unknown, deferred, or queued and therefore
+    /// keeps the loading gate closed. No global scheduler count or visible
+    /// section count participates in this decision.
+    #[must_use]
+    pub fn column_mesh_settled(&self, store: &ChunkWorld, cx: i32, cz: i32) -> bool {
+        let Some(extent) = store.extent() else {
+            return false;
+        };
+        if !store.contains_column(cx, cz) {
+            return false;
+        }
+        (0..extent.section_count).all(|si| {
+            let key = SectionKey {
+                cx,
+                cz,
+                si,
+                min_y: extent.min_y,
+            };
+            self.rendered_sections.contains(&key) || self.empty_sections.contains(&key)
+        })
+    }
+
     /// Block until every scheduled mesh is ready. Headless runs and tests only —
     /// never the frame loop.
     pub fn drain_all_meshes(&mut self) -> Vec<Meshed> {
@@ -3430,6 +3521,8 @@ impl TerrainMesh {
         self.non_air_empty_columns = 0;
         self.id_space_mismatch_columns = 0;
         self.deferred = 0;
+        self.rendered_sections.clear();
+        self.empty_sections.clear();
         self.pending_removals.extend(self.uploaded_sections.drain());
     }
 }
@@ -4490,6 +4583,135 @@ mod tests {
         assert_eq!(terrain.drops, 0);
         assert_eq!(terrain.non_air_empty_columns, 0);
         assert_eq!(terrain.pending_removals.len(), 2);
+    }
+
+    /// A small two-section fixture for the readiness controls below. One block
+    /// is enough to make section zero non-empty; section one remains a genuine
+    /// all-air result rather than an inferred sky shortcut.
+    fn readiness_column(non_air: bool) -> lodestone_world::LoadedChunk {
+        use lodestone_world::{ColumnLight, Heightmaps, LoadedChunk};
+
+        let mut column = ChunkColumn::new(
+            0,
+            2,
+            PaletteKind::block_states(),
+            PaletteKind::biomes(),
+            id::AIR,
+            0,
+        );
+        if non_air {
+            column.set_block(0, 0, 0, id::STONE);
+        }
+        LoadedChunk::new(
+            column,
+            ColumnLight::new(2),
+            Heightmaps::new(),
+            Vec::new(),
+        )
+    }
+
+    /// **Readiness control: absent neighbours with no queued jobs still hold.**
+    /// The centre section has geometry, but its streaming snapshot is deferred
+    /// because the eight horizontal neighbours are absent. The scheduler is
+    /// idle after that decision; a global pending count of zero is therefore a
+    /// deliberately wrong release signal.
+    #[test]
+    fn a_non_air_center_with_absent_neighbours_is_not_mesh_settled() {
+        let mut world = World::new();
+        world.load(ChunkPos::new(0, 0), readiness_column(true));
+        let write = ChunkWorldWrite::new(world);
+        let store = write.read_handle();
+        let mut terrain = streaming_terrain();
+
+        terrain.mesh_column(&store, 0, 0);
+
+        assert_eq!(terrain.scheduler.pending(), 0, "control: no mesh job remains queued");
+        assert!(
+            !terrain.column_mesh_settled(&store, 0, 0),
+            "a deferred non-air centre keeps the player's column loading even with zero jobs"
+        );
+    }
+
+    /// A completed CPU result is still not enough. This positive control loads
+    /// the complete horizontal neighbourhood, drains the one non-empty mesh,
+    /// and checks that only the renderer-handoff acknowledgement settles it.
+    #[test]
+    fn a_non_air_center_settles_only_after_renderer_handoff() {
+        let mut world = World::new();
+        for cx in -1..=1 {
+            for cz in -1..=1 {
+                world.load(
+                    ChunkPos::new(cx, cz),
+                    readiness_column(cx == 0 && cz == 0),
+                );
+            }
+        }
+        let write = ChunkWorldWrite::new(world);
+        let store = write.read_handle();
+        let mut terrain = streaming_terrain();
+
+        terrain.mesh_column(&store, 0, 0);
+        let meshes = terrain.drain_all_meshes();
+        assert_eq!(meshes.len(), 1, "the centre's one non-air section is meshed");
+        assert!(
+            !terrain.column_mesh_settled(&store, 0, 0),
+            "a CPU result has not crossed the renderer boundary yet"
+        );
+        for meshed in meshes {
+            terrain.mark_mesh_uploaded(meshed.key);
+        }
+        assert!(terrain.column_mesh_settled(&store, 0, 0));
+    }
+
+    /// **Readiness control: all-air is a real settled result.** Every section
+    /// enters the explicit `SnapshotOutcome::Empty` ledger, so no renderer
+    /// upload is required and the column can settle without a fabricated mesh.
+    #[test]
+    fn an_all_air_center_settles_empty() {
+        let mut world = World::new();
+        world.load(ChunkPos::new(0, 0), readiness_column(false));
+        let write = ChunkWorldWrite::new(world);
+        let store = write.read_handle();
+        let mut terrain = streaming_terrain();
+
+        terrain.mesh_column(&store, 0, 0);
+
+        assert_eq!(terrain.scheduler.pending(), 0);
+        assert!(
+            terrain.column_mesh_settled(&store, 0, 0),
+            "explicit empty outcomes settle every all-air section"
+        );
+    }
+
+    /// **Readiness control: another column cannot satisfy this one.** Populate
+    /// the renderer-handoff ledger for an unrelated column while the player's
+    /// non-air centre remains deferred. The local predicate is false despite a
+    /// complete unrelated upload set.
+    #[test]
+    fn an_unrelated_uploaded_column_cannot_release_the_center_gate() {
+        let mut world = World::new();
+        world.load(ChunkPos::new(0, 0), readiness_column(true));
+        world.load(ChunkPos::new(4, 4), readiness_column(false));
+        let write = ChunkWorldWrite::new(world);
+        let store = write.read_handle();
+        let extent = store.extent().expect("readiness fixture has an extent");
+        let mut terrain = streaming_terrain();
+
+        terrain.mesh_column(&store, 0, 0);
+        for si in 0..extent.section_count {
+            terrain.mark_mesh_uploaded(SectionKey {
+                cx: 4,
+                cz: 4,
+                si,
+                min_y: extent.min_y,
+            });
+        }
+
+        assert!(terrain.column_mesh_settled(&store, 4, 4));
+        assert!(
+            !terrain.column_mesh_settled(&store, 0, 0),
+            "an unrelated uploaded column must not release the centre gate"
+        );
     }
 
     #[test]

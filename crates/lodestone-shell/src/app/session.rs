@@ -782,8 +782,10 @@ impl WindowApp {
 
     /// Reconcile the menu state machine with the session's real phase, then keep
     /// the cursor grab in sync with whatever screen we ended up on. Called each
-    /// frame so the loading screen is never a lie: it clears the moment the
-    /// server logs us in, and flips to Error the moment the session ends.
+    /// frame so the loading screen is never a lie: login only moves the session
+    /// into play; the screen clears after `Sim::world_wait` observes the real
+    /// terrain/asset readiness milestone, and flips to Error when the session
+    /// ends.
     pub(super) fn drive_ui_from_session(&mut self) {
         use crate::sim::SessionPhase;
         // The loading screen's *label* comes from here, not from the
@@ -796,7 +798,16 @@ impl WindowApp {
             // LocalOnly never drives the menu — the dev world is already Playing.
             SessionPhase::LocalOnly | SessionPhase::Connecting => {}
             SessionPhase::Connected => {
-                self.ui.session_ready();
+                // Login only establishes the play connection. Keep the
+                // full-frame loading square up until the terrain producer has
+                // reported its real preparation milestone; resident columns
+                // and a full bar are telemetry, not proof that their first
+                // meshes can be presented. Remote sessions without a declared
+                // initial-view contract retain the own-column fallback inside
+                // `Sim::world_wait`.
+                if self.sim.world_wait().is_none() {
+                    self.ui.session_ready();
+                }
                 // Game-rule delivery: the integrated server only
                 // starts inside `begin_singleplayer`, so there was nothing to
                 // send the overrides to any earlier than the session's own
@@ -1699,6 +1710,15 @@ impl WindowApp {
     pub(super) fn begin_singleplayer(&mut self, launch: crate::menu::nav::SingleplayerLaunch) {
         use crate::menu::nav::SingleplayerLaunch;
         let launch_for_lan = launch.clone();
+        // The labelled terrain-generation screen is a first-creation affordance,
+        // not a generic connection screen. Existing saves (`Open`), creative
+        // and hardcore creations, and remote joins all skip it; only a newly
+        // created survival world gets the initial-world progress/grid.
+        let show_new_world_loading = matches!(
+            &launch,
+            SingleplayerLaunch::Created { config, .. }
+                if config.game_mode == crate::menu::create_world::WorldGameMode::Survival
+        );
         self.ui.begin(crate::menu::SessionKind::Singleplayer);
         // The world is a **directory the menu chose**,
         // and the two arms differ only in whether a typed seed is honoured.
@@ -1828,15 +1848,20 @@ impl WindowApp {
         match launch_result {
             Ok(net) => {
                 self.sim.attach_net(net);
-                // The loading screen's denominator is declared only
-                // for singleplayer, because here we *asked* for this view radius
-                // and the integrated server streams exactly the square it
-                // implies. A multiplayer server clamps our requested view
-                // distance to its own, so the same number would be an upper
-                // bound there — a bar that stalls at 70% and reads as a hang.
-                // Better no bar than a wrong one.
-                self.sim
-                    .set_view_radius(u32::try_from(view_radius).unwrap_or(0));
+                let view_radius = u32::try_from(view_radius).unwrap_or(0);
+                if show_new_world_loading {
+                    // The server receives one extra ring for neighbour-aware
+                    // meshing, but the loading square is the player's chosen
+                    // render distance. Do not make that implementation ring
+                    // inflate the visible box.
+                    self.sim
+                        .arm_new_world_loading(self.config.render_distance);
+                } else {
+                    // Keep the server radius available to diagnostics and
+                    // tests, but it is not a reason to display terrain loading
+                    // for an existing save.
+                    self.sim.set_view_radius(view_radius);
+                }
                 self.install_session_render_sources();
             }
             // Reported, never routed around: the only cause is a build with no

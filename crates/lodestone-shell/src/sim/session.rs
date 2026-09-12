@@ -413,6 +413,8 @@ impl Sim {
         self.connect_phase = crate::menu::loading::ConnectPhase::Connecting;
         self.terrain_progress.reset();
         self.expected_view_radius = None;
+        self.new_world_loading = false;
+        self.dimension_transition_pending = false;
         self.terrain_wait_started = None;
         let local = self.local;
         self.write(|world| {
@@ -424,7 +426,7 @@ impl Sim {
         });
     }
 
-    /// The four observations `crate::menu::loading::is_level_ready` reads, or
+    /// The observations `crate::menu::loading::is_level_ready` reads, or
     /// `None` with no live session — the demo/dev world has no net client and is
     /// never "loading terrain".
     ///
@@ -442,18 +444,36 @@ impl Sim {
         let pcx = (position.x.floor() as i32).div_euclid(16);
         let pcz = (position.z.floor() as i32).div_euclid(16);
 
-        // `None` — no dimensions yet — is `false`, i.e. "not inside a build
-        // height", which routes to `is_level_ready`'s bail-out. That is the honest
-        // reading rather than a defensive one: with no world dimensions there is no
-        // column under the player to be waiting for.
-        let within_build_height = net.world_dimensions().is_some_and(|dims| {
+        // A missing extent is not a known out-of-range player. Before the first
+        // decoded column, keep the non-bailing value so the still-false
+        // residency/mesh observations hold the join; only a known extent may
+        // make the build-height liveness escape meaningful.
+        let dimensions = net.world_dimensions();
+        let within_build_height = dimensions.map_or(true, |dims| {
             let top = dims.min_y + dims.section_count() as i32 * 16;
             let y = position.y.floor() as i32;
             y >= dims.min_y && y < top
         });
 
+        let own_column_loaded = net.is_chunk_loaded(lodestone_client::ChunkPos { x: pcx, z: pcz });
+        let own_column_mesh_settled = self.column_mesh_settled(pcx, pcz);
         Some(crate::menu::loading::TerrainWait {
-            own_column_loaded: net.is_chunk_loaded(lodestone_client::ChunkPos { x: pcx, z: pcz }),
+            // Residency is necessary but not sufficient. The mesh producer's
+            // per-section ledger only settles this observation after every
+            // non-air section has crossed the renderer hand-off and every
+            // all-air section has been explicitly classified as empty.
+            own_column_loaded,
+            // Keep the producer latch for sessions with a declared initial
+            // view, while also applying the same per-player-column predicate
+            // to remote sessions that have no trustworthy denominator. The
+            // progress count remains telemetry in both cases.
+            terrain_ready: Some(
+                own_column_mesh_settled
+                    && self
+                        .terrain_progress
+                        .snapshot()
+                        .is_none_or(|_| self.terrain_progress.is_ready()),
+            ),
             elapsed: self.load_elapsed(),
             player_alive: !self.is_dead(),
             within_build_height,
@@ -491,8 +511,46 @@ impl Sim {
     /// was ported from; this method's whole job is gathering what it reads.
     #[must_use]
     pub fn world_wait(&self) -> Option<crate::menu::loading::WorldWait> {
+        let assets = self.asset_wait();
+        if !crate::menu::loading::assets_ready(assets) {
+            return Some(crate::menu::loading::WorldWait::ApplyingPack);
+        }
+        // Cross-dimension travel has its own opaque cover. Do not reuse the
+        // initial-world terrain label/grid while the destination is arriving.
+        if self.dimension_transition_pending || !self.new_world_loading {
+            return None;
+        }
         let terrain = self.terrain_wait()?;
-        crate::menu::loading::world_wait(terrain, self.asset_wait())
+        crate::menu::loading::world_wait(terrain, assets)
+    }
+
+    /// Whether the full-frame `Loading terrain...` screen belongs to this
+    /// session. The launcher arms it only for `Created` + `Survival`; a
+    /// server-provided radius alone must never opt a remote join into it.
+    #[must_use]
+    pub const fn shows_new_world_loading(&self) -> bool {
+        self.new_world_loading
+    }
+
+    /// Whether dimension travel currently needs an opaque destination cover.
+    /// This is intentionally a separate presentation state from the initial
+    /// world-generation screen.
+    #[must_use]
+    pub fn dimension_transition_pending(&self) -> bool {
+        self.dimension_transition_pending
+            && self
+                .terrain_wait_started
+                .is_none_or(|started| started.elapsed() < crate::menu::loading::CLIENT_WAIT_TIMEOUT)
+    }
+
+    /// Arm the initial-world loading screen for the newly-created survival
+    /// world selected by the menu. Existing saves and multiplayer never call
+    /// this method.
+    pub(crate) fn arm_new_world_loading(&mut self, view_radius: u32) {
+        self.new_world_loading = true;
+        self.dimension_transition_pending = false;
+        self.set_view_radius(view_radius);
+        self.set_connect_phase(crate::menu::loading::ConnectPhase::LoadingTerrain);
     }
 
     /// The loading screen's current step.
@@ -522,6 +580,26 @@ impl Sim {
             self.terrain_wait_started = Some(crate::platform::Instant::now());
         }
         self.connect_phase = phase;
+    }
+
+    /// Start a fresh terrain-loading phase for a connected session that has
+    /// changed dimensions.
+    ///
+    /// A portal transition remains `Connected` while destination columns
+    /// arrive, so routing this through [`Self::set_connect_phase`] would not
+    /// restart the clock when the phase is already `LoadingTerrain`. The
+    /// timeout belongs to the destination world, not to the original join.
+    pub(crate) fn restart_terrain_loading(&mut self) {
+        self.connect_phase = crate::menu::loading::ConnectPhase::LoadingTerrain;
+        self.terrain_wait_started = Some(crate::platform::Instant::now());
+    }
+
+    /// Record the terrain producer's real preparation milestone for the current
+    /// dimension. This is deliberately separate from [`Self::observe_terrain_progress`]:
+    /// a resident column is useful telemetry but is not proof that its mesh (or
+    /// the required neighbouring meshes) can be presented.
+    pub(crate) fn mark_terrain_ready(&mut self) {
+        self.terrain_progress.mark_ready();
     }
 
     /// Declare how many columns this session's initial view contains, from the
@@ -562,22 +640,25 @@ impl Sim {
     /// How much of the initial view has landed, or `None` when there is no
     /// session or no declared view radius to divide by.
     ///
-    /// The numerator is the high-water mark of the client's own loaded-column
+    /// The numerator is the high-water mark of the client's own admitted-column
     /// observations inside the streamed square and the denominator is that
-    /// square. A missing denominator yields `None` so the screen draws a phase
-    /// name with no bar, rather than a synthesised one.
+    /// square. This is telemetry only; readiness comes from the separate
+    /// terrain-producer latch read by [`Self::terrain_wait`]. A missing
+    /// denominator yields `None` so the screen draws a phase name with no bar,
+    /// rather than a synthesised one.
     #[must_use]
     pub fn terrain_progress(&self) -> Option<crate::menu::loading::TerrainProgress> {
         self.net()?;
         self.terrain_progress.snapshot()
     }
 
-    /// Fold the client's current resident columns into the loading
-    /// high-water mark. The count is restricted to the server's current
-    /// streamed square so columns outside the expected view cannot fill the
-    /// bar. This reads the client-owned world rather than trusting event
-    /// delivery: a dropped/coalesced chunk notification still leaves the
-    /// source of truth available to the next poll.
+    /// Fold the client's current admitted columns into the loading high-water
+    /// mark. The count is restricted to the server's current streamed square
+    /// so columns outside the expected view cannot fill the bar. This reads
+    /// the client-owned world rather than trusting event delivery: a
+    /// dropped/coalesced chunk notification still leaves the source of truth
+    /// available to the next poll. The result remains telemetry; it never
+    /// marks the terrain producer ready.
     pub(crate) fn observe_terrain_progress(&mut self) {
         let Some(radius) = self.expected_view_radius else {
             return;
@@ -620,12 +701,10 @@ impl Sim {
     /// [`crate::menu::loading::ChunkCellStatus`]'s doc for why this has two
     /// states rather than vanilla's twelve.
     ///
-    /// **Bounded by [`crate::menu::loading::MAX_GRID_RADIUS`], not by the view
-    /// radius**: vanilla's own status view is a constant 17 regardless of
-    /// render distance, and an unbounded grid overflows the top of the screen
-    /// (see that constant's doc). The cells are still whole, real columns; at a
-    /// large render distance this is the innermost square of the view rather
-    /// than all of it.
+    /// **Bounded by [`crate::menu::loading::MAX_GRID_RADIUS`]** so the square
+    /// remains drawable on the smallest supported canvas. The selected render
+    /// distance is preserved through the supported range; a larger server
+    /// radius is clamped rather than silently making the grid overflow.
     #[must_use]
     pub fn terrain_chunk_grid(&self) -> Option<crate::menu::loading::TerrainChunkGrid> {
         let net = self.net()?;

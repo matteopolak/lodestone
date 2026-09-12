@@ -251,15 +251,17 @@ regardless of which screen is open.
 
 ### Loading
 
-Two draw shapes cover one loading flow. Before login, `Screen::Connecting` is a full-frame screen
-showing named connection phases. A singleplayer launch also supplies its declared view square here,
-so the real resident-column map and monotonic count can be visible even when the integrated server
-prepares terrain before the login transition. After login, the loading UI becomes an **overlay** drawn
-over the still-rendering world while terrain is loading, because chunks must keep meshing and
-uploading behind the text — a full-frame screen would stop that. It clears based on whether the
-player's own standing chunk has actually arrived, not when a progress bar visually fills. Both stages
-use the same panorama backdrop every other menu screen uses (see `ui-framework.md`) rather than a
-flat color wash.
+Two draw shapes cover one loading flow. Before and immediately after login, `Screen::Connecting`
+remains a full-frame screen showing named connection phases and the singleplayer view square. Login
+is only the network boundary: the shell keeps this screen up until the terrain producer reports its
+real preparation milestone. The resident-column map and monotonic count are telemetry, not a
+completion signal; a full bar cannot stand in for a mesh that is still deferred on a missing
+horizontal neighbour. Once the session is already in play, the loading UI can still become an
+**overlay** over the still-rendering world for a later terrain or asset wait, because chunks must
+keep meshing and uploading behind the text. Both shapes use the same panorama backdrop every other
+menu screen uses (see `ui-framework.md`) rather than a flat color wash. The shell also keeps the
+screen up until the destination world's vertical extent is known; “not known yet” is not the same
+as a player known to be outside build height, which is the only liveness short-circuit.
 
 ### Advancements
 

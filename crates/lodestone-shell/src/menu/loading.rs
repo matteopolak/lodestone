@@ -13,9 +13,11 @@
 //!   symptom (a dead player held on the death screen sending no chunks,
 //!   `PERFORM_RESPAWN` decoded and discarded, LAN hosting with no tick loop).
 //!   A screen that names its step turns those into "stuck at *this* step".
-//! * [`TerrainProgress`] — the session-scoped high-water count of loaded
+//! * [`TerrainProgress`] — the session-scoped high-water count of admitted
 //!   columns against the count the server is going to send, which is what the
-//!   progress bar is derived from.
+//!   progress bar is derived from. It is telemetry, not a readiness signal:
+//!   residency can precede a usable mesh when a horizontal neighbour is still
+//!   arriving.
 //!
 //! # The rule this module exists to enforce
 //!
@@ -35,19 +37,24 @@
 //! * [`TerrainProgress`] carries the raw numerator and denominator rather than a
 //!   pre-computed percentage, so a caller cannot round a partial load up to
 //!   "done", and [`TerrainProgress::fraction`] is clamped **below** 1.0 for
-//!   exactly that reason — the screen closes when [`is_level_ready`] says so,
-//!   never because a bar filled. [`TerrainProgressTracker`] keeps the numerator
-//!   monotonic while the join's resident set changes underneath it.
+//!   exactly that reason. [`TerrainProgressTracker`] keeps the numerator
+//!   monotonic while the join's resident set changes underneath it, and carries
+//!   a separate readiness latch for the producer that can observe completed
+//!   terrain work.
 //!
 //! # The dismissal condition
 //!
-//! [`is_level_ready`] is vanilla's `LevelLoadTracker.WaitingForPlayerChunk`
-//! readiness rule, and it is worth naming what it is *not*: it is **not** "the
-//! whole view square has landed". `TerrainProgress`'s `(2r+1)²` denominator is the
-//! progress *bar*'s, and nothing else; waiting on it would hold the screen for the
-//! entire initial stream. Vanilla waits on the player's own chunk and bounds even
-//! that with a 30 s timeout — see [`CLIENT_WAIT_TIMEOUT`] for the incident that
-//! made the bound load-bearing rather than defensive.
+//! [`is_level_ready`] is the shell's lower-level terrain predicate. The initial
+//! survival-world path requires both the player's admitted column and the
+//! separate [`TerrainProgressTracker::mark_ready`] observation from the
+//! terrain producer; the resident count and progress bar never satisfy that
+//! gate on their own. Existing saves and remote joins are intentionally not
+//! routed through this labelled terrain screen at all, while a dimension
+//! transition uses a separate opaque cover. This distinction matters because a
+//! column can be present in the client store while its first mesh is deferred
+//! until horizontal neighbours arrive. Every path that does wait remains
+//! bounded by the 30 s timeout — see [`CLIENT_WAIT_TIMEOUT`] — so a missing
+//! producer signal cannot strand the player forever.
 //!
 //! **Terrain is only half of it.** [`world_wait`] is the real dismissal
 //! condition, and it ANDs [`is_level_ready`] with [`assets_ready`]: a
@@ -62,12 +69,12 @@
 //! [`assets_ready`] for the bound, and `docs/join-readiness.md` for the whole
 //! sequence.
 //!
-//! Note that 26.2 has no `ReceivingLevelScreen` any more; the screen carrying
-//! `multiplayer.downloadingTerrain` is `LevelLoadingScreen`, and
-//! `Minecraft.doWorldLoad` constructs one unconditionally for singleplayer
-//! alongside `ConnectScreen`/`ClientPacketListener` for multiplayer. So it really
-//! does appear on **every** join, not only on world creation — the only
-//! singleplayer-specific part is a 500 ms close delay for a brand-new world.
+//! The shell deliberately narrows that broad protocol-level opportunity: the
+//! labelled grid is armed only by a newly-created survival singleplayer world.
+//! Existing saves and remote joins use the ordinary connection phases, and a
+//! cross-dimension respawn uses the separate opaque transition cover. Keeping
+//! these scopes explicit prevents a server-owned progress counter from making a
+//! multiplayer join look stalled.
 //!
 //! # How to change it
 //!
@@ -88,6 +95,13 @@
 //! rather than on an event — the fake-progress failure this module exists to
 //! avoid. They become available if and when the client driver reports the
 //! handshake stage; until then their absence is honest.
+//!
+//! The terrain producer follows the same rule. A caller that owns the actual
+//! spawn-area preparation boundary must call [`TerrainProgressTracker::mark_ready`]
+//! through `Sim::mark_terrain_ready`; neither a resident-column count nor a
+//! timer is a substitute. The network/session wiring for that boundary belongs
+//! beside the server's admission event, while this module owns only the
+//! presentation contract and its negative controls.
 
 /// Which step of establishing a session the loading screen is naming.
 ///
@@ -136,12 +150,14 @@ impl ConnectPhase {
     }
 }
 
-/// How much of the initial view has landed: `loaded` columns out of `expected`.
+/// How much of the initial view has been admitted: `loaded` columns out of `expected`.
 ///
 /// `expected` is the count the server is actually going to send — the view
 /// square `(2 * view_radius + 1)^2`, the same square `join_view_rings`
 /// partitions — not a guess. `loaded` is the client's high-water count of real
-/// resident columns observed within that square.
+/// resident columns observed within that square. This is a progress-bar
+/// measurement only; it does not imply that the terrain producer has completed
+/// the meshes the player can see.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerrainProgress {
     /// Columns the client has applied.
@@ -176,8 +192,9 @@ impl TerrainProgress {
         raw.clamp(0.0, MAX_FRACTION)
     }
 
-    /// The count line drawn under the bar — the honest raw numbers, so a stall
-    /// is legible as "stuck at 37/441" rather than as a bar that stopped.
+    /// A diagnostic rendering of the raw count. The compact loading frame uses
+    /// the status grid instead of drawing this line, but telemetry consumers
+    /// and focused tests can still request the honest numerator/denominator.
     #[must_use]
     pub fn detail(self) -> String {
         format!("{} / {} chunks", self.loaded, self.expected)
@@ -191,12 +208,15 @@ impl TerrainProgress {
 /// count directly would make the loading bar move backwards even though the
 /// client has already observed that work. The tracker keeps the largest real
 /// observation for the current join and exposes it against the declared view
-/// square. It is reset when a new server session starts, and its observation
-/// can be cleared independently when a connected session changes dimension.
+/// square. The producer's readiness latch is intentionally independent of that
+/// count: a full bar is still only a report of admissions. It is reset when a
+/// new server session starts, and its observation can be cleared independently
+/// when a connected session changes dimension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TerrainProgressTracker {
     expected: Option<usize>,
     loaded: usize,
+    ready: bool,
 }
 
 impl TerrainProgressTracker {
@@ -210,10 +230,30 @@ impl TerrainProgressTracker {
         self.loaded = self.loaded.max(loaded);
     }
 
+    /// Record that the terrain producer has completed the join's required
+    /// preparation milestone.
+    ///
+    /// This is deliberately not inferred from [`Self::observe`]. A resident
+    /// column may still have no uploaded mesh because its snapshot was deferred
+    /// while a horizontal neighbour was absent, and an all-air column is a
+    /// valid admitted result with no geometry at all. The caller that owns the
+    /// producer's completion state must make this observation explicitly.
+    pub fn mark_ready(&mut self) {
+        self.ready = true;
+    }
+
+    /// Whether the producer has explicitly reported the required preparation
+    /// milestone for the current dimension.
+    #[must_use]
+    pub const fn is_ready(&self) -> bool {
+        self.ready
+    }
+
     /// Forget the current dimension's observations while retaining its
     /// declared denominator.
     pub fn reset_observed(&mut self) {
         self.loaded = 0;
+        self.ready = false;
     }
 
     /// Return the current progress snapshot, if a denominator was declared.
@@ -234,31 +274,40 @@ impl TerrainProgressTracker {
 /// The most the progress bar will ever report. See [`TerrainProgress::fraction`].
 pub const MAX_FRACTION: f32 = 0.99;
 
-/// One chunk's status in the loading grid — vanilla's
-/// `LevelLoadingScreen` per-chunk squares, reduced to the two states this
-/// client can actually observe.
+/// One chunk's generation status in the loading grid.
 ///
-/// Vanilla colours each cell from `ChunkMap.getLatestStatus`, a **server-side
-/// generation stage** (`ChunkStatus.EMPTY` through `.FULL`, twelve of them),
-/// read in-process because vanilla's integrated server runs in the same JVM
-/// as the client (`MinecraftServer.createChunkLoadStatusView`). This client's
-/// server never models intermediate generation stages at all — a column comes
-/// out of `ChunkColumn::from_generated` in one step, with nothing in between
-/// to report — and the client only ever learns "not here yet" or "here", over
-/// the network, identically for singleplayer and real multiplayer (unlike
-/// vanilla, whose grid is singleplayer-only for exactly the in-process-read
-/// reason above). So this grid draws exactly two of vanilla's own per-status
-/// colours (`EMPTY` and `FULL`) rather than inventing intermediate ones: it is
-/// real spatial information — which of *these* columns has actually arrived,
-/// and in what pattern — just coarser than vanilla's twelve-stage view, and it
-/// never claims more than that.
+/// The reference client uses the twelve statuses below and a distinct colour
+/// for each. Lodestone can currently observe admission and completion over the
+/// wire, so production network cells use `Empty` until the decoded column is
+/// present and `Full` thereafter. Keeping the complete typed status set here is
+/// important: it prevents the renderer from collapsing the real palette back
+/// to a single grey/white placeholder when the integrated-server status view
+/// becomes available, and lets focused geometry tests exercise every colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChunkCellStatus {
-    /// Not yet received by the client. Vanilla `ChunkStatus.EMPTY`'s colour,
-    /// `0x545454`.
+    /// No generation work has been observed.
     Empty,
-    /// Received and applied to the client-owned world. Vanilla
-    /// `ChunkStatus.FULL`'s colour, white.
+    /// Structure starts.
+    StructureStarts,
+    /// Structure references.
+    StructureReferences,
+    /// Biomes.
+    Biomes,
+    /// Noise terrain.
+    Noise,
+    /// Surface rules.
+    Surface,
+    /// Carvers.
+    Carvers,
+    /// Feature placement.
+    Features,
+    /// Light initialisation.
+    InitializeLight,
+    /// Light propagation.
+    Light,
+    /// Spawn preparation.
+    Spawn,
+    /// Fully admitted and applied to the client-owned world.
     Full,
 }
 
@@ -282,48 +331,24 @@ pub struct TerrainChunkGrid {
     pub cells: Vec<ChunkCellStatus>,
 }
 
-/// The grid's own radius, in chunks — **a constant, not the render distance**.
-///
-/// This is vanilla's number, and reading it out of the jar is the whole of this
-/// constant's justification. Vanilla's own client entry point's world-load
-/// routine builds the view the
-/// loading screen draws as a chunk-load-status view sized by the max of 5 and
-/// 3, plus the radius-around-full-chunk constant, plus 1,
-/// and that radius constant is
-/// the generation pyramid's own accumulated-dependency radius for reaching
-/// the full status,
-/// which evaluates to **11** for 26.2's pyramid (the chain's widest accumulated
-/// dependency is `LIGHT`'s, `STRUCTURE_STARTS` at radius 8 pushed out by the
-/// `BIOMES`/`CARVERS`/`INITIALIZE_LIGHT` radius-1 steps above it). So vanilla's
-/// grid is 17, i.e. `2 * 17 + 1 = 35` cells and `35 * 2 = 70` logical pixels
-/// square, **for every render distance** — the status view is the *server's*
-/// generation neighbourhood, which does not grow with what the client draws.
-///
-/// # Why this is a cap here rather than a fixed size
-///
-/// This client has no server-side status view to size from; the grid is built
-/// from the client's own `NetClient::is_chunk_loaded` over the streamed square,
-/// so its natural radius is the view radius. Taking the **minimum** of the two
-/// keeps a small render distance showing its real, whole square (radius 8 draws
-/// 17×17, all of it meaningful) while pinning the large end to vanilla's own
-/// size instead of growing without bound.
-///
-/// Unbounded was the bug: at the owner's `render_distance = 32` the grid was
-/// 65 cells and 130 px square, which does not fit above the phase label on the
-/// 320×240 canvas `config::calculate_gui_scale` treats as the floor — it
-/// overflowed the top of the screen, and kept getting worse with distance.
-pub const MAX_GRID_RADIUS: u32 = 17;
+/// The largest selectable render distance. The loading square follows the
+/// selected distance rather than silently replacing a 32-chunk choice with a
+/// smaller centre crop. Its cell size remains the reference two logical pixels;
+/// the reference layout places the square below the label, so the full box fits
+/// on the smallest supported canvas even at the upper bound.
+pub const MAX_GRID_RADIUS: u32 = crate::config::MAX_RENDER_DISTANCE;
 
 impl TerrainChunkGrid {
-    /// The radius to actually draw for a session streaming `view_radius`:
-    /// [`MAX_GRID_RADIUS`], or the whole view when it is smaller.
-    ///
-    /// A function rather than a `min` at the one call site so the layout gate
-    /// and the producer share one expression — the same reason
-    /// `menu::render::screens::chunk_grid_dy` is a free function.
+    /// The radius to draw for the selected view, bounded to the selectable
+    /// range. The caller owns whether a grid is shown at all; this function is
+    /// only geometry, not a multiplayer/loading-scope decision.
     #[must_use]
     pub const fn view_radius(view_radius: u32) -> u32 {
-        if view_radius < MAX_GRID_RADIUS { view_radius } else { MAX_GRID_RADIUS }
+        if view_radius > MAX_GRID_RADIUS {
+            MAX_GRID_RADIUS
+        } else {
+            view_radius
+        }
     }
 
     /// Cells per side: `LevelLoadingScreen.extractChunksForRendering`'s
@@ -373,6 +398,12 @@ pub const CLIENT_WAIT_TIMEOUT: core::time::Duration = core::time::Duration::from
 pub struct TerrainWait {
     /// Whether the chunk column under the player's feet has arrived.
     pub own_column_loaded: bool,
+    /// For a session with a declared initial view, whether the terrain
+    /// producer has explicitly reported its preparation milestone. `None`
+    /// means this session has no trustworthy initial-view contract (the normal
+    /// remote-server case), so readiness falls back to `own_column_loaded`.
+    /// `Some(false)` is intentionally not replaced by a full progress bar.
+    pub terrain_ready: Option<bool>,
     /// How long the terrain phase has been up. Compared against
     /// [`CLIENT_WAIT_TIMEOUT`].
     pub elapsed: core::time::Duration,
@@ -380,40 +411,35 @@ pub struct TerrainWait {
     /// screen, and **a server holding a dead player sends no chunks at all** —
     /// so waiting for a column while dead waits forever.
     pub player_alive: bool,
-    /// Whether the player's Y is inside the world's build height. `false` when
-    /// the client has no world dimensions yet, which is also the honest answer:
-    /// there is no build height to be inside of.
+    /// Whether the player's Y is inside the world's build height. The producer
+    /// keeps this `true` while the extent is unknown so that the liveness
+    /// short-circuit below applies only to a known out-of-range position;
+    /// residency and mesh readiness remain false until the first real column.
     pub within_build_height: bool,
 }
 
-/// Vanilla's own level-load-tracker's waiting-for-player-chunk state's own
-/// is-ready check, ported.
+/// Decide whether the world can be presented.
 ///
-/// The behavior, so the port is auditable: once the wall clock passes the
-/// stored timeout, it logs a warning and reports ready unconditionally,
-/// letting the player in regardless of chunk state. Otherwise it reads the
-/// player's block position and the main camera's block position and reports
-/// ready outright unless *all four* of these hold: the player's Y is inside
-/// the world's build height, the camera's Y is inside it too, the player is
-/// not a spectator, and the player is alive — only when every one of those
-/// four holds does it defer to the actual "has this section loaded" flag.
+/// Once the wall clock passes the stored timeout, it reports ready
+/// unconditionally, letting the player in regardless of terrain state.
+/// Otherwise it waits only while the player is alive, inside the known build
+/// height, standing on an admitted column, and — when the session has a declared
+/// initial view — the terrain producer has reported its completion milestone.
 ///
-/// Read carefully, the ternary is **"only wait if waiting could work"**: every one
-/// of those four conditions failing makes the answer `true`, i.e. *ready*. They
-/// are not extra requirements for readiness — they are the states in which the
-/// wait is pointless, and vanilla short-circuits out of the screen rather than
-/// holding a player it can never satisfy. Transcribing them as `&&`ed
-/// preconditions for dismissal inverts the record and produces a screen that
-/// hangs in precisely the cases vanilla wrote them for.
+/// Read carefully, the short-circuits are **"only wait if waiting could work"**:
+/// a dead player or a player known to be outside build height is ready rather
+/// than held. An unknown build height is represented by the producer's false
+/// residency/readiness observations, so it remains held until the timeout or
+/// the first real world observation. A resident count or a full progress bar is
+/// not a substitute for the explicit terrain milestone.
 ///
 /// # Two named deviations
 ///
-/// * **Column loaded, not section compiled.** Vanilla waits on
-///   `playerSectionReady`, set from a mesh-compilation callback. This client has
-///   no such callback, and the column being present in the client-owned world is
-///   the observation it does have. It is a strictly *earlier* condition than a
-///   compiled mesh, so this dismisses no later than vanilla — never longer, which
-///   is the direction that matters for a screen the player is stuck behind.
+/// * **The producer milestone is explicit.** A client column being present in
+///   the world store is not enough: the mesh path can defer its first snapshot
+///   until neighbours arrive. The shell therefore receives this observation
+///   from the producer rather than turning the resident count into a false
+///   completion signal.
 /// * **No spectator check, and no separate camera check.** `Sim` carries no game
 ///   mode, so `isSpectator` has nothing to read; the camera Y is the player Y here
 ///   because the shell has no detached camera in the loading phase. Both are
@@ -425,10 +451,13 @@ pub fn is_level_ready(wait: TerrainWait) -> bool {
     if wait.elapsed >= CLIENT_WAIT_TIMEOUT {
         return true;
     }
-    if !wait.player_alive || !wait.within_build_height {
+    if !wait.player_alive {
         return true;
     }
-    wait.own_column_loaded
+    if !wait.within_build_height {
+        return true;
+    }
+    wait.own_column_loaded && wait.terrain_ready.unwrap_or(true)
 }
 
 /// Everything [`world_wait`] reads about **asset** work that is still
@@ -524,7 +553,8 @@ pub fn world_wait(terrain: TerrainWait, assets: AssetWait) -> Option<WorldWait> 
 /// The step [`world_wait`] is holding the world back for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorldWait {
-    /// The player's own chunk column has not arrived — [`is_level_ready`].
+    /// The player's own column or the explicit terrain-preparation milestone
+    /// has not arrived — [`is_level_ready`].
     Terrain,
     /// A server-pushed resource pack is still downloading or has not been
     /// applied to the block atlas yet — [`assets_ready`].
@@ -587,6 +617,7 @@ mod tests {
     /// one field moved, so what each test measures is unambiguous.
     const STILL_WAITING: TerrainWait = TerrainWait {
         own_column_loaded: false,
+        terrain_ready: None,
         elapsed: Duration::ZERO,
         player_alive: true,
         within_build_height: true,
@@ -648,6 +679,32 @@ mod tests {
         );
     }
 
+    /// A singleplayer join has an explicit terrain-preparation contract. The
+    /// player's column and even a resident count are not enough while the mesh
+    /// producer still reports no completion. This is the negative control for
+    /// the old false-positive path: changing only the readiness observation
+    /// must change the decision, while the admitted-column observation stays
+    /// identical.
+    #[test]
+    fn a_resident_column_without_terrain_readiness_does_not_dismiss() {
+        let not_ready = TerrainWait {
+            own_column_loaded: true,
+            terrain_ready: Some(false),
+            elapsed: Duration::from_secs(3),
+            player_alive: true,
+            within_build_height: true,
+        };
+        assert!(!is_level_ready(not_ready));
+        assert_eq!(world_wait(not_ready, ASSETS_DONE), Some(WorldWait::Terrain));
+
+        let ready = TerrainWait {
+            terrain_ready: Some(true),
+            ..not_ready
+        };
+        assert!(is_level_ready(ready));
+        assert_eq!(world_wait(ready, ASSETS_DONE), None);
+    }
+
     /// **The direction of vanilla's ternary, which is the easy thing to get
     /// backwards.** A dead player and a player outside build height are *ready*,
     /// not *held*: those are the states in which waiting cannot succeed.
@@ -671,14 +728,41 @@ mod tests {
                 within_build_height: false,
                 ..STILL_WAITING
             }),
-            "outside build height (or with no world dimensions yet) there is no column \
-             under the player to wait for"
+            "known out-of-range coordinates have no column under the player to wait for"
         );
         // And the control for both: with those two back to their healthy values and
         // nothing else changed, the screen is held — so the assertions above are
         // about the fields they name and not about `STILL_WAITING` being ready
         // already.
         assert!(!is_level_ready(STILL_WAITING));
+    }
+
+    /// **Negative control for the pre-column state.** A live player whose own
+    /// column has not arrived must stay behind the loading screen even when the
+    /// extent is not yet known (the producer represents that state with the
+    /// non-bailing `within_build_height` value). Treating no progress as an
+    /// out-of-range escape is the early-entry bug: the UI flips to Playing while
+    /// generation is still producing the first spawn-area columns.
+    #[test]
+    fn no_progress_does_not_dismiss_a_join_before_terrain_arrives() {
+        let no_progress = TerrainWait {
+            own_column_loaded: false,
+            terrain_ready: Some(false),
+            elapsed: Duration::from_secs(1),
+            player_alive: true,
+            within_build_height: true,
+        };
+        assert!(!is_level_ready(no_progress));
+        assert_eq!(world_wait(no_progress, ASSETS_DONE), Some(WorldWait::Terrain));
+
+        let known_outside = TerrainWait {
+            within_build_height: false,
+            ..no_progress
+        };
+        assert!(
+            is_level_ready(known_outside),
+            "known out-of-range coordinates retain the liveness bail-out"
+        );
     }
 
     /// Every phase must have both a key and a non-empty label, and no two
@@ -771,6 +855,7 @@ mod tests {
     /// the asset half and never a terrain condition leaking in.
     const TERRAIN_DONE: TerrainWait = TerrainWait {
         own_column_loaded: true,
+        terrain_ready: None,
         elapsed: Duration::ZERO,
         player_alive: true,
         within_build_height: true,
@@ -954,6 +1039,7 @@ mod tests {
     fn terrain_progress_tracker_is_monotonic_until_reset() {
         let mut tracker = TerrainProgressTracker::default();
         tracker.set_expected(TerrainProgress::expected_for_radius(1));
+        assert!(!tracker.is_ready());
         tracker.observe(3);
         assert_eq!(tracker.snapshot().map(|p| p.loaded), Some(3));
         tracker.observe(1);
@@ -979,6 +1065,11 @@ mod tests {
             }),
             "a dimension change keeps the denominator but starts its count over"
         );
+        assert!(!tracker.is_ready(), "a new dimension needs a new producer milestone");
+
+        tracker.mark_ready();
+        tracker.mark_ready();
+        assert!(tracker.is_ready(), "readiness is a one-way observation");
 
         tracker.reset();
         assert_eq!(tracker.snapshot(), None, "a new session has no denominator yet");

@@ -83,6 +83,24 @@ fn connection_loading_frame_carries_the_real_progress_and_grid() {
 }
 
 #[test]
+fn remote_connection_cannot_relabel_its_join_as_initial_terrain_generation() {
+    assert_eq!(
+        crate::app::menus::connection_phase_for_scope(
+            false,
+            crate::menu::loading::ConnectPhase::LoadingTerrain,
+        ),
+        crate::menu::loading::ConnectPhase::Joining,
+    );
+    assert_eq!(
+        crate::app::menus::connection_phase_for_scope(
+            true,
+            crate::menu::loading::ConnectPhase::LoadingTerrain,
+        ),
+        crate::menu::loading::ConnectPhase::LoadingTerrain,
+    );
+}
+
+#[test]
 fn benchmark_policy_is_uncapped_unvsynced_and_uses_physical_1440p() {
     let config = benchmark_config(crate::config::BenchmarkWorkload::Terrain);
     assert_eq!(window_physical_size(&config), Some((2560, 1440)));
