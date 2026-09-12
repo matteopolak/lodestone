@@ -101,7 +101,6 @@ pub use decorated_pot::*;
 pub use shields::*;
 pub use shulkers::*;
 pub use skulls::*;
-pub(super) use skulls::skull_head_part;
 
 /// The chest sheet is 64×64 (the declared canvas size in all three real
 /// chest body-layer builders). Asserted against the real `client.jar` PNGs by
@@ -777,7 +776,10 @@ mod tests {
         assert_eq!(mob.texture_height, 32);
         assert_eq!(humanoid.texture_width, 64);
         assert_eq!(humanoid.texture_height, 64);
-        assert_eq!(mob.root, PartDef::new(PartPose::ZERO).with_child("head", skull_head_part()));
+        assert_eq!(
+            mob.root,
+            PartDef::new(PartPose::ZERO).with_child("head", skulls::skull_head_part()),
+        );
         assert_eq!(
             mob.root.children[0].1.cubes,
             humanoid.root.children[0].1.cubes,
