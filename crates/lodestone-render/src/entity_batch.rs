@@ -203,7 +203,7 @@ impl EntityInstance {
         anim: &AnimInput,
         swell: f32,
     ) -> Self {
-        let part_transforms = mesh
+        let part_transforms: Vec<Mat4> = mesh
             .skeleton
             .pose_swelling(anim, swell)
             .into_iter()
