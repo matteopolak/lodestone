@@ -15,7 +15,7 @@ use lodestone_core::Reader;
 use lodestone_server::{ChunkColumn, EndChunkSource, NetherChunkSource, OverworldChunkSource, end_chunk_source, nether_chunk_source, overworld_chunk_source};
 use lodestone_worldgen_parity::lifecycle::{
     FEATURES_SOURCE_RADIUS, FEATURES_WRITE_RADIUS, LifecycleCompletion, LifecycleMaterializer,
-    LifecycleReplayEvent, LifecycleResidentStage,
+    LifecycleFeatureResult, LifecycleReplayEvent, LifecycleResidentStage,
     LifecycleResidentTransition, LifecycleWorldgenSource,
 };
 use lodestone_server::{ServerDirective, ServerProtocol};
@@ -1028,6 +1028,141 @@ fn v7_diagnostics_parse_each_literal_record_independently() {
         Some((light_free_record_layout(&expected, StreamDimension::Nether).unwrap().terrain.start + cell * 4, 1, 3, 2, 100_000 + cell as u32, 888_888)),
     );
     assert!(!records_match_without_heightmaps(&expected, &actual, StreamDimension::Nether));
+}
+
+struct EndP06ControlSource;
+
+impl LifecycleWorldgenSource for EndP06ControlSource {
+    fn shaped_column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+        ChunkColumn::new(0, 256)
+    }
+
+    fn feature_result(
+        &self,
+        _source: (i32, i32),
+        _overrides: &BTreeMap<(i32, i32, i32), String>,
+        _resident: &BTreeMap<(i32, i32), ChunkColumn>,
+    ) -> LifecycleFeatureResult {
+        LifecycleFeatureResult::default()
+    }
+}
+
+fn p06_put_i32(bytes: &mut Vec<u8>, value: i32) {
+    bytes.extend_from_slice(&value.to_be_bytes());
+}
+
+fn p06_put_u32(bytes: &mut Vec<u8>, value: u32) {
+    bytes.extend_from_slice(&value.to_be_bytes());
+}
+
+fn p06_put_u64(bytes: &mut Vec<u8>, value: u64) {
+    bytes.extend_from_slice(&value.to_be_bytes());
+}
+
+fn p06_put_u16(bytes: &mut Vec<u8>, value: u16) {
+    bytes.extend_from_slice(&value.to_be_bytes());
+}
+
+fn literal_end_p06_lifecycle_payload(
+    target: (i32, i32),
+    target_focus: [u16; 3],
+    reverse: bool,
+) -> Vec<u8> {
+    let mut sources = (-1..=1)
+        .flat_map(|x| (-1..=1).map(move |z| (target.0 + x, target.1 + z)))
+        .collect::<Vec<_>>();
+    if reverse {
+        sources.reverse();
+    }
+    let mut bytes = END_STREAM_EVENT_DOMAIN.to_vec();
+    p06_put_u32(&mut bytes, sources.len() as u32);
+    for (sequence, source) in sources.into_iter().enumerate() {
+        p06_put_u64(&mut bytes, sequence as u64);
+        p06_put_i32(&mut bytes, source.0);
+        p06_put_i32(&mut bytes, source.1);
+        bytes.push(1); // FEATURES completion
+        p06_put_u32(&mut bytes, u32::from(source != target) + 1);
+        let mut write_transition = |resident: (i32, i32), values: [u16; 3]| {
+            p06_put_i32(&mut bytes, resident.0);
+            p06_put_i32(&mut bytes, resident.1);
+            bytes.push(1); // FEATURES resident status
+            bytes.push(1); // map payload present
+            for map in 0..3 {
+                for cell in 0..256 {
+                    let value = if resident == target && cell == 2 {
+                        values[map]
+                    } else {
+                        58
+                    };
+                    p06_put_u16(&mut bytes, value);
+                }
+            }
+        };
+        write_transition(source, if source == target { target_focus } else { [58; 3] });
+        if source != target {
+            write_transition(target, target_focus);
+        }
+    }
+    bytes
+}
+
+fn replay_literal_end_p06_events(
+    events: &[LifecycleReplayEvent],
+) -> (u32, u32, u32) {
+    let target = (280, 78);
+    let mut materializer = LifecycleMaterializer::new(EndP06ControlSource);
+    for z in target.1 - 2..=target.1 + 2 {
+        for x in target.0 - 2..=target.0 + 2 {
+            materializer.admit((x, z));
+        }
+    }
+    for event in events {
+        materializer.complete_observing_with_residents(
+            event.source,
+            event.stage,
+            event.sequence,
+            &event.resident_transitions,
+            |_| {},
+        );
+    }
+    let maps = materializer
+        .resident_column(target)
+        .expect("P06 control target admission")
+        .client_heightmaps()
+        .expect("P06 control target maps");
+    (
+        maps.get(1).expect("WORLD_SURFACE map").get(2, 0),
+        maps.get(4).expect("MOTION_BLOCKING map").get(2, 0),
+        maps.get(5).expect("MOTION_BLOCKING_NO_LEAVES map").get(2, 0),
+    )
+}
+
+#[test]
+fn end_p06_parser_replays_authenticated_canonical_56_and_negative_58_maps() {
+    let target = (280, 78);
+    let canonical = literal_end_p06_lifecycle_payload(target, [68, 56, 56], false);
+    let canonical_events = parse_end_p06_lifecycle_events(&canonical, target.0, target.1);
+    assert_eq!(
+        replay_literal_end_p06_events(&canonical_events),
+        (68, 56, 56),
+        "canonical P06 resident transition keeps raw motion heightmaps at 56",
+    );
+
+    let reverse_value = literal_end_p06_lifecycle_payload(target, [68, 58, 58], false);
+    let reverse_value_events = parse_end_p06_lifecycle_events(&reverse_value, target.0, target.1);
+    assert_eq!(
+        replay_literal_end_p06_events(&reverse_value_events),
+        (68, 58, 58),
+        "the negative control preserves an authenticated raw 58 value rather than reconstructing it",
+    );
+}
+
+#[test]
+#[should_panic(expected = "End P06 lifecycle source order")]
+fn end_p06_parser_rejects_reverse_resident_admission_order() {
+    let target = (280, 78);
+    let reversed = literal_end_p06_lifecycle_payload(target, [68, 58, 58], true);
+    parse_end_p06_lifecycle_events(&reversed, target.0, target.1);
 }
 
 #[test]
