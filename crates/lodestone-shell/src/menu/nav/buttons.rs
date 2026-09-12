@@ -1,5 +1,3 @@
-use super::{Screen, SessionKind};
-
 /// The title screen's widgets, in vanilla's own display order.
 ///
 /// This is vanilla's own title-screen init's widget list,
@@ -15,7 +13,7 @@ use super::{Screen, SessionKind};
 /// the layout positions them evenly across the row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MainButton {
-    /// Open the singleplayer world list ([`Screen::WorldSelect`]) —
+    /// Open the singleplayer world list ([`super::Screen::WorldSelect`]) —
     /// vanilla's own behaviour for this button. It used to return
     /// [`MenuAction::Singleplayer`] and launch directly, which vanilla never
     /// does; that action is now produced one screen in, by **Play Selected
@@ -77,7 +75,7 @@ pub const MAIN_BUTTONS: [MainButton; 9] = [
     MainButton::Accounts,
 ];
 
-/// The two widgets on the ownership gate ([`Screen::Ownership`]).
+/// The two widgets on the ownership gate ([`super::Screen::Ownership`]).
 ///
 /// Deliberately only two, and deliberately not a title screen with everything
 /// greyed: a greyed row invites a click and reads as "temporarily unavailable",
@@ -85,7 +83,7 @@ pub const MAIN_BUTTONS: [MainButton; 9] = [
 /// nag, so there is no "Continue anyway".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OwnershipButton {
-    /// Open [`Screen::Accounts`] — the *same* account switcher the title screen
+    /// Open [`super::Screen::Accounts`] — the *same* account switcher the title screen
     /// reaches, writing the *same* roster. Adding an account here therefore adds
     /// it to the switcher by construction; there is no second store and no
     /// second sign-in path to keep in sync.
@@ -237,7 +235,7 @@ impl MainButton {
 ///
 /// The reference client labels its last button from the local-session state — "Save and Quit to
 /// Title" locally, "Disconnect" remotely. This
-/// client uses "Disconnect" for both, because [`SessionKind::Singleplayer`] is
+/// client uses "Disconnect" for both, because [`super::SessionKind::Singleplayer`] is
 /// currently the local dev world with no persistence: "Save and Quit" would
 /// promise a save that does not happen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -448,7 +446,7 @@ pub enum ServerListButton {
     ///
     /// **Present and inactive.** It would open a second
     /// address form this shell does not have; the add form
-    /// ([`Screen::ServerEdit`]) is the affordance it would duplicate, minus the
+    /// ([`super::Screen::ServerEdit`]) is the affordance it would duplicate, minus the
     /// "do not save it" part. Greyed out rather than omitted, which is this
     /// repo's rule for a vanilla control it cannot honour yet — see
     /// `docs/menu-widgets.md`.

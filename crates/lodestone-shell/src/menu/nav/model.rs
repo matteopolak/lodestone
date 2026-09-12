@@ -3,7 +3,6 @@ use super::command_block;
 use super::focus;
 use super::servers::ServerEntry;
 use super::sign_edit;
-use super::{Screen, UiState};
 use lodestone_auth::Entitlement;
 
 /// Longest accepted address string in the edit form, in characters. A hostname
@@ -20,7 +19,7 @@ pub enum MenuKey {
     Down,
     /// Activate the highlighted row / save the form.
     Enter,
-    /// Back out one level. Handled by [`UiState::on_escape`].
+    /// Back out one level. Handled by [`super::UiState::on_escape`].
     Escape,
     /// Move between fields in the edit form.
     Tab,
@@ -31,7 +30,7 @@ pub enum MenuKey {
     /// **F5** — refresh the multiplayer list.
     ///
     /// Its own variant rather than a reuse of `Char('r')`, because it is a
-    /// *function* key: on [`Screen::ServerEdit`] a `Char` is text, and mapping F5
+    /// *function* key: on [`super::Screen::ServerEdit`] a `Char` is text, and mapping F5
     /// onto one would type an `r` into the address field. `focus::KEY_F5` is the
     /// GLFW refresh code used by the multiplayer list.
     Refresh,
@@ -136,9 +135,9 @@ pub enum MenuAction {
     /// Enter a singleplayer world: start the integrated server in-process
     /// against that world's directory and connect to it.
     ///
-    /// Two producers, and the payload says which: [`Screen::WorldSelect`]'s
+    /// Two producers, and the payload says which: [`super::Screen::WorldSelect`]'s
     /// **Play Selected World** ([`SingleplayerLaunch::Open`]) and
-    /// [`Screen::CreateWorld`]'s **Create** ([`SingleplayerLaunch::Created`]).
+    /// [`super::Screen::CreateWorld`]'s **Create** ([`SingleplayerLaunch::Created`]).
     /// `app.rs`'s arm calls `begin_singleplayer`, which takes exactly what this
     /// variant carries.
     ///
@@ -180,14 +179,14 @@ pub enum MenuAction {
     /// new one with a fresh `ServerList`.
     RefreshList,
     /// The pause menu's "Quit to Title" was activated, or the
-    /// death screen's "Title Screen" button was: [`UiState`] has already moved
-    /// to [`Screen::MainMenu`] (see [`UiState::quit_to_title`]); the app must
+    /// death screen's "Title Screen" button was: [`super::UiState`] has already moved
+    /// to [`super::Screen::MainMenu`] (see [`super::UiState::quit_to_title`]); the app must
     /// now tear down whatever live session (net connection and/or integrated
     /// server) is still attached to `Sim`, exactly as it would for an
     /// ordinary disconnect — nothing here does that on its own, since
     /// `MenuNav` holds no session state to tear down.
     QuitToTitle,
-    /// Escape on [`Screen::Connecting`]: abandon a session that is still
+    /// Escape on [`super::Screen::Connecting`]: abandon a session that is still
     /// being established. Distinct from [`Self::QuitToTitle`], which leaves a
     /// session that is fully up — the screen each unwinds to differs, and this
     /// one can fire while the net thread is still inside its dial, so the app's
@@ -195,8 +194,8 @@ pub enum MenuAction {
     CancelConnect,
     /// The death screen's Respawn button was activated: the app
     /// must call `Sim::respawn` to submit the manual `ClientAction::Respawn`
-    /// — `MenuNav` holds no `Sim` to send it through. [`UiState`] stays on
-    /// [`Screen::Death`] until the server confirms the respawn (see
+    /// — `MenuNav` holds no `Sim` to send it through. [`super::UiState`] stays on
+    /// [`super::Screen::Death`] until the server confirms the respawn (see
     /// `net::NetUpdate::Respawned`), so a duplicate click before that lands
     /// just resubmits the same request — harmless, since `Sim::respawn` is a
     /// no-op once `Sim::is_dead` has already gone false.
@@ -221,7 +220,7 @@ pub enum MenuAction {
     /// keeps command text from being collected and then dropped.
     SetCommandBlock(command_block::CommandBlockSubmit),
     /// The sign-editing screen closed — Done **or** Escape, both of which send
-    /// (see [`Screen::SignEdit`]'s own doc): `app.rs` must submit the
+    /// (see [`super::Screen::SignEdit`]'s own doc): `app.rs` must submit the
     /// `ClientAction::SignUpdate` this payload rebuilds, the same division of
     /// labour [`MenuAction::SetCommandBlock`] has.
     ///
@@ -232,14 +231,14 @@ pub enum MenuAction {
     SignUpdate(sign_edit::SignEditSubmit),
     /// The book-editing screen closed with something to send — Done (draft
     /// save, `title: None`) or Finalize (sign, `title: Some(..)`); Cancel and
-    /// Escape never reach this variant (see [`Screen::BookEdit`]'s own doc).
+    /// Escape never reach this variant (see [`super::Screen::BookEdit`]'s own doc).
     /// `app.rs` must submit the `ClientAction::EditBook` this payload
     /// rebuilds. Carries a [`book_edit::BookEditSubmit`] rather than a
     /// [`lodestone_model::ClientAction`] directly for the identical
     /// `Eq`-derive reason [`MenuAction::SetCommandBlock`]'s own doc gives.
     EditBook(book_edit::BookEditSubmit),
     /// Tell a server-owned lectern to show `button_id` as its selected page.
-    /// The action only comes from a successful turn in [`Screen::BookView`],
+    /// The action only comes from a successful turn in [`super::Screen::BookView`],
     /// never from a hand-held book.
     ContainerButtonClick {
         /// The lectern's open container id.
@@ -261,7 +260,7 @@ pub enum MenuAction {
     /// [`MenuAction::Singleplayer`] have. Carries nothing: the world to publish is
     /// whichever one the app already has open.
     OpenToLan,
-    /// The resource-pack prompt was answered ([`Screen::ResourcePackPrompt`]).
+    /// The resource-pack prompt was answered ([`super::Screen::ResourcePackPrompt`]).
     /// The app must call `NetClient::respond_to_resource_pack(id, accept)`
     /// through `Sim::net()` — `MenuNav` holds no `Sim`/`NetClient` to send it
     /// through, the same division of labour [`MenuAction::Respawn`] has.
