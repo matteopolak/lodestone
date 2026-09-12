@@ -547,6 +547,15 @@ impl LifecycleWorldgenSource for NetherChunkSource {
             end_gateways: Vec::new(),
         }
     }
+
+    fn target_spills_persist(&self) -> bool {
+        // Nether feature sources own their cross-chunk writes. A source can
+        // complete before a neighbouring target reaches FEATURES, and the
+        // neighbour must retain that write when its later ticket is admitted.
+        // Rolling it back at the first target boundary loses the write while
+        // completion deduplication prevents the source from being replayed.
+        true
+    }
 }
 
 impl LifecycleWorldgenSource for EndChunkSource {
