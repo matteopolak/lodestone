@@ -41,7 +41,7 @@ use std::time::Duration;
 use crate::platform::Instant;
 
 use glam::{DVec3, IVec3};
-use lodestone_render::{RainAmbience, WeatherState};
+use lodestone_render::{Precipitation, RainAmbience, WeatherState};
 use lodestone_sound::JavaRandom;
 use lodestone_sound::ambient::{AmbientLoops, AmbientSounds, LightSample, LoopAction};
 use lodestone_sound::predict::{PredictionLedger, StepAccumulator};
@@ -77,6 +77,9 @@ pub(crate) struct AmbienceInput<'a> {
     pub(crate) landing: Option<[i32; 3]>,
     /// Whether there is something over the player's own ear.
     pub(crate) roof_above: bool,
+    /// The active biome's precipitation at the listener, resolved from the
+    /// live climate table. `None` means the biome is not known yet.
+    pub(crate) precipitation: Option<Precipitation>,
 }
 
 /// One thing an ambience tick decided should happen.
@@ -255,11 +258,12 @@ impl ShellAmbience {
         let roll = self.rng.next_i32_bound(RAIN_ROLL_BOUND).max(0) as u32;
         if let Some(weather) = input.weather
             && let Some(landing) = input.landing
-            && let Some(sound) = self.rain.tick(
+            && let Some(sound) = self.rain.tick_with_kind(
                 weather,
                 Some(landing),
                 input.eye.y,
                 input.roof_above,
+                input.precipitation.unwrap_or(Precipitation::Rain),
                 roll,
             )
         {
@@ -379,6 +383,7 @@ mod tests {
             weather: None,
             landing: None,
             roof_above: false,
+            precipitation: None,
         }
     }
 
@@ -520,6 +525,7 @@ mod tests {
                 weather: Some(&weather),
                 landing: Some([0, 70, 0]),
                 roof_above: false,
+                precipitation: Some(Precipitation::Rain),
             },
             &mut dark,
         );
@@ -540,6 +546,7 @@ mod tests {
                 weather: Some(&dry),
                 landing: Some([0, 70, 0]),
                 roof_above: false,
+                precipitation: Some(Precipitation::Rain),
             },
             &mut dark,
         );
@@ -564,6 +571,7 @@ mod tests {
                 weather: Some(&weather),
                 landing: Some([12, 70, -5]),
                 roof_above: false,
+                precipitation: Some(Precipitation::Rain),
             },
             &mut dark,
         );
@@ -583,6 +591,46 @@ mod tests {
         assert_eq!(rain.1, lodestone_model::event::SoundCategory::Weather);
     }
 
+    /// Snow uses the real snow event while retaining the same positional source
+    /// and Weather bus as rain. This is the positive control against accidentally
+    /// treating every cold-weather column as rain.
+    #[test]
+    fn snow_ambience_uses_snow_event_and_weather_category() {
+        let ambient = AmbientSounds::EMPTY;
+        let mut weather = WeatherState::clear();
+        weather.apply_rain_level(1.0);
+        let mut ambience = ShellAmbience::new(0);
+        let events = ambience.tick(
+            40,
+            &AmbienceInput {
+                eye: DVec3::new(12.25, 70.0, -4.75),
+                ambient: &ambient,
+                weather: Some(&weather),
+                landing: Some([12, 70, -5]),
+                roof_above: false,
+                precipitation: Some(Precipitation::Snow),
+            },
+            &mut dark,
+        );
+        let snow = events
+            .iter()
+            .find_map(|event| match event {
+                AmbienceEvent::OneShot {
+                    name,
+                    position,
+                    category,
+                    ..
+                } if name == "block.snow.fall" => Some((*position, *category)),
+                _ => None,
+            })
+            .expect("snow should emit at least one event in 40 ticks");
+        assert_eq!(snow.0, DVec3::new(12.5, 70.5, -4.5));
+        assert_eq!(snow.1, lodestone_model::event::SoundCategory::Weather);
+        assert!(!events.iter().any(
+            |event| matches!(event, AmbienceEvent::OneShot { name, .. } if name == "weather.rain")
+        ));
+    }
+
     #[test]
     fn covered_or_unstreamed_landing_suppresses_weather_audio() {
         let ambient = AmbientSounds::EMPTY;
@@ -597,6 +645,7 @@ mod tests {
                 weather: Some(&weather),
                 landing: None,
                 roof_above: true,
+                precipitation: Some(Precipitation::Rain),
             },
             &mut dark,
         );
