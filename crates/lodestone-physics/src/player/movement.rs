@@ -273,4 +273,3 @@ pub(crate) fn restitute_movement_after_collisions(
 pub(crate) fn mth_equal(a: f64, b: f64) -> bool {
     (b - a).abs() < f64::from(1.0e-5f32)
 }
-

@@ -736,4 +736,3 @@ mod tests {
         assert!(peak <= 6.0, "sneaking player gained height: {peak}");
     }
 }
-
