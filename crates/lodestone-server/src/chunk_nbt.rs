@@ -1639,6 +1639,10 @@ pub fn block_entity_update_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
             // the server opens the container or simulates the block entity.
             if matches!(id.as_str(), "minecraft:chest" | "minecraft:trapped_chest" | "minecraft:barrel" | "minecraft:beehive") {
                 Nbt::Compound(Vec::new())
+            } else if id.as_str() == "minecraft:banner" {
+                // Banner patterns/components are packet data, not save-only
+                // metadata. Retain them while removing the positional wrapper.
+                strip_block_entity_position(nbt.clone())
             } else {
                 strip_block_entity_metadata(nbt.clone())
             }
@@ -1663,6 +1667,18 @@ fn strip_block_entity_metadata(nbt: Nbt) -> Nbt {
             .filter(|(name, _)| {
                 !matches!(name.as_str(), "id" | "x" | "y" | "z" | "keepPacked" | "components")
             })
+            .collect(),
+    )
+}
+
+fn strip_block_entity_position(nbt: Nbt) -> Nbt {
+    let Nbt::Compound(fields) = nbt else {
+        return nbt;
+    };
+    Nbt::Compound(
+        fields
+            .into_iter()
+            .filter(|(name, _)| !matches!(name.as_str(), "id" | "x" | "y" | "z" | "keepPacked"))
             .collect(),
     )
 }
