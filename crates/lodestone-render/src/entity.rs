@@ -78,11 +78,16 @@ pub use entity_item::*;
 pub use entity_orb::*;
 pub use entity_first_person::*;
 
-pub(crate) use entity_catalog::{canonical_model_name, boat_model_name};
+pub(crate) use entity_catalog::canonical_model_name;
+#[cfg(test)]
+pub(crate) use entity_catalog::boat_model_name;
 pub(crate) use entity_model::push_part_quads;
 pub(crate) use entity_item::mesh_item_quads_with_light;
+#[cfg(test)]
 pub(crate) use entity_layers::SHEEP_WOOL_PART_NAMES;
+#[cfg(test)]
 pub(crate) use entity_orb::experience_orb_cell_uvs;
+#[cfg(test)]
 pub(crate) use entity_first_person::ArmSwingTerms;
 
 #[cfg(test)]
