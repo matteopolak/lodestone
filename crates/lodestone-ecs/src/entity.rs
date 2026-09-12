@@ -130,6 +130,26 @@ pub struct OnGround(pub bool);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EntityFlags(pub u8);
 
+/// The optional player model-layer visibility byte.
+///
+/// Bit `0x01` controls whether a player's cape is shown to other clients.
+/// The component is absent until the server reports the byte, preserving the
+/// distinction between an unreported customization and an explicit all-hidden
+/// value.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerModelCustomization(pub u8);
+
+impl PlayerModelCustomization {
+    /// The bit that controls the cape model layer.
+    pub const CAPE: u8 = 0x01;
+
+    /// Whether the cape model layer is enabled.
+    #[must_use]
+    pub const fn cape_shown(self) -> bool {
+        self.0 & Self::CAPE != 0
+    }
+}
+
 /// The entity's custom name.
 ///
 /// One of the two genuinely three-state fields: **absent** is "never

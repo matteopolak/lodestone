@@ -115,13 +115,10 @@ pub(super) struct EntityRenderer {
     /// `armour_models`/`wool_models` are.
     ///
     /// A player's own sheet can still override the jar one:
-    /// `WingsLayer.getPlayerElytraTexture` prefers `skin.elytra()`, then
-    /// `skin.cape()` when the cape is shown, and falls back to
-    /// `ELYTRA_TEXTURE_PATH`. Only the second and third of those are wired —
-    /// `crate::remote_skins::RemoteSkin` carries no `elytra` field, so the
-    /// `ELYTRA` profile-property URL that `lodestone_assets::skin::ProfileTextures`
-    /// already parses is dropped before it reaches here. See
-    /// `RenderState::prepare_elytra`.
+    /// preference is the installed custom elytra URL, then an installed visible
+    /// cape URL, and finally `ELYTRA_TEXTURE_PATH`. Profile parsing retains both
+    /// custom URLs on `crate::remote_skins::RemoteSkin`; the per-frame pass
+    /// selects the first installed identity and falls back to this bind group.
     ///
     /// `elytra_texture` is `None` without a vanilla pack, and the wings then
     /// draw nothing for anyone without a cape — the same asymmetry

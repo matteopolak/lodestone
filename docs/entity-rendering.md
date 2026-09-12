@@ -184,7 +184,8 @@ One ray per frame from the interpolated camera: blocks first, then entities capp
 | `LivingEntity` | pickable unless removed |
 | boat/minecart/falling-block/TNT, hanging/end-crystal/interaction/shulker-bullet | always pickable |
 | `Projectile` | only if tagged `redirectable_projectile` (fireball, wind charge — **no arrow type qualifies**) |
-| `Player`, `ArmorStand` | treated as living (spectator/marker-stand state not modelled — a harmless server no-op, not a disconnect) |
+| `Player`, ordinary `ArmorStand` | treated as living and pickable |
+| marker `ArmorStand` | excluded after its armor-stand flags arrive, matching its no-hitbox role |
 | `EnderDragon`, default `Entity` | never pickable |
 
 ### Pose dimensions (collision box)

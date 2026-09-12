@@ -110,6 +110,11 @@ pub struct RemoteSkin {
     /// `install_pending_player_skins`) already caches by URL, not by "is this
     /// a skin". Not yet host-checked, same as [`Self::url`].
     pub cape: Option<String>,
+    /// The profile's custom elytra texture URL, when declared.
+    ///
+    /// It uses the same URL-keyed fetch/cache pipeline as the skin and cape,
+    /// then becomes the texture identity for the production elytra mesh.
+    pub elytra: Option<String>,
     /// The built-in identity sheet to draw while [`Self::url`] has no bind
     /// group — a corpus reference like `entity/player/slim/ari`, resolved by
     /// vanilla's own default-player-skin lookup's hash pick.
@@ -353,6 +358,7 @@ pub fn skin_for_textures_property(value: &str) -> Option<RemoteSkin> {
                     url: skin.url.to_string(),
                     model: skin.model,
                     cape: textures.cape.map(|url| url.to_string()),
+                    elytra: textures.elytra.map(|url| url.to_string()),
                     // Vanilla's own default-player-skin default-skin accessor — vanilla's own
                     // answer when no uuid is in hand, which is exactly this
                     // function's situation: it is keyed by the property value
@@ -717,6 +723,7 @@ mod tests {
             url: "https://textures.minecraft.net/texture/alice".to_owned(),
             model: PlayerModelType::Slim,
             cape: None,
+            elytra: None,
             default_sheet: "entity/player/slim/ari",
         };
         let slot = Some((alice, skin.clone()));
@@ -734,6 +741,13 @@ mod tests {
             format!(r#","metadata":{{"model":"{m}"}}"#)
         });
         let json = format!(r#"{{"textures":{{"SKIN":{{"url":"{url}"{metadata}}}}}}}"#);
+        base64_encode(json.as_bytes())
+    }
+
+    fn payload_with_elytra(skin_url: &str, cape_url: &str, elytra_url: &str) -> String {
+        let json = format!(
+            r#"{{"textures":{{"SKIN":{{"url":"{skin_url}"}},"CAPE":{{"url":"{cape_url}"}},"ELYTRA":{{"url":"{elytra_url}"}}}}}}}"#
+        );
         base64_encode(json.as_bytes())
     }
 
@@ -797,6 +811,22 @@ mod tests {
                 .unwrap()
                 .model
         );
+    }
+
+    #[test]
+    fn profile_layers_reach_the_remote_skin_without_collapsing_identity() {
+        let skin_url = "https://textures.minecraft.net/texture/skin-layer";
+        let cape_url = "https://textures.minecraft.net/texture/cape-layer";
+        let elytra_url = "https://textures.minecraft.net/texture/elytra-layer";
+        let skin = skin_for_profile(&profile_with(&payload_with_elytra(
+            skin_url,
+            cape_url,
+            elytra_url,
+        )))
+        .expect("the SKIN entry must still identify the profile");
+        assert_eq!(skin.url, skin_url);
+        assert_eq!(skin.cape.as_deref(), Some(cape_url));
+        assert_eq!(skin.elytra.as_deref(), Some(elytra_url));
     }
 
     /// A profile with no `textures` property — every offline-mode server — is

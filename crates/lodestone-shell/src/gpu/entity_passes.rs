@@ -87,6 +87,35 @@ fn dropped_special_texture(
 /// Vanilla's `CustomHeadLayer` scale for a raw humanoid skull.
 const WORN_PLAYER_HEAD_SCALE: f32 = 1.1875;
 
+/// Choose the first installed custom sheet for an elytra wearer.
+///
+/// The built-in sheet is represented by `None` and selected by the caller, so
+/// an uninstalled remote URL cannot accidentally become a draw with a missing
+/// bind group. Keeping the preference order here makes the texture identity a
+/// directly testable render boundary rather than an inline chain hidden inside
+/// the batch loop.
+fn preferred_elytra_texture(
+    skin: Option<&crate::remote_skins::RemoteSkin>,
+    cape_visible: bool,
+    is_installed: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let skin = skin?;
+    let custom = skin
+        .elytra
+        .as_deref()
+        .filter(|url| !url.is_empty() && is_installed(url))
+        .map(str::to_owned);
+    let cape = cape_visible
+        .then(|| {
+            skin.cape
+                .as_deref()
+                .filter(|url| !url.is_empty() && is_installed(url))
+                .map(str::to_owned)
+        })
+        .flatten();
+    custom.or(cape)
+}
+
 /// The only head-slot item rendered by the special-item layer in this client.
 fn worn_player_head_item(draw: &EntityDraw) -> Option<&lodestone_assets::ResourceLocation> {
     draw.equipment.iter().find_map(|(slot, item)| {
@@ -393,10 +422,9 @@ fn apply_boat_rock(
 /// matrix would zero the homogeneous `w` too, which is a divide-by-zero in
 /// the perspective divide rather than a degenerate point.
 ///
-/// Only `no_base_plate` and `show_arms` are handled: `small` is folded into
-/// [`crate::entities`]'s scale resolution instead (see `EntityFacts`'s doc),
-/// and `marker` has no renderer equivalent — see `EntityDraw::armor_stand`'s
-/// doc for why.
+/// Only `no_base_plate` and `show_arms` are handled here: `small` is folded
+/// into [`crate::entities`]'s scale resolution instead (see `EntityFacts`'s
+/// doc), while `marker` is consumed by the nametag and interaction paths.
 fn hide_armor_stand_parts(
     instance: &mut lodestone_render::EntityInstance,
     wearer: &lodestone_render::EntityMesh,
@@ -2431,12 +2459,10 @@ impl RenderState {
     /// resource-pack-only custom chestplate asset that also declares a wings
     /// layer, which this build has no path to represent anyway.
     ///
-    /// `showCape` — the *subject* player's own `modelPart.cape` toggle,
-    /// broadcast to observers on `Player`'s `DATA_PLAYER_MODE_CUSTOMISATION`
-    /// metadata byte — is not decoded on this side of the wire (no
-    /// clientbound arm for that byte exists in `crates/protocol/v770` today),
-    /// so every remote player draws as if `showCape` were `true`, matching
-    /// vanilla's own default when the byte has never been reported.
+    /// The subject player's model-layer toggle is carried in
+    /// `AnimInput::cape_visible`, with the visible default used when it is
+    /// unreported. An explicit clear skips this pass before it creates a
+    /// texture group or submits a mesh instance.
     pub(super) fn prepare_cape(
         &self,
         _device: &wgpu::Device,
@@ -2453,6 +2479,9 @@ impl RenderState {
 
         for draw in entities {
             if draw.invisible || draw.type_path.as_ref() != "player" {
+                continue;
+            }
+            if !draw.anim.cape_visible {
                 continue;
             }
             let Some(skin) = draw.player_skin.as_ref() else {
@@ -2550,35 +2579,19 @@ impl RenderState {
     /// `"body"` matrix. `attach` is also what gates on a humanoid rig, so a
     /// pig handed an elytra by a plugin grows no wings.
     ///
-    /// # The pose is the resting one, always — a deliberate first cut
+    /// # The pose
     ///
-    /// `elytra_wing_transform`'s three angles want
-    /// `ElytraAnimationState`'s lerped state, which does not exist on this
-    /// side yet: the pure half is `lodestone_render::elytra_target_rotations`,
-    /// and the impure half (two triples advanced once per game tick by
-    /// `ELYTRA_ROTATION_LERP` and read back interpolated by partial ticks)
-    /// belongs beside `crate::entities::cape_sway`'s lagged cloak position,
-    /// which is where the equivalent cape state already lives. Until it does,
-    /// this passes `lodestone_render::elytra_rest_rotations()` and `false` for
-    /// `crouching` straight through.
-    ///
-    /// That is **correct for a wearer who is standing, walking or running**
-    /// (the rest triple *is* the not-flying-not-crouching branch's target) and
-    /// **wrong during a glide or a crouch**, where the wings will stay spread
-    /// instead of folding back. The check a reader can run: `EntityDraw`
-    /// carries no fall-flying flag and no crouch flag, so there is no input
-    /// here that could select either of the other two branches — closing this
-    /// means adding that state, not editing this function's arithmetic.
+    /// The extracted animation input carries fall-flying, crouching, and
+    /// motion state. `elytra_target_rotations` selects the deterministic target
+    /// for those inputs, including the normalized downward-motion branch, and
+    /// `elytra_wing_transform` applies the crouch offset and mirrored wing
+    /// signs to the production mesh.
     ///
     /// # The texture
     ///
-    /// `getPlayerElytraTexture` prefers `skin.elytra()`, then `skin.cape()`
-    /// when the cape is shown, then the jar sheet. The first preference is
-    /// unreachable here — `crate::remote_skins::RemoteSkin` carries no
-    /// `elytra` field, so `lodestone_assets::skin::ProfileTextures::elytra` is
-    /// dropped at the decode — so this implements the second and third. As in
-    /// [`Self::prepare_cape`], `showCape` is not decoded on this side of the
-    /// wire and is treated as `true`.
+    /// The texture preference is the profile's custom elytra URL, then its
+    /// visible cape URL, then the built-in elytra sheet. Each custom URL must
+    /// already have a bind group installed by the common texture pipeline.
     pub(super) fn prepare_elytra(
         &self,
         _device: &wgpu::Device,
@@ -2610,16 +2623,16 @@ impl RenderState {
             if !wearing_elytra {
                 continue;
             }
-            // The wearer's own cape sheet when one is installed, else the jar
-            // sheet — and if neither exists there is nothing to bind, so the
-            // wings draw nothing rather than drawing untextured.
-            let cape_url = draw
-                .player_skin
-                .as_ref()
-                .and_then(|skin| skin.cape.as_ref())
-                .filter(|u| !u.is_empty() && self.entities.player_skins.contains_key(u.as_str()));
-            let texture = match cape_url {
-                Some(url) => Some(url.clone()),
+            // Prefer a custom elytra sheet, then a visible installed cape
+            // sheet. If neither is available, the built-in sheet is used when
+            // present; otherwise this layer contributes no draw.
+            let texture = preferred_elytra_texture(
+                draw.player_skin.as_ref(),
+                draw.anim.cape_visible,
+                |url| self.entities.player_skins.contains_key(url),
+            );
+            let texture = match texture {
+                Some(url) => Some(url),
                 None if self.entities.elytra_texture.is_some() => None,
                 None => continue,
             };
@@ -2642,13 +2655,23 @@ impl RenderState {
             };
             let light = u32::from(entity_light(&self.entity_light, draw));
             let tint = InstanceTint::rgb([255, 255, 255]).with_hurt(draw.hurt);
-            let (x_rot, y_rot, z_rot) = lodestone_render::elytra_rest_rotations();
+            let (x_rot, y_rot, z_rot) = lodestone_render::elytra_target_rotations(
+                draw.anim.fall_flying,
+                draw.anim.crouching,
+                draw.anim.motion,
+            );
             for (wing, range, body_index) in self.entities.elytra_model.attach(&wearer.skeleton) {
                 let Some(body_transform) = instance.part_transforms.get(body_index) else {
                     continue;
                 };
                 let transform = *body_transform
-                    * lodestone_render::elytra_wing_transform(wing, x_rot, y_rot, z_rot, false);
+                    * lodestone_render::elytra_wing_transform(
+                        wing,
+                        x_rot,
+                        y_rot,
+                        z_rot,
+                        draw.anim.crouching,
+                    );
                 let group = match groups
                     .iter_mut()
                     .position(|(t, r, ..)| *t == texture && *r == range)
@@ -3523,6 +3546,36 @@ mod tests {
         assert_eq!(shadow_strength("not_a_real_entity"), 1.0);
     }
     use super::*;
+
+    #[test]
+    fn elytra_texture_selection_prefers_custom_then_visible_cape() {
+        let skin = crate::remote_skins::RemoteSkin {
+            url: "skin".to_owned(),
+            model: lodestone_assets::PlayerModelType::Wide,
+            cape: Some("cape".to_owned()),
+            elytra: Some("elytra".to_owned()),
+            default_sheet: "entity/player/wide/steve",
+        };
+        assert_eq!(
+            preferred_elytra_texture(Some(&skin), true, |url| url == "elytra" || url == "cape"),
+            Some("elytra".to_owned())
+        );
+        assert_eq!(
+            preferred_elytra_texture(Some(&skin), true, |url| url == "cape"),
+            Some("cape".to_owned()),
+            "an unavailable custom sheet must fall back to the installed cape"
+        );
+        assert_eq!(
+            preferred_elytra_texture(Some(&skin), false, |url| url == "cape"),
+            None,
+            "a hidden cape must not become an elytra texture fallback"
+        );
+        assert_eq!(
+            preferred_elytra_texture(Some(&skin), true, |_| false),
+            None,
+            "uninstalled URLs must leave the built-in sheet choice to the caller"
+        );
+    }
 
     /// **The caller was the bug, so the caller gets the assertion.**
     ///

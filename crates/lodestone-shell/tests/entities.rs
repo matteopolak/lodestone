@@ -9,6 +9,8 @@ mod aggressive_bow_pose_pixels;
 mod armor_stand_hologram_pixels;
 #[path = "entities/armor_stand_pose_wire.rs"]
 mod armor_stand_pose_wire;
+#[path = "entities/player_render_state_wire.rs"]
+mod player_render_state_wire;
 #[path = "entities/armour_pixels.rs"]
 mod armour_pixels;
 #[path = "entities/boat_water_mask_pixels.rs"]

@@ -406,11 +406,10 @@ pub struct EntityDraw {
     /// point instead of drawing it — the corpus's `armor_stand` model has
     /// real `left_arm`/`right_arm`/`base_plate` parts to hide, matching
     /// vanilla's own armor-stand-model animation setup toggling each part's
-    /// visibility on
-    /// the same three. `marker` has no consumer: vanilla's own use of it is a
-    /// render-type switch (vanilla's own armor-stand render-type accessor, cutout instead
-    /// of the default humanoid render type) with no equivalent pipeline state
-    /// here, so it stays decoded-and-unread rather than approximated.
+    /// visibility on the same three. `marker` is consumed by the nametag
+    /// anchor and interaction-target gates; the body pass deliberately keeps
+    /// its own part visibility decisions limited to `show_arms` and
+    /// `no_base_plate`.
     pub armor_stand: Option<lodestone_ecs::entity::ArmorStandFlags>,
     /// This player's declared skin, carried through from
     /// [`EntityFacts::player_skin`] — `None` for every non-player.
