@@ -337,6 +337,11 @@ impl Sim {
         // means the terrain is not streamed yet, so suppress the weather voice
         // instead of inventing an exposed landing.
         let (landing, roof_above) = self.weather_landing(eye);
+        let precipitation = self.weather_precipitation(landing.unwrap_or([
+            eye.x.floor() as i32,
+            eye.y.floor() as i32,
+            eye.z.floor() as i32,
+        ]));
 
         let taken = self.write(|w| w.resource_mut::<super::AmbienceState>().0.take());
         let Some(mut ambience) = taken else {
@@ -350,6 +355,7 @@ impl Sim {
                 weather,
                 landing,
                 roof_above,
+                precipitation,
             },
             &mut probe,
         );
@@ -406,7 +412,7 @@ impl Sim {
         let Some(dimensions) = handle.world_dimensions() else {
             return (None, false);
         };
-        let chunk = ChunkPos {
+        let chunk = lodestone_client::ChunkPos {
             x: x.div_euclid(16),
             z: z.div_euclid(16),
         };
@@ -416,6 +422,47 @@ impl Sim {
         let landing_y = heightmap.get(x.rem_euclid(16) as usize, z.rem_euclid(16) as usize) as i32
             + dimensions.min_y;
         Self::weather_landing_from_height(x, z, eye_block_y, Some(landing_y))
+    }
+
+    /// Resolve rain versus snow from the standing biome's live climate record.
+    /// Keeping this beside the heightmap read makes the ambience producer use
+    /// the same streamed world and listener column as the visible precipitation
+    /// path; an unknown section or climate suppresses the voice rather than
+    /// guessing the wrong weather.
+    fn weather_precipitation(
+        &self,
+        position: [i32; 3],
+    ) -> Option<lodestone_render::Precipitation> {
+        let [x, y, z] = position;
+        let net = self.net.as_ref()?;
+        let shared = net.shared_handle();
+        let handle = shared.get().cloned()?;
+        let dimensions = handle.world_dimensions()?;
+        let section_index = y.div_euclid(16) - dimensions.min_y.div_euclid(16);
+        let section_index = usize::try_from(section_index).ok()?;
+        if section_index >= dimensions.section_count() {
+            return None;
+        }
+        let chunk = lodestone_client::ChunkPos {
+            x: x.div_euclid(16),
+            z: z.div_euclid(16),
+        };
+        let section = handle.section_at(chunk, section_index)?;
+        let biome = section.biome_at_block(
+            x.rem_euclid(16) as usize,
+            y.rem_euclid(16) as usize,
+            z.rem_euclid(16) as usize,
+        );
+        let climate = net.shared_biome_climates().get(usize::try_from(biome).ok()?)?;
+        let temperature = lodestone_render::weather::height_adjusted_temperature(
+            climate.temperature?,
+            y,
+            crate::worldgen::SEA_LEVEL,
+        );
+        Some(lodestone_render::precipitation_for_temperature(
+            climate.has_precipitation?,
+            temperature,
+        ))
     }
 
     /// Convert one absolute `MOTION_BLOCKING` height into the weather sound
