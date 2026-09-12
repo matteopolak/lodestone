@@ -236,6 +236,7 @@ pub(crate) const fn ticket_level_for_ring(base_level: i32, ring: i32) -> i32 {
 /// position within the column, and they are the ground under the player's feet
 /// either way.
 #[must_use]
+#[cfg(test)]
 fn in_frustum(centre: (i32, i32), yaw_degrees: f32, coord: (i32, i32)) -> bool {
     join_order::in_frustum(centre, yaw_degrees, coord)
 }
@@ -267,13 +268,6 @@ fn priority_key(
     given_index: u32,
 ) -> (i32, u8, u32) {
     join_order::priority_key(centre, facing, coord, given_index)
-}
-
-/// [`priority_key`]'s first two components, which are the ordering proper — the
-/// third is only a tie-break, and a caller with no "given order" needs its own.
-#[must_use]
-fn distance_and_penalty(centre: (i32, i32), facing: Option<f32>, coord: (i32, i32)) -> (i32, u8) {
-    join_order::distance_and_penalty(centre, facing, coord)
 }
 
 /// [`priority_key`] for a caller ordering a *set* rather than draining a queue —
