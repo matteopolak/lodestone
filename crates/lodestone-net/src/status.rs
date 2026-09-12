@@ -24,6 +24,8 @@
 //! a server with a broken favicon should still show its MOTD.
 
 use crate::error::{NetError, Result};
+use serde::Deserialize;
+use serde_json::value::RawValue;
 
 /// The maximum decoded favicon size accepted, in bytes.
 ///
@@ -108,57 +110,124 @@ impl ServerStatus {
 /// not a JSON object. Missing or malformed *fields* never error — they decode
 /// to `None`, so one bad favicon cannot hide a server's MOTD.
 pub fn parse_status_json(json: &str, latency_ms: Option<u64>) -> Result<ServerStatus> {
-    let root: serde_json::Value = serde_json::from_str(json)
+    // Deserialize once as a raw document first. This keeps the two protocol
+    // errors distinct without reintroducing a catch-all JSON tree: a valid
+    // array, string, number, boolean, or null is not a status object, while a
+    // malformed object is simply invalid JSON.
+    let raw = serde_json::from_str::<Box<RawValue>>(json)
         .map_err(|_| NetError::MalformedFrame("status response is not valid JSON"))?;
-    let obj = root
-        .as_object()
-        .ok_or(NetError::MalformedFrame("status response is not a JSON object"))?;
+    if !raw.get().trim_start().starts_with('{') {
+        return Err(NetError::MalformedFrame(
+            "status response is not a JSON object",
+        ));
+    }
+    let document: StatusDocument = serde_json::from_str(raw.get())
+        .map_err(|_| NetError::MalformedFrame("status response is not valid JSON"))?;
 
-    let motd_spans = obj
-        .get("description")
+    let motd_spans = document
+        .description
+        .as_deref()
         .map(component_spans)
         .unwrap_or_default();
     let motd: String = motd_spans.iter().map(|s| s.text.as_str()).collect();
 
-    let players = obj.get("players").and_then(|p| p.as_object());
-    let count = |key: &str| -> Option<u32> {
-        players
-            .and_then(|p| p.get(key))
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|v| u32::try_from(v).ok())
-    };
-    let sample = players
-        .and_then(|p| p.get("sample"))
-        .and_then(serde_json::Value::as_array)
-        .map(|arr| arr.iter().filter_map(player_sample).collect())
+    let online = document.players.as_ref().and_then(|players| players.online);
+    let max = document.players.as_ref().and_then(|players| players.max);
+    let sample = document
+        .players
+        .as_ref()
+        .and_then(|players| players.sample.as_deref())
+        .map(parse_player_samples)
         .unwrap_or_default();
-
-    let version_obj = obj.get("version").and_then(|v| v.as_object());
-    let version = version_obj
-        .and_then(|v| v.get("name"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
-    let protocol = version_obj
-        .and_then(|v| v.get("protocol"))
-        .and_then(serde_json::Value::as_i64)
-        .and_then(|v| i32::try_from(v).ok());
-
-    let favicon_png = obj
-        .get("favicon")
-        .and_then(serde_json::Value::as_str)
-        .and_then(decode_favicon);
+    let version = document
+        .version
+        .as_ref()
+        .and_then(|version| version.name.clone());
+    let protocol = document.version.as_ref().and_then(|version| version.protocol);
+    let favicon_png = document.favicon.as_deref().and_then(decode_favicon);
 
     Ok(ServerStatus {
         motd,
         motd_spans,
-        online: count("online"),
-        max: count("max"),
+        online,
+        max,
         sample,
         version,
         protocol,
         favicon_png,
         latency_ms,
     })
+}
+
+/// The typed outer shape of a status response.
+///
+/// `description` and `players.sample` are intentionally raw JSON leaves. Both
+/// are recursive or extension-shaped wire values owned by the text model and
+/// the player-entry decoder respectively; retaining those leaves avoids
+/// turning the whole response into an untyped `Value` map while preserving
+/// the permissive field-by-field behavior of the server-list parser.
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct StatusDocument {
+    description: Option<Box<RawValue>>,
+    #[serde(deserialize_with = "deserialize_tolerant")]
+    players: Option<PlayersDocument>,
+    #[serde(deserialize_with = "deserialize_tolerant")]
+    version: Option<VersionDocument>,
+    #[serde(deserialize_with = "deserialize_tolerant")]
+    favicon: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct PlayersDocument {
+    #[serde(deserialize_with = "deserialize_tolerant")]
+    online: Option<u32>,
+    #[serde(deserialize_with = "deserialize_tolerant")]
+    max: Option<u32>,
+    #[serde(deserialize_with = "deserialize_tolerant")]
+    sample: Option<Vec<Box<RawValue>>>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct VersionDocument {
+    #[serde(deserialize_with = "deserialize_tolerant")]
+    name: Option<String>,
+    #[serde(deserialize_with = "deserialize_tolerant")]
+    protocol: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct PlayerSampleDocument {
+    #[serde(deserialize_with = "deserialize_tolerant")]
+    name: Option<String>,
+    #[serde(deserialize_with = "deserialize_tolerant")]
+    id: Option<String>,
+}
+
+/// A malformed optional field should not hide otherwise useful status data.
+/// Serde still validates the document's JSON syntax; this only narrows errors
+/// caused by a field whose type a proxy got wrong.
+fn deserialize_tolerant<'de, D, T>(
+    deserializer: D,
+) -> core::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer).ok().flatten())
+}
+
+fn parse_player_samples(raw: &[Box<RawValue>]) -> Vec<PlayerSample> {
+    raw.iter()
+        .filter_map(|entry| {
+            serde_json::from_str::<PlayerSampleDocument>(entry.get())
+                .ok()
+                .and_then(|entry| player_sample(&entry))
+        })
+        .collect()
 }
 
 /// Decodes one `players.sample[]` entry, or `None` if it is unusable.
@@ -171,18 +240,14 @@ pub fn parse_status_json(json: &str, latency_ms: Option<u64>) -> Result<ServerSt
 /// all-zero anonymous-profile UUID vanilla uses as a placeholder is tooltip
 /// shaping, not decode.
 #[must_use]
-fn player_sample(v: &serde_json::Value) -> Option<PlayerSample> {
-    let obj = v.as_object()?;
-    let name = obj.get("name")?.as_str()?.trim();
+fn player_sample(entry: &PlayerSampleDocument) -> Option<PlayerSample> {
+    let name = entry.name.as_deref()?.trim();
     if name.is_empty() {
         return None;
     }
     Some(PlayerSample {
         name: name.to_string(),
-        id: obj
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string),
+        id: entry.id.clone(),
     })
 }
 
@@ -215,12 +280,12 @@ fn player_sample(v: &serde_json::Value) -> Option<PlayerSample> {
 /// either (the row's own tooltips are the ping icon and the "who's online"
 /// list, both keyed off unrelated rects). Style is the whole of what a real
 /// server's MOTD gets to say to this screen.
-fn component_spans(v: &serde_json::Value) -> Vec<lodestone_model::text::TextSpan> {
+fn component_spans(v: &RawValue) -> Vec<lodestone_model::text::TextSpan> {
     // `Text::from_json` parses source text, and what we hold is already a parsed
     // `Value`, so re-serialise. Round-tripping one small JSON value per ping is
     // not a cost worth a second component parser to avoid — a second parser is
     // exactly what this module's doc warns about, and what it had.
-    lodestone_model::Text::from_json(&v.to_string())
+    lodestone_model::Text::from_json(v.get())
         .resolve(&|_| None)
         .to_spans()
 }
@@ -385,6 +450,54 @@ mod tests {
         assert_eq!(no_ids.sample.len(), 2);
         assert_eq!(no_ids.sample[1].name, "names");
         assert_eq!(no_ids.sample[1].id, None);
+    }
+
+    #[test]
+    fn a_captured_status_document_decodes_through_the_typed_outer_shape() {
+        let status = parse_status_json(
+            include_str!("../tests/fixtures/status_response_26_2.json"),
+            Some(23),
+        )
+        .expect("the captured status response must decode");
+        assert_eq!(status.motd, "Lodestone survival test world");
+        assert_eq!(status.online, Some(1));
+        assert_eq!(status.max, Some(10));
+        assert_eq!(status.version.as_deref(), Some("26.2"));
+        assert_eq!(status.protocol, Some(776));
+        assert_eq!(status.latency_ms, Some(23));
+        assert_eq!(status.sample[0].name, "Anonymous Player");
+        assert_eq!(status.sample[0].id.as_deref(), Some("00000000-0000-0000-0000-000000000000"));
+    }
+
+    #[test]
+    fn malformed_fields_and_unknown_extensions_do_not_blank_valid_status_data() {
+        let json = r#"{
+            "description": {"text":"live", "futureComponentExtension":{"nested":[1,true,null]}},
+            "players": {
+                "online":"not a number",
+                "max":9,
+                "sample":[
+                    {"name":"kept", "id":42, "futurePlayerExtension":{"x":1}},
+                    {"name":false},
+                    17
+                ],
+                "futurePlayersExtension":{"enabled":true}
+            },
+            "version": {"name":7, "protocol":"not a number", "futureVersionExtension":[]},
+            "favicon": 42,
+            "futureStatusExtension":{"recursive":{"still":{"unknown":true}}}
+        }"#;
+
+        let status = parse_status_json(json, None).expect("field errors must be non-fatal");
+        assert_eq!(status.motd, "live");
+        assert_eq!(status.online, None);
+        assert_eq!(status.max, Some(9));
+        assert_eq!(status.sample.len(), 1);
+        assert_eq!(status.sample[0].name, "kept");
+        assert_eq!(status.sample[0].id, None);
+        assert_eq!(status.version, None);
+        assert_eq!(status.protocol, None);
+        assert_eq!(status.favicon_png, None);
     }
 
     #[test]

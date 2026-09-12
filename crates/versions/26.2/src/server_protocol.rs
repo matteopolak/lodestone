@@ -113,6 +113,7 @@ use lodestone_data::entity_type::EntityType;
 use lodestone_data::menus::{MenuId, menu_id};
 use lodestone_data::mob_effects::{MobEffectId, mob_effect_id, mob_effect_name_for};
 use lodestone_data::sound_events::{SoundEventId, sound_event_id};
+use serde::Serialize;
 use crate::entity_variants;
 use crate::packet_ids::{MINECRAFT_VERSION, configuration, handshaking, login, play, status};
 use crate::packets::chunk::ChunkShape;
@@ -1917,42 +1918,92 @@ fn encode_component_nbt(text: &Text) -> Vec<u8> {
 /// mistake to make here — hence two functions rather than one, with the same
 /// field names and the same deliberate omissions (see [`text_to_nbt`]'s scope
 /// note).
-fn text_to_json(text: &Text) -> serde_json::Value {
-    let mut object = serde_json::Map::new();
-    match &text.content {
-        TextContent::Literal(literal) => {
-            object.insert(
-                "text".to_owned(),
-                serde_json::Value::String(literal.clone()),
-            );
+#[derive(Debug, Serialize, Default)]
+struct JsonTextComponent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    translate: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fallback: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    with: Vec<Self>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    extra: Vec<Self>,
+}
+
+impl JsonTextComponent {
+    fn literal(text: &str) -> Self {
+        Self {
+            text: Some(text.to_owned()),
+            ..Self::default()
         }
+    }
+}
+
+fn text_to_json(text: &Text) -> JsonTextComponent {
+    let mut component = match &text.content {
+        TextContent::Literal(literal) => JsonTextComponent::literal(literal),
         TextContent::Translate {
             key,
             with,
             fallback,
-        } => {
-            object.insert("translate".to_owned(), serde_json::Value::String(key.clone()));
-            if let Some(fallback) = fallback {
-                object.insert(
-                    "fallback".to_owned(),
-                    serde_json::Value::String(fallback.clone()),
-                );
-            }
-            if !with.is_empty() {
-                object.insert(
-                    "with".to_owned(),
-                    serde_json::Value::Array(with.iter().map(text_to_json).collect()),
-                );
-            }
-        }
-    }
-    if !text.extra.is_empty() {
-        object.insert(
-            "extra".to_owned(),
-            serde_json::Value::Array(text.extra.iter().map(text_to_json).collect()),
-        );
-    }
-    serde_json::Value::Object(object)
+        } => JsonTextComponent {
+            translate: Some(key.clone()),
+            fallback: fallback.clone(),
+            with: with.iter().map(text_to_json).collect(),
+            ..JsonTextComponent::default()
+        },
+    };
+    component.extra = text.extra.iter().map(text_to_json).collect();
+    component
+}
+
+#[derive(Debug, Serialize)]
+struct StatusResponseDocument {
+    description: JsonTextComponent,
+    players: StatusPlayers,
+    version: StatusVersion,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    favicon: Option<String>,
+    #[serde(
+        rename = "enforcesSecureChat",
+        skip_serializing_if = "is_false"
+    )]
+    enforces_secure_chat: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct StatusPlayers {
+    max: i32,
+    online: i32,
+    sample: Vec<StatusPlayerSample>,
+}
+
+#[derive(Debug, Serialize)]
+struct StatusPlayerSample {
+    id: String,
+    name: String,
+}
+
+#[derive(Debug, Serialize)]
+struct StatusVersion {
+    name: &'static str,
+    protocol: i32,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn encode_json<T: Serialize>(value: &T, context: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|error| {
+        panic!("{context}: {error}");
+    })
+}
+
+fn text_to_json_string(text: &Text) -> String {
+    encode_json(&text_to_json(text), "text component JSON serialization")
 }
 
 /// Base64-encodes `bytes` with the standard RFC 4648 alphabet and `=`
@@ -2034,44 +2085,28 @@ fn encode_status_response_body(
     favicon_png: Option<&[u8]>,
     enforces_secure_chat: bool,
 ) -> Vec<u8> {
-    let mut document = serde_json::Map::new();
-    document.insert(
-        "description".to_owned(),
-        serde_json::json!({ "text": description }),
-    );
-    document.insert(
-        "players".to_owned(),
-        serde_json::json!({
-            "max": players_max,
-            "online": players_online,
-            // Vanilla's own name-and-id codec keys these `id` and `name`, and writes the
-            // uuid through its own string-form UUID codec — the hyphenated string
-            // form, not the two-longs array a *packet* field would use
-            // (confirmed against the decompiled name-and-id record source).
-            "sample": sample
+    let document = StatusResponseDocument {
+        description: JsonTextComponent::literal(description),
+        players: StatusPlayers {
+            max: players_max,
+            online: players_online,
+            sample: sample
                 .iter()
-                .map(|(id, name)| serde_json::json!({ "id": id.to_string(), "name": name }))
-                .collect::<Vec<_>>(),
-        }),
-    );
-    document.insert(
-        "version".to_owned(),
-        serde_json::json!({ "name": MINECRAFT_VERSION, "protocol": crate::PROTOCOL }),
-    );
-    if let Some(png) = favicon_png {
-        document.insert(
-            "favicon".to_owned(),
-            serde_json::Value::String(format!("data:image/png;base64,{}", base64_encode(png))),
-        );
-    }
-    if enforces_secure_chat {
-        document.insert(
-            "enforcesSecureChat".to_owned(),
-            serde_json::Value::Bool(true),
-        );
-    }
-
-    let json = serde_json::Value::Object(document).to_string();
+                .map(|(id, name)| StatusPlayerSample {
+                    id: id.to_string(),
+                    name: name.clone(),
+                })
+                .collect(),
+        },
+        version: StatusVersion {
+            name: MINECRAFT_VERSION,
+            protocol: crate::PROTOCOL,
+        },
+        favicon: favicon_png
+            .map(|png| format!("data:image/png;base64,{}", base64_encode(png))),
+        enforces_secure_chat,
+    };
+    let json = encode_json(&document, "status response JSON serialization");
     let mut w = Writer::default();
     w.string(&json);
     w.into_vec()
@@ -5473,7 +5508,7 @@ impl ServerProtocol for V770ServerProtocol {
             State::Login => send(
                 login::clientbound::LOGIN_DISCONNECT,
                 &LoginDisconnect {
-                    reason: text_to_json(reason).to_string(),
+                    reason: text_to_json_string(reason),
                 },
             ),
             // NBT, via the same `write_network_nbt` path `encode_system_chat`
