@@ -57,7 +57,7 @@ use lodestone_game::item::ItemStack;
 use lodestone_game::menu::Menu;
 use lodestone_model::text::{Text, TextColor, TextSpan, TextStyle};
 
-use crate::hud::VanillaFont;
+use crate::hud::{VanillaFont, item_icon};
 
 use super::builder::Builder;
 
@@ -88,9 +88,7 @@ const TOOLTIP_BG: [f32; 4] = [16.0 / 255.0, 0.0, 16.0 / 255.0, 240.0 / 255.0];
 const BORDER_TOP: [f32; 4] = [80.0 / 255.0, 0.0, 1.0, 80.0 / 255.0];
 /// The border gradient's bottom colour, `0x5028007F`.
 const BORDER_BOTTOM: [f32; 4] = [80.0 / 255.0, 0.0, 127.0 / 255.0, 40.0 / 255.0];
-/// The title line's colour. Vanilla tints by rarity; this build carries no rarity
-/// data (see [`lodestone_game::item::styled_hover_name`]'s own note), and common
-/// — i.e. white — is right for the overwhelming majority of items.
+/// White is retained for non-title tooltip labels and fallback overlays.
 const NAME_COLOUR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 /// `ChatFormatting.DARK_GRAY`, `0x555555` — what the advanced lines use
 /// (vanilla's own item-stack tooltip rendering).
@@ -289,6 +287,8 @@ fn lore_lines(stack: &ItemStack) -> Vec<TooltipLine> {
 /// module builds as a plain literal and can never disagree with itself on
 /// colour.
 fn title_line(stack: &ItemStack) -> TooltipLine {
+    let rarity = item_icon::stack_rarity(stack);
+    let name_colour = rarity.rgba();
     if stack.custom_name().is_none() {
         let potion_key = stack
             .potion_custom_name()
@@ -317,7 +317,7 @@ fn title_line(stack: &ItemStack) -> TooltipLine {
             if let Some(name) = name {
                 return TooltipLine {
                     text: name,
-                    colour: NAME_COLOUR,
+                    colour: name_colour,
                     spans: None,
                 };
             }
@@ -327,10 +327,12 @@ fn title_line(stack: &ItemStack) -> TooltipLine {
     // `base_display_name`'s humanised fallback — "Diamond Sword" for
     // `minecraft:diamond_sword`. Right for every vanilla item whose id is its
     // name in snake_case, which is nearly all of them.
+    let mut spans = lodestone_game::item::styled_hover_name_spans(stack, &|_| None);
+    item_icon::apply_rarity_to_spans(&mut spans, rarity);
     TooltipLine {
         text: lodestone_game::item::styled_hover_name(stack, &|_| None),
-        colour: NAME_COLOUR,
-        spans: Some(lodestone_game::item::styled_hover_name_spans(stack, &|_| None)),
+        colour: name_colour,
+        spans: Some(spans),
     }
 }
 
@@ -1069,6 +1071,34 @@ fn draw_bundle_image(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tooltip_title_uses_rarity_colour_with_common_and_authored_controls() {
+        let common = ItemStack::new("minecraft:stone".parse().expect("valid id"), 1);
+        let rare = ItemStack::new(
+            "minecraft:music_disc_pigstep".parse().expect("valid id"),
+            1,
+        );
+        assert_eq!(tooltip_lines(&common, false)[0].colour, [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(
+            tooltip_lines(&rare, false)[0].colour,
+            lodestone_data::item_rarity::ItemRarity::Rare.rgba()
+        );
+
+        let mut custom = lodestone_model::Text::literal("Ruby");
+        custom.style.color = Some(lodestone_model::TextColor::Rgb(0x12_3456));
+        let mut named = ItemStack::new("minecraft:music_disc_pigstep".parse().unwrap(), 1);
+        named.set_custom_name(Some(custom));
+        let named_lines = tooltip_lines(&named, false);
+        let spans = named_lines[0]
+            .spans
+            .as_ref()
+            .expect("title keeps custom-name spans");
+        assert_eq!(
+            spans.iter().find_map(|span| span.style.color),
+            Some(lodestone_model::TextColor::Rgb(0x12_3456))
+        );
+    }
 
     #[test]
     fn item_tooltip_text_origin_is_the_same_pixel_origin_as_its_box() {

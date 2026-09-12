@@ -82,6 +82,11 @@ tick counter (nothing forwards the server's real tick count this deep into the H
 substitute divided into 50ms steps stands in for it — the same trade the chat caret's blink already
 makes):
 
+- **Regeneration wave**: while the active-effects projection contains regeneration, one health
+  container is lifted by 2 logical pixels per display tick. The index wraps at `ceil(max health + 5)`
+  half-points, and is computed separately from the health-change blink and critical-health jitter, so
+  the wave remains visible while either of those animations is also active. The atlas-backed path uses
+  the real heart sprites; jar-less procedural fallback intentionally remains a coarse gauge.
 - **Heart blink**: a health *change* opens a fixed window (20 ticks on damage, 10 on heal) during which
   every heart container swaps to a "blinking" sprite variant and a ghost overlay shows the pre-change
   health total fading back to the real value.
@@ -100,14 +105,10 @@ makes):
 None of these reproduce vanilla's exact RNG sequence for jitter/wobble offsets — only the same
 distribution shape, since nobody can screenshot-diff a purely cosmetic jitter against a live server.
 
-**A fifth vanilla vitals animation — the Regeneration effect's travelling heart "wave," a fixed −2px
-offset that visits one heart container per tick on a repeating cycle while Regeneration is active — is
-not yet implemented.** It is a distinct mechanism from the blink above: it is gated on the *status
-effect being present*, not on a health change, and moves nothing during either a damage or a heal event.
-A wave gated on a health delta instead of the effect itself is the wrong shape entirely and is the
-mistake to avoid if implementing it. Also worth carrying forward if this lands: vanilla's health fill
-uses an integer ceiling of the raw health float, not a float comparison — a float-based fill can show an
-apparently-empty heart row at fractional health values above zero, which reads as "alive at zero hearts."
+The health fill uses an integer ceiling of the raw health float, not a float comparison — a float-based
+fill can show an apparently-empty heart row at fractional health values above zero, which reads as
+"alive at zero hearts." The regeneration wave remains independent from both that fill and the blink
+window, so a health change cannot accidentally reset or suppress its phase.
 
 ### Tab list
 
@@ -151,9 +152,8 @@ changes — not whenever the selected hotbar slot changes. Switching between two
 identical item does not restart the timer; it only continues counting it down. It holds at full opacity
 for its whole duration and only fades in its last ten ticks — there is no fade-in, unlike a naive
 reading of "fade" might suggest. Font styling (forced italic for a custom-named item) depends on the
-same styled-text draw path documented above under vanilla text. Item rarity coloring and a same-page
-creative/spectator vertical offset are both known, narrower gaps, not modelled because the game-mode/
-rarity data needed to drive them doesn't reach the HUD frame yet.
+same styled-text draw path documented above under vanilla text. The label inherits the selected
+built-in item's typed rarity colour while explicit colours in a custom name remain authoritative.
 
 ## How to change it
 
@@ -177,6 +177,10 @@ rarity data needed to drive them doesn't reach the HUD frame yet.
 - **When animating a value that also drives a color transition (e.g. a level-up flash), render the
   "before" state first.** An animation that treats a first-ever value as a rising edge can paint the
   wrong color on the very first frame a gate observes it.
+- **Keep regeneration's phase independent from health-change animation state.** The renderer derives
+  the wave index from the active-effects icon projection and passes it as its own heart-row offset;
+  do not fold it into `HeartAnim`, whose blink/display-health state has different change and timeout
+  semantics.
 
 ## Configuration
 
@@ -193,6 +197,8 @@ should be added.
 - `crates/lodestone-shell/src/tablist.rs`, `scoreboard.rs` — the tab-list and sidebar projections.
 - `lodestone-game` — `tablist::TabList`, `scoreboard::Scoreboard`, `player_state::HeldItemHighlight`,
   the folded state every projection above reads.
+- `crates/lodestone-shell/src/effects.rs` — active status-effect icons, including the regeneration
+  identity used to arm the heart wave.
 - `lodestone-assets::font` — glyph metrics and rasterization, shared with every other text surface in
   the shell.
 - `lodestone-model` — `Text`/`TextStyle`, the `§`-coded legacy formatting model.

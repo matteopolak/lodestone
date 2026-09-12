@@ -650,6 +650,12 @@ impl WindowApp {
         // `Sim::player_menu` clones all 46 slots, and a second call per frame is
         // exactly the cost the mining-freeze fix removed from the tick path.
         let player_menu = self.sim.player_menu();
+        // Keep the held label's rarity tied to the stack that triggered the
+        // overlay, as far as the current HUD snapshot can observe it. The
+        // span path below preserves explicit custom-name colours.
+        let held_item_rarity = player_menu
+            .player_native(self.sim.selected_slot())
+            .map(crate::hud::item_icon::stack_rarity);
         let hotbar_cooldowns: Vec<f32> = (0..9)
             .map(|i| {
                 player_menu
@@ -1965,7 +1971,12 @@ impl WindowApp {
         hud_frame.title = self.sim.title_overlay();
         hud_frame.action_bar = self.sim.action_bar_overlay();
         hud_frame.held_item = self.sim.held_item_overlay();
-        hud_frame.held_item_spans = self.sim.held_item_overlay_spans();
+        hud_frame.held_item_spans = self.sim.held_item_overlay_spans().map(|(mut spans, alpha)| {
+            if let Some(rarity) = held_item_rarity {
+                crate::hud::item_icon::apply_rarity_to_spans(&mut spans, rarity);
+            }
+            (spans, alpha)
+        });
         hud_frame.recipe_stats = self
             .recipe_book
             .as_ref()

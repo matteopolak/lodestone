@@ -101,6 +101,8 @@ use super::font;
 use super::vanilla_font::{self, VanillaFont};
 use super::{FLOATS_PER_VERTEX, HUD_GLINT_WGSL, HUD_SPRITE_WGSL, SPRITE_FLOATS_PER_VERTEX};
 use crate::platform::Instant;
+use lodestone_data::item_rarity::ItemRarity;
+use lodestone_model::text::{TextColor, TextSpan};
 
 /// One occupied slot's drawable state, resolved shell-side from a
 /// [`lodestone_game::menu::Menu`]. `item` is the item id
@@ -175,6 +177,44 @@ pub struct ItemIcon {
     /// the draw and the batch key, and none of those hops should copy an
     /// unbounded server-provided string.
     pub skin: Option<Arc<str>>,
+}
+
+/// Resolve the effective built-in rarity for a live stack.
+///
+/// This is intentionally a narrow presentation boundary: the game's stack
+/// model stays version-free, while the shell's generated 26.2 item registry
+/// supplies the built-in definition rarity for labels and tooltip titles. A
+/// plugin or unknown item remains common until its protocol adapter exposes a
+/// typed rarity override. Enchantment promotion follows the same rule as the
+/// display name and therefore shares the existing foil predicate.
+#[must_use]
+pub(crate) fn stack_rarity(stack: &lodestone_game::item::ItemStack) -> ItemRarity {
+    let base = (stack.item().namespace() == "minecraft")
+        .then(|| lodestone_data::item::Item::from_name(stack.item().path()))
+        .flatten()
+        .map(ItemRarity::for_item)
+        .unwrap_or(ItemRarity::Common);
+    base.with_enchantment(stack_has_foil(stack))
+}
+
+/// Apply an item rarity as an inherited text colour.
+///
+/// Explicit colours on a custom name remain authoritative; the rarity is the
+/// parent style, not a post-processing tint. This keeps ordinary item names
+/// and authored RGB names separate while allowing the held-item and tooltip
+/// consumers to share one style rule.
+pub(crate) fn apply_rarity_to_spans(spans: &mut [TextSpan], rarity: ItemRarity) {
+    let colour = match rarity {
+        ItemRarity::Common => TextColor::White,
+        ItemRarity::Uncommon => TextColor::Yellow,
+        ItemRarity::Rare => TextColor::Aqua,
+        ItemRarity::Epic => TextColor::LightPurple,
+    };
+    for span in spans {
+        if span.style.color.is_none() {
+            span.style.color = Some(colour);
+        }
+    }
 }
 
 /// Say once, per process, that a head declares a skin we cannot use.
@@ -3926,5 +3966,58 @@ mod tint_wiring_tests {
             dye_default, 0x88_99AA,
             "dyed_leather_b must differ from the neutered default for the gate above to mean anything"
         );
+    }
+}
+
+#[cfg(test)]
+mod rarity_tests {
+    use super::{apply_rarity_to_spans, stack_rarity};
+    use lodestone_data::item_rarity::ItemRarity;
+    use lodestone_game::item::{ComponentValue, ENCHANTMENTS_COMPONENT, ItemStack};
+    use lodestone_model::text::{TextColor, TextSpan, TextStyle};
+
+    #[test]
+    fn stack_rarity_reaches_two_non_common_definitions_and_keeps_common_control() {
+        let common = ItemStack::new("minecraft:stone".parse().unwrap(), 1);
+        let rare = ItemStack::new("minecraft:music_disc_pigstep".parse().unwrap(), 1);
+        let epic = ItemStack::new("minecraft:mace".parse().unwrap(), 1);
+
+        assert_eq!(stack_rarity(&common), ItemRarity::Common);
+        assert_eq!(stack_rarity(&rare), ItemRarity::Rare);
+        assert_eq!(stack_rarity(&epic), ItemRarity::Epic);
+    }
+
+    #[test]
+    fn rarity_is_inherited_but_an_authored_colour_wins() {
+        let mut spans = vec![
+            TextSpan {
+                text: "default".to_owned(),
+                style: TextStyle::default(),
+            },
+            TextSpan {
+                text: "authored".to_owned(),
+                style: TextStyle {
+                    color: Some(TextColor::Rgb(0x12_3456)),
+                    ..TextStyle::default()
+                },
+            },
+        ];
+        apply_rarity_to_spans(&mut spans, ItemRarity::Uncommon);
+        assert_eq!(spans[0].style.color, Some(TextColor::Yellow));
+        assert_eq!(spans[1].style.color, Some(TextColor::Rgb(0x12_3456)));
+    }
+
+    #[test]
+    fn an_enchanted_common_stack_promotes_without_touching_the_item_texture_path() {
+        let mut stack = ItemStack::new("minecraft:stone".parse().unwrap(), 1);
+        stack.components_mut().insert(
+            ENCHANTMENTS_COMPONENT.parse().unwrap(),
+            ComponentValue::Enchantments(vec![lodestone_model::item::ItemEnchantment {
+                id: 0,
+                level: 1,
+            }]),
+        );
+        assert_eq!(stack_rarity(&stack), ItemRarity::Rare);
+        assert_eq!(stack.item().path(), "stone");
     }
 }
