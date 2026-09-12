@@ -10,7 +10,6 @@ fn owns_frame_excludes_paused_so_the_pause_menu_never_replaces_the_world() {
     // stop rendering for as long as it was up.
     assert!(!owns_frame(Screen::Paused));
 }
-
 #[test]
 fn frame_for_defers_to_an_overlay_for_in_world_settings() {
     // The player report this exists for: Options opened from the pause
@@ -1010,4 +1009,3 @@ fn the_highlighted_pause_button_is_visibly_different_from_its_neighbours() {
     assert_ne!(ROW_SEL, ROW_OFF);
     assert_ne!(ROW_BG, ROW_OFF);
 }
-

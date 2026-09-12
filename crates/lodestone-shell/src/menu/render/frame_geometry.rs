@@ -140,7 +140,6 @@ fn the_edit_box_draws_its_text_and_its_caret_inside_its_own_rect() {
         shorter_state.cursor_x + shorter_probe.advance
     );
 }
-
 #[test]
 fn the_edit_form_shows_both_fields_and_marks_the_focused_one() {
     use crate::menu::nav::{ADDRESS_FIELD, CANCEL_ROW, DONE_ROW, NAME_FIELD, RESOURCE_PACK_ROW};
@@ -441,4 +440,3 @@ fn long_labels_are_clipped_instead_of_overrunning_the_row() {
         "text overran the row's right edge"
     );
 }
-

@@ -85,7 +85,6 @@ fn the_button_sprite_matches_vanillas_enabled_hovered_rule() {
         "and the flat fallback must still draw the button"
     );
 }
-
 #[test]
 fn every_title_and_pause_widget_draws_the_sprite_the_widget_layer_picks() {
     use crate::menu::nav::{MAIN_BUTTONS, PAUSE_BUTTONS};
@@ -665,4 +664,3 @@ fn every_sprite_id_the_vanilla_screens_name_exists_in_the_real_pack() {
         "the pause screen's nine widgets did not all draw a sprite"
     );
 }
-

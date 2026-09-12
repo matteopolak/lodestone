@@ -21,7 +21,6 @@ fn logical_canvas_shrinks_a_retina_style_framebuffer_back_to_visual_size() {
         "logical canvases diverged: {lo_dpi:?} vs {hi_dpi:?}"
     );
 }
-
 #[test]
 fn logical_canvas_is_the_identity_at_scale_one() {
     // A tiny framebuffer forces scale 1 (see `config`'s own tests), at
@@ -750,4 +749,3 @@ fn a_long_world_name_is_clipped_to_its_row_rather_than_overhanging_it() {
         "the name is not actually long enough to be clipped, so nothing was cut"
     );
 }
-
