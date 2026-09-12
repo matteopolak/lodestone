@@ -320,4 +320,3 @@ impl Permissions {
         default.value(level.is_op())
     }
 }
-

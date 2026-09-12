@@ -206,4 +206,3 @@ pub use store::{Group, PermissionStore, PermissionSubject, SubjectPermissions};
 
 #[cfg(test)]
 mod tests;
-
