@@ -13,18 +13,16 @@ fn requested_target_replay_preserves_tuff_witness() {
     let admissions = (-1..=1)
         .flat_map(|z| (1..=3).map(move |x| (x, z)))
         .collect::<Vec<_>>();
-    let events = admissions
-        .iter()
-        .enumerate()
-        .map(|(sequence, &source)| LifecycleReplayEvent {
-            source,
-            stage: LifecycleCompletion::Features,
-            sequence: sequence as u64,
-            resident_transitions: Vec::new(),
-        })
-        .collect::<Vec<_>>();
+    let events = vec![LifecycleReplayEvent {
+        source: TARGET,
+        stage: LifecycleCompletion::Features,
+        sequence: 0,
+        resident_transitions: Vec::new(),
+    }];
     let plan = LifecycleReplayPlan::for_target(TARGET, &admissions, &events)
         .expect("the 3x3 capture is a complete target replay domain");
+    assert_eq!(plan.feature_events().len(), 1, "Overworld FEATURES has one centre completion");
+    assert_eq!(plan.feature_events()[0].source, TARGET);
 
     let mut materializer = LifecycleMaterializer::new(overworld_chunk_source(42));
     materializer.replay_plan(&plan);

@@ -99,12 +99,15 @@ remain position-derived, but placement reads and replacement checks observe
 earlier cross-chunk writes, so changing this order changes generated blocks even
 when every individual source's random stream is unchanged.
 
-Lifecycle packet replay keeps the requested target separate from the completing source. The source
-still owns its position-derived decoration seed, while the requested target owns the three-by-three
-read context and resident overlay used by that source body. Direct source-completion controls retain
-the source-centred default; authenticated target plans use the explicit target-aware seam. This
-distinction is observable at seed 42, target `(2,0)`, where world `(5,-62,0)` must remain tuff after
-the complete source event stream.
+Lifecycle packet replay treats Overworld FEATURES as one target-owned status
+completion. The admitted radius-one CARVERS columns provide the read/write
+region, but they do not become nine independent FEATURES events; writes into
+that region remain resident for later target packets. The lifecycle adapter
+therefore accepts a sparse event stream containing the requested centre while
+the production dispatcher may retain its internal source views for feature
+selection and write routing. This distinction is observable at seed 42,
+target `(2,0)`, where world `(5,-62,0)` remains tuff after the single target
+completion.
 
 Collections traversed while consuming that random stream must have explicit order. Vegetation patches
 use `CompatBlockPosSet` for successful surface positions: its compact membership index and insertion

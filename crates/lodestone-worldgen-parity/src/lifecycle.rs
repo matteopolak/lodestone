@@ -139,9 +139,11 @@ pub struct LifecycleReplayPlan {
 }
 
 impl LifecycleReplayPlan {
-    /// Build a target plan from a complete authenticated admission/event stream.
-    /// The reverse walk preserves event order while selecting only earlier
-    /// sources whose writes can affect the packet or a selected dependency.
+    /// Build a target plan from an authenticated admission/event stream. The
+    /// event stream may be sparse when a status task completes only the target
+    /// while its admitted dependency columns remain CARVERS inputs. The
+    /// reverse walk preserves event order while selecting only earlier sources
+    /// whose writes can affect the packet or a selected dependency.
     pub fn for_target(
         target: ChunkPos,
         admissions: &[ChunkPos],
@@ -178,9 +180,9 @@ impl LifecycleReplayPlan {
         if packet_domain.iter().any(|chunk| !admitted.contains(chunk)) {
             return Err(format!("target {target:?} does not have a complete admitted 3x3 packet-light domain"));
         }
-        if feature_events.len() != admissions.len() {
+        if feature_events.is_empty() || feature_events.len() > admissions.len() {
             return Err(format!(
-                "expected one FEATURES event per admission, got {} events for {} admissions",
+                "FEATURES event stream has {} events for {} admissions",
                 feature_events.len(), admissions.len()
             ));
         }
@@ -192,8 +194,11 @@ impl LifecycleReplayPlan {
             if rank > 0 && feature_events[rank - 1].sequence >= event.sequence {
                 return Err(format!("lifecycle replay completion order is not increasing at sequence {}", event.sequence));
             }
-            if admissions[rank] != event.source {
+            if feature_events.len() == admissions.len() && admissions[rank] != event.source {
                 return Err(format!("lifecycle replay event {} source {:?} disagrees with admission {:?}", event.sequence, event.source, admissions[rank]));
+            }
+            if !admitted.contains(&event.source) {
+                return Err(format!("lifecycle replay event {} source {:?} is not admitted", event.sequence, event.source));
             }
             if !seen_sources.insert(event.source) {
                 return Err(format!("lifecycle replay source {:?} appears more than once", event.source));
@@ -424,14 +429,12 @@ impl LifecycleWorldgenSource for OverworldChunkSource {
         overrides: &BTreeMap<AbsoluteCell, String>,
         _resident: &BTreeMap<ChunkPos, ChunkColumn>,
     ) -> LifecycleFeatureResult {
-        let overrides = override_vec(overrides);
-        let result = self.generator().parity_source_decoration_with_overrides(
-            target.0,
-            target.1,
-            source.0,
-            source.1,
-            &overrides,
+        assert_eq!(
+            target, source,
+            "Overworld FEATURES completes the requested centre chunk once",
         );
+        let overrides = override_vec(overrides);
+        let result = self.generator().parity_features_with_overrides(target.0, target.1, &overrides);
         LifecycleFeatureResult {
             spills: result
                 .spills
@@ -446,6 +449,14 @@ impl LifecycleWorldgenSource for OverworldChunkSource {
             block_entities: result.block_entities,
             end_gateways: Vec::new(),
         }
+    }
+
+    fn target_spills_persist(&self) -> bool {
+        // The centre FEATURES task writes through its radius-one region. A
+        // write into an admitted CARVERS neighbour is part of the resident
+        // world and must be visible when that neighbour later emits its own
+        // packet.
+        true
     }
 
     fn post_features_spills(
