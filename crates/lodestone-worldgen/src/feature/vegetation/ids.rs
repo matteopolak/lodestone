@@ -25,7 +25,7 @@
 //! [`IdTags`] is one bitset per [`Tag`], each covering the **entire** `StateId`
 //! space. That is not a generous over-allocation, it is exact: [`StateId`] wraps a
 //! `u16`, so 65,536 ids is the whole space and the table can never need to grow.
-//! 29 tags × 65,536 bits = 232 KiB per [`super::VegTags`], one `alloc_zeroed` at
+//! 26 tags × 65,536 bits = 208 KiB per [`super::VegTags`], one `alloc_zeroed` at
 //! construction, and a [`super::VegTags`] is per-generator.
 //!
 //! Bits are only *meaningful* for ids the table has actually examined, so
@@ -33,8 +33,6 @@
 //! at or above it fall back to the string path. [`super::VegTags::bind`] walks the
 //! interner's new ids and raises the watermark; the driver calls it **once per
 //! decoration pass**, which is the only place `interner.len()`'s lock is taken.
-//! Built-in names are compacted to canonical ids during resolver construction;
-//! only extension names remain in the fallback sets.
 //!
 //! ## Why the fallback is required, not defensive
 //!
@@ -43,8 +41,7 @@
 //! bitset would answer `false` for every tag, which is a **wrong answer, not a
 //! slow one**: an unexamined `oak_log` would fail `#minecraft:logs` and change
 //! where leaves decay. So the watermark test is a correctness gate, and the
-//! string path behind it is the same code the pre-U8 engine ran for extension
-//! states; built-in late ids use the compact canonical membership map.
+//! string path behind it is the same code the pre-U8 engine ran.
 //!
 //! It also makes every existing unit test work untouched. A test that builds
 //! `VegTags::default()`, inserts into `tags.leaves` and calls
@@ -61,11 +58,14 @@
 //!
 //! # How to change it, and the gotchas
 //!
-//! * **Never mutate a [`super::VegTags`]'s tag sets after binding or compaction.**
-//!   The bitset is a cache of those sets, and canonical names may already have
-//!   been released after [`super::build_veg_tags`]. Resolver construction keeps
-//!   unknown extension names, so plugin/data-pack states still use the textual
-//!   fallback; a caller that changes a closed tag must build a fresh `VegTags`.
+//! * **Never mutate a [`super::VegTags`]'s `HashSet`s after [`super::VegTags::bind`]
+//!   has run.** The bitset is a cache of those sets, and nothing re-derives it:
+//!   an insert after binding is visible to the string path and invisible to the
+//!   bitset, so the same query answers two different things depending on one id's
+//!   value. Production builds the sets once in
+//!   [`super::build_veg_tags`] and never touches them again; the tests that do
+//!   mutate them never bind. If you ever need both, add a `rebind` that clears
+//!   the masks and resets the watermark to 0.
 //! * **[`Clone`] deliberately returns an *unbound* table.** Cloning the atomics'
 //!   values would be safe but the copy would then be bound to an interner the
 //!   clone's owner may not be using. An unbound clone is always correct (string
@@ -86,12 +86,11 @@
 //!   string. **`Fluid` must stay base-aware**: `carver/mod.rs` writes
 //!   `minecraft:water[level=0]`, so a fluid is not a fixed handful of ids.
 
-use lodestone_worldgen_core::hash::{FastMap, FastSet};
+use lodestone_worldgen_core::hash::FastMap;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicI8, AtomicU64, AtomicUsize, Ordering};
 
 use crate::interner::{StateId, StateInterner};
-use lodestone_data::block_states::StateId as CanonicalStateId;
 
 use super::VegGrid;
 use super::base_id;
@@ -105,9 +104,6 @@ use super::config::VegTags;
 /// mechanism.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tag {
-    /// `#minecraft:features_cannot_replace` — the protected write set used by
-    /// dungeon placement.
-    FeaturesCannotReplace,
     CannotReplaceBelowTreeTrunk,
     SupportsVegetation,
     ReplaceableByTrees,
@@ -159,8 +155,8 @@ pub enum Tag {
     OverridesMushroomLightRequirement,
     /// Solid floors that support lily pads when the floor is not water.
     SupportsLilyPad,
-    /// Ground blocks replaced by bamboo's optional podzol disk.
-    BeneathBambooPodzolReplaceable,
+    /// Ground states the giant-conifer decorator may replace with podzol.
+    BeneathTreePodzolReplaceable,
     /// Ground blocks accepted by azalea root-system candidates.
     AzaleaGrowsOn,
 }
@@ -168,8 +164,7 @@ pub enum Tag {
 impl Tag {
     /// Every variant, in declaration order. `TAG_COUNT` and the mask layout are
     /// both derived from this, so it is the single place a new tag registers.
-    pub(super) const ALL: [Tag; 29] = [
-        Tag::FeaturesCannotReplace,
+    pub(super) const ALL: [Tag; 28] = [
         Tag::CannotReplaceBelowTreeTrunk,
         Tag::SupportsVegetation,
         Tag::ReplaceableByTrees,
@@ -196,7 +191,7 @@ impl Tag {
         Tag::SoulFireBaseBlocks,
         Tag::OverridesMushroomLightRequirement,
         Tag::SupportsLilyPad,
-        Tag::BeneathBambooPodzolReplaceable,
+        Tag::BeneathTreePodzolReplaceable,
         Tag::AzaleaGrowsOn,
     ];
 
@@ -214,12 +209,6 @@ const ID_SPACE: usize = u16::MAX as usize + 1;
 
 /// 64-bit words per tag.
 const WORDS_PER_TAG: usize = ID_SPACE / 64;
-
-/// The name-to-type conversion is performed once for resolver-backed tags.
-/// Canonical ids are retained as a typed fallback for states minted after the
-/// local interner watermark; extension names stay in the small string sets so
-/// plugin/data-pack blocks keep their original behaviour.
-type CanonicalTagKey = (u8, u16);
 
 /// Decimal literals for the `distance=N` rewrite, so building the replacement
 /// value needs no `n.to_string()`. Sized past `LeavesBlock.DECAY_DISTANCE` (7) on
@@ -282,11 +271,6 @@ pub(super) struct IdTags {
     /// that is the check `docs/worldgen-fast-hashing.md` prescribes). Nothing about
     /// a rewrite's *value* changes; only which bucket it lands in.
     rewrites: RwLock<FastMap<(u64, u16, Rewrite), Option<u16>>>,
-    /// Canonical membership for ids that arrive after `resolved` advances.
-    /// This is intentionally typed: it replaces the built-in names removed by
-    /// `VegTags::compact_registry_names` without reintroducing a string copy.
-    canonical_members: RwLock<FastSet<CanonicalTagKey>>,
-    canonicalized: std::sync::atomic::AtomicBool,
 }
 
 /// A block-state property edit vegetal decoration performs on an
@@ -319,8 +303,6 @@ impl Default for IdTags {
                 .collect(),
             distance: (0..ID_SPACE).map(|_| AtomicI8::new(-1)).collect(),
             rewrites: RwLock::new(FastMap::default()),
-            canonical_members: RwLock::new(FastSet::default()),
-            canonicalized: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -334,7 +316,7 @@ impl Clone for IdTags {
 }
 
 impl std::fmt::Debug for IdTags {
-    /// A summary, not the full atomic mask array. `VegTags` derives `Debug` and is printed in
+    /// A summary, not 26,624 atomics. `VegTags` derives `Debug` and is printed in
     /// test failure messages; dumping the raw masks would bury the tag sets that
     /// are the actually useful part.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -372,13 +354,6 @@ impl IdTags {
             .expect("veg id rewrite memo poisoned")
             .clear();
         self.resolved.store(0, Ordering::Relaxed);
-    }
-
-    fn canonical_has(&self, tag: Tag, id: CanonicalStateId) -> bool {
-        self.canonical_members
-            .read()
-            .expect("veg canonical tag memo poisoned")
-            .contains(&(tag.slot() as u8, id.block() as u16))
     }
 }
 
@@ -418,14 +393,7 @@ impl VegTags {
     /// step: this function is the only thing that decides membership, and
     /// [`Self::bind`] calls it to fill the bits.
     fn member(&self, tag: Tag, base: &str) -> bool {
-        if tag.is_registry()
-            && self.id_tags.canonicalized.load(Ordering::Acquire)
-            && let Some(id) = canonical_state_id(base)
-        {
-            return self.id_tags.canonical_has(tag, id);
-        }
         match tag {
-            Tag::FeaturesCannotReplace => self.features_cannot_replace.contains(base),
             Tag::CannotReplaceBelowTreeTrunk => self.cannot_replace_below_tree_trunk.contains(base),
             Tag::SupportsVegetation => self.supports_vegetation.contains(base),
             Tag::ReplaceableByTrees => self.replaceable_by_trees.contains(base),
@@ -455,74 +423,10 @@ impl VegTags {
             Tag::SoulFireBaseBlocks => self.soul_fire_base_blocks.contains(base),
             Tag::OverridesMushroomLightRequirement => self.overrides_mushroom_light_requirement.contains(base),
             Tag::SupportsLilyPad => self.supports_lily_pad.contains(base),
-            Tag::BeneathBambooPodzolReplaceable => {
-                self.beneath_bamboo_podzol_replaceable.contains(base)
+            Tag::BeneathTreePodzolReplaceable => {
+                self.beneath_tree_podzol_replaceable.contains(base)
             }
             Tag::AzaleaGrowsOn => self.azalea_grows_on.contains(base),
-        }
-    }
-
-    /// Converts built-in resolver names to typed canonical ids and releases
-    /// those names. Unknown names remain as the bounded extension fallback,
-    /// which is required for plugin/data-pack blocks outside the generated
-    /// state table. This runs at resolver construction, before any decoration
-    /// thread can observe the table.
-    pub fn compact_registry_names(&mut self) -> usize {
-        let mut dropped = 0;
-        let mut additions = Vec::new();
-        for tag in Tag::ALL {
-            if !tag.is_registry() {
-                continue;
-            }
-            let names = self.names_mut(tag);
-            names.retain(|name| {
-                let Some(id) = canonical_state_id(name) else {
-                    return true;
-                };
-                additions.push((tag.slot() as u8, id.block() as u16));
-                dropped += 1;
-                false
-            });
-            names.shrink_to_fit();
-        }
-        let mut members = self
-            .id_tags
-            .canonical_members
-            .write()
-            .expect("veg canonical tag memo poisoned");
-        members.extend(additions);
-        self.id_tags.canonicalized.store(true, Ordering::Release);
-        dropped
-    }
-
-    fn names_mut(&mut self, tag: Tag) -> &mut std::collections::HashSet<String> {
-        match tag {
-            Tag::FeaturesCannotReplace => &mut self.features_cannot_replace,
-            Tag::CannotReplaceBelowTreeTrunk => &mut self.cannot_replace_below_tree_trunk,
-            Tag::SupportsVegetation => &mut self.supports_vegetation,
-            Tag::ReplaceableByTrees => &mut self.replaceable_by_trees,
-            Tag::Logs => &mut self.logs,
-            Tag::SupportsCactus => &mut self.supports_cactus,
-            Tag::SupportsSugarCane => &mut self.supports_sugar_cane,
-            Tag::Leaves => &mut self.leaves,
-            Tag::MangroveLogsCanGrowThrough => &mut self.mangrove_logs_can_grow_through,
-            Tag::MangroveRootsCanGrowThrough => &mut self.mangrove_roots_can_grow_through,
-            Tag::HugeBrownMushroomCanPlaceOn => &mut self.huge_brown_mushroom_can_place_on,
-            Tag::HugeRedMushroomCanPlaceOn => &mut self.huge_red_mushroom_can_place_on,
-            Tag::ReplaceableByMushrooms => &mut self.replaceable_by_mushrooms,
-            Tag::SupportsBamboo => &mut self.supports_bamboo,
-            Tag::SupportsDryVegetation => &mut self.supports_dry_vegetation,
-            Tag::SupportsAzalea => &mut self.supports_azalea,
-            Tag::SupportsCrimsonRoots => &mut self.supports_crimson_roots,
-            Tag::SupportsSmallDripleaf => &mut self.supports_small_dripleaf,
-            Tag::SoulFireBaseBlocks => &mut self.soul_fire_base_blocks,
-            Tag::OverridesMushroomLightRequirement => &mut self.overrides_mushroom_light_requirement,
-            Tag::SupportsLilyPad => &mut self.supports_lily_pad,
-            Tag::BeneathBambooPodzolReplaceable => &mut self.beneath_bamboo_podzol_replaceable,
-            Tag::AzaleaGrowsOn => &mut self.azalea_grows_on,
-            Tag::Air | Tag::Fluid | Tag::Water | Tag::Lava | Tag::Cactus | Tag::SugarCane => {
-                unreachable!("synthetic vegetation tags have no resolver name set")
-            }
         }
     }
 
@@ -636,12 +540,6 @@ impl VegTags {
             self.id_tags.bit(tag, index)
         } else {
             bump_slow();
-            if self.id_tags.canonicalized.load(Ordering::Acquire)
-                && let Some(canonical) = interner.canonical_id(id)
-                && tag.is_registry()
-            {
-                return self.id_tags.canonical_has(tag, canonical);
-            }
             self.member(tag, base_id(interner.name_of(id)))
         }
     }
@@ -662,16 +560,6 @@ impl VegTags {
     fn fast_ok(&self, interner: &StateInterner, index: usize) -> bool {
         self.id_tags.instance.load(Ordering::Acquire) == interner.instance_id()
             && index < self.id_tags.resolved.load(Ordering::Acquire)
-    }
-}
-
-fn canonical_state_id(base: &str) -> Option<CanonicalStateId> {
-    lodestone_data::block_states::state_id(base).and_then(CanonicalStateId::new)
-}
-
-impl Tag {
-    const fn is_registry(self) -> bool {
-        !matches!(self, Self::Air | Self::Fluid | Self::Water | Self::Lava | Self::Cactus | Self::SugarCane)
     }
 }
 
@@ -738,7 +626,7 @@ mod tests {
     /// order and complete.
     #[test]
     fn tag_all_is_complete_and_in_discriminant_order() {
-        assert_eq!(TAG_COUNT, 29, "TAG_COUNT is derived from Tag::ALL");
+        assert_eq!(TAG_COUNT, 26, "TAG_COUNT is derived from Tag::ALL");
         for (i, tag) in Tag::ALL.iter().enumerate() {
             assert_eq!(
                 tag.slot(),
@@ -871,34 +759,6 @@ mod tests {
             slow_hits(), 1,
             "a query against the interner that is NOT bound must take the string path"
         );
-    }
-
-    #[test]
-    fn canonical_tag_names_are_released_but_extension_names_survive() {
-        let mut tags = VegTags::default();
-        tags.logs.insert("minecraft:oak_log".to_owned());
-        tags.logs.insert("example:plugin_log".to_owned());
-        tags.features_cannot_replace
-            .insert("minecraft:stone".to_owned());
-
-        let dropped = tags.compact_registry_names();
-        assert_eq!(dropped, 2, "only generated-table names are compacted");
-        assert!(!tags.logs.contains("minecraft:oak_log"));
-        assert!(tags.logs.contains("example:plugin_log"));
-        assert!(tags.features_cannot_replace.is_empty());
-
-        let interner = StateInterner::new();
-        tags.bind(&interner);
-
-        // This id is minted after the local watermark. It must still use the
-        // typed canonical fallback rather than the released name set.
-        let late_builtin = interner.id_of("minecraft:oak_log[axis=y]");
-        assert!(tags.has(&interner, Tag::Logs, late_builtin));
-
-        // The same late-state path remains string-backed for extension ids,
-        // preserving plugin/data-pack tag behaviour.
-        let late_extension = interner.id_of("example:plugin_log[axis=y]");
-        assert!(tags.has(&interner, Tag::Logs, late_extension));
     }
 
     /// The regression this file's worst bug left behind.

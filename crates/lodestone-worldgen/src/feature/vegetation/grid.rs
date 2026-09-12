@@ -3,6 +3,7 @@
 //!
 //! Moved here verbatim from `feature/vegetation.rs` by U16 Phase B.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -10,12 +11,22 @@ use crate::dense_grid::DenseBlockGrid;
 use crate::feature::region_view::{
     Overlay, WIDE_RADIUS, WIDE_SLOTS, WriteLog, wide_slot_of_offset, wide_source_slot,
 };
-use crate::interner::{StateId, StateInterner};
+use crate::interner::{BaseStateFacts, StateId, StateInterner};
 use crate::overworld::BiomeCells;
+use lodestone_data::biomes::{BiomeRef, BuiltinBiome};
 
 use self::census::bump as census_bump;
-use super::base_id;
-use super::config::is_fluid;
+
+const HEIGHT_CACHE_UNSET: i32 = i32::MIN;
+/// Compact representation for a vertically invariant biome source. Name-based
+/// compatibility inputs are converted at construction; retained grids never
+/// carry a parallel string array.
+#[derive(Debug)]
+enum FlatBiomeSources {
+    Ids {
+        cells: [Option<Arc<[BiomeRef; 16]>>; WIDE_SLOTS],
+    },
+}
 
 /// The mutable block field vegetal decoration reads and writes. Defaults to
 /// chunk-local (`0..16` × `0..16`, absolute `y`) via [`VegGrid::new`] — see
@@ -131,6 +142,16 @@ pub struct VegGrid {
     /// feature fixtures independent of a biome source; production fills all
     /// slots so the biome placement modifier can query the candidate's 3-D cell.
     biome_sources: Option<[Option<Arc<BiomeCells>>; WIDE_SLOTS]>,
+    /// Vertically invariant 4x4 biome slices, used by dimensions whose
+    /// climate has no Y component. This avoids materialising repeated 3-D
+    /// biome containers solely for the placement membership predicate.
+    flat_biome_sources: Option<FlatBiomeSources>,
+    /// Seed for the Overworld's three-dimensional nearby-corner biome lookup.
+    /// `None` is retained by the dimension-neutral constructor used by the
+    /// Nether, whose biome source supplies its own lookup in the decoration
+    /// driver. Overworld grids opt in through
+    /// [`Self::with_sources_and_biomes_shared_zoomed`].
+    biome_zoom_seed: Option<i64>,
     /// Top-level placed-feature id to eligible biome ids. This is deliberately
     /// keyed by the placed feature, rather than its configured body: a selector
     /// branch can share a body while carrying a different placement contract.
@@ -168,6 +189,18 @@ pub(super)     height: i32,
     /// three integer compares rather than an interner read guard. See
     /// [`Self::is_air_id`] for why an id comparison is exact for air. Unit 8.
     air_ids: [StateId; 3],
+    /// Memoised heightmap results, indexed by the local `(x, z)` column.
+    ///
+    /// Height queries are frequent during vegetation placement and their old
+    /// implementation walked the complete vertical span on every call. The
+    /// four caches memoise the result for each local column. They are
+    /// interior-mutable because the public height accessors intentionally stay
+    /// shared (`&self`), while writes invalidate only the column they touch.
+    /// A single four-lane cell keeps the caches compact (one allocation and
+    /// 16 bytes per column). [`HEIGHT_CACHE_UNSET`] is outside the generated build range
+    /// and represents an uncomputed lane.
+    height_cache: Vec<Cell<[i32; 4]>>,
+    local_width: usize,
     /// Block entities decoration produced, with **absolute** world
     /// positions, in write order. Alongside [`Self::dirty`] for the same reason
     /// that is a `Vec` and not a map: insertion order carries no ambiguity, and a
@@ -229,10 +262,15 @@ impl VegGrid {
             interner.id_of("minecraft:cave_air"),
             interner.id_of("minecraft:void_air"),
         ];
+        let local_width = usize::try_from(local_hi - local_lo)
+            .expect("VegGrid footprint must have a non-negative width");
+        let column_count = local_width * local_width;
         Self {
-            blocks: Overlay::default(),
+            blocks: Overlay::with_bounds(local_lo, local_hi, min_y, height),
             sources: std::array::from_fn(|_| None),
             biome_sources: None,
+            flat_biome_sources: None,
+            biome_zoom_seed: None,
             feature_biomes: Arc::new(HashMap::new()),
             interner,
             dirty: WriteLog::default(),
@@ -243,6 +281,10 @@ impl VegGrid {
             local_lo,
             local_hi,
             air_ids,
+            height_cache: std::iter::repeat_with(|| Cell::new([HEIGHT_CACHE_UNSET; 4]))
+                .take(column_count)
+                .collect(),
+            local_width,
             block_entities: Vec::new(),
         }
     }
@@ -354,24 +396,102 @@ impl VegGrid {
         biome_at: impl Fn(i32, i32) -> Option<Arc<BiomeCells>>,
         feature_biomes: Arc<HashMap<String, HashSet<String>>>,
     ) -> Self {
+        Self::with_sources_and_biomes_shared_impl(
+            interner,
+            min_y,
+            height,
+            origin_x,
+            origin_z,
+            local_lo,
+            local_hi,
+            source_at,
+            biome_at,
+            feature_biomes,
+            None,
+        )
+    }
+
+    /// Shared-map Overworld form. Its biome placement modifier resolves the
+    /// candidate through the same seed-derived three-dimensional zoom used by
+    /// the world biome accessor, rather than reading the candidate's containing
+    /// quart directly.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_sources_and_biomes_shared_zoomed(
+        interner: Arc<StateInterner>,
+        min_y: i32,
+        height: i32,
+        origin_x: i32,
+        origin_z: i32,
+        local_lo: i32,
+        local_hi: i32,
+        source_at: impl Fn(i32, i32) -> Option<Arc<DenseBlockGrid>>,
+        biome_at: impl Fn(i32, i32) -> Option<Arc<BiomeCells>>,
+        feature_biomes: Arc<HashMap<String, HashSet<String>>>,
+        biome_zoom_seed: i64,
+    ) -> Self {
+        Self::with_sources_and_biomes_shared_impl(
+            interner,
+            min_y,
+            height,
+            origin_x,
+            origin_z,
+            local_lo,
+            local_hi,
+            source_at,
+            biome_at,
+            feature_biomes,
+            Some(biome_zoom_seed),
+        )
+    }
+
+    /// Shared-map form for a vertically invariant biome source. Candidate
+    /// selection still uses the normal seed-derived nearby-corner zoom; only
+    /// the final quart lookup reads a compact 4x4 typed slice instead of a
+    /// vertically repeated [`BiomeCells`] allocation. The name-taking form is
+    /// a configuration/test adapter; names are parsed before the grid retains
+    /// the source.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_sources_and_flat_biomes_shared_zoomed(
+        interner: Arc<StateInterner>,
+        min_y: i32,
+        height: i32,
+        origin_x: i32,
+        origin_z: i32,
+        local_lo: i32,
+        local_hi: i32,
+        source_at: impl Fn(i32, i32) -> Option<Arc<DenseBlockGrid>>,
+        biome_at: impl Fn(i32, i32) -> Option<Arc<[String; 16]>>,
+        feature_biomes: Arc<HashMap<String, HashSet<String>>>,
+        biome_zoom_seed: i64,
+    ) -> Self {
         let mut grid = Self::with_sources(
             interner, min_y, height, origin_x, origin_z, local_lo, local_hi, source_at,
         );
         let mut biomes = std::array::from_fn(|_| None);
         for dx in -WIDE_RADIUS..=WIDE_RADIUS {
             for dz in -WIDE_RADIUS..=WIDE_RADIUS {
-                let slot = wide_slot_of_offset(dx, dz);
-                biomes[slot] = biome_at(dx, dz);
+                biomes[wide_slot_of_offset(dx, dz)] = biome_at(dx, dz).map(|names| {
+                    Arc::new(std::array::from_fn(|index| {
+                        let biome = BuiltinBiome::parse(&names[index]).unwrap_or_else(|error| {
+                            panic!("flat biome source is not a generated built-in: {error}")
+                        });
+                        BiomeRef::builtin(biome)
+                    }))
+                });
             }
         }
-        grid.biome_sources = Some(biomes);
+        grid.flat_biome_sources = Some(FlatBiomeSources::Ids { cells: biomes });
+        grid.biome_zoom_seed = Some(biome_zoom_seed);
         grid.feature_biomes = feature_biomes;
         grid
     }
 
-    /// Shared-map form for a vertically invariant biome source. The compact
-    /// source representation is accepted at the API seam; source terrain and
-    /// feature admission continue through the established grid path.
+    /// Shared-map form for a vertically invariant biome source whose cells are
+    /// constructor-assigned ids. Keeping ids in the producer's immutable cache
+    /// avoids retaining sixteen owned biome strings per cached Nether column;
+    /// names are resolved only while evaluating the placement membership query.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn with_sources_and_flat_biome_ids_shared_zoomed(
@@ -383,14 +503,53 @@ impl VegGrid {
         local_lo: i32,
         local_hi: i32,
         source_at: impl Fn(i32, i32) -> Option<Arc<DenseBlockGrid>>,
-        _biome_at: impl Fn(i32, i32) -> Option<Arc<[u8; 16]>>,
-        _biome_names: Arc<Vec<String>>,
-        _feature_biomes: Arc<HashMap<String, HashSet<String>>>,
-        _biome_zoom_seed: i64,
+        biome_at: impl Fn(i32, i32) -> Option<Arc<[BiomeRef; 16]>>,
+        feature_biomes: Arc<HashMap<String, HashSet<String>>>,
+        biome_zoom_seed: i64,
     ) -> Self {
-        Self::with_sources(
+        let mut grid = Self::with_sources(
             interner, min_y, height, origin_x, origin_z, local_lo, local_hi, source_at,
-        )
+        );
+        let mut biomes = std::array::from_fn(|_| None);
+        for dx in -WIDE_RADIUS..=WIDE_RADIUS {
+            for dz in -WIDE_RADIUS..=WIDE_RADIUS {
+                biomes[wide_slot_of_offset(dx, dz)] = biome_at(dx, dz);
+            }
+        }
+        grid.flat_biome_sources = Some(FlatBiomeSources::Ids { cells: biomes });
+        grid.biome_zoom_seed = Some(biome_zoom_seed);
+        grid.feature_biomes = feature_biomes;
+        grid
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_sources_and_biomes_shared_impl(
+        interner: Arc<StateInterner>,
+        min_y: i32,
+        height: i32,
+        origin_x: i32,
+        origin_z: i32,
+        local_lo: i32,
+        local_hi: i32,
+        source_at: impl Fn(i32, i32) -> Option<Arc<DenseBlockGrid>>,
+        biome_at: impl Fn(i32, i32) -> Option<Arc<BiomeCells>>,
+        feature_biomes: Arc<HashMap<String, HashSet<String>>>,
+        biome_zoom_seed: Option<i64>,
+    ) -> Self {
+        let mut grid = Self::with_sources(
+            interner, min_y, height, origin_x, origin_z, local_lo, local_hi, source_at,
+        );
+        let mut biomes = std::array::from_fn(|_| None);
+        for dx in -WIDE_RADIUS..=WIDE_RADIUS {
+            for dz in -WIDE_RADIUS..=WIDE_RADIUS {
+                let slot = wide_slot_of_offset(dx, dz);
+                biomes[slot] = biome_at(dx, dz);
+            }
+        }
+        grid.biome_sources = Some(biomes);
+        grid.biome_zoom_seed = biome_zoom_seed;
+        grid.feature_biomes = feature_biomes;
+        grid
     }
 
     /// Whether the biome at this exact candidate location lists `feature_id`.
@@ -406,39 +565,108 @@ impl VegGrid {
         y: i32,
         z: i32,
     ) -> bool {
+        let Some(feature_id) = feature_id else {
+            return self.biome_sources.is_none() && self.flat_biome_sources.is_none();
+        };
         let Some(sources) = &self.biome_sources else {
+            if let Some(flat) = &self.flat_biome_sources {
+                let Some(zoom_seed) = self.biome_zoom_seed else {
+                    return false;
+                };
+                let centre_chunk_x = self.origin_x.div_euclid(16);
+                let centre_chunk_z = self.origin_z.div_euclid(16);
+                let source_at = |source_chunk_x: i32,
+                                 source_chunk_z: i32,
+                                 qx: usize,
+                                 qz: usize|
+                 -> Option<&str> {
+                    let dx = source_chunk_x - centre_chunk_x;
+                    let dz = source_chunk_z - centre_chunk_z;
+                    let slot = wide_source_slot(dx * 16, dz * 16)?;
+                    let cells = match flat {
+                        FlatBiomeSources::Ids { cells } => cells,
+                    };
+                    let cells = cells[slot].as_deref()?;
+                    cells[qz * 4 + qx]
+                        .builtin_or_none()
+                        .map(|biome| biome.name())
+                };
+                let biome = crate::overworld::zoomed_biome_flat(zoom_seed, x, y, z, source_at);
+                return biome.is_some_and(|biome| {
+                    self.feature_biomes
+                        .get(feature_id)
+                        .is_some_and(|biomes| biomes.contains(biome))
+                });
+            }
             return true;
         };
-        let Some(feature_id) = feature_id else {
-            return false;
+        let biome = if let Some(zoom_seed) = self.biome_zoom_seed {
+            let centre_chunk_x = self.origin_x.div_euclid(16);
+            let centre_chunk_z = self.origin_z.div_euclid(16);
+            crate::overworld::zoomed_biome(
+                zoom_seed,
+                x,
+                y,
+                z,
+                |source_chunk_x, source_chunk_z| {
+                    let dx = source_chunk_x - centre_chunk_x;
+                    let dz = source_chunk_z - centre_chunk_z;
+                    wide_source_slot(dx * 16, dz * 16)
+                        .and_then(|slot| sources[slot].as_deref())
+                },
+            )
+        } else {
+            let lx = x - self.origin_x;
+            let lz = z - self.origin_z;
+            let Some(slot) = wide_source_slot(lx, lz) else {
+                return false;
+            };
+            let Some(cells) = sources[slot].as_deref() else {
+                return false;
+            };
+            let qx = lx.rem_euclid(16).div_euclid(4) as usize;
+            let qz = lz.rem_euclid(16).div_euclid(4) as usize;
+            let qy = (y - cells.min_y()).div_euclid(4);
+            if qy < 0 || qy >= cells.y_quarts() as i32 {
+                return false;
+            }
+            Some(cells.at_quart(qx, qy as usize, qz))
         };
-        let lx = x - self.origin_x;
-        let lz = z - self.origin_z;
-        let Some(slot) = wide_source_slot(lx, lz) else {
-            return false;
-        };
-        let Some(cells) = sources[slot].as_deref() else {
-            return false;
-        };
-        let qx = lx.rem_euclid(16).div_euclid(4) as usize;
-        let qz = lz.rem_euclid(16).div_euclid(4) as usize;
-        let qy = (y - cells.min_y()).div_euclid(4);
-        if qy < 0 || qy >= cells.y_quarts() as i32 {
-            return false;
-        }
-        self.feature_biomes
-            .get(feature_id)
-            .is_some_and(|biomes| biomes.contains(cells.at_quart(qx, qy as usize, qz)))
+        let allowed = biome.is_some_and(|biome| {
+            self.feature_biomes
+                .get(feature_id)
+                .is_some_and(|biomes| biomes.contains(biome))
+        });
+        allowed
     }
 
     /// The state one of the 25 source chunks holds at **local** `(lx, y, lz)`,
     /// or [`StateId::AIR`] when no source owns that column (outside
     /// `centre ± `[`WIDE_RADIUS`], a fixture with no sources, or a `None` slot).
     fn source_id(&self, lx: i32, y: i32, lz: i32) -> StateId {
-        match wide_source_slot(lx, lz).and_then(|slot| self.sources[slot].as_deref()) {
-            Some(grid) => grid.get_id(self.origin_x + lx, y, self.origin_z + lz),
-            None => StateId::AIR,
-        }
+        self.source_id_from_grid(self.source_grid(lx, lz), lx, y, lz)
+    }
+
+    /// Resolves the source grid for one horizontal column. Keeping this
+    /// separate from [`Self::source_id`] lets a vertical heightmap scan route
+    /// once and reuse the same source for every Y instead of repeating the
+    /// chunk-band calculation for each cell.
+    #[inline]
+    fn source_grid(&self, lx: i32, lz: i32) -> Option<&DenseBlockGrid> {
+        wide_source_slot(lx, lz).and_then(|slot| self.sources[slot].as_deref())
+    }
+
+    #[inline]
+    fn source_id_from_grid(
+        &self,
+        source: Option<&DenseBlockGrid>,
+        lx: i32,
+        y: i32,
+        lz: i32,
+    ) -> StateId {
+        source.map_or(StateId::AIR, |grid| {
+            grid.get_id(self.origin_x + lx, y, self.origin_z + lz)
+        })
     }
 
     /// This grid's interner, for a caller that needs to resolve or mint ids
@@ -501,7 +729,7 @@ impl VegGrid {
                 self.origin_x + lx,
                 y,
                 self.origin_z + lz,
-                self.blocks.get(&(lx, y, lz)).unwrap_or(StateId::AIR),
+                self.blocks.get_in_bounds(&(lx, y, lz)).unwrap_or(StateId::AIR),
             )
         })
     }
@@ -520,6 +748,37 @@ impl VegGrid {
 
     fn in_bounds_local(&self, lx: i32, lz: i32) -> bool {
         (self.local_lo..self.local_hi).contains(&lx) && (self.local_lo..self.local_hi).contains(&lz)
+    }
+
+    #[inline]
+    fn height_cache_index(&self, lx: i32, lz: i32) -> usize {
+        debug_assert!(self.in_bounds_local(lx, lz));
+        ((lz - self.local_lo) as usize) * self.local_width + (lx - self.local_lo) as usize
+    }
+
+    #[inline]
+    fn invalidate_height_caches(&self, lx: i32, lz: i32) {
+        let index = self.height_cache_index(lx, lz);
+        let mut cache = self.height_cache[index].get();
+        cache[0] = HEIGHT_CACHE_UNSET;
+        cache[2] = HEIGHT_CACHE_UNSET;
+        cache[3] = HEIGHT_CACHE_UNSET;
+        self.height_cache[index].set(cache);
+    }
+
+    #[inline]
+    fn cached_height(&self, lx: i32, lz: i32, lane: usize) -> Option<i32> {
+        let value = self.height_cache[self.height_cache_index(lx, lz)].get()[lane];
+        (value != HEIGHT_CACHE_UNSET).then_some(value)
+    }
+
+    #[inline]
+    fn cache_height(&self, lx: i32, lz: i32, lane: usize, value: i32) {
+        debug_assert_ne!(value, HEIGHT_CACHE_UNSET);
+        let index = self.height_cache_index(lx, lz);
+        let mut cache = self.height_cache[index].get();
+        cache[lane] = value;
+        self.height_cache[index].set(cache);
     }
 
     /// Absolute world `(x, z)` -> local `[local_lo, local_hi)`, **clamped**
@@ -556,7 +815,10 @@ impl VegGrid {
     /// composed grid, by interned id — the zero-allocation seeding path.
     pub fn seed_id(&mut self, x: i32, y: i32, z: i32, state: StateId) {
         let (lx, lz) = self.to_local_exact(x, z);
-        self.blocks.insert((lx, y, lz), state);
+        if self.in_bounds_local(lx, lz) && y >= self.min_y && y < self.min_y + self.height {
+            self.blocks.insert_in_bounds((lx, y, lz), state);
+            self.invalidate_height_caches(lx, lz);
+        }
     }
 
     /// This pass's own write if there is one, else the source chunk that owns the
@@ -570,9 +832,28 @@ impl VegGrid {
         if y < self.min_y || y >= self.min_y + self.height {
             return StateId::AIR;
         }
-        match self.blocks.get(&(lx, y, lz)) {
+        match self.blocks.get_in_bounds(&(lx, y, lz)) {
             Some(id) => id,
             None => self.source_id(lx, y, lz),
+        }
+    }
+
+    /// Typed block facts for one live cell. Source grids already cache these
+    /// facts in their palettes; only a decoration overlay cell needs the
+    /// interner lookup. Keeping this split makes heightmap scans exact without
+    /// putting a lock on every source-terrain cell.
+    #[inline]
+    fn get_local_facts(&self, lx: i32, y: i32, lz: i32) -> BaseStateFacts {
+        if y < self.min_y || y >= self.min_y + self.height {
+            return BaseStateFacts::air();
+        }
+        match self.blocks.get_in_bounds(&(lx, y, lz)) {
+            Some(id) => self.interner.base_facts(id),
+            None => self
+                .source_grid(lx, lz)
+                .map_or_else(BaseStateFacts::air, |source| {
+                    source.get_base_facts(self.origin_x + lx, y, self.origin_z + lz)
+                }),
         }
     }
 
@@ -607,14 +888,6 @@ impl VegGrid {
         self.set_id_if_in_bounds(x, y, z, id)
     }
 
-    /// Borrowed-state form of [`Self::set_if_in_bounds`]. Placement code often
-    /// already has a configured state or a static canonical name; resolving it
-    /// directly avoids allocating a temporary `String` before interning.
-    pub fn set_state_if_in_bounds(&mut self, x: i32, y: i32, z: i32, state: &str) -> bool {
-        let id = self.interner.id_of(state);
-        self.set_id_if_in_bounds(x, y, z, id)
-    }
-
     /// [`Self::set_if_in_bounds`] by interned id — the allocation-free write
     /// path. Identical bounds behaviour, including the census bumps, so which
     /// form a caller uses cannot change a placement outcome.
@@ -622,7 +895,8 @@ impl VegGrid {
         let (lx, lz) = self.to_local_exact(x, z);
         if self.in_bounds_local(lx, lz) && y >= self.min_y && y < self.min_y + self.height {
             census_bump(|c| c.writes += 1);
-            self.blocks.insert((lx, y, lz), state);
+            self.blocks.insert_in_bounds((lx, y, lz), state);
+            self.invalidate_height_caches(lx, lz);
             self.dirty.push((lx, y, lz));
             true
         } else {
@@ -631,33 +905,53 @@ impl VegGrid {
         }
     }
 
-    /// The final world-surface heightmap — topmost non-air, scanned live
-    /// against the current (possibly already-modified-this-step) grid.
-    /// `x`/`z` are absolute world coordinates. Returns `min_y` (not
-    /// `min_y - 1`) for an all-air column, matching vanilla's `y + 1`
-    /// convention with `y` floored at one below the lowest placeable block.
+    /// `Heightmap.Types.WORLD_SURFACE` — topmost non-air, scanned live against
+    /// the current (possibly already-modified-this-step) grid. `x`/`z` are
+    /// absolute world coordinates. Returns `min_y` (not `min_y - 1`) for an
+    /// all-air column, matching the reference `y + 1` convention with `y`
+    /// floored at one below the lowest placeable block.
     #[must_use]
     pub fn height_world_surface(&self, x: i32, z: i32) -> i32 {
         let (lx, lz) = self.to_local_clamped(x, z);
+        if let Some(height) = self.cached_height(lx, lz, 0) {
+            return height;
+        }
+        let source = self.source_grid(lx, lz);
         for y in (self.min_y..self.min_y + self.height).rev() {
-            if !self.is_air_id(self.get_local_id(lx, y, lz)) {
-                return y + 1;
+            let id = match self.blocks.get_in_bounds(&(lx, y, lz)) {
+                Some(id) => id,
+                None => self.source_id_from_grid(source, lx, y, lz),
+            };
+            if !self.is_air_id(id) {
+                let height = y + 1;
+                self.cache_height(lx, lz, 0, height);
+                return height;
             }
         }
+        self.cache_height(lx, lz, 0, self.min_y);
         self.min_y
     }
 
-    /// The generation-time world-surface heightmap — topmost non-air in the
-    /// immutable terrain source, before decoration writes. The generation
-    /// heightmap stays fixed while feature placement updates the final one.
+    /// `Heightmap.Types.WORLD_SURFACE_WG` — topmost non-air in the immutable
+    /// terrain snapshot, before decoration writes. The reference world keeps
+    /// this world-generation heightmap unchanged while FEATURES writes update
+    /// the final heightmaps, so an earlier grass/tree write must not move a
+    /// later `WORLD_SURFACE_WG` probe. `x`/`z` are absolute world coordinates.
     #[must_use]
     pub fn height_world_surface_wg(&self, x: i32, z: i32) -> i32 {
         let (lx, lz) = self.to_local_clamped(x, z);
+        if let Some(height) = self.cached_height(lx, lz, 1) {
+            return height;
+        }
+        let source = self.source_grid(lx, lz);
         for y in (self.min_y..self.min_y + self.height).rev() {
-            if !self.is_air_id(self.source_id(lx, y, lz)) {
-                return y + 1;
+            if !self.is_air_id(self.source_id_from_grid(source, lx, y, lz)) {
+                let height = y + 1;
+                self.cache_height(lx, lz, 1, height);
+                return height;
             }
         }
+        self.cache_height(lx, lz, 1, self.min_y);
         self.min_y
     }
 
@@ -667,16 +961,17 @@ impl VegGrid {
     #[must_use]
     pub fn height_motion_blocking(&self, x: i32, z: i32) -> i32 {
         let (lx, lz) = self.to_local_clamped(x, z);
+        if let Some(height) = self.cached_height(lx, lz, 2) {
+            return height;
+        }
         for y in (self.min_y..self.min_y + self.height).rev() {
-            let id = self.get_local_id(lx, y, lz);
-            if self.is_air_id(id) {
-                continue;
-            }
-            let base = base_id(self.interner.name_of(id));
-            if super::config::blocks_motion(base) || is_fluid(base) {
-                return y + 1;
+            if self.get_local_facts(lx, y, lz).is_motion_blocking() {
+                let height = y + 1;
+                self.cache_height(lx, lz, 2, height);
+                return height;
             }
         }
+        self.cache_height(lx, lz, 2, self.min_y);
         self.min_y
     }
 
@@ -693,10 +988,10 @@ impl VegGrid {
     /// break this, which is why that function's doc says not to.
     ///
     /// A fluid, by contrast, really does carry properties here —
-    /// `crate::carver` writes `minecraft:water[level=0]` — so
-    /// [`Self::height_ocean_floor`] cannot reduce its test to a fixed id set and
-    /// resolves the name for the (few) cells it has already found to be non-air.
-    fn is_air_id(&self, id: StateId) -> bool {
+    /// `crate::carver` writes `minecraft:water[level=0]` — so the heightmap
+    /// scans use the typed facts cached with each source palette entry rather
+    /// than reducing a state to its base-name string.
+    pub(super) fn is_air_id(&self, id: StateId) -> bool {
         self.air_ids.contains(&id)
     }
 
@@ -706,32 +1001,28 @@ impl VegGrid {
     /// It used to be "topmost non-air, non-fluid", which is not the same predicate
     /// and produced stacked, floating seagrass: seagrass is neither air nor fluid, so
     /// an already-placed plant counted as the floor and the next placement on that
-    /// column started on top of it. See
-    /// [`super::config::blocks_motion`] for the whole story, for why the deny-list
-    /// there defaults to "blocks motion" (it makes every unlisted block behave
-    /// exactly as before), and for what stands in for vanilla's per-block flag.
+    /// column started on top of it. The scan consumes the generated per-state
+    /// blocks-motion table through [`BaseStateFacts`]. This matters for feature
+    /// writes such as leaves: their empty collision shape makes them
+    /// non-motion-blocking even though they are non-air, so a tree canopy cannot
+    /// raise the disk's ocean-floor placement height.
     #[must_use]
     pub fn height_ocean_floor(&self, x: i32, z: i32) -> i32 {
         let (lx, lz) = self.to_local_clamped(x, z);
+        if let Some(height) = self.cached_height(lx, lz, 3) {
+            return height;
+        }
         for y in (self.min_y..self.min_y + self.height).rev() {
-            let id = self.get_local_id(lx, y, lz);
-            // The air test first and lock-free, so the ~250 cells of empty sky
-            // above a surface column cost three integer compares each instead of
-            // an interner read guard each. Only a non-air cell — the surface
-            // itself and at most a few fluid cells above it — resolves a name.
-            if self.is_air_id(id) {
-                continue;
-            }
-            // The name is resolved here either way, so testing two predicates on it
-            // instead of one costs nothing: only cells already known to be non-air
-            // reach this line.
-            let base = base_id(self.interner.name_of(id));
-            if !is_fluid(base) && super::config::blocks_motion(base) {
-                return y + 1;
+            if self.get_local_facts(lx, y, lz).is_ocean_floor() {
+                let height = y + 1;
+                self.cache_height(lx, lz, 3, height);
+                return height;
             }
         }
+        self.cache_height(lx, lz, 3, self.min_y);
         self.min_y
     }
+
 }
 
 /// Runs the whole `VEGETAL_DECORATION` step for one chunk against its own
@@ -872,5 +1163,172 @@ pub mod census {
 
     pub(in crate::feature::vegetation) fn bump(f: impl FnOnce(&mut VegCensus)) {
         CENSUS.with(|c| f(&mut c.borrow_mut()));
+    }
+}
+
+#[cfg(test)]
+mod heightmap_tests {
+    use std::sync::Arc;
+
+    use super::VegGrid;
+    use crate::dense_grid::DenseBlockGrid;
+    use crate::interner::StateInterner;
+
+    /// The P07 witness is on the east edge of source `(-26,-25)`: the source
+    /// writes its first grass at `(-401,122,-387)` before the later candidate
+    /// reaches `(-400,121,-385)` in target `(-25,-25)`. Keep the two columns
+    /// distinct here so a live-overlay regression cannot masquerade as a
+    /// source-terrain read.
+    fn p07_source_grid() -> (VegGrid, u16, u16, u16) {
+        let interner = Arc::new(StateInterner::new());
+        let air = interner.id_of("minecraft:air");
+        let grass = interner.id_of("minecraft:grass_block");
+        let short_grass = interner.id_of("minecraft:short_grass");
+
+        let mut west = DenseBlockGrid::with_interner(
+            Arc::clone(&interner), -416, 0, -400, 16, 128, 16, air,
+        );
+        west.set_id(-401, 121, -387, grass);
+
+        let mut centre = DenseBlockGrid::with_interner(
+            Arc::clone(&interner), -400, 0, -400, 16, 128, 16, air,
+        );
+        centre.set_id(-400, 120, -385, grass);
+
+        let west = Arc::new(west);
+        let centre = Arc::new(centre);
+        let grid = VegGrid::with_sources(
+            Arc::clone(&interner),
+            0,
+            128,
+            -400,
+            -400,
+            -16,
+            32,
+            move |dx, dz| {
+                if (dx, dz) == (-1, 0) {
+                    Some(Arc::clone(&west))
+                } else {
+                    Some(Arc::clone(&centre))
+                }
+            },
+        );
+        (grid, air.raw(), grass.raw(), short_grass.raw())
+    }
+
+    #[test]
+    fn p07_west_source_world_surface_wg_ignores_its_first_grass_write() {
+        let (mut grid, air, grass, short_grass) = p07_source_grid();
+        let source_probe: (i32, i32) = (-401, -387);
+        let witness: (i32, i32, i32) = (-400, 121, -385);
+
+        assert_eq!(source_probe.0.div_euclid(16), -26);
+        assert_eq!(source_probe.1.div_euclid(16), -25);
+        assert_eq!((witness.0.div_euclid(16), witness.2.div_euclid(16)), (-25, -25));
+        assert_eq!(grid.get_id(witness.0, witness.1, witness.2).raw(), air);
+        assert_eq!(grid.get_id(witness.0, 120, witness.2).raw(), grass);
+        assert_eq!(grid.height_world_surface_wg(witness.0, witness.2), 121);
+        assert_eq!(grid.height_world_surface(witness.0, witness.2), 121);
+        assert_eq!(grid.height_world_surface_wg(source_probe.0, source_probe.1), 122);
+
+        assert!(grid.set_id_if_in_bounds(-401, 122, -387, grid.interner().id_of("minecraft:short_grass")));
+
+        assert_eq!(
+            grid.height_world_surface_wg(source_probe.0, source_probe.1),
+            122,
+            "P07 source (-26,-25)'s immutable WG height must ignore its first grass write"
+        );
+        assert_eq!(
+            grid.height_world_surface(source_probe.0, source_probe.1),
+            123,
+            "the live final surface must see that same write"
+        );
+        assert_eq!(grid.get_id(witness.0, witness.1, witness.2).raw(), air);
+        assert_eq!(grid.height_world_surface_wg(witness.0, witness.2), 121);
+        assert_eq!(grid.height_world_surface(witness.0, witness.2), 121);
+        assert_eq!(short_grass, grid.interner().id_of("minecraft:short_grass").raw());
+    }
+
+    #[test]
+    fn world_surface_heightmap_control_sees_overlay_writes() {
+        let (mut grid, _air, _grass, short_grass) = p07_source_grid();
+        let source_probe: (i32, i32) = (-401, -387);
+        assert_eq!(grid.height_world_surface(source_probe.0, source_probe.1), 122);
+        grid.set_id_if_in_bounds(
+            source_probe.0,
+            122,
+            source_probe.1,
+            grid.interner().id_of("minecraft:short_grass"),
+        );
+        assert_eq!(grid.height_world_surface(source_probe.0, source_probe.1), 123);
+        assert_eq!(grid.get_id(-401, 122, -387).raw(), short_grass);
+    }
+
+    #[test]
+    fn all_heightmap_caches_invalidate_after_overlay_writes() {
+        let mut grid = VegGrid::with_footprint(0, 16, 0, 0, 0, 1);
+        let air = grid.interner().id_of("minecraft:air");
+        let grass = grid.interner().id_of("minecraft:grass_block");
+        let water = grid.interner().id_of("minecraft:water[level=0]");
+        let short_grass = grid.interner().id_of("minecraft:short_grass");
+
+        // Prime all four caches with an all-air answer before any writes.
+        assert_eq!(grid.height_world_surface(0, 0), 0);
+        assert_eq!(grid.height_world_surface_wg(0, 0), 0);
+        assert_eq!(grid.height_motion_blocking(0, 0), 0);
+        assert_eq!(grid.height_ocean_floor(0, 0), 0);
+
+        assert!(grid.set_id_if_in_bounds(0, 1, 0, grass));
+        assert_eq!(grid.height_world_surface(0, 0), 2);
+        assert_eq!(grid.height_world_surface_wg(0, 0), 0);
+        assert_eq!(grid.height_motion_blocking(0, 0), 2);
+        assert_eq!(grid.height_ocean_floor(0, 0), 2);
+
+        // Fluids count for motion blocking but not for the ocean-floor
+        // heightmap, and the cached results must observe that new state.
+        assert!(grid.set_id_if_in_bounds(0, 3, 0, water));
+        assert_eq!(grid.height_world_surface(0, 0), 4);
+        assert_eq!(grid.height_motion_blocking(0, 0), 4);
+        assert_eq!(grid.height_ocean_floor(0, 0), 2);
+
+        // A plant is part of WORLD_SURFACE but does not raise the two
+        // motion-based heightmaps.
+        assert!(grid.set_id_if_in_bounds(0, 5, 0, short_grass));
+        assert_eq!(grid.height_world_surface(0, 0), 6);
+        assert_eq!(grid.height_motion_blocking(0, 0), 4);
+        assert_eq!(grid.height_ocean_floor(0, 0), 2);
+
+        // Replacing the highest writes with air must invalidate the same
+        // column too; otherwise a stale top would survive an edit.
+        assert!(grid.set_id_if_in_bounds(0, 5, 0, air));
+        assert_eq!(grid.height_world_surface(0, 0), 4);
+        assert!(grid.set_id_if_in_bounds(0, 3, 0, air));
+        assert_eq!(grid.height_motion_blocking(0, 0), 2);
+        assert_eq!(grid.height_ocean_floor(0, 0), 2);
+    }
+
+    #[test]
+    fn ocean_floor_ignores_leaves_but_mutation_to_stone_raises_it() {
+        let mut grid = VegGrid::with_footprint(0, 80, 0, 0, 0, 1);
+        let dirt = grid.interner().id_of("minecraft:dirt");
+        let water = grid.interner().id_of("minecraft:water[level=0]");
+        let leaves = grid
+            .interner()
+            .id_of("minecraft:dark_oak_leaves[distance=3,persistent=false,waterlogged=false]");
+        let stone = grid.interner().id_of("minecraft:stone");
+        assert!(grid.set_id_if_in_bounds(0, 60, 0, dirt));
+        assert!(grid.set_id_if_in_bounds(0, 61, 0, water));
+        assert!(grid.set_id_if_in_bounds(0, 62, 0, water));
+        assert!(grid.set_id_if_in_bounds(0, 67, 0, leaves));
+        assert!(grid.set_id_if_in_bounds(0, 68, 0, leaves));
+
+        assert_eq!(grid.height_ocean_floor(0, 0), 61);
+        assert_eq!(grid.height_motion_blocking(0, 0), 63);
+
+        // Mutation control: replacing the canopy's highest cell with a solid
+        // block must raise both motion-based heightmaps to that cell.
+        assert!(grid.set_id_if_in_bounds(0, 68, 0, stone));
+        assert_eq!(grid.height_ocean_floor(0, 0), 69);
+        assert_eq!(grid.height_motion_blocking(0, 0), 69);
     }
 }

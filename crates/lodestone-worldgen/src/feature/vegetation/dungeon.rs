@@ -6,12 +6,13 @@
 //! geometry, draw order and block-entity hand-off together so a caller cannot
 //! accidentally add the blocks without the corresponding metadata.
 
+use lodestone_data::entity_type::{EntityType, EntityTypeRef};
+
 use crate::feature::{BlockPos, vegetation::config::is_air};
 use crate::rng::RandomSource;
 
 use super::{base_id, ConfiguredFeature, VegGrid, VegTags};
 use crate::interner::StateId;
-use super::ids::Tag;
 
 const DUNGEON_LOOT_TABLE: &str = "minecraft:chests/simple_dungeon";
 const CAVE_AIR: &str = "minecraft:cave_air";
@@ -158,16 +159,16 @@ pub(super) fn place_monster_room<R: RandomSource>(
     let spawner_pos = origin;
     if safe_set(grid, tags, spawner_pos, SPAWNER) {
         let entity_type = match random.next_int_bounded(4) {
-            0 => "minecraft:skeleton",
-            1 | 2 => "minecraft:zombie",
-            _ => "minecraft:spider",
+            0 => EntityType::Skeleton,
+            1 | 2 => EntityType::Zombie,
+            _ => EntityType::Spider,
         };
         grid.push_block_entity(
             crate::overworld::block_entities::GeneratedBlockEntity::DungeonSpawner {
                 x: spawner_pos.x,
                 y: spawner_pos.y,
                 z: spawner_pos.z,
-                entity_type: entity_type.to_owned(),
+                entity_type: EntityTypeRef::from(entity_type),
             },
         );
     }
@@ -207,7 +208,8 @@ fn set_unchecked(grid: &mut VegGrid, pos: BlockPos, state: &str) {
 }
 
 fn safe_set_id(grid: &mut VegGrid, tags: &VegTags, pos: BlockPos, state: StateId) -> bool {
-    if tags.has(grid.interner(), Tag::FeaturesCannotReplace, grid.get_id(pos.x, pos.y, pos.z)) {
+    let current = base_at(grid, pos);
+    if tags.features_cannot_replace.contains(current) {
         return false;
     }
     grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state)
@@ -325,7 +327,7 @@ fn clockwise(facing: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{BTreeMap, HashMap, HashSet};
 
     use super::*;
     use crate::density::{NoiseParams, Resolver};
@@ -377,6 +379,139 @@ mod tests {
             HashMap::from([(NON_SOLID_STATE.to_owned(), false)]),
         );
         tags
+    }
+
+    fn external_value(prefix: &str) -> String {
+        include_str!("../../../tests/support/monster_room_feature_external.txt")
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix).map(str::trim_start).map(str::to_owned))
+            .unwrap_or_else(|| panic!("external monster-room fixture is missing {prefix:?}"))
+    }
+
+    fn fixture_grid(opening: bool) -> VegGrid {
+        let mut grid = VegGrid::new(0, 128, -8, -8);
+        for x in -8..=8 {
+            for y in 0..128 {
+                for z in -8..=8 {
+                    grid.seed(x, y, z, "minecraft:stone".to_owned());
+                }
+            }
+        }
+        if opening {
+            grid.seed(-4, 64, 0, "minecraft:cave_air".to_owned());
+            grid.seed(-4, 65, 0, "minecraft:cave_air".to_owned());
+        }
+        grid
+    }
+
+    fn fixture_digest(cells: &BTreeMap<String, String>) -> u64 {
+        let mut hash = 1_469_598_103_934_665_603u64;
+        for (position, state) in cells {
+            for byte in format!("{position} {state}\n").bytes() {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+        }
+        hash
+    }
+
+    fn final_cells(grid: &VegGrid) -> BTreeMap<String, String> {
+        grid.dirty_cells()
+            .map(|(x, y, z, state)| (format!("{x},{y},{z}"), state.to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn compiled_runtime_fixture_matches_room_geometry_and_entities() {
+        let tags = solid_tags();
+        let mut grid = fixture_grid(true);
+        let mut random = LegacyRandomSource::new(19);
+        place_monster_room(
+            &mut random,
+            BlockPos { x: 0, y: 64, z: 0 },
+            &ConfiguredFeature::MonsterRoom,
+            &mut grid,
+            &tags,
+        );
+
+        let cells = final_cells(&grid);
+        assert_eq!(external_value("positive.result"), "true");
+        assert_eq!(cells.len().to_string(), external_value("positive.writes"));
+        assert_eq!(format!("{:x}", fixture_digest(&cells)), external_value("positive.digest"));
+        for (state, expected_count) in [
+            ("minecraft:cave_air", "139"),
+            ("minecraft:chest[facing=north,type=single,waterlogged=false]", "1"),
+            ("minecraft:chest[facing=west,type=single,waterlogged=false]", "1"),
+            ("minecraft:cobblestone", "122"),
+            ("minecraft:mossy_cobblestone", "50"),
+            ("minecraft:spawner", "1"),
+        ] {
+            let actual = cells.values().filter(|actual| actual.as_str() == state).count();
+            assert_eq!(actual.to_string(), external_value(&format!("positive.count {state}")));
+            assert_eq!(actual.to_string(), expected_count);
+        }
+        for (position, state) in [
+            ("0,64,0", "minecraft:spawner"),
+            ("0,64,2", "minecraft:chest[facing=north,type=single,waterlogged=false]"),
+            ("3,64,1", "minecraft:chest[facing=west,type=single,waterlogged=false]"),
+            ("-4,65,0", "minecraft:cave_air"),
+        ] {
+            assert_eq!(cells.get(position).map(String::as_str), Some(state));
+            assert_eq!(external_value(&format!("positive.cell {position}")), state);
+        }
+
+        let entities = grid.take_block_entities();
+        let mut chest_count = 0;
+        let mut spawner_count = 0;
+        for entity in entities {
+            match entity {
+                crate::overworld::block_entities::GeneratedBlockEntity::DungeonChest {
+                    x,
+                    y,
+                    z,
+                    facing,
+                    loot_table,
+                    loot_table_seed,
+                } => {
+                    chest_count += 1;
+                    let prefix = format!("positive.entity.chest {x},{y},{z} {facing}");
+                    let expected = external_value(&prefix);
+                    let expected_seed = expected
+                        .rsplit_once(' ')
+                        .expect("external chest row includes a loot seed")
+                        .1
+                        .parse::<i64>()
+                        .expect("external chest loot seed");
+                    assert_eq!(loot_table, "minecraft:chests/simple_dungeon");
+                    assert_eq!(loot_table_seed, expected_seed);
+                    assert!(expected.contains("ResourceKey[minecraft:loot_table / minecraft:chests/simple_dungeon]"));
+                }
+                crate::overworld::block_entities::GeneratedBlockEntity::DungeonSpawner { x, y, z, .. } => {
+                    spawner_count += 1;
+                    assert_eq!(external_value(&format!("positive.entity.spawner {x},{y},{z}")), "");
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(chest_count, 2);
+        assert_eq!(spawner_count, 1);
+    }
+
+    #[test]
+    fn sealed_external_control_rejects_room_before_any_write() {
+        let tags = solid_tags();
+        let mut grid = fixture_grid(false);
+        let mut random = LegacyRandomSource::new(19);
+        place_monster_room(
+            &mut random,
+            BlockPos { x: 0, y: 64, z: 0 },
+            &ConfiguredFeature::MonsterRoom,
+            &mut grid,
+            &tags,
+        );
+        assert_eq!(grid.dirty_len(), 0);
+        assert!(grid.take_block_entities().is_empty());
+        assert_eq!(external_value("control.sealed result=false writes="), "0");
     }
 
     #[test]

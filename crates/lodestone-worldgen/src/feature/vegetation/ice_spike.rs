@@ -36,247 +36,62 @@
 //! feature stream, and [`VegGrid`] provides live heightmap reads plus the
 //! bounded write surface used by every decoration body.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::Value;
 
 use crate::density::Resolver;
 use crate::feature::BlockPos;
 use crate::rng::RandomSource;
-use lodestone_data::block_states::StateId as CanonicalStateId;
 
 use super::base_id;
-use super::config::is_air;
+use super::config::{canon_state, is_air, parse_id_list, resolve_block_set};
 use super::grid::VegGrid;
-
-/// A validated registry key from a configured-feature document.
-///
-/// The resolver still owns registry lookup, but this boundary does not carry
-/// arbitrary strings: a key has exactly one namespace and path. Tags are a
-/// separate field in the schema and never hide behind a leading `#` here.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-struct ResourceKey(String);
-
-impl ResourceKey {
-    fn parse(value: String) -> Result<Self, String> {
-        let Some((namespace, path)) = value.split_once(':') else {
-            return Err(format!("resource key {value:?} is missing its namespace"));
-        };
-        if namespace.is_empty()
-            || path.is_empty()
-            || namespace
-                .chars()
-                .any(|character| !matches!(character, 'a'..='z' | '0'..='9' | '_' | '.' | '-'))
-            || path
-                .chars()
-                .any(|character| !matches!(character, 'a'..='z' | '0'..='9' | '_' | '.' | '-' | '/'))
-        {
-            return Err(format!("resource key {value:?} is not namespaced lowercase id"));
-        }
-        Ok(Self(value))
-    }
-
-    fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl<'de> Deserialize<'de> for ResourceKey {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Self::parse(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
-    }
-}
-
-impl Serialize for ResourceKey {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-/// A property key/value pair from a block-state object.
-///
-/// Property names are versioned registry data, so the key set intentionally
-/// stays open. The values are still strings, never arbitrary JSON values.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct PropertyKey(String);
-
-impl<'de> Deserialize<'de> for PropertyKey {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        if value.is_empty()
-            || value
-                .chars()
-                .any(|character| !matches!(character, 'a'..='z' | '0'..='9' | '_' | '-'))
-        {
-            return Err(serde::de::Error::custom(format!(
-                "invalid block-state property name {value:?}"
-            )));
-        }
-        Ok(Self(value))
-    }
-}
-
-impl Serialize for PropertyKey {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct PropertyValue(String);
-
-impl<'de> Deserialize<'de> for PropertyValue {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        if value.is_empty() || value.chars().any(char::is_whitespace) {
-            return Err(serde::de::Error::custom(format!(
-                "invalid block-state property value {value:?}"
-            )));
-        }
-        Ok(Self(value))
-    }
-}
-
-impl Serialize for PropertyValue {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BlockStateDocument {
-    #[serde(rename = "Name")]
-    name: ResourceKey,
-    #[serde(rename = "Properties", default)]
-    properties: BTreeMap<PropertyKey, PropertyValue>,
-}
-
-impl BlockStateDocument {
-    fn into_state_id(self) -> Option<CanonicalStateId> {
-        let mut canonical = self.name.0;
-        if !self.properties.is_empty() {
-            canonical.push('[');
-            for (index, (key, value)) in self.properties.into_iter().enumerate() {
-                if index != 0 {
-                    canonical.push(',');
-                }
-                canonical.push_str(&key.0);
-                canonical.push('=');
-                canonical.push_str(&value.0);
-            }
-            canonical.push(']');
-        }
-        CanonicalStateId::from_state_str(&canonical)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
-enum OneOrMany<T> {
-    One(T),
-    Many(Vec<T>),
-}
-
-impl<T> OneOrMany<T> {
-    fn into_vec(self) -> Vec<T> {
-        match self {
-            Self::One(value) => vec![value],
-            Self::Many(values) => values,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", deny_unknown_fields)]
-enum MatchingBlocksDocument {
-    #[serde(rename = "minecraft:matching_blocks", alias = "matching_blocks")]
-    MatchingBlocks { blocks: OneOrMany<ResourceKey> },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", deny_unknown_fields)]
-enum MatchingBlockTagDocument {
-    #[serde(rename = "minecraft:matching_block_tag", alias = "matching_block_tag")]
-    MatchingBlockTag { tag: ResourceKey },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct IceSpikeConfigDocument {
-    can_place_on: MatchingBlocksDocument,
-    can_replace: MatchingBlockTagDocument,
-    state: BlockStateDocument,
-}
 
 /// Parsed support, replacement, and output state for one packed-ice spike.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IceSpikeCfg {
-    pub(super) state: CanonicalStateId,
+    pub(super) state: String,
     pub(super) can_place_on: HashSet<String>,
     pub(super) can_replace: HashSet<String>,
 }
 
 impl IceSpikeCfg {
     /// Parses the predicate forms used by the bundled spike record.
-    ///
-    /// The generic serialization adapter keeps the shared resolver's JSON
-    /// boundary out of this closed schema module. `parse_configured_feature_doc`
-    /// still hands us its ordinary JSON value, while this function immediately
-    /// decodes only the fields this feature owns.
-    pub(super) fn try_parse<S>(resolver: &dyn Resolver, config: &S) -> Option<Self>
-    where
-        S: serde::Serialize + ?Sized,
-    {
-        let config = serde_json::to_value(config).ok()?;
-        let config = serde_json::from_value::<IceSpikeConfigDocument>(config).ok()?;
-        let can_place_on: HashSet<String> = match config.can_place_on {
-            MatchingBlocksDocument::MatchingBlocks { blocks } => blocks
-                .into_vec()
-                .into_iter()
-                .map(|state| base_id(state.as_str()).to_owned())
-                .collect(),
-        };
+    pub(super) fn try_parse(resolver: &dyn Resolver, config: &Value) -> Option<Self> {
+        let can_place_on = config.get("can_place_on")?;
+        let support_type = can_place_on.get("type")?.as_str()?;
+        if support_type.strip_prefix("minecraft:").unwrap_or(support_type) != "matching_blocks" {
+            return None;
+        }
+        let can_place_on: HashSet<String> = parse_id_list(can_place_on.get("blocks")?)
+            .into_iter()
+            .map(|state| base_id(&state).to_owned())
+            .collect();
         if can_place_on.is_empty() {
             return None;
         }
 
-        let tag = match config.can_replace {
-            MatchingBlockTagDocument::MatchingBlockTag { tag } => tag,
-        };
-        let mut can_replace = HashSet::new();
-        crate::compose::resolve_block_tag(
-            resolver,
-            tag.as_str(),
-            &mut can_replace,
-            &mut HashSet::new(),
-        );
+        let can_replace = config.get("can_replace")?;
+        let replacement_type = can_replace.get("type")?.as_str()?;
+        if replacement_type
+            .strip_prefix("minecraft:")
+            .unwrap_or(replacement_type)
+            != "matching_block_tag"
+        {
+            return None;
+        }
+        let tag = can_replace.get("tag")?.as_str()?;
+        let can_replace = resolve_block_set(resolver, &Value::String(format!("#{tag}")))?;
         if can_replace.is_empty() {
             return None;
         }
 
-        let state = config.state.into_state_id()?;
+        let state = config.get("state")?;
+        state.get("Name").and_then(Value::as_str)?;
 
         Some(Self {
-            state,
+            state: canon_state(state),
             can_place_on,
             can_replace,
         })
@@ -313,7 +128,7 @@ pub(super) fn place_ice_spike<R: RandomSource>(
         origin.y += 10 + random.next_int_bounded(30);
     }
 
-    let state_id = grid.interner().id_of_canonical(config.state);
+    let state_id = grid.interner().id_of(&config.state);
     for y_offset in 0..height {
         let scale = (1.0_f32 - y_offset as f32 / height as f32) * width as f32;
         let new_width = scale.ceil() as i32;
@@ -363,12 +178,12 @@ pub(super) fn place_ice_spike<R: RandomSource>(
                 run_length = random.next_int_bounded(5);
             }
             while y > 50 {
-                let current = grid.get_id(origin.x + x_offset, y, origin.z + z_offset);
+                let current = grid.get(origin.x + x_offset, y, origin.z + z_offset);
                 if !can_replace_at(grid, config, BlockPos {
                     x: origin.x + x_offset,
                     y,
                     z: origin.z + z_offset,
-                }) && grid.interner().canonical_id(current) != Some(config.state)
+                }) && current != config.state
                 {
                     break;
                 }
@@ -399,9 +214,14 @@ fn can_replace_at(grid: &VegGrid, config: &IceSpikeCfg, pos: BlockPos) -> bool {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
 
     use super::*;
-    use crate::feature::vegetation::{place_configured_feature, ConfiguredFeature, VegTags};
+    use crate::compose::build_decoration_catalog;
+    use crate::density::NoiseParams;
+    use crate::feature::vegetation::{
+        place_configured_feature, ConfiguredFeature, VegTags,
+    };
     use crate::rng::XoroshiroPositionalFactory;
 
     const EXTERNAL: &str = include_str!("../../../tests/support/ice_spike_feature_external.txt");
@@ -445,8 +265,7 @@ mod tests {
 
     fn cfg() -> IceSpikeCfg {
         IceSpikeCfg {
-            state: CanonicalStateId::from_state_str("minecraft:packed_ice")
-                .expect("packed ice is a generated block state"),
+            state: "minecraft:packed_ice".to_owned(),
             can_place_on: HashSet::from(["minecraft:snow_block".to_owned()]),
             can_replace: HashSet::from([
                 "minecraft:snow_block".to_owned(),
@@ -595,75 +414,75 @@ mod tests {
         }
     }
 
-    #[test]
-    fn typed_config_accepts_the_external_shape_and_roundtrips() {
-        let input = r##"{
-            "can_place_on": {
-                "type": "minecraft:matching_blocks",
-                "blocks": ["minecraft:snow_block", "minecraft:ice"]
-            },
-            "can_replace": {
-                "type": "minecraft:matching_block_tag",
-                "tag": "minecraft:ice_spike_replaceable"
-            },
-            "state": {
-                "Name": "minecraft:oak_log",
-                "Properties": {"axis": "y"}
-            }
-        }"##;
-        let parsed: IceSpikeConfigDocument =
-            serde_json::from_str(input).expect("ice-spike schema fixture must parse");
-        let encoded = serde_json::to_string(&parsed).expect("typed config must serialize");
-        let decoded: IceSpikeConfigDocument =
-            serde_json::from_str(&encoded).expect("serialized typed config must parse");
-        assert_eq!(decoded, parsed);
-        assert_eq!(
-            parsed.state.into_state_id().unwrap().canonical_state(),
-            "minecraft:oak_log[axis=y]"
-        );
+    struct AssetResolver {
+        root: PathBuf,
+    }
+
+    impl AssetResolver {
+        fn json(&self, kind: &str, id: &str) -> Value {
+            let name = id.strip_prefix("minecraft:").unwrap_or(id);
+            let path = self
+                .root
+                .join("worldgen")
+                .join(kind)
+                .join(format!("{name}.json"));
+            serde_json::from_str(
+                &std::fs::read_to_string(&path)
+                    .unwrap_or_else(|error| panic!("reading {}: {error}", path.display())),
+            )
+            .unwrap_or_else(|error| panic!("parsing {}: {error}", path.display()))
+        }
+    }
+
+    impl Resolver for AssetResolver {
+        fn density_function(&self, _id: &str) -> Value {
+            Value::Null
+        }
+
+        fn noise(&self, _id: &str) -> NoiseParams {
+            unreachable!("the spike configuration does not use noise")
+        }
+
+        fn block_tag(&self, id: &str) -> Value {
+            self.json("tags/block", id)
+        }
+
+        fn biome_document(&self, id: &str) -> Value {
+            self.json("biome", id)
+        }
+
+        fn configured_feature(&self, id: &str) -> Value {
+            self.json("configured_feature", id)
+        }
+
+        fn placed_feature(&self, id: &str) -> Value {
+            self.json("placed_feature", id)
+        }
     }
 
     #[test]
-    fn typed_config_rejects_unknown_fields_and_unvalidated_ids() {
-        let error = serde_json::from_str::<IceSpikeConfigDocument>(
-            r##"{
-                "can_place_on": {"type":"minecraft:matching_blocks", "blocks":"minecraft:snow_block"},
-                "can_replace": {"type":"minecraft:matching_block_tag", "tag":"minecraft:ice_spike_replaceable"},
-                "state": {"Name":"minecraft:packed_ice", "mystery":true}
-            }"##,
-        )
-        .expect_err("block-state unknown fields must be rejected");
-        assert!(error.to_string().contains("unknown field"), "{error}");
+    fn bundled_config_and_catalog_reach_ice_spike() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../lodestone-server/assets");
+        let resolver = AssetResolver { root };
+        let document = resolver.json("configured_feature", "minecraft:ice_spike");
+        let parsed = super::super::config::parse_configured_feature_doc(&resolver, &document);
+        let ConfiguredFeature::IceSpike(config) = parsed else {
+            panic!("ice_spike must parse as the dedicated feature body");
+        };
+        assert_eq!(config.state, "minecraft:packed_ice");
+        assert!(config.can_place_on.contains("minecraft:snow_block"));
+        assert!(config.can_replace.contains("minecraft:dirt"));
+        assert!(config.can_replace.contains("minecraft:ice"));
 
-        let error = serde_json::from_str::<IceSpikeConfigDocument>(
-            r##"{
-                "can_place_on": {"type":"minecraft:matching_blocks", "blocks":["Snow_Block"]},
-                "can_replace": {"type":"minecraft:matching_block_tag", "tag":"minecraft:ice_spike_replaceable"},
-                "state": {"Name":"minecraft:packed_ice"}
-            }"##,
-        )
-        .expect_err("resource keys must retain lowercase namespaced identity");
-        let _ = error;
-
-        let error = serde_json::from_str::<IceSpikeConfigDocument>(
-            r##"{
-                "can_place_on": {"type":"minecraft:future_predicate", "blocks":"minecraft:snow_block"},
-                "can_replace": {"type":"minecraft:matching_block_tag", "tag":"minecraft:ice_spike_replaceable"},
-                "state": {"Name":"minecraft:packed_ice"}
-            }"##,
-        )
-        .expect_err("unknown predicate discriminators must be rejected");
-        assert!(error.to_string().contains("unknown variant"), "{error}");
-
-        let error = serde_json::from_str::<IceSpikeConfigDocument>(
-            r##"{
-                "can_place_on": {"type":"minecraft:matching_blocks", "blocks":"minecraft:snow_block"},
-                "can_replace": {"type":"minecraft:matching_block_tag", "tag":"minecraft:ice_spike_replaceable"},
-                "state": {"Name":"minecraft:packed_ice", "Properties":{"axis":true}}
-            }"##,
-        )
-        .expect_err("state property values must remain strings");
-        assert!(error.to_string().contains("string"), "{error}");
+        let catalog = build_decoration_catalog(&resolver, &["minecraft:ice_spikes".to_owned()]);
+        let selected = catalog
+            .select(["minecraft:ice_spikes"])
+            .into_iter()
+            .find(|(_, _, placed)| placed.registry_id.as_deref() == Some("minecraft:ice_spike"))
+            .expect("ice_spikes must select its placed feature");
+        assert!(matches!(
+            selected.2.feature.as_ref(),
+            ConfiguredFeature::IceSpike(_)
+        ));
     }
-
 }

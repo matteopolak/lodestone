@@ -41,11 +41,16 @@
 //! added without an arm parses to `Unsupported` and is silently never reached.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::feature::{BlockPos, IntProvider};
 use crate::interner::StateId;
 use crate::rng::RandomSource;
+use lodestone_data::block_states::StateId as CanonicalStateId;
+use lodestone_data::block_survival;
+use lodestone_data::collision_shapes;
 use lodestone_data::face_occlusion::{self, Face};
+use lodestone_worldgen_core::hash::FastSet;
 
 use super::config::{
     BlockPredicate, BlockStateProvider, Decorator, PlacedRef, VegTags, blocks_motion, is_air, is_fluid,
@@ -54,6 +59,80 @@ use super::grid::VegGrid;
 use super::ids::{Rewrite, Tag, tag_at};
 use super::place::{place_attached_to_logs_decorator, place_trunk_vine_decorator};
 use super::tree::valid_tree_pos;
+
+/// A membership index paired with an explicit insertion log. Only vegetation
+/// patches need this: their successful cells are traversed while consuming the
+/// feature's random stream, so a set's native hash-table iteration is not an
+/// acceptable ordering contract. `members` answers duplicate checks in
+/// expected O(1); `entries` is the only production traversal path.
+#[derive(Debug, Default)]
+struct CompatBlockPosSet {
+    members: FastSet<BlockPos>,
+    /// Successful insertions in encounter order. Feature placement consumes
+    /// random draws while iterating the set, so bucket order is an
+    /// implementation detail and cannot determine the observable sequence.
+    entries: Vec<BlockPos>,
+}
+
+impl CompatBlockPosSet {
+    fn insert(&mut self, pos: BlockPos) -> bool {
+        if !self.members.insert(pos) {
+            return false;
+        }
+        self.entries.push(pos);
+        true
+    }
+
+    #[cfg(test)]
+    fn hash(pos: BlockPos) -> i32 {
+        pos.y
+            .wrapping_add(pos.z.wrapping_mul(31))
+            .wrapping_mul(31)
+            .wrapping_add(pos.x)
+    }
+
+    #[cfg(test)]
+    fn spread(hash: i32) -> u32 {
+        let hash = hash as u32;
+        hash ^ (hash >> 16)
+    }
+
+    #[cfg(test)]
+    fn bucket(hash: u32, capacity: usize) -> usize { hash as usize & (capacity - 1) }
+
+    #[cfg(test)]
+    fn bucket_capacity(&self) -> usize {
+        let mut capacity = 16;
+        while self.entries.len() > capacity * 3 / 4 {
+            capacity *= 2;
+        }
+        capacity
+    }
+
+    fn order(&self) -> Vec<BlockPos> {
+        self.entries.clone()
+    }
+
+    /// Reconstruct the bucket traversal that would be the wrong production
+    /// order. This is test-only negative-control evidence: it must differ from
+    /// the insertion log for a collision-heavy input.
+    #[cfg(test)]
+    fn bucket_order(&self) -> Vec<BlockPos> {
+        let capacity = self.bucket_capacity();
+        let mut buckets = vec![Vec::new(); capacity];
+        for &pos in &self.entries {
+            buckets[Self::bucket(Self::spread(Self::hash(pos)), capacity)].push(pos);
+        }
+        buckets.into_iter().flatten().collect()
+    }
+}
+
+impl IntoIterator for CompatBlockPosSet {
+    type Item = BlockPos;
+    type IntoIter = std::vec::IntoIter<BlockPos>;
+
+    fn into_iter(self) -> Self::IntoIter { self.entries.into_iter() }
+}
 
 /// `level.getSeaLevel()` for the overworld. Only [`place_blue_ice`] reads it.
 pub const SEA_LEVEL: i32 = 63;
@@ -77,6 +156,31 @@ fn air_at(grid: &VegGrid, x: i32, y: i32, z: i32) -> bool {
 fn sturdy_at(grid: &VegGrid, x: i32, y: i32, z: i32) -> bool {
     let base = base_at(grid, x, y, z);
     !is_air(base) && !is_fluid(base) && blocks_motion(base)
+}
+
+/// Whether the support cell presents the face required by a vegetation patch.
+///
+/// The patch body asks for full upward support on a floor and center support
+/// on the downward face of a ceiling. Those are distinct state predicates;
+/// the broader motion-blocking approximation used by [`sturdy_at`] accepts
+/// blocks whose collision occupies a cell without providing either face.
+/// Unknown fixture or extension states fail closed because no exact support
+/// fact has been captured for them.
+fn vegetation_patch_supports(
+    grid: &VegGrid,
+    x: i32,
+    y: i32,
+    z: i32,
+    surface: CaveSurface,
+) -> bool {
+    let state = grid.get_id(x, y, z);
+    let Some(canonical) = grid.interner().canonical_id(state) else {
+        return false;
+    };
+    match surface {
+        CaveSurface::Floor => block_survival::sturdy_up(canonical),
+        CaveSurface::Ceiling => block_survival::center_support_down(canonical),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -203,11 +307,7 @@ fn nether_vegetation_can_survive(
     fungus: bool,
 ) -> bool {
     let below = base_at(grid, pos.x, pos.y - 1, pos.z);
-    tags.has(
-        grid.interner(),
-        Tag::SupportsVegetation,
-        grid.get_id(pos.x, pos.y - 1, pos.z),
-    )
+    tags.supports_vegetation.contains(below)
         || below == "minecraft:crimson_nylium"
         || below == "minecraft:warped_nylium"
         || below == "minecraft:soul_soil"
@@ -242,7 +342,7 @@ fn place_speleothem_base_if_possible(
     z: i32,
 ) {
     if cfg.replaceable_blocks.contains(base_at(grid, x, y, z)) {
-        grid.set_state_if_in_bounds(x, y, z, &cfg.base_block);
+        grid.set_if_in_bounds(x, y, z, cfg.base_block.clone());
     }
 }
 
@@ -470,6 +570,30 @@ fn scan_speleothem_column(
     })
 }
 
+fn can_place_speleothem_pool(
+    grid: &VegGrid,
+    tags: &VegTags,
+    cfg: &SpeleothemClusterCfg,
+    floor: BlockPos,
+) -> bool {
+    let floor_state = base_at(grid, floor.x, floor.y, floor.z);
+    if floor_state == "minecraft:water"
+        || floor_state == cfg.base_block
+        || floor_state == cfg.pointed_block
+        || water_at(grid, floor.x, floor.y + 1, floor.z)
+    {
+        return false;
+    }
+    let supported = |x: i32, y: i32, z: i32| {
+        tags.base_stone_overworld.contains(base_at(grid, x, y, z))
+            || water_at(grid, x, y, z)
+    };
+    HORIZONTAL
+        .iter()
+        .all(|&(dx, dz)| supported(floor.x + dx, floor.y, floor.z + dz))
+        && supported(floor.x, floor.y - 1, floor.z)
+}
+
 fn replace_speleothem_base_layer(
     grid: &mut VegGrid,
     cfg: &SpeleothemClusterCfg,
@@ -482,7 +606,7 @@ fn replace_speleothem_base_layer(
         if !cfg.replaceable_blocks.contains(base_at(grid, pos.x, y, pos.z)) {
             return;
         }
-        grid.set_state_if_in_bounds(pos.x, y, pos.z, &cfg.base_block);
+        grid.set_if_in_bounds(pos.x, y, pos.z, cfg.base_block.clone());
     }
 }
 
@@ -554,6 +678,7 @@ pub fn place_speleothem_cluster<R: RandomSource>(
     origin: BlockPos,
     cfg: &SpeleothemClusterCfg,
     grid: &mut VegGrid,
+    tags: &VegTags,
 ) {
     if !empty_or_water_at(grid, origin.x, origin.y, origin.z) {
         return;
@@ -571,16 +696,21 @@ pub fn place_speleothem_cluster<R: RandomSource>(
                     * (edge_distance / cfg.max_distance_from_edge_affecting_chance_of_speleothem as f32)
                         .clamp(0.0, 1.0);
             let pos = BlockPos { x: origin.x + dx, y: origin.y, z: origin.z + dz };
-            let Some(column) = scan_speleothem_column(grid, pos, cfg.floor_to_ceiling_search_range) else {
+            let Some(mut column) = scan_speleothem_column(grid, pos, cfg.floor_to_ceiling_search_range) else {
                 continue;
             };
             if column.floor.is_none() && column.ceiling.is_none() {
                 continue;
             }
-            // Sulfur has zero wetness, but the float draw still belongs to each
-            // accepted column. The pool branch is intentionally absent until a
-            // full base-stone tag predicate is available; it cannot run here.
-            let _want_pool = random.next_float() < wetness;
+            if random.next_float() < wetness {
+                if let Some(floor) = column.floor {
+                    let floor_pos = BlockPos { y: floor, ..pos };
+                    if can_place_speleothem_pool(grid, tags, cfg, floor_pos) {
+                        grid.set_if_in_bounds(pos.x, floor, pos.z, "minecraft:water".to_string());
+                        column.floor = Some(floor - 1);
+                    }
+                }
+            }
             let want_stalactite = random.next_double() < chance as f64;
             let stalactite_height = if let Some(ceiling) = column.ceiling {
                 if want_stalactite && base_at(grid, pos.x, ceiling, pos.z) != "minecraft:lava" {
@@ -648,7 +778,7 @@ const HORIZONTAL: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
 /// `SpringConfiguration`.
 #[derive(Clone, Debug)]
 pub struct SpringCfg {
-    pub state: String,
+    pub state: CanonicalStateId,
     pub requires_block_below: bool,
     pub rock_count: i32,
     pub hole_count: i32,
@@ -676,14 +806,14 @@ pub struct DiskCfg {
 #[derive(Clone, Debug)]
 pub struct ReplaceBlobsCfg {
     pub target: String,
-    pub state: String,
+    pub state: CanonicalStateId,
     pub radius: IntProvider,
 }
 
 /// `BlockBlobConfiguration`.
 #[derive(Clone, Debug)]
 pub struct BlockBlobCfg {
-    pub state: String,
+    pub state: CanonicalStateId,
     pub can_place_on: BlockPredicate,
 }
 
@@ -894,7 +1024,9 @@ pub(super) fn place_spring(pos: BlockPos, cfg: &SpringCfg, grid: &mut VegGrid) {
         }
     }
     if rock_count == cfg.rock_count && hole_count == cfg.hole_count {
-        grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, &cfg.state);
+        let state = cfg.state.canonical_state();
+        let state = grid.interner().id_of(&state);
+        grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state);
     }
 }
 
@@ -1017,9 +1149,8 @@ pub(super) fn place_disk<R: RandomSource>(
             while y > bottom {
                 let at = BlockPos { x, y, z };
                 if cfg.target.test(grid, tags, at) {
-                    if let Some(state) = cfg.provider.get_state(grid, tags, random, at) {
-                        let state = state.to_string();
-                        grid.set_if_in_bounds(x, y, z, state);
+                    if let Some(state) = cfg.provider.get_state_id(grid, tags, random, at) {
+                        grid.set_id_if_in_bounds(x, y, z, state);
                     }
                 }
                 y -= 1;
@@ -1079,9 +1210,8 @@ fn try_place_pile_block<R: RandomSource>(
     if !ok {
         return;
     }
-    if let Some(state) = provider.get_state(grid, tags, random, pos) {
-        let state = state.to_string();
-        grid.set_if_in_bounds(pos.x, pos.y, pos.z, state);
+    if let Some(state) = provider.get_state_id(grid, tags, random, pos) {
+        grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state);
     }
 }
 
@@ -1147,6 +1277,8 @@ pub(super) fn place_block_blob<R: RandomSource>(
     if origin.y <= grid.min_y + 3 {
         return;
     }
+    let state = cfg.state.canonical_state();
+    let state = grid.interner().id_of(&state);
     for _ in 0..3 {
         let xr = random.next_int_bounded(2);
         let yr = random.next_int_bounded(2);
@@ -1157,7 +1289,7 @@ pub(super) fn place_block_blob<R: RandomSource>(
                 for z in (origin.z - zr)..=(origin.z + zr) {
                     let d = (x - origin.x).pow(2) + (y - origin.y).pow(2) + (z - origin.z).pow(2);
                     if (d as f32) <= tr * tr {
-                        grid.set_state_if_in_bounds(x, y, z, &cfg.state);
+                        grid.set_id_if_in_bounds(x, y, z, state);
                     }
                 }
             }
@@ -1235,11 +1367,11 @@ pub(super) fn place_delta<R: RandomSource>(
                 return;
             }
             if has_rim {
-                grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, &cfg.rim);
+                grid.set_if_in_bounds(pos.x, pos.y, pos.z, cfg.rim.clone());
             }
             let contents = BlockPos { x: pos.x + rim_x, y: pos.y, z: pos.z + rim_z };
             if delta_clear(grid, contents, &cfg.contents) {
-                grid.set_state_if_in_bounds(contents.x, contents.y, contents.z, &cfg.contents);
+                grid.set_if_in_bounds(contents.x, contents.y, contents.z, cfg.contents.clone());
             }
         },
         radius_x,
@@ -1315,7 +1447,7 @@ fn place_basalt_column(grid: &mut VegGrid, origin: BlockPos, height: i32, reach:
             let mut blocks = height - distance / 2;
             while blocks >= 0 {
                 if air_or_lava_ocean(grid, cursor) {
-                    grid.set_state_if_in_bounds(cursor.x, cursor.y, cursor.z, "minecraft:basalt[axis=y]");
+                    grid.set_if_in_bounds(cursor.x, cursor.y, cursor.z, "minecraft:basalt[axis=y]".to_string());
                     cursor.y += 1;
                 } else if base_at(grid, cursor.x, cursor.y, cursor.z) == "minecraft:basalt" {
                     cursor.y += 1;
@@ -1391,6 +1523,8 @@ pub(super) fn place_replace_blobs<R: RandomSource>(
     let ry = cfg.radius.sample(random);
     let rz = cfg.radius.sample(random);
     let max_r = rx.max(ry).max(rz);
+    let state = cfg.state.canonical_state();
+    let state = grid.interner().id_of(&state);
     for dx in -rx..=rx {
         for dy in -ry..=ry {
             for dz in -rz..=rz {
@@ -1399,7 +1533,7 @@ pub(super) fn place_replace_blobs<R: RandomSource>(
                 }
                 let (x, y, z) = (pos.x + dx, cy + dy, pos.z + dz);
                 if base_at(grid, x, y, z) == cfg.target {
-                    grid.set_state_if_in_bounds(x, y, z, &cfg.state);
+                    grid.set_id_if_in_bounds(x, y, z, state);
                 }
             }
         }
@@ -1421,7 +1555,7 @@ pub(super) fn place_glowstone_blob<R: RandomSource>(
     if above != "minecraft:netherrack" && above != "minecraft:basalt" && above != "minecraft:blackstone" {
         return;
     }
-    grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, GLOWSTONE);
+    grid.set_if_in_bounds(pos.x, pos.y, pos.z, GLOWSTONE.to_string());
     for _ in 0..1500 {
         let x = pos.x + random.next_int_bounded(8) - random.next_int_bounded(8);
         let y = pos.y - random.next_int_bounded(12);
@@ -1439,7 +1573,7 @@ pub(super) fn place_glowstone_blob<R: RandomSource>(
             }
         }
         if neighbours == 1 {
-            grid.set_state_if_in_bounds(x, y, z, GLOWSTONE);
+            grid.set_if_in_bounds(x, y, z, GLOWSTONE.to_string());
         }
     }
 }
@@ -1462,12 +1596,12 @@ pub(super) fn place_basalt_pillar<R: RandomSource>(
         if y < min || y > max {
             return;
         }
-        grid.set_state_if_in_bounds(pos.x, y, pos.z, BASALT);
+        grid.set_if_in_bounds(pos.x, y, pos.z, BASALT.to_string());
         for (i, (dx, dz)) in [(0, -1), (0, 1), (-1, 0), (1, 0)].into_iter().enumerate() {
             // N, S, W, E — vanilla's own order for the four hang-off flags.
             if hang[i] {
                 hang[i] = if random.next_int_bounded(10) != 0 {
-                    grid.set_state_if_in_bounds(pos.x + dx, y, pos.z + dz, BASALT);
+                    grid.set_if_in_bounds(pos.x + dx, y, pos.z + dz, BASALT.to_string());
                     true
                 } else {
                     false
@@ -1479,7 +1613,7 @@ pub(super) fn place_basalt_pillar<R: RandomSource>(
     y += 1;
     for (dx, dz) in [(0, -1), (0, 1), (-1, 0), (1, 0)] {
         if random.next_bool() {
-            grid.set_state_if_in_bounds(pos.x + dx, y, pos.z + dz, BASALT);
+            grid.set_if_in_bounds(pos.x + dx, y, pos.z + dz, BASALT.to_string());
         }
     }
     y -= 1;
@@ -1498,7 +1632,7 @@ pub(super) fn place_basalt_pillar<R: RandomSource>(
                     }
                 }
                 if !air_at(grid, bx, by - 1, bz) {
-                    grid.set_state_if_in_bounds(bx, by, bz, BASALT);
+                    grid.set_if_in_bounds(bx, by, bz, BASALT.to_string());
                 }
             }
         }
@@ -1539,7 +1673,7 @@ pub(super) fn place_desert_well<R: RandomSource>(
         }
     }
     let set = |grid: &mut VegGrid, dx: i32, dy: i32, dz: i32, s: &str| {
-        grid.set_state_if_in_bounds(origin.x + dx, origin.y + dy, origin.z + dz, s);
+        grid.set_if_in_bounds(origin.x + dx, origin.y + dy, origin.z + dz, s.to_string());
     };
     for oy in -2..=0 {
         for ox in -2..=2 {
@@ -1606,7 +1740,7 @@ pub(super) fn place_blue_ice<R: RandomSource>(random: &mut R, pos: BlockPos, gri
     if !found {
         return;
     }
-    grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, BLUE_ICE);
+    grid.set_if_in_bounds(pos.x, pos.y, pos.z, BLUE_ICE.to_string());
     for _ in 0..200 {
         let y_off = random.next_int_bounded(5) - random.next_int_bounded(6);
         let mut xz_diff = 3;
@@ -1629,7 +1763,7 @@ pub(super) fn place_blue_ice<R: RandomSource>(random: &mut R, pos: BlockPos, gri
         }
         for (dx, dy, dz) in DIRECTIONS {
             if base_at(grid, x + dx, y + dy, z + dz) == BLUE_ICE {
-                grid.set_state_if_in_bounds(x, y, z, BLUE_ICE);
+                grid.set_if_in_bounds(x, y, z, BLUE_ICE.to_string());
                 break;
             }
         }
@@ -1651,7 +1785,7 @@ pub(super) fn place_kelp<R: RandomSource>(random: &mut R, pos: BlockPos, grid: &
                 let age = random.next_int_bounded(4) + 20;
                 grid.set_if_in_bounds(x, cy, z, format!("minecraft:kelp[age={age}]"));
             } else {
-                grid.set_state_if_in_bounds(x, cy, z, "minecraft:kelp_plant");
+                grid.set_if_in_bounds(x, cy, z, "minecraft:kelp_plant".to_string());
             }
         } else if h > 0 {
             let below = cy - 1;
@@ -1710,11 +1844,11 @@ pub(super) fn place_seagrass<R: RandomSource>(
     }
     if is_tall {
         if water_at(grid, x, y + 1, z) {
-            grid.set_state_if_in_bounds(x, y, z, "minecraft:tall_seagrass[half=lower]");
-            grid.set_state_if_in_bounds(x, y + 1, z, "minecraft:tall_seagrass[half=upper]");
+            grid.set_if_in_bounds(x, y, z, "minecraft:tall_seagrass[half=lower]".to_string());
+            grid.set_if_in_bounds(x, y + 1, z, "minecraft:tall_seagrass[half=upper]".to_string());
         }
     } else {
-        grid.set_state_if_in_bounds(x, y, z, "minecraft:seagrass");
+        grid.set_if_in_bounds(x, y, z, "minecraft:seagrass".to_string());
     }
 }
 
@@ -1803,7 +1937,7 @@ fn place_growing_column<R: RandomSource>(
     grid: &mut VegGrid,
     upwards: bool,
 ) {
-    place_growing_column_with_age(random, start, total, grid, upwards, 17, 25);
+    place_growing_column_with_age(random, start, total, grid, upwards, 17, 25, None);
 }
 
 fn place_growing_column_with_age<R: RandomSource>(
@@ -1814,6 +1948,7 @@ fn place_growing_column_with_age<R: RandomSource>(
     upwards: bool,
     min_age: i32,
     max_age: i32,
+    owner: Option<BlockPos>,
 ) {
     let (head, plant, step, first) = if upwards {
         ("minecraft:twisting_vines", "minecraft:twisting_vines_plant", 1, 1)
@@ -1827,10 +1962,14 @@ fn place_growing_column_with_age<R: RandomSource>(
             let blocked = !air_at(grid, pos.x, pos.y + step, pos.z);
             if h == total || blocked {
                 let age = next_int_between(random, min_age, max_age);
-                grid.set_if_in_bounds(pos.x, pos.y, pos.z, format!("{head}[age={age}]"));
+                if owner.is_none_or(|origin| in_source_chunk(origin, pos)) {
+                    grid.set_if_in_bounds(pos.x, pos.y, pos.z, format!("{head}[age={age}]"));
+                }
                 return;
             }
-            grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, plant);
+            if owner.is_none_or(|origin| in_source_chunk(origin, pos)) {
+                grid.set_if_in_bounds(pos.x, pos.y, pos.z, plant.to_string());
+            }
         }
         pos.y += step;
         h += 1;
@@ -1851,7 +1990,7 @@ pub(super) fn place_weeping_vines<R: RandomSource>(
     if above != "minecraft:netherrack" && above != WART {
         return;
     }
-    grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, WART);
+    grid.set_if_in_bounds(pos.x, pos.y, pos.z, WART.to_string());
     for _ in 0..200 {
         let x = pos.x + random.next_int_bounded(6) - random.next_int_bounded(6);
         let y = pos.y + random.next_int_bounded(2) - random.next_int_bounded(5);
@@ -1870,7 +2009,7 @@ pub(super) fn place_weeping_vines<R: RandomSource>(
             }
         }
         if neighbours == 1 {
-            grid.set_state_if_in_bounds(x, y, z, WART);
+            grid.set_if_in_bounds(x, y, z, WART.to_string());
         }
     }
     for _ in 0..100 {
@@ -1974,7 +2113,7 @@ pub(super) fn place_bamboo<R: RandomSource>(
                     .beneath_bamboo_podzol_replaceable
                     .contains(base_at(grid, x, y, z))
                 {
-                    grid.set_state_if_in_bounds(x, y, z, "minecraft:podzol[snowy=false]");
+                    grid.set_if_in_bounds(x, y, z, "minecraft:podzol[snowy=false]".to_string());
                 }
             }
         }
@@ -2060,7 +2199,7 @@ fn place_growth_if_possible<R: RandomSource>(
             return false;
         }
         let new_state = multiface_state(&cfg.block, &existing, face);
-        grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, &new_state);
+        grid.set_if_in_bounds(pos.x, pos.y, pos.z, new_state.clone());
         if random.next_float() < cfg.chance_of_spreading {
             spread_multiface(random, pos, (dx, dy, dz), &new_state, cfg, grid);
         }
@@ -2210,6 +2349,10 @@ pub(super) fn place_lake<R: RandomSource>(
     };
     let mut mould = [false; 2048];
     let idx = |x: usize, z: usize, y: usize| (x * 16 + z) * 8 + y;
+    let interner = Arc::clone(grid.interner());
+    let water_base = interner.base_of(interner.id_of("minecraft:water"));
+    let lava_base = interner.base_of(interner.id_of("minecraft:lava"));
+    let cave_air = interner.id_of("minecraft:cave_air");
     let spots = random.next_int_bounded(4) + 4;
     for _ in 0..spots {
         let xr = random.next_double() * 6.0 + 3.0;
@@ -2231,9 +2374,10 @@ pub(super) fn place_lake<R: RandomSource>(
             }
         }
     }
-    let Some(fluid) = cfg.fluid.get_state(grid, tags, random, origin).map(str::to_string) else {
+    let Some(fluid) = cfg.fluid.get_state_id(grid, tags, random, origin) else {
         return;
     };
+    let fluid_base = interner.base_of(fluid);
     // Shell test: an unset cell adjacent to a set one.
     let shell = |mould: &[bool; 2048], xx: usize, zz: usize, yy: usize| -> bool {
         if mould[idx(xx, zz, yy)] {
@@ -2257,11 +2401,13 @@ pub(super) fn place_lake<R: RandomSource>(
                     y: origin.y + yy as i32,
                     z: origin.z + zz as i32,
                 };
-                let base = base_at(grid, at.x, at.y, at.z);
-                if yy >= 4 && is_fluid(base) {
+                let existing = grid.get_id(at.x, at.y, at.z);
+                let existing_base = interner.base_of(existing);
+                let existing_is_fluid = existing_base == water_base || existing_base == lava_base;
+                if yy >= 4 && existing_is_fluid {
                     return;
                 }
-                if yy < 4 && !sturdy_at(grid, at.x, at.y, at.z) && super::base_id(&fluid) != base {
+                if yy < 4 && !sturdy_at(grid, at.x, at.y, at.z) && fluid_base != existing_base {
                     return;
                 }
                 if !cfg.can_place_feature.test(grid, tags, at) {
@@ -2283,19 +2429,19 @@ pub(super) fn place_lake<R: RandomSource>(
                 };
                 if cfg.can_replace_with_air_or_fluid.test(grid, tags, at) {
                     let state = if yy >= 4 {
-                        "minecraft:cave_air".to_string()
+                        cave_air
                     } else {
-                        fluid.clone()
+                        fluid
                     };
-                    grid.set_if_in_bounds(at.x, at.y, at.z, state);
+                    grid.set_id_if_in_bounds(at.x, at.y, at.z, state);
                 }
             }
         }
     }
-    let Some(barrier) = cfg.barrier.get_state(grid, tags, random, origin).map(str::to_string) else {
+    let Some(barrier) = cfg.barrier.get_state_id(grid, tags, random, origin) else {
         return;
     };
-    if is_air(super::base_id(&barrier)) {
+    if grid.is_air_id(interner.base_of(barrier)) {
         return;
     }
     for xx in 0..16usize {
@@ -2315,7 +2461,7 @@ pub(super) fn place_lake<R: RandomSource>(
                 if sturdy_at(grid, at.x, at.y, at.z)
                     && cfg.can_replace_with_barrier.test(grid, tags, at)
                 {
-                    grid.set_state_if_in_bounds(at.x, at.y, at.z, &barrier);
+                    grid.set_id_if_in_bounds(at.x, at.y, at.z, barrier);
                 }
             }
         }
@@ -2429,7 +2575,10 @@ pub(super) fn place_huge_mushroom_at_height<R: RandomSource>(
     }
 
     let mut place_cap = |at: BlockPos, west: bool, east: bool, north: bool, south: bool, up: bool| {
-        if let Some(state) = cfg.cap_provider.get_state(grid, tags, random, pos) {
+        if let Some(state) = cfg
+            .cap_provider
+            .get_state_for_mushroom_cap(grid, tags, random, pos)
+        {
             if replaceable_mushroom_pos(grid, tags, at.x, at.y, at.z) {
                 grid.set_if_in_bounds(
                     at.x,
@@ -2501,9 +2650,9 @@ pub(super) fn place_huge_mushroom_at_height<R: RandomSource>(
     // are simple states.
     for y in 0..height {
         let at = BlockPos { x: pos.x, y: pos.y + y, z: pos.z };
-        if let Some(state) = cfg.stem_provider.get_state(grid, tags, random, pos) {
+        if let Some(state) = cfg.stem_provider.get_state_id(grid, tags, random, pos) {
             if replaceable_mushroom_pos(grid, tags, at.x, at.y, at.z) {
-                grid.set_state_if_in_bounds(at.x, at.y, at.z, state);
+                grid.set_id_if_in_bounds(at.x, at.y, at.z, state);
             }
         }
     }
@@ -2523,8 +2672,10 @@ pub(super) fn place_huge_fungus<R: RandomSource>(
         return;
     }
 
-    let mut total_height = random.next_int_bounded(10) + 4;
-    if random.next_int_bounded(12) == 0 {
+    let height_roll = random.next_int_bounded(10);
+    let double_roll = random.next_int_bounded(12);
+    let mut total_height = height_roll + 4;
+    if double_roll == 0 {
         total_height *= 2;
     }
     // The source generator's depth, rather than the widened receiving window,
@@ -2537,8 +2688,9 @@ pub(super) fn place_huge_fungus<R: RandomSource>(
     // Planted fungi never roll the broad-stem variant. The conditional is
     // important for the shared stream: the planted configuration must not
     // consume a draw that its source feature does not make.
-    let huge = !cfg.planted && random.next_float() < 0.06;
-    grid.set_state_if_in_bounds(origin.x, origin.y, origin.z, "minecraft:air");
+    let huge_roll = random.next_float();
+    let huge = !cfg.planted && huge_roll < 0.06;
+    grid.set_if_in_bounds(origin.x, origin.y, origin.z, "minecraft:air".to_string());
 
     let stem_radius: i32 = if huge { 1 } else { 0 };
     for dx in -stem_radius..=stem_radius {
@@ -2552,7 +2704,7 @@ pub(super) fn place_huge_fungus<R: RandomSource>(
                 if !cfg.planted && corner && random.next_float() >= 0.1 {
                     continue;
                 }
-                grid.set_state_if_in_bounds(at.x, at.y, at.z, &cfg.stem_state);
+                grid.set_if_in_bounds(at.x, at.y, at.z, cfg.stem_state.clone());
             }
         }
     }
@@ -2593,6 +2745,14 @@ pub(super) fn place_huge_fungus<R: RandomSource>(
             }
         }
     }
+}
+
+/// Huge-fungus placement reads the padded receiving view, but its body is
+/// owned by the chunk containing the feature origin. Keep this check local to
+/// the feature so ordinary border-spilling vegetation retains its own contract.
+fn in_source_chunk(origin: BlockPos, pos: BlockPos) -> bool {
+    origin.x.div_euclid(16) == pos.x.div_euclid(16)
+        && origin.z.div_euclid(16) == pos.z.div_euclid(16)
 }
 
 fn huge_fungus_replaceable(
@@ -2663,9 +2823,9 @@ fn place_huge_fungus_hat_block<R: RandomSource>(
     grid: &mut VegGrid,
 ) {
     if random.next_float() < decor_probability {
-        grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, &cfg.decor_state);
+        grid.set_if_in_bounds(pos.x, pos.y, pos.z, cfg.decor_state.clone());
     } else if random.next_float() < hat_probability {
-        grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, &cfg.hat_state);
+        grid.set_if_in_bounds(pos.x, pos.y, pos.z, cfg.hat_state.clone());
         if random.next_float() < vines_probability {
             try_place_huge_fungus_vines(random, pos, grid);
         }
@@ -2680,9 +2840,9 @@ fn place_huge_fungus_drop<R: RandomSource>(
     grid: &mut VegGrid,
 ) {
     if base_at(grid, pos.x, pos.y - 1, pos.z) == super::base_id(&cfg.hat_state) {
-        grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, &cfg.hat_state);
+        grid.set_if_in_bounds(pos.x, pos.y, pos.z, cfg.hat_state.clone());
     } else if random.next_float() < 0.15 {
-        grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, &cfg.hat_state);
+        grid.set_if_in_bounds(pos.x, pos.y, pos.z, cfg.hat_state.clone());
         if place_vines && random.next_int_bounded(11) == 0 {
             try_place_huge_fungus_vines(random, pos, grid);
         }
@@ -2698,7 +2858,10 @@ fn try_place_huge_fungus_vines<R: RandomSource>(random: &mut R, hat_pos: BlockPo
     if random.next_int_bounded(7) == 0 {
         goal *= 2;
     }
-    place_growing_column_with_age(random, below, goal, grid, false, 23, 25);
+    // Keep the temporary vine write visible to later placements in this source
+    // pass; the mixed dispatcher filters source-crossing fungus writes when it
+    // commits the source's final spills.
+    place_growing_column_with_age(random, below, goal, grid, false, 23, 25, None);
 }
 
 fn west_or_east(value: i32, radius: i32) -> bool {
@@ -2725,7 +2888,9 @@ pub(super) fn place_vegetation_patch_with_seed<R: RandomSource>(
     let z_radius = cfg.xz_radius.sample(random) + 1;
     let inwards = cfg.surface.dy();
     let outwards = -inwards;
-    let mut surface: Vec<BlockPos> = Vec::new();
+    // Membership and table traversal are both observable: the latter assigns
+    // each nested-placement random draw to a particular surface cell.
+    let mut surface = CompatBlockPosSet::default();
     for dx in -x_radius..=x_radius {
         let x_edge = dx == -x_radius || dx == x_radius;
         for dz in -z_radius..=z_radius {
@@ -2762,7 +2927,9 @@ pub(super) fn place_vegetation_patch_with_seed<R: RandomSource>(
                 y: cur.y + inwards,
                 z: cur.z,
             };
-            if !air_at(grid, cur.x, cur.y, cur.z) || !sturdy_at(grid, below.x, below.y, below.z) {
+            if !air_at(grid, cur.x, cur.y, cur.z)
+                || !vegetation_patch_supports(grid, below.x, below.y, below.z, cfg.surface)
+            {
                 continue;
             }
             let mut depth = cfg.depth.sample(random);
@@ -2772,25 +2939,30 @@ pub(super) fn place_vegetation_patch_with_seed<R: RandomSource>(
                 depth += 1;
             }
             if place_patch_ground(random, below, cfg, depth, grid, tags) {
-                surface.push(below);
+                surface.insert(below);
             }
         }
     }
     if cfg.waterlogged {
         // `WaterloggedVegetationPatchFeature`: only the non-exposed surface cells
-        // survive, and each becomes water.
-        let kept: Vec<BlockPos> = surface
-            .iter()
-            .copied()
+        // survive. The new set's table order governs both water writes and the
+        // subsequent nested-feature random draws.
+        let mut kept = CompatBlockPosSet::default();
+        for p in surface
+            .into_iter()
             .filter(|p| !patch_exposed(grid, *p))
-            .collect();
-        for p in &kept {
-            grid.set_state_if_in_bounds(p.x, p.y, p.z, "minecraft:water");
+        {
+            kept.insert(p);
+        }
+        for p in kept.order() {
+            grid.set_if_in_bounds(p.x, p.y, p.z, "minecraft:water".to_string());
         }
         surface = kept;
     }
     for p in surface {
-        if cfg.vegetation_chance > 0.0 && random.next_float() < cfg.vegetation_chance {
+        if cfg.vegetation_chance > 0.0
+            && random.next_float() < cfg.vegetation_chance
+        {
             let target = BlockPos {
                 x: p.x,
                 y: p.y + outwards,
@@ -2828,68 +3000,705 @@ fn place_patch_ground<R: RandomSource>(
 ) -> bool {
     let mut cur = start;
     for i in 0..depth {
-        let Some(state) = cfg.ground_state.get_state(grid, tags, random, cur).map(str::to_string)
-        else {
+        let Some(state) = cfg.ground_state.get_state_id(grid, tags, random, cur) else {
             return i != 0;
         };
+        let below_state = grid.get_id(cur.x, cur.y, cur.z);
         let below = base_at(grid, cur.x, cur.y, cur.z);
-        if super::base_id(&state) == below {
+        let same_base = grid.interner().base_of(state) == grid.interner().base_of(below_state);
+        if same_base {
             continue;
         }
         if !cfg.replaceable.contains(below) {
             return i != 0;
         }
-        grid.set_if_in_bounds(cur.x, cur.y, cur.z, state);
+        grid.set_id_if_in_bounds(cur.x, cur.y, cur.z, state);
         cur.y += cfg.surface.dy();
     }
     true
 }
 
-/// Vanilla's own sculk-patch feature's place.
-///
-/// **Narrowed, named:** vanilla's own sculk-spreader is a full charge-propagation simulation
-/// over a live level and is not modelled. What lands instead is a sculk skin over
-/// the sturdy cells within a radius derived from the config's own charge budget,
-/// plus the catalyst and the rare shriekers, whose draws are the ones later
-/// features depend on. Deep dark reads as sculk-floored rather than as vanilla's
-/// exact patch outline.
+const SCULK_MAX_CHARGE: i32 = 1000;
+const SCULK_MAX_CURSOR_DISTANCE: i32 = 1024;
+const SCULK_MAX_CURSORS: usize = 32;
+const SCULK_DIRECTIONS: [(i32, i32, i32); 6] = [
+    (0, -1, 0),
+    (0, 1, 0),
+    (0, 0, -1),
+    (0, 0, 1),
+    (-1, 0, 0),
+    (1, 0, 0),
+];
+const SCULK_NON_CORNER_NEIGHBOURS: [(i32, i32, i32); 18] = [
+    (0, -1, -1),
+    (-1, 0, -1),
+    (0, 0, -1),
+    (1, 0, -1),
+    (0, 1, -1),
+    (-1, -1, 0),
+    (0, -1, 0),
+    (1, -1, 0),
+    (-1, 0, 0),
+    (1, 0, 0),
+    (-1, 1, 0),
+    (0, 1, 0),
+    (1, 1, 0),
+    (0, -1, 1),
+    (-1, 0, 1),
+    (0, 0, 1),
+    (1, 0, 1),
+    (0, 1, 1),
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SculkBehaviourKind {
+    Default,
+    Sculk,
+    Vein,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SculkCursor {
+    pos: BlockPos,
+    charge: i32,
+    update_delay: i32,
+    decay_delay: i32,
+    facings: Option<u8>,
+}
+
+fn sculk_behaviour(grid: &VegGrid, pos: BlockPos) -> SculkBehaviourKind {
+    match base_at(grid, pos.x, pos.y, pos.z) {
+        "minecraft:sculk" => SculkBehaviourKind::Sculk,
+        "minecraft:sculk_vein" => SculkBehaviourKind::Vein,
+        _ => SculkBehaviourKind::Default,
+    }
+}
+
+fn sculk_is_water_source(state: &str) -> bool {
+    let base = super::base_id(state);
+    base == "minecraft:water" && (!state.contains('[') || state.contains("level=0"))
+}
+
+fn sculk_face_for_offset(offset: (i32, i32, i32)) -> Face {
+    match offset {
+        (0, -1, 0) => Face::Down,
+        (0, 1, 0) => Face::Up,
+        (0, 0, -1) => Face::North,
+        (0, 0, 1) => Face::South,
+        (-1, 0, 0) => Face::West,
+        _ => Face::East,
+    }
+}
+
+fn sculk_opposite(offset: (i32, i32, i32)) -> (i32, i32, i32) {
+    (-offset.0, -offset.1, -offset.2)
+}
+
+fn sculk_block_face_sturdy(grid: &VegGrid, pos: BlockPos, face: Face) -> bool {
+    if let Some(canonical) = grid.interner().canonical_id(grid.get_id(pos.x, pos.y, pos.z)) {
+        face_occlusion::occludes(canonical, face)
+    } else {
+        sturdy_at(grid, pos.x, pos.y, pos.z)
+    }
+}
+
+fn sculk_face_sturdy_at(grid: &VegGrid, pos: BlockPos, support: (i32, i32, i32)) -> bool {
+    let support_pos = BlockPos {
+        x: pos.x + support.0,
+        y: pos.y + support.1,
+        z: pos.z + support.2,
+    };
+    sculk_block_face_sturdy(grid, support_pos, sculk_face_for_offset(sculk_opposite(support)))
+}
+
+fn sculk_full_collision_at(grid: &VegGrid, pos: BlockPos) -> bool {
+    let state = grid.get_id(pos.x, pos.y, pos.z);
+    let Some(canonical) = grid.interner().canonical_id(state) else {
+        return sturdy_at(grid, pos.x, pos.y, pos.z);
+    };
+    let boxes = collision_shapes::collision_boxes(canonical);
+    boxes.len() == 1 && boxes[0].min == [0.0; 3] && boxes[0].max == [1.0; 3]
+}
+
+fn sculk_can_spread_from(grid: &VegGrid, origin: BlockPos) -> bool {
+    if sculk_behaviour(grid, origin) != SculkBehaviourKind::Default {
+        return true;
+    }
+    let state = grid.get(origin.x, origin.y, origin.z);
+    if !(is_air(super::base_id(state)) || sculk_is_water_source(state)) {
+        return false;
+    }
+    SCULK_DIRECTIONS.iter().any(|&(dx, dy, dz)| {
+        sculk_full_collision_at(
+            grid,
+            BlockPos { x: origin.x + dx, y: origin.y + dy, z: origin.z + dz },
+        )
+    })
+}
+
+fn sculk_face_mask(state: &str) -> u8 {
+    SCULK_DIRECTIONS.iter().enumerate().fold(0, |mask, (index, &offset)| {
+        let face = face_property(offset.0, offset.1, offset.2);
+        if state.contains(&format!("{face}=true")) {
+            mask | (1 << index)
+        } else {
+            mask
+        }
+    })
+}
+
+fn sculk_has_face(mask: u8, offset: (i32, i32, i32)) -> bool {
+    let index = SCULK_DIRECTIONS
+        .iter()
+        .position(|&candidate| candidate == offset)
+        .expect("sculk direction table contains every face");
+    mask & (1 << index) != 0
+}
+
+fn sculk_vein_state(mask: u8, waterlogged: bool) -> String {
+    let enabled = |index: usize| mask & (1 << index) != 0;
+    format!(
+        "minecraft:sculk_vein[down={},east={},north={},south={},up={},waterlogged={},west={}]",
+        enabled(0),
+        enabled(5),
+        enabled(2),
+        enabled(3),
+        enabled(1),
+        waterlogged,
+        enabled(4),
+    )
+}
+
+fn sculk_vein_state_with_face(old: &str, face: (i32, i32, i32)) -> String {
+    let mask = sculk_face_mask(old)
+        | (1 << SCULK_DIRECTIONS.iter().position(|&candidate| candidate == face).unwrap());
+    sculk_vein_state(mask, super::base_id(old) == "minecraft:water" || old.contains("waterlogged=true"))
+}
+
+fn sculk_can_replace_vein_target(grid: &VegGrid, target: BlockPos) -> bool {
+    let state = grid.get(target.x, target.y, target.z);
+    let base = super::base_id(state);
+    (is_air(base) || base == "minecraft:sculk_vein" || sculk_is_water_source(state))
+        && base != "minecraft:sculk"
+}
+
+fn sculk_spread_candidate_allowed(
+    grid: &VegGrid,
+    source: BlockPos,
+    target: BlockPos,
+    face: (i32, i32, i32),
+) -> bool {
+    let base = base_at(grid, target.x, target.y, target.z);
+    // The support cell beyond the placement face is part of the spread
+    // predicate too: a sculk block, catalyst, or piston there blocks a vein
+    // face even when the target itself is replaceable. This matters for the
+    // same-position pass after a cursor has just converted its substrate.
+    let beyond = base_at(grid, target.x + face.0, target.y + face.1, target.z + face.2);
+    if beyond == "minecraft:sculk"
+        || beyond == "minecraft:sculk_catalyst"
+        || beyond == "minecraft:moving_piston"
+    {
+        return false;
+    }
+    if base == "minecraft:sculk"
+        || base == "minecraft:sculk_catalyst"
+        || base == "minecraft:moving_piston"
+        || base == "minecraft:fire"
+        || (is_fluid(base) && base != "minecraft:water")
+    {
+        return false;
+    }
+    if !sculk_can_replace_vein_target(grid, target) {
+        return false;
+    }
+    if !sculk_face_sturdy_at(grid, target, face) {
+        return false;
+    }
+    if (target.x - source.x).abs() + (target.y - source.y).abs() + (target.z - source.z).abs() == 2 {
+        let behind = BlockPos {
+            x: source.x - face.0,
+            y: source.y - face.1,
+            z: source.z - face.2,
+        };
+        if sculk_block_face_sturdy(grid, behind, sculk_face_for_offset(face)) {
+            return false;
+        }
+    }
+    true
+}
+
+fn sculk_spread_all(
+    grid: &mut VegGrid,
+    source: BlockPos,
+    source_state: &str,
+    same_position_only: bool,
+) -> bool {
+    let kind = super::base_id(source_state);
+    let other_source = kind != "minecraft:sculk_vein";
+    let source_mask = sculk_face_mask(source_state);
+    let mut placed = false;
+    for &from_face in &SCULK_DIRECTIONS {
+        if !other_source && !sculk_has_face(source_mask, from_face) {
+            continue;
+        }
+        for &spread_direction in &SCULK_DIRECTIONS {
+            if same_axis(from_face, spread_direction)
+                || (!other_source && sculk_has_face(source_mask, spread_direction))
+            {
+                continue;
+            }
+            let candidates = if same_position_only {
+                [
+                    (source, spread_direction),
+                    (source, spread_direction),
+                    (source, spread_direction),
+                ]
+            } else {
+                [
+                    (source, spread_direction),
+                    (
+                        BlockPos {
+                            x: source.x + spread_direction.0,
+                            y: source.y + spread_direction.1,
+                            z: source.z + spread_direction.2,
+                        },
+                        from_face,
+                    ),
+                    (
+                        BlockPos {
+                            x: source.x + spread_direction.0 + from_face.0,
+                            y: source.y + spread_direction.1 + from_face.1,
+                            z: source.z + spread_direction.2 + from_face.2,
+                        },
+                        sculk_opposite(spread_direction),
+                    ),
+                ]
+            };
+            for (target, face) in candidates {
+                if !sculk_spread_candidate_allowed(grid, source, target, face) {
+                    continue;
+                }
+                let old = grid.get(target.x, target.y, target.z).to_string();
+                let next = sculk_vein_state_with_face(&old, face);
+                if next == old || !grid.set_if_in_bounds(target.x, target.y, target.z, next) {
+                    continue;
+                }
+                placed = true;
+                break;
+            }
+        }
+    }
+    placed
+}
+
+fn sculk_regrow_vein(grid: &mut VegGrid, pos: BlockPos, source_state: &str, facings: u8) -> bool {
+    let mut mask = 0;
+    for (index, &face) in SCULK_DIRECTIONS.iter().enumerate() {
+        let sturdy = sculk_face_sturdy_at(grid, pos, face);
+        if facings & (1 << index) != 0 && sturdy {
+            mask |= 1 << index;
+        }
+    }
+    if mask == 0 {
+        return false;
+    }
+    let waterlogged = super::base_id(source_state) == "minecraft:water"
+        || source_state.contains("waterlogged=true");
+    grid.set_if_in_bounds(pos.x, pos.y, pos.z, sculk_vein_state(mask, waterlogged))
+}
+
+fn sculk_attempt_spread_vein(
+    grid: &mut VegGrid,
+    pos: BlockPos,
+    source_state: &str,
+    facings: Option<u8>,
+) -> bool {
+    match sculk_behaviour(grid, pos) {
+        SculkBehaviourKind::Default => match facings {
+            None => sculk_spread_all(grid, pos, source_state, true),
+            Some(mask) if mask != 0 => sculk_regrow_vein(grid, pos, source_state, mask),
+            Some(_) => false,
+        },
+        SculkBehaviourKind::Sculk | SculkBehaviourKind::Vein => {
+            sculk_spread_all(grid, pos, source_state, false)
+        }
+    }
+}
+
+fn sculk_has_substrate_access(grid: &VegGrid, tags: &VegTags, pos: BlockPos, state: &str) -> bool {
+    if super::base_id(state) != "minecraft:sculk_vein" {
+        return false;
+    }
+    let mask = sculk_face_mask(state);
+    SCULK_DIRECTIONS.iter().enumerate().any(|(index, &face)| {
+        sculk_has_face(mask, face)
+            && tags.sculk_replaceable.contains(base_at(
+                grid,
+                pos.x + face.0,
+                pos.y + face.1,
+                pos.z + face.2,
+            ))
+            && index < SCULK_DIRECTIONS.len()
+    })
+}
+
+fn sculk_unobstructed_axis(grid: &VegGrid, from: BlockPos, axis: (i32, i32, i32)) -> bool {
+    let test = BlockPos {
+        x: from.x + axis.0,
+        y: from.y + axis.1,
+        z: from.z + axis.2,
+    };
+    sculk_block_face_sturdy(grid, test, sculk_face_for_offset(sculk_opposite(axis)))
+        == false
+}
+
+fn sculk_movement_unobstructed(grid: &VegGrid, from: BlockPos, to: BlockPos) -> bool {
+    let delta = (to.x - from.x, to.y - from.y, to.z - from.z);
+    let manhattan = delta.0.abs() + delta.1.abs() + delta.2.abs();
+    if manhattan == 1 {
+        return true;
+    }
+    if delta.0 == 0 {
+        sculk_unobstructed_axis(grid, from, (0, delta.1, 0))
+            || sculk_unobstructed_axis(grid, from, (0, 0, delta.2))
+    } else if delta.1 == 0 {
+        sculk_unobstructed_axis(grid, from, (delta.0, 0, 0))
+            || sculk_unobstructed_axis(grid, from, (0, 0, delta.2))
+    } else {
+        sculk_unobstructed_axis(grid, from, (delta.0, 0, 0))
+            || sculk_unobstructed_axis(grid, from, (0, delta.1, 0))
+    }
+}
+
+fn sculk_valid_movement_pos<R: RandomSource>(
+    random: &mut R,
+    grid: &VegGrid,
+    tags: &VegTags,
+    from: BlockPos,
+) -> Option<BlockPos> {
+    let mut fallback = None;
+    for (dx, dy, dz) in shuffled_copy(random, &SCULK_NON_CORNER_NEIGHBOURS) {
+        let target = BlockPos { x: from.x + dx, y: from.y + dy, z: from.z + dz };
+        if sculk_behaviour(grid, target) == SculkBehaviourKind::Default
+            || !sculk_movement_unobstructed(grid, from, target)
+        {
+            continue;
+        }
+        fallback = Some(target);
+        if sculk_has_substrate_access(grid, tags, target, grid.get(target.x, target.y, target.z)) {
+            break;
+        }
+    }
+    fallback
+}
+
+fn sculk_on_discharged(grid: &mut VegGrid, pos: BlockPos, state: &str) {
+    if super::base_id(state) != "minecraft:sculk_vein" {
+        return;
+    }
+    let mut mask = sculk_face_mask(state);
+    for (index, &face) in SCULK_DIRECTIONS.iter().enumerate() {
+        if sculk_has_face(mask, face)
+            && base_at(grid, pos.x + face.0, pos.y + face.1, pos.z + face.2) == "minecraft:sculk"
+        {
+            mask &= !(1 << index);
+        }
+    }
+    let waterlogged = state.contains("waterlogged=true");
+    let next = if mask == 0 {
+        if waterlogged {
+            "minecraft:water[level=0]".to_string()
+        } else {
+            "minecraft:air".to_string()
+        }
+    } else {
+        sculk_vein_state(mask, waterlogged)
+    };
+    grid.set_if_in_bounds(pos.x, pos.y, pos.z, next);
+}
+
+fn sculk_random_growth_state<R: RandomSource>(random: &mut R, waterlogged: bool) -> String {
+    let growth_roll = random.next_int_bounded(11);
+    let base = if growth_roll == 0 {
+        "minecraft:sculk_shrieker"
+    } else {
+        "minecraft:sculk_sensor"
+    };
+    let mut state = CanonicalStateId::from_state_str(base)
+        .map(CanonicalStateId::canonical_state)
+        .unwrap_or_else(|| base.to_string());
+    if base == "minecraft:sculk_shrieker" {
+        state = state.replace("can_summon=false", "can_summon=true");
+    }
+    if waterlogged {
+        state = state.replace("waterlogged=false", "waterlogged=true");
+    }
+    state
+}
+
+fn sculk_can_place_growth(grid: &VegGrid, pos: BlockPos) -> bool {
+    let above = grid.get(pos.x, pos.y + 1, pos.z);
+    if !(is_air(super::base_id(above)) || sculk_is_water_source(above)) {
+        return false;
+    }
+    let mut growth_count = 0;
+    for x in pos.x - 4..=pos.x + 4 {
+        for y in pos.y..=pos.y + 2 {
+            for z in pos.z - 4..=pos.z + 4 {
+                let base = base_at(grid, x, y, z);
+                if base == "minecraft:sculk_sensor" || base == "minecraft:sculk_shrieker" {
+                    growth_count += 1;
+                    if growth_count > 2 {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
+fn sculk_attempt_place_sculk<R: RandomSource>(
+    random: &mut R,
+    grid: &mut VegGrid,
+    tags: &VegTags,
+    pos: BlockPos,
+    state: &str,
+) -> bool {
+    let mask = sculk_face_mask(state);
+    for support in shuffled_copy(random, &SCULK_DIRECTIONS) {
+        if !sculk_has_face(mask, support) {
+            continue;
+        }
+        let support_pos = BlockPos {
+            x: pos.x + support.0,
+            y: pos.y + support.1,
+            z: pos.z + support.2,
+        };
+        if !tags
+            .sculk_replaceable_world_gen
+            .contains(base_at(grid, support_pos.x, support_pos.y, support_pos.z))
+        {
+            continue;
+        }
+        grid.set_if_in_bounds(support_pos.x, support_pos.y, support_pos.z, "minecraft:sculk".to_string());
+        sculk_spread_all(
+            grid,
+            support_pos,
+            "minecraft:sculk",
+            false,
+        );
+        let skip = sculk_opposite(support);
+        for &vein_direction in &SCULK_DIRECTIONS {
+            if vein_direction == skip {
+                continue;
+            }
+            let neighbour = BlockPos {
+                x: support_pos.x + vein_direction.0,
+                y: support_pos.y + vein_direction.1,
+                z: support_pos.z + vein_direction.2,
+            };
+            let neighbour_state = grid.get(neighbour.x, neighbour.y, neighbour.z).to_string();
+            if super::base_id(&neighbour_state) == "minecraft:sculk_vein" {
+                sculk_on_discharged(grid, neighbour, &neighbour_state);
+            }
+        }
+        return true;
+    }
+    false
+}
+
+fn sculk_attempt_use_charge<R: RandomSource>(
+    random: &mut R,
+    grid: &mut VegGrid,
+    tags: &VegTags,
+    cursor: &SculkCursor,
+    origin: BlockPos,
+    behaviour: SculkBehaviourKind,
+    spread_veins: bool,
+) -> i32 {
+    match behaviour {
+        SculkBehaviourKind::Default => {
+            if cursor.decay_delay > 0 { cursor.charge } else { 0 }
+        }
+        SculkBehaviourKind::Vein => {
+            let state = grid.get(cursor.pos.x, cursor.pos.y, cursor.pos.z).to_string();
+            if spread_veins && sculk_attempt_place_sculk(random, grid, tags, cursor.pos, &state) {
+                cursor.charge - 1
+            } else if {
+                let roll = random.next_int_bounded(5);
+                roll == 0
+            } {
+                (cursor.charge as f32 * 0.5) as i32
+            } else {
+                cursor.charge
+            }
+        }
+        SculkBehaviourKind::Sculk => {
+            let use_roll = random.next_int_bounded(5);
+            if cursor.charge == 0 || use_roll != 0 {
+                return cursor.charge;
+            }
+            let dx = cursor.pos.x - origin.x;
+            let dy = cursor.pos.y - origin.y;
+            let dz = cursor.pos.z - origin.z;
+            let close_to_origin = (dx * dx + dy * dy + dz * dz) < 1;
+            if !close_to_origin && sculk_can_place_growth(grid, cursor.pos) {
+                let growth_roll = random.next_int_bounded(50);
+                if growth_roll < cursor.charge {
+                    let above = grid.get(cursor.pos.x, cursor.pos.y + 1, cursor.pos.z);
+                    let growth = sculk_random_growth_state(random, sculk_is_water_source(above));
+                    grid.set_if_in_bounds(cursor.pos.x, cursor.pos.y + 1, cursor.pos.z, growth);
+                }
+                return (cursor.charge - 50).max(0);
+            }
+            let decay_roll = random.next_int_bounded(10);
+            if decay_roll != 0 {
+                return cursor.charge;
+            }
+            if close_to_origin {
+                cursor.charge - 1
+            } else {
+                let distance = ((dx * dx + dy * dy + dz * dz) as f32).sqrt();
+                let outer = (distance - 1.0_f32).max(0.0_f32).powi(2);
+                let factor = (outer / (24.0_f32 - 1.0_f32).powi(2)).min(1.0_f32);
+                ((cursor.charge as f32 * factor * 0.5) as i32).max(1)
+            }
+        }
+    }
+}
+
+fn sculk_update_cursor<R: RandomSource>(
+    random: &mut R,
+    grid: &mut VegGrid,
+    tags: &VegTags,
+    cursor: &mut SculkCursor,
+    origin: BlockPos,
+    spread_veins: bool,
+) {
+    if cursor.charge <= 0 {
+        return;
+    }
+    if cursor.update_delay > 0 {
+        cursor.update_delay -= 1;
+        return;
+    }
+    let mut state = grid.get(cursor.pos.x, cursor.pos.y, cursor.pos.z).to_string();
+    let mut behaviour = sculk_behaviour(grid, cursor.pos);
+    if spread_veins && sculk_attempt_spread_vein(grid, cursor.pos, &state, cursor.facings) {
+        if behaviour != SculkBehaviourKind::Sculk {
+            state = grid.get(cursor.pos.x, cursor.pos.y, cursor.pos.z).to_string();
+            behaviour = sculk_behaviour(grid, cursor.pos);
+        }
+    }
+    cursor.charge = sculk_attempt_use_charge(random, grid, tags, cursor, origin, behaviour, spread_veins);
+    if cursor.charge <= 0 {
+        sculk_on_discharged(grid, cursor.pos, &state);
+        return;
+    }
+    if let Some(next) = sculk_valid_movement_pos(random, grid, tags, cursor.pos) {
+        sculk_on_discharged(grid, cursor.pos, &state);
+        cursor.pos = next;
+        let dx = cursor.pos.x - origin.x;
+        let dz = cursor.pos.z - origin.z;
+        if dx * dx + dz * dz >= 15 * 15 {
+            cursor.charge = 0;
+            return;
+        }
+        state = grid.get(cursor.pos.x, cursor.pos.y, cursor.pos.z).to_string();
+    }
+    if sculk_behaviour(grid, cursor.pos) != SculkBehaviourKind::Default {
+        cursor.facings = Some(sculk_face_mask(&state));
+    }
+    cursor.decay_delay = match behaviour {
+        SculkBehaviourKind::Default => (cursor.decay_delay - 1).max(0),
+        SculkBehaviourKind::Sculk | SculkBehaviourKind::Vein => 1,
+    };
+    cursor.update_delay = 1;
+}
+
+/// Applies the configured world-generation cursor spread, including substrate
+/// replacement and multiface vein propagation. The cursor state is deliberately
+/// local to this feature: world generation never persists or merges it.
 pub(super) fn place_sculk_patch<R: RandomSource>(
     random: &mut R,
     pos: BlockPos,
     cfg: &SculkPatchCfg,
     grid: &mut VegGrid,
+    tags: &VegTags,
 ) {
-    if !sturdy_at(grid, pos.x, pos.y - 1, pos.z) || !air_at(grid, pos.x, pos.y, pos.z) {
+    if !sculk_can_spread_from(grid, pos) {
         return;
     }
-    let budget = (cfg.charge_count * cfg.amount_per_charge).max(1);
-    let radius = ((budget as f64).sqrt() / 2.0).round().clamp(1.0, 8.0) as i32;
-    for dx in -radius..=radius {
-        for dz in -radius..=radius {
-            if dx * dx + dz * dz > radius * radius {
-                continue;
+    let rounds = cfg.spread_rounds + cfg.growth_rounds;
+    for round in 0..rounds {
+        let mut cursors = Vec::new();
+        if cfg.charge_count > 0 && cfg.amount_per_charge > 0 {
+            for _ in 0..cfg.charge_count {
+                let mut charge = cfg.amount_per_charge;
+                while charge > 0 && cursors.len() < SCULK_MAX_CURSORS {
+                    let current = charge.min(SCULK_MAX_CHARGE);
+                    cursors.push(SculkCursor {
+                        pos,
+                        charge: current,
+                        update_delay: 0,
+                        decay_delay: 1,
+                        facings: None,
+                    });
+                    charge -= current;
+                }
             }
-            let (x, z) = (pos.x + dx, pos.z + dz);
-            if sturdy_at(grid, x, pos.y - 1, z) && air_at(grid, x, pos.y, z) {
-                grid.set_state_if_in_bounds(x, pos.y - 1, z, "minecraft:sculk");
+        }
+        let spread_veins = round < cfg.spread_rounds;
+        for _ in 0..cfg.spread_attempts.max(0) {
+            let mut next = Vec::with_capacity(cursors.len());
+            for mut cursor in cursors {
+                let dx = cursor.pos.x - pos.x;
+                let dy = cursor.pos.y - pos.y;
+                let dz = cursor.pos.z - pos.z;
+                if dx.abs().max(dy.abs()).max(dz.abs()) <= SCULK_MAX_CURSOR_DISTANCE {
+                    sculk_update_cursor(random, grid, tags, &mut cursor, pos, spread_veins);
+                    if cursor.charge > 0 {
+                        next.push(cursor);
+                    }
+                }
+            }
+            cursors = next;
+            if cursors.is_empty() {
+                break;
             }
         }
     }
-    if random.next_float() <= cfg.catalyst_chance && sturdy_at(grid, pos.x, pos.y - 1, pos.z) {
-        grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, "minecraft:sculk_catalyst");
+    let below = BlockPos { x: pos.x, y: pos.y - 1, z: pos.z };
+    if random.next_float() <= cfg.catalyst_chance && sculk_full_collision_at(grid, below) {
+        let state = CanonicalStateId::from_state_str("minecraft:sculk_catalyst")
+            .map(CanonicalStateId::canonical_state)
+            .unwrap_or_else(|| "minecraft:sculk_catalyst".to_string());
+        grid.set_if_in_bounds(pos.x, pos.y, pos.z, state);
     }
     let extra = cfg.extra_rare_growths.sample(random);
     for _ in 0..extra {
-        let x = pos.x + random.next_int_bounded(5) - 2;
-        let z = pos.z + random.next_int_bounded(5) - 2;
-        if air_at(grid, x, pos.y, z) && sturdy_at(grid, x, pos.y - 1, z) {
-            grid.set_if_in_bounds(
-                x,
-                pos.y,
-                z,
-                "minecraft:sculk_shrieker[can_summon=true,shrieking=false,waterlogged=false]"
-                    .to_string(),
-            );
+        let candidate = BlockPos {
+            x: pos.x + {
+                let roll = random.next_int_bounded(5);
+                roll
+            } - 2,
+            y: pos.y,
+            z: pos.z + {
+                let roll = random.next_int_bounded(5);
+                roll
+            } - 2,
+        };
+        if air_at(grid, candidate.x, candidate.y, candidate.z)
+            && sculk_face_sturdy_at(grid, candidate, (0, -1, 0))
+        {
+            let shrieker = CanonicalStateId::from_state_str("minecraft:sculk_shrieker")
+                .map(CanonicalStateId::canonical_state)
+                .unwrap_or_else(|| {
+                    "minecraft:sculk_shrieker[can_summon=false,shrieking=false,waterlogged=false]".to_string()
+                })
+                .replace("can_summon=false", "can_summon=true");
+            grid.set_if_in_bounds(candidate.x, candidate.y, candidate.z, shrieker);
         }
     }
 }
@@ -2930,7 +3739,10 @@ fn apply_fallen_tree_decorators<R: RandomSource>(
                     tags,
                 );
             }
-            Decorator::Beehive { .. } | Decorator::PlaceOnGround { .. } | Decorator::Unsupported => {}
+            Decorator::Beehive { .. }
+            | Decorator::PlaceOnGround { .. }
+            | Decorator::AlterGround { .. }
+            | Decorator::Unsupported => {}
         }
     }
 }
@@ -3048,6 +3860,100 @@ mod tests {
     use crate::feature::{HeightProvider, VerticalAnchor};
     use crate::feature::top_layer::StatePredicate;
     use crate::rng::{LegacyRandomSource, RandomSource, WorldgenRandom, XoroshiroPositionalFactory, XoroshiroRandomSource};
+
+    fn pos_for_hash(hash: i32) -> BlockPos { BlockPos { x: hash, y: 0, z: 0 } }
+
+    #[test]
+    fn compatibility_set_preserves_insertion_order_and_rejects_bucket_order() {
+        let mut set = CompatBlockPosSet::default();
+        for hash in [17, 0, 1, 33, 16, 0] {
+            set.insert(pos_for_hash(hash));
+        }
+        assert_eq!(
+            set.order(),
+            [17, 0, 1, 33, 16].map(pos_for_hash),
+            "the feature stream consumes successful insertions in encounter order",
+        );
+        assert_ne!(set.order(), set.bucket_order(), "bucket order is only a membership detail");
+    }
+
+    #[test]
+    fn compatibility_set_resize_splits_old_chains_without_reordering_them() {
+        let mut set = CompatBlockPosSet::default();
+        for hash in [0, 16, 32, 48, 1, 2, 3, 4, 5, 6, 7, 8, 9] {
+            assert!(set.insert(pos_for_hash(hash)));
+        }
+        assert_eq!(set.bucket_capacity(), 32, "the thirteenth entry crosses the 16-bucket threshold");
+        assert_eq!(
+            set.order(),
+            [0, 16, 32, 48, 1, 2, 3, 4, 5, 6, 7, 8, 9].map(pos_for_hash),
+            "resizing membership buckets does not reorder the feature stream",
+        );
+        assert_ne!(set.order(), set.bucket_order(), "the resized bucket order is a negative control");
+    }
+
+    #[test]
+    fn compatibility_set_order_is_identical_across_cold_and_warm_construction() {
+        let input = [97, -1, 31, 0, 16, 48, 2, 18, 34, 50, 3, 19, 35, 51];
+        let build = || {
+            let mut set = CompatBlockPosSet::default();
+            for hash in input { set.insert(pos_for_hash(hash)); }
+            set.order()
+        };
+        let expected = build();
+        for _ in 0..32 {
+            assert_eq!(build(), expected);
+        }
+    }
+
+    #[test]
+    fn sculk_movement_neighbour_order_matches_coordinate_iteration() {
+        assert_eq!(
+            SCULK_NON_CORNER_NEIGHBOURS,
+            [
+                (0, -1, -1),
+                (-1, 0, -1),
+                (0, 0, -1),
+                (1, 0, -1),
+                (0, 1, -1),
+                (-1, -1, 0),
+                (0, -1, 0),
+                (1, -1, 0),
+                (-1, 0, 0),
+                (1, 0, 0),
+                (-1, 1, 0),
+                (0, 1, 0),
+                (1, 1, 0),
+                (0, -1, 1),
+                (-1, 0, 1),
+                (0, 0, 1),
+                (1, 0, 1),
+                (0, 1, 1),
+            ],
+        );
+    }
+
+    #[test]
+    fn sculk_same_position_rejects_a_sculk_support_cell() {
+        let origin = BlockPos { x: 8, y: 0, z: 8 };
+        let mut grid = VegGrid::new(-64, 384, 0, 0);
+        grid.seed(origin.x, origin.y, origin.z, "minecraft:air".to_string());
+        grid.seed(origin.x, origin.y - 1, origin.z, "minecraft:sculk".to_string());
+        assert!(!sculk_spread_candidate_allowed(
+            &grid,
+            origin,
+            origin,
+            (0, -1, 0),
+        ));
+
+        grid.seed(origin.x, origin.y - 1, origin.z, "minecraft:deepslate".to_string());
+        assert!(sculk_spread_candidate_allowed(
+            &grid,
+            origin,
+            origin,
+            (0, -1, 0),
+        ));
+    }
 
     struct DeltaScriptRandom {
         bounded: VecDeque<i32>,
@@ -3204,6 +4110,45 @@ mod tests {
     }
 
     #[test]
+    fn disk_numeric_provider_keeps_write_order_for_builtin_and_extension_states() {
+        let make_grid = || {
+            let mut grid = VegGrid::new(-64, 384, 0, 0);
+            grid.seed(8, 70, 8, "minecraft:air".to_string());
+            grid
+        };
+        let cfg = |state: &str| DiskCfg {
+            provider: BlockStateProvider::Simple(state.to_string()),
+            target: BlockPredicate::True,
+            radius: IntProvider::Constant(0),
+            half_height: 0,
+        };
+        let pos = BlockPos { x: 8, y: 70, z: 8 };
+
+        let mut builtin = make_grid();
+        place_disk(
+            &mut LegacyRandomSource::new(11),
+            pos,
+            &cfg("minecraft:sand"),
+            &mut builtin,
+            &VegTags::default(),
+        );
+        assert_eq!(builtin.dirty_cells().collect::<Vec<_>>(), vec![(8, 70, 8, "minecraft:sand")]);
+
+        let mut extension = make_grid();
+        place_disk(
+            &mut LegacyRandomSource::new(11),
+            pos,
+            &cfg("example:plugin_block"),
+            &mut extension,
+            &VegTags::default(),
+        );
+        assert_eq!(
+            extension.dirty_cells().collect::<Vec<_>>(),
+            vec![(8, 70, 8, "example:plugin_block")]
+        );
+    }
+
+    #[test]
     fn red_huge_mushroom_rejects_blocked_lower_cap_cell() {
         let cfg = HugeMushroomCfg {
             can_place_on: BlockPredicate::MatchingBlocks {
@@ -3232,6 +4177,41 @@ mod tests {
             &VegTags::default(),
         );
         assert_eq!(grid.dirty_len(), 0);
+    }
+
+    #[test]
+    fn red_huge_mushroom_accepts_a_leaf_canopy_across_its_cap_rows() {
+        let cfg = HugeMushroomCfg {
+            can_place_on: BlockPredicate::MatchingBlocks {
+                blocks: ["minecraft:grass_block".to_string()].into_iter().collect(),
+                offset: (0, 0, 0),
+            },
+            cap_provider: BlockStateProvider::Simple(
+                "minecraft:red_mushroom_block[down=false,east=false,north=false,south=false,up=false,west=false]".to_string(),
+            ),
+            stem_provider: BlockStateProvider::Simple("minecraft:mushroom_stem".to_string()),
+            foliage_radius: 2,
+            kind: HugeMushroomKind::Red,
+        };
+        let mut grid = VegGrid::new(-64, 384, 0, 0);
+        grid.seed(8, 69, 8, "minecraft:grass_block".to_string());
+        grid.seed(10, 72, 8, "minecraft:dark_oak_leaves[distance=1,persistent=false,waterlogged=false]".to_string());
+        let mut tags = VegTags::default();
+        tags.leaves.insert("minecraft:dark_oak_leaves".to_string());
+        tags.replaceable_by_mushrooms.insert("minecraft:dark_oak_leaves".to_string());
+        let mut random = LegacyRandomSource::new(0);
+
+        place_huge_mushroom_at_height(
+            &mut random,
+            BlockPos { x: 8, y: 70, z: 8 },
+            &cfg,
+            4,
+            &mut grid,
+            &tags,
+        );
+
+        assert_eq!(base_at(&grid, 10, 72, 8), "minecraft:red_mushroom_block");
+        assert_eq!(base_at(&grid, 8, 70, 8), "minecraft:mushroom_stem");
     }
 
     #[test]
@@ -3275,6 +4255,25 @@ mod tests {
                 "{state} must expose the candidate's covered face"
             );
         }
+    }
+
+    #[test]
+    fn vegetation_patch_support_tracks_floor_and_ceiling_faces() {
+        let mut grid = VegGrid::new(-64, 384, 0, 0);
+        let support = "minecraft:oak_fence[east=false,north=false,south=false,waterlogged=false,west=false]";
+        grid.seed(8, 70, 8, support.to_string());
+
+        // Motion blocking is intentionally coarser than a patch's support
+        // face: this fence accepts the generic occupancy check, gives center
+        // support below a ceiling, and does not give full support above a
+        // floor.
+        assert!(sturdy_at(&grid, 8, 70, 8));
+        assert!(!vegetation_patch_supports(&grid, 8, 70, 8, CaveSurface::Floor));
+        assert!(vegetation_patch_supports(&grid, 8, 70, 8, CaveSurface::Ceiling));
+
+        grid.seed(9, 70, 8, "minecraft:stone".to_string());
+        assert!(vegetation_patch_supports(&grid, 9, 70, 8, CaveSurface::Floor));
+        assert!(vegetation_patch_supports(&grid, 9, 70, 8, CaveSurface::Ceiling));
     }
 
     impl RandomSource for DeltaScriptRandom {
@@ -3412,7 +4411,7 @@ mod tests {
         // target y=18, radii=(7,3,7), then 300 basalt cells.
         let cfg = ReplaceBlobsCfg {
             target: "minecraft:netherrack".to_string(),
-            state: "minecraft:basalt[axis=y]".to_string(),
+            state: CanonicalStateId::from_state_str("minecraft:basalt[axis=y]").unwrap(),
             radius: IntProvider::Uniform { min: 3, max: 7 },
         };
         let mut grid = VegGrid::with_footprint(0, 128, 0, 0, -8, 9);
@@ -3456,7 +4455,7 @@ mod tests {
     fn captured_nether_index0_first_attempts_keep_body_interleaved_stream() {
         let cfg = ReplaceBlobsCfg {
             target: "minecraft:netherrack".to_string(),
-            state: "minecraft:basalt[axis=y]".to_string(),
+            state: CanonicalStateId::from_state_str("minecraft:basalt[axis=y]").unwrap(),
             radius: IntProvider::Uniform { min: 3, max: 7 },
         };
         let mut grid = VegGrid::with_footprint(0, 128, -4_000, -4_000, -8, 18);

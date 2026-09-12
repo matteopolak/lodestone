@@ -1453,8 +1453,8 @@ pub(super) fn can_place_root(grid: &VegGrid, tags: &VegTags, can_grow_through: T
 /// positions for the next root segment, drawn from `pos`'s manhattan
 /// distance to `root_origin` and, in the two RNG-bearing branches, real
 /// draws. Order matches a faithful implementation's own list construction exactly (`below`
-/// first where both are returned). The fixed two-slot result is sufficient
-/// because no branch can produce more than two candidates.
+/// first where both are returned). The fixed two-slot result is sufficient because no branch
+/// can produce more than two candidates.
 fn potential_root_positions<R: RandomSource>(
     pos: BlockPos,
     prev_dir: (i32, i32),
