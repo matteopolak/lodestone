@@ -74,8 +74,8 @@ pub const DEFAULT_SENSITIVITY: f32 = 0.5;
 ///
 /// **This is 8 by design.** Keeping the command-line default at 8 avoids a
 /// 2.25x larger chunk load for an install without a persisted setting. The
-/// *slider's range* is still `2..=32` (see `menu::options::INT_RANGE_SLIDERS`),
-/// so a player can reach 12 or 32; this is the starting point, not a ceiling.
+/// *slider's range* is still `2..=256` (see `menu::options::INT_RANGE_SLIDERS`),
+/// so a player can reach 12 or 256; this is the starting point, not a ceiling.
 pub const DEFAULT_RENDER_DISTANCE: u32 = 8;
 
 /// Vanilla's `renderDistance` minimum (an int range starting at 2 in its own
@@ -83,10 +83,12 @@ pub const DEFAULT_RENDER_DISTANCE: u32 = 8;
 /// reaches `sim/build.rs`'s world radius and would generate nothing.
 pub const MIN_RENDER_DISTANCE: u32 = 2;
 
-/// Vanilla's `renderDistance` maximum on the `largeDistances` branch
-///. See `menu::options::LARGE_DISTANCES_MAX` for why this
-/// client takes that branch unconditionally — there is no JVM heap cap to ask.
-pub const MAX_RENDER_DISTANCE: u32 = 32;
+/// The maximum selectable render distance for this client.
+///
+/// The stream is scheduled incrementally and its server-side retention policy
+/// remains bounded; this is a selectable distance, not a request to generate
+/// the complete square synchronously at launch.
+pub const MAX_RENDER_DISTANCE: u32 = 256;
 
 /// Largest coarse visual horizon in chunks.
 ///
@@ -1222,7 +1224,7 @@ impl Options {
         // reusing `unit` rather than restating the range, because a hand-written
         // second copy is how the two would drift.
         let sensitivity = unit("sensitivity", DEFAULT_SENSITIVITY);
-        // Clamped to vanilla's own a clamped range `2..=32` rather
+        // Clamped to this client's supported range `2..=256` rather
         // than merely parsed: an out-of-range value here reaches
         // `sim/build.rs`'s world radius and `sim/camera.rs`'s fog, and a 0 would
         // generate no chunks at all — a hand-edited file must not be able to
@@ -2165,10 +2167,23 @@ impl Config {
                     }
                 }
                 "--render-distance" | "--rd" => {
-                    if let Some(v) = it.next().and_then(|v| v.parse().ok()) {
-                        cfg.render_distance = v;
-                        cfg.render_distance_given = true;
+                    let Some(raw) = it.next() else {
+                        return CliOutcome::Error(
+                            "--render-distance requires a positive integer".into(),
+                        );
+                    };
+                    let Ok(value) = raw.parse::<u32>() else {
+                        return CliOutcome::Error(format!(
+                            "--render-distance requires an integer in {MIN_RENDER_DISTANCE}..={MAX_RENDER_DISTANCE}, got {raw}"
+                        ));
+                    };
+                    if !(MIN_RENDER_DISTANCE..=MAX_RENDER_DISTANCE).contains(&value) {
+                        return CliOutcome::Error(format!(
+                            "--render-distance must be between {MIN_RENDER_DISTANCE} and {MAX_RENDER_DISTANCE}, got {value}"
+                        ));
                     }
+                    cfg.render_distance = value;
+                    cfg.render_distance_given = true;
                 }
                 "--seconds" => {
                     if let Some(v) = it.next().and_then(|v| v.parse::<u64>().ok()) {
@@ -2770,6 +2785,23 @@ mod tests {
         let c = parse(&["--port", "notanumber"]);
         assert_eq!(c.port, 25565);
         assert_eq!(c.explicit_port(), None, "an invalid --port is not explicit");
+    }
+
+    #[test]
+    fn render_distance_cli_accepts_the_typed_endpoints_and_rejects_out_of_range() {
+        assert_eq!(parse(&["--render-distance", "256"]).render_distance, MAX_RENDER_DISTANCE);
+        assert_eq!(parse(&["--rd", "2"]).render_distance, MIN_RENDER_DISTANCE);
+        for args in [
+            vec!["--render-distance", "1"],
+            vec!["--render-distance", "257"],
+            vec!["--render-distance", "not-a-number"],
+            vec!["--render-distance"],
+        ] {
+            assert!(
+                matches!(Config::from_args(args.into_iter().map(str::to_owned)), CliOutcome::Error(_)),
+                "out-of-range or missing render distance must fail closed: {args:?}"
+            );
+        }
     }
 
     #[test]
@@ -3795,13 +3827,13 @@ mod tests {
     /// A hand-edited or corrupt file must not be able to produce a black screen.
     ///
     /// `render_distance` reaches `sim/build.rs`'s world radius, so 0 would
-    /// generate no chunks at all. The clamp is to vanilla's own a clamped range `2..=32`
+    /// generate no chunks at all. The clamp is to this client's supported range `2..=256`
     /// rather than to "something positive", and each rejected value is checked to
     /// land on the **default** rather than on a silently clamped neighbour, which
     /// is what tells a reader the value was rejected rather than adjusted.
     #[test]
     fn an_out_of_range_render_distance_degrades_to_the_default() {
-        for bad in ["0", "1", "33", "999999", "-4", "\"twelve\"", "null"] {
+        for bad in ["0", "1", "257", "999999", "-4", "\"twelve\"", "null"] {
             let json = format!("{{\"render_distance\": {bad}}}");
             assert_eq!(
                 Options::from_json(&json).render_distance,
