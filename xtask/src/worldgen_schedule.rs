@@ -358,6 +358,10 @@ fn source_entrypoint(name: &str) -> bool {
     SOURCE_ENTRYPOINTS.contains(&name)
 }
 
+fn stage_implementation(name: &str) -> bool {
+    name.ends_with("_stage") || name.contains("_stage_")
+}
+
 fn inspect_function(
     file: &str,
     name: &str,
@@ -394,6 +398,13 @@ fn inspect_function(
             function: name.to_owned(),
             reason: "source entrypoint duplicates an offset/radius neighbourhood loop; use the central source schedule".to_owned(),
         });
+    }
+
+    // A helper whose name identifies one pass may contain several internal
+    // calls while implementing that pass. It is not an ordering owner, but a
+    // rogue typed cursor in it was still reported above before this exemption.
+    if stage_implementation(name) {
+        return false;
     }
 
     // A distant/far worldgen entrypoint must be a request against the same
