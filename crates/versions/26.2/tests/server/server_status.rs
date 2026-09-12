@@ -502,6 +502,23 @@ async fn status_json_reports_the_real_motd_cap_version_and_protocol() {
     );
 }
 
+/// The status body is a transport string, but its field order and omission
+/// rules are part of the captured wire contract. Keep one byte-exact control
+/// alongside the semantic JSON assertions above so a DTO change cannot
+/// silently alter the packet while leaving every parsed value unchanged.
+#[test]
+fn status_json_has_the_exact_minimal_wire_document() {
+    let directive =
+        V770ServerProtocol.encode_status_response(EXPECTED_MOTD, 0, 20, &[], None, false);
+    let ServerDirective::Send { payload, .. } = directive else {
+        panic!("encode_status_response must emit a Send");
+    };
+    assert_eq!(
+        read_status_json(&payload),
+        r#"{"description":{"text":"A Lodestone Server"},"players":{"max":20,"online":0,"sample":[]},"version":{"name":"26.2","protocol":776}}"#,
+    );
+}
+
 /// Our own client-side status parser — written independently, for reading *real*
 /// servers — accepts the document our server produces, and recovers the same
 /// four values from it.

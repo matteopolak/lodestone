@@ -261,6 +261,26 @@ fn login_disconnect_framing_matches_a_live_vanilla_refusal() {
     );
 }
 
+/// Login disconnects retain their raw JSON string contract. This pins the
+/// exact DTO output for a translatable reason, including nested component
+/// order and omission of absent fields.
+#[test]
+fn login_disconnect_json_has_the_exact_typed_wire_document() {
+    let reason = translatable(
+        "multiplayer.disconnect.outdated_client",
+        None,
+        vec![Text::literal("26.2")],
+    );
+    let (_, body) = payload_of(V770ServerProtocol.encode_disconnect(State::Login, &reason));
+    let json = Reader::new(&body)
+        .string(262_144)
+        .expect("login disconnect body is a length-prefixed JSON string");
+    assert_eq!(
+        json,
+        r#"{"translate":"multiplayer.disconnect.outdated_client","with":[{"text":"26.2"}]}"#,
+    );
+}
+
 /// The Configuration phase uses the *same* packet as Play, not Login's.
 ///
 /// It has no producer in this server yet — see this file's module docs — so this

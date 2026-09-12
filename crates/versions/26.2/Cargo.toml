@@ -29,6 +29,7 @@ uuid = { workspace = true }
 # rolls it client-side in its own explosion handler), so decoding
 # it faithfully means rolling the same die here.
 rand = { workspace = true }
+serde = { workspace = true }
 # Promoted from a dev-dependency to a production one by issue #277: the
 # `status_response` packet's entire body is a JSON document
 # (vanilla's own lenient-JSON stream codec, capped at 32767), so
