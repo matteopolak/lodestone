@@ -4,6 +4,18 @@
 
 The path from "the server says there is an entity at (x, y, z)" to a posed, textured, lit mob (or sprite, or nametag) on screen, plus two systems that ride on the same entity data: picking (what the crosshair targets) and pose-dependent collision dimensions (crouch/swim box sizing).
 
+The CPU entity renderer is split by responsibility behind the stable
+`lodestone_render::entity` re-export. `entity_catalog.rs` owns type/model and
+texture lookup; `entity_model.rs` owns baked part meshes and placement
+transforms; `entity_batch.rs` owns instances, culling, and draw grouping;
+`entity_layers.rs` owns armour, wool, cape, and elytra overlays;
+`entity_item.rs` owns dropped, framed, thrown, and block-entity item poses;
+`entity_orb.rs` owns experience-orb geometry; and `entity_first_person.rs`
+owns hand and first-person item transforms. Keep new code in the narrowest
+module and preserve the root re-export when adding public API. The split does
+not change shader bind groups or upload ownership: baked meshes remain one
+per model/layer and frame state remains per instance.
+
 ## How it works
 
 ### Type path → model → texture
@@ -14,19 +26,22 @@ The wire adapter and render-side type-path consumers resolve their external id o
 path before that lookup; an unknown or plugin type remains a miss and follows
 the caller's existing fallback instead of borrowing a built-in hitbox.
 
-The programmable client read-model follows the same ownership rule for entity
-instances: `ClientHandle::entity` accepts an `EntityNetworkId` classified as
-server-owned, while plugin-local ids remain at the ECS/plugin boundary. The
-explicit `ClientHandle::entity_from_wire(i32)` adapter performs server-wire
-classification for packet-facing callers, so an unknown or removed server id
-is a normal lookup miss and a negative local id cannot be mistaken for a server
-entity.
+The render fold performs that narrowing once per ingest snapshot and stores
+`Option<EntityType>` beside the original path in `RenderKind`. Closed dispatch
+such as dropped-item physics, projectile integration, TNT fuse handling,
+experience-orb extraction, armour-stand pose selection, and sheep wool uses the
+generated enum. `None` is not an error or an implicit built-in: it preserves the
+original custom/data-pack path for resource-pack model lookup while declining
+all built-in-only behavior. Add a built-in behavior by matching the generated
+variant at this boundary; do not introduce another path-string match.
 
-Render-derived identity helpers use the same canonical `EntityNetworkId` from
-`lodestone-model`. The item bob phase, dropped-stack scatter, and lightning
-seed accept a classified server or plugin id; conversion back to the integer
-hash key happens only inside the deterministic helper. Item previews use a
-separate registry-seed helper because they do not represent a network entity.
+The programmable client read-model follows the same ownership rule for entity
+instances: `ClientHandle::entity_by_network_id` accepts an `EntityNetworkId`
+classified as server-owned, while plugin-local ids remain at the ECS/plugin
+boundary. The raw `ClientHandle::entity(i32)` compatibility method performs
+that server-wire classification first, so an unknown or removed server id is a
+normal lookup miss and a negative local id cannot be mistaken for a server
+entity.
 
 Display-entity billboard metadata crosses the version seam as
 `lodestone_model::BillboardMode`, so the ECS and renderer cannot confuse its
@@ -167,6 +182,7 @@ Gotchas: `(double)0.6F != 0.6` — pose heights are widened `f32` literals, buil
 ## How to change it
 
 * **New mob ported**: add the `EntityModelEntry` to the corpus; nothing else needs touching. Alias only for another mob's model *class*; extend `HumanoidArms` only for a subclass animation override on an identical skeleton, never a branch in `AnimFamily::classify`.
+
 * **A mob looks too bright/dark**: check, in order, texture format (`_srgb`?), the shader's `light_term`, the sky-darken factor, and which side of the gamma curve the multiply happens on — independent, and indistinguishable on a non-sRGB render target, so measure on a real one.
 * **Wiring real world light / sky darkening**: both ride a source function installed at connect time, on *every* connect path; until installed, mobs render full-bright / permanent-noon. Terrain does not yet read the sky-darken lane, though the shared uniform already carries it.
 * **Adding a picking filter**: goes ahead of the hitbox lookup. Keep the table a default-deny allowlist, never a denylist.
