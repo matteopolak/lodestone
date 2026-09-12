@@ -72,7 +72,7 @@ final class EndP06LifecycleCapture {
         int[][] maps = null;
         boolean primed = true;
         for (Heightmap.Types type : types) {
-            if (!chunk.getHeightmaps().containsKey(type)) {
+            if (chunk.getHeightmaps().stream().noneMatch(entry -> entry.getKey() == type)) {
                 primed = false;
                 break;
             }
