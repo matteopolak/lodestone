@@ -125,11 +125,11 @@ Structure terrain adaptation is part of the authenticated full-world scope. Head
 
 The comparator replays the initial-light admission boundary before it asks the packet codec for bytes. Materialization admits rows in z-major/x-major order, so a target's first saved snapshot sees only its north row and west cell; the packet may still carry all eight terrain neighbours after that snapshot is fixed. This keeps a future east or south column from changing an already-saved initial fallback, while later live relight remains free to use the complete footprint. The same relative rule is used for one-record diagnostics and bounded prefixes, so the control never depends on a particular world coordinate.
 
-The live comparator models dependency completion separately from packet-stream order. Nether and End requests replay their admitted dependency wavefront with the request's tiled key (tile-z, tile-x, local-z, local-x); a later adjacent request schedules only the previously unseen edge. Overworld requests likewise complete the centre's three-by-three FEATURES dependency wavefront, because those source bodies can spill into the requested column even with a zero-radius ticket; a later adjacent request schedules only previously unseen sources. This is not the z-major order used to emit packet records, and it is not one universal source permutation. Overworld streaming retains the admitted dependency state across bounded frame batches, matching the external stream's removal of only the requested centre ticket. The `(0,-1)` wavefront fixture and the one-record Nether P07 glowstone witness continue to guard the halo lifecycle. Immutable shaped prefixes remain eligible for parallel preparation; only stateful decoration commits use these deterministic orders.
+The live comparator models dependency completion separately from packet-stream order. Nether and Overworld requests replay their admitted three-by-three FEATURES wavefront for each target with the request's tiled key (tile-z, tile-x, local-z, local-x); their source bodies can spill into the requested column even with a zero-radius ticket. End requests use the same wavefront but retain each source globally, so a later adjacent request schedules only the previously unseen edge. This is not the z-major order used to emit packet records, and it is not one universal source permutation. Overworld and Nether streaming retain the admitted dependency state across bounded frame batches, but each source completion is target-scoped: the requested target supplies the resident read window, and writes into a future target roll back at the boundary before that source is replayed for its own packet. End remains globally resident and applies each source once, preserving its cross-target writes. The `(0,-1)` wavefront fixture, the x=90..95 Nether basalt witness, and the one-record Nether P07 glowstone witness guard the halo lifecycle. Immutable shaped prefixes remain eligible for parallel preparation; only stateful decoration commits use these deterministic orders.
 
 ### Live streaming comparison
 
-When a full frozen root is unnecessary, `scripts/worldgen-oracle/stream-parity.sh` connects the external JVM oracle to the Rust comparator through a temporary file stream. It admits the requested rectangle in z-major/x-fastest order and compares one light-free content record at a time: terrain state IDs, 4×4×4 biome cells, the three client heightmaps, and canonical block entities. Neither side constructs or compares light, so a one-chunk check does not pay packet encoding or light settlement. Overworld still replays the centre's three-by-three FEATURES source wavefront because a neighbouring source can write into the emitted centre; only the requested centre is captured.
+When a full frozen root is unnecessary, `scripts/worldgen-oracle/stream-parity.sh` connects the external JVM oracle to the Rust comparator through a temporary file stream. It admits the requested rectangle in z-major/x-fastest order and compares one light-free content record at a time: terrain state IDs, 4×4×4 biome cells, the three client heightmaps, and canonical block entities. Neither side constructs or compares light, so a one-chunk check does not pay packet encoding or light settlement. Overworld and Nether replay the centre's three-by-three FEATURES source wavefront because a neighbouring source can write into the emitted centre; only the requested centre is captured. Their target transaction is finished before the next packet target, rolling back a write whose destination has not crossed FEATURES and promoting it when that destination becomes current. End source completions remain globally resident across packets.
 
 During content discovery, `LODESTONE_LARGE_PARITY_STREAM_DEFER_HEIGHTMAPS=1` reports and continues past a record whose only difference is a client heightmap. Terrain, biomes, and block entities must still match byte-for-byte. This is an iteration aid for the separately tracked incremental-heightmap lifecycle; it is never an acceptance mode.
 
@@ -171,12 +171,14 @@ feature lifecycle is an ordered read-after-write replay. Set
 running a controlled comparison; the launcher forwards it to the comparator.
 Nether batches admit their complete two-chunk feature-write halo in z-major,
 x-fastest order before replay, but emit records only for requested targets.
-Overworld stream batches retain the shaped halo and completed three-by-three
-FEATURES source bodies across frame batches. Each requested centre emits one
-record, while all nine source bodies in its dependency wavefront run in the
-authenticated source order; a source may leave a cross-boundary write in a
-resident neighbour, so retaining completed sources preserves the external
-ticket lifecycle without rebuilding an already completed source.
+Overworld and Nether stream batches retain the shaped halo and replay all nine
+three-by-three FEATURES source bodies for each target in the authenticated
+source order. Each requested centre emits one record; a source may leave a
+cross-boundary write in a resident neighbour during that target transaction,
+but the materializer rolls it back unless the neighbour has crossed FEATURES,
+so the later target can replay the source against its own read window. End
+keeps its source completions and cross-boundary writes globally resident
+instead.
 For example, a short End control is:
 
 ```text

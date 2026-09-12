@@ -334,13 +334,13 @@ struct StreamLifecycleState {
     /// The live oracle leaves dependency chunks resident after removing the
     /// requested centre ticket. Keep that state across bounded frame batches.
     admitted: BTreeSet<(i32, i32)>,
-    /// Nether and End source bodies are globally retained after their first
-    /// authenticated completion. Overworld is intentionally target-scoped:
-    /// its source body reads the requested target's neighbourhood, and a
-    /// cross-target write is rolled back at the prior target boundary before
-    /// the later target replays that source.
+    /// End source bodies are globally retained after their first authenticated
+    /// completion. Overworld and Nether are target-scoped: their source bodies
+    /// read the requested target's neighbourhood, and a cross-target write is
+    /// rolled back at the prior target boundary before the later target
+    /// replays that source.
     completed: BTreeSet<(i32, i32)>,
-    overworld_completed: BTreeSet<((i32, i32), (i32, i32))>,
+    target_completed: BTreeSet<((i32, i32), (i32, i32))>,
 }
 
 fn lifecycle_columns(
@@ -375,7 +375,7 @@ fn lifecycle_columns_with_events(
             materializer.reset_for_lifecycle_replay();
             state.admitted.clear();
             state.completed.clear();
-            state.overworld_completed.clear();
+            state.target_completed.clear();
         }
         let prepare_started = Instant::now();
         materializer.prepare_lifecycle_replay(&admissions);
@@ -411,7 +411,7 @@ fn lifecycle_columns_with_events(
                 StreamDimension::End => unreachable!(),
             }
         };
-        let target_scoped = matches!(dimension, StreamDimension::Overworld);
+        let target_scoped = matches!(dimension, StreamDimension::Overworld | StreamDimension::Nether);
         let mut active_target = None;
         for (sequence, (target, source)) in completion_order.into_iter().enumerate() {
             if target_scoped && active_target != Some(target) {
@@ -422,8 +422,10 @@ fn lifecycle_columns_with_events(
                 active_target = Some(target);
             }
             let should_complete = match dimension {
-                StreamDimension::Overworld => state.overworld_completed.insert((target, source)),
-                StreamDimension::Nether | StreamDimension::End => state.completed.insert(source),
+                StreamDimension::Overworld | StreamDimension::Nether => {
+                    state.target_completed.insert((target, source))
+                }
+                StreamDimension::End => state.completed.insert(source),
             };
             if should_complete {
                 if dimension == StreamDimension::End {
@@ -446,10 +448,10 @@ fn lifecycle_columns_with_events(
                         sequence as u64,
                     );
                 } else {
-                    // Nether and End source bodies are globally retained: the
-                    // same source must not be replayed for every packet target.
-                    // They also do not open a target transaction, so their
-                    // resident spills remain available to later packets.
+                    // End source bodies are globally retained: the same source
+                    // must not be replayed for every packet target, and End
+                    // does not open a target transaction, so its resident
+                    // spills remain available to later packets.
                     materializer.complete(
                         source,
                         LifecycleCompletion::Features,
@@ -568,12 +570,12 @@ fn overworld_stream_replays_dependencies_per_target() {
     let mut state = StreamLifecycleState::default();
     let first = lifecycle_completion_wavefront(&[(0, 0)]);
     for &(_, source) in &first {
-        assert!(state.overworld_completed.insert(((0, 0), source)));
+        assert!(state.target_completed.insert(((0, 0), source)));
     }
     let second = lifecycle_completion_wavefront(&[(1, 0)]);
     let replayed = second
         .into_iter()
-        .filter(|&(target, source)| state.overworld_completed.insert((target, source)))
+        .filter(|&(target, source)| state.target_completed.insert((target, source)))
         .collect::<Vec<_>>();
     assert_eq!(replayed.len(), 9);
     assert_eq!(
@@ -613,6 +615,57 @@ fn nether_stream_replays_prior_targets_before_magma_gravel_target() {
         Some("minecraft:magma_block"),
         "the eighth row-major target must retain the magma spill from its earlier source completion",
     );
+}
+
+#[test]
+fn nether_stream_target_sequence_preserves_basalt_witness() {
+    let targets = (90..=95).map(|x| (x, 90)).collect::<Vec<_>>();
+    let mut materializer = Some(OrderedLifecycleMaterializer::Nether(
+        LifecycleMaterializer::new(nether_chunk_source(SEED)),
+    ));
+    let mut state = StreamLifecycleState::default();
+    let mut witness = None;
+    for target in targets {
+        let columns = lifecycle_columns(
+            StreamDimension::Nether,
+            &[target],
+            materializer.as_mut(),
+            &mut state,
+        );
+        if target == (95, 90) {
+            witness = Some(columns[0].block_state(10, 7, 2).to_owned());
+        }
+    }
+    assert_eq!(
+        witness.as_deref(),
+        Some("minecraft:basalt[axis=y]"),
+        "the x=90..95 target sequence must retain basalt from source (95,89)",
+    );
+}
+
+#[test]
+fn target_scoped_stream_state_replays_nether_sources_and_keeps_end_global() {
+    let mut state = StreamLifecycleState::default();
+    let first = lifecycle_completion_wavefront(&[(0, 0)]);
+    for &(_, source) in &first {
+        assert!(state.target_completed.insert(((0, 0), source)));
+    }
+    let second = lifecycle_completion_wavefront(&[(1, 0)]);
+    let replayed = second
+        .iter()
+        .filter(|&&(target, source)| state.target_completed.insert((target, source)))
+        .count();
+    assert_eq!(replayed, 9, "Nether source completions are target-scoped");
+
+    let mut end_state = StreamLifecycleState::default();
+    for &(_, source) in &first {
+        assert!(end_state.completed.insert(source));
+    }
+    let retained = second
+        .iter()
+        .filter(|&&(_, source)| end_state.completed.insert(source))
+        .count();
+    assert_eq!(retained, 3, "End keeps only its three newly admitted sources globally");
 }
 
 fn diagnostics_enabled() -> bool {
