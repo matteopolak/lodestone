@@ -15,18 +15,7 @@ fn vegetation_patch_stream_uses_seed_42_reference_hash_order() {
         }
     }
 
-    let mut sequence = 0;
-    for x in TARGET.0 - 1..=TARGET.0 + 1 {
-        for z in TARGET.1 - 1..=TARGET.1 + 1 {
-            materializer.complete_for_target(
-                TARGET,
-                (x, z),
-                LifecycleCompletion::Features,
-                sequence,
-            );
-            sequence += 1;
-        }
-    }
+    materializer.complete_for_target(TARGET, TARGET, LifecycleCompletion::Features, 0);
     materializer.finish_target(TARGET);
 
     assert_eq!(

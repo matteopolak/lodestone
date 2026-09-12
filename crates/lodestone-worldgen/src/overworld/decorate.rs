@@ -379,6 +379,39 @@ impl OverworldGenerator {
             &context,
             Some((source_x, source_z)),
             overrides,
+            true,
+        )
+        .1
+    }
+
+    /// Runs the one target FEATURES completion against its radius-one
+    /// CARVERS region and returns the complete transition stream. The
+    /// dispatcher may use several internal source views to route boundary
+    /// reads and writes, but they are one lifecycle completion owned by the
+    /// target chunk.
+    #[must_use]
+    pub fn parity_features_with_overrides(
+        &self,
+        target_x: i32,
+        target_z: i32,
+        overrides: &[(i32, i32, i32, String)],
+    ) -> ParityDecorationResult {
+        let pre = self.pre_ore_stage(target_x, target_z);
+        if self.decoration_catalog.is_empty() {
+            return ParityDecorationResult {
+                spills: Vec::new(),
+                block_entities: Vec::new(),
+            };
+        }
+        let context = self.replay_context_for(target_x, target_z);
+        self.mixed_features_stage_selected(
+            target_x,
+            target_z,
+            (*pre.0).clone(),
+            &context,
+            None,
+            overrides,
+            true,
         )
         .1
     }
@@ -999,7 +1032,7 @@ impl OverworldGenerator {
             return (center_world, Vec::new());
         }
         let context = self.replay_context_for(cx, cz);
-        self.features_stage_with_context(cx, cz, center_world, &context, None, &[])
+        self.features_stage_with_context(cx, cz, center_world, &context, None, &[], false)
     }
 
     /// Timing-only twin of [`Self::features_stage`]. It builds the immutable
@@ -1026,7 +1059,7 @@ impl OverworldGenerator {
             center_heights,
             Arc::new(center_biomes.clone()),
         );
-        self.features_stage_with_context(cx, cz, center_world, &context, None, &[])
+        self.features_stage_with_context(cx, cz, center_world, &context, None, &[], false)
     }
 
     fn features_stage_with_context(
@@ -1037,6 +1070,7 @@ impl OverworldGenerator {
         context: &MixedReplayContext,
         selected_source: Option<(i32, i32)>,
         overrides: &[(i32, i32, i32, String)],
+        capture_spills: bool,
     ) -> (
         crate::dense_grid::DenseBlockGrid,
         Vec<super::block_entities::GeneratedBlockEntity>,
@@ -1048,6 +1082,7 @@ impl OverworldGenerator {
             context,
             selected_source,
             overrides,
+            capture_spills,
         );
         let block_entities = result
             .block_entities
@@ -1061,11 +1096,9 @@ impl OverworldGenerator {
     }
 
     /// Runs the complete Overworld FEATURES stream over one shared read/write
-    /// neighbourhood.  `selected_source` is only a parity filter: with
-    /// `None`, all nine source chunks run for the production path; with
-    /// `Some`, the exact same loop runs only that source for the lifecycle
-    /// materializer.  The adapters are synchronized after every raw entry so
-    /// later entries see the current resident state regardless of whether the
+    /// neighbourhood. `selected_source` is a parity filter for source-local
+    /// controls. The adapters are synchronized after every raw entry so later
+    /// entries see the current resident state regardless of whether the
     /// previous body used ore or vegetation placement.
     #[allow(clippy::too_many_arguments)]
     fn mixed_features_stage_selected(
@@ -1076,6 +1109,7 @@ impl OverworldGenerator {
         context: &MixedReplayContext,
         selected_source: Option<(i32, i32)>,
         overrides: &[(i32, i32, i32, String)],
+        capture_spills: bool,
     ) -> (
         crate::dense_grid::DenseBlockGrid,
         ParityDecorationResult,
@@ -1220,10 +1254,10 @@ impl OverworldGenerator {
         let mut ore_cursor = 0usize;
         let changed_scratch = &mut dispatch_scratch.changed;
         let final_cells_scratch = &mut dispatch_scratch.final_cells;
-        // Source writes are read by later sources, so this must match the
-        // bounded lifecycle's x-major/z-fastest admission order. The order is
-        // owned by the dimension schedule; keeping a second offset list here
-        // would let production and replay silently diverge.
+        // A selected source is retained for the parity seam, which can inspect
+        // one source in isolation. The lifecycle adapter exposes the complete
+        // dispatch as one target-owned FEATURES transition; this loop's
+        // internal source views are not lifecycle completion events.
         for &(dx, dz) in overworld_source_offsets() {
             let source_x = cx + dx;
             let source_z = cz + dz;
@@ -1338,7 +1372,8 @@ impl OverworldGenerator {
         }
 
         let mut spills = Vec::new();
-        if let Some(source) = selected_source {
+        if capture_spills {
+            let source = selected_source.unwrap_or((cx, cz));
             let mut final_cells = BTreeMap::new();
             for (x, y, z, state) in grid.dirty_cell_ids() {
                 final_cells.insert((x, y, z), state);

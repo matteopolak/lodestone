@@ -381,14 +381,18 @@ fn lifecycle_completion_wavefront(targets: &[(i32, i32)]) -> Vec<((i32, i32), (i
     order
 }
 
-/// A zero-radius streamed ticket still completes the centre's three-by-three
-/// FEATURES dependency wavefront before the packet is captured. Those
-/// dependency source bodies can spill across the centre boundary (for example
-/// an ore blob one block into the target), so replay must include all nine
-/// sources even though only the requested centre is emitted. Completed source
-/// columns remain resident across frames, matching ticket removal semantics.
+/// A zero-radius streamed ticket completes the requested chunk's FEATURES
+/// status once before the packet is captured. The radius-one CARVERS columns
+/// are the immutable read/write region supplied to that task; they do not
+/// contribute their own FEATURES bodies. The centre body may still spill into
+/// those admitted neighbours, so replay admits the complete write halo while
+/// completing only the target source.
 fn overworld_stream_completion_order(targets: &[(i32, i32)]) -> Vec<((i32, i32), (i32, i32))> {
-    lifecycle_completion_wavefront(targets)
+    targets
+        .iter()
+        .copied()
+        .map(|target| (target, target))
+        .collect()
 }
 
 #[derive(Default)]
@@ -397,11 +401,11 @@ struct StreamLifecycleState {
     /// requested centre ticket. Keep that state across bounded frame batches.
     admitted: BTreeSet<(i32, i32)>,
     /// Nether and End source bodies are globally retained after their first
-    /// authenticated completion. Overworld source bodies remain target-scoped
-    /// because its source replay owns a target-local read transaction.
+    /// authenticated completion. Overworld completion is target-scoped: each
+    /// request owns one centre FEATURES transition over its admitted region.
     completed: BTreeSet<(i32, i32)>,
-    /// Overworld source completions are keyed by the target whose read
-    /// transaction admitted them. Nether and End use `completed` above.
+    /// Overworld centre completions are keyed by their target request. Nether
+    /// and End use `completed` above.
     target_completed: BTreeSet<((i32, i32), (i32, i32))>,
 }
 
@@ -607,19 +611,13 @@ fn completion_wavefront_reuses_dependencies_between_adjacent_requests() {
 }
 
 #[test]
-fn overworld_stream_completes_feature_dependency_wavefront() {
+fn overworld_stream_completes_only_the_target_features_body() {
     assert_eq!(
         overworld_stream_completion_order(&[(2, 0), (3, 0), (2, 0)]),
         vec![
-            ((2, 0), (1, -1)), ((2, 0), (1, 0)), ((2, 0), (1, 1)),
-            ((2, 0), (2, -1)), ((2, 0), (2, 0)), ((2, 0), (2, 1)),
-            ((2, 0), (3, -1)), ((2, 0), (3, 0)), ((2, 0), (3, 1)),
-            ((3, 0), (2, -1)), ((3, 0), (2, 0)), ((3, 0), (2, 1)),
-            ((3, 0), (3, -1)), ((3, 0), (3, 0)), ((3, 0), (3, 1)),
-            ((3, 0), (4, -1)), ((3, 0), (4, 0)), ((3, 0), (4, 1)),
-            ((2, 0), (1, -1)), ((2, 0), (1, 0)), ((2, 0), (1, 1)),
-            ((2, 0), (2, -1)), ((2, 0), (2, 0)), ((2, 0), (2, 1)),
-            ((2, 0), (3, -1)), ((2, 0), (3, 0)), ((2, 0), (3, 1)),
+            ((2, 0), (2, 0)),
+            ((3, 0), (3, 0)),
+            ((2, 0), (2, 0)),
         ],
     );
 }
