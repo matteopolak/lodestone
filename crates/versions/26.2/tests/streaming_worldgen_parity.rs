@@ -396,12 +396,12 @@ struct StreamLifecycleState {
     /// The live oracle leaves dependency chunks resident after removing the
     /// requested centre ticket. Keep that state across bounded frame batches.
     admitted: BTreeSet<(i32, i32)>,
-    /// A source FEATURES body is executed once, at the first target ticket
-    /// that admits it.  Its writes are then retained in the shared resident
-    /// columns and become visible to later packet targets; rerunning it for a
-    /// second target would apply a different read window over already-live
-    /// state and diverge from the stream lifecycle.
+    /// End source bodies are globally retained after their first authenticated
+    /// completion. Overworld and Nether source bodies are target-scoped: their
+    /// read window is anchored to the packet target, so the same source must
+    /// be replayed for each target that admits it.
     completed: BTreeSet<(i32, i32)>,
+    target_completed: BTreeSet<((i32, i32), (i32, i32))>,
 }
 
 type EndP06LifecycleEvents = BTreeMap<(i32, i32), Vec<LifecycleReplayEvent>>;
@@ -429,6 +429,7 @@ fn lifecycle_columns(
             materializer.reset_for_lifecycle_replay();
             state.admitted.clear();
             state.completed.clear();
+            state.target_completed.clear();
         }
         let prepare_started = Instant::now();
         materializer.prepare_lifecycle_replay(&admissions);
@@ -470,7 +471,13 @@ fn lifecycle_columns(
                 materializer.begin_target(target);
                 active_target = Some(target);
             }
-            if state.completed.insert(source) {
+            let should_complete = match dimension {
+                StreamDimension::Overworld | StreamDimension::Nether => {
+                    state.target_completed.insert((target, source))
+                }
+                StreamDimension::End => state.completed.insert(source),
+            };
+            if should_complete {
                 if dimension == StreamDimension::End {
                     let event = end_events
                         .and_then(|events| events.get(&target))
