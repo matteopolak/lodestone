@@ -216,7 +216,8 @@ impl ModelSectionView for SnapshotModelView<'_> {
         self.models.quads(state)
     }
 
-    /// Vanilla's `ambientocclusion` model-JSON flag, per state.
+    /// The complete per-state smooth-lighting gate: model JSON's
+    /// `ambientocclusion` flag plus zero state emission.
     ///
     /// The trait default is `true`, which is what preserved behaviour while this
     /// was unwired — so **the flag mechanism was inert in the running game until
@@ -225,10 +226,8 @@ impl ModelSectionView for SnapshotModelView<'_> {
     /// `BlockModels`, so a model whose flag says "flat" cannot disagree with the
     /// geometry it was baked alongside.
     ///
-    /// Note this is only the model-flag third of
-    /// vanilla's own model-block-renderer predicate; the `getLightEmission() == 0`
-    /// clause has no data source in this codebase yet — see
-    /// `docs/model-smooth-lighting.md`.
+    /// The state id is validated at the snapshot boundary, then the renderer's
+    /// model table combines the model flag with its canonical emission census.
     fn ambient_occlusion_at(&self, x: usize, y: usize, z: usize) -> bool {
         let raw = self.snapshot.at(0, 0, 0).get_block(x, y, z);
         let Some(state) = StateId::new(raw) else {

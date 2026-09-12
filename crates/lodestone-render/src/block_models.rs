@@ -606,17 +606,16 @@ pub struct StateModel {
     /// not the live biome colour, so a state's debris matches the terrain quads
     /// beside it rather than the biome it fell in.
     pub particle_tint: Option<[f32; 3]>,
-    /// Whether the mesher should compute per-corner smooth ambient occlusion
-    /// for this state's quads, or fall back to flat per-face light — vanilla's
-    /// block-model tesselation function choosing its smooth-ambient-occlusion
-    /// path
-    /// vs its flat path. Sourced from
-    /// [`BakedModel::ambient_occlusion`](lodestone_assets::bake::BakedModel::ambient_occlusion),
-    /// which carries only the model-JSON half of vanilla's gate
-    /// (`this.parts.getFirst().useAmbientOcclusion()`); the
-    /// `blockState.getLightEmission() == 0` half has no data source in this
-    /// crate yet and is not applied — see that field's doc for what is missing.
+    /// Whether the model JSON requests per-corner smooth ambient occlusion.
+    /// The state-level [`BlockModels::ambient_occlusion`] accessor combines this
+    /// model flag with [`Self::light_emission`], because an emitting state takes
+    /// the flat-light path even when its model requests smooth lighting.
     pub ambient_occlusion: bool,
+    /// The state-resolved block-light emission (`0..=15`). This is kept beside
+    /// the baked model because the model JSON cannot describe a block state's
+    /// light level; the canonical per-state census is the external source used
+    /// by the live terrain mesher.
+    pub light_emission: u8,
     /// Whether this state is one of vanilla's eleven leaves-family blocks (the same
     /// real, vanilla-sourced list [`FLUID_OVERLAY_LEAVES_BLOCKS`] already
     /// carries for the water-overlay decal), i.e. the population
@@ -652,6 +651,13 @@ impl StateModel {
     /// An empty (air-like) model: no geometry, no occlusion, solid layer.
     #[must_use]
     fn empty() -> Self {
+        Self::empty_with_emission(0)
+    }
+
+    /// An empty model retaining the state-level emission even when baking
+    /// produced no drawable quads (air-like states and registry extensions).
+    #[must_use]
+    fn empty_with_emission(light_emission: u8) -> Self {
         StateModel {
             quads: Vec::new(),
             occludes: false,
@@ -660,6 +666,7 @@ impl StateModel {
             particle_uv: None,
             particle_tint: None,
             ambient_occlusion: true,
+            light_emission,
             is_leaves: false,
             half_transparent_class: None,
             is_cauldron: false,
@@ -1902,6 +1909,13 @@ impl BlockModels {
         let mut fluid_overlay = Vec::with_capacity(count as usize);
         for id in 0..count {
             let resolved = registry.resolve(id);
+            // `BlockModels` is built from the protocol-776 block-state report,
+            // whose ids are the same canonical ids as the generated light
+            // census. An extension id outside that census is conservatively
+            // treated as non-emitting until its owning registry supplies a
+            // dedicated light source.
+            let light_emission = StateId::new(id)
+                .map_or(0, lodestone_data::light_props::emission);
             let sm = match baker.bake_state(registry, id, &FirstWeight) {
                 Ok(model) if !model.quads.is_empty() => {
                     let particle_uv = model.particle_uv;
@@ -1953,12 +1967,13 @@ impl BlockModels {
                         particle_uv,
                         particle_tint,
                         ambient_occlusion,
+                        light_emission,
                         is_leaves,
                         half_transparent_class,
                         is_cauldron,
                     }
                 }
-                _ => StateModel::empty(),
+                _ => StateModel::empty_with_emission(light_emission),
             };
             models.push(sm);
 
@@ -2424,11 +2439,22 @@ impl BlockModels {
 
     /// Whether a state's quads should get per-corner smooth ambient occlusion
     /// (via [`crate::mesh_models`]'s corner sampling) or flat per-face light
-    /// instead — see [`StateModel::ambient_occlusion`] for exactly which half
-    /// of vanilla's gate this reflects.
+    /// instead. Both the model's `ambientocclusion` flag and the canonical
+    /// per-state emission are part of this decision: any nonzero emitter takes
+    /// flat lighting, matching the terrain renderer's state-level gate.
     #[must_use]
     pub fn ambient_occlusion(&self, state_id: StateId) -> bool {
-        self.state(state_id).ambient_occlusion
+        let state = self.state(state_id);
+        state.ambient_occlusion && state.light_emission == 0
+    }
+
+    /// The canonical block-light emission of a validated state, `0..=15`.
+    ///
+    /// This accessor is useful to callers that need the state emission for a
+    /// second lighting decision without reaching into the baked model row.
+    #[must_use]
+    pub fn light_emission(&self, state_id: StateId) -> u8 {
+        self.state(state_id).light_emission
     }
 
     /// Whether this state is one of vanilla's leaves-family blocks — see
@@ -3030,6 +3056,7 @@ mod tests {
         let _: fn(&BlockModels, u32) -> &[BakedQuad] = BlockModels::quads_raw;
         let _: fn(&BlockModels, StateId) -> bool = BlockModels::occludes;
         let _: fn(&BlockModels, StateId) -> bool = BlockModels::ambient_occlusion;
+        let _: fn(&BlockModels, StateId) -> u8 = BlockModels::light_emission;
         let _: fn(&BlockModels, StateId) -> bool = BlockModels::is_leaves;
         let _: fn(&BlockModels, StateId, StateId) -> bool =
             BlockModels::skips_rendering_against;

@@ -58,9 +58,10 @@ resolved model of a possibly-multipart state) and, in vanilla, by the block's li
 emission being zero. The canonical per-state emission census now exists in
 `lodestone_data::light_props`, alongside dampening, and its scalar APIs require a
 validated `StateId`; callers carrying raw packet or snapshot ids validate once at
-their boundary. The renderer has not yet connected that emission value to its AO
-choice, so a light-emitting full-cube block still takes the smooth-AO path where
-vanilla would flatten it.
+their boundary. `BlockModels::ambient_occlusion` combines both state facts, and
+`SnapshotModelView::ambient_occlusion_at` feeds that predicate into the live
+model mesher, so a light-emitting full-cube block takes flat lighting instead of
+smooth AO.
 
 The directional face shade multiplied into the same slot as AO is a fixed constant
 per face direction, not a diffuse dot product: `down 0.5, up 1.0, north/south 0.8,
@@ -70,10 +71,13 @@ variant is unported). Both AO and shade multiply in **gamma space** — the same
 model in this codebase follows; doing it in linear pulls the factor toward `1.0` and
 visibly washes the result out.
 
-Remaining gaps: non-cube models use the same nearest-corner AO approximation rather
-than vanilla's per-quad face-shape-weighted interpolation for a partial (not
-full-face) quad; fluids carry no AO term at all, matching vanilla, which renders
-fluid surfaces through a completely separate path.
+Partial model faces now blend the four corner samples using their in-plane
+min/max extents, including rotated and corner-cut geometry; full unit faces keep
+the nearest-corner path byte-for-byte. Fluids carry no AO term at all, matching
+vanilla, which renders fluid surfaces through a completely separate path. The
+remaining model-lighting gap is the hidden-diagonal substitution for translucent
+interior faces; the live culling predicate already removes the ordinary interior
+faces where it would matter.
 
 ### The light ramp
 

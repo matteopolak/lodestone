@@ -5,6 +5,8 @@
 
 #[path = "terrain/animated_block_pixels.rs"]
 mod animated_block_pixels;
+#[path = "terrain/emission_partial_face_gate.rs"]
+mod emission_partial_face_gate;
 #[path = "terrain/biome_tint_gate.rs"]
 mod biome_tint_gate;
 #[path = "terrain/biome_tint_row_identity_gate.rs"]
