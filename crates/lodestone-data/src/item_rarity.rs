@@ -92,9 +92,9 @@ impl ItemRarity {
     pub const fn rgba(self) -> [f32; 4] {
         match self {
             Self::Common => [1.0, 1.0, 1.0, 1.0],
-            Self::Uncommon => [1.0, 1.0, 0.33333334, 1.0],
-            Self::Rare => [0.33333334, 1.0, 1.0, 1.0],
-            Self::Epic => [1.0, 0.33333334, 1.0, 1.0],
+            Self::Uncommon => [1.0, 1.0, 85.0 / 255.0, 1.0],
+            Self::Rare => [85.0 / 255.0, 1.0, 1.0, 1.0],
+            Self::Epic => [1.0, 85.0 / 255.0, 1.0, 1.0],
         }
     }
 
