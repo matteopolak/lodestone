@@ -186,30 +186,21 @@
 //!
 //! # Approximations, named
 //!
-//! - **Heightmap types are collapsed to two scans**, not vanilla's five
-//!   distinct incremental heightmaps: [`HeightmapKind::WorldSurfaceWg`] and
-//!   `MotionBlocking` both scan for "topmost non-air" ([`VegGrid::height_world_surface`]);
-//!   [`HeightmapKind::OceanFloorWg`]/`OceanFloor` both scan for "topmost
-//!   non-air, non-fluid" ([`VegGrid::height_ocean_floor`]). The
-//!   `MOTION_BLOCKING` vs `WORLD_SURFACE_WG` difference (whether a
-//!   non-solid decorative block like an already-placed `short_grass` counts)
-//!   is real but narrow: [`VegPlacement::BlockPredicateFilter`]'s own
-//!   final air-check downstream rejects most of the cases where it would
-//!   have mattered anyway. Both scans are recomputed live against the
-//!   *current* (mutating, this-step-inclusive) grid on every query — not a
-//!   separately-maintained incremental heightmap — so a later feature in
-//!   the same step correctly sees an earlier feature's writes.
-//! - **`canSurvive` is modelled uniformly as `VegetationBlock`'s rule**
-//!   (the block below the target must be in `#minecraft:supports_vegetation`)
-//!   for every [`ConfiguredFeature::SimpleBlock`] placement. Every state this
-//!   module actually places (`short_grass`, `dandelion`, `poppy`, and their
-//!   siblings) really is a `VegetationBlock` subclass, so this is exact
-//!   within scope — it would be wrong for a double-plant
-//!   (`DoublePlantBlock`, e.g. `lilac`/`sunflower`/`tall_grass`) or
-//!   `MossyCarpetBlock`, which this module does not special-case (their
-//!   `SimpleBlockConfiguration` still parses; placement silently treats them
-//!   like a single-block state, which is wrong for anything taller than one
-//!   block — named here rather than hidden).
+//! - **Heightmap types retain the world-surface distinction**, while the
+//!   ocean-floor pair remains collapsed: [`HeightmapKind::WorldSurfaceWg`]
+//!   scans the immutable source terrain from before decoration, whereas
+//!   [`HeightmapKind::WorldSurface`] and `MotionBlocking` scan the current
+//!   overlay-aware grid. This is required because decoration writes update the
+//!   final heightmaps but do not move the world-generation heightmap. A later
+//!   feature must therefore see an earlier write through the final scan, while
+//!   a `WORLD_SURFACE_WG` placement must keep its original column height.
+//!   [`HeightmapKind::OceanFloorWg`]/`OceanFloor` still scan for "topmost
+//!   motion-blocking" ([`VegGrid::height_ocean_floor`]).
+//! - **Simple-block survival is resolved by state family.** Ordinary
+//!   vegetation uses the `#minecraft:supports_vegetation` floor rule. Tall
+//!   two-block vegetation is placed atomically as lower and upper halves only
+//!   when the upper cell is empty. Pale moss carpet remains an explicitly
+//!   unsupported shape in this path.
 //! - **`would_survive`'s tested `state` is ignored**; the predicate always
 //!   means "the block below the target is `#minecraft:supports_vegetation`"
 //!   regardless of which sapling it names. Exact for every `would_survive`
@@ -734,7 +725,7 @@ fn place_configured_feature_with_seed<R: RandomSource>(
         }
         ConfiguredFeature::SpeleothemCluster(cfg) => {
             census_bump(|c| c.other_feature += 1);
-            features::place_speleothem_cluster(random, pos, cfg, grid)
+            features::place_speleothem_cluster(random, pos, cfg, grid, tags)
         }
         ConfiguredFeature::Lake(cfg) => {
             census_bump(|c| c.other_feature += 1);
@@ -762,7 +753,7 @@ fn place_configured_feature_with_seed<R: RandomSource>(
         }
         ConfiguredFeature::SculkPatch(cfg) => {
             census_bump(|c| c.other_feature += 1);
-            features::place_sculk_patch(random, pos, cfg, grid)
+            features::place_sculk_patch(random, pos, cfg, grid, tags)
         }
         ConfiguredFeature::RandomBooleanSelector { yes, no } => {
             census_bump(|c| c.other_feature += 1);
@@ -939,7 +930,10 @@ mod tests {
             feature: Box::new(ConfiguredFeature::ReplaceBlobs(Box::new(
                 features::ReplaceBlobsCfg {
                     target: "minecraft:netherrack".to_string(),
-                    state: "minecraft:basalt[axis=y]".to_string(),
+                    state: lodestone_data::block_states::StateId::from_state_str(
+                        "minecraft:basalt[axis=y]",
+                    )
+                    .unwrap(),
                     radius: IntProvider::Uniform { min: 3, max: 7 },
                 },
             ))),
@@ -964,6 +958,39 @@ mod tests {
             -51_016_890,
             "the no-target body must leave the captured modifier terminal draw untouched",
         );
+    }
+
+    #[test]
+    fn captured_dark_forest_origin_stream_at_seed_42() {
+        let expected = [
+            (10, -7),
+            (13, -13),
+            (2, -1),
+            (14, -4),
+            (2, -4),
+            (2, -4),
+            (12, -1),
+            (0, -7),
+            (12, -4),
+            (14, -5),
+            (10, -8),
+            (2, -2),
+            (14, -11),
+            (12, -4),
+            (8, -11),
+            (15, -16),
+        ];
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        let decoration_seed = random.set_decoration_seed(42, 0, -16);
+        random.set_feature_seed(decoration_seed, 17, STEP_VEGETAL_DECORATION);
+
+        let actual = std::array::from_fn(|_| {
+            let x = random.next_int_bounded(16);
+            let z = -16 + random.next_int_bounded(16);
+            (x, z)
+        });
+
+        assert_eq!(actual, expected);
     }
 
     /// The captured large-parity first mismatch has a sulfur feature candidate
@@ -1038,6 +1065,177 @@ mod tests {
             Positions::None,
             "a production biome gate must not admit an inline feature without membership identity",
         );
+    }
+
+    #[test]
+    fn overworld_biome_modifier_uses_zoomed_corner_not_containing_quart() {
+        let interner = Arc::new(StateInterner::new());
+        let air = interner.id_of("minecraft:air");
+        let terrain = Arc::new(DenseBlockGrid::with_interner(
+            Arc::clone(&interner),
+            0,
+            0,
+            0,
+            16,
+            128,
+            16,
+            air,
+        ));
+        let cells = Arc::new(BiomeCells::from_fn(0, 128, |qx, qy, qz| {
+            if (qx, qy, qz) == (1, 1, 1) {
+                "minecraft:sulfur_caves".to_string()
+            } else {
+                "minecraft:plains".to_string()
+            }
+        }));
+        let feature_biomes = HashMap::from([(
+            "minecraft:sulfur_spike".to_string(),
+            HashSet::from(["minecraft:sulfur_caves".to_string()]),
+        )]);
+        let source_at = |_: i32, _: i32| Some(Arc::clone(&terrain));
+        let biome_at = |_: i32, _: i32| Some(Arc::clone(&cells));
+        let direct = VegGrid::with_sources_and_biomes(
+            Arc::clone(&interner),
+            0,
+            128,
+            0,
+            0,
+            0,
+            16,
+            source_at,
+            biome_at,
+            feature_biomes.clone(),
+        );
+        let zoomed = VegGrid::with_sources_and_biomes_shared_zoomed(
+            interner,
+            0,
+            128,
+            0,
+            0,
+            0,
+            16,
+            source_at,
+            biome_at,
+            Arc::new(feature_biomes),
+            crate::overworld::biome_zoom_seed(42),
+        );
+        let containing_quart = BlockPos { x: 4, y: 4, z: 4 };
+        let nearby_corner = BlockPos { x: 5, y: 4, z: 5 };
+        let mut random = LegacyRandomSource::new(0);
+
+        assert_eq!(
+            VegPlacement::Biome.get_positions(
+                &mut random,
+                containing_quart,
+                &direct,
+                &VegTags::default(),
+                Some("minecraft:sulfur_spike"),
+            ),
+            Positions::One(containing_quart),
+            "control: containing-quart lookup admits the sulfur cell",
+        );
+        assert_eq!(
+            VegPlacement::Biome.get_positions(
+                &mut random,
+                containing_quart,
+                &zoomed,
+                &VegTags::default(),
+                Some("minecraft:sulfur_spike"),
+            ),
+            Positions::None,
+            "the zoomed lookup must reject the neighbouring plains corner",
+        );
+        assert_eq!(
+            VegPlacement::Biome.get_positions(
+                &mut random,
+                nearby_corner,
+                &zoomed,
+                &VegTags::default(),
+                Some("minecraft:sulfur_spike"),
+            ),
+            Positions::One(nearby_corner),
+            "the zoomed lookup must still accept a candidate selecting sulfur",
+        );
+    }
+
+    #[test]
+    fn overworld_zoomed_biome_gate_routes_every_wide_source_slot() {
+        let interner = Arc::new(StateInterner::new());
+        let air = interner.id_of("minecraft:air");
+        let terrain = Arc::new(DenseBlockGrid::with_interner(
+            Arc::clone(&interner),
+            0,
+            0,
+            0,
+            16,
+            128,
+            16,
+            air,
+        ));
+        let biome_sources: Arc<
+            [Option<Arc<BiomeCells>>; crate::feature::region_view::WIDE_SLOTS],
+        > = Arc::new(std::array::from_fn(|slot| {
+            let dx = slot as i32 / 5 - 2;
+            let dz = slot as i32 % 5 - 2;
+            let name = format!("test:biome_{dx}_{dz}");
+            Some(Arc::new(BiomeCells::uniform(&name, 0, 128)))
+        }));
+        let mut source_feature_biomes = HashMap::new();
+        for dx in -2..=2 {
+            for dz in -2..=2 {
+                source_feature_biomes.insert(
+                    format!("test:wide_gate_{dx}_{dz}"),
+                    HashSet::from([format!("test:biome_{dx}_{dz}")]),
+                );
+            }
+        }
+        let grid = VegGrid::with_sources_and_biomes_shared_zoomed(
+            interner,
+            0,
+            128,
+            0,
+            0,
+            -32,
+            48,
+            {
+                let terrain = Arc::clone(&terrain);
+                move |_, _| Some(Arc::clone(&terrain))
+            },
+            {
+                let biome_sources = Arc::clone(&biome_sources);
+                move |dx, dz| {
+                    Some(Arc::clone(
+                        biome_sources[crate::feature::region_view::wide_slot_of_offset(dx, dz)]
+                            .as_ref()
+                            .expect("wide biome source"),
+                    ))
+                }
+            },
+            Arc::new(source_feature_biomes),
+            crate::overworld::biome_zoom_seed(42),
+        );
+        let mut random = LegacyRandomSource::new(0);
+
+        for dx in -2..=2 {
+            for dz in -2..=2 {
+                let candidate = BlockPos {
+                    x: dx * 16 + 8,
+                    y: 8,
+                    z: dz * 16 + 8,
+                };
+                assert_eq!(
+                    VegPlacement::Biome.get_positions(
+                        &mut random,
+                        candidate,
+                        &grid,
+                        &VegTags::default(),
+                        Some(&format!("test:wide_gate_{dx}_{dz}")),
+                    ),
+                    Positions::One(candidate),
+                    "zoomed biome lookup must route source offset ({dx},{dz})",
+                );
+            }
+        }
     }
 
     struct SpeleothemResolver;
@@ -1118,6 +1316,52 @@ mod tests {
             .map(|(x, y, z, state)| (format!("{x},{y},{z}"), state.to_string()))
             .collect();
         assert_eq!(actual, expected, "cluster scan, branch order, base layers, or pointed-state assembly drifted from the external fixture");
+    }
+
+    #[test]
+    fn speleothem_cluster_wetness_creates_a_substrate_gated_pool() {
+        let cfg = features::SpeleothemClusterCfg {
+            base_block: "minecraft:dripstone_block".to_string(),
+            pointed_block: "minecraft:pointed_dripstone".to_string(),
+            replaceable_blocks: HashSet::from(["minecraft:stone".to_string()]),
+            floor_to_ceiling_search_range: 12,
+            height: IntProvider::Constant(3),
+            radius: IntProvider::Constant(0),
+            max_stalagmite_stalactite_height_diff: 1,
+            height_deviation: 0,
+            speleothem_block_layer_thickness: IntProvider::Constant(1),
+            density: features::FloatProvider::Constant(0.0),
+            wetness: features::FloatProvider::Constant(1.0),
+            chance_of_speleothem_at_max_distance_from_center: 1.0,
+            max_distance_from_edge_affecting_chance_of_speleothem: 1,
+            max_distance_from_center_affecting_height_bias: 1,
+        };
+        let mut grid = VegGrid::with_footprint(-64, 384, 0, 0, -1, 1);
+        for x in -1..=1 {
+            for z in -1..=1 {
+                grid.seed(x, 59, z, "minecraft:stone".to_string());
+                grid.seed(x, 60, z, "minecraft:stone".to_string());
+            }
+        }
+        for y in 61..=67 {
+            grid.seed(0, y, 0, "minecraft:air".to_string());
+        }
+        grid.seed(0, 68, 0, "minecraft:stone".to_string());
+        let mut tags = VegTags::default();
+        tags.base_stone_overworld.insert("minecraft:stone".to_string());
+
+        place_configured_feature(
+            &mut LegacyRandomSource::new(0),
+            BlockPos { x: 0, y: 64, z: 0 },
+            &ConfiguredFeature::SpeleothemCluster(Box::new(cfg)),
+            &mut grid,
+            &tags,
+        );
+
+        assert_eq!(
+            grid.get(0, 60, 0),
+            "minecraft:pointed_dripstone[thickness=tip,vertical_direction=up,waterlogged=true]",
+        );
     }
 
     /// The compiled-server capture is deliberately centered at x=16: the
@@ -1711,6 +1955,50 @@ mod tests {
             "minecraft:air",
             "grass must not survive on a non-supports_vegetation block (stone)"
         );
+    }
+
+    #[test]
+    fn simple_block_places_both_halves_of_a_double_plant() {
+        let mut grid = VegGrid::new(-64, 384, 0, 0);
+        grid.seed(5, 69, 5, "minecraft:grass_block".to_string());
+        grid.seed(5, 70, 5, "minecraft:air".to_string());
+        grid.seed(5, 71, 5, "minecraft:air".to_string());
+        let mut tags = VegTags::default();
+        tags.supports_vegetation.insert("minecraft:grass_block".to_string());
+        let provider = BlockStateProvider::Simple("minecraft:tall_grass[half=lower]".to_string());
+
+        place_simple_block(
+            &mut LegacyRandomSource::new(1),
+            BlockPos { x: 5, y: 70, z: 5 },
+            &provider,
+            &mut grid,
+            &tags,
+        );
+
+        assert_eq!(grid.get(5, 70, 5), "minecraft:tall_grass[half=lower]");
+        assert_eq!(grid.get(5, 71, 5), "minecraft:tall_grass[half=upper]");
+    }
+
+    #[test]
+    fn simple_block_rejects_a_double_plant_when_the_upper_cell_is_occupied() {
+        let mut grid = VegGrid::new(-64, 384, 0, 0);
+        grid.seed(5, 69, 5, "minecraft:grass_block".to_string());
+        grid.seed(5, 70, 5, "minecraft:air".to_string());
+        grid.seed(5, 71, 5, "minecraft:stone".to_string());
+        let mut tags = VegTags::default();
+        tags.supports_vegetation.insert("minecraft:grass_block".to_string());
+        let provider = BlockStateProvider::Simple("minecraft:tall_grass[half=lower]".to_string());
+
+        place_simple_block(
+            &mut LegacyRandomSource::new(1),
+            BlockPos { x: 5, y: 70, z: 5 },
+            &provider,
+            &mut grid,
+            &tags,
+        );
+
+        assert_eq!(grid.get(5, 70, 5), "minecraft:air");
+        assert_eq!(grid.get(5, 71, 5), "minecraft:stone");
     }
 
     /// Real `configured_feature/cactus.json` (see `crates/lodestone-server
