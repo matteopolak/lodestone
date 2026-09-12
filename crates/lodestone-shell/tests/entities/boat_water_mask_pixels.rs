@@ -452,6 +452,7 @@ fn boat_draw(type_path: &str) -> EntityDraw {
         hurt: false,
         id: 1,
         type_path: Arc::from(type_path),
+        named_cosmetics: Default::default(),
         item: None,
         item_model: None,
         item_skin: None,

@@ -2,6 +2,19 @@
 
 use super::*;
 
+/// Name-selected visual variants that have crossed the entity render boundary.
+///
+/// These flags are resolved from the entity's exact custom-name text during
+/// extraction, rather than inferred from the display tag. That keeps a hidden
+/// custom name able to affect the model while ordinary names remain inert.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NamedEntityCosmetics {
+    /// Rotate the complete supported living-entity draw, including layers.
+    pub upside_down: bool,
+    /// Use the age-driven rainbow tint for sheep wool.
+    pub rainbow_wool: bool,
+}
+
 /// A single entity ready to draw this frame: its model type and interpolated
 /// transform inputs. The renderer turns this into an
 /// [`EntityInstance`](lodestone_render::EntityInstance).
@@ -25,6 +38,8 @@ pub struct EntityDraw {
     /// component's doc for why a refcount bump replaced a heap allocation
     /// here.
     pub type_path: Arc<str>,
+    /// Exact-name cosmetic decisions made by the entity extraction boundary.
+    pub named_cosmetics: NamedEntityCosmetics,
     /// Which item's model to draw, for any entity whose server metadata
     /// carried an `ITEM_STACK` field — a dropped item
     /// ([`ITEM_ENTITY_TYPE_PATH`]), an item frame's contents
@@ -84,13 +99,11 @@ pub struct EntityDraw {
     /// variant has been reported — `None` for every other entity type
     /// unconditionally, per [`sheep_wool`]'s gate.
     ///
-    /// **Not yet drawn.** The mesh/tint/pose plumbing
-    /// (`WoolMesh`/`SheepWoolModelSet::attach` in
+    /// The mesh/tint/pose plumbing (`WoolMesh`/`SheepWoolModelSet::attach` in
     /// `lodestone-render/src/entity.rs`, `RenderState::prepare_wool` in
-    /// `gpu.rs`) is specified but not landed — see
-    /// `docs/entity-rendering.md`'s "Render layers: sheep wool" section. This
-    /// field is the last hop that was missing before that work; it does not
-    /// draw anything by itself.
+    /// `gpu.rs`) consumes this field. A sheep carrying the exact rainbow name
+    /// selects an age-driven tint there; baby sheep use the same path with
+    /// their existing render scale.
     pub wool: Option<SheepWool>,
     /// How many items [`Self::item`] represents, when it is `Some`.
     /// Meaningless (and left at the neutral `1`) for every entity with no

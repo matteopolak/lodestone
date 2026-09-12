@@ -127,6 +127,7 @@ fn base_draw(id: i32, type_path: &str, feet: glam::Vec3, scale: f32) -> EntityDr
         item_frame_rotation: 0,
         id,
         type_path: std::sync::Arc::from(type_path),
+        named_cosmetics: Default::default(),
         item: None,
         item_model: None,
         item_skin: None,

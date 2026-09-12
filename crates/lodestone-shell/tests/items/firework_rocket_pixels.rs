@@ -91,6 +91,7 @@ fn rocket(id: i32, type_path: &str, flags: Option<FireworkFlags>, at: glam::Vec3
         projectile_owner: None,
         id,
         type_path: std::sync::Arc::from(type_path),
+        named_cosmetics: Default::default(),
         // Left `None` deliberately: the draw path falls back to
         // vanilla's firework-rocket entity's default-item accessor, which is what a rocket whose
         // item field was never marked dirty genuinely draws as, so this is the

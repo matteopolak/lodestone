@@ -112,6 +112,7 @@ fn armor_stand_draw(feet: glam::Vec3, invisible: bool, name_tag: Option<NameTag>
         item_frame_rotation: 0,
         id: 1,
         type_path: std::sync::Arc::from("armor_stand"),
+        named_cosmetics: Default::default(),
         item: None,
         item_model: None,
         item_skin: None,

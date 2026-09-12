@@ -90,6 +90,10 @@ impl EntityInstance {
         swell: f32,
         death_time: f32,
     ) -> Self {
+        let mut anim = *anim;
+        if anim.armor_stand_pose.is_some() {
+            anim.armor_stand_yaw_deg = yaw_deg;
+        }
         Self::placed(
             model,
             mesh,
@@ -99,7 +103,7 @@ impl EntityInstance {
                 scale,
                 crate::entity_anim::death_fall_over_degrees(death_time),
             ),
-            anim,
+            &anim,
             swell,
         )
     }
@@ -199,13 +203,18 @@ impl EntityInstance {
         anim: &AnimInput,
         swell: f32,
     ) -> Self {
-        let (aabb_min, aabb_max) = transformed_aabb(&transform, mesh.local_min, mesh.local_max);
         let part_transforms = mesh
             .skeleton
             .pose_swelling(anim, swell)
             .into_iter()
             .map(|part| transform * part)
             .collect();
+        let (aabb_min, aabb_max) = if anim.armor_stand_pose.is_some() {
+            posed_aabb(mesh, &part_transforms)
+                .unwrap_or_else(|| transformed_aabb(&transform, mesh.local_min, mesh.local_max))
+        } else {
+            transformed_aabb(&transform, mesh.local_min, mesh.local_max)
+        };
         // `false`/`true` here is `Arm::Right`/`Arm::Left`'s own `is_left()` —
         // spelled out rather than iterating `[Arm::Right, Arm::Left]` because
         // `Arm` is defined below this impl and `entity_anim::Skeleton` takes
@@ -245,6 +254,35 @@ impl EntityInstance {
     #[must_use]
     pub fn with_light(mut self, light: u8) -> Self {
         self.light = light;
+        self
+    }
+
+    /// Apply the exact-name upside-down placement to this already-resolved
+    /// instance, preserving the same transform for its body, attached layers,
+    /// held items and culling bounds.
+    #[must_use]
+    pub fn with_upside_down(
+        mut self,
+        feet: Vec3,
+        yaw_deg: f32,
+        scale: f32,
+        height: f32,
+    ) -> Self {
+        let old_transform = self.transform;
+        let transform = crate::entity::upside_down_entity_model_matrix(
+            feet, yaw_deg, scale, height,
+        );
+        let delta = transform * old_transform.inverse();
+        self.transform = transform;
+        for part in &mut self.part_transforms {
+            *part = delta * *part;
+        }
+        for hand in &mut self.hand_transforms {
+            if let Some(hand) = hand {
+                *hand = delta * *hand;
+            }
+        }
+        (self.aabb_min, self.aabb_max) = transformed_aabb(&delta, self.aabb_min, self.aabb_max);
         self
     }
 }
@@ -300,6 +338,30 @@ pub(crate) fn transformed_aabb(m: &Mat4, local_min: Vec3, local_max: Vec3) -> (V
         max = max.max(world);
     }
     (min, max)
+}
+
+/// Compute a culling box from the actual per-part vertices of a posed model.
+/// Armor stands need this because their six independently reported rotations
+/// can move geometry outside the authored rest-pose bounds.
+fn posed_aabb(mesh: &EntityMesh, transforms: &[Mat4]) -> Option<(Vec3, Vec3)> {
+    if mesh.parts.len() != transforms.len() {
+        return None;
+    }
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    let mut found = false;
+    for (range, transform) in mesh.parts.iter().zip(transforms) {
+        let start = usize::try_from(range.vertex_start).ok()?;
+        let count = usize::try_from(range.vertex_count).ok()?;
+        let end = start.checked_add(count)?;
+        for vertex in mesh.vertices.get(start..end)? {
+            let point = transform.transform_point3(Vec3::from(vertex.position));
+            min = min.min(point);
+            max = max.max(point);
+            found = true;
+        }
+    }
+    found.then_some((min, max))
 }
 
 /// A version-free baked corpus of every entity model the renderer can draw,

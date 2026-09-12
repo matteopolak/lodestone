@@ -53,11 +53,12 @@
 //!   term produces a black sky in clear weather the moment a server sends a
 //!   stale non-zero thunder level, which it does on join — the real server
 //!   sends all three weather fields unconditionally to every joining player.
-//! * **Rain versus snow is decided per column.** The pure predicate
-//!   ([`precipitation_for_temperature`]) is also used by the shell's live
-//!   climate lookup, so visible columns and weather ambience agree when the
-//!   biome registry has arrived. A missing section or climate remains unknown
-//!   rather than being guessed as rain by the audio path.
+//! * **Rain versus snow is decided per column, and today every column answers
+//!   `Rain`.** The predicate ([`precipitation_for_temperature`]) is vanilla's and
+//!   is exercised by unit tests, but its *input* — the biome's `temperature` and
+//!   `has_precipitation` — is not decoded by this client. See
+//!   [`WeatherProbe::precipitation`] for exactly which two NBT fields to add to
+//!   `crates/protocol/v770/src/packets/registry.rs` to close it.
 
 use bytemuck::{Pod, Zeroable};
 
@@ -921,23 +922,6 @@ pub struct RainSound {
     pub pitch: f32,
 }
 
-/// `block.snow.fall` uses the same short snow samples as the visible weather
-/// layer. It is a positional event rather than a loop, so the normal mixer
-/// attenuation and the Weather category slider still apply.
-pub const SNOW_SOUND_NEAR: RainSound = RainSound {
-    name: "block.snow.fall",
-    volume: 0.2,
-    pitch: 1.0,
-};
-
-/// Snow landing above a covered listener uses the same event with the rain
-/// ambience's muffled gain and pitch.
-pub const SNOW_SOUND_ABOVE: RainSound = RainSound {
-    name: "block.snow.fall",
-    volume: 0.1,
-    pitch: 0.5,
-};
-
 /// `weather.rain` played at the listener's own level.
 pub const RAIN_SOUND_NEAR: RainSound = RainSound {
     name: "weather.rain",
@@ -973,38 +957,12 @@ impl RainAmbience {
         roof_above: bool,
         rain_roll: u32,
     ) -> Option<RainSound> {
-        self.tick_with_kind(
-            weather,
-            landing,
-            camera_y,
-            roof_above,
-            Precipitation::Rain,
-            rain_roll,
-        )
-    }
-
-    /// Advance the shared cadence for either rain or snow. `None` is an
-    /// unresolved/non-precipitating biome and is intentionally silent.
-    pub fn tick_with_kind(
-        &mut self,
-        weather: &WeatherState,
-        landing: Option<[i32; 3]>,
-        camera_y: f64,
-        roof_above: bool,
-        kind: Precipitation,
-        rain_roll: u32,
-    ) -> Option<RainSound> {
         if !weather.any_precipitation() {
             // Vanilla never resets the counter on a dry tick because it never
             // reaches the counter at all; resetting here would make the first tick
             // of a shower always play, which is a pop.
             return None;
         }
-        let (near_sound, above_sound) = match kind {
-            Precipitation::Rain => (RAIN_SOUND_NEAR, RAIN_SOUND_ABOVE),
-            Precipitation::Snow => (SNOW_SOUND_NEAR, SNOW_SOUND_ABOVE),
-            Precipitation::None => return None,
-        };
         let landing = landing?;
         // Post-increment, as vanilla's `rainSoundTime++` is: the comparison sees
         // the *old* value, so the first eligible tick compares against 0 and can
@@ -1016,7 +974,7 @@ impl RainAmbience {
         }
         self.counter = 0;
         let above = f64::from(landing[1]) > camera_y + 1.0 && roof_above;
-        Some(if above { above_sound } else { near_sound })
+        Some(if above { RAIN_SOUND_ABOVE } else { RAIN_SOUND_NEAR })
     }
 }
 

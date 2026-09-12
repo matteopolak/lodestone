@@ -2,6 +2,36 @@
 
 use super::*;
 
+/// Resolve exact custom-name cosmetics at the entity-to-draw boundary.
+///
+/// Upside-down transforms are supported for built-in living entities with a
+/// model-backed draw. Non-living and sprite-only entities intentionally remain
+/// unchanged because their renderers do not share the living model transform.
+#[must_use]
+pub(crate) fn named_entity_cosmetics(
+    entity_type: Option<lodestone_data::entity_type::EntityType>,
+    custom_name: Option<&str>,
+) -> NamedEntityCosmetics {
+    let Some(name) = custom_name else {
+        return NamedEntityCosmetics::default();
+    };
+    let upside_down = matches!(name, "Dinnerbone" | "Grumm")
+        && entity_type.is_some_and(|entity_type| {
+            // These model-backed living types intentionally do not appear in
+            // the crowd-push census because they override that behaviour.
+            lodestone_data::entity_census::is_living(entity_type)
+                || matches!(
+                    entity_type,
+                    EntityType::ArmorStand | EntityType::Bat | EntityType::Parrot
+                )
+        });
+    let rainbow_wool = name == "jeb_" && entity_type == Some(EntityType::Sheep);
+    NamedEntityCosmetics {
+        upside_down,
+        rainbow_wool,
+    }
+}
+
 // The item-pickup fly-to-collector animation
 // ---------------------------------------------------------------------------
 
@@ -246,6 +276,7 @@ pub fn extract_pickup_draws(
         out.0.push(EntityDraw {
             id: pickup.item_entity_id.raw(),
             type_path: Arc::from(ITEM_ENTITY_TYPE_PATH),
+            named_cosmetics: NamedEntityCosmetics::default(),
             item: Some(pickup.item.clone()),
             item_model: None,
             item_skin: pickup.item_skin.clone(),
@@ -402,6 +433,10 @@ pub fn extract_entity_draws(
     // questions, two fields; a shift-key-down player whose standing box does not
     // fit is `SWIMMING`, not `CROUCHING`.
     poses: Query<&Pose>,
+    // Custom names live on the ingest entity, not the render track. Keep the
+    // raw text here so name-selected cosmetics do not depend on whether the
+    // separate visibility gate produced a nameplate.
+    custom_names: Query<&CustomName>,
     // `FallingBlockState` lives on the ingest entity too
     // (`apply_falling_block_state` inserts it from the spawn packet's Object Data
     // field through the same `EntityIndex`), bridged the same way. It is what turns
@@ -460,6 +495,8 @@ pub fn extract_entity_draws(
         firework_flags,
         projectile_owners,
         vehicle_hurts,
+        player_model_customizations,
+        velocities,
     ): (
         Query<&ExperienceOrbValue>,
         Query<&TntFuse>,
@@ -488,6 +525,12 @@ pub fn extract_entity_draws(
         // `VehicleEntity`'s hurt/hurt-dir/damage triple into it), bridged the
         // same way and nested here for the same `SystemParam`-arity reason.
         Query<&lodestone_ecs::entity::VehicleHurt>,
+        // Player model-layer customization is metadata on the ingest entity,
+        // bridged through the same index as the other remote-entity state.
+        Query<&PlayerModelCustomization>,
+        // Spawn velocity supplies the motion direction needed by the
+        // fall-flying wing target.
+        Query<&Velocity>,
     ),
     tracks: Query<(
         &MinecraftEntityId,
@@ -674,6 +717,22 @@ pub fn extract_entity_draws(
             .get(id.0)
             .and_then(|entity| vehicles.get(entity).ok())
             .is_some();
+        let entity_flags = index.get(id.0).and_then(|entity| flags.get(entity).ok());
+        let fall_flying = entity_flags.is_some_and(|flags| {
+            lodestone_entity::metadata::SharedEntityFlags::from_bits(flags.0 as i8).fall_flying()
+        }) || index
+            .get(id.0)
+            .and_then(|entity| poses.get(entity).ok())
+            .is_some_and(|pose| pose.0 == lodestone_model::EntityPose::FallFlying);
+        let motion = index
+            .get(id.0)
+            .and_then(|entity| velocities.get(entity).ok())
+            .map(|velocity| to_glam_vec3(velocity.0))
+            .unwrap_or(Vec3::ZERO);
+        let cape_visible = index
+            .get(id.0)
+            .and_then(|entity| player_model_customizations.get(entity).ok())
+            .map_or(true, |customization| customization.cape_shown());
         // `0.0` (and hence a bit-identical `pose_swelling` to `pose`, per that
         // function's own doc) for every non-creeper — `fuse` is `None` — and
         // for a creeper whose fuse has never moved off idle. Vanilla's own
@@ -723,6 +782,24 @@ pub fn extract_entity_draws(
             .get(id.0)
             .and_then(|entity| flags.get(entity).ok())
             .is_some_and(|flags| flags.0 & 0x20 != 0);
+        let custom_name = index
+            .get(id.0)
+            .and_then(|entity| custom_names.get(entity).ok())
+            .and_then(|name| name.0.as_ref())
+            .map(Text::to_plain_string);
+        let named_cosmetics = named_entity_cosmetics(kind.entity_type, custom_name.as_deref());
+        // The sheep's ordinary white/unsheared metadata is a wire default and
+        // may therefore be absent. A rainbow-named sheep still owns a wool
+        // layer in that state; only an explicitly reported sheared variant
+        // suppresses it at the GPU draw boundary.
+        let wool = wool.0.or_else(|| {
+            named_cosmetics
+                .rainbow_wool
+                .then_some(SheepWool {
+                    color: 0,
+                    sheared: false,
+                })
+        });
         // An armour stand's own client-flags byte, bridged off the ingest
         // entity through `index` exactly as `on_fire`/`invisible` above are.
         // `None` for every entity that is not an `ArmorStand` (the adapter
@@ -882,6 +959,7 @@ pub fn extract_entity_draws(
         out.0.push(EntityDraw {
             id: id.0,
             type_path: Arc::clone(&kind.path),
+            named_cosmetics,
             variant_sheet,
             // Only item entities use the selected definition on this scoped
             // world-item path. Frames and projectile stacks retain their base
@@ -903,7 +981,7 @@ pub fn extract_entity_draws(
             equipment_dye: equipment_dye.0.clone(),
             equipment_skin: equipment_skin.0.clone(),
             equipment_trim: equipment_trim.0.clone(),
-            wool: wool.0,
+            wool,
             block_state,
             item_frame_rotation,
             painting,
@@ -928,6 +1006,9 @@ pub fn extract_entity_draws(
                 swim_amount,
                 armor_stand_pose,
                 boat_hurt,
+                cape_visible,
+                fall_flying,
+                motion,
             ),
             name_tag: name_tag.0.clone(),
             hurt,

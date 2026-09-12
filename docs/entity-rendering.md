@@ -157,6 +157,22 @@ uses its 1.5-block pose box, and a marker armour stand overrides the height to
 zero. Per-type attachment overrides (sitting cat, sleeping villager) aren't
 ported, so the generic bounding-box point remains the fallback.
 
+### Named cosmetics
+
+The entity extraction boundary compares raw custom-name text exactly and
+case-sensitively. `Dinnerbone` and `Grumm` select an upside-down transform for
+model-backed living entities; `jeb_` selects the animated wool tint for sheep.
+The decision is carried on `EntityDraw`, so the body and model layers resolve
+the same orientation while the nameplate keeps its ordinary world anchor.
+Rainbow wool advances every 25 age ticks through the sixteen wool colours,
+using interpolated frame age for deterministic output and the same scaled mesh
+for baby sheep.
+
+Sprite-only, vehicle and other non-living entities intentionally do not receive
+these variants. The sheep undercoat texture and unrelated named variants are
+also unsupported until their own mesh/data paths are present; they must not be
+treated as complete merely because the base named variant reaches a draw.
+
 ### Entity picking
 
 One ray per frame from the interpolated camera: blocks first, then entities capped by the block-hit distance, narrowed by four filters — a cheap distance pre-filter, the `CAN_BE_PICKED` predicate below, a hitbox lookup that drops any type the census can't size, then the exact ray-vs-AABB test capped at `ENTITY_REACH` (3.0) and by the block-hit distance. The local player is never a candidate by construction.

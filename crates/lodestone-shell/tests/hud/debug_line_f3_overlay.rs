@@ -35,6 +35,7 @@ fn zombie() -> EntityDraw {
     EntityDraw {
         id: 1,
         type_path: std::sync::Arc::from("zombie"),
+        named_cosmetics: Default::default(),
         variant_sheet: None,
         item: None,
         item_model: None,

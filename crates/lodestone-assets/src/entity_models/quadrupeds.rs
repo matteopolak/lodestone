@@ -204,6 +204,29 @@ pub fn sheep_wool_tint(ordinal: u8) -> [u8; 3] {
     TINTS.get(ordinal as usize).copied().unwrap_or(WHITE)
 }
 
+/// The animated wool tint used by a sheep with the exact rainbow name.
+///
+/// The colour sequence advances one dye entry every 25 age ticks and blends
+/// adjacent entries in the packed sRGB channel space. The caller supplies the
+/// interpolated `ageInTicks` value, so a fixed frame always produces the same
+/// tint and a baby sheep follows the same clock as an adult. This deliberately
+/// reuses [`sheep_wool_tint`] rather than maintaining a second colour table.
+#[must_use]
+pub fn sheep_rainbow_wool_tint(age_ticks: f32) -> [u8; 3] {
+    let cycle_tick = age_ticks.rem_euclid(400.0);
+    let tick = cycle_tick.floor();
+    let first = (tick / 25.0) as u8;
+    let second = (first + 1) % 16;
+    let alpha = (tick.rem_euclid(25.0) + cycle_tick.fract()) / 25.0;
+    let a = sheep_wool_tint(first);
+    let b = sheep_wool_tint(second);
+    [
+        (f32::from(a[0]) + (f32::from(b[0]) - f32::from(a[0])) * alpha).floor() as u8,
+        (f32::from(a[1]) + (f32::from(b[1]) - f32::from(a[1])) * alpha).floor() as u8,
+        (f32::from(a[2]) + (f32::from(b[2]) - f32::from(a[2])) * alpha).floor() as u8,
+    ]
+}
+
 /// Vanilla's own adult-chicken model (its own base-chicken-model construction): head with beak and wattle
 /// children, rotated body, two legs, two wings, sheet 64×32.
 pub fn chicken_model() -> EntityModelDef {
