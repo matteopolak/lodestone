@@ -15,7 +15,6 @@
             assert_eq!(inst.texture, skull_texture_stem(*t));
         }
     }
-
     /// The dragon's jaw and the piglin's ears are **assigned** by
     /// vanilla's own animation update, not added to their authored rest pose, and at rest the
     /// assigned value differs from the authored one in both cases. Predicting
@@ -973,4 +972,3 @@
         assert_eq!(frame.stats.drawn, 2);
         assert_eq!(frame.batches.len(), 2, "a book is its own model and sheet");
     }
-

@@ -379,4 +379,3 @@ impl DecoratedPotSpawn {
 use glam::{Mat4, Vec3};
 
 use crate::entity::ENTITY_FULLBRIGHT;
-
