@@ -30,15 +30,15 @@
 //! skips `Drop`), and a server list that survives only a graceful quit is one
 //! that silently loses the entry the player just added.
 
-use super::{book_edit, book_view, command_block, edit_box, servers, sign_edit, spectator_menu};
-use super::focus::{self, KeyEvent};
-use super::servers::{ServerList, servers_path};
-use super::widget;
-use super::options::LiveOption;
-use super::{render, server_links};
-use super::{Screen, SessionKind, UiState};
-use crate::config::{MAX_MANUAL_GUI_SCALE, Options};
-use lodestone_auth::Entitlement;
+pub(super) use super::{book_edit, book_view, command_block, edit_box, servers, sign_edit, spectator_menu};
+pub(super) use super::focus::{self, KeyEvent};
+pub(super) use super::servers::{ServerList, servers_path};
+pub(super) use super::widget;
+pub(super) use super::options::LiveOption;
+pub(super) use super::{render, server_links};
+pub(super) use super::{Screen, SessionKind, UiState};
+pub(super) use crate::config::{MAX_MANUAL_GUI_SCALE, Options};
+pub(super) use lodestone_auth::Entitlement;
 
 mod buttons;
 mod form;
@@ -56,6 +56,7 @@ mod overlays;
 pub use buttons::*;
 pub use form::*;
 pub use model::*;
+pub use overlays::*;
 
 #[derive(Debug)]
 pub struct MenuNav {
