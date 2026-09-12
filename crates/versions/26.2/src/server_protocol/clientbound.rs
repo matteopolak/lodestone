@@ -150,7 +150,7 @@ pub(super) fn encode_set_time_body(game_time: i64, day_time: Option<i64>) -> Vec
 /// test is `template.min != the JDK's own integer type's own min-value accessor and, for the floating types,
 /// `!= -the JDK's own float type's own max-value accessor / the JDK's own float type's own max-value accessor. So the flags byte is derived here
 /// from the same comparison rather than from a separate "has bound" field, which
-fn write_argument_parser(w: &mut Writer, parser: &ArgumentParser) {
+pub(super) fn write_argument_parser(w: &mut Writer, parser: &ArgumentParser) {
     /// vanilla's own argument-utils helper's own number-flag-min accessor.
     const HAS_MIN: u8 = 1;
     /// vanilla's own argument-utils helper's own number-flag-max accessor.
@@ -317,7 +317,7 @@ fn write_argument_parser(w: &mut Writer, parser: &ArgumentParser) {
 /// builds a bare `RootCommandNode` for it. Re-encoding it as an argument is
 /// impossible anyway — a node that failed to decode carries neither a name nor a
 /// payload.
-fn write_command_node(w: &mut Writer, node: &RawCommandNode) {
+pub(super) fn write_command_node(w: &mut Writer, node: &RawCommandNode) {
     /// `TYPE_ROOT`, and the type of an unrecognised node's degraded form.
     const TYPE_ROOT: u8 = 0;
     /// `TYPE_LITERAL`.
@@ -381,7 +381,7 @@ fn write_command_node(w: &mut Writer, node: &RawCommandNode) {
 /// is the mirror of `V770Adapter`'s `decode_command_tree` and the ordering a
 /// round-trip cannot catch you getting wrong if both ends agree wrongly. Read
 /// against the vanilla record, not against the decoder.
-fn encode_commands_body(tree: &WireCommandTree) -> Vec<u8> {
+pub(super) fn encode_commands_body(tree: &WireCommandTree) -> Vec<u8> {
     let mut w = Writer::default();
     w.var_i32(tree.len() as i32);
     for index in 0..tree.len() {
@@ -405,7 +405,7 @@ fn encode_commands_body(tree: &WireCommandTree) -> Vec<u8> {
 /// [`command_suggestion_tooltip_nbt`] rather than a bare `{"text": ...}`
 /// compound precisely so a future caller that does attach a styled tooltip
 /// does not silently lose it the way the client-side decode used to.
-fn encode_command_suggestions_body(response: &CommandSuggestionsResponse) -> Vec<u8> {
+pub(super) fn encode_command_suggestions_body(response: &CommandSuggestionsResponse) -> Vec<u8> {
     let mut w = Writer::default();
     w.var_i32(response.id);
     w.var_i32(response.start);
@@ -440,7 +440,7 @@ fn encode_command_suggestions_body(response: &CommandSuggestionsResponse) -> Vec
 /// fallback). Click/hover/insertion are still omitted, matching
 /// [`text_to_nbt`]'s scope for the same reason: a tab-complete tooltip is a
 /// hover-only informational popup with no interactivity of its own to carry.
-fn command_suggestion_tooltip_nbt(text: &Text) -> Nbt {
+pub(super) fn command_suggestion_tooltip_nbt(text: &Text) -> Nbt {
     let mut fields: Vec<(String, Nbt)> = Vec::new();
     match &text.content {
         TextContent::Literal(literal) => {
@@ -498,19 +498,4 @@ fn command_suggestion_tooltip_nbt(text: &Text) -> Nbt {
         ));
     }
     Nbt::Compound(fields)
-}
-
-/// Hand-written encoder for the clientbound `system_chat` packet, which has no
-/// existing struct because it is currently only ever *decoded* (see
-/// `V770Adapter::handle_play`'s `SYSTEM_CHAT` arm). Wire layout (mirrors the
-/// decode side exactly): a network-form NBT text component (root tag id +
-/// payload, no root name — vanilla's vanilla's own component-serialization helper's own trusted-stream-codec accessor),
-/// then a big-endian `bool` overlay flag (`false` selects normal chat history,
-/// `true` the action-bar overlay).
-fn encode_system_chat(message: &str, overlay: bool) -> Vec<u8> {
-    let component = Nbt::Compound(vec![("text".to_owned(), Nbt::String(message.to_owned()))]);
-    let mut w = Writer::default();
-    write_network_nbt(&mut w, &component).expect("plain string NBT component always encodes");
-    w.bool(overlay);
-    w.into_vec()
 }

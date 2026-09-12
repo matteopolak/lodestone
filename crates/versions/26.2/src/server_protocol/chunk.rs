@@ -181,8 +181,8 @@ pub(super) fn encode_column_body(
 /// They are explicit ids, not declaration positions: the source registry gives
 /// the world-generation-only forms ids 0, 2, and 3, leaving the client forms
 /// at 1, 4, and 5.
-const WORLD_SURFACE_HEIGHTMAP_TYPE_ID: u32 = 1;
-const MOTION_BLOCKING_NO_LEAVES_HEIGHTMAP_TYPE_ID: u32 = 5;
+pub(super) const WORLD_SURFACE_HEIGHTMAP_TYPE_ID: u32 = 1;
+pub(super) const MOTION_BLOCKING_NO_LEAVES_HEIGHTMAP_TYPE_ID: u32 = 5;
 
 /// Builds every heightmap a completed chunk sends from its current state ids.
 ///
@@ -386,7 +386,7 @@ pub(super) fn stabilize_block_entity_nbt(nbt: &mut Nbt) {
 /// [`lodestone_data::light_props`] for the provenance argument — in particular
 /// that every gap in it darkens rather than brightens.
 pub(super) struct V770LightProps {
-    has_skylight: bool,
+    pub(super) has_skylight: bool,
 }
 
 impl LightProperties for V770LightProps {
@@ -467,7 +467,7 @@ pub(super) fn compute_served_light(column: &WorldChunkColumn, dimension: Dimensi
 /// production server normally supplies the exact snapshot captured at its
 /// light fence, which remains authoritative. The Nether has no sky, so its
 /// value is immaterial there.
-const fn initial_full_sky_sections(dimension: Dimension) -> usize {
+pub(super) const fn initial_full_sky_sections(dimension: Dimension) -> usize {
     match dimension {
         Dimension::End => usize::MAX,
         Dimension::Overworld | Dimension::Nether => 1,
