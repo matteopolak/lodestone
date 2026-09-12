@@ -77,6 +77,11 @@ test:
 check-comment-voice:
     cargo run -q -p xtask -- check-comment-voice
 
+# cargo xtask check-worldgen-schedule — source-level guard for typed worldgen
+# pass ownership and copied source-neighbourhood loops.
+check-worldgen-schedule:
+    cargo run -q -p xtask -- check-worldgen-schedule
+
 # All five checks above, in order.
 health: check check-all check-seam test check-comment-voice
 
