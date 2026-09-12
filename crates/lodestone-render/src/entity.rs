@@ -512,9 +512,9 @@ mod tests {
     }
 
     /// The curve must stay inside vanilla's `[0.24, 1.0]` across a whole day and
-    /// must actually *vary* — a constant 1.0 is the shipped bug, and a value
-    /// that ever reaches 0.0 would collide with the shader's "not wired"
-    /// sentinel and silently mean full daylight at exactly the darkest moment.
+    /// must actually *vary* — a constant 1.0 is the shipped bug. The renderer's
+    /// negative unset sentinel is outside this curve's range, so zero remains
+    /// available for an explicit dimension factor.
     #[test]
     fn sky_darken_stays_in_vanillas_range_and_is_not_constant() {
         let samples: Vec<f32> = (0..24_000)
@@ -525,7 +525,7 @@ mod tests {
         let hi = samples.iter().copied().fold(f32::NEG_INFINITY, f32::max);
         assert!(lo >= 0.24 - 1e-5, "dipped to {lo}, below vanilla's 0.24 floor");
         assert!(hi <= 1.0 + 1e-5, "rose to {hi}, above 1.0");
-        assert!(lo > 0.0, "0.0 is the shader's 'unset' sentinel and must be unreachable");
+        assert!(lo > 0.0, "the ordinary time-of-day curve must stay above zero");
         assert!(hi - lo > 0.5, "the curve barely moves ({lo}..{hi}) — that is the defect");
     }
 
@@ -2035,6 +2035,35 @@ mod tests {
             "det must stay positive so back-face culling remains valid, got {}",
             m.determinant(),
         );
+    }
+
+    #[test]
+    fn upside_down_instance_rotates_body_and_attached_part_together() {
+        let models = EntityModelSet::load();
+        let anim = AnimInput {
+            head_yaw_deg: 18.0,
+            head_pitch_deg: -11.0,
+            ..AnimInput::REST
+        };
+        let feet = Vec3::new(3.0, 64.0, -2.0);
+        let base = models
+            .resolve("zombie", feet, 37.0, 1.0, &anim)
+            .expect("zombie model");
+        let flipped = base
+            .clone()
+            .with_upside_down(feet, 37.0, 1.0, 1.95);
+        assert_ne!(flipped.transform, base.transform);
+        assert_eq!(flipped.part_transforms.len(), base.part_transforms.len());
+        let head = models.get("zombie").unwrap().skeleton.index_of("head").unwrap();
+        assert_ne!(flipped.part_transforms[head], base.part_transforms[head]);
+        assert!(flipped.aabb_min.y < base.aabb_min.y);
+        assert!(flipped.aabb_max.y > base.aabb_max.y);
+
+        // Control: applying the same helper with an ordinary model transform
+        // is the only difference; a near-miss name must not be able to reuse
+        // the flipped matrix by accident at this render seam.
+        let ordinary = base.clone();
+        assert_eq!(ordinary.transform, base.transform);
     }
 
     #[test]

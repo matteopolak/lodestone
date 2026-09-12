@@ -140,8 +140,9 @@ use glam::Vec3;
 use lodestone_assets::ResourceLocation;
 use lodestone_ecs::app::{App, Plugin};
 use lodestone_ecs::entity::{
-    AttackSwing, DeathTime, EntityFlags, EntityIndex, ExperienceOrbValue, FallingBlockState,
-    HurtTime, ItemFrameRotation, ItemUse, MinecraftEntityId, MobState, OnGround, Pose, TntFuse,
+    AttackSwing, CustomName, DeathTime, EntityFlags, EntityIndex, ExperienceOrbValue, FallingBlockState,
+    HurtTime, ItemFrameRotation, ItemUse, MinecraftEntityId, MobState, OnGround,
+    PlayerModelCustomization, Pose, TntFuse, Velocity,
 };
 use lodestone_ecs::player::{
     CollisionSource, LocalPlayer, PhysicsState, PlayerCollision, Profile,
@@ -170,7 +171,7 @@ mod interpolation;
 mod extraction;
 mod remote_body;
 
-pub use render_input::EntityDraw;
+pub use render_input::{EntityDraw, NamedEntityCosmetics};
 pub use physics::{tick_item_physics, tick_projectile_physics};
 pub(super) use physics::{new_item_physics, new_projectile_physics, step_item_physics, OpenAir};
 pub use interpolation::{advance_interp_clocks, tick_walk_animation};
@@ -1754,6 +1755,7 @@ fn default_remote_skin(uuid: uuid::Uuid) -> crate::remote_skins::RemoteSkin {
         // The 18 hash-picked built-in identities carry no cape — vanilla's
         // `DefaultPlayerSkin` has none either.
         cape: None,
+        elytra: None,
         // The whole point of the pick, and until this field existed it was
         // thrown away here: only `.model` (the rig) was read, so all eighteen
         // identities collapsed onto the pack's two plain sheets and every
@@ -3669,6 +3671,7 @@ mod tests {
             EntityDraw {
                 id: 1,
                 type_path: std::sync::Arc::from("player"),
+                named_cosmetics: Default::default(),
                 tnt_fuse: None,
                 variant_sheet: None,
                 item: None,
@@ -5582,6 +5585,56 @@ mod tests {
             pig_draw.wool, None,
             "the same decoded variant must not reach the draw on a non-sheep"
         );
+    }
+
+    #[test]
+    fn exact_custom_names_reach_entity_draw_cosmetics_with_negative_controls() {
+        let mut interp = EntityInterpolator::new();
+        let mut sheep = snap(1, Vec3::ZERO, 0.0);
+        sheep.type_path = "sheep".into();
+        sheep.variant = Some(EntityVariant::Dyed {
+            color: 0,
+            sheared: false,
+        });
+        sheep.apply(interp.world_mut());
+        let sheep_entity = interp.world().resource::<EntityIndex>().get(1).unwrap();
+        interp
+            .world_mut()
+            .entity_mut(sheep_entity)
+            .insert(CustomName(Some(Text::literal("jeb_"))));
+
+        let mut upside_down = snap(2, Vec3::new(2.0, 0.0, 0.0), 0.0);
+        upside_down.type_path = "zombie".into();
+        upside_down.apply(interp.world_mut());
+        let zombie_entity = interp.world().resource::<EntityIndex>().get(2).unwrap();
+        interp
+            .world_mut()
+            .entity_mut(zombie_entity)
+            .insert(CustomName(Some(Text::literal("Dinnerbone"))));
+
+        let mut near_miss = snap(3, Vec3::new(4.0, 0.0, 0.0), 0.0);
+        near_miss.type_path = "sheep".into();
+        near_miss.variant = Some(EntityVariant::Dyed {
+            color: 0,
+            sheared: false,
+        });
+        near_miss.apply(interp.world_mut());
+        let near_entity = interp.world().resource::<EntityIndex>().get(3).unwrap();
+        interp
+            .world_mut()
+            .entity_mut(near_entity)
+            .insert(CustomName(Some(Text::literal("Jeb_"))));
+
+        interp.update(0.016);
+        let draws = interp.draws();
+        let rainbow = draws.iter().find(|d| d.id == 1).unwrap();
+        let flipped = draws.iter().find(|d| d.id == 2).unwrap();
+        let ordinary = draws.iter().find(|d| d.id == 3).unwrap();
+        assert!(rainbow.named_cosmetics.rainbow_wool);
+        assert!(!rainbow.named_cosmetics.upside_down);
+        assert!(flipped.named_cosmetics.upside_down);
+        assert!(!flipped.named_cosmetics.rainbow_wool);
+        assert_eq!(ordinary.named_cosmetics, NamedEntityCosmetics::default());
     }
 
     #[test]

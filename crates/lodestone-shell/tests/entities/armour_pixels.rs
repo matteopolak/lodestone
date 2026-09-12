@@ -171,6 +171,7 @@ fn a_fully_armoured_zombie_draws_more_silhouette_than_a_bare_one() {
         item_frame_rotation: 0,
         id: 1,
         type_path: std::sync::Arc::from("zombie"),
+        named_cosmetics: Default::default(),
         item: None,
         item_model: None,
         item_skin: None,

@@ -402,6 +402,7 @@ fn a_fully_armoured_zombie_resolves_layers_on_real_wearer_parts() {
     let models = EntityModelSet::load();
     let armour = ArmourModelSet::load();
     let draw = EntityDraw {
+        named_cosmetics: Default::default(),
         hurt: false,
         id: 7,
         type_path: std::sync::Arc::from("zombie"),
@@ -580,6 +581,7 @@ fn the_local_bodys_own_skin_reaches_both_draw_channels() {
         url: "https://textures.minecraft.net/texture/feedface".to_owned(),
         model: lodestone_assets::PlayerModelType::Slim,
         cape: None,
+        elytra: None,
         // A non-legacy identity on purpose: `steve`/`alex` are what the plain
         // model sheets already look like, so either would pass under the very
         // collapse this field exists to undo.

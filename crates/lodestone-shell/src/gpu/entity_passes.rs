@@ -102,6 +102,40 @@ fn worn_player_head_placement(head_transform: glam::Mat4) -> glam::Mat4 {
     head_transform * glam::Mat4::from_scale(glam::Vec3::splat(WORN_PLAYER_HEAD_SCALE))
 }
 
+/// Apply name-selected orientation to the same instance consumed by every
+/// entity layer. The height comes from the jar-derived dimensions census, not
+/// from the model bounds, because the name transform is defined by the entity
+/// bounding box.
+pub(super) fn named_entity_anim(draw: &EntityDraw) -> lodestone_render::AnimInput {
+    let mut anim = draw.anim;
+    if draw.named_cosmetics.upside_down {
+        anim.head_yaw_deg = -anim.head_yaw_deg;
+        anim.head_pitch_deg = -anim.head_pitch_deg;
+    }
+    anim
+}
+
+pub(super) fn apply_named_orientation(
+    draw: &EntityDraw,
+    instance: lodestone_render::EntityInstance,
+) -> lodestone_render::EntityInstance {
+    // The living placement's death fall-over branch has precedence over the
+    // name branch. Keep that existing placement intact while the entity is
+    // dying; replacing it with a fresh upright matrix would erase the fall.
+    if !draw.named_cosmetics.upside_down || draw.death_time > 0.0 {
+        return instance;
+    }
+    let Some(entity_type) = lodestone_data::entity_type::EntityType::from_name(&draw.type_path)
+    else {
+        return instance;
+    };
+    let height = lodestone_data::entity_dimensions::base_dimensions(entity_type).height;
+    if height <= 0.0 || draw.scale <= 0.0 {
+        return instance;
+    }
+    instance.with_upside_down(draw.feet, draw.yaw, draw.scale, height)
+}
+
 /// Record an entity type whose ordinary body dispatch had no baked model.
 ///
 /// F3+B draws hitboxes independently of the model pass, so this is the useful
@@ -1175,19 +1209,21 @@ impl RenderState {
             // fall-over reach zero pixels while every formula behind them was built
             // and unit-tested; `0.0` is an exact identity for each, so nothing
             // looked wrong anywhere.
+            let anim = named_entity_anim(e);
             let Some(mut instance) = self.entities.models.resolve_animated(
                 e.model_type_path(),
                 e.feet,
                 e.yaw,
                 e.pitch,
                 e.scale,
-                &e.anim,
+                &anim,
                 e.creeper_swelling,
                 e.death_time,
             ) else {
                 note_missing_entity_model(e.type_path.as_ref(), e.model_type_path());
                 continue;
             };
+            let mut instance = apply_named_orientation(e, instance);
             // Apply the interpolated swim pitch only to the player. The type
             // check is separate from the amount gate because this field is
             // present for every entity kind.
@@ -1478,15 +1514,17 @@ impl RenderState {
             // different pose — or a different model — than the body it is drawn
             // over. `model_type_path` is the rig half: a slim player's chestplate
             // has to be posed off the *slim* body's part matrices.
+            let anim = named_entity_anim(draw);
             let Some(instance) = self.entities.models.resolve(
                 draw.model_type_path(),
                 draw.feet,
                 draw.yaw,
                 draw.scale,
-                &draw.anim,
+                &anim,
             ) else {
                 continue;
             };
+            let instance = apply_named_orientation(draw, instance);
             if !frustum.intersects_aabb(instance.aabb_min, instance.aabb_max) {
                 continue;
             }
@@ -1680,23 +1718,47 @@ impl RenderState {
             let Some(bb_width) = flame_hitbox_width(&draw.type_path, draw.scale) else {
                 continue;
             };
+            let anim = named_entity_anim(draw);
             let Some(instance) = self.entities.models.resolve(
                 draw.model_type_path(),
                 draw.feet,
                 draw.yaw,
                 draw.scale,
-                &draw.anim,
+                &anim,
             ) else {
                 continue;
             };
+            let instance = apply_named_orientation(draw, instance);
             if !frustum.intersects_aabb(instance.aabb_min, instance.aabb_max) {
                 continue;
             }
-            let transform = lodestone_render::entity_pipeline::flame_instance_matrix(
+            let mut transform = lodestone_render::entity_pipeline::flame_instance_matrix(
                 draw.feet,
                 camera.yaw,
                 bb_width,
             );
+            if draw.named_cosmetics.upside_down && draw.death_time <= 0.0 {
+                // Fire is a separate billboard buffer, so it does not inherit
+                // the model instance's name transform automatically. Conjugate
+                // the billboard by the same placement delta to keep the whole
+                // attached layer upside down around the entity's feet.
+                if let Some(entity_type) =
+                    lodestone_data::entity_type::EntityType::from_name(&draw.type_path)
+                {
+                    let ordinary = lodestone_render::entity::entity_model_matrix(
+                        draw.feet,
+                        draw.yaw,
+                        draw.scale,
+                    );
+                    let upside_down = lodestone_render::upside_down_entity_model_matrix(
+                        draw.feet,
+                        draw.yaw,
+                        draw.scale,
+                        lodestone_data::entity_dimensions::base_dimensions(entity_type).height,
+                    );
+                    transform = (upside_down * ordinary.inverse()) * transform;
+                }
+            }
             accum.entry(draw.type_path.to_string()).or_default().push(transform);
             stats.flame_billboards_drawn += 1;
         }
@@ -2249,9 +2311,10 @@ impl RenderState {
     ///   ([`crate::entities::sheep_wool`]'s own gate), so this is a second,
     ///   independent gate rather than the only one — belt and braces, the same
     ///   discipline `docs/entity-rendering.md` asks for.
-    /// * **Baby sheep, the `jeb_` rainbow name, and the undercoat overlay.**
-    ///   Not built — see `docs/entity-rendering.md`'s "deliberately out of
-    ///   scope" list, unchanged by this pass.
+    /// * **Baby sheep and the undercoat overlay.** Baby scale is already part
+    ///   of the resolved sheep instance, and the exact `jeb_` name now selects
+    ///   the age-driven rainbow tint below. The undercoat remains deliberately
+    ///   unsupported; see `docs/entity-rendering.md`.
     pub(super) fn prepare_wool(
         &self,
         _device: &wgpu::Device,
@@ -2277,15 +2340,17 @@ impl RenderState {
             if wool.sheared {
                 continue;
             }
+            let anim = named_entity_anim(draw);
             let Some(instance) = self.entities.models.resolve(
                 &draw.type_path,
                 draw.feet,
                 draw.yaw,
                 draw.scale,
-                &draw.anim,
+                &anim,
             ) else {
                 continue;
             };
+            let instance = apply_named_orientation(draw, instance);
             if !frustum.intersects_aabb(instance.aabb_min, instance.aabb_max) {
                 continue;
             }
@@ -2308,7 +2373,12 @@ impl RenderState {
             let light = u32::from(entity_light(&self.entity_light, draw));
             // Same reason armour carries it: the wool is one of the sheep's
             // model layers, so it reddens with the body.
-            let tint = InstanceTint::rgb(sheep_wool_tint(wool.color)).with_hurt(draw.hurt);
+            let tint = InstanceTint::rgb(if draw.named_cosmetics.rainbow_wool {
+                lodestone_assets::entity_models::sheep_rainbow_wool_tint(draw.anim.age_ticks)
+            } else {
+                sheep_wool_tint(wool.color)
+            })
+            .with_hurt(draw.hurt);
             for (range, wearer_index) in &attached {
                 let Some(transform) = instance.part_transforms.get(*wearer_index) else {
                     continue;
@@ -2404,15 +2474,17 @@ impl RenderState {
             if wearing_elytra {
                 continue;
             }
+            let anim = named_entity_anim(draw);
             let Some(instance) = self.entities.models.resolve(
                 draw.model_type_path(),
                 draw.feet,
                 draw.yaw,
                 draw.scale,
-                &draw.anim,
+                &anim,
             ) else {
                 continue;
             };
+            let instance = apply_named_orientation(draw, instance);
             if !frustum.intersects_aabb(instance.aabb_min, instance.aabb_max) {
                 continue;
             }
@@ -2551,15 +2623,17 @@ impl RenderState {
                 None if self.entities.elytra_texture.is_some() => None,
                 None => continue,
             };
+            let anim = named_entity_anim(draw);
             let Some(instance) = self.entities.models.resolve(
                 draw.model_type_path(),
                 draw.feet,
                 draw.yaw,
                 draw.scale,
-                &draw.anim,
+                &anim,
             ) else {
                 continue;
             };
+            let instance = apply_named_orientation(draw, instance);
             if !frustum.intersects_aabb(instance.aabb_min, instance.aabb_max) {
                 continue;
             }
@@ -2927,7 +3001,9 @@ impl RenderState {
         let placement = lodestone_render::entity::dropped_item_matrix(
             draw.feet,
             draw.anim.age_ticks,
-            lodestone_render::entity::item_bob_offset(draw.id),
+            lodestone_render::entity::item_bob_offset(
+                lodestone_model::EntityNetworkId::from_raw(draw.id),
+            ),
             &ground,
             lift,
         );
@@ -2952,13 +3028,15 @@ impl RenderState {
         light: u8,
     ) -> Option<lodestone_render::BlockEntityInstance> {
         let item = worn_player_head_item(draw)?;
+        let anim = named_entity_anim(draw);
         let wearer = self.entities.models.resolve(
             draw.model_type_path(),
             draw.feet,
             draw.yaw,
             draw.scale,
-            &draw.anim,
+            &anim,
         )?;
+        let wearer = apply_named_orientation(draw, wearer);
         let mesh = self.entities.models.get(wearer.model)?;
         let head = mesh.skeleton.index_of("head")?;
         let head_transform = *wearer.part_transforms.get(head)?;
@@ -3000,18 +3078,26 @@ impl RenderState {
         // expression `hand_transform` below reads its transform from.
         let ctx = ItemStateContext::new(arm.display_slot(false));
         let form = model.items.get(item)?.resolve_special(&ctx)?;
+        let anim = named_entity_anim(draw);
         let instance = self.entities.models.resolve(
             draw.model_type_path(),
             draw.feet,
             draw.yaw,
             draw.scale,
-            &draw.anim,
+            &anim,
         )?;
+        let instance = apply_named_orientation(draw, instance);
         let wearer = self.entities.models.get(instance.model)?;
         let arm_transform = instance.hand_transform(arm).or_else(|| {
             let part = wearer.skeleton.index_of(arm.part_name())?;
             instance.part_transforms.get(part).copied()
         })?;
+        let arm_transform = super::sources::local_attachment_with_view_lag(
+            draw.id,
+            draw.feet,
+            self.view_lag.value(),
+            arm_transform,
+        );
         // `net::entity_snapshot` maps `baby` onto a 0.5 uniform scale, the only baby
         // signal that reaches this layer — the same test `merge_held_items` uses.
         let baby = draw.scale < 1.0;
@@ -3504,6 +3590,7 @@ mod tests {
         EntityDraw {
             id: 1,
             type_path: Arc::from(type_path),
+            named_cosmetics: Default::default(),
             tnt_fuse: None,
             item: None,
             item_model: None,
@@ -3544,6 +3631,52 @@ mod tests {
             firework: None,
             projectile_owner: None,
         }
+    }
+
+    #[test]
+    fn named_upside_down_draw_reaches_the_gpu_instance_and_keeps_ordinary_draws_unchanged() {
+        let models = lodestone_render::EntityModelSet::load();
+        let mut named = subject("zombie", 64.0, 1.0, false);
+        named.named_cosmetics.upside_down = true;
+        named.anim.head_yaw_deg = 23.0;
+        named.anim.head_pitch_deg = -11.0;
+
+        let named_anim = named_entity_anim(&named);
+        assert_eq!(named_anim.head_yaw_deg, -23.0);
+        assert_eq!(named_anim.head_pitch_deg, 11.0);
+        let named_base = models
+            .resolve("zombie", named.feet, named.yaw, named.scale, &named_anim)
+            .expect("zombie must resolve at the entity GPU boundary");
+        let named_instance = apply_named_orientation(&named, named_base);
+
+        let ordinary = subject("zombie", 64.0, 1.0, false);
+        let ordinary_base = models
+            .resolve(
+                "zombie",
+                ordinary.feet,
+                ordinary.yaw,
+                ordinary.scale,
+                &ordinary.anim,
+            )
+            .expect("ordinary zombie must resolve");
+        let ordinary_instance = apply_named_orientation(&ordinary, ordinary_base);
+
+        assert_ne!(named_instance.transform, ordinary_instance.transform);
+        let head = models
+            .get(named_instance.model)
+            .and_then(|mesh| mesh.skeleton.index_of("head"))
+            .expect("zombie must have a head part");
+        assert_ne!(
+            named_instance.part_transforms[head],
+            ordinary_instance.part_transforms[head],
+            "the attached head must follow the upside-down body"
+        );
+        assert_eq!(ordinary_instance.transform, ordinary_base.transform);
+        assert_eq!(
+            ordinary_instance.part_transforms,
+            ordinary_base.part_transforms,
+            "an ordinary name must not alter the GPU instance"
+        );
     }
 
     #[test]

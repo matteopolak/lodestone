@@ -29,6 +29,7 @@ use lodestone_render::{
 };
 
 use lodestone_model::event::EquipmentSlot;
+use lodestone_model::EntityNetworkId;
 use lodestone_data::item::Item;
 
 use crate::entities::{EntityDraw, ITEM_ENTITY_TYPE_PATH};
@@ -258,7 +259,11 @@ impl RenderState {
             let fan_step = depth * 1.5;
             let jitter_extent = if flat { 0.075 } else { 0.15 };
             for copy in 0..amount {
-                let mut offset = item_cluster_jitter(draw.id, copy, jitter_extent);
+                let mut offset = item_cluster_jitter(
+                    EntityNetworkId::from_raw(draw.id),
+                    copy,
+                    jitter_extent,
+                );
                 if flat {
                     // Even spacing along z, centred on the entity, and no z
                     // jitter — the fan *is* the z placement.
@@ -271,7 +276,7 @@ impl RenderState {
                     &ground,
                     draw.feet + offset,
                     draw.anim.age_ticks,
-                    item_bob_offset(draw.id),
+                    item_bob_offset(EntityNetworkId::from_raw(draw.id)),
                     // Every copy of the stack shares the drop's one sample:
                     // `ItemEntityRenderer` reads `state.lightCoords` once and
                     // `submitMultipleFromCount` reuses it for all five.
@@ -728,7 +733,11 @@ impl RenderState {
                 .map(|item| i32::from(item.registry_id()))
                 .unwrap_or(0);
             for copy in 0..amount {
-                let mut offset = item_cluster_jitter(seed_key, copy, jitter_extent);
+                let mut offset = lodestone_render::entity::item_cluster_jitter_from_seed(
+                    seed_key as u32,
+                    copy,
+                    jitter_extent,
+                );
                 if flat {
                     offset.z =
                         fan_step * (copy as f32 - (amount.saturating_sub(1) as f32) / 2.0);
@@ -1143,7 +1152,11 @@ impl RenderState {
         let fan_step = depth * 1.5;
         let jitter_extent = if flat { 0.075 } else { 0.15 };
         for copy in 0..amount {
-            let mut offset = item_cluster_jitter(draw.id, copy, jitter_extent);
+            let mut offset = item_cluster_jitter(
+                EntityNetworkId::from_raw(draw.id),
+                copy,
+                jitter_extent,
+            );
             if flat {
                 offset.z =
                     fan_step * (copy as f32 - (amount.saturating_sub(1) as f32) / 2.0);
@@ -1220,15 +1233,17 @@ impl RenderState {
         // never be posed off a different pose than the arm the player sees. An
         // entity type with no ported model resolves to `None` and holds nothing,
         // which is also what happens to the mob itself.
+        let anim = super::entity_passes::named_entity_anim(draw);
         let Some(instance) = self.entities.models.resolve(
             &draw.type_path,
             draw.feet,
             draw.yaw,
             draw.scale,
-            &draw.anim,
+            &anim,
         ) else {
             return;
         };
+        let instance = super::entity_passes::apply_named_orientation(draw, instance);
         let Some(mesh) = self.entities.models.get(instance.model) else {
             return;
         };
@@ -1291,6 +1306,12 @@ impl RenderState {
             }) else {
                 continue;
             };
+            let arm_transform = super::sources::local_attachment_with_view_lag(
+                draw.id,
+                draw.feet,
+                self.view_lag.value(),
+                arm_transform,
+            );
             let transform = hand_transform(&geometry.display, arm, false);
             let mut mesh = held_item_mesh(
                 &geometry.quads,

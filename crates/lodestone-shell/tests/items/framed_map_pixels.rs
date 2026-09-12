@@ -134,6 +134,7 @@ fn blank_draw(id: i32, type_path: &str, yaw: f32) -> EntityDraw {
         item_frame_rotation: 0,
         id,
         type_path: std::sync::Arc::from(type_path),
+        named_cosmetics: Default::default(),
         item: None,
         item_model: None,
         item_skin: None,

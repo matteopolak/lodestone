@@ -778,6 +778,22 @@ fn sheep_wool_tint_matches_hand_derived_vanilla_values() {
     assert_eq!(unique.len(), 16, "dye table has duplicate entries");
 }
 
+#[test]
+fn sheep_rainbow_wool_tint_interpolates_on_the_age_clock() {
+    use lodestone_assets::entity_models::{sheep_rainbow_wool_tint, sheep_wool_tint};
+
+    assert_eq!(sheep_rainbow_wool_tint(0.0), sheep_wool_tint(0));
+    assert_eq!(sheep_rainbow_wool_tint(25.0), sheep_wool_tint(1));
+    assert_eq!(sheep_rainbow_wool_tint(400.0), sheep_wool_tint(0));
+
+    // The midpoint is deliberately not either endpoint, proving this is an
+    // age-driven interpolation rather than a static rainbow colour.
+    let at_midpoint = sheep_rainbow_wool_tint(12.5);
+    assert_ne!(at_midpoint, sheep_wool_tint(0));
+    assert_ne!(at_midpoint, sheep_wool_tint(1));
+    assert_eq!(at_midpoint, [208, 163, 125]);
+}
+
 // ============================================================================
 // Projectile rigs
 // ============================================================================

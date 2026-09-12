@@ -218,6 +218,7 @@ pub use entity::{
     EntityCullStats, EntityFrame, EntityInstance,
     EntityMesh, EntityModelSet, EntitySpawn, MODEL_FEET_OFFSET, PartRange, SheepWoolModelSet,
     WoolMesh, armour_layer_tint, armour_layers, cape_local_rotation, dying_entity_model_matrix,
+    upside_down_entity_model_matrix,
     elytra_rest_rotations, elytra_target_rotations, elytra_wing_transform, elytra_wing_y,
     entity_model_matrix,
     entity_texture_candidates, entity_variant_sheet, entity_variant_sheet_dirs,
@@ -281,7 +282,7 @@ pub use models::{
 };
 pub use scene::{CullStats, FramePlan, WorldScene, section_of};
 pub use screen_effects::{
-    FIRE_STRIP_TOP, FIRE_TILE_COUNT, FIRE_TINT, ScreenEffectRenderer, ScreenOverlayVertex,
+    FIRE_TINT, ScreenEffectRenderer, ScreenOverlayVertex,
     UNDERWATER_TILE_COUNT, UNDERWATER_TINT_ALPHA, border_warning_overlay_triangles,
     fire_overlay_triangles, underwater_brightness, underwater_overlay_quad,
     underwater_overlay_triangles,

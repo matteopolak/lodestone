@@ -129,6 +129,7 @@ fn entity_shadows_draw_a_ring_the_bare_silhouette_does_not() {
         item_frame_rotation: 0,
         id: 1,
         type_path: std::sync::Arc::from("zombie"),
+        named_cosmetics: Default::default(),
         item: None,
         item_model: None,
         item_skin: None,

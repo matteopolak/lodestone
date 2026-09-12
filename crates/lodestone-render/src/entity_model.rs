@@ -269,6 +269,34 @@ pub fn dying_entity_model_matrix(
     translate_feet * rotate * fall_over * flip_scale * lift
 }
 
+/// The living-entity placement with the exact-name upside-down transform.
+///
+/// The extra translation is in the entity's unscaled local frame, immediately
+/// before the half-turn and model flip. This keeps the complete model at the
+/// same feet column while placing its top at the entity's bounding-box height.
+/// `scale` is the render scale, and `height` is the unscaled bounding-box
+/// height. The ordinary placement remains unchanged when this helper is not
+/// selected.
+#[must_use]
+pub fn upside_down_entity_model_matrix(
+    feet: Vec3,
+    body_yaw_deg: f32,
+    scale: f32,
+    height: f32,
+) -> Mat4 {
+    let translate_feet = Mat4::from_translation(feet);
+    let rotate = Mat4::from_rotation_y((180.0 - body_yaw_deg).to_radians());
+    let upside_down_offset = Mat4::from_translation(Vec3::new(
+        0.0,
+        (height + 0.1) / scale,
+        0.0,
+    ));
+    let half_turn = Mat4::from_rotation_z(std::f32::consts::PI);
+    let flip_scale = Mat4::from_scale(Vec3::new(-scale, -scale, scale));
+    let lift = Mat4::from_translation(Vec3::new(0.0, -MODEL_FEET_OFFSET, 0.0));
+    translate_feet * rotate * upside_down_offset * half_turn * flip_scale * lift
+}
+
 /// The vertical bob and extra spin a **non-living vehicle** rig needs in place
 /// of [`MODEL_FEET_OFFSET`], keyed by model name — the second switch beside
 /// [`projectile_pitch_offset_deg`] that decides which of three placements a

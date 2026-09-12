@@ -115,6 +115,7 @@ fn a_woolly_sheep_draws_more_silhouette_than_a_sheared_one() {
         hurt: false,
         id: 1,
         type_path: std::sync::Arc::from("sheep"),
+        named_cosmetics: Default::default(),
         item: None,
         item_model: None,
         item_skin: None,

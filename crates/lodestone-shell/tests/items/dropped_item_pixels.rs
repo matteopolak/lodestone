@@ -70,6 +70,7 @@ use lodestone::entities::{EntityDraw, ITEM_ENTITY_TYPE_PATH};
 use lodestone::gpu::RenderState;
 use lodestone::resources::BlockResources;
 use lodestone_assets::ResourceLocation;
+use lodestone_model::EntityNetworkId;
 use lodestone_render::{
     AnimInput, BlockModels, Camera, GpuContext, HeadlessTarget, RenderTarget,
     entity::{ITEM_BOB_TICKS_PER_RADIAN, item_bob_offset},
@@ -110,6 +111,7 @@ fn drop_draw(item: Option<ResourceLocation>, age_ticks: f32) -> EntityDraw {
         item_frame_rotation: 0,
         id: DROP_ID,
         type_path: std::sync::Arc::from(ITEM_ENTITY_TYPE_PATH),
+        named_cosmetics: Default::default(),
         item,
         item_model: None,
         item_skin: None,
@@ -280,7 +282,7 @@ fn a_dropped_item_reaches_pixels_and_bobs() {
     let (no_stack, no_stack_drops) = shoot(&[drop_draw(None, 0.0)]);
 
     // Subject: the same entity, now carrying stone.
-    let bob_offset = item_bob_offset(DROP_ID);
+    let bob_offset = item_bob_offset(EntityNetworkId::from_raw(DROP_ID));
     // Two ages half a bob period apart, so `sin` is at its two extremes and the
     // item is drawn as high and as low as it ever goes.
     let half_period = std::f32::consts::PI * ITEM_BOB_TICKS_PER_RADIAN;
@@ -477,6 +479,7 @@ fn a_thrown_snowball_reaches_pixels_through_the_real_render_call() {
         item_frame_rotation: 0,
         id: DROP_ID + 1,
         type_path: std::sync::Arc::from(type_path),
+        named_cosmetics: Default::default(),
         // Exactly what `extract_entity_draws` produces for a non-`item` entity.
         item: None,
         item_model: None,

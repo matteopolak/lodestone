@@ -12,6 +12,24 @@ use lodestone_render::{AnimInput, ENTITY_FULLBRIGHT, entity::player_model_name};
 use lodestone_model::event::EquipmentSlot;
 
 use crate::entities::EntityDraw;
+use crate::camera_rig::ViewLagFrame;
+
+/// Apply the local view-lag rotation to a third-person hand attachment. The
+/// negative-id synthetic body is the only local draw; all real server entity
+/// ids are non-negative and must not consume this camera-local state.
+#[must_use]
+pub(super) fn local_attachment_with_view_lag(
+    id: i32,
+    feet: Vec3,
+    lag: ViewLagFrame,
+    attachment: glam::Mat4,
+) -> glam::Mat4 {
+    if id < 0 {
+        lag.attachment_transform(feet, attachment)
+    } else {
+        attachment
+    }
+}
 
 /// Samples the world's packed sky/block light (`sky << 4 | block`) at **an
 /// arbitrary world position** — one sample per entity, and the caller decides
@@ -86,15 +104,15 @@ pub struct SkyDarkenSource(pub(super) Option<Box<dyn Fn() -> Option<f32> + Send 
 
 impl SkyDarkenSource {
     /// This frame's factor, or `1.0` when there is no source or the world clock
-    /// is not known yet (pre-login). Clamped into vanilla's `[0.24, 1.0]`: a
-    /// source that hands back garbage should look like a wrong time of day, not
-    /// like a black or blown-out frame.
+    /// is not known yet (pre-login). Clamped into `[0.0, 1.0]`: a dimension may
+    /// legitimately declare zero sky-light factor (the End), while an unset
+    /// source still falls back to daylight through the `None` branch.
     #[must_use]
     pub(super) fn value(&self) -> f32 {
         self.0
             .as_ref()
             .and_then(|f| f())
-            .map_or(1.0, |v| v.clamp(0.24, 1.0))
+            .map_or(1.0, |v| v.clamp(0.0, 1.0))
     }
 }
 
@@ -360,6 +378,7 @@ impl ThirdPersonBodyState {
     /// corpus-name fallback with no new plumbing on the render side.
     pub(super) fn into_draw(self) -> EntityDraw {
         EntityDraw {
+            named_cosmetics: crate::entities::NamedEntityCosmetics::default(),
             // The local player's own body never reddens today, for the same
             // reason its `on_fire` overlay cannot: the local player has no
             // ingest entity carrying `HurtTime` (`apply_local_player_login`
@@ -1546,5 +1565,29 @@ impl std::fmt::Debug for MovingPistonSource {
         f.debug_tuple("MovingPistonSource")
             .field(&if self.0.is_some() { "set" } else { "empty" })
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::local_attachment_with_view_lag;
+    use crate::camera_rig::ViewLagFrame;
+
+    #[test]
+    fn view_lag_is_scoped_to_the_local_third_person_attachment() {
+        let feet = glam::Vec3::new(3.0, 64.0, -2.0);
+        let attachment = glam::Mat4::from_translation(feet);
+        let lag = ViewLagFrame {
+            yaw: 45.0,
+            view_yaw: 90.0,
+            ..ViewLagFrame::default()
+        };
+        let local = local_attachment_with_view_lag(-1, feet, lag, attachment);
+        assert_ne!(local.to_cols_array(), attachment.to_cols_array());
+
+        // A remote draw is a negative control: its own body interpolation must
+        // not inherit the camera-local residual merely because it carries an arm.
+        let remote = local_attachment_with_view_lag(17, feet, lag, attachment);
+        assert_eq!(remote.to_cols_array(), attachment.to_cols_array());
     }
 }
