@@ -60,17 +60,18 @@ use super::ids::{Rewrite, Tag, tag_at};
 use super::place::{place_attached_to_logs_decorator, place_trunk_vine_decorator};
 use super::tree::valid_tree_pos;
 
-/// A membership index paired with an explicit insertion log. Only vegetation
-/// patches need this: their successful cells are traversed while consuming the
-/// feature's random stream, so a set's native hash-table iteration is not an
-/// acceptable ordering contract. `members` answers duplicate checks in
-/// expected O(1); `entries` is the only production traversal path.
+/// A membership index paired with an insertion log. Only vegetation patches
+/// need this: their successful cells are traversed while consuming the
+/// feature's random stream, so the traversal must reproduce the reference
+/// hash-table order rather than Rust's randomized `HashSet` order. `members`
+/// answers duplicate checks in expected O(1); `entries` retains insertion order
+/// so the deterministic table walk can be reconstructed at the end.
 #[derive(Debug, Default)]
 struct CompatBlockPosSet {
     members: FastSet<BlockPos>,
-    /// Successful insertions in encounter order. Feature placement consumes
-    /// random draws while iterating the set, so bucket order is an
-    /// implementation detail and cannot determine the observable sequence.
+    /// Successful insertions in encounter order. The reference table walks
+    /// buckets in ascending index and preserves insertion order within a
+    /// bucket; [`Self::bucket_order`] reconstructs that walk.
     entries: Vec<BlockPos>,
 }
 
@@ -105,13 +106,14 @@ impl CompatBlockPosSet {
         capacity
     }
 
+    #[cfg(test)]
     fn order(&self) -> Vec<BlockPos> {
         self.entries.clone()
     }
 
-    /// Reconstruct the bucket traversal that would be the wrong production
-    /// order. This is test-only negative-control evidence: it must differ from
-    /// the insertion log for a collision-heavy input.
+    /// Reconstruct the reference hash-table traversal. The table starts at 16
+    /// buckets, grows at a 0.75 load factor, and mixes the 32-bit position hash
+    /// by XORing it with its unsigned 16-bit shift before masking the index.
     fn bucket_order(&self) -> Vec<BlockPos> {
         let capacity = self.bucket_capacity();
         let mut buckets = vec![Vec::new(); capacity];
@@ -126,7 +128,7 @@ impl IntoIterator for CompatBlockPosSet {
     type Item = BlockPos;
     type IntoIter = std::vec::IntoIter<BlockPos>;
 
-    fn into_iter(self) -> Self::IntoIter { self.entries.into_iter() }
+    fn into_iter(self) -> Self::IntoIter { self.bucket_order().into_iter() }
 }
 
 /// `level.getSeaLevel()` for the overworld. Only [`place_blue_ice`] reads it.
@@ -2949,27 +2951,10 @@ pub(super) fn place_vegetation_patch_with_seed<R: RandomSource>(
         {
             kept.insert(p);
         }
-        for p in kept.order() {
+        for p in kept.bucket_order() {
             grid.set_if_in_bounds(p.x, p.y, p.z, "minecraft:water".to_string());
         }
         surface = kept;
-    }
-    if std::env::var_os("LODESTONE_TRACE_CAVE_VINES").is_some()
-        && surface
-            .members
-            .contains(&BlockPos { x: 4, y: 11, z: 8 })
-    {
-        eprintln!(
-            "TRACE_PATCH origin=({},{},{}) radius=({},{}) entries={} insertion={:?} bucket={:?}",
-            pos.x,
-            pos.y,
-            pos.z,
-            x_radius,
-            z_radius,
-            surface.entries.len(),
-            surface.order(),
-            surface.bucket_order()
-        );
     }
     for p in surface {
         if cfg.vegetation_chance > 0.0
@@ -3916,6 +3901,17 @@ mod tests {
         for _ in 0..32 {
             assert_eq!(build(), expected);
         }
+    }
+
+    #[test]
+    fn compatibility_set_iteration_uses_reference_bucket_order() {
+        let mut set = CompatBlockPosSet::default();
+        for hash in [17, 0, 1, 33, 16, 0] {
+            set.insert(pos_for_hash(hash));
+        }
+        let expected = set.bucket_order();
+        let actual: Vec<_> = set.into_iter().collect();
+        assert_eq!(actual, expected);
     }
 
     #[test]

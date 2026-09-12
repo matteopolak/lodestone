@@ -7,7 +7,7 @@ const TARGET: (i32, i32) = (-9, -9);
 const WITNESS: (i32, i32, i32) = (15, -31, 2);
 
 #[test]
-fn vegetation_patch_stream_keeps_seed_42_target_witness() {
+fn vegetation_patch_stream_uses_seed_42_reference_hash_order() {
     let mut materializer = LifecycleMaterializer::new(overworld_chunk_source(42));
     for x in TARGET.0 - 2..=TARGET.0 + 2 {
         for z in TARGET.1 - 2..=TARGET.1 + 2 {
@@ -33,7 +33,7 @@ fn vegetation_patch_stream_keeps_seed_42_target_witness() {
         materializer
             .snapshot_for_packet(TARGET)
             .block_state(WITNESS.0, WITNESS.1, WITNESS.2),
-        "minecraft:azalea",
-        "vegetation patch iteration must retain insertion order for its random stream",
+        "minecraft:short_grass",
+        "vegetation patch iteration must retain reference hash-table order for its random stream",
     );
 }
