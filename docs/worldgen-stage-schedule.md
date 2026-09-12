@@ -41,15 +41,56 @@ There are four intentionally separate typed schedules:
   the numeric value needed by the seed derivation. External numeric values are
   decoded once at the data boundary.
 
-`StageCursor` is a small debug guard for pipelines whose prefix and suffix live
-in different helper methods: a cursor can resume at a cached-prefix boundary
-and asserts the next named stage in debug builds.
+`StageExecutor` is the production guard for pipelines whose prefix and suffix
+live in different helper methods: an executor can resume at a cached-prefix
+boundary, asserts the next named stage in every build, and can optionally
+append typed stage keys to a borrowed diagnostic trace without logging source
+code. `StageCursor` remains for dimensions not yet migrated. `StageGate` and
+`StageOption` record which data-dependent passes may be no-ops. The source
+guard `cargo xtask check-worldgen-schedule` checks that production entrypoints
+obtain their cursor from the matching central schedule and that all three
+dimension schedules retain their typed gate metadata.
 
-The schedules describe pass order and the named request-order vocabulary. They
-do not perform generation or replace dimension-specific dependency logic.
-The Nether production dispatcher and parity replay both consume
-`ChunkRequest::admission_order`, so a schedule change cannot silently leave
-one comparator with a copied tile loop.
+The End also has one `StageDescriptor` for every entry in `END`. A descriptor
+names typed prerequisites and products, its read/write radius, seed scope,
+resident-write barrier, and cancellation boundary. `StageSchedule::descriptors`
+derives the descriptor order from the same `stages` slice; there is no second
+pass list to drift. The current measured End contracts are a zero-radius pure
+prefix, a 16-chunk structure-placement read window, and a radius-one,
+source-ordered feature transaction for the nine source columns. Structure
+starts, structure blocks, block-entity events, decoration spills, gateways,
+and the three client heightmaps remain explicit products or sidecars.
+
+`StageFrontier` is the chunk-level resumable record. It admits only the next
+stage in the central order, checks the descriptor's required products and
+sidecars, and rejects a foreign dimension or schedule version before mutating
+the retained prefix. It records fingerprints and retention declarations but
+does not own the generator's product store; a caller persists those products
+alongside the frontier record. `GenerationTarget::{Shaped,Full}` derives the
+public prefix or complete stage slice from the same schedule, so a server or
+test entrypoint cannot copy a shaped list by hand.
+
+`RetainedStageFrontier` is the first production ownership seam for that
+eventual cache. It keeps typed product and sidecar handles beside the ordered
+frontier, advances only the missing prefix, and atomically validates every
+descriptor-declared payload before committing a stage. A changed pipeline
+fingerprint or an eviction clears both records and payloads, while a repeated
+full request is a no-op. The payload map erases concrete types only inside the
+retention boundary; callers use generic typed insertion and downcast accessors.
+The current executor hook is deliberately small so each dimension can wire its
+existing generator without introducing a second worldgen implementation.
+
+The schedules and End descriptors describe pass order and the named
+request-order vocabulary. They do not perform generation or replace
+dimension-specific dependency logic. Overworld and Nether currently expose
+cursor/gate metadata only; their descriptor footprints should be added after
+independent measurements rather than guessed from End.
+The Nether production dispatcher resolves `NETHER_SOURCES::order_for` from the
+same `ChunkRequest` used by the replay plan, so a schedule change cannot
+silently leave one comparator with a copied tile loop. The scalar one-column
+fallback retains its historical source order because it has no authenticated
+admission stream; only target-scoped completions consume the admission-derived
+order.
 
 The tables are based on the external runtime's generation pyramid and task
 dispatch, read as two separate sources: the pyramid defines statuses,
@@ -66,7 +107,7 @@ boundary. Add
 it to each affected dimension's static schedule in the exact order consumed by
 that generator, update its `shaped_boundary`, then extend the schedule tests.
 When wiring a generator whose
-pipeline is split across cached helpers, use `cursor_at` at the prefix boundary
+pipeline is split across cached helpers, use `executor_at` at the prefix boundary
 through `shaped_boundary_index`; do not repeat a stage name at each resumption
 site. Call `enter` or `run` at each helper boundary. Keep derived values such as
 heightmaps inside their consuming pass rather than promoting them to stages. Add
@@ -89,11 +130,21 @@ request whose source window crosses a tile boundary is a useful control: it
 must produce a different local source permutation than a request wholly inside
 one tile.
 
+When extending the End pipeline, update the descriptor for the existing stage
+in `END`; do not create a parallel descriptor order. If a new retained product
+or sidecar is needed, add its enum variant, include it in the descriptor, and
+add a frontier test that proves a record missing it is rejected atomically.
+Keep `StageFrontier` as metadata until the executor can persist and restore the
+corresponding product at the same boundary. In particular, a descriptor does
+not authorize rerunning feature sources against a mutable resident region
+without the source-order and transaction guarantees named by its barrier.
+
 ## Configuration
 
 The schedules have no runtime configuration. They are compile-time constants;
-debug assertions are active in debug builds and have no effect on generated
-block data. `LifecycleSchedule::validate` also checks that dependencies point
+`StageExecutor` validates entered stages in every build and has no trace
+allocation unless explicitly requested. `StageSchedule::validate` checks that
+each gate names one scheduled stage and appears once. `LifecycleSchedule::validate` also checks that dependencies point
 strictly backward and that packet finalization remains terminal.
 
 ## Dependencies
