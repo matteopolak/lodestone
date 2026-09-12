@@ -17,7 +17,7 @@ use lodestone_physics::pose::Pose;
 use lodestone_physics::push::{NearbyEntity, PushSelf};
 use lodestone_physics::{PhysicsProfile, Vec3d};
 
-#[path = "support/golden_traces.rs"]
+#[path = "support/golden_traces/mod.rs"]
 mod golden_traces;
 use golden_traces::{
     GOLDEN_ANALOG_STRAFE, GOLDEN_BLUE_ICE_SLIDE, GOLDEN_BUBBLE_COLUMN_DOWN,

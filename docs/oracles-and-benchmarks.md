@@ -41,6 +41,31 @@ on this machine:
 wall-clock log window now polls a fixed line count instead, sized generously enough to outlast
 one round trip of its own polling interval.
 
+### Physics golden-trace shards
+
+The physics integration suite replays 47 deterministic movement scenarios against the independent
+Python oracle in `crates/lodestone-physics/tests/gen_golden.py`. Its output is split into one
+generated Rust file per scenario under `crates/lodestone-physics/tests/support/golden_traces/`;
+`mod.rs` owns the shared `GoldenTick` type and re-exports each trace. Splitting by scenario keeps
+the generated fixtures small without changing any expected bits or the Rust test's single import
+surface.
+
+Regenerate after changing the oracle with:
+
+```bash
+python3 crates/lodestone-physics/tests/gen_golden.py
+```
+
+The drift gate does not rewrite files. It fails for a missing shard, an unexpected stale `.rs`
+file, or any byte difference from the oracle:
+
+```bash
+python3 crates/lodestone-physics/tests/gen_golden.py --check
+```
+
+The JVM movement comparison reads the same directory, so adding a scenario only requires adding
+it to `SCENARIOS`; do not hand-edit generated shards.
+
 ### The fuzz/property-testing harness (`lodestone-fuzz`)
 
 Property-based fuzzing (via `proptest`, a plain dev-dependency — not `cargo-fuzz`/libFuzzer,

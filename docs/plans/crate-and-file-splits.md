@@ -314,10 +314,11 @@ crate split silently drops profile overrides unless someone copies them.
 
 ## What NOT to split, and why
 
-- **`crates/lodestone-physics/tests/support/golden_traces.rs` (21,282 lines) — a test fixture.**
-  Machine-generated golden traces consumed by the physics suite. It has no contention, no readers, and
-  splitting it would only make the generator's output harder to regenerate. It should not have been on
-  the survey.
+- **`crates/lodestone-physics/tests/support/golden_traces/` — generated test fixtures.**
+  The former monolith was split by scenario because its 21,282 generated lines made review and
+  line-count auditing needlessly opaque. `gen_golden.py` now owns the shard manifest and a
+  missing/stale/drift check, so regeneration remains one command and the fixture values remain
+  unchanged. Do not split the individual scenario shards further.
 - **`crates/lodestone-physics/src/sin_table.rs` (8,207 lines) — a generated table.** Same reasoning.
 - **`crates/lodestone-data` (150,721 lines) — a data crate, not a monolith.** `src/generated/` is
   **142,855** lines against **4,724** hand-written across the rest of `src/`, wired in through 28
