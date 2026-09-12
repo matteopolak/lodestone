@@ -27,11 +27,10 @@ deferred: the dig keeps accruing progress on the server's own clock until it rea
 block breaks a tick or two late with no rollback sent, exactly matching vanilla's own behavior for
 this case. Refusing it outright looked more correct and was not: on a local integrated server both
 packets typically land on the very same tick, which no non-instant block could ever legitimately
-clear that fast, so refusing broke ordinary block breaking entirely. Creative mode is not modeled
-anywhere in this server yet, so its instant-break behavior is a named, accepted gap rather than a
-partial fix — and it cannot be half-fixed by treating a lone start action as sufficient, since that
-is indistinguishable on the wire from an ordinary survival player who taps and moves on, and would
-reopen the instant-break exploit this validation exists to close.
+clear that fast, so refusing broke ordinary block breaking entirely. Creative mode takes a separate
+start-only path: it bypasses the hardness clock and produces no drops, but still runs the interaction
+range, known-state, non-air, unbreakable-state, and plugin-proposal checks. A protected or invalid
+target therefore remains untouched even when the player has instant-build abilities.
 
 ### Server-authoritative inventory and container clicks
 
