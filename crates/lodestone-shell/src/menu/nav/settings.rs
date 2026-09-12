@@ -968,7 +968,7 @@ impl MenuNav {
     /// a transcription of `IntRangeBase::next`,
     /// which really does saturate.
     ///
-    /// The bounds are `config`'s, which are vanilla's `IntRange(2, 32)` — the same
+    /// The bounds are `config`'s `MIN_RENDER_DISTANCE..=MAX_RENDER_DISTANCE` — the same
     /// pair `menu::options::INT_RANGE_SLIDERS` places the handle with, so the
     /// value a click can reach and the track it draws on cannot disagree.
     pub(super) fn step_render_distance(&mut self, delta: i32) {

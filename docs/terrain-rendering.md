@@ -382,6 +382,13 @@ default).
 
 ## Configuration
 
+- `config::MIN_RENDER_DISTANCE..=config::MAX_RENDER_DISTANCE` is the one typed
+  selectable range for the shell's persisted `Options::render_distance`, CLI
+  validation, and the Video-screen `renderDistance` slider. The current maximum
+  is 256 chunks; malformed or out-of-range persisted values (including 257) use
+  `DEFAULT_RENDER_DISTANCE`, while the slider keeps any manually supplied value
+  on its track. Keep these consumers on the shared constants when changing the
+  bound.
 - `Config::render_distance` reaches `RenderState` every frame via `set_fog`;
   `render_distance_chunks == 0` disables the distance cull rather than culling
   everything (a default-constructed `RenderState` holds zero, and a cull that blanks
