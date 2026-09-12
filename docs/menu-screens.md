@@ -71,6 +71,9 @@ left; the title screen intentionally has no bottom-right project tagline. Lives 
 `crates/lodestone-shell/src/menu/`: `menu.rs` for the
 `Screen`/`UiState` state machine, `menu/nav/mod.rs` for input, with the pure action model, form state,
 and button tables split into `menu/nav/model.rs`, `menu/nav/form.rs`, and `menu/nav/buttons.rs`;
+the navigation implementation is further split by concern across `menu/nav/construct.rs`,
+`state.rs`, `scroll.rs`, `session.rs`, `input.rs`, `keys.rs`, `settings.rs`, `session_input.rs`,
+and `overlays.rs`;
 `menu/render.rs` owns layout and draw,
 `menu/servers.rs` for the persisted server list, `menu/status.rs` for background server status pings,
 `menu/accounts.rs` for the account list and sign-in flow.
