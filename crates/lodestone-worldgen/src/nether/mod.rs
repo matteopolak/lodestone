@@ -1491,22 +1491,16 @@ impl NetherGenerator {
     #[must_use]
     pub fn column(&self, cx: i32, cz: i32) -> NetherColumn {
         let pre = self.pre_decoration_stage(cx, cz);
-        // Structure placement is a completion-local operation.  The ordinary
-        // one-column API has no externally supplied completion stream, so it
-        // materializes the target's own pieces before composing the mixed
-        // feature window, preserving the historical packet-ready result.  The
-        // lifecycle API below applies the same stage when the target source
-        // completes, after earlier source spills have been installed.
-        let refs = self.structure_refs(cx, cz);
         let mut schedule = Self::stage_schedule().cursor_at(
             Self::stage_schedule().shaped_boundary_index(),
         );
-        let (world, placement_loot) = schedule.run(ColumnStage::StructurePlacement, || {
-            profile_stage("structure_place", || {
-                self.structure_place_stage(cx, cz, &refs, (*pre.0).clone())
-            })
-        });
-        let (world, decoration_spills) = schedule.run(ColumnStage::Features, || {
+        // Structure writes are dispatched by the mixed source loop below. The
+        // explicit stage boundary remains here so the column schedule still
+        // exposes structures before FEATURES, while each source applies all
+        // structures for a step immediately before that step's features.
+        schedule.enter(ColumnStage::StructurePlacement);
+        let world = (*pre.0).clone();
+        let (world, placement_loot, decoration_spills) = schedule.run(ColumnStage::Features, || {
             self.mixed_step7_stage_with_spills(cx, cz, world, &pre.1)
         });
 
@@ -1578,7 +1572,7 @@ impl NetherGenerator {
             Some((source_x, source_z)),
             overrides,
         )
-        .1
+        .2
     }
 
     /// Runs one source completion against the actual mutable resident region.
@@ -1620,7 +1614,7 @@ impl NetherGenerator {
             overrides,
             Some(&resident),
         )
-        .1
+        .2
     }
 
     fn mixed_step7_stage_with_spills(
@@ -1629,8 +1623,12 @@ impl NetherGenerator {
         cz: i32,
         center_world: crate::dense_grid::DenseBlockGrid,
         center_heights: &[i32; 256],
-    ) -> (crate::dense_grid::DenseBlockGrid, Vec<(i32, i32, i32, String)>) {
-        let (world, _, spills) = self.mixed_step7_stage_selected(
+    ) -> (
+        crate::dense_grid::DenseBlockGrid,
+        Vec<CodedLoot>,
+        Vec<(i32, i32, i32, String)>,
+    ) {
+        let (world, placement_loot, _, spills) = self.mixed_step7_stage_selected(
             cx,
             cz,
             center_world,
@@ -1638,7 +1636,7 @@ impl NetherGenerator {
             None,
             &[],
         );
-        (world, spills)
+        (world, placement_loot, spills)
     }
 
     /// [`Self::mixed_step7_stage_with_spills`] with an optional source filter for the
@@ -1654,6 +1652,7 @@ impl NetherGenerator {
         overrides: &[(i32, i32, i32, String)],
     ) -> (
         crate::dense_grid::DenseBlockGrid,
+        Vec<CodedLoot>,
         Vec<ParityDecorationSpill>,
         Vec<(i32, i32, i32, String)>,
     ) {
@@ -1680,18 +1679,11 @@ impl NetherGenerator {
         resident: Option<&[Option<Arc<crate::dense_grid::DenseBlockGrid>>; 25]>,
     ) -> (
         crate::dense_grid::DenseBlockGrid,
+        Vec<CodedLoot>,
         Vec<ParityDecorationSpill>,
         Vec<(i32, i32, i32, String)>,
     ) {
         let mut center_world = center_world;
-        // A source-filtered completion still needs the target-local structure
-        // pass before it runs the mixed feature stream.  In particular, a
-        // neighbouring source can be the first writer into this target, but
-        // its step-7 ore body must read the target's structure/air result
-        // rather than the carved netherrack beneath it.  When a resident
-        // target exists, structure placement starts from that live field so
-        // earlier source spills remain visible to its replacement predicates.
-        let mut structure_changes = Vec::new();
         if selected_source.is_some() {
             if let Some(sources) = resident {
                 if let Some(source) =
@@ -1707,23 +1699,6 @@ impl NetherGenerator {
                     && (min_z..min_z + size_z).contains(&z)
                 {
                     center_world.set(x, y, z, state);
-                }
-            }
-            let structure_seeded = center_world.clone();
-            let refs = self.structure_refs(cx, cz);
-            center_world = profile_stage("structure_place", || {
-                self.structure_place_stage(cx, cz, &refs, center_world)
-            })
-            .0;
-            for y in min_y..min_y + size_y {
-                for z in min_z..min_z + size_z {
-                    for x in min_x..min_x + size_x {
-                        let before = structure_seeded.get_id(x, y, z);
-                        let after = center_world.get_id(x, y, z);
-                        if before != after {
-                            structure_changes.push((x, y, z, after));
-                        }
-                    }
                 }
             }
         }
@@ -1917,6 +1892,7 @@ impl NetherGenerator {
         let mut grid_cursor = 0usize;
         let mut ore_cursor = 0usize;
         let mut changed_scratch = take_nether_changed_scratch();
+        let mut placement_loot = Vec::new();
         // Huge fungus needs to expose its border writes to later features in
         // this same source pass: their heightmap and replacement probes read
         // the live generation view.  Those writes are not source-owned when
@@ -1961,7 +1937,32 @@ impl NetherGenerator {
             let plan = &source_features[((dz + 1) * 3 + dx + 1) as usize];
             let (ores, decorations) = (plan.0.as_slice(), plan.1.as_slice());
             for &step_kind in NETHER_DECORATION_STEPS {
+                let dirty_before = grid.dirty_len();
                 let step = step_kind.ordinal();
+                let step_loot = self.structure_step_into_grid(
+                    source_x,
+                    source_z,
+                    step_kind,
+                    &mut grid,
+                );
+                if selected_source.is_none() && source_x == cx && source_z == cz {
+                    placement_loot.extend(step_loot);
+                }
+                if grid.dirty_len() != dirty_before {
+                    synchronize_mixed_entry_reusing(
+                        MixedEntryWriter::Decoration,
+                        &mut grid,
+                        &mut ore_view,
+                        cx,
+                        cz,
+                        self.min_y,
+                        self.height,
+                        &mut grid_cursor,
+                        &mut ore_cursor,
+                        &mut ore_transferred,
+                        &mut changed_scratch,
+                    );
+                }
                 let mut decoration_at = 0usize;
                 let mut ore_at = 0usize;
                 loop {
@@ -2074,19 +2075,6 @@ impl NetherGenerator {
         }
         let mut final_spills = BTreeMap::new();
         if let Some(source) = selected_source {
-            // Structure writes are part of this source completion too.  Insert
-            // them first so a later feature write at the same coordinate wins,
-            // matching the source's local structure-before-feature order.
-            for (x, y, z, state) in structure_changes {
-                if seeded.get(&(x, y, z)).copied() != Some(state) {
-                    final_spills.insert((x, y, z), ParityDecorationSpill {
-                        source,
-                        position: (x, y, z),
-                        state: self.interner.name_of(state).to_owned(),
-                        transient: false,
-                    });
-                }
-            }
             for (x, y, z, state) in grid.dirty_cell_ids() {
                 let transient = suppressed_huge.contains(&(x, y, z));
                 if transient || seeded.get(&(x, y, z)).copied() != Some(state) {
@@ -2101,7 +2089,7 @@ impl NetherGenerator {
         }
         return_nether_height_scratch(heights);
         return_nether_changed_scratch(changed_scratch);
-        (world, final_spills.into_values().collect(), decoration_spills)
+        (world, placement_loot, final_spills.into_values().collect(), decoration_spills)
     }
 
     /// The immutable base prefix: terrain through carving, before target-local
@@ -2768,7 +2756,77 @@ impl NetherGenerator {
         Beardifier::for_chunk(cx, cz, refs.adaptation_bearing().map(AsRef::as_ref))
     }
 
-    /// Stage 4b: writes every piece that touches this chunk into `world`.
+    /// Applies the structures for one source chunk and decoration step to the
+    /// shared mixed-generation grid.
+    ///
+    /// The source completion loop owns one decoration origin. It must run that
+    /// origin's structures before its placed features for the same step, while
+    /// still exposing any writes to later source completions. Structure code
+    /// operates on a dense chunk-local grid, so this adapter snapshots the
+    /// source chunk from the live sparse view, runs the existing structure
+    /// writer, and folds only changed source cells back into the view.
+    fn structure_step_into_grid(
+        &self,
+        source_x: i32,
+        source_z: i32,
+        step: DecorationStep,
+        grid: &mut crate::feature::vegetation::VegGrid,
+    ) -> Vec<CodedLoot> {
+        let Some(registry) = &self.structures else {
+            return Vec::new();
+        };
+        let refs = self.structure_refs(source_x, source_z);
+        if !refs.entries.iter().any(|(_, _, start)| {
+            registry
+                .feature_placement_key(&start.structure)
+                .is_some_and(|(structure_step, _)| structure_step == step.ordinal())
+        }) {
+            return Vec::new();
+        }
+
+        let min_x = source_x * 16;
+        let min_z = source_z * 16;
+        let mut source_world = crate::dense_grid::DenseBlockGrid::with_interner(
+            Arc::clone(&self.interner),
+            min_x,
+            self.min_y,
+            min_z,
+            16,
+            self.height,
+            16,
+            StateId::AIR,
+        );
+        for y in self.min_y..self.min_y + self.height {
+            for z in min_z..min_z + 16 {
+                for x in min_x..min_x + 16 {
+                    let state = grid.get_id(x, y, z);
+                    if state != StateId::AIR {
+                        source_world.set_id(x, y, z, state);
+                    }
+                }
+            }
+        }
+        let before = source_world.clone();
+        let (source_world, placement_loot) = profile_stage("structure_place", || {
+            self.structure_place_stage(source_x, source_z, &refs, source_world, step)
+        });
+        for y in self.min_y..self.min_y + self.height {
+            for z in min_z..min_z + 16 {
+                for x in min_x..min_x + 16 {
+                    let before_state = before.get_id(x, y, z);
+                    let after_state = source_world.get_id(x, y, z);
+                    if before_state != after_state {
+                        let landed = grid.set_id_if_in_bounds(x, y, z, after_state);
+                        debug_assert!(landed, "structure write fell outside the mixed grid");
+                    }
+                }
+            }
+        }
+        placement_loot
+    }
+
+    /// Stage 4b/7: writes every piece that touches this source chunk into
+    /// `world` for one decoration step.
     ///
     /// Clipping is the grid, not a box: [`crate::dense_grid::DenseBlockGrid::set`]
     /// ignores a write outside this chunk's 16×16 columns, so a piece that straddles
@@ -2782,6 +2840,7 @@ impl NetherGenerator {
         cz: i32,
         refs: &StructureRefs,
         mut world: crate::dense_grid::DenseBlockGrid,
+        step: DecorationStep,
     ) -> (crate::dense_grid::DenseBlockGrid, Vec<CodedLoot>) {
         let Some(registry) = &self.structures else {
             return (world, Vec::new());
@@ -2801,8 +2860,20 @@ impl NetherGenerator {
             crate::rng::WorldgenRandom<crate::rng::XoroshiroRandomSource>,
         > = HashMap::new();
         let mut placement_loot = Vec::new();
-        for (_, _, start) in &refs.entries {
+        let mut structure_entries = refs.entries.iter().collect::<Vec<_>>();
+        structure_entries.sort_by_key(|(_, _, start)| {
+            registry
+                .feature_placement_key(&start.structure)
+                .unwrap_or((i32::MAX, usize::MAX))
+        });
+        for (_, _, start) in structure_entries {
             if !start.pieces_complete {
+                continue;
+            }
+            let Some((structure_step, _)) = registry.feature_placement_key(&start.structure) else {
+                continue;
+            };
+            if structure_step != step.ordinal() {
                 continue;
             }
             if start.bounding_box.intersects_xz(bx, bz, bx + 15, bz + 15) {
