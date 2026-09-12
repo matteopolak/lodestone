@@ -115,7 +115,10 @@ commit when the branch has advanced, requiring the caller to re-read current blo
 selected files. It also requires every named path to exist in that private index, then uses `git
 update-ref` with the recorded old object as a compare-and-swap, closing
 the smaller race between validation and publication. This protects unrelated shared working-tree edits:
-the helper reads selected blobs from the private index and never stages, resets, or rewrites working files.
+the helper reads selected blobs from the private index and never stages or rewrites working files. After
+publication it resets only the selected paths in the shared index to the new commit, because advancing
+the branch leaves an otherwise-clean shared index anchored to the old tree and falsely reports those
+paths as staged. Unselected staged paths are preserved.
 
 The pre-commit hook rejects `git commit -- <paths>` (and `--only`) in this checkout. Git implements those
 forms by constructing a temporary `next-index-*.lock` from the working tree, so a selected file can carry
