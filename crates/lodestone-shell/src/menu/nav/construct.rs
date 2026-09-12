@@ -257,4 +257,3 @@ impl MenuNav {
     /// The saved servers.
     #[must_use]
 }
-

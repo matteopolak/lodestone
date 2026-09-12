@@ -511,5 +511,3 @@ fn wrap_prev(i: usize, len: usize) -> usize {
         i - 1
     }
 }
-
-

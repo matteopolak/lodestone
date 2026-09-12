@@ -1051,4 +1051,3 @@ impl MenuNav {
     /// the focused field, then Tab/arrow navigation, then Enter on whatever
     /// is focused) — this arm only decides what leaving the screen means.
 }
-

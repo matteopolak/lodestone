@@ -462,4 +462,3 @@ impl MenuNav {
     /// afterthought.
     #[must_use]
 }
-

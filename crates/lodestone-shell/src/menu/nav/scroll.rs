@@ -475,4 +475,3 @@ impl MenuNav {
     /// apart on its own.
     #[must_use]
 }
-

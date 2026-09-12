@@ -601,4 +601,3 @@ impl MenuNav {
     /// Handles one key for the current screen, mutating `ui` for navigation and
     /// returning the action the app must perform.
 }
-
