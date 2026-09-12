@@ -395,7 +395,7 @@ impl<'w> MobSim<'w> {
     /// through midnight back to 362 — so a cat's gift only has a real chance
     /// to land in the pre-dawn stretch of the night, which is when a player
     /// who slept through to morning actually wakes.
-    fn cat_gift_chance(day_time: i32) -> f32 {
+    pub(super) fn cat_gift_chance(day_time: i32) -> f32 {
         let t = day_time.rem_euclid(24_000);
         if !(362..23_667).contains(&t) { 0.7 } else { 0.0 }
     }
