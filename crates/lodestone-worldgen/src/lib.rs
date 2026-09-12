@@ -48,6 +48,7 @@ pub mod interner;
 pub mod nether;
 pub mod overworld;
 pub mod profile;
+pub mod retained_frontier;
 pub mod spawn_stage;
 pub mod spawners;
 pub mod stage_schedule;
