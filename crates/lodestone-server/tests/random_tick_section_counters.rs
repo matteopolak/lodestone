@@ -397,7 +397,7 @@ fn incremental_counters_match_an_independent_recount_through_a_mutation_storm() 
     );
 
     // --- The other construction entry point: `new` + per-cell `set_block`. ---
-    let nbt = chunk_nbt::column_to_nbt(4, -7, &column);
+    let nbt = chunk_nbt::column_to_nbt(4, -7, &column).expect("full column must encode");
     let loaded = chunk_nbt::column_from_nbt(&nbt, column.min_y, column.height)
         .expect("the column we just wrote must read back");
     compare_counters(&loaded, "after an NBT round trip (new + per-cell set_block)")

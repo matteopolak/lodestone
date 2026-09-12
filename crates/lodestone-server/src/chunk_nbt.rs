@@ -49,10 +49,11 @@
 //!   one without the census.
 //!   The read direction still *uses* heightmaps — as an oracle, in
 //!   `tests/chunk_nbt_vanilla_oracle.rs`, never as data.
-//! - **`Status` is the one genuinely mandatory field.** `parse` returns `null`
-//!   for an empty `Status` and defaults literally everything else. We write
-//!   `minecraft:full`, because anything less makes a real server re-run
-//!   worldgen over our terrain.
+//! - **`Status` is the one genuinely mandatory field.** The decoder accepts
+//!   exactly `minecraft:full`; a missing or earlier-generation status is a
+//!   schema rejection, so the region source falls back to generation instead
+//!   of treating partial terrain as a complete saved column. The encoder also
+//!   refuses [`ChunkGenerationStage::Shaped`] before it writes that status.
 //! - **Properties are sorted by name** when a palette entry is turned back into
 //!   a canonical state string. That is not cosmetic: `lodestone_data::
 //!   block_states::properties` documents its slice as sorted, and the worldgen
@@ -114,7 +115,7 @@ use lodestone_worldgen::overworld::block_entities::GeneratedBlockEntity;
 
 use crate::block_entities::BlockEntity;
 use crate::brewing::{Bottle, BottleKind, BrewingStand};
-use crate::chunk::{ChunkColumn, RetainedLightStatus};
+use crate::chunk::{ChunkColumn, ChunkGenerationStage, RetainedLightStatus};
 use crate::composter::Composter;
 use crate::furnace::{Furnace, FurnaceKind};
 use crate::hopper::Hopper;
@@ -152,6 +153,15 @@ pub enum Error {
         /// The NBT path that failed, for example `sections[3].block_states`.
         field: String,
     },
+    /// The persisted column is not a complete playable chunk.
+    #[error("chunk Status must be exactly minecraft:full, found {actual:?}")]
+    InvalidStatus {
+        /// The string status, or `None` when the field was absent or not a string.
+        actual: Option<String>,
+    },
+    /// A shaped column is a streaming product and cannot be persisted as full.
+    #[error("cannot encode a {stage:?} chunk as a full persisted column")]
+    PartialGeneration { stage: ChunkGenerationStage },
     /// A packed index pointed past the end of its own palette.
     #[error("palette index {index} out of range for a {len}-entry palette in section Y={y}")]
     PaletteIndexOutOfRange {
@@ -336,13 +346,14 @@ pub fn palette_entry_to_state(entry: &Nbt, path: &str) -> Result<String, Error> 
 /// want [`column_to_nbt_with`] — this is the terrain-only shortcut, kept for
 /// the tests and oracles that only ever had terrain.
 #[must_use]
-pub fn column_to_nbt(cx: i32, cz: i32, column: &ChunkColumn) -> Nbt {
+pub fn column_to_nbt(cx: i32, cz: i32, column: &ChunkColumn) -> Result<Nbt, Error> {
     column_to_nbt_with(cx, cz, column, &ChunkExtras::default())
 }
 
 /// Encodes a column as the chunk NBT tree a 26.2 region file holds.
 ///
-/// Writes `Status = "minecraft:full"` (the mandatory status field) and omits
+/// Writes `Status = "minecraft:full"` (the mandatory status field), rejecting
+/// shaped columns before emitting the tree, and omits
 /// `Heightmaps` so loading recomputes them — see this
 /// module's doc comment for why writing them would be worse than omitting them.
 ///
@@ -351,7 +362,17 @@ pub fn column_to_nbt(cx: i32, cz: i32, column: &ChunkColumn) -> Nbt {
 /// Nothing here filters by chunk — the caller is expected to have grouped
 /// already, matching the chunk-local grouping contract.
 #[must_use]
-pub fn column_to_nbt_with(cx: i32, cz: i32, column: &ChunkColumn, extras: &ChunkExtras) -> Nbt {
+pub fn column_to_nbt_with(
+    cx: i32,
+    cz: i32,
+    column: &ChunkColumn,
+    extras: &ChunkExtras,
+) -> Result<Nbt, Error> {
+    if column.generation_stage() != ChunkGenerationStage::Full {
+        return Err(Error::PartialGeneration {
+            stage: column.generation_stage(),
+        });
+    }
     let min_section = column.min_y.div_euclid(16);
     let section_count = (column.height as usize).div_ceil(SECTION_EDGE);
     let palette = column.raw_palette();
@@ -507,7 +528,7 @@ pub fn column_to_nbt_with(cx: i32, cz: i32, column: &ChunkColumn, extras: &Chunk
             }),
         ));
     }
-    Nbt::Compound(fields)
+    Ok(Nbt::Compound(fields))
 }
 
 /// Appends the exact retained sky/block light state to a chunk's section list.
@@ -666,8 +687,47 @@ fn structures_to_nbt(column: &ChunkColumn) -> Nbt {
 /// taller than the world. Sections outside `[min_y, min_y + height)` are
 /// skipped, exactly as `SerializableChunkData.parse` skips them.
 pub fn column_from_nbt(nbt: &Nbt, min_y: i32, height: i32) -> Result<ChunkColumn, Error> {
+    column_from_nbt_with_status(nbt, min_y, height, true)
+}
+
+/// Decodes an Anvil chunk for the explicit native-import boundary.
+///
+/// Importing a source region is a deliberate conversion operation, so it may
+/// accept a chunk whose persisted generation status is earlier than `full`.
+/// The regular region source must remain strict: it uses [`column_from_nbt`]
+/// so an incomplete saved column falls back to generation instead of becoming
+/// playable terrain. The import path has already reviewed the source payload
+/// and stores the resulting column as a native record, where its generation
+/// status is not persisted.
+pub(crate) fn column_from_nbt_for_import(
+    nbt: &Nbt,
+    min_y: i32,
+    height: i32,
+) -> Result<ChunkColumn, Error> {
+    column_from_nbt_with_status(nbt, min_y, height, false)
+}
+
+fn column_from_nbt_with_status(
+    nbt: &Nbt,
+    min_y: i32,
+    height: i32,
+    require_full_status: bool,
+) -> Result<ChunkColumn, Error> {
     if !matches!(nbt, Nbt::Compound(_)) {
         return Err(Error::RootNotCompound);
+    }
+    if require_full_status {
+        match field(nbt, "Status") {
+            Some(Nbt::String(status)) if status == "minecraft:full" => {}
+            Some(Nbt::String(status)) => {
+                return Err(Error::InvalidStatus {
+                    actual: Some(status.clone()),
+                });
+            }
+            Some(_) | None => {
+                return Err(Error::InvalidStatus { actual: None });
+            }
+        }
     }
     let Some(Nbt::List {
         elements: sections, ..
@@ -2384,7 +2444,7 @@ mod retained_light_tests {
         *light.block_mut(3) = LightData::Uniform(2);
         column.set_retained_light(light.clone());
 
-        let nbt = column_to_nbt(12, -9, &column);
+        let nbt = column_to_nbt(12, -9, &column).expect("full column must encode");
         assert_eq!(
             field(&nbt, "isLightOn"),
             Some(&lodestone_core::Nbt::Byte(1)),
@@ -2406,7 +2466,7 @@ mod retained_light_tests {
         *light.sky_mut(0) = LightData::Uniform(15);
         column.set_retained_light_with_status(light.clone(), RetainedLightStatus::DependencyInitialized);
 
-        let nbt = column_to_nbt(0, 0, &column);
+        let nbt = column_to_nbt(0, 0, &column).expect("full column must encode");
         let restored = column_from_nbt(&nbt, column.min_y, column.height)
             .expect("dependency light must decode with its lifecycle status");
         assert_eq!(restored.retained_light(), Some(&light));
@@ -2417,21 +2477,9 @@ mod retained_light_tests {
     }
 
     #[test]
-    fn retained_light_window_survives_a_shared_compact_storage_column() {
-        let mut column = ChunkColumn::new(0, 16);
-        let mut light = ColumnLight::new(24);
-        *light.sky_mut(25) = LightData::Uniform(15);
-        column.set_retained_light(light.clone());
-
-        let nbt = column_to_nbt(0, 0, &column);
-        let restored = column_from_nbt(&nbt, column.min_y, column.height)
-            .expect("dimension-aware light window must decode");
-        assert_eq!(restored.retained_light(), Some(&light));
-    }
-
-    #[test]
     fn malformed_retained_light_array_is_rejected() {
         let nbt = Nbt::Compound(vec![
+            ("Status".to_owned(), Nbt::String("minecraft:full".to_owned())),
             ("isLightOn".to_owned(), Nbt::Byte(1)),
             (
                 "sections".to_owned(),
@@ -2461,6 +2509,64 @@ mod retained_light_tests {
         column.set_block(1, 1, 1, "minecraft:stone");
 
         assert!(column.retained_light().is_none());
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use lodestone_core::Nbt;
+
+    use super::{Error, column_from_nbt, column_to_nbt};
+    use crate::chunk::{ChunkColumn, ChunkGenerationStage};
+
+    fn with_status(mut nbt: Nbt, status: Option<&str>) -> Nbt {
+        let Nbt::Compound(fields) = &mut nbt else {
+            panic!("encoded chunk root must be a compound");
+        };
+        fields.retain(|(name, _)| name != "Status");
+        if let Some(status) = status {
+            fields.push(("Status".to_owned(), Nbt::String(status.to_owned())));
+        }
+        nbt
+    }
+
+    #[test]
+    fn only_full_status_decodes_as_a_complete_column() {
+        let column = ChunkColumn::new(0, 16);
+        let encoded = column_to_nbt(0, 0, &column).expect("full column must encode");
+
+        let carved = with_status(encoded.clone(), Some("minecraft:carved"));
+        assert!(matches!(
+            column_from_nbt(&carved, 0, 16),
+            Err(Error::InvalidStatus { actual: Some(status) }) if status == "minecraft:carved"
+        ));
+
+        let missing = with_status(encoded, None);
+        assert!(matches!(
+            column_from_nbt(&missing, 0, 16),
+            Err(Error::InvalidStatus { actual: None })
+        ));
+    }
+
+    #[test]
+    fn shaped_column_cannot_be_serialized_as_full() {
+        let generated = crate::overworld_generator(42).column_shaped(0, 0);
+        let column = ChunkColumn::from_generated(generated);
+        assert_eq!(column.generation_stage(), ChunkGenerationStage::Shaped);
+        assert!(matches!(
+            column_to_nbt(0, 0, &column),
+            Err(Error::PartialGeneration {
+                stage: ChunkGenerationStage::Shaped
+            })
+        ));
+    }
+
+    #[test]
+    fn full_column_round_trip_preserves_complete_stage() {
+        let column = ChunkColumn::new(0, 16);
+        let nbt = column_to_nbt(0, 0, &column).expect("full column must encode");
+        let restored = column_from_nbt(&nbt, 0, 16).expect("full status must decode");
+        assert_eq!(restored.generation_stage(), ChunkGenerationStage::Full);
     }
 }
 

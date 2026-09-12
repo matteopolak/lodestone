@@ -167,7 +167,7 @@ fn a_column_read_back_off_disk_is_cell_identical() {
     assert_enough_variety(&reference);
 
     let column = ChunkColumn::from_generated(overworld_generator(SEED).column(CX, CZ));
-    let nbt = chunk_nbt::column_to_nbt(CX, CZ, &column);
+    let nbt = chunk_nbt::column_to_nbt(CX, CZ, &column).expect("full column must encode");
     let restored = chunk_nbt::column_from_nbt(&nbt, reference.min_y, reference.height)
         .expect("a column we just wrote must read back");
     assert_cell_identical(&reference, &restored, "round-tripped through region NBT");
