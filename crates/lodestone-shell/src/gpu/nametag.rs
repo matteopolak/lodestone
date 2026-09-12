@@ -171,12 +171,15 @@
 //! stream is involved.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use glam::Vec3;
 use lodestone_assets::font::{FontLoader, FontOptions, GlyphRaster, MISSING_ADVANCE, RasterFont, metrics};
 use lodestone_assets::{ResourceManager, ResourceSource, ZipSource};
-use lodestone_model::text::{FontId, Text, TextColor, TextSpan};
+use lodestone_model::text::{FontId, TextColor, TextSpan};
+#[cfg(test)]
+use lodestone_model::text::Text;
 use lodestone_render::entity::camera_orientation;
 use lodestone_render::{Camera, DEPTH_COMPARE_NEARER_OR_EQUAL, DEPTH_FORMAT};
 
@@ -390,10 +393,30 @@ pub(super) type StyledInkLayout = std::sync::Arc<(Vec<StyledRect>, f32)>;
 /// shape and reasoning as the nametag layout it serves; kept as a
 /// separate type rather than a generic cache because the two key types don't
 /// share a cheap `Borrow` conversion worth building for two call sites.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct StyledInkLayoutCache {
     inner: std::sync::Mutex<std::collections::HashMap<Vec<TextSpan>, StyledInkLayout>>,
     resolved: std::sync::Mutex<std::collections::HashMap<(u64, Vec<TextSpan>), StyledInkLayout>>,
+    /// Drawable replacement glyphs grouped by their original advance width.
+    /// This is initialized from the default world-text font once and is only
+    /// consulted for obfuscated spans; ordinary layouts remain cached exactly
+    /// as before.
+    obfuscation_pool: std::sync::OnceLock<std::collections::HashMap<u32, Vec<char>>>,
+    /// Free-running state for per-draw obfuscated glyph selection. Keeping it
+    /// on the shared cache makes both name-tag passes consume the same layout
+    /// while a later frame gets a fresh sample.
+    obfuscation_rng: AtomicU64,
+}
+
+impl Default for StyledInkLayoutCache {
+    fn default() -> Self {
+        Self {
+            inner: std::sync::Mutex::default(),
+            resolved: std::sync::Mutex::default(),
+            obfuscation_pool: std::sync::OnceLock::new(),
+            obfuscation_rng: AtomicU64::new(0x9E37_79B9_7F4A_7C15),
+        }
+    }
 }
 
 impl StyledInkLayoutCache {
@@ -402,8 +425,24 @@ impl StyledInkLayoutCache {
     const MAX_ENTRIES: usize = 512;
 
     /// This span list's styled ink-run layout, walking the texels only on a
-    /// miss.
+    /// miss. Obfuscated spans deliberately bypass the persistent map: their
+    /// glyph pixels are sampled again for each draw, while the source advance
+    /// and all effects remain fixed.
     pub(super) fn layout(&self, raster: &RasterFont, spans: &[TextSpan]) -> StyledInkLayout {
+        if spans
+            .iter()
+            .any(|span| span.style.obfuscated.unwrap_or(false))
+        {
+            let pool = self
+                .obfuscation_pool
+                .get_or_init(|| build_obfuscation_pool(raster));
+            return std::sync::Arc::new(layout_styled_ink_runs_with_obfuscation(
+                raster,
+                spans,
+                pool,
+                &self.obfuscation_rng,
+            ));
+        }
         let mut map = self
             .inner
             .lock()
@@ -510,9 +549,10 @@ fn resolved_rgb(color: Option<TextColor>, base: [f32; 3]) -> [f32; 3] {
 /// vanilla's own font rendering's own unconditional per-glyph effect bar (including
 /// for whitespace) rather than one bar merged across a run — simpler to keep
 /// obviously correct against the source, at the cost of more (touching,
-/// visually identical) rects. `§k` obfuscation is not implemented: it needs
-/// per-frame resampling state neither caller here keeps, and is disclosed as
-/// a real gap rather than half-built.
+/// visually identical) rects. Obfuscated spans are sampled by
+/// [`StyledInkLayoutCache::layout`] from a bounded same-advance pool; that
+/// cache deliberately skips persistence for those spans so each draw gets new
+/// glyph pixels without changing the source advances or gaps.
 /// The **advance width** of a styled span list, in logical pixels — the same
 /// number [`layout_styled_ink_runs`] returns as its second element, without
 /// walking a single texel.
@@ -547,15 +587,93 @@ pub(super) fn layout_styled_ink_runs(raster: &RasterFont, spans: &[TextSpan]) ->
     layout_styled_ink_runs_resolved(spans, |_, _| ResolvedRaster::Borrowed(raster))
 }
 
+/// Builds one default-font layout with a fresh same-width replacement for
+/// every obfuscated drawable glyph. The original codepoint still supplies
+/// advance, bold width and effect geometry, so replacement pixels cannot
+/// move the label or change its gaps.
+fn layout_styled_ink_runs_with_obfuscation(
+    raster: &RasterFont,
+    spans: &[TextSpan],
+    pool: &std::collections::HashMap<u32, Vec<char>>,
+    rng: &AtomicU64,
+) -> (Vec<StyledRect>, f32) {
+    layout_styled_ink_runs_resolved_with_replacement(
+        spans,
+        |_, _| ResolvedRaster::Borrowed(raster),
+        |font, codepoint, advance| {
+            if codepoint == ' ' as u32 {
+                return codepoint;
+            }
+            let width = advance.ceil();
+            let Some(candidates) = (0.0..4096.0)
+                .contains(&width)
+                .then(|| pool.get(&(width as u32)))
+                .flatten()
+            else {
+                return codepoint;
+            };
+            if candidates.is_empty() {
+                return codepoint;
+            }
+            let state = rng.fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed);
+            let mut z = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            let candidate = candidates[(z as usize) % candidates.len()] as u32;
+            font.raster(candidate).map_or(codepoint, |_| candidate)
+        },
+    )
+}
+
+/// Groups drawable codepoints by the rounded width class used by obfuscated
+/// text. Sorting each class makes the seeded sampler deterministic even though
+/// the font's internal codepoint map is hash-based.
+fn build_obfuscation_pool(raster: &RasterFont) -> std::collections::HashMap<u32, Vec<char>> {
+    let mut pool = std::collections::HashMap::new();
+    for codepoint in raster.font().codepoints() {
+        if raster.raster(codepoint).is_none() {
+            continue;
+        }
+        let Some(advance) = raster.advance(codepoint) else {
+            continue;
+        };
+        let width = advance.ceil();
+        if !(0.0..4096.0).contains(&width) {
+            continue;
+        }
+        let Some(ch) = char::from_u32(codepoint) else {
+            continue;
+        };
+        pool.entry(width as u32).or_insert_with(Vec::new).push(ch);
+    }
+    for candidates in pool.values_mut() {
+        candidates.sort_unstable();
+    }
+    pool
+}
+
 /// [`layout_styled_ink_runs`] with vanilla's per-span font selection supplied
 /// by the caller. A selected font wins only for codepoints it actually covers;
 /// callers return the default raster for the ordinary fallback case.
 pub(super) fn layout_styled_ink_runs_resolved<'a, F>(
     spans: &[TextSpan],
-    mut select: F,
+    select: F,
 ) -> (Vec<StyledRect>, f32)
 where
     F: FnMut(u32, Option<FontId>) -> ResolvedRaster<'a>,
+{
+    layout_styled_ink_runs_resolved_with_replacement(spans, select, |_, codepoint, _| codepoint)
+}
+
+fn layout_styled_ink_runs_resolved_with_replacement<'a, F, G>(
+    spans: &[TextSpan],
+    mut select: F,
+    mut replacement: G,
+) -> (Vec<StyledRect>, f32)
+where
+    F: FnMut(u32, Option<FontId>) -> ResolvedRaster<'a>,
+    G: FnMut(&RasterFont, u32, f32) -> u32,
 {
     const BASE_RGB: [f32; 3] = [1.0, 1.0, 1.0];
 
@@ -575,10 +693,16 @@ where
             let selected = select(cp, span.style.font);
             let raster = selected.as_ref();
             let x0 = cursor;
-            let glyph_raster = raster.raster(cp);
-            let base_advance = glyph_raster
+            let original_raster = raster.raster(cp);
+            let base_advance = original_raster
                 .as_ref()
                 .map_or_else(|| raster.advance(cp).unwrap_or(MISSING_ADVANCE), GlyphRaster::advance);
+            let draw_cp = if span.style.obfuscated.unwrap_or(false) {
+                replacement(raster, cp, base_advance)
+            } else {
+                cp
+            };
+            let glyph_raster = raster.raster(draw_cp);
             let bold_extra = raster.font().bold_offset(cp);
             // vanilla's own glyph-info shadow-offset accessor — carried onto every ink rect this
             // glyph emits so a consumer can reproduce vanilla's 8× outline
@@ -1766,6 +1890,53 @@ mod tests {
              not just the advance)"
         );
         assert!((total_advance - 42.0).abs() < 0.01);
+    }
+
+    /// Plain text is a cache-stable control, while obfuscated text samples a
+    /// different drawable glyph on the next draw. The two fixture glyphs have
+    /// the same advance class but different coverage, so this compares pixels
+    /// rather than merely observing the replacement character. Both layouts
+    /// retain the original total width, which is the gap/centering invariant.
+    #[test]
+    fn obfuscated_nametag_resamples_pixels_without_changing_layout() {
+        let cell = 4;
+        let mut rgba = vec![0u8; cell * cell * 4 * 2];
+        for y in 0..cell {
+            for x in 0..cell {
+                let offset = (y * cell + x) * 4;
+                rgba[offset..offset + 4].copy_from_slice(&[255, 255, 255, 255]);
+
+                let b_offset = cell * cell * 4 + offset;
+                let b_ink = x == 0 || x == cell - 1 || y == 0;
+                rgba[b_offset..b_offset + 4].copy_from_slice(if b_ink {
+                    &[255, 255, 255, 255]
+                } else {
+                    &[0, 0, 0, 0]
+                });
+            }
+        }
+        let raster = scaled_raster("AB", cell as u32, 4, &rgba);
+        assert_eq!(raster.advance('A' as u32), raster.advance('B' as u32));
+
+        let cache = StyledInkLayoutCache::default();
+        let plain = Text::from_legacy("A").resolve(&|_| None).to_spans();
+        let plain_first = cache.layout(&raster, &plain);
+        let plain_second = cache.layout(&raster, &plain);
+        assert_eq!(plain_first.0, plain_second.0, "plain control must be stable");
+        assert_eq!(plain_first.1, plain_second.1, "plain layout width must be stable");
+
+        let obfuscated = Text::from_legacy("\u{a7}kA")
+            .resolve(&|_| None)
+            .to_spans();
+        assert!(obfuscated.iter().any(|span| span.style.obfuscated == Some(true)));
+        let obfuscated_first = cache.layout(&raster, &obfuscated);
+        let obfuscated_second = cache.layout(&raster, &obfuscated);
+        assert_eq!(obfuscated_first.1, obfuscated_second.1);
+        assert_eq!(obfuscated_first.1, plain_first.1);
+        assert_ne!(
+            obfuscated_first.0, obfuscated_second.0,
+            "obfuscated nametag draws must resample glyph pixels"
+        );
     }
 
     /// **The colour control**, at [`layout_styled_ink_runs`] directly, using
