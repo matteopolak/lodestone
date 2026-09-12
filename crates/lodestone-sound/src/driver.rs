@@ -41,6 +41,20 @@ pub struct StreamingSound {
     pub declares_stream: bool,
 }
 
+/// The result of submitting one resolved sound to a mixer.
+///
+/// `subtitle` is present only when the submitted source contributes a non-zero
+/// signal under the mixer's current listener, category-volume and attenuation
+/// state. Keeping this result beside the playback handle lets shell overlays
+/// consume the exact decision made by the production audio path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SoundPlayback {
+    /// Handle of the newly submitted voice.
+    pub handle: PlayHandle,
+    /// Event-level subtitle key when the voice is audible, otherwise `None`.
+    pub subtitle: Option<String>,
+}
+
 /// Why a sound failed to play.
 #[derive(Debug, thiserror::Error)]
 pub enum DriverError {
@@ -291,13 +305,47 @@ impl SoundDriver {
         pitch: f32,
         seed: i64,
     ) -> Result<Option<PlayHandle>, DriverError> {
-        match self
+        Ok(self
+            .play_sound_with_subtitle(
+                event_name,
+                category,
+                position,
+                volume,
+                pitch,
+                seed,
+            )?
+            .map(|playback| playback.handle))
+    }
+
+    /// Plays a positioned sound and reports the subtitle decision made from
+    /// the same mixer state that will render it.
+    ///
+    /// The event is still submitted when out of range or muted; the returned
+    /// subtitle is simply absent because the rendered gain is zero. This is
+    /// the headless counterpart of the native and browser shell paths and is
+    /// intentionally useful in focused accessibility tests.
+    pub fn play_sound_with_subtitle(
+        &mut self,
+        event_name: &str,
+        category: ModelCategory,
+        position: Vec3,
+        volume: f32,
+        pitch: f32,
+        seed: i64,
+    ) -> Result<Option<SoundPlayback>, DriverError> {
+        let Some(instance) = self
             .resolver
             .resolve_instance(event_name, category, position, volume, pitch, seed)?
-        {
-            Some(instance) => Ok(Some(self.mixer.play(instance))),
-            None => Ok(None),
-        }
+        else {
+            return Ok(None);
+        };
+        let subtitle = self
+            .resolver
+            .subtitle(event_name)
+            .filter(|_| self.mixer.is_audible(&instance))
+            .map(str::to_owned);
+        let handle = self.mixer.play(instance);
+        Ok(Some(SoundPlayback { handle, subtitle }))
     }
 
     /// Plays an entity-attached sound (the `SOUND_ENTITY` packet path) at the
@@ -351,6 +399,7 @@ mod tests {
     /// event that references the first via `type: event`.
     const SOUNDS_JSON: &str = r#"{
         "block.stone.break": {
+            "subtitle": "subtitles.block.stone.break",
             "sounds": [ { "name": "block/stone/break1" } ]
         },
         "ref.event": {
@@ -423,6 +472,42 @@ mod tests {
         }
         assert_eq!(d.decoded_file_count(), 1);
         assert_eq!(d.mixer().voice_count(), 5, "all five voices are live");
+    }
+
+    #[test]
+    fn subtitle_is_from_the_production_playback_gain_decision() {
+        let mut d = driver();
+        let audible = d
+            .play_sound_with_subtitle(
+                "block.stone.break",
+                ModelCategory::Block,
+                Vec3::ZERO,
+                1.0,
+                1.0,
+                17,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(audible.subtitle.as_deref(), Some("subtitles.block.stone.break"));
+
+        // The event is still submitted while its category is muted, but the
+        // same gain state that makes playback silent suppresses its caption.
+        d.mixer_mut()
+            .volumes_mut()
+            .set_user(AudioCategory::Blocks, 0.0);
+        let muted = d
+            .play_sound_with_subtitle(
+                "block.stone.break",
+                ModelCategory::Block,
+                Vec3::ZERO,
+                1.0,
+                1.0,
+                18,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(muted.subtitle, None);
+        assert_eq!(d.mixer().voice_count(), 2, "muting must not drop submission");
     }
 
     #[test]

@@ -22,7 +22,7 @@ use glam::Vec3;
 use crate::category::SoundCategory;
 use crate::decode::PcmBuffer;
 use crate::spatial::{
-    Attenuation, Listener, Spatialization, attenuation_gain, azimuth_of, panning_gains,
+    Attenuation, Listener, Spatialization, azimuth_of, panning_gains,
 };
 
 /// An opaque id for a playing voice, returned by the mixer so callers can stop
@@ -125,16 +125,15 @@ impl Voice {
         if !self.pcm.is_mono() {
             return (bus_gain, bus_gain, true);
         }
-        let (pan_l, pan_r, dist_gain) =
+        let (pan_l, pan_r) =
             if self.spat.relative || self.spat.attenuation == Attenuation::None {
                 let (l, r) = panning_gains(0.0);
-                (l, r, 1.0)
+                (l, r)
             } else {
-                let distance = (self.spat.position - listener.position).length();
-                let dist_gain = attenuation_gain(distance, self.spat.range());
                 let (l, r) = panning_gains(azimuth_of(listener, self.spat.position));
-                (l, r, dist_gain)
+                (l, r)
             };
+        let dist_gain = self.spat.distance_gain(listener, self.pcm.is_mono());
         (
             bus_gain * dist_gain * pan_l,
             bus_gain * dist_gain * pan_r,

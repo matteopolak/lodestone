@@ -50,7 +50,9 @@
 
 mod driver;
 
-pub use driver::{DriverError, SoundDriver, SoundResolver, StreamingSound, map_category};
+pub use driver::{
+    DriverError, SoundDriver, SoundPlayback, SoundResolver, StreamingSound, map_category,
+};
 
 /// Situational music: *when* to play a music track and *which* one.
 ///

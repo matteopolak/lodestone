@@ -121,19 +121,23 @@ subtitles are a property of the event, not the chosen sample, so reading
 after selection would both waste a roll and desync the seeded pick every
 client agrees on. The hook lives in `ShellAudio::play_sound`/
 `play_entity_sound` — the single choke point every sound in the client passes
-through — and records the caption **before** the engine call, so a resolve
-failure (a missing `.ogg`) still surfaces a caption, matching vanilla's own
-listener hook running off submission rather than decode success.
+through — and consumes the `SoundPlayback` result from the audio engine. That
+result is assembled while the resolved voice and mixer state are together: the
+listener distance, resolved source volume, category/master/runtime gain and
+mono/stereo/relative attenuation policy are exactly the values the renderer
+uses. An event can still be submitted when its gain is zero, but it does not
+produce a caption. Relative UI sounds keep their unconditional caption because
+their playback range is infinite.
 
 Three things read backwards from the obvious guess: vanilla fades
 **brightness** (RGB 255→75), not alpha, so an old caption goes grey on an
 opaque plate rather than translucent over the world; every plate is the
 **same width** (max text width plus room for both arrow glyphs), so a row
 without an arrow does not shrink; and the text is **centred** inside that
-width even though the plate itself is right-aligned. Range is not modelled —
-every caption here is treated as audible regardless of the sound's real
-attenuation distance, since the sound was genuinely submitted to the mixer,
-which is a stronger signal than a distance check would add.
+width even though the plate itself is right-aligned. At the exact attenuation
+edge, linear gain is zero and the caption is omitted; the same applies when
+the category/master/runtime volume is muted. This avoids claiming that a player
+heard a source that the mixer rendered as silence.
 
 ### Ambient sounds and client prediction
 

@@ -42,7 +42,7 @@ use lodestone_audio::{
 };
 use lodestone_model::event::SoundCategory as ModelCategory;
 
-use crate::driver::{DriverError, SoundResolver};
+use crate::driver::{DriverError, SoundPlayback, SoundResolver};
 use crate::music::MusicStart;
 
 /// A running native audio engine.
@@ -276,6 +276,34 @@ impl AudioEngine {
         pitch: f32,
         seed: i64,
     ) -> Result<Option<PlayHandle>, DriverError> {
+        Ok(self
+            .play_sound_with_subtitle(
+                event_name,
+                category,
+                position,
+                volume,
+                pitch,
+                seed,
+            )?
+            .map(|playback| playback.handle))
+    }
+
+    /// Plays a positioned sound and returns the subtitle decision made from
+    /// the same listener, category-volume and attenuation state as the mixer.
+    ///
+    /// An out-of-range or muted source is still enqueued, preserving the
+    /// event's normal voice lifetime; only its subtitle key is omitted because
+    /// the rendered signal is zero. The shell uses this result to keep its
+    /// accessibility overlay on the production audio path.
+    pub fn play_sound_with_subtitle(
+        &mut self,
+        event_name: &str,
+        category: ModelCategory,
+        position: Vec3,
+        volume: f32,
+        pitch: f32,
+        seed: i64,
+    ) -> Result<Option<SoundPlayback>, DriverError> {
         // Decode OUTSIDE the lock — this is the slow step (file read + Vorbis
         // decode on a cache miss) and must never be held against the audio
         // callback.
@@ -286,8 +314,20 @@ impl AudioEngine {
             Some(instance) => instance,
             None => return Ok(None),
         };
-        // Now a brief O(1) lock just to enqueue the voice.
-        Ok(Some(self.lock_mixer().play(instance)))
+        let subtitle = self
+            .resolver
+            .subtitle(event_name)
+            .map(str::to_owned);
+        // Now a brief O(1) lock just to decide caption visibility and enqueue
+        // the voice. Both reads happen together so a concurrent listener or
+        // volume update cannot make the two paths disagree for this event.
+        let mut mixer = self.lock_mixer();
+        let audible = mixer.is_audible(&instance);
+        let handle = mixer.play(instance);
+        Ok(Some(SoundPlayback {
+            handle,
+            subtitle: audible.then_some(subtitle).flatten(),
+        }))
     }
 
     /// Plays an entity-attached sound (the `SOUND_ENTITY` packet path) at the
