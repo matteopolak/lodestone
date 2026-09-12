@@ -514,4 +514,3 @@ fn encode_system_chat(message: &str, overlay: bool) -> Vec<u8> {
     w.bool(overlay);
     w.into_vec()
 }
-
