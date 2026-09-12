@@ -57,6 +57,12 @@ fi
 if [ "${LODESTONE_ORACLE_ADMISSION:-}" = 1 ]; then
   WORLD_ENV+=( -e ORACLE_ADMISSION=1 )
 fi
+if [ "${LODESTONE_ORACLE_STREAM_LOADED_TRACE:-}" = 1 ]; then
+  WORLD_ENV+=( -e ORACLE_STREAM_LOADED_TRACE=1 )
+fi
+if [ -n "${LODESTONE_ORACLE_STREAM_RECORD_DIR:-}" ]; then
+  WORLD_ENV+=( -e "ORACLE_STREAM_RECORD_DIR=$LODESTONE_ORACLE_STREAM_RECORD_DIR" )
+fi
 for placement_var in SOURCE_X SOURCE_Z PLACED_FEATURE FEATURE_INDEX FEATURE_STEP TARGET_CHUNK TARGET_X TARGET_Z FOCUS FOCUS_X FOCUS_Y FOCUS_Z BLOCK; do
   host_var="LODESTONE_ORACLE_${placement_var}"
   if [ -n "${!host_var:-}" ]; then
@@ -183,7 +189,8 @@ container run "${CONTAINER_ARGS[@]}" eclipse-temurin:25-jdk bash -c '
       javac -cp "$CP" -d /work /work/LargeParityOracle.java /work/EndP06LifecycleCapture.java
     elif [ '"$CLASS"' = NetherPlacementOracle ] || [ '"$CLASS"' = NetherColumnOracle ] || [ '"$CLASS"' = NetherStageOracle ] || [ '"$CLASS"' = NetherFeatureAdmissionProbe ] || [ '"$CLASS"' = NetherFeatureAdmissionOracle ] || [ '"$CLASS"' = NetherFeatureCellsOracle ] || [ '"$CLASS"' = NetherBlobPlacementOracle ] || [ '"$CLASS"' = OverworldFeatureTraceOracle ] || [ '"$CLASS"' = OverworldStatusOracle ] || [ '"$CLASS"' = OverworldRegionReplayOracle ] || [ '"$CLASS"' = OverworldFeatureSourceOracle ] || [ '"$CLASS"' = OverworldLifecycleChestOracle ] || [ '"$CLASS"' = OverworldReplayFeaturesOracle ]; then
       cp /oracle/LargeParityOracle.java /work/
-      javac -cp "$CP" -d /work /work/LargeParityOracle.java /work/'"$CLASS"'.java
+      cp /oracle/EndP06LifecycleCapture.java /work/
+      javac -cp "$CP" -d /work /work/LargeParityOracle.java /work/EndP06LifecycleCapture.java /work/'"$CLASS"'.java
     else
       javac -cp "$CP" -d /work /work/'"$CLASS"'.java
     fi

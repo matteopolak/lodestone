@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Compare the external JVM oracle and Lodestone through an ephemeral stream.
 #
-# Overworld and Nether frames are light-free content records. End frames carry
-# raw packet bytes plus an authenticated resident-lifecycle sidecar so its
-# packet heightmaps are compared at the same boundary as the external server.
+# Overworld and Nether frames are light-free content records. Nether frames
+# also carry the observed FEATURES completion sequence. End frames carry raw
+# packet bytes plus resident transitions so packet heightmaps are compared at
+# the same boundary as the external server.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -110,6 +111,7 @@ if [[ "$dimension" = end ]]; then
   oracle_format=(--raw-packet)
 fi
 
+LODESTONE_ORACLE_DIMENSION="$dimension" \
 LODESTONE_ORACLE_OUTPUT_ROOT="$work/oracle-out" \
   bash "$HERE/run.sh" LargeParityOracle \
     --mode stream "${oracle_format[@]}" --dimension "$dimension" \
@@ -162,6 +164,9 @@ if [[ -n "${LODESTONE_LARGE_PARITY_STREAM_DIAGNOSTICS:-}" ]]; then
 fi
 if [[ -n "${LODESTONE_LARGE_PARITY_STREAM_DEFER_HEIGHTMAPS:-}" ]]; then
   consumer_env+=("LODESTONE_LARGE_PARITY_STREAM_DEFER_HEIGHTMAPS=$LODESTONE_LARGE_PARITY_STREAM_DEFER_HEIGHTMAPS")
+fi
+if [[ -n "${LODESTONE_DUMP_ACTUAL_RECORD_DIR:-}" ]]; then
+  consumer_env+=("LODESTONE_DUMP_ACTUAL_RECORD_DIR=$LODESTONE_DUMP_ACTUAL_RECORD_DIR")
 fi
 env "${consumer_env[@]}" cargo test -p lodestone-v26-2 --test streaming_worldgen_parity \
   stream_external_oracle_matches_lodestone -- --ignored --nocapture \
