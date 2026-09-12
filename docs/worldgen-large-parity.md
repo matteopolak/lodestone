@@ -125,7 +125,7 @@ Structure terrain adaptation is part of the authenticated full-world scope. Head
 
 The comparator replays the initial-light admission boundary before it asks the packet codec for bytes. Materialization admits rows in z-major/x-major order, so a target's first saved snapshot sees only its north row and west cell; the packet may still carry all eight terrain neighbours after that snapshot is fixed. This keeps a future east or south column from changing an already-saved initial fallback, while later live relight remains free to use the complete footprint. The same relative rule is used for one-record diagnostics and bounded prefixes, so the control never depends on a particular world coordinate.
 
-The live comparator models dependency completion separately from packet-stream order. Nether and End requests replay their admitted dependency wavefront with the request's tiled key (tile-z, tile-x, local-z, local-x); a later adjacent request schedules only the previously unseen edge. Overworld requests likewise complete the centre's three-by-three FEATURES dependency wavefront, because those source bodies can spill into the requested column even with a zero-radius ticket. Overworld completion identity is `(target, source)`, not just `source`: a source whose write crossed into a future target is replayed when that target becomes active, after the prior target transaction rolls back only writes to destinations that have not entered FEATURES. Source-owned writes become retained state when their source enters FEATURES. This is not the z-major order used to emit packet records, and it is not one universal source permutation. Overworld streaming retains admitted shaped columns and completed source state across bounded frame batches while retaining only incidental future-target writes at each target boundary, matching the external stream's removal of only the requested centre ticket. The `(0,-1)` wavefront fixture and the one-record Nether P07 glowstone witness continue to guard the halo lifecycle. Immutable shaped prefixes remain eligible for parallel preparation; only stateful decoration commits use these deterministic orders.
+The live comparator models dependency completion separately from packet-stream order. Nether and End requests replay their admitted dependency wavefront with the request's tiled key (tile-z, tile-x, local-z, local-x); a later adjacent request schedules only the previously unseen edge. Overworld requests likewise complete the centre's three-by-three FEATURES dependency wavefront, because those source bodies can spill into the requested column even with a zero-radius ticket; a later adjacent request schedules only previously unseen sources. This is not the z-major order used to emit packet records, and it is not one universal source permutation. Overworld streaming retains the admitted dependency state across bounded frame batches, matching the external stream's removal of only the requested centre ticket. The `(0,-1)` wavefront fixture and the one-record Nether P07 glowstone witness continue to guard the halo lifecycle. Immutable shaped prefixes remain eligible for parallel preparation; only stateful decoration commits use these deterministic orders.
 
 ### Live streaming comparison
 
@@ -141,6 +141,18 @@ arrived earlier are included when the destination later primes itself. This
 distinction matters for cross-chunk vegetation and structure writes because the
 final blocks alone cannot reveal whether a write preceded or followed map
 initialization.
+
+Generated block-entity sidecars use the same status boundary. A source may write
+a block and deferred sidecar into a future dependency while that dependency is
+still only a shaped resident; the block remains visible, but the light-free
+initial record enumerates only sidecars materialized after the destination
+crosses FEATURES. `LifecycleMaterializer::complete_observing_for_target` keeps
+such a sidecar out of the future packet while retaining it when the destination
+is the current target. The bounded Overworld control at source `(-7,-8)` and
+target `(-8,-8)` writes the dungeon chest at `(-113,-33,-125)` with loot seed
+`6190167671592746449`; one-target admission reports one sidecar, while the
+four-target order `(-9,-9), (-8,-9), (-9,-8), (-8,-8)` reports the chest state
+with a deferred sidecar and zero packet entities.
 
 End placement admission is evaluated at every sampled origin. A source chunk
 whose centre is not `minecraft:end_highlands` can still place a chorus plant
@@ -159,25 +171,12 @@ feature lifecycle is an ordered read-after-write replay. Set
 running a controlled comparison; the launcher forwards it to the comparator.
 Nether batches admit their complete two-chunk feature-write halo in z-major,
 x-fastest order before replay, but emit records only for requested targets.
-Overworld stream batches retain the shaped halo across frame batches. Each
-requested centre emits one record, while all nine source bodies in its
-dependency wavefront run in the authenticated source order. A source may
-write into a future target while that wavefront is active; if that destination
-has not entered FEATURES, the write is a target-local read context and is
-restored when the target finishes. The later target then replays the
-`(target, source)` completion, so global source deduplication cannot discard a
-write that belongs to the later packet. Writes into a source that has already
-entered FEATURES remain part of the retained source state.
-
-End uses the source's own decoration context for every source in a target's
-three-by-three wavefront. The target selects the retained packet column and
-the transaction boundary; it must not replace the source context used for
-biome filtering, random draws, or cross-border block-state connections. The
-regression at target `(285,79)`, local cell `(13,65,15)`, records the complete
-chorus-plant state with `south=true`; a control that withholds that source
-must leave the cell as air. This source-centred rule keeps a later neighbour's
-connection bit from being lost when the source and emitted target share a
-chunk boundary.
+Overworld stream batches retain the shaped halo and completed three-by-three
+FEATURES source bodies across frame batches. Each requested centre emits one
+record, while all nine source bodies in its dependency wavefront run in the
+authenticated source order; a source may leave a cross-boundary write in a
+resident neighbour, so retaining completed sources preserves the external
+ticket lifecycle without rebuilding an already completed source.
 For example, a short End control is:
 
 ```text
@@ -193,19 +192,7 @@ scripts/worldgen-oracle/stream-parity.sh \
   --dimension overworld --cx -2 2 --cz -2 2
 ```
 
-The stream's binary header is `LWS26S01`; format `7` is the light-free
-content layout used by Overworld and Nether. End uses format `8`, whose
-authenticated frame carries a SHA-256-bound lifecycle event payload before
-the light-free record. Each event records the external source sequence and
-each observed resident's stage plus raw client heightmaps (registry ids `1`,
-`4`, and `5`); the comparator validates the domain, source wavefront,
-sequence, transition uniqueness, map bounds, and event digest before passing
-`LifecycleReplayEvent::resident_transitions` to the materializer. Mutating an
-event payload therefore fails its digest check before it can become a
-synthetic heightmap sidecar. The launcher waits for a readiness marker before
-attaching the Rust reader, so a boot failure is reported instead of leaving it
-blocked. A zero-length frame is the normal end marker; the separate completion
-marker makes an early producer exit distinguishable from a complete stream.
+The stream's binary header is `LWS26S01`; the format marker is `7` for light-free content. The launcher waits for a readiness marker before attaching the Rust reader, so a boot failure is reported instead of leaving it blocked. A zero-length frame is the normal end marker; the separate completion marker makes an early producer exit distinguishable from a complete stream.
 
 The launcher forwards `LODESTONE_LARGE_PARITY_STREAM_DIAGNOSTICS` and
 `LODESTONE_LARGE_PARITY_STREAM_DEFER_HEIGHTMAPS` to the Rust comparator. Keep
@@ -301,14 +288,6 @@ The capture is deliberately external and is not checked into the repository. Its
 
 For Overworld replay, `prepare_lifecycle_replay` creates one bounded slot per authenticated admission. A FEATURES completion lazily fills its slot with only immutable 5 by 5 pre-ore handles, stitched heights, biome eligibility, and source feature/ore selections; resident overrides, placement writes, and RNG state remain per-completion and stay serial. Ordinary production generation does not retain these cloned selection contexts for every explored chunk. The byte-identity comparator remains the authority: enabling the prepared slots must not change packet bytes or the authenticated event order. Lifecycle controls compare serial and dispatched shaped admissions byte-for-byte, while a deliberately reversed FEATURES commit is required to change a spill-dependent control state; this catches accidental completion-order semantics.
 
-The Overworld source adapter keeps the decoration seed, origin, and immutable
-read window source-centred. A requested target supplies only the ordered
-retention/materialization transaction: temporary neighbour writes remain
-visible to later sources in that wavefront and are restored or promoted at the
-target boundary. Passing target coordinates into the source context changes
-order-sensitive spills; the seed-42 control at world `(-107,-59,-113)` must
-remain deepslate rather than target-only diamond ore.
-
 An out-of-rectangle spill is not copied into a resident packet column, but it is still retained in the shared read-after-write override map. A later source can therefore observe the spill through its wider feature context without causing an unadmitted destination chunk to enter the final packet set.
 
 To run the bounded lifecycle gate:
@@ -373,7 +352,7 @@ The Java exporter and Rust comparator must change together whenever a semantic f
 
 The Rust gate in `crates/versions/26.2/tests/large_worldgen_parity.rs` generates a complete 3 by 3 local input, sends it through the neighbour-aware production initial-chunk encoder, then decodes the resulting packet and applies the schema-selected canonical record before comparing the full digest. Its north-neighbour glowstone control proves that the old one-column path has zero block light at the centre border while the neighbour-aware path carries the expected value. The test support reader authenticates the entire manifest before generation; for P06 it also authenticates the complete two-byte payload and its required full-digest packet-audit sidecar, rejecting a matching prefix whose full digest differs. Its v2 refusal is intentional: a short raw hash cannot be converted into a semantic hash.
 
-When extending lifecycle replay, preserve the separation between capture facts and generator behavior: add a provenance field and a fixed digest for each new external stream, validate the 324 admissions and the one-FEATURES-per-source admission mapping, reject completion-sequence inversions, and deduplicate global completion events before dispatch. Add the corresponding override argument to the production source dispatcher so a later feature reads the resident state produced by earlier events, and carry generated sidecars through the production resident boundary in event order. Each source adapter must then state which resident sidecars belong in its detached packet snapshot; End structure-owned records are deliberately filtered at that boundary while direct source columns retain them. Keep the reusable source/materializer behavior in `lodestone-worldgen-parity::lifecycle`; the version-specific comparator should retain only capture parsing and acceptance reporting. Do not use target fences or `targets.tsv` as final-state acceptance. Keep the first final-manifest mismatch and its component report as the acceptance evidence.
+When extending lifecycle replay, preserve the separation between capture facts and generator behavior: add a provenance field and a fixed digest for each new external stream, validate the 324 admissions and the one-FEATURES-per-source admission mapping, reject completion-sequence inversions, and deduplicate global completion events before dispatch. Add the corresponding override argument to the production source dispatcher so a later feature reads the resident state produced by earlier events, and carry generated block entities through the production column boundary in event order. Keep the reusable source/materializer behavior in `lodestone-worldgen-parity::lifecycle`; the version-specific comparator should retain only capture parsing and acceptance reporting. Do not use target fences or `targets.tsv` as final-state acceptance. Keep the first final-manifest mismatch and its component report as the acceptance evidence.
 
 Run a small persisted control before any broad job. This proves both the frozen-world seal and duplicate read-only export:
 
