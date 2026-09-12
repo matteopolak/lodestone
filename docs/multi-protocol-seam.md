@@ -113,6 +113,17 @@ because `lodestone-world`'s `PalettedContainer` is version-free and accepts any 
   and 26.2's), with a small rename table and two generic property fallbacks
   (`waterlogged=false`, `powered=false`) for the states each source names differently.
 
+The `v1-21-11` table uses the same post-Flattening representation, but its generated source is
+sharded because the 29,671-entry mapping is too large for a useful review unit. The generated
+root (`crates/versions/1.21.11/src/generated/canonical.rs`) remains one flat
+`STATE_TO_CANONICAL` static and includes deterministic 1,024-entry files from
+`src/generated/canonical/state_to_canonical_*.in`; shard `N` covers source ids
+`N * 1,024 .. min((N + 1) * 1,024, SOURCE_STATE_COUNT)`. The ignored canonicalisation generator
+renders the root and every shard from the same mapping, compares the complete expected filename
+set and bytes before writing, and publishes each completed file through a temporary sibling. A
+missing, extra, or stale shard therefore fails the drift guard rather than producing a partial
+table. Runtime lookup still performs one array index with no allocation or shard traversal.
+
 All three fallback paths share one shape: an unresolvable value becomes air, counted on a
 `FallbackTally` and logged once per column if the tally is non-empty — never silent, per the
 project's "if you choose air, it must be visible, logged, counted" rule. **`cargo xtask
@@ -178,7 +189,9 @@ reading raw frames must decide for itself.
 
 - `vNNN` cargo features on `lodestone-registry` decide which families are compiled in at all;
   none are on by default except `live`, which enables `v26-2`.
-- `LODESTONE_REGEN=1` switches any canonicalisation-table generator from assert to write.
+- `LODESTONE_REGEN=1` switches any canonicalisation-table generator from assert to write. The
+  `v1-21-11` generator rewrites its root and complete shard set together; omit the variable to
+  reject missing, extra, or stale shards without changing generated files.
 - `cargo run -p xtask -- version-table [--check] [--fetch-missing]` regenerates or drift-checks
   the version table; `--fetch-missing` is the only network/disk-heavy path.
 - `MAX_PACKET_LEN` (2 MiB), `MAX_DECOMPRESSED_LEN` (8 MiB), `MAX_LENGTH_VARINT_BYTES` (3) in
