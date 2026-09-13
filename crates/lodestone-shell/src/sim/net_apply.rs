@@ -23,7 +23,6 @@
 //! boundary `sim/actions.rs` hit for its three `pub(crate)` methods.
 
 use super::*;
-use lodestone_model::EntityNetworkId;
 // Not reachable through `super::*`: the disconnect and failure arms build a
 // `SessionEnd` whose reason is a styled `Text` rather than a formatted string.
 

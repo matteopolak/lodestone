@@ -481,5 +481,3 @@ impl PackPromptCell {
 /// A [`PackPromptCell`] shared between the net thread and the render/menu
 /// thread.
 pub type SharedPackPrompt = Arc<PackPromptCell>;
-
-/// A decoded, version-free update the app can act on without touching tokio.

@@ -1,4 +1,13 @@
-//! Version-free updates forwarded from the background networking session.\n//!\n//! The event enum is the shell boundary between async protocol handling and\n//! the synchronous simulation loop. It contains actions and observations,\n//! while latest-value state remains in [`super::state`].\n\nuse super::*;\n\n/// A decoded, version-free update the app can act on without touching tokio.
+//! Version-free updates forwarded from the background networking session.
+//!
+//! The event enum is the shell boundary between async protocol handling and
+//! the synchronous simulation loop. It contains actions and observations,
+//! while latest-value state remains in [`super::state`].
+
+use super::{BlockStateRef, ClientEvent, LookAnchor, MobEffectId, ParticleOptions, Rotation,
+    SoundCategory, Uuid, Vec3, Vec3f};
+
+/// A decoded, version-free update the app can act on without touching tokio.
 #[derive(Debug, Clone)]
 pub enum NetUpdate {
     /// The background task is attempting to connect.
@@ -533,19 +542,3 @@ pub enum NetUpdate {
         velocity: Option<lodestone_model::event::TeleportVelocity>,
     },
 }
-
-/// The [`crate::menu::servers::ServerPackPolicy`] the *next*
-/// [`NetClient::connect_impl`] should start under, and reset to the default
-/// ([`Prompt`](crate::menu::servers::ServerPackPolicy::Prompt)) the moment it
-/// is read — see [`take_pending_server_pack_policy`].
-///
-/// A plain global rather than a `connect`/`connect_as` parameter:
-/// `Sim::connect` (`sim/session.rs`) owns that fixed signature, threaded
-/// through every call site regardless of session kind, and only a
-/// *saved-server* multiplayer join has a policy to carry at all — a direct
-/// quick-connect, a LAN join and singleplayer never do. `app/menus.rs`'s
-/// `MenuAction::Connect(entry)` arm already holds the whole `ServerEntry` at
-/// the one call site that matters, so it calls
-/// [`set_pending_server_pack_policy`] immediately before `Sim::connect`
-/// dials; every other path leaves the default in place, matching a fresh
-/// `ServerData`'s own `PROMPT`.

@@ -112,7 +112,7 @@ use std::sync::{
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use lodestone_client::{
+pub(super) use lodestone_client::{
     BlockPos, ChunkPos, ChunkSection, ClientAction, ClientBuilder, ClientEvent, ClientHandle,
     EntityView, LoginProfile, OpenMenuSnapshot, PlayerListEntry, RespawnPolicy,
     Rotation, SectionLight, ServerAddress, Vec3, WorldDimensions,
@@ -122,10 +122,10 @@ use lodestone_client::AuthenticationIntent;
 use lodestone_game::menu::Menu;
 use lodestone_game::scoreboard::Scoreboard;
 use lodestone_game::tablist::TabList;
-use lodestone_data::mob_effects::MobEffectId;
-use lodestone_model::Vec3f;
+pub(super) use lodestone_data::mob_effects::MobEffectId;
+pub(super) use lodestone_model::Vec3f;
 use lodestone_model::action::ResourcePackResponseKind;
-use lodestone_model::event::{
+pub(super) use lodestone_model::event::{
     BlockStateRef, LevelEventData, LookAnchor, ParticleOptions, SoundCategory,
 };
 // `SectionLight` is imported anonymously: it is the trait carrying
@@ -134,7 +134,7 @@ use lodestone_model::event::{
 // `sections_and_light_at` hands back.
 use lodestone_render::{SectionLight as _, SkyDefault, WorldSectionLight};
 
-use uuid::Uuid;
+pub(super) use uuid::Uuid;
 
 #[cfg(any(target_arch = "wasm32", test))]
 mod browser;
