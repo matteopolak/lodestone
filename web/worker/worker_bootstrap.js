@@ -40,6 +40,11 @@
       const wasm = await loadWasm();
       await wasm.default();
       postMessage({ kind: "progress", stage: "starting-server" });
+      // `start_worker` builds the authoritative source synchronously inside
+      // this Worker. Report that boundary before entering it so the page can
+      // distinguish module loading from world construction while its own
+      // render loop remains free to paint.
+      postMessage({ kind: "progress", stage: "preparing-world" });
       wasm.start_worker(ports[0], request.protocol, BigInt(request.seed), request.preset);
       postMessage({ kind: "ready" });
     } catch (caught) {

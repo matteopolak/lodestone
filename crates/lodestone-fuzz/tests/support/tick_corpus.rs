@@ -4,6 +4,8 @@
 //! expectation from the Rust-side oracle.  The live capture script is the
 //! producer; this module only validates and consumes its JSON.
 
+#![allow(dead_code)]
+
 use lodestone_fuzz::differential::{
     Action, BlockStateProbe, BlockStateRegion, FixedActionReplay, FixedReplayError, OracleFailure,
     Script, ScriptStep, Side, WorldOracle,

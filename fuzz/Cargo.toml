@@ -19,6 +19,9 @@ cargo-fuzz = true
 # fuzz`, never by `just check`/`just test`.
 [workspace]
 
+[lib]
+path = "src/lib.rs"
+
 [dependencies]
 libfuzzer-sys = "0.4"
 
@@ -150,6 +153,13 @@ bench = false
 [[bin]]
 name = "packet_frame_codec"
 path = "fuzz_targets/packet_frame_codec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "status_json_model"
+path = "fuzz_targets/status_json_model.rs"
 test = false
 doc = false
 bench = false

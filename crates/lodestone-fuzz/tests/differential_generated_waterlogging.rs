@@ -11,14 +11,16 @@ use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use tokio::io::DuplexStream;
 
-use lodestone_core::State;
+use lodestone_core::{Reader, State, Writer};
 use lodestone_fuzz::differential::{
     Action, DifferentialOutcome, Script, ScriptStep, WorldOracle, run_differential,
 };
+use lodestone_net::{Connection, Transport};
 use lodestone_server::{
-    BlockTickFeed, ChunkColumn, ChunkSource, IntegratedServer, ScheduledTickQueue, ServerBound,
-    ServerDirective, ServerProtocol, TickPriority,
+    BlockTickFeed, ChunkColumn, ChunkSource, IntegratedServer, ScheduledTickKind,
+    ScheduledTickQueue, ServerBound, ServerDirective, ServerProtocol, TickPriority,
 };
 use uuid::Uuid;
 
@@ -28,15 +30,79 @@ const STONE: &str = "minecraft:stone";
 const SLAB_DRY: &str = "minecraft:oak_slab[type=bottom,waterlogged=false]";
 const SLAB_WET: &str = "minecraft:oak_slab[type=bottom,waterlogged=true]";
 const FLUID_TICK: &str = "lodestone:fluid";
-// Keep the fixture outside the integrated server's initial chunk (0, 0), so
-// the fluid read is isolated from the connection's streamed terrain.
-const SOURCE_POS: (i32, i32, i32) = (32, 1, 0);
-const SLAB_POS: (i32, i32, i32) = (33, 1, 0);
-const OTHER_SOURCE_POS: (i32, i32, i32) = (34, 1, 0);
-const FLOOR_POS: (i32, i32, i32) = (32, 0, 0);
-const SLAB_FLOOR_POS: (i32, i32, i32) = (33, 0, 0);
-const OTHER_FLOOR_POS: (i32, i32, i32) = (34, 0, 0);
-const FLUID_DELAY: u64 = 1;
+// Keep the fixture inside the initial resident chunk so the delayed fluid
+// callback can run without asking the tick loop to synchronously generate a
+// cold column.
+const SOURCE_POS: (i32, i32, i32) = (8, 1, 0);
+const SLAB_POS: (i32, i32, i32) = (9, 1, 0);
+const OTHER_SOURCE_POS: (i32, i32, i32) = (10, 1, 0);
+const FLOOR_POS: (i32, i32, i32) = (8, 0, 0);
+const SLAB_FLOOR_POS: (i32, i32, i32) = (9, 0, 0);
+const OTHER_FLOOR_POS: (i32, i32, i32) = (10, 0, 0);
+const FLUID_DELAY: u64 = 0;
+
+const HANDSHAKE: i32 = 0;
+const LOGIN_START: i32 = 0;
+const LOGIN_ACKNOWLEDGED: i32 = 3;
+const LOGIN_SUCCESS: i32 = 2;
+const FINISH_CONFIGURATION: i32 = 3;
+const SET_TIME_S2C: i32 = 43;
+const CHUNK_BATCH_START: i32 = 10;
+const CHUNK: i32 = 0x27;
+const CHUNK_BATCH_FINISHED: i32 = 11;
+
+async fn drive_login_and_join<T: Transport>(client: &mut Connection<T>, username: &str) {
+    client.write_packet(HANDSHAKE, &[2]).await.expect("handshake");
+    let mut writer = Writer::default();
+    writer.string(username);
+    client
+        .write_packet(LOGIN_START, writer.as_slice())
+        .await
+        .expect("login start");
+
+    let (packet_id, payload) = client
+        .read_packet()
+        .await
+        .expect("login success read")
+        .expect("login success packet");
+    assert_eq!(packet_id, LOGIN_SUCCESS);
+    let mut reader = Reader::new(&payload);
+    assert_eq!(reader.string(16).expect("login username"), username);
+
+    client
+        .write_packet(LOGIN_ACKNOWLEDGED, &[])
+        .await
+        .expect("login acknowledgement");
+    client
+        .write_packet(FINISH_CONFIGURATION, &[])
+        .await
+        .expect("finish configuration");
+
+    let (packet_id, _) = client
+        .read_packet()
+        .await
+        .expect("join time read")
+        .expect("join time packet");
+    assert_eq!(packet_id, SET_TIME_S2C);
+    let (packet_id, _) = client
+        .read_packet()
+        .await
+        .expect("join batch start read")
+        .expect("join batch start packet");
+    assert_eq!(packet_id, CHUNK_BATCH_START);
+    let (packet_id, _) = client
+        .read_packet()
+        .await
+        .expect("join chunk read")
+        .expect("join chunk packet");
+    assert_eq!(packet_id, CHUNK);
+    let (packet_id, _) = client
+        .read_packet()
+        .await
+        .expect("join batch finish read")
+        .expect("join batch finish packet");
+    assert_eq!(packet_id, CHUNK_BATCH_FINISHED);
+}
 
 #[derive(Clone)]
 struct WaterloggingSource {
@@ -97,12 +163,34 @@ impl ChunkSource for WaterloggingSource {
 struct WaterloggingProtocol;
 
 impl ServerProtocol for WaterloggingProtocol {
-    fn decode(&self, _state: State, _packet_id: i32, _payload: &[u8]) -> ServerBound {
-        ServerBound::Ignored
+    fn decode(&self, state: State, packet_id: i32, payload: &[u8]) -> ServerBound {
+        match state {
+            State::Handshaking if packet_id == HANDSHAKE => ServerBound::Handshake {
+                next_state: State::Login,
+            },
+            State::Login if packet_id == LOGIN_START => {
+                let mut reader = Reader::new(payload);
+                let username = reader.string(16).expect("waterlogging username");
+                ServerBound::LoginStart {
+                    username,
+                    uuid: Uuid::nil(),
+                }
+            }
+            State::Login if packet_id == LOGIN_ACKNOWLEDGED => ServerBound::LoginAcknowledged,
+            State::Configuration if packet_id == FINISH_CONFIGURATION => {
+                ServerBound::ConfigurationFinished
+            }
+            _ => ServerBound::Ignored,
+        }
     }
 
-    fn login_success(&self, _username: &str, _uuid: Uuid) -> Vec<ServerDirective> {
-        Vec::new()
+    fn login_success(&self, username: &str, _uuid: Uuid) -> Vec<ServerDirective> {
+        let mut writer = Writer::default();
+        writer.string(username);
+        vec![ServerDirective::Send {
+            packet_id: LOGIN_SUCCESS,
+            payload: writer.as_slice().to_vec(),
+        }]
     }
 
     fn begin_configuration(&self) -> Vec<ServerDirective> {
@@ -113,8 +201,27 @@ impl ServerProtocol for WaterloggingProtocol {
         Vec::new()
     }
 
+    fn encode_set_time(&self, game_time: i64, day_time: Option<i64>) -> ServerDirective {
+        let mut writer = Writer::default();
+        writer.i64(game_time);
+        match day_time {
+            Some(day_time) => {
+                writer.bool(true);
+                writer.i64(day_time);
+            }
+            None => writer.bool(false),
+        }
+        ServerDirective::Send {
+            packet_id: SET_TIME_S2C,
+            payload: writer.as_slice().to_vec(),
+        }
+    }
+
     fn begin_chunk_batch(&self) -> ServerDirective {
-        ServerDirective::None
+        ServerDirective::Send {
+            packet_id: CHUNK_BATCH_START,
+            payload: Vec::new(),
+        }
     }
 
     fn encode_chunk(
@@ -123,19 +230,28 @@ impl ServerProtocol for WaterloggingProtocol {
         _cz: i32,
         _column: &ChunkColumn,
     ) -> ServerDirective {
-        ServerDirective::None
+        ServerDirective::Send {
+            packet_id: CHUNK,
+            payload: Vec::new(),
+        }
     }
 
-    fn end_chunk_batch(&self, _batch_size: i32) -> ServerDirective {
-        ServerDirective::None
+    fn end_chunk_batch(&self, batch_size: i32) -> ServerDirective {
+        let mut writer = Writer::default();
+        writer.var_i32(batch_size);
+        ServerDirective::Send {
+            packet_id: CHUNK_BATCH_FINISHED,
+            payload: writer.as_slice().to_vec(),
+        }
     }
 }
 
 struct WaterloggingServerOracle {
     server: IntegratedServer,
-    source: WaterloggingSource,
     feed: BlockTickFeed,
+    _client: Connection<DuplexStream>,
     next_server_tick: u64,
+    first_advance: bool,
     runtime: tokio::runtime::Runtime,
 }
 
@@ -146,8 +262,7 @@ impl WaterloggingServerOracle {
             .build()
             .expect("waterlogging fixture runtime");
         let source = WaterloggingSource::new();
-        let source_view = source.clone();
-        let (server, _client) = {
+        let (server, client_io) = {
             let _guard = runtime.enter();
             IntegratedServer::open_in_memory_with_mobs(
                 WaterloggingProtocol,
@@ -158,6 +273,8 @@ impl WaterloggingServerOracle {
                 0,
             )
         };
+        let mut client = Connection::new(client_io);
+        runtime.block_on(drive_login_and_join(&mut client, "waterlogging"));
         let initial_tick = server
             .server_tick_count()
             .expect("waterlogging fixture must have a live tick loop");
@@ -167,9 +284,10 @@ impl WaterloggingServerOracle {
             .clone();
         Self {
             server,
-            source: source_view,
             feed,
+            _client: client,
             next_server_tick: initial_tick + 1,
+            first_advance: true,
             runtime,
         }
     }
@@ -185,12 +303,16 @@ impl WorldOracle for WaterloggingServerOracle {
         if !matches!(state.as_str(), SLAB_DRY | WATER) {
             return Err(format!("waterlogging fixture does not know {state}"));
         }
-        self.source.set_block(pos.0, pos.1, pos.2, state);
+        let state_id = lodestone_data::block_states::StateId::from_state_str(state)
+            .ok_or_else(|| format!("waterlogging fixture does not know {state}"))?;
+        self.server
+            .set_resident_block_state_id(pos.0, pos.1, pos.2, state_id)
+            .map_err(|error| format!("set resident waterlogging block: {error}"))?;
         if state == WATER {
             let mut pending = ScheduledTickQueue::new();
             pending.schedule(
                 *pos,
-                FLUID_TICK.to_owned(),
+                ScheduledTickKind::from_name(FLUID_TICK),
                 FLUID_DELAY,
                 TickPriority::Normal,
             );
@@ -201,7 +323,15 @@ impl WorldOracle for WaterloggingServerOracle {
     }
 
     fn advance_tick(&mut self) -> Result<(), Self::Error> {
-        let target = self.next_server_tick;
+        // The feed is asynchronous: the first request may arrive before or
+        // after the loop's next drain. Give that initial handoff one extra
+        // server tick so this oracle's relative tick 0 always observes the
+        // scheduled source reaction, independent of thread scheduling.
+        let target = if self.first_advance {
+            self.next_server_tick + 1
+        } else {
+            self.next_server_tick
+        };
         let deadline = Instant::now() + Duration::from_secs(2);
         let server = &self.server;
         self.runtime.block_on(async move {
@@ -215,6 +345,7 @@ impl WorldOracle for WaterloggingServerOracle {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
         })?;
+        self.first_advance = false;
         self.next_server_tick = target + 1;
         Ok(())
     }
@@ -224,8 +355,16 @@ impl WorldOracle for WaterloggingServerOracle {
         pos: (i32, i32, i32),
         candidates: &[String],
     ) -> Result<Option<String>, Self::Error> {
-        let actual = self.source.block_state(pos.0, pos.1, pos.2);
-        Ok(candidates.iter().find(|candidate| candidate.as_str() == actual).cloned())
+        let actual = self
+            .server
+            .resident_block_state_id(pos.0, pos.1, pos.2)
+            .map(|state| state.canonical_state());
+        Ok(actual.and_then(|actual| {
+            candidates
+                .iter()
+                .find(|candidate| candidate.as_str() == actual)
+                .cloned()
+        }))
     }
 }
 
@@ -346,7 +485,7 @@ fn source_water_waterlogs_adjacent_slab() {
 #[test]
 fn waterlogging_control_reports_the_first_wrong_read() {
     let result = thread::spawn(|| {
-        let mut expected = WaterloggingExpectedWorld::new(Some(1));
+        let mut expected = WaterloggingExpectedWorld::new(Some(2));
         let mut server = WaterloggingServerOracle::new();
         run_differential(&script(), &region(), &mut expected, &mut server, 4)
     })

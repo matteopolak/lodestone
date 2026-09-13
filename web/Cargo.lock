@@ -743,6 +743,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "bon"
+version = "3.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60eafe0d77c3a2fc292c1d1346c3041b33c0a108085a2afabf672b70f69dbbc9"
+dependencies = [
+ "bon-macros",
+]
+
+[[package]]
+name = "bon-macros"
+version = "3.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd0f9631d8aaaee112c41985d675ef269e02acbd4f33122836af4f0c5f699ff6"
+dependencies = [
+ "darling",
+ "ident_case",
+ "prettyplease 0.3.0",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2814,6 +2837,7 @@ dependencies = [
  "lodestone-javarandom",
  "lodestone-model",
  "png",
+ "serde",
  "serde_json",
  "thiserror 2.0.19",
  "url",
@@ -2836,6 +2860,7 @@ name = "lodestone-auth"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.0",
+ "bon",
  "keyring",
  "lodestone-time",
  "num-bigint",
@@ -2949,8 +2974,11 @@ dependencies = [
 name = "lodestone-game"
 version = "0.1.0"
 dependencies = [
+ "bon",
  "lodestone-model",
+ "serde",
  "serde_json",
+ "thiserror 2.0.19",
  "uuid",
 ]
 
@@ -2974,6 +3002,7 @@ dependencies = [
 name = "lodestone-model"
 version = "0.1.0"
 dependencies = [
+ "bon",
  "lodestone-core",
  "lodestone-world",
  "smol_str",
@@ -2996,6 +3025,7 @@ dependencies = [
  "lodestone-time",
  "rand 0.8.7",
  "rsa",
+ "serde",
  "serde_json",
  "thiserror 2.0.19",
  "tokio",
@@ -3018,6 +3048,23 @@ dependencies = [
 [[package]]
 name = "lodestone-physics"
 version = "0.1.0"
+dependencies = [
+ "lodestone-data",
+ "tracing",
+]
+
+[[package]]
+name = "lodestone-plugin-support"
+version = "0.1.0"
+dependencies = [
+ "bevy_app",
+ "bevy_ecs",
+ "lodestone-auth",
+ "lodestone-ecs",
+ "lodestone-world",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "lodestone-registry"
@@ -3067,6 +3114,7 @@ version = "0.1.0"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
+ "bon",
  "flate2",
  "js-sys",
  "lodestone-anvil",
@@ -3085,6 +3133,7 @@ dependencies = [
  "lodestone-time",
  "lodestone-world",
  "lodestone-worldgen",
+ "rayon",
  "reqwest",
  "serde",
  "serde_json",
@@ -3092,6 +3141,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tracing",
+ "url",
  "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -3185,6 +3235,7 @@ version = "0.1.0"
 dependencies = [
  "lodestone-storage-schema",
  "prost",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -3216,6 +3267,7 @@ dependencies = [
  "lodestone-server",
  "lodestone-world",
  "rand 0.8.7",
+ "serde",
  "serde_json",
  "tracing",
  "uuid",
@@ -3231,6 +3283,7 @@ dependencies = [
  "lodestone-controller",
  "lodestone-ecs",
  "lodestone-model",
+ "lodestone-plugin-support",
  "serde",
  "thiserror 2.0.19",
  "toml",
@@ -3289,7 +3342,9 @@ dependencies = [
  "lodestone-data",
  "lodestone-time",
  "lodestone-worldgen-core",
+ "serde",
  "serde_json",
+ "serde_path_to_error",
  "sha2",
 ]
 
@@ -4400,6 +4455,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "prettyplease"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bfe0f4c752e450fc2faf62654f1c134747922825d5b04ca717b8874f41a40c0"
+dependencies = [
+ "proc-macro2",
+ "syn 3.0.3",
+]
+
+[[package]]
 name = "proc-macro-crate"
 version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4444,7 +4509,7 @@ dependencies = [
  "log",
  "multimap",
  "petgraph",
- "prettyplease",
+ "prettyplease 0.2.37",
  "prost",
  "prost-types",
  "regex",

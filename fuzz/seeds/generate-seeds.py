@@ -605,6 +605,17 @@ def seed_resource_pack_zip() -> list[str]:
     return ["a zip of vanilla's own lang files -> resource_pack_zip_source"]
 
 
+def seed_status_json_model() -> list[str]:
+    """Seed the status model with a raw response captured from a real server."""
+    fixture = require(V26_2_FIXTURES / "vanilla_status_response_26_2.json")
+    capture = json.loads(fixture.read_text())
+    raw = capture.get("status_json_raw")
+    if not isinstance(raw, str) or not raw:
+        raise Fatal(f"{fixture} has no non-empty status_json_raw capture")
+    write_seed("status_json_model", "vanilla_status_response_26_2.json", raw.encode())
+    return ["a real 26.2 status response -> status_json_model"]
+
+
 FAMILIES = [
     seed_packet_decoders,
     seed_packet_frame_codec,
@@ -616,6 +627,7 @@ FAMILIES = [
     seed_text_nbt,
     seed_block_states,
     seed_resource_pack_zip,
+    seed_status_json_model,
 ]
 
 
