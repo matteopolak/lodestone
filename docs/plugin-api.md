@@ -319,7 +319,7 @@ missing file opens empty, an existing file must validate, and saves sync an excl
 sibling before rename so a failed write leaves the previous snapshot intact. `migrate` exposes
 monotonic schema-version upgrades and refuses downgrades. Entity generation is part of the key, so a
 runtime id reused after despawn cannot read the prior occupant's record. The store does not choose a
-world backend; server save-path wiring and a typed WASM scope ABI remain separate work.
+world backend; server save-path wiring remains separate work.
 
 The live entity/chunk stores still have no automatic eviction on entity despawn (a despawned id can be
 reused, so a stale entry could be read back by a new occupant) — wiring that would require this crate
@@ -338,10 +338,14 @@ cannot create missing subdirectories. The shipped native shell uses
 WASM host. The host's `LoadedPlugin::write_file` and `delete_file` helpers apply the same guarantees to
 embedding lifecycle code.
 
-WASM filesystem data remains plugin-scoped files: the host does not expose typed world/player/entity
-records or a scope-unload event through the component ABI yet. A guest that needs those scopes must
-currently encode its own records in its confined directory; the native `PluginDataStore` envelope is
-the reference shape for a future typed import.
+The WASM host also exposes the bounded envelope through the `data:persistent` component import. It is
+default-denied like the filesystem imports; a granted guest calls `get`, `set`, and `delete` with a
+plugin, world, player, or entity scope. World/player/entity identities are exactly 16 bytes, and entity
+scopes carry an explicit generation so runtime-id reuse cannot reveal stale data. When
+`with_filesystem_root` is configured, the host reloads and saves the same
+`lodestone-plugin-data.json` sidecar; otherwise the store is process-local. Scope unloading remains an
+embedding lifecycle operation: `delete` removes one record, while native `unload_scope` drains resident
+memory without claiming durable deletion.
 
 ### Bulk world edits
 

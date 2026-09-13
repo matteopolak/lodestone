@@ -34,12 +34,21 @@ etc.), verified against the census so an accidental suffix match yields
 `None` rather than an unresolvable state. Never compute a state *id* here —
 return a property-named string and let the encoder (`resolve_state_id`)
 resolve it against the jar-marked default; re-deriving id arithmetic has
-broken before.
+broken before. A connection retains the latest secondary-use bit from
+`PlayerInput`: when a block item is held, sneak-right-clicking a menu block
+bypasses its menu and places into the adjacent cell; chest pairing is also
+skipped so the new chest remains single.
 
-Known gaps: a chest's sneak-placement branch is unmodelled (no client sneak
-state reaches the server); `canSurvive` is collapsed to "use the clicked
-face"; a bed/door whose second cell is occupied still places anyway; and
-waterlogging is never set on placement.
+The authoritative server gate now evaluates every owned cell before mutating
+anything: each partner must be replaceable (with the deliberate paired-container
+retyping exception), every resolved state must have its support requirement, and
+the full set must remain inside the build height. This makes doors, beds, tall
+plants and small dripleaves atomic instead of leaving a half-placement behind.
+Waterloggable states read source water independently at each owned position;
+flowing water is not promoted to a source. A rejected multi-cell attempt still
+gets block updates for all attempted cells, which clears a client-side partner
+prediction as well as the primary cell. Accepted cells run the same neighbour,
+fluid-tick and block-entity fan-out as a single-cell placement.
 
 ### Client-side placement prediction
 
@@ -53,12 +62,14 @@ re-entrantly, because the decision needs the ECS write guard while a
 re-entrant world read would nest `chunks → World` — the one lock order this
 codebase forbids.
 
-Nothing has to detect a server refusal: vanilla's server sends a
+The prediction ledger records every owned position for a two-cell placement.
+Nothing has to detect a server refusal: the server sends a
 `BLOCK_UPDATE` for **both** the clicked cell and its neighbour after every
-`use_item_on`, unconditionally, so a mispredicted cell is corrected within one
-round trip and `sync_block_entity` on that same arm removes any block-entity
-record the prediction wrongly created. Every classification here is therefore
-allowed to err toward **not** predicting, never toward predicting wrong.
+`use_item_on`, plus every attempted partner, unconditionally, so a mispredicted
+cell is corrected within one round trip and `sync_block_entity` on that same arm
+removes any block-entity record the prediction wrongly created. Every
+classification here is therefore allowed to err toward **not** predicting,
+never toward predicting wrong.
 
 Resolving a full state (`state_for_placement`) needs values for every
 property, since no census here carries a block's registered default state.
@@ -260,6 +271,22 @@ name lookup is total. Version adapters validate raw state IDs before lookup and
 convert the resulting type with `raw()` only when writing version-free world
 records. Extend the generated census and its committed-dump tests together;
 these lookups introduce no configuration or runtime dependencies.
+
+Generated columns are bulk-adopted, so they do not pass through the ordinary
+state-write hook that creates state-owned records. The Overworld source repairs
+that seam after structure sidecars are attached with
+`ChunkColumn::populate_missing_block_entity_states`: it scans the jar-derived
+state-to-type table, fills only positions without an existing richer record,
+and uses an empty `Nbt::End` payload for state-only types such as
+`minecraft:potent_sulfur` (registry id 48). Keep this repair after structure
+attachment so generated chests are not duplicated; callers must provide the
+column coordinates because the dense block field stores local X/Z while
+block-entity records use absolute positions. Plain `minecraft:sulfur` is the
+negative control and must not produce a record. Lifecycle feature and
+post-feature writes run the same repair immediately after each resident-column
+mutation via `ChunkColumn::reconcile_generated_block_entity_states`; a state introduced
+by a spill therefore gets its empty record even when the shaped column did not
+contain that state yet, without rescanning the whole column for every write.
 
 Four independent, pure, tick-driven state machines
 (`crates/lodestone-server/src/{composter,furnace,hopper,brewing}.rs`), each a

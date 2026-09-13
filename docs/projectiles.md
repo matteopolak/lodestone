@@ -41,6 +41,14 @@ toward treasure via the same integer weight formula every loot table uses. A cau
 as a real item entity plus a real experience orb, reusing the sim's existing item/orb producers rather
 than a bespoke reward path.
 
+Fishing ticks use a two-stage owner plan once a simulation has at least 2,048 live bobbers. Entity-id
+order first consumes the isolated random stream into immutable per-bobber decisions; bounded native
+owner lanes then perform the water scan and physics from cloned tick-start state. The central apply
+step validates the plan generation, owner coverage, and serial slots before writing the live map. The
+browser build and smaller simulations retain the serial path. The focused dense-pond measurement
+(`measure_dense_fishing_owner_workers`) is the evidence for this cutoff; the parity tests also cover
+interleaved owners, a negative chunk coordinate, and bite/lure/reset random transitions.
+
 ### Riptide and the elytra firework boost
 
 Two item-driven velocity impulses, each split between pure arithmetic (in `lodestone-physics`) and a

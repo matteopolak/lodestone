@@ -4,7 +4,7 @@
 
 How the render camera's orientation is built and why (`lodestone-render`'s
 `Camera`), the three tick-driven effects layered onto it before it reaches a
-uniform — the walking bob, the damage tilt, and (not yet built) held-item view lag
+uniform — the walking bob, the damage tilt, and the decaying held-item view lag
 — and the shell's frame clock, which decides how much simulated time a frame gets
 and whether it presents at all.
 
@@ -51,10 +51,10 @@ culling needs).
 
 Three mechanisms a screenshot makes look like one: `bobView` (the walking sway/dip/
 nod, once per footfall, driven by tick-accumulated `walkDist`/`bob`), `bobHurt` (a
-roll toward the hit direction, driven by a `hurtTime` countdown), and `xBob`/`yBob`
-(a smoothed lag of the held item and third-person body behind head rotation — **not
-yet implemented**). `bobHurt` is unrelated to the red hurt-flash overlay, which is a
-separate ~30%-red blend in the entity pipeline; the two happen to fire together.
+roll toward the hit direction, driven by a `hurtTime` countdown), and `ViewLag` (a
+smoothed lag of the held item and local third-person body behind head rotation).
+`bobHurt` is unrelated to the red hurt-flash overlay, which is a separate ~30%-red
+blend in the entity pipeline; the two happen to fire together.
 
 Tick-advanced state (`ViewBob`, alongside the eye-height smoother — both are
 per-tick state that cannot be a pure function of the current player pose) lives in
@@ -152,10 +152,14 @@ presentation.
   exactly the bug this module exists to prevent.
 - **The bob goes on `render_camera`, never on `Sim::camera`** — the latter is also
   the pick-ray origin and the audio listener, and vanilla bobs neither.
-- **To land held-item view lag (`xBob`/`yBob`)**: add the same current/previous pair
-  to `ViewBob`, prefixed onto the hand pose — it is a smoothed *lag*, not a bob, and
-  is unrelated to the arm's own `bobHurt` wiring (the two were historically
-  conflated in this doc).
+- **Held-item/third-person view lag (`ViewLag`)**: the shell keeps current and
+  previous yaw/pitch values beside `ViewBob`, easing each toward the live view by
+  half the remaining distance per fixed tick. A frame interpolates that pair and
+  prefixes ten percent of the residual onto the first-person hand pose and the
+  synthetic local body's held-item attachment. The ordinary camera remains
+  unlagged for picking, audio, and third-person pullback. Keep the two consumers
+  on the same sampled source so a rapid-turn gate can observe a nonzero offset
+  that decays on stationary ticks.
 - **A bob-fixture test that never actually accumulates `walkDist` measures
   nothing** — a hermetic gate needs a flattened path the player can really walk down
   before asserting on the resulting bob.
