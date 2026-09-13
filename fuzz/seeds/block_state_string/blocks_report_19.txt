@@ -1,1 +1,0 @@
-minecraft:andesite_stairs[facing=north,half=top,shape=straight,waterlogged=true]

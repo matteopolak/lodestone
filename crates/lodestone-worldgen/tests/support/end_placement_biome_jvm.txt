@@ -1,3 +1,0 @@
-# Seed 42 block-position biome answers captured from the compiled 26.2 server.
-block 2819,61,1352 minecraft:end_highlands
-block 2944,64,1385 minecraft:end_midlands

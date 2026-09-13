@@ -1,1 +1,0 @@
-minecraft:acacia_stairs[facing=north,half=top,shape=straight,waterlogged=true]
