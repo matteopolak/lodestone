@@ -523,7 +523,9 @@ fn mining_effect_amplifiers_choose_the_stronger_haste_source_and_keep_fatigue() 
         1,
         200,
     ));
-    let (haste, fatigue) = mining_effect_amplifiers(Some(&HudEffects(active)));
+    let (haste, fatigue) = crate::interact::typed_mining_effect_amplifiers(Some(&HudEffects(
+        active,
+    )));
     assert_eq!(haste, Some(2), "Haste and Conduit Power do not stack");
     assert_eq!(fatigue, Some(1));
 

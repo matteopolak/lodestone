@@ -205,23 +205,6 @@ pub(crate) fn dig_break_inputs_with_effects(
     }
 }
 
-/// The active mining-effect amplifiers from the HUD's authoritative local
-/// effect state. Conduit Power uses the Haste formula; when both are present,
-/// the stronger amplifier wins rather than applying the multiplier twice.
-#[must_use]
-pub(crate) fn mining_effect_amplifiers(
-    effects: Option<&HudEffects>,
-) -> (Option<u32>, Option<u32>) {
-    let amplifier = |bare: &str| {
-        let id = lodestone_model::Identifier::new("minecraft", bare).ok()?;
-        effects?.0.get(&id).map(|effect| u32::from(effect.amplifier))
-    };
-    (
-        amplifier("haste").max(amplifier("conduit_power")),
-        amplifier("mining_fatigue"),
-    )
-}
-
 /// The bare-hand [`lodestone_model::ToolMining`] fold, for when
 /// [`lodestone_model::VersionAdapter::tool_mining`] has nothing to resolve
 /// against (no held item) or is unreachable.
