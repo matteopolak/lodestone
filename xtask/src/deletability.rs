@@ -450,7 +450,7 @@ fn manifest_lines_mentioning(
 /// are not dependency-graph edges, so they must be caught textually. Matches the
 /// feature token only as a `/<token>` path segment ending at a feature-string
 /// boundary, so `v1-8` never matches inside a longer token such as `v1-80`.
-fn line_forwards_to_family_feature(line: &str, folder_token: &str) -> bool {
+pub(crate) fn line_forwards_to_family_feature(line: &str, folder_token: &str) -> bool {
     if folder_token.is_empty() {
         return false;
     }

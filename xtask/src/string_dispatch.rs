@@ -30,8 +30,6 @@ pub struct Hit {
 pub enum Category {
     Generated,
     TestOrBenchmark,
-    /// A textual boundary that should still become a Serde enum when its
-    /// accepted domain is closed. This is a report category, not an allow.
     Boundary,
     Production,
 }
