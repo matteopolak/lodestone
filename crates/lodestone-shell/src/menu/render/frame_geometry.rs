@@ -1,4 +1,4 @@
-use super::*
+use super::*;
 
 
 /// A pixel gate using a real `EditBox` on a real screen, measured **inside
