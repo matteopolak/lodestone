@@ -99,15 +99,15 @@ remain position-derived, but placement reads and replacement checks observe
 earlier cross-chunk writes, so changing this order changes generated blocks even
 when every individual source's random stream is unchanged.
 
-Lifecycle packet replay treats Overworld FEATURES as one target-owned status
-completion. The admitted radius-one CARVERS columns provide the read/write
-region, but they do not become nine independent FEATURES events; writes into
-that region remain resident for later target packets. The lifecycle adapter
-therefore accepts a sparse event stream containing the requested centre while
-the production dispatcher may retain its internal source views for feature
-selection and write routing. This distinction is observable at seed 42,
-target `(2,0)`, where world `(5,-62,0)` remains tuff after the single target
-completion.
+Lifecycle packet replay keeps the requested target separate from the completing
+source. Each completion runs one source's body with the target's live
+radius-one read/write region, while the source retains its position-derived
+decoration seed. A spill into an admitted neighbour remains resident for later
+target packets. This distinction is observable at seed 42: the streamed target
+`(1,0)` retains `minecraft:granite` at local `(1,27,14)` from the preceding
+`(0,0)` source, whereas a fused nine-source dispatch produces a different
+state. A complete source event sequence still preserves the tuff witness at
+target `(2,0)` and local `(5,-62,0)`.
 
 Collections traversed while consuming that random stream must have explicit order. Vegetation patches
 use `CompatBlockPosSet` for successful surface positions: its compact membership index and insertion
