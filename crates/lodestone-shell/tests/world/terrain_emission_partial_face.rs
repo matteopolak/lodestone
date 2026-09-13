@@ -26,7 +26,7 @@ use lodestone_world::{
 };
 
 const SECTIONS: usize = 1;
-const SUBJECT: (usize, usize, usize) = (8, 8, 8);
+const SUBJECT: (usize, i32, usize) = (8, 8, 8);
 
 fn pack_root() -> PathBuf {
     let cwd = std::env::current_dir().expect("cwd");

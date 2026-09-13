@@ -3712,7 +3712,7 @@ mod tests {
                 &ordinary.anim,
             )
             .expect("ordinary zombie must resolve");
-        let ordinary_instance = apply_named_orientation(&ordinary, ordinary_base);
+        let ordinary_instance = apply_named_orientation(&ordinary, ordinary_base.clone());
 
         assert_ne!(named_instance.transform, ordinary_instance.transform);
         let head = models

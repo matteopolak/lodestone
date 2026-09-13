@@ -359,7 +359,7 @@ fn use_item_on_sequences(ticks: &[Vec<ClientAction>]) -> Vec<i32> {
         .iter()
         .flatten()
         .filter_map(|a| match a {
-            ClientAction::UseItemOn { sequence, .. } => Some(*sequence),
+            ClientAction::UseItemOn { sequence, .. } => Some(sequence.as_wire()),
             _ => None,
         })
         .collect()
