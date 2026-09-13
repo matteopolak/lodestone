@@ -611,5 +611,3 @@ fn the_walk_bob_reaches_the_projection_at_vanillas_own_magnitude_and_axis() {
         dip_px - nod_peak_px
     );
 }
-
-#[test]
