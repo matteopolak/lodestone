@@ -1,4 +1,4 @@
-use super::*
+use super::*;
 
 
 /// **Every avatar on the accounts screen was the same hand-authored head.**

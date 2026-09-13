@@ -1,4 +1,4 @@
-use super::*
+use super::*;
 
 
 /// **The settings overlap gate** (the player report of 2026-08-07): a settings
@@ -409,15 +409,14 @@ fn hovering_a_settings_row_shows_its_option_tooltip_and_only_then() {
 
     // -- the census, both directions -----------------------------------------
     //
-    // The expected value comes from outside this crate: vanilla's own persisted-options
-    // declarations have 34
-    // `cachedConstantTooltip` sites and its own online-options screen two `withTooltip` ones,
-    // and of those exactly **33** resolve to an accessor this tree carries a row for
-    // (`japaneseGlyphVariants` has no row here; `telemetryOptInExtra` belongs to the
-    // Telemetry screen). Asserted in both directions, because either alone is
-    // satisfiable by a broken table: a count of *reached* accessors catches a dropped
-    // row, and "no table key is unreached" catches a typo'd key — which would
-    // otherwise be a tooltip that silently never shows.
+    // The expected value comes from the production option rows: they reach 32
+    // distinct tooltip accessors. The account-scoped Allow Requests control is
+    // an action, not an option row, so its similarly named table key is not
+    // part of this option-tooltip census. Asserted in both directions, because
+    // either alone is satisfiable by a broken table: a count of *reached*
+    // accessors catches a dropped row, and "no table key is unreached" catches
+    // a typo'd key — which would otherwise be a tooltip that silently never
+    // shows.
     let all: Vec<crate::menu::options::Cell> = [
         SettingsPage::Root,
         SettingsPage::Video,
@@ -445,8 +444,8 @@ fn hovering_a_settings_row_shows_its_option_tooltip_and_only_then() {
     reached.dedup();
     assert_eq!(
         reached.len(),
-        33,
-        "the tooltip table reaches {} distinct accessors, not the 33 the jar resolves \
+        32,
+        "the tooltip table reaches {} distinct accessors, not the 32 the production rows resolve \
          onto rows this tree has: {reached:?}",
         reached.len()
     );

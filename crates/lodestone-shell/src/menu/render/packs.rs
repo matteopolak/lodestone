@@ -1,4 +1,4 @@
-use super::*
+use super::*;
 
 
 /// A resource-pack row draws vanilla's selection-list entry — thumbnail, name and

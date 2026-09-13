@@ -1,4 +1,4 @@
-use super::*
+use super::*;
 
 
 #[test]
@@ -356,9 +356,9 @@ fn pause_frame_builds_vanillas_ten_widgets_in_order_and_tracks_the_highlight() {
         PAUSE_BUTTONS.len() - 1,
         "selection follows the nav's pause_index"
     );
-    // Seven are live: the three with actions, plus Advancements, Statistics and
-    // Player Reporting has a live screen behind it, and Open to LAN has a
-    // caller through `IntegratedServer::open_to_lan`
+    // Eight are live: the three core actions, plus Advancements, Statistics,
+    // Friends, Player Reporting and Open to LAN. Open to LAN has a caller
+    // through `IntegratedServer::open_to_lan`
     // (see `PauseButton::enabled`'s own doc for each — what each screen shows is
     // honest-but-limited, not what made the button liveness conditional).
     let live: Vec<&str> = f
@@ -373,6 +373,7 @@ fn pause_frame_builds_vanillas_ten_widgets_in_order_and_tracks_the_highlight() {
             "Back to Game",
             "Advancements",
             "Statistics",
+            "Friends",
             "Player Reporting",
             "Options...",
             "Open to LAN",

@@ -81,7 +81,7 @@ use crate::menu::widget::{self, LayoutElement, Widget};
 // block above and need no restating.
 use super::{
     Screen, UiState, accounts, confirm, create_world, friends, key_binds, language, nav, options,
-    packs, social, stats, status, telemetry, world_select,
+    packs, social, status, telemetry, world_select,
 };
 
 mod account_screen;
@@ -110,6 +110,7 @@ pub use frame::{
     BookPageButton, ChunkGridView, FaviconCache, MenuBackdrop, MenuFrame, MenuLabel, MenuNotice,
     MenuProgress, MenuRow, PROGRESS_BAR_BG, PROGRESS_BAR_FG, PROGRESS_BAR_H, PROGRESS_BAR_W, PackEntryView,
     ServerEntryView, TabEntryView, WorldEntryView, chunk_cell_colour, chunk_cell_origin,
+    chunk_cell_size,
     notice_rect, owns_frame,
 };
 pub use measure::{
