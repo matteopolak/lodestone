@@ -29,13 +29,13 @@
 //! `crates/lodestone-net/src/connection.rs`'s own
 //! `read_packet_timeout_fires_when_peer_is_silent` test.
 
-mod common;
-mod join;
-mod connection;
-mod vitals;
-mod streaming;
-mod breaking;
-mod pickup;
-mod ban;
-mod encoding;
-mod misc;
+include!("serve_play/common.rs");
+include!("serve_play/join.rs");
+include!("serve_play/connection.rs");
+include!("serve_play/vitals.rs");
+include!("serve_play/streaming.rs");
+include!("serve_play/breaking.rs");
+include!("serve_play/pickup.rs");
+include!("serve_play/ban.rs");
+include!("serve_play/encoding.rs");
+include!("serve_play/misc.rs");

@@ -1,5 +1,9 @@
-use super::common::*;
-
+/// **A banned uuid is refused at login**, before `login_success`, with
+/// the canonical refusal translation key on the wire — and the identical connection is
+/// admitted once the ban is lifted.
+///
+/// The lifted-ban arm is the control: without it, a test that only asserts the
+/// refusal cannot tell "the ban was enforced" from "this fixture never joins".
 #[tokio::test]
 async fn a_banned_uuid_is_refused_at_login_and_admitted_once_pardoned() {
     use lodestone_server::access::{AccessHandle, BanEntry};

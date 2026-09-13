@@ -1,5 +1,3 @@
-use super::common::*;
-
 /// **The second block-drop gate: the drop can be picked up, and
 /// the pickup reaches the client.**
 ///
@@ -78,7 +76,6 @@ async fn a_dropped_item_is_collected_into_the_hotbar_and_announced() {
     drop(client);
     let _ = server.await.expect("server task panicked");
 }
-
 // ---------------------------------------------------------------------------
 // The pickup animation (`TAKE_ITEM_ENTITY`) and its ordering.
 // ---------------------------------------------------------------------------
@@ -592,11 +589,3 @@ async fn a_drop_outside_the_pickup_volume_is_not_collected() {
     drop(client);
     let _ = server.await.expect("server task panicked");
 }
-
-
-/// **A banned uuid is refused at login**, before `login_success`, with
-/// the canonical refusal translation key on the wire — and the identical connection is
-/// admitted once the ban is lifted.
-///
-/// The lifted-ban arm is the control: without it, a test that only asserts the
-/// refusal cannot tell "the ban was enforced" from "this fixture never joins".

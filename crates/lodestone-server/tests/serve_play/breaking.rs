@@ -1,5 +1,11 @@
-use super::common::*;
-
+/// A [`ChunkSource`] that records every coordinate it is asked to generate.
+///
+/// Exists for [`generation_is_anchored_at_the_player_not_at_the_origin`]: the
+/// comparison is between enumerating from `(0, 0)` outward and enumerating from
+/// the player, which would make each recenter do more work as the player moves.
+/// That is a claim about
+/// *which coordinates are generated*, and nothing that counts columns can answer
+/// it — only something that records the coordinates themselves.
 struct RecordingSource {
     seen: std::sync::Arc<std::sync::Mutex<Vec<(i32, i32)>>>,
 }

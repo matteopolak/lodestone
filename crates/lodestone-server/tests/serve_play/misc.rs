@@ -1,5 +1,3 @@
-use super::common::*;
-
 /// **The hunger integration gate**: a sprinting player's exhaustion
 /// reaches the wire as a falling `saturation`, then a falling `food`, on the real
 /// `serve_connection` path — not just inside `crate::food`'s own unit tests, which

@@ -1,5 +1,3 @@
-use super::common::*;
-
 /// A protocol from before the Configuration phase enters Play immediately
 /// after login success. The server must use the capability rather than waiting
 /// for acknowledgements that this wire cannot carry.

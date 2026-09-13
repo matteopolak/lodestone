@@ -1,5 +1,3 @@
-use super::common::*;
-
 /// Reads packets until a [`SET_HEALTH_S2C`] arrives, collecting every
 /// [`AIR_SUPPLY_S2C`] value seen along the way (in order) and discarding
 /// anything else (keep-alive, time-sync noise interleaved by the same
@@ -667,17 +665,3 @@ async fn client_information_view_distance_resizes_the_streamed_view() {
     drop(client);
     let _ = server.await.unwrap();
 }
-
-/// **The player-feed integration gate.**
-///
-/// Every other gate for the perception feed calls `MobSim::set_players`
-/// *itself*, so all of them would pass with no producer anywhere — which is
-/// exactly the state `nearest_player`/`temptation` start in: seam
-/// present, feed present, nothing calling it. This test never touches
-/// `set_players`. It drives a real `PLAYER_MOVED` packet through
-/// `serve_connection` and asserts the perception arrived, so it fails if the one
-/// line in `dispatch_play_packet`'s `PlayerMoved` arm is ever removed.
-///
-/// Note the `MobHandle` is a real one over a real `ChunkWorld` holding a real
-/// mob, not the `MobHandle::default()` every other test in this file uses — the
-/// default is an empty sim, which cannot show a mob's perception changing.

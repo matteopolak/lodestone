@@ -1,5 +1,16 @@
-use super::common::*;
-
+/// **The player-feed integration gate.**
+///
+/// Every other gate for the perception feed calls `MobSim::set_players`
+/// *itself*, so all of them would pass with no producer anywhere — which is
+/// exactly the state `nearest_player`/`temptation` start in: seam
+/// present, feed present, nothing calling it. This test never touches
+/// `set_players`. It drives a real `PLAYER_MOVED` packet through
+/// `serve_connection` and asserts the perception arrived, so it fails if the one
+/// line in `dispatch_play_packet`'s `PlayerMoved` arm is ever removed.
+///
+/// Note the `MobHandle` is a real one over a real `ChunkWorld` holding a real
+/// mob, not the `MobHandle::default()` every other test in this file uses — the
+/// default is an empty sim, which cannot show a mob's perception changing.
 #[tokio::test(start_paused = true)]
 async fn a_player_moved_packet_feeds_mob_perception_through_the_real_connection() {
     let (client_end, server_end) = memory_pair();
@@ -981,11 +992,3 @@ async fn weather_feed_transitions_reach_the_client_as_game_event_bytes() {
     drop(client);
     let _ = server.await.expect("server task panicked");
 }
-
-/// A [`ChunkSource`] that records every coordinate it is asked to generate.
-///
-/// Exists for [`generation_is_anchored_at_the_player_not_at_the_origin`]: the
-/// comparison is between enumerating from `(0, 0)` outward and enumerating from
-/// the player, which would make each recenter do more work as the player moves.
-/// That is a claim about
-/// *which coordinates are generated*, and nothing that counts columns can answer
