@@ -1,0 +1,77 @@
+[package]
+name = "lodestone-ecs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+lodestone-data = { workspace = true }
+# The workspace's one portable clock seam — see `lodestone_time`'s crate docs. It
+# is here because `Instant::now()` and `SystemTime::now()` COMPILE for wasm32 and
+# then TRAP at runtime (measured, executed in a wasm VM: `RuntimeError:
+# unreachable`), and this crate runs in the browser: `lodestone-shell`'s browser
+# build reached a world and died here. Not a direct `web-time` dependency any
+# more: `lodestone-time` is the one crate that depends on `web-time` directly, so
+# every other crate's clock goes through it instead of an improvised copy. See
+# `docs/browser-shell-port.md`.
+lodestone-time = { workspace = true }
+# `default-features = false, features = ["std"]` per docs/bevy-migration.md §3:
+# `bevy_reflect` (default-on) is heavyweight and unneeded, and `multi_threaded`
+# does not even compile on wasm32 with no threads (§3.1) — left off on every
+# target so native and wasm run the same executor and the same system order.
+bevy_app = { workspace = true }
+bevy_ecs = { workspace = true }
+# The `Arc<RwLock<World>>` handle a driver hands to async/bot callers and, later,
+# net-thread ingest. `parking_lot` per §11 (azalea uses it for the same purpose).
+parking_lot = { workspace = true }
+# The version-free ingest vocabulary (`ClientEvent`) and the value types the
+# entity component set is built out of (`Vec3`, `Rotation`, `ResourceKey`,
+# `ItemStack`, `Reported`, …), per docs/bevy-migration.md §11. Deliberately the
+# *only* Lodestone dependency: never a version crate (§5), and not
+# `lodestone-render` (§4.4 keeps the GPU layer bevy-free, which also means the
+# ECS must not reach into it).
+lodestone-model = { workspace = true }
+# Stage 2: the local player's components *are* `PlayerState`/`MovementInput`/
+# `FluidState`, and `player_physics` calls `lodestone_physics::tick`. The maths
+# stays here-adjacent, never inlined — it is bit-exact against a JVM oracle with
+# golden traces (docs/bevy-migration.md §8), so the ECS may only ever be its
+# caller. wasm-safe: `lodestone-controller` already depends on it and is in
+# `scripts/wasm-check.sh`'s crate list.
+lodestone-physics = { workspace = true }
+# Depth Strider (docs/swimming.md): `player_physics` folds the local player's
+# `Attributes` component through vanilla's three-stage `calculateValue` to
+# reach `PlayerState::water_movement_efficiency`. `lodestone-entity` depends
+# only on `lodestone-model` + `uuid` (both already in this graph), so this adds
+# no new wasm surface. Never a version crate (§5): the fold is keyed by
+# canonical attribute id, not a version-specific wire shape.
+lodestone-entity = { workspace = true }
+# Stage 3: the session/HUD component set *is* `lodestone-game`'s canonical
+# aggregates (`scoreboard::Scoreboard`, `tablist::TabList`, `bossbar::BossBarSet`,
+# `menus::Menus`, `effect::ActiveEffects`, `player_state::{TitleState, ActionBar}`).
+# Wrapping them in components rather than reimplementing them is the whole point
+# of the stage: there were three folds of the scoreboard family, and this leaves
+# one (docs/bevy-migration.md §8: `lodestone-game`'s folds stay plain functions
+# the ECS calls). wasm-safe: `lodestone-client` already depends on it with
+# default features and is in `scripts/wasm-check.sh`'s crate list.
+lodestone-game = { workspace = true }
+# Stage 4: the chunk store. `ChunkWorld` is an `Arc<RwLock<lodestone_world::World>>`
+# exposed as a `Resource` (docs/bevy-migration.md §4.1(d)) — chunks are deliberately
+# *not* entities, matching azalea's `Worlds` resource (§2.3). wasm-safe:
+# `lodestone-client` already depends on it and is in `scripts/wasm-check.sh`'s
+# crate list.
+lodestone-world = { workspace = true }
+# `EntityUuid`. `lodestone-model` already speaks `Uuid` in `EntitySpawned`, so
+# this adds no new type to the graph, only the name.
+uuid = { workspace = true }
+# The Brigadier argument tree, parser and suggester behind `commands` (issues
+# #118/#119/#122). This is that crate's *first* consumer — it was landed as a
+# declared island with three named expected consumers, and this closes one.
+#
+# Safe to add and cannot cycle: `lodestone-command` has a literally empty
+# `[dependencies]` section, so it is a graph sink. It is also trivially
+# wasm-safe for the same reason, which matters because this crate is in
+# `scripts/wasm-check.sh`'s list.
+lodestone-command = { workspace = true }

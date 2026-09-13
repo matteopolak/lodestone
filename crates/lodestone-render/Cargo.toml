@@ -1,0 +1,110 @@
+[package]
+name = "lodestone-render"
+autobenches = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Headless (offscreen texture target) is the default so the crate builds and
+# tests without a window server. Windowing is strictly additive.
+#
+# Section meshing fans across a rayon pool on native targets; this is gated on
+# `cfg(not(target_arch = "wasm32"))` rather than a Cargo feature. A default-on
+# feature is the wrong tool here: feature unification lets any consumer re-enable
+# it across the whole graph (see scripts/wasm-check.sh), which would drag the
+# non-wasm-safe rayon into the browser build. Target-gating the dependency (below)
+# is immune to that — wasm simply never sees rayon, and `mesher::build_batch`
+# falls back to a serial loop there.
+default = []
+window = ["dep:winit"]
+# Enables the Phase-5 acceptance gate test (`tests/live_gate.rs`): connect to a
+# real vanilla 26.2 server, pull real chunks, bake + mesh + render them
+# headlessly, and read back pixels. Off by default so the default build stays
+# version-free and hermetic.
+#
+# VERSION-FREE: the gate drives a real login through `lodestone-client`'s public
+# session driver, obtaining the concrete adapter from `lodestone-registry` (the
+# one sanctioned aggregation point that may name a version, behind its own
+# feature-gated optional dep). The gate names no version crate, no packet id, and
+# no wire type: it connects, waits for chunks, and reads `Arc<ChunkSection>`
+# snapshots back through `ClientHandle::sections_at`. This proves the whole path
+# (live server -> client -> world -> mesher -> pixels) rather than a chunk the
+# test hand-decoded, and keeps v26-2 deletable via its folder plus the registry's
+# one feature line.
+live-chunk-gate = ["dep:lodestone-client", "dep:lodestone-registry", "dep:tokio", "dep:uuid"]
+
+[dependencies]
+wgpu.workspace = true
+bytemuck.workspace = true
+pollster.workspace = true
+thiserror.workspace = true
+serde_json.workspace = true
+glam.workspace = true
+lodestone-assets.workspace = true
+lodestone-model.workspace = true
+lodestone-world.workspace = true
+# `entity::model_for_type` takes an `EntityType` (issue #523's third pass) --
+# the generated 158-variant registry enum whose discriminant is the wire's own
+# id. `lodestone-data` depends on nothing but `lodestone-model`, is not a
+# protocol-version crate, and `lodestone-world`/`lodestone-shell`/
+# `lodestone-entity` already take it as a plain dependency for the same
+# version-free-census reason, so this does not touch `check-isolation`.
+lodestone-data.workspace = true
+# `java.util.Random`, bit-exact — the lightning bolt's procedural geometry is a
+# pure function of a seed drawn through it. The workspace's one copy, shared
+# with `lodestone-particle`, `lodestone-audio` and `lodestone-shell`'s
+# enchanting table. See `src/lightning_bolt.rs`.
+lodestone-javarandom.workspace = true
+# `Mth.sin`/`Mth.cos` — vanilla's quantized 65,536-entry lookup table, not
+# `f32::sin`/`f32::cos`. `entity_sprite`'s fishing-line anchor evaluates them on
+# a body yaw, where the two agree to within a table quantum in the middle of the
+# range and disagree in sign at the cardinal angles a fixture is most likely to
+# pick. `lodestone-physics` has **no** dependencies of its own, so this adds one
+# leaf to the graph and cannot cycle.
+lodestone-physics.workspace = true
+winit = { workspace = true, optional = true }
+
+# Live-gate deps: optional, enabled only by `live-chunk-gate`. The gate connects
+# through the client's public API and selects the adapter by protocol number via
+# the registry (the sanctioned version aggregator), so this crate names no
+# version crate directly and `check-isolation` stays clean.
+lodestone-client = { workspace = true, optional = true }
+lodestone-registry = { workspace = true, optional = true, features = ["v26-2"] }
+tokio = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+
+# Off-thread section meshing. Target-gated (not feature-gated) so it is absent
+# from the wasm build unconditionally — see the [features] note above.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rayon.workspace = true
+
+[dev-dependencies]
+pollster.workspace = true
+png.workspace = true
+lodestone-model.workspace = true
+lodestone-testsupport = { workspace = true, features = ["bench-record"] }
+# `lodestone-data` moved to a real dependency above (issue #523); this
+# `model_ao_corner_gate`/census-reading use is unaffected, it just no longer
+# needs its own dev-only entry.
+# Same pin as every other bench site in the workspace (lodestone-world,
+# -worldgen, -physics, -entity, protocol/v770). `default-features = false` is
+# load-bearing: it drops plotters and criterion's own rayon.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+# Meshing throughput for BOTH meshers plus frontier remesh (issues #90/#91/#92).
+# CPU-only and hermetic — no GPU adapter, no window, no server.
+[[bench]]
+name = "meshing"
+harness = false
+
+# Draw-call counts, entity render planning/upload and arena occupancy
+# (issues #106/#128/#160). The occupancy half needs a GPU adapter and says
+# loudly which gates did not run when there is none; the count gates are
+# CPU-only.
+[[bench]]
+name = "render_submit"
+harness = false

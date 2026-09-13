@@ -1,0 +1,17 @@
+[package]
+name = "lodestone-javarandom"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A single, bit-exact `java.util.Random` — the workspace's one copy of the 48-bit LCG."
+
+[lints]
+workspace = true
+
+[dependencies]
+# `from_entropy`'s one clock read. `lodestone_time::epoch_duration`, never
+# `SystemTime::now()` directly — the latter compiles for wasm32 and traps at
+# runtime; see `lodestone_time`'s own crate docs for the measurement. Every
+# other method in this crate is pure integer arithmetic and needs nothing.
+lodestone-time = { workspace = true }

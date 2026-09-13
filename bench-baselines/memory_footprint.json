@@ -1,0 +1,51 @@
+{
+  "bench": "memory_footprint",
+  "note": "Committed baseline for deterministic bench metrics: counts, byte totals and fractions of a fixed capacity. NEVER a duration -- scripts/bench-gate.py refuses to write one, because a committed duration is a wall-clock ceiling on whatever machine recorded it. Move a value with `just bench-baseline-update` and commit the diff alongside the change that moved it; the band is two-way, so an unexplained improvement is red too. First recorded on macbook.local (aarch64, macOS, `bench` profile); cross-machine agreement is verified by CI's own first run of the bench-gate job, and a disagreement there is evidence that the metric is not machine-independent rather than evidence of a regression.",
+  "entries": [
+    {
+      "metric": "dense_light_column_heap_bytes",
+      "scene": "every light section genuinely varied",
+      "unit": "bytes",
+      "value": 107328.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "dense_varied_column_heap_bytes",
+      "scene": "every section direct-storage varied",
+      "unit": "bytes",
+      "value": 202368.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "flatworld_like_column_heap_bytes",
+      "scene": "bedrock/dirt/grass, one allocated section",
+      "unit": "bytes",
+      "value": 2488.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "realistic_light_column_heap_bytes",
+      "scene": "lit surface band, uniform elsewhere",
+      "unit": "bytes",
+      "value": 9024.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    },
+    {
+      "metric": "realistic_terrain_column_heap_bytes",
+      "scene": "issue #80 shared Tier 2 fixture (seed=0)",
+      "unit": "bytes",
+      "value": 16280.0,
+      "tolerance_pct": 0,
+      "required": true,
+      "recorded_sha": "a0e24e675441"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+[package]
+name = "lodestone-storage-schema"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+prost = "0.14.3"
+
+[build-dependencies]
+prost-build = "0.14.3"
+protoc-bin-vendored = "3"

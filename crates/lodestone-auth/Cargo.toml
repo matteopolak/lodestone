@@ -1,0 +1,107 @@
+[package]
+name = "lodestone-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Permits a loopback-only Friends-service origin for downstream hermetic tests.
+# Production code has no configurable origin: a bearer token must never follow a
+# preference or environment value to an arbitrary host.
+friends-test-service = []
+
+[dependencies]
+bon.workspace = true
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+url = { workspace = true }
+
+# The Minecraft server-ID hash is a non-standard SHA-1 rendered as a *signed*
+# two's-complement hex string (Java `BigInteger(bytes).toString(16)`), so we need
+# both a SHA-1 implementation and a big-integer type to reproduce Java's exact
+# textual output. `num-bigint`'s `from_signed_bytes_be` + `to_str_radix(16)` is
+# the direct analog and avoids hand-rolled two's-complement bit-twiddling.
+sha1 = { workspace = true, features = ["oid"] }
+num-bigint = { workspace = true }
+base64 = { workspace = true }
+# The portable clock (`docs/`, `lodestone-time`'s own crate docs): `flow`'s
+# `session_from_ms_token` and `login`'s cache-expiry check both need a wall
+# clock, and now that both compile for wasm32 (see the target section below)
+# neither may reach `std::time::SystemTime::now()` directly — it traps there.
+# Unconditional, matching every other depender: this crate's own
+# `unix_now`-shaped need used to be served by the native-only `migrate`
+# module, which cannot serve a wasm32 caller.
+lodestone-time = { workspace = true }
+
+# HTTP client for the Microsoft OAuth / Xbox Live / XSTS / Minecraft-services
+# call chain and the session-server `join` POST. `reqwest` itself is *not*
+# native-only any more — see the `wasm32` target section below, which depends
+# on the identical `[workspace.dependencies]` entry: reqwest's own manifest
+# target-gates every hyper/rustls/tokio dependency its TLS-related features
+# pull in to `cfg(not(wasm32))`, so requesting them here is a no-op on wasm32
+# and the crate falls through to its `fetch`-backed wasm client instead. What
+# stays native-only in *this* block is `tokio` (the device-code poll loop's
+# blocking runtime, `crate::browser_login`'s socket, and this crate's own
+# `#[tokio::test]`s) and `keyring` (the OS credential store, `docs/accounts.md`
+# — no wasm32 backend exists, hence `crate::store::LocalStorageStore` below).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { workspace = true }
+tokio = { workspace = true }
+keyring = { workspace = true }
+# Named directly only to install the process-default crypto provider (`tls`).
+# reqwest is built with `rustls-no-provider` (issue #446, and see the workspace
+# manifest for why), which means *nothing* selects a provider unless we do — and
+# the failure is a runtime panic inside `Client::build()`, not a compile error.
+# Target-gated for the same reason as `reqwest` above: reqwest's own rustls deps
+# are `cfg(not(wasm32))`, so a browser build has no TLS stack to configure and
+# must not grow one. `lodestone-client` is in `scripts/wasm-check.sh`'s crate
+# list and depends on this crate, so an ungated entry here breaks that guard.
+rustls = { workspace = true }
+
+# The loopback authorization-code flow (`browser_login`): PKCE needs SHA-256 and
+# base64url, and both the verifier and the CSRF `state` need a CSPRNG. Native-only
+# for the same reason as `reqwest` above — the flow binds a `127.0.0.1` listener
+# and launches the platform's browser, neither of which a wasm build can do.
+#
+# `features = ["oid"]` is for `chat_session`'s `Pkcs1v15Sign::new::<Sha256>()`,
+# which needs `Sha256: AssociatedOid` — off by default (see `sha2`'s own
+# `Cargo.toml`: `oid = ["digest/oid"]`).
+sha2 = { workspace = true, features = ["oid"] }
+rand = { workspace = true }
+# The Mojang-issued RSA-2048 chat-signing key pair (`chat_session`):
+# `RsaPrivateKey`/`RsaPublicKey` PKCS#8/X.509 DER parsing and
+# `SHA256withRSA`/PKCS#1 v1.5 signing. Native-only for the same reason
+# `lodestone-net`'s handshake RSA is: `rsa` 0.9 pins `rand_core` 0.6, a
+# different major than the rest of the tree's `getrandom` 0.4, and online-mode
+# chat signing needs the native-only key-fetch above anyway, so there is
+# nothing gained by making this compile for wasm32 yet. Signing itself needs
+# no RNG (PKCS#1 v1.5 signature padding is deterministic, unlike PSS/OAEP), so
+# this is not pulling in randomness the browser build would need to source.
+rsa = { workspace = true }
+
+# The browser build's own half of the device-code chain. `reqwest` here is the
+# *same* `[workspace.dependencies]` entry the native block above uses — see
+# that block's comment for why enabling `rustls-no-provider`/`http2`/`charset`
+# is harmless on this target (every dependency they would pull in is itself
+# target-gated to `cfg(not(wasm32))` in reqwest's own manifest, so the features
+# simply have nothing to activate here) — reqwest picks its `fetch`-backed
+# `wasm` client module instead of the hyper one, with no TLS stack of its own
+# to configure (the browser's own `fetch` already speaks TLS). `web-sys` is
+# `crate::metadata::AccountsMetadata`'s and `crate::store::LocalStorageStore`'s
+# `localStorage` seam, mirroring the precedent `lodestone-shell`'s
+# `menu/accounts.rs::open_in_browser` already set for this exact crate pairing.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+reqwest = { workspace = true }
+web-sys = { version = "0.3", features = ["Window", "Storage"] }
+
+[dev-dependencies]
+tokio = { workspace = true }
+reqwest = { workspace = true }
+# `tests/tls_provider.rs` inspects the installed provider directly (issue #446).
+rustls = { workspace = true }

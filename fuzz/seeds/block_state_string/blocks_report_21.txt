@@ -1,0 +1,1 @@
+minecraft:acacia_fence[east=true,north=true,south=true,waterlogged=true,west=true]

@@ -1,0 +1,548 @@
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use lodestone_client::{ClientBuilder, EventStream, LoginProfile, PlayerLoadedPolicy, ServerAddress};
+use lodestone_model::{
+    AnimationAction, BlockActionKind, BlockFace, BlockPos, ChatKind, ClientAction, ClientEvent,
+    ConnectionState, ContainerClickType, ContainerSlotChange, ContainerStateId, Hand, Rotation,
+    Vec3, Vec3f, VersionAdapter,
+};
+use lodestone_server::{BlockEntity, ChunkColumn, ChunkSource, IntegratedServer, PLAYER_ENTITY_ID_BASE};
+use lodestone_v1_17::adapter_for;
+
+const TARGET: BlockPos = BlockPos::new(8, 100, 8);
+const CHEST: BlockPos = BlockPos::new(9, 100, 8);
+
+fn assert_adapter_block_use_reaches_host(protocol_version: i32) {
+    let adapter = adapter_for(protocol_version);
+    let action = ClientAction::UseItemOn {
+        hand: lodestone_model::Hand::Off,
+        pos: BlockPos::new(5, -10, -7),
+        face: BlockFace::South,
+        cursor: Vec3f {
+            x: 0.25,
+            y: 1.0,
+            z: 0.75,
+        },
+        inside_block: true,
+        sequence: lodestone_model::PredictionSequence::new(17),
+    };
+    let Some((packet_id, payload)) = adapter
+        .encode_action(ConnectionState::Play, &action)
+        .expect("the era adapter must encode a block use")
+    else {
+        panic!("block use must have a serverbound packet");
+    };
+    let host = lodestone_registry::server_protocol_for_protocol(protocol_version)
+        .expect("the hosted protocol must resolve from the registry");
+    assert_eq!(
+        host.decode(lodestone_core::State::Play, packet_id, &payload),
+        lodestone_server::ServerBound::UseItemOn {
+            pos: BlockPos::new(5, -10, -7),
+            face: BlockFace::South,
+            cursor: Vec3f {
+                x: 0.25,
+                y: 1.0,
+                z: 0.75,
+            },
+            sequence: 0,
+            hand: 1,
+        },
+        "the adapter and registry-selected host must agree on the server consumer input"
+    );
+    assert_eq!(
+        host.decode(lodestone_core::State::Configuration, packet_id, &payload),
+        lodestone_server::ServerBound::Ignored,
+        "the same bytes must not bypass the Play-state gate"
+    );
+}
+
+#[test]
+fn adapter_block_use_reaches_protocol_756_host_consumer() {
+    assert_adapter_block_use_reaches_host(756);
+}
+
+#[test]
+fn adapter_block_use_reaches_protocol_758_host_consumer() {
+    assert_adapter_block_use_reaches_host(758);
+}
+
+fn assert_adapter_chat_reaches_host(protocol_version: i32) {
+    let adapter = adapter_for(protocol_version);
+    let Some((packet_id, payload)) = adapter
+        .encode_action(
+            ConnectionState::Play,
+            &ClientAction::SendChat {
+                text: "adapter legacy chat".to_owned(),
+            },
+        )
+        .expect("the era adapter must encode chat")
+    else {
+        panic!("chat must have a serverbound packet");
+    };
+    let host = lodestone_registry::server_protocol_for_protocol(protocol_version)
+        .expect("the hosted protocol must resolve from the registry");
+    assert_eq!(
+        host.decode(lodestone_core::State::Play, packet_id, &payload),
+        lodestone_server::ServerBound::Chat {
+            message: "adapter legacy chat".to_owned(),
+            timestamp_millis: 0,
+            salt: 0,
+            signature: None,
+        },
+        "the adapter and registry-selected host must agree on legacy chat"
+    );
+    assert_eq!(
+        host.decode(lodestone_core::State::Configuration, packet_id, &payload),
+        lodestone_server::ServerBound::Ignored,
+        "legacy chat must remain unavailable before Play"
+    );
+}
+
+#[test]
+fn adapter_chat_reaches_protocol_756_host_consumer() {
+    assert_adapter_chat_reaches_host(756);
+}
+
+#[test]
+fn adapter_chat_reaches_protocol_758_host_consumer() {
+    assert_adapter_chat_reaches_host(758);
+}
+
+struct FixtureSource {
+    column: Mutex<ChunkColumn>,
+}
+
+impl FixtureSource {
+    fn new() -> Self {
+        let mut column = ChunkColumn::new(-64, 384);
+        column.set_block(TARGET.x, TARGET.y, TARGET.z, "minecraft:dandelion");
+        column.set_block(CHEST.x, CHEST.y, CHEST.z, "minecraft:chest");
+        Self {
+            column: Mutex::new(column),
+        }
+    }
+}
+
+async fn next_content(events: &mut EventStream, window_id: i32) -> Vec<Option<lodestone_model::ItemStack>> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ClientEvent::ContainerContent { window_id: id, items, .. }) = events.recv().await
+                && id == window_id
+            {
+                return items;
+            }
+        }
+    })
+    .await
+    .expect("server must send authoritative container content")
+}
+
+async fn assert_protocol_container_chest_move(protocol_version: i32) {
+    let protocol = lodestone_registry::server_protocol_for_protocol(protocol_version)
+        .expect("the hosted protocol must resolve from the registry");
+    let source = Arc::new(FixtureSource::new());
+    let (server, client_io) = IntegratedServer::open_in_memory_with_mobs(
+        protocol,
+        Arc::clone(&source),
+        (0..=0, 0..=0),
+        (8, 8),
+        0,
+        0,
+    );
+    let entities = server
+        .block_entities()
+        .expect("the live integrated server owns block entities")
+        .clone();
+    entities.with(|registry| {
+        let mut chest = BlockEntity::container("minecraft:chest");
+        chest.set_container_slot(
+            0,
+            Some(lodestone_model::ItemStack::new(
+                "minecraft:stone".parse().expect("stone key"),
+                1,
+            )),
+        );
+        registry.insert(CHEST, chest);
+    });
+
+    let profile = LoginProfile {
+        username: format!("Protocol{protocol_version}Chest"),
+        uuid: uuid::Uuid::new_v4(),
+    };
+    let (mut handle, mut events) = ClientBuilder::new(
+        ServerAddress { host: "memory".to_owned(), port: 0 },
+        profile,
+        Box::new(adapter_for(protocol_version)),
+    )
+    .player_loaded_policy(PlayerLoadedPolicy::Manual)
+    .connect_with(client_io);
+    handle
+        .wait_for_spawn(Duration::from_secs(20))
+        .await
+        .expect("the client must reach Play");
+    handle
+        .send_action(ClientAction::UseItemOn {
+            hand: Hand::Main,
+            pos: CHEST,
+            face: BlockFace::North,
+            cursor: Vec3f::new(0.5, 0.5, 0.5),
+            inside_block: false,
+            sequence: lodestone_model::PredictionSequence::INITIAL,
+        })
+        .expect("the client must use the chest");
+
+    let window_id = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ClientEvent::ScreenOpened { window_id, menu_type, .. }) = events.recv().await {
+                assert_eq!(menu_type.to_string(), "minecraft:generic_9x3");
+                break window_id;
+            }
+        }
+    })
+    .await
+    .expect("server must open the chest window");
+    let initial = next_content(&mut events, window_id).await;
+    assert_eq!(initial.len(), 63);
+    assert_eq!(initial[0].as_ref().map(|item| item.count), Some(1));
+
+    // Deliberately claim no changed slots and no cursor item. The server must
+    // still move the authoritative stack and send a correction content frame.
+    handle
+        .send_action(ClientAction::ContainerClick {
+            window_id,
+            state_id: ContainerStateId::INITIAL,
+            slot: 0,
+            button: 0,
+            click_type: ContainerClickType::Pickup,
+            changed_slots: Vec::<ContainerSlotChange>::new(),
+            carried_item: None,
+        })
+        .expect("the client must send the pickup click");
+    let after_pickup = next_content(&mut events, window_id).await;
+    assert!(after_pickup[0].is_none());
+
+    handle
+        .send_action(ClientAction::ContainerClick {
+            window_id,
+            state_id: ContainerStateId::INITIAL,
+            slot: 27,
+            button: 0,
+            click_type: ContainerClickType::Pickup,
+            changed_slots: Vec::<ContainerSlotChange>::new(),
+            carried_item: None,
+        })
+        .expect("the client must send the placement click");
+    let after_place = next_content(&mut events, window_id).await;
+    assert_eq!(after_place[27].as_ref().map(|item| item.count), Some(1));
+
+    handle
+        .send_action(ClientAction::ContainerClose { window_id })
+        .expect("the client must close the chest window");
+    handle.shutdown();
+    let _ = handle.join().await;
+    server.shutdown().await;
+    assert!(entities.with(|registry| match registry.get(CHEST) {
+        Some(BlockEntity::Container { slots, .. }) => slots[0].is_none(),
+        _ => false,
+    }));
+}
+
+#[tokio::test]
+async fn registry_selected_protocol_756_moves_a_chest_item_and_corrects_the_client() {
+    assert_protocol_container_chest_move(756).await;
+}
+
+#[tokio::test]
+async fn registry_selected_protocol_758_moves_a_chest_item_and_corrects_the_client() {
+    assert_protocol_container_chest_move(758).await;
+}
+
+async fn assert_registry_selected_host_echoes_legacy_chat(protocol_version: i32) {
+    let protocol = lodestone_registry::server_protocol_for_protocol(protocol_version)
+        .expect("the hosted protocol must resolve from the registry");
+    let source = Arc::new(FixtureSource::new());
+    let (server, client_io) = IntegratedServer::open_in_memory(protocol, source, 0);
+    let username = format!("ChatFixture{protocol_version}");
+    let (mut handle, mut events) = ClientBuilder::new(
+        ServerAddress {
+            host: "memory".to_owned(),
+            port: 0,
+        },
+        LoginProfile {
+            username: username.clone(),
+            uuid: uuid::Uuid::new_v4(),
+        },
+        Box::new(adapter_for(protocol_version)),
+    )
+    .player_loaded_policy(PlayerLoadedPolicy::Manual)
+    .connect_with(client_io);
+    handle
+        .wait_for_spawn(Duration::from_secs(10))
+        .await
+        .expect("legacy chat fixture reaches Play");
+    handle
+        .send_action(ClientAction::SendChat {
+            text: "end to end \"quoted\" chat".to_owned(),
+        })
+        .expect("joined client accepts chat");
+
+    let expected = format!("<{username}> end to end \"quoted\" chat");
+    let (text, kind) = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ClientEvent::Chat { text, kind, .. }) = events.recv().await {
+                return (text.to_plain_string(), kind);
+            }
+        }
+    })
+    .await
+    .expect("the host must echo chat before the deadline");
+    assert_eq!(text, expected);
+    assert_eq!(kind, ChatKind::System);
+
+    handle.shutdown();
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn registry_selected_protocol_756_echoes_legacy_chat_to_the_client_event_stream() {
+    assert_registry_selected_host_echoes_legacy_chat(756).await;
+}
+
+#[tokio::test]
+async fn registry_selected_protocol_758_echoes_legacy_chat_to_the_client_event_stream() {
+    assert_registry_selected_host_echoes_legacy_chat(758).await;
+}
+
+async fn assert_registry_selected_host_broadcasts_arm_swing(protocol_version: i32) {
+    let protocol = lodestone_registry::server_protocol_for_protocol(protocol_version)
+        .expect("the hosted protocol must resolve from the registry");
+    let source = Arc::new(FixtureSource::new());
+    let (mut server, sender_io) = IntegratedServer::open_in_memory_with_mobs(
+        protocol,
+        source,
+        (0..=0, 0..=0),
+        (8, 8),
+        0,
+        0,
+    );
+    let address = server
+        .publish(("127.0.0.1", 0), None)
+        .await
+        .expect("the shared in-memory world must accept a second client");
+    let sender_profile = LoginProfile {
+        username: format!("SwingSender{protocol_version}"),
+        uuid: uuid::Uuid::new_v4(),
+    };
+    let observer_profile = LoginProfile {
+        username: format!("SwingObserver{protocol_version}"),
+        uuid: uuid::Uuid::new_v4(),
+    };
+    let (mut sender, _sender_events) = ClientBuilder::new(
+        ServerAddress {
+            host: "memory".to_owned(),
+            port: 0,
+        },
+        sender_profile,
+        Box::new(adapter_for(protocol_version)),
+    )
+    .player_loaded_policy(PlayerLoadedPolicy::Manual)
+    .connect_with(sender_io);
+    let (mut observer, mut observer_events) = ClientBuilder::new(
+        ServerAddress {
+            host: "127.0.0.1".to_owned(),
+            port: address.port(),
+        },
+        observer_profile,
+        Box::new(adapter_for(protocol_version)),
+    )
+    .player_loaded_policy(PlayerLoadedPolicy::Manual)
+    .connect()
+    .await
+    .expect("the observer must connect through the published shared host");
+
+    sender
+        .wait_for_spawn(Duration::from_secs(10))
+        .await
+        .expect("the swing sender must reach Play");
+    observer
+        .wait_for_spawn(Duration::from_secs(10))
+        .await
+        .expect("the swing observer must reach Play");
+    sender
+        .send_action(ClientAction::SwingArm { hand: Hand::Off })
+        .expect("the joined sender accepts an off-hand swing");
+
+    let (entity_id, action) = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ClientEvent::EntityAnimation { entity_id, action }) =
+                observer_events.recv().await
+            {
+                return (entity_id, action);
+            }
+        }
+    })
+    .await
+    .expect("the observer must receive the hosted swing broadcast");
+    assert_eq!(
+        entity_id, PLAYER_ENTITY_ID_BASE,
+        "the first shared-world player must retain the registry's first entity id"
+    );
+    assert_eq!(action, AnimationAction::SwingOffHand);
+
+    sender.shutdown();
+    observer.shutdown();
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn registry_selected_protocol_756_broadcasts_an_arm_swing_to_another_client() {
+    assert_registry_selected_host_broadcasts_arm_swing(756).await;
+}
+
+#[tokio::test]
+async fn registry_selected_protocol_758_broadcasts_an_arm_swing_to_another_client() {
+    assert_registry_selected_host_broadcasts_arm_swing(758).await;
+}
+
+impl ChunkSource for FixtureSource {
+    fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+        self.column.lock().expect("fixture column lock poisoned").clone()
+    }
+
+    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        self.column
+            .lock()
+            .expect("fixture column lock poisoned")
+            .block_state(x.rem_euclid(16), y, z.rem_euclid(16))
+            .to_owned()
+    }
+
+    fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+        "minecraft:plains".to_owned()
+    }
+
+    fn set_block(&self, x: i32, y: i32, z: i32, state: &str) {
+        self.column
+            .lock()
+            .expect("fixture column lock poisoned")
+            .set_block(x.rem_euclid(16), y, z.rem_euclid(16), state);
+    }
+}
+
+#[tokio::test]
+async fn registry_selected_protocol_756_reaches_play_and_confirms_a_block_break() {
+    let protocol = lodestone_registry::server_protocol_for_protocol(756)
+        .expect("protocol 756 must resolve to the hosted family");
+    let source = Arc::new(FixtureSource::new());
+    let (server, client_io) = IntegratedServer::open_in_memory(protocol, Arc::clone(&source), 0);
+    let profile = LoginProfile {
+        username: "Fixture".to_owned(),
+        uuid: uuid::Uuid::new_v4(),
+    };
+    let address = ServerAddress {
+        host: "memory".to_owned(),
+        port: 0,
+    };
+    let (mut handle, _) = ClientBuilder::new(address, profile, Box::new(adapter_for(756)))
+        .player_loaded_policy(PlayerLoadedPolicy::Manual)
+        .connect_with(client_io);
+
+    handle
+        .wait_for_spawn(Duration::from_secs(10))
+        .await
+        .expect("protocol-756 login reaches Play");
+    handle
+        .wait_for_chunk(lodestone_client::ChunkPos::new(0, 0), Duration::from_secs(10))
+        .await
+        .expect("protocol-756 chunk arrives");
+    let flower = lodestone_data::block_states::state_id("minecraft:dandelion")
+        .expect("fixture state exists");
+    assert_eq!(handle.block_at(TARGET), Some(flower));
+
+    handle
+        .send_action(ClientAction::BlockAction {
+            action: BlockActionKind::StartDestroy,
+            pos: TARGET,
+            face: BlockFace::Up,
+            sequence: 0,
+        })
+        .expect("joined client accepts a block action");
+    let air = lodestone_data::block_states::air_state_id();
+    handle
+        .wait_for(Duration::from_secs(10), move |client| client.block_at(TARGET) == Some(air))
+        .await
+        .expect("block update reaches the protocol-756 client");
+
+    handle
+        .move_to(Vec3::new(24.0, 100.0, 8.0), Rotation::default(), true, false)
+        .expect("the 1.17 client emits a position packet");
+    handle
+        .wait_for_chunk(lodestone_client::ChunkPos::new(1, 0), Duration::from_secs(10))
+        .await
+        .expect("the protocol-756 host recenters the view after movement");
+
+    handle.shutdown();
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn registry_selected_protocol_758_reaches_play_and_confirms_a_block_break() {
+    let protocol = lodestone_registry::server_protocol_for_protocol(758)
+        .expect("protocol 758 must resolve to the hosted family");
+    let source = Arc::new(FixtureSource::new());
+    let (server, client_io) = IntegratedServer::open_in_memory(protocol, Arc::clone(&source), 0);
+    let profile = LoginProfile {
+        username: "Fixture".to_owned(),
+        uuid: uuid::Uuid::new_v4(),
+    };
+    let address = ServerAddress {
+        host: "memory".to_owned(),
+        port: 0,
+    };
+    let (mut handle, _) = ClientBuilder::new(address, profile, Box::new(adapter_for(758)))
+        .player_loaded_policy(PlayerLoadedPolicy::Manual)
+        .connect_with(client_io);
+
+    handle
+        .wait_for_spawn(Duration::from_secs(10))
+        .await
+        .expect("protocol-758 login reaches Play");
+    handle
+        .wait_for_chunk(lodestone_client::ChunkPos::new(0, 0), Duration::from_secs(10))
+        .await
+        .expect("protocol-758 chunk arrives");
+    let flower = lodestone_data::block_states::state_id("minecraft:dandelion")
+        .expect("fixture state exists");
+    assert_eq!(handle.block_at(TARGET), Some(flower));
+
+    handle
+        .send_action(ClientAction::BlockAction {
+            action: BlockActionKind::StartDestroy,
+            pos: TARGET,
+            face: BlockFace::Up,
+            sequence: 0,
+        })
+        .expect("joined client accepts a block action");
+    let air = lodestone_data::block_states::air_state_id();
+    handle
+        .wait_for(Duration::from_secs(10), move |client| client.block_at(TARGET) == Some(air))
+        .await
+        .expect("block update reaches the protocol-758 client");
+
+    handle
+        .move_to(Vec3::new(24.0, 100.0, 8.0), Rotation::default(), true, false)
+        .expect("the 1.18 client emits a position packet");
+    handle
+        .wait_for_chunk(lodestone_client::ChunkPos::new(1, 0), Duration::from_secs(10))
+        .await
+        .expect("the protocol-758 host recenters the view after movement");
+
+    handle.shutdown();
+    server.shutdown().await;
+}
+
+#[test]
+fn protocol_755_is_not_hosted() {
+    assert!(lodestone_registry::server_protocol_for_protocol(755).is_none());
+}

@@ -1,0 +1,3 @@
+name: LodestonePaperConformance
+version: 1.0.0
+main: io.lodestone.conformance.PaperConformancePlugin

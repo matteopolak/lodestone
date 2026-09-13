@@ -1,0 +1,2092 @@
+//! `WindowApp` construction, cursor grab, and session start/teardown.
+//!
+//! Split out of `app.rs`; see that module's own header for the layout.
+
+use super::*;
+use lodestone_data::item::Item;
+
+impl WindowApp {
+    /// Build the normal shell pipeline against an offscreen target. This is
+    /// used by the terminal surface so it rasterizes the exact same world,
+    /// HUD, inventory, and menu passes as a window instead of maintaining a
+    /// second renderer.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn new_terminal(config: Config, width: u32, height: u32) -> anyhow::Result<Self> {
+        let gpu = GpuContext::new_headless_blocking()
+            .map_err(|error| anyhow::anyhow!("terminal GPU bring-up failed: {error}"))?;
+        let target = super::PresentationTarget::Headless(HeadlessTarget::new(
+            gpu.device(),
+            width.max(1),
+            height.max(1),
+            wgpu::TextureFormat::Rgba8Unorm,
+        ));
+        let mut app = Self::new(config);
+        app.terminal_chat_native = true;
+        app.finish_bring_up(None, gpu, target);
+        Ok(app)
+    }
+
+    /// Render one terminal frame through [`WindowApp::redraw`] and return its
+    /// completed offscreen pixels. `None` is reserved for an accidental use
+    /// with a window target.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn redraw_terminal(&mut self) -> anyhow::Result<Vec<u8>> {
+        self.redraw();
+        let (Some(gpu), Some(target)) = (self.gpu.as_ref(), self.target.as_ref()) else {
+            anyhow::bail!("terminal renderer was not initialized");
+        };
+        target
+            .readback(gpu.device(), gpu.queue())
+            .ok_or_else(|| anyhow::anyhow!("terminal renderer has no offscreen readback"))
+    }
+
+    pub(crate) fn terminal_set_action(&mut self, action: Action, pressed: bool) {
+        self.sim.input_mut(|input| input.set(action, pressed));
+    }
+
+    pub(crate) fn terminal_select_slot(&mut self, slot: usize) {
+        self.sim.select_slot(slot);
+    }
+
+    pub(crate) fn terminal_cycle_camera(&mut self) {
+        self.sim.cycle_camera_type();
+    }
+
+    pub(crate) fn terminal_mouse_motion(&mut self, dx: f32, dy: f32) {
+        self.sim.input_mut(|input| input.add_mouse(dx, dy));
+    }
+
+    pub(crate) fn terminal_mouse_attack(&mut self, pressed: bool) {
+        if pressed {
+            self.sim.begin_attack();
+        } else {
+            self.sim.end_attack();
+        }
+    }
+
+    pub(crate) fn terminal_mouse_use(&mut self, pressed: bool) {
+        if pressed {
+            self.sim.use_item();
+        } else {
+            self.sim.end_use();
+        }
+    }
+
+    pub(crate) fn terminal_mouse_pick_item(&mut self, include_data: bool) {
+        self.sim.pick_block_or_entity(include_data);
+    }
+
+    pub(crate) fn terminal_cycle_slot(&mut self, delta: i32) {
+        self.sim.cycle_slot(delta);
+    }
+
+    /// Apply one terminal wheel notch through the same screen-owned actions as
+    /// the window path. Crossterm reports discrete up/down events, so the
+    /// terminal adapter supplies a signed notch rather than inventing a second
+    /// pixel-delta model.
+    pub(crate) fn terminal_scroll(&mut self, notches: f64) {
+        if notches == 0.0 {
+            return;
+        }
+
+        if self.terminal_routes_menu_input() {
+            let Some((width, height)) = self.target.as_ref().map(RenderTarget::size) else {
+                return;
+            };
+            let (_, canvas_height) = crate::menu::render::logical_canvas(
+                self.nav.gui_scale(),
+                width,
+                height,
+            );
+            let notches = scale_scroll(
+                notches,
+                self.nav.discrete_mouse_scroll(),
+                self.nav.mouse_wheel_sensitivity(),
+            );
+            if notches == 0.0 {
+                return;
+            }
+            self.nav
+                .scroll_active_list(&self.ui, notches as f32, canvas_height);
+            return;
+        }
+
+        if self.active_container_menu().is_some() {
+            if self.creative_screen_open() {
+                self.scroll_creative_screen(notches as f32);
+                return;
+            }
+            let consumed_by_bundle = self
+                .target
+                .as_ref()
+                .map(RenderTarget::size)
+                .is_some_and(|(width, height)| {
+                    self.handle_bundle_scroll(notches, width, height)
+                });
+            if !consumed_by_bundle {
+                let _ = self.scroll_stonecutter(notches) || self.scroll_loom(notches);
+            }
+            return;
+        }
+
+        if self.ui.accepts_gameplay_input() {
+            let scaled = scale_scroll(
+                notches,
+                self.nav.discrete_mouse_scroll(),
+                self.nav.mouse_wheel_sensitivity(),
+            );
+            let step = hotbar_scroll_step(accumulate_scroll(&mut self.scroll_accum, scaled));
+            if step != 0 {
+                // Positive wheel values mean up in both adapters; moving up
+                // the wheel selects the previous slot, as in the window path.
+                self.terminal_cycle_slot(-step);
+            }
+        }
+    }
+
+    pub(crate) fn terminal_reset_input(&mut self) {
+        self.sim.input_mut(InputState::release_all);
+        self.sim.end_attack();
+        self.sim.end_use();
+    }
+
+    pub(crate) fn terminal_expire_action(&mut self, action: Action) {
+        self.sim.input_mut(|input| input.set(action, false));
+    }
+
+    pub(crate) fn terminal_chat_lines(
+        &self,
+        max_lines: usize,
+    ) -> Vec<(Vec<lodestone_model::text::TextSpan>, f32)> {
+        self.sim
+            .recent_chat_spans(max_lines)
+    }
+
+    pub(crate) fn terminal_chat_is_open(&self) -> bool {
+        self.ui.is_chat_open()
+    }
+
+    /// Terminal input delegates to the same edit box and chat history as the
+    /// windowed input path. The terminal only supplies a platform-neutral
+    /// key adapter; it does not maintain a second chat buffer.
+    pub(crate) fn terminal_chat_text(&self) -> &str {
+        self.chat_input.as_str()
+    }
+
+    pub(crate) fn terminal_chat_open(&mut self, command: bool) {
+        self.sim.input_mut(InputState::release_all);
+        let _ = self.chat_input.take();
+        if command {
+            self.chat_input.push_char('/');
+        }
+        self.ui.open_chat();
+        self.tab_held = false;
+        self.set_grab(false);
+    }
+
+    pub(crate) fn terminal_chat_cancel(&mut self) {
+        let _ = self.chat_input.take();
+        self.ui.close_chat();
+        self.set_grab(self.ui.wants_cursor_grab());
+    }
+
+    pub(crate) fn terminal_chat_submit(&mut self) {
+        let line = self.chat_input.as_str().to_owned();
+        self.chat_input.record_sent(&line);
+        let _ = self.chat_input.take();
+        self.sim.send_chat(&line);
+        self.ui.close_chat();
+        self.set_grab(self.ui.wants_cursor_grab());
+    }
+
+    pub(crate) fn terminal_chat_push_char(&mut self, ch: char) {
+        self.chat_input.push_char(ch);
+    }
+
+    pub(crate) fn terminal_chat_backspace(&mut self) {
+        self.chat_input.backspace();
+    }
+
+    pub(crate) fn terminal_chat_move_left(&mut self) {
+        self.chat_input.move_left();
+    }
+
+    pub(crate) fn terminal_chat_move_right(&mut self) {
+        self.chat_input.move_right();
+    }
+
+    pub(crate) fn terminal_chat_move_start(&mut self) {
+        self.chat_input.move_start();
+    }
+
+    pub(crate) fn terminal_chat_move_end(&mut self) {
+        self.chat_input.move_end();
+    }
+
+    pub(crate) fn terminal_chat_history_up(&mut self) {
+        self.chat_input.history_up();
+    }
+
+    pub(crate) fn terminal_chat_history_down(&mut self) {
+        self.chat_input.history_down();
+    }
+
+    pub(crate) fn resize_terminal(&mut self, width: u32, height: u32) {
+        if let (Some(gpu), Some(target), Some(render)) = (
+            self.gpu.as_ref(),
+            self.target.as_mut(),
+            self.render.as_mut(),
+        ) {
+            target.resize(gpu.device(), width, height);
+            render.resize(gpu.device(), width, height);
+        }
+    }
+
+    pub(crate) fn terminal_toggle_inventory(&mut self) {
+        if self.active_container_menu().is_some() {
+            if self.sim.open_menu().is_some() {
+                self.sim.close_open_menu();
+            }
+            self.ui.close_container();
+        } else {
+            self.ui.open_container();
+            if self.ui.is_container_open() {
+                self.focus_container_screen();
+            }
+        }
+        self.set_grab(self.ui.wants_cursor_grab());
+    }
+
+    pub(crate) fn terminal_close_container(&mut self) {
+        if self.sim.open_menu().is_some() {
+            self.sim.close_open_menu();
+        }
+        self.ui.close_container();
+        self.set_grab(self.ui.wants_cursor_grab());
+    }
+
+    pub(crate) fn terminal_container_hotbar(&mut self, slot: u8) {
+        self.send_container_swap(i32::from(slot));
+    }
+
+    pub(crate) fn terminal_routes_menu_input(&self) -> bool {
+        crate::menu::nav::routes_menu_input(&self.ui)
+    }
+
+    pub(crate) fn terminal_has_container(&self) -> bool {
+        self.active_container_menu().is_some()
+    }
+
+    /// Apply the same context-sensitive Escape action as the window keyboard
+    /// path: an open container closes first, otherwise the current UI screen
+    /// receives Escape (for example, Playing becomes Paused).
+    pub(crate) fn terminal_escape(&mut self) {
+        if self.active_container_menu().is_some() {
+            self.sim.close_open_menu();
+            self.ui.close_container();
+        } else {
+            self.ui.on_escape();
+        }
+        self.set_grab(self.ui.wants_cursor_grab());
+    }
+
+    /// Feed a terminal keyboard navigation key through the same menu navigator
+    /// used by window input. The caller translates Crossterm's key code into
+    /// the platform-neutral [`MenuKey`] enum.
+    pub(crate) fn terminal_menu_key(&mut self, key: MenuKey) {
+        self.handle_menu_key(key);
+        self.set_grab(self.ui.wants_cursor_grab());
+    }
+
+    /// Update the shared menu/container pointer from terminal-cell coordinates
+    /// already converted to framebuffer pixels by the terminal adapter.
+    pub(crate) fn terminal_pointer_moved(&mut self, position: Option<(f32, f32)>) {
+        let Some((x, y)) = position else {
+            self.cursor = (-1.0, -1.0);
+            return;
+        };
+        self.cursor = (x, y);
+        if self.terminal_routes_menu_input() {
+            if let Some(row) = self.menu_slider_drag {
+                if let Some(fraction) = self.menu_slider_fraction(row, x, y) {
+                    self.nav.drag_slider(&self.ui, row, fraction);
+                }
+            } else {
+                if let Some(row) = self.menu_row_at(x, y) {
+                    self.nav.hover(&self.ui, row);
+                }
+                self.track_book_page_cursor();
+            }
+        } else if self.active_container_menu().is_some()
+            && self.menu_input.is_dragging()
+            && let Some(menu) = self.active_container_menu()
+            && let Some((w, h)) = self.target.as_ref().map(RenderTarget::size)
+        {
+            let hit = crate::container::hit_test_with_book(
+                &menu,
+                self.nav.gui_scale(),
+                w,
+                h,
+                x,
+                y,
+                self.recipe_panel.open,
+            );
+            self.menu_input.dragged(hit, &menu);
+        }
+    }
+
+    /// Route a terminal pointer press/release through the same menu or
+    /// container hit-testing and click prediction used by the window path.
+    pub(crate) fn terminal_pointer_button(&mut self, button: MenuButton, pressed: bool) {
+        if self.terminal_routes_menu_input() {
+            if button == MenuButton::Left
+                && let Some((w, h)) = self.target.as_ref().map(RenderTarget::size)
+            {
+                self.terminal_pointer_button_at(
+                    button,
+                    pressed,
+                    self.cursor.0,
+                    self.cursor.1,
+                    w,
+                    h,
+                );
+            }
+            self.set_grab(self.ui.wants_cursor_grab());
+            return;
+        }
+        if self.active_container_menu().is_none() {
+            return;
+        }
+        let Some((w, h)) = self.target.as_ref().map(RenderTarget::size) else {
+            return;
+        };
+
+        if self.creative_screen_open() {
+            let (button, input) = match button {
+                MenuButton::Pick => (0, lodestone_game::click::ContainerInput::Clone),
+                MenuButton::Left if self.shift_held => {
+                    (0, lodestone_game::click::ContainerInput::QuickMove)
+                }
+                MenuButton::Right if self.shift_held => {
+                    (1, lodestone_game::click::ContainerInput::QuickMove)
+                }
+                MenuButton::Left => (0, lodestone_game::click::ContainerInput::Pickup),
+                MenuButton::Right => (1, lodestone_game::click::ContainerInput::Pickup),
+            };
+            if pressed {
+                self.handle_creative_click(button, input, w, h);
+            } else {
+                self.creative.scrolling = false;
+            }
+            self.set_grab(self.ui.wants_cursor_grab());
+            return;
+        }
+
+        let Some(menu) = self.active_container_menu() else {
+            return;
+        };
+        let hit = crate::container::hit_test_with_book(
+            &menu,
+            self.nav.gui_scale(),
+            w,
+            h,
+            self.cursor.0,
+            self.cursor.1,
+            self.recipe_panel.open,
+        );
+        let ctx = MenuContext {
+            cursor_loaded: menu.carried().is_some(),
+            creative: false,
+        };
+        let clicks = if pressed {
+            let now = Instant::now();
+            let repeat = button == MenuButton::Left
+                && self
+                    .last_menu_click
+                    .is_some_and(|previous| now.duration_since(previous) < DOUBLE_CLICK_WINDOW);
+            self.last_menu_click = Some(now);
+            self.menu_input
+                .press(hit, button, self.shift_held, ctx, repeat, &menu)
+        } else {
+            self.menu_input.release(hit, button, self.shift_held, ctx, &menu)
+        };
+        for click in clicks {
+            self.send_menu_click(click);
+        }
+    }
+
+    /// Activate a menu row at an explicit framebuffer size. The terminal uses
+    /// [`Self::terminal_pointer_button`] in production, while the explicit
+    /// dimensions make the adapter's click-to-state seam testable without a
+    /// GPU surface.
+    pub(crate) fn terminal_pointer_button_at(
+        &mut self,
+        button: MenuButton,
+        pressed: bool,
+        x: f32,
+        y: f32,
+        width: u32,
+        height: u32,
+    ) {
+        if !self.terminal_routes_menu_input() || button != MenuButton::Left {
+            return;
+        }
+        self.cursor = (x, y);
+        if pressed {
+            if self.nav.awaiting_key_capture() {
+                return;
+            }
+            if self.dispatch_book_page_click() || self.dispatch_death_click_under_cursor() {
+                return;
+            }
+            if let Some(row) = self.menu_row_at_in(x, y, width, height) {
+                let dragged = self.nav.slider_row(&self.ui, row)
+                    && self
+                        .menu_slider_fraction(row, x, y)
+                        .is_some_and(|fraction| self.nav.drag_slider(&self.ui, row, fraction));
+                if dragged {
+                    self.menu_slider_drag = Some(row);
+                } else {
+                    self.sim.play_ui_click_sound();
+                    let action = self.nav.click(&mut self.ui, row);
+                    self.apply_menu_action(action);
+                }
+            }
+        } else if self.menu_slider_drag.take().is_some() {
+            self.sim.play_ui_click_sound();
+        }
+        self.set_grab(self.ui.wants_cursor_grab());
+    }
+
+    pub(crate) fn terminal_set_modifiers(&mut self, shift: bool, ctrl: bool) {
+        self.shift_held = shift;
+        self.ctrl_held = ctrl;
+    }
+
+    pub(super) fn new(config: Config) -> Self {
+        Self::new_with_app(Sim::client_app(), config)
+    }
+
+    /// Build the windowed shell around a **caller-composed** [`lodestone_app::App`]
+    /// instead of [`Sim::client_app`]'s own — the rendered half of the seam
+    /// `crates/lodestone-shell/tests/interaction/rendered_client_takes_a_plugin.rs`
+    /// proves against a bare [`Sim`], wired one level further down into the exact
+    /// struct the real winit driver (`super::runners::run_windowed_with_app`)
+    /// constructs. `new` above is the special case with nothing added: every field
+    /// below is identical to what it built before this split, just fed from
+    /// [`Sim::from_app`] instead of [`Sim::new`].
+    ///
+    /// The `App` must carry at least what [`Sim::client_app`] installs — see that
+    /// function's own doc for why starting from it is the straightforward way to
+    /// guarantee that.
+    pub(super) fn new_with_app(app: lodestone_app::App, config: Config) -> Self {
+        let sim = Sim::from_app(app, config.clone());
+        let benchmark = config.benchmark.clone().map(BenchmarkDriver::new);
+        let show_debug = config.benchmark.as_ref().is_some_and(|benchmark| {
+            benchmark.debug_overlay == crate::config::BenchmarkDebugOverlay::Open
+        });
+        // Matches the sky fog set at render bring-up, so the fog reconciliation's
+        // first above-water frame is a no-op rather than a redundant upload.
+        let applied_fog = Some(crate::sim::fog_for_render_distance(config.render_distance));
+        // Read once for both the keybinds and the Render Distance edge detector
+        // below. **The seed is the *persisted* value, not `config`'s**, because
+        // `--render-distance` on argv wins for the run (`Config::resolve_persisted`)
+        // — seeding from `config` would make frame one see a "change" back to the
+        // stored value and quietly undo the flag 600 ms in.
+        let persisted = crate::config::Options::load();
+        Self {
+            config,
+            benchmark,
+            benchmark_segment: None,
+            sim,
+            window: None,
+            gpu: None,
+            target: None,
+            render: None,
+            hud: None,
+            container: None,
+            grabbed: false,
+            pending_pick: None,
+            pacer: FramePacer::new(Instant::now()),
+            ui: UiState::new(),
+            nav: MenuNav::new(),
+            statuses: StatusCache::new(),
+            friends: FriendsApp::new(),
+            menu: None,
+            favicons: crate::menu::render::FaviconCache::new(),
+            cursor: (0.0, 0.0),
+            show_debug,
+            debug_held: false,
+            debug_chord_used: false,
+            debug_hitboxes: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            debug_chunk_borders: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            show_profiler_chart: false,
+            profiler_chart_selected: None,
+            menu_slider_drag: None,
+            render_distance_seen: persisted.render_distance,
+            render_distance_apply_at: None,
+            tab_held: false,
+            pending_screenshot: false,
+            // `0`, not the current generation: a fresh `WindowApp` has built
+            // no icon surface yet, so the first frame must run the refresh.
+            // `crate::resources::pack_generation` starts above zero whenever a
+            // pack was selected before the window existed, and seeding this
+            // with it would skip exactly that case.
+            last_icon_pack_generation: 0,
+            chat_input: ChatInput::new(),
+            terminal_chat_native: false,
+            chat_wrap: crate::hud::ChatWrapCache::default(),
+            menu_input: MenuInput::new(),
+            shift_held: false,
+            ctrl_held: false,
+            modifiers: winit::keyboard::ModifiersState::empty(),
+            scroll_accum: 0.0,
+            last_menu_click: None,
+            // `LODESTONE_FRAME_PROFILE_DUMP`, named in `docs/frame-profiling.md`
+            // — unset (the ordinary case) means no dump file, not an error.
+            // `frame_profile::DumpWriter::open` is what logs a warning (once,
+            // via `tracing`) if the path is set but cannot actually be opened,
+            // per this repo's "never silently skipped" rule.
+            frame_profile: FrameProfiler::new(
+                Instant::now(),
+                std::env::var(crate::app::frame_profile::DUMP_ENV_VAR)
+                    .ok()
+                    .filter(|p| !p.is_empty())
+                    .map(std::path::PathBuf::from)
+                    .as_deref(),
+            ),
+            applied_fog,
+            recipe_book: None,
+            recipe_book_revision: 0,
+            recipe_panel: RecipePanelState::default(),
+            recipe_toasts: lodestone_game::recipe::RecipeToastQueue::new(),
+            recipe_toast_seen: std::collections::HashSet::new(),
+            recipe_toast_synced: false,
+            recipe_book_seen: std::collections::HashSet::new(),
+            bundle_selection: None,
+            // No session yet, so no weather cell to read; see
+            // `install_session_render_sources`.
+            weather: None,
+            creative: crate::container::CreativeState::default(),
+            advancements_drag: None,
+            advancement_feed: super::advancements_screen::AdvancementsFeed::default(),
+            hosted_world: None,
+            merchant_selected: 0,
+            anvil_rename: crate::container::AnvilRenameState::new(),
+            beacon_selection: crate::container::beacon::BeaconSelection::new(),
+            stonecutter_scroll: 0.0,
+            loom_scroll: 0.0,
+            pending_game_rules: None,
+            last_ping_request: None,
+            // Ordinary startup always wants a window and always accepts
+            // input from it — unchanged from before these fields existed.
+            // Only `WindowApp::new_headless_session` seeds `false`.
+            #[cfg(feature = "runtime-presentation")]
+            presentation_desired: true,
+            #[cfg(feature = "runtime-presentation")]
+            input_armed: true,
+        }
+    }
+
+    /// Start a session with **no** window, no GPU and no
+    /// presentation-only ECS systems — a genuine headless session mode,
+    /// as opposed to `Mode::Headless`'s one-shot PPM capture
+    /// (which has no event loop and no server; see `app::runners::run_headless`'s
+    /// own doc on why the two are not the same thing).
+    ///
+    /// The session still ticks, connects and persists exactly as a windowed
+    /// one does: `Sim::new` is unchanged, so a real login and every
+    /// non-presentation system (physics, net ingest, chat, inventory) runs
+    /// normally. What is missing is only what
+    /// [`Self::detach_presentation`] removes: the four presentation plugins'
+    /// systems ([`crate::sim::presentation::PresentationSet`]) and, once a
+    /// window is later attached, the GPU state.
+    ///
+    /// `Sim::detach_presentation()` runs **after** `Sim::new`, not instead of
+    /// composing the four plugins in the first place: `Sim::client_app`'s
+    /// plugin set is one well-tested construction path with no second
+    /// "windowless" variant to drift from it — see
+    /// `crate::sim::presentation`'s module doc for why detach is the
+    /// mechanism that has to be exact regardless of when it first runs.
+    // Native-only, matching `Mode::HeadlessSession` itself (`app.rs`'s `run`)
+    // and `create_and_attach_window` below: a browser session never calls
+    // this (`spawn_app` hands the loop to the browser and returns
+    // immediately, and bring-up there is the async `attach_window_async`
+    // path `resumed`/`about_to_wait` already split at, not this synchronous
+    // one). Keeping it target-gated rather than merely feature-gated is what
+    // makes a wasm32 build with the feature on still compile.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "runtime-presentation"))]
+    pub(crate) fn new_headless_session(config: Config) -> Self {
+        let mut app = Self::new(config);
+        app.presentation_desired = false;
+        app.input_armed = false;
+        app.sim.detach_presentation();
+        app
+    }
+
+    /// Create a window, attach the GPU and (if it was detached) re-attach
+    /// `Sim`'s presentation-only ECS systems — the runtime-attach half of
+    /// the runtime toggle. Called from `resumed` (ordinary startup) and from
+    /// `user_event`'s `AppEvent::AttachPresentation` (a session that started,
+    /// or was put, headless).
+    ///
+    /// `enable_input` seeds [`Self::input_armed`] — see that field's own doc
+    /// for why a runtime attach should almost always pass `false` here.
+    ///
+    /// A no-op if a window already exists: attach is only ever the
+    /// windowless → windowed transition, never a second window.
+    // Native-only for `create_and_attach_window`'s own reason, just below.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "runtime-presentation"))]
+    pub(crate) fn attach_presentation(&mut self, event_loop: &ActiveEventLoop, enable_input: bool) {
+        if self.window.is_some() {
+            tracing::debug!(target: "presentation", "attach_presentation: already attached");
+            return;
+        }
+        self.presentation_desired = true;
+        self.input_armed = enable_input;
+        self.sim.attach_presentation();
+        if !self.create_and_attach_window(event_loop, super::lifecycle::window_attributes(&self.config)) {
+            // GPU bring-up failed — leave the session headless rather than a
+            // half-attached mess (`self.window` is still `None` here, since
+            // `create_and_attach_window` only sets it on success), and undo
+            // the ECS half so a retry starts from a clean detached state
+            // instead of double-registering the presentation systems next
+            // time (`add_systems` does not deduplicate).
+            self.sim.detach_presentation();
+            self.presentation_desired = false;
+        }
+    }
+
+    /// Drop the window, GPU surface and `RenderState`, and detach `Sim`'s
+    /// presentation-only ECS systems — the other half of the runtime
+    /// toggle, and the half that actually has to release something to be
+    /// worth anything (the AFK case is the whole point of case 1: "leave a
+    /// session running ... and drop to headless so it stops rendering, stops
+    /// holding a swapchain, and stops burning GPU").
+    ///
+    /// # What this releases, and how that is measured
+    ///
+    /// `self.container`/`self.menu`/`self.hud`/`self.render` hold every
+    /// pipeline, bind group and atlas texture this session's GPU bring-up
+    /// created; `self.target` holds the swapchain and depth buffer;
+    /// `self.gpu` holds the wgpu device/queue/adapter/instance this process
+    /// took from the OS. Setting all of them (plus `self.window`) to `None`
+    /// drops the *last* strong reference to each — nothing else in this
+    /// struct clones a `wgpu` handle out of them — so this is a real release,
+    /// not merely "stop drawing". `sim/tests.rs`'s
+    /// `detach_presentation_releases_wgpu_resources` proves this against
+    /// `wgpu::Instance::generate_report()`'s live resource counts, not
+    /// against the absence of a draw call — see `docs/runtime-presentation.md`
+    /// for the measured figures.
+    ///
+    /// Order: the ECS half first (stop the presentation systems from
+    /// producing more mesh/particle/interpolation work), then the GPU half
+    /// (nothing left to consume it). `self.presentation_desired = false` is
+    /// what stops the very next `resumed` (a native event loop keeps running
+    /// with no window — see `app::runners::run_headless_session`'s doc) from
+    /// immediately recreating the window this call just dropped.
+    // Native-only for `Self::attach_presentation`'s own reason: this is the
+    // other half of the same runtime toggle, and keeping both target-gated
+    // identically is simpler than reasoning about which parts of a
+    // browser's (always-windowed) session this would even mean.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "runtime-presentation"))]
+    pub(crate) fn detach_presentation(&mut self) {
+        self.sim.detach_presentation();
+        self.container = None;
+        self.menu = None;
+        self.hud = None;
+        self.render = None;
+        self.target = None;
+        self.gpu = None;
+        self.window = None;
+        self.presentation_desired = false;
+        self.input_armed = false;
+    }
+
+    /// The native window-creation + GPU-attach + render bring-up shared by
+    /// `resumed` (ordinary/benchmark startup) and
+    /// [`Self::attach_presentation`] (a runtime attach) — factored out so
+    /// runtime attach/detach does not grow a second, slightly-different copy of GPU
+    /// bring-up. Returns whether it succeeded; on failure nothing is left
+    /// half-set (`self.window` stays `None`, matching `resumed`'s own
+    /// `event_loop.exit()` failure arms, except a runtime attach chooses to
+    /// stay headless rather than end the process — see the caller).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn create_and_attach_window(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        attrs: winit::window::WindowAttributes,
+    ) -> bool {
+        let window = match event_loop.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                eprintln!("failed to create window: {e}");
+                return false;
+            }
+        };
+        match attach_window(window.clone()) {
+            Ok((gpu, target)) => {
+                self.finish_bring_up(
+                    Some(window),
+                    gpu,
+                    super::PresentationTarget::Surface(target),
+                );
+                true
+            }
+            Err(e) => {
+                eprintln!("failed to attach GPU to window: {e}");
+                false
+            }
+        }
+    }
+
+    pub(super) fn set_grab(&mut self, grabbed: bool) {
+        if !grabbed {
+            self.pending_pick = None;
+        }
+        let Some(window) = &self.window else { return };
+        if grabbed {
+            let locked = window
+                .set_cursor_grab(CursorGrabMode::Locked)
+                .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
+            if locked.is_ok() {
+                window.set_cursor_visible(false);
+                self.grabbed = true;
+            }
+        } else {
+            let _ = window.set_cursor_grab(CursorGrabMode::None);
+            window.set_cursor_visible(true);
+            self.grabbed = false;
+            self.sim.input_mut(InputState::release_all);
+            // Releasing the pointer also ends any held dig, so mining does not
+            // continue while the player is in a menu or the window is unfocused.
+            self.sim.end_attack();
+        }
+    }
+
+    /// Release gameplay pointer capture and place the visible pointer at the
+    /// centre of the newly focused container screen.
+    pub(super) fn focus_container_screen(&mut self) {
+        self.set_grab(false);
+        let Some((width, height)) = self.target.as_ref().map(RenderTarget::size) else {
+            return;
+        };
+        let (x, y) = container_cursor_center(width, height);
+        self.cursor = (x, y);
+        if let Some(window) = &self.window {
+            let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(
+                x as i32, y as i32,
+            ));
+        }
+    }
+
+    /// Reconcile the menu state machine with the session's real phase, then keep
+    /// the cursor grab in sync with whatever screen we ended up on. Called each
+    /// frame so the loading screen is never a lie: login only moves the session
+    /// into play; the screen clears after `Sim::world_wait` observes the real
+    /// terrain/asset readiness milestone, and flips to Error when the session
+    /// ends.
+    pub(super) fn drive_ui_from_session(&mut self) {
+        use crate::sim::SessionPhase;
+        // The loading screen's *label* comes from here, not from the
+        // coarse `SessionPhase` below — see `crate::menu::loading::ConnectPhase`
+        // for why they are two different questions. Pushed every frame rather
+        // than on transition, because `Sim` is the only thing the net thread
+        // reaches and `UiState` is the only thing `frame_for` reads.
+        self.ui.set_connect_phase(self.sim.connect_phase());
+        match self.sim.session_phase() {
+            // LocalOnly never drives the menu — the dev world is already Playing.
+            SessionPhase::LocalOnly | SessionPhase::Connecting => {}
+            SessionPhase::Connected => {
+                // Login only establishes the play connection. Keep the
+                // full-frame loading square up until the terrain producer has
+                // reported its real preparation milestone; resident columns
+                // and a full bar are telemetry, not proof that their first
+                // meshes can be presented. Remote sessions without a declared
+                // initial-view contract retain the own-column fallback inside
+                // `Sim::world_wait`.
+                if self.sim.world_wait().is_none() {
+                    self.ui.session_ready();
+                }
+                // Game-rule delivery: the integrated server only
+                // starts inside `begin_singleplayer`, so there was nothing to
+                // send the overrides to any earlier than the session's own
+                // first `Connected` frame. `take()` means a later frame
+                // (this arm runs every frame the session stays `Connected`,
+                // not just the transition into it) sends nothing a second
+                // time.
+                if let Some(entries) = self.pending_game_rules.take() {
+                    self.sim.send_set_game_rules(entries);
+                }
+            }
+            SessionPhase::Ended(end) => {
+                // Only transition in once; re-setting every frame would keep
+                // re-latching the same reason (harmless but wasteful).
+                //
+                // The whole `SessionEnd` crosses, not a formatted string: its
+                // `kind` is what picks the screen's title (a server disconnect
+                // and a failure to reach the server are different screens) and
+                // its `reason` is still a styled `Text`, so the
+                // server's own colours survive to the draw.
+                if self.ui.screen() != crate::menu::Screen::Error {
+                    self.ui.session_failed(*end);
+                }
+            }
+        }
+        // The death screen: `net::run` now builds the client
+        // with `RespawnPolicy::Manual`, so nothing auto-respawns any more —
+        // `Sim::is_dead` is the ground truth for whether the screen should be
+        // up, reconciled here the same way `SessionPhase` is reconciled into
+        // `UiState` above. The `!self.ui.is_death()` guard makes `die` fire
+        // exactly once per death rather than re-latching (and re-cloning) the
+        // message every frame the screen stays up; the `respawn_confirmed`
+        // side needs no such guard — it is already a no-op off `Screen::Death`.
+        //
+        // The immediate-respawn rule forks
+        // this: vanilla's own respawn-packet handling never puts the
+        // death screen up at all when the rule is on, it respawns on the spot.
+        // That is the rule's entire user-visible meaning, and it is the reason
+        // the fold had a reader worth writing — `SessionGameRules` was folded,
+        // reset on quit-to-title, gated through the real `SharedState::apply`
+        // path, and read by nothing.
+        if self.sim.is_dead() {
+            if self.sim.game_rules().immediate_respawn() == Some(true) {
+                // No screen, ever — not "open it and close it next frame",
+                // which would flash the death screen for one frame at 60 Hz.
+                // `Sim::respawn` is already a no-op unless `is_dead`, so this
+                // cannot fire twice for one death: the second frame sees the
+                // server's confirmation and `is_dead` is false.
+                self.sim.respawn();
+            } else if !self.ui.is_death() {
+                self.ui.die(self.sim.death_message().map(<[_]>::to_vec));
+            }
+        } else if self.ui.is_death() {
+            self.ui.respawn_confirmed();
+        }
+        self.restore_recipe_book_settings();
+        self.sync_recipe_toasts();
+        self.sync_recipe_book_seen();
+        // The credits screen: `Sim::has_won()` is the ground
+        // truth `NetUpdate::WinGame` sets in `poll_net`, reconciled here the
+        // same way `is_dead()` is reconciled above. The `!= Screen::Credits`
+        // guard mirrors the `!self.ui.is_death()` one: `show_credits` is
+        // already idempotent (it only moves the screen from a live-gameplay
+        // screen), but this avoids re-latching every frame the screen stays
+        // up. No "un-won" transition is needed on the other side — unlike
+        // death, winning has no server-confirmed reversal to reconcile
+        // against, and `Sim::end_session` clears the flag for the next
+        // session.
+        if self.sim.has_won() && self.ui.screen() != crate::menu::Screen::Credits {
+            self.ui.show_credits();
+        }
+        // The sign-editing screen: `Sim::take_pending_sign_edit` is the
+        // ground truth a real `NetUpdate::SignEditorOpened` sets, reconciled
+        // here every frame the same way `has_won`/`is_dead` are above. Unlike
+        // those two this is a one-shot **take**, not a latched flag — see
+        // `Sim::pending_sign_edit`'s own doc — so there is no "un-open"
+        // branch to reconcile on the other side; the screen closes itself
+        // through `MenuNav::close_sign_edit` when the player is done.
+        //
+        // `MenuNav::open_sign_edit` converts `Sim`'s menu-agnostic
+        // `PendingSignEdit` into `menu::sign_edit::SignEditOpen` and guards
+        // on `Screen::Playing`, matching `open_command_block`'s own two-step
+        // (widget state here, screen there).
+        if let Some(request) = self.sim.take_pending_sign_edit() {
+            self.nav.open_sign_edit(
+                &mut self.ui,
+                crate::menu::sign_edit::SignEditOpen {
+                    pos: request.pos,
+                    is_front_text: request.is_front_text,
+                    lines: request.lines,
+                },
+            );
+        }
+        // `OPEN_BOOK` is the server-side counterpart to the local `try_use`
+        // book fork. The packet selects one hand, which is important when both
+        // hands have books; it does not carry contents, so resolve the already
+        // synchronised stack only after taking that selector.
+        if self.ui.screen() == crate::menu::Screen::Playing
+            && let Some(main_hand) = self.sim.take_pending_book_open()
+        {
+            if let Some(open) = self.sim.writable_book_in_hand_at(main_hand) {
+                self.sim.input_mut(InputState::release_all);
+                self.nav.open_book_edit(&mut self.ui, open);
+                self.tab_held = false;
+                self.set_grab(false);
+            } else if let Some(open) = self.sim.written_book_in_hand_at(main_hand) {
+                self.sim.input_mut(InputState::release_all);
+                self.nav.open_book_view(&mut self.ui, open);
+                self.tab_held = false;
+                self.set_grab(false);
+            }
+        }
+        // A lectern is a one-slot server menu, but its screen is a book reader
+        // rather than a generic container. Open it before `redraw` reaches its
+        // usual `open_menu() -> Screen::Container` fallback, and leave page
+        // turns to `BookViewState`'s menu-button actions.
+        if self.ui.screen() == crate::menu::Screen::Playing
+            && let Some((window_id, book, page)) = self.sim.lectern_book_view()
+        {
+            self.nav
+                .open_lectern_book_view(&mut self.ui, window_id, book, page);
+        }
+        // The pause menu stops offering Open to LAN
+        // once there is nothing left for it to do. `Sim::is_lan_published`
+        // is the ground truth (set from the real `NetUpdate::LanOpened`, not
+        // from `hosted_world` — a multiplayer session is never published
+        // either), reconciled here every frame the same way `has_won`/
+        // `is_dead` are above, so a menu already open catches up the instant
+        // the server confirms the bind rather than needing to be reopened.
+        self.nav.set_lan_published(self.sim.is_lan_published());
+        // The other half of the same gate, singleplayer-server availability —
+        // without this a multiplayer session read the same `false` an
+        // unpublished singleplayer world does and showed Open to LAN with
+        // nothing local to publish. `MenuNav` holds no `Sim`/`UiState` of its
+        // own, so `SessionKind` is pushed in here too, next to the flag it
+        // combines with (`MenuNav::open_to_lan_available`).
+        self.nav.set_has_singleplayer_server(
+            self.ui.kind() == Some(crate::menu::SessionKind::Singleplayer),
+        );
+        // A server-initiated container close: `Sim::open_menu` is the same
+        // ground truth `redraw` reads a few lines below to *open*
+        // `Screen::Container` (`Sim::open_menu().is_some() && is_playing()`),
+        // reconciled the other way here. `ClientEvent::ScreenClosed` already
+        // resets the *menu* model (`lodestone_game::menus::Menus::apply`,
+        // folded through `lodestone-ecs`'s session ingest) the instant the
+        // server sends `CONTAINER_CLOSE`, but nothing reset the *screen* —
+        // see `UiState::reconcile_server_menu_window`'s own doc for the full
+        // client-side close handling's two clauses and why
+        // this has to be edge-triggered on the window id rather than a level
+        // check on "no window right now", which would also fire for the
+        // player's own `E`-opened inventory.
+        self.ui
+            .reconcile_server_menu_window(self.sim.open_menu().map(|open| open.window_id));
+        // The resource-pack prompt: `NetClient::pending_resource_pack_prompt`
+        // is the ground truth, reconciled here every frame the same way
+        // `has_won`/`is_dead`/`is_lan_published` are above. `show_resource_pack_prompt`
+        // rebuilds `MenuNav`'s own dialog state unconditionally (a second
+        // push must not inherit a stale focus or pack id — see that
+        // method's own doc), so it is only called on the **edge** into
+        // "something is pending" via `!self.ui.is_resource_pack_prompt()`.
+        //
+        // That edge alone used to be the owner's exact report ("accepting
+        // the custom resource pack didn't do anything, and it kept the
+        // choice menu open"): `apply_resource_pack_prompt` closes the screen
+        // the moment the player answers, but `respond_to_resource_pack` only
+        // *queues* the answer for the net thread's own loop to drain — up to
+        // 15 ms later, never "the instant" a doc comment here used to claim
+        // — so this reconcile, which can run again the very same frame (the
+        // click handler and `redraw` share one winit dispatch), still reads
+        // the *same* pending prompt back from the still-uncleared shared
+        // cell and reopens it right away, indistinguishable from the click
+        // having done nothing. `MenuNav::resource_pack_already_answered`
+        // is the fix: it remembers the id this side already answered so the
+        // edge does not re-fire for it, and is forgotten once the ground
+        // truth itself reports nothing pending (the net thread has, by then,
+        // actually cleared its cell).
+        if let Some(net) = self.sim.net() {
+            match net.pending_resource_pack_prompt() {
+                Some(prompt) => {
+                    if !self.ui.is_resource_pack_prompt()
+                        && !self.nav.resource_pack_already_answered(prompt.id)
+                    {
+                        self.nav.show_resource_pack_prompt(&mut self.ui, &prompt);
+                    }
+                }
+                None => self.nav.clear_resource_pack_answered(),
+            }
+        }
+        // A transition may have changed grab intent (Connected → Playing grabs;
+        // Ended/Death → menu-owned screens release). Only touch the OS grab
+        // when it disagrees.
+        let want = self.ui.wants_cursor_grab();
+        if want != self.grabbed {
+            self.set_grab(want);
+        }
+
+        // Keep the Social Interactions roster live.
+        // `social::entries_from_tablist` was pure and tested with **no
+        // production caller** — this is the queued call
+        // `docs/social-interactions.md`'s "How to change it" names. Only
+        // `Screen::Social` ever reads `MenuNav::social()`, but this runs every
+        // frame regardless of which screen is open (matching every other
+        // reconciliation in this function) rather than gating on the screen:
+        // a `TabList` clone plus a short `Vec` build is cheap, and refreshing
+        // only-while-open would mean the roster the player sees the instant
+        // they open it is one frame stale.
+        if self.sim.session_phase() == crate::sim::SessionPhase::Connected {
+            let tab_list = self.sim.tab_list();
+            let entries =
+                crate::menu::social::entries_from_tablist(&tab_list, self.sim.local_uuid());
+            self.nav.refresh_social(entries);
+
+            // The Spectator Menu (`TeleportToEntity`
+            // remainder), same reason and same shape as the Social roster
+            // immediately above — `crate::menu::spectator_menu`'s module
+            // doc names why this cannot be built inside `MenuNav` itself
+            // (it needs a live `TabList` + `Scoreboard`, which only `Sim`
+            // can reach). Every frame regardless of which screen is open,
+            // for the identical staleness reason.
+            let scoreboard = self.sim.scoreboard();
+            let spectator_entries = crate::menu::spectator_menu::spectator_menu_entries(
+                &tab_list,
+                &scoreboard,
+                self.sim.local_uuid(),
+            );
+            self.nav.refresh_spectator_menu(spectator_entries);
+
+            // The Statistics screen, for exactly the same reason and in
+            // exactly the same shape. `award_stats` is decoded and folded into
+            // `lodestone_ecs::SessionStatistics`, and `menu::render::dispatch`
+            // passed `StatsSnapshot::default()` — a literal — into the frame, so
+            // every counter read zero no matter what the server sent. This is the
+            // read that was missing.
+            //
+            // Every frame rather than only while the screen is open, matching the
+            // roster above: the projection walks the screen's fixed 77 ids against
+            // a sparse map, and refreshing only-while-open would show one stale
+            // frame on open.
+            let stats = self.sim.statistics();
+            self.nav
+                .refresh_stats(crate::menu::stats::StatsSnapshot::from_statistics(&stats));
+
+            // The pause menu's Server Links row and the screen it opens, for
+            // exactly the same reason: `SERVER_LINKS` decodes into
+            // `ClientEvent::ServerLinksReceived` and folds into
+            // `lodestone_ecs::session::SessionServerInfo`, and nothing read
+            // it — the row never had a live link list to gate its own
+            // presence on. Every frame rather than only while the screen is
+            // open, matching the roster and the counters above.
+            self.nav.refresh_server_links(self.sim.server_links());
+        }
+    }
+
+    /// Apply the server's `RECIPE_BOOK_SETTINGS` (76) to the recipe-book panel,
+    /// once per book type per session — `SessionRecipeBookSettings`
+    /// island.
+    ///
+    /// Before this, the panel always started closed and unfiltered no matter
+    /// what the server said, so a player who had left their book open came back
+    /// to it shut. The fold landed in `fd53995` and had **no reader**; this is
+    /// it.
+    ///
+    /// Three guards, each load-bearing:
+    ///
+    /// * `settings.reported` — an unreported record is all-`false`, which is
+    ///   indistinguishable from "the server wants it closed". Restoring on an
+    ///   unreported record would be restoring *our own default*, a wire that
+    ///   looks connected and carries nothing.
+    /// * `restored_type != Some(book_type)` — the settings are per book type
+    ///   while the panel state is one shared instance, so this re-restores when
+    ///   the player opens a furnace after a crafting table, and does **not**
+    ///   re-restore every frame (which would fight the user's own clicks).
+    /// * an open menu with a recipe book at all — `recipe_book_type_for`
+    ///   returns `None` for a chest, and there is nothing to restore into.
+    ///
+    /// Deliberately does **not** call `send_recipe_book_settings`: this is the
+    /// server's own value coming back, and echoing it would be a write loop.
+    /// That asymmetry is why the two click arms report and this does not.
+    pub(super) fn restore_recipe_book_settings(&mut self) {
+        let Some(menu) = self.active_container_menu() else {
+            return;
+        };
+        let Some(book_type) = super::recipe_panel::recipe_book_type_for(&menu) else {
+            return;
+        };
+        if self.recipe_panel.restored_type == Some(book_type) {
+            return;
+        }
+        let settings = self.sim.recipe_book_settings();
+        if !settings.reported {
+            return;
+        }
+        let per_type = settings.for_type(book_type);
+        self.recipe_panel.open = per_type.open;
+        self.recipe_panel.filtering = per_type.filtering;
+        self.recipe_panel.page = 0;
+        self.recipe_panel.restored_type = Some(book_type);
+    }
+
+    /// Diff the server's recipe-unlock sync against what has already been
+    /// toasted, and push every newly-unlocked, notifying recipe into
+    /// [`Self::recipe_toasts`] — the missing hop between `SessionRecipeBook`
+    /// (`lodestone-ecs`, folded and read but never dispatched) and the toast
+    /// queue (built and drawn, but never fed).
+    ///
+    /// Same shape as [`Self::restore_recipe_book_settings`]: a plain per-frame
+    /// diff against `Sim::known_recipes()`, run from
+    /// [`Self::drive_ui_from_session`] so it keeps up the instant a session
+    /// exists, not gated on any screen being open (a toast can fire with no
+    /// menu on screen at all).
+    ///
+    /// The **first** sync — `known_recipes().has_data()` true for the first
+    /// time this session — seeds [`Self::recipe_toast_seen`] from the whole
+    /// current known set and toasts nothing: vanilla does not toast a fresh
+    /// join's entire unlock history, only genuinely new unlocks after that.
+    /// Every later frame toasts exactly the display ids not already in the
+    /// seen set, which both first-sync seeding and a real toast insert into,
+    /// so nothing is ever toasted twice.
+    ///
+    /// A recipe whose result or station item id does not resolve through
+    /// [`Item::from_registry_id`] (an id outside the generated
+    /// census) is marked seen but never toasted — the same "draw nothing
+    /// rather than a wrong icon" contract `container::merchant::cost_item_stack`
+    /// documents for the same table.
+    pub(super) fn sync_recipe_toasts(&mut self) {
+        let sync = self.sim.known_recipes();
+        if !sync.has_data() {
+            // Off a server, or before the first recipe-book sync packet has
+            // landed this session — nothing to diff against yet.
+            return;
+        }
+        if !self.recipe_toast_synced {
+            self.recipe_toast_seen = sync.known().keys().copied().collect();
+            self.recipe_toast_synced = true;
+            return;
+        }
+        let now = recipe_toast_now_ms();
+        for (&display_id, recipe) in sync.known() {
+            if !self.recipe_toast_seen.insert(display_id) {
+                // Already toasted, or already folded into the first-sync seed.
+                continue;
+            }
+            if !recipe.notification {
+                continue;
+            }
+            let Some(unlocked) = recipe
+                .result_items
+                .first()
+                .copied()
+                .and_then(recipe_item_identifier)
+            else {
+                continue;
+            };
+            let Some(station) = recipe
+                .station_items
+                .first()
+                .copied()
+                .and_then(recipe_item_identifier)
+            else {
+                continue;
+            };
+            self.recipe_toasts.push(station, unlocked, now);
+        }
+    }
+
+    /// Report vanilla's "seen recipe" signal for every highlighted, unseen
+    /// recipe currently placed on the recipe-book panel's visible page —
+    /// recipe-button initialization → recipe-page display notification →
+    /// recipe-book notification handling → local-player highlight removal
+    /// chain, which fires the instant a highlighted recipe's button is
+    /// populated onto a page the player can see, not on a click.
+    ///
+    /// Walked every frame the panel is open, the same shape as
+    /// [`Self::sync_recipe_toasts`] and [`Self::restore_recipe_book_settings`]:
+    /// only while `recipe_panel.open`, because vanilla only ever populates
+    /// recipe buttons — and therefore only ever fires this — for a page
+    /// actually on screen, never for the whole corpus at once.
+    ///
+    /// [`Self::recipe_book_seen`] is this method's own "already reported" set,
+    /// separate from [`Self::recipe_toast_seen`]: a recipe can be seen (its
+    /// tab highlight cleared) without ever having raised a toast (highlight
+    /// and notification are independent `flags` bits), and the toast queue's
+    /// own dedup must not be reused to gate a differently-timed signal.
+    pub(super) fn sync_recipe_book_seen(&mut self) {
+        if !self.recipe_panel.open {
+            return;
+        }
+        let Some(menu) = self.active_container_menu() else {
+            return;
+        };
+        let Some(book_type) = super::recipe_panel::recipe_book_type_for(&menu) else {
+            return;
+        };
+        let (_, _, page_ids) = super::recipe_panel::recipe_panel_contents(
+            self.recipe_book.as_ref(),
+            &self.recipe_panel,
+            &menu,
+            book_type,
+        );
+        let seen = {
+            let sync = self.sim.known_recipes();
+            let mut seen = Vec::new();
+            for id in &page_ids {
+                let Some(item_reg_id) = Item::from_name(&id.to_string())
+                    .map(|item| i32::from(item.registry_id()))
+                else {
+                    continue;
+                };
+                for (display_id, recipe) in sync.unlocked_producing(
+                    lodestone_model::ItemId::canonical(item_reg_id as u32),
+                ) {
+                    if !recipe.highlight {
+                        continue;
+                    }
+                    if self.recipe_book_seen.insert(display_id) {
+                        seen.push(display_id);
+                    }
+                }
+            }
+            seen
+        };
+        for display_id in seen {
+            self.sim.send_recipe_book_seen_recipe(display_id);
+        }
+    }
+
+    /// Staged Singleplayer entry point. Vanilla's singleplayer starts an
+    /// integrated server in-process and connects to it over a local transport;
+    /// that server (`impl-worldgen`'s `lodestone-server`, via a future
+    /// `IntegratedServer::start`) is not wired yet. Rather than fork a second
+    /// launch path or silently do nothing, this drives the honest failure path:
+    /// the menu shows an Error explaining the feature is staged. Kept here so the
+    /// wiring is a one-call swap once the seam lands.
+    /// Install the block-outline source, which needs a live `Sim` — it reads the
+    /// version adapter's per-state outline census through the shared handle.
+    ///
+    /// Must run *after* `attach_net`: `Sim::outline_shape_source` returns `None`
+    /// without a net client. Until this is installed the selection box falls back
+    /// to a unit cube, which is wrong for roughly nine block states in ten — only
+    /// 3,328 of 32,366 have a full-cube outline.
+    ///
+    /// Note the outline census is deliberately *not* the collision census: they
+    /// are different vanilla shape families and disagree for over half of all
+    /// states, so a slab's box and a slab's collider are not the same box.
+    pub(super) fn install_outline_source(&mut self) {
+        if let (Some(render), Some(f)) = (self.render.as_mut(), self.sim.outline_shape_source()) {
+            render.set_outline_shape_source(f);
+        }
+    }
+
+    /// Install the entity-shadow ground sampler (owner report: "entity
+    /// shadows are missing"), which needs a live net client — the render
+    /// half of `RenderState::prepare_shadows`'s block query.
+    ///
+    /// Unlike [`install_outline_source`](Self::install_outline_source), this
+    /// needs no `Sim`-side factory method: `NetClient::block_at` is already a
+    /// cheap one-position read (the same one the live dig loop uses), so the
+    /// closure calls it directly through a cloned [`crate::net::SharedHandle`]
+    /// — the same "hand out a cheap, `'static` handle rather than a `NetClient`
+    /// borrow" shape [`crate::net::entity_light_at`] already uses for
+    /// [`RenderState::set_entity_light_source`]. Must run *after*
+    /// `attach_net`, for [`install_outline_source`]'s own reason: `NetClient`
+    /// itself is not `'static`.
+    pub(super) fn install_shadow_ground_source(&mut self) {
+        let (Some(render), Some(net)) = (self.render.as_mut(), self.sim.net()) else {
+            return;
+        };
+        let handle = net.shared_handle();
+        render.set_shadow_ground_source(move |[x, y, z]| {
+            handle
+                .get()?
+                .block_at(lodestone_client::BlockPos::new(x, y, z))
+        });
+    }
+
+    /// Install the debug-lines source: the render half of `ExtractSet::Debug`
+    /// (`docs/plugin-api.md`), the channel a plugin (e.g. a navigator) uses to
+    /// push world-space line geometry onto screen via
+    /// `lodestone_ecs::player::DebugLines`. `RenderState::set_debug_lines_source`
+    /// and the line pipeline it drives already existed with no caller —
+    /// `gpu.rs`'s own `DebugLinesSource` doc names this as "the one wire this
+    /// crate cannot lay itself."
+    ///
+    /// Unlike [`install_outline_source`](Self::install_outline_source), this
+    /// needs no live connection: `Sim::new`/`Sim::with_demo_world` always add
+    /// `LocalPlayerPlugin` (`crates/lodestone-ecs/src/player.rs`), which
+    /// `init_resource`s `DebugLines` on the one `World` regardless of session
+    /// kind, so `self.sim.ecs()` is enough. Callable — and safe to call
+    /// repeatedly, since it only replaces the closure with an equivalent one —
+    /// the moment `self.render` exists.
+    pub(super) fn install_debug_lines_source(&mut self) {
+        let Some(render) = self.render.as_mut() else {
+            return;
+        };
+        let ecs = self.sim.ecs().clone();
+        // The two F3 sub-modes ride this same channel rather than
+        // getting a pass of their own: they are world-space coloured segments,
+        // which is exactly what `DebugLineRenderer` already draws, and it draws
+        // last in the world pass so they read over everything real.
+        let hitboxes = std::sync::Arc::clone(&self.debug_hitboxes);
+        let borders = std::sync::Arc::clone(&self.debug_chunk_borders);
+        // The world column, resolved **now** rather than assumed in the closure:
+        // a nether or custom-height dimension has a different range, and a
+        // hardcoded `-64..320` would silently draw the wrong box there. `None`
+        // (no session yet) falls back to the overworld column, which is what the
+        // dev world is.
+        let (min_y, height) = self
+            .sim
+            .net()
+            .and_then(crate::net::NetClient::world_dimensions)
+            .map_or((-64, 384), |d| (d.min_y, d.height));
+        let local = self.sim.local_entity();
+        let structure_blocks = self
+            .sim
+            .net()
+            .map(crate::net::NetClient::shared_handle);
+        render.set_debug_lines_source(move |eye| {
+            use std::sync::atomic::Ordering;
+            let (mut out, permission_level, instabuild, spectator) = lodestone_ecs::hold_read(&ecs, |world| {
+                let mut out = crate::gpu::debug_line_vertices(
+                    &world.resource::<lodestone_ecs::DebugLines>().0,
+                );
+                // Both flags read *before* either producer runs, and the two
+                // sub-modes selected in one place — `crate::gpu::f3_overlay_vertices`
+                // — so the flag-to-producer mapping has a subject a gate can drive
+                // with the two flags at different values. The two `World` reads stay
+                // lazy (each is a clone or a component lookup nobody wants on a frame
+                // where its overlay is off), which is the only reason they are still
+                // spelled out here rather than hidden behind that call.
+                let hitboxes_on = hitboxes.load(Ordering::Relaxed);
+                let borders_on = borders.load(Ordering::Relaxed);
+                let draws = if hitboxes_on {
+                    crate::entities::extracted_entity_draws(world)
+                } else {
+                    Vec::new()
+                };
+                // `EntityDraw` intentionally contains only ordinary render
+                // state. F3+B additionally needs the authoritative pose and
+                // resolved `minecraft:scale` attribute, so build its tiny
+                // side table only while that overlay is enabled rather than
+                // duplicating two ingest fields onto every draw every frame.
+                let hitbox_states = if hitboxes_on {
+                    let scale_key = lodestone_model::Identifier::new("minecraft", "scale")
+                        .expect("minecraft:scale is a valid identifier");
+                    let index = world.resource::<lodestone_ecs::entity::EntityIndex>();
+                    draws
+                        .iter()
+                        .filter_map(|draw| {
+                            let entity = index.get(draw.id)?;
+                            let pose = world
+                                .get::<lodestone_ecs::entity::Pose>(entity)
+                                .map_or(lodestone_model::EntityPose::Standing, |pose| pose.0);
+                            let attribute_scale = world
+                                .get::<lodestone_ecs::entity::Attributes>(entity)
+                                .map_or(1.0, |attributes| {
+                                    lodestone_entity::attribute::attribute_value(
+                                        &attributes.0,
+                                        &scale_key,
+                                    ) as f32
+                                });
+                            Some(crate::gpu::EntityHitboxState {
+                                id: draw.id,
+                                pose,
+                                attribute_scale,
+                            })
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let player = if borders_on {
+                    world
+                        .get::<lodestone_ecs::player::PhysicsState>(local)
+                        .map_or([0.0, 0.0, 0.0], |s| {
+                            [s.0.position.x, s.0.position.y, s.0.position.z]
+                        })
+                } else {
+                    [0.0, 0.0, 0.0]
+                };
+                out.extend(crate::gpu::f3_overlay_vertices_with_states(
+                    &draws,
+                    &hitbox_states,
+                    player,
+                    min_y,
+                    height,
+                    hitboxes_on,
+                    borders_on,
+                ));
+                let permission_level = world
+                    .get::<lodestone_ecs::session::ServerPermissionLevel>(local)
+                    .map_or(0, |level| level.0);
+                let instabuild = world
+                    .get::<lodestone_ecs::session::Abilities>(local)
+                    .is_some_and(|abilities| abilities.instabuild);
+                let spectator = world
+                    .get::<lodestone_ecs::session::ServerGameMode>(local)
+                    .is_some_and(|mode| {
+                        matches!(mode.0, Some(lodestone_model::GameMode::Spectator))
+                    });
+                (out, permission_level, instabuild, spectator)
+            });
+            if let Some(handle) = structure_blocks.as_ref() {
+                out.extend(crate::block_entities::structure_block_vertices(
+                    handle,
+                    eye,
+                    permission_level,
+                    instabuild,
+                    spectator,
+                ));
+            }
+            out
+        });
+    }
+
+    /// Install the per-frame entity-effect state source. Positions are not
+    /// captured here: `RenderState` joins the ids with the current entity draw
+    /// slice, preserving interpolation and making expiry/removal immediately
+    /// visible in the next frame.
+    pub(super) fn install_entity_glow_source(&mut self) {
+        let Some(render) = self.render.as_mut() else {
+            return;
+        };
+        render.set_entity_glow_source(self.sim.glowing_entity_ids_source());
+    }
+
+    /// Install the plugin-billboard source: the render half of the
+    /// `ExtractSet::Debug` billboard channel (`docs/plugin-api.md`), the
+    /// channel a plugin (a waypoint, a hologram, a minimap overlay) uses to
+    /// push textured/billboard world-space geometry onto screen via
+    /// `lodestone_ecs::PluginBillboards`. `RenderState::set_plugin_billboards_source`
+    /// and the pipeline it drives already exist with no caller — same shape
+    /// as [`install_debug_lines_source`](Self::install_debug_lines_source),
+    /// whose doc this one mirrors.
+    ///
+    /// Needs no live connection, for the identical reason
+    /// `install_debug_lines_source` does not: `Sim::new`/`Sim::with_demo_world`
+    /// always add `LocalPlayerPlugin`, which `init_resource`s
+    /// `PluginBillboards` on the one `World` regardless of session kind, so
+    /// `self.sim.ecs()` is enough. Callable — and safe to call repeatedly,
+    /// since it only replaces the closure with an equivalent one — the moment
+    /// `self.render` exists.
+    pub(super) fn install_plugin_billboards_source(&mut self) {
+        let Some(render) = self.render.as_mut() else {
+            return;
+        };
+        let ecs = self.sim.ecs().clone();
+        // Resolved **now**, not inside the closure: the atlas table is a
+        // snapshot of whatever `RenderState` uploaded at connect time, and
+        // capturing it once here is what lets the closure stay a plain `Fn`
+        // with no borrow back into `render`.
+        let atlas = render.plugin_atlas_sprites();
+        render.set_plugin_billboards_source(move || {
+            lodestone_ecs::hold_read(&ecs, |world| {
+                crate::gpu::plugin_billboard_vertices(
+                    &world.resource::<lodestone_ecs::PluginBillboards>().0,
+                    &atlas,
+                )
+            })
+        });
+    }
+
+    /// Arm and service the deferred Render Distance commit — vanilla's own
+    /// slider-option delayed-apply mechanism: a deadline armed on each change,
+    /// and an apply pass that commits the pending value once the deadline passes.
+    ///
+    /// Called once per frame from `app/redraw.rs`. The deadline is **re-armed by
+    /// every change**, so a drag that crosses ten values commits once, 600 ms
+    /// after it stops.
+    ///
+    /// # Edge detection, not difference
+    ///
+    /// The trigger is `nav`'s value *changing*, not `nav` disagreeing with
+    /// `config`. A difference test would re-arm on every frame of the 600 ms
+    /// window and the commit would never fire — and it would also fight
+    /// `--render-distance` on argv, which is deliberately allowed to disagree
+    /// with the persisted value for the whole run.
+    pub(super) fn tick_render_distance(&mut self, now: Instant) {
+        let wanted = self.nav.render_distance();
+        if wanted != self.render_distance_seen {
+            self.render_distance_seen = wanted;
+            self.render_distance_apply_at = Some(now + RENDER_DISTANCE_APPLY_DELAY);
+        }
+        if self.render_distance_apply_at.is_none_or(|at| now < at) {
+            return;
+        }
+        self.render_distance_apply_at = None;
+        if wanted == self.config.render_distance {
+            return;
+        }
+        // Both copies. `self.config` is what the fog upload and the render
+        // bring-up read; `self.sim.config` is what the camera's far plane
+        // (`sim/camera.rs`) and the fog helpers read. Leaving either behind is
+        // the "the slider appears to do nothing" report with one symptom fixed.
+        self.config.render_distance = wanted;
+        self.sim.config.render_distance = wanted;
+        // The server side. Vanilla's own client-options broadcast sends
+        // a client-information packet whenever an option in it changes,
+        // and view distance is in it — without this the server keeps streaming
+        // the square we asked for at join and the extra rings simply never
+        // arrive, so fog and the far plane would open onto empty space.
+        //
+        // `+ 1` for the mesher's buffer ring, the same reason
+        // `start_singleplayer`'s `view_radius` adds one: the outermost streamed
+        // ring can never be meshed, so asking for exactly `render_distance`
+        // loses the last visible ring.
+        //
+        // Raising it mid-session is supported.
+        //
+        // This used to be capped: `dispatch_play_packet`'s
+        // `ClientInformationChanged` arm clamped against *this connection's own*
+        // `serve_connection` radius — the `render_distance + 1` the shell asked
+        // for at join — so a decrease took effect and an increase past the launch
+        // value was silently clamped back. `0c09f576` separated the join view
+        // radius from the permitted maximum, so the clamp is now against the
+        // server's configured ceiling and the chunk store's capacity follows a
+        // live raise (grow-only, a session high-water mark). Both directions
+        // reach the stream now, and nothing on this side needs to compensate.
+        let radius = wanted.saturating_add(1);
+        if let Some(net) = self.sim.net() {
+            net.send_action(lodestone_model::action::ClientAction::SetClientSettings(
+                self.client_settings(radius),
+            ));
+        }
+        // Deliberately **not** `Sim::set_view_radius`: that is the loading
+        // screen's progress denominator, not the streaming radius, and
+        // re-declaring it mid-session would re-baseline a bar for a load that
+        // already finished. Nothing client-side gates chunk *retention* on the
+        // radius — the camera's far plane and the fog do the work, and both read
+        // `config` above.
+    }
+
+    /// The pause menu's **Open to LAN** (scope 1): publish the
+    /// world this process is hosting on a TCP port, so other machines can join it.
+    ///
+    /// # Publishes the live handle in place
+    ///
+    /// This used to call `Sim::end_session` and reopen the same launch through
+    /// `NetClient::open_to_lan`, which **rebuilt** the world: a fresh
+    /// `ChunkStore`, a fresh tick loop, and the local player rejoining over
+    /// loopback like a stranger — a real loading screen for a button that is
+    /// supposed to be invisible if you are not the one joining. Vanilla's own
+    /// publish-to-LAN handling adds a listener to
+    /// the world already running; nothing about it is torn down. This now does
+    /// the same: `NetClient::publish_to_lan` asks the net thread to call
+    /// `IntegratedServer::publish` on the handle it already holds, so every
+    /// entity, loaded chunk and this player's own position are exactly what
+    /// they were the instant before the button was pressed — see that
+    /// method's own doc comment for what state a publish-time joiner shares.
+    ///
+    /// `0` — an OS-assigned port — rather than a fixed one:
+    /// vanilla's `/publish` defaults to asking the OS for any free port, and the
+    /// actual bound port comes back through `NetUpdate::LanOpened`, which
+    /// `Sim::apply` already turns into the "Local game hosted on port N" chat
+    /// line — unchanged by this fix, since it already read the *reported*
+    /// port rather than the requested one.
+    ///
+    /// Off a hosted world, or before a net session exists at all, this says so
+    /// in chat instead of doing nothing — the caller only omits the button
+    /// once it has *itself* learned the world is published (see
+    /// `MenuNav::pause_buttons`), so a stale render (this frame's menu built
+    /// from last frame's `MenuNav` state) can still land here between the
+    /// press and that catch-up, and this is where "there is nothing of ours
+    /// to publish" gets stated for it.
+    ///
+    /// A publish that fails server-side (already published, or a bind error)
+    /// reports through `NetUpdate::LanPublishError` — **not**
+    /// `NetUpdate::Error`, which ends the session — so a race here reads as
+    /// one more chat line, never a kick. See `NetClient::publish_to_lan`'s own
+    /// doc, and `NetUpdate::Error`'s for why the two must stay distinct: they
+    /// used to be one variant, and every "already published" reply rode in on
+    /// the session-ending one, which is exactly the disconnect this doc
+    /// used to (wrongly) say could not happen.
+    #[cfg(all(feature = "multiplayer", not(target_arch = "wasm32")))]
+    pub(super) fn open_current_world_to_lan(&mut self) {
+        if self.hosted_world.is_none() {
+            self.sim
+                .push_local_chat("Only a world you are hosting can be opened to LAN");
+            return;
+        }
+        let Some(net) = self.sim.net() else {
+            self.sim
+                .push_local_chat("Only a world you are hosting can be opened to LAN");
+            return;
+        };
+        net.publish_to_lan(0);
+    }
+
+    /// The spectate debug binding (F3+N): drop into spectator, or come back
+    /// out of it.
+    ///
+    /// **The first producer of `ClientAction::ChangeGameMode` anywhere outside
+    /// `crates/protocol/`** — the variant was encoded by two families and sent by
+    /// nothing, the outbound-island shape `ClientAction::SetFlying` was caught in,
+    /// and the reason the server's own `ServerBound::ChangeGameMode` arm (live
+    /// since `226ac517`) could never fire.
+    ///
+    /// **Coming back always lands in Creative, never in whatever you left.**
+    /// Vanilla reads the previous player mode and falls back to
+    /// Creative when there is none; this client tracks no previous
+    /// mode, so it takes that fallback every time. The server is authoritative
+    /// either way — it answers with the mode it applied plus fresh abilities — so
+    /// the worst case is one extra chord, not a desync.
+    pub(super) fn toggle_spectator(&self) {
+        use lodestone_model::GameMode;
+        let Some(net) = self.sim.net() else { return };
+        let current = net
+            .shared_handle()
+            .get()
+            .cloned()
+            .and_then(|handle| handle.game_mode());
+        let wanted = if current == Some(GameMode::Spectator) {
+            GameMode::Creative
+        } else {
+            GameMode::Spectator
+        };
+        net.send_action(lodestone_model::action::ClientAction::ChangeGameMode { mode: wanted });
+    }
+
+    /// The game-mode debug binding (F3+F4), cycling instead of opening a
+    /// radial picker.
+    ///
+    /// Vanilla's own debug-key handling shows a game-mode switcher screen — a
+    /// four-slot hover picker with its own hotbar-style art. Cycling is the
+    /// honest subset: it reaches every mode with the same chord and needs no new
+    /// screen, and a player holding F3 and tapping F4 four times sees exactly the
+    /// same four modes the picker offers. Whoever wants the picker adds a
+    /// `Screen` variant; the action this sends does not change.
+    ///
+    /// **No permission gate.** The reference client checks permission predicates;
+    /// this client tracks no op level, and the
+    /// server rejects an unauthorised request as it rejects every other
+    /// optimistic action — see `targeted_command_block`'s doc for the same call.
+    pub(super) fn cycle_game_mode(&self) {
+        use lodestone_model::GameMode;
+        let Some(net) = self.sim.net() else { return };
+        let current = net
+            .shared_handle()
+            .get()
+            .cloned()
+            .and_then(|handle| handle.game_mode());
+        net.send_action(lodestone_model::action::ClientAction::ChangeGameMode {
+            mode: next_game_mode(current),
+        });
+    }
+
+    /// The [`lodestone_model::action::ClientSettings`] this client would send
+    /// now, with `view_distance` overridden to `radius` chunks.
+    ///
+    /// Split out because it is the *only* producer of
+    /// [`lodestone_model::action::ClientAction::SetClientSettings`] in the
+    /// workspace — the variant was encoded by four adapters and sent by nothing,
+    /// which is `CLAUDE.md`'s outbound-island shape. Everything but
+    /// `view_distance` and `chat_colors` is the client-information payload
+    /// default, because this client has no option for it yet; a fabricated value
+    /// would be worse than the default it would replace.
+    fn client_settings(&self, radius: u32) -> lodestone_model::action::ClientSettings {
+        use lodestone_model::action::{
+            ChatMode, ClientSettings, DisplayedSkinParts, MainHand, ParticleStatus,
+        };
+        ClientSettings {
+            locale: "en_us".to_string(),
+            // The client-information payload carries a byte; the server clamps
+            // to `2..=32` before sending. Saturating rather than wrapping, or a
+            // radius past 127 would arrive as a negative distance.
+            view_distance: i8::try_from(radius.clamp(2, 32)).unwrap_or(i8::MAX),
+            chat_mode: ChatMode::Full,
+            chat_colors: self.nav.options().chat_colors,
+            skin_parts: DisplayedSkinParts {
+                cape: true,
+                jacket: true,
+                left_sleeve: true,
+                right_sleeve: true,
+                left_pants_leg: true,
+                right_pants_leg: true,
+                hat: true,
+            },
+            main_hand: MainHand::Right,
+            text_filtering: false,
+            allow_server_listing: true,
+            particle_status: ParticleStatus::All,
+        }
+    }
+
+    /// Start singleplayer and show the loading screen.
+    ///
+    /// The multiplayer twin of this is [`Self::connect_to`], and after the
+    /// session is attached the two are *the same function*: both call
+    /// [`Self::install_session_render_sources`], because the sky, fog clock,
+    /// entity light sampler and screen-effect passes are properties of having a
+    /// session, not of how it was obtained. That sharing is the point — a
+    /// singleplayer path with its own render wiring is how one of the two ends up
+    /// silently missing a pass.
+    ///
+    /// `attach_net` rather than a `Sim::connect`-style helper because the client
+    /// is already built *with* this `Sim`'s `World` and local entity: that is what
+    /// [`launch_singleplayer`]'s `session` argument is, threaded through
+    /// `NetClient::open_singleplayer` into `ClientBuilder::ecs` (§4.1(c)).
+    /// Attaching without it is the silent failure `Sim::connect`'s docs warn
+    /// about — every HUD accessor would read an empty default.
+    pub(super) fn begin_singleplayer(&mut self, launch: crate::menu::nav::SingleplayerLaunch) {
+        use crate::menu::nav::SingleplayerLaunch;
+        let launch_for_lan = launch.clone();
+        // The labelled terrain-generation screen is a first-creation affordance,
+        // not a generic connection screen. Existing saves (`Open`), creative
+        // and hardcore creations, and remote joins all skip it; only a newly
+        // created survival world gets the initial-world progress/grid.
+        let show_new_world_loading = matches!(
+            &launch,
+            SingleplayerLaunch::Created { config, .. }
+                if config.game_mode == crate::menu::create_world::WorldGameMode::Survival
+        );
+        self.ui.begin(crate::menu::SessionKind::Singleplayer);
+        // The world is a **directory the menu chose**,
+        // and the two arms differ only in whether a typed seed is honoured.
+        //
+        // `Open` resolves through `resolve_launch_seed(None)` and the value is then
+        // *discarded* by `resolve_world_seed`, which reads the world's stored seed
+        // — a requested seed is a creation parameter for an existing world. That is
+        // not a wire carrying the wrong value, it is a parameter with no effect on
+        // this path, and it is why `SingleplayerLaunch::Open` carries no seed of
+        // its own to imply otherwise. The one case where it *does* matter is a
+        // directory whose `world_gen_settings.dat` is missing, which
+        // `resolve_world_seed` then creates from it — see
+        // `world_select::BUNDLED_WORLD`.
+        //
+        // `Created`'s directory already exists (the menu made it, with the player's
+        // typed name in its `level.dat`) and has **no** settings file yet, so this
+        // is the arm where `config.seed` reaches the generator.
+        #[cfg(not(target_arch = "wasm32"))]
+        let world_dir = Some(match &launch {
+            SingleplayerLaunch::Open(dir) => dir.clone(),
+            SingleplayerLaunch::Created { world_dir, .. } => world_dir.clone(),
+        });
+        let seed = match &launch {
+            SingleplayerLaunch::Open(_) => resolve_launch_seed(None),
+            SingleplayerLaunch::Created { config, .. } => resolve_launch_seed(Some(config)),
+        };
+        // World-type selection follows the same rule as `seed` immediately above:
+        // only `Created` carries a `WorldCreationConfig` to read a chosen
+        // preset from, and only a **new** world's generator is ever built
+        // from this — an existing `Open`ed world has no stored world-type
+        // field to override either, so it takes the same `Normal` default the
+        // unconditional `overworld_chunk_source(seed)` call used before this
+        // was threaded. Not cfg-gated to native, unlike `online_mode` below:
+        // `launch_singleplayer` needs this on wasm32 too.
+        //
+        // The full `WorldTypePreset` is threaded now, not just its
+        // `lodestone_server::WorldType` projection (item 1) —
+        // `net.rs`'s `preset_chunk_source` is what resolves the other four
+        // presets (`SingleBiomeSurface`/`Flat`/`FlatAllDimensions`/
+        // `DebugAllBlockStates`) once `lodestone-server`'s `lib.rs` re-exports
+        // their entry points (item 2, already landed), and it
+        // needs the preset itself to pick among four different generator
+        // constructors, not a three-way `WorldType`.
+        let world_type = match &launch {
+            SingleplayerLaunch::Open(_) => crate::menu::create_world::WorldTypePreset::Normal,
+            SingleplayerLaunch::Created { config, .. } => config.world_type,
+        };
+        // Game-rule selection follows the same rule as `world_type` immediately
+        // above: only a **new** world carries a `WorldCreationConfig` to read
+        // overrides from, and an empty `Vec` (nothing touched) is left as
+        // `None` so `drive_ui_from_session` has nothing to send.
+        self.pending_game_rules = match &launch {
+            SingleplayerLaunch::Open(_) => None,
+            SingleplayerLaunch::Created { config, .. } if !config.game_rules.is_empty() => {
+                Some(config.game_rules.clone())
+            }
+            SingleplayerLaunch::Created { .. } => None,
+        };
+        // The shell-side control: only `SingleplayerLaunch::Created`
+        // carries a `WorldCreationConfig` to hold this on — `Open` (Play
+        // Selected World) has none, so an existing world always takes the
+        // ordinary offline path below. See
+        // `WorldCreationConfig::online_mode`'s own doc for the full picture.
+        #[cfg(all(feature = "multiplayer", not(target_arch = "wasm32")))]
+        let online_mode = matches!(
+            &launch,
+            SingleplayerLaunch::Created { config, .. } if config.online_mode
+        );
+        let session = Some((self.sim.ecs().clone(), self.sim.local_player()));
+        // The server streams simulation- and view-distance chunks around the
+        // player; ours is the same number the camera's far plane and the mesher
+        // already use, so the server never sends a column the renderer would
+        // discard and never withholds one it wants.
+        //
+        // **Plus one, and the `+ 1` is not slack — it is the buffer ring the
+        // mesher's invariant requires.** The server tracks
+        // the view distance plus one ring around the center, and it has
+        // to: a section is only meshed once all its neighbours are resident, so the
+        // outermost ring of a radius-`n` stream permanently lacks a neighbour and
+        // **never draws**. Streaming exactly `render_distance` made singleplayer
+        // silently lose its last ring of chunks — reported as "some water far away
+        // is blocky", because a large flat surface is where a missing outer ring
+        // reads as a hard step rather than as absent scenery.
+        //
+        // This does not widen the view: fog and the far plane read
+        // `config.render_distance` directly, not this value.
+        let view_radius = i32::try_from(self.config.render_distance)
+            .unwrap_or(i32::MAX)
+            .saturating_add(1);
+        #[cfg(all(feature = "multiplayer", not(target_arch = "wasm32")))]
+        let launch_result = if online_mode {
+            launch_open_to_lan_online(
+                self.config.protocol,
+                view_radius,
+                session,
+                seed,
+                world_type,
+                world_dir,
+            )
+        } else {
+            launch_singleplayer(
+                self.config.protocol,
+                view_radius,
+                session,
+                seed,
+                world_type,
+                world_dir,
+            )
+        };
+        #[cfg(all(not(feature = "multiplayer"), not(target_arch = "wasm32")))]
+        let launch_result = launch_singleplayer(
+            self.config.protocol,
+            view_radius,
+            session,
+            seed,
+            world_type,
+            world_dir,
+        );
+        #[cfg(target_arch = "wasm32")]
+        let launch_result = launch_singleplayer(
+            self.config.protocol,
+            view_radius,
+            session,
+            seed,
+            world_type,
+        );
+        match launch_result {
+            Ok(net) => {
+                self.sim.attach_net(net);
+                let view_radius = u32::try_from(view_radius).unwrap_or(0);
+                if show_new_world_loading {
+                    // The server receives one extra ring for neighbour-aware
+                    // meshing, but the loading square is the player's chosen
+                    // render distance. Do not make that implementation ring
+                    // inflate the visible box.
+                    self.sim
+                        .arm_new_world_loading(self.config.render_distance);
+                } else {
+                    // Keep the server radius available to diagnostics and
+                    // tests, but it is not a reason to display terrain loading
+                    // for an existing save.
+                    self.sim.set_view_radius(view_radius);
+                }
+                self.install_session_render_sources();
+            }
+            // Reported, never routed around: the only cause is a build with no
+            // hostable version family, and telling the player that is strictly
+            // better than a world that silently never loads.
+            Err(e) => self
+                .ui
+                .session_failed(crate::sim::SessionEnd::failed(lodestone_model::ResolvedText::literal(e.to_string()))),
+        }
+        // Remembered for Open to LAN, which republishes this exact
+        // launch on a TCP port. Recorded even on the error arm above: a failed
+        // launch left no session, and the field is only ever read behind one.
+        self.hosted_world = Some(launch_for_lan);
+    }
+
+    /// Open a live connection to `host:port` and show the loading screen.
+    ///
+    /// Factored out of `resumed` because the menu's Join button needs the exact
+    /// same sequence, including the entity light sampler — which must be
+    /// installed at connect time, not after login (see the long note at the
+    /// `resumed` call site for why).
+    pub(super) fn connect_to(&mut self, host: String, port: Option<u16>) {
+        // Leave the menu for the `Connecting` screen *before*
+        // dialing, mirroring `begin_singleplayer`. Without this, multiplayer
+        // never shows a loading screen for the handshake/configuration phase —
+        // the screen stays on the server list until `session_ready()` flips it
+        // straight to Playing.
+        self.ui.begin(crate::menu::SessionKind::Multiplayer);
+        // §4.1(c): `Sim::connect` builds the client *with* the shell's one `World`
+        // and attaches it, so the render sources below are installed from the
+        // already-attached client's shared handle rather than from a `NetClient`
+        // this function still owns. `shared_handle` survives the move either way
+        // (it is an `Arc<OnceLock<_>>` the net thread publishes into).
+        self.sim.connect(host, port, self.config.protocol);
+        self.install_session_render_sources();
+    }
+
+    /// Install every render source a live session feeds, for **either** session
+    /// kind: the fog/sky clock, the entity light sampler, the sky pass and the
+    /// screen-effect overlays, plus the outline and debug-line sources.
+    ///
+    /// Shared by [`Self::connect_to`] and [`Self::begin_singleplayer`] rather
+    /// than duplicated, because a source installed for one session
+    /// kind and not the other is invisible until someone plays the other one —
+    /// and the two differ *only* in transport (see `net.rs`'s `Origin`). A no-op
+    /// when there is no session or no GPU yet, so it is safe to call from either
+    /// path unconditionally.
+    fn install_session_render_sources(&mut self) {
+        // `sky_clock.get().map(|h| h.world_time().1)` used to be handed to
+        // `set_time_of_day_source` directly. `WorldTime` is a flat snapshot the
+        // network thread only overwrites on a decoded `SET_TIME`
+        // (`ClientEvent::TimeChanged` — `lodestone-client/src/state.rs`), and the
+        // server sends that roughly once per second
+        // (`docs/served-session-liveness.md`'s `TIME_SYNC_INTERVAL`), so the raw
+        // value steps once/sec instead of advancing per frame. That produced the
+        // reported once-a-second cloud "teleport" (`sky.rs::cloud_plane_geometry`'s
+        // `scroll_x` is `time_of_day * CLOUD_SCROLL_BLOCKS_PER_TICK`, so a
+        // once/sec step is a visible ~0.6-block jump).
+        //
+        // `ContinuousTimeOfDay::advance` wraps the same raw value with a local,
+        // wall-clock extrapolation between packets — the same trick vanilla's own
+        // client-side day-time prediction uses, and it keeps `sky.rs` itself
+        // clock-agnostic per its own module docs ("there is deliberately no
+        // second clock... anywhere in this module"): the extrapolation lives here,
+        // at the render-source boundary, not inside the sky module.
+        //
+        // The handle comes from the already-attached client rather than from a
+        // `NetClient` a caller still owns; `shared_handle` survives the move
+        // either way (it is an `Arc<OnceLock<_>>` the net thread publishes into).
+        let Some(net_handle) = self.sim.net().map(crate::net::NetClient::shared_handle) else {
+            return;
+        };
+        // The weather cell, cloned out for the same reason `shared_handle` is: the
+        // `NetClient` is moved into `Sim::attach_net` and the closures below outlive
+        // it. Re-created on every connect so a new session starts clear.
+        let weather = self
+            .sim
+            .net()
+            .map(|net| Arc::new(WeatherTracker::new(net.shared_weather())));
+        self.weather = weather.clone();
+        // The dimension's absent-sky-light policy, cloned out for the same reason as
+        // the two above. The entity-light closure is installed **once** and must
+        // still be right after a portal, so it reads the policy per call from this
+        // cell rather than capturing today's value — `Sim::refresh_mesh_policy`
+        // publishes into it. See `net::SkyDefaultCell`.
+        let sky_policy = self
+            .sim
+            .net()
+            .map(crate::net::NetClient::shared_sky_default);
+        if let Some(render) = self.render.as_mut() {
+            let handle = net_handle.clone();
+            let light_policy = sky_policy.clone();
+            // Terrain and mobs must read the same clock: `RenderState` folds this
+            // factor into the fog lane both the model and entity passes sample.
+            // Installing it for one and not the other makes mobs darker than the
+            // blocks they stand on at midnight.
+            let clock = net_handle.clone();
+            // The dimension's own ambient floor rides beside the darken lane
+            // rather than inside it: `sky_darken` is a time-of-day curve that
+            // weather modifies, while this is a constant of wherever the player
+            // currently is. Folding them would make one a second writer of the
+            // other's value.
+            let ambient_handle = net_handle.clone();
+            // The sky pass's own clock — see `set_time_of_day_source`'s doc for
+            // why it needs the raw tick rather than `set_sky_darken_source`'s
+            // already-derived factor.
+            let sky_clock = net_handle;
+            let continuous_time_of_day = ContinuousTimeOfDay::new();
+            // Weather rides *this* lane rather than getting one of its own.
+            // The sky-light factor is a single attribute in
+            // vanilla too: the time-of-day curve is its base and
+            // vanilla's own weather-attribute layers modify it
+            // on top, so a separate uniform would be
+            // a second writer of one value and the two would drift. This is the
+            // exact `sky_darken` `lodestone_render::light`'s module doc derives,
+            // and terrain, mobs and the first-person arm all read it through the
+            // same fog lane — so one line here darkens all three under a storm.
+            let darken_weather = weather.clone();
+            render.set_sky_darken_source(move || {
+                let base = clock.get().map(|h| {
+                    lodestone_render::entity::sky_darken_for_time_of_day(h.world_time().1)
+                })?;
+                Some(match &darken_weather {
+                    Some(w) => lodestone_render::weather_sky_light_factor(base, &w.state()),
+                    None => base,
+                })
+            });
+            // Without this the Nether renders the overworld's own ambient floor
+            // and reads far darker than vanilla — the shaders carried the
+            // overworld grey as a constant until the wire started supplying the
+            // real per-dimension colour. `None` is the honest answer before the
+            // dimension type is known, and the source is polled every frame, so
+            // there is nothing to wait for.
+            render.set_ambient_light_source(move || {
+                let dim = ambient_handle.get()?.player().dimension_type?;
+                Some(match dim.ambient_light_color {
+                    Some(packed) => lodestone_render::light::rgb24_to_channels(packed),
+                    None => lodestone_render::light::OVERWORLD_AMBIENT_LIGHT,
+                })
+            });
+            render.set_effect_light_source(self.sim.effect_light_source());
+            render.set_entity_light_source(move |feet| {
+                crate::net::entity_light_at(
+                    &handle,
+                    feet.x.floor() as i32,
+                    feet.y.floor() as i32,
+                    feet.z.floor() as i32,
+                    // Read per call, not captured: a portal changes this mid-session.
+                    light_policy.as_ref().map_or(
+                        lodestone_render::SkyDefault::Full,
+                        |cell| cell.get(),
+                    ),
+                )
+            });
+            render.set_time_of_day_source(move || {
+                sky_clock
+                    .get()
+                    .map(|h| continuous_time_of_day.advance(h.world_time().1))
+            });
+        }
+        // The sky pass itself needs GPU handles `RenderState::set_*_source`'s
+        // closures don't (it uploads the celestial atlas + cloud texture
+        // immediately, via `crate::resources::load_sky`), so it is installed
+        // from a separate `self.gpu`/`self.target` borrow rather than folded
+        // into the block above. `has_sky` guards a re-connect from re-loading
+        // and re-uploading the same jar's textures a second time.
+        if let (Some(gpu), Some(target)) = (self.gpu.as_ref(), self.target.as_ref()) {
+            let (device, queue, format) = (gpu.device(), gpu.queue(), target.format());
+            if let Some(render) = self.render.as_mut()
+                && !render.has_sky()
+                && let Some(sky) = crate::resources::load_sky(device, queue, format)
+            {
+                render.install_sky(sky);
+            }
+            // The underwater/fire overlay pass: same
+            // shape and same reason as the sky install just above (needs GPU
+            // handles immediately, so it is loaded here rather than folded
+            // into a `set_*_source` closure). `has_screen_effects` guards a
+            // re-connect the same way `has_sky` does.
+            if let Some(render) = self.render.as_mut()
+                && !render.has_screen_effects()
+                && let Some(fx) = crate::resources::load_screen_effects(device, queue, format)
+            {
+                render.install_screen_effects(fx);
+            }
+            // The rain/snow pass: same shape and same `has_*` re-connect guard as
+            // the two above. Note this is only the *droplets* — a jar-less run
+            // still darkens correctly, because that half went in through
+            // `set_sky_darken_source` and `set_fog` above.
+            if let Some(render) = self.render.as_mut()
+                && !render.has_weather()
+                && let Some(textures) = crate::resources::load_weather_textures()
+            {
+                render.install_weather(device, queue, format, &textures);
+            }
+        }
+        self.install_outline_source();
+        self.install_shadow_ground_source();
+        self.install_debug_lines_source();
+        self.install_entity_glow_source();
+        self.install_plugin_billboards_source();
+    }
+}
+
+/// The next game mode in F3+F4's cycle: survival → creative → adventure →
+/// spectator → survival.
+///
+/// A free function so the cycle is testable without a window, a GPU or a live
+/// session — the same split [`crate::app::offhand_swap_action`] makes. An unknown
+/// current mode (no session, or a server that has not reported one) starts at
+/// creative, which is where a host reaching for this chord is going.
+pub(super) fn next_game_mode(current: Option<lodestone_model::GameMode>) -> lodestone_model::GameMode {
+    use lodestone_model::GameMode;
+    match current {
+        Some(GameMode::Survival) => GameMode::Creative,
+        Some(GameMode::Creative) => GameMode::Adventure,
+        Some(GameMode::Adventure) => GameMode::Spectator,
+        Some(GameMode::Spectator) => GameMode::Survival,
+        None => GameMode::Creative,
+    }
+}
+
+/// The physical framebuffer coordinate used when a container screen first
+/// takes pointer focus. Kept pure so the transition's rounding policy is
+/// deterministic on native, browser, and terminal surfaces alike.
+pub(super) fn container_cursor_center(width: u32, height: u32) -> (f32, f32) {
+    ((width / 2) as f32, (height / 2) as f32)
+}

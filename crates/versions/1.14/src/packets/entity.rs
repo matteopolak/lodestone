@@ -1,0 +1,229 @@
+//! Entity packets for the 1.14 era that carry [`EntityMetadata`].
+//!
+//! Both the mob-spawn packet and the standalone metadata packet end with a
+//! metadata list; because [`EntityMetadata`](super::metadata::EntityMetadata)
+//! implements `Encode`/`Decode`, these are ordinary derived structs.
+
+use lodestone_core::{Ctx, Decode as CoreDecode, Error, Reader, Result};
+use lodestone_macros::{Decode, Encode, Packet};
+use uuid::Uuid;
+
+use super::metadata::EntityMetadata;
+use super::slot::Slot;
+
+/// Clientbound `entity_equipment` for protocols 498 and 578 — one entity slot
+/// update.
+///
+/// Those protocol revisions carry a VarInt entity id, a VarInt equipment-slot
+/// ordinal, and the 1.13.1+ presence-prefixed [`Slot`]. Protocol 754 uses the
+/// continuation-flagged [`EntityEquipment754Packet`] shape below instead.
+#[derive(Debug, Clone, PartialEq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:entity_equipment", state = Play, bound = Client)]
+pub struct EntityEquipmentPacket {
+    /// Entity whose equipment changed.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// Canonical equipment-slot ordinal.
+    #[mc(varint)]
+    pub slot: i32,
+    /// New item, or an empty slot marker.
+    pub item: Slot,
+}
+
+/// Clientbound `entity_equipment` for protocol 754.
+///
+/// The entity id is followed by one or more `(slot, item)` records. The slot
+/// is an i8-shaped byte whose top bit says another record follows; the low
+/// seven bits carry the equipment-slot ordinal. Keeping this decoder separate
+/// from [`EntityEquipmentPacket`] is required because 498/578 use a single
+/// VarInt ordinal and have no continuation byte.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntityEquipment754Packet {
+    /// Entity whose equipment changed.
+    pub entity_id: i32,
+    /// Continuation-flagged slot records, in wire order.
+    pub entries: Vec<(i8, Slot)>,
+}
+
+impl CoreDecode for EntityEquipment754Packet {
+    fn decode(r: &mut Reader<'_>, ctx: Ctx) -> Result<Self> {
+        let entity_id = r.var_i32()?;
+        let mut entries = Vec::new();
+        loop {
+            if entries.len() >= 8 {
+                return Err(Error::LimitExceeded {
+                    limit: 8,
+                    actual: entries.len() + 1,
+                });
+            }
+            let encoded_slot = r.i8()?;
+            let item = Slot::decode(r, ctx)?;
+            entries.push((encoded_slot, item));
+            if encoded_slot >= 0 {
+                break;
+            }
+        }
+        Ok(Self { entity_id, entries })
+    }
+}
+
+/// Clientbound `spawn_entity_living` — spawns a mob.
+///
+/// # Era shape
+///
+/// Carries an **entity UUID**, a **VarInt type** and **`f64` coordinates**. The
+/// trailing metadata list that protocol 498 appended was **removed** in 1.15
+/// — metadata now arrives only via the separate `entity_metadata` packet from
+/// 578 onward. The protocol gate is load-bearing: leaving 498's terminator
+/// unread makes the next packet frame start one byte late.
+///
+/// Wire layout: varint entity id, UUID, varint type, three `f64` coordinates,
+/// signed-byte yaw/pitch/head-pitch, three `i16` velocity components, then a
+/// metadata list only at 498.
+#[derive(Debug, Clone, PartialEq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:spawn_entity_living", state = Play, bound = Client)]
+pub struct SpawnEntityLiving {
+    /// Entity id.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// Entity UUID.
+    pub entity_uuid: Uuid,
+    /// Mob type id (VarInt, 1.16 numbering).
+    #[mc(varint)]
+    pub kind: i32,
+    /// X coordinate.
+    pub x: f64,
+    /// Y coordinate.
+    pub y: f64,
+    /// Z coordinate.
+    pub z: f64,
+    /// Yaw as a signed-byte angle (`256` = 360°).
+    pub yaw: i8,
+    /// Pitch as a signed-byte angle.
+    pub pitch: i8,
+    /// Head pitch as a signed-byte angle.
+    pub head_pitch: i8,
+    /// Velocity X (fixed-point).
+    pub velocity_x: i16,
+    /// Velocity Y (fixed-point).
+    pub velocity_y: i16,
+    /// Velocity Z (fixed-point).
+    pub velocity_z: i16,
+    /// Spawn-time metadata, present only in protocol 498.
+    #[mc(until = 498)]
+    pub metadata: EntityMetadata,
+}
+
+/// Clientbound `entity_metadata` — an incremental metadata update for an entity.
+///
+/// The header is identical across versions (`varint entity id`, then the list);
+/// only the list encoding differs, and that difference lives entirely in
+/// [`EntityMetadata`](super::metadata::EntityMetadata).
+#[derive(Debug, Clone, PartialEq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:entity_metadata", state = Play, bound = Client)]
+pub struct EntityMetadataPacket {
+    /// Target entity id.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// The changed metadata entries.
+    pub metadata: EntityMetadata,
+}
+
+// RelEntityMove/EntityMoveLook/EntityTeleport are byte-identical to v1-9's
+// own definitions (measured) but not to v1-8's (1.8 used a narrower
+// signed-byte delta and fixed-point coordinates), so they are shared via
+// `lodestone-protocol-common` ranged 340..=754. EntityLook/
+// EntityVelocityPacket carry no such divergence and are shared across all
+// three (v1-8 included) with the derive's default ProtocolRange::ALL -- see
+// `packets::entity`'s module docs.
+pub use lodestone_protocol_common::packets::entity::{
+    EntityLook, EntityMoveLook, EntityTeleport, EntityVelocityPacket, RelEntityMove,
+};
+
+/// Clientbound `spawn_entity` — spawns a non-living object entity.
+///
+/// # 1.16 shape
+///
+/// Carries a 128-bit `object_uuid`, a **VarInt `type`** (widened from the legacy
+/// byte), `f64` coordinates, and sends `velocity` **unconditionally**. The
+/// unconditional shape means this is an ordinary derived struct here.
+#[derive(Debug, Clone, PartialEq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:spawn_entity", state = Play, bound = Client)]
+pub struct SpawnObject {
+    /// Entity id.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// Entity UUID.
+    pub object_uuid: Uuid,
+    /// Object type id (VarInt, 1.16 entity-type numbering).
+    #[mc(varint)]
+    pub kind: i32,
+    /// X coordinate.
+    pub x: f64,
+    /// Y coordinate.
+    pub y: f64,
+    /// Z coordinate.
+    pub z: f64,
+    /// Pitch as a signed-byte angle.
+    pub pitch: i8,
+    /// Yaw as a signed-byte angle.
+    pub yaw: i8,
+    /// Type-specific object data.
+    pub object_data: i32,
+    /// Velocity X in `1/8000` block/tick.
+    pub velocity_x: i16,
+    /// Velocity Y in `1/8000` block/tick.
+    pub velocity_y: i16,
+    /// Velocity Z in `1/8000` block/tick.
+    pub velocity_z: i16,
+}
+
+/// Clientbound `named_entity_spawn` — spawns a player entity.
+///
+/// 1.16 sends the player UUID as a 128-bit value and, since 1.15, no longer
+/// appends a metadata list (it arrives via the separate `entity_metadata`
+/// packet), so this struct ends at the pitch angle.
+#[derive(Debug, Clone, PartialEq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:named_entity_spawn", state = Play, bound = Client)]
+pub struct NamedEntitySpawn {
+    /// Entity id.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// Player UUID.
+    pub player_uuid: Uuid,
+    /// X coordinate.
+    pub x: f64,
+    /// Y coordinate.
+    pub y: f64,
+    /// Z coordinate.
+    pub z: f64,
+    /// Yaw as a signed-byte angle.
+    pub yaw: i8,
+    /// Pitch as a signed-byte angle.
+    pub pitch: i8,
+}
+
+// `EntityDestroy` is byte-identical across v1-8/v1-9/v1-14 (measured), shared
+// via `lodestone-protocol-common` -- see `packets::entity`'s module docs.
+pub use lodestone_protocol_common::packets::entity::EntityDestroy;
+
+/// Clientbound `spawn_entity_experience_orb` — spawns an experience orb.
+///
+/// Wire layout: varint entity id, three `f64` coordinates, `i16` xp count —
+/// verified against minecraft-data's 1.16.2 `packet_spawn_entity_experience_orb`
+/// (byte-identical to 1.12.2's shape).
+#[derive(Debug, Clone, PartialEq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:spawn_entity_experience_orb", state = Play, bound = Client)]
+pub struct SpawnEntityExperienceOrb {
+    /// Entity id.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// X coordinate.
+    pub x: f64,
+    /// Y coordinate.
+    pub y: f64,
+    /// Z coordinate.
+    pub z: f64,
+    /// Experience count carried by this orb.
+    pub count: i16,
+}

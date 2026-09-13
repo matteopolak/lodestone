@@ -1,0 +1,758 @@
+//! **Coded** structure pieces reach blocks.
+//!
+//! `swamp_hut` and `desert_pyramid` have no `.nbt` template: their blocks are Java
+//! statements, ported in `structure/coded.rs` and resolved eagerly at start time.
+//! What this file gates is the end of that path — that a generated chunk at a real
+//! placement chunk of the real bundled data contains blocks only these structures
+//! can produce, and that the identical world with no structure data contains none.
+//!
+//! Neither structure appears in the survival oracle's generated area, so the chunks
+//! come from the *placement* engine instead — already gated against that oracle by
+//! S1 — walked outward in rings until the biome filter lets one through, and then
+//! recorded as constants. The seed is still the vanilla-authored world's, and the
+//! control arm is the structure-free resolver over identical data.
+
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
+use lodestone_worldgen::density::{NoiseParams, Resolver};
+use lodestone_worldgen::overworld::OverworldGenerator;
+use lodestone_worldgen::structure::StructureRegistry;
+use serde_json::Value;
+
+const SEED: i64 = -195_764_831;
+
+/// A [`Resolver`] over `crates/lodestone-server/assets/` — the same bundle the
+/// integrated server embeds, JSON *and* the NBT templates.
+struct ServerAssets {
+    worldgen: PathBuf,
+    structures: PathBuf,
+}
+
+impl ServerAssets {
+    fn new() -> Self {
+        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../lodestone-server/assets");
+        Self {
+            worldgen: assets.join("worldgen"),
+            structures: assets.join("structure"),
+        }
+    }
+
+    fn read(&self, kind: &str, id: &str) -> Value {
+        let name = id.strip_prefix("minecraft:").unwrap_or(id);
+        let path = self.worldgen.join(kind).join(format!("{name}.json"));
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("parsing {}: {e}", path.display()))
+    }
+
+    fn try_read(&self, kind: &str, id: &str) -> Value {
+        let name = id.strip_prefix("minecraft:").unwrap_or(id);
+        let path = self.worldgen.join(kind).join(format!("{name}.json"));
+        match std::fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str(&text)
+                .unwrap_or_else(|e| panic!("parsing {}: {e}", path.display())),
+            Err(_) => Value::Null,
+        }
+    }
+}
+
+impl Resolver for ServerAssets {
+    fn density_function(&self, id: &str) -> Value {
+        self.read("density_function", id)
+    }
+    fn noise(&self, id: &str) -> NoiseParams {
+        let v = self.read("noise", id);
+        NoiseParams {
+            first_octave: v["firstOctave"].as_i64().expect("firstOctave") as i32,
+            amplitudes: v["amplitudes"]
+                .as_array()
+                .expect("amplitudes")
+                .iter()
+                .map(|a| a.as_f64().expect("amplitude"))
+                .collect(),
+        }
+    }
+    fn biome_parameters(&self) -> Value {
+        self.read("biome_parameters", "overworld")
+    }
+    fn biome_temperatures(&self) -> Value {
+        self.read("biome_parameters", "overworld_temperature")
+    }
+    fn block_tag(&self, id: &str) -> Value {
+        self.try_read("tags/block", id)
+    }
+    fn structure_set_ids(&self) -> Vec<String> {
+        let dir = self.worldgen.join("structure_set");
+        let mut ids: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()))
+            .filter_map(|e| {
+                let path = e.ok()?.path();
+                let stem = path.file_stem()?.to_str()?;
+                (path.extension()? == "json").then(|| format!("minecraft:{stem}"))
+            })
+            .collect();
+        ids.sort();
+        ids
+    }
+    fn structure_set(&self, id: &str) -> Value {
+        self.try_read("structure_set", id)
+    }
+    fn structure(&self, id: &str) -> Value {
+        self.try_read("structure", id)
+    }
+    fn biome_tag(&self, id: &str) -> Value {
+        self.try_read("tags/worldgen/biome", id)
+    }
+    fn structure_template(&self, id: &str) -> Option<Vec<u8>> {
+        let name = id.strip_prefix("minecraft:").unwrap_or(id);
+        std::fs::read(self.structures.join(format!("{name}.nbt"))).ok()
+    }
+    fn template_pool(&self, id: &str) -> Value {
+        self.try_read("template_pool", id)
+    }
+    fn processor_list(&self, id: &str) -> Value {
+        self.try_read("processor_list", id)
+    }
+}
+
+/// The control arm: identical data, no structure sets, so the registry is inert.
+struct NoStructures(ServerAssets);
+
+impl Resolver for NoStructures {
+    fn density_function(&self, id: &str) -> Value {
+        self.0.density_function(id)
+    }
+    fn noise(&self, id: &str) -> NoiseParams {
+        self.0.noise(id)
+    }
+    fn biome_parameters(&self) -> Value {
+        self.0.biome_parameters()
+    }
+    fn biome_temperatures(&self) -> Value {
+        self.0.biome_temperatures()
+    }
+}
+
+fn settings() -> Value {
+    let assets = ServerAssets::new();
+    serde_json::from_str(
+        &std::fs::read_to_string(assets.worldgen.join("noise_settings/overworld.json")).unwrap(),
+    )
+    .unwrap()
+}
+
+fn generator(resolver: &dyn Resolver, settings: &Value) -> OverworldGenerator {
+    generator_for_seed(SEED, resolver, settings)
+}
+
+fn generator_for_seed(seed: i64, resolver: &dyn Resolver, settings: &Value) -> OverworldGenerator {
+    OverworldGenerator::new(seed, settings, resolver, "minecraft:plains", false)
+}
+
+/// The nearest placement chunk to the origin at which each structure really
+/// starts, **measured** by walking `is_structure_chunk` outward in rings at this
+/// seed: `desert_pyramid` needs 234 candidate cells and `swamp_hut` 211 before the
+/// biome filter lets one through, so neither is anywhere near the origin and a
+/// bounded search would report "not implemented" for a working generator.
+///
+/// Recorded as constants rather than re-searched: the search costs a column sample
+/// per candidate and its answer is a function of the seed alone.
+const PYRAMID_CHUNK: (i32, i32) = (-243, 149);
+const HUT_CHUNK: (i32, i32) = (-95, 234);
+/// Measured the same way, by [`find_the_nearest_start_chunks`] — grid ring **5**,
+/// which is far nearer than either of the two above and is the reason a bounded
+/// search that happened to stop at ring 4 would have reported the jungle temple
+/// missing as well.
+const JUNGLE_CHUNK: (i32, i32) = (-152, -160);
+
+/// The search that produced the constants above. `#[ignore]`d because it is
+/// minutes of column sampling and its answer is a function of the seed alone —
+/// re-run it (`-- --ignored --nocapture`) if a constant ever goes stale, which
+/// `start_at`'s panic says explicitly.
+///
+/// **The walk is over placement *cells*, not chunks.** A `random_spread` set
+/// nominates exactly one chunk per `spacing × spacing` cell, so walking chunks
+/// would be `spacing²` times more work — 224 million chunks to reach the desert
+/// pyramid's cell 234. The candidate chunk comes from
+/// `Placement::potential_structure_chunk`, i.e. production's own function, rather
+/// than a re-derivation of the grid maths here: a test helper that duplicates
+/// production logic is what turns a failing gate into a hanging one.
+#[test]
+#[ignore = "minutes of column sampling; run to re-measure a stale constant"]
+fn find_the_nearest_start_chunks() {
+    let settings = settings();
+    let with = generator(&ServerAssets::new(), &settings);
+    let registry = StructureRegistry::new(SEED, &ServerAssets::new());
+    for (set_id, structure_id) in [
+        ("minecraft:jungle_temples", "minecraft:jungle_pyramid"),
+        ("minecraft:desert_pyramids", "minecraft:desert_pyramid"),
+        ("minecraft:swamp_huts", "minecraft:swamp_hut"),
+    ] {
+        let set = registry
+            .sets()
+            .iter()
+            .find(|s| s.id == set_id)
+            .unwrap_or_else(|| panic!("{set_id} is not a bundled set"));
+        let mut found = None;
+        'rings: for ring in 0..300i32 {
+            for gx in -ring..=ring {
+                for gz in -ring..=ring {
+                    if gx.abs() != ring && gz.abs() != ring {
+                        continue;
+                    }
+                    // `spacing` is private, and any literal here would be a second
+                    // copy of the set's own data: nominate the cell by a chunk
+                    // inside it and let production pick the candidate.
+                    let Some((cx, cz)) =
+                        set.placement.potential_structure_chunk(SEED, gx * 32, gz * 32)
+                    else {
+                        continue;
+                    };
+                    if with
+                        .structure_starts(cx, cz)
+                        .iter()
+                        .any(|s| s.structure == structure_id && !s.pieces.is_empty())
+                    {
+                        found = Some((cx, cz, ring));
+                        break 'rings;
+                    }
+                }
+            }
+        }
+        println!("{structure_id}: {found:?}");
+    }
+}
+
+/// The start of `structure_id` at `chunk`, which must exist and must be complete.
+fn start_at(
+    generator: &OverworldGenerator,
+    chunk: (i32, i32),
+    structure_id: &str,
+) -> std::sync::Arc<lodestone_worldgen::structure::StructureStart> {
+    let start = generator
+        .structure_starts(chunk.0, chunk.1)
+        .into_iter()
+        .find(|s| s.structure == structure_id)
+        .unwrap_or_else(|| {
+            panic!("no {structure_id} start at {chunk:?} — the measured constant is stale")
+        });
+    assert!(start.pieces_complete, "{structure_id} reports no pieces");
+    assert!(!start.pieces.is_empty(), "{structure_id} has an empty piece list");
+    start
+}
+
+/// Counts, over every chunk the start's box covers, how many blocks are in `names`.
+fn count_blocks(
+    generator: &OverworldGenerator,
+    bb: lodestone_worldgen::structure::BoundingBox,
+    names: &HashSet<&str>,
+) -> usize {
+    let mut n = 0usize;
+    for x in (bb.min[0] >> 4)..=(bb.max[0] >> 4) {
+        for z in (bb.min[2] >> 4)..=(bb.max[2] >> 4) {
+            let column = generator.column(x, z);
+            for lx in 0..16 {
+                for lz in 0..16 {
+                    for y in column.min_y()..(column.min_y() + column.height()) {
+                        let state = column.block_state(lx, y, lz);
+                        let name = state.split_once('[').map_or(state, |(n, _)| n);
+                        if names.contains(name) {
+                            n += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    n
+}
+
+/// `swamp_hut` and `desert_pyramid` are **absent** from the ledger, and the coded
+/// generators that have not landed are still **present** on it.
+///
+/// The negative half is the load-bearing half: a registry that quietly demoted
+/// `desert_pyramid` for an unloadable something would pass every "the ledger names
+/// its gaps" assertion on its own.
+#[test]
+fn the_coded_structures_s5_models_are_not_on_the_ledger() {
+    let registry = StructureRegistry::new(SEED, &ServerAssets::new());
+    let ledger = registry.unsupported();
+    for id in [
+        "minecraft:swamp_hut",
+        "minecraft:desert_pyramid",
+        "minecraft:jungle_pyramid",
+        // S7: both mineshaft structures place blocks now, so both come **off** the
+        // ledger. The `mineshaft:` deviation rows below are what replaces them —
+        // a structure moving from "absent" to "present with named deviations" is the
+        // transition this pair of loops exists to make visible.
+        "minecraft:mineshaft",
+        "minecraft:mineshaft_mesa",
+        // `StrongholdPieces` places real blocks now (the remaining piece
+        // generator); the `stronghold:` and `coded:worldgen_entities` rows below
+        // are its named deviations, the same "absent -> present with deviations"
+        // transition as the mineshaft pair above.
+        "minecraft:stronghold",
+        // `OceanMonumentPieces` places real blocks now, the last item in this
+        // port's structure-placement work; `coded:worldgen_entities` and
+        // `monument:postprocess_random_unseeded` below are its named deviations.
+        "minecraft:monument",
+    ] {
+        assert!(
+            !ledger.contains_key(id),
+            "{id} is on the ledger: {:?}",
+            ledger.get(id)
+        );
+    }
+    assert!(
+        !ledger.contains_key("minecraft:ruined_portal_nether"),
+        "the Nether portal builds and its Nether placement stage writes its refinement: {:?}",
+        ledger.get("minecraft:ruined_portal_nether")
+    );
+    assert!(
+        !ledger.contains_key("minecraft:ruined_portal"),
+        "minecraft:ruined_portal has a generator now and must not be ledgered: {:?}",
+        ledger.get("minecraft:ruined_portal")
+    );
+    // Every deviation is named, not just the absences.
+    for key in [
+        "coded:average_ground_height",
+        "coded:region_random",
+        "coded:worldgen_entities",
+        "coded:decoration_random",
+        "mineshaft:pre_surface_world_reads",
+    ] {
+        assert!(ledger.contains_key(key), "{key} is not on the ledger");
+    }
+    let mineshaft_row = ledger
+        .get("mineshaft:pre_surface_world_reads")
+        .expect("the mineshaft pre-surface deviation stays named");
+    assert!(
+        mineshaft_row.contains("vertical shift"),
+        "the mineshaft row must identify the remaining eager height read: {mineshaft_row}"
+    );
+    assert!(
+        !mineshaft_row.contains("six mineshaft placement helpers"),
+        "placement-time world reads were moved to the receiving grid; stale detail remains: {mineshaft_row}"
+    );
+    // The row whose gap **closed**: a rail `shape` is remapped now, by both
+    // `rotate` and `mirror`, because a mineshaft corridor is the first thing in this
+    // engine to place a rail under a real transform. A ledger that still carried it
+    // would be pointing at the wrong remainder.
+    assert!(
+        !ledger.contains_key("template:mirrored_shape"),
+        "rail shape is remapped now; the row must be gone"
+    );
+    assert!(
+        !ledger.contains_key("mineshaft:post_process_scope"),
+        "mineshaft block replay is already chunk-scoped; the stale scope row must be gone"
+    );
+    assert!(
+        !ledger.contains_key("coded:ruined_portal_terrain_skirt"),
+        "ruined-portal terrain uses the target chunk's decoration stream"
+    );
+    // `bastion_remnant` is **supported** (its pools load, it assembles) and, since
+    // `NetherGenerator` gained a structure stage, it also *places blocks* — 15,405
+    // bastion-only blocks at chunk (8, 7) against 0 in the structure-free control,
+    // measured by `tests/nether_structures.rs`, which is where that half is gated.
+    // The dimension-serving consumer is a server concern and is covered by the
+    // server integration gate; it must not remain misreported as a worldgen gap.
+    assert!(
+        !ledger.contains_key("minecraft:bastion_remnant"),
+        "bastion_remnant assembles and places; it is not a support gap"
+    );
+    assert!(
+        !ledger.contains_key("dimension:nether_structures"),
+        "Nether generation is served by the integrated server; this stale worldgen gap must be gone"
+    );
+    // Every structure-container path has a consumer. Marker containers had one
+    // already; self-named template containers and coded-piece containers now do
+    // too. Buried treasure's material-sensitive walk also runs at placement time.
+    // These absence checks keep completed seams from being reported as gaps.
+    assert!(
+        !ledger.contains_key("template:data_markers"),
+        "template:data_markers described a closed gap and must not come back"
+    );
+    assert!(
+        !ledger.contains_key("template:block_entity_nbt"),
+        "self-named template containers have a loot consumer"
+    );
+    assert!(
+        !ledger.contains_key("coded:chests"),
+        "coded containers have a loot consumer"
+    );
+    assert!(
+        !ledger.contains_key("coded:chest_reorient"),
+        "coded chest facing is resolved from the receiving grid"
+    );
+    assert!(
+        !ledger.contains_key("coded:pyramid_roof_seed"),
+        "desert-pyramid roof picks use the world seed's positional forks"
+    );
+    assert!(
+        !ledger.contains_key("coded:buried_treasure_chest"),
+        "buried treasure's refinement places its chest"
+    );
+    let brush_row = ledger
+        .get("block_entity:append_loot")
+        .expect("append_loot stays on the ledger");
+    assert!(
+        brush_row.contains("brush"),
+        "append_loot's blocker is that nothing brushes, not that worldgen lacks \
+         block entities: {brush_row}"
+    );
+}
+
+/// A desert pyramid puts its own blocks in the world, and a structure-free world
+/// with identical data puts none there.
+///
+/// `chiseled_sandstone`, `cut_sandstone` and `orange_terracotta` have no other
+/// source in this world: no surface rule, carver, ore or feature produces any of
+/// them, so a non-zero control would mean the counter is measuring terrain.
+#[test]
+fn a_desert_pyramid_chunk_gains_pyramid_blocks_a_structureless_chunk_does_not() {
+    let settings = settings();
+    let with = generator(&ServerAssets::new(), &settings);
+    let without = generator(&NoStructures(ServerAssets::new()), &settings);
+    let start = start_at(&with, PYRAMID_CHUNK, "minecraft:desert_pyramid");
+    let piece = &start.pieces[0];
+    let blocks = piece
+        .blocks
+        .as_ref()
+        .expect("a coded piece carries a resolved block list");
+    assert!(
+        blocks.len() > 3_000,
+        "a pyramid should be thousands of blocks, got {}",
+        blocks.len()
+    );
+
+    let pyramid_blocks: HashSet<&str> = [
+        "minecraft:chiseled_sandstone",
+        "minecraft:cut_sandstone",
+        "minecraft:orange_terracotta",
+        "minecraft:blue_terracotta",
+        "minecraft:sandstone_stairs",
+        "minecraft:tnt",
+        "minecraft:stone_pressure_plate",
+        "minecraft:suspicious_sand",
+    ]
+    .into_iter()
+    .collect();
+    // **The expected count is predicted, not observed.** The piece's own resolved
+    // list is collapsed last-write-wins into a final state per position, and the
+    // signature blocks in *that* are what the world must contain. So the number
+    // comes from the start stage and the measurement from the placement stage —
+    // two different stages, which is what makes a partially-written pyramid fail
+    // rather than merely score lower.
+    let mut final_state: std::collections::HashMap<[i32; 3], &str> =
+        std::collections::HashMap::new();
+    for block in blocks.iter() {
+        final_state.insert(block.pos, block.state.as_str());
+    }
+    let expected = final_state
+        .values()
+        .filter(|state| {
+            let name = state.split_once('[').map_or(**state, |(n, _)| n);
+            pyramid_blocks.contains(name)
+        })
+        .count();
+    assert!(expected > 300, "the piece itself carries only {expected} signature blocks");
+
+    let placed = count_blocks(&with, start.bounding_box, &pyramid_blocks);
+    let control = count_blocks(&without, start.bounding_box, &pyramid_blocks);
+    assert_eq!(
+        placed, expected,
+        "the world holds {placed} of the piece's {expected} signature blocks"
+    );
+    assert_eq!(control, 0, "the structureless control holds {control}");
+}
+
+/// A swamp hut likewise, and its stilts reach the ground.
+///
+/// `spruce_planks`, `spruce_stairs`, `cauldron` and `potted_red_mushroom` have no
+/// other source in a generated swamp.
+#[test]
+fn a_swamp_hut_chunk_gains_hut_blocks_a_structureless_chunk_does_not() {
+    let settings = settings();
+    let with = generator(&ServerAssets::new(), &settings);
+    let without = generator(&NoStructures(ServerAssets::new()), &settings);
+    let start = start_at(&with, HUT_CHUNK, "minecraft:swamp_hut");
+
+    let hut_blocks: HashSet<&str> = [
+        "minecraft:spruce_planks",
+        "minecraft:spruce_stairs",
+        "minecraft:cauldron",
+        "minecraft:crafting_table",
+        "minecraft:potted_red_mushroom",
+    ]
+    .into_iter()
+    .collect();
+    let placed = count_blocks(&with, start.bounding_box, &hut_blocks);
+    let control = count_blocks(&without, start.bounding_box, &hut_blocks);
+    assert!(
+        placed > 80 && control == 0,
+        "hut blocks: {placed} (expected > 80), structureless control: {control} \
+         (expected 0)"
+    );
+}
+
+/// A jungle temple puts its own blocks in the world, and a structure-free world
+/// with identical data puts none there.
+///
+/// The signature set is chosen for having **no other source in a generated
+/// jungle**: `chiseled_stone_bricks`, `cobblestone_stairs`, `lever`, `repeater`,
+/// `sticky_piston`, `dispenser` and `tripwire_hook` are produced by no surface
+/// rule, carver, ore or feature anywhere in this generator. `mossy_cobblestone` is
+/// deliberately *excluded* — the temple's commonest block, but also a
+/// `simple_dungeon`-adjacent one, so a non-zero control could be terrain rather
+/// than a leak.
+///
+/// The expected count is predicted from the *start* stage the same way the pyramid
+/// gate's is, and the two chests are asserted separately: they are the one thing
+/// last-write-wins could silently swallow, since the alcove writes and the chest
+/// share a position in the pyramid's case.
+#[test]
+fn a_jungle_temple_chunk_gains_temple_blocks_a_structureless_chunk_does_not() {
+    let settings = settings();
+    let with = generator(&ServerAssets::new(), &settings);
+    let without = generator(&NoStructures(ServerAssets::new()), &settings);
+    let start = start_at(&with, JUNGLE_CHUNK, "minecraft:jungle_pyramid");
+    let piece = &start.pieces[0];
+    let blocks = piece
+        .blocks
+        .as_ref()
+        .expect("a coded piece carries a resolved block list");
+
+    let temple_blocks: HashSet<&str> = [
+        "minecraft:chiseled_stone_bricks",
+        "minecraft:cobblestone_stairs",
+        "minecraft:lever",
+        "minecraft:repeater",
+        "minecraft:sticky_piston",
+        "minecraft:dispenser",
+        "minecraft:tripwire_hook",
+        "minecraft:tripwire",
+        "minecraft:chest",
+    ]
+    .into_iter()
+    .collect();
+    let mut final_state: std::collections::HashMap<[i32; 3], &str> =
+        std::collections::HashMap::new();
+    for block in blocks.iter() {
+        final_state.insert(block.pos, block.state.as_str());
+    }
+    let expected = final_state
+        .values()
+        .filter(|state| {
+            let name = state.split_once('[').map_or(**state, |(n, _)| n);
+            temple_blocks.contains(name)
+        })
+        .count();
+    // 3 chiseled + 3 lever + 1 repeater + 3 piston + 2 dispenser + 4 hook +
+    // 5 tripwire + 2 chest + 14 stairs (`5,9,6`..`7,4,5` and the 8 descending
+    // south stairs) — all in distinct positions, so nothing collapses. The literal
+    // is a floor on that hand count, not a guess at the piece's size.
+    assert!(
+        expected >= 30,
+        "the piece itself carries only {expected} signature blocks"
+    );
+
+    let placed = count_blocks(&with, start.bounding_box, &temple_blocks);
+    let control = count_blocks(&without, start.bounding_box, &temple_blocks);
+    assert_eq!(
+        placed, expected,
+        "the world holds {placed} of the piece's {expected} signature blocks"
+    );
+    assert_eq!(control, 0, "the structureless control holds {control}");
+}
+
+/// A coded piece's containers carry their loot table and vanilla's roll seed, and
+/// the chest **block** really lands.
+///
+/// This is the gate on `coded:chests`' *corrected* claim. It fails in three
+/// independent ways: a missing `StructurePiece::loot` entry, a chest block that the
+/// alcove/air writes overwrote (last-write-wins order), and a wrong loot table id.
+#[test]
+fn a_coded_container_carries_its_loot_table_and_its_block() {
+    let settings = settings();
+    let with = generator(&ServerAssets::new(), &settings);
+    for (chunk, structure, expected) in [
+        (
+            PYRAMID_CHUNK,
+            "minecraft:desert_pyramid",
+            vec!["minecraft:chests/desert_pyramid"; 4],
+        ),
+        (
+            JUNGLE_CHUNK,
+            "minecraft:jungle_pyramid",
+            vec![
+                "minecraft:chests/jungle_temple_dispenser",
+                "minecraft:chests/jungle_temple_dispenser",
+                "minecraft:chests/jungle_temple",
+                "minecraft:chests/jungle_temple",
+            ],
+        ),
+    ] {
+        let start = start_at(&with, chunk, structure);
+        let piece = &start.pieces[0];
+        let tables: Vec<&str> = piece.loot.iter().map(|l| l.table.as_str()).collect();
+        assert_eq!(tables, expected, "{structure}'s container loot tables");
+        // Every seed is a distinct `nextLong()` off one stream; two equal seeds
+        // would mean a re-seed, and two chests rolling identically.
+        let mut seeds: Vec<i64> = piece.loot.iter().map(|l| l.seed).collect();
+        seeds.sort_unstable();
+        seeds.dedup();
+        assert_eq!(seeds.len(), piece.loot.len(), "{structure} reused a roll seed");
+        // The block is in the piece's *final* state at that position, not merely
+        // written at some point.
+        let mut final_state: std::collections::HashMap<[i32; 3], &str> =
+            std::collections::HashMap::new();
+        for block in piece.blocks.as_ref().expect("blocks").iter() {
+            final_state.insert(block.pos, block.state.as_str());
+        }
+        for entry in &piece.loot {
+            let state = final_state
+                .get(&entry.pos)
+                .unwrap_or_else(|| panic!("{structure} has no block at its loot pos {:?}", entry.pos));
+            assert!(
+                state.starts_with("minecraft:chest[")
+                    || state.starts_with("minecraft:dispenser["),
+                "{structure}'s loot at {:?} sits on {state}",
+                entry.pos
+            );
+        }
+    }
+}
+
+/// A coded piece is reproducible across two independently constructed generators —
+/// the property the per-chunk clip rests on, and the one vanilla's
+/// `level.getRandom()` cellar draws do **not** have.
+#[test]
+fn a_coded_piece_is_identical_across_generators() {
+    let settings = settings();
+    let a = generator(&ServerAssets::new(), &settings);
+    let b = generator(&ServerAssets::new(), &settings);
+    let first = start_at(&a, PYRAMID_CHUNK, "minecraft:desert_pyramid");
+    let second = start_at(&b, PYRAMID_CHUNK, "minecraft:desert_pyramid");
+    let left = first.pieces[0].blocks.as_ref().expect("blocks");
+    let right = second.pieces[0].blocks.as_ref().expect("blocks");
+    assert_eq!(left.len(), right.len());
+    for (l, r) in left.iter().zip(right.iter()) {
+        assert_eq!((l.pos, &l.state), (r.pos, &r.state));
+    }
+}
+
+/// Exact externally-decoded mineshaft cells prove that post-processing uses the
+/// decorating chunk's liquid survey rather than the whole start's shell.
+///
+/// The retained seed-42 packet control has a corridor in chunk `(-249, 250)` whose
+/// west neighbour is liquid. A whole-shell survey vetoes the corridor and leaves
+/// stone; the decorating-chunk survey admits its local footprint. The sentinels are
+/// deliberately spread across the corridor floor, rail, and fence, so an accidental
+/// one-cell write cannot satisfy the gate.
+#[test]
+fn mineshaft_scope_matches_external_corridor_sentinels() {
+    const SEED_42: i64 = 42;
+    const CHUNK: (i32, i32) = (-249, 250);
+    const SENTINELS: &str = include_str!("support/mineshaft_scope_seed42.txt");
+    const OLD_WHOLE_SHELL_OUTPUT: &str = "minecraft:stone";
+    let settings = settings();
+    let with = generator_for_seed(SEED_42, &ServerAssets::new(), &settings);
+    let without = generator_for_seed(SEED_42, &NoStructures(ServerAssets::new()), &settings);
+    let column = with.column(CHUNK.0, CHUNK.1);
+    let structureless = without.column(CHUNK.0, CHUNK.1);
+
+    for line in SENTINELS.lines().filter(|line| !line.starts_with('#')) {
+        let mut fields = line.split_whitespace();
+        let x = fields.next().expect("x").parse::<i32>().expect("integer x");
+        let y = fields.next().expect("y").parse::<i32>().expect("integer y");
+        let z = fields.next().expect("z").parse::<i32>().expect("integer z");
+        let expected = fields.next().expect("state");
+        assert!(fields.next().is_none(), "one state per sentinel: {line}");
+        assert_eq!(x.div_euclid(16), CHUNK.0, "sentinel leaves the target chunk: {line}");
+        assert_eq!(z.div_euclid(16), CHUNK.1, "sentinel leaves the target chunk: {line}");
+
+        let lx = x.rem_euclid(16) as usize;
+        let lz = z.rem_euclid(16) as usize;
+        let actual = column.block_state(lx, y, lz);
+        assert_eq!(actual, expected, "scope replay at ({x}, {y}, {z})");
+
+        // The retained pre-fix output was stone: that is the explicit
+        // old-whole-shell control. A resolver with no structures independently
+        // reproduces it, proving these sentinels are not terrain look-alikes.
+        let no_structure = structureless.block_state(lx, y, lz);
+        assert_eq!(
+            no_structure, OLD_WHOLE_SHELL_OUTPUT,
+            "structureless control at ({x}, {y}, {z})"
+        );
+        assert_ne!(
+            OLD_WHOLE_SHELL_OUTPUT, expected,
+            "old whole-shell control must fail at ({x}, {y}, {z})"
+        );
+    };
+}
+
+/// A decoded packet cell from the same corridor proves the production path
+/// reaches the column that becomes a clientbound chunk packet. Its 0.05 cobweb
+/// choice uses the target chunk's underground-structures stream, not the
+/// stream that built the owning start's tree.
+#[test]
+fn mineshaft_target_chunk_rng_matches_external_cobweb() {
+    const SEED_42: i64 = 42;
+    const CHUNK: (i32, i32) = (-249, 250);
+    const WORLD: (i32, i32, i32) = (-3975, 14, 4003);
+    let settings = settings();
+    let with = generator_for_seed(SEED_42, &ServerAssets::new(), &settings);
+    let column = with.column(CHUNK.0, CHUNK.1);
+    assert_eq!(WORLD.0.div_euclid(16), CHUNK.0);
+    assert_eq!(WORLD.2.div_euclid(16), CHUNK.1);
+    assert_eq!(
+        column.block_state(WORLD.0.rem_euclid(16) as usize, WORLD.1, WORLD.2.rem_euclid(16) as usize),
+        "minecraft:cobweb",
+        "captured section-Y0 palette entry at the corridor's probabilistic gate"
+    );
+}
+
+/// The embedded generator's jungle temple has one chest with no horizontal
+/// support and one with several supports. This drives the same receiving-column
+/// path used by the served world, while comparing the retained loot sidecar
+/// before and after placement to guard the placement stream's draw boundary.
+#[test]
+fn coded_chest_reorientation_reaches_production_column_without_changing_loot() {
+    let with = lodestone_server::overworld_generator(SEED);
+    let start = start_at(&with, JUNGLE_CHUNK, "minecraft:jungle_pyramid");
+    let expected_loot = start.pieces[0].loot.clone();
+    let chest_positions: Vec<[i32; 3]> = expected_loot
+        .iter()
+        .filter(|loot| loot.table == "minecraft:chests/jungle_temple")
+        .map(|loot| loot.pos)
+        .collect();
+    assert_eq!(chest_positions.len(), 2, "jungle temple chest sidecar");
+
+    let column = with.column(JUNGLE_CHUNK.0, JUNGLE_CHUNK.1);
+    let states: Vec<String> = chest_positions
+        .iter()
+        .map(|pos| {
+            column
+                .block_state(
+                    pos[0].rem_euclid(16) as usize,
+                    pos[1],
+                    pos[2].rem_euclid(16) as usize,
+                )
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(
+        states,
+        vec![
+            "minecraft:chest[facing=north,type=single,waterlogged=false]".to_string(),
+            "minecraft:chest[facing=south,type=single,waterlogged=false]".to_string(),
+        ],
+        "the receiving grid must control each coded chest's facing"
+    );
+    assert_eq!(
+        start_at(&with, JUNGLE_CHUNK, "minecraft:jungle_pyramid").pieces[0].loot,
+        expected_loot,
+        "reorientation must not mutate or redraw the coded loot sidecar"
+    );
+}

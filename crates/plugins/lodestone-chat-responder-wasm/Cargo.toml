@@ -1,0 +1,166 @@
+# The worked example for the wasm plugin tier: observe chat, act by chatting.
+#
+# # Why this is NOT a workspace member
+#
+# It is in the root `Cargo.toml`'s `exclude` list, and that is deliberate rather
+# than incidental. `crates/plugins/*` is a member glob, so without the exclude
+# this crate would be built for `aarch64-apple-darwin` by every
+# `cargo check --workspace --all-targets` in `CLAUDE.md`'s health list — and a
+# `cdylib` whose `wit-bindgen` bindings declare
+# `#[link(wasm_import_module = ...)]` externs does not *link* on a native target.
+# The health checks would go red for a crate that is not meant to be built that
+# way at all.
+#
+# Its own `[workspace]` table below is the other half: it makes this directory a
+# workspace root in its own right, so `cargo build` inside it does not go looking
+# upward, and it gets its own `Cargo.lock` rather than churning the shared one.
+#
+# # Why the plugin the plan named is deliberately not this
+#
+# `docs/plans/runtime-plugin-loading.md` §"The compiled-in path" argues at length
+# that `lodestone-autopilot` is the *wrong* first conformance plugin for this tier
+# — it is the native tier's stress case (owned `Arc<ChunkSection>` snapshots,
+# ~15k `Arc` clones per snapshot, thousands of collider queries per search step),
+# and `docs/plugin-api.md`'s cost analysis concludes it does not fit through a
+# call-shaped ABI. Forcing it through one would prove the wrong point at maximum
+# cost. A chat responder covers both directions of the boundary — it observes and
+# it acts — at a size where the ABI, not the plugin, is what is under test.
+[workspace]
+
+[package]
+name = "lodestone-chat-responder-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Example Lodestone wasm plugin: replies in chat, counting what it has seen."
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+# The deny-case fixture, built from *this* source so the misbehaving artifact and
+# the well-behaved one differ by exactly one call. See
+# `crates/lodestone-wasm-host/tests/capability_denial.rs`: a control built from a
+# different crate could differ in a dozen ways, and the refusal could be about any
+# of them.
+misbehave = []
+# The preemption fixture: a guest that never returns. Same reasoning as
+# `misbehave` — a fuel-exhaustion test pointed at a well-behaved plugin measures
+# nothing, because the plugin returns long before the budget runs out.
+spin = []
+# The memory-ceiling fixture: a guest that tries to grow its linear memory without
+# bound. See `crates/lodestone-wasm-host/tests/memory_denial.rs` — the pair of
+# tests there needs one artifact whose growth is bounded only by whatever ceiling
+# the *host* configures, so the same module run under two different
+# `PluginHost::with_memory_limit` values is the control.
+alloc-loop = []
+# The network-denial fixture: a guest that attempts a real TCP connect. See
+# `crates/lodestone-wasm-host/tests/network_denial.rs`.
+network = []
+# The scheduler conformance fixture. It imports the host's task scheduler,
+# schedules one-shot and repeating callbacks during `init`, and cancels both a
+# pending task and a running repeating task.
+scheduler = []
+# Verdict fixtures for the host's synchronous cancellation conformance test.
+verdict-deny = []
+verdict-trap = []
+# The command-registration conformance fixture. It declares a root and alias
+# from `init`, then returns a non-round-number result from `on-command`.
+commands = []
+# The intent-boundary fixture. It owns the copied local-player look target for
+# one tick, which the host must route through the normal physics/send path.
+look = []
+# The movement fixture drives one copied input through the host's controller,
+# physics, and egress path. It is separate from `look` so each gate has one
+# intentional guest action.
+movement = []
+# The placement-lifecycle conformance fixture. It makes one intentionally
+# unresolvable request, then reports the bounded outcome delivered on a later
+# tick rather than depending on a world handle or packet result.
+place = []
+# The multi-tick mining lifecycle fixture. It starts a copied break claim,
+# observes one bounded rejection from the shell, then explicitly releases it.
+break = []
+# The hotbar-selection conformance fixture. It asks for a valid slot; the host
+# must route it through the shell's selected-slot and carried-item-echo path.
+select-slot = []
+# Same route, but deliberately outside the valid 0..=8 range so the composed
+# shell gate proves it rejects malformed guest input without an echo.
+select-slot-invalid = []
+# The inventory-observation conformance fixture. It reports a copied native
+# inventory-slot event after the host explicitly grants `observe:inventory`.
+inventory = []
+# The copied remote-entity lifecycle fixture. It reports a generation-scoped
+# spawn through the normal guest action return path.
+entity-observation = []
+# The bounded raw-packet observation fixture. It reports both packet directions
+# through the version-free event ABI; the host remains the only transport owner.
+raw-observation = []
+# The bounded inventory-click fixtures. The positive request targets player-menu
+# slot 36; the invalid control uses the largest ABI slot and must be rejected by
+# the shell before it reaches the live predictor.
+inventory-click = []
+inventory-click-invalid = []
+# A copied shift-click through the host's separately granted quick-move action.
+inventory-quick-move = []
+# The maximum ABI slot confirms the shell rejects malformed quick moves before
+# the live menu predictor can enqueue a container action.
+inventory-quick-move-invalid = []
+# A bounded pickup-all double click resolved entirely by the live menu.
+inventory-double-click = []
+# A copied number-key hotbar swap through the shell's live menu predictor.
+inventory-hotbar-swap = []
+# The valid menu slot paired with an out-of-range hotbar key must be rejected by
+# the shell before the live predictor can enqueue a container action.
+inventory-hotbar-swap-invalid = []
+# A copied one-item or complete-stack drop from one live menu slot.
+inventory-throw = []
+# The maximum ABI slot confirms the shell rejects malformed slot throws before
+# the live menu predictor can enqueue a container action.
+inventory-throw-invalid = []
+# A copied no-argument cursor drop through the shell's live menu predictor.
+inventory-drop-cursor = []
+# A copied selected-stack drop through the normal client action queue. The
+# host owns the selected item and the protocol encoding.
+drop-selected-item = []
+# A one-shot main/off-hand swap through the normal client action queue. The host
+# owns both live stacks and the protocol encoding.
+swap-offhand = []
+# A one-shot held-use release through the normal client action queue. The host
+# owns the held-use lifecycle and protocol encoding.
+release-use-item = []
+# A one-shot piercing-weapon stab through the normal client action queue. The
+# host owns the selected item and protocol encoding.
+stab = []
+# A one-shot respawn request through the normal client action queue. The server
+# remains authoritative over whether the request is legal.
+respawn = []
+# A one-shot orderly disconnect request through the live client queue.
+disconnect = []
+# A one-shot command send used to prove command authority is separate from chat.
+send-command = []
+# Reads a three-position, bounded world snapshot and reports the copied values.
+world-read = []
+world-write = []
+# A denied-by-default filesystem write import. The fixture writes one file inside
+# the configured root and attempts one path outside it for the confinement gate.
+fs-write = []
+# The lifecycle fixture writes a file and then deletes it through the ABI's
+# empty-write deletion convention, proving the guest controls deletion too.
+fs-delete = []
+
+[dependencies]
+# The only dependency, and it must stay that way: everything a guest links is
+# bytes in the artifact, and the artifact is the thing a user downloads.
+wit-bindgen = { version = "0.57", default-features = false, features = ["macros"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+# A guest panic becomes a wasm trap, which the host records as a permanent
+# failure and stops calling — the failure isolation that is this tier's strongest
+# advantage over the native one. Unwinding would buy nothing: there is no host
+# frame to unwind into.
+panic = "abort"
