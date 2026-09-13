@@ -373,11 +373,14 @@ impl<W: Write> Write for TerminalFrameWriter<W> {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.inner.write_all(&self.frame)?;
-        // The bytes have been handed to the underlying writer before its
-        // flush can fail; clear them even on that error so a caller retrying
-        // the flush cannot duplicate a complete frame.
-        let result = self.inner.flush();
+        // A failed write may have handed only part of the frame to the
+        // underlying writer, so clear the buffer on every error as well as on
+        // a failed flush. Retrying must not duplicate an already-partial
+        // frame.
+        let result = self
+            .inner
+            .write_all(&self.frame)
+            .and_then(|()| self.inner.flush());
         self.frame.clear();
         result
     }
@@ -1241,7 +1244,7 @@ mod tests {
 
     #[test]
     fn rgba_frame_uses_the_library_halfblock_protocol() {
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let protocol = halfblock_protocol(
             vec![0; 4 * 3 * 4],
             4,
@@ -1260,7 +1263,7 @@ mod tests {
     fn terminal_pixel_to_cell_conversion_profile() {
         let width = 320;
         let height = 180;
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let protocol = halfblock_protocol(
             vec![128; width as usize * height as usize * 4],
             width,
@@ -1316,7 +1319,7 @@ mod tests {
 
         let mut direct_sink = RecordingWriter::default();
         let mut direct = CrosstermBackend::new(&mut direct_sink);
-        let direct_started = std::time::Instant::now();
+        let direct_started = Instant::now();
         direct
             .draw(cells.iter().map(|(x, y, cell)| (*x, *y, cell)))
             .expect("direct backend serialization");
@@ -1325,12 +1328,12 @@ mod tests {
 
         let mut atomic_sink = RecordingWriter::default();
         let mut atomic = CrosstermBackend::new(TerminalFrameWriter::new(&mut atomic_sink));
-        let atomic_started = std::time::Instant::now();
+        let atomic_started = Instant::now();
         atomic
             .draw(cells.iter().map(|(x, y, cell)| (*x, *y, cell)))
             .expect("frame-buffered backend serialization");
         let atomic_serialization_elapsed = atomic_started.elapsed();
-        let atomic_flush_started = std::time::Instant::now();
+        let atomic_flush_started = Instant::now();
         Backend::flush(&mut atomic).expect("frame-buffered backend flush");
         let atomic_flush_elapsed = atomic_flush_started.elapsed();
 
@@ -1352,5 +1355,33 @@ mod tests {
         assert_eq!(direct_bytes, atomic_bytes);
         assert_eq!(atomic_sink.writes.len(), 1);
         assert_eq!(atomic_sink.flushes, 1);
+    }
+
+    #[test]
+    fn frame_writer_discards_a_failed_frame_before_retry() {
+        #[derive(Default)]
+        struct FailingWriter {
+            writes: usize,
+            flushes: usize,
+        }
+
+        impl Write for FailingWriter {
+            fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+                self.writes += 1;
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "test write failure"))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                self.flushes += 1;
+                Ok(())
+            }
+        }
+
+        let mut writer = TerminalFrameWriter::new(FailingWriter::default());
+        writer.write_all(b"frame").expect("buffering does not touch the sink");
+        assert!(writer.flush().is_err());
+        assert!(writer.flush().is_ok());
+        assert_eq!(writer.inner.writes, 1);
+        assert_eq!(writer.inner.flushes, 1);
     }
 }
