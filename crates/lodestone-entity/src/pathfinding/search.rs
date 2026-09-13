@@ -361,8 +361,8 @@ impl<'a> Search<'a> {
         PathType::Walkable
     }
 
-    fn path_type_within_mob_bb(&self, x: i32, y: i32, z: i32) -> Vec<PathType> {
-        let mut set: Vec<PathType> = Vec::new();
+    fn path_type_within_mob_bb(&self, x: i32, y: i32, z: i32) -> PathTypeSet {
+        let mut set = PathTypeSet::new();
         let mob_rail = self.path_type_static(self.mob_block.x, self.mob_block.y, self.mob_block.z);
         let mob_rail_below =
             self.path_type_static(self.mob_block.x, self.mob_block.y - 1, self.mob_block.z);
@@ -385,9 +385,7 @@ impl<'a> Search<'a> {
                     {
                         bt = PathType::UnpassableRail;
                     }
-                    if !set.contains(&bt) {
-                        set.push(bt);
-                    }
+                    set.push_unique(bt);
                 }
             }
         }
@@ -397,20 +395,20 @@ impl<'a> Search<'a> {
     fn path_type_of_mob(&self, x: i32, y: i32, z: i32) -> PathType {
         let mut set = self.path_type_within_mob_bb(x, y, z);
         if set.len() == 1 {
-            return set[0];
+            return set.as_slice()[0];
         }
-        if set.contains(&PathType::Fence) {
+        if set.contains(PathType::Fence) {
             return PathType::Fence;
         }
-        if set.contains(&PathType::UnpassableRail) {
+        if set.contains(PathType::UnpassableRail) {
             return PathType::UnpassableRail;
         }
         // Iterate in enum-declaration order to match vanilla's EnumSet ordering,
         // which decides the `>=` tie-break.
-        set.sort_by_key(|pt| ordinal(*pt));
         let mut highest_type = PathType::Blocked;
         let mut highest_malus = self.mob.malus(PathType::Blocked);
-        for &pt in &set {
+        set.sort_by_ordinal();
+        for &pt in set.as_slice() {
             let m = self.mob.malus(pt);
             if m < 0.0 {
                 return pt;
@@ -947,6 +945,74 @@ impl<'a> Search<'a> {
     }
 }
 
+const INLINE_PATH_TYPES: usize = 4;
+
+enum PathTypeSet {
+    Inline {
+        values: [PathType; INLINE_PATH_TYPES],
+        len: usize,
+    },
+    Overflow(Vec<PathType>),
+}
+
+impl PathTypeSet {
+    fn new() -> Self {
+        Self::Inline {
+            values: [PathType::Blocked; INLINE_PATH_TYPES],
+            len: 0,
+        }
+    }
+
+    fn push_unique(&mut self, path_type: PathType) {
+        match self {
+            Self::Inline { values, len } => {
+                if values[..*len].contains(&path_type) {
+                    return;
+                }
+                if *len < INLINE_PATH_TYPES {
+                    values[*len] = path_type;
+                    *len += 1;
+                    return;
+                }
+                let mut overflow = Vec::with_capacity(INLINE_PATH_TYPES + 1);
+                overflow.extend_from_slice(&values[..*len]);
+                overflow.push(path_type);
+                *self = Self::Overflow(overflow);
+            }
+            Self::Overflow(values) => {
+                if !values.contains(&path_type) {
+                    values.push(path_type);
+                }
+            }
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Inline { len, .. } => *len,
+            Self::Overflow(values) => values.len(),
+        }
+    }
+
+    fn contains(&self, path_type: PathType) -> bool {
+        self.as_slice().contains(&path_type)
+    }
+
+    fn as_slice(&self) -> &[PathType] {
+        match self {
+            Self::Inline { values, len } => &values[..*len],
+            Self::Overflow(values) => values,
+        }
+    }
+
+    fn sort_by_ordinal(&mut self) {
+        match self {
+            Self::Inline { values, len } => values[..*len].sort_unstable_by_key(|pt| ordinal(*pt)),
+            Self::Overflow(values) => values.sort_unstable_by_key(|pt| ordinal(*pt)),
+        }
+    }
+}
+
 fn ordinal(pt: PathType) -> u8 {
     match pt {
         PathType::Blocked => 0,
@@ -982,4 +1048,48 @@ fn ordinal(pt: PathType) -> u8 {
 fn pack(x: i32, y: i32, z: i32) -> i64 {
     // BlockPos.asLong-style packing, sufficient as a cache key.
     ((x as i64 & 0x3FF_FFFF) << 38) | ((z as i64 & 0x3FF_FFFF) << 12) | (y as i64 & 0xFFF)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_type_set_matches_unique_vec_before_and_after_overflow() {
+        let values = [
+            PathType::Open,
+            PathType::Blocked,
+            PathType::Water,
+            PathType::Fence,
+            PathType::Open,
+            PathType::Fire,
+            PathType::Water,
+            PathType::Leaves,
+        ];
+        let mut optimized = PathTypeSet::new();
+        let mut reference = Vec::new();
+        for path_type in values {
+            if !reference.contains(&path_type) {
+                reference.push(path_type);
+            }
+            optimized.push_unique(path_type);
+        }
+        assert_eq!(optimized.as_slice(), reference.as_slice());
+        assert_eq!(optimized.len(), reference.len());
+        assert!(optimized.contains(PathType::Leaves));
+        assert!(!optimized.contains(PathType::Lava));
+
+        optimized.sort_by_ordinal();
+        reference.sort_unstable_by_key(|path_type| ordinal(*path_type));
+        assert_eq!(optimized.as_slice(), reference.as_slice());
+    }
+
+    #[test]
+    fn path_type_set_keeps_the_common_single_value_on_stack() {
+        let mut set = PathTypeSet::new();
+        set.push_unique(PathType::Walkable);
+        assert_eq!(set.len(), 1);
+        assert_eq!(set.as_slice(), &[PathType::Walkable]);
+        assert!(matches!(set, PathTypeSet::Inline { .. }));
+    }
 }
