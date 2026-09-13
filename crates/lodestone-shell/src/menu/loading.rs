@@ -331,12 +331,14 @@ pub struct TerrainChunkGrid {
     pub cells: Vec<ChunkCellStatus>,
 }
 
-/// The largest selectable render distance. The loading square follows the
-/// selected distance rather than silently replacing a 32-chunk choice with a
-/// smaller centre crop. Its cell size remains the reference two logical pixels;
-/// the reference layout places the square below the label, so the full box fits
-/// on the smallest supported canvas even at the upper bound.
-pub const MAX_GRID_RADIUS: u32 = crate::config::MAX_RENDER_DISTANCE;
+/// The largest radius represented by the per-column loading diagnostic.
+///
+/// This is intentionally independent from [`crate::config::MAX_RENDER_DISTANCE`].
+/// A 256-chunk view contains 265,225 cells; rebuilding and drawing that status
+/// matrix every frame would turn a progress diagnostic into an unbounded CPU and
+/// allocation cost. The progress denominator still tracks the complete selected
+/// view, and terrain streaming is unaffected by this bounded overview.
+pub const MAX_GRID_RADIUS: u32 = 32;
 
 impl TerrainChunkGrid {
     /// The radius to draw for the selected view, bounded to the selectable

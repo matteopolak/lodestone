@@ -701,10 +701,10 @@ impl Sim {
     /// [`crate::menu::loading::ChunkCellStatus`]'s doc for why this has two
     /// states rather than vanilla's twelve.
     ///
-    /// **Bounded by [`crate::menu::loading::MAX_GRID_RADIUS`]** so the square
-    /// remains drawable on the smallest supported canvas. The selected render
-    /// distance is preserved through the supported range; a larger server
-    /// radius is clamped rather than silently making the grid overflow.
+    /// **Bounded by [`crate::menu::loading::MAX_GRID_RADIUS`]** so the per-frame
+    /// diagnostic remains affordable. The selected render distance and progress
+    /// denominator are preserved through the supported range; only this optional
+    /// status overview uses a smaller, documented radius.
     #[must_use]
     pub fn terrain_chunk_grid(&self) -> Option<crate::menu::loading::TerrainChunkGrid> {
         let net = self.net()?;

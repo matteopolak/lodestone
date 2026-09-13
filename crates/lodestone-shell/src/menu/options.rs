@@ -315,7 +315,7 @@ pub enum LiveOption {
     Sensitivity,
     /// `options.renderDistance` → [`crate::config::Options::render_distance`].
     ///
-    /// An `IntRange(2, 32)`, so unlike every other
+    /// An `IntRange(2, 256)`, so unlike every other
     /// live slider its handle position comes from [`SliderRange`] rather than
     /// from the stored value directly — [`LiveOption::unit_double`] answers
     /// `None` for it on purpose.
@@ -985,8 +985,9 @@ impl Cell {
     ///
     /// A slider whose accessor is not in [`UNIT_DOUBLE_DEFAULTS`] is built on
     /// some other value set — an `IntRange` or an `IntRange.xmap` — whose
-    /// range this client has not ported (`renderDistance`,
-    /// `menuBackgroundBlurriness`, `chatDelay`, `notificationDisplayTime`, …).
+    /// range this client has not ported (`menuBackgroundBlurriness`, `chatDelay`,
+    /// `notificationDisplayTime`, …); `renderDistance` is the live exception
+    /// with a shared typed range.
     /// Those return `None` rather than a fabricated position; porting each
     /// range is a bigger job than a handle draw and is tracked separately.
     #[must_use]
@@ -1313,7 +1314,8 @@ impl SliderRange {
     /// a bucket, so a fraction of exactly `1.0` maps to `max + 1` before the
     /// floor and has to be clamped back. Without the clamp the top of the track
     /// would select a value one past the maximum, which for `renderDistance` is
-    /// 33 chunks and for `sprintWindow` is 11 ticks.
+    /// `config::MAX_RENDER_DISTANCE + 1` chunks and for `sprintWindow` is 11
+    /// ticks.
     ///
     /// Round-trips with [`Self::to_slider_value`] for every value in range,
     /// which is the property `slider_values_round_trip_through_the_bucket_map`
@@ -1331,12 +1333,14 @@ impl SliderRange {
 }
 
 /// This client's `largeDistances`, the one bound in [`INT_RANGE_SLIDERS`] that
-/// vanilla decides at runtime rather than in a literal.
+/// the inactive simulation-distance row uses at runtime rather than in a
+/// literal. Render distance has its own wider typed bound in `config` because
+/// it is a live shell setting.
 ///
 /// Vanilla's own options constructor reads
 /// `Runtime.getRuntime().maxMemory() >= 1000000000L` **once** and uses it for
-/// both distance sliders' maximum: `largeDistances` gates the render-distance
-/// slider's max between `32` and `16` (with a `12`-chunk default either way).
+/// the simulation-distance slider's maximum between `32` and `16` (with a
+/// `12`-chunk default either way).
 ///
 /// That test is a question about **the JVM's `-Xmx` heap cap**, not about the
 /// machine: it is `false` on a 64 GB box launched with `-Xmx512m`. This client
@@ -1420,13 +1424,15 @@ const INT_RANGE_SLIDERS: &[(&str, SliderRange, i32)] = &[
     // a `ValueSet::xmap`, so it does not touch the slider at all — reading it
     // as one would put the handle at `(int)(70 * 40 + 70)`, far off the track.
     ("fov", SliderRange { min: 30, max: 110 }, 70),
-    // vanilla's own options class: `IntRange(2, largeDistances ? 32 : 16,
-    // false)`, default `12`. See [`LARGE_DISTANCES_MAX`] for the max.
+    // This client's render-distance range is intentionally wider than the
+    // reference client's normal `largeDistances` branch. Keep the maximum in
+    // `config` so validation, persistence, keyboard stepping and this handle
+    // all share one typed ceiling.
     (
         "renderDistance",
         SliderRange {
-            min: 2,
-            max: LARGE_DISTANCES_MAX,
+            min: crate::config::MIN_RENDER_DISTANCE as i32,
+            max: crate::config::MAX_RENDER_DISTANCE as i32,
         },
         12,
     ),
@@ -5242,8 +5248,8 @@ mod tests {
         expect("fov", 40.5 / 81.0, "IntRange(30,110), default 70");
         expect(
             "renderDistance",
-            10.5 / 31.0,
-            "IntRange(2,32), default 12 — the max is LARGE_DISTANCES_MAX",
+            10.5 / 255.0,
+            "IntRange(2,256), default 12 — the max is config::MAX_RENDER_DISTANCE",
         );
         expect(
             "simulationDistance",

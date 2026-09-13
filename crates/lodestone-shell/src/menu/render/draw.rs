@@ -286,11 +286,12 @@ pub fn build(
             let center_x = width * 0.5;
             let center_y = (height * 0.5 + view.dy).floor();
             let diameter = crate::menu::loading::TerrainChunkGrid::diameter(view.grid.radius);
+            let cell_size = chunk_cell_size(diameter);
             for z in 0..diameter {
                 for x in 0..diameter {
                     let status = view.grid.get(x, z);
                     let (cx, cy) = chunk_cell_origin(center_x, center_y, diameter, x, z);
-                    b.rect(cx, cy, CHUNK_CELL_SIZE, CHUNK_CELL_SIZE, chunk_cell_colour(status));
+                    b.rect(cx, cy, cell_size, cell_size, chunk_cell_colour(status));
                 }
             }
         }

@@ -885,6 +885,20 @@ pub struct ChunkGridView {
 /// its own call site (`margin` is `0` there too, so cells sit flush).
 pub const CHUNK_CELL_SIZE: f32 = 2.0;
 
+/// Maximum logical width reserved for the loading grid. The reference cell is
+/// two pixels wide through radius 32; beyond that, cells shrink so the complete
+/// selected square remains represented instead of being cropped. This keeps
+/// the diagnostic geometry bounded while terrain generation stays independent.
+pub const MAX_CHUNK_GRID_SIZE: f32 = 130.0;
+
+/// Cell size for a grid with `diameter` cells. Small grids retain the reference
+/// two-pixel cells; the 256-radius grid is 513 cells across and fits the same
+/// bounded 130-pixel diagnostic footprint.
+#[must_use]
+pub fn chunk_cell_size(diameter: usize) -> f32 {
+    CHUNK_CELL_SIZE.min(MAX_CHUNK_GRID_SIZE / diameter.max(1) as f32)
+}
+
 /// Empty generation status, `0x545454`.
 pub const CHUNK_CELL_EMPTY: [f32; 4] = [84.0 / 255.0, 84.0 / 255.0, 84.0 / 255.0, 1.0];
 
@@ -969,12 +983,13 @@ pub fn chunk_cell_origin(
     x: usize,
     z: usize,
 ) -> (f32, f32) {
-    let total = diameter as f32 * CHUNK_CELL_SIZE;
+    let cell_size = chunk_cell_size(diameter);
+    let total = diameter as f32 * cell_size;
     let start_x = (center_x - total * 0.5).floor();
     let start_y = (center_y - total * 0.5).floor();
     (
-        start_x + x as f32 * CHUNK_CELL_SIZE,
-        start_y + z as f32 * CHUNK_CELL_SIZE,
+        start_x + x as f32 * cell_size,
+        start_y + z as f32 * cell_size,
     )
 }
 
