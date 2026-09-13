@@ -1,6 +1,0 @@
-# Captured from the 26.2 runtime registry, in its decoration-loop order.
-minecraft:buried_treasure
-minecraft:mineshaft
-minecraft:mineshaft_mesa
-minecraft:trail_ruins
-minecraft:trial_chambers

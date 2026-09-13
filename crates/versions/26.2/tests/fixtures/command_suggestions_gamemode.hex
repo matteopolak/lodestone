@@ -1,9 +1,0 @@
-# Raw clientbound `minecraft:command_suggestions` payload (play id 15),
-# captured from a real vanilla 26.2 server (flat creative oracle, :25570)
-# as the reply to a serverbound `command_suggestion` for `/gamemode `
-# with transaction id 0. Payload only — no length or packet-id prefix.
-#
-# Recapture: same command as command_tree_creative.hex.
-00 0a 00 04 09 61 64 76 65 6e 74 75 72 65 00 08
-63 72 65 61 74 69 76 65 00 09 73 70 65 63 74 61
-74 6f 72 00 08 73 75 72 76 69 76 61 6c 00
