@@ -34,9 +34,11 @@ container. It does not read or modify Lodestone generation code.
 The validated seed-42 witness is source-order sensitive: the target focus `(2,0)` has raw client map
 values `(68,56,56)` at the authenticated FEATURES boundary, even though the final resident terrain
 would otherwise suggest `(68,58,58)`. The Rust control replays that canonical value and separately
-proves the negative `(68,58,58)` payload is not silently normalised. The external one-chunk gate
-currently reports identical End terrain, biomes, entities, and all three heightmaps; any remaining
-raw-packet difference is isolated to the light payload.
+proves the negative `(68,58,58)` payload is not silently normalised. The raw packet capture uses a
+radius-zero target ticket, so its light payload is encoded from the target column alone; the admitted
+CARVERS halo remains lifecycle context for terrain and maps, not an implicit light input. The external
+one-chunk gate reports identical End terrain, biomes, entities, all three heightmaps, and light after
+applying that boundary.
 
 ## How to change it
 
