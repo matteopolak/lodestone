@@ -1238,7 +1238,7 @@ impl RenderState {
             // and unit-tested; `0.0` is an exact identity for each, so nothing
             // looked wrong anywhere.
             let anim = named_entity_anim(e);
-            let Some(mut instance) = self.entities.models.resolve_animated(
+            let Some(instance) = self.entities.models.resolve_animated(
                 e.model_type_path(),
                 e.feet,
                 e.yaw,

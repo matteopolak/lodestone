@@ -173,13 +173,16 @@ mod remote_body;
 
 pub use render_input::{EntityDraw, NamedEntityCosmetics};
 pub use physics::{tick_item_physics, tick_projectile_physics};
-pub(super) use physics::{new_item_physics, new_projectile_physics, step_item_physics, OpenAir};
+use physics::{new_item_physics, new_projectile_physics, OpenAir};
 pub use interpolation::{advance_interp_clocks, tick_walk_animation};
-pub(super) use interpolation::{arm_pose_for, controlled_vehicle_render_pose, occupied_equipment, render_anim, render_feet, render_head_yaw, render_pitch, render_yaw, sample_vehicle_pose, VANILLA, CROSSBOW_CHARGE_TICKS};
+use interpolation::{arm_pose_for, controlled_vehicle_render_pose, occupied_equipment, render_anim, render_feet, render_head_yaw, render_pitch, render_yaw, VANILLA};
+#[cfg(test)]
+use interpolation::{sample_vehicle_pose, CROSSBOW_CHARGE_TICKS};
 pub(super) use interpolation::riding_render_seat;
 pub use extraction::{begin_item_pickup, extract_entity_draws, extract_pickup_draws, tick_pickup_animations};
 pub use extraction::{PickupAnimation, PickupAnimations};
-pub(super) use extraction::{collector_target, pickup_progress, PICKUP_TARGET_EYE_FRACTION, REMOTE_COLLECTOR_EYE_HEIGHT};
+#[cfg(test)]
+use extraction::{pickup_progress, PICKUP_TARGET_EYE_FRACTION, REMOTE_COLLECTOR_EYE_HEIGHT};
 pub use remote_body::{tick_remote_body_yaw, BodyYawState};
 
 /// Converts a render-space [`glam::Vec3`] into the `f64` [`lodestone_model::Vec3`]

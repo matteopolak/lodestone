@@ -80,9 +80,13 @@ pub use snapshot::{
     snapshot_section, snapshot_section_in, snapshot_section_live, sky_default_for_dimension,
 };
 pub(crate) use snapshot::{
-    ColumnBlockSummary, SnapLight, SnapshotLight, air_section, should_report_empty_column,
+    ColumnBlockSummary, SnapLight, SnapshotLight, should_report_empty_column,
 };
-pub(crate) use model::{ao_occludes_raw_state, biome_name_at, split16, take_tint_probe};
+pub(crate) use model::{biome_name_at, split16, take_tint_probe};
+#[cfg(test)]
+use snapshot::air_section;
+#[cfg(test)]
+use model::ao_occludes_raw_state;
 
 /// The geometry a worker produced for one section.
 ///

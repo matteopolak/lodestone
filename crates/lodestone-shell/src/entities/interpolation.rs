@@ -168,7 +168,7 @@ pub(crate) fn render_pitch(from: &InterpFrom, to: &InterpTo, clock: &InterpClock
 /// whole-body prone rotation. This is the second, independent consumer: it
 /// drives the humanoid swim branch — the arm-over-arm stroke and leg kick —
 /// which reads it from `AnimInput` rather than `EntityDraw`.
-pub(crate) fn render_anim(
+pub(super) fn render_anim(
     from: &InterpFrom,
     to: &InterpTo,
     clock: &InterpClock,
@@ -302,7 +302,7 @@ pub(super) struct ArmPoseChoice {
 /// Because the fallthrough is now avatar-only, it changes **no** mob silhouette, and
 /// neither bow-pose pixel gate (both of which use a skeleton subject and a zombie
 /// control) needed re-baselining.
-pub(crate) fn arm_pose_for(
+pub(super) fn arm_pose_for(
     type_path: &str,
     equipment: &[(EquipmentSlot, ResourceLocation)],
     item_use: Option<ItemUse>,
