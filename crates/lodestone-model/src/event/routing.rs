@@ -596,7 +596,7 @@ pub fn route(event: &ClientEvent) -> Route {
 
 #[cfg(test)]
 mod equipment_slot_tests {
-    use super::EquipmentSlot;
+    use crate::EquipmentSlot;
 
     /// `from_name` is the inverse of `name` for **every** slot, checked against
     /// `ALL` rather than against a list restated here.
@@ -636,7 +636,7 @@ mod equipment_slot_tests {
 
 #[cfg(test)]
 mod block_state_ref_tests {
-    use super::{BlockStateRef, LevelEventData};
+    use crate::{BlockStateRef, LevelEventData};
 
     #[test]
     fn canonical_and_protocol_local_state_ids_keep_the_same_raw_value_distinct() {
@@ -674,7 +674,8 @@ mod block_state_ref_tests {
 
 #[cfg(test)]
 mod route_tests {
-    use super::{ClientEvent, Difficulty, LevelEventData, PackedMessageSignature, Route, route};
+    use super::{ClientEvent, Route, route};
+    use crate::{Difficulty, LevelEventData, PackedMessageSignature};
     use uuid::Uuid;
     use crate::{LookAnchor, PredictionSequence, Vec3, ids::Identifier, math::BlockPos};
 
