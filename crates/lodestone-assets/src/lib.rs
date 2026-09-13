@@ -141,7 +141,7 @@ pub use item_model::{
 pub use item_tint::{ItemTintContext, ResolvedTint, TintProvenance};
 pub use location::ResourceLocation;
 pub use manager::ResourceManager;
-pub use meta::{PackDescription, PackMeta, PackVersion, VersionMeta};
+pub use meta::{PackDescription, PackMeta, PackVersion, VersionId, VersionIdError, VersionMeta};
 pub use mipmap::{MipStrategy, Transparency, generate_mip_levels, max_mip_level};
 pub use model::{
     Axis, Direction, DisplaySlot, DisplayTransform, DisplayTransforms, Element, ElementRotation,
