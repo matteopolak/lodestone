@@ -240,7 +240,7 @@ pub fn tick_projectile_physics(
 /// re-anchored) snapshot. A missing velocity seeds zero — gravity still applies
 /// to it, it just has nothing to arc with, which is exactly the discriminating
 /// behaviour the hermetic tests below pin.
-pub(crate) fn new_item_physics(snap: &EntityFacts) -> ItemPhysics {
+pub(super) fn new_item_physics(snap: &EntityFacts) -> ItemPhysics {
     let mut sim = ItemMotion::new(
         to_model_vec3(snap.feet),
         snap.velocity.map(to_model_vec3).unwrap_or_default(),
@@ -254,7 +254,7 @@ pub(crate) fn new_item_physics(snap: &EntityFacts) -> ItemPhysics {
 }
 
 /// Seeds the local projectile simulation from the first authoritative report.
-pub(crate) fn new_projectile_physics(snap: &EntityFacts) -> ProjectilePhysics {
+pub(super) fn new_projectile_physics(snap: &EntityFacts) -> ProjectilePhysics {
     let position = to_model_vec3(snap.feet);
     let velocity = snap.velocity.map(to_model_vec3).unwrap_or_default();
     let sim = if is_accelerating_projectile(snap.entity_type) {

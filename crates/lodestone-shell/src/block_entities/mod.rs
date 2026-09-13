@@ -115,7 +115,7 @@ use lodestone_render::{
     CopperGolemOxidation, CopperGolemPose, CopperGolemStatueSpawn,
     BlockEntityTexture, DecoratedPotSpawn, EndGatewaySpawn, EndPortalSpawn, LecternSpawn, SHELF_SLOTS,
     SHULKER_COLOURS, ShelfItemSpawn, ShulkerFacing, ShulkerSpawn, SignKind, SignOrientation,
-    SignSpawn, SkullOrientation, SkullSpawn, SkullType, SkyDefault, VaultSpawn, average_beam_color,
+    SignSpawn, SkullOrientation, SkullSpawn, SkullType, VaultSpawn, average_beam_color,
     beacon_beam_color, beam_radius_scale, conduit_active_rotation_value, conduit_advance,
     conduit_anim_time, conduit_animation_phase, conduit_frame_scan, entity::vault_spin_degrees,
     horizontal_facing_clockwise_yaw, horizontal_facing_yaw,
@@ -130,10 +130,12 @@ use crate::net::{SharedHandle, entity_light_at};
 mod snapshot;
 pub(crate) use snapshot::BlockEntityFrameSnapshot;
 pub(crate) use snapshot::block_entity_frame_snapshot;
-use snapshot::BlockEntityFrameCandidate;
 
 mod scanner;
-pub(crate) use scanner::{can_render_structure_boxes, structure_block_outline_vertices, structure_block_vertices, structure_block_vertices_from_loaded_world};
+#[cfg(test)]
+pub(crate) use scanner::{can_render_structure_boxes, structure_block_outline_vertices, structure_block_vertices_from_loaded_world};
+pub(crate) use scanner::structure_block_vertices;
+#[cfg(test)]
 use scanner::structure_box;
 
 mod render_inputs;
@@ -1545,7 +1547,6 @@ pub fn chest_spawns(
     chest_spawns_from_snapshot(&snapshot, lids, partial_tick)
 }
 
-#[must_use]
 /// Reads a skull/head block state's orientation — `rotation` (`0..16`, floor
 /// placement) or `facing` (wall placement) — into the renderer's fields.
 ///
@@ -1813,7 +1814,6 @@ pub fn bell_spawns(
     bell_spawns_from_snapshot(&snapshot, shakes, partial_tick)
 }
 
-#[must_use]
 /// Resolves a block state id into `(dye colour, facing)` for a shulker box, or
 /// `None` if the state is not one.
 ///
@@ -1879,7 +1879,6 @@ pub fn shulker_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<ShulkerSpawn> {
     shulker_spawns_from_snapshot(&snapshot)
 }
 
-#[must_use]
 /// One candidate resolved into a [`LecternSpawn`], or `None` if the state at
 /// that position is not a lectern **with a book in it**.
 ///
@@ -1932,7 +1931,6 @@ pub fn lectern_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<LecternSpawn> {
     lectern_spawns_from_snapshot(&snapshot)
 }
 
-#[must_use]
 /// Whether a block state is an enchanting table.
 ///
 /// One block, no properties that matter: an enchanting table has **no `facing`**
