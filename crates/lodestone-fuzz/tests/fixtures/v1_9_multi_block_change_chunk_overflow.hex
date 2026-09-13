@@ -1,0 +1,32 @@
+# Issue #450 regression input: a protocol-340 (1.12.2) clientbound
+# `multi_block_change` payload whose wire `chunk_x` overflows `chunk_x * 16`.
+#
+# PROVENANCE: this is *not* hand-invented and not produced by our own encoder.
+# These are the exact twelve bytes proptest shrank `handle_packet_never_panics`
+# down to, recorded verbatim in
+# `tests/no_panic_arbitrary_bytes.proptest-regressions` as
+#   shrinks to family = V340, state = Play, use_declared_id = true,
+#   id_pick = 4206400410222768096, arbitrary_id = 0,
+#   payload = [8, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]
+# Against the pre-fix decoder they produce
+#   panicked at crates/versions/1.9/src/adapter.rs:736:25:
+#   attempt to multiply with overflow
+#
+# Field layout (see the MULTI_BLOCK_CHANGE arm of `v1-9`'s adapter):
+#
+#   chunk_x : i32 be = 0x08000000 = 134_217_728
+#                      -> * 16 = 2_147_483_648, one past i32::MAX. This is the
+#                         defect: 134_217_728 > i32::MAX / 16 == 134_217_727.
+#   chunk_z : i32 be = 0
+#   count   : VarInt = 1          (one block record follows)
+#   record  : horizontalPos = 0x00 (rel_x = 0, rel_z = 0)
+#             y             = 0x00
+#             composite     = VarInt 0x00 -> legacy id 0 meta 0, i.e. air
+#
+# The trailing record matters: without it `count` would be 0 and the loop that
+# contains the multiply would never run, so a fixture that only carried the
+# header would exercise nothing.
+08 00 00 00
+00 00 00 00
+01
+00 00 00

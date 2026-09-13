@@ -1,0 +1,43 @@
+# Vanilla's own world upgrade, 1.13.2 -> 26.2: the outside oracle for the two
+# block-state bridging rules this family's canonicalisation needs and which no
+# table on either side states.
+#
+# Procedure (reproducible; every step is a real vanilla server, no lodestone
+# code involved):
+#
+#   1. ./scripts/live-oracles/legacy.sh 1.13.2
+#   2. over RCON on :25591, `setblock` each probe below into the flat world at
+#      the listed coordinates, confirm each with `execute if block`, then
+#      `save-all flush`
+#   3. stop that container, copy .cache/mc/1.13.2/world beside .cache/mc/26.2/
+#      server.jar in a scratch directory with an eula.txt and a
+#      server.properties
+#   4. boot that server.jar (Java 25) on the copied world; vanilla upgrades
+#      level.dat and every chunk it loads through its own data fixers, logging
+#      "Starting upgrade for world" / "Upgrade done for world"
+#   5. `forceload add 160 0 176 15`, then read each probe back with
+#      `execute if block <pos> <candidate state>` over RCON, trying every
+#      candidate value of the changed property
+#
+# The answer is therefore what vanilla itself decided the old state becomes,
+# not a reading of any table. Every "-> " line below was confirmed by a
+# "Test passed", and every rejected candidate by a "Test failed", so each row
+# is a measurement with its own controls rather than a single positive.
+#
+# probe (1.13.2 state)                                          -> 26.2 state
+#
+# Signs: 1.14 added the other five woods and renamed the 1.13 blocks. Both
+# `rotation`/`facing` and `waterlogged` carry across unchanged; the name is
+# the only thing that moves.
+160 5 0  sign[rotation=3,waterlogged=false]      -> oak_sign[rotation=3,waterlogged=false]
+170 5 0  sign[rotation=0,waterlogged=true]       -> oak_sign[rotation=0,waterlogged=true]
+162 5 0  wall_sign[facing=east,waterlogged=false] -> oak_wall_sign[facing=east,waterlogged=false]
+#
+# Walls: the four side properties stopped being booleans in 1.16 and became a
+# three-valued none/low/tall. Both values are pinned here; `tall` is a state
+# the 1.13.2 wire cannot express and vanilla never produces from one. `up` and
+# `waterlogged` are unchanged, and are varied across the three probes so a
+# rule that dropped one would be visible.
+164 5 0  cobblestone_wall[east=true,north=false,south=false,west=false,up=true,waterlogged=false]        -> cobblestone_wall[east=low,north=none,south=none,west=none,up=true,waterlogged=false]
+166 5 0  cobblestone_wall[east=false,north=false,south=false,west=false,up=true,waterlogged=false]       -> cobblestone_wall[east=none,north=none,south=none,west=none,up=true,waterlogged=false]
+168 5 0  mossy_cobblestone_wall[east=true,north=true,south=true,west=true,up=false,waterlogged=true]     -> mossy_cobblestone_wall[east=low,north=low,south=low,west=low,up=false,waterlogged=true]

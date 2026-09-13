@@ -1,0 +1,1713 @@
+//! `Sim`'s **per-frame driver**: [`Sim::step`] itself, everything it calls
+//! that is not a resource accessor, and the per-frame work `app.rs` drives
+//! around it -- seam 12 of the sim.rs decomposition
+//! sequence. Seam 1 was the test module, `sim/tests.rs`; 2 placement
+//! prediction, `sim/placement.rs`; 3 the interaction/combat cluster,
+//! `sim/actions.rs`; 4 the per-tick net-apply fold, `sim/net_apply.rs`; 5 the
+//! audio cluster, `sim/audio.rs`; 6 the camera cluster, `sim/camera.rs`; 7
+//! chunk/mesh streaming, `sim/meshing.rs`; 8 the `audio` *field* out of the
+//! struct into the `AudioEngine` resource -- a field dissolution rather than a
+//! file split, but `docs/sim-dissolution.md` numbers it in the same sequence,
+//! so these five are 9-13. Seams 9-13 landed together.
+//!
+//! **`sim/meshing.rs`'s own module doc calls seam 7 "the last of the sim.rs
+//! decomposition sequence".** That was true when it was written and is not now.
+//! It is left exactly as it stands, because this split is a pure move and
+//! editing a neighbour's prose is not part of one -- recorded here instead so a
+//! reader who arrives through that file is not misled, and in
+//! `docs/sim-dissolution.md`, which carries the authoritative seam list.
+//!
+//! [`Sim::step`] is the fixed-timestep loop: one `Update` schedule, an early
+//! `poll_net` (so a queued server teleport reaches `PhysicsState` before this
+//! frame's own `TickSet::Send` — see that call's own comment for the loop it
+//! closes), then N catch-up `GameTick` schedules, then a second, trailing
+//! `poll_net`/`fold_entities`/`Extract`.
+//! Around it sit the things that must happen once per *frame* rather than
+//! once per tick and so cannot be systems -- `apply_mouse` (vanilla's
+//! `MouseHandler.turnPlayer` is off the render loop too), `update_target` and
+//! `update_entity_target` (the pick ray, cast from the already-interpolated
+//! camera), the mesh drains `app.rs` uploads from, and `refresh_stats`.
+//! `drain_action_queue` is here because it is the tail of each tick: the one
+//! funnel where every queued [`ClientAction`] reaches the socket, in order,
+//! and where a queued main-hand `SwingArm` starts the local animation.
+//!
+//! Reading `step` beside `apply_mouse` and `update_target` is the point. The
+//! frame's ordering is load-bearing in three places its own comments record --
+//! `Update` before the tick loop so `advance_interp_clocks` runs first, the
+//! walk-bob inputs captured *before* the tick's movement, and the swing clock
+//! ticking before the queue drains (a deliberate one-tick offset from
+//! vanilla). None of that is checkable if the participants live in three
+//! files.
+//!
+//! # What widened
+//!
+//! `drain_action_queue` and `update_entity_target` go private ->
+//! `pub(crate)`, both called from `sim/tests.rs` -- a *sibling*, so its
+//! `use super::*;` reaches `sim`'s items but not another child's private
+//! ones. `refresh_stats` stays private: `step`, in this file, is its only
+//! caller.
+//!
+//! `use super::*;` for the same reason every earlier seam file uses it: this
+//! module is a *descendant* of `sim`, so it already has the same visibility
+//! into `Sim`'s private fields, into `sim.rs`'s remaining private helpers and
+//! into everything `sim.rs` re-exports that `sim::tests` has always had, with
+//! no need to enumerate any of it.
+
+use super::*;
+#[cfg(not(target_arch = "wasm32"))]
+use lodestone_game::click::{Click, PlayerCtx};
+
+/// `LivingEntity.tick`'s per-tick candidate for the body yaw *before* easing:
+/// `yBodyRotT`. Defaults to the body's own unchanged yaw (no candidate this
+/// tick, so [`tick_head_turn`]'s catch-up term is a no-op), becomes the
+/// **walking** direction once the feet moved far enough to matter
+/// (`sideDist > 0.0025`, vanilla's own epsilon — `dx`/`dz` are this tick's
+/// feet delta), flipped 180° when that direction is more than 95° off the
+/// look yaw (so walking backwards keeps the body facing the way the eyes look
+/// rather than the way the feet are moving), and snaps straight to the look
+/// yaw while an arm swing is in progress (`attackAnim > 0.0F`), overriding
+/// the walking clause outright — vanilla checks it *after*, unconditionally.
+///
+/// `pub(crate)` rather than private: `crate::entities::tick_remote_body_yaw`
+/// reuses this exact port for every tracked player entity, not only the local
+/// one -- a player's reported body/head yaw arrive over the wire equal (see
+/// that function's doc), so this same client-side lag is the only way a
+/// remote player's body ever diverges from its head. One implementation of
+/// the rule, called from two places, not a second copy risking drift.
+#[must_use]
+pub(crate) fn body_yaw_target(body_yaw: f32, look_yaw: f32, dx: f64, dz: f64, attacking: bool) -> f32 {
+    let mut target = body_yaw;
+    let side_dist = (dx * dx + dz * dz) as f32;
+    if side_dist > 0.002_500_000_2 {
+        let walk_direction = (dz as f32).atan2(dx as f32).to_degrees() - 90.0;
+        let diff = (wrap_degrees(look_yaw) - walk_direction).abs();
+        target = if diff > 95.0 && diff < 265.0 {
+            walk_direction - 180.0
+        } else {
+            walk_direction
+        };
+    }
+    if attacking {
+        target = look_yaw;
+    }
+    target
+}
+
+/// `LivingEntity.tickHeadTurn`: eases the body yaw 30% of the way toward
+/// `target` this tick, then clamps so the look yaw never ends up more than
+/// `max_head_rotation` degrees from the eased body — forcing an instant snap
+/// of the body (not the head, which is never clamped here) when the head
+/// would otherwise exceed it. `max_head_rotation` is
+/// `getMaxHeadRotationRelativeToBody()`: `50.0` by default
+/// (`LivingEntity`), narrowed to `15.0` while a `Player` blocks with a
+/// shield (`Player`'s override — see [`Sim::is_blocking`]).
+///
+/// `pub(crate)`, for the same reuse as [`body_yaw_target`] just above.
+#[must_use]
+pub(crate) fn tick_head_turn(body_yaw: f32, look_yaw: f32, target: f32, max_head_rotation: f32) -> f32 {
+    let mut body = body_yaw + wrap_degrees(target - body_yaw) * 0.3;
+    let head_diff = wrap_degrees(look_yaw - body);
+    if head_diff.abs() > max_head_rotation {
+        body += head_diff - head_diff.signum() * max_head_rotation;
+    }
+    body
+}
+
+impl Sim {
+    /// Number of meshing jobs still outstanding.
+    #[must_use]
+    pub fn pending_meshes(&self) -> usize {
+        self.terrain(|t| t.scheduler.pending())
+    }
+
+    /// Collect finished meshes for the caller to upload to the GPU.
+    ///
+    /// Also records each key into `TerrainMesh::uploaded_sections`, which is how
+    /// [`Sim::end_session`] later knows every section the GPU is holding for
+    /// this session and can queue every one of them for removal.
+    pub fn drain_meshes(&mut self) -> Vec<Meshed> {
+        let meshes = self.terrain_mut(TerrainMesh::drain_meshes);
+        for mesh in &meshes {
+            self.join_trace.mark("remeshed", mesh.key.cx, mesh.key.cz);
+        }
+        meshes
+    }
+
+    /// Consume relighting work completed during the current simulated frame.
+    pub(crate) fn take_relight_workload(&mut self) -> crate::mesher::RelightWorkload {
+        self.terrain_mut(TerrainMesh::take_relight_workload)
+    }
+
+    /// Block until every scheduled mesh is ready (used by headless runs/tests).
+    pub fn drain_all_meshes(&mut self) -> Vec<Meshed> {
+        self.terrain_mut(TerrainMesh::drain_all_meshes)
+    }
+
+    /// Sections that became empty (drained by the app to remove GPU meshes).
+    pub fn drain_removals(&mut self) -> Vec<SectionKey> {
+        self.terrain_mut(TerrainMesh::drain_removals)
+    }
+
+    /// Frames rendered per physics tick since start (fixed-timestep health).
+    #[must_use]
+    pub fn frames_per_tick(&self) -> f32 {
+        self.clock().frames_per_tick()
+    }
+
+    /// Apply accumulated mouse motion to the view angles.
+    ///
+    /// Deliberately **not** a `GameTick` system: mouse-look is per-frame in
+    /// vanilla too (`MouseHandler.turnPlayer` runs off the render loop, not the
+    /// tick), so binding it to 20 Hz would make aiming feel stepped at high
+    /// frame rates.
+    pub fn apply_mouse(&mut self) {
+        let (dx, dy) = self.input_mut(InputState::take_mouse);
+        if dx != 0.0 || dy != 0.0 {
+            // The *pushed* option, not `self.config.sensitivity`.
+            // The latter is argv-derived and fixed for the process lifetime,
+            // so reading it made the persisted slider apply only at the next
+            // launch. See `Sim::sensitivity`'s own doc comment.
+            let sensitivity = self.sensitivity;
+            let player = self.player();
+            let (yaw, pitch) = apply_look_inverted(
+                player.yaw,
+                player.pitch,
+                dx,
+                dy,
+                sensitivity,
+                self.invert_mouse_x,
+                self.invert_mouse_y,
+            );
+            self.player_mut(|player| {
+                player.yaw = yaw;
+                player.pitch = pitch;
+            });
+        }
+    }
+
+    /// Push vanilla's `invertMouseX`/`invertMouseY` options down from the menu
+    /// layer, the same way [`Self::set_view_bobbing`] does for
+    /// View Bobbing. Cheap and idempotent; `app.rs` calls it once per frame,
+    /// before [`Self::step`] so the very tick the option changes already
+    /// sees it.
+    pub fn set_mouse_invert(&mut self, invert_x: bool, invert_y: bool) {
+        self.invert_mouse_x = invert_x;
+        self.invert_mouse_y = invert_y;
+    }
+
+    /// Push vanilla's `sensitivity` option down from the menu layer (issue
+    /// That fix), the same way [`Self::set_mouse_invert`] does. Cheap and
+    /// idempotent; `app/redraw.rs` calls it once per frame **before**
+    /// [`Self::step`] so the very tick the slider moves already turns at the
+    /// new rate — pushing it after `step` would apply each change one frame
+    /// late.
+    pub fn set_sensitivity(&mut self, sensitivity: f32) {
+        self.sensitivity = sensitivity;
+    }
+
+    /// Push vanilla's `key.sneak`/`key.sprint`/`key.attack`/`key.use`
+    /// hold-vs-toggle options down from the menu layer.
+    /// Stored rather than applied directly because the actual
+    /// [`InputState::set_toggle_modes`] call has to happen inside
+    /// [`Self::step`] (see that field's doc) — `Sim` has no `MenuNav` to read
+    /// from at that point, only whatever was last pushed here.
+    pub fn set_toggle_modes(
+        &mut self,
+        toggle_sneak: bool,
+        toggle_sprint: bool,
+        toggle_attack: bool,
+        toggle_use: bool,
+    ) {
+        self.toggle_sneak = toggle_sneak;
+        self.toggle_sprint = toggle_sprint;
+        self.toggle_attack = toggle_attack;
+        self.toggle_use = toggle_use;
+    }
+
+    /// Push vanilla's `options.autoJump` down from the menu layer (issue
+    /// That fix), the same shape as [`Self::set_toggle_modes`] — stored here,
+    /// applied inside [`Self::step`] where the physics world is readable.
+    pub fn set_auto_jump(&mut self, auto_jump: bool) {
+        self.auto_jump = auto_jump;
+    }
+
+    /// Push vanilla's `options.particles` down from the menu layer — the
+    /// particle-density filter, stored here and read by the
+    /// `NetUpdate::Particles` arm in `crate::sim::net_apply`, which is this
+    /// client's `ClientLevel.doAddParticle`.
+    ///
+    /// A push polled per presented frame like [`Self::set_auto_jump`], not a
+    /// one-shot on the settings write: `Sim` is rebuilt on every session start
+    /// and a value pushed only when the row is clicked would be lost across a
+    /// reconnect.
+    pub fn set_particle_level(&mut self, level: crate::config::ParticleLevel) {
+        self.particle_level = level;
+    }
+
+    /// Push vanilla's `options.sprintWindow` down from the menu layer (issue
+    /// That fix) — the double-tap-forward window in 20 Hz ticks. `0` disables
+    /// double-tap sprint. Pushed once per `step` by the shell, so a mid-session
+    /// change from the settings screen applies on the very next tick.
+    pub fn set_sprint_window_ticks(&mut self, ticks: u8) {
+        self.sprint_window_ticks = ticks;
+    }
+
+    /// Hand everything the `GameTick` systems queued to the socket, in order.
+    ///
+    /// The queue is drained (not read) even with no connection, so a
+    /// disconnected session cannot accumulate a session's worth of stale
+    /// actions to deliver on reconnect.
+    ///
+    /// # Also the animation half of every queued swing
+    ///
+    /// A [`ClientAction::SwingArm`] on this queue is the *same* event vanilla's
+    /// `LivingEntity.swing` handles: it both sends `ClientboundAnimatePacket` to
+    /// everyone else **and** starts the swinger's own animation clock. This is the
+    /// single funnel every tick-driven swing passes through — notably
+    /// `interact.rs`'s hold-to-mine loop via `lodestone_game::mining`, which is
+    /// what makes the arm swing while breaking a block — so hooking it here means
+    /// a new producer of swings animates for free rather than having to remember
+    /// to. [`Self::use_item_live`] is the one swing that does *not* come through
+    /// here (it writes to the socket directly, to control wire order) and calls
+    /// [`Self::swing_hand`] itself.
+    ///
+    /// Deliberately **outside** the `if let Some(net)` below: the animation is
+    /// client-side and must not depend on having a live socket, exactly as the
+    /// demo world's [`Self::break_block`] swings with no connection at all.
+    pub(crate) fn drain_action_queue(&mut self) {
+        // The guard is released before `net.send_action`, per `EcsHandle`'s rule 1:
+        // `send_action` is a channel push today, but the whole `NetClient` surface
+        // otherwise reads this same `World` through `ClientHandle`, and holding a
+        // write guard into it would deadlock the moment one of those was reached.
+        let actions = self.write(|w| {
+            let mut actions = std::mem::take(&mut w.resource_mut::<ActionQueue>().0);
+            // Vanilla's tick tail. Its own client tick routine ends with
+            // sending the client-tick-end packet — every
+            // tick, after everything else the tick queued, whenever a connection
+            // exists and the game is not paused.
+            //
+            // **`ClientAction::EndClientTick` had no producer outside a test**:
+            // v770 encodes it and nothing sent it, the `SetFlying` shape. It is
+            // not cosmetic. `ServerGamePacketListenerImpl.handleClientTickEnd`
+            // (`:2195-2202`) sets `knownMovement` to `Vec3.ZERO` when **no**
+            // movement packet arrived that tick, so without this the server keeps
+            // our last movement vector forever — `resetLastActionTime` (the AFK
+            // clock) and every server-side `getKnownMovement()` reader see a
+            // player still travelling after they stop.
+            //
+            // Appended here rather than by a `TickSet::Send` system for two
+            // reasons: it must be **last**, which is a fragile thing to express as
+            // system ordering among the interaction systems, and vanilla's own
+            // send site is likewise outside the per-entity tick. It goes in
+            // *before* the egress filter below on purpose — a plugin that
+            // suppresses everything should be able to suppress this too.
+            //
+            // Gated on `Egress::in_world` — **the movement packet's gate, not the
+            // player-input packet's.** `send_move_action` asks `in_world` alone
+            // while `send_player_input` also asks `live`, and vanilla's send site
+            // matches the former: it sits inside `if (this.level != null)` with a
+            // `connection != null && !this.pause` guard, and has nothing to do
+            // with whether a resource pack resolved (which is what `live` means
+            // here). Ungated entirely, a merely-*Connecting* sim emits one per
+            // tick before the adapter has a Play-state packet for it — the same
+            // dropped-action noise `move_is_withheld_until_connected` forbids.
+            if w.get_resource::<lodestone_ecs::Egress>()
+                .is_some_and(|egress| egress.in_world)
+            {
+                actions.push(ClientAction::EndClientTick);
+            }
+            // That fix's outbound hook: a plugin's chance to inspect, replace
+            // or suppress what another plugin queued, before any of it reaches
+            // the socket. Inside the guard we already hold — the filters receive
+            // only `&ClientAction`, never the `World`, so this cannot re-enter
+            // the lock (see `lodestone_ecs::egress`'s module doc).
+            //
+            // `get_resource`, so a client with no plugin installed pays one
+            // resource lookup and nothing else; `apply` itself returns after a
+            // single `is_empty` check when no filter is registered.
+            if let Some(filters) = w.get_resource::<lodestone_ecs::EgressFilters>() {
+                filters.apply(&mut actions);
+            }
+            actions
+        });
+        // The WASM conductor hands out copied requests only. Take them while
+        // the ECS guard is held, then release it before crossing into
+        // `NetClient`: that task owns the integrated server and may await its
+        // bounded proposal lifecycle. Results return through the same resource
+        // on a later tick, never through a guest callback under this guard.
+        #[cfg(not(target_arch = "wasm32"))]
+        let wasm_world_mutations = self.write(|w| {
+            w.get_resource_mut::<lodestone_wasm_host::PendingWasmWorldMutations>()
+                .map(|mut pending| pending.take_requests())
+                .unwrap_or_default()
+        });
+        // Only the *main* hand drives the first-person arm and the self-avatar's
+        // right arm. An off-hand swing animates the left arm, which neither
+        // consumer draws — treating it as a main-hand swing would swing the wrong
+        // limb, so it is ignored rather than approximated.
+        if actions
+            .iter()
+            .any(|a| matches!(a, ClientAction::SwingArm { hand: Hand::Main }))
+        {
+            self.swing_hand();
+        }
+        if let Some(net) = &self.net {
+            // The `transfer` target's producer-side hop: the pose this tick's
+            // `Move` actually claims, and how many server teleports the
+            // simulation had adopted when it built that claim. Pair it with the
+            // v770 adapter's `xfer: move packet` line (the same movement, one
+            // channel hop later, on the wire) and with `xfer: teleport applied
+            // to the simulation` above it: a `Move` logged here with a
+            // `teleport_count` lower than the teleport the driver has already
+            // acknowledged is a claim built from a pose the server has already
+            // overruled. See the `xfer` module in the v770 adapter.
+            if tracing::enabled!(target: "transfer", tracing::Level::DEBUG) {
+                for action in &actions {
+                    if let ClientAction::Move {
+                        pos,
+                        rotation,
+                        on_ground,
+                        ..
+                    } = action
+                    {
+                        tracing::debug!(
+                            target: "transfer",
+                            teleport_count = self.teleport_count,
+                            x = pos.x,
+                            y = pos.y,
+                            z = pos.z,
+                            yaw = rotation.yaw,
+                            pitch = rotation.pitch,
+                            on_ground,
+                            "xfer: Move queued for the socket"
+                        );
+                    }
+                }
+            }
+            for action in actions {
+                // Best-effort — a closed session just drops it.
+                net.send_action(action);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let mut results = net.drain_wasm_block_mutation_results();
+                for (plugin, request) in wasm_world_mutations {
+                    if let Err(result) = net.submit_wasm_block_mutation(plugin, request) {
+                        results.push(result);
+                    }
+                }
+                if !results.is_empty() {
+                    self.write(|w| {
+                        if let Some(mut pending) = w
+                            .get_resource_mut::<lodestone_wasm_host::PendingWasmWorldMutations>()
+                        {
+                            for (plugin, outcome) in results {
+                                pending.push_outcome(plugin, outcome);
+                            }
+                        }
+                    });
+                }
+            }
+        } else {
+            #[cfg(not(target_arch = "wasm32"))]
+            if !wasm_world_mutations.is_empty() {
+                self.write(|w| {
+                    if let Some(mut pending) = w
+                        .get_resource_mut::<lodestone_wasm_host::PendingWasmWorldMutations>()
+                    {
+                        for (plugin, request) in wasm_world_mutations {
+                            pending.push_outcome(
+                                plugin,
+                                lodestone_wasm_host::ResidentBlockMutationOutcome {
+                                    request_id: request.request_id,
+                                    status: lodestone_wasm_host::BlockMutationStatus::Refused(
+                                        lodestone_wasm_host::BlockMutationRefusal::Unavailable,
+                                    ),
+                                },
+                            );
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    /// Start the local player's arm-swing animation, like `LivingEntity.swing`.
+    ///
+    /// Idempotent within the first half of a running swing — [`EntityPose::start_swing`]
+    /// swallows a restart before its half-way point, which is what turns
+    /// `interact.rs`'s once-per-tick swing during a held mine into a continuous
+    /// arc instead of a stutter.
+    ///
+    /// # One-tick offset from vanilla, and why it is left alone
+    ///
+    /// Vanilla calls `swing()` from `Minecraft.handleKeybinds`, which runs
+    /// *before* `updateSwingTime` in the same tick, so `swingTime` reaches `0` on
+    /// the tick the click happened. Here [`Self::step`] ticks `body_pose` before
+    /// draining the action queue, so the clock starts on the **next** tick — a
+    /// 50 ms delay on the animation beginning, invisible at any frame rate, and
+    /// worth less than reordering a tick loop whose wire ordering is load-bearing.
+    ///
+    /// The duration is [`lodestone_entity::pose::swing_duration`] with **no**
+    /// effect inputs: neither Haste nor Mining Fatigue has a modelled source in
+    /// this engine (`lodestone_game::mining::BreakInputs` has the identical hole —
+    /// see `tool_inputs_stay_at_bare_hand_defaults`), so this is vanilla's
+    /// component default of 6 ticks. Closing that hole is a change of arguments
+    /// here, not a change of clock.
+    pub(crate) fn swing_hand(&mut self) {
+        self.body_pose
+            .start_swing(lodestone_entity::pose::swing_duration(
+                lodestone_entity::pose::DEFAULT_SWING_DURATION,
+                None,
+                None,
+            ));
+    }
+
+    /// How far through an arm swing the local player is **this frame**, in
+    /// `0.0..=1.0` — vanilla's own attack-anim calculation at a given partial tick.
+    ///
+    /// This is the value `RenderState::set_hand_swing_source`'s closure returns and
+    /// the value `third_person_body_state` puts on [`AnimInput::attack_anim`]; both
+    /// consumers read this one accessor so they can never disagree about where in
+    /// the swing the player is.
+    ///
+    /// The swing clock advances in [`Self::step`]'s 20 Hz loop and is only
+    /// *interpolated* here, so calling this more often does not make the arm swing
+    /// faster. Reading it per frame is the correct and intended use.
+    #[must_use]
+    pub fn hand_swing_progress(&self) -> f32 {
+        self.body_pose.attack_anim_lerp(self.clock().interp_alpha)
+    }
+
+    /// Vanilla's own is-blocking check: using an item whose own use-animation
+    /// is the block animation.
+    /// Approximated by item id, the same simplification `spyglass_scoping`
+    /// (`sim/camera.rs`) makes for its own is-scoping check: a shield is the only item
+    /// this client raises a block pose for, so an id check stands in for
+    /// resolving `use_animation` off the item's data components. Feeds
+    /// [`Sim::step`]'s body-yaw clamp — vanilla narrows
+    /// its own max-head-rotation-relative-to-body from `50°` to `15°` while
+    /// blocking (the player's own override of the living-entity default).
+    #[must_use]
+    fn is_blocking(&self) -> bool {
+        self.using_item()
+            && self
+                .player_menu()
+                .player_native(self.selected_slot())
+                .is_some_and(|st| st.item().to_string() == "minecraft:shield")
+    }
+
+    /// Advance the simulation by real elapsed time, running fixed 20 Hz `GameTick`
+    /// schedules against the world's collision. Rendering interpolates between
+    /// ticks via [`Sim::interp_alpha`].
+    ///
+    /// # What the tick loop is, since Stage 2
+    ///
+    /// Each iteration of the fixed-timestep loop resolves this tick's collision
+    /// geometry, runs one `GameTick` schedule (`TickSet::Input` →
+    /// `Physics` → `Send`), then hands whatever the systems queued to the
+    /// socket. Everything the schedule needs is a component or resource, so a
+    /// plugin can insert a system anywhere in that order.
+    ///
+    /// **Movement intent is now recomputed per tick, not per frame.** It used to
+    /// be computed once before the loop, so a frame long enough to run several
+    /// catch-up ticks reused one decision for all of them — see
+    /// `lodestone_controller::ecs::compute_movement_intent` for exactly what
+    /// that changes (nothing at all at 20 fps or better; the difference is
+    /// confined to stalls).
+    pub fn step(&mut self, dt: f64) {
+        self.apply_mouse();
+        // Those fixes: apply the hold-vs-toggle and sprint-window options
+        // to the live `InputState` before any `GameTick` schedule this call
+        // runs reads it. One push per `step` call is enough — the option
+        // cannot change mid-frame, and every catch-up tick inside this call
+        // shares it.
+        let (toggle_sneak, toggle_sprint, toggle_attack, toggle_use) = (
+            self.toggle_sneak,
+            self.toggle_sprint,
+            self.toggle_attack,
+            self.toggle_use,
+        );
+        let sprint_window_ticks = self.sprint_window_ticks;
+        self.input_mut(|i| {
+            i.set_toggle_modes(toggle_sneak, toggle_sprint, toggle_attack, toggle_use);
+            i.set_sprint_window_ticks(sprint_window_ticks);
+        });
+        // The **one** accumulator, on the **one** catch-up policy
+        // (`lodestone_ecs::MAX_CATCH_UP_SECS` — ten ticks, vanilla's own; see that
+        // constant for why the shell's old inner `0.25 s` clamp lost).
+        self.clock_mut(|clock| clock.begin_frame(dt));
+
+        // The derived egress gate. Refreshed once per frame because both of its
+        // inputs are frame-stable: `poll_net` is the only thing that changes the
+        // phase, and this snapshot is taken before either of this frame's own
+        // calls to it (see the one just before the tick loop, below).
+        let egress = Egress {
+            in_world: self.session_phase() == SessionPhase::Connected,
+            live: self.is_live(),
+        };
+        self.write(|w| w.insert_resource(egress));
+
+        // `Update` before the tick loop, not after it. `FrameSet::Interpolate`'s
+        // `advance_interp_clocks` has to run first, because the tick systems
+        // (`tick_item_physics`, `tick_walk_animation`) measure off the *drawn*
+        // pose and would otherwise measure last frame's. That ordering was
+        // internal to `EntityInterpolator::update_with_view` before §4.1(c) and is
+        // now the frame's own.
+        //
+        // The one behaviour change this carries: `FrameSet::Terrain`'s
+        // `heal_dirty_columns` now runs *before* `poll_net`, so a column that
+        // arrives this frame has its neighbours healed on the next one. It is a
+        // coalescing drain feeding an async worker pool on a per-frame budget, so a
+        // single frame of latency is inside the noise it already tolerates —
+        // but it is a change, not a no-op.
+        let frame_dt = dt as f32;
+        self.write(|w| {
+            w.insert_resource(crate::entities::FrameDelta(frame_dt));
+            w.run_schedule(Update);
+        });
+
+        // A second, early drain of the network channel, *before* this frame's
+        // own tick loop — not a duplicate of the one at the tail of this
+        // function, which stays exactly where it is for `fold_entities`'s and
+        // `heal_dirty_columns`'s sake (see their own comments).
+        //
+        // Without this, a `NetUpdate::Teleport` already sitting in the
+        // channel when `step` is called would not reach `PhysicsState` until
+        // *after* `TickSet::Send` below has already queued this tick's
+        // outbound `Move` from the **pre-teleport** position — a claim the
+        // real server has every reason to reject, since it just told us we
+        // are somewhere else. That is the live-server "yanked back on every
+        // move" loop: our own `ACCEPT_TELEPORTATION` echo lands fine (see
+        // `handle_player_position`'s own doc), but the very next `Move`
+        // contradicts it, so the server re-teleports with a fresh id and the
+        // cycle repeats. `poll_net` is safe to call twice a frame — it is a
+        // non-blocking drain of whatever is currently queued, every arm
+        // processes each event exactly once regardless of which call sees
+        // it, and `adopt_live_world`/`refresh_mesh_policy` are documented
+        // idempotent. Anything that arrives *during* this frame's tick loop
+        // still waits for the trailing call, same as before this existed.
+        self.poll_net();
+
+        loop {
+            if !self.clock_mut(FrameClock::take_tick) {
+                break;
+            }
+            let collision = self.tick_collision();
+            let item_collision = self.item_collision();
+            let nearby = self.tick_nearby_entities();
+            // The walk bob's amplitude reads the state vanilla's `updateBob` sees,
+            // which is the state **before** this tick's movement: `aiStep` calls
+            // `updateBob()` and only then `super.aiStep()`, so `getDeltaMovement()`
+            // is still last tick's post-friction velocity there. Captured here,
+            // before the `GameTick` write guard, for that reason and not merely
+            // for lock hygiene.
+            let (pre_position, pre_speed, pre_on_ground, pre_swimming) = {
+                let p = self.player();
+                (
+                    p.position,
+                    (p.velocity.x * p.velocity.x + p.velocity.z * p.velocity.z).sqrt() as f32,
+                    p.on_ground,
+                    p.pose == lodestone_physics::Pose::Swimming,
+                )
+            };
+            let pre_dead = self.is_dead();
+            // Vanilla's Auto-Jump option, pushed at the one place the
+            // real detector can read it. Inside the tick loop rather than before
+            // it for no reason other than symmetry with the three resources
+            // below — the value is frame-stable either way.
+            let auto_jump = lodestone_ecs::player::AutoJump(self.auto_jump);
+            // The equipment half of `LivingEntity.canGlide`.
+            let glider = lodestone_ecs::player::GliderEquipped(self.glider_equipped());
+            self.write(|w| {
+                w.insert_resource(collision);
+                w.insert_resource(item_collision);
+                w.insert_resource(nearby);
+                w.insert_resource(auto_jump);
+                w.insert_resource(glider);
+                w.run_schedule(GameTick);
+            });
+            #[cfg(not(target_arch = "wasm32"))]
+            self.drain_wasm_menu_clicks();
+            // The completion becomes visible when `tick_item_use` advances the
+            // fixed-tick clock. Re-enter the existing live use path outside the
+            // ECS guard, so holding food starts the next bite without another OS
+            // press event and retains the established direct-send ordering.
+            self.restart_completed_consumable_if_held();
+            // Drive the local player's own walk/head-look clock off the
+            // post-physics position, exactly like a tracked network entity's
+            // `EntityPose::tick` — see `Self::body_pose`'s doc for why this
+            // is unconditional rather than gated on `third_person`. Read
+            // *after* the `GameTick` write guard above is dropped: `Self::player`
+            // takes its own short read guard, and holding one across another
+            // accessor is exactly what this crate's locking rules forbid.
+            let p = self.player();
+            // The body yaw fed to `EntityPose::tick` must already be the
+            // eased, clamped value — that type stores whatever it is given
+            // (see its own doc: "call once for every entity every time a
+            // movement/rotation update is applied"), it does not run
+            // `tickHeadTurn` itself. Feeding it the raw look yaw for *both*
+            // body and head (as this used to) collapses the two: the body
+            // then always faces exactly where the camera does, with no lag
+            // and no clamp, which is `LivingEntity.tickHeadTurn`'s entire
+            // job left undone.
+            //
+            // `self.body_pose.body_yaw` here is still *last* tick's result —
+            // `EntityPose::tick` below is what overwrites it — matching
+            // vanilla, where `tickHeadTurn`'s own `this.yBodyRot` read
+            // happens before that same call reassigns it. `attacking` reads
+            // last tick's `attack_anim` for the same reason `pre_position`
+            // was captured before this tick's physics: the value vanilla's
+            // `attackAnim > 0.0F` check would see has not been produced yet
+            // this iteration, and re-deriving it correctly would mean
+            // splitting `EntityPose::tick`'s swing-time update out from its
+            // orientation update. The result can be one tick stale relative
+            // to vanilla's own ordering, which already has a two-tick lag
+            // between `start_swing` and `attack_anim` turning positive (see
+            // `EntityPose::start_swing`) — not a new class of imprecision.
+            let attacking = self.body_pose.attack_anim > 0.0;
+            let target = body_yaw_target(
+                self.body_pose.body_yaw,
+                p.yaw,
+                p.position.x - pre_position.x,
+                p.position.z - pre_position.z,
+                attacking,
+            );
+            let max_head_rotation = if self.is_blocking() { 15.0 } else { 50.0 };
+            let body_yaw =
+                tick_head_turn(self.body_pose.body_yaw, p.yaw, target, max_head_rotation);
+            self.body_pose
+                .tick(p.position.x, p.position.z, body_yaw, p.yaw, p.pitch);
+            // The camera's eye chases the entity's, half the gap per tick, so a
+            // pose change eases instead of snapping. Same read guard as above.
+            self.eye_height_smoother.tick(p.eye_height);
+            // The bob's *phase* is the distance the feet actually travelled, which
+            // is why this is a post-tick subtraction rather than a velocity:
+            // `LocalPlayer.move` adds `length(getX() - prevX, getZ() - prevZ) * 0.6`
+            // **after** `super.move` has already clipped the delta against
+            // collision, so walking into a wall does not advance the stride.
+            let moved = ((p.position.x - pre_position.x) as f32)
+                .hypot((p.position.z - pre_position.z) as f32);
+            self.view_bob.tick(
+                moved,
+                pre_speed,
+                pre_on_ground,
+                pre_dead,
+                pre_swimming,
+            );
+            // The local player's own footstep, client-predicted. Here rather than
+            // in a `GameTick` system for the same reason the bob's phase is: the
+            // input is the movement *achieved* after collision, which only exists
+            // as the difference across the schedule run above.
+            self.tick_footstep(pre_position, &p);
+            // **Auto-jump used to live here, and that was that fix's defect.**
+            // `lodestone_physics::update_auto_jump` is a complete port of
+            // `LocalPlayer.updateAutoJump` — swept look-ahead probe, headroom
+            // raycast, the `-0.15` facing-vs-moving dot product and all — and it
+            // runs inside `tick_air` every tick. This file held a *second*,
+            // deliberately simplified probe in front of it, gated on
+            // `self.auto_jump`; the real one was gated on
+            // `PlayerState::auto_jump_enabled`, which nothing outside tests ever
+            // set. So the option correctly suppressed the simplification and the
+            // real detector jumped anyway, and auto-jump could not be turned
+            // off. The option now reaches the real detector through
+            // `lodestone_ecs::player::AutoJump` (pushed above, before the
+            // schedule) and the simplification is gone — one implementation, one
+            // gate. Do not reintroduce a probe here.
+            // Vanilla emits a movement packet every tick (20 Hz); mirror that so
+            // the server sees our authoritative position/rotation and never has
+            // to correct us. `TickSet::Send` produced it; this is where it and
+            // everything else the tick queued reach the socket, in order.
+            //
+            // Since Stage 5 that includes the sprint edge and the hold-to-mine
+            // loop, which used to be sent *after* this drain by a hand-written
+            // `drive_interaction()` below. Player input is ordered before the
+            // sprint edge, then movement follows; mining and placement sit
+            // behind that movement packet in the same single queue.
+            self.drain_action_queue();
+            // The tick was counted and withdrawn by `FrameClock::take_tick` at the
+            // top of this loop, so there is nothing to book-keep here any more.
+            self.tick_particles();
+            // The portal-transition screen effect, on the same fixed 20 Hz for the
+            // same reason the lids and bells below are: vanilla's
+            // `LocalPlayer.handlePortalTransitionEffect` ramps by +0.0125 and
+            // decays by -0.05 **per tick**, so advancing it per frame would make
+            // the four-second ramp-in a function of the frame rate — 1.3 s at
+            // 60 fps. After the physics run above, because the predicate is "does
+            // the player's bounding box overlap a portal cell" and that is a fact
+            // about where the tick left them, not where it started.
+            self.tick_portal_effect();
+            // Chest lids, on the same fixed 20 Hz as everything else
+            // here: vanilla's own chest-lid tick ramps by ±0.1 per tick, so a
+            // lid takes exactly 10 ticks to swing. Advancing it per *frame*
+            // instead would open a chest in a third of a second at 60 fps and
+            // make the animation speed a function of the frame rate.
+            self.chest_lids.tick();
+            // Bell shakes, on the same fixed 20 Hz and for the same reason: the
+            // shake angle is a `sin` of vanilla's raw tick counter over a 50-tick
+            // window, so advancing it per frame would make the swing's speed a
+            // function of the frame rate.
+            self.bell_shakes.tick();
+            // End gateway teleport cooldowns, on the same fixed 20 Hz —
+            // `beamAnimationTick`'s own `teleportCooldown--` is a per-tick
+            // decrement, not per-frame.
+            self.gateway_cooldowns.tick();
+            // Enchanting-table books, on the same fixed 20 Hz. Three of vanilla's
+            // terms here are per-tick rates (`open` ±0.1, `tRot` +0.02, and the
+            // 90% smoothing on `flipA`), so a per-frame advance would make the
+            // book open three times faster at 60 fps — the `chest_lids` trap
+            // exactly, but with three victims instead of one.
+            //
+            // Unlike the two above this needs the *world* and the player, because
+            // nothing on the wire starts it: the trigger is the player standing
+            // within three blocks of a table. The position gather is
+            // `VIEW_DISTANCE`-wide even so — vanilla draws a book for every
+            // enchanting table it renders, and the near-player test decides only
+            // whether that book *opens*, so a tighter gather here is exactly what
+            // made distant tables draw no book at all. See
+            // `block_entities::EnchantingTableBooks`.
+            if let Some(net) = self.net.as_ref() {
+                let handle = net.shared_handle();
+                let player = {
+                    let p = self.player();
+                    glam::DVec3::new(p.position.x, p.position.y, p.position.z)
+                };
+                // The same cutoff `enchanting_table_spawns` draws at, so the
+                // tracked set and the drawn set cannot disagree.
+                let tables = crate::block_entities::enchanting_table_positions(
+                    &handle,
+                    player,
+                    f64::from(crate::block_entities::VIEW_DISTANCE),
+                );
+                self.enchanting_table_books.tick(&tables, player);
+                // Moving pistons, on the same fixed 20 Hz. This one *must* be a tick
+                // and not a frame: vanilla's ramp is `progress += 0.5` per tick and
+                // the whole push is two ticks, so a per-frame advance at 60 fps would
+                // finish it in a single frame and the animation would not exist at
+                // all. The gather is unbounded by view distance on purpose — see
+                // `block_entities::moving_piston_seeds`.
+                let pistons = crate::block_entities::moving_piston_seeds(&handle);
+                self.moving_pistons.tick(&pistons);
+                // Conduits, on the same fixed 20 Hz — `ConduitTicks::tick` owns
+                // its own rescan cadence internally (see that method's doc), so
+                // this call site only has to supply this tick's candidate set
+                // and a way to re-scan one. `eye` is the plain player position
+                // rather than the render camera's eye (which this GPU-less loop
+                // has none of) — matching `conduit_positions`' own
+                // `VIEW_DISTANCE` cutoff, the same one `bell_spawns`/
+                // `banner_spawns` apply from the *render* eye each frame; the
+                // few-block difference between the two only shifts which
+                // conduits are tracked a tick early or late at the boundary.
+                let eye = glam::Vec3::new(player.x as f32, player.y as f32, player.z as f32);
+                let conduits = crate::block_entities::conduit_positions(&handle, eye);
+                self.conduit_ticks.tick(&conduits, |pos| {
+                    crate::block_entities::conduit_scan_frame(&handle, pos)
+                });
+                // Spawner/trial-spawner spin, on the same fixed 20 Hz:
+                // `BaseSpawner.clientTick`'s own rate term
+                // (`1000 / (spawnDelay + 200)`) is a per-tick advance, so a
+                // per-frame one would spin every cage faster at 60 fps than
+                // at 20. `spawner_tick_candidates` reads world state (a
+                // proximity test plus each candidate's own `SpawnData` NBT)
+                // rather than the wire, exactly as `enchanting_table_books`
+                // does above.
+                let spawner_tick_rows = crate::block_entities::spawner_tick_candidates(&handle, eye);
+                self.spawner_spins.tick(&spawner_tick_rows);
+            }
+            // The HUD status effects and the title/action-bar overlays used to be
+            // aged by three hand-written `tick(1)` calls right here. They are now
+            // `lodestone_ecs::session::tick_hud_overlays` in `TickSet::Animate`,
+            // which the `run_schedule(GameTick)` above already ran — same fixed
+            // 20 Hz, but a plugin can now order against it and the components are
+            // the only copy.
+            // The live block interactions — the sprint edge and the held dig —
+            // used to be driven from here by `drive_interaction()`. They are
+            // `crate::interact`'s `send_sprint_command` / `drive_mining` systems in
+            // `TickSet::Send` since Stage 5, which the `run_schedule(GameTick)`
+            // above already ran; the `Egress` resource inserted before this loop
+            // carries the `phase == Connected && is_live()` gate that used to be
+            // written here. See `docs/sim-dissolution.md` for why the blocker
+            // Stage 2 recorded (`Sim.target` / `version_data` / the live block
+            // store) was not the real one.
+        }
+        // Publish the sub-tick residual. One number now: the camera's between-tick
+        // ease and `extract_entity_draws`'s walk-cycle partial tick both read it,
+        // where they used to read two accumulators' residuals.
+        self.clock_mut(FrameClock::end_frame);
+
+        // The trailing drain — catches whatever arrived *during* this frame's
+        // tick loop (the early call above already applied anything queued
+        // beforehand, in particular a `NetUpdate::Teleport`, before
+        // `TickSet::Send` ran).
+        self.poll_net();
+        // Fold this frame's server report into the render-side tracks, then extract.
+        // Still after the tick loop and after ingest, which is the order the ~25
+        // interpolation tests are written against — see `fold_snapshots`' docs for
+        // why it is not a `NetIngest` system even now that it could reach the
+        // components directly.
+        self.fold_entities();
+        self.write(|w| w.run_schedule(Extract));
+        self.refresh_stats();
+    }
+
+    /// Recompute the targeted block by casting the view ray from the (already
+    /// interpolated) camera. Call once per frame before rendering the outline.
+    ///
+    /// The pick ray does **not** consult `is_solid`. `is_solid` is the *collision*
+    /// predicate (also fed to the physics engine), and vanilla deliberately gives
+    /// cross-plants (`short_grass`, ferns, flowers, kelp) an empty collision shape —
+    /// you walk through grass — while picking them still works, because vanilla's
+    /// `clip`/`clipWithInteractionOverride` walks a *separate* outline/interaction
+    /// shape (`BlockBehaviour.getShape` / `getInteractionShape`), not the collision
+    /// shape.
+    ///
+    /// The whole question therefore lives in one place,
+    /// [`LiveCollision::pick_boxes`] / [`WorldCollision::pick_boxes`] — read its
+    /// docs, which record why an earlier inlined `!is_water(...)` here made **kelp
+    /// and every waterlogged block unbreakable**. Deliberately a single call and not
+    /// an `||` chain: the geometry the collision tests exercise has to be the exact
+    /// geometry the ray uses, or the gate proves nothing about the pick.
+    ///
+    /// # Boxes, not a boolean
+    ///
+    /// This used to pass `is_pickable` — a per-*cell* occupancy predicate — so
+    /// every pickable block was a unit cube to the hit test while the selection
+    /// box was already drawn from the real outline census. Leaf litter therefore
+    /// stayed targetable with the crosshair well above it. The closure now emits
+    /// the cell's real outline boxes and [`raycast`] clips against them, which is
+    /// vanilla's `ClipContext.Block.OUTLINE`.
+    pub fn update_target(&mut self, aspect: f32) {
+        let cam = self.camera(aspect);
+        let origin = [
+            f64::from(cam.position.x),
+            f64::from(cam.position.y),
+            f64::from(cam.position.z),
+        ];
+        let fwd = cam.forward();
+        let dir = [f64::from(fwd.x), f64::from(fwd.y), f64::from(fwd.z)];
+        // Live: raycast the server's terrain (client-owned world), not the demo
+        // world, or dig/place would target phantom offline blocks. The 3×3
+        // column snapshot spans ±16 blocks — far more than REACH (4.5) — so a
+        // face at the edge of reach is always covered. A `None` snapshot means
+        // the player's own column has not streamed in; nothing is targetable.
+        let hit = if self.is_live() {
+            self.live_collision().and_then(|view| {
+                raycast(origin, dir, REACH, |x, y, z, out| {
+                    view.pick_boxes(x, y, z, out);
+                })
+            })
+        } else {
+            let store = self.chunk_world();
+            let world = store.read();
+            let view = WorldCollision::new(&world);
+            raycast(origin, dir, REACH, |x, y, z, out| {
+                view.pick_boxes(x, y, z, out);
+            })
+        };
+        self.set_target(hit);
+        // Shared with the demo world too (harmlessly a no-op there — the demo
+        // ECS holds no networked entities), so `crack_target`/the outline and
+        // `EntityRayTarget` are always derived from the exact same ray.
+        self.update_entity_target(origin, dir, hit);
+    }
+
+    /// Recompute [`EntityRayTarget`] from the same ray [`Self::update_target`]
+    /// just cast against blocks — vanilla's entity half of
+    /// its own per-frame crosshair pick, which [`Self::begin_attack`] reads to decide
+    /// between `case ENTITY` and `case BLOCK`.
+    ///
+    /// The search radius is [`ENTITY_REACH`] (`3.0`, vanilla's own
+    /// default entity-interaction range), shortened to
+    /// `block_hit`'s own entry distance when a block sits closer than that —
+    /// matching vanilla's `blockDistance` clamp, so a wall between the eye and
+    /// an entity is never picked through.
+    ///
+    /// That distance is [`RayHit::distance`], the entry point of the **outline
+    /// box** the ray actually struck. It used to be re-derived here by clipping
+    /// a unit cube around `block_hit.block`, which was wrong in both directions
+    /// on a partial block — too *short* whenever the real box sits deeper in the
+    /// cell than its near face, which hid an entity standing in front of a
+    /// fence. The ray now reports its own entry distance, so there is nothing
+    /// left to approximate.
+    ///
+    /// Candidates come from the same `(Position, EntityKind)` query
+    /// [`Self::tick_nearby_entities`] uses for pushers, resolved to a hitbox
+    /// through the identical [`VersionData::entity_facts`] seam — an unknown
+    /// type is excluded, never approximated. They are additionally filtered by
+    /// [`crate::interact::entity_type_can_be_picked`], vanilla's
+    /// `EntitySelector.CAN_BE_PICKED`: without it the ray happily resolves to a
+    /// dropped item or an experience orb, and the resulting attack packet gets
+    /// the session disconnected by the real server. The local player is never a
+    /// candidate: `apply_entity_spawn`/`apply_local_player_login`
+    /// (`lodestone_ecs::ingest`) never give the local player's own `Entity` a
+    /// `Position`/`EntityKind` component, so the query structurally cannot
+    /// return it — the same property vanilla's `clip()` gets from excluding
+    /// `this` explicitly.
+    pub(crate) fn update_entity_target(&mut self, origin: [f64; 3], dir: [f64; 3], block_hit: Option<RayHit>) {
+        let search_limit = block_hit.map_or(ENTITY_REACH, |hit| hit.distance.min(ENTITY_REACH));
+
+        let target = self.write(|w| {
+            let mut state = w.query::<(
+                &Position,
+                &EntityKind,
+                &MinecraftEntityId,
+                Option<&lodestone_ecs::entity::ArmorStandFlags>,
+            )>();
+            let version = w.resource::<VersionData>();
+            state
+                .iter(w)
+                .filter_map(|(pos, kind, id, armor_stand)| {
+                    let feet = Vec3d::new(pos.0.x, pos.0.y, pos.0.z);
+                    // Cheap pre-filter before the exact ray-vs-box test: an
+                    // entity whose *feet* are already further than the search
+                    // radius plus a generous per-axis margin for its own
+                    // hitbox cannot possibly be hit. Same shape as
+                    // `tick_nearby_entities`'s box, sized off `search_limit`
+                    // instead of the fixed push radius.
+                    let margin = search_limit + 4.0;
+                    if (feet.x - origin[0]).abs() > margin
+                        || (feet.y - origin[1]).abs() > margin
+                        || (feet.z - origin[2]).abs() > margin
+                    {
+                        return None;
+                    }
+                    // Vanilla's `EntitySelector.CAN_BE_PICKED`, the predicate
+                    // its own entity ray is given. Without it the ray resolves
+                    // to dropped items and experience orbs, and the attack that
+                    // follows gets the session disconnected — see
+                    // `crate::interact::entity_type_can_be_picked` for the
+                    // kick, the citations and the eight override families.
+                    if !crate::interact::entity_type_can_be_picked(&kind.0) {
+                        return None;
+                    }
+                    if kind.0.path() == "armor_stand"
+                        && armor_stand.is_some_and(|flags| flags.marker)
+                    {
+                        return None;
+                    }
+                    let facts = version.entity_facts(&kind.0)?;
+                    let dims =
+                        EntityDimensions::new(facts.dimensions.width, facts.dimensions.height, 0.6);
+                    let aabb = dims.bounding_box(feet);
+                    let t = ray_aabb(
+                        origin,
+                        dir,
+                        search_limit,
+                        [aabb.min_x, aabb.min_y, aabb.min_z],
+                        [aabb.max_x, aabb.max_y, aabb.max_z],
+                    )?;
+                    Some((id.0, t))
+                })
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(id, _)| id)
+        });
+        self.write(|w| w.resource_mut::<EntityRayTarget>().0 = target);
+    }
+
+    /// The number of fixed simulation ticks (20/s) elapsed. Drives animated
+    /// block sprites, whose vanilla frame timing is measured in game ticks; the
+    /// renderer samples each animation at this tick each frame.
+    #[must_use]
+    pub fn tick_count(&self) -> u64 {
+        self.clock().ticks
+    }
+
+    fn refresh_stats(&mut self) {
+        let player = self.player();
+        self.stats.position = [player.position.x, player.position.y, player.position.z];
+        self.stats.yaw = player.yaw;
+        self.stats.pitch = player.pitch;
+        let store = self.chunk_world();
+        self.stats.chunk_count = store.len();
+        self.stats.mesh_drops = self.terrain(|t| t.drops);
+        self.stats.frames_per_tick = self.frames_per_tick();
+        self.stats.target = self.target().map(|h| h.block);
+        // The three fields whose cost is O(resident world) or a syscall, throttled
+        // to one frame in [`WORLD_STATS_PERIOD`]. See that constant for the
+        // measured numbers and why the whole overlay is not simply gated on `F3`.
+        if refreshes_world_stats(self.clock().frames) {
+            self.stats.live_columns = self.net.as_ref().map_or(0, |n| n.loaded_chunks().len());
+            self.stats.world_bytes = store.read().heap_bytes();
+            self.stats.rss_bytes = process_rss_bytes();
+            // The F3 overlay's light readout. Inside the throttle deliberately:
+            // it is a section fetch under the client world's own lock, which is
+            // the same class of cost as the three above even though it touches
+            // one section rather than all of them. The sky policy comes from
+            // `shared_sky_default`, never from `sky_at` directly — see
+            // `net::entity_light_at`'s doc for the two bugs that produced.
+            self.stats.light = self.net.as_ref().and_then(|net| {
+                let packed = crate::net::entity_light_at(
+                    &net.shared_handle(),
+                    player.position.x.floor() as i32,
+                    player.position.y.floor() as i32,
+                    player.position.z.floor() as i32,
+                    net.shared_sky_default().get(),
+                )?;
+                Some((packed >> 4, packed & 0x0F))
+            });
+            // The identifier half of vanilla's last `position`-group line. Also
+            // inside the throttle: it takes the ECS read lock, and a dimension
+            // changes a handful of times per session, so paying for it every
+            // frame buys nothing.
+            //
+            // Read from the local player's own `ServerDimension` component rather
+            // than from anything the shell derives, because that fold updates on
+            // `Respawned` as well as `Login` — a portal trip has to move this, and
+            // a shell-side cache set at login is exactly the stale-value shape
+            // that produced the too-bright Nether.
+            //
+            // No change-guard here, unlike `status` below: the `to_string` has
+            // already allocated by the time a comparison could skip the move, so
+            // a guard would only look like an optimisation. Once per 30 frames.
+            self.stats.dimension = self.read(|w| {
+                w.get::<lodestone_ecs::session::ServerDimension>(self.local)
+                    .and_then(|d| d.0.as_ref().map(ToString::to_string))
+            });
+        }
+        // `clone_from` reuses the existing `String`'s buffer, and the comparison
+        // skips even that on the overwhelmingly common frame where the status line
+        // has not changed. This used to be an unconditional `self.status.clone()`
+        // — one heap allocation and free per frame, for a field that changes a
+        // handful of times per session.
+        if self.stats.status != self.status {
+            self.stats.status.clone_from(&self.status);
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Sim {
+    /// Feed bounded WASM inventory clicks to the one client path that owns menu
+    /// prediction. The host cannot construct `ClientAction::ContainerClick`: its
+    /// changed-slot list, cursor stack, and state id must come from the live
+    /// `SessionMenus` owned by `ClientHandle::menu_click`.
+    fn drain_wasm_menu_clicks(&mut self) {
+        let clicks = self.write(|world| {
+            world
+                .get_resource_mut::<lodestone_wasm_host::PendingWasmMenuClicks>()
+                .map(|mut pending| pending.take())
+                .unwrap_or_default()
+        });
+        if clicks.is_empty() {
+            return;
+        }
+        let Some(net) = self.net() else { return };
+        let shared = net.shared_handle();
+        let Some(handle) = shared.get() else { return };
+        submit_wasm_menu_clicks(handle, clicks);
+    }
+}
+
+/// Submit copied guest clicks through the client-owned menu predictor.
+///
+/// The function is deliberately outside [`Sim::drain_wasm_menu_clicks`] so its
+/// real consumer can be exercised with a live [`lodestone_client::ClientHandle`]
+/// without constructing the shell's network broker in a test.
+#[cfg(not(target_arch = "wasm32"))]
+fn submit_wasm_menu_clicks(
+    handle: &lodestone_client::ClientHandle,
+    clicks: Vec<lodestone_wasm_host::InventoryClickIntent>,
+) {
+    for request in clicks {
+        let live_menu = || {
+            handle
+                .open_menu()
+                .map(|open| open.menu)
+                .unwrap_or_else(|| handle.player_menu())
+        };
+        let click = match request {
+            lodestone_wasm_host::InventoryClickIntent::Slot { slot, mode } => {
+                let slot = usize::from(slot);
+                if slot >= live_menu().slot_count() {
+                    tracing::warn!(slot, "refused a WASM inventory click outside the active menu");
+                    continue;
+                }
+                match mode {
+                    lodestone_wasm_host::InventoryClickMode::Pickup(
+                        lodestone_wasm_host::InventoryClickButton::Left,
+                    ) => Click::left(slot),
+                    lodestone_wasm_host::InventoryClickMode::Pickup(
+                        lodestone_wasm_host::InventoryClickButton::Right,
+                    ) => Click::right(slot),
+                    lodestone_wasm_host::InventoryClickMode::QuickMove => Click::shift(slot),
+                    lodestone_wasm_host::InventoryClickMode::DoubleClick => Click::double(slot),
+                    lodestone_wasm_host::InventoryClickMode::HotbarSwap(hotbar) if hotbar < 9 => {
+                        Click::hotbar_swap(slot, hotbar)
+                    }
+                    lodestone_wasm_host::InventoryClickMode::HotbarSwap(hotbar) => {
+                        tracing::warn!(hotbar, "refused a WASM inventory swap outside the hotbar");
+                        continue;
+                    }
+                }
+            }
+            lodestone_wasm_host::InventoryClickIntent::Throw { slot, mode } => {
+                let slot = usize::from(slot);
+                if slot >= live_menu().slot_count() {
+                    tracing::warn!(slot, "refused a WASM inventory throw outside the active menu");
+                    continue;
+                }
+                match mode {
+                    lodestone_wasm_host::InventoryThrowMode::One => Click::drop_one(slot),
+                    lodestone_wasm_host::InventoryThrowMode::Stack => Click::drop_stack(slot),
+                }
+            }
+            lodestone_wasm_host::InventoryClickIntent::DropCursor => {
+                if live_menu().carried().is_none() {
+                    tracing::warn!("refused a WASM cursor drop without a carried stack");
+                    continue;
+                }
+                Click::drop_cursor()
+            }
+        };
+        let _ = handle.menu_click(click, PlayerCtx::survival());
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod wasm_menu_click_tests {
+    use std::time::Duration;
+
+    use lodestone_client::{
+        ClientAction, ClientBuilder, ConnectionState, Directive, LoginProfile, ServerAddress,
+        VersionAdapter,
+    };
+    use lodestone_model::{AdapterError, ClientEvent, ContainerClickType, ItemStack};
+    use lodestone_net::{Connection, memory_pair};
+    use lodestone_wasm_host::{InventoryClickIntent, InventoryClickMode, InventoryThrowMode};
+    use lodestone_world::WorldSink;
+    use uuid::Uuid;
+
+    use super::submit_wasm_menu_clicks;
+
+    const CONTAINER_CLICK_PACKET: i32 = 0x31;
+    const BARRIER_PACKET: i32 = 0x32;
+    const SEED_CURSOR_PACKET: i32 = 0x33;
+    const SEED_THROW_SLOT_PACKET: i32 = 0x34;
+
+    /// A protocol-free encoder that makes the client action queue observable.
+    #[derive(Debug)]
+    struct ClickAdapter {
+        expected: ContainerClickType,
+    }
+
+    impl VersionAdapter for ClickAdapter {
+        fn protocol_version(&self) -> i32 {
+            0
+        }
+
+        fn minecraft_versions(&self) -> &'static [&'static str] {
+            &["test"]
+        }
+
+        fn supports(&self, _protocol: i32) -> bool {
+            true
+        }
+
+        fn begin_login(
+            &self,
+            _profile: &LoginProfile,
+            _server: &ServerAddress,
+        ) -> Result<Vec<Directive>, AdapterError> {
+            Ok(vec![Directive::SetState(ConnectionState::Play)])
+        }
+
+        fn handle_packet(
+            &self,
+            _world: &mut dyn WorldSink,
+            _state: ConnectionState,
+            packet_id: i32,
+            _payload: &[u8],
+        ) -> Result<Vec<Directive>, AdapterError> {
+            if packet_id != SEED_CURSOR_PACKET && packet_id != SEED_THROW_SLOT_PACKET {
+                return Ok(Vec::new());
+            }
+            let mut items = vec![None; 46];
+            if packet_id == SEED_THROW_SLOT_PACKET {
+                items[36] = Some(ItemStack::new(
+                    "minecraft:stone".parse().expect("constant item key"),
+                    4,
+                ));
+            }
+            if packet_id == SEED_CURSOR_PACKET {
+                items[36] = Some(ItemStack::new(
+                    "minecraft:stone".parse().expect("constant item key"),
+                    2,
+                ));
+            }
+            Ok(vec![Directive::Emit(ClientEvent::ContainerContent {
+                window_id: 0,
+                state_id: lodestone_model::ContainerStateId::new(7),
+                items,
+                carried_item: (packet_id == SEED_CURSOR_PACKET).then(|| {
+                    ItemStack::new(
+                        "minecraft:stone".parse().expect("constant item key"),
+                        4,
+                    )
+                }),
+            })])
+        }
+
+        fn encode_action(
+            &self,
+            _state: ConnectionState,
+            action: &ClientAction,
+        ) -> Result<Option<(i32, Vec<u8>)>, AdapterError> {
+            match action {
+                ClientAction::ContainerClick {
+                    window_id,
+                    state_id,
+                    slot,
+                    button,
+                    click_type,
+                    ..
+                } => {
+                    assert_eq!(
+                        *click_type,
+                        self.expected,
+                        "the shell must choose the requested menu mode rather than a pickup"
+                    );
+                    Ok(Some((
+                        CONTAINER_CLICK_PACKET,
+                        [*window_id, state_id.as_wire(), *slot, *button]
+                            .into_iter()
+                            .flat_map(i32::to_be_bytes)
+                            .collect(),
+                    )))
+                }
+                ClientAction::KeepAliveResponse { id } => {
+                    Ok(Some((BARRIER_PACKET, id.to_be_bytes().to_vec())))
+                }
+                _ => Ok(None),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_clicks_reach_the_live_menu_predictor_and_invalid_slots_do_not() {
+        let (client_io, server_io) = memory_pair();
+        let (handle, events) = ClientBuilder::new(
+            ServerAddress {
+                host: "memory".into(),
+                port: 0,
+            },
+            LoginProfile {
+                username: "PluginTest".into(),
+                uuid: Uuid::nil(),
+            },
+            Box::new(ClickAdapter {
+                expected: ContainerClickType::QuickMove,
+            }),
+        )
+        .connect_with(client_io);
+        let mut peer = Connection::new(server_io);
+
+        submit_wasm_menu_clicks(
+            &handle,
+            vec![
+                InventoryClickIntent::Slot {
+                    slot: 36,
+                    mode: InventoryClickMode::QuickMove,
+                },
+                InventoryClickIntent::Slot {
+                    slot: u16::MAX,
+                    mode: InventoryClickMode::QuickMove,
+                },
+            ],
+        );
+        handle
+            .send_action(ClientAction::KeepAliveResponse { id: 77 })
+            .expect("the barrier action must enter the same live queue");
+
+        let first = tokio::time::timeout(Duration::from_secs(1), peer.read_packet())
+            .await
+            .expect("the valid click must reach the client action queue")
+            .expect("memory transport stays open")
+            .expect("the fake adapter encodes the valid click");
+        assert_eq!(first.0, CONTAINER_CLICK_PACKET);
+        assert_eq!(
+            first.1,
+            [0_i32, 0, 36, 0]
+                .into_iter()
+                .flat_map(i32::to_be_bytes)
+                .collect::<Vec<_>>(),
+            "the real predictor supplies the player window, its live state id, and the quick-move button"
+        );
+
+        let second = tokio::time::timeout(Duration::from_secs(1), peer.read_packet())
+            .await
+            .expect("the queue barrier must arrive")
+            .expect("memory transport stays open")
+            .expect("the fake adapter encodes the barrier");
+        assert_eq!(
+            second,
+            (BARRIER_PACKET, 77_i64.to_be_bytes().to_vec()),
+            "if the invalid slot reached ClientHandle::menu_click, it would precede this barrier"
+        );
+        drop(events);
+    }
+
+    #[tokio::test]
+    async fn bounded_hotbar_swaps_reach_the_live_menu_predictor_and_invalid_keys_do_not() {
+        let (client_io, server_io) = memory_pair();
+        let (handle, events) = ClientBuilder::new(
+            ServerAddress {
+                host: "memory".into(),
+                port: 0,
+            },
+            LoginProfile {
+                username: "PluginTest".into(),
+                uuid: Uuid::nil(),
+            },
+            Box::new(ClickAdapter {
+                expected: ContainerClickType::Swap,
+            }),
+        )
+        .connect_with(client_io);
+        let mut peer = Connection::new(server_io);
+
+        submit_wasm_menu_clicks(
+            &handle,
+            vec![
+                InventoryClickIntent::Slot {
+                    slot: 36,
+                    mode: InventoryClickMode::HotbarSwap(3),
+                },
+                InventoryClickIntent::Slot {
+                    slot: 36,
+                    mode: InventoryClickMode::HotbarSwap(9),
+                },
+            ],
+        );
+        handle
+            .send_action(ClientAction::KeepAliveResponse { id: 78 })
+            .expect("the barrier action must enter the same live queue");
+
+        let first = tokio::time::timeout(Duration::from_secs(1), peer.read_packet())
+            .await
+            .expect("the valid swap must reach the client action queue")
+            .expect("memory transport stays open")
+            .expect("the fake adapter encodes the valid swap");
+        assert_eq!(first.0, CONTAINER_CLICK_PACKET);
+        assert_eq!(
+            first.1,
+            [0_i32, 0, 36, 3]
+                .into_iter()
+                .flat_map(i32::to_be_bytes)
+                .collect::<Vec<_>>(),
+            "the real predictor supplies the player window and live state while the shell preserves the hotbar key"
+        );
+
+        let second = tokio::time::timeout(Duration::from_secs(1), peer.read_packet())
+            .await
+            .expect("the queue barrier must arrive")
+            .expect("memory transport stays open")
+            .expect("the fake adapter encodes the barrier");
+        assert_eq!(
+            second,
+            (BARRIER_PACKET, 78_i64.to_be_bytes().to_vec()),
+            "the invalid hotbar key must not precede the barrier"
+        );
+        drop(events);
+    }
+
+    #[tokio::test]
+    async fn bounded_double_clicks_reach_the_live_pickup_all_predictor() {
+        let (client_io, server_io) = memory_pair();
+        let (handle, mut events) = ClientBuilder::new(
+            ServerAddress { host: "memory".into(), port: 0 },
+            LoginProfile { username: "PluginTest".into(), uuid: Uuid::nil() },
+            Box::new(ClickAdapter { expected: ContainerClickType::PickupAll }),
+        )
+        .connect_with(client_io);
+        let mut peer = Connection::new(server_io);
+        peer.write_packet(SEED_CURSOR_PACKET, &[])
+            .await
+            .expect("the wire seed must reach the client read model");
+        events.recv().await.expect("the menu seed must be folded before the click");
+
+        submit_wasm_menu_clicks(
+            &handle,
+            vec![InventoryClickIntent::Slot {
+                slot: 36,
+                mode: InventoryClickMode::DoubleClick,
+            }],
+        );
+
+        let packet = tokio::time::timeout(Duration::from_secs(1), peer.read_packet())
+            .await
+            .expect("pickup-all must reach the client action queue")
+            .expect("memory transport stays open")
+            .expect("the fake adapter encodes pickup-all");
+        assert_eq!(packet.0, CONTAINER_CLICK_PACKET);
+        assert_eq!(
+            packet.1,
+            [0_i32, 7, 36, 0]
+                .into_iter()
+                .flat_map(i32::to_be_bytes)
+                .collect::<Vec<_>>(),
+            "the live predictor must supply the window and state while choosing pickup-all"
+        );
+    }
+
+    /// A no-argument guest request uses the same live predictor for an outside
+    /// cursor drop. The wire-seeded cursor makes the first request valid; the
+    /// second sees the predictor's cleared cursor and must not pass the barrier.
+    #[tokio::test]
+    async fn bounded_cursor_drops_use_the_live_predictor_and_reject_an_empty_cursor() {
+        let (client_io, server_io) = memory_pair();
+        let (handle, mut events) = ClientBuilder::new(
+            ServerAddress {
+                host: "memory".into(),
+                port: 0,
+            },
+            LoginProfile {
+                username: "PluginTest".into(),
+                uuid: Uuid::nil(),
+            },
+            Box::new(ClickAdapter {
+                expected: ContainerClickType::Pickup,
+            }),
+        )
+        .connect_with(client_io);
+        let mut peer = Connection::new(server_io);
+        peer.write_packet(SEED_CURSOR_PACKET, &[])
+            .await
+            .expect("the wire seed must reach the client read model");
+        events
+            .recv()
+            .await
+            .expect("the cursor seed must be folded before the drop");
+
+        submit_wasm_menu_clicks(
+            &handle,
+            vec![
+                InventoryClickIntent::DropCursor,
+                InventoryClickIntent::DropCursor,
+            ],
+        );
+        handle
+            .send_action(ClientAction::KeepAliveResponse { id: 79 })
+            .expect("the barrier action must enter the same live queue");
+
+        let first = tokio::time::timeout(Duration::from_secs(1), peer.read_packet())
+            .await
+            .expect("the carried cursor must produce one live-predicted click")
+            .expect("memory transport stays open")
+            .expect("the fake adapter encodes the valid click");
+        assert_eq!(first.0, CONTAINER_CLICK_PACKET);
+        assert_eq!(
+            first.1,
+            [0_i32, 7, -999, 0]
+                .into_iter()
+                .flat_map(i32::to_be_bytes)
+                .collect::<Vec<_>>(),
+            "the shell, not the guest, must choose the outside slot and live state id"
+        );
+
+        let second = tokio::time::timeout(Duration::from_secs(1), peer.read_packet())
+            .await
+            .expect("the barrier must follow the one valid cursor drop")
+            .expect("memory transport stays open")
+            .expect("the fake adapter encodes the barrier");
+        assert_eq!(
+            second,
+            (BARRIER_PACKET, 79_i64.to_be_bytes().to_vec()),
+            "the empty-cursor request must not enqueue a second container click"
+        );
+        assert!(
+            handle.player_menu().carried().is_none(),
+            "the live predictor must clear the cursor before it rejects the second request"
+        );
+        drop(events);
+    }
+
+    /// A slot throw selects the live menu's `Throw` mode and preserves the
+    /// explicit one-item/whole-stack button. The invalid copied slot is
+    /// rejected before it can pass the queue barrier.
+    #[tokio::test]
+    async fn bounded_slot_throws_reach_the_live_predictor_and_invalid_slots_do_not() {
+        let (client_io, server_io) = memory_pair();
+        let (handle, mut events) = ClientBuilder::new(
+            ServerAddress {
+                host: "memory".into(),
+                port: 0,
+            },
+            LoginProfile {
+                username: "PluginTest".into(),
+                uuid: Uuid::nil(),
+            },
+            Box::new(ClickAdapter {
+                expected: ContainerClickType::Throw,
+            }),
+        )
+        .connect_with(client_io);
+        let mut peer = Connection::new(server_io);
+        peer.write_packet(SEED_THROW_SLOT_PACKET, &[])
+            .await
+            .expect("the wire seed must reach the client read model");
+        events
+            .recv()
+            .await
+            .expect("the slot seed must be folded before the throw");
+
+        submit_wasm_menu_clicks(
+            &handle,
+            vec![
+                InventoryClickIntent::Throw {
+                    slot: 36,
+                    mode: InventoryThrowMode::One,
+                },
+                InventoryClickIntent::Throw {
+                    slot: 36,
+                    mode: InventoryThrowMode::Stack,
+                },
+                InventoryClickIntent::Throw {
+                    slot: u16::MAX,
+                    mode: InventoryThrowMode::One,
+                },
+            ],
+        );
+        handle
+            .send_action(ClientAction::KeepAliveResponse { id: 80 })
+            .expect("the barrier action must enter the same live queue");
+
+        let first = tokio::time::timeout(Duration::from_secs(1), peer.read_packet())
+            .await
+            .expect("the one-item throw must reach the client action queue")
+            .expect("memory transport stays open")
+            .expect("the fake adapter encodes the one-item throw");
+        assert_eq!(first.0, CONTAINER_CLICK_PACKET);
+        assert_eq!(
+            first.1,
+            [0_i32, 7, 36, 0]
+                .into_iter()
+                .flat_map(i32::to_be_bytes)
+                .collect::<Vec<_>>(),
+            "the one-item form must choose Throw button 0 with the live state id"
+        );
+
+        let second = tokio::time::timeout(Duration::from_secs(1), peer.read_packet())
+            .await
+            .expect("the stack throw must reach the client action queue")
+            .expect("memory transport stays open")
+            .expect("the fake adapter encodes the stack throw");
+        assert_eq!(second.0, CONTAINER_CLICK_PACKET);
+        assert_eq!(
+            second.1,
+            [0_i32, 7, 36, 1]
+                .into_iter()
+                .flat_map(i32::to_be_bytes)
+                .collect::<Vec<_>>(),
+            "the stack form must choose Throw button 1 after the predictor advances state"
+        );
+
+        let barrier = tokio::time::timeout(Duration::from_secs(1), peer.read_packet())
+            .await
+            .expect("the barrier must follow the two valid slot throws")
+            .expect("memory transport stays open")
+            .expect("the fake adapter encodes the barrier");
+        assert_eq!(
+            barrier,
+            (BARRIER_PACKET, 80_i64.to_be_bytes().to_vec()),
+            "the invalid slot must not reach ClientHandle::menu_click"
+        );
+        assert_eq!(
+            handle.player_menu().slot_item(36).map(|stack| stack.count()),
+            None,
+            "the live predictor must consume the seeded slot before the barrier"
+        );
+        drop(events);
+    }
+}
+
+/// How many frames apart [`Sim::refresh_stats`] recomputes the debug fields whose
+/// cost scales with the resident world.
+///
+/// Three fields were recomputed **every frame** for an overlay that is usually
+/// not on screen:
+///
+/// * `world_bytes` — `World::heap_bytes` walks every resident chunk, every
+///   section and every paletted container, under the world **read lock**;
+/// * `live_columns` — `NetClient::loaded_chunks` allocates a `Vec<ChunkPos>` of
+///   every loaded column and the caller immediately takes `.len()`;
+/// * `rss_bytes` — a `task_info` syscall.
+///
+/// Measured in instructions retired at render distance 8 (361 resident columns),
+/// by `crates/lodestone-shell/tests/client_chunk_cycles.rs`: `heap_bytes`
+/// **494,570 instructions per frame** and the position `Vec` **116,242**. Both
+/// scale linearly in resident columns, so both get worse at render distance 16
+/// and 32 — the direction the render plan is trying to move.
+///
+/// **30 frames is ~0.5 s at 60 fps.** That is below the rate a human reads a
+/// changing debug figure, and it divides both terms by 30.
+///
+/// Why a throttle and not a `show_debug` gate: `DebugStats` has a second consumer,
+/// `DebugStats::one_line`, which `app/redraw.rs` and `app/runners.rs` print in
+/// headless and logged runs where no overlay is visible. Gating on overlay
+/// visibility would silently zero those logs — the shape of defect this repo
+/// calls a signal that looks like evidence and isn't. A throttle keeps every
+/// consumer correct and merely slightly stale. See `docs/client-chunk-cycles.md`.
+const WORLD_STATS_PERIOD: u64 = 30;
+
+/// Whether the frame numbered `frames` (from [`FrameClock::frames`]) recomputes
+/// the O(resident-world) debug fields.
+///
+/// `FrameClock::begin_frame` increments before the step body, so `frames` is `1`
+/// on the first frame; subtracting one makes that first frame a refresh frame, so
+/// the overlay is populated immediately instead of reading zeros for half a
+/// second. Exactly one frame in every [`WORLD_STATS_PERIOD`] returns `true` —
+/// pinned by `world_stats_refresh_is_exactly_one_frame_per_period`, which computes
+/// both the correct count (1) and the unthrottled one (`WORLD_STATS_PERIOD`).
+const fn refreshes_world_stats(frames: u64) -> bool {
+    frames.saturating_sub(1) % WORLD_STATS_PERIOD == 0
+}
+
+#[cfg(test)]
+mod stats_throttle_tests {
+    use super::{WORLD_STATS_PERIOD, refreshes_world_stats};
+
+    /// The throttle's whole claim, as a count rather than a sign: over any window
+    /// of [`WORLD_STATS_PERIOD`] consecutive frames, exactly **one** recomputes.
+    ///
+    /// Both hypotheses are computed from the constant rather than restated: the
+    /// correct one is `1` per window, and the pre-fix (unthrottled) one is
+    /// `WORLD_STATS_PERIOD` per window. Asserting only "fewer than before" would
+    /// be the *magnitude* species of vacuous test — a throttle that fired on 29
+    /// frames in 30 would pass it.
+    #[test]
+    fn world_stats_refresh_is_exactly_one_frame_per_period() {
+        const WINDOWS: u64 = 7;
+        let unthrottled_hypothesis = WORLD_STATS_PERIOD;
+        assert_ne!(
+            1, unthrottled_hypothesis,
+            "with a period of 1 the throttle is a no-op and this test cannot distinguish the \
+             two hypotheses"
+        );
+        for window in 0..WINDOWS {
+            let first = window * WORLD_STATS_PERIOD + 1;
+            let hits = (first..first + WORLD_STATS_PERIOD)
+                .filter(|&f| refreshes_world_stats(f))
+                .count() as u64;
+            assert_eq!(
+                hits, 1,
+                "frames {first}..{} recomputed the world stats {hits} times; the correct \
+                 hypothesis is 1 and the unthrottled hypothesis is {unthrottled_hypothesis}",
+                first + WORLD_STATS_PERIOD
+            );
+        }
+    }
+
+    /// The first frame must refresh, or the overlay and the `one_line` log read
+    /// zeros for the first half-second of every session — which is exactly the
+    /// "flat zero that looks like evidence" failure the RSS field already had once.
+    #[test]
+    fn the_first_frame_refreshes() {
+        assert!(
+            refreshes_world_stats(1),
+            "FrameClock::frames is 1 on the first frame and it must be a refresh frame"
+        );
+        // And frame 0, in case a caller reaches `refresh_stats` before any
+        // `begin_frame` (the hermetic-test path).
+        assert!(refreshes_world_stats(0), "frame 0 must also refresh");
+    }
+}

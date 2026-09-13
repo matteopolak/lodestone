@@ -1,0 +1,37 @@
+{
+  "source": "Unmodified payload captured from the external 26.2 creative server on 25570, protocol 776. Before the capture client joined, RCON force-loaded chunk (0,0), sealed two one-cell glass enclosures, then placed water[level=7] at (3,100,3) and lava[level=3] at (11,100,3). The enclosures prevent either source from spreading before capture. The state and one-section fluid-count annotation derive from those external source commands. Capture entry point: acquire_fluid_chunk_from_external_server.",
+  "protocol": 776,
+  "chunk": [
+    0,
+    0
+  ],
+  "blocks": [
+    {
+      "pos": [
+        3,
+        100,
+        3
+      ],
+      "state": "minecraft:water[level=7]"
+    },
+    {
+      "pos": [
+        11,
+        100,
+        3
+      ],
+      "state": "minecraft:lava[level=3]"
+    }
+  ],
+  "motion_blocking_tops": [],
+  "fluid_counts": [
+    {
+      "section": 10,
+      "cells": 2
+    }
+  ],
+  "packet": {
+    "packet_id": 45,
+    "payload": "eNrtnUFsG8cVhmdtqqHYNh4SRoH2Ei0JBnaB9rBke+gtXhIJAiE1il26qJsacrRijahWYTkUj2zhghZ6qA9OYQkoULSxC9uHFEULFIp7CJrk4NhBgAQ5ST4lQRDAsg8JcjMzb94sSZG72rGi5Ubm+w96nH2z7/9mSO7OchcQY6j9RvHwxZuetTJ9pRuda+73X/bjs5cPX0hPQJzi6dQ+Y/rK1EGxXfQT7QnRvyX6if1Ya+qg2N9gl0Wd2X0Gax1+/9OXfiL3y4j+z/1DxpdFP1mHwX4OxG77KEZs+36yH3C0BtqXHzaif6+ubhSzJGOqqCpdCXXa6UzBzHcJof/enqkJminNmfr/06kD4uUBNzO5ed945QuDXXzi2vc++ZvxwefGh58Zxls/+PcP/1xmCSs75srvQIVSqbQlliuVnUZXquYG6CVXV3+IyP9iZcV9eB133f9A/KWbhI4/j/FXbkI67pJIJFKcYoeYAQsG9smPk14KkEgkEumRkkFTsEd0SDfCW5raz9ZnxQ8LYzhPJBKJRCIlLvmLsKl+SI6KMShglXCT7Zv4LjNe/fnyk60nvyhuFj8qrhffK94svl78b/HV4pXiX4oXi38s3v3R74v/StXmnj811m8gaUiZo/6rg5fhD7SNZ49225DB9oh1zkwf4X48Z/qxj+9/IlkW7bQ9fRReKl4D+2ORKfEnfaT7cqtEvylVd8inG2H/br1h7btwUsb065svfueVv37cy8j5Y4Pz2W0/I8d3kH3NNfnOYv9oF7/uvCQSiUR6RHRoVDE11XnDYOc6bz6WybDJkzMvvHjirNc8azD+65nFE/X5haVTp+tyE0uziRcW5hfOsImT86LfJEv/xltcnKl7i2lRKdVlN1j61OKJpZmmN8syLDN3ZuH02R0UzUDRbnr/GW82zVJyn8eOPTU9/bNqhfkb0rDhyE+nKwZLnVyYnxUEYueJ387PnDotX4L+3nkrvYfG+MxTzz29ZYywIWqMb+ypMaaPDQ5y8pjOKNVPwk/8yX/xePcewO8yLb63vukkEolEIpF2Q7QCIJFIJBJpHEUrABKJRCKRxlG0AiCRSCQSaRxFKwASiUQikcZRtAIgkUgkEmkc1eIbUrdvbUrdudGRune7cw+CiKoN2QedXnswimSnI/bfuCs6inobSptKnRCRP/mTP/mTP/mT/+j9aQVA/uRP/uRP/uRPKwB6B8bPf/BXIdx6gKH/gW4bdL/Taw9GkRwuNlR3WPc7etqmBIlEIpF2oBanOSCRSCQSafyUpkcBx11lp3FpbbVZs7321bevL9ehuX5jtQnNu7evL4umbEMW8pCF/pitV9fWH9y50dfGvWtlrFYtYPVyzm/7eb9/FYxFHOL4xqW1d5FDtiELeche7fOJ8sXqBSOMowbGIgZztGA+ZBuykIfspT6fKF+snmNhHNWCcBKxbGHPguKA5toFySHbkIU8ZNsB8xrmi9UNFsZRzgknEQsm9swpDrPHIduQhTxkGwHzGuaL1VkoR8EQTiLmOPY0FAfvccg2ZCEPWS9gXsN8sToL5cgx4SSi4fdUHKzHIduQhTxknYB5DfPF6uEcBqQgMdizxyHbkHUQq2oHzGuYb0j1bn+ZwhjGgW2RtRGrbAXMa5hvRHVMGdtyYFtkLdyxYAbMa6hvRHWZYtv2VG3TMHHHHA+qo9rGoG9E9f5/4xbSU7W5yofUUe2cyhts8NQeXL3F/VnYhmSg1tbsoLP4rDJsD9cN2t//FGzHESR/hIO+/tu6Xd3+6vr9t273+w36+h9r3bq6/Yd9WaCv/7XWravbX9e3rjbo1tXtr+vbVBt06+r21/VdVht06+r21/VdVRt06+r21/W9rjbo1tXtr+t7Q23QravbX9f3ttqgW1e3v67vHbVBt65uf13fe2qDbt2kx5/0+5/057/Fkz4CJH0ETPoMkPQZMOkVQNIroK++Agzm0K2r6/uwHLp1H9ZXl0O37m79K2tjl8azWxwk0l5Q8ncBsllDK8alfD6nFePiKJXwmBkV4+KoVPCcERXj4nBdPGdGxbg45uZwzRAV4+JYWpJrJh4VFQdXHFxxcMXBFQdXHP73epuYlTp/Xq4ZzaioOEzFYSoOU3GYisNUHKbi8P9fbl+UtiYQg1ZWYM2ctaIicnALObiFHNxCDm4hB7eQg1vIwS3k4JbytZSvBcSga9fgmiFvR0XkMG3kMG3kMG3kMG3kMG3kMG3kMG3BAcO11X8Dt5WvDcSg116Da6aSExWRw3KQw3KQw3IkR9ZyJIf4SVpyiAgcYriO4IDhOvm89HWy6OsAMejWLbhqrHhRETlsDzlsDzlsT3LkbU9yiJ/kJYeIwCGG6wkOGK5XKklfL4++HhCDNjbgqtltREXkcBrI4TSQw2lIjpLTkBziloTkEBE4xHAbggOG26hUpG+jhL4NIAbB49erzbl2VEQOr40cXhs5vLbkqHhtySFuyUgOEYFDDLctOGC4bdeVvu0K+raBGOQ/Zh0V41KLxzoDTqNdhxkQ9zKbNZj3S+eX6zD+q8urTTF8cQ8x1k+A7TVq8AkQ9zLrVflGLCmOps8R6zfAcrwqfAPEvcxaWX4Q5xRH3eeI9Qhg2k4ZjgDiXma1IL+IruKo+RyxHgG5ZRfgCCjuZZZz8kBUURxVnyPeM4Bp5bKyaRUMeSAuKY6yzxHvGZCrG2mmiednK684Cj7HaFYAnCuOrOLI+RyjXQFxdY1sGj5HMivAHkeyK2Ce+BVA0ldASV8BjrvoSUASKVQ8Yd/gB3FG5hv6UNOIfMMe6tp1joiHxeLm2O5huVFwBPvio4gj4AjxxUcxR8AR7KseRY2fI8RXPYobNwesAIKdZXNttRk7SYivqR4Kj50jxNdSD8XHzRHma6uH8UfC0Sf0/TaTtg8e77ZB/1z/Ftq+/U3FnVHzN4m2mke6nYxf9I5n/Am//4l//pP+/id8BEz+DJD4GTDpFUDiK6CkV4BJroBbXIck6WuRxK/FSCQSiUR6xPQloGkBBg=="
+  }
+}

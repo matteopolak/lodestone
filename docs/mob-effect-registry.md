@@ -1,0 +1,61 @@
+# Mob-effect registry boundary
+
+## What it is
+
+`lodestone_data::mob_effects::MobEffectId` is the validated 26.2 built-in
+`minecraft:mob_effect` registry id. It separates a known entry in the shipped
+census from an arbitrary integer carried by a version-free item component or
+an extension.
+
+## How it works
+
+The generated `MOB_EFFECT_NAMES` and colour tables are indexed only by
+`MobEffectId`. The 26.2 entity-effect decoder validates its VarInt before it
+creates a `ClientEvent`, and the 26.2 server and beacon encoders obtain an id
+by canonical name before writing it. The HUD's natural effect ordering and the
+beacon UI likewise resolve a validated id, so their table lookups are total.
+The 1.17 family applies the same boundary to both legacy packet forms: it
+converts their 1-based wire value to `MobEffectId` before producing an event,
+and rejects an unknown value without attempting a table lookup.
+The 1.19 family applies that checked 1-based conversion to its update and
+remove packets as well. The 1.20.6 and 1.21.11 families carry the zero-based
+wire id directly; both validate it before producing an event. Thus a legacy
+packet cannot shift the name by one, while an unknown modern or legacy value
+still fails at packet ingress.
+The 1.7, 1.8, 1.9, 1.13 and 1.14 families use the same boundary for their
+signed-byte legacy ids, widening the wire value before the checked offset.
+Their packet handlers apply it across every protocol revision each family
+serves, so negative values and extension ids remain explicit misses rather
+than table indices.
+
+`MobEffectInstance` intentionally retains its raw `i32` id. It can arrive in
+an item component where the owning session or an extension has supplied a
+value outside this built-in census. The tooltip converts that raw value with
+`MobEffectId::from_registry_id` before it calls
+`lodestone_data::potion::mob_effect_tooltip_for` or
+`mob_effect_attribute_modifiers_for`; an unknown value is preserved by the
+model and simply has no built-in name, tooltip, colour, or attribute modifier.
+
+## How to change it
+
+Regenerate the mob-effect names and colours together when the canonical data
+version changes, then update the literal boundary controls in
+`lodestone_data::mob_effects`. Packet paths should convert their raw VarInt
+with `MobEffectId::from_registry_id` once at decode or encode entry, applying
+the era's one-based adjustment with checked arithmetic when required, then
+pass the typed value through table lookups. Built-in helper APIs take
+`MobEffectId`, not raw `i32`, so add a conversion at a newly introduced
+external consumer rather than a second unchecked lookup helper. Do not change
+`MobEffectInstance` to reject an extension value unless the owning session's
+registry synchronization is also modeled.
+
+## Configuration
+
+There is no runtime configuration. The fixed census is generated from the
+canonical 26.2 registry report and has 40 entries.
+
+## Dependencies
+
+This boundary depends on the generated mob-effect name and colour tables.
+The 26.2 protocol adapter, integrated-server packet encoder, shell HUD, and
+beacon controls consume it.

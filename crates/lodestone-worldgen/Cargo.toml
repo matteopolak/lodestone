@@ -1,0 +1,130 @@
+[package]
+name = "lodestone-worldgen"
+autobenches = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Version-free Minecraft world-generation engine (RNG, noise, density-function interpreter)."
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Structural counters through the generation hot path, the instrument the
+# worldgen-rewrite acceptance criteria are written in
+# (`docs/plans/worldgen-rewrite.md` Unit 1, `docs/render-benchmarks.md`).
+#
+# **This is now a forward, not a definition.** `counters.rs` moved to
+# `lodestone-worldgen-core` in Unit 16, so the `#[cfg(feature = "gen-counters")]`
+# that selects live hooks over inert ones is evaluated *there*. This entry has to
+# keep existing — this crate's own `benches/generation.rs` reads
+# `cfg!(feature = "gen-counters")` and callers pass
+# `-p lodestone-worldgen --features gen-counters` — and it has to enable the core
+# crate's feature, or the parent would compile with the flag set and count
+# nothing. That failure mode is silent and would make every downstream
+# acceptance criterion vacuous, so it has a dedicated gate:
+# `tests/gen_counters_forward.rs` asserts a non-zero counter through the
+# re-export with the feature on, and `Snapshot::default()` with it off.
+#
+# Default OFF and it must stay that way: every hook is an `#[inline(always)]`
+# empty function without it, so a shipped build carries no counter code at all.
+# With it on, relaxed atomics sit inside `AquiferSystem::block_at` (98,304 calls
+# per chunk fill) and `WorldgenRandom::next_bits` — measurably slower, which is
+# why a timing run and a counter run are two separate runs, never one.
+#
+# Additive only: it adds atomics and hook bodies, and touches no arithmetic and
+# no RNG draw, so it cannot change generated terrain. `just test` covers both
+# settings via `--all-features`.
+gen-counters = ["lodestone-worldgen-core/gen-counters"]
+
+[dependencies]
+serde = { workspace = true }
+serde_path_to_error = { workspace = true }
+# Canonical 26.2 block-state and face-occlusion facts. The local interner
+# resolves each state into this global table once, leaving feature candidate
+# loops on numeric ids instead of parsing state text.
+lodestone-data = { workspace = true }
+# The workspace's one portable clock seam — see `lodestone_time`'s crate docs. It is
+# here because `Instant::now()` and `SystemTime::now()` COMPILE for wasm32 and then
+# TRAP at runtime (measured, executed in a wasm VM: `RuntimeError: unreachable`), and
+# this crate runs in the browser: `lodestone-shell`'s browser build reached a world
+# and died here. Not a direct `web-time` dependency any more: `lodestone-time` is the
+# one crate allowed to depend on `web-time` directly, so every other crate's clock
+# goes through it instead of an improvised copy. See `docs/browser-shell-port.md`.
+lodestone-time = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+# The numeric core (hash, math, rng, noise, density, counters) — Unit 16's leaf
+# extraction. Re-exported wholesale from `src/lib.rs` under the original module
+# paths, so this dependency is invisible to every caller. A path dependency
+# rather than a `[workspace.dependencies]` alias, matching how `lodestone-server`
+# spells its dependency on this crate.
+lodestone-worldgen-core = { path = "../lodestone-worldgen-core" }
+# Issue #514's S2 (`src/structure/template.rs`): the NBT codec (`Nbt`, `Reader`,
+# `read_named_nbt`) the 1212 bundled `.nbt` structure templates are written in.
+# Reused rather than re-implemented — `lodestone-anvil` already reads chunk NBT
+# and `level.dat` through it, so a second decoder here would be a second thing to
+# be wrong about modified UTF-8 and list nesting. Version-free and already in
+# every build graph this crate is part of, wasm included.
+lodestone-core = { workspace = true }
+# Same unit: Mojang writes structure templates as gzip-wrapped NBT, so the
+# template reader needs an inflate. Pure-Rust backend (miniz_oxide), already a
+# workspace dependency (`lodestone-net`, `lodestone-anvil`).
+flate2 = { workspace = true }
+
+[dev-dependencies]
+lodestone-testsupport = { workspace = true, features = ["bench-record"] }
+serde_json = { workspace = true }
+# Direct dependency (not a workspace alias), per the harness decision in
+# `docs/roadmap/benchmarks.md`: pure in-memory, no-GPU benches use criterion
+# for its statistically-robust sampling and free local `--baseline` diffing.
+# `default-features = false` + only `cargo_bench_support`: the default feature
+# set pulls in `plotters` (HTML report charts) and `rayon`, neither of which
+# this crate's benches need — `plotters` in particular was flagged in the
+# harness doc as needing a dependency-tree check before adoption, so it stays
+# off. Dev-only: does not affect the wasm build of this crate's lib (`gpu`/wasm
+# concerns live in `lodestone-server`/`lodestone-shell`, not here).
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+# Issue #87's peak-RSS half. In-process resident-set sampling: reads the same OS
+# counter `/usr/bin/time -l` reports, but per-radius inside one run rather than
+# once per process, and with no output parsing. Already in the lockfile via
+# `lodestone-shell`. Dev-only.
+memory-stats = "1"
+# Release-only throughput example: process CPU time for utilization alongside
+# wall-clock generation time. Dev-only; no production dependency edge.
+libc = "0.2"
+# **Dev-only, and only so `benches/generation.rs` can measure the EMBEDDED
+# production worldgen data** — `lodestone_server::overworld_generator`, the exact
+# generator the integrated server serves. This reverses an earlier decision
+# recorded in this file ("no `lodestone-server` dependency is needed"), and the
+# reason is `docs/plans/worldgen-rewrite.md`'s C_ss definition plus this bench
+# file's own documented history:
+#
+# * The in-crate fixture tree (`tests/support/worldgen_data`) is single-biome
+#   plains and carries no `block_freeze_facts` document, so against it the biome
+#   search never runs and `freeze_top_layer` early-returns. Two of the ten stages
+#   are structurally absent. Benchmarking the "composed pipeline" against it is
+#   the **"world" species of vacuous test** (`CLAUDE.md`) — the flaw is in the
+#   input data and reading the bench cannot reveal it. That is not a
+#   hypothetical here: it already happened in this file.
+# * `EmbeddedResolver` is private to `lodestone-server` and `block_freeze_facts`
+#   is built from `lodestone-data`'s jar dumps, not from any JSON asset, so
+#   pointing an `FsResolver` at `crates/lodestone-server/assets/worldgen/` would
+#   reproduce eight of the nine resolver methods and silently miss that one.
+#
+# This is a **dev-dependency cycle** (`lodestone-server` depends on this crate
+# normally), which Cargo supports: the lib builds from its non-dev deps first,
+# then `lodestone-server` against it, then this crate's dev targets against
+# both. It adds nothing to this crate's lib, so the wasm build and
+# `cargo check -p lodestone-shell --no-default-features` are untouched.
+lodestone-server = { path = "../lodestone-server" }
+# The top-layer replay control exercises the same shared lifecycle tooling as
+# the large comparator; production worldgen remains independent of this parity
+# harness dependency.
+lodestone-worldgen-parity = { path = "../lodestone-worldgen-parity" }
+
+[[bench]]
+name = "generation"
+harness = false

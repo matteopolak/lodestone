@@ -1,0 +1,140 @@
+[package]
+name = "lodestone-game"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Version-free Minecraft client game-state layer: inventory, crafting, scoreboard, tab list, and HUD state."
+
+[dependencies]
+lodestone-model = { workspace = true }
+uuid = { workspace = true }
+bon = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true, features = ["raw_value"] }
+thiserror = { workspace = true, optional = true }
+# Live-oracle-only, feature-gated dependencies. These are SHARED infrastructure
+# crates (wire primitives + the transport), never version crates, so enabling
+# them cannot break version isolation (`cargo xtask check-isolation` stays
+# clean). The live reconciliation test hand-drives the protocol-776 handshake
+# with these plus a handful of documented, test-local packet-id constants, so it
+# depends on no `crates/protocol/*` family and deleting one wouldn't touch it.
+lodestone-core = { workspace = true, optional = true }
+lodestone-net = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+
+[features]
+# JSON loading of recipes/tags from Mojang generated data. Off by default so the
+# hermetic build carries no JSON dependency; enabled by the corpus test.
+json = ["dep:bon", "dep:serde", "dep:serde_json", "dep:thiserror"]
+# Wires the predict->click->reconcile oracle against a live vanilla 26.2 server.
+# Off by default so `cargo test` stays hermetic and version-free; the test is
+# additionally `#[ignore]`d.
+live-reconcile = ["dep:lodestone-core", "dep:lodestone-net", "dep:tokio"]
+# The `live-*` client oracles below drive the *real* client. `lodestone-client`
+# is a dev-dependency (see `[dev-dependencies]`), so these features do NOT list
+# `dep:lodestone-client` — they only turn on tokio and enable the client's
+# `live-v26-2` family so the real v26-2 adapter is available to the test (the
+# registry itself is a dev-dependency, present whenever the test targets build).
+# `lodestone-game` still names no version crate, so isolation stays clean.
+#
+# Wires the tab list end-to-end through the real client and asserts the server's
+# `player_info_update` reaches `ClientHandle::players()`. `#[ignore]`d.
+live-tablist = [
+    "dep:tokio",
+    "lodestone-client/live-v26-2",
+]
+# Wires scoreboard, teams and boss bar end-to-end through the real client via
+# RCON `/scoreboard`, `/team`, `/bossbar`, then asserts through
+# `ClientHandle::scoreboard()` / `boss_bars()`. `#[ignore]`d.
+live-scoreboard = [
+    "dep:tokio",
+    "lodestone-client/live-v26-2",
+]
+# Wires an inventory mutation end-to-end through the real client: seed a held
+# item over RCON, assert it reaches our `Menu` via the real `ClientEvent` stream
+# (clientbound), then send a real `ContainerClick`/`DropSelectedItem` via
+# `ClientHandle::send_action` and assert the server's authoritative response
+# matches the click machine's prediction (serverbound). `#[ignore]`d.
+live-inventory = [
+    "dep:tokio",
+    "lodestone-client/live-v26-2",
+]
+# Wires block breaking end to end through the real client against the SURVIVAL
+# oracle (:25565, RCON :25566): drive `ClientAction::BlockAction` start/stop via
+# `ClientHandle::send_action`, then assert the server reports the block as air
+# (read over RCON — server truth, not our prediction). Also gates the vanilla
+# break-*timing* (stone bare-handed vs a diamond pickaxe, and instant break on
+# START). `#[ignore]`d.
+live-mining = [
+    "dep:tokio",
+    "lodestone-client/live-v26-2",
+]
+# Wires chat/system-message component resolution end to end through the real
+# client against the SURVIVAL oracle: trigger a real death-by-mob over RCON,
+# capture the server's `system_chat` component via the real `ClientEvent` stream,
+# resolve it against the *real* vanilla `en_us.json` (read from the downloaded
+# `client.jar` via `lodestone-assets`, a dev-dep), and assert the wording matches
+# vanilla. The pre-fix raw-key output is captured as the negative control.
+# `#[ignore]`d.
+live-chat = [
+    "dep:tokio",
+    "lodestone-client/live-v26-2",
+]
+# Wires block placement / item use end to end through the real client against
+# the SURVIVAL oracle (:25565, RCON :25566): seed a block item, drive
+# `Placement::use_on` -> `ClientAction::UseItemOn` via `ClientHandle::send_action`,
+# then assert the server reports the placed block at the predicted position (read
+# over RCON on a force-loaded chunk — server truth, not our prediction). Also
+# gates a rejected placement rolling back and the sneak-vs-interact ordering.
+# `#[ignore]`d.
+live-place = [
+    "dep:tokio",
+    "lodestone-client/live-v26-2",
+]
+# Wires **crafting** end to end through the real client against the SURVIVAL
+# oracle (:25565, RCON :25566): open a real crafting table by interacting with
+# it, move planks into the grid with real `ContainerClick` packets predicted by
+# the click machine, and assert the *server* fills the result slot and consumes
+# the ingredients when it is taken. Every result-slot assertion reads the
+# server's own `container_set_slot` / `container_set_content`; the client never
+# matches a recipe. `#[ignore]`d.
+live-craft = [
+    "dep:tokio",
+    "lodestone-client/live-v26-2",
+]
+
+[dev-dependencies]
+serde_json = { workspace = true }
+lodestone-testsupport = { workspace = true }
+# `lodestone-registry` is a **dev-dependency** for the same reason
+# `lodestone-client` below is. The live end-to-end tests resolve protocol 776
+# through `lodestone_registry::adapter_for_protocol`, and the registry's
+# optional `v26-2` feature names `lodestone-v26-2`, which (issue #286) now depends
+# on this crate for its chat signature cache. A normal
+# `game -> registry -> v26-2 -> game` edge would be a dependency cycle; dev-deps
+# do not count toward the dependency cycle, so the version-free normal graph
+# stays acyclic. Only the `live-*` test targets (`tests/live_*.rs`) use it.
+lodestone-registry = { workspace = true }
+# `lodestone-client` is a **dev-dependency**, not a normal dependency, and this
+# is load-bearing architecture, not a convenience. `lodestone-game` is the
+# version-free game-state layer: it folds `lodestone_model::ClientEvent`s into
+# game state and must be depend-able *by* the client/shell, never the reverse.
+# A normal `game -> client` edge makes `client -> game` look circular from the
+# client's side, which is exactly what pushed a *duplicate* scoreboard fold into
+# `lodestone-client`. `lodestone-client` is only needed to drive the live oracle
+# tests, so it belongs here: dev-deps do not count toward the dependency cycle,
+# so `lodestone-client`/`lodestone-shell` can now depend on this crate cleanly.
+lodestone-client = { workspace = true }
+# Used only by the live chat oracle to load the *real* vanilla `en_us.json` from
+# the downloaded `client.jar` (via `ZipSource` + `Language`), so the expected
+# wording originates from a real asset rather than a table we typed ourselves.
+# A dev-dep, so normal builds of this version-free crate never link the asset
+# layer and isolation stays clean.
+lodestone-assets = { workspace = true }
+# Used only by the live oracle tests to surface the driver's internal tracing
+# (e.g. a fatal "adapter rejected packet" with its packet id) to stderr.
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

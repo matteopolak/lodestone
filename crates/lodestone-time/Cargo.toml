@@ -1,0 +1,21 @@
+[package]
+name = "lodestone-time"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The ONE place this workspace is allowed to depend on `web-time` — see `src/lib.rs`
+# for the reasoning this crate exists to centralise. Every other crate that needs a
+# clock depends on `lodestone-time` instead, never on `web-time` directly.
+#
+# Unconditional, not wasm-only, and that is deliberate: `web-time`'s non-wasm arm is
+# literally `pub use std::time::*`, so on native this crate's `Instant` IS
+# `std::time::Instant` — the same type, not a newtype — and native behaviour is
+# unchanged. Declaring it for both targets is what lets a signature written once
+# (`fn tick_music(now: Instant)`) work on both targets with no `cfg`.
+web-time = "1"

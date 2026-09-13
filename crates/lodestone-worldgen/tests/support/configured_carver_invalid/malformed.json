@@ -1,0 +1,9 @@
+{
+  "type": "minecraft:cave",
+  "config": {
+    "floor_level": {
+      "type": "minecraft:uniform",
+      "min_inclusive": 0.1
+    }
+  }
+}

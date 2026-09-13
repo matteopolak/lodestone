@@ -1,0 +1,1015 @@
+//! `Sim`'s camera cluster: the fog helpers (`fog_for_render_distance`,
+//! `water_fog`, `lava_fog`), `fog_settings`/`biome_sky_color`, and the
+//! eye/render camera derivation (`interpolated_player`, `camera`,
+//! `cycle_camera_type`, `set_view_bobbing`, `bob_frame`, `render_camera`,
+//! `spyglass_scoping`, `third_person_body_state`) plus the `NoCollision`
+//! stand-in `render_camera`'s third-person pullback falls back to — seam 6
+//! of the sim.rs decomposition sequence (seam 1 was the test module,
+//! `sim/tests.rs`; seam 2 was placement prediction, `sim/placement.rs`;
+//! seam 3 was the interaction/combat cluster, `sim/actions.rs`; seam 4 was
+//! the net-apply cluster, `sim/net_apply.rs`; seam 5 was the audio cluster,
+//! `sim/audio.rs`).
+//!
+//! `use super::*;` for the same reason every other seam file uses it:
+//! `sim::camera` is a descendant of `sim` and already has the same
+//! visibility into `Sim`'s private fields and `sim.rs`'s other private
+//! helpers that the earlier seams have.
+//!
+//! `fog_for_render_distance` is `pub(crate)` here, same as it was in
+//! `sim.rs`, but now needs a re-export: `app.rs` names it by its full path
+//! (`crate::sim::fog_for_render_distance`), and `app.rs` is neither `sim`
+//! nor a descendant of it, so the item has to be reachable *at* the `sim`
+//! module boundary. `sim.rs` picks it back up with a plain (non-`pub`)
+//! `use camera::fog_for_render_distance;` — sufficient for
+//! `crate::sim::fog_for_render_distance` to resolve, and it also re-enters
+//! `sim::tests`' `use super::*;` glob the same way `placement::is_air_state`
+//! already does. `water_fog`/`lava_fog` need no such treatment: both are
+//! called only from `fog_settings`, which moved here with them.
+//!
+//! Every other item here is an `impl Sim` method and needed no privacy
+//! change: all were already `pub` (called from `app.rs`) or stay private
+//! because their only callers moved into this same file (`biome_sky_color`
+//! from `fog_settings`, `interpolated_player` from `camera`/
+//! `third_person_body_state`, `spyglass_scoping` from `render_camera`).
+
+use super::*;
+
+use lodestone_model::EntityNetworkId;
+
+/// Distance fog for a render distance of `render_distance` chunks.
+///
+/// Fog is what hides the render-distance edge — without it the loaded world
+/// ends in a hard wall of geometry against the sky. It therefore has to track
+/// the *configured* distance rather than a fixed default, or raising
+/// `--render-distance` would fog out the very chunks it just loaded, making a
+/// larger view look worse than a smaller one.
+///
+/// Free-standing so the relationship is testable without generating a world:
+/// [`Sim::new`] at render distance 32 builds thousands of sections, which is a
+/// minute of work to check a multiplication.
+pub(crate) fn fog_for_render_distance(render_distance: u32) -> lodestone_render::fog::FogSettings {
+    // `for_render_distance`, not `for_view_distance`: the latter deliberately does
+    // **not** populate the environmental fog pair, so the live overworld was still
+    // getting only the render-distance term after that fix landed. The Nether and
+    // the End already had it, because `Sim::fog_settings` calls `FogSettings::nether`
+    // /`the_end` directly — so the one dimension a player actually starts in was the
+    // one the fix did not reach.
+    //
+    // The span is unchanged: `for_render_distance` is algebraically identical to the
+    // fraction form across render distance 3..=40, which `gpu.rs`'s
+    // `fog_start_fraction_matches_vanillas_span` pins. `gpu::FOG_START_FRACTION` is
+    // still used by that test, so it does not become dead.
+    lodestone_render::fog::FogSettings::for_render_distance(crate::gpu::SKY_COLOR, render_distance)
+}
+
+/// Short, near-eye distance fog for an eye submerged in water.
+///
+/// Vanilla water vision is only a few chunks, so the far edge is capped short
+/// (and never past where chunks actually stop) and the ramp starts at the eye
+/// (`start_fraction` 0) so terrain dissolves close rather than at the sky edge.
+/// The colour is the default ocean underwater fog — the per-biome water fog
+/// colour is not yet reachable from the shell, so this is the documented
+/// fallback rather than a biome-correct tint.
+fn water_fog(render_distance: u32) -> lodestone_render::fog::FogSettings {
+    let far = 32.0_f32.min(render_distance as f32 * 16.0);
+    lodestone_render::fog::FogSettings::for_view_distance([0.05, 0.19, 0.44], far, 0.0)
+}
+
+/// Near-opaque, few-block distance fog for an eye submerged in lava: submerging
+/// in lava blinds fast in vanilla, so the range is very short and the colour a
+/// hot orange.
+fn lava_fog() -> lodestone_render::fog::FogSettings {
+    lodestone_render::fog::FogSettings::for_view_distance([0.6, 0.1, 0.0], 3.0, 0.0)
+}
+
+impl Sim {
+    /// Distance fog for this frame: sized to the configured render distance
+    /// normally (further specialised by the connected *dimension* — the
+    /// Nether's fixed dense red haze, the End's near-black edge fade — when
+    /// neither override below applies), and swapped for a short, dense
+    /// water/lava fog while the player's eye is submerged.
+    ///
+    /// Selected from the bit-exact eye-in-fluid state (`FluidState`) the physics
+    /// producer computes each tick, so the fog matches vanilla's submerged view
+    /// rather than a locally-guessed boolean. Lava is checked before water,
+    /// matching vanilla's lava-first submersion order, and both take priority
+    /// over the dimension fog: standing in lava in the Nether still gets lava
+    /// fog, not Nether fog.
+    ///
+    /// The dimension comes from [`Sim::dimension`], the one accessor every
+    /// dimension-conditioned decision in this crate goes through — `None` before
+    /// login, and correct across a portal trip because
+    /// `lodestone_ecs::session::ServerDimension`'s fold handles `Respawned` as
+    /// well as `Login`. **This doc used to record that read as stale after a
+    /// portal trip**; it was, and the fix is described in
+    /// `docs/dimension-visuals.md`.
+    ///
+    /// Fog colour is only half of "the Nether looks like the Nether": the sky
+    /// *pass* is gated separately by [`Sim::sky_mode`], because a colour cannot
+    /// express "draw no sun".
+    #[must_use]
+    pub fn fog_settings(&self) -> lodestone_render::fog::FogSettings {
+        let fluid = self.fluid_state();
+        if fluid.under_lava() {
+            return lava_fog();
+        }
+        if fluid.under_water() {
+            return water_fog(self.config.render_distance);
+        }
+        match self.dimension() {
+            Some(d) if d.namespace() == "minecraft" && d.path() == "the_nether" => {
+                lodestone_render::fog::FogSettings::nether(self.config.render_distance)
+            }
+            Some(d) if d.namespace() == "minecraft" && d.path() == "the_end" => {
+                lodestone_render::fog::FogSettings::the_end(
+                    self.config.render_distance,
+                    crate::gpu::FOG_START_FRACTION,
+                )
+            }
+            _ => fog_for_render_distance(self.config.render_distance),
+        }
+        .with_biome_sky_color(self.biome_sky_color())
+    }
+
+    /// The standing biome's `minecraft:visual/sky_color` in **linear** RGB, or
+    /// `None` when there is nothing better than the dimension default to draw.
+    ///
+    /// # The chain, and the one hop that is not a lookup
+    ///
+    /// The colour table arrives whole, indexed by biome holder id, on
+    /// `ClientEvent::BiomeVisuals` and reaches here as
+    /// `PlayerSnapshot::biome_sky_colors`. **The biome itself is not on the
+    /// network at all** — it lives in the chunk section's biome palette, so this
+    /// is the hop that has to happen at the camera every frame, and it is the
+    /// reason the whole table travels rather than one resolved colour.
+    ///
+    /// # Why it scans downward for a section
+    ///
+    /// `sections_at` elides an empty section to `None`, and the section holding
+    /// the player's own feet is very often empty — standing on a plain at `y=64`
+    /// puts the eye in section `64..80` while the ground is the last block of
+    /// `48..64`. Sampling only the eye's section would therefore leave the sky
+    /// untinted over open ground, which is precisely where a sky is visible.
+    /// Biomes are all but columnar (one cell is 4×4×4 blocks, and vanilla's own
+    /// biome sources vary far more horizontally than vertically), so the first
+    /// present section at or below the eye is the right answer, not an
+    /// approximation worth a second mechanism.
+    ///
+    /// The `None`s are all deliberate and all mean the same thing: *the server
+    /// has not told us*. Pre-login, a server that sent no biome registry, a
+    /// column that has not streamed in, a biome with no `sky_color` (the ten
+    /// Nether/End biomes) — each falls back to the dimension colour the caller
+    /// already computed, which is the same explicit-fallback shape that fix was filed
+    /// over. Never a plausible-looking overworld blue.
+    #[must_use]
+    fn biome_sky_color(&self) -> Option<[f32; 3]> {
+        let net = self.net.as_ref()?;
+        let table = net.shared_handle().get()?.player().biome_sky_colors;
+        if table.is_empty() {
+            return None;
+        }
+        let dims = net.world_dimensions()?;
+        let section_count = dims.section_count();
+
+        let position = self.player().position;
+        let block_x = position.x.floor() as i32;
+        let block_y = position.y.floor() as i32;
+        let block_z = position.z.floor() as i32;
+        let chunk = lodestone_client::ChunkPos {
+            x: block_x.div_euclid(16),
+            z: block_z.div_euclid(16),
+        };
+        let base_si = dims.min_y.div_euclid(16);
+        let eye_si = block_y.div_euclid(16) - base_si;
+        // Clamp rather than reject: an eye above the build limit still stands in
+        // a biome, and the topmost section is the one that holds it.
+        let top = eye_si.clamp(0, i32::try_from(section_count).unwrap_or(0).saturating_sub(1));
+        if section_count == 0 {
+            return None;
+        }
+
+        // Top-down: one lock acquisition for the whole column, then the highest
+        // present section at or below the eye.
+        let requests: Vec<(lodestone_client::ChunkPos, usize)> = (0..=top)
+            .rev()
+            .map(|si| (chunk, usize::try_from(si).unwrap_or(0)))
+            .collect();
+        let (section, si) = net
+            .sections_at(&requests)
+            .into_iter()
+            .zip(requests.iter().map(|(_, si)| *si))
+            .find_map(|(section, si)| section.map(|s| (s, si)))?;
+
+        // The sampled `y` is the eye's own within its section, or the top of
+        // whichever lower section answered.
+        let local_y = if si == usize::try_from(top).unwrap_or(0) {
+            block_y.rem_euclid(16) as usize
+        } else {
+            15
+        };
+        let biome = section.biome_at_block(
+            block_x.rem_euclid(16) as usize,
+            local_y,
+            block_z.rem_euclid(16) as usize,
+        );
+        let packed = (*table.get(usize::try_from(biome).ok()?)?)?;
+        // sRGB bytes → linear, exactly as `FogSettings::nether`/`the_end` do with
+        // their own hex constants. The *day/night* multiply stays in gamma space
+        // inside the sky pass (`SkyFrame`); this is only the transfer function
+        // for the base colour, which every colour handed to the renderer gets.
+        Some(lodestone_render::fog::srgb_u8_to_linear([
+            ((packed >> 16) & 0xFF) as u8,
+            ((packed >> 8) & 0xFF) as u8,
+            (packed & 0xFF) as u8,
+        ]))
+    }
+
+    /// The player's physics state with `position` replaced by the feet
+    /// interpolated between the last two physics ticks — the "drawn" position
+    /// every per-frame consumer of the player's own placement wants, rather
+    /// than the raw tick-boundary value [`Self::player`] returns. Shared by
+    /// [`Self::camera`] and [`Self::third_person_body_state`] so the eye and
+    /// the third-person body it stands next to never disagree about where
+    /// "here" is.
+    ///
+    /// # Riding overrides the whole tick-to-tick ease
+    ///
+    /// `lodestone_ecs::player::pin_passenger_to_vehicle` snaps
+    /// [`PhysicsState::position`] to the vehicle's raw, tick-boundary
+    /// [`lodestone_ecs::entity::Position`] once per 20 Hz tick — the same
+    /// value the vehicle's own fixed-tick prediction just produced. The
+    /// controlled vehicle now records the pose on both sides of that tick and
+    /// its mesh samples them with `FrameClock::interp_alpha`; blending the
+    /// already-pinned player independently would create a second path with a
+    /// potentially different endpoint and make the rider slide against the
+    /// hull between ticks.
+    ///
+    /// Vanilla does not have this seam at all: a passenger's screen position
+    /// is composed directly from the vehicle's **already-interpolated**
+    /// render transform (`EntityRenderDispatcher` renders a passenger as a
+    /// child of the vehicle it just placed), never from a second,
+    /// independently-clocked position track. [`Self::riding_seat_this_frame`]
+    /// reproduces that: it reads the vehicle's per-frame sampled feet/yaw from
+    /// the same source the mesh extractor uses (controlled tick history, or a
+    /// remote entity's network interpolation track) and derives the seat from
+    /// those. When it returns `None` (not riding, or any link in the chain is
+    /// not yet resolvable — see its own doc), this falls back to the ordinary
+    /// tick-to-tick ease, unchanged from before this existed.
+    #[must_use]
+    fn interpolated_player(&self) -> PlayerState {
+        let mut interp = self.player();
+        if let Some(feet) = self.riding_seat_this_frame() {
+            interp.position = Vec3d::new(f64::from(feet.x), f64::from(feet.y), f64::from(feet.z));
+            return interp;
+        }
+        let a = f64::from(self.clock().interp_alpha);
+        let prev = self.prev_position();
+        interp.position = Vec3d::new(
+            prev.x + (interp.position.x - prev.x) * a,
+            prev.y + (interp.position.y - prev.y) * a,
+            prev.z + (interp.position.z - prev.z) * a,
+        );
+        interp
+    }
+
+    /// The local player's on-screen seat this frame, if currently riding a
+    /// vehicle whose interpolation track has actually reached the shell.
+    ///
+    /// `None` covers both "not riding" ([`Riding`] absent or `None`) and every
+    /// "decline rather than guess" case [`crate::entities::riding_render_seat`]
+    /// documents — the vehicle not spawned client-side yet, no interpolation
+    /// track on it, or no [`VersionData`]/no facts for its type. The caller's
+    /// fallback in every such case is the tick-boundary seat
+    /// `pin_passenger_to_vehicle` already pins, so declining here never leaves
+    /// the player somewhere invented.
+    #[must_use]
+    fn riding_seat_this_frame(&self) -> Option<glam::Vec3> {
+        self.read(|w| {
+            let vehicle_id = w.get::<Riding>(self.local)?.0?;
+            let own_id = w.get::<ServerEntityId>(self.local).and_then(|id| id.0);
+            crate::entities::riding_render_seat(w, vehicle_id, own_id)
+        })
+    }
+
+    /// Build the **true first-person eye** camera for the given viewport
+    /// aspect ratio, with the feet position interpolated between the last two
+    /// physics ticks so motion stays smooth even though physics runs at a
+    /// fixed 20 Hz. View angles are current (mouse-look is per-frame, matching
+    /// vanilla).
+    ///
+    /// The pose's eye height is passed to [`build_camera`] explicitly, so the
+    /// position handed to it is the player's real interpolated feet in every pose
+    /// (vanilla's own per-pose eye heights: `0.4` swimming, `1.27` crouching, `1.62` standing).
+    /// It used to be folded into the feet Y as a bias instead — arithmetically the
+    /// same, but the argument was then not the feet whenever a non-standing pose
+    /// was active. See `camera_rig.rs`'s module docs.
+    ///
+    /// This is also the ray origin for [`update_target`](Self::update_target)
+    /// and the audio listener ([`Self::set_audio_listener`]'s caller in
+    /// `app.rs`), **deliberately unmodified by third-person mode**: block
+    /// interaction and hearing both originate from the real eye in vanilla,
+    /// not from wherever a pulled-back camera happens to be. Only the actual
+    /// render pass wants the third-person offset — see [`Self::render_camera`].
+    #[must_use]
+    pub fn camera(&self, aspect: f32) -> Camera {
+        let interp = self.interpolated_player();
+        let mut camera = build_camera(
+            &interp,
+            // The *camera's* eased eye, not `interp.eye_height` — see the field's
+            // doc. Interpolating the entity's eye height would still snap, because
+            // the value being interpolated between two ticks is itself the
+            // post-snap one.
+            self.eye_height_smoother.lerp(self.clock().interp_alpha),
+            aspect,
+            self.config.render_distance,
+            // Vanilla's FOV option, not the module constant `build_camera` used
+            // to write itself — see [`Self::set_fov_y_degrees`].
+            self.fov_y_degrees,
+        );
+        if let Some((position, yaw, pitch)) = self.camera_entity_pose() {
+            camera.position = position;
+            camera.yaw = yaw;
+            camera.pitch = pitch;
+        }
+        camera
+    }
+
+    /// The selected remote entity's live camera pose, when its shared state has
+    /// arrived. The local-player id deliberately uses the normal camera path.
+    ///
+    /// Entity-specific eye heights are not represented at this boundary yet, so
+    /// this uses the same standing-height fallback as other remote eye consumers.
+    fn camera_entity_pose(&self) -> Option<(glam::Vec3, f32, f32)> {
+        let entity_id = self.camera_entity_id?;
+        if self.server_entity_id().map(EntityNetworkId::from_raw) == Some(entity_id) {
+            return None;
+        }
+        self.read(|world| {
+            let entity = world.resource::<EntityIndex>().get_typed(entity_id)?;
+            let position = world.get::<Position>(entity)?.0;
+            let rotation = world.get::<lodestone_ecs::entity::Rotation>(entity)?.0;
+            Some((
+                glam::Vec3::new(
+                    position.x as f32,
+                    position.y as f32 + lodestone_physics::player::DEFAULT_EYE_HEIGHT,
+                    position.z as f32,
+                ),
+                rotation.yaw,
+                rotation.pitch,
+            ))
+        })
+    }
+
+    /// Adopt the server-selected camera subject. Resolution stays lazy because
+    /// the set-camera packet may arrive before the target's entity spawn.
+    pub(crate) fn set_camera_entity(&mut self, entity_id: EntityNetworkId) {
+        self.camera_entity_id = Some(entity_id);
+    }
+
+    /// Push vanilla's **FOV** option ([`crate::config::Options::fov`]) down from
+    /// the menu layer in degrees, exactly as [`Self::set_view_bobbing`] does for
+    /// View Bobbing, and polled per frame for the same reason.
+    ///
+    /// Per frame rather than at launch because vanilla applies this one
+    /// immediately: its own int-range option takes the default
+    /// immediate-apply behaviour, unlike `renderDistance`'s explicit opt-out. So the
+    /// FOV slider must move the view while the settings page is still open, which
+    /// is why this is a `Sim` field and not a `Config::resolve_persisted` fold like
+    /// `render_distance`.
+    ///
+    /// Clamping lives in [`build_camera`], which is the one place that can see
+    /// every producer — the setter storing a raw value keeps this from being a
+    /// second, drifting copy of vanilla's range.
+    pub fn set_fov_y_degrees(&mut self, degrees: f32) {
+        self.fov_y_degrees = degrees;
+    }
+
+    /// The FOV in degrees this frame, before the spyglass zoom. Exposed so a gate
+    /// can assert the pushed value separately from the projection it produces.
+    #[must_use]
+    pub fn fov_y_degrees(&self) -> f32 {
+        self.fov_y_degrees
+    }
+
+    /// Advances the camera mode one step (vanilla's `F5`, i.e.
+    /// its own camera-type cycling): first person → third person back → third person
+    /// **front** → first person.
+    ///
+    /// [`Self::render_camera`] and [`Self::third_person_body_state`] are the two
+    /// halves of
+    /// [`RenderState::set_third_person_body_source`](crate::gpu::RenderState::set_third_person_body_source)'s
+    /// closure, and both read this one field, so they can never disagree about
+    /// which mode is active this frame. They ask *different questions* of it,
+    /// though: the body state (and hence every screen-overlay and first-person-arm
+    /// gate downstream of `RenderStats::third_person_body_drawn`) is keyed on
+    /// `is_first_person`, and only the camera itself distinguishes back from
+    /// front.
+    pub fn cycle_camera_type(&mut self) {
+        self.camera_type = self.camera_type.cycle();
+    }
+
+    /// The camera mode this frame — all three of vanilla's states.
+    #[must_use]
+    pub fn camera_type(&self) -> crate::camera_rig::CameraType {
+        self.camera_type
+    }
+
+    /// The camera the frame is actually **drawn** from: [`Self::camera`]
+    /// unmodified in first person, or that same eye pulled straight backward
+    /// along its own view direction in third person — vanilla's real
+    /// "back" algorithm, not a stand-in for it — clamped against live
+    /// collision geometry so it never clips through a wall (see
+    /// [`crate::camera_rig::collision_pullback`]).
+    ///
+    /// Reads whichever collision adapter [`Self::update_target`] would use
+    /// (`LiveCollision` on a server, `WorldCollision` on the offline fixture),
+    /// so a third-person camera respects the exact same geometry the player
+    /// collides against. A live session whose own column has not streamed in
+    /// yet (`Self::live_collision` returning `None`) has nothing real to
+    /// clamp against, so this falls back to the desired distance unclamped
+    /// rather than jamming the camera into the eye.
+    /// Push vanilla's View Bobbing option down from the menu layer. Cheap and
+    /// idempotent; `app.rs` calls it once per presented frame rather than on the
+    /// toggle, for the same reason the deleted present-mode poll did — the menu
+    /// is pure and owns the `Options`, and `Sim` owns none.
+    pub fn set_view_bobbing(&mut self, on: bool) {
+        self.view_bobbing = on;
+    }
+
+    /// Push vanilla's **Damage Tilt** accessibility option down from the menu
+    /// layer, exactly as [`Self::set_view_bobbing`] does for View Bobbing.
+    ///
+    /// The two are the halves of one vanilla split and must be pushed together:
+    /// `GameRenderer.renderLevel` applies `bobHurt` *outside* the `bobView` check,
+    /// so turning View Bobbing off must not take the damage tilt with it.
+    ///
+    /// Clamped here as well as on load, because this is the value a matrix is
+    /// built from and a stray negative would roll the camera the wrong way.
+    pub fn set_damage_tilt_strength(&mut self, strength: f32) {
+        self.damage_tilt_strength = strength.clamp(0.0, 1.0);
+    }
+
+    /// The Damage Tilt strength this frame — for the two consumers that build a
+    /// matrix from it, [`Self::damage_tilt_eye_transform`] and the first-person
+    /// hand pass.
+    #[must_use]
+    pub fn damage_tilt_strength(&self) -> f32 {
+        self.damage_tilt_strength
+    }
+
+    /// This frame's `bobHurt` as an **eye-space** matrix — the damage tilt swung
+    /// onto the direction the hit came from, plus the death roll.
+    ///
+    /// # This is the hop that was missing, and why it is not a `Camera`
+    ///
+    /// `bobHurt` is almost entirely a **roll**, and [`bobbed_camera`] cannot carry
+    /// one: `Camera` is `position`/`yaw`/`pitch`, two angles, so a decomposed
+    /// orientation has two degrees of freedom where the bob matrix has three. That
+    /// — not an unverified formula, and not a missing packet decode — is why
+    /// `render_camera` passed a hard `0.0` for so long. The maths was ported and
+    /// tested the whole time; there was no seam it could reach the matrix through.
+    ///
+    /// `RenderState::set_eye_bob_transform` is that seam, and it is vanilla's own
+    /// `projectionMatrix.mul(bobStack.last().pose())` — the bob multiplied into the
+    /// world view-projection in eye space rather than folded into camera fields.
+    /// `Self::camera` is deliberately untouched by it, so the block-targeting ray
+    /// and the audio listener still do not bob.
+    ///
+    /// Returns the identity when the player has not been hit recently, which is
+    /// almost every frame.
+    #[must_use]
+    pub fn damage_tilt_eye_transform(&self) -> glam::Mat4 {
+        self.bob_frame().hurt_transform(self.damage_tilt_strength)
+    }
+
+    /// The interpolated walk bob this frame, or a frame with the walk terms
+    /// zeroed when the option is off. Exposed so a gate can assert the *input*
+    /// to the camera fold separately from the fold itself.
+    ///
+    /// The option zeroes **only the walk terms**, never the hurt half of the
+    /// frame: vanilla's `bobHurt` is unconditional — `GameRenderer.renderLevel`
+    /// applies it outside the `optionsRenderState.bobView` check
+    /// — so the damage tilt must survive View
+    /// Bobbing being off. A player who has not been hit recently is unaffected
+    /// either way (`frame.hurt` is negative when the countdown has lapsed, and
+    /// `BobFrame::hurt_roll_degrees` already returns `0` for that), so this
+    /// differs from the old whole-frame `BobFrame::default()` only in the ten
+    /// ticks after a hit.
+    #[must_use]
+    pub fn bob_frame(&self) -> crate::camera_rig::BobFrame {
+        let frame = self.view_bob.frame(self.clock().interp_alpha);
+        if self.view_bobbing {
+            frame
+        } else {
+            crate::camera_rig::BobFrame {
+                walk_phase: 0.0,
+                bob: 0.0,
+                ..frame
+            }
+        }
+    }
+
+    /// The local player was hurt: start the damage tilt (`Player.animateHurt`,
+    /// which records `hurtDir = yaw` after `LivingEntity.animateHurt` resets the
+    /// ten-tick countdown). The wire `yaw` is
+    /// `ClientboundHurtAnimationPacket.yaw`, already decoded onto
+    /// `ClientEvent::EntityHurtAnimation`; the server computes it as
+    /// `atan2(damage) - playerYaw` (`ServerPlayer.indicateDamage`), so a hit from
+    /// straight ahead is `0` — the pure-roll case.
+    ///
+    /// The camera-side half of the `bobHurt` wiring: `ViewBob` owns the
+    /// countdown and direction here, and the ECS `HurtTime` component
+    /// (`lodestone_ecs::entity::HurtTime`, folded by
+    /// `apply_entity_hurt_animation`) is a separate consumer that exists for
+    /// the red hurt-flash overlay. Called by the net-apply layer when
+    /// `EntityHurtAnimation` names the local player's own id — see
+    /// `docs/view-bobbing.md` for that hop.
+    pub fn on_local_player_hurt(&mut self, yaw_degrees: f32) {
+        self.view_bob.hurt(yaw_degrees);
+    }
+
+    #[must_use]
+    pub fn render_camera(&self, aspect: f32) -> Camera {
+        // The `CameraOverride` hook: a plugin's wish to drive the drawn frame
+        // directly, `LookIntent`-style (insert to take control, remove to
+        // hand it back). Reuses `Self::camera(aspect)`'s near/far/FOV
+        // derivation (render distance, vanilla FOV option) rather than letting
+        // the override supply them, so it cannot open either clip plane wrong
+        // by omission — only position/yaw/pitch differ. Deliberately does not
+        // touch `PhysicsState`, `Self::camera` (the pick-ray/audio-listener
+        // source), or anything below this early return: this is the *drawn*
+        // frame only, a deliberate scope limit rather than a gap.
+        if let Some(over) = self.read(|w| w.get::<CameraOverride>(self.local).copied()) {
+            let mut cam = self.camera(aspect);
+            // `CameraOverride::position` is `lodestone_model::Vec3` (f64, the
+            // world-space precision every ECS position uses); `Camera::position`
+            // is `glam::Vec3` (f32, the render layer's own precision) — the same
+            // narrowing `interpolated_player()`'s `x as f32` does a few lines
+            // below for the unmodified path.
+            cam.position = glam::Vec3::new(
+                over.position.x as f32,
+                over.position.y as f32,
+                over.position.z as f32,
+            );
+            cam.yaw = over.yaw;
+            cam.pitch = over.pitch;
+            return cam;
+        }
+        // The bob lands **here and not in `Self::camera`**, which is deliberate
+        // and is the difference between a wobbling camera and a wobbling *game*:
+        // `Self::camera` is also the block-targeting ray origin and the audio
+        // listener, and vanilla bobs neither. `GameRenderer.renderLevel` folds the
+        // bob into the *projection matrix* (`:539`), so `Camera`'s own position
+        // and rotation — what `getPickRay` and the listener read — never see it.
+        //
+        // Not gated on `third_person`: 26.2's `renderLevel` applies `bobView`
+        // whenever `optionsRenderState.bobView` is set, with no camera-type check
+        //, and `bobView` itself only tests
+        // `isPlayer`. Older versions did suppress it in third person and issue
+        // That fix's body says so; re-read against `.cache/mc/26.2/client-src`, that is
+        // no longer true.
+        let eye = bobbed_camera(
+            self.camera(aspect),
+            self.bob_frame(),
+            // **Still `0.0` here, and that is now a routing decision rather than
+            // a hold.** `bobHurt` is almost entirely a roll, and this fold cannot
+            // carry one — `Camera` has `position`/`yaw`/`pitch`, two angles,
+            // against the bob matrix's three degrees of freedom. Passing a real
+            // strength here would not tilt the camera; it would smear the roll
+            // into yaw and pitch, which is worse than dropping it.
+            //
+            // So the hurt half takes the *other* route, the one vanilla itself
+            // uses: `Self::damage_tilt_eye_transform` hands it to
+            // `RenderState::set_eye_bob_transform`, which multiplies it into the
+            // world view-projection in eye space — `projectionMatrix.mul(bobStack)`.
+            // This fold keeps `bobView` only, whose own roll term is under `0.3°`.
+            //
+            // Both halves are therefore live; nothing about the damage tilt is
+            // held off any more. See `docs/view-bobbing.md`.
+            0.0,
+        );
+        // `is_first_person`, not "is it the back view": vanilla's own predicate
+        // here is the negation of its own camera-type first-person check (its
+        // own client-side camera update's `detached` assignment), so the front view takes the *same* pullback
+        // path as the back view and differs only by the mirror inside
+        // `third_person_camera`.
+        if self.camera_type.is_first_person() {
+            // Vanilla's FOV zoom is gated on `firstPerson &&
+            // isScoping()` (its own field-of-view-modifier calculation) —
+            // a third-person camera
+            // never zooms, so this composition only runs on the early
+            // first-person return, not the two third-person branches below.
+            return apply_spyglass_fov(eye, self.spyglass_scoping());
+        }
+        let camera_type = self.camera_type;
+        if self.is_live() {
+            match self.live_collision() {
+                Some(view) => third_person_camera(eye, camera_type, &view),
+                None => third_person_camera(eye, camera_type, &NoCollision),
+            }
+        } else {
+            let store = self.chunk_world();
+            let world = store.read();
+            let view = WorldCollision::new(&world);
+            third_person_camera(eye, camera_type, &view)
+        }
+    }
+
+    /// Vanilla's own is-scoping check: using an item, and that item
+    /// is the spyglass
+    ///, computed entirely from `Sim`'s own state so
+    /// [`Self::render_camera`] needs no new parameter — `app.rs` computes the
+    /// same condition independently for `ScreenEffects::scoping` (it already
+    /// has the held item at hand for the first-person render source), and
+    /// the two are expected to agree rather than share a call, the same way
+    /// `wearing_pumpkin` is computed locally in `app.rs` rather than exposed
+    /// from here.
+    #[must_use]
+    fn spyglass_scoping(&self) -> bool {
+        self.using_item()
+            && self
+                .player_menu()
+                .player_native(self.selected_slot())
+                .is_some_and(|st| st.item().to_string() == "minecraft:spyglass")
+    }
+
+    /// The local player's own third-person body for this frame, or `None` in
+    /// first person — exactly the value `app.rs` hands
+    /// [`RenderState::set_third_person_body_source`](crate::gpu::RenderState::set_third_person_body_source)'s
+    /// closure every frame.
+    ///
+    /// The walk cycle, **arm swing** and idle age come from [`Self::body_pose`],
+    /// ticked once per physics tick the same way `entities.rs`'s `render_anim`
+    /// drives one for a tracked network entity, and interpolated here for the
+    /// current sub-tick alpha. Facing does **not** come from that pose,
+    /// though: `body_yaw_deg`/`head_pitch_deg` are read straight off the
+    /// interpolated player instead, so the avatar's own facing tracks the
+    /// camera with no per-tick lag — the lag `EntityPose`'s body-yaw smoothing
+    /// exists to model is a *third-party observer's* view of a remote entity,
+    /// which does not apply to your own body.
+    ///
+    /// Two gaps, both left exactly where the equivalent gap already is
+    /// elsewhere in this codebase rather than guessed at:
+    /// * **Head yaw never diverges from body yaw** (`head_yaw_deg` is always
+    ///   `0`): vanilla's independent head-turn-then-body-catches-up
+    ///   (`LivingEntity.tickHeadTurn`) is not modelled for the local player
+    ///   anywhere in this engine.
+    /// * **`slim`/skin data**: the rig comes from
+    ///   [`crate::skin_fetch::current_model`] — the same signed-in-profile
+    ///   fetch that already reaches the inventory avatar
+    ///   (`container::player_preview`), read here instead of drained from
+    ///   its one-shot pending slot so this body sees it on every frame, not
+    ///   only the one after a container last opened. The **texture** is a
+    ///   separate, still-open gap (`player_skin: None` below;
+    ///   `docs/player-skins.md`) — only the rig shape is fixed here.
+    /// * **Equipment covers main hand, off hand, and all four armour
+    ///   slots.** Main hand is the selected hotbar slot; off hand is native
+    ///   inventory index `40`; the armour slots are native indices
+    ///   `39/38/37/36` for head/chest/legs/feet (`lodestone_game::menu`'s own
+    ///   table, `Menu::player`).
+    /// The local player's own animation state for this frame — the walk cycle,
+    /// the arm swing, the head pitch, the crouch — with **no camera-mode gate**.
+    ///
+    /// [`Self::third_person_body_state`] is this plus placement and equipment, and
+    /// its `None`-in-first-person early return is a *drawing* decision: the body
+    /// must not be drawn when the camera is inside its head. The pose itself is
+    /// camera-independent, and one consumer needs it precisely when the camera is
+    /// first-person — the **inventory avatar**, which is only ever opened in first
+    /// person. That is the whole reason this exists as its own method: the
+    /// obstacle was never access to `Sim`'s private `body_pose`, it was that early
+    /// return.
+    ///
+    /// Fed to `ContainerFrame::with_avatar_pose` → `gui_entity_anim`'s `base` in
+    /// `app/redraw.rs`; see `docs/inventory-player-preview.md`.
+    ///
+    /// **`attack_anim` here is a phase, not a fraction.** `1.0` is the rest pose
+    /// again, because `HumanoidModel.setupAttackAnimation` drives it through sines
+    /// and `sin(π) == 0` — so a consumer that substitutes `1.0` for "fully
+    /// swung" measures no movement at all and reads as unwired.
+    #[must_use]
+    pub fn local_body_anim(&self) -> AnimInput {
+        let partial_tick = self.clock().interp_alpha;
+        self.body_anim(&self.interpolated_player(), &self.body_pose.render(partial_tick), partial_tick)
+    }
+
+    /// **Our own** skin, resolved through the identical ladder every other
+    /// player's goes through: `entities::player_skin_for_uuid` against the same
+    /// tab list, which is the profile the *server* saw and therefore the same
+    /// evidence a remote client would draw us from.
+    ///
+    /// `None` only before login, or on a server that never told us our own
+    /// uuid — and both are logged, because a skin that quietly declines to
+    /// resolve is invisible at the draw site: a default skin looks exactly like
+    /// a skin. Everything past that point has a real answer, including "this
+    /// account has none", which resolves to its uuid-hash built-in identity
+    /// rather than to a silent fallback.
+    ///
+    /// # Two side effects, and both are the point
+    ///
+    /// It **starts the fetch** (`remote_skins::request`, idempotent and
+    /// memoised per url, so the per-frame call costs one map lookup after the
+    /// first). Nothing else would: `app/redraw.rs`'s per-frame `request_all`
+    /// collects urls off the *entity draws*, and the local player is not among
+    /// them — `extract_entity_draws` excludes it — so our own url would reach
+    /// no fetch at all and our own body would sit on the built-in identity
+    /// forever.
+    ///
+    /// And it **publishes to `remote_skins::set_local`**, which is how the
+    /// first-person arm reads it. The arm and this body are mutually exclusive
+    /// — the arm draws exactly when [`Self::third_person_body_state`] returns
+    /// `None` — so the arm cannot read the body's state and needs the skin
+    /// through a channel that survives the camera-mode gate.
+    ///
+    /// That is why the call site is *above* that gate in
+    /// [`Self::third_person_body_state`], which `app/redraw.rs` invokes every
+    /// frame regardless of camera mode. Moving this below the early return, or
+    /// calling it only when a body is drawn, silently unwires the arm.
+    pub fn local_player_skin(&self) -> Option<crate::remote_skins::RemoteSkin> {
+        let Some(id) = self.local_uuid() else {
+            tracing::debug!(
+                target: "assets",
+                "no local uuid yet, so our own body and arm draw the pack default rig"
+            );
+            return None;
+        };
+        let mut skin = crate::entities::player_skin_for_uuid(id, &self.tab_list());
+        if skin.url.is_empty() {
+            // The tab list declared nothing, which is not a failure and not
+            // rare: every offline-mode server and every singleplayer world
+            // sends no `textures` property at all.
+            //
+            // Our own cached profile sheet is the one thing that can still be
+            // right here, and it is the *only* rung of this ladder that is
+            // ours alone — a remote player has no equivalent, which is why it
+            // lives here rather than in the shared resolver. Without it the
+            // inventory avatar drew the owner's real skin and the body beside
+            // it drew a uuid-hash identity, for the same person, in the same
+            // frame.
+            match crate::skin_fetch::local_profile_sheet_key(id) {
+                Some(key) => {
+                    key.clone_into(&mut skin.url);
+                    // The rig has to move with the sheet or the arms sit a
+                    // texel out, and `skin_fetch` owns the rig that sheet was
+                    // authored for.
+                    if let Some(model) = crate::skin_fetch::current_model(id) {
+                        skin.model = model;
+                    }
+                }
+                None => {
+                    // Logged because "drew a default" and "declined to
+                    // resolve" are indistinguishable on screen, and only one
+                    // of them is a bug.
+                    tracing::debug!(
+                        target: "assets",
+                        player = %id,
+                        sheet = skin.default_sheet,
+                        "no declared skin and no cached profile sheet; drawing the \
+                         uuid-hash identity"
+                    );
+                }
+            }
+        } else {
+            crate::remote_skins::request(&skin.url);
+        }
+        // The body draw is synthetic rather than part of the extracted remote
+        // entity list, so its additional wearable sheets do not pass through
+        // `app::redraw`'s per-entity request collection. Route them here with
+        // the same idempotent URL cache as the skin itself.
+        if let Some(url) = skin.cape.as_deref() {
+            crate::remote_skins::request(url);
+        }
+        if let Some(url) = skin.elytra.as_deref() {
+            crate::remote_skins::request(url);
+        }
+        crate::remote_skins::set_local(id, &skin);
+        Some(skin)
+    }
+
+    #[must_use]
+    pub fn third_person_body_state(&self) -> Option<ThirdPersonBodyState> {
+        // Resolved **before** the camera-mode gate below, deliberately: this is
+        // the only per-frame call the shell makes into this file whatever the
+        // camera mode, and the first-person arm — which draws precisely when
+        // this returns `None` — reads the published result. See
+        // `local_player_skin`'s own doc.
+        let player_skin = self.local_player_skin();
+        // `isFirstPerson()`, so the body draws in **both** detached modes. This
+        // is also what suppresses the first-person arm and the pumpkin/underwater
+        // overlays in the front view: `gpu/frame.rs` derives both from
+        // `RenderStats::third_person_body_drawn`, which is this `Option`'s
+        // `is_some()`. Asking "is the camera behind me" here instead would put
+        // the arm back on screen in front view.
+        if self.camera_type.is_first_person() {
+            return None;
+        }
+        let partial_tick = self.clock().interp_alpha;
+        let interp = self.interpolated_player();
+        let feet = glam::Vec3::new(
+            interp.position.x as f32,
+            interp.position.y as f32,
+            interp.position.z as f32,
+        );
+        let walk = self.body_pose.render(partial_tick);
+        /// Native player-inventory index of the off-hand slot
+        /// (`lodestone_game::menu`'s doc table: hotbar `0..=8`, off-hand `40`).
+        const OFFHAND_NATIVE_INDEX: usize = 40;
+        let menu = self.player_menu();
+        let mut equipment = Vec::new();
+        let mut equipment_skin = Vec::new();
+        let mut add_equipment = |native: usize, slot: EquipmentSlot, use_item_model: bool| {
+            let Some(stack) = menu.player_native(native) else {
+                return;
+            };
+            let visual = if use_item_model {
+                stack.item_model().unwrap_or_else(|| stack.item().clone())
+            } else {
+                stack.item().clone()
+            };
+            let Ok(id) = ResourceLocation::parse(&visual.to_string()) else {
+                return;
+            };
+            equipment.push((slot, id));
+            if let Some(skin) = crate::hud::item_icon::stack_skin_url(stack) {
+                equipment_skin.push((slot, skin));
+            }
+        };
+        add_equipment(self.selected_slot(), EquipmentSlot::MainHand, true);
+        add_equipment(OFFHAND_NATIVE_INDEX, EquipmentSlot::OffHand, false);
+        // Native player-inventory indices of the four armour slots
+        // (`lodestone_game::menu::Menu::player`'s own table: menu slots
+        // `5..=8` are head/chest/legs/feet at native indices `39/38/37/36` —
+        // the native indices run backwards, feet-first).
+        const ARMOUR_NATIVE_SLOTS: [(usize, EquipmentSlot); 4] = [
+            (39, EquipmentSlot::Head),
+            (38, EquipmentSlot::Chest),
+            (37, EquipmentSlot::Legs),
+            (36, EquipmentSlot::Feet),
+        ];
+        for (native, slot) in ARMOUR_NATIVE_SLOTS {
+            add_equipment(native, slot, false);
+        }
+        Some(ThirdPersonBodyState {
+            feet,
+            // `walk.body_yaw` — `EntityPose::render`'s interpolated body yaw —
+            // not `interp.yaw` (the raw look yaw). This used to be `interp.yaw`
+            // directly, which is the mesh-orientation half of the "body always
+            // faces exactly where the camera does" bug: `Sim::step` already
+            // feeds `body_pose` a properly eased, clamped body yaw (see its own
+            // doc), but this accessor was reading straight past it to the raw
+            // look yaw instead, so the fix in `step.rs` alone was invisible on
+            // screen. `walk` was already computed above for `anim`'s walk-cycle
+            // fields; this reuses it rather than re-deriving `body_pose.render`
+            // a second time at a different partial tick.
+            body_yaw_deg: walk.body_yaw,
+            anim: self.body_anim(&interp, &walk, partial_tick),
+            scale: 1.0,
+            // `Mth.lerp(partialTick, swimAmountO, swimAmount)` — the same
+            // blend `body_anim` computes for `AnimInput::swim_amount` (the
+            // arm-stroke input) below, off the same physics-integrated
+            // `PlayerState` fields. This is the *body-pitch* half
+            // (`gpu::entity_passes::apply_swim_rotation` reads
+            // `ThirdPersonBodyState::swim_amount`, not `anim.swim_amount`),
+            // and it used to have no source at all — see that field's own
+            // doc for the "stood bolt upright" symptom this fixes.
+            swim_amount: interp.swim_amount_o
+                + (interp.swim_amount - interp.swim_amount_o) * partial_tick,
+            // The rig comes from the resolved skin when there is one, because
+            // the rig and the sheet must change together — a slim-authored
+            // sheet on the wide rig puts the arm UVs a texel out. The
+            // signed-in profile's own rig is the fallback for a session where
+            // no tab-list entry for us exists yet; it was the *only* source
+            // before the tab-list resolution above existed, which is why our
+            // own body could be the right shape and still the wrong skin.
+            slim: player_skin
+                .as_ref()
+                .map_or(lodestone_assets::PlayerModelType::Wide, |skin| skin.model)
+                .is_slim(),
+            player_skin,
+            equipment,
+            equipment_skin,
+        })
+    }
+
+    /// The `AnimInput` half of [`Self::third_person_body_state`], taking the two
+    /// values that caller already has in hand so nothing is interpolated twice at
+    /// a different partial tick, plus the `partial_tick` itself for the one field
+    /// ([`AnimInput::swim_amount`]) that needs to blend between two tick-quantized
+    /// physics values rather than reading a single already-current one.
+    ///
+    /// Split out for [`Self::local_body_anim`] — see its doc for why.
+    #[must_use]
+    fn body_anim(
+        &self,
+        interp: &PlayerState,
+        walk: &lodestone_entity::pose::RenderPose,
+        partial_tick: f32,
+    ) -> AnimInput {
+        AnimInput {
+            // `walk.head_yaw` is `EntityPose::render`'s `relative_head_yaw_lerp`
+            // — the look yaw already clamped to and expressed relative to the
+            // eased body yaw `Sim::step` now feeds `EntityPose::tick`. This
+            // used to be a bare `0.0`: `EntityPose::tick` was fed the raw look
+            // yaw for *both* its `body_yaw` and `head_yaw` parameters, which
+            // makes the body always equal the head (`Sim::step`'s own doc on
+            // that call explains why), so this field being unread there was
+            // no loss — reading it back now that the body actually lags is
+            // what makes the head turn independently of the body at all.
+            head_yaw_deg: walk.head_yaw,
+            head_pitch_deg: interp.pitch,
+            limb_swing: walk.limb_swing,
+            limb_swing_amount: walk.limb_swing_amount,
+            // The self-avatar's *body* half of the swing:
+            // `HumanoidModel.setupAttackAnimation`, via
+            // `lodestone_render::entity_anim::Skeleton::pose`. The same scalar
+            // the first-person arm pass polls through
+            // `Sim::hand_swing_progress`, but a completely different pose
+            // function — see `ThirdPersonBodyState`'s docs on why the two must
+            // never share one.
+            //
+            // `walk.attack_anim` rather than `self.hand_swing_progress()`: both
+            // are `body_pose.attack_anim_lerp(partial_tick)`, and this one is
+            // already in hand from the `render` call above at the *same*
+            // partial tick, so the arm and the body cannot drift by a frame.
+            attack_anim: walk.attack_anim,
+            age_ticks: walk.age,
+            aggressive: false,
+            // **Not wired for the local player yet.** Remote
+            // entities get their bow/crossbow pose from
+            // `entities::arm_pose_for`, driven by the `ItemUse` component that
+            // `ingest::apply_entity_item_use` folds off the living-flags byte.
+            // The local player cannot use that path: it has no `EntityKind`/
+            // `Position`/`Rotation`/`HeadYaw` (deliberately — that absence is
+            // what keeps a self-model off `ClientHandle::entities()`), so
+            // `entity_view()`'s early `?` returns before the flags are read,
+            // exactly as it does for `Vitals::on_fire`. Reaching it needs a
+            // session-scoped fold and a `PlayerSnapshot` field, the same shape
+            // `apply_local_player_on_fire` has. Left explicit rather than
+            // spread with `..AnimInput::REST` so the gap is visible here.
+            arm_pose: lodestone_render::ArmPose::Empty,
+            arm_pose_left_hand: false,
+            // Vanilla's own is-crouching check is really a pose check — the
+            // *pose*, not the shift-key flag, and
+            // the two genuinely differ: holding shift in a one-block gap
+            // leaves you shift-key-down and `SWIMMING`. For the local player
+            // the pose is already authoritative and already fit-gated —
+            // `lodestone_physics::pose::update_player_pose` writes
+            // `PlayerState::pose` as the tail of every tick — so this reads
+            // it directly rather than re-deriving a crouch from input.
+            crouching: interp.pose == lodestone_physics::pose::Pose::Crouching,
+            // Vanilla's own is-passenger check. The local player has no `Vehicle`
+            // component the way a tracked remote entity does (see
+            // `entities::extract_entity_draws`'s own doc on why) — it is the
+            // one entity `session::Riding` exists to answer this for instead,
+            // and that is already the source `Self::riding_seat_this_frame`
+            // reads to derive the camera's own seat, so the two cannot
+            // disagree about "am I riding" even though they answer two
+            // different questions from it.
+            is_passenger: self.read(|w| {
+                w.get::<Riding>(self.local).is_some_and(|riding| riding.0.is_some())
+            }),
+            // `Mth.lerp(partialTick, swimAmountO, swimAmount)` — the same blend
+            // `entities::extract_entity_draws` does for a tracked remote entity's
+            // `SwimRamp`, except the local player already carries the real
+            // physics-integrated value (`lodestone_physics::player::PlayerState`'s
+            // own `swim_amount`/`swim_amount_o`, updated every tick by
+            // `update_swim_amount`) rather than an approximation reconstructed
+            // client-side from a synced `Pose`. This used to be a bare `0.0`
+            // wherever this `AnimInput` reached `ThirdPersonBodyState` (see that
+            // struct's own doc on `swim_amount`), so our own third-person body
+            // stood bolt upright while swimming; that gap is `ThirdPersonBodyState`
+            // gaining its own `swim_amount` field from `interp` directly; this
+            // one is the *arm-stroke* input, which reads the same interpolated
+            // number but through `AnimInput` rather than `EntityDraw`.
+            swim_amount: interp.swim_amount_o + (interp.swim_amount - interp.swim_amount_o) * partial_tick,
+            // The local body has no remote model-customization component, so
+            // the unreported state keeps the visible default.
+            cape_visible: true,
+            fall_flying: interp.fall_flying,
+            motion: glam::Vec3::new(
+                interp.velocity.x as f32,
+                interp.velocity.y as f32,
+                interp.velocity.z as f32,
+            ),
+            // The local player is never an armour stand, and `None` here is the
+            // field's own meaning of "not one" rather than a gap — see
+            // `AnimInput::armor_stand_pose`. Stated explicitly, like `arm_pose`
+            // above, rather than spread from `AnimInput::REST`.
+            armor_stand_pose: None,
+            armor_stand_yaw_deg: 0.0,
+            // The local player is never a vehicle either. Stated explicitly for
+            // the same reason `armor_stand_pose` above is.
+            boat_hurt: lodestone_render::entity_anim::BoatHurt::REST,
+        }
+    }
+}
+
+/// A [`CollisionView`] with no geometry at all, for
+/// [`Sim::render_camera`]'s third-person pullback when no live collision
+/// snapshot exists yet (the player's own column has not streamed in): there
+/// is nothing real to clamp against, so the camera pulls back the full
+/// desired distance rather than treating "no data" as "solid".
+struct NoCollision;
+
+impl CollisionView for NoCollision {
+    fn collision_boxes(&self, _x: i32, _y: i32, _z: i32, _out: &mut Vec<lodestone_physics::Aabb>) {}
+}

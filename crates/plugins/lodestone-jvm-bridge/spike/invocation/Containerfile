@@ -1,0 +1,36 @@
+FROM rust:1.90.0-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f2db16d1d8a7e58f
+
+# Install one exact Temurin archive instead of resolving a moving package
+# repository. Both supported architectures are checksum-locked to 25.0.3+9.
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) \
+        jdk_url='https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.3%2B9/OpenJDK25U-jdk_x64_linux_hotspot_25.0.3_9.tar.gz'; \
+        jdk_sha256='69264a7a211bf5029830d07bc3370f879769d62ebc5b5488e90c9343a2da0e1f' \
+        ;; \
+      arm64) \
+        jdk_url='https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.3%2B9/OpenJDK25U-jdk_aarch64_linux_hotspot_25.0.3_9.tar.gz'; \
+        jdk_sha256='3e4287cb98870ba824ed698854bdc27cff984254caf66dd12cc291e7bfdde26b' \
+        ;; \
+      *) \
+        echo 'unsupported architecture' >&2; \
+        exit 1 \
+        ;; \
+    esac; \
+    curl --fail --location --silent --show-error "${jdk_url}" --output /tmp/openjdk.tar.gz; \
+    echo "${jdk_sha256}  /tmp/openjdk.tar.gz" | sha256sum --check --strict; \
+    mkdir -p /opt/java/openjdk; \
+    tar --extract --gzip --file /tmp/openjdk.tar.gz --directory /opt/java/openjdk --strip-components=1; \
+    rm /tmp/openjdk.tar.gz
+
+ENV JAVA_HOME=/opt/java/openjdk
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
+
+RUN rustup toolchain install nightly-2026-08-07 \
+      --profile minimal \
+      --component rustc-codegen-cranelift-preview \
+    && rustup default nightly-2026-08-07
+
+# The digest-pinned Rust image supplies rustup and cc. The installed dated
+# nightly matches the repository's Cargo profile, while the checksum-pinned JDK
+# supplies the JVM, its invocation library and javac on arm64 and amd64.

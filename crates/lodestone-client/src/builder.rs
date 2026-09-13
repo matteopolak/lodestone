@@ -1,0 +1,440 @@
+//! The [`ClientBuilder`] entry point.
+
+use std::collections::HashMap;
+use std::sync::{
+    Arc,
+    atomic::AtomicU64,
+};
+use std::time::Duration;
+
+use lodestone_model::{LoginProfile, ResourceKey, ServerAddress, VersionAdapter};
+use lodestone_net::{Connection, Transport};
+use tokio::sync::{mpsc, oneshot};
+
+use crate::config::{KeepAlivePolicy, PlayerLoadedPolicy, RespawnPolicy};
+use crate::driver::Driver;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::error::ClientError;
+use crate::handle::{ClientHandle, EventStream};
+
+/// The account policy a native client carries into the login handshake.
+///
+/// This is deliberately not an `Option<Session>`: an explicit offline identity,
+/// a usable online session, and an online account whose session could not be
+/// refreshed have different security behaviour when the server asks for
+/// encryption. See [`ClientBuilder::authentication_intent`].
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub enum AuthenticationIntent {
+    /// Never contact Microsoft or Mojang services for this connection.
+    Offline,
+    /// Use this session if, and only if, the server requests authentication.
+    Online(lodestone_auth::Session),
+    /// Retain a selected online account's failure until the server proves that
+    /// authentication is required.
+    OnlineUnavailable {
+        /// The selected account's display name or stable identifier.
+        account: String,
+        /// A user-facing explanation that contains no credential material.
+        detail: String,
+    },
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl AuthenticationIntent {
+    pub(crate) fn online_session(&self) -> Option<&lodestone_auth::Session> {
+        match self {
+            Self::Online(session) => Some(session),
+            Self::Offline | Self::OnlineUnavailable { .. } => None,
+        }
+    }
+
+    pub(crate) fn should_join_session_server(&self, should_authenticate: bool) -> bool {
+        should_authenticate && matches!(self, Self::Online(_))
+    }
+}
+
+/// Default capacity of the event channel.
+const DEFAULT_EVENT_BUFFER: usize = 256;
+
+/// Builds and starts a client session.
+///
+/// A session is fully described by a [`ServerAddress`], a [`LoginProfile`], and
+/// a boxed [`VersionAdapter`] that owns all protocol choreography. The builder
+/// adds cross-cutting options (keep-alive policy, timeouts, buffering) that are
+/// version-free.
+#[derive(Debug)]
+pub struct ClientBuilder {
+    server: ServerAddress,
+    profile: LoginProfile,
+    adapter: Box<dyn VersionAdapter>,
+    keep_alive: KeepAlivePolicy,
+    respawn: RespawnPolicy,
+    player_loaded: PlayerLoadedPolicy,
+    read_timeout: Option<Duration>,
+    // Only read by the native-only `connect()` (TCP). On wasm the transport is
+    // always supplied via `connect_with`, so this is intentionally unused there.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    connect_timeout: Option<Duration>,
+    /// Concrete TCP endpoint when it differs from the address sent in the
+    /// protocol handshake, such as a target selected by an SRV record.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    connect_target: Option<(String, u16)>,
+    event_buffer: usize,
+    /// A prior session's cookie store, seeded via [`Self::seed_cookies`] for the
+    /// reconnect leg of a [`crate::error::SessionOutcome::Transferred`].
+    /// Empty for every ordinary join.
+    initial_cookies: HashMap<ResourceKey, Vec<u8>>,
+    /// The caller's `World` and session entity, when the caller has one — §4.1(c).
+    /// `None` means "mint your own", which is what a bot with no driver wants.
+    ecs: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
+    /// The selected account policy for an online-mode join. It is a typed
+    /// intent rather than an optional session so explicit offline play cannot
+    /// be mistaken for a failed online sign-in.
+    #[cfg(not(target_arch = "wasm32"))]
+    authentication_intent: AuthenticationIntent,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    fn session() -> lodestone_auth::Session {
+        lodestone_auth::Session {
+            access_token: "test-token".to_owned(),
+            profile: lodestone_auth::Profile {
+                name: "OnlinePlayer".to_owned(),
+                id: uuid::Uuid::nil(),
+                skin: None,
+            },
+            expires_at: u64::MAX,
+        }
+    }
+
+    #[test]
+    fn authentication_intent_only_joins_for_a_valid_online_session_when_requested() {
+        let offline = AuthenticationIntent::Offline;
+        let online = AuthenticationIntent::Online(session());
+        let unavailable = AuthenticationIntent::OnlineUnavailable {
+            account: "OnlinePlayer".to_owned(),
+            detail: "the saved session has expired".to_owned(),
+        };
+
+        for intent in [&offline, &online, &unavailable] {
+            assert!(
+                !intent.should_join_session_server(false),
+                "no intent may call Mojang without a server request"
+            );
+        }
+        assert!(!offline.should_join_session_server(true));
+        assert!(online.should_join_session_server(true));
+        assert!(!unavailable.should_join_session_server(true));
+    }
+}
+
+impl ClientBuilder {
+    /// Creates a builder for the given server, identity, and protocol adapter.
+    #[must_use]
+    pub fn new(
+        server: ServerAddress,
+        profile: LoginProfile,
+        adapter: Box<dyn VersionAdapter>,
+    ) -> Self {
+        Self {
+            server,
+            profile,
+            adapter,
+            keep_alive: KeepAlivePolicy::default(),
+            respawn: RespawnPolicy::default(),
+            player_loaded: PlayerLoadedPolicy::default(),
+            read_timeout: None,
+            connect_timeout: None,
+            connect_target: None,
+            event_buffer: DEFAULT_EVENT_BUFFER,
+            initial_cookies: HashMap::new(),
+            ecs: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            authentication_intent: AuthenticationIntent::Offline,
+        }
+    }
+
+    /// Supplies an authenticated Microsoft/Minecraft session (from
+    /// `lodestone-auth`: a cached refresh silently renewed, or a completed
+    /// interactive device-code login — see `lodestone_auth::login`) to prove
+    /// ownership with when the server's login sequence demands online-mode
+    /// encryption.
+    ///
+    /// Without this, [`ClientBuilder::connect`]/[`ClientBuilder::connect_with`]
+    /// still work exactly as before against an offline-mode server (the
+    /// default, unchanged path — nothing about this method is required to
+    /// join a server that doesn't ask for encryption). The default is an
+    /// explicit offline intent, which can still complete a server's RSA/AES
+    /// request without calling Mojang; only this online intent calls Mojang,
+    /// and only when the request's `should_authenticate` flag is true.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn online_session(mut self, session: lodestone_auth::Session) -> Self {
+        self.authentication_intent = AuthenticationIntent::Online(session);
+        self
+    }
+
+    /// Explicitly selects the offline identity for this connection.
+    ///
+    /// This is also the default for backwards compatibility. In contrast to a
+    /// missing online session, this means the RSA/AES portion of an encryption
+    /// request still proceeds and Mojang is never contacted.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn offline_authentication(mut self) -> Self {
+        self.authentication_intent = AuthenticationIntent::Offline;
+        self
+    }
+
+    /// Supplies the complete authentication policy for this connection.
+    ///
+    /// Prefer [`Self::online_session`] and
+    /// [`Self::online_session_unavailable`] for the common cases. This method
+    /// exists for callers that already model account selection with
+    /// [`AuthenticationIntent`].
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn authentication_intent(mut self, intent: AuthenticationIntent) -> Self {
+        self.authentication_intent = intent;
+        self
+    }
+
+    /// Records that the caller *had* an account to use and could not resolve a
+    /// session for it, so an online-mode server produces
+    /// [`crate::ClientError::OnlineModeSessionUnavailable`] naming `account`
+    /// rather than silently becoming an offline join.
+    ///
+    /// **This must not stop the connection.** An offline-mode server never
+    /// sends an encryption request at all (vanilla's own login handler gates
+    /// it on the server running in authenticating mode and not being an
+    /// in-memory/LAN connection), so a dead refresh token
+    /// has no bearing on joining one — refusing to dial would break joins that
+    /// work today. The reason is therefore *carried* and only spent if the
+    /// server turns out to demand online mode.
+    ///
+    /// Calling this after [`Self::online_session`] does not revoke the session:
+    /// a real session always wins, since it is the thing that can actually
+    /// complete the join.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn online_session_unavailable(mut self, account: String, detail: String) -> Self {
+        // A usable session is stronger evidence than an earlier resolution
+        // diagnostic. Preserve the established API's "real session wins"
+        // behaviour regardless of method order.
+        if !matches!(self.authentication_intent, AuthenticationIntent::Online(_)) {
+            self.authentication_intent = AuthenticationIntent::OnlineUnavailable { account, detail };
+        }
+        self
+    }
+
+    /// Fold this session's read-model into a `World` the caller already owns,
+    /// hanging the session components off `session`.
+    ///
+    /// This is how `docs/bevy-migration.md` §4.1(c) lands: a driver that has its
+    /// own `World` (`lodestone_shell::sim::Sim`) passes it down here, so the net
+    /// thread's ingest writes components the driver's `GameTick` systems can
+    /// actually read. Without this the session gets a `World` of its own and a
+    /// component written by ingest is invisible to every system in the driver's.
+    ///
+    /// `session` must already exist and must already carry the session component
+    /// set (`lodestone_ecs::session::insert_session_components`); the `World` must
+    /// already carry `IngestPlugin`'s and `SessionPlugin`'s systems. Neither is
+    /// installed here, because `add_systems` does not deduplicate and a second
+    /// copy of `drain_ingest_queue` blanks every batch the first one filled — the
+    /// exact bug Stage 3 shipped and caught.
+    #[must_use]
+    pub fn ecs(
+        mut self,
+        world: lodestone_ecs::EcsHandle,
+        session: lodestone_ecs::ecs::entity::Entity,
+    ) -> Self {
+        self.ecs = Some((world, session));
+        self
+    }
+
+    /// Sets the keep-alive policy. Defaults to [`KeepAlivePolicy::Automatic`].
+    #[must_use]
+    pub fn keep_alive_policy(mut self, policy: KeepAlivePolicy) -> Self {
+        self.keep_alive = policy;
+        self
+    }
+
+    /// Sets the respawn policy. Defaults to [`RespawnPolicy::Automatic`], which
+    /// auto-respawns the player on death so chunk streaming resumes.
+    #[must_use]
+    pub fn respawn_policy(mut self, policy: RespawnPolicy) -> Self {
+        self.respawn = policy;
+        self
+    }
+
+    /// Sets the client-loaded policy. Defaults to
+    /// [`PlayerLoadedPolicy::Automatic`], which announces client-readiness after
+    /// each join/respawn so the server stops ignoring the player's movement.
+    /// Choose [`PlayerLoadedPolicy::Manual`] only to deliberately observe the
+    /// server's client-load window.
+    #[must_use]
+    pub fn player_loaded_policy(mut self, policy: PlayerLoadedPolicy) -> Self {
+        self.player_loaded = policy;
+        self
+    }
+
+    /// Sets a maximum idle time between inbound packets.
+    ///
+    /// When the server sends nothing for this long, the session ends with
+    /// [`ClientError::Timeout`]. Defaults to no timeout.
+    #[must_use]
+    pub fn read_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.read_timeout = timeout;
+        self
+    }
+
+    /// Sets a maximum time to establish the TCP connection in [`ClientBuilder::connect`].
+    ///
+    /// Ignored by [`ClientBuilder::connect_with`], which is handed an already
+    /// established transport. Defaults to no timeout.
+    #[must_use]
+    pub fn connect_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.connect_timeout = timeout;
+        self
+    }
+
+    /// Overrides the concrete TCP endpoint without changing the server address
+    /// presented to the protocol adapter during the handshake.
+    ///
+    /// This is primarily for SRV resolution: the socket dials the record's
+    /// target while virtual-hosting proxies still receive the hostname the
+    /// player entered.
+    #[must_use]
+    pub fn connect_target(mut self, host: String, port: u16) -> Self {
+        self.connect_target = Some((host, port));
+        self
+    }
+
+    /// Sets the event channel capacity. Must be non-zero.
+    #[must_use]
+    pub fn event_buffer(mut self, capacity: usize) -> Self {
+        self.event_buffer = capacity.max(1);
+        self
+    }
+
+    /// Seeds the new session's cookie store from a prior one — the reconnect
+    /// leg of [`crate::error::SessionOutcome::Transferred`], whose own doc
+    /// explains why the driver cannot open that connection itself and hands
+    /// the caller everything needed to do it: the target address and this
+    /// map. Without calling this, a `cookie_request` on the far side of a
+    /// transfer always answers `None`, even for a cookie the previous server
+    /// stored — vanilla's own client carries its cookie store across a
+    /// transfer, so this is what closes that gap.
+    ///
+    /// **Only the cookie store carries across a transfer.** Nothing else
+    /// about the previous session should — a fresh [`ClientBuilder`] already
+    /// gives the new [`crate::driver::Driver`] an unannounced chat session and
+    /// an empty last-seen window, which is the correct behaviour (vanilla
+    /// itself tears its whole session down and rebuilds it on a transfer, not
+    /// just the socket); do not add a second seeding method that carries
+    /// anything else forward without re-reading `docs/secure-chat.md`'s
+    /// transfer section first.
+    #[must_use]
+    pub fn seed_cookies(mut self, cookies: HashMap<ResourceKey, Vec<u8>>) -> Self {
+        self.initial_cookies = cookies;
+        self
+    }
+
+    /// Connects over TCP and starts the driver.
+    ///
+    /// Native-only: `wasm32` targets have no TCP stack, so the browser must
+    /// supply a `ws-web` transport through [`ClientBuilder::connect_with`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError::Transport`] if the TCP connection cannot be
+    /// established, or [`ClientError::ConnectTimeout`] if it exceeds
+    /// `connect_timeout`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn connect(self) -> Result<(ClientHandle, EventStream), ClientError> {
+        let address = self
+            .connect_target
+            .clone()
+            .unwrap_or_else(|| (self.server.host.clone(), self.server.port));
+        let connection = match self.connect_timeout {
+            Some(duration) => crate::native_time::timeout(duration, Connection::connect(address))
+                .await
+                .map_err(|_| ClientError::ConnectTimeout {
+                    seconds: duration.as_secs(),
+                })??,
+            None => Connection::connect(address).await?,
+        };
+        Ok(self.start(connection))
+    }
+
+    /// Starts the driver over an already established transport.
+    ///
+    /// This is the hermetic entry point used by tests (paired with
+    /// [`lodestone_net::memory_pair`]) and by an in-process server, and it is
+    /// the entry point browsers use with a `ws-web` transport.
+    ///
+    /// Natively this must be called from within a Tokio runtime; on `wasm32` it
+    /// must be called on the browser event loop (both are already the case for
+    /// the intended callers).
+    #[must_use]
+    pub fn connect_with<T>(self, transport: T) -> (ClientHandle, EventStream)
+    where
+        T: Transport + 'static,
+    {
+        self.start(Connection::new(transport))
+    }
+
+    /// Spawns the driver task and wires up the handle and event stream.
+    fn start<T>(self, connection: Connection<T>) -> (ClientHandle, EventStream)
+    where
+        T: Transport + 'static,
+    {
+        let (events_tx, events_rx) = mpsc::channel(self.event_buffer);
+        let (actions_tx, actions_rx) = mpsc::unbounded_channel();
+        let (correction_tx, correction_rx) = mpsc::unbounded_channel();
+        let action_generation = Arc::new(AtomicU64::new(0));
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        // The maintained read-model. The driver holds the sole writing clone;
+        // the handle holds a reading clone for cheap queries and waits.
+        //
+        // §4.1(c): fold into the caller's `World` when it gave us one, so ingest
+        // and the caller's systems share a store. Otherwise mint one.
+        let read_model = match self.ecs {
+            Some((world, session)) => crate::state::SharedState::adopting(world, session),
+            None => crate::state::SharedState::default(),
+        };
+
+        let driver = Driver::new(
+            connection,
+            self.adapter,
+            read_model.clone(),
+            events_tx,
+            self.keep_alive,
+            self.respawn,
+            self.player_loaded,
+            self.read_timeout,
+            self.profile,
+            self.server,
+            self.initial_cookies,
+            #[cfg(not(target_arch = "wasm32"))]
+            self.authentication_intent,
+        );
+
+        let task = crate::spawn::spawn_driver(driver.run(actions_rx, correction_rx, shutdown_rx));
+        let handle = ClientHandle::new(
+            actions_tx,
+            correction_tx,
+            action_generation,
+            shutdown_tx,
+            task,
+            read_model,
+        );
+        let stream = EventStream::new(events_rx);
+        (handle, stream)
+    }
+}

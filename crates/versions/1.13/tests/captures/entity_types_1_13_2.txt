@@ -1,0 +1,103 @@
+# Entity type ids a real Minecraft 1.13.2 server put on the wire.
+# Recorded by tests/entity_types.rs against
+# ./scripts/live-oracles/legacy.sh 1.13.2: each name was handed to vanilla's
+# own `/summon` over RCON, and the number is the type field of the
+# spawn_entity_living / spawn_entity packet that followed, read out of the
+# raw body, together with which of the two packets carried it.
+# A `refused` row records vanilla's own reply verbatim instead.
+# <name> <living|object> <type id>   |   <name> refused <reason>
+minecraft:area_effect_cloud object 3
+minecraft:armor_stand object 78
+minecraft:arrow object 60
+minecraft:bat living 3
+minecraft:blaze living 4
+minecraft:boat object 1
+minecraft:cave_spider living 6
+minecraft:chicken living 7
+minecraft:cod living 8
+minecraft:cow refused summoned, but vanilla reported no tagged entity to read a uuid from
+minecraft:creeper living 10
+minecraft:donkey living 11
+minecraft:dolphin living 12
+minecraft:dragon_fireball refused 
+minecraft:drowned living 14
+minecraft:elder_guardian living 15
+minecraft:end_crystal object 51
+minecraft:ender_dragon living 17
+minecraft:enderman living 18
+minecraft:endermite living 19
+minecraft:evoker_fangs object 79
+minecraft:evoker living 21
+minecraft:experience_orb refused no spawn packet carried the summoned entity's own uuid (5 other new entities in the window)
+minecraft:eye_of_ender object 72
+minecraft:falling_block object 70
+minecraft:firework_rocket object 76
+minecraft:ghast living 26
+minecraft:giant living 27
+minecraft:guardian living 28
+minecraft:horse living 29
+minecraft:husk living 30
+minecraft:illusioner living 31
+minecraft:item object 2
+minecraft:item_frame object 71
+minecraft:fireball refused 
+minecraft:leash_knot object 77
+minecraft:llama living 36
+minecraft:llama_spit object 68
+minecraft:magma_cube living 38
+minecraft:minecart object 10
+minecraft:chest_minecart object 10
+minecraft:command_block_minecart object 10
+minecraft:furnace_minecart object 10
+minecraft:hopper_minecart object 10
+minecraft:spawner_minecart object 10
+minecraft:tnt_minecart object 10
+minecraft:mule living 46
+minecraft:mooshroom living 47
+minecraft:ocelot living 48
+minecraft:painting refused no spawn packet carried the summoned entity's own uuid (13 other new entities in the window)
+minecraft:parrot living 50
+minecraft:pig living 51
+minecraft:pufferfish living 52
+minecraft:zombie_pigman living 53
+minecraft:polar_bear living 54
+minecraft:tnt object 50
+minecraft:rabbit living 56
+minecraft:salmon refused summoned, but vanilla reported no tagged entity to read a uuid from
+minecraft:sheep living 58
+minecraft:shulker living 59
+minecraft:shulker_bullet object 67
+minecraft:silverfish living 61
+minecraft:skeleton living 62
+minecraft:skeleton_horse living 63
+minecraft:slime living 64
+minecraft:small_fireball refused 
+minecraft:snow_golem living 66
+minecraft:snowball object 61
+minecraft:spectral_arrow object 91
+minecraft:spider living 69
+minecraft:squid living 70
+minecraft:stray living 71
+minecraft:tropical_fish living 72
+minecraft:turtle living 73
+minecraft:egg object 62
+minecraft:ender_pearl object 65
+minecraft:experience_bottle object 75
+minecraft:potion object 73
+minecraft:vex living 78
+minecraft:villager living 79
+minecraft:iron_golem living 80
+minecraft:vindicator living 81
+minecraft:witch living 82
+minecraft:wither living 83
+minecraft:wither_skeleton living 84
+minecraft:wither_skull refused 
+minecraft:wolf living 86
+minecraft:zombie living 87
+minecraft:zombie_horse living 88
+minecraft:zombie_villager living 89
+minecraft:phantom living 90
+minecraft:lightning_bolt refused summoned, but vanilla reported no tagged entity to read a uuid from
+minecraft:player refused Unknown entity: minecraft:player
+minecraft:fishing_bobber refused Unknown entity: minecraft:fishing_bobber
+minecraft:trident object 94

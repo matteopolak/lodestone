@@ -1,0 +1,967 @@
+//! One shared, persistable store for the world's *scalars*: game rules,
+//! difficulty, and the clock.
+//!
+//! # What it is
+//!
+//! [`WorldStateHandle`] is the world-scoped counterpart of
+//! [`crate::BlockEntityHandle`]: a cheap clone, one store. It holds
+//! [`crate::game_rules::GameRules`], the difficulty and its lock, and the two
+//! world-clock counters (`game_time` and `day_time`).
+//!
+//! These domains live together because connections and the world tick loop must
+//! read the same stored values.
+//!
+//! | state domain | stored value | consumers |
+//! |---|---|---|
+//! | game rules | typed [`GameRules`] values | command handlers and tick-time decisions |
+//! | difficulty | current difficulty and its lock | spawn admission, damage rules, and client updates |
+//! | world time | monotonically increasing `game_time` and `day_time` | tick progression and time packets |
+//!
+//! The world owns these values, while connection tasks only read snapshots and
+//! enqueue requests that the world tick loop applies.
+//!
+//! # How it works
+//!
+//! `run_tick_loop` calls [`WorldStateHandle::tick_time`] once per world tick.
+//! `game_time` always advances; `day_time` advances **only** when the
+//! `advance_time` rule is on. This asymmetry makes `/gamerule advance_time false`
+//! freeze the sun without freezing anything measured in game ticks.
+//!
+//! Every connection reads the same store, so a rule set by one LAN player is the
+//! rule every player and the tick loop sees.
+//!
+//! # How to change it
+//!
+//! * **Enforcing another rule**: add the typed accessor in
+//!   [`crate::game_rules`], forward it here, and read it at the decision point.
+//!   The accessor is the cheap half — a rule with an accessor and no reader is
+//!   the island this whole module exists to stop creating.
+//! * **Persisting another scalar**: [`WorldStateHandle::level_data_fields`] and
+//!   [`WorldStateHandle::load_level_data`] are the pair, and they must stay
+//!   inverse. Both use the established `level.dat` field names (`GameRules`,
+//!   `Time`, `DayTime`, `difficulty_settings`), so worlds written here retain
+//!   the same interchange format.
+//!
+//! ## Gotchas
+//!
+//! * **`GameRules` in `level.dat` is a compound of *string* values**, even for an
+//!   integer rule. Writing `Nbt::Int` there produces a file readers silently
+//!   drop every rule from.
+//! * **A locked difficulty refuses a change** ([`set_difficulty`](WorldStateHandle::set_difficulty)
+//!   returns `false`). Applying it anyway and only *displaying* the lock would
+//!   leave the stored difficulty unchanged while presenting a misleading result.
+//! * **The clock is `i64` and `day_time` is not reduced mod 24000.** The stored
+//!   value grows monotonically and the client uses its fractional day position for rendering;
+//!   truncating it here would break "how many days has this world existed".
+//!
+//! # Dependencies
+//!
+//! [`crate::game_rules`] for the typed registry, `lodestone-core` for the NBT
+//! codec, `lodestone-model` for [`Difficulty`]. No protocol, no packet id.
+
+use std::sync::{Arc, Mutex};
+
+use lodestone_core::Nbt;
+use lodestone_model::{Difficulty, GameMode};
+
+use crate::game_rules::{GameRuleError, GameRuleValue, GameRules};
+
+/// Ticks in one full day (`24_000`). The client takes `day_time % 24000` to
+/// place the sun; nothing here needs to.
+pub const TICKS_PER_DAY: i64 = 24_000;
+
+/// A `/weather` command's request, applied by the world tick loop's
+/// [`crate::weather::WeatherState`] on the next pass.
+///
+/// # Why a request queue rather than a direct write
+///
+/// `WeatherState` is owned by `crate::tick::run_tick_loop_with_weather` with
+/// **no lock** — the same reason [`crate::sleep::SleepVote`] exists as a
+/// separate caller-side handle rather than letting a connection touch
+/// `SleepState` directly. This is that shape applied to weather: a command
+/// executor cannot reach `raining`/`thundering` at all, so it leaves a
+/// request here instead, and the loop is the only thing that ever turns one
+/// into a field write.
+///
+/// Each request sets the clear/rain/thunder timers and both booleans
+/// **directly**, so the transition is visible on the very next world tick
+/// instead of waiting for an existing timer to expire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeatherRequest {
+    /// `/weather clear [<duration>]` — force clear weather.
+    Clear {
+        /// Ticks the clear spell is forced for.
+        duration: i32,
+    },
+    /// `/weather rain [<duration>]` — force rain, thunder off.
+    Rain {
+        /// Ticks the rain spell is forced for.
+        duration: i32,
+    },
+    /// `/weather thunder [<duration>]` — force rain **and** thunder.
+    Thunder {
+        /// Ticks the thunder spell is forced for.
+        duration: i32,
+    },
+}
+
+/// The two world-clock counters, as [`WorldStateHandle::time`] reports them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WorldTime {
+    /// `game_time` — total world ticks, **always** advancing. The `SET_TIME`
+    /// packet's monotonic first field carries this value.
+    pub game_time: i64,
+    /// `day_time` — the day/night anchor, frozen while `advance_time` is off.
+    pub day_time: i64,
+}
+
+/// The world's scalars, behind [`WorldStateHandle`].
+///
+/// **`PartialEq` but not `Eq`**, since the world spawn carries `f64`/`f32`
+/// coordinates. Nothing here needs total equality; the derive existed only for
+/// test convenience.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorldState {
+    rules: GameRules,
+    difficulty: Difficulty,
+    difficulty_locked: bool,
+    time: WorldTime,
+    /// The world spawn point, once something has resolved one. `None` means "not
+    /// yet searched", which is what a brand-new world is — see
+    /// [`WorldStateHandle::world_spawn`] for why the distinction matters.
+    spawn: Option<crate::world_spawn::WorldSpawn>,
+    /// The game mode a **new** player joins in (`/defaultgamemode`) — the
+    /// default setting in the world data. Distinct from any joined player's
+    /// own `game_mode` local: a returning player's saved mode always wins over
+    /// this (see `crate::server::serve_connection_inner`'s join arm), so this
+    /// field only ever decides a *fresh* player's first mode.
+    default_game_mode: GameMode,
+    /// A pending `/weather` request the tick loop has not yet consumed. See
+    /// [`WeatherRequest`]'s own doc for why this exists instead of a direct
+    /// write, and [`WorldStateHandle::take_weather_request`] for the consumer.
+    weather_request: Option<WeatherRequest>,
+}
+
+impl Default for WorldState {
+    fn default() -> Self {
+        Self {
+            rules: GameRules::new(),
+            // Fresh worlds start at Normal difficulty.
+            difficulty: Difficulty::Normal,
+            difficulty_locked: false,
+            time: WorldTime::default(),
+            spawn: None,
+            // Fresh players start in Survival mode.
+            default_game_mode: GameMode::Survival,
+            weather_request: None,
+        }
+    }
+}
+
+/// A cheap, cloneable handle to **one** world's [`WorldState`].
+///
+/// Deliberately has no `subscriber()`: every clone shares the store, so updates
+/// from one connection remain visible to the world's tick loop.
+#[derive(Debug, Clone, Default)]
+pub struct WorldStateHandle {
+    state: Arc<Mutex<WorldState>>,
+    /// Where this world's players are, for
+    /// [`crate::tick_area::FollowArea`] — the set that makes the world tick follow
+    /// them instead of sitting on chunk `(0, 0)` forever.
+    ///
+    /// # Why it rides this handle, and why it is a *sibling* of `state`
+    ///
+    /// It rides this handle because this handle is already threaded to **both**
+    /// ends of the problem: every `serve_connection*` wrapper passes it down to the
+    /// packet dispatch (which is where a player's chunk position and its dimension
+    /// are both already in hand), and `crate::tick::run_tick_loop_with_weather`
+    /// receives the same store. Adding a parameter to the `serve_connection*` chain
+    /// instead would change six wrapper signatures and every
+    /// `crates/protocol/v770/tests/*` call site — the exact cost
+    /// [`crate::server::SourceRef`]'s own doc comment records as the reason those
+    /// wrappers exist in the first place.
+    ///
+    /// It is a sibling rather than a field inside [`WorldState`] because
+    /// `WorldState` is the **persisted** scalar set — rules, difficulty, clock,
+    /// spawn — and a player's current chunk is none of those: it is derived from a
+    /// live connection, is meaningless after a restart, and must not appear in a
+    /// save schema. Keeping it outside the same `Mutex` also keeps a per-tick
+    /// anchor read from contending with a rule lookup.
+    ///
+    /// [`is_same_store`](Self::is_same_store) deliberately still compares only
+    /// `state`: it exists as the sharing gate's negative control for the *rules*
+    /// store, and widening it would change what that control measures.
+    anchors: crate::tick_area::TickAnchors,
+    /// This world's scoreboard (objectives and scores) — a sibling of
+    /// `state` for the identical reason `anchors` is one: every
+    /// `/scoreboard`/`/execute … score` command entry point (a live
+    /// connection's `ChatCommand` arm, RCON, and a command block's tick)
+    /// already receives this handle to reach `state`/`rules`, so riding here
+    /// reaches all three with no new parameter anywhere. See
+    /// `crate::commands::scoreboard_store`'s module doc for why a second,
+    /// independently-constructed handle would be the island this crate has
+    /// already paid to learn about once.
+    scoreboard: crate::commands::scoreboard_store::ScoreboardHandle,
+    /// This world's teams — a sibling of `state`/`scoreboard` for the
+    /// identical reason: every `/team`/`/execute` command entry point already
+    /// receives this handle to reach `state`, so riding here reaches all of
+    /// them with no new parameter anywhere. See
+    /// `crate::commands::team_store`'s module doc.
+    teams: crate::commands::team_store::TeamHandle,
+    /// This world's `/data storage`, a sibling of `state`/`scoreboard`/
+    /// `teams` for the identical reason: every command entry point already
+    /// receives this handle. See `crate::commands::nbt_storage`'s module
+    /// doc.
+    nbt_storage: crate::commands::nbt_storage::NbtStorageHandle,
+    /// This world's `/stopwatch` registry, a sibling of `state`/`scoreboard`/
+    /// `teams`/`nbt_storage` for the identical reason. See
+    /// `crate::commands::stopwatch_store`'s module doc.
+    stopwatches: crate::commands::stopwatch_store::StopwatchHandle,
+    /// This world's plugin-facing crafting-station (anvil/grindstone/
+    /// smithing/loom/stonecutter) result hooks, a sibling of
+    /// `state`/`scoreboard`/`teams`/`nbt_storage`/`stopwatches` for the
+    /// identical reason: `WorldStateHandle` is already threaded to
+    /// `crate::server::dispatch_play_packet`, which is where every one of
+    /// those packets is handled, so riding here reaches it with no new
+    /// parameter added to the `serve_connection*` wrappers. See
+    /// `crate::plugin_crafting`'s own module doc.
+    crafting_hooks: crate::plugin_crafting::CraftingStationHooks,
+    /// This world's loaded datapack functions and function tags, a sibling of
+    /// `state`/`scoreboard`/`teams`/`nbt_storage`/
+    /// `stopwatches`/`crafting_hooks` for the identical reason: every command
+    /// entry point already receives this handle. See
+    /// `crate::commands::function_store`'s module doc.
+    functions: crate::commands::function_store::FunctionHandle,
+    /// The optional tick-owned proposal ingress shared with connection tasks.
+    /// It is a sibling of the persisted scalar state because the sender is a
+    /// runtime capability, not world data. Compatibility connection wrappers
+    /// leave it absent; integrated worlds install the handle before serving.
+    proposals: Arc<Mutex<Option<crate::ecs::ServerProposalHandle>>>,
+}
+
+impl WorldStateHandle {
+    /// A handle to a fresh world: every rule at its default, Normal
+    /// difficulty unlocked, clock at zero.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Runs `f` against the shared state.
+    ///
+    /// **Synchronous by construction**, like [`crate::BlockEntityHandle::with`]: a
+    /// closure cannot contain an `.await`, so the compiler guarantees the guard
+    /// never crosses a suspension point.
+    pub fn with<R>(&self, f: impl FnOnce(&mut WorldState) -> R) -> R {
+        let _order = crate::lock_order::acquire(crate::lock_order::LockClass::WorldState);
+        f(&mut self.state.lock().expect("world state lock poisoned"))
+    }
+
+    /// Installs the tick owner's bounded proposal ingress for this world.
+    ///
+    /// Connections clone the handle at the action boundary and never retain
+    /// the mutex across an await. A second installation replaces the old
+    /// sender, which is useful only while a constructor is assembling a world
+    /// and avoids exposing a mutable ECS resource to a connection task.
+    pub fn set_proposal_handle(&self, handle: crate::ecs::ServerProposalHandle) {
+        *self.proposals.lock().expect("world proposal lock poisoned") = Some(handle);
+    }
+
+    /// Returns the tick owner's bounded proposal ingress, if this world has
+    /// one. `None` is the deliberate compatibility-wrapper path.
+    #[must_use]
+    pub fn proposal_handle(&self) -> Option<crate::ecs::ServerProposalHandle> {
+        self.proposals
+            .lock()
+            .expect("world proposal lock poisoned")
+            .clone()
+    }
+
+    /// This world's player-anchor set — where [`crate::tick_area::FollowArea`] reads
+    /// player positions from, and where a connection publishes them.
+    ///
+    /// A borrow rather than a clone so a caller that only reads does not touch a
+    /// refcount; clone it when a `'static` copy is needed (the tick loop's
+    /// [`crate::tick_area::TickFollow`] takes one).
+    #[must_use]
+    pub fn tick_anchors(&self) -> &crate::tick_area::TickAnchors {
+        &self.anchors
+    }
+
+    /// This world's scoreboard — see [`Self`]'s own field doc for why a
+    /// command reaches it through here rather than through a handle of its
+    /// own.
+    #[must_use]
+    pub fn scoreboard(&self) -> &crate::commands::scoreboard_store::ScoreboardHandle {
+        &self.scoreboard
+    }
+
+    /// This world's teams — see [`Self`]'s own field doc for why a command
+    /// reaches it through here rather than through a handle of its own.
+    #[must_use]
+    pub fn team(&self) -> &crate::commands::team_store::TeamHandle {
+        &self.teams
+    }
+
+    /// This world's `/data storage` — see [`Self`]'s own field doc for why a
+    /// command reaches it through here rather than through a handle of its
+    /// own.
+    #[must_use]
+    pub fn nbt_storage(&self) -> &crate::commands::nbt_storage::NbtStorageHandle {
+        &self.nbt_storage
+    }
+
+    /// This world's `/stopwatch` registry — see [`Self`]'s own field doc for
+    /// why a command reaches it through here rather than through a handle of
+    /// its own.
+    #[must_use]
+    pub fn stopwatches(&self) -> &crate::commands::stopwatch_store::StopwatchHandle {
+        &self.stopwatches
+    }
+
+    /// This world's crafting-station plugin hooks — see [`Self`]'s own field
+    /// doc for why a station evaluation reaches it through here rather than
+    /// through a registry of its own.
+    #[must_use]
+    pub fn crafting_hooks(&self) -> &crate::plugin_crafting::CraftingStationHooks {
+        &self.crafting_hooks
+    }
+
+    /// This world's loaded datapack functions and function tags — see
+    /// [`Self`]'s own field doc for why `/function`/`/reload` reach it
+    /// through here rather than through a store of their own.
+    #[must_use]
+    pub fn functions(&self) -> &crate::commands::function_store::FunctionHandle {
+        &self.functions
+    }
+
+    /// Whether this handle and `other` name the same store — for the sharing
+    /// gate's negative control (two handles at the same default value look
+    /// identical otherwise).
+    #[must_use]
+    pub fn is_same_store(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
+
+    /// Advances the clock by one world tick and returns the new value.
+    ///
+    /// `game_time` always advances; `day_time` advances only when `advance_time`
+    /// is on. See the module doc for why that asymmetry is the whole rule.
+    pub fn tick_time(&self) -> WorldTime {
+        self.with(|state| {
+            state.time.game_time += 1;
+            if state.rules.advance_time() {
+                state.time.day_time += 1;
+            }
+            state.time
+        })
+    }
+
+    /// The clock, without advancing it.
+    #[must_use]
+    pub fn time(&self) -> WorldTime {
+        self.with(|state| state.time)
+    }
+
+    /// Overwrites `day_time` — a night skip (`crate::sleep`) or `/time set`.
+    pub fn set_day_time(&self, day_time: i64) {
+        self.with(|state| state.time.day_time = day_time);
+    }
+
+    /// The difficulty and whether it is locked.
+    #[must_use]
+    pub fn difficulty(&self) -> (Difficulty, bool) {
+        self.with(|state| (state.difficulty, state.difficulty_locked))
+    }
+
+    /// Sets the difficulty, returning `false` if the world's difficulty is
+    /// **locked** — the lock check rejects changes while this flag is set.
+    pub fn set_difficulty(&self, difficulty: Difficulty) -> bool {
+        self.with(|state| {
+            if state.difficulty_locked {
+                return false;
+            }
+            state.difficulty = difficulty;
+            true
+        })
+    }
+
+    /// Locks or unlocks the difficulty. Hosts may use this to mirror the
+    /// level-data property or to configure a test world.
+    pub fn set_difficulty_locked(&self, locked: bool) {
+        self.with(|state| state.difficulty_locked = locked);
+    }
+
+    /// Sets one game rule from its wire/command string form, validating the
+    /// identifier and value against [`crate::game_rules::GAME_RULES`].
+    pub fn set_rule(&self, name: &str, raw: &str) -> Result<GameRuleValue, GameRuleError> {
+        self.with(|state| state.rules.set(name, raw))
+    }
+
+    /// Every rule explicitly set on this world, as `(identifier, value)` strings —
+    /// what `REQUEST_GAMERULE_VALUES` replies with.
+    #[must_use]
+    pub fn rule_entries(&self) -> Vec<(String, String)> {
+        self.with(|state| state.rules.entries())
+    }
+
+    /// A snapshot of the whole rule set, for a caller that wants several reads
+    /// without re-locking.
+    #[must_use]
+    pub fn rules(&self) -> GameRules {
+        self.with(|state| state.rules.clone())
+    }
+
+    /// `advance_time` — whether the day/night clock moves.
+    #[must_use]
+    pub fn advance_time(&self) -> bool {
+        self.with(|state| state.rules.advance_time())
+    }
+
+    /// `random_tick_speed` — random ticks per section per tick.
+    #[must_use]
+    pub fn random_tick_speed(&self) -> u32 {
+        self.with(|state| state.rules.random_tick_speed())
+    }
+
+    /// `spawn_mobs` — whether natural mob spawning runs.
+    #[must_use]
+    pub fn spawn_mobs(&self) -> bool {
+        self.with(|state| state.rules.spawn_mobs())
+    }
+
+    /// `spawner_blocks_work` — whether a `minecraft:spawner` block entity may
+    /// fire. Read by `crate::tick::run_tick_loop`'s spawner-block tick pass.
+    #[must_use]
+    pub fn spawner_blocks_work(&self) -> bool {
+        self.with(|state| state.rules.spawner_blocks_work())
+    }
+
+    /// `mob_griefing` — whether a mob may change the world.
+    #[must_use]
+    pub fn mob_griefing(&self) -> bool {
+        self.with(|state| state.rules.mob_griefing())
+    }
+
+    /// `keep_inventory` — whether a player keeps their items through death.
+    #[must_use]
+    pub fn keep_inventory(&self) -> bool {
+        self.with(|state| state.rules.keep_inventory())
+    }
+
+    /// `natural_health_regeneration` — whether a fed player heals over time. Read by
+    /// `crate::server`'s hunger tick; see [`crate::game_rules::GameRules::natural_health_regeneration`]
+    /// for what it does and does *not* gate.
+    #[must_use]
+    pub fn natural_health_regeneration(&self) -> bool {
+        self.with(|state| state.rules.natural_health_regeneration())
+    }
+
+    /// `block_drops` — whether breaking a block drops anything.
+    #[must_use]
+    pub fn block_drops(&self) -> bool {
+        self.with(|state| state.rules.block_drops())
+    }
+
+    /// `mob_drops` — whether a mob's death drops anything.
+    #[must_use]
+    pub fn mob_drops(&self) -> bool {
+        self.with(|state| state.rules.mob_drops())
+    }
+
+    /// `tnt_explodes` — whether igniting TNT actually primes it. See
+    /// [`crate::game_rules::GameRules::tnt_explodes`] for every gated
+    /// producer.
+    #[must_use]
+    pub fn tnt_explodes(&self) -> bool {
+        self.with(|state| state.rules.tnt_explodes())
+    }
+
+    /// `spawn_patrols` — whether pillager patrols spawn.
+    #[must_use]
+    pub fn spawn_patrols(&self) -> bool {
+        self.with(|state| state.rules.spawn_patrols())
+    }
+
+    /// `spawn_wandering_traders` — whether the wandering trader spawn cycle runs.
+    #[must_use]
+    pub fn spawn_wandering_traders(&self) -> bool {
+        self.with(|state| state.rules.spawn_wandering_traders())
+    }
+
+    /// Whether the difficulty permits hostile mobs to exist. This returns false
+    /// for [`Difficulty::Peaceful`]; callers pair it with the species-specific
+    /// [`crate::mob_spawn::allowed_in_peaceful`] check because difficulty and
+    /// entity category are separate admission rules. The tick loop and
+    /// [`crate::spawn_egg`] apply both checks.
+    #[must_use]
+    pub fn monsters_may_spawn(&self) -> bool {
+        self.with(|state| state.difficulty != Difficulty::Peaceful)
+    }
+
+    /// The game mode a new player joins in — `/defaultgamemode`'s read side,
+    /// and what `crate::server::serve_connection_inner`'s join arm falls back
+    /// to when no saved player data names one.
+    #[must_use]
+    pub fn default_game_mode(&self) -> GameMode {
+        self.with(|state| state.default_game_mode)
+    }
+
+    /// Sets the game mode a new player joins in — `/defaultgamemode`'s write
+    /// side. Never touches an already-connected player; see
+    /// [`Self::default_game_mode`]'s own doc for why only a *fresh* join reads
+    /// this.
+    pub fn set_default_game_mode(&self, mode: GameMode) {
+        self.with(|state| state.default_game_mode = mode);
+    }
+
+    /// Queues a `/weather` request for the world tick loop to apply on its next
+    /// pass — see [`WeatherRequest`]'s own doc for why this cannot be a direct
+    /// write. Overwrites whatever the loop has not yet consumed: `/weather
+    /// rain` immediately followed by `/weather clear` before the next tick must
+    /// land on clear, matching the single mutable weather state stored here.
+    pub fn request_weather(&self, request: WeatherRequest) {
+        self.with(|state| state.weather_request = Some(request));
+    }
+
+    /// Takes and clears the pending `/weather` request, if any — the world
+    /// tick loop's own consumer, called once per pass alongside
+    /// [`Self::tick_time`].
+    #[must_use]
+    pub fn take_weather_request(&self) -> Option<WeatherRequest> {
+        self.with(|state| state.weather_request.take())
+    }
+
+    /// The world spawn point, or `None` when no spawn has been resolved. A
+    /// missing value tells the first join to run
+    /// [`crate::world_spawn::find_initial_spawn`]; a resolved value is reused
+    /// by later joins and persisted through [`Self::level_data_fields`].
+    #[must_use]
+    pub(crate) fn world_spawn(&self) -> Option<crate::world_spawn::WorldSpawn> {
+        self.with(|state| state.spawn)
+    }
+
+    /// Records the world spawn — the first join's spiral result, or a
+    /// `/setworldspawn`. Persisted on the next autosave through
+    /// [`level_data_fields`](Self::level_data_fields).
+    pub(crate) fn set_world_spawn(&self, spawn: crate::world_spawn::WorldSpawn) {
+        self.with(|state| state.spawn = Some(spawn));
+    }
+
+    /// Forgets the world spawn, so the next join searches for one.
+    ///
+    /// The one caller is world *creation*: `LevelDat::for_new_world` writes a
+    /// placeholder `spawn` compound (it has to write something, and it has no
+    /// terrain to consult), and loading that placeholder back would suppress the
+    /// spiral search forever. Clearing it after the load is what keeps a fresh
+    /// world's first join the thing that actually finds the spawn.
+    pub(crate) fn clear_world_spawn(&self) {
+        self.with(|state| state.spawn = None);
+    }
+
+    /// The fields this world contributes to `level.dat`'s `Data` compound,
+    /// using the 26.2 interchange names.
+    ///
+    /// `difficulty_settings` is written whole (difficulty + lock) because that is
+    /// how 26.2 nests them; the other three are flat.
+    #[must_use]
+    pub fn level_data_fields(&self) -> Vec<(String, Nbt)> {
+        self.with(|state| {
+            let mut fields = vec![
+                (
+                    "GameRules".to_owned(),
+                    // Strings, even for an integer rule — see the module doc.
+                    Nbt::Compound(
+                        state
+                            .rules
+                            .entries()
+                            .into_iter()
+                            .map(|(name, value)| (name, Nbt::String(value)))
+                            .collect(),
+                    ),
+                ),
+                ("Time".to_owned(), Nbt::Long(state.time.game_time)),
+                ("DayTime".to_owned(), Nbt::Long(state.time.day_time)),
+                (
+                    "difficulty_settings".to_owned(),
+                    Nbt::Compound(vec![
+                        (
+                            "difficulty".to_owned(),
+                            Nbt::String(difficulty_name(state.difficulty).to_owned()),
+                        ),
+                        (
+                            "difficulty_locked".to_owned(),
+                            Nbt::Byte(i8::from(state.difficulty_locked)),
+                        ),
+                    ]),
+                ),
+            ];
+            // `spawn` is contributed only when there *is* one: a world whose spawn
+            // has not been resolved yet must not overwrite the placeholder
+            // `LevelDat::for_new_world` wrote with a zeroed compound, which is a
+            // file that reads back as a real spawn at the origin.
+            //
+            // **The field is `spawn`, a nested compound — not the flat
+            // `SpawnX`/`SpawnY`/`SpawnZ` ints.** Those are pre-1.21; 26.2 nests
+            // them, and `lodestone_anvil::level_dat::Spawn` is the measured shape.
+            // Writing flat coordinate names would produce an origin spawn when
+            // read as the nested 26.2 shape.
+            if let Some(spawn) = state.spawn {
+                fields.push((
+                    "spawn".to_owned(),
+                    Nbt::Compound(vec![
+                        (
+                            "pos".to_owned(),
+                            Nbt::IntArray(vec![
+                                spawn.pos.x.floor() as i32,
+                                spawn.pos.y.floor() as i32,
+                                spawn.pos.z.floor() as i32,
+                            ]),
+                        ),
+                        ("pitch".to_owned(), Nbt::Float(spawn.pitch)),
+                        (
+                            "dimension".to_owned(),
+                            Nbt::String("minecraft:overworld".to_owned()),
+                        ),
+                        ("yaw".to_owned(), Nbt::Float(spawn.yaw)),
+                    ]),
+                ));
+            }
+            fields
+        })
+    }
+
+    /// Loads whatever of [`level_data_fields`](Self::level_data_fields) is present
+    /// in a `level.dat` `Data` compound. **Total and non-failing**: a missing or
+    /// malformed field leaves that scalar at its current value, and an unknown
+    /// rule name is dropped by
+    /// [`GameRules::set`](crate::game_rules::GameRules::set)'s own validation.
+    pub fn load_level_data(&self, data: &Nbt) {
+        let Nbt::Compound(fields) = data else { return };
+        let field = |name: &str| fields.iter().find(|(key, _)| key == name).map(|(_, v)| v);
+
+        if let Some(Nbt::Compound(rules)) = field("GameRules") {
+            self.with(|state| {
+                for (name, value) in rules {
+                    if let Nbt::String(raw) = value {
+                        let _ = state.rules.set(name, raw);
+                    }
+                }
+            });
+        }
+        self.with(|state| {
+            if let Some(Nbt::Long(time)) = field("Time") {
+                state.time.game_time = *time;
+            }
+            if let Some(Nbt::Long(day)) = field("DayTime") {
+                state.time.day_time = *day;
+            }
+            // The nested 26.2 `spawn` compound. Read leniently: a missing or
+            // malformed value leaves `spawn` at `None`, so the next join searches.
+            if let Some(Nbt::Compound(spawn)) = field("spawn") {
+                let sub = |name: &str| spawn.iter().find(|(key, _)| key == name).map(|(_, v)| v);
+                if let Some(Nbt::IntArray(pos)) = sub("pos") {
+                    if let [x, y, z] = pos[..] {
+                        let angle = |name: &str| match sub(name) {
+                            Some(Nbt::Float(value)) => *value,
+                            _ => 0.0,
+                        };
+                        state.spawn = Some(crate::world_spawn::WorldSpawn {
+                            pos: lodestone_model::Vec3::new(
+                                f64::from(x),
+                                f64::from(y),
+                                f64::from(z),
+                            ),
+                            yaw: angle("yaw"),
+                            pitch: angle("pitch"),
+                        });
+                    }
+                }
+            }
+            if let Some(Nbt::Compound(settings)) = field("difficulty_settings") {
+                for (key, value) in settings {
+                    match (key.as_str(), value) {
+                        ("difficulty", Nbt::String(name)) => {
+                            if let Some(difficulty) = difficulty_from_name(name) {
+                                state.difficulty = difficulty;
+                            }
+                        }
+                        ("difficulty_locked", Nbt::Byte(locked)) => {
+                            state.difficulty_locked = *locked != 0;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// `Difficulty.getKey()` — the lowercase name `level.dat` stores.
+fn difficulty_name(difficulty: Difficulty) -> &'static str {
+    match difficulty {
+        Difficulty::Peaceful => "peaceful",
+        Difficulty::Easy => "easy",
+        Difficulty::Normal => "normal",
+        Difficulty::Hard => "hard",
+    }
+}
+
+fn difficulty_from_name(name: &str) -> Option<Difficulty> {
+    match name {
+        "peaceful" => Some(Difficulty::Peaceful),
+        "easy" => Some(Difficulty::Easy),
+        "normal" => Some(Difficulty::Normal),
+        "hard" => Some(Difficulty::Hard),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The clock's one asymmetry, which is the whole of `advance_time`'s meaning:
+    /// `game_time` counts every tick, `day_time` only counts while the rule is on.
+    ///
+    /// For `n` ticks with the rule disabled for `k` of them,
+    /// `game_time == n` and `day_time == n - k` exactly. Testing both counters
+    /// distinguishes the daylight gate from a clock that freezes both values.
+    #[test]
+    fn advance_time_freezes_the_day_clock_and_not_the_game_clock() {
+        let world = WorldStateHandle::new();
+        for _ in 0..10 {
+            world.tick_time();
+        }
+        assert_eq!(
+            world.time(),
+            WorldTime {
+                game_time: 10,
+                day_time: 10
+            }
+        );
+
+        world.set_rule("advance_time", "false").expect("known rule");
+        for _ in 0..7 {
+            world.tick_time();
+        }
+        assert_eq!(
+            world.time(),
+            WorldTime {
+                game_time: 17,
+                day_time: 10
+            },
+            "game_time must keep counting while day_time freezes"
+        );
+
+        world.set_rule("advance_time", "true").expect("known rule");
+        world.tick_time();
+        assert_eq!(
+            world.time(),
+            WorldTime {
+                game_time: 18,
+                day_time: 11
+            }
+        );
+    }
+
+    /// A locked difficulty refuses a change. The control is the *unlocked* arm:
+    /// without it, a `set_difficulty` that never worked at all would pass.
+    #[test]
+    fn a_locked_difficulty_refuses_a_change() {
+        let world = WorldStateHandle::new();
+        assert!(world.set_difficulty(Difficulty::Hard));
+        assert_eq!(world.difficulty(), (Difficulty::Hard, false));
+
+        world.set_difficulty_locked(true);
+        assert!(!world.set_difficulty(Difficulty::Peaceful));
+        assert_eq!(
+            world.difficulty(),
+            (Difficulty::Hard, true),
+            "a locked world keeps its difficulty"
+        );
+    }
+
+    /// Difficulty's first real reader: Peaceful forbids monster spawning.
+    #[test]
+    fn peaceful_forbids_monster_spawning() {
+        let world = WorldStateHandle::new();
+        assert!(world.monsters_may_spawn());
+        assert!(world.set_difficulty(Difficulty::Peaceful));
+        assert!(!world.monsters_may_spawn());
+    }
+
+    /// `/defaultgamemode`'s store: defaults to Survival and only a fresh write
+    /// moves it — never anything to do with a joined player's own mode, which
+    /// this file does not track at all.
+    #[test]
+    fn default_game_mode_starts_survival_and_a_write_sticks() {
+        let world = WorldStateHandle::new();
+        assert_eq!(world.default_game_mode(), lodestone_model::GameMode::Survival);
+        world.set_default_game_mode(lodestone_model::GameMode::Creative);
+        assert_eq!(world.default_game_mode(), lodestone_model::GameMode::Creative);
+    }
+
+    /// A `/weather` request queues until taken, and taking it clears it — so a
+    /// second `take` in the same "tick" sees nothing, exactly like
+    /// `WeatherFeed::drain_all`'s single-consumer contract.
+    #[test]
+    fn a_weather_request_is_queued_then_taken_exactly_once() {
+        let world = WorldStateHandle::new();
+        assert_eq!(world.take_weather_request(), None, "nothing queued yet");
+
+        world.request_weather(WeatherRequest::Rain { duration: 12_000 });
+        assert_eq!(
+            world.take_weather_request(),
+            Some(WeatherRequest::Rain { duration: 12_000 })
+        );
+        assert_eq!(world.take_weather_request(), None, "a taken request is gone");
+
+        // A later request overwrites an unconsumed earlier one — the control
+        // that proves this is a single slot, not a queue that would otherwise
+        // deliver both.
+        world.request_weather(WeatherRequest::Rain { duration: 1 });
+        world.request_weather(WeatherRequest::Clear { duration: 2 });
+        assert_eq!(
+            world.take_weather_request(),
+            Some(WeatherRequest::Clear { duration: 2 }),
+            "the later request must win, and only one request must be delivered"
+        );
+    }
+
+    /// Every clone is the same store — a property checked by `is_same_store` (two
+    /// fresh handles at the
+    /// same default would otherwise look identical).
+    #[test]
+    fn every_clone_shares_one_store() {
+        let a = WorldStateHandle::new();
+        let b = a.clone();
+        assert!(a.is_same_store(&b));
+        a.set_rule("random_tick_speed", "7").expect("known rule");
+        assert!(a.set_difficulty(Difficulty::Hard));
+        assert_eq!(b.random_tick_speed(), 7);
+        assert_eq!(b.difficulty().0, Difficulty::Hard);
+
+        let separate = WorldStateHandle::new();
+        assert!(!a.is_same_store(&separate));
+        assert_eq!(separate.random_tick_speed(), 3, "an unrelated world is untouched");
+    }
+
+    /// Persistence round-trips through the `level.dat` field names, and the
+    /// encoder/decoder pair is inverse.
+    #[test]
+    fn level_data_round_trips_rules_difficulty_and_the_clock() {
+        let saved = WorldStateHandle::new();
+        saved.set_rule("advance_time", "false").expect("known rule");
+        saved.set_rule("random_tick_speed", "11").expect("known rule");
+        assert!(saved.set_difficulty(Difficulty::Hard));
+        saved.set_difficulty_locked(true);
+        for _ in 0..500 {
+            saved.tick_time();
+        }
+
+        let data = Nbt::Compound(saved.level_data_fields());
+        let loaded = WorldStateHandle::new();
+        loaded.load_level_data(&data);
+
+        assert_eq!(loaded.random_tick_speed(), 11);
+        assert!(!loaded.advance_time());
+        assert_eq!(loaded.difficulty(), (Difficulty::Hard, true));
+        assert_eq!(
+            loaded.time(),
+            WorldTime {
+                game_time: 500,
+                day_time: 0
+            },
+            "advance_time was off for all 500 ticks, so only game_time moved"
+        );
+        assert_eq!(loaded.rule_entries(), saved.rule_entries());
+    }
+
+    /// An integer rule must be stored as a **string** in `level.dat`; writing
+    /// `Nbt::Int` causes the file reader to drop every rule.
+    #[test]
+    fn game_rules_persist_as_strings_even_for_an_integer_rule() {
+        let world = WorldStateHandle::new();
+        world.set_rule("random_tick_speed", "9").expect("known rule");
+        let fields = world.level_data_fields();
+        let (_, rules) = fields
+            .iter()
+            .find(|(name, _)| name == "GameRules")
+            .expect("GameRules field");
+        let Nbt::Compound(entries) = rules else {
+            panic!("GameRules must be a compound");
+        };
+        assert_eq!(
+            entries,
+            &vec![(
+                "random_tick_speed".to_owned(),
+                Nbt::String("9".to_owned())
+            )]
+        );
+    }
+    /// The world spawn round-trips through the **nested** 26.2 `spawn` compound,
+    /// and its `None` state survives — which is the property the join path reads.
+    ///
+    /// Three separate claims, because getting any one wrong is silent:
+    ///
+    /// * A fresh world's spawn is `None`, and `level_data_fields` contributes **no**
+    ///   `spawn` field at all. A zeroed compound would read back as a real spawn at
+    ///   the origin, which is the worst possible answer for an ocean world.
+    /// * A resolved spawn is written under `spawn` as `pos`/`yaw`/`pitch` — the
+    ///   nested shape `lodestone_anvil::level_dat::Spawn` measured, not the
+    ///   pre-1.21 flat `SpawnX`/`SpawnY`/`SpawnZ` ints.
+    /// * Loading it back yields the same coordinates, so the spiral search does not
+    ///   re-run on the next session.
+    #[test]
+    fn the_world_spawn_round_trips_and_absence_writes_no_field() {
+        let saved = WorldStateHandle::new();
+        assert_eq!(saved.world_spawn(), None, "a fresh world has not searched yet");
+        assert!(
+            !saved
+                .level_data_fields()
+                .iter()
+                .any(|(name, _)| name == "spawn"),
+            "an unresolved spawn must contribute no field, or the file reads back as \
+             a real spawn at (0, 0, 0)"
+        );
+
+        saved.set_world_spawn(crate::world_spawn::WorldSpawn {
+            pos: lodestone_model::Vec3::new(136.0, 71.0, -24.0),
+            yaw: 0.0,
+            pitch: 0.0,
+        });
+        let fields = saved.level_data_fields();
+        let (_, spawn) = fields
+            .iter()
+            .find(|(name, _)| name == "spawn")
+            .expect("a resolved spawn contributes the field");
+        let Nbt::Compound(entries) = spawn else {
+            panic!("spawn must be a compound, not {spawn:?}");
+        };
+        assert_eq!(
+            entries.iter().find(|(k, _)| k == "pos").map(|(_, v)| v),
+            Some(&Nbt::IntArray(vec![136, 71, -24])),
+            "26.2 nests the position as an IntArray under `spawn`"
+        );
+
+        let loaded = WorldStateHandle::new();
+        loaded.load_level_data(&Nbt::Compound(fields));
+        let restored = loaded.world_spawn().expect("the spawn loads back");
+        assert_eq!(restored.pos, lodestone_model::Vec3::new(136.0, 71.0, -24.0));
+
+        // The control: a `Data` compound with no `spawn` field must leave the
+        // loading world at `None` rather than at some default, or every join
+        // would silently spawn at the origin.
+        let older = WorldStateHandle::new();
+        older.load_level_data(&Nbt::Compound(vec![(
+            "Time".to_owned(),
+            Nbt::Long(5),
+        )]));
+        assert_eq!(
+            older.world_spawn(),
+            None,
+            "no spawn field must stay unresolved, so the next join searches"
+        );
+    }
+}

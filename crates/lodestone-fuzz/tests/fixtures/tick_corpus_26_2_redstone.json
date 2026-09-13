@@ -1,0 +1,51 @@
+{
+  "format_version": 1,
+  "scenario": "live-redstone-two-seam-timing",
+  "provenance": {
+    "source": "real-java-rcon",
+    "minecraft_version": "26.2",
+    "capture_command": "cargo test -p lodestone-fuzz --test differential_live_redstone_contraption -- our_redstone_crosses_two_chunk_seams_as_vanilla_does --ignored --nocapture"
+  },
+  "settle_ticks": 14,
+  "region": [
+    {
+      "pos": [1, 0, 0],
+      "candidates": ["minecraft:redstone_wire[power=15]", "minecraft:redstone_wire[power=0]"]
+    },
+    {
+      "pos": [16, 0, 0],
+      "candidates": ["minecraft:redstone_wire[power=8]", "minecraft:redstone_wire[power=0]"]
+    },
+    {
+      "pos": [18, 0, 0],
+      "candidates": ["minecraft:redstone_wire[power=15]", "minecraft:redstone_wire[power=0]"]
+    }
+  ],
+  "steps": [
+    {
+      "tick": 0,
+      "action": {
+        "kind": "set_block",
+        "pos": [0, 0, 0],
+        "state": "minecraft:redstone_block"
+      }
+    }
+  ],
+  "observations": [
+    { "tick": 0, "game_time": 4200000, "states": ["minecraft:redstone_wire[power=15]", "minecraft:redstone_wire[power=0]", "minecraft:redstone_wire[power=0]"] },
+    { "tick": 1, "game_time": 4200001, "states": ["minecraft:redstone_wire[power=15]", "minecraft:redstone_wire[power=0]", "minecraft:redstone_wire[power=0]"] },
+    { "tick": 2, "game_time": 4200002, "states": ["minecraft:redstone_wire[power=15]", "minecraft:redstone_wire[power=0]", "minecraft:redstone_wire[power=0]"] },
+    { "tick": 3, "game_time": 4200003, "states": ["minecraft:redstone_wire[power=15]", "minecraft:redstone_wire[power=0]", "minecraft:redstone_wire[power=0]"] },
+    { "tick": 4, "game_time": 4200004, "states": ["minecraft:redstone_wire[power=15]", "minecraft:redstone_wire[power=0]", "minecraft:redstone_wire[power=0]"] },
+    { "tick": 5, "game_time": 4200005, "states": ["minecraft:redstone_wire[power=15]", "minecraft:redstone_wire[power=0]", "minecraft:redstone_wire[power=0]"] },
+    { "tick": 6, "game_time": 4200006, "states": ["minecraft:redstone_wire[power=15]", "minecraft:redstone_wire[power=0]", "minecraft:redstone_wire[power=0]"] },
+    { "tick": 7, "game_time": 4200007, "states": ["minecraft:redstone_wire[power=15]", "minecraft:redstone_wire[power=0]", "minecraft:redstone_wire[power=0]"] },
+    { "tick": 8, "game_time": 4200008, "states": ["minecraft:redstone_wire[power=15]", "minecraft:redstone_wire[power=0]", "minecraft:redstone_wire[power=0]"] },
+    { "tick": 9, "game_time": 4200009, "states": ["minecraft:redstone_wire[power=15]", "minecraft:redstone_wire[power=8]", "minecraft:redstone_wire[power=0]"] },
+    { "tick": 10, "game_time": 4200010, "states": ["minecraft:redstone_wire[power=15]", "minecraft:redstone_wire[power=8]", "minecraft:redstone_wire[power=0]"] },
+    { "tick": 11, "game_time": 4200011, "states": ["minecraft:redstone_wire[power=15]", "minecraft:redstone_wire[power=8]", "minecraft:redstone_wire[power=0]"] },
+    { "tick": 12, "game_time": 4200012, "states": ["minecraft:redstone_wire[power=15]", "minecraft:redstone_wire[power=8]", "minecraft:redstone_wire[power=0]"] },
+    { "tick": 13, "game_time": 4200013, "states": ["minecraft:redstone_wire[power=15]", "minecraft:redstone_wire[power=8]", "minecraft:redstone_wire[power=15]"] },
+    { "tick": 14, "game_time": 4200014, "states": ["minecraft:redstone_wire[power=15]", "minecraft:redstone_wire[power=8]", "minecraft:redstone_wire[power=15]"] }
+  ]
+}

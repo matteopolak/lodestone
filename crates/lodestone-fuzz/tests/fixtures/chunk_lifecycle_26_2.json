@@ -1,0 +1,30 @@
+{
+  "source": "Unmodified payloads captured from the external 26.2 creative server on 25570, protocol 776. The capture client received chunk (0,0), then RCON set (8,100,8) to gold_block and moved that client to x=1600 so the server withdrew chunk (0,0). Capture entry point: acquire_chunk_lifecycle_from_external_server. The update annotation is the source command.",
+  "protocol": 776,
+  "chunk": [
+    0,
+    0
+  ],
+  "update": {
+    "pos": [
+      8,
+      100,
+      8
+    ],
+    "state": "minecraft:gold_block"
+  },
+  "packets": [
+    {
+      "packet_id": 45,
+      "payload": "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"
+    },
+    {
+      "packet_id": 8,
+      "payload": "eNpjYGBiYGBoSFkkBAAEnAGb"
+    },
+    {
+      "packet_id": 37,
+      "payload": "eNpjYIAAAAAIAAE="
+    }
+  ]
+}

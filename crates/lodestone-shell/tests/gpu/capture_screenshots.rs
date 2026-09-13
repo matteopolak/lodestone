@@ -1,0 +1,1321 @@
+//! Capture the README's in-game screenshots by driving the **real** client
+//! against the flat creative 26.2 oracle and writing PNGs to `docs/images/`.
+//!
+//! # What it is
+//!
+//! A live gate in the shape of `live_sign_text_pixels.rs` that ends at a file
+//! instead of at an assertion. It joins the oracle with [`Sim`] — the same type
+//! `WindowApp` drives — installs the render sources `app/redraw.rs` and
+//! `app/session.rs` install, builds each scene over RCON, renders one frame
+//! through [`RenderState::render`] and encodes it with
+//! [`lodestone::screenshot::encode_png`], the same encoder the `key.screenshot`
+//! keybind uses.
+//!
+//! Nothing here is staged: every pixel comes from this client rendering a real
+//! session against a real vanilla server.
+//!
+//! # How it works
+//!
+//! Scenes are **data**, not code: one `scripts/screenshot-scenes/<name>.txt`
+//! per image. A line starting with `@` is a directive, `#` is a comment, and
+//! anything else is an RCON command run verbatim before the shot. That split is
+//! deliberate — a scene edit must not cost a seven-minute recompile of this
+//! crate, and the camera belongs beside the build that it is aimed at.
+//!
+//! ```text
+//! @size 2560 1440        # framebuffer, and therefore the PNG
+//! @camera 0.5 -58.0 2.0  # eye position, world coordinates
+//! @look 0.5 -57.6 12.0   # aim at a point (mutually exclusive with @yawpitch)
+//! @yawpitch 180 8        # or aim explicitly, in the render camera's convention
+//! @fov 70                # vertical FOV, degrees (default 70)
+//! @wait 1500             # WALL-CLOCK ms to let the build stream back (no ticks)
+//! @ticks 60              # sim ticks to advance after that, before the shot
+//! @hud                   # composite the HUD over the world (off by default)
+//! @hand                  # draw the first-person hand (off by default)
+//! @debug                 # also draw the F3 overlay (implies nothing; needs @hud)
+//! ```
+//!
+//! # How to change it
+//!
+//! Add or edit a file under `scripts/screenshot-scenes/`; nothing in this file
+//! needs to know about it. `LODESTONE_SCENES=name1,name2` restricts a run to
+//! those stems, which is how you iterate on one image without paying for the
+//! whole set.
+//!
+//! # Why the two settle directives are not one
+//!
+//! A capture with no code change has to produce a **byte-identical** PNG, and
+//! for a while it did not: two runs of the same commit differed by tens of
+//! thousands of pixels. Every one of those differences was an animation phase,
+//! and every animation phase is a function of `Sim::tick_count` — animated
+//! block sprites through `RenderState::update_animation`, the beacon beam's
+//! `floorMod(40)`, banner sway, the enchanting-table book, the campfire flame,
+//! the conduit shell. The old settle loop was `while Instant::now() < until {
+//! pump(); sleep(10ms) }`, so the tick the frame was captured at was whatever
+//! the machine managed in that wall-clock window — 119 ticks on one run of the
+//! first scene, a different number on the next.
+//!
+//! So the two things the settle was doing are now two directives:
+//!
+//! * `@wait` is **wall clock**, and it is for the *network*: RCON edits have to
+//!   travel back over the socket and be meshed. That phase pumps with `dt = 0`,
+//!   which drains the update channel, heals dirty columns and uploads meshes
+//!   while advancing **no** ticks, so a slow machine costs seconds and not
+//!   phase.
+//! * `@ticks` is **sim ticks**, and it is for the *animation*. It runs after
+//!   the drain with no sleep at all, so the frame is always captured at the
+//!   same absolute tick: [`JOIN_BASE_TICK`] plus the running total of every
+//!   scene's `@ticks` before it. The harness asserts that.
+//!
+//! The join is the one phase that cannot be tick-free — a client that never
+//! ticks never sends a position — so its tick cost is variable and is
+//! normalised away by pumping up to [`JOIN_BASE_TICK`] before the first scene.
+//!
+//! Gotchas, each of which cost a run:
+//!
+//! * **A freshly uploaded section is mid-fade and draws nothing** until the
+//!   animation clock passes it — `FADE_COMPLETE_TICK` in
+//!   `live_sign_text_pixels.rs` records the same trap. `SECTION_FADE_DURATION_SECS`
+//!   is 0.75 s of *animation clock*, so 15 ticks; the `@ticks` default is well
+//!   past it, and the drain phase advances no clock precisely so that a section
+//!   uploaded late in it still gets the whole of `@ticks` to fade in.
+//! * **Every scene shares one world**, so a scene must build what it needs and
+//!   must not assume the plot is empty. Each file starts with its own `fill`.
+//! * **The camera is free**, but only sections the server streamed to the
+//!   player are meshed, so keep a scene within a few chunks of the spawn
+//!   column — everything here is inside a 48-block box around it.
+//!
+//! # Configuration
+//!
+//! `LODESTONE_SCENES` (optional filter). The oracle's ports and password are
+//! the constants below, matching `scripts/live-oracles/creative.sh`. The
+//! harness clears its in-process selected resource packs before it constructs
+//! `Sim`, so committed PNGs always use the built-in 26.2 pack without changing
+//! the player's persisted selection.
+//!
+//! # Dependencies
+//!
+//! The flat creative 26.2 oracle (`scripts/live-oracles/creative.sh`), a wgpu
+//! adapter, the vanilla assets under `.cache/mc/26.2`, and `--features live`.
+//!
+//! ```text
+//! just screenshots
+//! ```
+#![cfg(feature = "live")]
+
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use lodestone::config::{Config, Mode};
+use lodestone::gpu::RenderState;
+use lodestone::hud::{HotbarSlot, HudFrame, HudRenderer};
+use lodestone::sim::Sim;
+use lodestone_render::{Camera, GpuContext, HeadlessTarget, RenderTarget};
+use lodestone_testsupport::{RconClient, unique_username};
+
+const HOST: &str = "127.0.0.1";
+/// The flat creative 26.2 oracle: game on `:25570`, RCON on `:25571`.
+const PORT: u16 = 25570;
+const RCON_ADDR: &str = "127.0.0.1:25571";
+const RCON_PASSWORD: &str = "lodestone";
+const PROTOCOL: i32 = 776;
+
+/// Chunks the sim is told to keep. Every scene sits inside this radius of the
+/// spawn column, so the camera never looks at an unmeshed section.
+const RENDER_DISTANCE: u32 = 8;
+
+/// The world spawn this harness pins before joining, so a scene file can name
+/// absolute coordinates instead of offsets from wherever the last run left the
+/// spawn point.
+const SPAWN: [i32; 3] = [0, -60, 0];
+
+/// The camera bot's name, and the one whose eye every frame is rendered from.
+/// Fixed rather than [`unique_username`] because it is the name the tab list
+/// screenshot shows; see this file's `join_companions` for the tradeoff.
+const CAMERA_NAME: &str = "Lodestone";
+
+/// Extra clients joined only so the tab list has more than one row. Same
+/// fixed-name tradeoff as [`CAMERA_NAME`].
+const COMPANIONS: [&str; 4] = ["Ferris", "Basalt", "Cinder", "Quartz"];
+
+/// The absolute [`Sim::tick_count`] the clock is wound up to once the camera
+/// client is in the world, before the first scene runs.
+///
+/// The join phase is the one part of a capture that cannot be tick-free, and
+/// how many ticks it costs is a property of the machine and the server, not of
+/// the scenes: measured between 30 and 120 across runs. Normalising to a fixed
+/// value here is what makes every later shot tick a constant, and therefore
+/// what makes the PNGs byte-identical between runs. Raise it (do not remove the
+/// assertion) if a join ever costs more.
+const JOIN_BASE_TICK: u64 = 400;
+
+/// Consecutive tick-free frames with no section upload, no section removal and
+/// no change in the loaded-column count that count as "the world has stopped
+/// arriving" — see [`settle_world`].
+///
+/// Forty frames at the drain loop's 10 ms sleep is a little under half a second
+/// of silence, which is comfortably longer than the gap between two columns of
+/// one streaming batch and far shorter than any scene's `@wait`.
+const QUIET_FRAMES: u32 = 40;
+
+/// Ceiling on one [`settle_world`] call. Reaching it prints a warning and
+/// captures anyway rather than hanging.
+const SETTLE_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Sim ticks a scene advances between its network drain and its shot, unless it
+/// says otherwise with `@ticks`.
+///
+/// Three seconds of animation clock. It has to clear `SECTION_FADE_DURATION_SECS`
+/// (0.75 s, so 15 ticks) with room to spare, because a section uploaded on the
+/// last frame of the drain starts its fade at the drain's tick.
+const DEFAULT_SETTLE_TICKS: u64 = 60;
+
+/// The framebuffer, unless a scene overrides it with `@size`.
+///
+/// 1440p, matching what every README scene asks for explicitly, so a new one
+/// added without an `@size` lands in the committed set at the right size
+/// rather than a sixth of it. The `zz-*` probe scenes all name their own
+/// smaller sizes and are unaffected — a probe is read once and deleted, and
+/// there is no reason to pay 11x the pixels for one.
+const DEFAULT_SIZE: (u32, u32) = (2560, 1440);
+
+fn main_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("repo root")
+}
+
+/// One scene: the parsed directives plus the RCON commands that build it.
+#[derive(Debug)]
+struct Scene {
+    name: String,
+    commands: Vec<String>,
+    size: (u32, u32),
+    eye: glam::Vec3,
+    /// Resolved to yaw/pitch at parse time, whichever directive supplied it.
+    yaw: f32,
+    pitch: f32,
+    fov: f32,
+    /// Wall-clock time to drain the network after the scene's commands. Costs
+    /// no sim ticks — see this file's "why the two settle directives are not
+    /// one".
+    settle: Duration,
+    /// Sim ticks to advance after that drain, before the shot. This, and not
+    /// [`Self::settle`], is what fixes every animation phase in the frame.
+    ticks: u64,
+    hud: bool,
+    hand: bool,
+    debug: bool,
+}
+
+/// Yaw/pitch (degrees) that aim the camera from `eye` at `target`, inverting
+/// the render camera's convention `forward = (-sin y·cos p, -sin p, cos y·cos p)`.
+/// Copied from `live_entity_render.rs`, which derives it the same way.
+fn look_at(eye: glam::Vec3, target: glam::Vec3) -> (f32, f32) {
+    let d = (target - eye).normalize();
+    ((-d.x).atan2(d.z).to_degrees(), (-d.y).asin().to_degrees())
+}
+
+fn parse_scene(path: &Path) -> Scene {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("reading scene {}: {e}", path.display()));
+    let name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_owned();
+
+    let mut scene = Scene {
+        name,
+        commands: Vec::new(),
+        size: DEFAULT_SIZE,
+        eye: glam::Vec3::new(0.5, -58.0, 0.5),
+        yaw: 0.0,
+        pitch: 0.0,
+        fov: 70.0,
+        settle: Duration::from_millis(1500),
+        ticks: DEFAULT_SETTLE_TICKS,
+        hud: false,
+        hand: false,
+        debug: false,
+    };
+    // `@look` may appear before or after `@camera`, so the aim point is held
+    // aside and resolved once the eye is final.
+    let mut look: Option<glam::Vec3> = None;
+
+    for (n, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix('@') else {
+            scene.commands.push(line.to_owned());
+            continue;
+        };
+        let mut parts = rest.split_whitespace();
+        let directive = parts.next().unwrap_or_default();
+        let nums: Vec<f32> = parts.filter_map(|p| p.parse().ok()).collect();
+        let where_ = format!("{}:{}", path.display(), n + 1);
+        match directive {
+            "size" => {
+                assert!(nums.len() == 2, "@size wants two numbers ({where_})");
+                scene.size = (nums[0] as u32, nums[1] as u32);
+            }
+            "camera" => {
+                assert!(nums.len() == 3, "@camera wants three numbers ({where_})");
+                scene.eye = glam::Vec3::new(nums[0], nums[1], nums[2]);
+            }
+            "look" => {
+                assert!(nums.len() == 3, "@look wants three numbers ({where_})");
+                look = Some(glam::Vec3::new(nums[0], nums[1], nums[2]));
+            }
+            "yawpitch" => {
+                assert!(nums.len() == 2, "@yawpitch wants two numbers ({where_})");
+                (scene.yaw, scene.pitch) = (nums[0], nums[1]);
+                look = None;
+            }
+            "fov" => {
+                assert!(nums.len() == 1, "@fov wants one number ({where_})");
+                scene.fov = nums[0];
+            }
+            "wait" => {
+                assert!(nums.len() == 1, "@wait wants one number ({where_})");
+                scene.settle = Duration::from_millis(nums[0] as u64);
+            }
+            "ticks" => {
+                assert!(nums.len() == 1, "@ticks wants one number ({where_})");
+                assert!(
+                    nums[0] >= 1.0,
+                    "@ticks must advance the clock at least once ({where_})"
+                );
+                scene.ticks = nums[0] as u64;
+            }
+            "hud" => scene.hud = true,
+            "hand" => scene.hand = true,
+            "debug" => scene.debug = true,
+            other => panic!("unknown directive @{other} ({where_})"),
+        }
+    }
+    if let Some(target) = look {
+        (scene.yaw, scene.pitch) = look_at(scene.eye, target);
+    }
+    scene
+}
+
+fn scenes() -> Vec<Scene> {
+    let dir = main_dir().join("scripts/screenshot-scenes");
+    let filter: Option<Vec<String>> = std::env::var("LODESTONE_SCENES").ok().map(|v| {
+        v.split(',')
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .collect()
+    });
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()))
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "txt"))
+        .collect();
+    paths.sort();
+    let mut out: Vec<Scene> = paths.iter().map(|p| parse_scene(p)).collect();
+    if let Some(names) = &filter {
+        out.retain(|s| names.iter().any(|n| n == &s.name));
+        assert!(
+            !out.is_empty(),
+            "LODESTONE_SCENES={names:?} matched no scene under {}",
+            dir.display()
+        );
+    }
+    assert!(!out.is_empty(), "no scenes under {}", dir.display());
+    out
+}
+
+/// Run one RCON command and fail if the server could not **parse** it.
+///
+/// `<--[HERE]` is the caret vanilla's `CommandSyntaxException` appends to every
+/// parse failure, whatever the message above it says — one marker beats
+/// guessing at the wording of "Unknown block type", "Expected integer" and
+/// "Incorrect argument for command". A command that parses and then does
+/// nothing (an empty `fill`, a `team remove` for a team that does not exist)
+/// is not an error: scenes legitimately clear ground that is already clear.
+///
+/// The preamble goes through this too, and that is not symmetry for its own
+/// sake — it went unchecked at first, and five silently-rejected `gamerule`
+/// calls rode along for several runs looking exactly like success.
+fn checked(rcon: &mut RconClient, command: &str) -> String {
+    let reply = rcon.cmd(command);
+    assert!(
+        !reply.contains("<--[HERE]"),
+        "the server could not parse:\n  {command}\n  -> {reply}"
+    );
+    reply
+}
+
+/// Run one `Sim` frame worth `dt` seconds and drain its outputs the way
+/// `app/redraw.rs` does — removals **before** uploads, which is the order that
+/// file documents.
+///
+/// `dt` is the whole determinism seam. [`FrameClock::begin_frame`] banks it and
+/// [`FrameClock::take_tick`] withdraws whole `TICK_PERIOD`s from the bank, so
+/// `dt = 1.0 / 20.0` advances exactly one tick and `dt = 0.0` advances none —
+/// while both run `Update` (and therefore `poll_net`, `heal_dirty_columns` and
+/// the mesh drains below) exactly once. That is what lets the network drain
+/// take as long as the machine needs without moving a single animation phase.
+fn step_and_drain(
+    sim: &mut Sim,
+    render: &mut RenderState,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    dt: f64,
+) -> bool {
+    sim.step(dt);
+    let mut moved = false;
+    for key in sim.drain_removals() {
+        render.remove_section(&key);
+        moved = true;
+    }
+    for meshed in sim.drain_meshes() {
+        render.upload_section(device, queue, meshed.key, &meshed.mesh);
+        moved = true;
+    }
+    moved
+}
+
+/// One frame that advances the sim clock by exactly one tick.
+fn pump(sim: &mut Sim, render: &mut RenderState, device: &wgpu::Device, queue: &wgpu::Queue) {
+    let _ = step_and_drain(sim, render, device, queue, 1.0 / 20.0);
+}
+
+/// One frame that advances the sim clock by nothing — the network drain's unit
+/// of work. Returns whether a section was uploaded or removed. See
+/// [`step_and_drain`].
+fn drain(
+    sim: &mut Sim,
+    render: &mut RenderState,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> bool {
+    step_and_drain(sim, render, device, queue, 0.0)
+}
+
+/// Drain the network until the world has **stopped arriving**, then return.
+///
+/// A fixed wall-clock settle is the wrong instrument and it was measured being
+/// wrong: with `LODESTONE_SCENES=03-block-entities` — no earlier scene to have
+/// paid for the initial stream — two runs of the same commit drew **38 sections
+/// / 15,015 quads** and **36 / 13,991**, because a fixed 3 s is a bet on the
+/// machine rather than a condition on the world. The condition is what this
+/// waits for: [`QUIET_FRAMES`] consecutive frames in which no section was
+/// uploaded, none removed, and the loaded-column count did not move.
+///
+/// `minimum` (the scene's `@wait`) is a floor rather than the whole settle,
+/// because quiet is not the same as finished — a server-side effect a scene
+/// asks for (a teleport landing, water finding its level) can be in flight
+/// while no chunk is. Every frame here is tick-free, so both the floor and the
+/// wait cost seconds and no animation phase.
+fn settle_world(
+    sim: &mut Sim,
+    render: &mut RenderState,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    minimum: Duration,
+    what: &str,
+) {
+    let start = Instant::now();
+    let deadline = start + SETTLE_DEADLINE;
+    let mut quiet = 0u32;
+    let mut last_columns = usize::MAX;
+    loop {
+        let moved = drain(sim, render, device, queue);
+        let columns = sim.net().map_or(0, |n| n.loaded_chunks().len());
+        if moved || columns != last_columns {
+            quiet = 0;
+        } else {
+            quiet += 1;
+        }
+        last_columns = columns;
+        let now = Instant::now();
+        if quiet >= QUIET_FRAMES && now >= start + minimum {
+            return;
+        }
+        if now >= deadline {
+            // Not an assertion: a capture that proceeds against a still-loading
+            // world writes a *visibly* wrong PNG and the two-statistic control
+            // below is what catches that. A hang here would just look like a
+            // slow run.
+            println!(
+                "warning: {what} never went quiet within {:?} ({columns} columns loaded); \
+                 capturing anyway",
+                SETTLE_DEADLINE
+            );
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Wind the sim clock forward to exactly `target`, as fast as the machine will
+/// go and with no sleeping — this is animation time, not real time.
+fn advance_to_tick(
+    sim: &mut Sim,
+    render: &mut RenderState,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    target: u64,
+    what: &str,
+) {
+    assert!(
+        sim.tick_count() <= target,
+        "{what} wanted the shot at tick {target} and the clock is already at {}. \
+         The capture's determinism rests on every shot landing on a fixed tick; \
+         raise JOIN_BASE_TICK (or the scene's @ticks) rather than dropping the check.",
+        sim.tick_count()
+    );
+    while sim.tick_count() < target {
+        pump(sim, render, device, queue);
+    }
+    assert_eq!(sim.tick_count(), target, "{what} overshot its tick target");
+}
+
+fn live_config() -> Config {
+    // Documentation is evidence of the shipped default appearance, not of
+    // whichever local pack the developer last selected. This changes only the
+    // current capture process; unlike the Resource Packs screen it never saves
+    // the empty order back to `resource_packs.json`.
+    lodestone::resources::set_selected_packs(Vec::new());
+    Config {
+        mode: Mode::Window,
+        host: HOST.into(),
+        port: PORT,
+        protocol: PROTOCOL,
+        connect_in_window: true,
+        render_distance: RENDER_DISTANCE,
+        ..Config::default()
+    }
+}
+
+#[test]
+fn capture_configuration_uses_only_the_builtin_pack() {
+    lodestone::resources::set_selected_packs(vec!["file/Faithful-32x.zip".to_owned()]);
+
+    let _ = live_config();
+
+    assert!(
+        lodestone::resources::selected_packs().is_empty(),
+        "documentation captures must ignore the developer's persisted resource-pack selection"
+    );
+}
+
+#[test]
+#[ignore = "capture harness: requires the flat creative 26.2 oracle on :25570 (+ RCON :25571), the vanilla assets under .cache/mc/26.2, a GPU adapter, and `--features live`"]
+fn capture_readme_screenshots() {
+    let scenes = scenes();
+    let out_dir = main_dir().join("docs/images");
+    std::fs::create_dir_all(&out_dir).expect("docs/images");
+
+    let ctx = GpuContext::new_headless_blocking().expect(
+        "no wgpu adapter. This harness renders the real client; there is nothing to \
+         capture without one.",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    // sRGB, unlike the pixel gates' `Rgba8Unorm`: the window's own swapchain is
+    // viewed as sRGB (see `SurfaceTarget`'s `view_formats`), so this is the
+    // format whose stored bytes are the ones a player sees — and therefore the
+    // ones that belong in a PNG. A non-sRGB target would build every pipeline
+    // against a linear write and the file would come out dark.
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+    let mut rcon = RconClient::connect(RCON_ADDR, RCON_PASSWORD).unwrap_or_else(|e| {
+        panic!(
+            "cannot reach RCON at {RCON_ADDR}: {e}. Fix: ./scripts/live-oracles/creative.sh"
+        )
+    });
+    checked(
+        &mut rcon,
+        &format!("setworldspawn {} {} {}", SPAWN[0], SPAWN[1], SPAWN[2]),
+    );
+    // Keep the whole build area resident whether or not a player is standing in
+    // it; the flat oracle unloads columns aggressively.
+    checked(&mut rcon, "forceload add -32 -32 32 32");
+    // **26.2 renamed every game rule to snake_case** — `advance_time`, not
+    // `doDaylightCycle`; `mob_drops`, not `doMobLoot`. The camelCase spellings
+    // are not merely deprecated, they do not parse, and `/gamerule` reports
+    // that as `Incorrect argument for command` with the caret after the rule
+    // name. Ask the server (`help gamerule`) rather than trusting a wiki page.
+    checked(&mut rcon, "gamerule advance_time false");
+    checked(&mut rcon, "gamerule advance_weather false");
+    checked(&mut rcon, "weather clear");
+    // Nothing this harness does should leave item entities lying around. Each
+    // scene clears its stage with `kill`, and killing a mob drops its loot —
+    // which then sits in the *next* scene's frame as unexplained litter.
+    checked(&mut rcon, "gamerule mob_drops false");
+    checked(&mut rcon, "gamerule block_drops false");
+    checked(&mut rcon, "gamerule mob_griefing false");
+    // Command feedback goes to *chat*, and the HUD scene photographs chat — a
+    // run's own `/bossbar set` and `/tp` echoes would otherwise be most of
+    // what the frame shows. RCON's own reply is unaffected (verified: a
+    // `setblock` still returns "Changed the block…" and a bad block id still
+    // returns its parse caret), so the command checks above keep working.
+    checked(&mut rcon, "gamerule send_command_feedback false");
+    rcon.cmd("kill @e[type=item]");
+    // Water is the one thing a scene cannot clean up after itself: a `fill …
+    // air` over the stage leaves the sources *outside* it, which flow straight
+    // back in and flood the next scene's floor. Measured — a conduit pool from
+    // an earlier revision of the block-entity scene was still washing over the
+    // stage several scenes later. Purged once per run, over a box wider than
+    // any stage.
+    checked(
+        &mut rcon,
+        "fill -24 62 -4 24 72 34 minecraft:air replace minecraft:water",
+    );
+    // Late morning: a high sun, long-ish shadows, no night desaturation.
+    checked(&mut rcon, "time set 2000");
+
+    let mut sim = Sim::new(live_config());
+    assert!(
+        sim.vanilla_atlas().is_some(),
+        "vanilla assets did not load, so this would capture the demo palette rather than \
+         the game. Banner: {:?}. Fix: put a vanilla pack at .cache/mc/26.2 or set \
+         LODESTONE_ASSETS.",
+        sim.asset_banner()
+    );
+    sim.connect_as(HOST.into(), PORT, PROTOCOL, CAMERA_NAME.to_owned());
+
+    let (mut w, mut h) = scenes[0].size;
+    let mut target = HeadlessTarget::new(device, w, h, format);
+    let mut render = RenderState::new(device, queue, format, w, h, sim.vanilla_atlas());
+    if let Some(sheet) = sim.particle_sheet_atlas() {
+        // Mirror `App::finish_bring_up`: the CPU-side UV table and the GPU
+        // texture must be the same stitch. Without this upload every sheet
+        // particle resolves successfully and samples the transparent fallback.
+        render.install_particle_sheet_atlas(device, queue, sheet.atlas());
+    }
+    let mut hud = build_hud(device, queue, format, &target, &render);
+
+    // Join the world before anything else: the sources below capture the
+    // session handle, and a scene's blocks only stream to a client that is in.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let demo_spawn = sim.player().position;
+    let mut placed = false;
+    while Instant::now() < deadline {
+        pump(&mut sim, &mut render, device, queue);
+        if let Some(net) = sim.net()
+            && net.world_dimensions().is_some()
+            && !net.loaded_chunks().is_empty()
+            && sim.player().position != demo_spawn
+        {
+            placed = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        placed,
+        "the server never placed the camera client within 60s (still at the demo spawn \
+         {demo_spawn:?}). Fix: ./scripts/live-oracles/creative.sh"
+    );
+    println!("joined at tick {}", sim.tick_count());
+    rcon.cmd(&format!("gamemode creative {CAMERA_NAME}"));
+
+    install_render_sources(&mut render, &sim, device, queue, format);
+    let companions = join_companions();
+    // The companions exist to be tab-list rows, not to stand in shot. Spectator
+    // hides their bodies and their name plates from every other client, and a
+    // spectator is still a tab-list entry — which is the whole of what they are
+    // for. Without this they spawn on top of the camera and a nameplate covers
+    // half the frame; measured on the first capture.
+    for name in COMPANIONS {
+        rcon.cmd(&format!("gamemode spectator {name}"));
+        rcon.cmd(&format!("tp {name} 0 -20 0"));
+    }
+    if let Some(time) = sim
+        .net()
+        .and_then(|n| n.shared_handle().get().map(|h| h.world_time()))
+    {
+        println!("world time (game, day) = {time:?}");
+    }
+
+    // Let the whole initial stream land before the first scene runs. Without
+    // this the first scene pays for it out of its own `@wait`, and a run
+    // narrowed with `LODESTONE_SCENES` pays for it out of nothing at all.
+    settle_world(
+        &mut sim,
+        &mut render,
+        device,
+        queue,
+        Duration::from_millis(500),
+        "the initial chunk stream",
+    );
+    // Normalise the clock the join left behind. Everything after this point is
+    // counted in ticks rather than in seconds, so the capture stops depending on
+    // how fast the machine got the camera into the world.
+    advance_to_tick(
+        &mut sim,
+        &mut render,
+        device,
+        queue,
+        JOIN_BASE_TICK,
+        "the join",
+    );
+
+    let mut written: Vec<(String, u64)> = Vec::new();
+    let mut shot_tick = JOIN_BASE_TICK;
+    for scene in &scenes {
+        if scene.size != (w, h) {
+            (w, h) = scene.size;
+            target = HeadlessTarget::new(device, w, h, format);
+            render.resize(device, w, h);
+        }
+        for command in &scene.commands {
+            let reply = rcon.cmd(command);
+            assert!(
+                !reply.contains("<--[HERE]"),
+                "scene {:?} command did not parse:\n  {command}\n  -> {reply}",
+                scene.name
+            );
+        }
+        // Phase one: let the edits stream back and be meshed. Wall clock,
+        // because that is what a socket and a worker pool answer to — and
+        // **tick-free**, so however long it takes costs no animation phase.
+        // `Sim::step` is what pumps the net thread's update channel.
+        settle_world(
+            &mut sim,
+            &mut render,
+            device,
+            queue,
+            scene.settle,
+            &format!("scene {:?}", scene.name),
+        );
+        // Phase two: the animation clock, and the only thing that decides the
+        // phase of every sprite, beam, sway and flame in the frame.
+        shot_tick += scene.ticks;
+        advance_to_tick(
+            &mut sim,
+            &mut render,
+            device,
+            queue,
+            shot_tick,
+            &format!("scene {:?}", scene.name),
+        );
+
+        let bytes = shoot(
+            scene,
+            &mut sim,
+            &mut render,
+            &mut hud,
+            &mut target,
+            device,
+            queue,
+            w,
+            h,
+        );
+        let path = out_dir.join(format!("{}.png", scene.name));
+        std::fs::write(&path, &bytes).unwrap_or_else(|e| panic!("writing {}: {e}", path.display()));
+        written.push((scene.name.clone(), bytes.len() as u64));
+        println!("wrote {} ({} bytes)", path.display(), bytes.len());
+    }
+
+    drop(companions);
+    println!("=== captured {} scene(s) ===", written.len());
+    for (name, size) in &written {
+        println!("  {name:<28} {size:>8} bytes");
+    }
+}
+
+/// Render one scene and return its PNG bytes.
+///
+/// The colour-variance check at the end is the harness's own control: a frame
+/// that failed to mesh, failed to light, or landed inside a block reads as a
+/// nearly-uniform image, and writing that to `docs/images/` is exactly the
+/// silent failure a capture tool must not have.
+#[allow(clippy::too_many_arguments)]
+fn shoot(
+    scene: &Scene,
+    sim: &mut Sim,
+    render: &mut RenderState,
+    hud: &mut HudRenderer,
+    target: &mut HeadlessTarget,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    w: u32,
+    h: u32,
+) -> Vec<u8> {
+    let camera = Camera {
+        position: scene.eye,
+        yaw: scene.yaw,
+        pitch: scene.pitch,
+        fov_y_degrees: scene.fov,
+        aspect: w as f32 / h as f32,
+        near: 0.05,
+        far: Camera::far_for_render_distance(RENDER_DISTANCE, 0),
+    };
+
+    // What the first-person pass puts in the hand. Vanilla's
+    // `ItemInHandRenderer` forks on `isEmpty()` and draws *either* the item or
+    // the bare arm, so without this install a `@hand` scene captures an empty
+    // fist even with a sword in slot 0.
+    let held = hotbar_records(sim)
+        .get(sim.selected_slot())
+        .and_then(|record| record.as_ref())
+        .map(|record| lodestone::gpu::MainHandItem {
+            item: record.item.clone(),
+            foil: record.enchanted,
+            custom_model_data: record.custom_model_data,
+            dyed_color: record.dyed_color,
+            potion_color: record.potion_color,
+            banner_patterns: record.banner_patterns.clone(),
+            base_color: record.base_color.clone(),
+            skin: None,
+        });
+    render.set_main_hand_source(move || held.clone());
+
+    // `RenderState` draws the first-person hand whenever no third-person body
+    // is reported, at a fixed screen rect — the hazard
+    // `distant_flat_terrain_holes.rs` records. A disembodied arm in a scenic
+    // shot is noise, so scenes opt into it with `@hand`.
+    //
+    // **Installed on both arms, never on one.** A source has no uninstall, and
+    // one `RenderState` serves every scene in a run: installing the suppressor
+    // only for `!hand` left it in place for the `@hand` scene that came after,
+    // which captured with no hand at all and no error anywhere.
+    if scene.hand {
+        render.set_third_person_body_source(|| None);
+    } else {
+        render.set_third_person_body_source(|| {
+            Some(lodestone::gpu::ThirdPersonBodyState {
+                player_skin: None,
+                feet: glam::Vec3::new(0.0, -10_000.0, 0.0),
+                body_yaw_deg: 0.0,
+                anim: lodestone_render::entity_anim::AnimInput::default(),
+                scale: 1.0,
+                swim_amount: 0.0,
+                slim: false,
+                equipment: Vec::new(),
+                equipment_skin: Vec::new(),
+            })
+        });
+    }
+
+    // Per-frame source installs, in `app/redraw.rs`'s own order — every one of
+    // these is a closure over a clock or a snapshot, so a stale install freezes
+    // or drops whatever it feeds.
+    install_frame_sources(render, sim);
+    render.set_fog(sim.fog_settings(), RENDER_DISTANCE);
+    render.set_clear_color_tracked(sim.fog_settings().color);
+    render.set_sky_mode(sim.sky_mode());
+    // Mirrored from `app/redraw.rs` in the same commit that added it there —
+    // this harness is a second, silent implementation of that function's
+    // wiring, which is exactly how the shadow ground source came to be missing
+    // here for its whole life. The flat oracle *is* a superflat world, so this
+    // one is load-bearing: without it every scene renders under the non-flat
+    // 32-block void fade and a stage built near the world bottom photographs
+    // under a near-black sky.
+    render.set_void_fog(sim.void_fog());
+    render.update_animation(queue, sim.tick_count());
+    let particles = sim.extract_particles(&camera);
+    if scene.name == "05-hud" {
+        let handle = sim
+            .net()
+            .expect("05-hud is a live scene")
+            .shared_handle();
+        let smoke_sources =
+            lodestone::block_entities::campfire_smoke_sources(&handle, camera.position);
+        assert!(
+            smoke_sources.contains(&([2, 64, 18], false)),
+            "05-hud's cosy campfire must be a live block-entity smoke source: {smoke_sources:?}"
+        );
+        assert!(
+            particles.campfire_smoke_alive > 0
+                && particles.drawn > 0
+                && particles.unresolved == 0,
+            "05-hud's real lit campfire must reach the particle renderer: {particles:?}"
+        );
+    }
+    let entity_draws = sim.entity_draws();
+    let particle_instances = sim.particle_instances().to_vec();
+    let particle_control = if scene.name == "05-hud" {
+        render.prepare_particles(device, queue, &[], &camera);
+        let control_frame = target.acquire().expect("headless particle control acquire");
+        render.render(device, queue, control_frame.view(), &camera, None, &entity_draws);
+        Some(target.read_texels(device, queue))
+    } else {
+        None
+    };
+    render.prepare_particles(device, queue, &particle_instances, &camera);
+    let frame = target.acquire().expect("headless acquire");
+    let stats = render.render(device, queue, frame.view(), &camera, None, &entity_draws);
+
+    if let Some(control) = particle_control {
+        assert!(
+            stats.particle_sheet_atlas_bound,
+            "05-hud resolved sheet particles but the renderer still has its transparent fallback bound"
+        );
+        let with_particles = target.read_texels(device, queue);
+        let changed = control
+            .chunks_exact(4)
+            .zip(with_particles.chunks_exact(4))
+            .filter(|(a, b)| {
+                (0..3)
+                    .map(|channel| (i32::from(a[channel]) - i32::from(b[channel])).abs())
+                    .sum::<i32>()
+                    > 12
+            })
+            .count();
+        eprintln!("05-hud particle pixel control: {changed} pixels changed");
+        assert!(
+            changed > 0,
+            "05-hud submitted smoke instances but its world frame is byte-identical to \
+             the no-particle control"
+        );
+    }
+
+    if scene.hud {
+        let raw_view = frame.create_view(target.raw_view_format());
+        let hotbar = hotbar_records(sim);
+        let tab = sim.tab_list_view();
+        let sidebar = sim.sidebar();
+        // Chat, boss bars and the action bar come from the same live session
+        // fold the windowed client reads. `chat_spans`, not `chat`: a `§`
+        // string cannot carry a hex `TextColor::Rgb`, and a scene that sends
+        // one over `/tellraw` would silently lose it here.
+        let chat_owned = sim.recent_chat_spans(6);
+        let chat_ages: Vec<(&[lodestone_model::TextSpan], f32)> = chat_owned
+            .iter()
+            .map(|(spans, age)| (spans.as_slice(), *age))
+            .collect();
+        let boss_bars = sim.boss_bars();
+        let action_bar = sim.action_bar_overlay();
+        let air = sim.air().map(|a| {
+            (
+                a,
+                lodestone_game::player_state::HudState::MAX_AIR,
+                sim.player().eye_in_water,
+            )
+        });
+        // The one gate that hides the hearts, the hunger row, the bubbles and
+        // the XP bar together — vanilla's `canHurtPlayer()`. Read from the live
+        // session rather than hardcoded, so a creative capture honestly shows
+        // no vitals and a survival one shows them. A scene that wants the bars
+        // puts itself in survival.
+        let can_hurt_player = lodestone::hud::can_hurt_player(
+            sim.net()
+                .and_then(|n| n.shared_handle().get().cloned())
+                .and_then(|h| h.game_mode()),
+        );
+        let hud_frame = HudFrame {
+            // `HudFrame::new` defaults this to `true`, which is right for a
+            // gate and wrong for a screenshot: the F3 overlay covers the tab
+            // list and reports a frame time this harness does not really have.
+            show_debug: scene.debug,
+            crosshair: true,
+            can_hurt_player,
+            health: sim.health(),
+            food: sim.food(),
+            saturation: sim.saturation(),
+            armour: sim.armour_value(),
+            air,
+            xp: sim.xp(),
+            hotbar: Some(sim.selected_slot()),
+            hotbar_items: Some(hotbar.as_slice()),
+            players: Some(&tab),
+            sidebar: sidebar.as_ref(),
+            chat_spans: &chat_ages,
+            boss_bars: &boss_bars,
+            action_bar,
+            attack_cooldown: Some(sim.attack_strength_scale()),
+            ..HudFrame::new(&sim.stats)
+        };
+        hud.render_with_item_models(
+            device,
+            queue,
+            frame.view(),
+            &raw_view,
+            Some(render.depth_view()),
+            &hud_frame,
+            sim.vanilla_atlas().and_then(lodestone_render::BlockAtlas::models),
+            0,
+            w,
+            h,
+        );
+    }
+
+    let pixels = target.read_texels(device, queue);
+    println!(
+        "[{}] tick {} — {w}x{h} eye {:?} yaw {:.1} pitch {:.1} — {} sections, {} quads, {} entities",
+        scene.name,
+        sim.tick_count(),
+        scene.eye,
+        scene.yaw,
+        scene.pitch,
+        stats.sections_drawn,
+        stats.total_quads,
+        stats.entities_drawn,
+    );
+
+    // The control, and it is deliberately *two* numbers rather than one.
+    //
+    // `sections_drawn` and `total_quads` above are draw counters, and this
+    // repo has measured a harness that submitted geometry and read back
+    // nothing while every counter reported health — so the counters cannot
+    // stand in for pixels. `distinct` catches a frame that never lit (one flat
+    // colour); `off_modal` catches a frame that is *mostly* one thing — a
+    // camera inside a block, or a scene that failed to build, both of which
+    // leave a legible sky gradient and so clear a distinct-colour floor on
+    // their own.
+    //
+    // The thresholds are set under the measured values, not at a round number:
+    // the first scene captured reads 322 distinct / 0.79 off-modal, and a
+    // camera buried in deepslate reads 1 / 0.00.
+    let distinct = distinct_colours(&pixels);
+    let off_modal = off_modal_fraction(&pixels);
+    println!(
+        "[{}] control: {distinct} distinct colours, {:.2} of pixels off the modal colour",
+        scene.name, off_modal
+    );
+    assert!(
+        distinct >= 64 && off_modal >= 0.25,
+        "scene {:?} is not a screenshot: {distinct} distinct colours, {off_modal:.2} off-modal. \
+         Sections drawn: {}, quads: {}.",
+        scene.name,
+        stats.sections_drawn,
+        stats.total_quads
+    );
+
+    lodestone::screenshot::encode_png(&pixels, w, h).expect("png encode")
+}
+
+/// Number of distinct RGB triples in a frame, quantised to 5 bits per channel
+/// so dithering and light gradients do not inflate the count into meaning
+/// nothing.
+fn distinct_colours(pixels: &[u8]) -> usize {
+    let mut seen = std::collections::HashSet::new();
+    for px in pixels.chunks_exact(4) {
+        seen.insert((px[0] >> 3, px[1] >> 3, px[2] >> 3));
+    }
+    seen.len()
+}
+
+/// Fraction of pixels that are **not** the frame's single most common colour,
+/// at the same 5-bit quantisation.
+///
+/// This is the half `distinct_colours` cannot see: a camera stuck inside a
+/// block still renders the fog gradient over most of the frame and can carry
+/// hundreds of distinct colours while showing nothing.
+fn off_modal_fraction(pixels: &[u8]) -> f64 {
+    let mut counts = std::collections::HashMap::new();
+    let mut total = 0usize;
+    for px in pixels.chunks_exact(4) {
+        *counts
+            .entry((px[0] >> 3, px[1] >> 3, px[2] >> 3))
+            .or_insert(0usize) += 1;
+        total += 1;
+    }
+    let modal = counts.values().copied().max().unwrap_or(0);
+    if total == 0 {
+        return 0.0;
+    }
+    1.0 - (modal as f64 / total as f64)
+}
+
+/// The hotbar row, built the way `app/redraw.rs` builds it — minus two fields
+/// this side of the crate boundary cannot reach.
+///
+/// `enchanted` and `skin` come from `hud::item_icon`, which is `pub(crate)`, so
+/// an integration test cannot call it. The consequence is narrow and stated
+/// rather than hidden: a **glinting** or **custom-head** stack in a captured
+/// hotbar would draw without its foil or its face. No scene puts one there.
+fn hotbar_records(sim: &Sim) -> Vec<Option<HotbarSlot>> {
+    let menu = sim.player_menu();
+    (0..9)
+        .map(|i| {
+            menu.player_native(i).and_then(|st| {
+                let item = lodestone_assets::ResourceLocation::parse(&st.item().to_string()).ok()?;
+                let damage = st
+                    .components()
+                    .get_int(lodestone_game::item::DAMAGE_COMPONENT)
+                    .and_then(|v| u32::try_from(v).ok());
+                let max_damage = st
+                    .components()
+                    .get_int(lodestone_game::item::MAX_DAMAGE_COMPONENT)
+                    .and_then(|v| u32::try_from(v).ok());
+                Some(HotbarSlot {
+                    item,
+                    count: st.count().max(0) as u32,
+                    damage,
+                    max_damage,
+                    enchanted: false,
+                    custom_model_data: st.custom_model_data(),
+                    dyed_color: st.dyed_color(),
+                    potion_color: st.potion_color(),
+                    banner_patterns: st.banner_patterns().to_vec(),
+                    base_color: st.base_color().map(str::to_owned),
+                    skin: None,
+                })
+            })
+        })
+        .collect()
+}
+
+/// Bring the HUD renderer up the way `app/lifecycle.rs` does.
+///
+/// The **raw** (non-sRGB) format goes to `HudRenderer::new` and the corrected
+/// one to every `attach_*`, and that split is not a detail: the flat-colour
+/// stream (text, plates, stack counts) draws into its own pass on a raw view
+/// of the same texture, because vanilla's 2-D GUI blending is not
+/// colour-managed. Building the whole thing against one format is a wgpu
+/// validation error at the first `set_pipeline`, which is how this was found.
+fn build_hud(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    format: wgpu::TextureFormat,
+    target: &HeadlessTarget,
+    render: &RenderState,
+) -> HudRenderer {
+    let mut hud = HudRenderer::new(device, target.raw_view_format());
+    if let Some(gui) = lodestone::resources::load_gui_atlas() {
+        hud.attach_gui(device, queue, format, gui);
+    }
+    let item_atlas = lodestone::resources::load_item_atlas();
+    let glint = item_atlas
+        .as_ref()
+        .and_then(|_| lodestone::resources::load_glint_texture());
+    if let Some(items) = item_atlas {
+        hud.attach_items(device, queue, format, items);
+        if let Some(img) = &glint {
+            hud.attach_glint(device, queue, format, img);
+        }
+    }
+    // The 3-D block-item icons, borrowing the world renderer's own atlas,
+    // palette and animation buffers rather than a second copy. Without it a
+    // hotbar of blocks draws flat sprites where the game draws little cubes.
+    if let (Some(atlas_view), Some(atlas_sampler), Some(palette), Some(anim)) = (
+        render.model_atlas_view(),
+        render.model_atlas_sampler(),
+        render.model_palette_buffer(),
+        render.model_anim_buffer(),
+    ) {
+        hud.attach_item_models(device, format, atlas_view, atlas_sampler, palette, anim);
+    }
+    hud
+}
+
+/// The block-entity and display sources `app/redraw.rs` re-installs every
+/// frame. Kept in that file's order so the two can be diffed by eye — a source
+/// missing here is a hole in the world, not a missing decoration, for every one
+/// of the block types whose 26.2 model is empty (chests, shulkers, pots,
+/// conduits, banners).
+fn install_frame_sources(render: &mut RenderState, sim: &Sim) {
+    if let Some(f) = sim.block_entity_source() {
+        render.set_block_entity_source(f);
+    }
+    if let Some(f) = sim.skull_source() {
+        render.set_skull_source(f);
+    }
+    if let Some(f) = sim.copper_golem_statue_source() {
+        render.set_copper_golem_statue_source(f);
+    }
+    if let Some(f) = sim.sign_source() {
+        render.set_sign_source(f);
+    }
+    if let Some(f) = sim.beacon_source() {
+        render.set_beacon_source(f);
+    }
+    render.set_display_draws(sim.display_draws());
+    if let Some(f) = sim.end_portal_source() {
+        render.set_end_portal_source(f);
+    }
+    if let Some(f) = sim.end_gateway_source() {
+        render.set_end_gateway_source(f);
+    }
+    render.set_end_portal_game_time(sim.game_time_for_shaders());
+    if let Some(f) = sim.end_gateway_beam_source() {
+        render.set_end_gateway_beam_source(f);
+    }
+    if let Some(f) = sim.bell_source() {
+        render.set_bell_source(f);
+    }
+    if let Some(f) = sim.shulker_source() {
+        render.set_shulker_source(f);
+    }
+    if let Some(f) = sim.decorated_pot_source() {
+        render.set_decorated_pot_source(f);
+    }
+    if let Some(f) = sim.conduit_source() {
+        render.set_conduit_source(f);
+    }
+    if let Some(f) = sim.banner_source() {
+        render.set_banner_source(f);
+    }
+    if let Some(f) = sim.lectern_source() {
+        render.set_lectern_source(f);
+    }
+    if let Some(f) = sim.campfire_source() {
+        render.set_campfire_source(f);
+    }
+    if let Some(f) = sim.brushable_source() {
+        render.set_brushable_source(f);
+    }
+    if let Some(f) = sim.shelf_source() {
+        render.set_shelf_source(f);
+    }
+    if let Some(f) = sim.vault_source() {
+        render.set_vault_source(f);
+    }
+    if let Some(f) = sim.enchanting_table_source() {
+        render.set_enchanting_table_source(f);
+    }
+    if let Some(f) = sim.moving_piston_source() {
+        render.set_moving_piston_source(f);
+    }
+    if let Some(f) = sim.spawner_source() {
+        render.set_spawner_source(f);
+    }
+    if let Some(f) = sim.map_source() {
+        render.set_map_source(f);
+    }
+}
+
+/// The once-per-session installs `app/session.rs`'s
+/// `install_session_render_sources` performs: the sky pass and its textures,
+/// the per-dimension ambient floor, the time-of-day clock, the entity light
+/// sampler and the shadow ground sampler.
+///
+/// Without the light sampler every mob and every block entity renders at a
+/// constant brightness, which looks *plausible* in a screenshot and is wrong —
+/// exactly the failure this harness must not ship, so it is installed here even
+/// though nothing would go red without it.
+///
+/// The shadow ground sampler is the same class and was missed for exactly that
+/// reason: `RenderState::prepare_shadows` asks it what block sits under each
+/// candidate cell, and an *unset* source samples `None` for every one of them,
+/// so the pass emits zero vertices and every entity in every capture stands on
+/// its own reflection-free patch of floor. Nothing goes red — the option half
+/// of vanilla's gate (`set_entity_shadows_enabled`) already defaults on, the
+/// shadow texture already loads from the vanilla pack, and the only tell is a
+/// missing decal in the image. Any *new* source `app/session.rs` grows has to
+/// be mirrored here for the same reason; this harness is a second, silent
+/// implementation of that function's wiring.
+fn install_render_sources(
+    render: &mut RenderState,
+    sim: &Sim,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    format: wgpu::TextureFormat,
+) {
+    let Some(net) = sim.net() else {
+        panic!("no session attached; the join loop above should have made this impossible")
+    };
+    let handle = net.shared_handle();
+    let sky_policy = net.shared_sky_default();
+
+    let darken = handle.clone();
+    render.set_sky_darken_source(move || {
+        darken
+            .get()
+            .map(|h| lodestone_render::entity::sky_darken_for_time_of_day(h.world_time().1))
+    });
+    let ambient = handle.clone();
+    render.set_ambient_light_source(move || {
+        let dim = ambient.get()?.player().dimension_type?;
+        Some(match dim.ambient_light_color {
+            Some(packed) => lodestone_render::light::rgb24_to_channels(packed),
+            None => lodestone_render::light::OVERWORLD_AMBIENT_LIGHT,
+        })
+    });
+    let light = handle.clone();
+    render.set_entity_light_source(move |feet| {
+        lodestone::net::entity_light_at(
+            &light,
+            feet.x.floor() as i32,
+            feet.y.floor() as i32,
+            feet.z.floor() as i32,
+            sky_policy.get(),
+        )
+    });
+    // `app/session.rs`'s `install_shadow_ground_source`, verbatim: a cheap
+    // one-position read through a cloned handle, answering "what block is
+    // this" and leaving "does that state catch a shadow" to the collision
+    // data on the render side.
+    let ground = handle.clone();
+    render.set_shadow_ground_source(move |[x, y, z]| {
+        ground
+            .get()?
+            .block_at(lodestone_client::BlockPos::new(x, y, z))
+    });
+    // The option half of vanilla's `entityShadows && !isInvisible` gate. The
+    // live client polls `nav.options().entity_shadows` every presented frame
+    // in `app/redraw.rs`; this harness has no options menu, so it states the
+    // value it wants once rather than resting on `RenderState::new`'s default.
+    render.set_entity_shadows_enabled(true);
+
+    // The raw day-time tick, not `sky_darken`'s derived factor — the sky pass
+    // needs the tick itself to place the sun, the moon and the cloud scroll.
+    // `app/session.rs` wraps this in `ContinuousTimeOfDay` so the clouds do not
+    // step once a second between `SET_TIME` packets; a still frame cannot see
+    // that, so the raw value is used here.
+    let clock = handle;
+    render.set_time_of_day_source(move || clock.get().map(|h| h.world_time().1));
+
+    if !render.has_sky()
+        && let Some(sky) = lodestone::resources::load_sky(device, queue, format)
+    {
+        render.install_sky(sky);
+    }
+    assert!(
+        render.has_sky(),
+        "the sky pass did not install, so every capture would have a flat void above the \
+         horizon instead of a sky. `resources::load_sky` needs the vanilla pack stack \
+         (.cache/mc/26.2 or LODESTONE_ASSETS)."
+    );
+    if !render.has_screen_effects()
+        && let Some(fx) = lodestone::resources::load_screen_effects(device, queue, format)
+    {
+        render.install_screen_effects(fx);
+    }
+}
+
+/// Join the extra clients whose only job is to be rows in the tab list.
+///
+/// **Fixed names, not [`unique_username`]**, and that is a deliberate exception
+/// to the live-gate rule. Offline mode derives the account UUID from the name,
+/// so a shared name is a shared player file — the hazard being that a *dead*
+/// player is held on the death screen and is sent no chunks. These clients never
+/// render anything and the oracle is flat, creative and peaceful, so there is
+/// nothing here that can kill one; what a unique name would cost is the whole
+/// point of the image, since `E0_1k3j9fa2` is not a screenshot of a tab list.
+/// The camera client is put in creative on join for the same reason.
+fn join_companions() -> Vec<lodestone::net::NetClient> {
+    let clients: Vec<lodestone::net::NetClient> = COMPANIONS
+        .iter()
+        .map(|name| {
+            lodestone::net::NetClient::connect_as(
+                HOST.to_owned(),
+                PORT,
+                PROTOCOL,
+                None,
+                (*name).to_owned(),
+            )
+        })
+        .collect();
+    // Drain each one's update channel until it is in the world, so the camera
+    // client's own tab list has actually received them. Bounded — a companion
+    // that never arrives costs a thinner tab list, not a failed capture.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        let ready = clients
+            .iter()
+            .filter(|c| {
+                let _ = c.poll();
+                !c.loaded_chunks().is_empty()
+            })
+            .count();
+        if ready == clients.len() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = unique_username();
+    clients
+}

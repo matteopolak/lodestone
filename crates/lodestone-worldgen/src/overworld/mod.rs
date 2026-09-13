@@ -1,0 +1,1413 @@
+//! Composed overworld chunk generation: the version-free driver that chains the
+//! proven stages into a single "give me the blocks in chunk `(cx, cz)`" call.
+//!
+//! Everything below this module is a *stage* proven bit-for-bit against a JVM in
+//! isolation (`region_parity`, `chunk_parity`, `surface_parity`, `carver_parity`,
+//! `feature_parity`, `aquifer_parity`). This module is the glue that runs them in
+//! sequence so a caller — the integrated server, or the shell's local world —
+//! gets real terrain instead of a stand-in. It holds **no data**: the noise
+//! settings `Value` and every density function / noise / carver / feature it
+//! references arrive through a [`Resolver`], exactly as the parity tests supply
+//! them, so the engine stays version-free (plan §3).
+//!
+//! # Composed pipeline, and vanilla's own order
+//!
+//! Vanilla's real order is: fill (shape + the real aquifer, the aquifer
+//! participating *inside* fill rather than after it) -> per-quart biome
+//! resolution -> surface building -> carving -> feature decoration.
+//! [`column`](Self::column) reproduces that order exactly:
+//!
+//! 1. **Fill** — [`AquiferSystem::block_at`] evaluates the interpolated
+//!    `final_density` field *and* the real aquifer's barrier/floodedness/
+//!    spread/lava routing together (vanilla's combined substance
+//!    computation), the same code `aquifer_parity` proves block-for-block
+//!    against the JVM. This replaces
+//!    the sea-level-only fluid approximation this generator used before the
+//!    real aquifer landed: underground water/lava pockets now come from the
+//!    real aquifer, not just
+//!    "below sea level ⇒ water."
+//! 2. **Biome** — one climate sample per quart, unchanged since biome
+//!    sampling first landed (real multi-noise biome variety), now sampling the fill stage's real
+//!    solid-top heightmap.
+//! 3. **Surface** — [`SurfaceSystem::build_surface`], unchanged since that
+//!    same landing, now consuming the real aquifer's fill instead of the approximation.
+//! 4. **Carve** — [`crate::carver::apply_carvers`] over a materialised
+//!    world-keyed block grid, replicating vanilla's real per-source-chunk
+//!    per-source-chunk carver-biome resolution (each of the 17×17 source chunks in the carve
+//!    neighbourhood gets its own biome — and therefore its own carver list —
+//!    sampled at that source chunk's quart corner and `y = 0`, **not** its
+//!    surface height; carver selection is a different question from surface
+//!    material). See [`crate::carver::apply_carvers`]'s doc comment.
+//!
+//! 5. **FEATURES** — [`Self::features_stage`] runs the unified, globally
+//!    ordered decoration stream over the real 3×3 source neighbourhood. Each
+//!    source uses its own pre-ore terrain prefix and 3x3 section-biome union,
+//!    while all ore, disk and vegetal bodies share one read/write region and observe
+//!    preceding entries' writes. The surrounding 5×5 terrain-prefix context
+//!    supplies the padded probes required by those source passes; the centre
+//!    16×16 result and entities are then returned to the caller.
+//!
+//! This landed after an architecture review found that `FeatureOracle.java`
+//! — the oracle `feature_parity` validates the ore *engine* against —
+//! originally shared the very simplification it was supposed to be
+//! checking (it used to not model neighbour spill at all); that oracle bug
+//! was fixed first (`7f97ca1`), and this module's own composition second,
+//! deliberately in that order — composing against a wrong oracle would have
+//! baked a wrong edge band into every chunk with no gate able to see it.
+//!
+//! **What composing the real 3×3 driver actually measured, and why the gap
+//! against `postfeatures` did not go to (near) zero the way carve's gap
+//! against `postcarve` did.** `ComposedChunkOracle.java`'s `postfeatures`
+//! stage is *single-source only* (it never extends to a real 3×3 with real
+//! per-quart biome variety — that would need 8 more fully-generated real
+//! chunks per fixture dump, not attempted; see that file's own doc comment).
+//! A diagnostic single-source probe reproduced that oracle's narrower scope
+//! and measured a much smaller residual against it (563/98304 at chunk (0,0),
+//! down from the pre-composition 4113) — evidence the *engine* is correct
+//! and that most of the *full* 3×3 gap against `postfeatures` (2237/98304 at
+//! the same chunk) is real vanilla ore spill this oracle stage cannot model,
+//! not a defect. See `docs/worldgen-parity.md` for the full per-chunk
+//! numbers, including the one fixture chunk ((-120,-120)) where the gap
+//! against `postfeatures` genuinely *worsened*: that chunk's real biome is
+//! badlands (see "Badlands" below), so composing ores there places the
+//! *wrong* biome's ore list, not merely an incomplete one — confirmed
+//! directly by a whole missing ore type (`badlands.json`'s
+//! underground-ore step names `minecraft:ore_gold_extra`, badlands' bonus
+//! gold vein, which no substitute biome's list contains).
+//!
+//! **Everything listed above is composed.** This paragraph twice carried a
+//! "still not composed" list that had gone stale — first vegetation/tree
+//! features, then structures, each already built and composed by the time a
+//! reader trusted the sentence. Structures now enter through this generator's
+//! `structure_starts` and `structure_refs` stages (see [`structures`]) and
+//! adapt terrain through the beardifier. **Do not restore a not-yet list
+//! here**; the live record of what does not build is
+//! `OverworldGenerator::structure_ledger`, read at runtime, and that is the
+//! thing CLAUDE.md's §2 keeps warning stale claims in this file are prone to.
+//! `docs/worldgen-parity.md` measures the composed subset
+//! (shape + real aquifer + biome + surface + carvers + ores + vegetation)
+//! against a real
+//! vanilla JVM.
+//!
+//! # Performance work, and an honest miss
+//!
+//! **A correctness bug this refactor introduced, found and fixed before
+//! landing.** A [`crate::dense_grid::DenseBlockGrid`]'s palette is built
+//! incrementally, in `.set()` call order — unlike the `HashMap`-keyed
+//! `world` it replaced, whose palette used to be assigned by a *separate*,
+//! fixed-order final pass regardless of how `world` itself was populated.
+//! [`Self::materialize_world`] originally applied `surface_diff` (a
+//! `HashMap<(i32,i32,i32), String>`, fresh per chunk) by iterating it
+//! directly — and `std::collections::HashMap` iteration order is not
+//! guaranteed stable even across two *separately constructed* maps with
+//! identical content (`RandomState` reseeds per map). Two independent
+//! `column()` calls for the *same* chunk therefore produced the same blocks
+//! at the same positions but a **different palette order** — same terrain,
+//! different bytes. Caught by
+//! `lodestone_server::worldgen_data::tests::column_is_byte_identical_across_two_independently_constructed_generators`
+//! (added as a permanent regression control, no threading involved) after
+//! it was first surfaced by `lodestone-server`'s own
+//! `chunk::tests::parallel_generation_is_deterministic_and_matches_serial`
+//! (added by a different agent's concurrently-landed feature — confirmed
+//! via an isolated `git worktree` at the commit *before* this crate's ore
+//! composition that the failure did not exist there, ruling out a
+//! threading bug in that test's own new code before spending time on it).
+//! Fixed by consulting `surface_diff` with a point lookup inside the same
+//! fixed `(lz, lx, ly)` loop the base fill already uses, never iterating it.
+//!
+//! The working grid every stage above writes into is
+//! [`crate::dense_grid::DenseBlockGrid`] — a flat, palette-indexed array —
+//! not a `HashMap<(i32,i32,i32), String>`. `materialize_world` builds the
+//! dense grid directly; [`crate::carver::CarveGrid`] wraps it with no copy
+//! (`from_dense`/`into_dense`); [`Self::intern_from_dense`] adopts the
+//! finished grid's own palette/blocks straight into [`GeneratedColumn`] with
+//! no second interning pass. A debug-only toggle
+//! (`LODESTONE_CARVE_HASHMAP_DEBUG=1`, in [`Self::carve_stage`]) forces the
+//! old `HashMap` round trip for direct comparison, measured (debug,
+//! single-threaded, radius-1/9-chunk patch): **4782us → 4173us mean/chunk,
+//! ~12.7% faster**; parallel wall/chunk (10 threads) 892us → 799us, ~11.6%
+//! faster. Real, and the right shape of fix — but **not** what closes the
+//! gap to the historical "144-chunk sweep: sub-second → ~68s in debug"
+//! regression that motivated this section, because that regression was
+//! carve-only, pre-ore-composition. Composing the real 3×3 ore driver
+//! (stage 5 above) adds its own ~9× multiplier on top — 9 full pre-ore
+//! pipeline recomputations per `column()` call (1 centre + 8 neighbours,
+//! each needing its own real post-carve terrain/heightmap for correctness,
+//! not an approximation) — which dominates over the `HashMap`-vs-array
+//! delta. Measured directly on the actual 144-chunk sweep this section's
+//! history refers to
+//! (`lodestone_server::worldgen_data::tests::served_columns_never_carry_an_unported_badlands_variant`,
+//! a 12×12 chunk loop, `crates/lodestone-server/src/worldgen_data.rs`) —
+//! `cargo test -p lodestone-server --lib` (debug, whose total wall time is
+//! dominated by this one test among 129) measured **700.57s**, versus the
+//! documented pre-ore-composition ~68s: **~10× worse**, close to the
+//! predicted ~9× (1 centre + 8 neighbours) rather than an unexplained
+//! blow-up. **This is not fully solved.** The dense grid is real and worth keeping; the
+//! dominant remaining cost is structural — `ore_stage` has no cache across
+//! adjacent chunks in a sweep (exactly the access pattern a real server/
+//! shell has), so neighbour work that's shared between two adjacent
+//! `column()` calls is redone from scratch every time. A per-generator
+//! neighbour cache (safe to memoize — generation is pure/deterministic) was
+//! the natural next step, and has since **LANDED** — first as two
+//! `Mutex`-guarded FIFO caches (`6509a97`), and now as the sharded staged
+//! [`store`] that replaced them in Unit 6 of the rewrite plan, because the
+//! FIFO caches' own global mutexes became the next bottleneck (~5,000
+//! concurrent lock attempts under a 289-column join burst, `4307b59`).
+//! The rest of this paragraph is kept as the argument that
+//! produced it, because it named the real design constraint correctly:
+//! [`OverworldGenerator`] is used from multiple threads
+//! (`chunk::tests::parallel_generation_is_deterministic_and_matches_serial`
+//! in `lodestone-server` exercises this directly), so a correct cache needs
+//! real interior-mutability design rather than something bolted on under
+//! time pressure. The one remaining `HashMap<(i32,i32,i32), String>` in the
+//! hot path regardless is the ore region grid
+//! `crate::feature::apply_ore_step_3x3_per_source` itself expects (proven
+//! against `feature_parity`'s fixture-driven `HashMap` shape) — narrowing
+//! that engine's own signature to a dense grid too is further work, also
+//! not attempted in this pass.
+//!
+//! # Badlands (a carried-over gap, now closed)
+//!
+//! `minecraft:badlands`/`eroded_badlands`/`wooded_badlands` used to be
+//! excluded from the searchable biome table
+//! (`crate::biome::usable_overworld_table`) because their surface rule
+//! reached an unported band-lookup subsystem that would panic. That
+//! band lookup is now ported (`crate::surface::Rule::Bandlands`) and the
+//! exclusion is removed (`usable_overworld_table` is a pass-through), so a
+//! column can resolve to any of the three real names again — which means
+//! the per-source-chunk carver biome and ore biome (both driven through the
+//! same table [`Self::biome_for_carver_source`] resolves) now see them too,
+//! closing the specific gap `docs/worldgen-parity.md` measured: chunk
+//! `(-120,-120)`'s real vanilla biome is badlands, and the substitute biome
+//! this exclusion used to force could never carry badlands' bonus
+//! `ore_gold_extra` gold vein (51 blocks at that chunk, measured zero
+//! before).
+
+//! # File layout (U16 Phase A)
+//!
+//! This module was one 1,873-line file until the decomposition unit split it along
+//! the stage seams `column`/`column_timed` already called. Nothing moved but text:
+//!
+//! * this file — the generator struct, `new`, the `column`/`column_timed`
+//!   orchestration and the memoised `pre_ore_stage` entry point;
+//! * [`store`] — the staged sharded per-chunk store that memoises the terrain
+//!   prefix, Unit 6's replacement for the `Mutex`-guarded FIFO cache this file
+//!   used to hold;
+//! * [`fill`] — stages 1-4 (aquifer, shape, surface, materialise, carve);
+//! * [`biome`] — the climate/biome resolution stages;
+//! * [`decorate`] — stages 5-7 (ore, vegetation, top layer) and their stitches;
+//! * [`output`] — [`GeneratedColumn`] and [`StageTimes`], the read-mostly result types.
+
+mod biome;
+pub mod biome_cells;
+pub mod block_entities;
+mod decorate;
+mod fill;
+mod output;
+pub mod store;
+pub mod structures;
+mod veins;
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use serde_json::Value;
+
+use crate::biome::ClimateSampler;
+use crate::carver::CarverConfig;
+use crate::density::{Builder, Resolver};
+use crate::feature::PlacedOre;
+use crate::surface::{SurfaceSystem, identity_canon};
+
+use self::biome::DynamicBiome;
+use self::fill::AquiferTrees;
+
+pub use self::biome_cells::BiomeCells;
+pub use self::block_entities::{BeeOccupant, GeneratedBlockEntity};
+pub(crate) use self::biome::{zoomed_biome, zoomed_biome_flat};
+#[cfg(test)]
+pub(crate) use self::biome::biome_zoom_seed;
+pub use self::output::{
+    GenStage, GeneratedColumn, HEIGHTMAP_COLUMNS, MOTION_BLOCKING_HEIGHTMAP_TYPE_ID,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use self::output::StageTimes;
+pub use self::structures::{BEARD_REACH, REFS_RADIUS, StructureRefs};
+
+/// The return shape of [`OverworldGenerator::pre_ore_stage`] — one chunk's
+/// own post-carve world, heightmap and biome quarts (stages 1-4). Named so the
+/// store's value type reads as "one chunk's pre-ore result", not an anonymous
+/// 3-tuple.
+///
+/// The world is an `Arc` so read-only neighbourhood consumers can be handed the
+/// terrain prefix rather than copying it. Every consumer that needs to mutate it
+/// still clones out of the `Arc`.
+type PreOreResult = (
+    Arc<crate::dense_grid::DenseBlockGrid>,
+    [i32; 256],
+    [(String, bool); 16],
+    // The full 4x4x4 biome grid for this chunk. Behind an `Arc` for the same
+    // reason the world is: neighbourhood consumers must not copy 1,536 cells
+    // per neighbour. The 16-entry surface array above is *derived from* this
+    // one (`surface_quarts_from_cells`), kept alongside rather than recomputed
+    // because every existing consumer -- surface, carve, decorate -- asks the
+    // surface question specifically.
+    Arc<biome_cells::BiomeCells>,
+);
+
+/// One chunk's memoised intermediate products — the payload of a
+/// [`store::StagedStore`] entry, one [`store::StageSlot`] per stage of the
+/// pipeline that other chunks read.
+///
+/// Unit 6 of `docs/plans/worldgen-rewrite.md` replaced two independent
+/// `Mutex<HashMap + VecDeque>` FIFO caches with this: one entry per chunk
+/// holding *both* stages, so the two products of one chunk share one shard
+/// lookup instead of two global-mutex acquisitions, and each stage carries its
+/// own once-only guard. Adding a stage (Unit 9's memoised per-source biome is
+/// next) means adding a field here and nothing else — see [`store`]'s module
+/// doc, including its reentrancy rule: a stage may only depend on stages
+/// declared *below* it.
+#[derive(Debug, Default)]
+struct ChunkStages {
+    /// Stage 0a — this chunk's own structure starts. **The
+    /// topmost stage**, and the only one whose computation reads no other stage:
+    /// see [`structures`]'s module doc for why starts must precede noise, and
+    /// [`store`]'s for why "above the stages it consumes" is the rule that keeps
+    /// the once-guards deadlock-free.
+    structure_starts: store::StageSlot<Vec<Arc<crate::structure::StructureStart>>>,
+    /// Stage 0b — the 17×17 references walk over `structure_starts`. Consumed by
+    /// `pre_ore` (as the beardifier context) and by the persistence path.
+    structure_refs: store::StageSlot<structures::StructureRefs>,
+    /// Stages 1–4 — see [`OverworldGenerator::pre_ore_stage`].
+    pre_ore: store::StageSlot<PreOreResult>,
+}
+
+/// Replay-only slots for the immutable portion of the unified FEATURES
+/// dispatch. Keeping these outside [`ChunkStages`] is deliberate: normal
+/// production generation must not retain a large cloned selection context for
+/// every explored chunk. A lifecycle materializer prepares this bounded map
+/// from its authenticated admission set, and source completions then fill each
+/// slot lazily while preserving their own serial state.
+struct ReplayContextCache {
+    slots: HashMap<
+        (i32, i32),
+        Arc<store::StageSlot<decorate::MixedReplayContext>>,
+    >,
+    /// Exact-coordinate pre-ore slots covering every prepared admission's
+    /// 5x5 read closure. Keeping these handles alive prevents the general
+    /// store's production retention policy from making a replay recompute an
+    /// immutable terrain prefix between source completions.
+    pre_ore: Arc<
+        HashMap<(i32, i32), Arc<std::sync::OnceLock<Arc<PreOreResult>>>>,
+    >,
+}
+
+/// Chebyshev chunk radius one [`OverworldGenerator::column`] call closes over.
+///
+/// **Derived from the drivers, not chosen.** The unified FEATURES dispatcher reads
+/// the pre-ore world of the 5×5 neighbourhood: each source's 3×3 feature pass can
+/// inspect the centre-relative region and its padded decoration context. If a
+/// driver's neighbourhood ever widens, this widens with it or the pin below
+/// stops covering the request that needs it.
+const COLUMN_CLOSURE_RADIUS: i32 = 2;
+
+/// Chebyshev chunk radius one [`OverworldGenerator::column`] call closes over
+/// **including the structure stages** — the radius the store pin actually uses.
+///
+/// # Why this is not [`COLUMN_CLOSURE_RADIUS`], and what it cost to find out
+///
+/// Structure placement's S1 added one upstream edge: [`OverworldGenerator::pre_ore_stage`]
+/// reads `structure_refs_stage` for its own chunk, and that stage walks
+/// `structure_starts_stage` over [`structures::REFS_RADIUS`] = 8 chunks in every
+/// direction (vanilla's structure-reference-gathering range). Compose that with the 5×5
+/// pre-ore closure and **one `column()` call touches 21×21 = 441 store entries,
+/// not 25**.
+///
+/// The pin radius was left at 2, so 416 of those 441 entries were unpinned while
+/// the request that needed them was still running, and [`STORE_RETENTION`] was
+/// still sized for the 25-per-column world. Measured over the 12×12 C_ss sweep at
+/// `ac5391d1`, against the exactly-once predictions in `benches/generation.rs`:
+///
+/// | counter | predicted | measured | factor |
+/// |---|---|---|---|
+/// | `pre_ore_computed` | 256 | **740** | 2.9× |
+/// | `structure_starts_computed` | 1,024 | **7,569** | 7.4× |
+///
+/// Every one of those recomputations is a full terrain stage re-run, and the
+/// counters that were supposed to report it were unreadable because a *different*
+/// assertion in the same bench had gone red first (see that file's `block_at`
+/// decomposition). Nothing was wrong with the eviction policy: the pin was
+/// narrower than the closure, which is exactly the failure the pin exists to make
+/// impossible.
+///
+/// **Widen this with any driver that widens.** The rule from
+/// [`COLUMN_CLOSURE_RADIUS`] applies twice over here: this is `2 + 8` because two
+/// separate constants say so, and if either moves this must be re-derived rather
+/// than adjusted.
+const STRUCTURE_CLOSURE_RADIUS: i32 = COLUMN_CLOSURE_RADIUS + structures::REFS_RADIUS;
+
+/// Side length of the default admitted generation window.
+///
+/// Admission is tile-based, and the normal shaped request spans two adjacent
+/// 16×16 tiles. Keeping that contract here means the retention policy follows
+/// the scheduler's bounded window instead of a benchmark-specific constant.
+pub const ADMITTED_GENERATION_WINDOW_SIDE: usize =
+    (crate::stage_schedule::ADMISSION_TILE_SIDE as usize) * 2;
+
+/// Soft ceiling on entries retained by [`OverworldGenerator::store`].
+///
+/// The default shaped request admits a 32×32 window and reads a radius-10
+/// structure halo, so its closure is 52×52 = 2,704 entries. The helper rounds
+/// that area to the next power of two, yielding 4,096 entries. In-flight
+/// neighbourhoods are pinned, so exceeding this bound can evict only an
+/// unpinned cold tail; the bounded ceiling protects a long-lived generator's
+/// memory without changing deterministic values.
+const STORE_RETENTION: usize = store::retention_for_window(
+    ADMITTED_GENERATION_WINDOW_SIDE,
+    STRUCTURE_CLOSURE_RADIUS as usize,
+);
+
+/// A composed, reusable overworld generator. Build once per seed; call
+/// [`column`](Self::column) per chunk.
+#[allow(missing_debug_implementations)]
+pub struct OverworldGenerator {
+    /// Shared slot-index upper bound for every `Density` tree this generator
+    /// built (final_density, surface, climate, aquifer) — see
+    /// [`AquiferTrees`]'s doc comment.
+    slot_count: usize,
+    surface: SurfaceSystem,
+    /// Block-state string to [`crate::interner::StateId`] table, shared by
+    /// **every** grid this generator builds — that sharing is what lets a cell
+    /// move between two grids as a `u16` instead of a fresh `String`, which is
+    /// where Unit 3's 884,736-allocations-per-column saving comes from
+    /// (`docs/plans/worldgen-rewrite.md` D2).
+    ///
+    /// Owned per generator rather than globally, and it outlives every column,
+    /// so interning is a warmup cost and steady-state serving allocates nothing
+    /// here. See [`crate::interner`]'s module doc for why id-assignment order
+    /// cannot reach the wire.
+    interner: Arc<crate::interner::StateInterner>,
+    min_y: i32,
+    height: i32,
+    sea_level: i32,
+    default_block: String,
+    default_fluid: String,
+    /// Vanilla hardcodes lava as the aquifer's second fluid regardless of the
+    /// dimension's configured `default_fluid` (the aquifer's fluid-status
+    /// type is built from the game's fixed lava block state, not from the
+    /// noise-generator settings) — not a simplification, this is vanilla's
+    /// own behaviour.
+    default_lava: String,
+    /// The three `default_*` strings above as [`PreState`]s — interned id plus
+    /// air/fluid/stone class — resolved once here.
+    ///
+    /// [`Self::surface_stage`]'s `pre` closure and [`Self::materialize_world`]
+    /// both need a block-state per position and used to `clone()` / re-hash one
+    /// of the strings above per call; these make both a 4-byte copy.
+    ///
+    /// **Both halves come from [`PreState::from_name`]**, i.e. from
+    /// `class_of_name` applied to the very string the settings supplied — so
+    /// the class is *derived*, never hand-written at the use site. That is
+    /// deliberate: a hand-written class would be a fully-connected wire
+    /// carrying the wrong value (`CLAUDE.md`'s own phrase) — the scan would
+    /// branch differently and still produce a plausible column. The `String`
+    /// forms are kept as the definition `surface_stage` re-derives against on
+    /// every entry under `debug_assertions`.
+    /// The ore-vein sampler's three router channels plus its positional RNG,
+    /// or `None` when the settings do not enable veins. Consumed by
+    /// [`Self::materialize_world`]. See [`veins`].
+    veins: Option<veins::VeinPrograms>,
+    default_block_pre: crate::surface::PreState,
+    default_fluid_pre: crate::surface::PreState,
+    default_lava_pre: crate::surface::PreState,
+    /// The biome (and its "cold enough to snow" answer) used for every column
+    /// when [`Self::dynamic_biome`] is `None` — i.e. exactly the whole-world
+    /// behaviour this generator had before biome sampling became per-column,
+    /// kept as the fallback
+    /// a [`Resolver`] with no biome data still gets.
+    fallback_biome: String,
+    fallback_cold_enough_to_snow: bool,
+    /// `None` unless `resolver.biome_parameters()` returned a non-empty
+    /// table, in which case every column samples real climate instead of
+    /// using the fallback above.
+    dynamic_biome: Option<DynamicBiome>,
+    seed: i64,
+    aquifer_trees: AquiferTrees,
+    /// `#overworld_carver_replaceables` tag closure — which
+    /// blocks a carver is allowed to overwrite. Empty when the [`Resolver`]
+    /// supplies no tag data (`Resolver::block_tag`'s default), in which case
+    /// `carver::apply_carvers`'s own `can_replace` is always false and
+    /// carving becomes a harmless no-op rather than a panic — matching the
+    /// "no data supplied" convention every resolver method establishes.
+    carver_replaceable: HashSet<String>,
+    /// Per-biome carver list, resolved once at construction for every biome
+    /// name the [`Resolver`]'s biome-parameter table (or the fallback biome)
+    /// can produce — see `crate::compose::build_biome_carvers`.
+    carvers_by_biome: HashMap<String, Vec<CarverConfig>>,
+    /// Every ore-capable placed feature in the global decoration catalog.
+    /// [`Self::ore_stage`] selects a source's eligible subset from that catalog
+    /// with global per-step indices, rather than treating a biome document's
+    /// local array offset as a seed index.
+    ore_definitions: HashMap<String, PlacedOre>,
+    /// Block-tag closures for every tag referenced by any biome's ore
+    /// targets, resolved once — see `crate::compose::build_ore_tag_map`.
+    ore_tag_map: HashMap<String, HashSet<String>>,
+    /// The staged per-chunk store: this generator's memoisation of the terrain
+    /// prefix produced by [`Self::pre_ore_stage`], and Unit 6's replacement for
+    /// the `Mutex`-guarded FIFO cache that preceded it.
+    ///
+    /// The memoisation itself is not new and its motivation is unchanged:
+    /// The unified FEATURES dispatcher needs the centre plus the surrounding
+    /// pre-ore pipelines on every [`column`](Self::column) call, so without
+    /// memoisation a sweep would redo each terrain prefix up to 9×.
+    ///
+    /// What **is** new is that computing once is now structural rather than
+    /// best-effort. The old caches took one global `Mutex` each and released it
+    /// across the computation, so two threads racing the same key both ran the
+    /// whole pipeline — `pre_ore_stage`'s own comment conceded "the work really
+    /// was done twice". Under a 289-column join burst that produced ~5,000
+    /// concurrent attempts on a single `Arc<Mutex>` and forced
+    /// `lodestone-server`'s per-ring barrier back in (`4307b59`). Here the map
+    /// is sharded [`store::SHARD_COUNT`] ways and each stage has its own
+    /// once-only guard, so a racing thread *waits for the value* instead of
+    /// computing a second copy. See [`store`]'s module doc for the full
+    /// argument, the exact-key rule, and why eviction is view-scoped.
+    store: store::StagedStore<ChunkStages>,
+    /// Per-biome decoration list, resolved alongside the generator's ore
+    /// definitions and global [`crate::compose::DecorationCatalog`]. Empty
+    /// (whole map) when the resolver supplies no biome documents with any driven
+    /// step, in which case the FEATURES dispatcher is a no-op, matching every
+    /// other resolver's "no data supplied" convention.
+    ///
+    /// **This later widened from `VEGETAL_DECORATION` alone to every step in
+    /// `crate::compose::DRIVEN_STEPS`**, so entries now carry their own step index
+    /// and the map is no longer one-step-per-biome. The catalog is consumed by
+    /// the unified FEATURES dispatcher.
+    decoration_catalog: crate::compose::DecorationCatalog,
+    /// Block-tag closures [`crate::feature::vegetation`]'s own predicates/
+    /// checks need (`supports_vegetation`, `replaceable_by_trees`, `logs`,
+    /// `cannot_replace_below_tree_trunk`) — resolved once, analogous to
+    /// `ore_tag_map` but via `crate::feature::vegetation::build_veg_tags`
+    /// rather than a per-ore-target walk (this module's own tag set is
+    /// fixed, not data-dependent — see that function's doc comment).
+    veg_tags: crate::feature::vegetation::VegTags,
+    /// Per-biome `ClimateSettings` (`has_precipitation`, `temperature`,
+    /// `temperature_modifier`), read straight out of each biome's own
+    /// `Resolver::biome_document` — see
+    /// [`crate::feature::top_layer::parse_biome_climate`] for why no new
+    /// resolver method was needed. Only populated for biomes whose document
+    /// carries a `temperature` field; a biome absent here does not freeze.
+    biome_climates: HashMap<String, crate::feature::top_layer::BiomeClimate>,
+    /// Per-biome `MobSpawnSettings` — `spawners` and `spawn_costs` — read out of
+    /// the same `Resolver::biome_document` walk as `biome_climates`, so it costs
+    /// no extra JSON parse. See
+    /// [`crate::spawners`] for the parse and [`Self::biome_spawners`] for the
+    /// accessor.
+    ///
+    /// **No production caller reads this field or its accessors.** The runtime
+    /// spawner this was built for (`lodestone_server::natural_spawn`) now
+    /// exists and does read `MobSpawnSettings`, but through its own
+    /// independent `crate::spawners::parse_biome_spawners` call over the
+    /// bundled assets (`lodestone_server::worldgen_data::bundled_biome_spawners`)
+    /// rather than through this generator's already-parsed copy — two parses
+    /// of the same data rather than one, not a missing consumer.
+    spawners_by_biome: HashMap<String, crate::spawners::BiomeSpawners>,
+    /// Which biomes list `minecraft:freeze_top_layer` in their
+    /// `TOP_LAYER_MODIFICATION` step. In vanilla 26.2 that is **every** biome
+    /// (vanilla's own default per-biome feature registration adds it
+    /// unconditionally), so this is not really a filter — it is
+    /// there so a trimmed or modified datapack that omits the step gets a
+    /// snow-free world rather than snow this engine invented.
+    freeze_biomes: HashSet<String>,
+    /// The five per-block-state predicates plus two tags
+    /// [`Self::top_layer_stage`] needs. Empty (making the stage a no-op) when
+    /// the resolver supplies no `block_freeze_facts` — the same "no data
+    /// supplied" convention as every field above.
+    snow_support: crate::feature::top_layer::SnowSupport,
+    /// `Biome`'s three climate noise fields, built once per generator rather
+    /// than per column — see [`crate::noise::ClimateNoise`]. Only read by
+    /// [`Self::top_layer_stage`], and cheap enough (~780 draws) to build
+    /// unconditionally.
+    climate_noise: crate::noise::ClimateNoise,
+    /// The structure placement engine, or `None` when the
+    /// resolver supplied no `structure_set_ids` — which is every fixture resolver
+    /// in this workspace, and the reason this unit changes no parity fixture.
+    ///
+    /// `None` rather than an empty registry so the two structure stages can
+    /// early-return without touching the registry at all: a generator with no
+    /// structure data does zero placement draws per chunk, not twenty
+    /// no-ops.
+    structures: Option<crate::structure::StructureRegistry>,
+    /// Temporary lifecycle-only cache for immutable FEATURES contexts. It is
+    /// populated by [`Self::prepare_lifecycle_replay`] and replaced on the
+    /// next preparation; ordinary column generation leaves it empty.
+    replay_context_cache: std::sync::Mutex<Option<ReplayContextCache>>,
+}
+
+/// Renders a noise-settings block-state object (`{"Name": ..., "Properties": {...}}`)
+/// as this engine's canonical state string, `name[k=v,...]` with properties
+/// **sorted by key**.
+///
+/// The properties are not optional decoration: vanilla's own
+/// `noise_settings/overworld.json` carries
+/// `"default_fluid": {"Name": "minecraft:water", "Properties": {"level": "0"}}`,
+/// and reading only `["Name"]` produces `minecraft:water` — a *different string*
+/// from the `minecraft:water[level=0]` that `crate::carver` writes for the same
+/// block state. One column then holds two palette entries for one state, which
+/// costs a palette slot each (and a bit of index width for the whole section once
+/// the palette crosses 16), and makes every downstream `match` on the full state
+/// string miss for the bare form.
+fn canonical_state_from_settings(value: &Value, fallback: &str) -> String {
+    let Some(name) = value["Name"].as_str() else {
+        return fallback.to_string();
+    };
+    match value["Properties"].as_object() {
+        Some(properties) if !properties.is_empty() => {
+            let mut rendered: Vec<String> = properties
+                .iter()
+                .map(|(key, value)| {
+                    let value = value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string());
+                    format!("{key}={value}")
+                })
+                .collect();
+            rendered.sort();
+            format!("{name}[{}]", rendered.join(","))
+        }
+        _ => name.to_string(),
+    }
+}
+
+impl OverworldGenerator {
+    /// The named pass order consumed by this generator and its parity tools.
+    #[must_use]
+    pub const fn stage_schedule() -> &'static crate::stage_schedule::StageSchedule {
+        &crate::stage_schedule::OVERWORLD
+    }
+
+    /// The executable stage contract used by production column generation.
+    #[must_use]
+    pub const fn stage_pipeline() -> &'static crate::stage_schedule::DimensionPipeline {
+        &crate::stage_schedule::OVERWORLD_PIPELINE
+    }
+
+    /// Builds the generator for `seed` from a noise-settings `Value` and a
+    /// [`Resolver`] that supplies the density functions, noises, carvers,
+    /// features and tags it references.
+    ///
+    /// `biome` is the fallback biome id (e.g. `"minecraft:plains"`) used for
+    /// every column when `resolver` supplies no real biome-parameter table
+    /// (`resolver.biome_parameters()` empty, the default — see
+    /// [`Resolver::biome_parameters`]); `cold_enough_to_snow` is that
+    /// biome's answer. A resolver that overrides `biome_parameters`/
+    /// `biome_temperatures` (the bundled singleplayer generator does) gets
+    /// real per-column biome variety instead, and these two arguments are
+    /// then unused except as a documentation of "what this used to always
+    /// be."
+    #[must_use]
+    pub fn new(
+        seed: i64,
+        settings: &Value,
+        resolver: &dyn Resolver,
+        biome: &str,
+        cold_enough_to_snow: bool,
+    ) -> Self {
+        let builder = Builder::new(seed, resolver);
+        let router = &settings["noise_router"];
+        let final_density = builder
+            .build(&router["final_density"])
+            .expect("bundled final_density density-function document");
+        let canon = identity_canon(settings);
+        // Built here rather than in the `Self { .. }` literal below because
+        // `SurfaceSystem::new` interns its whole result-state set into it at
+        // parse time — see that method's own note on why a set
+        // walked out of the parsed data cannot drift the way a hand-maintained
+        // pre-intern list would.
+        let interner = Arc::new(crate::interner::StateInterner::new());
+        let surface = SurfaceSystem::new(settings, &builder, &canon, &interner);
+
+        let min_y = settings["noise"]["min_y"].as_i64().unwrap_or(-64) as i32;
+        let height = settings["noise"]["height"].as_i64().unwrap_or(384) as i32;
+        let sea_level = settings["sea_level"].as_i64().unwrap_or(63) as i32;
+        let (cell_width, cell_height) = crate::aquifer::cell_geometry(settings);
+        let default_block = settings["default_block"]["Name"]
+            .as_str()
+            .unwrap_or("minecraft:stone")
+            .to_string();
+        let default_fluid =
+            canonical_state_from_settings(&settings["default_fluid"], "minecraft:water[level=0]");
+        let default_lava = "minecraft:lava[level=0]".to_string();
+        // Built from the same `builder` every other router channel uses,
+        // so `vein_toggle`'s slot indices share one address space with
+        // `final_density`'s -- the property `slot_count` below depends on.
+        let veins = veins::VeinPrograms::build(&builder, settings, &interner);
+        let default_block_pre = crate::surface::PreState::from_name(&interner, &default_block);
+        let default_fluid_pre = crate::surface::PreState::from_name(&interner, &default_fluid);
+        let default_lava_pre = crate::surface::PreState::from_name(&interner, &default_lava);
+
+        let raw_table = crate::biome::parse_table(&resolver.biome_parameters());
+        let dynamic_biome = if raw_table.is_empty() {
+            None
+        } else {
+            let table = crate::biome::usable_overworld_table(raw_table);
+            let temperatures = crate::biome::parse_temperatures(&resolver.biome_temperatures());
+            let climate = ClimateSampler::new(settings, &builder);
+            Some(DynamicBiome {
+                climate,
+                table,
+                temperatures,
+            })
+        };
+
+        // Aquifer support trees — built via the same shared
+        // `builder` as final_density/surface/climate above; see
+        // `AquiferTrees`'s doc comment for why `slot_count` is captured only
+        // after every one of these `builder.build()` calls.
+        let aquifer_trees = AquiferTrees {
+            final_density: crate::engine::Program::compile(&final_density),
+            erosion: crate::engine::Program::compile(
+                &builder.build(&router["erosion"]).expect("bundled erosion density-function document"),
+            ),
+            depth: crate::engine::Program::compile(
+                &builder.build(&router["depth"]).expect("bundled depth density-function document"),
+            ),
+            barrier: std::sync::Arc::new(
+                builder.build(&router["barrier"]).expect("bundled barrier density-function document"),
+            ),
+            floodedness: std::sync::Arc::new(
+                builder
+                    .build(&router["fluid_level_floodedness"])
+                    .expect("bundled fluid_level_floodedness density-function document"),
+            ),
+            spread: std::sync::Arc::new(
+                builder
+                    .build(&router["fluid_level_spread"])
+                    .expect("bundled fluid_level_spread density-function document"),
+            ),
+            lava: std::sync::Arc::new(
+                builder.build(&router["lava"]).expect("bundled lava density-function document"),
+            ),
+            prelim: std::sync::Arc::new(
+                builder
+                    .build(&router["preliminary_surface_level"])
+                    .expect("bundled preliminary_surface_level density-function document"),
+            ),
+            positional: {
+                use crate::rng::{PositionalRandomFactory, RandomSource};
+                let mut src = builder
+                    .positional_factory()
+                    .from_hash_of("minecraft:aquifer");
+                src.fork_positional()
+            },
+            cell_width,
+            cell_height,
+        };
+
+        // Carver-replaceable tag closure: without this
+        // populated, every carve write is rejected (`can_replace` always
+        // false) — the same trap `CarverOracle.java`'s own header warns
+        // about for the isolated oracle.
+        let mut carver_replaceable = HashSet::new();
+        {
+            let mut seen = HashSet::new();
+        crate::compose::resolve_block_tag(
+                resolver,
+                "minecraft:overworld_carver_replaceables",
+                &mut carver_replaceable,
+                &mut seen,
+            );
+        }
+
+        // Per-biome carver composition data: resolved once for
+        // every biome name that can appear (every distinct name in the usable
+        // biome table, plus the fallback biome) — a handful of JSON parses at
+        // construction time, not one per chunk or per source-chunk. Ore
+        // features are deliberately not resolved here yet — see the module
+        // doc.
+        let mut biome_source_order = Vec::new();
+        if let Some(dynamic) = &dynamic_biome {
+            for point in dynamic.table.iter() {
+                if !biome_source_order.contains(&point.biome) {
+                    biome_source_order.push(point.biome.clone());
+                }
+            }
+        }
+        if !biome_source_order.iter().any(|name| name == biome) {
+            biome_source_order.push(biome.to_string());
+        }
+        let biome_names: std::collections::BTreeSet<String> =
+            biome_source_order.iter().cloned().collect();
+
+        let mut carvers_by_biome = HashMap::new();
+        // The same per-biome document walk also yields each
+        // biome's `ClimateSettings` and whether it lists `freeze_top_layer`, so
+        // `TOP_LAYER_MODIFICATION` composition costs no extra JSON parses.
+        let mut biome_climates = HashMap::new();
+        let mut freeze_biomes = HashSet::new();
+        // The SPAWN generation's part 1 rides the same walk, for the same reason.
+        let mut spawners_by_biome = HashMap::new();
+        for name in &biome_names {
+            carvers_by_biome.insert(
+                name.clone(),
+                crate::compose::build_biome_carvers(resolver, name),
+            );
+            let document = resolver.biome_document(name);
+            if let Some(climate) = crate::feature::top_layer::parse_biome_climate(&document) {
+                biome_climates.insert(name.clone(), climate);
+            }
+            if crate::compose::biome_lists_freeze_top_layer(&document) {
+                freeze_biomes.insert(name.clone());
+            }
+            let spawners = crate::spawners::parse_biome_spawners(&document);
+            if !spawners.is_empty() {
+                spawners_by_biome.insert(name.clone(), spawners);
+            }
+        }
+        let decoration_catalog = crate::compose::build_decoration_catalog(resolver, &biome_source_order);
+        let ore_definitions = crate::compose::build_ore_definitions(resolver, &decoration_catalog);
+        let ore_tag_map = crate::compose::build_ore_tag_map(
+            resolver,
+            &ore_definitions.values().cloned().collect::<Vec<_>>(),
+        );
+        let veg_tags = crate::feature::vegetation::build_veg_tags(resolver);
+        let snow_support = crate::feature::top_layer::build_snow_support(resolver);
+
+        // Captured last, after every `builder.build()` call above (shape,
+        // surface, climate, the eight aquifer trees) — see `AquiferTrees`'s
+        // doc comment for why this is always a safe bound.
+        let slot_count = builder.slot_count();
+
+        // Structure placement's S1. Built here, from the same `resolver` borrow every
+        // other composition table above uses, because the registry parses ~54
+        // JSON documents plus their biome-tag closures and must not do that per
+        // chunk. An empty `structure_set_ids` (the `Resolver` default) yields
+        // `None`, so nothing downstream distinguishes "no structure data" from
+        // "this engine before structures existed".
+        let structures = {
+            let registry = crate::structure::StructureRegistry::new(seed, resolver);
+            if registry.is_empty() { None } else { Some(registry) }
+        };
+
+        let generator = Self {
+            slot_count,
+            surface,
+            // Fresh per generator, built just above so `SurfaceSystem::new`
+            // could intern into it. Still deliberately *not* pre-populated
+            // from a hand-written list of everything the resolver's data can
+            // produce: the allocation budget is written against a steady-state
+            // column, by which point every state the data can produce has been
+            // interned by ordinary generation, and a hand-maintained
+            // pre-intern list that drifted out of sync with the data would be
+            // a stale claim of exactly the kind CLAUDE.md's rule 2 is about.
+            // U21's additions are not that: the surface rule's result states,
+            // the clay bands and the three `default_*` blocks are all walked
+            // out of the parsed data itself, so they cannot drift from it.
+            interner,
+            min_y,
+            height,
+            sea_level,
+            default_block,
+            default_fluid,
+            default_lava,
+            veins,
+            default_block_pre,
+            default_fluid_pre,
+            default_lava_pre,
+            fallback_biome: biome.to_string(),
+            fallback_cold_enough_to_snow: cold_enough_to_snow,
+            dynamic_biome,
+            seed,
+            aquifer_trees,
+            carver_replaceable,
+            carvers_by_biome,
+            ore_definitions,
+            ore_tag_map,
+            store: store::StagedStore::new(STORE_RETENTION),
+            decoration_catalog,
+            veg_tags,
+            biome_climates,
+            spawners_by_biome,
+            freeze_biomes,
+            snow_support,
+            climate_noise: crate::noise::ClimateNoise::new(),
+            structures,
+            replay_context_cache: std::sync::Mutex::new(None),
+        };
+        if let Some(registry) = &generator.structures {
+            let sampler = structures::StartSampler::new(&generator);
+            registry.prepare_origin_index(&sampler);
+        }
+        generator
+    }
+
+    /// The SPAWN generation's part 1: one biome's parsed `MobSpawnSettings`, or `None` when
+    /// the biome declares no spawner entry and no spawn cost (which includes every
+    /// biome a fixture `Resolver` supplies, and any name this generator's biome
+    /// table cannot produce).
+    ///
+    /// Resolved once at construction, so this is a map lookup rather than a JSON
+    /// parse. **Nothing calls it in production** — `crate::spawn_stage` (the
+    /// SPAWN generation's part 2) and `lodestone_server::natural_spawn` (parts 3/4) are wired
+    /// and running, but both read `MobSpawnSettings` through their own copy of
+    /// [`crate::spawners::parse_biome_spawners`] rather than through this
+    /// generator's cache, so this accessor and [`Self::all_biome_spawners`]
+    /// remain the unused half of a duplicate.
+    #[must_use]
+    pub fn biome_spawners(&self, biome: &str) -> Option<&crate::spawners::BiomeSpawners> {
+        self.spawners_by_biome.get(biome)
+    }
+
+    /// Every biome's parsed `MobSpawnSettings`, biome name to settings.
+    ///
+    /// The whole table, for a runtime spawner that needs it keyed by the biome
+    /// name it reads off a served column rather than one lookup at a time.
+    /// Borrowed, so a caller that must own it (one holding no generator,
+    /// e.g. a server tick loop) clones deliberately.
+    #[must_use]
+    pub fn all_biome_spawners(&self) -> &HashMap<String, crate::spawners::BiomeSpawners> {
+        &self.spawners_by_biome
+    }
+
+    /// Vanilla's multi-noise biome lookup at an arbitrary quart cell (qx, qy,
+    /// qz), sampled fresh rather than read out of a generated chunk.
+    ///
+    /// Needed by the structure stages, which run before any chunk exists.
+    /// [`Self::biome_cells_stage`] resolves the same question for a whole chunk's
+    /// 4×4×4 grid; both go through the same `climate.target` +
+    /// `table.nearest` pair, and the quart-**corner** convention is the same one
+    /// that stage documents. Falls back to the fixed biome for a generator with no
+    /// climate table.
+    #[must_use]
+    pub fn biome_at_quart(&self, qx: i32, qy: i32, qz: i32) -> String {
+        match &self.dynamic_biome {
+            None => self.fallback_biome.clone(),
+            Some(dynamic) => {
+                let target = dynamic.climate.target(qx * 4, qy * 4, qz * 4);
+                dynamic.table.nearest(&target).to_string()
+            }
+        }
+    }
+
+    pub(super) fn biome_search_cursor(&self) -> Option<crate::biome::BiomeSearchCursor> {
+        self.dynamic_biome
+            .as_ref()
+            .map(|dynamic| dynamic.table.search_cursor())
+    }
+
+    /// Answers a placement biome-membership probe without materialising the
+    /// selected biome name. `cursor` is owned by the current sampler lifecycle
+    /// and is never shared across generators or worker threads.
+    pub(super) fn biome_in_set_at_quart(
+        &self,
+        qx: i32,
+        qy: i32,
+        qz: i32,
+        allowed: &HashSet<String>,
+        cursor: &mut Option<crate::biome::BiomeSearchCursor>,
+    ) -> bool {
+        match &self.dynamic_biome {
+            None => allowed.contains(&self.fallback_biome),
+            Some(dynamic) => {
+                let target = dynamic.climate.target(qx * 4, qy * 4, qz * 4);
+                let Some(search) = cursor.as_mut() else {
+                    return allowed.contains(dynamic.table.nearest(&target));
+                };
+                let row = dynamic.table.nearest_row_with_cursor(&target, search);
+                allowed.contains(dynamic.table.biome_at(row))
+            }
+        }
+    }
+
+    pub(super) fn biome_in_set_at_quart_cached(
+        &self,
+        qx: i32,
+        qy: i32,
+        qz: i32,
+        allowed: &HashSet<String>,
+        cache: &mut crate::structure::RingProbeCache,
+        cursor: &mut Option<crate::biome::BiomeSearchCursor>,
+    ) -> bool {
+        match &self.dynamic_biome {
+            None => allowed.contains(&self.fallback_biome),
+            Some(dynamic) => {
+                let target = cache.target(qx, qy, qz, || {
+                    dynamic.climate.target(qx * 4, qy * 4, qz * 4)
+                });
+                let Some(search) = cursor.as_mut() else {
+                    return allowed.contains(dynamic.table.nearest(&target));
+                };
+                let row = dynamic.table.nearest_row_with_cursor(&target, search);
+                allowed.contains(dynamic.table.biome_at(row))
+            }
+        }
+    }
+
+    pub(super) fn ring_probe_targets(
+        &self,
+        quart_cells: &[(i32, i32, i32)],
+    ) -> Option<Vec<[i64; 7]>> {
+        let dynamic = self.dynamic_biome.as_ref()?;
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (dynamic, quart_cells);
+            return None;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if quart_cells.is_empty() {
+                return Some(Vec::new());
+            }
+            let workers = std::thread::available_parallelism()
+                .map_or(1, std::num::NonZeroUsize::get)
+                .min(quart_cells.len());
+            let mut targets = vec![[0; 7]; quart_cells.len()];
+            if workers < 2 || quart_cells.len() < 4_096 {
+                for (target, &(qx, qy, qz)) in targets.iter_mut().zip(quart_cells) {
+                    *target = dynamic.climate.target(qx * 4, qy * 4, qz * 4);
+                }
+                return Some(targets);
+            }
+            let chunk_len = quart_cells.len().div_ceil(workers);
+            std::thread::scope(|scope| {
+                for (target_chunk, cell_chunk) in targets
+                    .chunks_mut(chunk_len)
+                    .zip(quart_cells.chunks(chunk_len))
+                {
+                    let climate = &dynamic.climate;
+                    scope.spawn(move || {
+                        for (target, &(qx, qy, qz)) in target_chunk.iter_mut().zip(cell_chunk) {
+                            *target = climate.target(qx * 4, qy * 4, qz * 4);
+                        }
+                    });
+                }
+            });
+            Some(targets)
+        }
+    }
+
+    pub(super) fn has_dynamic_biome(&self) -> bool {
+        self.dynamic_biome.is_some()
+    }
+
+    /// World Y of the lowest generated block row.
+    #[must_use]
+    pub fn min_y(&self) -> i32 {
+        self.min_y
+    }
+
+    /// Number of block rows generated per column.
+    #[must_use]
+    pub fn height(&self) -> i32 {
+        self.height
+    }
+
+    /// Sea level (fluid fill height).
+    #[must_use]
+    pub fn sea_level(&self) -> i32 {
+        self.sea_level
+    }
+
+    /// Returns the low-detail preliminary terrain-surface estimate at block
+    /// coordinates `(x, z)` without generating a chunk.
+    ///
+    /// This is for a distant heightfield's silhouette and is intentionally not
+    /// the post-carve, post-decoration top block that [`Self::column`] returns.
+    /// Callers that need collision, an editable block, or a packet-ready
+    /// column must generate the real column instead.
+    #[must_use]
+    pub fn preliminary_surface_level(&self, x: i32, z: i32) -> i32 {
+        self.surface.preliminary_surface_level(x, z)
+    }
+
+    /// Distinct chunks currently held in the staged store. **Diagnostics and
+    /// gates only** — nothing in generation may branch on it.
+    ///
+    /// Exposed because it is the one assertion about the store that works with
+    /// `gen-counters` **off**: it bounds from above how many times a stage can
+    /// have run. A sweep that ends with exactly as many entries as its
+    /// neighbourhood closure, and [`Self::store_evictions`] at zero, has proved
+    /// no chunk was entered twice and none was dropped — the counters-off half of
+    /// Unit 6's acceptance criterion, and the reason the gate is not a
+    /// counters-only test that silently measures nothing in a default build.
+    #[must_use]
+    pub fn store_len(&self) -> usize {
+        self.store.len()
+    }
+
+    /// Store entries dropped by reclamation over this generator's life.
+    /// **Diagnostics and gates only.**
+    ///
+    /// The control that separates "each stage computed exactly once" from "each
+    /// stage computed once, plus however many times eviction silently made us
+    /// redo it". A sweep or burst asserting this is zero has established that its
+    /// stage-computation counts cannot have been inflated by the retention
+    /// ceiling — see [`STORE_RETENTION`] for why zero is expected there.
+    #[must_use]
+    pub fn store_evictions(&self) -> usize {
+        self.store.evicted()
+    }
+
+    /// Whether `(cx, cz)` is a slime chunk for **this generator's**
+    /// seed — vanilla's own slime-chunk RNG seeding, followed by a
+    /// "roll a bounded random int in `[0, 10)` and require it to be 0" check.
+    ///
+    /// A method on the generator rather than a bare function so a caller never has
+    /// to know the world seed to ask; the derivation itself is
+    /// [`crate::rng::is_slime_chunk`], beside the three other worldgen-RNG seed
+    /// derivations, and is unit-tested element-wise against an independently
+    /// transcribed lattice.
+    ///
+    /// **This has no gameplay consumer yet, and that is the honest state.** Slime
+    /// spawning is blocked on there being a natural spawn cycle at all and a
+    /// per-species spawn rule table; nothing here can make slimes appear. It
+    /// is a proven predicate waiting for whichever of those lands first, or for a
+    /// future F3 chunk-borders overlay to read it.
+    #[must_use]
+    pub fn is_slime_chunk(&self, cx: i32, cz: i32) -> bool {
+        crate::rng::is_slime_chunk(cx, cz, self.seed)
+    }
+
+    /// Generates the block field for chunk `(cx, cz)`.
+    #[must_use]
+    pub fn column(&self, cx: i32, cz: i32) -> GeneratedColumn {
+        // Pins this request's whole closure in the store for the duration of the
+        // call, so nothing it computes can be evicted before it is read back —
+        // the property that makes eviction view-scoped instead of a capacity
+        // guess. Dropped at the end of the call.
+        //
+        // [`STRUCTURE_CLOSURE_RADIUS`], not [`COLUMN_CLOSURE_RADIUS`]: with
+        // this radius the closure is 21×21, and pinning the inner 5×5 of it left
+        // the request's own structure-start entries evictable *by the request
+        // itself*. See that constant for the measured cost.
+        let _view = self.store.open_view((cx, cz), STRUCTURE_CLOSURE_RADIUS);
+        let cached = self.pre_ore_stage(cx, cz);
+        // FEATURES is one globally indexed stream. Ores, disks and vegetal
+        // bodies must share both their source order and their intermediate
+        // writes, so production enters the same dispatcher used by lifecycle
+        // replay rather than composing an ore result with a later vegetation
+        // pass.
+        let mut schedule = Self::stage_pipeline().executor_at(
+            Self::stage_pipeline().schedule().shaped_boundary_index(),
+        );
+        let (world, block_entities) = schedule.run(
+            crate::stage_schedule::ColumnStage::Features,
+            || self.features_stage(cx, cz, (*cached.0).clone()),
+        );
+        // `TOP_LAYER_MODIFICATION` is vanilla's LAST decoration
+        // step (index 10) and must run after vegetation, because the
+        // `MOTION_BLOCKING` height it reads includes leaves and logs — snow sits
+        // on a spruce canopy. Running it before vegetation would put snow at the
+        // pre-tree surface and then bury it.
+        let (world, _) = schedule.run(
+            crate::stage_schedule::ColumnStage::TopLayer,
+            || self.top_layer_stage(cx, cz, world, &cached.2),
+        );
+        let column = schedule.run(crate::stage_schedule::ColumnStage::Output, || {
+            self.intern_from_dense(
+                cx,
+                cz,
+                output::GenStage::Full,
+                world,
+                cached.2.clone(),
+                (*cached.3).clone(),
+                block_entities,
+            )
+        });
+        schedule.finish();
+        column
+    }
+
+    /// Generates chunk `(cx, cz)` through stage 4 only: structure starts/refs,
+    /// fill, biome, surface, materialise, carve (structure piece placement runs
+    /// inside `pre_ore_stage_uncached`'s carve step, so a Shaped column already
+    /// contains villages/mineshafts/monuments — see [`fill`]'s module doc). No
+    /// ores, no vegetation, no top-layer freeze, no generation-time creature
+    /// spawns: [`GenStage::Shaped`] on the result, and [`Self::intern_from_dense`]'s
+    /// own doc for why the spawn list is empty regardless of what `world`
+    /// contains.
+    ///
+    /// # Why this is a pure prefix of [`Self::column`], not a second pipeline
+    ///
+    /// This calls exactly [`Self::pre_ore_stage`] — the same memoised stage
+    /// `column` calls first — and nothing else. It performs no write [`Self::column`]
+    /// does not already perform through that same call, so calling this for
+    /// `(cx, cz)` and then calling [`Self::column`] for the same `(cx, cz)` is
+    /// byte-identical to calling [`Self::column`] cold: the second call's
+    /// `pre_ore_stage` invocation is a memo hit (same store, same once-guard),
+    /// and every stage after `pre_ore` runs exactly as it would have from a cold
+    /// start. This is the property the plan's byte-identity gate
+    /// (`tests/stage1_shaped_seam.rs`) exercises, and it is what makes an
+    /// "upgrade" a resumption rather than a distinct code path.
+    ///
+    /// Pinned with the same [`STRUCTURE_CLOSURE_RADIUS`] view [`Self::column`]
+    /// uses (a superset of what `pre_ore_stage` alone needs for one chunk, since
+    /// that radius also covers `column`'s wider vegetation-read rim) — see that
+    /// constant's doc for why a narrower pin here would risk the exact
+    /// "recomputed 2.9–7.4×" failure mode this crate already measured once.
+    #[must_use]
+    pub fn column_shaped(&self, cx: i32, cz: i32) -> GeneratedColumn {
+        let _view = self.store.open_view((cx, cz), STRUCTURE_CLOSURE_RADIUS);
+        let cached = self.pre_ore_stage(cx, cz);
+        self.intern_from_dense(
+            cx,
+            cz,
+            output::GenStage::Shaped,
+            (*cached.0).clone(),
+            cached.2.clone(),
+            (*cached.3).clone(),
+            Vec::new(),
+        )
+    }
+
+    /// Stages 1-4 (fill/aquifer, biome, surface, carve) for chunk `(cx, cz)` —
+    /// any chunk, not only the one being composed. Returns that chunk's own
+    /// post-carve world (absolute-coordinate keyed, populated only for its
+    /// own 16×16 columns), its heightmap and its biome quarts.
+    ///
+    /// Factored out of [`Self::column`] so [`Self::ore_stage`]
+    /// can call it again for each of the 8 neighbour chunks in the ore
+    /// driver's 3×3 neighbourhood: vanilla's real one-chunk-into-neighbours
+    /// ore spill (`FeatureOracle.java`'s own doc comment,
+    /// `docs/worldgen-parity.md`'s "known gap" section) depends on each
+    /// neighbour's own real post-carve terrain and heightmap, not an
+    /// approximation — a neighbour in a different biome to the centre also
+    /// carves (and later decorates) differently, so there is no shortcut
+    /// that reuses the centre's own field.
+    ///
+    /// Memoised in [`Self::store`], keyed by the **exact** `(cx, cz)` passed in
+    /// — never rounded, clamped, or otherwise merged with a neighbouring key.
+    /// That distinction matters: an earlier version of this same idea in the JVM
+    /// oracle this crate is proven against (`FeatureOracle.java`) *did* clamp
+    /// reads to a bounded region, aliasing two distinct chunk coordinates onto
+    /// one memoised value, and vanilla's own bulk section-access cache then
+    /// tried to lock the same chunk section's non-reentrant semaphore twice
+    /// within one placement and hung forever (see `docs/worldgen-parity.md`'s "Known
+    /// gap" section on the 3×3 driver). This engine has no such semaphore, but
+    /// the aliasing shape — two logically distinct chunks sharing one cached
+    /// answer — is exactly what an exact-coordinate key rules out, and
+    /// [`store::ChunkPos`] carries that rule as its own documentation.
+    ///
+    /// **Computed exactly once per chunk per generator, now by construction.**
+    /// The shard lock is released before this returns and is never held across
+    /// the pipeline below — but unlike the FIFO cache this replaced, a second
+    /// thread arriving on the same miss no longer recomputes: it blocks on the
+    /// slot's own once-guard and takes the first thread's value. The counter is
+    /// bumped from *inside* that guard, so `pre_ore_computed` is the number of
+    /// distinct chunks whose stages 1–4 really ran, and a sweep can assert it
+    /// equals the size of the region it swept.
+    fn pre_ore_stage(&self, cx: i32, cz: i32) -> Arc<PreOreResult> {
+        let replay_slot = self
+            .replay_context_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(|cache| cache.pre_ore.get(&(cx, cz)).cloned());
+        if let Some(slot) = replay_slot {
+            // A generator may be prepared after ordinary generation has
+            // already populated the production store. Reuse that exact
+            // value on the replay slot's first fill; only the production slot
+            // owns the pre-ore computation counter.
+            let computed = std::cell::Cell::new(false);
+            let value = slot.get_or_init(|| {
+                computed.set(true);
+                self.pre_ore_stage_store(cx, cz)
+            });
+            if !computed.get() {
+                crate::counters::bump_pre_ore(false);
+            }
+            return Arc::clone(value);
+        }
+        self.pre_ore_stage_store(cx, cz)
+    }
+
+    fn pre_ore_stage_store(&self, cx: i32, cz: i32) -> Arc<PreOreResult> {
+        let entry = self.store.entry((cx, cz));
+        entry.pre_ore.get_or_compute(
+            crate::counters::bump_pre_ore,
+            || {
+                // Structure placement's S1 added the upstream edge to `structure_refs`
+                // here as a placeholder with a `debug_assert` guarding the gap;
+                // **S3 closed it**, and the edge is now a real data dependency
+                // consumed inside `pre_ore_stage_uncached` →
+                // `beardifier_for` → `fill_stage`. Nothing to do at this level
+                // any more, which is why the guard is gone rather than relaxed.
+                self.pre_ore_stage_uncached(cx, cz)
+            },
+        )
+    }
+
+    /// Runs **only** [`Self::ore_stage`] for `(cx, cz)` against a private copy of
+    /// that chunk's already-memoised pre-ore world, and returns how many cells ore
+    /// placement wrote into the centre.
+    ///
+    /// # Why this exists
+    ///
+    /// DESIGN.md §12.143 measured `ore` at 38.7% of a steady-state column with
+    /// nothing ever having profiled it. A sampling profile of `column()` spends
+    /// most of its samples in `shape`/`vegetation`; this isolates the stage so a
+    /// `samply` profile of a sweep over it attributes ore's own cycles.
+    /// `tests/ore_stage_profile.rs` is the driver, and its warm-up is the
+    /// load-bearing part — on a cold store the `pre_ore_stage` call below runs a
+    /// whole terrain pipeline and the profile stops being about ore.
+    ///
+    /// Deliberately runs against a private dense-grid clone so a second call
+    /// over the same chunk still measures the ore walk rather than a cached
+    /// result. The clone is ~0.2% of the stage.
+    ///
+    /// The return value is how many of the centre's own cells the stage changed,
+    /// purely so a caller can assert the workload was not vacuous — a resolver with
+    /// no ore data makes `ore_stage` an early return, which is exactly §12.143's
+    /// "world" species of vacuous benchmark, and a profile of it would be a profile
+    /// of the `if` at the top. The 98,304-cell diff walk that produces it is ~0.05%
+    /// of the stage's own instruction count.
+    #[must_use]
+    pub fn ore_stage_for_profiling(&self, cx: i32, cz: i32) -> u64 {
+        let _view = self.store.open_view((cx, cz), STRUCTURE_CLOSURE_RADIUS);
+        let pre = self.pre_ore_stage(cx, cz);
+        let world = self.ore_stage(cx, cz, (*pre.0).clone(), &pre.1);
+        let (min_x, min_y, min_z, sx, sy, sz) = world.bounds();
+        let mut changed = 0u64;
+        for y in min_y..min_y + sy {
+            for z in min_z..min_z + sz {
+                for x in min_x..min_x + sx {
+                    if world.get_id(x, y, z) != pre.0.get_id(x, y, z) {
+                        changed += 1;
+                    }
+                }
+            }
+        }
+        changed
+    }
+
+    /// Identical to [`column`](Self::column), timed per stage. Exists so the
+    /// per-stage cost split can be re-measured without maintaining a second,
+    /// hand-duplicated copy of the pipeline: this calls the exact same private
+    /// stage functions `column` does, just wrapped in `Instant::now()` at each
+    /// boundary. Native-only (wall-clock timing has no meaning under wasm, and
+    /// `Instant::now()` panics on bare `wasm32-unknown-unknown`).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn column_timed(&self, cx: i32, cz: i32) -> (GeneratedColumn, StageTimes) {
+        // Same pin as [`Self::column`] — this path drives the same 3×3/5×5
+        // neighbourhood through the FEATURES dispatcher, so it needs the same
+        // protection or a bench near the retention ceiling could measure an
+        // eviction rather than the pipeline.
+        let _view = self.store.open_view((cx, cz), STRUCTURE_CLOSURE_RADIUS);
+        let base_x = cx * 16;
+        let base_z = cz * 16;
+        // Keep the timing-only path on the same named order as `column` and
+        // `pre_ore_stage_uncached`. The timestamps below intentionally split
+        // some stages differently, but they must never become a second source
+        // of truth for which operation precedes which.
+        let mut schedule = Self::stage_schedule().cursor();
+
+        let t_aquifer_start = lodestone_time::Instant::now();
+        let aquifer = self.build_aquifer(cx, cz);
+        // Structure placement's S3, inside the *aquifer* timing bucket rather than given one
+        // of its own: for a chunk with no adaptation-bearing start in reach this is
+        // a store read and an empty `Vec`, and the per-block cost it can add lands
+        // in `shape` where it belongs.
+        schedule.enter(crate::stage_schedule::ColumnStage::StructureStarts);
+        schedule.enter(crate::stage_schedule::ColumnStage::StructureReferences);
+        let beard = self.beardifier_for(cx, cz);
+        schedule.enter(crate::stage_schedule::ColumnStage::StructureInfluence);
+        schedule.enter(crate::stage_schedule::ColumnStage::Fill);
+        let t_shape_start = lodestone_time::Instant::now();
+        let field = self.fill_stage(&aquifer, base_x, base_z, &beard);
+        let heights = self.heights_from_field(&field);
+        let mut biome_cursor = self
+            .dynamic_biome
+            .as_ref()
+            .map(|dynamic| dynamic.table.search_cursor());
+        let t_biome_start = lodestone_time::Instant::now();
+        // Same two-line shape as `pre_ore_stage_uncached` — the 4x4x4
+        // grid is sampled and the 16 surface quarts are read out of it, so this
+        // timing bucket now covers 96x the samples it used to. That is the point
+        // of measuring it here.
+        schedule.enter(crate::stage_schedule::ColumnStage::Biomes);
+        let biome_cells = self.biome_cells_stage(
+            base_x,
+            base_z,
+            biome_cursor.as_mut().map(|cursor| cursor),
+        );
+        let biome_quarts = self.biome_stage(&biome_cells, &heights);
+        schedule.enter(crate::stage_schedule::ColumnStage::Surface);
+        let t_surface_start = lodestone_time::Instant::now();
+        let surface_diff = self.surface_stage(
+            &field,
+            &heights,
+            base_x,
+            base_z,
+            biome_cursor.as_mut().map(|cursor| cursor),
+        );
+        schedule.enter(crate::stage_schedule::ColumnStage::Materialize);
+        let t_materialize_start = lodestone_time::Instant::now();
+        let world = self.materialize_world(&field, surface_diff, base_x, base_z);
+        schedule.enter(crate::stage_schedule::ColumnStage::Carvers);
+        let t_carve_start = lodestone_time::Instant::now();
+        let world = self.carve_stage(
+            cx,
+            cz,
+            &aquifer,
+            &heights,
+            &biome_quarts,
+            base_x,
+            base_z,
+            world,
+            biome_cursor.as_mut().map(|cursor| cursor),
+        );
+        // The same stage `pre_ore_stage_uncached` runs; timed inside the carve
+        // bucket rather than given one of its own, because for a chunk with no
+        // structure in reach it is a single early return.
+        schedule.enter(crate::stage_schedule::ColumnStage::StructurePlacement);
+        let world = self.structure_place_stage(cx, cz, world);
+        let feature_heights = self.ore_heights_from_world(&world);
+        schedule.enter(crate::stage_schedule::ColumnStage::Features);
+        let t_features_start = lodestone_time::Instant::now();
+        let (world, block_entities) = self.features_stage_uncached(
+            cx,
+            cz,
+            world,
+            &feature_heights,
+            &biome_cells,
+        );
+        let t_top_layer_start = lodestone_time::Instant::now();
+        // This call is why `StageTimes` grew a field rather
+        // than folding another stage into `intern`: `top_layer_stage` is the
+        // first stage cheap enough that its cost had to be *measured* to be
+        // believed, and `docs/plans/worldgen-parity.md` §6 predicts <5% for it.
+        schedule.enter(crate::stage_schedule::ColumnStage::TopLayer);
+        let (world, _) = self.top_layer_stage(cx, cz, world, &biome_quarts);
+        schedule.enter(crate::stage_schedule::ColumnStage::Output);
+        let t_intern_start = lodestone_time::Instant::now();
+        let col = self.intern_from_dense(
+            cx,
+            cz,
+            output::GenStage::Full,
+            world,
+            biome_quarts,
+            biome_cells,
+            block_entities,
+        );
+        let t_end = lodestone_time::Instant::now();
+
+        let result = (
+            col,
+            StageTimes {
+                aquifer: t_shape_start - t_aquifer_start,
+                shape: t_biome_start - t_shape_start,
+                biome: t_surface_start - t_biome_start,
+                surface: t_materialize_start - t_surface_start,
+                materialize: t_carve_start - t_materialize_start,
+                carve: t_features_start - t_carve_start,
+                ore: std::time::Duration::ZERO,
+                vegetation: t_top_layer_start - t_features_start,
+                top_layer: t_intern_start - t_top_layer_start,
+                intern: t_end - t_intern_start,
+            },
+        );
+        // Keep this assertion after the result is built so it also covers any
+        // future output-side work added to the timed path.
+        schedule.finish();
+        result
+    }
+}

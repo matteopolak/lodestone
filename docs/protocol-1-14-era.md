@@ -1,0 +1,360 @@
+# The 1.14 era crate: one family, three protocols
+
+## What it is
+
+`crates/versions/1.14` (package `lodestone-v1-14`) serves Minecraft 1.14.4,
+1.15.2 and 1.16.5 — protocols 498, 578 and 754 — from a single adapter, three
+generated packet-id tables, three generated block-state tables, three
+generated entity registries, and nine explicitly-carried shape deltas, rather
+than three copies of a family. It is the second era crate, after
+[`the 1.9 era`](./protocol-1-9-era.md), and applies the range and era-sharing
+rules in [`docs/plans/multi-version-protocol-dedup.md`](./plans/multi-version-protocol-dedup.md)
+to the pre-1.17 legacy gap between 1.13 and 1.17.
+
+The folder is named `1.14` for the era's opening release. It has never been a
+protocol number, and now it is not even a single protocol — ask
+`VersionAdapter::supports`.
+
+The family also provides server protocols for 498, 578 and 754. Each selector
+uses its separate packet registry and chunk encoder, with its committed state
+table as the sole canonical-state inverse. Hosting remains intentionally
+narrower than full server behaviour: light updates and most Play actions still
+need their own protocol evidence.
+
+## How it works
+
+### Protocol selection
+
+`PROTOCOLS` lists all three. `adapter_for(protocol)` constructs a
+`V735Adapter` that stores that protocol and, resolved once at construction,
+four things keyed by it: a `&'static PacketIds` (the id of every packet the
+adapter names plus that protocol's whole clientbound `ENTRIES` slice), the
+`CanonicalTable` for its block-state numbering, its `EntityTypeTable`, and a
+`ChunkShape` carrying both. `V735Adapter::ctx()` builds the `Ctx { version }`
+every codec call reads, so a `#[mc(since)]`/`#[mc(until)]` predicate and a
+`#[mc(protocols = "a..=b")]` precondition both see the negotiated protocol
+rather than a constant.
+
+The indirection is the point, and here it is not a formality: **no clientbound
+play id past 7 is stable across the era.** 1.15 moved
+`acknowledge_player_digging` from the end of the table to id 8, shifting 84
+ids by one; 1.16 dropped `spawn_entity_weather` from id 2, shifting almost
+everything back. Each generated table is its own module, and nothing outside
+the `packet_ids_from!` macro may name one.
+
+Dispatch is one `lodestone_core::dispatch::Table` per protocol, cached in a
+three-slot array of `OnceLock`s indexed the same way `ids_for` resolves a
+table. `spawn_entity_weather` is an `IGNORED::ranged` entry covering
+`498..=578`, so 754's table does not fail construction on a stale entry and
+the older two do not fail on an unlisted id.
+
+`V498ServerProtocol`, `V578ServerProtocol` and `V754ServerProtocol` handle
+their era-specific handshake and login shapes, transition directly to Play,
+and emit join, initial position, chunk, block-update and Play-disconnect
+packets. Each chunk encoder requires a 0..256 column, writes a named
+heightmap, and rejects a non-plains biome, block entity, or canonical state
+absent from that protocol's committed table rather than silently substituting.
+Protocol 498 writes 256 fixed biome integers inside the length-prefixed
+`chunkData` buffer after its straddling section palettes; protocol 578 writes
+1,024 fixed biome integers before the buffer and also uses straddling palettes;
+protocol 754 writes a length-prefixed VarInt biome array and padded palettes.
+Light-update encoding and many interaction/inventory serverbound actions are
+still outside this host slice and require their own protocol evidence. A
+right-click against a block is the supported interaction exception: each host
+decodes the shared 1.14+ `block_place` body (hand, packed target, face, three
+cursor floats, `inside_block`) into `ServerBound::UseItemOn`. The three
+revisions predate block-prediction sequences, so that consumer input uses zero
+rather than inventing one. Literal wire bodies prove the decoder separately
+for 498, 578 and 754; adapter-to-registry tests prove the matching producer and
+host agree, including rejection outside Play and for an invalid face.
+
+Entity interaction now crosses the same hosted boundary for all three
+selectors. Protocols 498 and 578 carry the target, action-specific fields and
+hand, while 754 appends the sneaking flag; the shared decoder consumes precise
+hit coordinates before lifting the action to the mob consumer. Literal external
+bodies cover attack, ordinary interaction and interaction-at, with malformed
+hands, trailing flags and non-Play delivery rejected. Registry-selected
+in-memory controls send a real tamed-wolf interaction through each adapter and
+observe the resulting sit state, so this path is verified beyond a decoder-only
+positive.
+
+Container transport now crosses the same three selectors. The open-screen
+menu registry id, full window item list, single-slot correction, click
+transaction and close packets each have literal byte controls; the production
+adapter and host are checked against those controls. An in-memory chest test
+then opens a real block entity, moves its stone stack through the client
+inventory, observes the host's authoritative full-list corrections, and
+confirms the block entity is empty after close. The legacy slot bridge uses the
+historical item registry for each selector and keeps unsupported item keys
+empty rather than inventing a numeric id.
+
+The three hosts also decode `client_command`'s single VarInt action. The
+literal zero-byte body becomes `ServerBound::ClientCommand { action: 0 }` after
+registry selection, which is the server-loop input used to request a respawn;
+trailing bytes and packets received outside Play remain ignored.
+
+The three hosts also lift the arm-swing request: its one VarInt hand field
+(`0` main hand or `1` off hand) becomes `ServerBound::Swing`. The shared swing
+consumer's broadcast is encoded as a VarInt entity id followed by the raw
+animation action byte (`0` for main hand or `3` for off hand), using each
+protocol's own clientbound packet id. The protocol test keeps the one-byte
+request and three-byte broadcast bodies literal, then sends the latter through
+the registry-selected adapter into `ClientEvent::EntityAnimation`. Unknown
+hand values, trailing request bytes, and requests delivered before Play all
+remain ignored.
+
+The host tests anchor packet ids in the committed generated tables and exercise
+each differing chunk framing against the crate's independent decoder. Every
+hosted protocol also has a literal reference join body and its own in-memory
+client/server acceptance test: the registry selects 498, 578 or 754, the
+matching adapter reaches Play, receives the fixture chunk, and observes its
+block-break update. The literals keep 578's appended seed/respawn fields and
+754's NBT-bearing join distinct from the codec that emits them. These tests
+prove the local consumer chain from registry selection through server wire and
+client state, but a live client/server acceptance capture for these host
+selectors is not yet committed, so it remains a gate before calling this host
+production-ready.
+
+All three hosts also decode the four ordinary Play movement bodies. Position
+and position-with-look lift to `ServerBound::PlayerMoved`; look-only lifts to
+`PlayerRotated`; and the grounded-only body lifts to `PlayerStatusOnly`. The
+position-bearing forms reach `lodestone_server::dispatch_play_packet`, which
+recenters `ViewTracker`, moves the connection's chunk tickets, publishes the
+tick anchor, and streams the newly visible chunk strip. The literal protocol
+tests use negative and fractional coordinates rather than the client encoder,
+and the registry-selected in-memory tests cross from chunk `(0, 0)` to `(1,
+0)` and wait for that chunk to arrive. That proves the local action-to-stream
+consumer chain; it does not replace the outstanding real-client gate.
+
+### Three data sets, not one
+
+This era's per-protocol data is not only packet ids. All three of these
+produce a real-but-wrong answer when shared, never an error:
+
+| table | 498 | 578 | 754 | first disagreement |
+|---|---|---|---|---|
+| block states (`canonical`) | 11,271 | 11,337 | 17,112 | state 72 (498 vs 754) |
+| entity types (`entity_types`) | 102 | 103 | 108 | id 4 (bee inserted in 1.15) |
+| clientbound play ids | 89 | 89 | 88 | id 8 |
+
+Wire block-state **11214** is a lantern at 498, a bell at 578 and a prismarine
+wall at 754 — and a trapped chest if left unmapped. That four-way split is the
+committed probe in `tests/canonicalisation.rs`; it exists because no pair of
+those answers can coincide, so the test cannot pass for the wrong reason.
+
+The block-state and entity tables are generated from each jar's own `--reports`
+dump, committed under `tests/support/`. Two mappings those dumps cannot supply
+— a wall's four side properties turning from booleans into a `none`/`low`/`tall`
+enum in 1.16, and the jigsaw block's `facing` becoming `orientation` — are not
+read off any table. They are what vanilla itself produced when a real 1.15.2
+world carrying those exact states was booted under the real 26.2 server jar and
+read back over RCON; the probes, the procedure and the answers are committed
+verbatim in `tests/support/state_upgrade_1_15_2_to_26_2.txt`. Without them 902
+of each pre-1.16 dump's 11k states have no mapping at all.
+
+### The nine shape deltas, and which mechanism carries each
+
+Measured from `minecraft-data`'s `protocol.json` with named types inlined and
+**primitive aliases kept**, then cross-checked against the captures. The 1.9
+era's warning applies here too: collapsing `varint`/`i64`/`u8`/`f32` to the
+string `"native"` hides every retype.
+
+| packet | changed at | delta | carried by |
+|---|---|---|---|
+| `login` (join) | 754 | numeric dimension + level type → world-name string + two NBT blobs | second struct |
+| `login` (join) | 578 | seed hash inserted, respawn-screen flag appended | `#[mc(since = 578)]` fields |
+| `respawn` | 754 | numeric dimension → NBT | second struct |
+| `respawn` | 578 | seed hash inserted | `#[mc(since = 578)]` field |
+| login `success` | 754 | UUID string → 128 bits | second struct (the shared one widens to `47..=578`) |
+| `chat` | 754 | trailing sender UUID added | `#[mc(since = 754)]` field |
+| `use_entity` (×3 forms) | 754 | trailing sneaking flag added | `#[mc(since = 754)]` field |
+| `abilities` (serverbound) | 754 | two trailing `f32` speeds removed | `#[mc(until = 578)]` fields |
+| `update_light` | 754 | leading `trustEdges` bool added | branch on the protocol |
+| `crafting_book_data` → `recipe_book` | 754 | one packet with an action selector split into two | second struct + a `RecipeBookShape` on the id table |
+| `map_chunk` biomes | 578, 754 | see below | branch on the protocol |
+| section long packing | 754 | straddling → padded | branch on the protocol |
+
+The split is not stylistic. A **field appearing or disappearing** is exactly
+what the derive's `since`/`until` predicates express. A **retype** cannot be an
+attribute: reading sixteen raw bytes where a length-prefixed 36-character
+string was sent does not fail, it eats the username too.
+
+### Chunk and light framing, the era's real risk
+
+Three differences live in `packets/chunk.rs`, and each desynchronises rather
+than errors when taken from the wrong protocol:
+
+* **Where the biomes are.** At 498 a full column's biomes are a 2-D 16×16
+  array of big-endian `i32`s **inside** `chunkData`, after the last section —
+  so the container fabricates a vertical dimension for them, the same seam
+  v1-8 and v1-9 document. At 578 they left the buffer and became a bare
+  1,024-entry (4×4×4 over the column) `i32` array *before* it, with no count.
+  At 754 that array gained a VarInt length prefix and VarInt elements.
+* **How section indices are packed.** 498 and 578 use the pre-1.16
+  *straddling* layout where a value may cross a 64-bit boundary, so
+  `PalettedContainer::decode` cannot serve them; 754 pads each long. The
+  declared long count is checked against the straddling geometry rather than
+  trusted, which is what makes a 754 column fed to the older decoder fail.
+* **`update_light`'s leading `trustEdges` flag**, added at 754. One byte,
+  before four VarInt masks — and a mask is what decides how many 2,048-byte
+  arrays follow.
+
+**`minecraft-data` is wrong about the first of those**, which is the single
+most expensive fact in this document: its 1.14.4 `protocol.json` models
+`map_chunk` with no biome field anywhere. A decoder that believes it leaves
+exactly 1,024 bytes of the buffer unread, which no round-trip test can see,
+because both halves agree about a field neither knows exists.
+
+### Captures
+
+`tests/captures/join_{1_14_4,1_15_2}.txt` are clientbound bytes from real
+servers, and `tests/capture_join.rs` holds both the `#[ignore]`d recorder that
+made them and the hermetic replay that consumes them. See
+[`the captures' own README`](../crates/versions/1.14/tests/captures/README.md)
+for the format and the caps.
+
+Their strongest assertion is the flat preset's own floor: every decoded column
+must be uniformly canonical bedrock at `y = 0` and uniformly canonical grass at
+`y = 3`, with the expected ids resolved out of `lodestone_data::block_states`
+rather than from this crate. That one check covers the biome placement, the
+long packing and the block-state table together — all three going wrong
+produce a populated but wrong world, not an error.
+
+The negative control has a different shape from the 1.9 era's, and the
+difference is worth recording. There, a misrouted packet decoded into a
+plausible wrong event. Here, measured across all 28 captured packets, **no**
+misroute does: the adapter's exact-decode discipline turns every one into a
+trailing-bytes or truncation error, or lands it on an ignored id.
+`update_health` is id 72 at 498 and 73 at 754, where 72 is `experience`; the
+754 adapter rejects 498's bytes with three trailing.
+`misrouting_between_protocols_is_never_a_plausible_wrong_event` holds that
+line for the whole capture, so a future lenient decode cannot quietly undo it.
+
+### Incremental world and entity signals
+
+The adapter applies a single changed block and bulk changes through the same
+per-protocol canonical state table used for chunk palettes. Every changed cell
+also synchronizes its block-entity record and emits a section-local dirty
+signal, so a server update changes both the stored world and the mesh consumer.
+The bulk packet has two layouts: 498/578 name a chunk and encode each local
+`x/z`, `y`, state triple; 754 names a packed section and encodes each update as
+`state << 12 | local-position`. The tests use one fixture of each layout,
+including negative section coordinates, rather than the adapter's encoder.
+After the full packet validates, records are grouped by touched section and
+applied through `WorldSink::set_blocks`, preserving duplicate-record order
+within a section while avoiding repeated storage forks. The literal fixtures in
+`tests/block_updates.rs` query the world after dispatch for all three protocols
+and assert that block events reach the visible-event route.
+
+Explosions lift their three floating-point centre coordinates, radius,
+signed affected-block offsets, and the always-present local-player impulse.
+The offsets are authoritative removals: the adapter floors the centre, adds
+each signed offset, writes that protocol's canonical air into a loaded world
+section, and clears a block entity at the same position before publishing the
+event. A loaded-world fixture checks the negative-offset coordinate and an
+adjacent untouched cell separately.
+Break-progress packets preserve the stage byte exactly, including a value used
+to clear an overlay. Game-state reasons 1, 2, 3, 7, and 8 become the shared
+rain-start, rain-stop, game-mode, rain-level, and thunder-level events. Other
+reasons are fully consumed but intentionally have no model event. The mode
+argument is accepted only when it is a finite integral value from 0 through 3;
+fractional and non-finite floats are protocol errors rather than truncated
+into a plausible mode.
+
+The era's existing metadata list codec is now consumed at ingress. Only index
+zero's shared entity-flags byte is exported: later indices are reused by
+different entity categories, and this adapter does not retain enough category
+state to report one without inventing meaning. Attribute snapshots are fully
+consumed. 498/578 dotted camel-case keys and 754 namespaced `generic.*` keys
+both map to the model's canonical attribute names; unknown keys are skipped
+only after their modifiers have been consumed. Legacy modifier UUIDs become
+stable `lodestone:legacy_modifier_*` identifiers because the model requires an
+identifier where this wire only provides a UUID. A packet accepts at most 128
+properties and 1,024 modifiers per property, and only operation ids 0, 1, and
+2; these checks keep untrusted counts and enum values out of the model.
+
+Protocol 498 also appends a metadata list to a living-entity spawn, unlike
+578 and 754. The codec consumes that tail only at 498 and emits its shared
+flags immediately after the spawn event; later rows keep the standalone
+metadata packet path. The fixture's terminator makes an omitted protocol gate
+fail as trailing bytes rather than silently losing the flags.
+
+Equipment and block-event packets now resolve their historical registration
+ids at ingress. The 498 and 578 tables come from the committed release-jar
+registry reports; the 754 table uses the matching 1.16 registry census, with a
+shared-name index keeping the three production tables compact. A present item
+id or block id absent from the negotiated table is rejected rather than looked
+up in the current registry. Protocols 498 and 578 carry one equipment entry;
+754 carries a top-bit-continued sequence, and the adapter preserves every
+entry in the emitted `EntityEquipmentUpdated` vector. Populated legacy NBT is
+retained as `ItemComponents::has_unmodeled`; present zero or negative counts
+are rejected instead of being normalized. Each block event emits its
+position, two opaque parameters, and canonical block key. Equipment is
+consumed by the ECS entity-equipment ingest path; block events are forwarded
+into the shell's chest, bell, spawner, and gateway event trackers, so both
+signals reach a visible production consumer.
+
+### External-client acceptance
+
+The opt-in release-client gate covers all three hosted rows in this era: protocol 498 (1.14.4),
+578 (1.15.2), and 754 (1.16.5). Each row records direct login-to-Play
+(`configuration.mode: "login_to_play"`) and unbatched initial chunks
+(`chunk_batch_acknowledgement.mode: "unbatched", batch_count: 0`) before requiring world join,
+deliberate movement, one observed `start_destroy_block` result, and a client-initiated clean
+disconnect. Run a row with, for example, `just external-client-acceptance --protocol 498 --output
+/private/tmp/lodestone-v498`; repeat for 578 and 754. Provenance must identify the exact release
+build (1.14.4, 1.15.2, or 1.16.5) and retain non-empty capture and client-log artifacts. No client
+was launched while this document was updated; all three rows remain unverified by a real release
+client until their manual runs produce passing `report.json` files.
+
+## How to change it
+
+- **Adding a fourth protocol to this era** (there is none — 1.13.2 is below it
+  and carries light inside the chunk packet, 1.17 changes world height):
+  generate its tables with `cargo run -p xtask -- gen-packet-ids --source
+  minecraft-data`, run the jar's data generator for its `blocks.json` and
+  `registries.json`, add a `PROTOCOL_*` const, a `PROTOCOLS` entry, an `IDS_*`
+  static, an `ids_for` arm, a `play_dispatch_table` slot, a `table_for` arm in
+  each of `canonical` and `entity_types`, a `Source`/`JarSource` row per
+  generator, and a `MEMBERS` row with its recorder and replay test. Then record
+  a capture and let the replay tell you which shapes moved. Measured here at
+  **69 hand-written lines** for the second of the two versions added.
+- **Never widen a `#[mc(protocols)]` range without a capture from the protocol
+  it now claims.** That is the plan's one guard against inheritance-by-range,
+  and the reason `lodestone-protocol-common`'s `LoginSuccess` moved from
+  `47..=340` to `47..=578` in the same change as the captures.
+- **The adapter type is still called `V735Adapter`** even though it serves
+  three protocols and 735 is not one of them. Renaming it touches its own
+  tests and `lodestone-fuzz`; worth doing, but not inside a change that also
+  moves the wire.
+- `minecraft-data` ships 1.14.4 and 1.15.2 under their own directories (unlike
+  the 1.9 era's same-major fallbacks), so pass the real version and protocol.
+- For an incremental-world packet, preserve the order `decode → canonicalize →
+  write world → synchronize block entity → emit dirty section`. Omitting the
+  last two steps creates stored-but-invisible blocks or stale block entities.
+  Keep fixtures field-assembled and route each packet through all applicable
+  generated id tables.
+- Do not wire equipment or block events from a modern registry lookup. Generate
+  and commit one historical registry per protocol first, then test a numeric id
+  whose mapping differs between at least two rows.
+
+## Configuration
+
+The era is selected by the existing `v1-14` feature on `lodestone-registry`.
+Joining and hosting both resolve all three protocols; the host constructor
+selects 498, 578 or 754 before any packet is encoded.
+Oracle ports live in
+`scripts/live-oracles/legacy.sh` and are read from there by
+`tests/capture_join.rs`'s `MEMBERS` table.
+
+## Dependencies
+
+`lodestone-core` (`Ctx`, `ProtocolRange`, `dispatch::{Table, Handler,
+IGNORED}`), `lodestone-macros` (`since`/`until`/`protocols`),
+`lodestone-protocol-common` (the shared packet definitions, one of whose ranges
+this work widened), `lodestone-world`, `lodestone-data` (the canonical 26.2
+block-state registry the generated tables target), and `lodestone-server` for
+the hosting seam. Recording needs Apple
+`container` and [`scripts/live-oracles/legacy.sh`](../scripts/live-oracles/legacy.sh);
+regenerating the block-state and entity tables additionally needs each jar's
+own data generator under `container`; replay needs nothing.

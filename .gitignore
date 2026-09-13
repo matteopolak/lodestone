@@ -1,0 +1,62 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# xtask's fixture scratch. Named `target/` but not a cargo build dir: xtask
+# tests write throwaway workspaces and codegen `.rmeta` outputs under it. It
+# was unignored, so 104 of those outputs were once committed by accident and
+# then orphaned when the fixtures moved to per-run mkdtemp leaves.
+/xtask/target/
+
+# Fetched / generated inputs — recreate with `cargo xtask`
+/vendor/
+/.cache/
+
+# Downloaded tooling (trunk et al) — recreate with scripts/
+/.tooling/
+
+# Scratch capture workspace — not part of the build
+/.capture/
+
+# Local agent/session state and disposable checkout scaffolding. These contain
+# per-machine patches, indexes, and worktree administrative data rather than
+# repository inputs.
+/.codex/
+/.worktrees/
+/.typed-biome-*
+
+# Deletion-drill scratch (see plan §3.2); recreate with `cargo xtask check-deletable`
+/.deletion-drill-backup/
+
+# Debug artifacts from headless/window render runs — regenerate on demand,
+# never commit. These are outputs of tests, not inputs to them.
+/*.png
+/*.ppm
+/*.log
+
+# Decompiled reference source: NEVER commit (Mojang-copyrighted)
+**/mc/*/src/
+**/mc/*/client-src/
+*.jar
+
+# Benchmark measurement data (docs/benchmark-regression-gate.md) — local dev
+# artifacts, not comparable across machines, never committed.
+/bench-results/
+
+# A vanilla server booted in the repo root writes here (oracle/JVM dump runs).
+# Never repo state.
+/logs/
+
+# rustc ICE dumps. Written into whatever directory rustc was invoked from, so
+# they land in the repo root and are untracked where another agent's `git add`
+# can sweep them up. Four appeared in one minute from a single incremental-cache
+# fingerprint failure -- they are diagnostic scratch, never repo state.
+rustc-ice-*.txt
+
+# OS
+.DS_Store
+
+# stray per-run logs from live gates
+**/.session_*.log
+lodestone-frame.ppm
+*.ppm

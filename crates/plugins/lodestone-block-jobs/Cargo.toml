@@ -1,0 +1,36 @@
+# A block-edit job queue plugin (issue #436's "declared islands", item 1):
+# the first production producer of `lodestone_ecs::player::BreakIntent`/
+# `PlaceIntent` outside a unit test. Same role in this crate group as
+# `lodestone-mob-spawner` plays for `spawn_entity`/`despawn_entity` — a small,
+# real queue a caller drives from outside the ECS, proving the seam end to
+# end rather than adding a second, competing implementation of the intent
+# doctrine.
+[package]
+name = "lodestone-block-jobs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# `BreakIntent`/`BreakOutcome`/`BreakStatus`, `PlaceIntent`/`PlaceOutcome`/
+# `PlaceStatus`, `LocalPlayer`, `LocalPlayerPlugin`, `TickSet`, `GameTick` —
+# the whole doctrine this plugin drives.
+lodestone-ecs = { workspace = true }
+# `BlockPos`, `BlockFace` — the two facts a job carries, mirroring
+# `BreakIntent`/`PlaceIntent`'s own fields exactly.
+lodestone-model = { workspace = true }
+# Direct, in addition to `lodestone-ecs`'s re-export: `#[derive(Resource)]`
+# below emits an absolute `bevy_ecs::` path, which only resolves if this
+# crate has it as a direct dependency too — every sibling plugin's
+# `Cargo.toml` documents the same requirement for the same reason.
+bevy_ecs = { workspace = true }
+bevy_app = { workspace = true }
+
+[dev-dependencies]
+# `PlayerState`/`Vec3d`, to spawn a real local player in this crate's own
+# tests — not reachable through `lodestone-ecs`'s re-exports, matching
+# `lodestone-key-toggle`'s identical dev-time need.
+lodestone-physics = { workspace = true }

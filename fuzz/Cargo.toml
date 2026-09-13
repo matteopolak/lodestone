@@ -1,0 +1,155 @@
+[package]
+name = "lodestone-fuzz-targets"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Deliberately its OWN workspace (empty `[workspace]` table below), the same
+# pattern `crates/lodestone-wasm-host`'s wasm guests use (see the root
+# `Cargo.toml`'s `exclude` comment) and cargo-fuzz's own default layout: `cargo
+# fuzz build` injects nightly-only sanitizer/coverage instrumentation flags
+# (`-Cpasses=sancov-module`, `-Zsanitizer=address`) that must not leak into a
+# plain `cargo build --workspace` for the other ~292 crates. Folding this into
+# the root workspace would also pull the whole crate graph's `Cargo.lock`
+# resolution into scope for a directory that only exists to be built by `cargo
+# fuzz`, never by `just check`/`just test`.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+# cargo-fuzz/libFuzzer targets ("Track A" of this workspace's fuzzing design)
+# on the highest-value
+# untrusted-input surfaces — a malformed packet from a hostile server (or, for
+# the serverbound target, a hostile client against our integrated server)
+# should never panic. This crate is additive to `crates/lodestone-fuzz`
+# (proptest-based, runs under a plain `cargo test`, no nightly/no corpus dir),
+# not a replacement — see that crate's own `docs/fuzz-harness.md` for why both
+# shapes coexist. Targets below reuse `lodestone-fuzz`'s existing
+# `decode_clientbound`/`Family` plumbing rather than re-deriving adapter
+# construction, so "which packet ids exist" keeps tracking the generated
+# `packet_ids` tables instead of a second hand-maintained list.
+lodestone-fuzz = { path = "../crates/lodestone-fuzz" }
+lodestone-core = { path = "../crates/lodestone-core" }
+lodestone-model = { path = "../crates/lodestone-model" }
+lodestone-server = { path = "../crates/lodestone-server" }
+lodestone-v26-2 = { path = "../crates/versions/26.2" }
+# For the widened Track A scope -- loot tables, block-state strings, the
+# density compiler, the unihex HEX parser -- each a leaf/near-leaf crate
+# pulled in for exactly one parse entry point, not for any of these crates'
+# own heavier subsystems.
+lodestone-data = { path = "../crates/lodestone-data" }
+lodestone-worldgen-core = { path = "../crates/lodestone-worldgen-core" }
+lodestone-assets = { path = "../crates/lodestone-assets" }
+serde_json = "1"
+# For chunk/region deserialization (`RegionFile::parse` +
+# `read_chunk_nbt_bytes`) and the text-component JSON/NBT front-ends in
+# `lodestone-model` (`Text::from_json`, `Text::from_nbt`) -- the latter
+# already depended on via `lodestone-model` above.
+lodestone-anvil = { path = "../crates/lodestone-anvil" }
+# The wire-framing target drives the sans-I/O receive state machine directly.
+# Packet-decoder targets start after this boundary, so they cannot exercise
+# split length prefixes, compression headers, or zlib payload length checks.
+lodestone-net = { path = "../crates/lodestone-net" }
+
+[[bin]]
+name = "v26_2_clientbound_decode"
+path = "fuzz_targets/v26_2_clientbound_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "v26_2_clientbound_decode_by_id"
+path = "fuzz_targets/v26_2_clientbound_decode_by_id.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "v26_2_serverbound_decode"
+path = "fuzz_targets/v26_2_serverbound_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "v26_2_serverbound_decode_by_id"
+path = "fuzz_targets/v26_2_serverbound_decode_by_id.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nbt_decode"
+path = "fuzz_targets/nbt_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "loot_table_json"
+path = "fuzz_targets/loot_table_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "block_state_string"
+path = "fuzz_targets/block_state_string.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "density_function_json"
+path = "fuzz_targets/density_function_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "unihex_font"
+path = "fuzz_targets/unihex_font.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "anvil_region_parse"
+path = "fuzz_targets/anvil_region_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "text_chat_json"
+path = "fuzz_targets/text_chat_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "text_chat_nbt"
+path = "fuzz_targets/text_chat_nbt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "resource_pack_zip_source"
+path = "fuzz_targets/resource_pack_zip_source.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "packet_frame_codec"
+path = "fuzz_targets/packet_frame_codec.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,20 @@
+# Captured from vanilla 26.2 (protocol 776) survival oracle.
+# Packet: clientbound container_set_slot, from
+# `item replace entity <player> weapon.mainhand with minecraft:diamond_pickaxe`.
+#
+# ..        VarInt window id  (session-scoped; not compared)
+# ..        VarInt state id   (container revision; not compared)
+# ..        i16    slot index (not compared)
+# 01        VarInt stack count = 1
+# c6 07     VarInt item registry id 966 = minecraft:diamond_pickaxe
+# 00        DataComponentPatch: 0 added
+# 00        DataComponentPatch: 0 removed
+#
+# THE POINT OF THIS FIXTURE: those last two bytes are the whole patch.
+# A real diamond pickaxe sends NO minecraft:tool. The component lives in
+# the item's prototype component map (ToolMaterial.applyToolProperties),
+# and a clientbound stack transmits only the delta from that prototype,
+# so the client is expected to already know it. Decoding the wire alone
+# can never make a pickaxe dig faster; the per-item census in
+# src/generated/tools.rs is what does.
+00 02 00 24 01 c6 07 00 00
