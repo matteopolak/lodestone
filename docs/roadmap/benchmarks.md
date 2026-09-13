@@ -36,6 +36,32 @@ disable automatic bench discovery, so the recorder modules are not runnable benc
 targets. This count is a registry of Cargo targets, not proof that every production
 workload is represented.
 
+### Entity pathfinding classification
+
+`lodestone-entity`'s `pathfinding_search` target measures the production A* search
+through open terrain, forced detours, a serpentine maze, an unreachable pocket, and a
+real collision-shape corridor. The search classifies every candidate node across the
+mob footprint; `PathTypeSet` keeps up to four distinct classifications inline and
+falls back to the original heap-backed representation for larger footprints. This
+removes the common one-to-four-value allocation without changing duplicate handling,
+malus ordering, or the selected path type.
+
+The benchmark first checks reachability and route shape, then records 80 manual
+wall-time samples before Criterion runs. `open_flat` is the cheap control; the three
+obstacle scenes must each remain more than twice its median, and the unreachable scene
+must remain unreached. A release run on `macbook.local` measured the inline form at
+0.88x, 0.88x, 0.97x, 0.89x, and 0.85x of the clean baseline for `open_flat`,
+`detour_fence`, `serpentine_maze`, `sealed_unreachable`, and
+`real_collision_stair_gap`, respectively. These are same-machine observations, not
+portable thresholds.
+
+To change this path, update `PathTypeSet` and its parity tests together, then rerun
+the release benchmark with every scene. Keep the overflow path: a mob footprint may
+contain more than four distinct classifications, and the selected type depends on
+the full ordered set. The target uses the synthetic arenas plus the committed
+collision-shape census; it depends on `PathType`, `MobShape`, `PathWorld`, Criterion,
+and the shared benchmark recorder.
+
 ### Worldgen parallel scaling
 
 `crates/lodestone-server/tests/join_parallel_efficiency.rs` contains a separate

@@ -288,6 +288,24 @@ fn run_search<W: PathWorld>(world: &W, target: BlockPos, budget: i32) -> Option<
     PathFinder::new(budget).find_path(world, &mob, start, &[target], params)
 }
 
+fn assert_scene_contract(name: &str, path: &Path) {
+    match name {
+        "detour_fence" => assert!(
+            path.nodes().iter().any(|node| node.z.abs() > 25),
+            "detour_fence: path never crossed beyond the barrier ends"
+        ),
+        "serpentine_maze" => assert!(
+            path.nodes().iter().any(|node| node.z.abs() >= 18),
+            "serpentine_maze: path never entered either designated corridor gap"
+        ),
+        "sealed_unreachable" => assert!(
+            !path.reached(),
+            "sealed_unreachable: control unexpectedly reached the sealed target"
+        ),
+        _ => {}
+    }
+}
+
 fn bench_scenes(c: &mut Criterion) {
     let scenes: [(&str, Arena, BlockPos, i32, bool); 4] = [
         ("open_flat", open_flat(), BlockPos::new(30, 0, 0), 20_000, true),
@@ -311,6 +329,7 @@ fn bench_scenes(c: &mut Criterion) {
             "scene {name}: expected reached={must_reach}, got {} -- this scene no longer tests what its name claims",
             probe.reached()
         );
+        assert_scene_contract(name, &probe);
 
         for _ in 0..5 {
             black_box(run_search(world, *target, *budget));
@@ -346,6 +365,10 @@ fn bench_scenes(c: &mut Criterion) {
         if *name != "open_flat" {
             let ratio = us / open_us;
             println!("  {name} / open_flat = {ratio:.2}x");
+            assert!(
+                ratio > 2.0,
+                "{name}: obstacle control is only {ratio:.2}x open_flat; benchmark no longer exercises a distinct search shape"
+            );
             support::record(support::Record {
                 bench: "pathfinding_search",
                 metric: "vs_open_flat_ratio",
