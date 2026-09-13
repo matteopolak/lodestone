@@ -3773,6 +3773,8 @@ mod top_layer_parity {
 /// to make this true.
 #[cfg(test)]
 mod generation_spawn_reaches_a_real_chunk {
+    use lodestone_data::entity_type::{EntityType, EntityTypeRef};
+
     #[test]
     fn dark_forest_chunk_proposes_a_full_pack_of_one_species() {
         let generator = super::overworld_generator(12345);
@@ -3791,10 +3793,15 @@ mod generation_spawn_reaches_a_real_chunk {
              predicts exactly 4 regardless of which one the weighted pick lands on"
         );
         let species = &candidates[0].entity_type;
+        let allowed = [
+            EntityTypeRef::from(EntityType::Sheep),
+            EntityTypeRef::from(EntityType::Pig),
+            EntityTypeRef::from(EntityType::Chicken),
+            EntityTypeRef::from(EntityType::Cow),
+        ];
         assert!(
-            ["minecraft:sheep", "minecraft:pig", "minecraft:chicken", "minecraft:cow"]
-                .contains(&species.as_str()),
-            "{species} is not one of dark_forest's own four creature entries"
+            allowed.contains(species),
+            "{species:?} is not one of dark_forest's own four creature entries"
         );
         assert!(
             candidates.iter().all(|c| &c.entity_type == species),
