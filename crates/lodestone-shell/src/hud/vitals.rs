@@ -6,9 +6,9 @@
 
 use super::{
     bubble_position, bubble_row, vitals_line_base, Builder, HudFrame, HOTBAR_MARGIN, BUBBLE_SIZE,
-    VITALS_LINE_BASE_FROM_BOTTOM, VITALS_ROW_PITCH,
+    VITALS_ROW_PITCH,
 };
-use super::{anim, font, locator};
+use super::{anim, locator};
 
 /// Vanilla's own client-side can-hurt-player check, the predicate
 /// [`HudFrame::can_hurt_player`] carries.
@@ -298,7 +298,7 @@ pub(super) fn regeneration_active(effects: Option<&[crate::effects::HudEffectIco
 }
 
 impl HudAnim {
-    const NONE: Self = Self {
+    pub(super) const NONE: Self = Self {
         heart_blink: false,
         display_health: i32::MIN, // unused while `heart_blink` is false and jitter is skipped
         tick: 0,

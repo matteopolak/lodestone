@@ -3188,7 +3188,6 @@ pub fn entry_offset(entries: &[Entry], index: usize) -> f32 {
 /// The distinction is 5 px on a control row and it is load-bearing: an entry is
 /// 25 px tall but paints a 20 px widget inset 2 px, so the trailing 3 px are
 /// blank and excluding a row for them would drop a row that fits.
-#[must_use]
 /// This page's list, as the generic [`super::widget::ListSpec`].
 ///
 /// **The one screen here with non-uniform rows**, which is why

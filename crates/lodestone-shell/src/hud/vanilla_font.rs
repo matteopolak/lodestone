@@ -83,7 +83,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use lodestone_assets::font::{
     FontLoader, FontOptions, GlyphRaster, MISSING_ADVANCE, RasterFont, metrics as font_metrics,

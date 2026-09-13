@@ -44,6 +44,7 @@
 
 use lodestone_render::{DEPTH_COMPARE_NEARER_OR_EQUAL, DEPTH_FORMAT};
 use lodestone_render::lightning_bolt::{BOLT_VERTICES, bolt_seed_for_entity, lightning_bolt_vertices};
+use lodestone_model::EntityNetworkId;
 
 use crate::entities::EntityDraw;
 
@@ -232,7 +233,7 @@ impl LightningBoltRenderer {
             if out.len() + BOLT_VERTICES > MAX_BOLT_VERTICES {
                 break;
             }
-            let seed = bolt_seed_for_entity(draw.id);
+            let seed = bolt_seed_for_entity(EntityNetworkId::from_raw(draw.id));
             out.extend(lightning_bolt_vertices(seed).into_iter().map(|v| {
                 BoltGpuVertex {
                     // The pure geometry is bolt-local; the entity's own

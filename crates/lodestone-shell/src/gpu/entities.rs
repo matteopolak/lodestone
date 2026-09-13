@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use lodestone_assets::equipment::{ArmourLayerType, ArmourSlot};
-use lodestone_render::entity_pipeline::{FlameInstanceRaw, flame_mesh};
+use lodestone_render::entity_pipeline::flame_mesh;
 use lodestone_render::{
     ArmourModelSet, CameraUniform, EntityCameraUniform, EntityModelSet, EntityPipeline,
     GpuEntityModel, SheepWoolModelSet, entity_camera_buffer, fog::FogUniform,
@@ -114,7 +114,7 @@ pub(super) struct EntityRenderer {
     /// wing with the wearer's own `"body"` part index, exactly as
     /// `armour_models`/`wool_models` are.
     ///
-    /// A player's own sheet can still override the jar one:
+    /// A player's own sheet can override the built-in one: the production
     /// preference is the installed custom elytra URL, then an installed visible
     /// cape URL, and finally `ELYTRA_TEXTURE_PATH`. Profile parsing retains both
     /// custom URLs on `crate::remote_skins::RemoteSkin`; the per-frame pass

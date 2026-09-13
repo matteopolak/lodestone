@@ -839,6 +839,13 @@ fn note_framed_map_gather(
     if !state.gather_changed(&diagnostic) {
         return;
     }
+    let projection_details = diagnostic.projection.map(|projection| {
+        (
+            projection.comparison_surface,
+            projection.centre_depth_ulp_margin,
+            projection.points,
+        )
+    });
     let switches = map_diagnostic_switches();
     persist_map_diagnostic(&format!(
         "gather camera={:?} yaw={} pitch={} fov={} aspect={} model={} source_installed={} candidates={} tracked={:?} \
@@ -858,7 +865,7 @@ fn note_framed_map_gather(
         diagnostic.submitted_instances,
         diagnostic.submitted_batches,
         diagnostic.projection_state,
-        diagnostic.projection,
+        projection_details,
         diagnostic.selected,
     ));
     tracing::debug!(
@@ -876,7 +883,7 @@ fn note_framed_map_gather(
         selected_in_frustum = diagnostic.selected_in_frustum,
         selected_submitted = diagnostic.selected_submitted,
         projection_state = ?diagnostic.projection_state,
-        projection = ?diagnostic.projection,
+        projection = ?projection_details,
         submitted_instances = diagnostic.submitted_instances,
         submitted_batches = diagnostic.submitted_batches,
         selected = ?diagnostic.selected,
@@ -1733,12 +1740,6 @@ mod tests {
         );
     }
 
-    /// `ItemFrameRenderer.submit` enters frame-local space, moves contents by
-    /// `.4375`/`.5`, then its map branch's `scale(1/128)` carries the
-    /// `translate(0, 0, -1)` plus `MapRenderer.MAP_Z_OFFSET (-.01)`. The map
-    /// mesh here is already centred and unit-sized, so this asserts that same
-    /// depth at its local origin for every wall orientation.
-    #[test]
     /// A glow frame lights its map itself; a plain one passes the frame's own
     /// sampled light straight through. The two must differ, and the glow value
     /// must be a shade under a fully-bright framed *item*, which is the

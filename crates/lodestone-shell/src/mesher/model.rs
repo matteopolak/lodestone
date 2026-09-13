@@ -4,6 +4,7 @@
 //! model-layer entry points. It deliberately reads only `SectionSnapshot`.
 use super::*;
 
+#[derive(Debug, Clone, Copy, Default)]
 pub struct TintProbe {
     /// Quads offered to the tint path (every quad the model mesher emits).
     pub quads: u32,

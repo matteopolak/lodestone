@@ -294,7 +294,7 @@ impl PlayerPreview {
         let view = crate::gpu::entities::entity_texture_from_image(device, queue, &img);
         let texture = pipeline.texture_bind_group(device, &view, &sampler);
 
-        // Fog disabled, which also leaves the sky-darken lane at its `0.0`
+        // Fog disabled, which also leaves the sky-darken lane at its negative
         // sentinel — read back as `1.0`. That is vanilla:
         // `GuiEntityRenderer.renderToTexture` sets up `Lighting.Entry.ENTITY_IN_UI`
         // and `GuiGraphicsExtractor.entity` forces `lightCoords = 15728880`

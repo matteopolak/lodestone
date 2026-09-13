@@ -1327,6 +1327,7 @@ fn push_side_quads(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn push_side_layers(
     raster: &RasterFont,
     ink: &super::nametag::StyledInkLayoutCache,

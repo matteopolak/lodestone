@@ -12,8 +12,7 @@ use std::cell::RefCell;
 use bytemuck::{Pod, Zeroable};
 use lodestone_render::{
     DEPTH_COMPARE_NEARER_OR_EQUAL, DEPTH_FORMAT, DISTANT_TERRAIN_WGSL, DistantTerrain,
-    HORIZON_CELL_BLOCKS, HORIZON_TILE_BLOCKS, HORIZON_TILE_CELLS, HORIZON_TILES_PER_AXIS,
-    HorizonCell, HorizonTile,
+    HORIZON_CELL_BLOCKS, HORIZON_TILE_CELLS, HORIZON_TILES_PER_AXIS, HorizonCell,
     horizon_tile_intersects_radius,
     ModelSharedCameraUniform, fog::FogUniform,
     model_shared_camera_buffer_with_fog, update_model_shared_camera_buffer,
@@ -23,6 +22,7 @@ use lodestone_render::{
 pub(crate) const HORIZON_ATLAS_CELLS: u32 =
     HORIZON_TILES_PER_AXIS as u32 * HORIZON_TILE_CELLS as u32;
 /// Bytes in the height/water and colour/flags atlases combined.
+#[cfg(test)]
 pub(crate) const HORIZON_ATLAS_GPU_BYTES: u64 =
     HORIZON_ATLAS_CELLS as u64 * HORIZON_ATLAS_CELLS as u64 * 2 * 4;
 /// Vertices emitted by the vertex-pulled 63 by 63 quad grid for one tile.
@@ -34,10 +34,6 @@ const TILE_UNIFORM_BYTES: u64 = 32;
 /// per-tile uniform allocation a known 20,736 bytes rather than a
 /// device-specific unbounded multiple.
 const MAX_TILE_UNIFORM_STRIDE: u32 = 256;
-const TILE_UNIFORM_BUFFER_BYTES: u64 = MAX_TILE_UNIFORM_STRIDE as u64
-    * HORIZON_TILES_PER_AXIS as u64
-    * HORIZON_TILES_PER_AXIS as u64;
-
 /// Group-1 binding zero for one atlas tile.
 ///
 /// Each entry begins at the device's dynamic-uniform alignment. This is one
@@ -116,9 +112,7 @@ pub(crate) struct DistantTerrainRenderer {
     terrain: DistantTerrain,
     residency: TileResidency,
     heights_water: wgpu::Texture,
-    heights_water_view: wgpu::TextureView,
     colours_flags: wgpu::Texture,
-    colours_flags_view: wgpu::TextureView,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     tile_uniform_buffer: wgpu::Buffer,
@@ -132,13 +126,24 @@ pub(crate) struct DistantTerrainRenderer {
 }
 
 /// Why a bounded distant-terrain renderer could not be constructed.
-#[derive(Debug)]
 pub(crate) enum HorizonGpuError {
     /// The fixed CPU terrain allocation failed.
     Allocation(lodestone_render::HorizonAllocationError),
     /// The adapter requires a dynamic uniform stride above this tier's fixed
     /// budget instead of the portable 256-byte baseline.
     UnsupportedUniformAlignment(u32),
+}
+
+impl std::fmt::Debug for HorizonGpuError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Allocation(error) => formatter.debug_tuple("Allocation").field(error).finish(),
+            Self::UnsupportedUniformAlignment(alignment) => formatter
+                .debug_tuple("UnsupportedUniformAlignment")
+                .field(alignment)
+                .finish(),
+        }
+    }
 }
 
 impl From<lodestone_render::HorizonAllocationError> for HorizonGpuError {
@@ -326,9 +331,7 @@ impl DistantTerrainRenderer {
             terrain,
             residency: TileResidency::empty(),
             heights_water,
-            heights_water_view,
             colours_flags,
-            colours_flags_view,
             camera_buffer,
             camera_bind_group,
             tile_uniform_buffer,

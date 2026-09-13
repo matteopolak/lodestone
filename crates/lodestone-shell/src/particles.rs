@@ -72,6 +72,11 @@ use lodestone_render::{BlockModels, Camera};
 /// drawing, because an untinted potion mote looks like a working particle.
 const WHITE: [f32; 3] = [1.0, 1.0, 1.0];
 
+/// Number of fixed ambient probes performed each particle tick.
+pub(super) const AMBIENT_SAMPLES: usize = 128;
+/// Horizontal and vertical radius of the ambient probe cube.
+pub(super) const AMBIENT_RANGE: i32 = 8;
+
 /// Which stitched texture a [`ParticleInstance`]'s UVs address.
 ///
 /// This travels *with* the UVs, decided by the same

@@ -177,11 +177,13 @@ impl ShellAmbience {
     }
 
     /// Current moodiness, `0.0..=1.0`. Vanilla shows this on the debug screen.
+    #[cfg(test)]
     pub(crate) fn moodiness(&self) -> f32 {
         self.mood.moodiness()
     }
 
     /// The loops currently live, with their crossfade volumes.
+    #[cfg(test)]
     pub(crate) fn live_loops(&self) -> Vec<(String, f32)> {
         self.loops
             .live()

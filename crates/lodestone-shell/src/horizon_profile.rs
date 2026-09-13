@@ -6,8 +6,8 @@
 //! is a Samply input, not a timing regression test.
 
 use lodestone_render::{
-    DistantTerrain, HORIZON_CELL_BLOCKS, HORIZON_CELLS_PER_TILE, HORIZON_TILE_BLOCKS,
-    HORIZON_TILE_CELLS, MAX_HORIZON_BYTES, MAX_HORIZON_TILES, horizon_tile_intersects_radius,
+    DistantTerrain, HORIZON_CELL_BLOCKS, HORIZON_TILE_BLOCKS, HORIZON_TILE_CELLS,
+    MAX_HORIZON_BYTES, MAX_HORIZON_TILES, horizon_tile_intersects_radius,
 };
 
 use lodestone_server::{
@@ -240,7 +240,7 @@ mod tests {
         assert!(report.horizon_tiles_skipped > 0, "the bounded tile budget must be observable");
         assert_eq!(
             report.horizon_cells_written,
-            report.horizon_tiles_updated * HORIZON_CELLS_PER_TILE
+            report.horizon_tiles_updated * lodestone_render::HORIZON_CELLS_PER_TILE
         );
         assert_eq!(report.atlas_cpu_bytes, MAX_HORIZON_BYTES);
         assert_eq!(report.atlas_gpu_bytes, MAX_HORIZON_BYTES);

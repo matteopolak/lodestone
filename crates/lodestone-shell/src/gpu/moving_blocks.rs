@@ -163,6 +163,7 @@ fn falling_block_pose(feet: glam::Vec3) -> glam::Mat4 {
 /// TNT renderer
 /// line for line instead of trusting an algebraic shortcut.
 #[must_use]
+#[cfg(test)]
 fn primed_tnt_pose(feet: glam::Vec3, fuse: f32) -> glam::Mat4 {
     primed_tnt_pose_with_scale(feet, 1.0 + primed_tnt_swell_amount(fuse))
 }
