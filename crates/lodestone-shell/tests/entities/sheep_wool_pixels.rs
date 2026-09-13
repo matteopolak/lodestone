@@ -154,6 +154,7 @@ fn a_woolly_sheep_draws_more_silhouette_than_a_sheared_one() {
         // No variant texture axis on these subjects; the model sheet applies.
         variant_sheet: None,
         experience_orb_value: None,
+        tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),
         painting: None,
         firework: None,

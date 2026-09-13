@@ -120,6 +120,7 @@ fn blank_draw(id: i32, type_path: &str) -> EntityDraw {
         player_skin: None,
         variant_sheet: None,
         experience_orb_value: None,
+        tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),
         painting: None,
         firework: None,

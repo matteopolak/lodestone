@@ -157,6 +157,7 @@ fn drop_draw(item: Option<ResourceLocation>, age_ticks: f32) -> EntityDraw {
         // No variant texture axis on these subjects; the model sheet applies.
         variant_sheet: None,
         experience_orb_value: None,
+        tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),
         painting: None,
         firework: None,
@@ -514,6 +515,7 @@ fn a_thrown_snowball_reaches_pixels_through_the_real_render_call() {
         // No variant texture axis on these subjects; the model sheet applies.
         variant_sheet: None,
         experience_orb_value: None,
+        tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),
         painting: None,
         firework: None,

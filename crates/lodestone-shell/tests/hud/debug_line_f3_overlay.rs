@@ -69,6 +69,7 @@ fn zombie() -> EntityDraw {
         armor_stand: None,
         player_skin: None,
         experience_orb_value: None,
+        tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),
         painting: None,
         firework: None,
