@@ -9,10 +9,10 @@ use std::path::{Path, PathBuf};
 use lodestone_ecs::events::GameEvent;
 use lodestone_ecs::player::ActionQueue;
 use lodestone_ecs::{app::App, GameTick};
-use lodestone_model::{ClientAction, ClientEvent, Text};
+use lodestone_model::{ClientAction, ClientEvent, ItemStack, Text};
 use lodestone_physics::{PlayerState, Vec3d};
 use lodestone_wasm_host::{
-    reload_wasm_plugins, CapabilitySet, PluginGrantPolicy, PluginHost, WasmHostPlugin,
+    reload_wasm_plugins, Capability, CapabilitySet, PluginGrantPolicy, PluginHost, WasmHostPlugin,
     WasmPlugins, WasmReloadError,
 };
 
@@ -55,6 +55,19 @@ fn manifest(name: &str, priority: &str, required: Option<&str>) -> String {
     )
 }
 
+fn optional_manifest(name: &str, priority: &str, dependency: &str) -> String {
+    format!(
+        "name = \"{name}\"\n\
+         version = \"0.1.0\"\n\
+         abi = \"lodestone:plugin@0.29.0\"\n\
+         module = \"chat_responder.wasm\"\n\
+         priority = \"{priority}\"\n\
+         capabilities = [\"log\", \"observe:chat\", \"observe:inventory\", \"act:chat\"]\n\
+         [dependencies]\n\
+         optional = [\"{dependency}\"]\n"
+    )
+}
+
 fn chat_actions(app: &App) -> Vec<ClientAction> {
     app.world()
         .resource::<ActionQueue>()
@@ -63,6 +76,16 @@ fn chat_actions(app: &App) -> Vec<ClientAction> {
         .filter(|action| matches!(action, ClientAction::SendChat { .. }))
         .cloned()
         .collect()
+}
+
+fn inventory_event() -> GameEvent {
+    GameEvent(ClientEvent::InventorySlotChanged {
+        slot: 4,
+        item: Some(ItemStack::new(
+            "minecraft:gold_ingot".parse().expect("valid item key"),
+            13,
+        )),
+    })
 }
 
 fn plugin_names(app: &App) -> Vec<String> {
@@ -158,5 +181,68 @@ fn ordered_failure_isolated_and_transactional_plugin_lifecycle() {
             text: "pong (chat messages seen: 1)".to_owned(),
         }],
         "a reloaded guest must be enabled once with fresh lifecycle state"
+    );
+}
+
+/// An optional edge is still an ordering edge when its target is installed. The
+/// composed client must therefore dispatch the dependency before the dependent,
+/// even when their declared priorities would choose the opposite order, and the
+/// resulting order must be visible in the shared production action queue.
+#[test]
+fn optional_dependency_orders_composed_client_actions_before_priority() {
+    let dependency = support::build_example_plugin(&["inventory"]);
+    let dependent = support::build_example_plugin(&[]);
+    let root = fresh_root();
+
+    // The dependent would sort first by priority alone. Its optional edge to the
+    // high-priority dependency must win once both manifests are present.
+    install(
+        &root,
+        "dependent",
+        &optional_manifest("dependent", "lowest", "dependency"),
+        &dependent,
+    );
+    install(
+        &root,
+        "dependency",
+        &optional_manifest("dependency", "highest", "not-installed"),
+        &dependency,
+    );
+
+    let mut policy = CapabilitySet::default_policy();
+    policy.insert(Capability::ObserveInventory);
+    let mut host = PluginHost::new(policy).expect("engine");
+    let results = host.load_directory(&root);
+    assert_eq!(results.len(), 2, "both manifests must be discovered");
+    for result in results {
+        result.expect("the optional dependency graph must load");
+    }
+    assert_eq!(
+        host.plugins()
+            .iter()
+            .map(|plugin| plugin.name())
+            .collect::<Vec<_>>(),
+        vec!["dependency", "dependent"],
+        "an installed optional dependency must precede its dependent"
+    );
+
+    let mut app = lodestone_app::client_app();
+    app.add_plugins(WasmHostPlugin::new(host));
+    lodestone_app::spawn_session(&mut app, PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0));
+    app.world_mut().write_message(chat("hello ping there"));
+    app.world_mut().write_message(inventory_event());
+    app.world_mut().run_schedule(GameTick);
+
+    assert_eq!(
+        chat_actions(&app),
+        vec![
+            ClientAction::SendChat {
+                text: "inventory: slot=4 item=minecraft:gold_ingotx13".to_owned(),
+            },
+            ClientAction::SendChat {
+                text: "pong (chat messages seen: 1)".to_owned(),
+            },
+        ],
+        "optional dependency order must reach the composed client's action queue"
     );
 }

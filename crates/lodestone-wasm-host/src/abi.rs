@@ -314,6 +314,10 @@ pub fn lift_verdict_context(
 /// around the capability check.
 #[must_use]
 pub fn lift_event(event: &ClientEvent, granted: &CapabilitySet) -> Option<Event> {
+    if let Some(inventory_event) = crate::inventory_menu::lift_event(event, granted) {
+        return Some(inventory_event);
+    }
+
     match event {
         ClientEvent::Chat { text, kind, .. } if granted.contains(Capability::ObserveChat) => {
             Some(Event::Chat(ChatMessage {

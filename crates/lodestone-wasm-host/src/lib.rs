@@ -108,6 +108,7 @@ mod bindings;
 pub mod capability;
 pub mod conductor;
 pub mod host;
+mod inventory_menu;
 pub mod manifest;
 pub mod version_broker;
 
@@ -133,7 +134,10 @@ pub use host::{
     MAX_BLOCK_SNAPSHOT_POSITIONS, MAX_PLUGIN_FILE_BYTES, EntityEquipment, EntityEquipmentChanged, EntityHealthChanged,
     EntityIdentity, EntityMotion, EntityMoved, EntityRotation, EntitySpawned, EntityVelocity,
     EquipmentSlot, Event, Hand, Health,
-    HostError, InventoryHotbarSwap, InventoryThrow, LoadError, LoadedPlugin, LogLevel, LookIntent, MovementIntent, PlaceIntent, PlaceOutcome,
+    HostError, InventoryContainerContent, InventoryContainerDataChanged, InventoryContainerSlotChanged,
+    InventoryCursorItemChanged, InventoryHeldSlotChanged, InventoryHotbarSwap, InventoryMountScreenOpened,
+    InventoryScreenClosed, InventoryScreenOpened, InventoryThrow, LoadError, LoadedPlugin, LogLevel,
+    LookIntent, MovementIntent, PlaceIntent, PlaceOutcome,
     SelectedItemDropMode,
     PlaceRejection, PlaceStatus, PluginGrantPolicy, PluginHost, PluginIdentity, PluginInfo, SectionBlocksChanged, SectionPos,
     PlayerTeleported, ReloadError, ResidentBlockMutation, ResidentBlockMutationOutcome,
