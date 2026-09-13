@@ -642,6 +642,11 @@ impl Sim {
             // takes its own short read guard, and holding one across another
             // accessor is exactly what this crate's locking rules forbid.
             let p = self.player();
+            // The hand/third-person attachment lag is a renderer-facing pair,
+            // but its target is the post-tick local view. Updating it here keeps
+            // the response fixed at 20 Hz and makes repeated stationary frames
+            // pure decay rather than frame-rate-dependent accumulation.
+            self.view_lag.tick(p.yaw, p.pitch);
             // The body yaw fed to `EntityPose::tick` must already be the
             // eased, clamped value — that type stores whatever it is given
             // (see its own doc: "call once for every entity every time a

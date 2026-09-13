@@ -67,6 +67,7 @@ mod screen_effects;
 mod sections;
 mod sign_text;
 mod sources;
+use first_person::ViewLagSource;
 mod spawner_mobs;
 mod state;
 mod stats;
@@ -247,6 +248,10 @@ pub struct RenderState {
     /// Defaults to `CloudStatus::default()` — `Fancy`, vanilla's own — so a
     /// renderer nobody pushes the option into draws exactly what it drew before.
     cloud_status: lodestone_render::CloudStatus,
+    /// This frame's dimension-level cloud colour, in linear RGBA. The alpha
+    /// gate is part of the environment attribute: a transparent value removes
+    /// the cloud deck even when the video option is enabled.
+    cloud_color: [f32; 4],
     /// The connected **dimension's** own `Skybox` — vanilla's
     /// own per-dimension skybox choice, not a graphics option. Pushed down per frame by
     /// `app/redraw.rs` from [`crate::Sim::sky_mode`] and stamped onto the
@@ -466,6 +471,9 @@ pub struct RenderState {
     /// third-person camera and a way to describe the local player's pose —
     /// see [`RenderState::set_third_person_body_source`].
     third_person_body: ThirdPersonBodySource,
+    /// The local view-lag sample shared by first-person hand and local
+    /// third-person held-item attachment transforms.
+    view_lag: ViewLagSource,
     /// How far through an arm swing the local player is *right now*. A rested
     /// arm until the shell wires its swing clock in via
     /// [`RenderState::set_hand_swing_source`].

@@ -15,7 +15,7 @@ use lodestone_render::{
     update_model_shared_camera_buffer, upload_instances, upload_instances_tinted,
 };
 
-use crate::camera_rig::BobFrame;
+use crate::camera_rig::{BobFrame, ViewLagFrame};
 
 use super::{MainHandItem, RenderState, RenderStats};
 
@@ -437,6 +437,32 @@ impl std::fmt::Debug for HandBobSource {
     }
 }
 
+/// Per-frame view-lag source shared by the first-person hand and the local
+/// third-person held-item attachment. The value is sampled by the frame bridge,
+/// so both consumers see the same partial-tick residual.
+pub(super) struct ViewLagSource(pub(super) Option<Box<dyn Fn() -> ViewLagFrame + Send + Sync>>);
+
+impl ViewLagSource {
+    #[must_use]
+    pub(super) fn value(&self) -> ViewLagFrame {
+        self.0.as_ref().map_or_else(ViewLagFrame::default, |f| f())
+    }
+}
+
+impl Default for ViewLagSource {
+    fn default() -> Self {
+        Self(None)
+    }
+}
+
+impl std::fmt::Debug for ViewLagSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ViewLagSource")
+            .field(&if self.0.is_some() { "set" } else { "rest" })
+            .finish()
+    }
+}
+
 /// The hand pass's whole camera-space transform: [`hand_projection`] composed
 /// with a fresh copy of the walk/hurt bob — vanilla's own second application
 /// of it, described in full on
@@ -456,8 +482,15 @@ impl std::fmt::Debug for HandBobSource {
 /// against hand-derived vanilla numbers with no adapter — see the `tests`
 /// module below.
 #[must_use]
-fn hand_view_proj(aspect: f32, bob: BobFrame, damage_tilt_strength: f32) -> glam::Mat4 {
-    hand_projection(aspect) * bob.eye_transform(damage_tilt_strength)
+fn hand_view_proj(
+    aspect: f32,
+    bob: BobFrame,
+    view_lag: ViewLagFrame,
+    damage_tilt_strength: f32,
+) -> glam::Mat4 {
+    hand_projection(aspect)
+        * view_lag.hand_transform()
+        * bob.eye_transform(damage_tilt_strength)
 }
 
 /// What the first-person hand pass draws this frame: the held item's model, or
@@ -653,15 +686,12 @@ impl RenderState {
     ///   for the derivation — it is vanilla's own **second, independent**
     ///   application of the identical [`BobFrame`] the world's camera already
     ///   folds, not something inherited from `camera`.
-    /// * **`bobHurt` reaches the hand *mechanically* but is held at `0.0`
-    ///   (`HAND_HURT_TILT_STRENGTH`).** The transform is proven — see that
-    ///   constant's own doc — but landing it needs a small fix to
-    ///   `Sim::bob_frame` first, or it would silently drop the tilt whenever a
-    ///   player has View Bobbing off, which vanilla does not do.
-    /// * **The `xBob`/`yBob` view lag is still absent** — a *different* feature
-    ///   (the hand trailing behind camera rotation, not the walk bob), needing
-    ///   the two smoothed view angles, which the shell does not track. Tracked
-    ///   as its own issue rather than folded in here; see `docs/view-bobbing.md`.
+    /// * **`bobHurt` reaches the hand mechanically** through the same independent
+    ///   eye-space path as the world camera.
+    /// * **View lag is live** — [`ViewLagSource`] prefixes the decaying residual
+    ///   used by the local third-person held-item attachment. It stays separate
+    ///   from walk/hurt bob because those are eye-space animations while this is
+    ///   head-turn response.
     ///
     /// The bare-arm branch draws **our own skin**, on our own rig — see the
     /// `local_skin` resolve at that branch. It reads
@@ -1386,6 +1416,16 @@ impl RenderState {
         self.hand_bob = HandBobSource(Some(Box::new(f)));
     }
 
+    /// Install this frame's decaying view-lag sample for both hand attachment
+    /// consumers. Re-installed every frame because the lagged pair is
+    /// partial-tick interpolated and decays after a turn.
+    pub fn set_view_lag_source(
+        &mut self,
+        f: impl Fn() -> ViewLagFrame + Send + Sync + 'static,
+    ) {
+        self.view_lag = ViewLagSource(Some(Box::new(f)));
+    }
+
     /// Rewrite both hand passes' group-0 uniforms with [`hand_view_proj`].
     ///
     /// **No view matrix, but now a bob matrix**, because
@@ -1417,6 +1457,7 @@ impl RenderState {
         let view_proj = hand_view_proj(
             camera.aspect,
             self.hand_bob.value(),
+            self.view_lag.value(),
             self.damage_tilt_strength,
         );
         let camera_uniform = CameraUniform {
@@ -1433,7 +1474,7 @@ impl RenderState {
         // the arm's uniform carried it (via `EntityCameraUniform::
         // with_sky_darken`) and the item's did not: `update_model_shared_
         // camera_buffer` was called with a bare `FogUniform::disabled()`,
-        // which leaves the spare lane at its `0.0`/"unwired" sentinel, and the
+        // which leaves the spare lane at its negative/"unwired" sentinel, and the
         // model shader's `sky_darken()` reads that sentinel as permanent
         // noon. That was that fix's actual bug — not a missing light sample
         // (`hand_light` already samples real per-position world light for
@@ -2016,7 +2057,12 @@ mod tests {
     /// equality on an inert input, not a small-diff tolerance.
     #[test]
     fn a_zero_frame_is_bit_identical_to_the_bare_hand_projection() {
-        let bobbed = hand_view_proj(HAND_TEST_ASPECT, BobFrame::default(), NO_DAMAGE_TILT);
+        let bobbed = hand_view_proj(
+            HAND_TEST_ASPECT,
+            BobFrame::default(),
+            ViewLagFrame::default(),
+            NO_DAMAGE_TILT,
+        );
         let bare = hand_projection(HAND_TEST_ASPECT);
         assert_eq!(
             bobbed.to_cols_array(),
@@ -2027,6 +2073,48 @@ mod tests {
         // And an unset source reads the same way, through `HandBobSource`.
         let source = HandBobSource::default();
         assert_eq!(source.value(), BobFrame::default());
+    }
+
+    /// The production hand-camera matrix must move a real screen-space sample by
+    /// the residual's measured amount. The expected pixels come from the
+    /// projection equation and the two rotation angles, not from another call
+    /// into the matrix under test; the zero-residual control must remain centred.
+    #[test]
+    fn a_rapid_turn_reaches_the_predicted_hand_pixels() {
+        let frame = ViewLagFrame {
+            pitch: 15.0,
+            yaw: 45.0,
+            view_pitch: 30.0,
+            view_yaw: 90.0,
+        };
+        let m = hand_view_proj(
+            HAND_TEST_ASPECT,
+            BobFrame::default(),
+            frame,
+            NO_DAMAGE_TILT,
+        );
+        let (ndc_x, ndc_y) = ndc(m, HAND_TEST_POINT);
+        let pixel_x = ndc_x * (HAND_TEST_W / 2.0);
+        let pixel_y = -ndc_y * (HAND_TEST_H / 2.0);
+        assert!(
+            (pixel_x - -13.4923).abs() < 0.02,
+            "the yaw residual must reach the hand at the predicted location; got {pixel_x:+.4} px"
+        );
+        assert!(
+            (pixel_y - -4.4877).abs() < 0.02,
+            "the pitch residual must reach the hand at the predicted location; got {pixel_y:+.4} px"
+        );
+
+        let (control_x, control_y) = ndc(
+            hand_view_proj(
+                HAND_TEST_ASPECT,
+                BobFrame::default(),
+                ViewLagFrame::default(),
+                NO_DAMAGE_TILT,
+            ),
+            HAND_TEST_POINT,
+        );
+        assert_eq!((control_x, control_y), (0.0, 0.0));
     }
 
     /// **The dip, at the amplitude ceiling** (`walk_phase = 0`, `bob = 0.1`).
@@ -2067,7 +2155,7 @@ mod tests {
             hurt_dir_degrees: 0.0,
             death_time: 0.0,
         };
-        let m = hand_view_proj(HAND_TEST_ASPECT, dip, NO_DAMAGE_TILT);
+        let m = hand_view_proj(HAND_TEST_ASPECT, dip, ViewLagFrame::default(), NO_DAMAGE_TILT);
         let (x1, y1) = ndc(m, HAND_TEST_POINT);
         let dpixel_y = -(y1 - y0) * (HAND_TEST_H / 2.0);
         let dpixel_x = (x1 - x0) * (HAND_TEST_W / 2.0);
@@ -2128,7 +2216,7 @@ mod tests {
             hurt_dir_degrees: 0.0,
             death_time: 0.0,
         };
-        let m = hand_view_proj(HAND_TEST_ASPECT, sway, NO_DAMAGE_TILT);
+        let m = hand_view_proj(HAND_TEST_ASPECT, sway, ViewLagFrame::default(), NO_DAMAGE_TILT);
         let (x1, y1) = ndc(m, HAND_TEST_POINT);
         let dpixel_x = (x1 - x0) * (HAND_TEST_W / 2.0);
         let dpixel_y = -(y1 - y0) * (HAND_TEST_H / 2.0);
@@ -2170,7 +2258,7 @@ mod tests {
         // At the accessibility option's `0.0`, inert — matching the bare
         // projection exactly, not just closely. This is the contract that makes
         // the option a real off switch rather than a shrink.
-        let off = hand_view_proj(HAND_TEST_ASPECT, hurt, NO_DAMAGE_TILT);
+        let off = hand_view_proj(HAND_TEST_ASPECT, hurt, ViewLagFrame::default(), NO_DAMAGE_TILT);
         assert_eq!(
             off.to_cols_array(),
             hand_projection(HAND_TEST_ASPECT).to_cols_array(),
@@ -2178,7 +2266,7 @@ mod tests {
         );
 
         // At vanilla's own accessibility default, live.
-        let on = hand_view_proj(HAND_TEST_ASPECT, hurt, 1.0);
+        let on = hand_view_proj(HAND_TEST_ASPECT, hurt, ViewLagFrame::default(), 1.0);
         assert_ne!(
             on.to_cols_array(),
             hand_projection(HAND_TEST_ASPECT).to_cols_array(),
