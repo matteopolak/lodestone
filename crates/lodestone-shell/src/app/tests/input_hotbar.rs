@@ -317,7 +317,13 @@ fn terminal_escape_and_wheel_reach_the_shared_playing_actions() {
     app.terminal_escape();
     assert!(app.ui.is_paused(), "terminal Escape must use the shared pause action");
 
-    app.ui.open_container();
+    // Escape pauses the world; return to the gameplay state before invoking
+    // the gameplay-only inventory action. Opening a container while paused is
+    // intentionally a no-op, so leaving this transition implicit would test
+    // an impossible precondition rather than the terminal close path below.
+    app.ui.on_escape();
+    assert!(app.ui.is_playing());
+    app.terminal_toggle_inventory();
     assert!(app.terminal_has_container());
     app.terminal_escape();
     assert!(!app.terminal_has_container());
