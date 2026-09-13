@@ -3223,6 +3223,7 @@ dependencies = [
 name = "lodestone-game"
 version = "0.1.0"
 dependencies = [
+ "bon",
  "lodestone-assets",
  "lodestone-client",
  "lodestone-core",
@@ -3230,7 +3231,9 @@ dependencies = [
  "lodestone-net",
  "lodestone-registry",
  "lodestone-testsupport",
+ "serde",
  "serde_json",
+ "thiserror 2.0.20",
  "tokio",
  "tracing-subscriber",
  "uuid",
@@ -3332,6 +3335,7 @@ dependencies = [
  "lodestone-time",
  "rand 0.8.8",
  "rsa",
+ "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
@@ -3474,6 +3478,7 @@ dependencies = [
  "base64 0.23.1",
  "bevy_app",
  "bevy_ecs",
+ "bon",
  "criterion",
  "flate2",
  "js-sys",
@@ -3906,6 +3911,7 @@ dependencies = [
  "lodestone-worldgen",
  "lodestone-worldgen-parity",
  "rand 0.8.8",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",
@@ -4011,6 +4017,7 @@ dependencies = [
 name = "lodestone-worldgen-parity"
 version = "0.1.0"
 dependencies = [
+ "lodestone-data",
  "lodestone-server",
  "lodestone-worldgen",
  "serde_json",

@@ -155,7 +155,7 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
 - [Camera, view bobbing and frame pacing](./camera-and-view.md) — How the render
   camera's orientation is built and why (`lodestone-render`'s `Camera`), the three
   tick-driven effects layered onto it before it reaches a uniform — the walking bob,
-  the damage tilt, and (not yet built) held-item view lag — and the shell's frame
+  the damage tilt, and the decaying held-item view lag — and the shell's frame
   clock, which decides how much simulated time a frame gets and whether it presents at
   all.
 - [Chat](./chat.md) — The chat box: the outbound input line, the received
@@ -251,6 +251,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   dedicated hosting. Everything downstream of the socket — login, the tick loop,
   chunk streaming, commands — is byte-identical code regardless of which one is
   running.
+- [Dimension environment attributes](./dimension-environment.md) — The
+  registry-to-rendering path for a dimension type's environment attributes. It
+  preserves the complete server-declared attribute map while exposing the visual fog,
+  sky, cloud, ambient-light, and sky-light-factor values consumed by the client
+  renderer.
 - [Distant horizon profiling](./distant-horizon-profiling.md) — `horizon-profile` is
   a finite, headless Samply input for the coarse distant-terrain path. It requests
   exactly 256 far columns through the staged reduced-generation seam and exercises
@@ -260,6 +265,12 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   heightfield visual horizon beyond the real streamed-chunk radius. It is a local
   integrated-Overworld feature, not a chunk cache: it cannot request, retain, or mesh
   ordinary chunks.
+- [End heightmap status oracle](./end-heightmap-status-oracle.md) —
+  `EndP06LifecycleCapture` is the bounded external adapter for the End generation
+  boundary that affects cross-chunk feature writes and the three client-visible
+  heightmaps. It runs inside the stream oracle with seed `42`, holds target chunk
+  `(280,78)` at its pre-feature stage, and authenticates each raw resident transition
+  before the Rust materializer builds the packet.
 - [End light replay](./end-light-replay.md) — End light replay keeps an initial
   chunk packet tied to the light snapshot captured after its admitted footprint is
   settled. A block change invalidates every retained snapshot that could have read the
@@ -437,6 +448,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   [`container-screens.md`](./container-screens.md) for the inventory-and-menu family,
   which follows a different geometry model (slot rects from the *menu* classes, not
   layout containers).
+- [Section meshing](./meshing.md) — The shell terrain mesher turns immutable section
+  neighbourhoods into packed face or baked block-model geometry. It keeps snapshot
+  capture on the owning world thread and runs pure geometry work in the native worker
+  pool or the bounded browser drain.
 - [Mining, drops and loot tables](./mining-and-drops.md) — How fast a held item
   mines a block (the item half of break-time math; the block half — hardness —
   lives in [`docs/blocks.md`](./blocks.md)), and the whole chain that turns a broken
@@ -486,6 +501,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   reopens it as `NativeChunkRecord`. The boundary keeps block, biome, heightmap,
   resident block-entity, canonical light, and pending block/fluid-tick state together
   so a partial save or load cannot silently erase a field.
+- [Shell network sessions](./network-session.md) — The shell network session is the
+  boundary between asynchronous protocol work and the synchronous simulation/render
+  loop. `lodestone_shell::net` keeps the public façade and session lifecycle, while
+  its focused submodules own forwarded events, latest-value state, and browser
+  integrated-server transport.
 - [Oracle assets: what's on disk under `.cache/mc/`, and who reads it](./oracle-assets.md) —
   An audit procedure for `.cache/mc/`: server jars, client jars, and generated world
   directories used as external test or generation inputs. It distinguishes an asset
@@ -507,11 +527,6 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   serverbound (hosting) and clientbound (joining) sides, and the two plugin-facing
   hooks — `EgressFilters` and `ActionVetoes` — that let a plugin inspect, replace,
   suppress, or veto an action before it takes effect or reaches the wire.
-- [Paper command dispatch and completion](./paper-command-dispatch.md) — The server
-  command seam carries plugin command execution and tab completion from an installed
-  host registry into the live player connection. It keeps the authenticated caller and
-  permission decision on the server side while leaving protocol-specific offsets and
-  encoding in the server loop.
 - [Paper inventory bridge](./paper-inventory-bridge.md) — The inventory substrate
   for the optional Java compatibility host. It gives a host an owned, authoritative
   snapshot of a connected player's native inventory without exposing a connection
@@ -539,7 +554,9 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
 - [Particle rendering](./particles.md) — The particle system: how a decoded particle
   type becomes a physically-simulated, textured billboard on screen, and the special
   case of block-break debris, whose colour and texture are derived from the broken
-  block itself rather than from a dedicated sprite.
+  block itself rather than from a dedicated sprite. The shell facade delegates to
+  `particles/events.rs` for event and ambient emission, `particles/lifecycle.rs` for
+  simulation/extraction, and `particles/render.rs` for GPU uploads and draws.
 - [Player rendering](./player-rendering.md) — Everything that turns a player's (or
   player-shaped entity's) identity and pose into pixels: skin and cape texture
   resolution, the local player's synthetic third-person body, armour and trim layers,
@@ -713,6 +730,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   in `docs/plans/multi-version-protocol-dedup.md`; `v1-8`, `v1-9` and `v1-14` now all
   dispatch through it, and `v1-9` is a four-protocol era crate built on it (see
   [`protocol-1-9-era.md`](./protocol-1-9-era.md)).
+- [Random-tick behavior families](./random-tick-families.md) — The random-tick
+  scheduler selects positions and delegates each eligible block to a behavior family.
+  The family modules keep grass spreading, lava ignition, gravity decisions, and
+  redstone propagation separate from the shared position-selection and event plumbing.
 - [Recipe item IDs](./recipe-item-ids.md) — Recipe displays, ghost previews, and
   recipe property sets carry item-registry numbers. `lodestone_model::ItemId` keeps
   each number together with whether it has been validated against this build's
@@ -878,10 +899,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   into animation scheduling and per-sprite sampling metadata. The decoded result feeds
   atlas frame tables and mipmap generation without carrying a JSON tree into those
   consumers.
-- [Server tick clock](./tick-clock.md) — `lodestone_server::tick_clock` owns the
-  shared timing and accounting boundary for the integrated server's world tick. It
-  keeps tick duration, phase timing, owner-handoff counts, and overload counters
-  independent from simulation code.
+- [Server tick clock](./tick-clock.md) — The internal `lodestone_server::tick_clock`
+  module owns the shared timing and accounting boundary for the integrated server's
+  world tick. It keeps tick duration, phase timing, owner-handoff counts, and overload
+  counters independent from simulation code.
 - [Tick region ownership](./tick-region-ownership.md) —
   `lodestone_server::tick_region::TickRegionPlan` makes the ownership of every chunk
   selected for a server tick explicit. The current plan assigns every selected chunk
@@ -1095,6 +1116,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   growing one connected blob. It is the feature body used by the Nether's step-7
   ancient-debris entry and shares the configured targets, placement modifiers, and
   exposure rule with standard ore.
+- [Worldgen Schedule Guard](./worldgen-schedule-guard.md) — `cargo xtask
+  check-worldgen-schedule` is a source-level architecture guard for the production
+  world-generation entrypoints. It keeps orchestration tied to the central typed
+  schedule for each dimension and requires option gates to be declared in
+  `lodestone_worldgen::stage_schedule` metadata.
 - [Worldgen Stage Schedule](./worldgen-stage-schedule.md) —
   `lodestone_worldgen::stage_schedule` names the ordered passes that turn a
   dimension's density field into a packet-ready chunk. The table is shared by the
