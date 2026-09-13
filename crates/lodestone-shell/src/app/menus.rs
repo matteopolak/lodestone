@@ -122,6 +122,8 @@ impl WindowApp {
             match code {
                 KeyCode::ArrowUp => return Some(MenuKey::Up),
                 KeyCode::ArrowDown => return Some(MenuKey::Down),
+                KeyCode::PageUp => return Some(MenuKey::PageUp),
+                KeyCode::PageDown => return Some(MenuKey::PageDown),
                 KeyCode::Enter | KeyCode::NumpadEnter => return Some(MenuKey::Enter),
                 KeyCode::Escape => return Some(MenuKey::Escape),
                 KeyCode::Tab => return Some(MenuKey::Tab),

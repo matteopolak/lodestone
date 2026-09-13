@@ -63,10 +63,9 @@ resolvable from that alone — and the tooltip is resolved at that point, not at
 the language table: a page is already resolved but a hover payload inside it is not (the resolve step
 carries interactivity through untouched by design).
 
-A hovered run's tooltip paints through the menu overlay's own tooltip painter, which draws `§`-coded
-strings — so a payload's sixteen legacy colours survive and a hex colour does not, and an item or entity
-payload (which has no component to flatten) shows nothing here. The chat HUD's tooltip is the surface
-that carries real spans and composes item and entity payloads.
+A hovered run's tooltip paints through the menu overlay's tooltip painter. Text payloads retain their
+legacy colours; item and entity payloads use a visible compact description, while an unknown action is
+shown as an explicit unsupported-hover line instead of disappearing.
 
 All three book layouts (reader, editor, signing form) draw from the same real vanilla book texture — a
 loose, non-atlas 256×256 sheet cropped to its top-left 192×192 window, registered as an extra on the
@@ -78,8 +77,9 @@ to how text draws elsewhere in the menu or HUD.
 ### Lecterns
 
 A lectern's container content is unusual: it carries only the book in its single slot, with the current
-page communicated as a container-data property rather than as ordinary slot state. Page navigation is
-optimistic (sent immediately, corrected by the server's next container-data update if it disagrees) and
+page communicated as a container-data property rather than as ordinary slot state. Page navigation uses
+the reader's previous/next buttons or page-jump action (sent immediately, corrected by the server's next
+container-data update if it disagrees) and
 reuses the editor's own word-wrap constants and widget rather than a second, independently-written wrap
 implementation — since both vanilla screens actually share one wrap width, a second implementation would
 be free to disagree with the first about exactly where a line breaks.
@@ -88,12 +88,8 @@ be free to disagree with the first about exactly where a line breaks.
 
 Each of these is a real, known gap rather than a silent omission:
 
-- **A hex-coloured page hover tooltip, and item/entity hover payloads on a page.** See "Reading a
-  signed book" above for why: this overlay's tooltip painter is a plain-string surface.
-- **Page Up / Page Down as real key bindings.** Arrow keys stand in for the dedicated pair vanilla
-  binds.
-- **Taking a book out of a lectern.** Page navigation and closing are implemented; the take-book
-  control is not yet exposed.
+- **A hex-coloured page hover tooltip.** The overlay's tooltip painter remains a legacy-colour string
+  surface; unsupported colour detail is intentionally reduced rather than dropping the tooltip.
 
 ## How to change it
 

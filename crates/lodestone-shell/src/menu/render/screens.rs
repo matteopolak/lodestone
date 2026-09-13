@@ -829,7 +829,7 @@ pub fn book_view_frame(state: &book_view::BookViewState) -> MenuFrame<'static> {
     });
 
     let footer_y = 159.0;
-    let rows = vec![
+    let mut rows = vec![
         MenuRow {
             label: "<".to_string(),
             enabled: state.can_page_back(),
@@ -869,7 +869,21 @@ pub fn book_view_frame(state: &book_view::BookViewState) -> MenuFrame<'static> {
             ..Default::default()
         },
     ];
-    debug_assert_eq!(rows.len(), book_view::page_row::DONE + 1);
+    if state.can_take_book() {
+        rows.push(MenuRow {
+            label: "Take Book".to_string(),
+            enabled: true,
+            slot: Some(Slot {
+                origin: Origin::ScreenTop,
+                dx: -100.0,
+                dy: 177.0,
+                w: 200.0,
+                h: 16.0,
+            }),
+            ..Default::default()
+        });
+    }
+    debug_assert!(rows.len() > book_view::page_row::DONE);
 
     MenuFrame {
         rows,

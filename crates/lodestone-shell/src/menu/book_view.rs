@@ -102,6 +102,8 @@ pub mod page_row {
     pub const NEXT: usize = 1;
     /// `CommonComponents.GUI_DONE`.
     pub const DONE: usize = 2;
+    /// Lectern-only take-book action.
+    pub const TAKE_BOOK: usize = 3;
 }
 
 /// What opening this screen needs: a signed book's already-resolved
@@ -261,13 +263,20 @@ impl BookViewState {
         self.lectern_window_id
     }
 
+    /// Whether this reader has a server-owned lectern book that can be taken.
+    #[must_use]
+    pub fn can_take_book(&self) -> bool {
+        self.lectern_window_id.is_some()
+    }
+
     /// The packet payload for the current page after a successful page turn.
     /// Vanilla's `LecternScreen.sendPageToServer` sends this new zero-based
-    /// index as `ServerboundContainerButtonClickPacket.buttonId`.
+    /// index as the protocol's lectern page-jump button id (`100 + index`).
     #[must_use]
     pub fn lectern_page_action(&self) -> Option<(i32, i32)> {
         let window_id = self.lectern_window_id?;
-        Some((window_id, i32::try_from(self.current_page).unwrap_or(i32::MAX)))
+        let page = i32::try_from(self.current_page).unwrap_or(i32::MAX - 100);
+        Some((window_id, page.saturating_add(100)))
     }
 
     /// The 1-based page indicator vanilla's `book.pageIndicator` shows —
@@ -480,21 +489,55 @@ impl BookViewState {
     }
 
     /// [`Self::hover_tooltip`]'s producer: the hovered run's hover payload,
-    /// resolved and flattened.
-    ///
-    /// Flattened to `§`-coded strings because that is what the menu overlay's
-    /// tooltip painter draws — the loss this module's own doc names. Split on
-    /// literal newlines the way the chat tooltip's layout does, so a
-    /// multi-line hover payload is multi-line here too. An item or entity
-    /// payload has no component to flatten and so shows nothing here; the
-    /// chat HUD's own tooltip is the surface that composes those.
+    /// resolved and flattened. Item and entity payloads have structured data
+    /// rather than a text component, so they receive compact visible lines;
+    /// unknown actions explicitly identify themselves instead of vanishing.
     fn hover_tooltip_under_cursor(
         &self,
         translate: &dyn Fn(&str) -> Option<String>,
     ) -> Option<Vec<String>> {
         let hover = self.run_under_cursor()?.span.hover?;
-        let text = hover.text_payload()?.resolve(translate).to_legacy_string();
-        Some(text.split('\n').map(str::to_owned).collect())
+        let lines = match hover {
+            lodestone_model::HoverEvent::ShowText(text) => text
+                .resolve(translate)
+                .to_legacy_string()
+                .split('\n')
+                .map(str::to_owned)
+                .collect(),
+            lodestone_model::HoverEvent::ShowItem(item) => vec![format!(
+                "Item: {} ×{}",
+                item.item,
+                item.count
+            )],
+            lodestone_model::HoverEvent::ShowEntity(entity) => {
+                let mut lines = Vec::new();
+                if let Some(name) = &entity.name {
+                    lines.push(name.resolve(translate).to_legacy_string());
+                }
+                if let Some(kind) = &entity.kind {
+                    let key = entity
+                        .type_translation_key()
+                        .unwrap_or_else(|| kind.to_string());
+                    lines.push(translate(&key).unwrap_or(key));
+                }
+                if let Some(uuid) = entity.uuid {
+                    lines.push(uuid.to_string());
+                }
+                if lines.is_empty() {
+                    lines.push("Entity: unknown".to_owned());
+                }
+                lines
+            }
+            lodestone_model::HoverEvent::Other { action, value } => {
+                let mut lines = vec![format!("Unsupported hover: {action}")];
+                let text = value.resolve(translate).to_legacy_string();
+                if !text.is_empty() {
+                    lines.extend(text.split('\n').map(str::to_owned));
+                }
+                lines
+            }
+        };
+        Some(lines)
     }
 }
 
@@ -878,8 +921,8 @@ mod tests {
     }
 
     /// A lectern reuses the reader's visible pages, but the server owns its
-    /// selected page. Turning one must send `container_button_click` with the
-    /// new zero-based page, while Done closes the open lectern container.
+    /// selected page. Turning one sends the protocol's page-jump button, while
+    /// Done closes the open lectern container.
     #[test]
     fn lectern_page_turns_report_the_new_page_to_its_open_menu() {
         let mut ui = UiState::new();
@@ -902,7 +945,7 @@ mod tests {
             nav.click(&mut ui, page_row::NEXT),
             crate::menu::nav::MenuAction::ContainerButtonClick {
                 window_id: 12,
-                button_id: 1,
+                button_id: 101,
             }
         );
         assert_eq!(nav.book_view().unwrap().page_indicator(), (2, 2));
@@ -912,5 +955,36 @@ mod tests {
         );
         assert_eq!(ui.screen(), Screen::Playing);
         assert!(nav.book_view().is_none());
+    }
+
+    #[test]
+    fn lectern_take_button_is_visible_and_uses_the_dedicated_action() {
+        let mut ui = UiState::new();
+        let mut nav = MenuNav::new();
+        ui.enter_dev_world();
+        nav.open_lectern_book_view(
+            &mut ui,
+            19,
+            BookViewOpen::from_pages(
+                "Library".to_owned(),
+                "Librarian".to_owned(),
+                0,
+                &[Text::literal("page")],
+                &|_| None,
+            ),
+            0,
+        );
+
+        let frame = crate::menu::render::book_view_frame(nav.book_view().unwrap());
+        assert_eq!(frame.rows.len(), page_row::TAKE_BOOK + 1);
+        assert!(frame.rows[page_row::TAKE_BOOK].enabled);
+        assert_eq!(
+            nav.click(&mut ui, page_row::TAKE_BOOK),
+            crate::menu::nav::MenuAction::ContainerButtonClick {
+                window_id: 19,
+                button_id: 3,
+            }
+        );
+        assert!(nav.book_view().is_none(), "taking the book closes the reader");
     }
 }

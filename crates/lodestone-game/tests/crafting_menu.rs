@@ -595,3 +595,31 @@ fn a_crafting_menu_type_with_an_unexpected_size_falls_back_to_generic() {
     assert_eq!(open.slot_count(), 41);
     assert!(open.craft_layout().is_none());
 }
+
+#[test]
+fn lectern_is_a_display_only_slot_with_a_live_player_inventory() {
+    let menu = Menu::lectern();
+    assert_eq!(menu.kind(), MenuKind::Generic { container_size: 1 });
+    assert_eq!(menu.slot_count(), 37);
+    assert_eq!(menu.slot(0).unwrap().kind, SlotKind::ReadOnly);
+    assert!(!menu.may_pickup(0));
+    assert!(!menu.may_place(0, &stack("minecraft:written_book", 1)));
+
+    let mut menus = Menus::new();
+    menus.apply(&ClientEvent::ScreenOpened {
+        window_id: 9,
+        menu_type: id("minecraft:lectern"),
+        title: Text::literal("Lectern"),
+    });
+    menus.apply(&ClientEvent::ContainerContent {
+        window_id: 9,
+        state_id: ContainerStateId::new(1),
+        items: vec![Some(model_stack("minecraft:written_book", 1))],
+        carried_item: None,
+    });
+
+    let opened = menus.opened().expect("lectern content opens its menu");
+    assert_eq!(opened.slot_item(0), Some(&stack("minecraft:written_book", 1)));
+    assert_eq!(opened.slot_item(36), None, "player inventory starts after the book");
+    assert_eq!(opened.slot_count(), 37);
+}

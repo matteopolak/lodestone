@@ -857,6 +857,7 @@ fn build_menu(menu_type: Option<&ResourceKey>, container_size: usize) -> Menu {
         // `container_size == 1` matches `BeaconMenu`'s one payment slot
         // (vanilla's own beacon slot-count constant).
         (Some("beacon"), 1) => Menu::beacon(),
+        (Some("lectern"), 1) => Menu::lectern(),
         _ => Menu::generic(container_size),
     }
 }
@@ -971,6 +972,11 @@ mod tests {
 
         let opened = menus.opened().expect("lectern must open from its content");
         assert_eq!(opened.slot_item(0), Some(&GameItemStack::from(&book)));
+        assert!(!opened.may_pickup(0), "lectern book slot is display-only");
+        assert!(
+            !opened.may_place(0, &GameItemStack::from(&book)),
+            "lectern book slot rejects ordinary placement"
+        );
         assert_eq!(opened.slot_count(), 37, "one lectern slot plus player inventory");
     }
 
