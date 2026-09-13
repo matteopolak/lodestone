@@ -228,13 +228,14 @@ interchangeable here (the End genuinely has real per-block sky exposure; a level
 fallback that lumped it in with the Nether rendered sky-lit End terrain artificially
 dark). Fog colour, clear colour and the sky-pass gate all branch on the connected
 dimension the same way. What is *not* yet decoded off the wire is the dimension
-type's `attributes` map (the real per-dimension fog/sky/cloud/ambient hex colours,
-present in the registry payload and currently dropped at decode) — every colour
-preset in this doc is still a hand-transcribed constant rather than server-derived,
-and the End's own sky-darkening behaviour (`sky_light_factor: 0.0`, which per
-vanilla's own formula should leave every sky-only-lit block on the End pure black
-regardless of overworld time) is deliberately left unwired pending a live-server
-comparison rather than shipping a guessed sign.
+type's `attributes` map is decoded and retained by
+`DimensionTypeInfo::environment_attributes`. Its visual fog/sky/cloud/ambient
+colour values are lifted into typed optional fields and drive the corresponding
+render consumers; unknown data-pack keys remain available for future consumers.
+The End's declared `sky_light_factor: 0.0` is carried through the shared
+lightmap lane, where zero is distinct from the negative "not wired" sentinel,
+so sky-only-lit End surfaces receive no sky contribution while ordinary
+Overworld timeline lighting is unchanged.
 
 A player's connected dimension is read off one accessor
 (`Sim::dimension`/`ServerDimension`) that updates on both `Login` and `Respawned` —
@@ -303,9 +304,10 @@ frames instead of stalling one.
   formula, which is what actually distinguishes the retired linear ramp, the real
   curve, and the ambient-floor-dropped hypothesis; a gate importing the production
   function would be `decode(encode(x))`.
-- **`sky_darken`'s `0.0` sentinel means "never wired", and every shader/caller reads
-  it as full daylight** — a caller that forgets to install the source renders at
-  noon forever rather than at the historical (now-fixed) 20%-floor midnight.
+- **`sky_darken`'s negative sentinel means "never wired", and every shader/caller
+  reads it as full daylight** — zero remains a legitimate dimension factor, so a
+  caller that forgets to install the source renders at noon rather than treating
+  the End as a bright sky.
 - **Fog's environmental and render-distance ranges must never be collapsed into one
   pair** — water/lava fog deliberately keeps its range in the render-distance slot
   rather than the environmental one, because several call sites structurally compare
@@ -332,9 +334,9 @@ frames instead of stalling one.
   wiring a real brightness slider means threading it through the shared uniform's
   two remaining free lanes.
 - `Config::render_distance` is the only input to the overworld fog ramp.
-- Sky/fog/cloud constants come from the decompiled 26.2 dimension-type and biome
-  JSON, not from any env var; only the (still-undecoded) registry `attributes` map
-  would make them server-controlled.
+- Sky/fog/cloud constants come from the 26.2 registry's dimension attributes and
+  biome data, not from any env var; unknown registry attributes are retained for
+  future consumers.
 - `lodestone-world`'s relight tunables (`AFFECTED_RADIUS`, `RELIGHT_CELL_BUDGET`,
   `RELIGHT_JOB_CEILING`, `PENDING_RELIGHT_CAP`) and the shell's
   `LIGHT_DIRTY_SECTION_BUDGET` are compile-time constants; `RUST_LOG=light=debug`

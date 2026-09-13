@@ -89,12 +89,12 @@ impl FogSettings {
     }
 
     /// The same settings with a different sky-disc centre colour — the
-    /// per-biome `minecraft:visual/sky_color`.
+    /// per-biome `minecraft:visual/sky_color` or dimension fallback.
     ///
     /// The fog colour is deliberately left alone: the biome's own
-    /// `visual/fog_color` is a separate attribute this client does not decode
-    /// yet, and painting the horizon with the *sky* colour would flatten the
-    /// gradient the sky pass exists to draw.
+    /// `visual/fog_color` is a separate attribute, and painting the horizon
+    /// with the *sky* colour would flatten the gradient the sky pass exists to
+    /// draw.
     #[must_use]
     pub fn with_sky_color(mut self, sky_color: [f32; 3]) -> Self {
         self.sky_color = sky_color;
@@ -668,7 +668,9 @@ impl FogUniform {
                 settings.color[2],
                 settings.start,
             ],
-            end_enabled: [settings.end, enabled, 0.0, settings.environmental_end],
+            // Negative means the sky-light lane was not supplied by a caller;
+            // zero is a valid dimension value (the End's sky-light factor).
+            end_enabled: [settings.end, enabled, -1.0, settings.environmental_end],
             ambient_light: [ambient[0], ambient[1], ambient[2], 0.0],
         }
     }

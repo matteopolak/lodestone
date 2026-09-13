@@ -2309,6 +2309,11 @@ mod tests {
             // Irrelevant to this fixture's own policy, same rule as the other
             // fields this doc comment calls out.
             ambient_light_color: None,
+            environment_attributes: Vec::new(),
+            fog_color: None,
+            sky_color: None,
+            cloud_color: None,
+            sky_light_factor: None,
         }
     }
 

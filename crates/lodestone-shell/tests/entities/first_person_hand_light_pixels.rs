@@ -16,8 +16,8 @@
 //! What was missing was one hop later, and only on the **item** side:
 //! `write_hand_camera` wrote the item's `model.hand_cam_buffer` with a bare
 //! `FogUniform::disabled()`, which leaves the shared sky-darken lane
-//! (`fog.end_enabled[2]`) at its `0.0` sentinel. `model_pipeline.rs`'s
-//! `sky_darken()` reads `<= 0.0` as `1.0` — permanent noon — so the arm
+//! (`fog.end_enabled[2]`) at its negative sentinel. `model_pipeline.rs`'s
+//! `sky_darken()` reads a negative value as `1.0` — permanent noon — so the arm
 //! (entity pipeline, lane correctly set) already dimmed at night while the
 //! held item (model pipeline, lane left at the sentinel) stayed lit as if it
 //! were noon, right next to it on the same screen. The fix folds the same

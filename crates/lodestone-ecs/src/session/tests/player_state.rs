@@ -300,6 +300,11 @@ use super::*;
             // the colour itself. See `lodestone_render::light`'s tests for
             // that.
             ambient_light_color: None,
+            environment_attributes: Vec::new(),
+            fog_color: None,
+            sky_color: None,
+            cloud_color: None,
+            sky_light_factor: None,
         }
     }
 

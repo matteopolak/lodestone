@@ -2184,17 +2184,13 @@ impl EntityCameraUniform {
     /// already unused and the model shader does not read them, so terrain is
     /// unaffected until it opts in.
     ///
-    /// # Why `0.0` reads as full daylight
+    /// # Why negative reads as full daylight
     ///
     /// Every path that builds this uniform derives its fog from
     /// [`FogUniform::new`](crate::fog::FogUniform::new) or
     /// [`FogUniform::disabled`](crate::fog::FogUniform::disabled), both of which
-    /// zero the lane. Taking `0.0` literally would render every mob in every
-    /// existing caller at the `0.2` floor — a silent, global regression of
-    /// exactly the shape [`ENTITY_FULLBRIGHT`](crate::entity::ENTITY_FULLBRIGHT)
-    /// exists to prevent. Vanilla's factor is floored at `0.24`, so `0.0` is
-    /// never a legitimate value and is safe as the "not wired yet" sentinel: the
-    /// shader reads it as `1.0`, i.e. today's behaviour.
+    /// use a negative sentinel for the lane. Zero is a legitimate value for a
+    /// dimension such as the End, so it must not be rewritten to daylight.
     #[must_use]
     pub const fn with_sky_darken(mut self, sky_darken: f32) -> Self {
         self.fog.end_enabled[SKY_DARKEN_LANE] = sky_darken;
@@ -2202,11 +2198,11 @@ impl EntityCameraUniform {
     }
 
     /// This frame's sky-darken factor as the shader will interpret it: the raw
-    /// lane, or `1.0` when the lane is the unset `0.0` sentinel.
+    /// lane, or `1.0` when the lane is the unset negative sentinel.
     #[must_use]
     pub fn sky_darken(&self) -> f32 {
         let raw = self.fog.end_enabled[SKY_DARKEN_LANE];
-        if raw <= 0.0 { 1.0 } else { raw }
+        if raw < 0.0 { 1.0 } else { raw }
     }
 }
 
@@ -2592,13 +2588,15 @@ mod tests {
             },
             fog,
         };
-        // Unset is the 0.0 sentinel, which reads as full daylight — not as the
+        // Unset is the negative sentinel, which reads as full daylight — not as the
         // 0.2 floor, which would black out every existing caller's mobs.
-        assert_eq!(base.fog.end_enabled[SKY_DARKEN_LANE], 0.0);
+        assert_eq!(base.fog.end_enabled[SKY_DARKEN_LANE], -1.0);
         assert_eq!(base.sky_darken(), 1.0);
 
         let dark = base.with_sky_darken(0.24);
         assert!((dark.sky_darken() - 0.24).abs() < 1e-6);
+        let end = base.with_sky_darken(0.0);
+        assert_eq!(end.sky_darken(), 0.0, "the End's declared zero factor must not become daylight");
         // Everything else is byte-identical: same eye, same colour+start, same
         // end and enabled flag.
         assert_eq!(dark.fog.eye, base.fog.eye);

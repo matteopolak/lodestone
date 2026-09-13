@@ -36,15 +36,13 @@ fn section_visibility(now: f32, build_time: f32) -> f32 {
 // night. Rides `fog_end_enabled.z`, the same spare lane the entity pass uses, so
 // terrain and mobs cannot disagree about what time it is.
 //
-// `0.0` is the `not wired yet` sentinel and reads as full daylight: every caller
-// builds this uniform from a `FogUniform` that zeroes the lane, and taking 0.0
-// literally would render all sky-lit water pure black. Vanilla's real range is
-// [0.24, 1.0], so 0.0 is never legitimate.
+// Negative is the `not wired yet` sentinel and reads as full daylight. Zero is
+// a legitimate dimension value (the End's sky-light factor).
 //
 // Only the sky half is scaled -- see `lightmap_color` below.
 fn sky_darken() -> f32 {
     let raw = camera.fog_end_enabled.z;
-    return select(raw, 1.0, raw <= 0.0);
+    return select(raw, 1.0, raw < 0.0);
 }
 
 // Vanilla's lightmap, byte-for-byte the model shader's copy -- see

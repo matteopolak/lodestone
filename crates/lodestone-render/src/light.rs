@@ -253,8 +253,9 @@ pub fn apply_brightness_option(combined: f32) -> f32 {
 ///
 /// `sky_darken` scales only the sky half — block light is a torch and does not
 /// dim at dusk. Pass `1.0` for full daylight; the shaders additionally treat
-/// `0.0` as a "lane never written" sentinel meaning daylight, which is a
-/// uniform-plumbing concern and deliberately not repeated here.
+/// A negative lane value is the "never written" sentinel meaning daylight;
+/// zero remains a legitimate per-dimension factor and is deliberately not
+/// rewritten here.
 #[must_use]
 pub fn light_term(packed_light: u8, sky_darken: f32) -> f32 {
     let sky = f32::from((packed_light >> 4) & 0x0F) / 15.0;

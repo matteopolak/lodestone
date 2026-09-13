@@ -80,7 +80,7 @@ pub const ENTITY_FULLBRIGHT: u8 = 15 << 4;
 /// game-attribute layer — omitted here because the shell tracks neither yet.
 /// Add them as arguments to this function rather than at the call site, so the
 /// one place that knows vanilla's curve stays the one place. The
-/// `0.0`-means-daylight sentinel lives in the shader, not here — this
+/// Negative-means-daylight sentinel lives in the shader, not here — this
 /// function never returns `0.0`.
 #[must_use]
 pub fn sky_darken_for_time_of_day(time_of_day: i64) -> f32 {

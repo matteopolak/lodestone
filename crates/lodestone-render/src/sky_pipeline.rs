@@ -831,6 +831,10 @@ pub struct SkyFrame {
     /// same colour as the renderer's distance fog so the horizon and the
     /// terrain edge dissolve into each other rather than meeting at a seam.
     pub day_fog_color: [f32; 3],
+    /// Dimension-level cloud colour in linear RGB plus alpha. The alpha is a
+    /// real environment-attribute gate: zero means the dimension has no cloud
+    /// deck even when the player's cloud option is enabled.
+    pub cloud_color: [f32; 4],
     /// Where the world bottom is and how far up the void darkening reaches.
     /// [`VoidFog::DISABLED`] to turn it off.
     pub void_fog: VoidFog,
@@ -890,6 +894,7 @@ impl SkyFrame {
             time_of_day,
             day_sky_color,
             day_fog_color: day_sky_color,
+            cloud_color: [crate::sky::CLOUD_COLOR_RGB[0], crate::sky::CLOUD_COLOR_RGB[1], crate::sky::CLOUD_COLOR_RGB[2], crate::sky::CLOUD_COLOR_ALPHA],
             void_fog: VoidFog::DISABLED,
             sky_fog_end: crate::sky::SKY_FOG_END_DISTANCE,
             cloud_status: CloudStatus::default(),
@@ -901,6 +906,13 @@ impl SkyFrame {
     #[must_use]
     pub fn with_cloud_status(mut self, cloud_status: CloudStatus) -> Self {
         self.cloud_status = cloud_status;
+        self
+    }
+
+    /// Sets the dimension's environment-attribute cloud colour.
+    #[must_use]
+    pub fn with_cloud_color(mut self, cloud_color: [f32; 4]) -> Self {
+        self.cloud_color = cloud_color;
         self
     }
 
@@ -936,6 +948,7 @@ impl SkyFrame {
     #[must_use]
     pub const fn draws_clouds(&self) -> bool {
         self.sky_mode.draws_sky_geometry()
+            && self.cloud_color[3] > 0.0
             && (self.cloud_status.draws_flat_quad() || self.cloud_status.draws_extruded_cells())
     }
 
@@ -1016,12 +1029,15 @@ impl SkyFrame {
         // vanilla's fog-colour computation darkens the fog colour, and the cloud
         // attribute is read straight off the probe in vanilla's level-extractor
         // function.
-        let cloud_rgb = cloud_color_for_time_of_day(self.time_of_day, crate::sky::CLOUD_COLOR_RGB);
+        let cloud_rgb = cloud_color_for_time_of_day(
+            self.time_of_day,
+            [self.cloud_color[0], self.cloud_color[1], self.cloud_color[2]],
+        );
         let cloud = [
             cloud_rgb[0],
             cloud_rgb[1],
             cloud_rgb[2],
-            crate::sky::CLOUD_COLOR_ALPHA,
+            self.cloud_color[3],
         ];
         let [r, g, b, a] = sunrise_sunset_color_for_time_of_day(self.time_of_day);
         let sunrise = [
@@ -1549,7 +1565,8 @@ impl SkyRenderer {
         // draw: FANCY walks a 16-cell radius and expands every visible face every
         // frame, which is the most expensive thing in this pass. A player who turned
         // clouds off to reclaim that cost must actually reclaim it.
-        let draw_fast_clouds = frame.cloud_status.draws_flat_quad();
+        let draw_clouds = frame.draws_clouds();
+        let draw_fast_clouds = draw_clouds && frame.cloud_status.draws_flat_quad();
         let fancy_face_count = if draw_fast_clouds {
             let (cloud_pos, cloud_uv) = cloud_plane_geometry(
                 camera.position.to_array(),
@@ -1721,6 +1738,15 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_transparent_dimension_cloud_attribute_suppresses_clouds_even_with_sky() {
+        let frame = SkyFrame::new(6_000, [0.47, 0.65, 1.0])
+            .with_cloud_status(CloudStatus::Fancy)
+            .with_cloud_color([1.0, 1.0, 1.0, 0.0]);
+        assert!(frame.draws_sky_geometry());
+        assert!(!frame.draws_clouds());
+    }
+
     /// The colours are **unchanged** by the mode, and that is deliberate rather
     /// than incidental: `clear_color` is what the Nether's entire sky *is*, so if
     /// `SkyMode::None` had also zeroed the resolved fog colour the fix would have
@@ -1883,6 +1909,21 @@ mod tests {
             night[2] < cloud[2] * 0.1,
             "night clouds must be far darker than noon's: {night:?} vs {cloud:?}"
         );
+    }
+
+    #[test]
+    fn dimension_cloud_colour_reaches_the_resolved_cloud_pixels() {
+        let frame = SkyFrame::new(6_000, [0.47, 0.65, 1.0])
+            .with_cloud_color([1.0, 0.0, 0.0, 0.5]);
+        let cloud = frame.resolve_colors(64.0).2;
+        assert!(cloud[0] > 0.9 && cloud[1] < 0.01 && cloud[2] < 0.01);
+        assert!((cloud[3] - 0.5).abs() < 1e-6);
+
+        // Negative control: the ordinary default remains white and opaque
+        // enough to produce the existing cloud deck.
+        let ordinary = SkyFrame::new(6_000, [0.47, 0.65, 1.0]).resolve_colors(64.0).2;
+        assert!(ordinary[1] > 0.9 && ordinary[2] > 0.9);
+        assert!((ordinary[3] - 0.8).abs() < 1e-6);
     }
 
     /// The clear colour and the disc's outermost fragment must be the *same*

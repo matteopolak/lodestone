@@ -36,17 +36,15 @@ struct Origin {
 // and `entity.wgsl` use, so the packed path, live terrain and mobs cannot
 // disagree about what time it is.
 //
-// `0.0` is the `not wired yet` sentinel and reads as full daylight: every caller
-// builds this uniform from a `FogUniform` that zeroes the lane, and taking 0.0
-// literally would render all sky-lit terrain pure black. Vanilla's real range is
-// [0.24, 1.0], so 0.0 is never legitimate.
+// Negative is the `not wired yet` sentinel and reads as full daylight. Zero is
+// a legitimate dimension value (the End's sky-light factor).
 //
 // Only the sky half is scaled -- block light is a torch and does not dim at dusk.
 // Without this term, the demo world and every headless gate would render at a
 // fixed permanent noon regardless of the clock.
 fn sky_darken() -> f32 {
     let raw = camera.fog_end_enabled.z;
-    return select(raw, 1.0, raw <= 0.0);
+    return select(raw, 1.0, raw < 0.0);
 }
 
 // Byte-for-byte `model.wgsl`'s `linear_fog`/`fog_amount` -- WGSL has no include,

@@ -1,6 +1,7 @@
 //! World, dimension, and particle payloads.
 
 use crate::*;
+use lodestone_core::Nbt;
 
 /// A last-death location, from the optional `GlobalPos` field of
 /// the respawn packet (and the game-join packet's equivalent).
@@ -31,9 +32,9 @@ pub struct DeathLocation {
 ///
 /// Only the fields a version-free consumer can act on. Vanilla's dimension-type
 /// record additionally carries `infiniburn`, monster-spawn settings, a skybox
-/// choice, a cardinal-light mode, an environment-attribute map and a timeline
-/// set; those are nested registry references with no consumer here. Add one when
-/// something reads it.
+/// choice, a cardinal-light mode and a timeline set. Those remain outside this
+/// version-free consumer surface; the environment-attribute map is retained
+/// because visual attributes already have render consumers.
 ///
 /// Note there is **no `bed_works`**: 26.2 moved that into the dimension type's
 /// environment attributes (`minecraft:gameplay/bed_rule`), so it is not a
@@ -72,6 +73,19 @@ pub struct DimensionTypeInfo {
     /// resolve one; a version-free consumer should fall back to the
     /// overworld's own value rather than invent a brighter one.
     pub ambient_light_color: Option<u32>,
+    /// The server's complete environment-attribute map, retained in wire
+    /// order so data-pack extensions survive the version seam. Typed visual
+    /// fields below are extracted from this map; unknown keys remain available
+    /// to a future consumer instead of being discarded at decode time.
+    pub environment_attributes: Vec<(String, Nbt)>,
+    /// Dimension-level `visual/fog_color`, packed RGB, when declared.
+    pub fog_color: Option<u32>,
+    /// Dimension-level `visual/sky_color`, packed RGB, when declared.
+    pub sky_color: Option<u32>,
+    /// Dimension-level `visual/cloud_color`, packed ARGB, when declared.
+    pub cloud_color: Option<u32>,
+    /// Dimension-level `visual/sky_light_factor`, validated finite value.
+    pub sky_light_factor: Option<f32>,
 }
 
 impl DimensionTypeInfo {
