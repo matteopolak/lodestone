@@ -286,7 +286,7 @@ async fn drive_open_chest(
     events: &mut lodestone_client::EventStream,
     recent_events: &mut Vec<String>,
 ) -> Result<(), String> {
-    for sequence in 1..=5 {
+    for sequence in 1..=5u32 {
         handle
             .move_to(PLAYER_POS, PLAYER_ROTATION, true, false)
             .map_err(|err| {
@@ -299,7 +299,7 @@ async fn drive_open_chest(
                 face: BlockFace::West,
                 cursor: Vec3f::new(0.0, 0.5, 0.5),
                 inside_block: false,
-                sequence,
+                sequence: lodestone_model::PredictionSequence::new(sequence),
             })
             .map_err(|err| format!("send use_item_on chest failed: {err}"))?;
         handle
