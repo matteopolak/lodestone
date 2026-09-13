@@ -1932,13 +1932,28 @@ impl WindowApp {
             let weather = Arc::new(WeatherTracker::new(net.shared_weather()));
             self.weather = Some(weather.clone());
             render.set_sky_darken_source(move || {
-                let base = clock.get().map(|h| {
-                    lodestone_render::entity::sky_darken_for_time_of_day(h.world_time().1)
-                })?;
+                let handle = clock.get()?;
+                let base = handle
+                    .player()
+                    .dimension_type
+                    .and_then(|dimension| dimension.sky_light_factor)
+                    .unwrap_or_else(|| {
+                        lodestone_render::entity::sky_darken_for_time_of_day(
+                            handle.world_time().1,
+                        )
+                    });
                 Some(lodestone_render::weather_sky_light_factor(
                     base,
                     &weather.state(),
                 ))
+            });
+            let ambient_handle = net.shared_handle();
+            render.set_ambient_light_source(move || {
+                let dimension = ambient_handle.get()?.player().dimension_type?;
+                Some(match dimension.ambient_light_color {
+                    Some(packed) => lodestone_render::light::rgb24_to_channels(packed),
+                    None => lodestone_render::light::OVERWORLD_AMBIENT_LIGHT,
+                })
             });
             render.set_effect_light_source(self.sim.effect_light_source());
             // Same cell as `install_session_render_sources`, installed on this path
@@ -2364,6 +2379,7 @@ fn measured_canvas_physical_size() -> Option<(u32, u32)> {
 /// ordinary native `cargo test` run (see `app::tests`) rather than only by a `wasm32` target
 /// nothing in `just health` builds for — a `#[cfg(test)]` block inside the `wasm32`-gated
 /// function above would never run under any check this repo actually runs.
+#[cfg(any(target_arch = "wasm32", test))]
 pub(crate) fn dpr_scaled_size(client_width: i32, client_height: i32, dpr: f64) -> Option<(u32, u32)> {
     let w = (f64::from(client_width) * dpr).round();
     let h = (f64::from(client_height) * dpr).round();

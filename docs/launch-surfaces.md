@@ -126,6 +126,12 @@ surface.
 The Unicode renderer still needs a GPU adapter: "terminal" means no window or swapchain, not software
 rendering. The `stdio` surface is the option for a genuinely GPU-free session.
 
+All terminal timing probes, including test-only serialization and conversion profiles, use the shared
+`crate::platform::Instant` seam. The native implementation remains `std::time::Instant`, while the
+browser implementation uses the page's monotonic clock; keeping the probes on that seam lets the
+lexical wasm confinement check cover the whole shell source without changing the native window or
+terminal event loops.
+
 ## Configuration
 
 ```text

@@ -29,17 +29,16 @@ pub mod vanilla_font;
 pub use font::glyph_rows;
 pub use tab_panel::TabPanel;
 use tab_panel::{
-    TAB_COL_GAP, TAB_HEAD_W, TAB_INK, TAB_INK_SPECTATOR, TAB_MAX_ROWS_PER_COL,
-    TAB_PING_H, TAB_PING_INSET, TAB_PING_W, TAB_PLATE, TAB_ROW_FILL, TAB_ROW_SLACK,
-    TAB_SCREEN_INSET, TAB_TOP,
+    TAB_HEAD_W, TAB_INK, TAB_INK_SPECTATOR, TAB_PING_H, TAB_PING_INSET, TAB_PING_W, TAB_PLATE,
+    TAB_ROW_FILL,
 };
+pub use vanilla_font::VanillaFont;
 pub use vitals::{
     armour_icon, can_hurt_player, heart_fill, heart_rows, ArmourIcon, HeartFill,
 };
 use vitals::{
     draw_hotbar_cooldowns, draw_hotbar_items, regeneration_active, sprite_vitals, HudAnim,
 };
-pub use vanilla_font::VanillaFont;
 use toasts::{draw_advancement_toast, draw_friends_toast, draw_recipe_toast};
 /// The hotbar's per-slot draw record. The container screen builds the same
 /// record for every menu slot, so the type itself lives in [`item_icon`]; this
@@ -2854,10 +2853,10 @@ impl HudGeometry {
         // With the vanilla GUI atlas attached, the vitals cluster (hotbar, XP,
         // hearts, hunger) draws from real sprites; without it — jar-less runs and
         // the headless negative-control path — it falls back to the procedural
-        // quads below. Both branches return `bars_y`, the anchor the action bar
-        // sits above, so the rest of the HUD is oblivious to which drew.
-        let bars_y = if b.gui.is_some() {
-            sprite_vitals(&mut b, frame, &anim)
+        // quads below. Both branches draw the same vitals cluster, so the rest
+        // of the HUD is oblivious to which path ran.
+        if b.gui.is_some() {
+            sprite_vitals(&mut b, frame, &anim);
         } else {
             let pip = 8.0;
             let gap = 2.0;
@@ -2997,8 +2996,7 @@ impl HudGeometry {
                 );
             }
 
-            bars_y
-        };
+        }
 
         // Item icons sit inside the hotbar cells, drawn over whichever hotbar
         // frame (real atlas or procedural) was emitted above.
@@ -3817,7 +3815,7 @@ fn draw_profiler_chart(b: &mut Builder, chart: &ProfilerChart) {
     };
 
     let legend_right = cx - r - 8.0;
-    let mut row = |b: &mut Builder, i: usize, swatch: [f32; 4], text: &str| {
+    let row = |b: &mut Builder, i: usize, swatch: [f32; 4], text: &str| {
         let y = cy - r + i as f32 * DEBUG_LINE_H;
         let tw = b.text_width(text, 1.0);
         // Right-aligned, but clamped so a long legend row cannot run off the
@@ -6996,6 +6994,7 @@ const HUD_GLINT_WGSL: &str = include_str!("shaders/hud_glint.wgsl");
 mod tests {
     use super::*;
     use lodestone_assets::ResourceLocation;
+    use super::tab_panel::TAB_MAX_ROWS_PER_COL;
 
     #[test]
     fn debug_geometry_refresh_is_bounded_but_open_and_layout_changes_are_immediate() {
@@ -9569,7 +9568,7 @@ mod tests {
     /// is the value where the mode-naming hypothesis (`mode == Creative`) and the real
     /// predicate disagree. Adventure is the second such value in the other direction.
     #[test]
-    fn can_hurt_player_is_isSurvival_and_not_a_creative_test() {
+    fn can_hurt_player_is_survival_and_not_creative_test() {
         use lodestone_model::GameMode;
         assert!(can_hurt_player(Some(GameMode::Survival)));
         // `isSurvival()` returns true for ADVENTURE too — an adventure-mode player is
@@ -10411,7 +10410,7 @@ mod tests {
             3,
             "two waypoints must draw background + two dots, no more, no fewer: got {quads:?}"
         );
-        let mut check = |name: &str, got: f32, want: f32| {
+        let check = |name: &str, got: f32, want: f32| {
             assert!(
                 (got - want).abs() < 0.5,
                 "{name}: got {got:.2}, want {want:.2} (all quads: {quads:?})"

@@ -1,12 +1,10 @@
 //! Tests for connection loading, window policy, inventory focus, and stonecutter/menu setup.
 
-use super::*;
-
-//! `app`'s unit tests, unwrapped verbatim out of `app.rs`.
-//!
-//! Kept as a single file on purpose: splitting it would rename every test
-//! path (`app::tests::foo` -> `app::tests::input::foo`), and those names are
-//! used by diagnostics and documentation across the repo.
+// `app`'s unit tests, unwrapped verbatim out of `app.rs`.
+//
+// Kept as a single file on purpose: splitting it would rename every test
+// path (`app::tests::foo` -> `app::tests::input::foo`), and those names are
+// used by diagnostics and documentation across the repo.
 
 use super::*;
 use super::session::container_cursor_center;
