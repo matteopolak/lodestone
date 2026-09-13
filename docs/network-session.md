@@ -17,6 +17,13 @@ Browser singleplayer starts its integrated server in a Worker. `net/browser.rs` 
 `MessagePort` into the client transport and waits for an explicit startup-ready response; startup errors
 and post-start crashes remain distinct so a failed launch cannot create a second world owner.
 
+Native integrated sessions use a separate 120-second per-packet read watchdog during the initial join.
+The in-memory server resolves and admits a fresh world's spawn before it sends the first Play packet;
+that legitimate work can exceed the 30-second watchdog used for remote sockets. Once Play begins, the
+server's regular keep-alive cadence keeps the same watchdog well inside its bound. This is independent
+of the loading screen's own readiness deadline, which measures terrain and assets after the session has
+entered the world-loading phase.
+
 ## How to change it
 
 Keep `net.rs` as the compatibility façade: public types moved into a submodule must be re-exported there,

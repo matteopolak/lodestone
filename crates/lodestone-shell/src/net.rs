@@ -700,22 +700,32 @@ impl std::fmt::Debug for Origin {
 /// echoed into the handshake the server's own decoder ignores.
 const SINGLEPLAYER_ADDRESS: (&str, u16) = ("singleplayer", 0);
 
-/// How long a connected client waits for the server to send **any** packet
-/// before declaring the connection dead.
+/// How long a remote client waits for the server to send **any** packet before
+/// declaring the connection dead.
 ///
 /// Vanilla arms the same bound at the socket with Netty's own read-timeout
 /// handler set to 30 seconds — a 30-second stall that
 /// disconnects with `disconnect.timeout`. This mirrors it through the client
 /// library's `read_packet_timeout`, which is a **per-packet** window reset by
 /// every inbound packet. That is why 30 s is safely above the server's keep-alive
-/// cadence (15 s in vanilla's own server-side common-packet-listener handling; our own
-/// `lodestone-server` sends on the same `KEEP_ALIVE_INTERVAL` of 15000 ms): a
-/// healthy session re-arms the window twice over, and only a server that has
-/// stopped sending entirely trips it. When it fires the driver task ends, the
-/// event sender drops, and the shell's existing `Ok(None)` → [`NetUpdate::Disconnected`]
-/// arm reports the loss — no new disconnect wiring, which is why this is one
-/// line on the builder.
+/// cadence (15 s in the server's common-packet handling; our own `lodestone-server`
+/// sends on the same `KEEP_ALIVE_INTERVAL` of 15000 ms): a healthy remote session
+/// re-arms the window twice over, and only a server that has stopped sending
+/// entirely trips it. When it fires the driver task ends, the event sender drops,
+/// and the shell's existing `Ok(None)` → [`NetUpdate::Disconnected`] arm reports
+/// the loss — no new disconnect wiring, which is why this is one line on the
+/// builder.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long an integrated client may wait for the first Play packet.
+///
+/// The integrated server resolves a fresh world's spawn during the
+/// configuration-to-Play handoff. That work may generate the spawn search's
+/// candidate columns before it can send the Play login, so the remote socket
+/// timeout above would be a false disconnect for a healthy local world. Keep
+/// the longer bound local to this transport; after the first packet, the
+/// server's 15-second keep-alive cadence still keeps a session below it.
+const INTEGRATED_READ_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Well-known Minecraft port used when a caller supplies only a host address.
 ///
@@ -2044,6 +2054,11 @@ async fn run_async(
     session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
     identity: LoginProfile,
 ) {
+        // A fresh integrated world can spend longer than the remote read
+        // bound resolving its initial spawn before the first Play packet. Keep
+        // that transport distinction after `origin` is consumed by the setup
+        // match below.
+        let integrated_session = matches!(&origin, Origin::Integrated { .. });
         let Some(adapter) = lodestone_registry::adapter_for_protocol(protocol) else {
             let _ = tx.try_send(NetUpdate::Error(format!(
                 "no version family compiled in for protocol {protocol}; build with the `live` feature"
@@ -2672,11 +2687,16 @@ async fn run_async(
         let builder_server_host = server.host.clone();
         let mut builder = ClientBuilder::new(server, profile, adapter)
             .connect_timeout(Some(Duration::from_secs(10)))
-            // Arm the read timeout so a server that hangs (sends
-            // nothing) surfaces as a disconnect instead of stalling the session
-            // forever. The mechanism is per-packet, so the server's own 15-second
-            // keep-alive keeps a healthy session clear of it — see [`READ_TIMEOUT`].
-            .read_timeout(Some(READ_TIMEOUT))
+            // Arm the read timeout so a server that hangs (sends nothing)
+            // surfaces as a disconnect instead of stalling the session forever.
+            // A fresh integrated world gets the longer bound because its
+            // server may resolve the initial spawn before sending Play's first
+            // packet; see [`INTEGRATED_READ_TIMEOUT`].
+            .read_timeout(Some(if integrated_session {
+                INTEGRATED_READ_TIMEOUT
+            } else {
+                READ_TIMEOUT
+            }))
             .respawn_policy(RespawnPolicy::Manual);
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(explicit_port) = remote_explicit_port {
