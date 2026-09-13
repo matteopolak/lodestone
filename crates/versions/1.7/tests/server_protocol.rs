@@ -7,7 +7,7 @@ use lodestone_core::{Ctx, Reader, State, encode_body};
 use lodestone_data::block_states::{self, block_name, properties};
 use lodestone_model::{
     AnimationAction, BlockActionKind, BlockFace, BlockPos, ClientAction, ClientEvent,
-    ConnectionState, Directive, Hand, Reported, Text, Vec3f, VersionAdapter,
+    ConnectionState, Directive, Hand, PredictionSequence, Reported, Text, Vec3f, VersionAdapter,
 };
 use lodestone_server::{
     ChunkColumn, ClientChannels, ServerBound, ServerDirective, ServerProtocol,
@@ -710,7 +710,7 @@ fn adapter_emitted_block_place_reaches_the_hosted_placement_boundary() {
         face: BlockFace::North,
         cursor: Vec3f::new(0.5, 0.25, 0.75),
         inside_block: false,
-        sequence: 123,
+        sequence: PredictionSequence::new(123),
     };
     let (packet_id, body) = V5Adapter::new()
         .encode_action(ConnectionState::Play, &action)

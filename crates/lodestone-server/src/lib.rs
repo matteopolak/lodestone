@@ -397,6 +397,7 @@ mod redstone_piston_order_oracle_gate;
 mod redstone_placement_gate;
 mod redstone_rail;
 mod redstone_target;
+pub use redstone_target::{HitAxis, redstone_strength};
 mod redstone_torch;
 mod redstone_tripwire;
 mod redstone_wire;
