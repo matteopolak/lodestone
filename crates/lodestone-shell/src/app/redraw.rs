@@ -651,6 +651,14 @@ impl WindowApp {
         let hand_bob = self.sim.bob_frame();
         render.set_hand_bob_source(move || hand_bob);
 
+        // The held hand and the local third-person body's hand attachment share
+        // one sampled view-lag frame. It is installed every frame because the
+        // residual decays on the fixed tick clock and is interpolated at the
+        // current frame alpha; `Sim::camera` remains the unlagged pick/audio
+        // origin.
+        let view_lag = self.sim.view_lag_frame();
+        render.set_view_lag_source(move || view_lag);
+
         // Snapshot the player's nine hotbar slots into owned draw records.
         //
         // **Hoisted above the world render on purpose.** The HUD is the obvious
@@ -1055,6 +1063,9 @@ impl WindowApp {
         // `SkyRenderer::render`, and no uniform upload. A change-detected version
         // would need a second `applied_*` field for no measurable saving.
         render.set_sky_mode(self.sim.sky_mode());
+        // Dimension-level cloud colour (including alpha, which suppresses the
+        // cloud pass for dimensions whose environment declares none).
+        render.set_cloud_color(self.sim.cloud_color());
         // Beside `set_sky_mode` because it is the same shape: a per-frame read
         // of the connected dimension with no edge detector. See
         // `Sim::void_fog` for the two constants this replaced.
@@ -1276,7 +1287,7 @@ impl WindowApp {
                     let candidate = lodestone_render::weather::rain_splash_position(
                         w,
                         self.nav.options().weather_radius,
-                        tick,
+                        i64::try_from(tick).unwrap_or(i64::MAX),
                         [
                             f64::from(camera.position.x),
                             f64::from(camera.position.y),
@@ -1299,7 +1310,7 @@ impl WindowApp {
             let splash = self
                 .weather
                 .as_ref()
-                .and_then(|tracker| tracker.splash_for_tick(tick, splash));
+                .and_then(|tracker| tracker.splash_for_tick(i64::try_from(tick).unwrap_or(i64::MAX), splash));
             self.sim.emit_weather_splash(splash);
         }
         // The underwater/fire overlay pass's per-frame input. `eye_in_water` is

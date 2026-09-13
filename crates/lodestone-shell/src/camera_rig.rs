@@ -580,6 +580,107 @@ impl ViewBob {
     }
 }
 
+/// The local player's short-lived view lag behind head rotation.
+///
+/// The client updates these two angles once per fixed tick, chasing the current
+/// view by half the remaining distance. Rendering interpolates the previous and
+/// current values, then the residual (`view - lagged`) is applied as a small
+/// ten-percent rotation to the hand/attachment pose. Keeping this state beside
+/// [`ViewBob`] is intentional: both are tick-driven presentation state, but the
+/// walk bob is an eye-space translation/rotation while this is a decaying turn
+/// response and must not be folded into the camera used for interaction.
+const VIEW_LAG_RESPONSE: f32 = 0.5;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViewLag {
+    pitch: f32,
+    pitch_o: f32,
+    yaw: f32,
+    yaw_o: f32,
+}
+
+impl ViewLag {
+    /// Seed the lagged and current angles together so a fresh player has no
+    /// artificial kick on the first rendered frame.
+    #[must_use]
+    pub fn new(yaw: f32, pitch: f32) -> Self {
+        Self {
+            pitch,
+            pitch_o: pitch,
+            yaw,
+            yaw_o: yaw,
+        }
+    }
+
+    /// Advance one fixed tick using the same half-gap response as the client
+    /// player. The direct difference is deliberate: yaw is maintained in the
+    /// shell's wrapped `[-180, 180)` convention, and this preserves the exact
+    /// edge behaviour at that seam.
+    pub fn tick(&mut self, yaw: f32, pitch: f32) {
+        self.pitch_o = self.pitch;
+        self.yaw_o = self.yaw;
+        self.pitch += (pitch - self.pitch) * VIEW_LAG_RESPONSE;
+        self.yaw += (yaw - self.yaw) * VIEW_LAG_RESPONSE;
+    }
+
+    /// Interpolate the current/previous pair for a rendered frame.
+    #[must_use]
+    pub fn frame(&self, alpha: f32, yaw: f32, pitch: f32) -> ViewLagFrame {
+        ViewLagFrame {
+            pitch: self.pitch_o + (self.pitch - self.pitch_o) * alpha,
+            yaw: self.yaw_o + (self.yaw - self.yaw_o) * alpha,
+            view_pitch: pitch,
+            view_yaw: yaw,
+        }
+    }
+}
+
+/// Interpolated view-lag sample consumed by the GPU attachment paths.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ViewLagFrame {
+    /// Interpolated lagged pitch.
+    pub pitch: f32,
+    /// Interpolated lagged yaw.
+    pub yaw: f32,
+    /// Current unlagged view pitch for this frame.
+    pub view_pitch: f32,
+    /// Current unlagged view yaw for this frame.
+    pub view_yaw: f32,
+}
+
+impl ViewLagFrame {
+    /// Residual hand/attachment rotation in degrees. The presentation scale is
+    /// `0.1` on each axis; exposing the residual makes the decay and its sign directly
+    /// measurable without a GPU readback.
+    #[must_use]
+    pub fn residual_degrees(self) -> (f32, f32) {
+        (
+            (self.view_pitch - self.pitch) * 0.1,
+            (self.view_yaw - self.yaw) * 0.1,
+        )
+    }
+
+    /// Prefix the residual rotation onto a camera-space hand pose.
+    #[must_use]
+    pub fn hand_transform(self) -> glam::Mat4 {
+        let (pitch, yaw) = self.residual_degrees();
+        glam::Mat4::from_rotation_x(pitch.to_radians())
+            * glam::Mat4::from_rotation_y(yaw.to_radians())
+    }
+
+    /// Prefix the same residual rotation around a holder's feet, preserving
+    /// the attachment point while the body turns. This is used only for the
+    /// synthetic local third-person body; remote entities have their own
+    /// network/body interpolation and must not read the local camera state.
+    #[must_use]
+    pub fn attachment_transform(self, pivot: Vec3, attachment: glam::Mat4) -> glam::Mat4 {
+        glam::Mat4::from_translation(pivot)
+            * self.hand_transform()
+            * glam::Mat4::from_translation(-pivot)
+            * attachment
+    }
+}
+
 /// One frame's worth of interpolated bob input — what vanilla threads through
 /// its own per-frame render state for its walk-bob and hurt-bob routines to
 /// read.
@@ -1056,6 +1157,58 @@ mod tests {
         }
         assert!(prev_gap < 1e-4, "converges close to the target: {prev_gap}");
         assert_ne!(prev_gap, 0.0, "exponential decay never exactly reaches it");
+    }
+
+    // --- ViewLag: decaying held-item/attachment turn response. -------------
+
+    #[test]
+    fn a_fresh_view_lag_is_an_exact_no_turn_control() {
+        let lag = ViewLag::new(12.0, -7.0);
+        let frame = lag.frame(0.5, 12.0, -7.0);
+        assert_eq!(frame.residual_degrees(), (0.0, 0.0));
+        assert_eq!(frame.hand_transform().to_cols_array(), glam::Mat4::IDENTITY.to_cols_array());
+    }
+
+    #[test]
+    fn a_rapid_turn_produces_the_predicted_bounded_hand_offset() {
+        let mut lag = ViewLag::new(0.0, 0.0);
+        lag.tick(90.0, 30.0);
+        let frame = lag.frame(1.0, 90.0, 30.0);
+        // One tick moves the pair halfway: the residual is 45° yaw / 15°
+        // pitch, then the attachment response applies exactly ten percent.
+        assert_eq!(frame.residual_degrees(), (1.5, 4.5));
+        let transformed = frame.hand_transform() * glam::Vec3::new(0.0, 0.0, -1.0).extend(1.0);
+        assert!((transformed.x - -0.0784591).abs() < 1.0e-5, "pitch/yaw order and sign must be stable: {transformed:?}");
+        assert!((transformed.y - 0.0260963).abs() < 1.0e-5, "pitch response must reach the hand: {transformed:?}");
+        assert!(transformed.is_finite());
+    }
+
+    #[test]
+    fn stationary_ticks_decay_the_offset_without_accumulating() {
+        let mut lag = ViewLag::new(0.0, 0.0);
+        lag.tick(90.0, 0.0);
+        let first = lag.frame(1.0, 90.0, 0.0).residual_degrees().1;
+        lag.tick(90.0, 0.0);
+        let second = lag.frame(1.0, 90.0, 0.0).residual_degrees().1;
+        lag.tick(90.0, 0.0);
+        let third = lag.frame(1.0, 90.0, 0.0).residual_degrees().1;
+        assert_eq!(first, 4.5);
+        assert_eq!(second, 2.25);
+        assert_eq!(third, 1.125);
+        assert!(first > second && second > third, "the residual must decay: {first}, {second}, {third}");
+    }
+
+    #[test]
+    fn attachment_lag_rotates_around_the_feet_without_orbiting_the_pivot() {
+        let mut lag = ViewLag::new(0.0, 0.0);
+        lag.tick(90.0, 0.0);
+        let frame = lag.frame(1.0, 90.0, 0.0);
+        let feet = glam::Vec3::new(3.0, 64.0, -2.0);
+        let attachment = glam::Mat4::from_translation(feet);
+        let transformed = frame.attachment_transform(feet, attachment);
+        let pivot = transformed.transform_point3(glam::Vec3::ZERO);
+        assert!((pivot - feet).length() < 1.0e-4, "the lag must rotate the attachment around the body pivot");
+        assert_ne!(transformed.to_cols_array(), attachment.to_cols_array());
     }
 
     #[test]

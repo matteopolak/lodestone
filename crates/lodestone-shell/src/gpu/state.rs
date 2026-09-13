@@ -53,6 +53,7 @@ use super::{
     PluginBillboardInstance, PluginBillboardRenderer, PluginBillboardsSource,
     RenderState, SKY_COLOR, ShadowGroundSource, SignSource, SignTextRenderer, SkullSource, SkyDarkenSource,
     SpawnerSource, ThirdPersonBodySource, ThirdPersonBodyState, TimeOfDaySource, VaultSource,
+    ViewLagSource,
     transparent_placeholder_atlas,
 };
 
@@ -361,6 +362,7 @@ impl RenderState {
             // No third-person camera exists yet; see
             // `set_third_person_body_source`.
             third_person_body: ThirdPersonBodySource::default(),
+            view_lag: ViewLagSource::default(),
             // A rested arm until the shell installs its tick-driven swing clock;
             // see `set_hand_swing_source`.
             hand_swing: HandSwingSource::default(),
@@ -440,6 +442,7 @@ impl RenderState {
             // `Fancy` — vanilla's own default, and what the pass hardcoded through
             // `SkyFrame::new` before the option had anywhere to enter.
             cloud_status: lodestone_render::CloudStatus::default(),
+            cloud_color: [1.0, 1.0, 1.0, lodestone_render::sky::CLOUD_COLOR_ALPHA],
             // `Overworld` — what the pass drew unconditionally before the
             // dimension had anywhere to enter.
             sky_mode: lodestone_render::SkyMode::default(),
@@ -1159,6 +1162,18 @@ impl RenderState {
     #[must_use]
     pub fn cloud_status(&self) -> lodestone_render::CloudStatus {
         self.cloud_status
+    }
+
+    /// Push this dimension's environment-attribute cloud colour down to the
+    /// sky pass. Values are linear RGBA; alpha zero suppresses cloud geometry.
+    pub fn set_cloud_color(&mut self, color: [f32; 4]) {
+        self.cloud_color = color;
+    }
+
+    /// The cloud colour currently stamped onto a sky frame.
+    #[must_use]
+    pub fn cloud_color(&self) -> [f32; 4] {
+        self.cloud_color
     }
 
     /// Push the connected **dimension's** `Skybox` down — vanilla's

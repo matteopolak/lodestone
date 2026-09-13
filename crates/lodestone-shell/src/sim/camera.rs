@@ -116,7 +116,7 @@ impl Sim {
         if fluid.under_water() {
             return water_fog(self.config.render_distance);
         }
-        match self.dimension() {
+        let mut settings = match self.dimension() {
             Some(d) if d.namespace() == "minecraft" && d.path() == "the_nether" => {
                 lodestone_render::fog::FogSettings::nether(self.config.render_distance)
             }
@@ -127,8 +127,52 @@ impl Sim {
                 )
             }
             _ => fog_for_render_distance(self.config.render_distance),
+        };
+        // The dimension type's environment map is authoritative for custom
+        // dimensions. A biome sky colour, when available, still overrides the
+        // dimension fallback below because that is the standing biome's own
+        // visual attribute.
+        if let Some(info) = self
+            .net
+            .as_ref()
+            .and_then(|net| net.shared_handle().get().map(|h| h.player()))
+            .and_then(|player| player.dimension_type)
+        {
+            if let Some(packed) = info.fog_color {
+                settings.color = packed_rgb_to_linear(packed);
+            }
+            if let Some(packed) = info.sky_color {
+                settings.sky_color = packed_rgb_to_linear(packed);
+            }
         }
-        .with_biome_sky_color(self.biome_sky_color())
+        settings.with_biome_sky_color(self.biome_sky_color())
+    }
+
+    /// The current dimension's `visual/cloud_color` environment attribute as
+    /// linear RGBA. A resolved dimension that omitted the attribute keeps the
+    /// registered transparent fallback; the server's other visual attributes
+    /// do not get replaced by a guessed custom value.
+    #[must_use]
+    pub fn cloud_color(&self) -> [f32; 4] {
+        let Some(net) = &self.net else {
+            return [1.0, 1.0, 1.0, lodestone_render::sky::CLOUD_COLOR_ALPHA];
+        };
+        let Some(info) = net
+            .shared_handle()
+            .get()
+            .and_then(|h| h.player().dimension_type)
+        else {
+            return [1.0, 1.0, 1.0, lodestone_render::sky::CLOUD_COLOR_ALPHA];
+        };
+        let Some(packed) = info.cloud_color else {
+            return [1.0, 1.0, 1.0, 0.0];
+        };
+        [
+            packed_rgb_to_linear(packed)[0],
+            packed_rgb_to_linear(packed)[1],
+            packed_rgb_to_linear(packed)[2],
+            ((packed >> 24) & 0xFF) as f32 / 255.0,
+        ]
     }
 
     /// The standing biome's `minecraft:visual/sky_color` in **linear** RGB, or
@@ -507,6 +551,17 @@ impl Sim {
                 ..frame
             }
         }
+    }
+
+    /// The interpolated local view-lag sample for this frame. The target uses
+    /// the current camera angles while the lagged pair is ticked at 20 Hz;
+    /// unlike [`Self::camera`], this is presentation state and is only consumed
+    /// by hand/attachment render transforms.
+    #[must_use]
+    pub fn view_lag_frame(&self) -> crate::camera_rig::ViewLagFrame {
+        let player = self.player();
+        self.view_lag
+            .frame(self.clock().interp_alpha, player.yaw, player.pitch)
     }
 
     /// The local player was hurt: start the damage tilt (`Player.animateHurt`,
@@ -1001,6 +1056,14 @@ impl Sim {
             boat_hurt: lodestone_render::entity_anim::BoatHurt::REST,
         }
     }
+}
+
+fn packed_rgb_to_linear(packed: u32) -> [f32; 3] {
+    lodestone_render::fog::srgb_u8_to_linear([
+        ((packed >> 16) & 0xFF) as u8,
+        ((packed >> 8) & 0xFF) as u8,
+        (packed & 0xFF) as u8,
+    ])
 }
 
 /// A [`CollisionView`] with no geometry at all, for
