@@ -311,15 +311,15 @@ pub enum ChunkCellStatus {
     Full,
 }
 
-/// The loading screen's chunk-status grid: real per-column state for every
-/// column in the current view, centred on the server's streamed-view chunk
-/// when one is known (otherwise the player chunk).
+/// The loading screen's bounded chunk-status grid: real per-column state for
+/// the diagnostic view, centred on the server's streamed-view chunk when one
+/// is known (otherwise the player chunk). The selected render distance remains
+/// the progress denominator; [`MAX_GRID_RADIUS`] bounds this spatial overview.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerrainChunkGrid {
     /// Half the grid's side length in chunks. The grid is [`Self::diameter`]
-    /// cells square — the same radius [`TerrainProgress::expected_for_radius`]
-    /// squares for the progress bar's denominator, so the two can never
-    /// disagree about the size of "the initial view".
+    /// cells square, bounded independently from the selected render-distance
+    /// square used for the progress bar's denominator.
     pub radius: u32,
     /// World chunk at the grid's centre. The cell values are queried relative
     /// to this coordinate, so it is the authoritative origin for a visible
@@ -341,9 +341,10 @@ pub struct TerrainChunkGrid {
 pub const MAX_GRID_RADIUS: u32 = 32;
 
 impl TerrainChunkGrid {
-    /// The radius to draw for the selected view, bounded to the selectable
-    /// range. The caller owns whether a grid is shown at all; this function is
-    /// only geometry, not a multiplayer/loading-scope decision.
+    /// The radius to draw for the selected view, bounded to the diagnostic
+    /// overview's [`MAX_GRID_RADIUS`]. The caller owns whether a grid is shown
+    /// at all; this function is only geometry, not a multiplayer/loading-scope
+    /// decision.
     #[must_use]
     pub const fn view_radius(view_radius: u32) -> u32 {
         if view_radius > MAX_GRID_RADIUS {
