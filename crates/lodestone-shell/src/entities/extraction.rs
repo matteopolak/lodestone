@@ -52,7 +52,7 @@ const PICKUP_LIFE_TICKS: f32 = 3.0;
 /// eye height above the feet. Reading `getEyeY()` as a relative offset instead
 /// would target `y + (y + 1.62)/2`, which for a player at y = 64 is 32 blocks
 /// below the floor.
-const PICKUP_TARGET_EYE_FRACTION: f32 = 0.5;
+pub(crate) const PICKUP_TARGET_EYE_FRACTION: f32 = 0.5;
 
 /// A **remote** collector's assumed eye height, for the
 /// [`PICKUP_TARGET_EYE_FRACTION`] midpoint.
@@ -65,7 +65,7 @@ const PICKUP_TARGET_EYE_FRACTION: f32 = 0.5;
 /// approximation, and the only one in this animation: the render-side track set
 /// carries no per-entity eye height, and inventing one from [`RenderScale`] would
 /// be a guess dressed as a measurement.
-const REMOTE_COLLECTOR_EYE_HEIGHT: f32 = lodestone_physics::player::DEFAULT_EYE_HEIGHT;
+pub(crate) const REMOTE_COLLECTOR_EYE_HEIGHT: f32 = lodestone_physics::player::DEFAULT_EYE_HEIGHT;
 
 /// One in-flight item-pickup animation: a **frozen copy** of a collected item,
 /// travelling from where the item was drawn to the entity that collected it.
@@ -160,7 +160,7 @@ impl PickupAnimations {
 /// reading and is visibly different at the midpoint: at `life + partial = 1.5`
 /// the correct fraction is `0.25`, a linear one gives `0.5`.
 #[must_use]
-pub(super) fn pickup_progress(life: f32, partial_tick: f32) -> f32 {
+pub(crate) fn pickup_progress(life: f32, partial_tick: f32) -> f32 {
     let t = ((life + partial_tick) / PICKUP_LIFE_TICKS).clamp(0.0, 1.0);
     t * t
 }
@@ -360,7 +360,7 @@ pub fn extract_pickup_draws(
 /// stays off the render path), so resolving only through [`TrackIndex`] would
 /// silently animate nothing for **every pickup the player makes**, which is all
 /// of them that matter.
-pub(super) fn collector_target(
+pub(crate) fn collector_target(
     collector_id: EntityNetworkId,
     index: &TrackIndex,
     poses: &Query<(&InterpFrom, &InterpTo, &InterpClock)>,

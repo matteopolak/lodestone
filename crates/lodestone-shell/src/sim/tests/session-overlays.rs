@@ -1079,7 +1079,7 @@ fn held_item_overlay_spans_carry_hex_colour_from_a_real_item_to_a_vertex() {
 /// place is still present, so the two together cover the whole seam.
 #[test]
 fn redraw_rs_still_forwards_held_item_overlay_spans_to_the_hud_frame() {
-    let src = include_str!("../app/redraw.rs");
+    let src = include_str!("../../app/redraw.rs");
     assert!(
         src.contains("hud_frame.held_item_spans = self.sim.held_item_overlay_spans();"),
         "app/redraw.rs no longer forwards `Sim::held_item_overlay_spans` into \
@@ -1476,14 +1476,3 @@ fn tick_nearby_entities_keeps_a_boat_as_a_hard_collider_without_making_it_a_crow
 // -----------------------------------------------------------------------
 // Local placement prediction
 // -----------------------------------------------------------------------
-
-/// The state ids below are transcribed from
-/// `.cache/mc/26.2/generated/reports/blocks.json` — the registry generator's
-/// output — and **not** from this code's own resolution, so
-/// they are an external oracle rather than a round trip through
-/// `state_for_placement`. Each is the state whose properties the reference
-/// placement rules produce for that block.
-///
-/// A 26.2 data bump shifts every id, and this failing is the point: it says
-/// the census moved under the resolver, which is exactly when the property
-/// rules deserve a re-read.

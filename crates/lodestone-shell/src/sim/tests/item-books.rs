@@ -1,5 +1,5 @@
 use super::*;
-pub(super) fn give_main_hand_item(sim: &mut Sim, item: &str) {
+pub(crate) fn give_main_hand_item(sim: &mut Sim, item: &str) {
     let local = sim.local;
     sim.write(|w| {
         if let Some(mut menus) = w.get_mut::<lodestone_ecs::SessionMenus>(local) {
@@ -101,7 +101,7 @@ fn block_changed_ack_retires_only_the_predictions_the_server_has_processed() {
 
 /// Installs one toggleable `PlayerInteract` veto and records every context the
 /// production ask site presents to it.
-fn install_player_interact_veto(
+pub(crate) fn install_player_interact_veto(
     sim: &mut Sim,
     deny: std::sync::Arc<std::sync::atomic::AtomicBool>,
     seen: std::sync::Arc<std::sync::Mutex<Vec<lodestone_ecs::veto::VerbContext>>>,
@@ -329,11 +329,3 @@ fn lectern_book_view_reads_slot_zero_and_container_page_data() {
     assert_eq!(open.title, "Lectern manual");
     assert_eq!(open.pages[1], lodestone_model::ResolvedText::literal("second"));
 }
-
-/// Same idiom as [`give_main_hand_item`], carrying a real `minecraft:
-/// equippable` component so `Sim::predict_equip_swap` has something to find
-/// — matching what `crates/protocol/v770/src/adapter/inventory.rs`'s
-/// `read_component_patch` really populates for an armour item off the wire
-/// (`ItemComponents::equippable`, seeded from `lodestone_data::
-/// item_prototypes`), not the bare `ItemStack::new` [`give_main_hand_item`]
-/// builds.

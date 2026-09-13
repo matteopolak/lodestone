@@ -854,6 +854,7 @@ pub(crate) fn block_sound_seed(block: [i32; 3], ticks: u64) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use crate::sim::Sim;
     use lodestone_model::event::{BlockStateRef, SoundCategory};
 
     #[test]

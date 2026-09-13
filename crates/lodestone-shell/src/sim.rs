@@ -4,7 +4,7 @@
 //! the interesting logic — stepping, meshing, camera derivation — be unit tested
 //! headlessly, with the windowed layer in [`crate::app`] staying a thin driver.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use bevy_ecs::entity::Entity;
@@ -38,7 +38,7 @@ use lodestone_entity::pose::EntityPose;
 use lodestone_game::menu::Menu;
 use lodestone_game::mining::{BreakInputs, Mining};
 use lodestone_game::placement::{
-    Axis, Half, OrientationKind, Placement, PlacedState, UseOnContext, UseOnDecision,
+    OrientationKind, Placement, UseOnContext, UseOnDecision,
 };
 use lodestone_model::event::EquipmentSlot;
 use lodestone_model::{BlockFace, BlockStateRef, EntityInteraction, EntityNetworkId, Vec3f};
@@ -67,6 +67,8 @@ use crate::interact::{
     AttackPresses, Attacking, EntityRayTarget, InteractPlugin, MiningPredictor, NetHandle, ParticleSim,
     PlacementPredictor, RayTarget, UsingItem,
 };
+#[cfg(test)]
+pub(crate) use crate::interact::mining_break_attributes;
 use crate::mesher::{MeshPolicy, MeshScheduler, Meshed, SectionKey, TerrainMesh, TerrainPlugin};
 use crate::net::{NetClient, NetUpdate};
 use crate::overlay::{BossBarView, Sidebar};
@@ -163,6 +165,7 @@ pub(crate) const HOTBAR_SLOTS: usize = 9;
 /// flowers) that happen to instant-break under the survival formula too — the
 /// exact split ("particles for grass, nothing for anything else") this was
 /// caught reproducing.
+#[cfg(test)]
 pub(crate) fn dig_break_inputs(
     entry: lodestone_model::BlockHardness,
     tool: lodestone_model::ToolMining,
@@ -317,7 +320,7 @@ use placement::{PlacementFacts, is_interactable_state};
 // file does. See `sim/placement.rs`'s own doc.
 pub(crate) use placement::{
     block_intersects_player, block_states_of, orientation_for_placement, placement_facts,
-    state_for_placement,
+    state_for_extra_placement, state_for_placement,
 };
 
 
@@ -718,6 +721,10 @@ pub struct Sim {
     /// [`Self::hand_swing_progress`] for the first-person arm's swing. The swing
     /// half is started by [`Self::swing_hand`].
     body_pose: EntityPose,
+    /// The local camera's current/previous view angles for the decaying hand
+    /// and third-person attachment lag. This never changes [`Self::camera`],
+    /// which remains the unlagged interaction and audio origin.
+    view_lag: crate::camera_rig::ViewLag,
     /// The camera's own eased eye height — vanilla's own camera-eye-height
     /// current/previous pair, **not** the entity's.
     ///
@@ -975,7 +982,7 @@ pub struct AudioEngine(pub Option<ShellAudio>);
 /// and put straight back. `None` is therefore only ever observable *during* a
 /// tick, from inside the tick itself.
 #[derive(Debug, Default, Resource)]
-pub struct MusicState(pub Option<crate::audio::music::ShellMusic>);
+pub(crate) struct MusicState(pub Option<crate::audio::music::ShellMusic>);
 
 /// Vanilla's `BiomeAmbientSoundsHandler` plus the rain cadence, beside
 /// [`MusicState`] and for the same reasons: config-scoped (a reconnect must not
@@ -984,7 +991,8 @@ pub struct MusicState(pub Option<crate::audio::music::ShellMusic>);
 /// [`Sim::tick_ambience`] has to hold it and [`AudioEngine`] mutably at one
 /// instant, which two `World::resource_mut` borrows cannot express.
 #[derive(Debug, Default, Resource)]
-pub struct AmbienceState(pub Option<crate::audio::ambient::ShellAmbience>);
+pub(crate) struct AmbienceState(pub Option<crate::audio::ambient::ShellAmbience>);
+
 
 impl Sim {
     // -----------------------------------------------------------------------
@@ -1529,6 +1537,14 @@ impl Sim {
     /// liked. `PlayerState` is `Copy`, so this is a register copy and every
     /// existing `sim.player().position`-shaped call site is unchanged.
     #[must_use]
+    pub fn player(&self) -> PlayerState {
+        self.read(|w| {
+            w.get::<PhysicsState>(self.local)
+                .expect("the local player always carries PhysicsState")
+                .0
+        })
+    }
+
     /// The local player's ECS entity.
     ///
     /// Exists for the `Send + Sync + 'static` render-source closures in
@@ -1538,14 +1554,6 @@ impl Sim {
     #[must_use]
     pub fn local_entity(&self) -> Entity {
         self.local
-    }
-
-    pub fn player(&self) -> PlayerState {
-        self.read(|w| {
-            w.get::<PhysicsState>(self.local)
-                .expect("the local player always carries PhysicsState")
-                .0
-        })
     }
 
     /// Mutate the player's physics state in place.
@@ -1565,7 +1573,7 @@ impl Sim {
     /// ([`crate::app`]) is the only writer.
     #[must_use]
     pub fn input(&self) -> InputState {
-        self.read(|w| w.resource::<RawInput>().0.clone())
+        self.read(|w| w.resource::<RawInput>().0)
     }
 
     /// Mutate the raw input state in place — the platform layer's only writer.
