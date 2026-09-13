@@ -6,7 +6,7 @@
 
 use lodestone_canonical::inverse;
 use lodestone_core::{Ctx, Decode, Encode, Reader, State, Writer, encode_body};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Rotation, Vec3f};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ItemStack, Rotation, Vec3f};
 use lodestone_server::{
     ChunkColumn, ChunkEncodeError, ServerBound, ServerDirective, ServerProtocol,
 };
@@ -25,7 +25,7 @@ use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
 use crate::packets::position::{Position, pack_position};
 use crate::packets::settings::Settings;
-use crate::packets::window::ServerboundHeldItemSlot;
+use crate::packets::window::{OpenWindow, ServerboundHeldItemSlot, SetSlot, WindowClick, WindowItems};
 
 const CTX: Ctx = Ctx { version: PROTOCOL };
 const COMPRESSION_THRESHOLD: i32 = 256;
@@ -80,6 +80,77 @@ fn legacy_text_component(message: &str) -> String {
     }
     json.push_str("\"}");
     json
+}
+
+/// Converts a canonical stack to protocol 47's pre-flattening slot shape.
+/// Unknown keys and unsupported counts are sent empty rather than guessed into
+/// a different item family; the server remains authoritative for corrections.
+fn encode_legacy_slot(item: Option<&ItemStack>) -> crate::packets::slot::Slot {
+    let Some(item) = item.filter(|item| item.count > 0) else {
+        return crate::packets::slot::Slot::Empty;
+    };
+    let Some((id, _)) = crate::generated_item_types::ITEM_TYPES
+        .iter()
+        .find(|(_, name)| *name == item.item.to_string())
+    else {
+        return crate::packets::slot::Slot::Empty;
+    };
+    let (Ok(id), Ok(count)) = (i16::try_from(*id), i8::try_from(item.count)) else {
+        return crate::packets::slot::Slot::Empty;
+    };
+    crate::packets::slot::Slot::Item { id, count, damage: 0, nbt: None }
+}
+
+/// Maps version-free menu identifiers to protocol 47's legacy window type and
+/// the number of slots owned by the block entity.
+fn legacy_window_shape(menu: &str) -> (&str, u8) {
+    match menu {
+        "minecraft:generic_9x3" => ("minecraft:chest", 27),
+        "minecraft:generic_3x3" => ("minecraft:dispenser", 9),
+        "minecraft:furnace" => ("minecraft:furnace", 3),
+        "minecraft:hopper" => ("minecraft:hopper", 5),
+        "minecraft:beacon" => ("minecraft:beacon", 1),
+        other => (other, 0),
+    }
+}
+
+fn encode_open_window(window_id: i32, menu: &str, title: &str) -> ServerDirective {
+    let Ok(window_id) = u8::try_from(window_id) else {
+        return ServerDirective::None;
+    };
+    let (inventory_type, slot_count) = legacy_window_shape(menu);
+    send(
+        play::clientbound::OPEN_WINDOW,
+        &OpenWindow {
+            window_id,
+            inventory_type: inventory_type.to_owned(),
+            window_title: legacy_text_component(title),
+            slot_count,
+            entity_id: None,
+        },
+    )
+}
+
+fn encode_window_items(window_id: i32, items: &[Option<ItemStack>]) -> ServerDirective {
+    let Ok(window_id) = u8::try_from(window_id) else {
+        return ServerDirective::None;
+    };
+    let items = items.iter().map(|item| encode_legacy_slot(item.as_ref())).collect();
+    send(play::clientbound::WINDOW_ITEMS, &WindowItems { window_id, items })
+}
+
+fn encode_set_slot(
+    window_id: i32,
+    slot: i32,
+    item: Option<&ItemStack>,
+) -> ServerDirective {
+    let (Ok(window_id), Ok(slot)) = (i8::try_from(window_id), i16::try_from(slot)) else {
+        return ServerDirective::None;
+    };
+    send(
+        play::clientbound::SET_SLOT,
+        &SetSlot { window_id, slot, item: encode_legacy_slot(item) },
+    )
 }
 
 fn block_action(status: i32) -> Option<BlockActionKind> {
@@ -366,6 +437,30 @@ impl ServerProtocol for V47ServerProtocol {
                     ServerBound::Ignored
                 }
             }
+            State::Play if packet_id == play::serverbound::WINDOW_CLICK => {
+                let Some(WindowClick {
+                    window_id,
+                    slot,
+                    button,
+                    mode,
+                    ..
+                }) = decode_full(payload)
+                else {
+                    return ServerBound::Ignored;
+                };
+                if !(0..=6).contains(&mode) {
+                    return ServerBound::Ignored;
+                }
+                ServerBound::ContainerClicked {
+                    window_id: i32::from(window_id),
+                    state_id: 0,
+                    slot: i32::from(slot),
+                    button,
+                    click_type: i32::from(mode),
+                    changed_slots: Vec::new(),
+                    carried_item: None,
+                }
+            }
             State::Play if packet_id == play::serverbound::HELD_ITEM_SLOT => {
                 let Some(slot) = decode_full::<ServerboundHeldItemSlot>(payload)
                     .and_then(|packet| u8::try_from(packet.slot).ok())
@@ -565,6 +660,30 @@ impl ServerProtocol for V47ServerProtocol {
                 animation: action,
             },
         )
+    }
+
+    fn encode_open_screen(&self, window_id: i32, menu: &str, title: &str) -> ServerDirective {
+        encode_open_window(window_id, menu, title)
+    }
+
+    fn encode_container_content(
+        &self,
+        window_id: i32,
+        _state_id: i32,
+        items: &[Option<ItemStack>],
+        _carried: Option<&ItemStack>,
+    ) -> ServerDirective {
+        encode_window_items(window_id, items)
+    }
+
+    fn encode_container_slot(
+        &self,
+        window_id: i32,
+        _state_id: i32,
+        slot: i32,
+        item: Option<&ItemStack>,
+    ) -> ServerDirective {
+        encode_set_slot(window_id, slot, item)
     }
 
     fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {

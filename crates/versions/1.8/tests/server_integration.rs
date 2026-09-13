@@ -7,7 +7,7 @@ use lodestone_client::{ClientBuilder, LoginProfile, PlayerLoadedPolicy, ServerAd
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, ChatKind, ChatMode, ClientAction, ClientEvent,
     ClientSettings, DisplayedSkinParts, EntityInteraction, Hand, MainHand,
-    ParticleStatus, Rotation, Vec3, Vec3f,
+    ParticleStatus, PredictionSequence, Rotation, Vec3, Vec3f,
 };
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer, MobOwner};
 use lodestone_v1_8::adapter;
@@ -83,7 +83,7 @@ async fn block_place_reaches_the_integrated_protocol_47_consumer_before_later_mo
             face: BlockFace::Up,
             cursor: Vec3f::new(0.5, 0.5, 0.5),
             inside_block: false,
-            sequence: 0,
+            sequence: PredictionSequence::INITIAL,
         })
         .expect("joined legacy client accepts a block use");
     handle
