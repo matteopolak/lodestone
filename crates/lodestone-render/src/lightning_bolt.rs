@@ -42,6 +42,7 @@
 //! produces for the values this module draws.
 
 use lodestone_javarandom::JavaRandom;
+use lodestone_model::EntityNetworkId;
 
 /// One bolt vertex: a world-space position and a straight RGBA colour. No UV
 /// and no light — the bolt is untextured and unlit, which is why it cannot
@@ -225,6 +226,6 @@ pub fn lightning_bolt_vertices(seed: i64) -> Vec<BoltVertex> {
 /// The mixing is `java.util.Random`'s own seed scramble applied to the id, so
 /// two bolts with adjacent ids do not produce near-identical walks.
 #[must_use]
-pub fn bolt_seed_for_entity(entity_id: i32) -> i64 {
-    (i64::from(entity_id) ^ 0x5DEE_CE66D).wrapping_mul(0x5DEE_CE66D) & ((1i64 << 48) - 1)
+pub fn bolt_seed_for_entity(entity_id: EntityNetworkId) -> i64 {
+    (i64::from(entity_id.raw()) ^ 0x5DEE_CE66D).wrapping_mul(0x5DEE_CE66D) & ((1i64 << 48) - 1)
 }
