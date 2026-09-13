@@ -116,7 +116,7 @@
 //! Nothing version-specific.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{
     atomic::{AtomicU64, AtomicUsize, Ordering},
     Arc, Mutex, OnceLock,
@@ -500,6 +500,18 @@ pub struct ParityDecorationSpill {
     /// source pass. Lifecycle replay retains it in the ordered spill stream so
     /// later source reads and the final packet snapshot observe the same state.
     pub transient: bool,
+}
+
+/// The writes and source ownership produced by one target-centred FEATURES
+/// pass.  A target pass can visit its radius-one feature region while the
+/// scheduler records only the requested target completion; ownership keeps a
+/// later overlapping target from replaying a source body that already ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParityTargetPass {
+    /// Final block transitions from the pass, including neighbouring columns.
+    pub spills: Vec<ParityDecorationSpill>,
+    /// Internal source coordinates whose feature bodies ran during this pass.
+    pub completed_sources: Vec<(i32, i32)>,
 }
 
 impl NetherColumn {
@@ -1613,8 +1625,82 @@ impl NetherGenerator {
             Some((source_x, source_z)),
             overrides,
             Some(&resident),
+            false,
+            None,
         )
         .2
+    }
+
+    /// Runs the complete FEATURES pass for one requested target against the
+    /// current admitted resident region.  The pass is target-centred: the
+    /// surrounding radius-one columns provide read/write context, while the
+    /// returned transitions are attributed to the requested target as one
+    /// lifecycle completion.
+    ///
+    /// `resident_at` may return the current mutable column for each admitted
+    /// coordinate.  Missing context falls back to the immutable shaped
+    /// prefix, which keeps this aggregate useful for a cold target as well as
+    /// for an ordered stream replay.
+    #[must_use]
+    pub fn parity_target_spills_with_resident(
+        &self,
+        target_x: i32,
+        target_z: i32,
+        overrides: &[(i32, i32, i32, String)],
+        resident_at: impl FnMut(i32, i32) -> Option<crate::dense_grid::DenseBlockGrid>,
+    ) -> Vec<ParityDecorationSpill> {
+        self.parity_target_pass_with_resident(
+            target_x,
+            target_z,
+            overrides,
+            &BTreeSet::new(),
+            resident_at,
+        )
+        .spills
+    }
+
+    /// Runs the target-centred FEATURES pass while retaining authenticated
+    /// ownership from earlier target passes. Sources already present in
+    /// `completed_sources` are context for this pass, not another execution.
+    #[must_use]
+    pub fn parity_target_pass_with_resident(
+        &self,
+        target_x: i32,
+        target_z: i32,
+        overrides: &[(i32, i32, i32, String)],
+        completed_sources: &BTreeSet<(i32, i32)>,
+        mut resident_at: impl FnMut(i32, i32) -> Option<crate::dense_grid::DenseBlockGrid>,
+    ) -> ParityTargetPass {
+        let mut resident: [Option<Arc<crate::dense_grid::DenseBlockGrid>>; 25] =
+            std::array::from_fn(|_| None);
+        for dx in -crate::feature::region_view::WIDE_RADIUS
+            ..=crate::feature::region_view::WIDE_RADIUS
+        {
+            for dz in -crate::feature::region_view::WIDE_RADIUS
+                ..=crate::feature::region_view::WIDE_RADIUS
+            {
+                resident[crate::feature::region_view::wide_slot_of_offset(dx, dz)] =
+                    resident_at(target_x + dx, target_z + dz).map(Arc::new);
+            }
+        }
+        let pre = self.pre_decoration_stage(target_x, target_z);
+        let spills = self.mixed_step7_stage_selected_with_resident(
+            target_x,
+            target_z,
+            (*pre.0).clone(),
+            &pre.1,
+            Some((target_x, target_z)),
+            overrides,
+            Some(&resident),
+            true,
+            Some(completed_sources),
+        ).2;
+        let completed_sources = if completed_sources.contains(&(target_x, target_z)) {
+            Vec::new()
+        } else {
+            vec![(target_x, target_z)]
+        };
+        ParityTargetPass { spills, completed_sources }
     }
 
     fn mixed_step7_stage_with_spills(
@@ -1664,6 +1750,8 @@ impl NetherGenerator {
             selected_source,
             overrides,
             None,
+            false,
+            None,
         )
     }
 
@@ -1677,6 +1765,8 @@ impl NetherGenerator {
         selected_source: Option<(i32, i32)>,
         overrides: &[(i32, i32, i32, String)],
         resident: Option<&[Option<Arc<crate::dense_grid::DenseBlockGrid>>; 25]>,
+        capture_all_spills: bool,
+        completed_sources: Option<&BTreeSet<(i32, i32)>>,
     ) -> (
         crate::dense_grid::DenseBlockGrid,
         Vec<CodedLoot>,
@@ -1860,6 +1950,7 @@ impl NetherGenerator {
             grid_feature_biomes,
             zoom_seed,
         );
+        grid.set_generation_top(self.min_y + self.height);
         self.veg_tags.bind(grid.interner());
         let mut ore_transferred = HashMap::new();
         let mut seeded = BTreeMap::new();
@@ -1927,6 +2018,9 @@ impl NetherGenerator {
             let source_x = cx + dx;
             let source_z = cz + dz;
             if selected_source.is_some_and(|source| source != (source_x, source_z)) {
+                continue;
+            }
+            if completed_sources.is_some_and(|sources| sources.contains(&(source_x, source_z))) {
                 continue;
             }
             let origin = crate::feature::BlockPos { x: source_x * 16, y: self.min_y, z: source_z * 16 };
@@ -2054,8 +2148,18 @@ impl NetherGenerator {
         }
         let mut world = resident_source(0, 0).cloned().unwrap_or(center_world);
         let mut decoration_spills = Vec::new();
+        let mut aggregate_spills = BTreeMap::new();
         for (x, y, z, state) in grid.dirty_cell_ids() {
-            if suppressed_huge.contains(&(x, y, z)) {
+            let transient = suppressed_huge.contains(&(x, y, z));
+            if capture_all_spills
+                && (cx * 16 - 16..cx * 16 + 32).contains(&x)
+                && (cz * 16 - 16..cz * 16 + 32).contains(&z)
+                && (self.min_y..self.min_y + DECORATION_WINDOW_HEIGHT).contains(&y)
+            {
+                aggregate_spills.insert((x, y, z), (state, transient));
+                continue;
+            }
+            if transient {
                 continue;
             }
             if (self.min_y..self.min_y + self.height).contains(&y) {
@@ -2074,6 +2178,25 @@ impl NetherGenerator {
             }
         }
         let mut final_spills = BTreeMap::new();
+        if capture_all_spills {
+            let mut aggregate = BTreeMap::new();
+            for ((x, y, z), (state, transient)) in aggregate_spills {
+                if transient || seeded.get(&(x, y, z)).copied() != Some(state) {
+                    aggregate.insert(
+                        (x, y, z),
+                        ParityDecorationSpill {
+                            source: (cx, cz),
+                            position: (x, y, z),
+                            state: self.interner.name_of(state).to_owned(),
+                            transient,
+                        },
+                    );
+                }
+            }
+            return_nether_height_scratch(heights);
+            return_nether_changed_scratch(changed_scratch);
+            return (world, placement_loot, aggregate.into_values().collect(), Vec::new());
+        }
         if let Some(source) = selected_source {
             for (x, y, z, state) in grid.dirty_cell_ids() {
                 let transient = suppressed_huge.contains(&(x, y, z));

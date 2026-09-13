@@ -158,6 +158,9 @@ pub struct VegGrid {
     /// driver. Overworld grids opt in through
     /// [`Self::with_sources_and_biomes_shared_zoomed`].
     biome_zoom_seed: Option<i64>,
+    /// Optional source-generation ceiling when resident grids are padded to a
+    /// dimension window larger than the terrain generator's own height.
+    generation_top_override: Option<i32>,
     /// Top-level placed-feature id to eligible biome ids. This is deliberately
     /// keyed by the placed feature, rather than its configured body: a selector
     /// branch can share a body while carrying a different placement contract.
@@ -278,6 +281,7 @@ impl VegGrid {
             biome_sources: None,
             flat_biome_sources: None,
             biome_zoom_seed: None,
+            generation_top_override: None,
             feature_biomes: Arc::new(HashMap::new()),
             interner,
             dirty: WriteLog::default(),
@@ -689,6 +693,9 @@ impl VegGrid {
     /// feature bounds are relative to the source generator's depth instead.
     #[must_use]
     pub(super) fn generation_top(&self) -> i32 {
+        if let Some(top) = self.generation_top_override {
+            return top;
+        }
         let centre = wide_slot_of_offset(0, 0);
         self.sources[centre]
             .as_ref()
@@ -739,6 +746,12 @@ impl VegGrid {
                 self.blocks.get_in_bounds(&(lx, y, lz)).unwrap_or(StateId::AIR),
             )
         })
+    }
+
+    /// Keep feature height guards tied to the terrain source when resident
+    /// grids include padded rows above the generated field.
+    pub(crate) fn set_generation_top(&mut self, top: i32) {
+        self.generation_top_override = Some(top);
     }
 
     /// The number of writes recorded so far — a caller (currently only
