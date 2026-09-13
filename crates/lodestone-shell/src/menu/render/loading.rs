@@ -1,4 +1,4 @@
-use super::*
+use super::*;
 
 
 /// The loading screen's progress bar reaches geometry, at vanilla's
@@ -183,10 +183,10 @@ fn the_chunk_grid_draws_two_real_statuses_at_two_different_cells() {
     );
 }
 
-/// The grid must fit the smallest canvas at the largest selectable render
-/// distance. The layout keeps the square centred and moves the label/bar above
-/// it, so a 32-radius selection should show the complete 65x65 cell square
-/// rather than silently cropping it to the middle.
+/// The bounded loading diagnostic must fit the smallest canvas, including when
+/// the selected render distance is 256. The progress bar still covers the full
+/// selected view; the optional per-cell overview is deliberately bounded so it
+/// cannot allocate or draw hundreds of thousands of quads per frame.
 #[test]
 fn the_chunk_grid_fits_the_smallest_canvas_at_every_render_distance() {
     use crate::menu::loading::{MAX_GRID_RADIUS, TerrainChunkGrid};
@@ -198,20 +198,22 @@ fn the_chunk_grid_fits_the_smallest_canvas_at_every_render_distance() {
     /// canvas coordinates on a `height`-tall canvas.
     fn grid_top(view_radius: u32, height: f32) -> f32 {
         let radius = TerrainChunkGrid::view_radius(view_radius);
-        let side = TerrainChunkGrid::diameter(radius) as f32 * CHUNK_CELL_SIZE;
+        let diameter = TerrainChunkGrid::diameter(radius);
+        let side = diameter as f32 * chunk_cell_size(diameter);
         (height * 0.5 + chunk_grid_dy(radius)).floor() - side * 0.5
     }
 
     fn grid_bottom(view_radius: u32, height: f32) -> f32 {
         let radius = TerrainChunkGrid::view_radius(view_radius);
-        let side = TerrainChunkGrid::diameter(radius) as f32 * CHUNK_CELL_SIZE;
+        let diameter = TerrainChunkGrid::diameter(radius);
+        let side = diameter as f32 * chunk_cell_size(diameter);
         grid_top(view_radius, height) + side
     }
 
     // The selected maximum, a larger request (which must be clamped), and the
     // ordinary default all need to stay inside the 240-pixel canvas floor.
     let mut bad: Vec<String> = Vec::new();
-    for view_radius in [8u32, 32, 64, 1024] {
+    for view_radius in [8u32, 32, 64, 256, 1024] {
         let top = grid_top(view_radius, FLOOR_H);
         if top < 0.0 {
             bad.push(format!(
@@ -231,8 +233,9 @@ fn the_chunk_grid_fits_the_smallest_canvas_at_every_render_distance() {
     // The player's selected distance is preserved up to the supported maximum;
     // a server/fixture asking for more cannot make the square grow off-screen.
     assert_eq!(TerrainChunkGrid::view_radius(8), 8, "a small view is drawn whole");
-    assert_eq!(TerrainChunkGrid::view_radius(32), 32, "the selected maximum is drawn whole");
+    assert_eq!(TerrainChunkGrid::view_radius(32), 32, "an ordinary view is drawn whole");
     assert_eq!(TerrainChunkGrid::view_radius(64), MAX_GRID_RADIUS);
+    assert_eq!(TerrainChunkGrid::view_radius(1024), MAX_GRID_RADIUS);
 }
 
 /// Every generation status has its own palette entry. A single grey/white

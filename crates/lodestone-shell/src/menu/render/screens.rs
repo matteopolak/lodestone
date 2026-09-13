@@ -1118,7 +1118,8 @@ pub fn loading_frame_with_progress_and_grid(
             // grid itself is `(radius * 2 + 1) * 2` pixels wide. Preserve that
             // one-cell distinction; using the full side here shifts the label
             // an extra cell upward at every distance.
-            let label = -(grid.radius as f32 * super::CHUNK_CELL_SIZE)
+            let diameter = crate::menu::loading::TerrainChunkGrid::diameter(grid.radius);
+            let label = -(diameter as f32 * super::chunk_cell_size(diameter) * 0.5)
                 - LOADING_TEXT_LINES_ABOVE_GRID * LOADING_TEXT_LINE;
             (label, label + LOADING_BAR_OFFSET)
         }

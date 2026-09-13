@@ -1669,10 +1669,11 @@ impl WindowApp {
         };
         ClientSettings {
             locale: "en_us".to_string(),
-            // The client-information payload carries a byte; the server clamps
-            // to `2..=32` before sending. Saturating rather than wrapping, or a
-            // radius past 127 would arrive as a negative distance.
-            view_distance: i8::try_from(radius.clamp(2, 32)).unwrap_or(i8::MAX),
+            // The client-information payload carries a signed byte. The initial
+            // join's VarInt view radius can reach 257, but a live settings update
+            // can advertise only 127; saturating rather than wrapping prevents
+            // a large render-distance choice from becoming a negative request.
+            view_distance: i8::try_from(radius.clamp(2, i8::MAX as u32)).unwrap_or(i8::MAX),
             chat_mode: ChatMode::Full,
             chat_colors: self.nav.options().chat_colors,
             skin_parts: DisplayedSkinParts {

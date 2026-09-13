@@ -843,6 +843,11 @@ mod tests {
     fn far_plane_matches_vanilla_render_distance_formula() {
         // Vanilla: max(rd*16*4, cloud*16). RD32, no clouds → 2048.
         assert_eq!(Camera::far_for_render_distance(32, 0), 2048.0);
+        // The shell's selectable maximum must stay on the same path rather
+        // than falling through a legacy 32-chunk ceiling. The far plane is
+        // 256 * 16 * 4 = 16384 blocks, which leaves incremental far-chunk
+        // generation visible to the renderer as those columns arrive.
+        assert_eq!(Camera::far_for_render_distance(256, 0), 16_384.0);
         // Cloud range can dominate at tiny render distances.
         assert_eq!(Camera::far_for_render_distance(2, 192), 3072.0);
     }
