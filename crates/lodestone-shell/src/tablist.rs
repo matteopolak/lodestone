@@ -376,7 +376,6 @@ mod tests {
     #[test]
     fn a_player_with_no_display_name_is_coloured_by_their_scoreboard_team() {
         use lodestone_game::scoreboard::{Scoreboard, Team, TeamColor};
-        use lodestone_model::TextColor;
 
         let mut tabs = TabList::new();
         tabs.insert(entry(1, "Notch", 10, GameMode::Survival));

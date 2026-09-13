@@ -499,7 +499,7 @@ fn ulps_between(a: f32, b: f32) -> u32 {
 /// than a restatement of what the run happens to print.
 fn predicted_ulp_bracket(distance: f32, clearance: f32) -> (i64, i64) {
     let camera = camera_facing_sign(distance, 0.0);
-    let (near, far) = (f64::from(camera.near), f64::from(camera.far));
+    let far = f64::from(camera.far);
     let d = f64::from(distance);
     let relative = f64::from(clearance) * far / (d * (far - d));
     (

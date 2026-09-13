@@ -520,18 +520,6 @@ impl ColumnQueue {
             .map(|(entry, _)| (entry.coord, entry.force_full))
     }
 
-    /// The best pending coordinate without handing it to a worker.
-    ///
-    /// Admission into the native dispatcher is a non-blocking try-operation.
-    /// Peeking first lets a saturated pipeline retain this coordinate in its
-    /// deterministic queue instead of popping it and having to reconstruct its
-    /// priority metadata after backpressure.
-    #[must_use]
-    #[cfg(test)]
-    pub(crate) fn peek(&self) -> Option<(i32, i32)> {
-        self.peek_request().map(|(coord, _)| coord)
-    }
-
     /// The best pending coordinate and its explicit full-generation bit.
     #[must_use]
     fn peek_request(&self) -> Option<((i32, i32), bool)> {

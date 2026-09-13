@@ -2367,7 +2367,6 @@ mod tests {
         assert!(ui.is_playing());
     }
 
-    #[test]
     /// Escape on the loading screen unwinds to wherever the dial started, and
     /// forgets the session, so the loading screen cannot leave a stale session
     /// behind.

@@ -1,7 +1,6 @@
 //! `app`'s unit tests, split into cohesive thematic modules.
 
 use super::*;
-use super::session::container_cursor_center;
 use crate::menu::Screen;
 use lodestone_data::item::Item;
 

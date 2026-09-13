@@ -4621,6 +4621,7 @@ mod tests {
     // `tests/no_production_source_names_testsupport.rs`.
     use lodestone_testsupport::unique_username;
 
+    #[test]
     fn integrated_plugin_commands_use_the_server_callers_permission_level() {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut command = lodestone_ecs::PluginCommand::new("bridge");
