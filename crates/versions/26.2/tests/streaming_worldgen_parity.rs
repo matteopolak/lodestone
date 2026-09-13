@@ -544,19 +544,11 @@ fn end_p06_packet_payload(
     target: (i32, i32),
 ) -> Vec<u8> {
     let column = materializer.snapshot_for_packet(target);
-    let mut neighbours = Vec::with_capacity(8);
-    for dz in -1..=1 {
-        for dx in -1..=1 {
-            if (dx, dz) == (0, 0) {
-                continue;
-            }
-            let neighbour = (target.0 + dx, target.1 + dz);
-            let column = materializer
-                .resident_column(neighbour)
-                .unwrap_or_else(|| panic!("End P06 target {target:?} is missing packet-light neighbour {neighbour:?}"));
-            neighbours.push((dx, dz, column.clone()));
-        }
-    }
+    // The external P06 capture requests each target with a radius-zero ticket.
+    // Its initial packet therefore contains the target's own light field; the
+    // neighbouring CARVERS columns admitted for lifecycle replay are not light
+    // inputs until their own packets or a later seam update.
+    let neighbours: [(i32, i32, ChunkColumn); 0] = [];
     let directive = V770ServerProtocol
         .try_encode_chunk_with_neighbours_in_dimension(
             target.0,
@@ -834,6 +826,62 @@ fn diagnose_end_raw_packet(expected: &[u8], actual: &[u8]) {
     );
 }
 
+    let light_shape = |data: &lodestone_world::LightData| match data {
+        lodestone_world::LightData::Missing => "missing".to_owned(),
+        lodestone_world::LightData::Uniform(value) => format!("uniform({value})"),
+        lodestone_world::LightData::Values(values) => {
+            let first = values.get(0);
+            let nonzero = values.as_bytes().iter().filter(|&&byte| byte != 0).count();
+            format!("values(first={first}, nonzero_bytes={nonzero})")
+        }
+    };
+    for section in 0..expected.light.light_section_count() {
+        let sky_expected = light_shape(expected.light.sky(section));
+        let sky_actual = light_shape(actual.light.sky(section));
+        let block_expected = light_shape(expected.light.block(section));
+        let block_actual = light_shape(actual.light.block(section));
+        if sky_expected != sky_actual || block_expected != block_actual {
+            eprintln!(
+                "P06 light section={section}: sky expected={sky_expected} actual={sky_actual}; block expected={block_expected} actual={block_actual}"
+            );
+            if expected.light.sky(section) != actual.light.sky(section) {
+                let mut shown = 0;
+                for cell in 0..4096 {
+                    let x = cell % 16;
+                    let z = (cell / 16) % 16;
+                    let y = cell / 256;
+                    let left = expected.light.section_light(section).sky_at(x, y, z);
+                    let right = actual.light.section_light(section).sky_at(x, y, z);
+                    if left != right {
+                        eprintln!("P06 sky diff section={section} local=({x},{y},{z}) expected={left} actual={right}");
+                        shown += 1;
+                        if shown == 8 { break; }
+                    }
+                }
+            }
+            for (kind, data) in [("sky", actual.light.sky(section)), ("block", actual.light.block(section))] {
+                let Some(values) = (match data { lodestone_world::LightData::Values(values) => Some(values), _ => None }) else { continue };
+                let mut shown = 0;
+                for cell in 0..4096 {
+                    let value = values.get(cell);
+                    if value == 0 { continue; }
+                    let x = cell % 16;
+                    let z = (cell / 16) % 16;
+                    let y = cell / 256;
+                    let world_y = (section.saturating_sub(1) * 16 + y) as i32;
+                    let state = actual.column.get_block(x, world_y, z);
+                    let emission = lodestone_data::block_states::StateId::new(state)
+                        .map(lodestone_data::light_props::emission);
+                    let state_name = lodestone_data::block_states::StateId::new(state)
+                        .map(|state| state.canonical_state())
+                        .unwrap_or_else(|| "unknown".to_owned());
+                    eprintln!("P06 light nonzero kind={kind} section={section} local=({x},{y},{z}) world_y={world_y} value={value} state={state_name} emission={emission:?}");
+                    shown += 1;
+                    if shown == 4 { break; }
+                }
+            }
+        }
+    }
 fn mismatch_component(record: &[u8], offset: usize, dimension: StreamDimension) -> &'static str {
     let Some(layout) = light_free_record_layout(record, dimension) else { return "malformed"; };
     if offset < layout.heightmaps.start { "header" }
