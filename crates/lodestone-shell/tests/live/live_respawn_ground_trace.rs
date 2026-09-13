@@ -189,10 +189,6 @@ fn respawn_far_from_the_loaded_area_lands_on_real_ground_not_inside_it() {
          client's loaded set, so the far-teleport did not force the race this gate exists \
          to observe. Increase FAR_X/FAR_Z or the settle window."
     );
-    let control_final = control
-        .samples
-        .last()
-        .expect("the control traced at least one tick");
     // With no terrain to collide against, `on_ground` can never legitimately
     // become true — the "falling" the control reproduces is not a monotonic
     // drop (the server corrects our claimed position most ticks, snapping us

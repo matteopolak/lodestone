@@ -774,7 +774,7 @@ fn measure_draw_submission(
     const WINDOWS: usize = 5;
     const WARMUP_FRAMES: usize = 40;
 
-    let mut arm = |state: &RenderState, one_frame: &mut dyn FnMut(&RenderState) -> _| {
+    let arm = |state: &RenderState, one_frame: &mut dyn FnMut(&RenderState) -> _| {
         for _ in 0..WARMUP_FRAMES {
             black_box(one_frame(state));
         }

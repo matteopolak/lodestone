@@ -410,7 +410,6 @@ pub fn servers_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsString;
 
     fn sample() -> ServerList {
         let mut list = ServerList::new();

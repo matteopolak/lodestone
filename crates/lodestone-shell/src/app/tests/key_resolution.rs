@@ -8,8 +8,6 @@ use super::*;
 // decision-making, so a precedence regression shows up here rather than
 // needing a window, a GPU and a live `Sim` to observe.
 
-use crate::keybinds::{Binding, InputAction};
-
 /// The gate while the world is being played normally.
 pub(crate) fn playing() -> KeyGate {
     KeyGate {

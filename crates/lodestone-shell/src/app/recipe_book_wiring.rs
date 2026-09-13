@@ -5,7 +5,7 @@
 
 use super::*;
 use lodestone_game::item::ItemStack;
-use lodestone_game::recipe::{Ingredient, Recipe, RecipeBook, ShapedRecipe, TagResolver};
+use lodestone_game::recipe::{Ingredient, Recipe, RecipeBook, ShapedRecipe};
 use lodestone_model::Identifier;
 
 fn id(name: &str) -> Identifier {
