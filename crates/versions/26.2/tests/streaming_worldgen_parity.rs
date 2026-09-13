@@ -364,11 +364,10 @@ fn lifecycle_admissions(targets: &[(i32, i32)]) -> Vec<(i32, i32)> {
 }
 
 /// Decoration completions follow each requested chunk's accumulated dependency
-/// square with x changing by column and z changing fastest. A source is kept
-/// paired with the target request that admitted it: the same source can run
-/// again for a later target because the feature read window is target-centred.
-/// This is distinct from the z-major/x-fastest order used to emit packet
-/// records.
+/// square with x changing by column and z changing fastest. A source body is
+/// retained after its first completion, so an overlapping later target does
+/// not replay the same source against a different resident window. This is
+/// distinct from the z-major/x-fastest order used to emit packet records.
 fn lifecycle_completion_wavefront(targets: &[(i32, i32)]) -> Vec<((i32, i32), (i32, i32))> {
     let mut order = Vec::new();
     for &(target_x, target_z) in targets {
@@ -381,13 +380,11 @@ fn lifecycle_completion_wavefront(targets: &[(i32, i32)]) -> Vec<((i32, i32), (i
     order
 }
 
-/// A zero-radius streamed ticket completes the requested chunk's FEATURES
-/// status once before the packet is captured. The radius-one CARVERS columns
-/// are the immutable read/write region supplied to that task; they do not
-/// contribute their own FEATURES bodies. The centre body may still spill into
-/// those admitted neighbours, so replay admits the complete write halo while
-/// completing only the target source.
-fn overworld_stream_completion_order(targets: &[(i32, i32)]) -> Vec<((i32, i32), (i32, i32))> {
+/// A streamed ticket completes the requested chunk's FEATURES body before
+/// its FULL result resolves. Its radius-one region supplies the admitted
+/// read/write context, but dependency admissions do not run independent
+/// FEATURES bodies. The target pass owns all writes observed at this boundary.
+fn target_centered_completion_order(targets: &[(i32, i32)]) -> Vec<((i32, i32), (i32, i32))> {
     targets
         .iter()
         .copied()
@@ -400,13 +397,10 @@ struct StreamLifecycleState {
     /// The live oracle leaves dependency chunks resident after removing the
     /// requested centre ticket. Keep that state across bounded frame batches.
     admitted: BTreeSet<(i32, i32)>,
-    /// Nether and End source bodies are globally retained after their first
-    /// authenticated completion. Overworld completion is target-scoped: each
-    /// request owns one centre FEATURES transition over its admitted region.
+    /// Source bodies are globally retained after their first authenticated
+    /// completion. A source owns its generation-region writes even when a
+    /// later target reaches the same source through an overlapping halo.
     completed: BTreeSet<(i32, i32)>,
-    /// Overworld centre completions are keyed by their target request. Nether
-    /// and End use `completed` above.
-    target_completed: BTreeSet<((i32, i32), (i32, i32))>,
 }
 
 type EndP06LifecycleEvents = BTreeMap<(i32, i32), Vec<LifecycleReplayEvent>>;
@@ -434,7 +428,6 @@ fn lifecycle_columns(
             materializer.reset_for_lifecycle_replay();
             state.admitted.clear();
             state.completed.clear();
-            state.target_completed.clear();
         }
         let prepare_started = Instant::now();
         materializer.prepare_lifecycle_replay(&admissions);
@@ -461,7 +454,7 @@ fn lifecycle_columns(
                 .collect::<Vec<_>>()
         } else {
             match dimension {
-                StreamDimension::Overworld => overworld_stream_completion_order(targets),
+                StreamDimension::Overworld => lifecycle_completion_wavefront(targets),
                 StreamDimension::Nether => lifecycle_completion_wavefront(targets),
                 StreamDimension::End => unreachable!(),
             }
@@ -476,10 +469,7 @@ fn lifecycle_columns(
                 materializer.begin_target(target);
                 active_target = Some(target);
             }
-            let should_complete = match dimension {
-                StreamDimension::Overworld => state.target_completed.insert((target, source)),
-                StreamDimension::Nether | StreamDimension::End => state.completed.insert(source),
-            };
+            let should_complete = state.completed.insert(source);
             if should_complete {
                 if dimension == StreamDimension::End {
                     let event = end_events
@@ -509,7 +499,7 @@ fn lifecycle_columns(
             }
         }
         let complete_ms = complete_started.elapsed().as_millis();
-        let columns = targets
+        let columns: Vec<ChunkColumn> = targets
             .iter()
             .copied()
             .map(|target| materializer.snapshot_for_packet(target))
@@ -605,7 +595,7 @@ fn completion_wavefront_reuses_dependencies_between_adjacent_requests() {
 #[test]
 fn overworld_stream_completes_only_the_target_features_body() {
     assert_eq!(
-        overworld_stream_completion_order(&[(2, 0), (3, 0), (2, 0)]),
+        target_centered_completion_order(&[(2, 0), (3, 0), (2, 0)]),
         vec![
             ((2, 0), (2, 0)),
             ((3, 0), (3, 0)),
@@ -615,8 +605,8 @@ fn overworld_stream_completes_only_the_target_features_body() {
 }
 
 #[test]
-fn nether_completion_wavefront_preserves_resident_neighbour_writes() {
-    let target = (96, 96);
+fn nether_target_completion_replays_the_captured_source_wavefront() {
+    let target = (380, 380);
     let mut materializer = LifecycleMaterializer::new(nether_chunk_source(SEED));
     for admission in lifecycle_admissions(&[target]) {
         materializer.admit(admission);
@@ -629,26 +619,30 @@ fn nether_completion_wavefront_preserves_resident_neighbour_writes() {
     assert_eq!(
         materializer
             .snapshot_for_packet(target)
-            .block_state(0, 12, 15),
-        "minecraft:blackstone",
-        "the resident feature wavefront must retain the neighbour's blackstone at world (1536,12,1551)",
+            .block_state(8, 50, 1),
+        "minecraft:crimson_roots",
+        "the captured source wavefront must retain the target's external root witness",
+    );
+    assert_eq!(
+        materializer.snapshot_for_packet(target).block_state(15, 77, 5),
+        "minecraft:netherrack",
+        "the first captured packet must not inherit the later east-neighbour root",
     );
 }
 
 #[test]
-fn overworld_stream_state_deduplicates_completed_dependencies() {
+fn stream_state_deduplicates_completed_targets() {
     let mut state = StreamLifecycleState::default();
-    let first = lifecycle_completion_wavefront(&[(0, 0)]);
+    let first = target_centered_completion_order(&[(0, 0)]);
     for &(_, source) in &first {
         assert!(state.completed.insert(source));
     }
-    let second = lifecycle_completion_wavefront(&[(1, 0)]);
+    let second = target_centered_completion_order(&[(1, 0)]);
     let unseen = second
         .into_iter()
         .filter(|&(_, source)| state.completed.insert(source))
         .collect::<Vec<_>>();
-    assert_eq!(unseen.len(), 3);
-    assert_eq!(&unseen[..3], &[((1, 0), (2, -1)), ((1, 0), (2, 0)), ((1, 0), (2, 1))]);
+    assert_eq!(unseen, vec![((1, 0), (1, 0))]);
 }
 
 #[test]
@@ -880,10 +874,10 @@ fn diagnose_end_raw_packet(expected: &[u8], actual: &[u8]) {
             }
         }
     }
-fn mismatch_component(record: &[u8], offset: usize, dimension: StreamDimension) -> &'static str {
-    let Some(layout) = light_free_record_layout(record, dimension) else { return "malformed"; };
 }
 
+fn mismatch_component(record: &[u8], offset: usize, dimension: StreamDimension) -> &'static str {
+    let Some(layout) = light_free_record_layout(record, dimension) else { return "malformed"; };
     if offset < layout.heightmaps.start { "header" }
     else if offset < layout.heightmaps.end { "heightmaps" }
     else if offset < layout.terrain.start { "section_count" }
