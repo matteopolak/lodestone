@@ -134,10 +134,74 @@ impl From<VersionMeta> for PackMeta {
     fn from(version: VersionMeta) -> Self {
         Self {
             pack_format: version.resource_format.major,
-            description: PackDescription::Text(version.id),
+            description: PackDescription::Text(version.id.into_string()),
             supported_formats: None,
             pack_version: Some(version.resource_format),
         }
+    }
+}
+
+/// A validated identifier from a resource pack's `version.json`.
+///
+/// Version names are opaque release labels rather than resource locations, so
+/// this type deliberately does not impose a namespace/path split. The metadata
+/// format does require a non-empty token without whitespace, control
+/// characters, or path separators; preserving the original spelling keeps
+/// snapshot and pre-release labels intact.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct VersionId(String);
+
+/// Why a version metadata id could not become a [`VersionId`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum VersionIdError {
+    /// The metadata omitted the id or supplied an empty string.
+    #[error("version id is empty")]
+    Empty,
+    /// The id contains a character outside the version-label token grammar.
+    #[error("version id contains invalid character {0:?}")]
+    InvalidCharacter(char),
+}
+
+impl VersionId {
+    /// Parses a version label from metadata.
+    pub fn parse(raw: impl Into<String>) -> Result<Self, VersionIdError> {
+        let raw = raw.into();
+        if raw.is_empty() {
+            return Err(VersionIdError::Empty);
+        }
+        if let Some(ch) = raw
+            .chars()
+            .find(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_' | '+')))
+        {
+            return Err(VersionIdError::InvalidCharacter(ch));
+        }
+        Ok(Self(raw))
+    }
+
+    /// Borrows the original metadata spelling.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Returns the owned metadata spelling.
+    #[must_use]
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Display for VersionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for VersionId {
+    type Err = VersionIdError;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        Self::parse(raw)
     }
 }
 
@@ -158,7 +222,7 @@ pub struct PackVersion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionMeta {
     /// The version id, for example `"26.2"`.
-    pub id: String,
+    pub id: VersionId,
     /// The wire protocol version, when present.
     pub protocol_version: Option<i32>,
     /// The resource pack format (major/minor).
@@ -177,11 +241,12 @@ impl VersionMeta {
     pub fn parse(bytes: &[u8]) -> Result<Self, AssetError> {
         let root: Value =
             serde_json::from_slice(bytes).map_err(|e| AssetError::MetaMalformed(e.to_string()))?;
-        let id = root
+        let raw_id = root
             .get("id")
             .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned();
+            .ok_or_else(|| AssetError::MetaMalformed("missing \"id\"".to_string()))?;
+        let id = VersionId::parse(raw_id)
+            .map_err(|error| AssetError::MetaMalformed(format!("invalid \"id\": {error}")))?;
         let protocol_version = root
             .get("protocol_version")
             .and_then(Value::as_i64)

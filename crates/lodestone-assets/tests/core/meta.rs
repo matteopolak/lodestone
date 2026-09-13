@@ -72,13 +72,13 @@ fn invalid_json_is_malformed_not_panic() {
 
 // --- version.json (vanilla built-in pack metadata) ---
 
-use lodestone_assets::{PackVersion, VersionMeta};
+use lodestone_assets::{PackVersion, VersionId, VersionMeta};
 
 #[test]
 fn parses_version_json_major_minor() {
     let json = br#"{"id":"26.2","protocol_version":776,"pack_version":{"resource_major":88,"resource_minor":0,"data_major":107,"data_minor":1}}"#;
     let v = VersionMeta::parse(json).unwrap();
-    assert_eq!(v.id, "26.2");
+    assert_eq!(v.id.as_str(), "26.2");
     assert_eq!(v.protocol_version, Some(776));
     assert_eq!(
         v.resource_format,
@@ -146,6 +146,22 @@ fn version_json_into_pack_meta() {
 fn version_json_malformed_is_error() {
     assert!(VersionMeta::parse(br#"{"id":"x"}"#).is_err()); // missing pack_version
     assert!(VersionMeta::parse(br#"not json"#).is_err());
+}
+
+#[test]
+fn version_id_rejects_empty_and_path_like_labels() {
+    assert!(VersionId::parse("").is_err());
+    assert!(VersionId::parse("26.2/unsafe").is_err());
+    assert!(VersionId::parse("26.2 rc1").is_err());
+    assert_eq!(VersionId::parse("26.2-pre+1").unwrap().as_str(), "26.2-pre+1");
+}
+
+#[test]
+fn version_json_requires_a_valid_id() {
+    let missing = br#"{"pack_version":4}"#;
+    assert!(VersionMeta::parse(missing).is_err());
+    let invalid = br#"{"id":"26.2/unsafe","pack_version":4}"#;
+    assert!(VersionMeta::parse(invalid).is_err());
 }
 
 #[test]

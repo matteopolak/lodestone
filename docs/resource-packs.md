@@ -81,6 +81,13 @@ pack goes on top") and never appears in the local pack-selection screen's own
 list, matching vanilla keeping downloaded packs out of the user-visible
 repository.
 
+The built-in pack's `version.json` is parsed into `VersionMeta`. Its `id` is a
+validated `VersionId` token, not an arbitrary string: release, snapshot, and
+pre-release spellings are preserved, while missing, empty, whitespace-bearing,
+or path-like values fail at the asset boundary. The id is converted back to
+plain text only when it becomes the built-in pack's display description; the
+numeric resource/data formats remain separate typed values.
+
 The server-side `ResourcePackPush` seam carries a parsed `ResourcePackUrl`
 rather than a free-form string. Construction accepts only absolute `http` and
 `https` URLs; the version adapter converts the validated value back to text
