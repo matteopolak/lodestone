@@ -26,11 +26,13 @@ use tokio::io::ReadBuf;
 /// the JavaScript transport makes the partial-write and over-credit rules
 /// testable on every target.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(any(test, all(feature = "worker-web", target_arch = "wasm32")))]
 pub(crate) struct ByteCreditWindow {
     limit: usize,
     available: usize,
 }
 
+#[cfg(any(test, all(feature = "worker-web", target_arch = "wasm32")))]
 impl ByteCreditWindow {
     /// Creates an empty window. This is the sender side before the peer's
     /// initial grant arrives.
@@ -96,6 +98,7 @@ impl ByteCreditWindow {
 
 /// A malformed or out-of-window credit operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(any(test, all(feature = "worker-web", target_arch = "wasm32")))]
 pub(crate) enum CreditError {
     /// A payload consumed more credit than remained.
     Exceeded { available: usize, requested: usize },
@@ -105,6 +108,7 @@ pub(crate) enum CreditError {
 
 /// Details returned when a bounded inbox cannot accept a frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(any(test, all(feature = "worker-web", target_arch = "wasm32")))]
 pub(crate) struct InboxOverflow {
     pub(crate) buffered: usize,
     pub(crate) incoming: usize,
@@ -121,17 +125,23 @@ pub(crate) struct ByteInbox {
     buf: VecDeque<u8>,
     /// `usize::MAX` is the legacy unbounded mode used by the WebSocket
     /// adapters. The MessagePort adapter opts into an explicit finite limit.
+    #[cfg(any(test, all(feature = "worker-web", target_arch = "wasm32")))]
     capacity: usize,
 }
 
 impl Default for ByteInbox {
     fn default() -> Self {
-        Self { buf: VecDeque::new(), capacity: usize::MAX }
+        Self {
+            buf: VecDeque::new(),
+            #[cfg(any(test, all(feature = "worker-web", target_arch = "wasm32")))]
+            capacity: usize::MAX,
+        }
     }
 }
 
 impl ByteInbox {
     /// Creates a FIFO with a finite byte capacity.
+    #[cfg(any(test, all(feature = "worker-web", target_arch = "wasm32")))]
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self { buf: VecDeque::new(), capacity }
     }
@@ -143,6 +153,7 @@ impl ByteInbox {
     }
 
     /// Appends a frame only if it fits in the configured capacity.
+    #[cfg(any(test, all(feature = "worker-web", target_arch = "wasm32")))]
     pub(crate) fn try_push(&mut self, bytes: &[u8]) -> Result<(), InboxOverflow> {
         if bytes.len() > self.capacity.saturating_sub(self.buf.len()) {
             return Err(InboxOverflow {
@@ -157,6 +168,7 @@ impl ByteInbox {
 
     /// Returns the number of bytes that can be accepted without exceeding the
     /// configured capacity.
+    #[cfg(any(test, all(feature = "worker-web", target_arch = "wasm32")))]
     pub(crate) fn remaining_capacity(&self) -> usize {
         self.capacity.saturating_sub(self.buf.len())
     }
