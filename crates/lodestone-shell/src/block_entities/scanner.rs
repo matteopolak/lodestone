@@ -111,7 +111,7 @@ pub(crate) fn structure_block_outline_vertices(block: [i32; 3], nbt: &lodestone_
 }
 
 #[must_use]
-fn structure_block_vertices_from_loaded_world(
+pub(crate) fn structure_block_vertices_from_loaded_world(
     world: &World,
     chunks: impl IntoIterator<Item = ChunkPos>,
     eye: Vec3,

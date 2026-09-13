@@ -62,3 +62,5 @@ mod presentation;
 
 pub(super) use item_books::give_main_hand_item;
 pub(super) use player_actions::peak_swing_over;
+pub(super) use item_books::install_player_interact_veto;
+pub(super) use world_mining::{client_config, displayed_sidebar, login_event};

@@ -497,7 +497,7 @@ fn hex_chat_colour_reaches_a_vertex_through_the_real_session_and_redraw_wiring()
 /// the widget.
 #[test]
 fn app_rs_fills_hud_frame_chat_spans_not_the_legacy_chat_field() {
-    let src = include_str!("../app/redraw.rs");
+    let src = include_str!("../../app/redraw.rs");
     assert!(
         src.contains("hud_frame.chat_spans = &chat_spans_lines"),
         "app/redraw.rs must fill `HudFrame::chat_spans` from the real \
@@ -623,7 +623,7 @@ fn initial_terrain_screen_is_scoped_to_the_new_world_latch() {
 /// string and passes with the real line deleted.
 #[test]
 fn redraw_applies_a_pending_pack_before_it_asks_whether_to_stop_covering_the_world() {
-    let src = include_str!("../app/redraw.rs");
+    let src = include_str!("../../app/redraw.rs");
 
     let reload = src
         .find("self.sim.reload_resource_pack_atlas()")

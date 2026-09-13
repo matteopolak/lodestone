@@ -34,7 +34,7 @@ fn recipe_snapshot_reuses_the_cache_until_the_source_revision_moves() {
 /// A `ClientEvent::Login` for `entity_id`, creative in the overworld — the
 /// event that seeds `ServerEntityId` **and** the local player's `EntityIndex`
 /// entry.
-fn login_event(entity_id: i32) -> lodestone_client::ClientEvent {
+pub(crate) fn login_event(entity_id: i32) -> lodestone_client::ClientEvent {
     lodestone_client::ClientEvent::Login {
         entity_id,
         game_mode: lodestone_client::GameMode::Creative,
@@ -46,7 +46,7 @@ fn login_event(entity_id: i32) -> lodestone_client::ClientEvent {
 /// off the [`lodestone_ecs::SessionScoreboard`] component rather than through
 /// `Sim::sidebar` — which also needs the objective's own `ObjectiveUpdate` and
 /// a translator, neither of which this is asking about.
-fn displayed_sidebar(sim: &Sim) -> Option<String> {
+pub(crate) fn displayed_sidebar(sim: &Sim) -> Option<String> {
     sim.read(|w| {
         w.get::<lodestone_ecs::SessionScoreboard>(sim.local)?
             .0
@@ -58,7 +58,7 @@ fn displayed_sidebar(sim: &Sim) -> Option<String> {
 /// What a real windowed client is built from — the path that must never hold
 /// an offline world. `Mode::Window` matters: `Mode::Headless` deliberately
 /// delegates to the demo-world fixture (see [`Sim::new`]).
-fn client_config() -> Config {
+pub(crate) fn client_config() -> Config {
     Config {
         mode: Mode::Window,
         render_distance: 2,

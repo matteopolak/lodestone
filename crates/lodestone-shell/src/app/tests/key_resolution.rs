@@ -11,14 +11,14 @@ use super::*;
 use crate::keybinds::{Binding, InputAction};
 
 /// The gate while the world is being played normally.
-fn playing() -> KeyGate {
+pub(crate) fn playing() -> KeyGate {
     KeyGate {
         gameplay: true,
         ..KeyGate::default()
     }
 }
 
-fn resolve(gate: KeyGate, code: KeyCode, pressed: bool) -> Option<KeyOutcome> {
+pub(crate) fn resolve(gate: KeyGate, code: KeyCode, pressed: bool) -> Option<KeyOutcome> {
     resolve_key(&Keybinds::new(), gate, Some(code), pressed, false, None)
 }
 

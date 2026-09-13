@@ -1182,16 +1182,3 @@ fn holding_use_restarts_food_after_its_consume_duration() {
         "holding use through bread's 32-tick duration must send a fresh UseItem, got {sent:?}"
     );
 }
-
-/// Vanilla's `getCurrentItemAttackStrengthDelay`/`getAttackStrengthScale`
-///: with no [`Attributes`] component at all (the
-/// pre-login default `attribute_value` falls back to — see
-/// `no_attributes_component_folds_to_the_registry_default` in
-/// `lodestone_ecs::player`'s own tests for the identical fallback one
-/// layer down), the unarmed `attack_speed` default of `4.0` gives a
-/// 5-tick delay, so the scale ramps linearly from `0.0` to `1.0` over
-/// exactly 5 real `GameTick`s (via [`Self::step`], not a hand-called
-/// tick function — the same "reachable through the schedule" bar
-/// `lodestone_ecs::player`'s island-class tests hold `PhysicsState`/
-/// `AttackStrengthTicker` to) and clamps there rather than overshooting.
-#[test]

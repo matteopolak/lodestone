@@ -670,3 +670,25 @@ fn third_person_body_retains_the_selected_heads_profile_skin_for_its_main_hand()
 /// most recently — that was the cross-account skin flash on join.
 #[test]
 fn a_sessionless_body_does_not_consume_another_accounts_cached_model() {
+    fn sheet() -> lodestone_assets::Image {
+        lodestone_assets::Image {
+            width: 64,
+            height: 64,
+            rgba: vec![0u8; 64 * 64 * 4],
+        }
+    }
+
+    let mut sim = Sim::new(test_config());
+    sim.cycle_camera_type();
+    assert!(sim.local_uuid().is_none(), "control: this sim has no account identity");
+    let foreign = uuid::Uuid::from_u128(0xF0_12_E1_6E);
+
+    crate::skin_fetch::publish(foreign, lodestone_assets::PlayerModelType::Slim, sheet());
+    let body = sim
+        .third_person_body_state()
+        .expect("third person is on");
+    assert!(
+        !body.slim,
+        "a profile cache with no matching live UUID must not select its slim rig"
+    );
+}

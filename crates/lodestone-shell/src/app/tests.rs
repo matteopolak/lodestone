@@ -32,6 +32,8 @@ mod server_list;
 #[path = "tests/render_controls.rs"]
 mod render_controls;
 
+pub(super) use key_resolution::{playing, resolve};
+
 /// A cheap sim shared by pacing and session tests: headless mode with the
 /// smallest render distance that still generates real terrain.
 fn pacing_sim() -> Sim {

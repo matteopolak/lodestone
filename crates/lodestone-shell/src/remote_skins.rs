@@ -740,14 +740,28 @@ mod tests {
         let metadata = model.map_or(String::new(), |m| {
             format!(r#","metadata":{{"model":"{m}"}}"#)
         });
-        let json = format!(r#"{{"textures":{{"SKIN":{{"url":"{url}"{metadata}}}}}}}"#);
+        let json = [
+            r#"{"textures":{"SKIN":{"url":""#,
+            url,
+            r#"""#,
+            metadata.as_str(),
+            r#"}}}"#,
+        ]
+        .concat();
         base64_encode(json.as_bytes())
     }
 
     fn payload_with_elytra(skin_url: &str, cape_url: &str, elytra_url: &str) -> String {
-        let json = format!(
-            r#"{{"textures":{{"SKIN":{{"url":"{skin_url}"}},"CAPE":{{"url":"{cape_url}"}},"ELYTRA":{{"url":"{elytra_url}"}}}}}}}"#
-        );
+        let json = [
+            r#"{"textures":{"SKIN":{"url":""#,
+            skin_url,
+            r#"","CAPE":{"url":""#,
+            cape_url,
+            r#"","ELYTRA":{"url":""#,
+            elytra_url,
+            r#""}}}"#,
+        ]
+        .concat();
         base64_encode(json.as_bytes())
     }
 

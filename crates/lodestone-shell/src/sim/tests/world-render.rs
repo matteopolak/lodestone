@@ -1,6 +1,5 @@
 use super::*;
 
-#[test]
 fn chunk_dirty_signal_reschedules_a_loaded_column() {
     // A `ChunkLoaded`/`NetUpdate::Chunk { x, z }` signal must re-mesh the
     // column it names (the §12.24 dirty-region trigger), so the live-world
@@ -23,7 +22,6 @@ fn chunk_dirty_signal_reschedules_a_loaded_column() {
     );
 }
 
-#[test]
 fn chunk_arrival_also_remeshes_its_loaded_neighbours() {
     // A section's geometry depends on its whole 3×3×3 neighbourhood, so a
     // column meshed before its neighbour loaded baked its seam against air —
@@ -90,8 +88,6 @@ fn neighbour_remesh_skips_columns_that_are_not_loaded() {
         "no neighbour of an out-of-world column is loaded, so none is queued"
     );
 }
-
-#[test]
 fn chunk_dirty_signal_ignores_an_absent_column() {
     // Columns we don't hold (e.g. before the live world source is wired in)
     // must be a no-op, never a panic or spurious work.

@@ -133,7 +133,7 @@ pub(crate) use snapshot::block_entity_frame_snapshot;
 use snapshot::BlockEntityFrameCandidate;
 
 mod scanner;
-pub(crate) use scanner::{can_render_structure_boxes, structure_block_outline_vertices, structure_block_vertices};
+pub(crate) use scanner::{can_render_structure_boxes, structure_block_outline_vertices, structure_block_vertices, structure_block_vertices_from_loaded_world};
 use scanner::structure_box;
 
 mod render_inputs;

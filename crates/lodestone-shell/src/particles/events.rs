@@ -1084,7 +1084,7 @@ impl Particles {
 
     /// One block's `animateTick`, for the handful of blocks a survival player
     /// actually notices. Silent for everything else.
-    fn animate_block(
+    pub(crate) fn animate_block(
         &mut self,
         block: [i32; 3],
         state: lodestone_data::block_states::StateId,

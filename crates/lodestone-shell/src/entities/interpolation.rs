@@ -7,7 +7,7 @@ pub(super) fn alpha(clock: &InterpClock) -> f32 {
 }
 
 /// The currently-drawn position: [`InterpFrom`] eased toward [`InterpTo`].
-pub(super) fn render_feet(from: &InterpFrom, to: &InterpTo, clock: &InterpClock) -> Vec3 {
+pub(crate) fn render_feet(from: &InterpFrom, to: &InterpTo, clock: &InterpClock) -> Vec3 {
     from.feet.lerp(to.feet, alpha(clock))
 }
 
@@ -15,7 +15,7 @@ pub(super) fn render_feet(from: &InterpFrom, to: &InterpTo, clock: &InterpClock)
 ///
 /// `alpha` is the shared driver's accumulator residual. This function is pure:
 /// calling it once or a hundred times between ticks cannot advance physics.
-pub(super) fn sample_vehicle_pose(
+pub(crate) fn sample_vehicle_pose(
     previous: VehicleRenderPose,
     current: VehicleRenderPose,
     alpha: f32,
@@ -36,7 +36,7 @@ pub(super) fn sample_vehicle_pose(
 /// Returns this frame's fixed-tick sample when `id` is the vehicle the local
 /// client controls. Remote/uncontrolled entities deliberately return `None` and
 /// continue through the generic network interpolation track.
-pub(super) fn controlled_vehicle_render_pose(
+pub(crate) fn controlled_vehicle_render_pose(
     controlled: Option<&ControlledVehicle>,
     id: i32,
     alpha: f32,
@@ -123,18 +123,18 @@ pub(crate) fn riding_render_seat(
 
 /// The currently-drawn body yaw, taking the shortest arc so a wrap across 360°
 /// (e.g. 350°→10°) turns +20° rather than −340°.
-pub(super) fn render_yaw(from: &InterpFrom, to: &InterpTo, clock: &InterpClock) -> f32 {
+pub(crate) fn render_yaw(from: &InterpFrom, to: &InterpTo, clock: &InterpClock) -> f32 {
     lerp_angle(from.yaw, to.yaw, alpha(clock))
 }
 
 /// The currently-drawn head yaw, shortest-arc like the body yaw.
-pub(super) fn render_head_yaw(from: &InterpFrom, to: &InterpTo, clock: &InterpClock) -> f32 {
+pub(crate) fn render_head_yaw(from: &InterpFrom, to: &InterpTo, clock: &InterpClock) -> f32 {
     lerp_angle(from.head_yaw, to.head_yaw, alpha(clock))
 }
 
 /// The currently-drawn head pitch. Pitch is bounded to ±90° and never wraps, so
 /// a plain linear ease is correct.
-pub(super) fn render_pitch(from: &InterpFrom, to: &InterpTo, clock: &InterpClock) -> f32 {
+pub(crate) fn render_pitch(from: &InterpFrom, to: &InterpTo, clock: &InterpClock) -> f32 {
     from.pitch + (to.pitch - from.pitch) * alpha(clock)
 }
 
@@ -168,7 +168,7 @@ pub(super) fn render_pitch(from: &InterpFrom, to: &InterpTo, clock: &InterpClock
 /// whole-body prone rotation. This is the second, independent consumer: it
 /// drives the humanoid swim branch — the arm-over-arm stroke and leg kick —
 /// which reads it from `AnimInput` rather than `EntityDraw`.
-pub(super) fn render_anim(
+pub(crate) fn render_anim(
     from: &InterpFrom,
     to: &InterpTo,
     clock: &InterpClock,
@@ -213,7 +213,7 @@ pub(super) fn render_anim(
 /// Vanilla's namespace. Matched explicitly rather than ignored: a resource pack
 /// or mod item at `mypack:bow` is a *different* item and must not inherit the
 /// bow's arm pose from its path alone.
-const VANILLA: &str = "minecraft";
+pub(crate) const VANILLA: &str = "minecraft";
 /// The `minecraft:bow` item path, matched by identity because the arm pose is a
 /// per-item special case in vanilla too (vanilla's own bow use-animation).
 const BOW_PATH: &str = "bow";
@@ -240,7 +240,7 @@ const AIR_PATH: &str = "air";
 /// Two copies would let a crossbow's arms and its model disagree about how far
 /// along the same wind is, on the same frame. An alias rather than a re-import so
 /// the derivation stays documented at the place the arm pose reads it.
-const CROSSBOW_CHARGE_TICKS: f32 = lodestone_render::CROSSBOW_CHARGE_TICKS;
+pub(crate) const CROSSBOW_CHARGE_TICKS: f32 = lodestone_render::CROSSBOW_CHARGE_TICKS;
 
 /// Which arm pose an entity's arms take, and in which hand.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -302,7 +302,7 @@ pub(super) struct ArmPoseChoice {
 /// Because the fallthrough is now avatar-only, it changes **no** mob silhouette, and
 /// neither bow-pose pixel gate (both of which use a skeleton subject and a zombie
 /// control) needed re-baselining.
-pub(super) fn arm_pose_for(
+pub(crate) fn arm_pose_for(
     type_path: &str,
     equipment: &[(EquipmentSlot, ResourceLocation)],
     item_use: Option<ItemUse>,
@@ -461,7 +461,7 @@ pub(super) fn wrap_degrees(deg: f32) -> f32 {
 /// Narrows a snapshot's per-slot equipment to the slots that actually hold an
 /// item — dropping both the never-reported slots (absent already) and the
 /// explicitly-empty ones, which draw nothing either way.
-pub(super) fn occupied_equipment(
+pub(crate) fn occupied_equipment(
     equipment: &[(EquipmentSlot, Option<ResourceLocation>)],
 ) -> Vec<(EquipmentSlot, ResourceLocation)> {
     equipment

@@ -1078,23 +1078,3 @@ fn both_collision_sources_are_send_sync_and_static() {
 //
 // The local-namespace gate is directly below. Plugin-specific command
 // registration is outside this crate's current dependency set.
-
-/// The `#` client-local namespace is still reserved by [`Sim::send_chat`] even
-/// though nothing fills it: a `#`-prefixed line must be consumed and refused,
-/// never composed into an outbound chat action where every other player on the
-/// server would read it.
-///
-/// This gate covers the local interception half of
-/// `goto_chat_command_never_reaches_the_outbound_action_queue`. The command
-/// dispatch and goal execution are outside this crate; the *interception* is
-/// the shell behavior to pin, because deleting it would start leaking `#` lines
-/// onto the wire.
-///
-/// # The control is the point
-///
-/// `assert!(actions.try_recv().is_err())` is the load-bearing line, and on its
-/// own it is the *precondition* species of vacuous test: an empty outbound
-/// queue is also exactly what a `Sim` produces when nothing is wired to it at
-/// all. So an ordinary `/say` line runs first on the **same** `Sim` and must
-/// land in the queue. Without that, this gate would pass on a `send_chat` that
-/// had been gutted to send nothing whatsoever.

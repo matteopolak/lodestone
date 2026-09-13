@@ -449,7 +449,7 @@ fn aim_at_the_floor(sim: &mut Sim) {
 }
 
 /// Run whole ticks and report the largest swing progress seen.
-pub(super) fn peak_swing_over(sim: &mut Sim, ticks: u32) -> f32 {
+pub(crate) fn peak_swing_over(sim: &mut Sim, ticks: u32) -> f32 {
     let mut peak = 0.0f32;
     for _ in 0..ticks {
         sim.step(1.0 / 20.0);
@@ -795,11 +795,3 @@ fn begin_attack_live_sends_no_target_spectator_action_on_a_miss() {
     let peak = peak_swing_over(&mut sim, 10);
     assert_eq!(peak, 0.0, "a spectator's click must not swing the arm either way");
 }
-
-/// Puts `item` into the local player's main-hand hotbar slot (native
-/// index 0, [`Sim::selected_slot`]'s default) via the same
-/// [`lodestone_ecs::SessionMenus`] fold a real `ContainerSetSlot`
-/// packet drives — the pattern
-/// `closing_a_server_menu_clears_it_locally_without_waiting_for_the_server`
-/// already established for writing menu state directly in a hermetic
-/// test.

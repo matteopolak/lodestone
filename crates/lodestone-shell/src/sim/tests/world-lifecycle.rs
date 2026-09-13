@@ -616,7 +616,3 @@ fn the_avatar_pose_carries_the_walk_cycle_in_first_person() {
         "the camera must not have changed mode under us"
     );
 }
-
-/// [`Sim::reload_resource_pack_atlas`]'s equality guard: a freshly built `Sim`
-/// seeds `last_pack_generation` to whatever [`crate::resources::pack_generation`]
-/// already was at construction (its own doc explains why — the `BlockResources`

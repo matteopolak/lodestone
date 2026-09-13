@@ -59,7 +59,7 @@ fn item_friction_block(position: Vec3d) -> (i32, i32, i32) {
 /// for the same reason `docs/bevy-migration.md` §8 keeps `lodestone-physics` a
 /// library: it is the vanilla-constant carrier, and its per-tick trace is what
 /// the tests below pin.
-pub(super) fn step_item_physics(
+pub(crate) fn step_item_physics(
     sim: &mut ItemMotion,
     view: &dyn CollisionView,
     profile: &PhysicsProfile,
@@ -112,7 +112,7 @@ pub(super) fn step_item_physics(
 /// this: since §4.1(c) `crate::sim::Sim` inserts an [`ItemCollision`] resource
 /// built from the player's loaded chunks before each `GameTick` run.
 #[derive(Debug)]
-pub(super) struct OpenAir;
+pub(crate) struct OpenAir;
 
 impl CollisionView for OpenAir {
     fn collision_boxes(&self, _x: i32, _y: i32, _z: i32, _out: &mut Vec<lodestone_physics::Aabb>) {}
@@ -240,7 +240,7 @@ pub fn tick_projectile_physics(
 /// re-anchored) snapshot. A missing velocity seeds zero — gravity still applies
 /// to it, it just has nothing to arc with, which is exactly the discriminating
 /// behaviour the hermetic tests below pin.
-pub(super) fn new_item_physics(snap: &EntityFacts) -> ItemPhysics {
+pub(crate) fn new_item_physics(snap: &EntityFacts) -> ItemPhysics {
     let mut sim = ItemMotion::new(
         to_model_vec3(snap.feet),
         snap.velocity.map(to_model_vec3).unwrap_or_default(),
@@ -254,7 +254,7 @@ pub(super) fn new_item_physics(snap: &EntityFacts) -> ItemPhysics {
 }
 
 /// Seeds the local projectile simulation from the first authoritative report.
-pub(super) fn new_projectile_physics(snap: &EntityFacts) -> ProjectilePhysics {
+pub(crate) fn new_projectile_physics(snap: &EntityFacts) -> ProjectilePhysics {
     let position = to_model_vec3(snap.feet);
     let velocity = snap.velocity.map(to_model_vec3).unwrap_or_default();
     let sim = if is_accelerating_projectile(snap.entity_type) {
