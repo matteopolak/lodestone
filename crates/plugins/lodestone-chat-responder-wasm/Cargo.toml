@@ -91,6 +91,9 @@ select-slot-invalid = []
 # The inventory-observation conformance fixture. It reports a copied native
 # inventory-slot event after the host explicitly grants `observe:inventory`.
 inventory = []
+# The full copied inventory/menu observation fixture: container content, slot,
+# property, open/close, mount, held-slot, and cursor events.
+inventory-menu = []
 # The copied remote-entity lifecycle fixture. It reports a generation-scoped
 # spawn through the normal guest action return path.
 entity-observation = []

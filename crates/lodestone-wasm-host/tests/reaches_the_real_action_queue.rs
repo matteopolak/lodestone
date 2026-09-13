@@ -1340,6 +1340,80 @@ fn a_wasm_inventory_observer_is_default_denied() {
     assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 0);
 }
 
+/// The full menu observation family reaches a separately built guest through
+/// the production client app and its `GameEvent` bus. This is deliberately a
+/// container-content event rather than the existing player-slot control, so a
+/// test of the old arm cannot masquerade as coverage for menu wiring.
+#[test]
+fn a_wasm_inventory_menu_observer_receives_container_content() {
+    let wasm = support::build_example_plugin(&["inventory-menu"]);
+    let mut policy = CapabilitySet::default_policy();
+    policy.insert(Capability::ObserveInventory);
+    let mut host = PluginHost::new(policy).expect("engine");
+    host.load_file(
+        "inventory-menu",
+        &wasm,
+        &CapabilitySet::from_iter([
+            Capability::Log,
+            Capability::ObserveInventory,
+            Capability::ActChat,
+        ]),
+    )
+    .expect("the inventory-menu fixture must load");
+
+    let mut app = client_app_with_host(false);
+    app.add_plugins(WasmHostPlugin::new(host));
+    app.world_mut().write_message(GameEvent(ClientEvent::ContainerContent {
+        window_id: 4,
+        state_id: lodestone_model::ContainerStateId::new(31),
+        items: vec![None, Some(lodestone_model::ItemStack::new(
+            "minecraft:diamond".parse().expect("valid item key"),
+            7,
+        ))],
+        carried_item: Some(lodestone_model::ItemStack::new(
+            "minecraft:diamond".parse().expect("valid item key"),
+            2,
+        )),
+    }));
+    app.world_mut().run_schedule(GameTick);
+
+    assert_eq!(
+        chat_actions(&app),
+        vec![ClientAction::SendChat {
+            text: "inventory-menu:content window=4 state=31 slots=2 cursor=true".to_owned(),
+        }],
+        "the production conductor must deliver copied container content"
+    );
+}
+
+/// The menu event uses the same explicit data-flow grant as the existing
+/// player-inventory observation. The identical production event and guest are
+/// run without that grant as a negative control.
+#[test]
+fn a_wasm_inventory_menu_observer_is_default_denied() {
+    let wasm = support::build_example_plugin(&["inventory-menu"]);
+    let mut host = PluginHost::new(CapabilitySet::default_policy()).expect("engine");
+    host.load_file(
+        "inventory-menu",
+        &wasm,
+        &CapabilitySet::from_iter([Capability::Log, Capability::ActChat]),
+    )
+    .expect("the menu fixture must load without the observation grant");
+
+    let mut app = client_app_with_host(false);
+    app.add_plugins(WasmHostPlugin::new(host));
+    app.world_mut().write_message(GameEvent(ClientEvent::ContainerContent {
+        window_id: 4,
+        state_id: lodestone_model::ContainerStateId::new(31),
+        items: Vec::new(),
+        carried_item: None,
+    }));
+    app.world_mut().run_schedule(GameTick);
+
+    assert_eq!(chat_actions(&app), Vec::<ClientAction>::new());
+    assert_eq!(app.world().resource::<WasmPlugins>().refused_actions(), 0);
+}
+
 /// A separately compiled guest reaches the shell handoff, but the handoff still
 /// carries only the bounded input that the live menu predictor needs. The
 /// shell's `bounded_clicks_reach_the_live_menu_predictor_and_invalid_slots_do_not`

@@ -156,6 +156,56 @@ interface types {
         item: option<item-stack>,
     }
 
+    /// A full replacement for the active container's slot contents.
+    record inventory-container-content {
+        window-id: s32,
+        state-id: u32,
+        items: list<option<item-stack>>,
+        carried-item: option<item-stack>,
+    }
+
+    /// One changed slot in an open container.
+    record inventory-container-slot-changed {
+        window-id: s32,
+        state-id: u32,
+        slot: s32,
+        item: option<item-stack>,
+    }
+
+    /// One menu-local property update, such as progress or an input cost.
+    record inventory-container-data-changed {
+        window-id: s32,
+        property: s32,
+        value: s32,
+    }
+
+    /// A menu screen opened with its canonical type and flattened title.
+    record inventory-screen-opened {
+        window-id: s32,
+        menu-type: string,
+        title: string,
+    }
+
+    record inventory-screen-closed {
+        window-id: s32,
+    }
+
+    /// A mount inventory screen opened. The entity id is protocol identity,
+    /// not an ECS entity handle.
+    record inventory-mount-screen-opened {
+        container-id: s32,
+        inventory-columns: s32,
+        entity-id: s32,
+    }
+
+    record inventory-held-slot-changed {
+        slot: s32,
+    }
+
+    record inventory-cursor-item-changed {
+        item: option<item-stack>,
+    }
+
     /// Section coordinates — block coordinate `>> 4` on every axis, exactly
     /// `lodestone_model::SectionPos`.
     record section-pos {
@@ -344,6 +394,22 @@ interface types {
         health-changed(health),
         /// `ClientEvent::InventorySlotChanged` — capability `observe:inventory`.
         inventory-slot-changed(inventory-slot-changed),
+        /// `ClientEvent::ContainerContent` — capability `observe:inventory`.
+        inventory-container-content(inventory-container-content),
+        /// `ClientEvent::ContainerSlot` — capability `observe:inventory`.
+        inventory-container-slot-changed(inventory-container-slot-changed),
+        /// `ClientEvent::ContainerData` — capability `observe:inventory`.
+        inventory-container-data-changed(inventory-container-data-changed),
+        /// `ClientEvent::ScreenOpened` — capability `observe:inventory`.
+        inventory-screen-opened(inventory-screen-opened),
+        /// `ClientEvent::ScreenClosed` — capability `observe:inventory`.
+        inventory-screen-closed(inventory-screen-closed),
+        /// `ClientEvent::MountScreenOpened` — capability `observe:inventory`.
+        inventory-mount-screen-opened(inventory-mount-screen-opened),
+        /// `ClientEvent::HeldSlotChanged` — capability `observe:inventory`.
+        inventory-held-slot-changed(inventory-held-slot-changed),
+        /// `ClientEvent::CursorItemChanged` — capability `observe:inventory`.
+        inventory-cursor-item-changed(inventory-cursor-item-changed),
         /// `ClientEvent::SectionBlocksChanged` — capability `observe:blocks`.
         blocks-changed(section-blocks-changed),
         /// Remote-entity lifecycle and copied state — capability `observe:entities`.

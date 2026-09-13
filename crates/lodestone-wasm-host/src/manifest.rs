@@ -19,6 +19,8 @@
 //! capabilities = ["log", "observe:chat", "act:chat"]
 //! ```
 //!
+//! A `monitor` priority is observation-only: its manifest cannot request any
+//! `act:*`, `world:write`, `veto:actions`, or `commands:register` capability.
 //! Dependencies are declared in a typed table. Required dependencies must be
 //! present in the same discovery directory; optional dependencies affect order
 //! only when present.
@@ -596,6 +598,19 @@ capabilities = ["log", "observe:chat", "act:chat"]
         Manifest::parse(text, Path::new("plugin.toml"))
     }
 
+    fn manifest_at_priority(name: &str, priority: &str) -> String {
+        let mut text = GOOD
+            .replace(r#"name = "chat-responder""#, &format!("name = \"{name}\""))
+            .replace(r#"priority = "normal""#, &format!("priority = \"{priority}\""));
+        if priority == "monitor" {
+            text = text.replace(
+                r#"capabilities = ["log", "observe:chat", "act:chat"]"#,
+                r#"capabilities = ["log", "observe:chat"]"#,
+            );
+        }
+        text
+    }
+
     /// A scratch directory for the two scan tests.
     ///
     /// `std::env::temp_dir()` rather than `CARGO_TARGET_TMPDIR`, which cargo sets only
@@ -738,7 +753,13 @@ capabilities = ["log", "observe:chat", "act:chat"]
         ];
         let mut parsed = Vec::new();
         for (name, expected) in names {
-            let text = GOOD.replace(r#"priority = "normal""#, &format!("priority = \"{name}\""));
+            let mut text = GOOD.replace(r#"priority = "normal""#, &format!("priority = \"{name}\""));
+            if expected == Priority::Monitor {
+                text = text.replace(
+                    r#"capabilities = ["log", "observe:chat", "act:chat"]"#,
+                    r#"capabilities = ["log", "observe:chat"]"#,
+                );
+            }
             let m = parse(&text).unwrap_or_else(|e| panic!("`{name}` must parse: {e}"));
             assert_eq!(m.priority, expected);
             parsed.push(m.priority);
@@ -799,9 +820,7 @@ capabilities = ["log", "observe:chat", "act:chat"]
         ] {
             let d = root.join(dir);
             std::fs::create_dir_all(&d).expect("mkdir");
-            let text = GOOD
-                .replace(r#"name = "chat-responder""#, &format!("name = \"{name}\""))
-                .replace(r#"priority = "normal""#, &format!("priority = \"{priority}\""));
+            let text = manifest_at_priority(name, priority);
             std::fs::write(d.join("plugin.toml"), text).expect("write");
         }
 
@@ -834,9 +853,7 @@ capabilities = ["log", "observe:chat", "act:chat"]
         for (dir, name, priority, dependencies) in manifests {
             let d = root.join(dir);
             std::fs::create_dir_all(&d).unwrap();
-            let mut text = GOOD
-                .replace(r#"name = "chat-responder""#, &format!("name = \"{name}\""))
-                .replace(r#"priority = "normal""#, &format!("priority = \"{priority}\""));
+            let mut text = manifest_at_priority(name, priority);
             if let Some((required, optional)) = dependencies {
                 text.push_str(&format!(
                     "\n[dependencies]\nrequired = [\"{required}\"]\noptional = [\"{optional}\"]\n"

@@ -163,6 +163,9 @@ impl Guest for ChatResponder {
         #[cfg(feature = "inventory")]
         return report_inventory_change(events);
 
+        #[cfg(feature = "inventory-menu")]
+        return report_inventory_menu_change(events);
+
         #[cfg(feature = "entity-observation")]
         return report_entity_observation(events);
 
@@ -286,7 +289,7 @@ impl Guest for ChatResponder {
         #[cfg(feature = "fs-delete")]
         return delete_file();
 
-        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid", feature = "inventory", feature = "entity-observation", feature = "inventory-click", feature = "inventory-click-invalid", feature = "inventory-quick-move", feature = "inventory-quick-move-invalid", feature = "inventory-double-click", feature = "inventory-hotbar-swap", feature = "inventory-hotbar-swap-invalid", feature = "inventory-throw", feature = "inventory-throw-invalid", feature = "inventory-drop-cursor", feature = "drop-selected-item", feature = "swap-offhand", feature = "release-use-item", feature = "stab", feature = "respawn", feature = "disconnect", feature = "send-command", feature = "world-read", feature = "world-write", feature = "fs-write", feature = "fs-delete")))]
+        #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network", feature = "look", feature = "movement", feature = "place", feature = "break", feature = "select-slot", feature = "select-slot-invalid", feature = "inventory", feature = "inventory-menu", feature = "entity-observation", feature = "inventory-click", feature = "inventory-click-invalid", feature = "inventory-quick-move", feature = "inventory-quick-move-invalid", feature = "inventory-double-click", feature = "inventory-hotbar-swap", feature = "inventory-hotbar-swap-invalid", feature = "inventory-throw", feature = "inventory-throw-invalid", feature = "inventory-drop-cursor", feature = "drop-selected-item", feature = "swap-offhand", feature = "release-use-item", feature = "stab", feature = "respawn", feature = "disconnect", feature = "send-command", feature = "world-read", feature = "world-write", feature = "fs-write", feature = "fs-delete")))]
         return respond(events);
     }
 
@@ -498,6 +501,56 @@ fn report_inventory_change(events: Vec<Event>) -> Vec<Action> {
                 change.slot
             ))];
         }
+    }
+    Vec::new()
+}
+
+/// Report one copied container/menu event. This fixture is intentionally
+/// value-only: it proves the production conductor reaches the guest with the
+/// menu's identity and payload without exposing a client inventory handle.
+#[cfg(feature = "inventory-menu")]
+fn report_inventory_menu_change(events: Vec<Event>) -> Vec<Action> {
+    for event in events {
+        let message = match event {
+            Event::InventoryContainerContent(content) => format!(
+                "inventory-menu:content window={} state={} slots={} cursor={}",
+                content.window_id,
+                content.state_id,
+                content.items.len(),
+                content.carried_item.is_some(),
+            ),
+            Event::InventoryContainerSlotChanged(change) => format!(
+                "inventory-menu:slot window={} state={} slot={} occupied={}",
+                change.window_id,
+                change.state_id,
+                change.slot,
+                change.item.is_some(),
+            ),
+            Event::InventoryContainerDataChanged(change) => format!(
+                "inventory-menu:data window={} property={} value={}",
+                change.window_id, change.property, change.value,
+            ),
+            Event::InventoryScreenOpened(screen) => format!(
+                "inventory-menu:open window={} type={} title={}",
+                screen.window_id, screen.menu_type, screen.title,
+            ),
+            Event::InventoryScreenClosed(screen) => {
+                format!("inventory-menu:close window={}", screen.window_id)
+            }
+            Event::InventoryMountScreenOpened(screen) => format!(
+                "inventory-menu:mount container={} columns={} entity={}",
+                screen.container_id, screen.inventory_columns, screen.entity_id,
+            ),
+            Event::InventoryHeldSlotChanged(slot) => {
+                format!("inventory-menu:held slot={}", slot.slot)
+            }
+            Event::InventoryCursorItemChanged(cursor) => format!(
+                "inventory-menu:cursor occupied={}",
+                cursor.item.is_some(),
+            ),
+            _ => continue,
+        };
+        return vec![Action::SendChat(message)];
     }
     Vec::new()
 }
