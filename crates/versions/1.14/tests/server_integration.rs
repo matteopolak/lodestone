@@ -37,7 +37,7 @@ fn assert_adapter_block_use_reaches_host(protocol_version: i32) {
             pos: BlockPos::new(5, -10, -7),
             face: BlockFace::South,
             cursor: Vec3f::new(0.25, 1.0, 0.75),
-            sequence: lodestone_model::PredictionSequence::INITIAL,
+            sequence: 0,
             hand: 1,
         },
         "the adapter and registry-selected host must agree on the server consumer input"

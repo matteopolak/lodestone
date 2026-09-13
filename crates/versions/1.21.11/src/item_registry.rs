@@ -119,18 +119,6 @@ pub(crate) fn item_from_wire_id(id: i32) -> Option<Item> {
     Item::from_registry_id(canonical)
 }
 
-/// Resolves a canonical item to this protocol's wire registry id.
-///
-/// The server-side item model uses the canonical registry order, while 774
-/// uses its own order. Keep the inverse lookup beside the generated bridge so
-/// every serverbound/clientbound slot encoder uses the same mapping.
-pub(crate) fn wire_id_for_item(item: Item) -> Option<i32> {
-    WIRE_TO_CANONICAL
-        .iter()
-        .position(|&canonical| canonical == item.registry_id())
-        .and_then(|id| i32::try_from(id).ok())
-}
-
 #[cfg(test)]
 mod tests {
     use serde::Deserialize;
