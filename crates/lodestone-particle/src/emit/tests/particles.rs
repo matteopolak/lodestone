@@ -1,4 +1,7 @@
 use super::*;
+use crate::emit::{
+    ash, campfire_smoke, fly_towards_position, spore_blossom_air, white_smoke,
+};
 
     #[test]
     fn ash_falls_through_terrain_and_white_smoke_rises_and_collides() {
@@ -167,20 +170,3 @@ use super::*;
             "the random per-particle sprite-set pick should vary the plume, got frames {frames:?}"
         );
     }
-}
-
-// ---------------------------------------------------------------------------
-// Ambient and environmental types
-// ---------------------------------------------------------------------------
-//
-// Vanilla's own rising-particle class is the shared base for `flame`,
-// `soul_fire_flame` and `soul`, and its whole constructor is the four lines
-// [`rising`] transcribes. `flame` above predates it and keeps its own copy;
-// everything below goes through this one.
-
-/// Vanilla's own rising-particle constructor: `friction = 0.96`, the requested velocity with
-/// a 1% scatter, a ±0.05 positional jitter and a `8 / (rand*0.8 + 0.2) + 4`
-/// lifetime.
-///
-/// The velocity line is `this.xd * 0.01F + xd`: the *scattered* component is
-/// almost entirely discarded and replaced by what the caller asked for, which is

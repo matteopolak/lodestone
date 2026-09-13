@@ -221,14 +221,3 @@ use super::*;
             s.behaviour
         );
     }
-
-    /// `ash` falls and `white_smoke` rises, and both come out of the same
-    /// parameterised base constructor.
-    ///
-    /// The two differ by the sign of one number in vanilla's positional
-    /// argument list (`gravity` `0.1F` against `-0.1F`) plus the sign of a
-    /// second (the vertical scatter direction), which is exactly the
-    /// transposition-shaped mistake [`AshSmokeParams`] exists to make
-    /// unspellable. Asserting the sign of
-    /// `gravity` rather than an observed drift keeps this independent of how
-    /// many ticks a fixture happens to run.

@@ -67,7 +67,7 @@ use super::*;
     #[test]
     fn item_crumb_retains_its_validated_item() {
         let mut rng = ParticleEngine::seeded(4);
-        let carrot = super::item_particle(
+        let carrot = crate::emit::item_particle(
             0.0,
             0.0,
             0.0,
@@ -77,7 +77,8 @@ use super::*;
             Item::Carrot,
             rng.rng(),
         );
-        let beetroot = super::item_burst_particle(0.0, 0.0, 0.0, Item::Beetroot, rng.rng());
+        let beetroot =
+            crate::emit::item_burst_particle(0.0, 0.0, 0.0, Item::Beetroot, rng.rng());
         assert_eq!(carrot.sprite, SpriteSource::Item(Item::Carrot));
         assert_eq!(beetroot.sprite, SpriteSource::Item(Item::Beetroot));
         assert_ne!(
@@ -180,4 +181,3 @@ use super::*;
             "chip should be slower than a destruction fragment"
         );
     }
-
