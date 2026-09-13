@@ -816,6 +816,7 @@ impl RenderState {
             // the FAST quad path and the OFF case both existed in
             // `SkyRenderer::render` and no player could select either.
             .with_cloud_status(self.cloud_status)
+            .with_cloud_color(self.cloud_color)
             // The connected dimension's own `Skybox`. `SkyMode::None` (the Nether)
             // makes `SkyRenderer::render` clear and return, so `stats.sky_drawn`
             // below stays `true` — the target *was* written, which is exactly what
