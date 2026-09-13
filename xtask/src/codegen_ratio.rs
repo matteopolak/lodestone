@@ -162,6 +162,3 @@ fn natural_family_key(family: &str) -> (u8, u32, u32, &str) {
     }
     (2, 0, 0, family)
 }
-
-/// Options for scaffolding a new protocol version family (`xtask new-version`).
-#[derive(Clone, Debug, Eq, PartialEq)]
