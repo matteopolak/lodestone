@@ -5,7 +5,7 @@
 //! # What it is
 //!
 //! `docs/worldgen-store-distance-leak.md`: `StagedStore`'s
-//! 512-entry retention ceiling was unreachable from `open_view`, the only
+//! 4,096-entry retention ceiling was unreachable from `open_view`, the only
 //! insertion path `OverworldGenerator::column` uses, so `reclaim` never ran in a
 //! real session and the store grew without bound as a player walked. The fix
 //! makes `open_view` check the ceiling once its whole box is pinned. That turns
@@ -23,9 +23,9 @@
 //!
 //! [`reclaimed_columns_regenerate_byte_identically`] walks a **1-D strip** with
 //! one generator, which is the cheapest shape that overflows the ceiling: a
-//! straight walk of `n` columns closes over roughly `5 · (n + 4)` chunks at the
-//! pre-ore stage, so [`STRIP`] = 140 wants ~720 entries against 512 and forces
-//! about 200 evictions. The first [`SAMPLE`] columns' wire bytes are captured
+//! straight walk of `n` columns closes over 21 · (n + 20) chunks at the
+//! production structure closure, so [`STRIP`] = 220 wants 5,040 entries against
+//! 4,096 and forces eviction. The first [`SAMPLE`] columns' wire bytes are captured
 //! while the store is still cold and has evicted nothing; the strip then walks
 //! far enough that those entries are the oldest unpinned ones in the store and
 //! are reclaimed; then the same coordinates are regenerated and compared.
@@ -36,7 +36,7 @@
 //!   test is a re-run of `column_is_byte_identical_across_two_independently_constructed_generators`
 //!   and says nothing about eviction. This is the detector control.
 //! * **The sampled entries were themselves evicted**, not merely *some* entries:
-//!   `store_len()` is bounded by the ceiling while the strip is 140 columns
+//!   `store_len()` is bounded by the ceiling while the strip is 220 columns
 //!   long, so the early columns cannot still be resident.
 //! * **The bytes are not degenerate** — distinct columns must differ from each
 //!   other, or byte-equality would hold under any change at all.
@@ -57,8 +57,8 @@
 //!
 //! # How to change it
 //!
-//! [`STRIP`] is derived from `STORE_RETENTION` via the `5 · (n + 4)` closure and
-//! must stay comfortably past it; shortening it below ~100 columns silently
+//! [`STRIP`] is derived from `STORE_RETENTION` via the `21 · (n + 20)` closure and
+//! must stay comfortably past it; shortening it below ~216 columns silently
 //! stops reaching the retention path and the test goes green while measuring
 //! nothing. Widening the sample or the strip is free and strictly better.
 //! Do **not** hash the dump inside this file — `cmp` on raw bytes is what makes
@@ -89,11 +89,11 @@ use lodestone_server::overworld_generator;
 /// terrain compared here is known-verified rather than arbitrary.
 const SEED: i64 = 42;
 
-/// Columns in the strip. **Derived from `STORE_RETENTION` (512), not picked**: a
-/// straight `+x` walk of `n` columns closes over ~`5 · (n + 4)` chunks at the
-/// pre-ore stage, so the ceiling is first crossed at `n ≈ 99`. 140 wants ~720
-/// entries — about 40% past it, enough that the early columns are long gone.
-const STRIP: i32 = 140;
+/// Columns in the strip. **Derived from `STORE_RETENTION` (4,096), not picked**:
+/// a straight `+x` walk of `n` columns closes over `21 · (n + 20)` chunks at
+/// the production structure closure, so the ceiling is first crossed at
+/// `n ≈ 175`. 220 wants 5,040 entries — enough that the early columns are long gone.
+const STRIP: i32 = 220;
 
 /// Columns whose bytes are captured and later re-compared. The first 20 of the
 /// strip: the oldest entries in the store, hence the first reclaimed.
@@ -104,7 +104,7 @@ const SAMPLE: i32 = 20;
 /// `walk_distance_curve.rs` documents. Used only as an upper bound the strip
 /// must be shown to have crossed, so a stale low value weakens this rather than
 /// breaking it.
-const STORE_RETENTION_UNDER_TEST: usize = 512;
+const STORE_RETENTION_UNDER_TEST: usize = 4_096;
 
 /// One column's whole wire-facing product, as `u15_column_dump.rs` frames it:
 /// `(min_y, height, palette, blocks, biomes)` from `GeneratedColumn::into_raw`,
@@ -130,8 +130,9 @@ fn column_bytes(generator: &lodestone_worldgen::overworld::OverworldGenerator, c
         out.extend_from_slice(&b.to_le_bytes());
     }
     for biome in &biomes {
-        out.extend_from_slice(&(biome.len() as u32).to_le_bytes());
-        out.extend_from_slice(biome.as_bytes());
+        let kind = format!("{:?}", biome.kind());
+        out.extend_from_slice(&(kind.len() as u32).to_le_bytes());
+        out.extend_from_slice(kind.as_bytes());
     }
     out
 }
@@ -143,7 +144,7 @@ fn column_bytes(generator: &lodestone_worldgen::overworld::OverworldGenerator, c
 /// path with real terrain, and for the three assertions that keep it from being
 /// vacuous.
 #[test]
-#[ignore = "~10s release-profile strip walk; the byte-identity evidence for #503's reclamation fix"]
+#[ignore = "~35s release-profile strip walk; the byte-identity evidence for the reclamation fix"]
 fn reclaimed_columns_regenerate_byte_identically() {
     let generator = overworld_generator(SEED);
 
@@ -184,7 +185,7 @@ fn reclaimed_columns_regenerate_byte_identically() {
          path and the identity comparison below is vacuous"
     );
     // And the sample specifically cannot still be resident: the strip wants
-    // ~5*(STRIP+4) entries and the store is holding far fewer.
+    // ~21*(STRIP+20) entries and the store is holding far fewer.
     assert!(
         len_after_walk <= STORE_RETENTION_UNDER_TEST + 25,
         "store_len {len_after_walk} is not inside the ceiling, so the store may still hold \
@@ -243,12 +244,12 @@ fn reclaimed_columns_regenerate_byte_identically() {
     std::hint::black_box(after);
 }
 
-/// View radius of the concurrent burst below. 10 gives a 21×21 = 441-column
-/// burst whose pre-ore closure is 25×25 = **625** chunks — past the 512-entry
-/// ceiling, so reclamation runs *during* the burst. The existing
+/// View radius of the concurrent burst below. 22 gives a 45×45 = 2,025-column
+/// burst whose production closure is 65×65 = **4,225** chunks — past the
+/// 4,096-entry ceiling, so reclamation runs *during* the burst. The existing
 /// `staged_store_gates.rs` burst is deliberately R=8 (289 columns, a 441-entry
 /// closure) so that it evicts nothing; this one is deliberately the opposite.
-const BURST_RADIUS: i32 = 10;
+const BURST_RADIUS: i32 = 22;
 
 /// **Reclaiming under concurrency must not change results.**
 ///
@@ -262,7 +263,7 @@ const BURST_RADIUS: i32 = 10;
 /// worth measuring rather than restating.
 ///
 /// The comparison is against a **serial** generator over the same coordinates.
-/// Note that the serial arm reclaims too (same 625-entry closure), so what this
+/// Note that the serial arm reclaims too (same 4,225-entry closure), so what this
 /// gate isolates is specifically *concurrent* reclamation against *serial*
 /// reclamation. "Reclaiming at all versus not reclaiming" is the question
 /// [`reclaimed_columns_regenerate_byte_identically`] and the two-arm dumper
@@ -272,7 +273,7 @@ const BURST_RADIUS: i32 = 10;
 /// compared and dropped immediately rather than collected, because `CLAUDE.md`
 /// records unbounded test memory force-rebooting this machine.
 #[test]
-#[ignore = "441 columns x2 of real embedded-data generation with reclamation live; ~1 min in release"]
+#[ignore = "2,025 columns x2 of real embedded-data generation with reclamation live; several minutes in release"]
 fn a_concurrent_burst_past_the_ceiling_matches_serial_bytes() {
     let r = BURST_RADIUS;
     // Offset well away from every other gate's coordinates in this crate so the
@@ -383,7 +384,7 @@ fn a_concurrent_burst_past_the_ceiling_matches_serial_bytes() {
 /// It dumps the sample **after** the strip walk, so on the fixed arm every
 /// column in the dump is a post-reclamation recompute.
 #[test]
-#[ignore = "two-arm byte-identity dumper for #503; driven by a shell harness, not by cargo test"]
+#[ignore = "two-arm byte-identity dumper; driven by a shell harness, not by cargo test"]
 fn dump_walked_strip() {
     let path = std::env::var("LODESTONE_STORE_WALK_DUMP")
         .expect("set LODESTONE_STORE_WALK_DUMP to the output path for this arm");
