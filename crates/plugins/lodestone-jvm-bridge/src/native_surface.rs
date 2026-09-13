@@ -218,7 +218,7 @@ pub struct IsolatedListenerMethodSpec {
     pub descriptor: &'static str,
 }
 
-const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 43] = [
+const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 44] = [
     NativeMethodSpec {
         name: "blockStateId",
         descriptor: "(III)I",
@@ -364,6 +364,10 @@ const ISOLATED_SHIM_METHODS: [NativeMethodSpec; 43] = [
         name: "playerHandleNativeItemCount",
         descriptor: "(JI)I",
     },
+    NativeMethodSpec {
+        name: "playerHandleTeleport",
+        descriptor: "(JDDD)V",
+    },
 ];
 
 const ISOLATED_PLUGIN_DESCRIPTOR_MEMBERS: [IsolatedDescriptorMemberSpec; 4] = [
@@ -445,7 +449,7 @@ const PAPER_WORLD_SURFACE_CENSUS: [PaperWorldMemberSpec; 14] = [
 /// declaration is classified and, when it belongs to this domain, included in
 /// [`PAPER_WORLD_SURFACE_CENSUS`]. `None` is intentional for lifecycle,
 /// player, and inventory members.
-const PAPER_WORLD_METHOD_CAPABILITIES: [Option<PaperWorldCapability>; 43] = [
+const PAPER_WORLD_METHOD_CAPABILITIES: [Option<PaperWorldCapability>; 44] = [
     Some(PaperWorldCapability::ResidentStateRead),
     None,
     Some(PaperWorldCapability::ResidentStateWrite),
@@ -489,6 +493,7 @@ const PAPER_WORLD_METHOD_CAPABILITIES: [Option<PaperWorldCapability>; 43] = [
     Some(PaperWorldCapability::ResidentStateWrite),
     None,
     None,
+    None,
 ];
 
 /// The Rust producer category for one implemented player shim member.
@@ -512,6 +517,8 @@ pub enum PaperPlayerCapability {
     GameModeRead,
     /// A bounded host query for copied player experience.
     ExperienceRead,
+    /// A bounded host mutation request for a generation-checked player.
+    TeleportMutation,
 }
 
 /// One generated player shim declaration and its Rust capability.
@@ -528,7 +535,7 @@ pub struct PaperPlayerMemberSpec {
 /// This intentionally describes the small value-and-handle surface that is
 /// implemented today. A player member absent here is unsupported, even if a
 /// similarly named method exists in an upstream API.
-const PAPER_PLAYER_SURFACE_CENSUS: [PaperPlayerMemberSpec; 21] = [
+const PAPER_PLAYER_SURFACE_CENSUS: [PaperPlayerMemberSpec; 22] = [
     PaperPlayerMemberSpec { method: ISOLATED_SHIM_METHODS[17], capability: PaperPlayerCapability::CallbackPlayerHandle },
     PaperPlayerMemberSpec { method: ISOLATED_SHIM_METHODS[18], capability: PaperPlayerCapability::IdentityRead },
     PaperPlayerMemberSpec { method: ISOLATED_SHIM_METHODS[19], capability: PaperPlayerCapability::IdentityRead },
@@ -550,6 +557,7 @@ const PAPER_PLAYER_SURFACE_CENSUS: [PaperPlayerMemberSpec; 21] = [
     PaperPlayerMemberSpec { method: ISOLATED_SHIM_METHODS[35], capability: PaperPlayerCapability::GameModeRead },
     PaperPlayerMemberSpec { method: ISOLATED_SHIM_METHODS[36], capability: PaperPlayerCapability::ExperienceRead },
     PaperPlayerMemberSpec { method: ISOLATED_SHIM_METHODS[37], capability: PaperPlayerCapability::ExperienceRead },
+    PaperPlayerMemberSpec { method: ISOLATED_SHIM_METHODS[43], capability: PaperPlayerCapability::TeleportMutation },
 ];
 
 /// The Rust producer category for one implemented inventory shim member.
@@ -649,6 +657,7 @@ const ISOLATED_SHIM_REGISTRATION: &[NativeRegistrationStep] = registration_steps
     ISOLATED_SHIM_METHODS[40],
     ISOLATED_SHIM_METHODS[41],
     ISOLATED_SHIM_METHODS[42],
+    ISOLATED_SHIM_METHODS[43],
 );
 
 /// The source-of-truth registration list for [`ISOLATED_SHIM_CLASS`].
@@ -1347,6 +1356,11 @@ fn method_id(
             jni_str!("playerHandleNativeItemCount"),
             jni_sig!("(JI)I"),
         ),
+        ("playerHandleTeleport", "(JDDD)V") => env.get_static_method_id(
+            class,
+            jni_str!("playerHandleTeleport"),
+            jni_sig!("(JDDD)V"),
+        ),
         _ => unreachable!("the isolated native surface has only generated method specs"),
     }
 }
@@ -1589,6 +1603,12 @@ pub(crate) fn register_method(
                 method.descriptor,
             )
         }
+        ("playerHandleTeleport", "(JDDD)V") => adapter::register_player_handle_teleport(
+            env,
+            class,
+            method.name,
+            method.descriptor,
+        ),
         _ => unreachable!("the isolated native surface has only generated method specs"),
     }
 }
@@ -1835,6 +1855,10 @@ mod tests {
                     name: "playerHandleNativeItemCount",
                     descriptor: "(JI)I",
                 },
+                NativeMethodSpec {
+                    name: "playerHandleTeleport",
+                    descriptor: "(JDDD)V",
+                },
             ],
         );
         let methods = isolated_shim_methods();
@@ -1921,7 +1945,7 @@ mod tests {
     #[test]
     fn generated_player_surface_census_maps_each_member_and_names_unsupported_mutations() {
         let census = paper_player_surface_census();
-        assert_eq!(census.len(), 21, "every supported player member is listed once");
+        assert_eq!(census.len(), 22, "every supported player member is listed once");
         let unique_methods = census
             .iter()
             .map(|entry| (entry.method.name, entry.method.descriptor))
@@ -1933,9 +1957,14 @@ mod tests {
                 || entry.method.name.starts_with("playerHandle")
                 || entry.method.name.starts_with("activePlayer")
         }));
+        assert!(census.iter().any(|entry| {
+            entry.method == NativeMethodSpec {
+                name: "playerHandleTeleport",
+                descriptor: "(JDDD)V",
+            } && entry.capability == PaperPlayerCapability::TeleportMutation
+        }));
 
         for unsupported in [
-            "playerHandleTeleport",
             "playerHandleDamage",
             "playerHandleSendMessage",
             "playerHandleSetGameMode",
@@ -2144,7 +2173,8 @@ mod tests {
              public static native int playerHandleExperienceLevel(long handle); \
              public static native int playerHandleExperiencePoints(long handle); \
              public static native String playerHandleNativeItemKey(long handle, int nativeSlot); \
-             public static native int playerHandleNativeItemCount(long handle, int nativeSlot); }",
+             public static native int playerHandleNativeItemCount(long handle, int nativeSlot); \
+             public static native void playerHandleTeleport(long handle, double x, double y, double z); }",
         )
         .expect("shim source");
         let descriptor_source = source_root.join("IsolatedPluginDescriptor.java");
@@ -2256,7 +2286,8 @@ mod tests {
              public static native int playerHandleExperienceLevel(long handle); \
              public static native int playerHandleExperiencePoints(long handle); \
              public static native String playerHandleNativeItemKey(long handle, int nativeSlot); \
-             public static native int playerHandleNativeItemCount(long handle, int nativeSlot); }",
+             public static native int playerHandleNativeItemCount(long handle, int nativeSlot); \
+             public static native void playerHandleTeleport(long handle, double x, double y, double z); }",
         )
         .expect("shim source");
         let descriptor_source = shim_source_root.join("IsolatedPluginDescriptor.java");

@@ -2,7 +2,9 @@
 
 use std::time::Duration;
 
-use lodestone_jvm_bridge::adapter::{AdapterHost, PlayerIdentity, PlayerGameMode, PlayerSnapshot};
+use lodestone_jvm_bridge::adapter::{
+    AdapterHost, PlayerGameMode, PlayerIdentity, PlayerSnapshot, PlayerTeleportRequest,
+};
 use lodestone_jvm_bridge::runtime::JvmConfig;
 
 #[test]
@@ -69,6 +71,7 @@ fn java_adapter_registration_world_query_and_exception_are_connected() {
     let mut disconnected = false;
     let player = PlayerIdentity::new([7; 16], "Alice");
     let mut queries = Vec::new();
+    let mut teleports = Vec::new();
     let limit = Instant::now() + Duration::from_secs(15);
     let failure = loop {
         assert!(Instant::now() < limit, "production adapter did not finish");
@@ -93,6 +96,11 @@ fn java_adapter_registration_world_query_and_exception_are_connected() {
                 experience_level: 7,
                 experience_points: 23,
             })
+        });
+        host.service_pending_player_teleports(8, |request| {
+            assert_eq!(request.uuid, [7; 16]);
+            teleports.push(request);
+            Ok(())
         });
         match host.poll() {
             Ok(Some(AdapterEvent::Ready)) => {
@@ -145,6 +153,15 @@ fn java_adapter_registration_world_query_and_exception_are_connected() {
     };
     assert!(ready && success && joined_once && disconnected, "registration/control callback failed: {failure}");
     assert_eq!(queries, [(11, 7, -3), (-19, 5, 23)]);
+    assert_eq!(
+        teleports,
+        [PlayerTeleportRequest {
+            uuid: [7; 16],
+            x: 1.25,
+            y: 65.5,
+            z: -4.75,
+        }],
+    );
     let failure = failure.to_string();
     assert!(failure.contains("onTick(J)V"), "{failure}");
     assert!(failure.contains("RuntimeException"), "{failure}");

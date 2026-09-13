@@ -16,12 +16,21 @@
       "domain": "world-editing",
       "jar": "/operator/plugins/protection-plugin.jar",
       "sha256": "replace-with-the-plugin-sha256",
+      "entrypoint": "example.protection.Plugin",
+      "unmodified": true
+    },
+    {
+      "name": "LodestonePaperConformance",
+      "domain": "server-api",
+      "jar": "/operator/plugins/lodestone-paper-conformance.jar",
+      "sha256": "replace-with-the-driver-sha256",
       "entrypoint": "io.lodestone.conformance.PaperConformancePlugin",
       "unmodified": true
     }
   ],
+  "target_plugins": ["operator-protection-plugin"],
   "driver": {
-    "plugin": "operator-protection-plugin",
+    "plugin": "LodestonePaperConformance",
     "entrypoint": "io.lodestone.conformance.PaperConformancePlugin",
     "protocol": "paper-observation-v1",
     "controls": ["listener-present", "no-listener"],
