@@ -50,13 +50,11 @@ fn fog_amount(rel: vec3<f32>) -> f32 {
 // 0xF0 and `light_term` is 1.000 at both noon *and* midnight. Vanilla darkens
 // client-side only, when the light texture is rebuilt.
 //
-// `0.0` is the `not wired yet` sentinel and reads as full daylight: every caller
-// builds this uniform from a `FogUniform` that zeroes the lane, and taking 0.0
-// literally would render every sky-lit mob pure black. Vanilla's real range is
-// [0.24, 1.0], so 0.0 is never a legitimate value.
+// Negative is the `not wired yet` sentinel and reads as full daylight. Zero is
+// a legitimate dimension value (the End's sky-light factor).
 fn sky_darken() -> f32 {
     let raw = camera.fog_end_enabled.z;
-    return select(raw, 1.0, raw <= 0.0);
+    return select(raw, 1.0, raw < 0.0);
 }
 
 // Vanilla's lightmap, byte-for-byte the model shader's copy -- see `model.wgsl`'s
