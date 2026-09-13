@@ -233,6 +233,7 @@ fn a_mob_wearing_an_elytra_draws_wings_the_same_mob_bare_does_not() {
         player_skin: None,
         variant_sheet: None,
         experience_orb_value: None,
+        tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),
         painting: None,
         firework: None,

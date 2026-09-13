@@ -126,6 +126,7 @@ fn rocket(id: i32, type_path: &str, flags: Option<FireworkFlags>, at: glam::Vec3
         player_skin: None,
         variant_sheet: None,
         experience_orb_value: None,
+        tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),
     }
 }
