@@ -40,8 +40,8 @@ Attack, .. }`, sent immediately (not queued), encoded as the 26.2 `Attack`
 packet. **The wire packet carries only the target entity id — no damage, no
 strength scalar. Damage is fully server-authoritative.**
 
-Server-side, `ServerBound::Attack { entity_id }` decodes `minecraft:attack`
-and reaches `MobHandle::with(|sim| sim.attack(..))` — a
+Server-side, `ServerBound::Attack { entity_id }` decodes `minecraft:attack`,
+records a main-hand swing in `PlayerRegistry` for remote observers, and reaches `MobHandle::with(|sim| sim.attack(..))` — a
 `BlockEntityHandle`-shaped `Arc<Mutex<_>>` handle onto the live `MobSim`,
 letting a connection task mutate the same sim the tick loop ticks.
 `minecraft:interact` (plain right-click) deliberately decodes to `Ignored` —

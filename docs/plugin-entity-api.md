@@ -49,8 +49,10 @@ client's `apply_entity_removal` skipping an id held by `LocalPlayer`.
 `SimMob` lives behind (`mobs.with(|sim| sim.get_mut(id))`), so healing, repositioning or re-equipping a
 spawned mob is ordinary use of an accessor that already shipped for combat.
 
-`ServerEntityApi` is the typed request boundary for operations that must not expose a lock guard:
-`observe` returns an owned identity/motion/health copy, while `mutate` accepts typed knockback,
+`ServerEntityApi` is the typed request boundary for operations that must not expose a lock guard.
+Every plugin-facing entity reference is an `EntityNetworkId`; a raw player or packet id must be
+classified explicitly with `EntityNetworkId::from_wire` before it enters this API. `observe` returns
+an owned identity/motion/health copy, while `mutate` accepts typed knockback,
 health, effect, teleport, and despawn operations. Mob knockback changes the snapshot consumed by
 the entity streamer. Player teleports and effects enter `PlayerRegistry`'s directed queue, whose
 owning connection emits the authoritative packet. Observations include copied six-slot equipment

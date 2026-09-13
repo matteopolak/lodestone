@@ -193,10 +193,18 @@ known live-server hazard — see the root project rules).
 ### Join readiness: the loading-screen gate
 
 The loading screen clears only when **two** independent conditions are both satisfied: the
-terrain rule (the player's own chunk column has arrived — vanilla's own wait-for-player-chunk
-rule) and the asset rule (no server-pushed resource pack is still downloading or waiting to be
-applied to the block atlas). Both are measured from one shared clock, the moment the client
-enters `ConnectPhase::LoadingTerrain`, with vanilla's own 30-second `CLIENT_WAIT_TIMEOUT` — a
+terrain rule and the asset rule. For a newly created survival world with a declared initial view,
+terrain requires both the player's own admitted column and an explicit preparation
+milestone from the terrain producer. The resident-column count and its progress bar remain
+telemetry; a full bar is not readiness because a first mesh can still be deferred on a missing
+horizontal neighbour. Remote sessions without a trustworthy denominator retain the own-column
+fallback. A known destination-world vertical extent is required before the out-of-range liveness
+escape can apply; an unknown extent is not proof of being outside the build height. The timeout
+and dead-player short-circuits remain independent of that extent check. The asset rule
+requires that no server-pushed resource pack is still downloading or
+waiting to be applied to the block atlas. Both are measured from one shared clock, the moment
+the client enters `ConnectPhase::LoadingTerrain`, with vanilla's own 30-second
+`CLIENT_WAIT_TIMEOUT` — a
 single deadline for the whole client load rather than one per sub-wait, matching vanilla's
 `LevelLoadTracker`. Assets are checked first, matching vanilla's precedence between a resource
 reload overlay and a loading screen. The world keeps rendering underneath the opaque loading
@@ -225,6 +233,15 @@ always in wire (Chebyshev-ring) coordinate order regardless of which column the 
 first, which is what keeps the encoded byte sequence a pure function of view radius. This
 scheduler is no longer only for joins: the same pipeline is fed newly-visible columns as a
 player walks, so a move is streamed through it rather than generated in a separate fan-out.
+
+The initial centre packet has a stricter admission contract than the rest of that stream. Before
+the centre can release the loading phase, the server admits the centre and its eight immediate
+neighbours (a bounded 3×3 footprint) and settles the centre's initial border light from that
+footprint. The centre is generated through the complete generation stage even when the view later
+uses the reduced shaped stage outside the near-generation band. This nine-column milestone keeps
+the loading barrier independent of render distance: the remainder of the view continues through
+the scheduler while the player enters, and a resident centre packet is never treated as proof that
+the required terrain/light admission already happened.
 
 ### Transfer tracing
 

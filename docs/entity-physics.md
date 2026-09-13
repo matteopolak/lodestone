@@ -9,6 +9,21 @@ sand/gravel. All of it ports vanilla 26.2 behaviour rather than approximating it
 reached only through the `VersionAdapter` seam so it degrades cleanly when no version family is compiled
 in.
 
+## Cross-chunk ownership hand-off
+
+Experience-orb motion is planned from a tick-start chunk owner and applied by
+one central writer. Each completed owner batch records both the source owner
+and the chunk containing the completed position; the writer rejects stale,
+duplicate, or incomplete plans before committing a complete destination hand-off.
+This keeps a boundary-crossing orb single-writer: the source cannot
+continue mutating it after the destination becomes authoritative on the next
+tick.
+
+When changing this path, update `mobs::orbs::OrbTickEffect` and its production
+apply method together. The boundary regression in that module deliberately
+starts at a negative chunk and crosses into a positive chunk, because truncating
+division would assign the negative side to the wrong owner.
+
 ## How it works
 
 ### Local player input ordering

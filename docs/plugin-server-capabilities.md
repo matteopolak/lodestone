@@ -61,9 +61,10 @@ proposal-backed Paper event bus adds ordered listener priorities separately.
 
 `ecs::PaperEventBus` gives the proposal path a small Paper-shaped listener surface for
 `PaperEventKind::EntitySpawn`, `PaperEventKind::EntityDespawn`,
-`PaperEventKind::ResidentBlockChange`, and block-face `PaperEventKind::PlayerInteract`. The
-player-interaction and entity-removal events are available through
-`ServerProposalHandle::player_interact` and `ServerProposalHandle::despawn_mob`, so a
+`PaperEventKind::ResidentBlockChange`, block-face `PaperEventKind::PlayerInteract`, and the
+validated player `PaperEventKind::BlockBreak`. The player-interaction, entity-removal, and
+block-break events are available through `ServerProposalHandle::player_interact`,
+`ServerProposalHandle::despawn_mob`, and `ServerProposalHandle::block_break`, so a
 connection-facing owner can submit value-only proposals without borrowing the tick-owned world.
 `InventoryClick`, for example, remains explicitly unsupported and cannot silently become a
 successful no-op subscription.
@@ -90,6 +91,7 @@ Bukkit event or that they have already been differentially run against Paper.
 | `EntityDespawn` | `ServerProposalAction::DespawnMob` | supported; allow, deny, replacement, ordered mutation, and monitor observation are covered by the server test suite |
 | `ResidentBlockChange` | `ServerProposalAction::SetResidentBlock` | supported for one resident-state proposal; it is not a claim to implement every block-break/place event |
 | `PlayerInteract` | `ServerProposalAction::PlayerInteract` | supported for a value-only block-face interaction proposal; it has no player wrapper or inventory mutation surface |
+| `BlockBreak` | `ServerProposalAction::BlockBreak` | supported for validated player breaks; cancellation stops mutation and sends the authoritative state back to the acting connection |
 | `InventoryClick` | none | explicitly unsupported; registration returns `PaperEventRegistrationError::Unsupported` |
 
 There is no server-lifecycle event kind and no event owner for inventory clicks, game-mode changes,
@@ -190,7 +192,7 @@ flipped and, in every capability shipped so far, with clauses 2/3 kept and claus
 rather than faked (see the crafting-station hook decision below, which the second half of this
 table generalises).
 
-### The five shipped capabilities, by symbol, scored against the five clauses
+### Shipped capabilities, by symbol, scored against the five clauses
 
 | capability | symbol path | (1) observation vocab | (2) single writer | (3) refusal observable | (4) human/plugin arbitration | (5) lifecycle-shaped |
 |---|---|---|---|---|---|---|
@@ -198,6 +200,7 @@ table generalises).
 | Worldgen: custom dimension | [`lodestone_server::plugin_dimension::DimensionRegistry`] | — (a registration call, `register(dimension)`) | yes — `Option<Arc<PluginDimension>>` keyed by string, one owner per key | partial — `register` returns `None` on a duplicate key, so *that* refusal is observable; there is no other refusal shape | N/A | N/A — register once, `get`/`chunk_source` forever after |
 | Worldgen: live structure placement | [`lodestone_server::structure_placement::place_structure_live`] | — (a direct function call with a template and origin) | yes — one function, called synchronously | no — returns a plain `usize` (cells written), no verdict a second party could have vetoed | N/A — nothing else contests one placement call | N/A — one-shot, matches its own shape |
 | Entity spawn/despawn | [`lodestone_server::IntegratedServer::spawn_mob_proposed`]/[`despawn_mob_proposed`], backed by [`crate::mobs::MobSim::remove_mob`] | yes — `ServerProposalAction::{SpawnMob, NaturalSpawnMob, DespawnMob}` is observable; legacy `spawn_mob` and `despawn_mob` remain direct | yes — the checked path resolves exactly one action before `MobHandle::with` mutates | yes — checked spawn/despawn return typed `Denied`, `TimedOut`, `Unavailable`, or a mismatched replacement; a permitted missing despawn reports `Ok(false)` | yes — native plugins prioritize allow/deny/replace for checked spawn, natural candidates, and checked despawn; lower numeric priority wins and ties keep schedule order | N/A — install/remove remain one-shot actions, not long-lived subscriptions |
+| Resident block observation | [`ecs::ServerWorldSnapshot`] | yes — a plugin receives copied `BlockPos`/`StateId` answers, never a source handle or guard | yes — the source remains the sole writer | yes — `None` identifies a cold, contended, or out-of-range cell; oversized batches return `WorldSnapshotError` | N/A — observation does not compete with a world mutation | N/A — each call is a bounded snapshot, not a retained grant |
 | Resident block mutation | [`lodestone_server::IntegratedServer::set_resident_block_state_proposed`] | yes — `SetResidentBlock { BlockPos, StateId }` gives plugins copied coordinates plus a validated state, never a source handle or chunk guard | yes — one resolved action writes through the live source and publishes its block change | yes — `BlockMutationRefusal` distinguishes policy, timeout, availability, mismatched action, nonresident column, and vertical-bound failures | yes — server plugins may allow, deny, or replace the requested position/state before the source write | N/A — one proposal resolves once; it does not retain a mutable-world grant |
 | Crafting-station hooks | [`lodestone_server::plugin_crafting::CraftingStationHooks`], [`StationVerdict`] | **yes** — [`StationInputs`] is observation-only: the station, its input cells, vanilla's own computed result; never a menu-slot index, a raw click, or a mutable inventory borrow | **yes** — `workstation_result` is the one choke point every one of the five production entry points already passed through before this work | **yes** — `StationVerdict::{Allow, Deny, Replace(ItemStack)}`, always returned, never inferred from silence | **dropped, by name** — "there is no second, *human* source of a workstation result to arbitrate against ('human outranks a plugin' has nothing to outrank)" | **dropped, by name** — "a station evaluation has no lifecycle beyond answering the one question it was asked" |
 

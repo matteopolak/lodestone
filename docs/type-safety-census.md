@@ -13,12 +13,12 @@ numeric: public functions with state_id, block_state, effect_id, item_id, entity
 text: public String fields whose names end in url, dimension, potion, effect, state, kind, mode, key, or id
 ```
 
-The snapshot contains **84 numeric APIs** and **62 text fields**, **146 sites total**. Every row is assigned either a migration family or an intentional boundary category. The scanner is a discovery guard, not a claim that every integer or string in the repository needs a wrapper.
+The snapshot contains **74 numeric APIs** and **62 text fields**, **136 sites total**. Every row is assigned either a migration family or an intentional boundary category. The scanner is a discovery guard, not a claim that every integer or string in the repository needs a wrapper.
 
 | disposition | sites |
 |---|---:|
 | `dimension-resource-url` | 16 |
-| `entity-network-id` | 32 |
+| `entity-network-id` | 22 |
 | `intentional-cache-index` | 6 |
 | `intentional-external-identity` | 1 |
 | `intentional-observability-label` | 2 |
@@ -45,16 +45,12 @@ Intentional categories retain primitives because the representation is the inter
 | `crates/lodestone-server/src/players.rs:     pub fn swing(&self, entity_id: i32, hand: lodestone_model::Hand) {` | `entity-network-id` |
 | `crates/lodestone-server/src/players.rs:     pub fn set_position(&self, entity_id: i32, position: Vec3) {` | `entity-network-id` |
 | `crates/lodestone-server/src/players.rs:     pub fn set_rotation(&self, entity_id: i32, rotation: Rotation) {` | `entity-network-id` |
-| `crates/lodestone-render/src/entity.rs: pub fn item_bob_offset(entity_id: i32) -> f32 {` | `entity-network-id` |
-| `crates/lodestone-render/src/entity.rs: pub fn item_cluster_jitter(entity_id: i32, copy: u32, extent: f32) -> Vec3 {` | `entity-network-id` |
 | `crates/lodestone-server/src/inventory.rs:     pub fn set_selected_hotbar_slot(&mut self, slot: u8) -> bool {` | `inventory-menu-slot` |
 | `crates/lodestone-server/src/inventory.rs:     pub fn apply_menu_slot_change(&mut self, menu_slot: i32, item: Option<ItemStack>) -> bool {` | `inventory-menu-slot` |
 | `crates/lodestone-server/src/inventory.rs:     pub fn set_selected_bundle_item(&mut self, slot: i32, selected: i32) {` | `inventory-menu-slot` |
 | `crates/lodestone-server/src/inventory.rs:     pub fn selected_bundle_item(&self, slot: usize) -> Option<usize> {` | `inventory-menu-slot` |
 | `crates/lodestone-server/src/inventory.rs: pub fn player_craft_grid_cell(menu_slot: i32) -> Option<usize> {` | `inventory-menu-slot` |
-| `crates/lodestone-shell/src/sim/camera.rs:     pub(crate) fn set_camera_entity(&mut self, entity_id: i32) {` | `entity-network-id` |
 | `crates/lodestone-ecs/src/entity_spawn.rs: pub fn is_plugin_entity_id(entity_id: i32) -> bool {` | `entity-network-id` |
-| `crates/lodestone-shell/src/sim/audio.rs:     pub(crate) fn entity_sound_position(&self, entity_id: i32) -> glam::Vec3 {` | `entity-network-id` |
 | `crates/lodestone-server/src/brewing.rs:     pub fn bottle(&self, slot: usize) -> Option<&Bottle> {` | `inventory-menu-slot` |
 | `crates/lodestone-server/src/brewing.rs:     pub fn set_bottle(&mut self, slot: usize, bottle: Option<Bottle>) {` | `inventory-menu-slot` |
 | `crates/lodestone-ecs/src/entity.rs:     pub fn get(&self, entity_id: i32) -> Option<Entity> {` | `entity-network-id` |
@@ -72,7 +68,6 @@ Intentional categories retain primitives because the representation is the inter
 | `crates/lodestone-server/src/mobs/mod.rs:     pub fn dismount_mob(&mut self, player_entity_id: i32) -> Option<i32> {` | `entity-network-id` |
 | `crates/lodestone-server/src/mobs/mod.rs:     pub fn trigger_camel_dash(&mut self, player_entity_id: i32) -> bool {` | `entity-network-id` |
 | `crates/lodestone-server/src/mobs/mod.rs:     pub fn apply_mob_move(&mut self, player_entity_id: i32, position: Vec3, yaw: f32) -> bool {` | `entity-network-id` |
-| `crates/lodestone-render/src/lightning_bolt.rs: pub fn bolt_seed_for_entity(entity_id: i32) -> i64 {` | `entity-network-id` |
 | `crates/lodestone-server/src/mobs/minecart.rs:     pub fn minecart_ridden_by(&self, player_entity_id: i32) -> Option<i32> {` | `entity-network-id` |
 | `crates/lodestone-server/src/mobs/minecart.rs:     pub fn mount_minecart(&mut self, id: i32, player_entity_id: i32) -> bool {` | `entity-network-id` |
 | `crates/lodestone-server/src/mobs/minecart.rs:     pub fn dismount_minecart_rider(&mut self, player_entity_id: i32) -> Option<i32> {` | `entity-network-id` |
@@ -97,11 +92,6 @@ Intentional categories retain primitives because the representation is the inter
 | `crates/lodestone-game/src/click.rs:     pub fn double(slot: usize) -> Self {` | `inventory-menu-slot` |
 | `crates/lodestone-game/src/reconcile.rs:     pub fn to_action(&self, window_id: i32) -> ClientAction {` | `inventory-menu-slot` |
 | `crates/versions/26.2/src/packets/metadata.rs: pub fn write_update_attributes(w: &mut Writer, entity_id: i32, attributes: &[EntityAttributeSnapshot]) {` | `intentional-wire-boundary` |
-| `crates/lodestone-shell/src/entities.rs: pub fn begin_item_pickup(world: &mut World, item_entity_id: i32, collector_id: i32) -> bool {` | `entity-network-id` |
-| `crates/lodestone-shell/src/entities.rs:     pub fn set_item_stack(&mut self, entity_id: i32, item: ResourceLocation) {` | `entity-network-id` |
-| `crates/lodestone-shell/src/entities.rs:     pub fn set_item_stack_with_count(&mut self, entity_id: i32, item: ResourceLocation, count: u32) {` | `entity-network-id` |
-| `crates/lodestone-shell/src/entities.rs:     pub fn item_stack(&self, entity_id: i32) -> Option<&ResourceLocation> {` | `entity-network-id` |
-| `crates/lodestone-shell/src/entities.rs:     pub fn item_count(&self, entity_id: i32) -> Option<u32> {` | `entity-network-id` |
 | `crates/lodestone-shell/src/menu/book_view.rs:     pub fn lectern(open: BookViewOpen, window_id: i32, page: i32) -> Self {` | `inventory-menu-slot` |
 | `crates/lodestone-shell/src/gpu/distant_terrain.rs:     pub(crate) fn rejects_unpopulated_submission(&self, slot: usize) -> bool {` | `intentional-ring-buffer-index` |
 | `crates/lodestone-worldgen-core/src/engine/scratch.rs:     pub(crate) fn cell_get(&self, slot: usize, cx: i32, cy: i32, cz: i32) -> Option<[f64; 8]> {` | `intentional-cache-index` |
@@ -213,6 +203,13 @@ unknown non-negative ids protocol-local through the recipe fields. Consumers
 must require `ItemId::canonical_raw()` before indexing a generated item table;
 the shared `RegistrySet` representation remains a separate session-scoped
 boundary for fields belonging to several registries.
+
+Entity identity helpers use `lodestone_model::EntityNetworkId`. Server-owned
+ids are classified at packet ingress with `from_wire`; plugin-owned negative
+ids are created only by the plugin allocator. Render and shell entity maps keep
+the classified value through lookup and deterministic seed calculation, calling
+`raw()` only at a wire or GPU POD boundary. The remaining server simulation and
+client compatibility APIs in the ledger are the next migration surface.
 
 ## Configuration
 

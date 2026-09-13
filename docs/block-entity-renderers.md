@@ -19,9 +19,9 @@ Four layers, version-free until the last:
 | layer | crate/file | owns |
 |---|---|---|
 | geometry | `lodestone-assets::block_entity_models` | ported `EntityModelDef`s (cuboid rigs), built from `CubeDef`/`PartDef`/`bake_entity_parts` — the same baker entity models use |
-| renderer | `lodestone-render::block_entity` | placement matrices, per-part pose overrides (lid/lock/flag/bell body), material→sheet resolution, batching key |
+| renderer | `lodestone-render::block_entity` (facade over `block_entity/model_families/`, `model_set/`, and `batching.rs`) | placement matrices, per-part pose overrides (lid/lock/flag/bell body), material→sheet resolution, batching key |
 | GPU | `lodestone-shell::gpu::block_entities` (+ `gpu::moving_blocks`, `gpu::world_items` for the two reuse families below) | pipeline selection, mesh upload, texture bind groups |
-| source | `lodestone-shell::block_entities` | world state → typed `*Spawn`/`*Source`, plus any per-tick animation clock |
+| source | `lodestone-shell::block_entities::{snapshot,scanner,render_inputs}` | world state → typed `*Spawn`/`*Source`, plus any per-tick animation clock |
 
 Per-frame flow mirrors the entity path elsewhere in this codebase (extract from world/ECS state →
 build instance data → batch → draw): a `Sim::*_source()` is captured fresh every frame (never a
@@ -29,6 +29,13 @@ one-shot install — a stale source freezes every lid/flag/pattern at whatever p
 captured on) and installed on `RenderState`; `prepare_block_entities` (or the moving-blocks/world-items
 equivalents) resolves it into instances and hands them to `EntityPipeline`, which is generic over
 `(model, texture)` — most new types need **no new pipeline**, only a new resolver arm.
+
+The shell source facade is split by data lifetime. `block_entities::snapshot` performs the shared
+camera-scoped chunk read and retains only validated state ids plus packed light. `block_entities::scanner`
+owns world-backed candidate/debug scans whose inputs cannot be shared safely across a frame. Finally,
+`block_entities::render_inputs` converts the immutable snapshot into typed spawns without reacquiring
+the world; the facade re-exports these functions so `Sim`, diagnostics, and GPU source installation
+retain their stable `crate::block_entities::*` paths.
 
 World snapshots still carry raw state numbers because imported or protocol-local values can fall
 outside the built-in census. Renderer-specific resolvers must validate those numbers at snapshot
@@ -56,6 +63,12 @@ Ordinary chests/skulls have *zero-element* block models — a total absence, so 
 landed a chest was a hole in the world no terrain-drawn metric could see. Signs are the opposite trap:
 their board **is** a real block model and the renderer is a **text-only** pass — porting sign geometry
 here would draw a second board inside the one the mesher already produces.
+
+The renderer source is split by responsibility behind the unchanged
+`lodestone_render::block_entity` API. `model_families` owns family constants, placement and animation
+math, and mesh baking helpers; `model_set` owns the baked corpus, typed spawn inputs, and resolver
+methods; `batching` owns texture identity, resolved instances, frustum culling, and per-frame draw
+batches. Tests remain beside the facade so external imports and the existing coverage remain stable.
 
 **A block entity's placement is not one convention.** At least three coexist: corner-anchored with a
 pivot (`block_entity_placement_matrix`, chest/skull-ground shape), centre-pivot (shulker, decorated

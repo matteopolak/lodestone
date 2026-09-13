@@ -14,6 +14,12 @@ The rebindable `key.friends` action opens that same surface from active gameplay
 It first enters the paused-world route, so the Friends screen remains an overlay over the current world
 and closing it returns to pause. Menu, chat, and container focus suppress the gameplay hotkey.
 
+When a selected account resolves to the service's disabled default without a prior local choice, the
+Friends screen presents an explicit `Enable Friends` / `Not Now` first-use decision. `Enable Friends`
+queues the normal typed preference update through `FriendsApp`; `Not Now` records the local decline and
+does not reopen the prompt automatically during that account selection. The decision currently lives in
+the selected runtime; durable per-account consent storage remains a separate persistence concern.
+
 `FriendsNotificationFeed` consumes only successive credential-free `FriendsView` values. `FriendsApp` turns its emitted relationship changes into a short-lived HUD toast when the shared top-right toast slot is free. The frame applies the local in-world notification gate only at this presentation boundary, so a disabled setting cannot consume the shared HUD slot or start a hidden toast lifetime.
 
 ## How it works

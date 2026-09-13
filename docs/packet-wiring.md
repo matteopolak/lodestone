@@ -89,11 +89,11 @@ a response encoder. No new configuration or external dependency is required.
 The 26.2 chunk encoder has a separate `chunk_nbt::block_entity_update_nbt` view.
 The packet already carries each entity's registry id and position, so its NBT is
 the update payload rather than a persisted record: save metadata is omitted,
-spawner potentials are omitted, and the protocol's empty-update types (including
-generated dungeon chests and beehives) carry an empty compound. End gateways
-retain their age, destination, and exact-teleport fields under the 26.2 keys.
-This split keeps deferred loot and generated occupants in region saves without
-mistaking those save-only fields for clientbound chunk state.
+spawner potentials are omitted, and an empty update compound is written as the
+network `TAG_End` null tag (including furnaces, generated dungeon chests, and
+beehives). Data-bearing spawners and End gateways retain their update fields;
+deferred loot and generated occupants remain in region saves without being
+mistaken for clientbound chunk state.
 
 ### Operator entity queries
 
