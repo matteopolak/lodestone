@@ -10,7 +10,8 @@ use lodestone_data::block_states;
 use lodestone_data::mob_effects::{mob_effect_name_for, MobEffectId};
 use lodestone_model::{
     AdapterError, AnimationAction, BlockActionKind, BlockFace, BlockStateRef, ChatKind, ChatMode,
-    ChunkPos, ClientAction, ClientEvent, ClientSettings, CollisionRule, ConnectionState, Difficulty,
+    ChunkPos, ClientAction, ClientEvent, ClientSettings, CollisionRule, ConnectionState,
+    ContainerClickType, Difficulty,
     Directive, DisplayedSkinParts, DisplaySlot, EntityAttributeModifier, EntityAttributeSnapshot,
     EntityEquipment, EntityInteraction, EntityMovement, EquipmentSlot, GameMode, Hand, ItemStack,
     LoginProfile, ObjectiveMode,
@@ -48,7 +49,7 @@ use crate::packets::settings::{BrandPayload, PlayerAbilities, Settings};
 use crate::packets::slot::Slot;
 use crate::packets::window::{
     CloseWindow, EnchantItem, HeldItemSlot, OpenWindow, ServerboundCloseWindow,
-    ServerboundHeldItemSlot, SetCreativeSlot, SetSlot, WindowItems,
+    ServerboundHeldItemSlot, SetCreativeSlot, SetSlot, WindowClick, WindowItems,
 };
 use crate::packets::world::{
     BlockAction, BlockBreakAnimation, Explosion, NamedSoundEffect, OpenSignEntity, WorldEvent,
@@ -3536,7 +3537,7 @@ pub static IGNORED: &[lodestone_core::dispatch::IGNORED] = &[
     lodestone_core::dispatch::IGNORED::new("minecraft:bed", "removed from the wire after protocol 340 (1.12.2); vanilla folds sleeping state into entity metadata (a Pose value) from 1.14 onward, so there is no v26-2 clientbound packet to backport"),
     lodestone_core::dispatch::IGNORED::new("minecraft:entity", "entity-tracker no-op heartbeat: minecraft-data's own schema is a bare entityId with no other field, and no protocol family in this workspace (v1-9, v1-14, v26-2) translates it either"),
     lodestone_core::dispatch::IGNORED::new("minecraft:world_particles", "v26-2 has this; backport"),
-    lodestone_core::dispatch::IGNORED::new("minecraft:transaction", "removed from the wire after protocol 754 (1.16.5, still present in v1-14); v26-2 has no clientbound-or-serverbound transaction-ack packet at all, so there is nothing to backport"),
+    lodestone_core::dispatch::IGNORED::new("minecraft:transaction", "the legacy click acknowledgement has no canonical event; authoritative window-items/set-slot corrections already reconcile the hosted click, so the ack is consumed without inventing a second client state machine"),
     lodestone_core::dispatch::IGNORED::new("minecraft:update_sign", "the clientbound arm was removed after protocol 754 (v1-9 and v1-14 both carry it serverbound-only); modern sign text travels through block-entity NBT instead, so there is no v26-2 clientbound packet to backport"),
     lodestone_core::dispatch::IGNORED::new("minecraft:map", "v26-2 has this; backport"),
     lodestone_core::dispatch::IGNORED::new("minecraft:tile_entity_data", "v26-2 has this; backport"),
@@ -3907,34 +3908,46 @@ impl VersionAdapter for V47Adapter {
                 Ok(Some((play::serverbound::ABILITIES, encode_body(&body)?)))
             }
 
-            // Container clicks predate the modern `state_id` reconciliation.
-            // Faithfully encoding 1.8's `window_click` requires three things the
-            // current model/architecture cannot supply, so it is refused loudly
-            // rather than encoded with wrong bytes (which a live server rejects
-            // via a failed transaction, silently dropping the click):
-            //   1. a client-tracked transaction id (the `action` counter) plus
-            //      the `confirm_transaction` ack loop — the model carries only
-            //      the 1.17+ `state_id`, and this adapter now tracks other
-            //      per-connection state (`pending_tab_complete`) but not this;
-            //   2. an item registry (`ResourceKey` -> numeric id) to encode the
-            //      clicked stack, which no version crate has yet;
-            //   3. item metadata/damage, which pre-1.13 slots carry but the
-            //      model's `ItemStack { item, count }` cannot express.
-            //
-            // This is also why the clientbound `TRANSACTION` packet (id 0x32)
-            // has no decode arm: it exists solely to accept or reject a
-            // `window_click` this client cannot yet send, so nothing here
-            // could ever receive one. Wiring a decode for it now would be an
-            // event with no producer that could trigger it — inventing a
-            // consumer for a packet a real server never sends us is the wrong
-            // side of that trade. It becomes real work once `ContainerClick`
-            // above is, not before.
-            ClientAction::ContainerClick { .. } => Err(AdapterError::Unsupported(
-                "protocol 47 ContainerClick needs a client-tracked transaction id (model carries \
-                 only the 1.17+ state_id), an item registry, and item metadata the model's \
-                 ItemStack cannot express"
-                    .to_owned(),
-            )),
+            // Container clicks predate modern state-id reconciliation. The
+            // shared state id is used as the legacy transaction/action number
+            // for the basic hosted path; the server remains authoritative and
+            // sends its correction after every click. The canonical model does
+            // not infer legacy damage variants, so the clicked-stack claim is
+            // empty and the server's own slot state wins.
+            ClientAction::ContainerClick {
+                window_id,
+                state_id,
+                slot,
+                button,
+                click_type,
+                ..
+            } => {
+                let body = WindowClick {
+                    window_id: u8::try_from(*window_id).map_err(|_| {
+                        AdapterError::Encode(format!("window id {window_id} does not fit a byte"))
+                    })?,
+                    slot: i16::try_from(*slot).map_err(|_| {
+                        AdapterError::Encode(format!("container slot {slot} does not fit an i16"))
+                    })?,
+                    button: i8::try_from(*button).map_err(|_| {
+                        AdapterError::Encode(format!("click button {button} does not fit an i8"))
+                    })?,
+                    action: i16::try_from(state_id.as_wire()).map_err(|_| {
+                        AdapterError::Encode(format!("container state {} does not fit an i16", state_id.as_wire()))
+                    })?,
+                    mode: match click_type {
+                        ContainerClickType::Pickup => 0,
+                        ContainerClickType::QuickMove => 1,
+                        ContainerClickType::Swap => 2,
+                        ContainerClickType::Clone => 3,
+                        ContainerClickType::Throw => 4,
+                        ContainerClickType::QuickCraft => 5,
+                        ContainerClickType::PickupAll => 6,
+                    },
+                    item: Slot::Empty,
+                };
+                Ok(Some((play::serverbound::WINDOW_CLICK, encode_body(&body)?)))
+            }
 
             // Genuinely absent in 1.8: there is no off-hand and no player-input
             // packet. These fail loudly so a caller cannot mistake a silent no-op

@@ -5,12 +5,14 @@ use lodestone_core::{Ctx, Reader, State, encode_body};
 use lodestone_data::block_states::{self, block_name, properties};
 use lodestone_model::{
     AnimationAction, BlockActionKind, BlockFace, BlockPos, ClientAction, ClientEvent,
-    ConnectionState, Directive, Hand, Vec3f, VersionAdapter,
+    ConnectionState, Directive, Hand, ItemStack, PredictionSequence, Vec3f, VersionAdapter,
 };
 use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol};
 use lodestone_v1_8::{V47Adapter, V47ServerProtocol};
 use lodestone_v1_8::packet_ids::{handshaking, play};
 use lodestone_v1_8::packets::handshake::SetProtocol;
+use lodestone_v1_8::packets::slot::Slot;
+use lodestone_v1_8::packets::window::WindowClick;
 use lodestone_world::World;
 
 const CTX: Ctx = Ctx { version: 47 };
@@ -42,6 +44,65 @@ fn accepts_only_the_hosted_handshake_protocol() {
         ServerBound::Ignored
     );
     assert!(!protocol.has_configuration_phase());
+}
+
+#[test]
+fn container_click_reaches_the_shared_host_consumer() {
+    let body = encode_body(
+        &WindowClick {
+            window_id: 3,
+            slot: 0,
+            button: 0,
+            action: 0,
+            mode: 0,
+            item: Slot::Empty,
+        },
+        CTX,
+    )
+    .expect("window click fixture encodes");
+    assert_eq!(
+        V47ServerProtocol.decode(State::Play, play::serverbound::WINDOW_CLICK, &body),
+        ServerBound::ContainerClicked {
+            window_id: 3,
+            state_id: 0,
+            slot: 0,
+            button: 0,
+            click_type: 0,
+            changed_slots: Vec::new(),
+            carried_item: None,
+        }
+    );
+}
+
+#[test]
+fn container_server_packets_match_literal_protocol_47_shapes() {
+    let protocol = V47ServerProtocol;
+    let payload = |directive| match directive {
+        ServerDirective::Send { payload, .. } => payload,
+        other => panic!("expected packet directive, got {other:?}"),
+    };
+    assert_eq!(
+        payload(protocol.encode_open_screen(7, "minecraft:generic_9x3", "Chest")),
+        b"\x07\x0fminecraft:chest\x10{\"text\":\"Chest\"}\x1b",
+    );
+    assert_eq!(
+        payload(protocol.encode_container_content(
+            7,
+            0,
+            &[None, Some(ItemStack::new("minecraft:stone".parse().unwrap(), 1))],
+            None,
+        )),
+        b"\x07\x00\x02\xff\xff\x00\x01\x01\x00\x00\x00",
+    );
+    assert_eq!(
+        payload(protocol.encode_container_slot(
+            7,
+            0,
+            36,
+            Some(&ItemStack::new("minecraft:stone".parse().unwrap(), 1)),
+        )),
+        b"\x07\x00\x24\x00\x01\x01\x00\x00\x00",
+    );
 }
 
 #[test]
@@ -402,7 +463,7 @@ fn adapter_emitted_block_place_reaches_the_hosted_placement_boundary() {
         face: BlockFace::North,
         cursor: Vec3f::new(0.5, 0.25, 0.75),
         inside_block: false,
-        sequence: 123,
+        sequence: PredictionSequence::new(123),
     };
     let (packet_id, body) = V47Adapter::new()
         .encode_action(ConnectionState::Play, &action)
