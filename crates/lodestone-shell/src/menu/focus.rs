@@ -367,7 +367,7 @@ impl KeyEvent {
             // rather than being abstracted away, because for these keys the
             // modifiers are the meaning. See [`super::nav::MenuKey::Edit`].
             MenuKey::Edit(event) => event,
-            MenuKey::Char(_) => return None,
+            MenuKey::Char(_) | MenuKey::PageUp | MenuKey::PageDown => return None,
         })
     }
 }

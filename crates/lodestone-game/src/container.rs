@@ -139,6 +139,10 @@ pub enum SlotKind {
     Armor(EquipmentSlot),
     /// The off-hand slot (accepts any item, like vanilla's shield slot).
     Offhand,
+    /// A display-only slot: it accepts no placement and cannot be picked up
+    /// through ordinary container clicks. Screens with a separate action for
+    /// removal (such as a lectern's take control) use that action instead.
+    ReadOnly,
     /// The enchanting table's currency slot: accepts only lapis lazuli
     /// (vanilla's own enchanting-table lapis slot, whose `mayPlace`
     /// checks `itemStack.is(Items.LAPIS_LAZULI)`). A dedicated variant rather
@@ -225,18 +229,19 @@ impl Slot {
     #[must_use]
     pub fn may_place(&self, stack: &ItemStack) -> bool {
         match self.kind {
-            SlotKind::Output => false,
+            SlotKind::Output | SlotKind::ReadOnly => false,
             SlotKind::Armor(target) => equippable_slot(stack) == Some(target),
             SlotKind::LapisOnly => stack.item().to_string() == LAPIS_LAZULI,
             SlotKind::Normal | SlotKind::CraftingInput | SlotKind::Offhand => true,
         }
     }
 
-    /// Returns whether an item may be taken from this slot. Always `true` in the
-    /// base model; a hook for locked/gated slots can override later.
+    /// Returns whether an item may be taken from this slot. Display-only slots
+    /// refuse ordinary pickup; a screen-specific action may still remove their
+    /// content through its own protocol operation.
     #[must_use]
     pub fn may_pickup(&self) -> bool {
-        true
+        !matches!(self.kind, SlotKind::ReadOnly)
     }
 
     /// Returns the effective cap for `stack` in this slot: the smaller of the

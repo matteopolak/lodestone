@@ -109,6 +109,9 @@ pub enum SpecialLayout {
     /// selection state, not `AbstractContainerMenu` slots; see
     /// `lodestone_shell::container::beacon`.
     Beacon,
+    /// Lectern book display. The server-owned book is rendered by the book
+    /// reader overlay; this discriminator keeps its single slot read-only.
+    Lectern,
 }
 
 /// Where a menu's crafting grid and result live, in **menu-slot** indices.

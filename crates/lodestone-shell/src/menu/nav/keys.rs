@@ -441,7 +441,11 @@ impl MenuNav {
                 }
                 MenuAction::None
             }
-            MenuKey::Up | MenuKey::Down | MenuKey::Refresh => MenuAction::None,
+            MenuKey::Up
+            | MenuKey::Down
+            | MenuKey::PageUp
+            | MenuKey::PageDown
+            | MenuKey::Refresh => MenuAction::None,
         }
     }
 
@@ -556,7 +560,10 @@ impl MenuNav {
                 }
                 MenuAction::None
             }
-            MenuKey::Tab | MenuKey::Refresh => MenuAction::None,
+            MenuKey::Tab
+            | MenuKey::PageUp
+            | MenuKey::PageDown
+            | MenuKey::Refresh => MenuAction::None,
         }
     }
 
@@ -647,7 +654,13 @@ impl MenuNav {
                 }
                 MenuAction::None
             }
-            MenuKey::Up | MenuKey::Down | MenuKey::Enter | MenuKey::Tab | MenuKey::Refresh => {
+            MenuKey::Up
+            | MenuKey::Down
+            | MenuKey::Enter
+            | MenuKey::Tab
+            | MenuKey::PageUp
+            | MenuKey::PageDown
+            | MenuKey::Refresh => {
                 MenuAction::None
             }
         }
@@ -812,6 +825,13 @@ impl MenuNav {
                 let window_id = state.lectern_window_id();
                 self.close_book_view(ui);
                 return window_id.map_or(MenuAction::None, |window_id| MenuAction::CloseContainer { window_id });
+            }
+            book_view::page_row::TAKE_BOOK if state.can_take_book() => {
+                let Some(window_id) = state.lectern_window_id() else {
+                    return MenuAction::None;
+                };
+                self.close_book_view(ui);
+                return MenuAction::ContainerButtonClick { window_id, button_id: 3 };
             }
             _ => {}
         }

@@ -219,6 +219,9 @@ pub(super) fn background_kind(menu: &Menu) -> BackgroundKind {
         Some(SpecialLayout::Hopper) => return BackgroundKind::Hopper,
         Some(SpecialLayout::Merchant) => return BackgroundKind::Merchant,
         Some(SpecialLayout::Beacon) => return BackgroundKind::Beacon,
+        // The reader overlay owns the visible lectern screen. Keep a stable
+        // one-row fallback for callers that ask for the menu panel directly.
+        Some(SpecialLayout::Lectern) => return BackgroundKind::Generic { rows: 1 },
         None => {}
     }
     match menu.kind() {

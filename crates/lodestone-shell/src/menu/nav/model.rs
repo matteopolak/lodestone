@@ -17,6 +17,10 @@ pub enum MenuKey {
     Up,
     /// Move the highlight down one row (wraps).
     Down,
+    /// Turn a book reader page backward (Page Up).
+    PageUp,
+    /// Turn a book reader page forward (Page Down).
+    PageDown,
     /// Activate the highlighted row / save the form.
     Enter,
     /// Back out one level. Handled by [`super::UiState::on_escape`].
@@ -237,13 +241,13 @@ pub enum MenuAction {
     /// [`lodestone_model::ClientAction`] directly for the identical
     /// `Eq`-derive reason [`MenuAction::SetCommandBlock`]'s own doc gives.
     EditBook(book_edit::BookEditSubmit),
-    /// Tell a server-owned lectern to show `button_id` as its selected page.
+    /// Tell a server-owned lectern to process its selected-page button id.
     /// The action only comes from a successful turn in [`super::Screen::BookView`],
     /// never from a hand-held book.
     ContainerButtonClick {
         /// The lectern's open container id.
         window_id: i32,
-        /// The new zero-based page index.
+        /// Previous/next (`1`/`2`), take (`3`), or page jump (`100 + index`).
         button_id: i32,
     },
     /// Close the server-owned lectern after Done or Escape. Hand-held books

@@ -446,6 +446,17 @@ impl Menu {
         menu
     }
 
+    /// Builds the read-only lectern menu. A lectern content packet contains
+    /// only its displayed book; the player's inventory is not part of that
+    /// packet because the screen is the book reader overlay.
+    #[must_use]
+    pub fn lectern() -> Self {
+        let mut menu = Self::generic(1);
+        menu.slots[0].kind = SlotKind::ReadOnly;
+        menu.special_layout = Some(SpecialLayout::Lectern);
+        menu
+    }
+
     /// Returns the menu kind.
     #[must_use]
     pub fn kind(&self) -> MenuKind {
