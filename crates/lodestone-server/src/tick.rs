@@ -276,9 +276,18 @@ fn resident_tick_set_block<S: ChunkSource + ?Sized>(
         Some(crate::chunk_store::TryBlockMutation::Applied) => true,
         Some(
             crate::chunk_store::TryBlockMutation::Busy
-            | crate::chunk_store::TryBlockMutation::Unsupported
             | crate::chunk_store::TryBlockMutation::Absent,
         ) => false,
+        Some(crate::chunk_store::TryBlockMutation::Unsupported) => {
+            // Legacy sources can expose a resident snapshot without an edit
+            // ledger. Confirm residency first, then use their ordinary writer;
+            // this keeps the resident-only boundary while allowing lightweight
+            // in-memory sources to participate in tick-owned callbacks.
+            resident_tick_block_state(source, x, y, z).is_some_and(|_| {
+                source.set_block(x, y, z, state);
+                true
+            })
+        }
         None => resident_tick_block_state(source, x, y, z).is_some_and(|_| {
             source.set_block(x, y, z, state);
             true
