@@ -1407,7 +1407,7 @@ mod menu_text_editing {
     use super::*;
     use crate::menu::command_block::CommandBlockOpen;
     use crate::menu::UiState;
-    use crate::menu::nav::{MenuKey, MenuNav};
+    use crate::menu::nav::MenuNav;
     use crate::menu::sign_edit::SignEditOpen;
 
     /// The platform's edit-shortcut modifier as winit reports it. Same

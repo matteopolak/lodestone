@@ -17,16 +17,27 @@ use crate::menu::servers::ServerEntry;
 use crate::menu::status::{ServerStatus, StatusCache, unavailable_probe};
 use crate::menu::{Screen, SessionKind, UiState};
 
+#[path = "title_command.rs"]
 mod title_command;
+#[path = "server_render_tests.rs"]
 mod server_render_tests;
+#[path = "frame_geometry.rs"]
 mod frame_geometry;
+#[path = "accounts.rs"]
 mod accounts;
+#[path = "screen_frames.rs"]
 mod screen_frames;
+#[path = "widget_sprites.rs"]
 mod widget_sprites;
+#[path = "world_select.rs"]
 mod world_select;
+#[path = "settings.rs"]
 mod settings;
+#[path = "loading.rs"]
 mod loading;
+#[path = "packs.rs"]
 mod packs;
+#[path = "layered_screens.rs"]
 mod layered_screens;
 
 /// Vertex stride in the emitted buffer.

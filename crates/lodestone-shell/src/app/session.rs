@@ -1641,7 +1641,6 @@ impl WindowApp {
     /// server rejects an unauthorised request as it rejects every other
     /// optimistic action — see `targeted_command_block`'s doc for the same call.
     pub(super) fn cycle_game_mode(&self) {
-        use lodestone_model::GameMode;
         let Some(net) = self.sim.net() else { return };
         let current = net
             .shared_handle()
@@ -1982,9 +1981,16 @@ impl WindowApp {
             // same fog lane — so one line here darkens all three under a storm.
             let darken_weather = weather.clone();
             render.set_sky_darken_source(move || {
-                let base = clock.get().map(|h| {
-                    lodestone_render::entity::sky_darken_for_time_of_day(h.world_time().1)
-                })?;
+                let handle = clock.get()?;
+                let base = handle
+                    .player()
+                    .dimension_type
+                    .and_then(|dimension| dimension.sky_light_factor)
+                    .unwrap_or_else(|| {
+                        lodestone_render::entity::sky_darken_for_time_of_day(
+                            handle.world_time().1,
+                        )
+                    });
                 Some(match &darken_weather {
                     Some(w) => lodestone_render::weather_sky_light_factor(base, &w.state()),
                     None => base,

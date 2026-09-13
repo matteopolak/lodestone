@@ -398,7 +398,7 @@ pub fn build(
         let band = active_list
             .as_ref()
             .map(|(list, _)| (list.top(), list.height()));
-        let mut draw_list_labels = |b: &mut Quads<'_>| {
+        let draw_list_labels = |b: &mut Quads<'_>| {
             for label in &frame.list_labels {
                 let (ax, ay) = label.origin.anchor(width, height);
                 let tw = b.text_width(&label.text, label.scale);

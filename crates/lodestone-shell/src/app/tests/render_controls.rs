@@ -31,7 +31,7 @@
 /// and `capture_key_for` is asserted here too, so the substitution is checked
 /// rather than assumed.
 
-//! Tests for controls persistence and render-path debug guards.
+// Tests for controls persistence and render-path debug guards.
 
 use super::*;
 
