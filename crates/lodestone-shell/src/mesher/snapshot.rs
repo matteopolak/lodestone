@@ -613,9 +613,9 @@ fn is_all_air(section: &ChunkSection) -> bool {
 /// distinct from a loaded column whose block data disappeared before meshing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct ColumnBlockSummary {
-    allocated_sections: usize,
-    non_air_sections: usize,
-    non_air_blocks: usize,
+    pub(crate) allocated_sections: usize,
+    pub(crate) non_air_sections: usize,
+    pub(crate) non_air_blocks: usize,
 }
 
 impl ColumnBlockSummary {

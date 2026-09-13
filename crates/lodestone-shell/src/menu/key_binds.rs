@@ -758,7 +758,7 @@ pub fn frame(nav: &KeyBindsNav, keybinds: &Keybinds) -> MenuFrame<'static> {
         })
         .collect();
 
-    let mut labels = vec![MenuLabel {
+    let labels = vec![MenuLabel {
         text: "Key Binds".to_string(), // `controls.keybinds.title`
         origin: Origin::ScreenTop,
         dx: 0.0,

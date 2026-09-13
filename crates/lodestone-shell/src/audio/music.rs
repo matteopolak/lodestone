@@ -23,10 +23,10 @@
 //! browser on **every** `cargo test -p lodestone-shell` run, invisible because the
 //! suite passed. So playback here forks on **`#[cfg(test)]`**, not on
 //! `cfg!(test)`. The difference matters: a `cfg!(test)` early return is a silent
-//! skip that nothing can assert, whereas the two `#[cfg]` arms below also define
-//! [`PLAYBACK`], so [`the_test_build_intercepts_playback`] can assert *which arm
-//! compiled*. Delete the test arm and that gate fails rather than quietly
-//! reaching for a device.
+//! skip that nothing can assert. The test-only [`PLAYBACK`] marker lets
+//! [`the_test_build_intercepts_playback`] assert that the interception compiled;
+//! deleting the test arm makes that gate fail rather than quietly reaching for a
+//! device.
 //!
 //! # Playback is real; this module still owns none of it
 //!
@@ -50,7 +50,6 @@ use crate::platform::Instant;
 use lodestone_sound::JavaRandom;
 use lodestone_sound::music::{
     BackgroundMusic, Music, MusicFrequency, MusicManager, MusicSink, MusicSituation, MusicStart,
-    STARTING_DELAY,
 };
 
 use super::ShellAudio;
@@ -63,22 +62,20 @@ const TICK: Duration = Duration::from_millis(50);
 /// ticks of music bookkeeping, not 1200.
 const MAX_CATCH_UP_TICKS: u32 = 10;
 
-/// Which playback path this build compiled.
+/// Marker for the test-only playback path.
 ///
 /// Exists so the `#[cfg(test)]` interception is **assertable** rather than merely
-/// present — see this module's header.
+/// present — see this module's header. Production has no marker because its
+/// ordinary `ShellAudio` path is the behavior under test.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Playback {
-    /// Requests reach [`ShellAudio`] and thus a real output device.
-    RealDevice,
     /// Requests are recorded and go no further.
     InterceptedForTests,
 }
 
 #[cfg(test)]
 pub(crate) const PLAYBACK: Playback = Playback::InterceptedForTests;
-#[cfg(not(test))]
-pub(crate) const PLAYBACK: Playback = Playback::RealDevice;
 
 /// The shell's music state: vanilla's `MusicManager` plus what it needs to run.
 #[derive(Debug)]
@@ -115,11 +112,13 @@ impl ShellMusic {
     }
 
     /// The track currently playing, if any.
+    #[cfg(test)]
     pub(crate) fn current_track(&self) -> Option<&str> {
         self.manager.current_track()
     }
 
     /// Every start request so far, oldest first.
+    #[cfg(test)]
     pub(crate) fn requests(&self) -> &[String] {
         &self.requests
     }
@@ -316,6 +315,7 @@ impl MusicSink for ShellMusicSink<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lodestone_sound::music::STARTING_DELAY;
 
     /// Both production call sites exist, in code rather than in a comment.
     ///

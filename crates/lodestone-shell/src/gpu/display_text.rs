@@ -282,11 +282,15 @@
 use glam::{Mat4, Vec3};
 use lodestone_assets::font::RasterFont;
 use lodestone_assets::font::metrics::{SHADOW_BRIGHTNESS, SHADOW_OFFSET};
-use lodestone_model::text::{Text, TextSpan};
+use lodestone_model::text::TextSpan;
+#[cfg(test)]
+use lodestone_model::text::Text;
 use lodestone_render::display::{
-    BillboardMode, DisplayTransformation, display_orientation, display_placement_matrix,
-    text_background_color, text_glyph_color, text_glyph_transform,
+    display_orientation, display_placement_matrix, text_background_color, text_glyph_color,
+    text_glyph_transform,
 };
+#[cfg(test)]
+use lodestone_render::display::{BillboardMode, DisplayTransformation};
 use lodestone_render::sign::TEXT_LINE_HEIGHT;
 use lodestone_render::{Camera, DEPTH_COMPARE_NEARER_OR_EQUAL, DEPTH_FORMAT};
 

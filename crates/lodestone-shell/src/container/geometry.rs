@@ -4,10 +4,9 @@
 //!
 //! Split out of `container.rs` verbatim.
 
-use lodestone_assets::ItemAtlas;
 use lodestone_game::item::ItemStack;
 use lodestone_game::menu::{Menu, MenuKind, SpecialLayout};
-use lodestone_render::{BlockModels, ModelVertex};
+use lodestone_render::ModelVertex;
 
 use crate::hud::VanillaFont;
 use crate::hud::item_icon::{self, IconAssets, SpecialIconDraw};
@@ -91,7 +90,7 @@ pub struct ContainerGeometry {
     /// slot wells, title, stack counts and durability bars.
     pub verts: Vec<f32>,
     /// Flat `[x, y, u, v, r, g, b, a]` per textured **item**-sprite vertex,
-    /// sampling the [`ItemAtlas`]. Empty unless one was supplied.
+    /// sampling the [`lodestone_assets::ItemAtlas`]. Empty unless one was supplied.
     pub item_verts: Vec<f32>,
     /// The **enchantment-glint** copies of [`item_verts`](Self::item_verts) —
     /// see [`crate::hud::HudGeometry::glint_verts`]. Split at
@@ -99,7 +98,7 @@ pub struct ContainerGeometry {
     /// reason the sprite stream is.
     pub glint_verts: Vec<f32>,
     /// The 3-D **block-item** icons, already posed into GUI pixel space on the
-    /// CPU. Empty unless a [`BlockModels`] was supplied.
+    /// CPU. Empty unless a [`lodestone_render::BlockModels`] was supplied.
     pub model_verts: Vec<ModelVertex>,
     /// The **special-renderer** icons (chest, and the rest of the ex-
     /// `builtin/entity` family as their geometry lands): the baked block-entity

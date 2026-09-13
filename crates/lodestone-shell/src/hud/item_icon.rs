@@ -1693,7 +1693,7 @@ impl SpecialIcons {
             "built the GUI special-renderer icon pass"
         );
 
-        // `FogUniform::disabled()` leaves the sky-darken lane at its `0.0`
+        // `FogUniform::disabled()` leaves the sky-darken lane at its negative
         // sentinel, which `EntityCameraUniform::sky_darken` reads back as `1.0`
         // (full daylight). An inventory slot is not in the world: it must not
         // dim at night, and taking the lane literally would render every chest

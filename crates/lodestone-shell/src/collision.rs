@@ -93,6 +93,7 @@
 //! [`demo_fluid`]: crate::blocks::demo_fluid
 //! [`vanilla_fluid`]: crate::blocks::vanilla_fluid
 
+#[cfg(test)]
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 

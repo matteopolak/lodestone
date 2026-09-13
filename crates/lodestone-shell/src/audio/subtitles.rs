@@ -139,6 +139,7 @@ impl SubtitleQueue {
     }
 
     /// How many captions are live.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.subtitles.len()
     }

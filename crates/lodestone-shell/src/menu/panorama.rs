@@ -277,7 +277,12 @@ pub fn view_projection(width: u32, height: u32, spin_degrees: f32) -> Mat4 {
     // glam's `perspective_rh` is [0,1] depth where JOML's may be [-1,1]; the
     // difference is confined to the z row and this pass has no depth attachment
     // at all, so it cannot matter here. x/y are identical between the two.
-    let projection = Mat4::perspective_rh(FOV_DEGREES.to_radians(), aspect, Z_NEAR, Z_FAR);
+    let projection = glam::camera::rh::proj::directx::perspective(
+        FOV_DEGREES.to_radians(),
+        aspect,
+        Z_NEAR,
+        Z_FAR,
+    );
     let model_view = Mat4::from_rotation_x(std::f32::consts::PI)
         * Mat4::from_rotation_x(TILT_DEGREES.to_radians())
         * Mat4::from_rotation_y(spin_degrees.to_radians());
