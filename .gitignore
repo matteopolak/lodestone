@@ -18,6 +18,13 @@
 # Scratch capture workspace — not part of the build
 /.capture/
 
+# Local agent/session state and disposable checkout scaffolding. These contain
+# per-machine patches, indexes, and worktree administrative data rather than
+# repository inputs.
+/.codex/
+/.worktrees/
+/.typed-biome-*
+
 # Deletion-drill scratch (see plan §3.2); recreate with `cargo xtask check-deletable`
 /.deletion-drill-backup/
 
