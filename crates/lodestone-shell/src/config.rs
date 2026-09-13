@@ -2798,7 +2798,10 @@ mod tests {
             vec!["--render-distance"],
         ] {
             assert!(
-                matches!(Config::from_args(args.into_iter().map(str::to_owned)), CliOutcome::Error(_)),
+                matches!(
+                    Config::from_args(args.clone().into_iter().map(str::to_owned)),
+                    CliOutcome::Error(_)
+                ),
                 "out-of-range or missing render distance must fail closed: {args:?}"
             );
         }
