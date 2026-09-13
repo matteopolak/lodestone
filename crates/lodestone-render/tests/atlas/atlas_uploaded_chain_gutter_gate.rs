@@ -115,7 +115,6 @@ fn texel(level: &lodestone_render::MipLevel, x: u32, y: u32) -> [u8; 4] {
 /// One disagreement between a gutter texel and the sprite edge it must
 /// replicate. Carries the level's own dimensions and both texels so a failure
 /// says *what* it found, not just that it found something.
-#[derive(Debug)]
 struct Mismatch {
     sprite: &'static str,
     requested_levels: u32,
@@ -124,6 +123,23 @@ struct Mismatch {
     side: &'static str,
     got: [u8; 4],
     want: [u8; 4],
+}
+
+impl std::fmt::Display for Mismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "sprite={} requested_levels={} level={} size={}x{} side={} got={:02x?} want={:02x?}",
+            self.sprite,
+            self.requested_levels,
+            self.level,
+            self.level_size.0,
+            self.level_size.1,
+            self.side,
+            self.got,
+            self.want,
+        )
+    }
 }
 
 #[test]
@@ -195,12 +211,17 @@ fn every_uploaded_level_replicates_the_sprite_edge_into_its_gutter() {
         "no gutter texel was compared — the probe found nothing to look at, \
          which is a failure to run, not a pass"
     );
+    let mismatch_details = mismatches
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
         mismatches.is_empty(),
         "{} of {checks} gutter texels do not replicate their sprite's own edge; \
-         a Linear-minified tap at a face edge reads these:\n{:#?}",
+         a Linear-minified tap at a face edge reads these:\n{}",
         mismatches.len(),
-        mismatches
+        mismatch_details,
     );
 
     // Vanilla's texture-atlas creation function asks for

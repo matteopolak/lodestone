@@ -66,9 +66,9 @@ const LIGHT_TORCH: u8 = 15;
 
 /// Noon. Vanilla's curve tops out at exactly 1.0.
 const NOON: f32 = 1.0;
-/// The lane left at its `0.0` default — the "sky darken was never wired" state
+/// The lane left at its negative default — the "sky darken was never wired" state
 /// every caller that predates this term is in. Must render identically to noon.
-const UNSET: f32 = 0.0;
+const UNSET: f32 = -1.0;
 
 /// Sky colour behind the mob; nothing else in the frame is this colour.
 const CLEAR: wgpu::Color = wgpu::Color {
@@ -607,8 +607,8 @@ fn a_torch_lit_mob_is_identical_at_midnight_and_noon() {
 
 /// **No regression for callers that predate this term.** Every existing path
 /// builds the group-0 uniform from a `FogUniform` that leaves the sky-darken lane
-/// at `0.0`. That must render *byte-identically* to explicit noon, or the
-/// sky-darken term silently renders every mob in the demo world and in a
+/// at its negative unset sentinel. That must render *byte-identically* to explicit noon, or
+/// the sky-darken term silently renders every mob in the demo world and in a
 /// dozen other gates pure black — the old ramp's `0.2` floor at least left
 /// them dimly visible, so this sentinel matters.
 #[test]
@@ -626,7 +626,7 @@ fn the_unset_lane_renders_identically_to_explicit_noon() {
     let midnight_diff = differing_pixels(&unset, &mob_frame(&gpu, LIGHT_SKY, 0.24));
 
     println!("=== UNSET-LANE SENTINEL ===");
-    println!("lane 0.0 (unset) = {unset_mean:.1}");
+    println!("lane -1.0 (unset) = {unset_mean:.1}");
     println!("lane 1.0 (noon)  = {noon_mean:.1}");
     println!("differing pixels = {diff} (must be 0)");
     println!("detector control: unset vs midnight differs in {midnight_diff} pixels");
@@ -638,8 +638,8 @@ fn the_unset_lane_renders_identically_to_explicit_noon() {
     );
     assert_eq!(
         diff, 0,
-        "the unset (0.0) sky-darken lane must read as full daylight, but it differs from \
+        "the unset (-1.0) sky-darken lane must read as full daylight, but it differs from \
          explicit noon in {diff} pixels ({unset_mean:.1} vs {noon_mean:.1}). Taken literally, \
-         0.0 renders every pre-existing caller's sky-lit mobs pure black."
+         -1.0 renders every pre-existing caller's sky-lit mobs pure black."
     );
 }
