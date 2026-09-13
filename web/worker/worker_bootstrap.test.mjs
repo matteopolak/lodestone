@@ -46,6 +46,7 @@ test("reports ordered, real startup milestones and transfers only the supplied p
   assert.deepEqual(controlMessages(received), [
     { kind: "progress", stage: "loading-module" },
     { kind: "progress", stage: "starting-server" },
+    { kind: "progress", stage: "preparing-world" },
     { kind: "ready" },
   ]);
   assert.deepEqual(started, [[port, 776, -42n, 0]]);
@@ -76,6 +77,7 @@ test("reports a wasm startup failure instead of claiming a ready server", async 
   assert.deepEqual(controlMessages(received), [
     { kind: "progress", stage: "loading-module" },
     { kind: "progress", stage: "starting-server" },
+    { kind: "progress", stage: "preparing-world" },
     { kind: "error", message: "Error: world source failed" },
   ]);
 });

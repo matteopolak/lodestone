@@ -1101,7 +1101,9 @@ pub mod fluid {
 
     use lodestone_model::BlockPos;
     use lodestone_server::fluid::{FluidEnv, run_scheduled_tick, ticks_after_edit};
-    use lodestone_server::{ChunkColumn, ChunkSource, ScheduledTickQueue};
+    use lodestone_server::{
+        ChunkColumn, ChunkSource, ScheduledTickQueue, ScheduledTickSink,
+    };
 
     use super::{Action, WorldOracle, state_matches};
 
@@ -1219,7 +1221,8 @@ pub mod fluid {
                     // set-block path it stands for rather than like a silent
                     // poke at the store.
                     for pending in ticks_after_edit(&self.rig, self.env, BlockPos::new(x, y, z)) {
-                        self.queue.schedule(
+                        ScheduledTickSink::schedule_tick(
+                            &mut self.queue,
                             pending.pos,
                             pending.kind,
                             self.tick + pending.trigger_tick,

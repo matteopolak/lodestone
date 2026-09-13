@@ -609,6 +609,12 @@ CONFINEMENT_RULES=(
   # `std::time::` path at all.
   "lodestone-time instant-ban|crates/lodestone-time/src|std::time::Instant|"
   "lodestone-time systemtime-ban|crates/lodestone-time/src|std::time::SystemTime|"
+  # The dedicated server Worker is a separate wasm crate, not a root-workspace
+  # member. Keep its own entry point free of crash-class host calls even though
+  # its shell/server dependencies have their own crate-level guards.
+  "lodestone-server-worker thread-ban|web/worker/src|std::thread::spawn|"
+  "lodestone-server-worker instant-ban|web/worker/src|std::time::Instant|"
+  "lodestone-server-worker systemtime-ban|web/worker/src|std::time::SystemTime|"
 )
 
 confinement_ran=0

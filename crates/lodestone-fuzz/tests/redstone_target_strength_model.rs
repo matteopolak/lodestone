@@ -8,7 +8,7 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use lodestone_server::redstone_target::{HitAxis, redstone_strength};
+use lodestone_server::{HitAxis, redstone_strength};
 use proptest::prelude::*;
 
 const CASES: u32 = 256;
