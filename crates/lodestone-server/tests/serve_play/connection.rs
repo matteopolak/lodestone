@@ -1,5 +1,3 @@
-use super::common::*;
-
 /// **Positive control**: a client that stops responding after joining —
 /// connected, but never echoing anything back — must actually be
 /// disconnected once the keep-alive challenge goes unanswered, not merely

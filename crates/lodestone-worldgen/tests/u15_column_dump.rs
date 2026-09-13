@@ -97,8 +97,12 @@ fn dump_columns() {
                     out.extend_from_slice(&bytes);
                 }
                 for biome in &biomes {
-                    out.extend_from_slice(&(biome.len() as u32).to_le_bytes());
-                    out.extend_from_slice(biome.as_bytes());
+                    let name = biome
+                        .builtin_or_none()
+                        .expect("the dump only supports built-in biome identities")
+                        .name();
+                    out.extend_from_slice(&(name.len() as u32).to_le_bytes());
+                    out.extend_from_slice(name.as_bytes());
                 }
                 columns += 1;
             }

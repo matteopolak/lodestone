@@ -337,7 +337,7 @@ async fn joined_protocol_762_chest_moves_a_slot_and_corrects_prediction() {
                 z: 0.5,
             },
             inside_block: false,
-            sequence: 0,
+            sequence: lodestone_model::PredictionSequence::INITIAL,
         })
         .expect("joined client accepts the chest interaction");
     handle
@@ -398,7 +398,7 @@ async fn joined_protocol_762_chest_moves_a_slot_and_corrects_prediction() {
                 z: 0.5,
             },
             inside_block: false,
-            sequence: 1,
+            sequence: lodestone_model::PredictionSequence::new(1),
         })
         .expect("joined client reopens the chest");
     handle
