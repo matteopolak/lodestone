@@ -54,6 +54,7 @@ SECRET_ASSIGNMENT = re.compile(
 )
 COMMAND_PLACEHOLDERS = frozenset({"java", "paper_jar", "plugin_dir", "scenario", "workdir"})
 COMMAND_PLACEHOLDER = re.compile(r"\{([^{}]+)\}")
+JDK_RELEASE = 25
 
 
 class ContractError(ValueError):
@@ -210,12 +211,25 @@ def load_contract(path: Path) -> dict[str, Any]:
             }
         )
 
+    target_plugins = raw.get("target_plugins")
+    if not isinstance(target_plugins, list) or not target_plugins:
+        raise ContractError("target_plugins must name at least one maintained plugin")
+    if any(not isinstance(name, str) or not name for name in target_plugins):
+        raise ContractError("target_plugins must contain non-empty plugin names")
+    if len(set(target_plugins)) != len(target_plugins):
+        raise ContractError("target_plugins must contain each plugin name once")
+    unknown_targets = sorted(set(target_plugins) - names)
+    if unknown_targets:
+        raise ContractError(f"target_plugins names undeclared plugins: {unknown_targets}")
+
     driver = raw.get("driver")
     if not isinstance(driver, dict):
         raise ContractError("driver must identify the operator-supplied conformance plugin")
     driver_plugin = driver.get("plugin")
     if not isinstance(driver_plugin, str) or not driver_plugin or driver_plugin not in names:
         raise ContractError("driver.plugin must name one of the declared plugin names")
+    if driver_plugin in target_plugins:
+        raise ContractError("driver.plugin must be separate from target_plugins")
     driver_entrypoint = driver.get("entrypoint")
     declared_entrypoint = next(
         plugin["entrypoint"] for plugin in normalized_plugins if plugin["name"] == driver_plugin
@@ -231,8 +245,8 @@ def load_contract(path: Path) -> dict[str, Any]:
     build = driver.get("build")
     if not isinstance(build, dict):
         raise ContractError("driver.build must describe the offline operator build")
-    if build.get("jdk_release") != 25:
-        raise ContractError("driver.build.jdk_release must be 25")
+    if build.get("jdk_release") != JDK_RELEASE:
+        raise ContractError(f"driver.build.jdk_release must be {JDK_RELEASE}")
     if build.get("paper_api") != "{paper_jar}":
         raise ContractError("driver.build.paper_api must be {paper_jar}")
     if build.get("network") is not False:
@@ -249,8 +263,15 @@ def load_contract(path: Path) -> dict[str, Any]:
     )
     if "{java}" not in paper_command:
         raise ContractError("commands.paper must use the pinned JDK through the {java} placeholder")
+    if paper_command[0] != "{java}":
+        raise ContractError("commands.paper must invoke the pinned JDK directly as its executable")
     if "{paper_jar}" not in paper_command:
         raise ContractError("commands.paper must launch the verified Paper jar through {paper_jar}")
+    if not any(
+        item == "-jar" and index + 1 < len(paper_command) and paper_command[index + 1] == "{paper_jar}"
+        for index, item in enumerate(paper_command)
+    ):
+        raise ContractError("commands.paper must pass {paper_jar} to Java's -jar option")
     execution = raw.get("execution", {})
     if not isinstance(execution, dict):
         raise ContractError("execution must be an object")
@@ -268,6 +289,7 @@ def load_contract(path: Path) -> dict[str, Any]:
             "build": paper["build"],
         },
         "plugins": normalized_plugins,
+        "target_plugins": list(target_plugins),
         "driver": {
             "plugin": driver_plugin,
             "entrypoint": declared_entrypoint,
@@ -275,7 +297,7 @@ def load_contract(path: Path) -> dict[str, Any]:
             "controls": [identifier for identifier, _ in EXPECTED_OBSERVATIONS],
             "requires_real_block_break": True,
             "build": {
-                "jdk_release": 25,
+                "jdk_release": JDK_RELEASE,
                 "paper_api": "{paper_jar}",
                 "network": False,
             },
@@ -314,6 +336,7 @@ def blocked_records(contract: dict[str, Any]) -> list[dict[str, Any]]:
             "contract_sha256": contract_id,
             "scenario": contract["scenario"]["id"],
             "plugins": [plugin["name"] for plugin in contract["plugins"]],
+            "target_plugins": contract["target_plugins"],
         },
         {
             "schema": SCHEMA,
@@ -342,7 +365,12 @@ def blocked_records(contract: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _normalize_observation(
-    observation: dict[str, Any], *, backend: str, scenario_id: str, allow_synthetic: bool
+    observation: dict[str, Any],
+    *,
+    backend: str,
+    scenario_id: str,
+    allow_synthetic: bool,
+    required_plugins: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Validate one parsed backend observation and retain only comparison fields."""
     if observation.get("schema") != SCHEMA:
@@ -362,6 +390,21 @@ def _normalize_observation(
         raise ContractError(f"{backend} synthetic evidence is test-only and cannot pass the CLI gate")
     if not isinstance(observation.get("source"), str) or not observation["source"].strip():
         raise ContractError(f"{backend} observation.source must identify its runner")
+    enabled_plugins = observation.get("enabled_plugins")
+    if required_plugins:
+        if not isinstance(enabled_plugins, list) or any(
+            not isinstance(name, str) or not name.strip() for name in enabled_plugins
+        ):
+            raise ContractError(
+                f"{backend} observation.enabled_plugins must list the Paper plugins enabled by the driver"
+            )
+        if len(set(enabled_plugins)) != len(enabled_plugins):
+            raise ContractError(f"{backend} observation.enabled_plugins must contain unique names")
+        missing_plugins = sorted(set(required_plugins) - set(enabled_plugins))
+        if missing_plugins:
+            raise ContractError(
+                f"{backend} observation is missing enabled target plugins: {missing_plugins}"
+            )
     observations = observation.get("observations")
     if not isinstance(observations, list) or len(observations) != len(EXPECTED_OBSERVATIONS):
         raise ContractError(
@@ -385,17 +428,25 @@ def _normalize_observation(
         raise ContractError(
             f"{backend} observation ids must be {sorted(expected_ids)}, got {sorted(seen)}"
         )
-    return {
+    normalized = {
         "backend": backend,
         "scenario": scenario_id,
         "evidence_kind": evidence_kind,
         "source": observation["source"],
         "observations": normalized,
     }
+    if enabled_plugins is not None:
+        normalized["enabled_plugins"] = list(enabled_plugins)
+    return normalized
 
 
 def _load_observation(
-    path: Path, *, backend: str, scenario_id: str, allow_synthetic: bool
+    path: Path,
+    *,
+    backend: str,
+    scenario_id: str,
+    allow_synthetic: bool,
+    required_plugins: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Load one complete backend observation from an NDJSON file."""
     try:
@@ -419,12 +470,16 @@ def _load_observation(
             f"{backend} results must contain exactly one observation record and no auxiliary records"
         )
     return _normalize_observation(
-        records[0], backend=backend, scenario_id=scenario_id, allow_synthetic=allow_synthetic
+        records[0],
+        backend=backend,
+        scenario_id=scenario_id,
+        allow_synthetic=allow_synthetic,
+        required_plugins=required_plugins,
     )
 
 
 def _observation_from_stdout(
-    stdout: str, *, backend: str, scenario_id: str
+    stdout: str, *, backend: str, scenario_id: str, required_plugins: tuple[str, ...] = ()
 ) -> dict[str, Any]:
     """Extract the sole structured observation from a process's mixed log output."""
     records: list[dict[str, Any]] = []
@@ -442,7 +497,11 @@ def _observation_from_stdout(
     if len(records) != 1:
         raise ContractError(f"Paper process must emit exactly one structured observation record")
     return _normalize_observation(
-        records[0], backend=backend, scenario_id=scenario_id, allow_synthetic=False
+        records[0],
+        backend=backend,
+        scenario_id=scenario_id,
+        allow_synthetic=False,
+        required_plugins=required_plugins,
     )
 
 
@@ -540,9 +599,10 @@ def _expand_paper_command(contract: dict[str, Any], workdir: Path, plugin_dir: P
     return expanded
 
 
-def _stage_paper_fixtures(contract: dict[str, Any], plugin_dir: Path) -> None:
+def _stage_paper_fixtures(contract: dict[str, Any], plugin_dir: Path) -> dict[str, Path]:
     plugin_dir.mkdir(parents=True, exist_ok=True)
     names: set[str] = set()
+    staged: dict[str, Path] = {}
     for plugin in contract["plugins"]:
         source = Path(plugin["jar"])
         destination_name = source.name
@@ -554,6 +614,38 @@ def _stage_paper_fixtures(contract: dict[str, Any], plugin_dir: Path) -> None:
         observed = sha256(destination)
         if observed != plugin["sha256"]:
             raise ContractError(f"staged plugin hash changed for {plugin['name']}: {observed}")
+        staged[plugin["name"]] = destination
+    return staged
+
+
+def _verify_jdk_runtime(contract: dict[str, Any]) -> None:
+    """Require the selected executable to report the pinned major JDK release."""
+    java = Path(contract["jdk"]["java_home"]) / "bin" / "java"
+    if not java.is_file() or not os.access(java, os.X_OK):
+        raise ContractError(f"jdk.java_home has no executable bin/java: {java}")
+    try:
+        version = subprocess.run(
+            [str(java), "-version"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ContractError(f"cannot query pinned JDK at {java}: {error}") from error
+    if version.returncode != 0:
+        detail = redact((version.stderr or version.stdout)[-1000:])
+        raise ContractError(f"pinned JDK query exited {version.returncode}; output={detail!r}")
+    match = re.search(r'(?m)(?:version\s+)?"(\d+)(?:[.\-]|$)', version.stdout + version.stderr)
+    if match is None or int(match.group(1)) != JDK_RELEASE:
+        detail = redact((version.stdout + version.stderr)[-1000:])
+        raise ContractError(
+            f"pinned JDK must report major release {JDK_RELEASE}; output={detail!r}"
+        )
 
 
 def run_paper_backend(contract: dict[str, Any]) -> dict[str, Any]:
@@ -566,7 +658,8 @@ def run_paper_backend(contract: dict[str, Any]) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="lodestone-paper-conformance-") as directory:
         workdir = Path(directory)
         plugin_dir = workdir / "plugins"
-        _stage_paper_fixtures(contract, plugin_dir)
+        _verify_jdk_runtime(contract)
+        staged_plugins = _stage_paper_fixtures(contract, plugin_dir)
         command = _expand_paper_command(contract, workdir, plugin_dir)
         try:
             process = subprocess.Popen(
@@ -598,7 +691,10 @@ def run_paper_backend(contract: dict[str, Any]) -> dict[str, Any]:
             detail = redact(stderr[-4000:])
             raise ContractError(f"Paper command exited {process.returncode}; stderr={detail!r}")
         record = _observation_from_stdout(
-            stdout, backend="paper", scenario_id=contract["scenario"]["id"]
+            stdout,
+            backend="paper",
+            scenario_id=contract["scenario"]["id"],
+            required_plugins=tuple(contract["target_plugins"]),
         )
         if sha256(Path(contract["paper"]["jar"])) != contract["paper"]["sha256"]:
             raise ContractError("operator Paper jar changed during execution")
@@ -606,6 +702,9 @@ def run_paper_backend(contract: dict[str, Any]) -> dict[str, Any]:
             source = Path(plugin["jar"])
             if sha256(source) != plugin["sha256"]:
                 raise ContractError(f"operator plugin changed during execution: {plugin['name']}")
+            staged = staged_plugins[plugin["name"]]
+            if sha256(staged) != plugin["sha256"]:
+                raise ContractError(f"staged plugin changed during execution: {plugin['name']}")
         return record
 
 
@@ -657,6 +756,7 @@ def main(argv: list[str] | None = None) -> int:
                 backend="paper",
                 scenario_id=scenario_id,
                 allow_synthetic=False,
+                required_plugins=tuple(contract["target_plugins"]),
             )
             lodestone = _load_observation(
                 args.lodestone_results,

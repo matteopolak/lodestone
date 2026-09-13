@@ -1183,6 +1183,25 @@ order, and then releases and reuses a matching player's slot. The returned
 handle is therefore only a bounded value from the reconciled worker roster,
 never a reference to a connection, ECS value, or world guard.
 
+### Player teleport mutation
+
+`playerHandleTeleport(long, double, double, double)` is the first player-handle
+mutation in the bounded surface. The worker validates finite coordinates and
+the handle generation, then sends only the copied profile UUID and coordinates
+through a deadline-bounded port. The dedicated host resolves that UUID against
+the live roster and applies `EntityMutation::Teleport`, which queues the
+ordinary directed player effect; the connection-owned protocol path therefore
+produces the client-visible relocation.
+
+A disconnected handle fails before it can queue a request, a reused slot cannot
+act on the old generation, and a disconnected UUID is a named host error rather
+than a successful no-op. The surface census classifies the declaration as
+`TeleportMutation`; damage, messaging, game-mode mutation and experience
+mutation remain absent and are still reported by name when a fixture requests
+them. The hermetic adapter test predicts the copied request and stale/non-finite
+errors, while the ignored JDK fixture invokes the real native declaration and
+the dedicated poll path consumes it.
+
 The same composed caller exercises recursive Java-to-Rust-to-Java callbacks below and above the
 budget. Depth `2` returns `REENTRANT:OK:3`; depth `4` attempts one more callback and receives
 `RuntimeException:Rust error: reentrant callback depth limit 4 exceeded`. A thread-local guard restores its

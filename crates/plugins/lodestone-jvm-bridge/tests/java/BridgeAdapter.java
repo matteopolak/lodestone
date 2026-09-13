@@ -97,7 +97,7 @@ public final class BridgeAdapter {
                     || playerHandleExperiencePoints(playerHandle) != 23) {
                 throw new AssertionError("player snapshot getter returned the wrong value");
             }
-            expectUnsupported("playerHandleTeleport", () -> playerHandleTeleport(playerHandle, 1.0, 2.0, 3.0));
+            playerHandleTeleport(playerHandle, 1.25, 65.5, -4.75);
             expectUnsupported("playerHandleDamage", () -> playerHandleDamage(playerHandle, 4.0f));
             expectUnsupported("playerHandleSendMessage", () -> playerHandleSendMessage(playerHandle, "hello"));
             expectUnsupported("playerHandleSetGameMode", () -> playerHandleSetGameMode(playerHandle, 1));

@@ -41,19 +41,30 @@ def check(name: str, condition: bool, detail: str = "") -> None:
 def fixture(root: Path) -> Path:
     paper = root / "paper.jar"
     plugin = root / "plugin.jar"
+    target = root / "target.jar"
     paper.write_bytes(b"operator supplied Paper fixture")
     plugin.write_bytes(b"operator supplied unmodified plugin fixture")
+    target.write_bytes(b"operator supplied maintained target fixture")
     java = root / "bin" / "java"
     java.parent.mkdir(exist_ok=True)
     java.write_text(
         "#!" + sys.executable + "\n"
+        "import sys\n"
         "import json\n"
-        "print(json.dumps({\"schema\": 1, \"kind\": \"observation\", "
+        "from pathlib import Path\n"
+        "if '-version' in sys.argv:\n"
+        "    print('openjdk version \\\"25.0.3\\\"')\n"
+        "else:\n"
+        "    if '--mutate-staged' in sys.argv:\n"
+        "        Path('plugins/target.jar').write_bytes(b'mutated staged target')\n"
+        "    print(json.dumps({\"schema\": 1, \"kind\": \"observation\", "
         "\"backend\": \"paper\", \"scenario\": \"block-break-cancel\", "
-        "\"status\": \"complete\", \"evidence_kind\": \"synthetic\", "
+        "\"status\": \"complete\", \"evidence_kind\": "
+        "(\"external\" if '--external' in sys.argv else \"synthetic\"), "
         "\"source\": \"operator-test-paper-driver\", \"observations\": "
         "[{\"id\": \"listener-present\", \"outcome\": \"cancelled\"}, "
-        "{\"id\": \"no-listener\", \"outcome\": \"completed\"}]}))\n",
+        "{\"id\": \"no-listener\", \"outcome\": \"completed\"}], "
+        "\"enabled_plugins\": [\"operator-protection-plugin\"]}))\n",
         encoding="utf-8",
     )
     java.chmod(0o755)
@@ -90,17 +101,26 @@ def fixture(root: Path) -> Path:
                 },
                 "plugins": [
                     {
-                        "name": "operator-protection-plugin",
+                        "name": "LodestonePaperConformance",
                         "domain": "world-editing",
                         "jar": "plugin.jar",
                         "sha256": digest(plugin),
+                        "entrypoint": "io.lodestone.conformance.PaperConformancePlugin",
+                        "unmodified": True,
+                    },
+                    {
+                        "name": "operator-protection-plugin",
+                        "domain": "world-editing",
+                        "jar": "target.jar",
+                        "sha256": digest(target),
                         "entrypoint": "example.protection.Plugin",
                         "unmodified": True,
                     }
                 ],
+                "target_plugins": ["operator-protection-plugin"],
                 "driver": {
-                    "plugin": "operator-protection-plugin",
-                    "entrypoint": "example.protection.Plugin",
+                    "plugin": "LodestonePaperConformance",
+                    "entrypoint": "io.lodestone.conformance.PaperConformancePlugin",
                     "protocol": "paper-observation-v1",
                     "controls": ["listener-present", "no-listener"],
                     "requires_real_block_break": True,
@@ -146,12 +166,16 @@ def main() -> int:
             marker in source_text
             for marker in (
                 "BlockBreakEvent",
-                "event.setCancelled(true)",
-                "HandlerList.unregisterAll(this)",
+                "EventPriority.MONITOR",
+                "event.isCancelled()",
+                "HandlerList.unregisterAll(plugin)",
                 "target.getType() != Material.AIR",
+                "enabled_plugins",
+                "Bukkit.getPluginManager().getPlugins()",
             )
         ),
     )
+    check("driver does not decide target cancellation", "event.setCancelled" not in source_text)
     check(
         "driver build is offline and pinned",
         "--release 25" in build_text
@@ -177,12 +201,31 @@ def main() -> int:
                     {"id": "listener-present", "outcome": "cancelled"},
                     {"id": "no-listener", "outcome": "completed"},
                 ],
+                "enabled_plugins": ["operator-protection-plugin"],
             },
             backend="paper",
             scenario_id="block-break-cancel",
             allow_synthetic=False,
+            required_plugins=("operator-protection-plugin",),
         )
         check("external Paper observation shape validates", external["backend"] == "paper")
+
+        missing_target = dict(external)
+        missing_target["schema"] = 1
+        missing_target["status"] = "complete"
+        missing_target["enabled_plugins"] = []
+        try:
+            runner._normalize_observation(
+                missing_target,
+                backend="paper",
+                scenario_id="block-break-cancel",
+                allow_synthetic=False,
+                required_plugins=("operator-protection-plugin",),
+            )
+        except runner.ContractError as error:
+            check("Paper must report enabled target plugins", "missing enabled target" in str(error))
+        else:
+            check("Paper must report enabled target plugins", False, "missing target unexpectedly passed")
 
         bad_hash = json.loads(contract_path.read_text(encoding="utf-8"))
         bad_hash["paper"]["sha256"] = "0" * 64
@@ -193,6 +236,18 @@ def main() -> int:
             check("Paper hash is verified before launch", "does not match" in str(error))
         else:
             check("Paper hash is verified before launch", False, "validation unexpectedly passed")
+        fixture(Path(directory))
+        contract = runner.load_contract(contract_path)
+
+        bad_target = json.loads(contract_path.read_text(encoding="utf-8"))
+        bad_target["target_plugins"] = ["LodestonePaperConformance"]
+        contract_path.write_text(json.dumps(bad_target), encoding="utf-8")
+        try:
+            runner.load_contract(contract_path)
+        except runner.ContractError as error:
+            check("driver cannot masquerade as target", "separate from target_plugins" in str(error))
+        else:
+            check("driver cannot masquerade as target", False, "driver target unexpectedly passed")
         fixture(Path(directory))
         contract = runner.load_contract(contract_path)
 
@@ -231,6 +286,19 @@ def main() -> int:
         fixture(Path(directory))
         contract = runner.load_contract(contract_path)
 
+        bad_launcher = json.loads(contract_path.read_text(encoding="utf-8"))
+        bad_launcher["commands"]["paper"] = ["java-wrapper", "{java}", "-jar", "{paper_jar}"]
+        contract_path.write_text(json.dumps(bad_launcher), encoding="utf-8")
+        try:
+            runner.load_contract(contract_path)
+        except runner.ContractError as error:
+            check("Paper cannot hide the pinned JDK behind a wrapper", "invoke the pinned JDK directly" in str(error))
+        else:
+            check("Paper cannot hide the pinned JDK behind a wrapper", False, "wrapper unexpectedly passed")
+
+        fixture(Path(directory))
+        contract = runner.load_contract(contract_path)
+
         secret = runner.canonical_json(
             {"token": "do-not-print", "argv": ["--password=do-not-print", "plain"]}
         )
@@ -248,6 +316,43 @@ def main() -> int:
         check("run exits blocked", exit_code == 2)
         check("run names the missing seam", "lodestone-paper-event-dispatch" in stderr.getvalue())
         check("run emits NDJSON", len(stdout.getvalue().splitlines()) == 4)
+
+        external_contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        external_contract["commands"]["paper"] = [
+            "{java}",
+            "-jar",
+            "{paper_jar}",
+            "--external",
+        ]
+        contract_path.write_text(json.dumps(external_contract), encoding="utf-8")
+        external_loaded = runner.load_contract(contract_path)
+        external_run = runner.run_paper_backend(external_loaded)
+        check(
+            "Paper backend accepts external target-load evidence",
+            external_run["backend"] == "paper"
+            and "operator-protection-plugin" in external_run["enabled_plugins"],
+        )
+        fixture(Path(directory))
+        contract = runner.load_contract(contract_path)
+
+        mutated_contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        mutated_contract["commands"]["paper"] = [
+            "{java}",
+            "-jar",
+            "{paper_jar}",
+            "--external",
+            "--mutate-staged",
+        ]
+        contract_path.write_text(json.dumps(mutated_contract), encoding="utf-8")
+        mutated_loaded = runner.load_contract(contract_path)
+        try:
+            runner.run_paper_backend(mutated_loaded)
+        except runner.ContractError as error:
+            check("staged plugin mutation is rejected", "staged plugin changed" in str(error))
+        else:
+            check("staged plugin mutation is rejected", False, "staged mutation unexpectedly passed")
+        fixture(Path(directory))
+        contract = runner.load_contract(contract_path)
 
         try:
             runner.run_paper_backend(contract)
