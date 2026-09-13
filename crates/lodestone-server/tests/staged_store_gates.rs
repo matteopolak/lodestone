@@ -24,12 +24,13 @@
 //! cargo test --release -p lodestone-server --test staged_store_gates -- --ignored --nocapture
 //! ```
 
+use lodestone_data::biomes::BiomeRef;
 use lodestone_server::{GeneratedColumn, overworld_generator};
 
 /// Sweep extent, matching the counter gate's.
 const SWEEP: i32 = 12;
 
-type ColumnBytes = (i32, i32, Vec<String>, Vec<u16>, Vec<String>);
+type ColumnBytes = (i32, i32, Vec<String>, Vec<u16>, Vec<BiomeRef>);
 
 fn raw(col: GeneratedColumn) -> ColumnBytes {
     let (min_y, height, palette, blocks, biomes) = col.into_raw();

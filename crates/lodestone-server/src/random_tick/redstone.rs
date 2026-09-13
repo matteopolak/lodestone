@@ -595,7 +595,7 @@ impl<'h, 'w> RedstoneColumns<'h, 'w> {
 /// (all four would panic) because [`RedstoneColumns::ensure`]
 /// short-circuits on `is_column_resident` before reaching any of them.
 #[cfg(test)]
-struct NoNeighbors;
+pub(crate) struct NoNeighbors;
 
 #[cfg(test)]
 impl ChunkSource for NoNeighbors {

@@ -277,7 +277,7 @@ fn block_break_listener_cancellation_reaches_the_proposal_result() {
             listeners: Arc::new({
                 let seen = Arc::clone(&seen);
                 move |events| {
-                    let seen = Arc::clone(&seen);
+                    let cancel_seen = Arc::clone(&seen);
                     events
                         .register(
                             PaperEventKind::BlockBreak,
@@ -297,7 +297,7 @@ fn block_break_listener_cancellation_reaches_the_proposal_result() {
                                 assert_eq!(*state, block);
                                 assert_eq!(*event_breaker, breaker);
                                 event.cancel();
-                                seen.lock().expect("break listener lock").push("cancel");
+                                cancel_seen.lock().expect("break listener lock").push("cancel");
                             },
                         )
                         .expect("block break is supported");
