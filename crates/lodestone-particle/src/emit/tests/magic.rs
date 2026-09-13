@@ -105,7 +105,3 @@ use super::*;
         assert!(greens > 0, "the ~75% green branch never fired in 200 draws");
         assert!(goldens > 0, "the ~25% golden branch never fired in 200 draws");
     }
-
-    /// Vanilla's own huge-explosion-seed particle is a non-rendering particle,
-    /// and it hardcodes `lifetime = 8` — overwriting the base constructor's own
-    /// RNG-drawn lifetime, exactly the way `note`/`heart_particle` overwrite theirs.

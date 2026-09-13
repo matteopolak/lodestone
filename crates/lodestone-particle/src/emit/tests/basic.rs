@@ -228,10 +228,3 @@ use super::*;
             "particle should have moved despite the wall at x={start_x}"
         );
     }
-
-    /// Vanilla's own spell-particle witch provider always tints magenta (`(1, 0, 1)`
-    /// scaled by a shared brightness) — green is structurally impossible from this
-    /// formula, which is the exact property that distinguishes "witch" from
-    /// the green-tinted mob-effect variants of the same particle family (neither
-    /// of which this pass builds, since they need a colour-carrying particle
-    /// option decode).

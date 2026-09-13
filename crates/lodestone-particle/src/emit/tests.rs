@@ -1,8 +1,7 @@
 use super::{
     FULL_CUBE, Face, angry_villager, breaking_block_effect, bubble, crit, destroy_block_effect,
-    ash, campfire_smoke, drip, explosion_emitter, firework, flame, fly_towards_position,
-    happy_villager, heart, huge_explosion, lava, note, poof, smoke, splash,
-    spore_blossom_air, sweep_attack, totem_of_undying, white_smoke, witch,
+    drip, explosion_emitter, firework, flame, happy_villager, heart, huge_explosion, lava, note,
+    poof, smoke, splash, sweep_attack, totem_of_undying, witch,
 };
 use crate::{Behaviour, DripKind, DripPhase, ParticleEngine, Sheet, SpriteSource};
 use lodestone_data::block_states::StateId;
@@ -21,4 +20,3 @@ mod magic;
 mod explosion;
 mod drips;
 mod particles;
-

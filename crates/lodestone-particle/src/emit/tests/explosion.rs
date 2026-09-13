@@ -238,19 +238,3 @@ use super::*;
         assert_eq!(run(500), run(500));
         assert_ne!(run(500), run(501));
     }
-
-    /// A lava pop trails smoke, and the odds of doing so fall to zero over its
-    /// life.
-    ///
-    /// This is the second particle in the crate whose own tick spawns another,
-    /// and unlike a drip's hand-off it is **probabilistic** — the roll is
-    /// `nextFloat() > age / lifetime`, so a fresh pop trails almost every tick
-    /// and an old one almost never does. Dropping the roll entirely leaves a
-    /// bare orange dot where vanilla has a smoking ember, and the particle count
-    /// is the only thing that shows it.
-    ///
-    /// Measured across the pop's whole life rather than tick by tick, because a
-    /// single tick's roll is a coin flip: the discriminating claim is that the
-    /// *early* half of the life produces strictly more smoke than the late half,
-    /// which no constant-probability implementation (and certainly no absent
-    /// one) satisfies.
