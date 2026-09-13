@@ -105,7 +105,7 @@ async fn assert_protocol(protocol_version: i32) {
             face: BlockFace::North,
             cursor: Vec3f::new(0.5, 0.5, 0.5),
             inside_block: false,
-            sequence: 0,
+            sequence: lodestone_model::PredictionSequence::INITIAL,
         })
         .expect("client must use the chest");
 

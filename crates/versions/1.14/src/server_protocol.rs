@@ -1272,7 +1272,3 @@ impl ServerProtocol for V754ServerProtocol {
         })
     }
 }
-
-        })
-    }
-}
