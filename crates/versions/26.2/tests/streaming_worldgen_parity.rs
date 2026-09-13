@@ -824,8 +824,6 @@ fn diagnose_end_raw_packet(expected: &[u8], actual: &[u8]) {
         actual.block_entities.len(),
         expected.light == actual.light,
     );
-}
-
     let light_shape = |data: &lodestone_world::LightData| match data {
         lodestone_world::LightData::Missing => "missing".to_owned(),
         lodestone_world::LightData::Uniform(value) => format!("uniform({value})"),
@@ -884,6 +882,8 @@ fn diagnose_end_raw_packet(expected: &[u8], actual: &[u8]) {
     }
 fn mismatch_component(record: &[u8], offset: usize, dimension: StreamDimension) -> &'static str {
     let Some(layout) = light_free_record_layout(record, dimension) else { return "malformed"; };
+}
+
     if offset < layout.heightmaps.start { "header" }
     else if offset < layout.heightmaps.end { "heightmaps" }
     else if offset < layout.terrain.start { "section_count" }
