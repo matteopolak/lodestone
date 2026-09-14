@@ -129,23 +129,21 @@ impl MessagePortTransport {
                     return;
                 }
                 let data = event.data();
-                match data.clone().dyn_into::<ArrayBuffer>() {
-                    Ok(buffer) => {
-                        let bytes = Uint8Array::new(&buffer).to_vec();
-                        if state.receive_credit.available() < bytes.len()
-                            || state.inbox.remaining_capacity() < bytes.len()
-                            || state.inbox.try_push(&bytes).is_err()
-                        {
-                            state.fail("worker port exceeded receive credit");
-                        } else {
-                            // The capacity check above makes this infallible;
-                            // keeping the operation explicit documents the
-                            // two halves of the receive window.
-                            let _ = state.receive_credit.consume_exact(bytes.len());
-                            state.wake_read();
-                        }
+                if let Some(bytes) = binary_message(&data) {
+                    if state.receive_credit.available() < bytes.len()
+                        || state.inbox.remaining_capacity() < bytes.len()
+                        || state.inbox.try_push(&bytes).is_err()
+                    {
+                        state.fail("worker port exceeded receive credit");
+                    } else {
+                        // The capacity check above makes this infallible;
+                        // keeping the operation explicit documents the
+                        // two halves of the receive window.
+                        let _ = state.receive_credit.consume_exact(bytes.len());
+                        state.wake_read();
                     }
-                    Err(_) => match parse_credit(&data) {
+                } else {
+                    match parse_credit(&data) {
                         Ok(Some(bytes)) => {
                             if let Err(error) = state.send_credit.release(bytes) {
                                 state.fail(credit_error_message(error));
@@ -230,6 +228,19 @@ impl Drop for MessagePortTransport {
         // cases; the peer's Worker is terminated by the owning shell transport.
         self.close();
     }
+}
+
+/// `postMessage` preserves a transferred typed-array view, so the peer may
+/// receive either that view or its backing buffer depending on the browser.
+fn binary_message(value: &JsValue) -> Option<Vec<u8>> {
+    if let Ok(buffer) = value.clone().dyn_into::<ArrayBuffer>() {
+        return Some(Uint8Array::new(&buffer).to_vec());
+    }
+    value
+        .clone()
+        .dyn_into::<Uint8Array>()
+        .ok()
+        .map(|view| view.to_vec())
 }
 
 /// Parses the one non-binary message understood on the data port. Any other

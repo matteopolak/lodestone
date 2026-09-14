@@ -14,10 +14,10 @@ fn fingerprint(value: u8) -> [u8; 32] {
 fn end_schedule_is_the_single_order_for_targets_and_levels() {
     END.validate();
     assert_eq!(END.dimension(), Dimension::End);
-    assert_eq!(END.stages_for(GenerationTarget::Shaped).len(), 6);
+    assert_eq!(END.stages_for(GenerationTarget::Shaped).len(), 5);
     assert_eq!(
         END.target_stage(GenerationTarget::Shaped),
-        ColumnStage::StructurePlacement
+        ColumnStage::StructureStarts
     );
     assert_eq!(
         END.stages_for_level(GenerationLevel::Terrain),
@@ -25,11 +25,11 @@ fn end_schedule_is_the_single_order_for_targets_and_levels() {
     );
     assert_eq!(
         END.stages_for_level(GenerationLevel::Structures),
-        Some(&END.stages()[..6])
+        None
     );
     assert_eq!(
         END.stages_for_level(GenerationLevel::Decorated),
-        Some(&END.stages()[..7])
+        Some(&END.stages()[..6])
     );
     assert_eq!(END.target_stage(GenerationTarget::Full), ColumnStage::Output);
 
@@ -43,20 +43,7 @@ fn end_schedule_is_the_single_order_for_targets_and_levels() {
 
 #[test]
 fn end_descriptor_contract_covers_structure_and_outer_island_transitions() {
-    let placement = END
-        .descriptor(ColumnStage::StructurePlacement)
-        .expect("structure placement descriptor");
-    assert_eq!(placement.key().dimension(), Dimension::End);
-    assert_eq!(placement.read_radius().chunks_value(), 16);
-    assert_eq!(placement.write_radius().chunks_value(), 0);
-    assert_eq!(placement.seed_scope(), SeedScope::StructureChunk);
-    assert_eq!(placement.barrier(), BarrierPolicy::Pure);
-    assert!(placement
-        .outputs()
-        .contains(&ResourceKey::StructureBlocks));
-    assert!(placement
-        .retained_sidecars()
-        .contains(&SidecarKey::BlockEntityEvents));
+    assert!(END.descriptor(ColumnStage::StructurePlacement).is_none());
 
     let features = END
         .descriptor(ColumnStage::Features)
@@ -73,6 +60,10 @@ fn end_descriptor_contract_covers_structure_and_outer_island_transitions() {
         .retained_sidecars()
         .contains(&SidecarKey::DecorationSpills));
     assert!(features.retained_sidecars().contains(&SidecarKey::Gateways));
+    assert!(features.outputs().contains(&ResourceKey::StructureBlocks));
+    assert!(features
+        .retained_sidecars()
+        .contains(&SidecarKey::BlockEntityEvents));
 }
 
 #[test]
@@ -106,9 +97,9 @@ fn end_frontier_resumes_only_at_committed_boundaries() {
     assert!(frontier.is_complete());
     assert_eq!(frontier.highest_level(), Some(GenerationLevel::Output));
     assert!(frontier.is_complete_at_level(GenerationLevel::Terrain));
-    assert!(frontier.is_complete_at_level(GenerationLevel::Structures));
+    assert!(!frontier.is_complete_at_level(GenerationLevel::Structures));
     assert!(frontier.is_complete_at_level(GenerationLevel::Decorated));
-    assert_eq!(frontier.completed_stage_mask(), 0xff);
+    assert_eq!(frontier.completed_stage_mask(), 0x7f);
 
     let restored = StageFrontier::from_records(
         END,

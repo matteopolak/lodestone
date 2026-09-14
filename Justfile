@@ -361,6 +361,10 @@ wasm-check:
 wasm-size:
     ./scripts/wasm-size.sh
 
+[doc("build the deterministic embeddable browser SDK archive and manifest")]
+wasm-sdk output="target/wasm-sdk":
+    python3 web/scripts/package_wasm_sdk.py --output-dir {{output}}
+
 # Native distribution build: preserves the normal release optimizer settings
 # while omitting debug metadata and the object-file symbol table. Use plain
 # `cargo build --release` for Samply/Instruments, which need its DWARF.
@@ -466,6 +470,20 @@ test-bench-gate:
 # idle machine, per CLAUDE.md.
 worldgen-sweep *args:
     ./scripts/worldgen-region-sweep.sh {{args}}
+
+# Run the generation bench with the pinned toolchain's LLVM linker when it is
+# available, preserving LTO on macOS; otherwise use the documented no-LTO
+# diagnostic fallback.
+worldgen-bench *args:
+    ./scripts/worldgen-bench.sh {{args}}
+
+# Build and capture one bounded worldgen workload with Samply. `production`
+# profiles the embedded server generator, `session` profiles the shared
+# dimension workload, and `parity-consumer` profiles the stream comparator.
+# The capture is written under bench-results/profiles unless --output-dir is
+# supplied. Use --dry-run to inspect the resolved shared target path.
+samply-worldgen *args:
+    python3 scripts/samply-worldgen.py {{args}}
 
 # Where a frame goes, CPU *and* GPU, over a fixed camera path on a fixed demo
 # world. Prints a per-waypoint CPU-vs-GPU verdict from real TIMESTAMP_QUERY

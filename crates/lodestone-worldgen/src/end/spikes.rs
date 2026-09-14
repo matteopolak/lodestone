@@ -10,6 +10,9 @@
 //! turns each [`EndSpike`] into actual obsidian/bedrock/crystal placement
 //! and a real `MobSim::spawn_end_crystal` call.
 
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Mutex, OnceLock};
+
 use crate::rng::{LegacyRandomSource, RandomSource};
 
 use super::podium::PodiumBlock;
@@ -20,6 +23,39 @@ pub const SPIKE_COUNT: usize = 10;
 
 /// The ring radius every spike's centre sits on, in blocks.
 const SPIKE_DISTANCE: f64 = 42.0;
+
+/// Keep the seed-derived layout reusable without allowing a long-running
+/// server to retain every world seed it has visited.
+const SPIKE_CACHE_CEILING: usize = 1024;
+const SPIKE_CACHE_SHARDS: usize = 16;
+
+struct SpikeCache {
+    entries: HashMap<i64, [EndSpike; SPIKE_COUNT]>,
+    order: VecDeque<i64>,
+}
+
+impl SpikeCache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn capacity() -> usize {
+        SPIKE_CACHE_CEILING.div_ceil(SPIKE_CACHE_SHARDS)
+    }
+}
+
+static SPIKE_CACHE: OnceLock<[Mutex<SpikeCache>; SPIKE_CACHE_SHARDS]> = OnceLock::new();
+
+fn spike_cache() -> &'static [Mutex<SpikeCache>; SPIKE_CACHE_SHARDS] {
+    SPIKE_CACHE.get_or_init(|| std::array::from_fn(|_| Mutex::new(SpikeCache::new())))
+}
+
+fn spike_cache_shard(seed: i64) -> usize {
+    (seed as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) as usize % SPIKE_CACHE_SHARDS
+}
 
 /// One obsidian pillar: its centre `(x, z)`, radius, the height its crystal
 /// sits at, and whether it is caged in iron bars (blocking a direct hit
@@ -49,6 +85,33 @@ pub struct EndSpike {
 /// reproduces the chain exactly.
 #[must_use]
 pub fn end_spikes_for_seed(seed: i64) -> [EndSpike; SPIKE_COUNT] {
+    let cache = &spike_cache()[spike_cache_shard(seed)];
+    if let Some(spikes) = cache
+        .lock()
+        .expect("End spike cache poisoned")
+        .entries
+        .get(&seed)
+        .copied()
+    {
+        return spikes;
+    }
+
+    let spikes = compute_end_spikes_for_seed(seed);
+    let mut cache = cache.lock().expect("End spike cache poisoned");
+    if let Some(cached) = cache.entries.get(&seed).copied() {
+        return cached;
+    }
+    if cache.entries.len() >= SpikeCache::capacity() {
+        if let Some(evicted) = cache.order.pop_front() {
+            cache.entries.remove(&evicted);
+        }
+    }
+    cache.order.push_back(seed);
+    cache.entries.insert(seed, spikes);
+    spikes
+}
+
+fn compute_end_spikes_for_seed(seed: i64) -> [EndSpike; SPIKE_COUNT] {
     let mut key_source = LegacyRandomSource::new(seed);
     let key = key_source.next_long() & 65535;
     let mut random = LegacyRandomSource::new(key);
@@ -252,6 +315,42 @@ mod tests {
             sizes.sort_unstable();
             assert_eq!(sizes, (0..10).collect::<Vec<_>>(), "seed {seed}: sizes are not a permutation of 0..10");
         }
+    }
+
+    fn layout_checksum(spikes: &[EndSpike; SPIKE_COUNT]) -> u64 {
+        spikes.iter().fold(0xcbf2_9ce4_8422_2325, |checksum, spike| {
+            let mut checksum = checksum ^ spike.center_x as u32 as u64;
+            checksum = checksum.wrapping_mul(0x1000_0000_01b3);
+            checksum ^= spike.center_z as u32 as u64;
+            checksum = checksum.wrapping_mul(0x1000_0000_01b3);
+            checksum ^= spike.radius as u32 as u64;
+            checksum = checksum.wrapping_mul(0x1000_0000_01b3);
+            checksum ^= spike.height as u32 as u64;
+            checksum = checksum.wrapping_mul(0x1000_0000_01b3);
+            checksum ^ u64::from(spike.guarded)
+        })
+    }
+
+    #[test]
+    fn cached_layout_matches_the_uncached_layout_checksum() {
+        for seed in [0i64, 1, -1, 42, 12345, i64::MIN, i64::MAX] {
+            let cached = end_spikes_for_seed(seed);
+            let uncached = compute_end_spikes_for_seed(seed);
+            assert_eq!(layout_checksum(&cached), layout_checksum(&uncached), "seed {seed}");
+            assert_eq!(cached, uncached, "cache changed spike geometry for seed {seed}");
+        }
+    }
+
+    #[test]
+    fn spike_cache_stays_within_its_global_bound() {
+        for seed in 0..(SPIKE_CACHE_CEILING as i64 * 2) {
+            let _ = end_spikes_for_seed(seed);
+        }
+        let retained = spike_cache()
+            .iter()
+            .map(|shard| shard.lock().expect("End spike cache poisoned").entries.len())
+            .sum::<usize>();
+        assert!(retained <= SPIKE_CACHE_CEILING, "retained {retained} spike layouts");
     }
 
     fn find<'a>(writes: &'a [PodiumBlock], x: i32, y: i32, z: i32) -> Option<&'a PodiumBlock> {

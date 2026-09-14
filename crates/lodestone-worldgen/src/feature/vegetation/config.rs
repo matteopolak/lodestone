@@ -3265,13 +3265,13 @@ mod heightmap_tests {
 
     #[test]
     fn final_world_surface_sees_overlay_while_worldgen_surface_stays_frozen() {
-        // This overlay-only fixture is deliberate: WORLD_SURFACE must see a
-        // decoration write, while WORLD_SURFACE_WG must stay at the immutable
-        // all-air source height rather than delegating to the live scan.
         let mut grid = VegGrid::new(0, 16, 0, 0);
         grid.seed(8, 4, 8, "minecraft:stone".to_string());
+        assert_eq!(HeightmapKind::WorldSurfaceWg.scan(&grid, 8, 8), 5);
 
-        assert_eq!(HeightmapKind::WorldSurface.scan(&grid, 8, 8), 5);
-        assert_eq!(HeightmapKind::WorldSurfaceWg.scan(&grid, 8, 8), 0);
+        assert!(grid.set_if_in_bounds(8, 8, 8, "minecraft:short_grass".to_string()));
+
+        assert_eq!(HeightmapKind::WorldSurface.scan(&grid, 8, 8), 9);
+        assert_eq!(HeightmapKind::WorldSurfaceWg.scan(&grid, 8, 8), 5);
     }
 }

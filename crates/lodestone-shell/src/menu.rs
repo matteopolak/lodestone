@@ -1123,6 +1123,13 @@ impl UiState {
         }
     }
 
+    /// Return from the browser's local ownership attestation to the title.
+    pub fn close_ownership_gate(&mut self) {
+        if self.kind.is_none() && self.screen == Screen::Ownership {
+            self.screen = Screen::MainMenu;
+        }
+    }
+
     /// Back to the title screen from the account list.
     pub fn close_accounts(&mut self) {
         if self.screen == Screen::Accounts {

@@ -56,7 +56,7 @@ use lodestone_worldgen_core::rng::{
 use crate::aquifer::{AquiferSystem, BlockKind};
 use crate::structure::{
     CodedBlock, HeightmapKind, PieceRefinement, RingProbeCache, StartContext, StructureKind,
-    StructureStart, VerticalPlacement,
+    StructureMutationContext, StructureStart, VerticalPlacement,
 };
 
 use super::OverworldGenerator;
@@ -247,7 +247,8 @@ impl StartContext for StartSampler<'_> {
         // (the first is `fill_stage`'s one-per-cell loop), it is data-dependent,
         // and `benches/generation.rs`'s calibration decomposes the total into the
         // two terms rather than asserting a literal that quietly absorbed this
-        // one. See `counters::Snapshot::structure_probe_block_at`.
+        // one. See `counters::Snapshot::structure_probe_block_at`; the
+        // placement predicates below have their own call-site counters.
         let mut queries = 0u64;
         for ly in (0..generator.height()).rev() {
             let y = min_y + ly;
@@ -332,6 +333,7 @@ impl StartContext for StartSampler<'_> {
     /// costs no extra aquifer build.
     fn is_replaceable_at(&self, x: i32, y: i32, z: i32) -> bool {
         let aquifer = self.aquifer(x >> 4, z >> 4);
+        crate::counters::bump_structure_context_replaceable_block_at();
         !matches!(aquifer.block_at(x, y, z), BlockKind::Stone)
     }
 
@@ -340,6 +342,7 @@ impl StartContext for StartSampler<'_> {
     /// [`AquiferSystem::block_at`] calls but no aquifer builds beyond the chunks it
     /// already spans.
     fn block_kind_at(&self, x: i32, y: i32, z: i32) -> BlockKind {
+        crate::counters::bump_structure_context_kind_block_at();
         self.aquifer(x >> 4, z >> 4).block_at(x, y, z)
     }
 }
@@ -458,6 +461,31 @@ pub(crate) fn place_ruined_portal_terrain<R: RandomSource>(
     vines: bool,
     features_cannot_replace: &std::collections::HashSet<String>,
 ) {
+    place_ruined_portal_terrain_with_sink(
+        world,
+        box_,
+        random,
+        placement,
+        cold,
+        overgrown,
+        vines,
+        features_cannot_replace,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn place_ruined_portal_terrain_with_sink<R: RandomSource>(
+    world: &mut crate::dense_grid::DenseBlockGrid,
+    box_: crate::structure::BoundingBox,
+    random: &mut R,
+    placement: VerticalPlacement,
+    cold: bool,
+    overgrown: bool,
+    vines: bool,
+    features_cannot_replace: &std::collections::HashSet<String>,
+    mut mutation: Option<&mut StructureMutationContext<'_>>,
+) {
     let centre = [
         box_.min[0] + (box_.max[0] - box_.min[0] + 1) / 2,
         box_.min[1] + (box_.max[1] - box_.min[1] + 1) / 2,
@@ -488,17 +516,23 @@ pub(crate) fn place_ruined_portal_terrain<R: RandomSource>(
             {
                 continue;
             }
-            place_portal_netherrack_or_magma(world, random, [x, y, z], cold);
+            place_portal_netherrack_or_magma(world, random, [x, y, z], cold, mutation.as_deref_mut());
             if overgrown {
-                maybe_add_portal_leaves(world, random, [x, y, z]);
+                maybe_add_portal_leaves(world, random, [x, y, z], mutation.as_deref_mut());
             }
-            add_portal_drip_column(world, random, [x, y - 1, z], cold);
+            add_portal_drip_column(world, random, [x, y - 1, z], cold, mutation.as_deref_mut());
         }
     }
     for x in (box_.min[0] + 1)..box_.max[0] {
         for z in (box_.min[2] + 1)..box_.max[2] {
             if base_name(world.get(x, box_.min[1], z)) == "minecraft:netherrack" {
-                add_portal_drip_column(world, random, [x, box_.min[1] - 1, z], cold);
+                add_portal_drip_column(
+                    world,
+                    random,
+                    [x, box_.min[1] - 1, z],
+                    cold,
+                    mutation.as_deref_mut(),
+                );
             }
         }
     }
@@ -507,10 +541,10 @@ pub(crate) fn place_ruined_portal_terrain<R: RandomSource>(
             for y in box_.min[1]..=box_.max[1] {
                 for z in box_.min[2]..=box_.max[2] {
                     if vines {
-                        maybe_add_portal_vine(world, random, [x, y, z]);
+                        maybe_add_portal_vine(world, random, [x, y, z], mutation.as_deref_mut());
                     }
                     if overgrown {
-                        maybe_add_portal_leaves(world, random, [x, y, z]);
+                        maybe_add_portal_leaves(world, random, [x, y, z], mutation.as_deref_mut());
                     }
                 }
             }
@@ -552,13 +586,18 @@ fn place_portal_netherrack_or_magma<R: RandomSource>(
     random: &mut R,
     pos: [i32; 3],
     cold: bool,
+    mut mutation: Option<&mut StructureMutationContext<'_>>,
 ) {
     let state = if !cold && random.next_float() < 0.07 {
         "minecraft:magma_block"
     } else {
         "minecraft:netherrack"
     };
-    world.set(pos[0], pos[1], pos[2], state);
+    if let Some(mutation) = mutation.as_deref_mut() {
+        mutation.write(world, pos[0], pos[1], pos[2], state);
+    } else {
+        world.set(pos[0], pos[1], pos[2], state);
+    }
 }
 
 fn add_portal_drip_column<R: RandomSource>(
@@ -566,14 +605,15 @@ fn add_portal_drip_column<R: RandomSource>(
     random: &mut R,
     mut pos: [i32; 3],
     cold: bool,
+    mut mutation: Option<&mut StructureMutationContext<'_>>,
 ) {
-    place_portal_netherrack_or_magma(world, random, pos, cold);
+    place_portal_netherrack_or_magma(world, random, pos, cold, mutation.as_deref_mut());
     for _ in 0..8 {
         if random.next_float() >= 0.5 {
             break;
         }
         pos[1] -= 1;
-        place_portal_netherrack_or_magma(world, random, pos, cold);
+        place_portal_netherrack_or_magma(world, random, pos, cold, mutation.as_deref_mut());
     }
 }
 
@@ -581,17 +621,18 @@ fn maybe_add_portal_leaves<R: RandomSource>(
     world: &mut crate::dense_grid::DenseBlockGrid,
     random: &mut R,
     pos: [i32; 3],
+    mut mutation: Option<&mut StructureMutationContext<'_>>,
 ) {
     if random.next_float() < 0.5
         && base_name(world.get(pos[0], pos[1], pos[2])) == "minecraft:netherrack"
         && base_name(world.get(pos[0], pos[1] + 1, pos[2])) == "minecraft:air"
     {
-        world.set(
-            pos[0],
-            pos[1] + 1,
-            pos[2],
-            "minecraft:jungle_leaves[distance=7,persistent=true,waterlogged=false]",
-        );
+        let state = "minecraft:jungle_leaves[distance=7,persistent=true,waterlogged=false]";
+        if let Some(mutation) = mutation.as_deref_mut() {
+            mutation.write(world, pos[0], pos[1] + 1, pos[2], state);
+        } else {
+            world.set(pos[0], pos[1] + 1, pos[2], state);
+        }
     }
 }
 
@@ -599,6 +640,7 @@ fn maybe_add_portal_vine<R: RandomSource>(
     world: &mut crate::dense_grid::DenseBlockGrid,
     random: &mut R,
     pos: [i32; 3],
+    mut mutation: Option<&mut StructureMutationContext<'_>>,
 ) {
     let state = base_name(world.get(pos[0], pos[1], pos[2]));
     if matches!(state, "minecraft:air" | "minecraft:water" | "minecraft:lava" | "minecraft:vine") {
@@ -611,7 +653,11 @@ fn maybe_add_portal_vine<R: RandomSource>(
         _ => (-1, 0, "minecraft:vine[east=true,north=false,south=false,up=false,west=false]"),
     };
     if base_name(world.get(pos[0] + dx, pos[1], pos[2] + dz)) == "minecraft:air" {
-        world.set(pos[0] + dx, pos[1], pos[2] + dz, vine);
+        if let Some(mutation) = mutation.as_deref_mut() {
+            mutation.write(world, pos[0] + dx, pos[1], pos[2] + dz, vine);
+        } else {
+            world.set(pos[0] + dx, pos[1], pos[2] + dz, vine);
+        }
     }
 }
 

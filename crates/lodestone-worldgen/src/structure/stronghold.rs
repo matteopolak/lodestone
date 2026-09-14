@@ -99,7 +99,10 @@ use lodestone_worldgen_core::rng::RandomSource;
 
 use super::coded::Facing;
 use super::template::{BlockState, Mirror, Rotation};
-use super::{BoundingBox, CodedBlock, CodedLoot, PieceRefinement, StartContext, StructurePiece};
+use super::{
+    BoundingBox, CodedBlock, CodedLoot, PieceRefinement, StartContext, StructureMutationContext,
+    StructurePiece,
+};
 
 /// The deepest a child piece may recurse.
 const MAX_DEPTH: i32 = 50;
@@ -138,6 +141,14 @@ pub fn place_post_surface_blocks(
     world: &mut crate::dense_grid::DenseBlockGrid,
     writes: &[PostSurfaceWrite],
 ) {
+    place_post_surface_blocks_with_sink(world, writes, None);
+}
+
+pub fn place_post_surface_blocks_with_sink(
+    world: &mut crate::dense_grid::DenseBlockGrid,
+    writes: &[PostSurfaceWrite],
+    mut mutation: Option<&mut StructureMutationContext<'_>>,
+) {
     for write in writes {
         let [x, y, z] = write.block.pos;
         let existing = world.get(x, y, z);
@@ -148,7 +159,11 @@ pub fn place_post_surface_blocks(
         if write.only_if_non_air && existing_is_air {
             continue;
         }
-        world.set(x, y, z, &write.block.state);
+        if let Some(mutation) = mutation.as_deref_mut() {
+            mutation.write(world, x, y, z, &write.block.state);
+        } else {
+            world.set(x, y, z, &write.block.state);
+        }
     }
 }
 

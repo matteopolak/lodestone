@@ -324,6 +324,7 @@ impl VersionAdapter for FakeAdapter {
 /// A version-free decorator used by the outbound observer gate. It mutates the
 /// action before delegating, so the observed body must include the decorator's
 /// prefix if publication happens after adapter/decorator encoding.
+#[derive(Debug)]
 struct PrefixDecorator {
     inner: FakeAdapter,
     prefix: &'static str,

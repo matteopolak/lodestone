@@ -66,6 +66,7 @@ use super::*;
             slot,
             button: quick_craft_mask(header, kind),
             input: ContainerInput::QuickCraft,
+        }
     }
 
     /// Total item count across every menu slot plus the cursor. A drag must

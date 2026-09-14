@@ -11,21 +11,21 @@ replay and production dispatch code.
 
 There are four intentionally separate typed schedules:
 
-* `StageSchedule` describes one column's pass order. The Overworld and Nether
-  resolve structure starts, references, and terrain influence before fill;
-  structure placement then happens after carving. The End has no terrain
-  influence stage and resolves starts while placing structures after
-  materialisation. Biomes, surface rules, decoration, and the final output are
-  named separately. The Overworld has the final top-layer pass, while the
-  Nether and End do not. Its `shaped_boundary` is explicit because `Shaped`
-  does not mean the same final pass in every dimension: Overworld and End
-  include structure placement, while Nether resumes with placement at source
-  completion.
+* `StageSchedule` describes one column's pass order. The Overworld resolves
+  structure starts, references, terrain influence, and placement before its
+  Features pass. Nether structure placement is interleaved in that Features
+  stream immediately before each source step's configured features. The End
+  has no terrain influence stage and resolves starts while placing structures
+  after materialisation. Biomes, surface rules, decoration, and the final
+  output are named separately. The Overworld has the final top-layer pass,
+  while the Nether and End do not. Its `shaped_boundary` is explicit because
+  `Shaped` does not mean the same final pass in every dimension: Nether and End
+  resume with structure work inside Features.
 * `LifecycleSchedule` describes the common externally observable status graph:
   empty → structure starts → structure references → biomes → noise → surface
   → carvers → features → initialize light → light → spawn → full → packet
-  finalization. Every `PhaseContract` gives its prerequisite phase and radius,
-  plus its block-write radius. A dimension with no actual carver still advances
+  finalization. Every `PhaseContract` gives its prerequisite phase dependency
+  radius, plus its block-write radius. A dimension with no actual carver still advances
   through that no-op lifecycle status; this is intentionally distinct from its
   internal `StageSchedule`. Packet finalization is a Lodestone serving boundary
   that depends on both a full centre and the radius-one settled-light footprint.
@@ -55,8 +55,15 @@ their executor from the matching central schedule and that all three dimension
 schedules retain their typed gate metadata.
 
 Every dimension now has one `StageDescriptor` for every entry in its schedule.
-A descriptor names typed products and sidecars, a conservative read/write
-radius, seed scope, resident-write barrier, and cancellation boundary.
+A descriptor names typed products and sidecars, a conservative
+`task_read_radius` and `mutable_write_radius`, seed scope, resident-write
+barrier, and cancellation boundary. The task-read radius is the square of
+relative chunks a stage may inspect; the mutable-write radius is the square it
+may change. They are task contracts, not the wider closure or admission halo
+used to keep residents available, and neither is the radius-one light/packet
+dependency recorded by `LifecycleSchedule`.
+For example, structure starts are task-local (`0/0`), while carvers inspect
+the source square through radius 8 and still write only their centre (`8/0`).
 `StageSchedule::descriptors` derives descriptor order from the same `stages`
 slice; there is no second pass list to drift. An absent pass is rejected by
 dimension-qualified lookup (for example, Nether cannot obtain the
@@ -86,6 +93,16 @@ full request is a no-op. The payload map erases concrete types only inside the
 retention boundary; callers use generic typed insertion and downcast accessors.
 The current executor hook is deliberately small so each dimension can wire its
 existing generator without introducing a second worldgen implementation.
+
+`ChunkRequest::admission_radius` names the halo admitted for a request, and
+`LifecycleSchedule::reverse_dependency_radius` derives the accumulated
+transitive consumer closure when planning backwards from a completed phase.
+`immediate_reverse_dependency_radius` is available when only the next consumer
+edge is intended. These are separate from task footprints.
+`LifecycleSchedule::packet_target_radius` and `packet_light_radius` expose the
+two packet-finalization dependencies independently: the full target is radius
+0, while settled light is radius 1. Neither must be reused as a generation or
+admission radius.
 
 The schedules and descriptors describe pass order and the named request-order
 vocabulary. They do not perform generation or replace dimension-specific
@@ -124,7 +141,10 @@ ordinal.
 
 Change `LifecycleSchedule` only after checking both the external pyramid and
 its task dispatcher. A new phase needs a typed `LifecyclePhase`, one
-`PhaseContract`, and independently derived dependency/write radii. Never infer
+`PhaseContract`, and independently derived dependency/write radii. Read a
+phase dependency through `PhaseDependency::dependency_radius`; keep that
+separate from a stage descriptor's task-read radius and from packet/light
+readiness. Never infer
 those radii from Lodestone's current neighborhood loops: that would make the
 contract repeat the implementation it is meant to check. Keep strings out of
 all of these tables; diagnostic text is derived from enum variants only at the

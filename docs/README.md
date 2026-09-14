@@ -152,6 +152,12 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   the shell depends on an operating system, what was measured about the hazard and the
   chosen disposition (**gate**, **replace with a seam**, or **delete the need**), plus
   the confinement guards that keep a fixed hazard from creeping back in.
+- [Browser world-generation worker](./browser-worldgen-worker.md) — The browser
+  world-generation worker keeps the authoritative integrated server in a dedicated Web
+  Worker and optionally runs its immutable shaped-admission work through a bounded
+  WebAssembly thread pool. The page receives protocol bytes through one transferred
+  `MessagePort`; startup, pool selection, and world-generation progress use a separate
+  control/progress channel.
 - [Camera, view bobbing and frame pacing](./camera-and-view.md) — How the render
   camera's orientation is built and why (`lodestone-render`'s `Camera`), the three
   tick-driven effects layered onto it before it reaches a uniform — the walking bob,
@@ -265,6 +271,12 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   heightfield visual horizon beyond the real streamed-chunk radius. It is a local
   integrated-Overworld feature, not a chunk cache: it cannot request, retain, or mesh
   ordinary chunks.
+- [End decoration order oracle](./end-decoration-order-oracle.md) — This
+  fixture-backed check records two independent overlapping End decoration experiments.
+  It proves that source order is observable: an outer island followed by a structure
+  leaves the structure block, while the reverse leaves island material; chorus
+  followed by the fixed platform leaves platform air, while the reverse leaves chorus
+  plant state.
 - [End heightmap status oracle](./end-heightmap-status-oracle.md) —
   `EndP06LifecycleCapture` is the bounded external adapter for the End generation
   boundary that affects cross-chunk feature writes and the three client-visible
@@ -940,6 +952,15 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   economy (anvil, grindstone, smithing table, enchanting table, loom, stonecutter) for
   lack of a better home — that machinery has no villager involvement at all; see its
   own section below.
+- [WebAssembly bundle size](./wasm-bundle-size.md) — The browser delivery consists
+  of a page WebAssembly module, a dedicated server-worker module, their `wasm-bindgen`
+  JavaScript glue, and runtime-fetched game assets. This document defines the size
+  gates and the trade-offs that keep the browser build small without changing
+  rendering or world-generation behavior.
+- [Browser embedding](./wasm-embedding.md) — The browser target exposes a small
+  `mount(options)` / `LodestoneHandle.destroy()` API for hosts that already own a
+  canvas and have downloaded the required resource bytes. The standalone page remains
+  a thin adapter that uses the same runtime and asset contract.
 - [WASM plugin commands](./wasm-plugin-commands.md) — The native WASM host can
   expose a guest-owned root command through the same
   `lodestone_ecs::commands::CommandRegistry` used by compiled-in plugins. A guest
@@ -989,6 +1010,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   output. Both values carry block, biome, heightmap, resident block-entity, canonical
   light, and pending block/fluid-tick state together; partial chunk loaders are not
   part of this API.
+- [World-generation allocation gates](./worldgen-allocation-gates.md) — The focused
+  vegetation allocation tests separate container recycling from allocations made by
+  the placement path. They are diagnostic gates: a warm pass must not grow the pooled
+  scratch containers, while the total allocation gate remains strict until every
+  placement-side allocation is removed.
 - [Worldgen Biome Types](./worldgen-biome-types.md) — Worldgen biome cells carry
   generated `BuiltinBiome` identities and compact `BiomeRef` handles instead of one
   owned string per sampled cell. The name view exists only at display, packet, and
@@ -1034,6 +1060,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   entities travel with the column, so the server's chunk packet carries their registry
   records while the save path retains the deferred loot, occupants, and spawner state
   needed after reload.
+- [Worldgen generation ledger](./worldgen-generation-ledger.md) — The generation
+  ledger is the world-owned retention lane for resumable world generation. It keeps
+  typed stage frontiers and immutable products separate from packet-column caching,
+  while source completions and sparse mutations remain available when an individual
+  request is cancelled.
 - [Worldgen iceberg features](./worldgen-iceberg.md) — The iceberg
   configured-feature path grows the packed-ice and blue-ice masses used by
   frozen-ocean decoration. It is consumed by the unified Overworld FEATURES dispatcher
@@ -1121,6 +1152,13 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   world-generation entrypoints. It keeps orchestration tied to the central typed
   schedule for each dimension and requires option gates to be declared in
   `lodestone_worldgen::stage_schedule` metadata.
+- [World-generation session](./worldgen-session.md) —
+  `lodestone_server::worldgen_session` is the request-scoped state boundary for
+  parallel world generation. It keeps a target's dependency halo admission plan,
+  retains typed stage products, commits mutable source work deterministically, and
+  detaches a packet snapshot only after the requested generation prefix and light
+  domain are ready; the protocol installs the numeric light product at the detached
+  encoding boundary.
 - [Worldgen Stage Schedule](./worldgen-stage-schedule.md) —
   `lodestone_worldgen::stage_schedule` names the ordered passes that turn a
   dimension's density field into a packet-ready chunk. The table is shared by the

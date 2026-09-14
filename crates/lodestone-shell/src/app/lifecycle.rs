@@ -19,7 +19,10 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
         if !self.presentation_desired {
             return;
         }
+        #[cfg(not(target_arch = "wasm32"))]
         let mut attrs = window_attributes(&self.config);
+        #[cfg(target_arch = "wasm32")]
+        let mut attrs = window_attributes(&self.config, self.browser_canvas.as_ref());
         if self.config.benchmark.is_some() {
             let Some(monitor) = benchmark_builtin_monitor(event_loop) else {
                 eprintln!("benchmark requires a discoverable built-in laptop display");
@@ -85,9 +88,22 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
         #[cfg(target_arch = "wasm32")]
         {
             self.window = Some(window.clone());
+            let lifecycle = self
+                .browser_lifecycle
+                .as_ref()
+                .expect("browser sessions carry a lifecycle marker")
+                .clone();
             wasm_bindgen_futures::spawn_local(async move {
+                if lifecycle.get() {
+                    return;
+                }
                 match lodestone_render::window::attach_window_async(window).await {
-                    Ok(pair) => PENDING_GPU.with_borrow_mut(|slot| *slot = Some(pair)),
+                    Ok((gpu, target)) if !lifecycle.get() => {
+                        PENDING_GPU.with_borrow_mut(|slot| {
+                            *slot = Some((lifecycle, gpu, target));
+                        })
+                    }
+                    Ok(_) => {}
                     // Not `event_loop.exit()`: we are outside the callback and have no
                     // `ActiveEventLoop`. Nothing else can draw, so say why loudly and
                     // leave the page up — a blank canvas with an explanation beats a
@@ -101,28 +117,7 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
         }
     }
 
-    /// The runtime toggle: everything that lets a caller outside
-    /// this event loop attach or detach presentation on a running session —
-    /// the mechanism a runtime switch needs ("attach things with the bevy
-    /// systems at runtime when switching ... as long as we can also remove
-    /// them"). Delivered through winit's own `user_event` callback, which
-    /// (like every `ApplicationHandler` method) carries a live
-    /// `&ActiveEventLoop`, so a window can be created here exactly as
-    /// `resumed` creates one — see `WindowApp::attach_presentation`.
-    ///
-    /// Native-only in practice: `AppEvent` only exists behind
-    /// `runtime-presentation`, and the one producer today
-    /// (`app::runners::run_headless_session`) is itself
-    /// `cfg(not(target_arch = "wasm32"))` — see that function's own doc for
-    /// why. The browser target still compiles this impl (the trait method is
-    /// generic over `ShellEvent`), it simply never receives one.
-    // Native-only, matching `WindowApp::attach_presentation`/
-    // `detach_presentation` (`app::session`), the two methods every non-`Quit`
-    // arm below reaches: a wasm32 build with the feature on still needs to
-    // compile, and those two are themselves target-gated because a browser's
-    // bring-up is the async `attach_window_async` path, not this synchronous
-    // one. Nothing on wasm32 constructs an `AppEvent` either way — the one
-    // producer, `app::runners::run_headless_session`, is itself native-only.
+    /// Deliver presentation controls and shutdown through the event loop.
     #[cfg(all(not(target_arch = "wasm32"), feature = "runtime-presentation"))]
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
@@ -135,6 +130,13 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
             }
             AppEvent::DetachPresentation => self.detach_presentation(),
             AppEvent::Quit => event_loop.exit(),
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
+        if matches!(event, AppEvent::Quit) {
+            event_loop.exit();
         }
     }
 
@@ -987,19 +989,30 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
         #[cfg(target_arch = "wasm32")]
         if self.gpu.is_none() {
             let pending = PENDING_GPU.with_borrow_mut(Option::take);
-            if let Some((gpu, target)) = pending {
-                // `resumed` parked the window before spawning the attach, so it is
-                // present here. If it somehow is not, drop the pair rather than
-                // inventing a window: `finish_bring_up` needs the real one the surface
-                // was created from, and a second `resumed` will retry cleanly.
-                if let Some(window) = self.window.clone() {
-                    tracing::info!(target: "gpu", "GPU attached; finishing bring-up");
-                    self.finish_bring_up(Some(window), gpu, super::PresentationTarget::Surface(target));
-                } else {
-                    tracing::warn!(
-                        target: "gpu",
-                        "GPU attach landed with no window parked; discarding it"
-                    );
+            if let Some((lifecycle, gpu, target)) = pending {
+                let current = !lifecycle.get()
+                    && self
+                        .browser_lifecycle
+                        .as_ref()
+                        .is_some_and(|current| Rc::ptr_eq(current, &lifecycle));
+                if current {
+                    // `resumed` parked the window before spawning the attach, so it is
+                    // present here. If it somehow is not, drop the pair rather than
+                    // inventing a window: `finish_bring_up` needs the real one the surface
+                    // was created from, and a second `resumed` will retry cleanly.
+                    if let Some(window) = self.window.clone() {
+                        tracing::info!(target: "gpu", "GPU attached; finishing bring-up");
+                        self.finish_bring_up(
+                            Some(window),
+                            gpu,
+                            super::PresentationTarget::Surface(target),
+                        );
+                    } else {
+                        tracing::warn!(
+                            target: "gpu",
+                            "GPU attach landed with no window parked; discarding it"
+                        );
+                    }
                 }
             }
         }
@@ -1616,7 +1629,11 @@ impl WindowApp {
     pub(super) fn pointer_really_locked(&self) -> bool {
         #[cfg(target_arch = "wasm32")]
         {
-            self.grabbed && browser_pointer_locked()
+            self.grabbed
+                && self
+                    .browser_canvas
+                    .as_ref()
+                    .is_some_and(browser_pointer_locked)
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1656,7 +1673,12 @@ impl WindowApp {
     /// double pause/unpause — this needs no ordering guarantee between the two.
     #[cfg(target_arch = "wasm32")]
     fn reconcile_browser_pointer_lock_change(&mut self) {
-        if !self.grabbed || browser_pointer_locked() {
+        if !self.grabbed
+            || self
+                .browser_canvas
+                .as_ref()
+                .is_none_or(browser_pointer_locked)
+        {
             return;
         }
         // Mirrors the `KeyOutcome::Pause` arm in `window_event` exactly: a
@@ -1701,7 +1723,8 @@ impl WindowApp {
         // instead of relying on a `Resized` event to correct it a moment later.
         #[cfg(target_arch = "wasm32")]
         if let Some(window) = window.as_ref()
-            && let Some((mw, mh)) = measured_canvas_physical_size()
+            && let Some(canvas) = self.browser_canvas.as_ref()
+            && let Some((mw, mh)) = measured_canvas_physical_size(canvas)
             && (mw, mh) != target.size()
         {
             let _ = window;
@@ -2180,6 +2203,7 @@ impl WindowApp {
 /// `WindowApp::attach_presentation` (`app::session`) needs the identical
 /// attributes for a runtime attach's window, not a second, potentially
 /// drifting copy.
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn window_attributes(config: &Config) -> winit::window::WindowAttributes {
     let attrs = Window::default_attributes().with_title("Lodestone");
 
@@ -2195,71 +2219,47 @@ pub(super) fn window_attributes(config: &Config) -> winit::window::WindowAttribu
         None => attrs.with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0)),
     };
 
-    // Browser: bind winit to the page's own `<canvas id="lodestone">` instead of
-    // letting it create one. Two reasons, and the second is the one that bites:
-    // winit does create a canvas when given none, but it does **not** insert it into
-    // the DOM, so the app runs, renders, reports success and is invisible — the island
-    // failure with a GPU attached. Taking the canvas from the page also lets
-    // `web/index.html` own layout and sizing, which is where they belong.
     //
-    // A missing element falls through to winit's own canvas rather than panicking, so a
-    // page that forgot the element gets the "renders nowhere" behaviour and a warning,
-    // not a dead tab.
-    //
-    // **No `.with_inner_size(..)` call on this path — this is not an oversight.**
-    // Winit's web backend does not treat `inner_size` as a mere initial hint: `Canvas::create`
-    // spends it by writing an *inline* `style.width`/`style.height` (in px) onto the canvas
-    // element (see `winit::platform_impl::web::web_sys::set_canvas_size`), and an inline style
-    // outranks the stylesheet rule `#lodestone { width: 100vw; height: 100vh; }` in
-    // `web/index.html`. Calling it here — even with a value that happens to match the
-    // viewport at that instant — pins the canvas's CSS box at that fixed pixel size forever;
-    // nothing else in winit's web backend ever rewrites that inline style. That was the whole
-    // bug this comment replaces: the canvas rendered at a permanent 1280x720 and was then
-    // stretched by nothing (its own inline style *was* the layout), which is
-    // indistinguishable on screen from "not resizing to the viewport" because that is
-    // exactly what was happening. Leaving `inner_size` unset lets the stylesheet own the box,
-    // and winit's own `ResizeObserver` on the canvas element (already wired up regardless of
-    // this call, in `web_sys::resize_scaling`) reports every subsequent box change — initial
-    // layout included — as a `WindowEvent::Resized`, which the shared `Resized` arm below
-    // already forwards to the surface reconfigure and the depth buffer resize. Sizes it
-    // reports are already DPR-scaled (`devicePixelContentBoxSize` where supported), so this
-    // renders at native `devicePixelRatio`, matching what desktop winit already does and
-    // costing the same `dpr²` fragment multiplier a retina display always costs — e.g. 4x
-    // fragments at `dpr = 2`. Downscaling to CSS pixels and letting the browser upscale
-    // would trade that cost for a soft/blurry image; this build takes the sharp, expensive
-    // option to match native rather than picking silently.
-    #[cfg(target_arch = "wasm32")]
-    {
-        use winit::platform::web::WindowAttributesExtWebSys;
-        match browser_canvas() {
-            Some(canvas) => attrs.with_canvas(Some(canvas)),
-            None => {
-                tracing::warn!(
-                    target: "gpu",
-                    "no <canvas id=\"{CANVAS_ID}\"> in the page: winit will create its own, \
-                     which is NOT inserted into the DOM, so nothing will be visible"
-                );
-                attrs
-            }
-        }
-    }
-    #[cfg(not(target_arch = "wasm32"))]
     attrs
 }
 
-/// The id of the canvas element `web/index.html` provides.
 #[cfg(target_arch = "wasm32")]
-const CANVAS_ID: &str = "lodestone";
+pub(super) fn window_attributes(
+    _config: &Config,
+    canvas: Option<&web_sys::HtmlCanvasElement>,
+) -> winit::window::WindowAttributes {
+    use winit::platform::web::WindowAttributesExtWebSys;
+    let attrs = Window::default_attributes().with_title("Lodestone");
+    match canvas {
+        Some(canvas) => attrs.with_canvas(Some(canvas.clone())),
+        None => {
+            tracing::warn!(
+                target: "gpu",
+                "no host canvas was supplied; winit will create a canvas outside the document"
+            );
+            attrs
+        }
+    }
+}
 
-/// The page's canvas, if it has one.
-#[cfg(target_arch = "wasm32")]
-fn browser_canvas() -> Option<web_sys::HtmlCanvasElement> {
+#[cfg(all(test, target_arch = "wasm32"))]
+mod browser_tests {
+    use super::*;
     use wasm_bindgen::JsCast;
-    web_sys::window()?
-        .document()?
-        .get_element_by_id(CANVAS_ID)?
-        .dyn_into::<web_sys::HtmlCanvasElement>()
-        .ok()
+
+    #[test]
+    fn host_canvas_id_survives_direct_window_binding() {
+        let document = web_sys::window().unwrap().document().unwrap();
+        let canvas = document
+            .create_element("canvas")
+            .unwrap()
+            .dyn_into::<web_sys::HtmlCanvasElement>()
+            .unwrap();
+        canvas.set_id("host-owned-canvas");
+        let before = canvas.id();
+        let _ = window_attributes(&Config::default(), Some(&canvas));
+        assert_eq!(canvas.id(), before);
+    }
 }
 
 /// Whether the browser's Pointer Lock API has **genuinely** engaged on our canvas —
@@ -2286,11 +2286,8 @@ fn browser_canvas() -> Option<web_sys::HtmlCanvasElement> {
 /// a lock briefly held by some other element (there is only ever one canvas here, but
 /// nothing enforces that structurally) cannot read as ours.
 #[cfg(target_arch = "wasm32")]
-fn browser_pointer_locked() -> bool {
+fn browser_pointer_locked(canvas: &web_sys::HtmlCanvasElement) -> bool {
     use wasm_bindgen::JsValue;
-    let Some(canvas) = browser_canvas() else {
-        return false;
-    };
     web_sys::window()
         .and_then(|w| w.document())
         .and_then(|d| d.pointer_lock_element())
@@ -2361,12 +2358,11 @@ fn ensure_pointer_lock_change_listener() {
 /// already laid out. Scaled by `devicePixelRatio` to match what `SurfaceTarget`/`RenderState`
 /// expect everywhere else — see `window_attributes`'s doc on rendering at native DPR.
 ///
-/// `None` if there is no canvas (mirrors `browser_canvas`) or it currently measures to zero
+/// `None` if the host canvas currently measures to zero
 /// (e.g. `display: none`), in which case the caller keeps whatever `target` already has
 /// rather than resizing to a degenerate surface.
 #[cfg(target_arch = "wasm32")]
-fn measured_canvas_physical_size() -> Option<(u32, u32)> {
-    let canvas = browser_canvas()?;
+fn measured_canvas_physical_size(canvas: &web_sys::HtmlCanvasElement) -> Option<(u32, u32)> {
     let dpr = web_sys::window()?.device_pixel_ratio();
     dpr_scaled_size(canvas.client_width(), canvas.client_height(), dpr)
 }
@@ -2397,6 +2393,10 @@ thread_local! {
     /// same fact that made the mesher's pool removable.
     #[cfg(target_arch = "wasm32")]
     static PENDING_GPU: std::cell::RefCell<
-        Option<(GpuContext, lodestone_render::SurfaceTarget<'static>)>,
+        Option<(
+            Rc<Cell<bool>>,
+            GpuContext,
+            lodestone_render::SurfaceTarget<'static>,
+        )>,
     > = const { std::cell::RefCell::new(None) };
 }

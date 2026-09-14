@@ -54,6 +54,9 @@ paint while the Worker prepares and streams the initial view.
 `lodestone_net::MessagePortTransport` turns the two ports into an async byte
 stream. Binary messages carry framed bytes; a private `{kind: "credit", bytes}`
 envelope carries flow-control grants and is never passed to the packet codec.
+Transferred protocol payloads are accepted as either an `ArrayBuffer` or a
+`Uint8Array`, matching the browser's structured-clone representation for a
+transferred view.
 The finite receive window is replenished only after `ByteInbox` has handed bytes
 to the reader, so `poll_write` either returns a partial write or waits for
 credit instead of growing the browser's `MessagePort` queue without bound.
@@ -85,16 +88,14 @@ browser bundle. It complements the real browser smoke test, rather than
 pretending a host-side control-plane test can prove painting or browser
 scheduling.
 
-The authoritative Worker is the browser's first and only world owner. A second
-compute-worker pool is intentionally not created by this boundary: moving a
-generated column across another worker would require serializing its block
-entities, structures, biome cells, generation candidates, edits, and retained
-light before the owner can serve or tick it. That would either duplicate
-mutable state or silently drop gameplay data. The current contract keeps that
-state in one Worker, yields between requested columns there, and leaves the
-page thread free for rendering, input, and client packet application. A future
-compute pool must therefore add a typed immutable-column transfer and an
-owner-side merge gate before it can replace this decision.
+The authoritative Worker is the browser's first and only world owner. When the
+page is cross-origin isolated and supports shared WebAssembly memory, the staged
+threaded artifact creates bounded Rayon workers that share the owner's module
+and memory. They run immutable production-session products only; mutable world
+state, ordered commits, ticks, and packet encoding remain in the authoritative
+Worker. Pages without those capabilities use the serial-yielding artifact.
+`docs/browser-worldgen-worker.md` records the launch envelope, progress channel,
+epoch checks, and measured harness.
 
 The page's synchronous ECS command dispatch cannot cross this boundary. The
 worker installs a command sink that visibly refuses page-plugin commands rather
@@ -136,7 +137,7 @@ until it is called.
 |---|---|
 | `Instant::now()` / `Instant` in struct fields | replaced with a seam: `crate::platform::Instant` |
 | `SystemTime::now()` | replaced with a seam: `crate::platform::epoch_duration` |
-| `std::thread::spawn` | gated per call site (sign-in workers, mesher worker pool, network) |
+| `std::thread::spawn` | gated per call site (mesher worker pool, network) |
 | `tokio::time::{sleep,timeout}` | gated with the native-only workers that use them |
 | blocking `Runtime::new` + `block_on` | gated — a browser main thread cannot block |
 
@@ -162,8 +163,8 @@ These do not compile at all, so a plain `cargo check --target wasm32-unknown-unk
 | `pollster` | blocks the browser main thread | gated; `spawn_local` is the wasm arm |
 | `memory-stats` | reads `/proc`/`task_info` | replaced: `core::arch::wasm32::memory_size(0)` as a high-water-mark proxy for RSS |
 | `lodestone-anvil` | `std::fs`-based region/`level.dat` codecs | gated |
-| `reqwest` | blocking client (`.blocking` feature) is native-only | reqwest itself is **not** gated any more: its `wasm32-unknown-unknown` arm is `fetch`-backed and async, so the sign-in workers use the same `reqwest::Client` type on both targets |
-| `lodestone-auth` | looked native-only, is not | **not gated** — `metadata`/`paths`/`entitlement` were always plain `serde`/`uuid`/`PathBuf`; `flow`/`login`/`store` joined them once the device-code flow (needs no listener) got a wasm32 HTTP client and `store::LocalStorageStore` replaced the OS keychain (see `docs/accounts-and-join.md`). Only `browser_login` (the loopback flow — a real listener and an OS browser process), `chat_session`, `texture` and `tls` stay native-only. |
+| `reqwest` | blocking client (`.blocking` feature) is native-only | the browser keeps its async `fetch`-backed arm for non-authenticated services |
+| `lodestone-auth` | native accounts require keychain and network services | browser account, entitlement, token, and identity persistence paths are unreachable; the browser uses a session-local ownership acknowledgement |
 
 ### Degradation-class (`std::fs`), by subsystem
 
@@ -192,14 +193,10 @@ Each is gated with an **explicit, self-describing refusal** rather than a silent
 a UI row that silently shows nothing is indistinguishable from a subsystem that is broken:
 audio (needs an `AudioWorklet` sink; the mixer itself is already wasm-clean), server-list ping
 (needs an async probe over a relay, since a page cannot open a raw `TcpStream`), remote player
-skins (blocked on porting the authlib host-allowlist that guards the fetch, not merely swapping
-the HTTP client — a signed-in browser account plays with the default skin rig until this lands),
+skins (blocked on a browser-safe trusted-host fetch path),
 and screenshots (would need to trigger a download instead of a disk write).
-**Microsoft sign-in is no longer in this list**: it used to need a real HTTP client, an OS
-keychain, and (via the loopback flow) a listener, so browser accounts were offline-identity
-only. The device-code flow needs none of those — see `docs/accounts-and-join.md` for the
-`flow`/`login`/`store::LocalStorageStore` wiring and `crate::platform::relay::sleep` as the
-`tokio::time::sleep` replacement in its poll loop. Audio's gate is an **uninhabited type**
+Browser account sign-in is intentionally absent; the local gate stores only its checkbox state
+for the active handle. Audio's gate is an **uninhabited type**
 (`pub enum ShellAudio {}`) rather than a stub with do-nothing methods — a stub is a reachable
 value that silently produces nothing, which is exactly the shape that makes a subsystem look
 wired while doing nothing; an uninhabited type makes that a compile-time impossibility.

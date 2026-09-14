@@ -131,10 +131,10 @@ fn worn_player_head_placement(head_transform: glam::Mat4) -> glam::Mat4 {
     head_transform * glam::Mat4::from_scale(glam::Vec3::splat(WORN_PLAYER_HEAD_SCALE))
 }
 
-/// Apply name-selected orientation to the same instance consumed by every
-/// entity layer. The height comes from the jar-derived dimensions census, not
-/// from the model bounds, because the name transform is defined by the entity
-/// bounding box.
+/// Apply name-selected and player-swim orientation to the same instance consumed
+/// by every entity layer. The height comes from the jar-derived dimensions
+/// census, not from the model bounds, because the name transform is defined by
+/// the entity bounding box.
 pub(super) fn named_entity_anim(draw: &EntityDraw) -> lodestone_render::AnimInput {
     let mut anim = draw.anim;
     if draw.named_cosmetics.upside_down {
@@ -146,23 +146,31 @@ pub(super) fn named_entity_anim(draw: &EntityDraw) -> lodestone_render::AnimInpu
 
 pub(super) fn apply_named_orientation(
     draw: &EntityDraw,
-    instance: lodestone_render::EntityInstance,
+    mut instance: lodestone_render::EntityInstance,
 ) -> lodestone_render::EntityInstance {
     // The living placement's death fall-over branch has precedence over the
     // name branch. Keep that existing placement intact while the entity is
     // dying; replacing it with a fresh upright matrix would erase the fall.
-    if !draw.named_cosmetics.upside_down || draw.death_time > 0.0 {
-        return instance;
+    if draw.named_cosmetics.upside_down && draw.death_time <= 0.0 {
+        if let Some(entity_type) = lodestone_data::entity_type::EntityType::from_name(&draw.type_path)
+        {
+            let height = lodestone_data::entity_dimensions::base_dimensions(entity_type).height;
+            if height > 0.0 && draw.scale > 0.0 {
+                instance = instance.with_upside_down(draw.feet, draw.yaw, draw.scale, height);
+            }
+        }
     }
-    let Some(entity_type) = lodestone_data::entity_type::EntityType::from_name(&draw.type_path)
-    else {
-        return instance;
-    };
-    let height = lodestone_data::entity_dimensions::base_dimensions(entity_type).height;
-    if height <= 0.0 || draw.scale <= 0.0 {
-        return instance;
+    if is_player_draw(draw) {
+        apply_swim_rotation(
+            &mut instance,
+            draw.feet,
+            draw.yaw,
+            draw.death_time,
+            draw.pitch,
+            draw.swim_amount,
+        );
     }
-    instance.with_upside_down(draw.feet, draw.yaw, draw.scale, height)
+    instance
 }
 
 /// Record an entity type whose ordinary body dispatch had no baked model.
@@ -218,6 +226,15 @@ fn note_missing_entity_model(type_path: &str, model_path: &str) {
             "entity has a hitbox but no ordinary body model; it may be handled by a specialised pass or need a model mapping"
         );
     }
+}
+
+/// The body-pitch rotation also applies to the synthetic local-player draw.
+/// Its reserved id and type path are the selected model name, unlike a network
+/// player's path.
+fn is_player_draw(draw: &EntityDraw) -> bool {
+    draw.type_path.as_ref() == "player"
+        || (draw.id == super::sources::LOCAL_PLAYER_DRAW_ID
+            && matches!(draw.type_path.as_ref(), "player_wide" | "player_slim"))
 }
 
 /// Player-only swim pitch: an interpolated whole-body rotation toward
@@ -1252,12 +1269,6 @@ impl RenderState {
                 continue;
             };
             let mut instance = apply_named_orientation(e, instance);
-            // Apply the interpolated swim pitch only to the player. The type
-            // check is separate from the amount gate because this field is
-            // present for every entity kind.
-            if e.type_path.as_ref() == "player" {
-                apply_swim_rotation(&mut instance, e.feet, e.yaw, e.death_time, e.pitch, e.swim_amount);
-            }
             // `AbstractBoatRenderer.submit`'s hull roll — and
             // `AbstractMinecartRenderer.submit`'s, which is the identical
             // formula about the identical axis at the identical point in the
@@ -4013,6 +4024,45 @@ mod tests {
             part0, part1,
             "part_transforms[0] did not rotate with the body"
         );
+    }
+
+    #[test]
+    fn swim_rotation_gate_accepts_the_local_players_selected_model_name() {
+        let remote = subject("player", 64.0, 1.0, false);
+        let mut local_wide = subject("player_wide", 64.0, 1.0, false);
+        local_wide.id = crate::gpu::sources::LOCAL_PLAYER_DRAW_ID;
+        let mut local_slim = subject("player_slim", 64.0, 1.0, false);
+        local_slim.id = crate::gpu::sources::LOCAL_PLAYER_DRAW_ID;
+        let mob = subject("zombie", 64.0, 1.0, false);
+
+        assert!(is_player_draw(&remote));
+        assert!(is_player_draw(&local_wide));
+        assert!(is_player_draw(&local_slim));
+        assert!(!is_player_draw(&mob));
+
+        for (mut draw, model) in [
+            (remote, "player"),
+            (local_wide, "player_wide"),
+            (local_slim, "player_slim"),
+        ] {
+            draw.swim_amount = 1.0;
+            let feet = draw.feet;
+            let base = lodestone_render::dying_entity_model_matrix(feet, 0.0, 1.0, 0.0);
+            let posed = apply_named_orientation(
+                &draw,
+                lodestone_render::EntityInstance {
+                    model,
+                    transform: base,
+                    part_transforms: vec![base],
+                    hand_transforms: [None, None],
+                    aabb_min: feet,
+                    aabb_max: feet + glam::Vec3::ONE,
+                    light: 0,
+                },
+            );
+            let up = posed.transform.transform_vector3(glam::Vec3::Y);
+            assert!(up.y.abs() < 1.0e-5, "{model} swim pose must be horizontal: {up}");
+        }
     }
 
     /// `hide_armor_stand_parts` collapses exactly the named parts — and no

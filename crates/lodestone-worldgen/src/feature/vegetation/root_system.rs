@@ -392,7 +392,7 @@ mod tests {
             &mut grid,
             &tags,
             |_, pos, _, grid, _| {
-                grid.set_if_in_bounds(pos.x, pos.y, pos.z, "minecraft:oak_log".to_string());
+                grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, "minecraft:oak_log");
             },
         );
         let got: BTreeMap<_, _> = grid
@@ -439,7 +439,7 @@ mod tests {
             &mut grid,
             &tags,
             |_, pos, _, grid, _| {
-                grid.set_if_in_bounds(pos.x, pos.y, pos.z, "minecraft:oak_log".to_string());
+                grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, "minecraft:oak_log");
             },
         ));
         assert!(
@@ -493,7 +493,7 @@ mod tests {
                 callback_positions.push(pos.y);
                 callback_draws.push(random.next_int());
                 if pos.y == 66 {
-                    grid.set_if_in_bounds(pos.x, pos.y, pos.z, "minecraft:oak_log".to_string());
+                    grid.set_state_if_in_bounds(pos.x, pos.y, pos.z, "minecraft:oak_log");
                 }
             },
         ));

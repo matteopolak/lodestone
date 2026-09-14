@@ -79,6 +79,7 @@ use lodestone_worldgen_core::rng::{LegacyRandomSource, RandomSource, get_seed};
 
 use super::BoundingBox;
 use super::processor::{ProcessCtx, Processor, ProcessedBlock};
+use super::StructureMutationContext;
 use crate::dense_grid::DenseBlockGrid;
 
 /// One template block's `nbt` compound, as the flat field list the NBT reader
@@ -907,7 +908,17 @@ impl StructureTemplate {
         settings: &PlaceSettings,
         grid: &mut DenseBlockGrid,
     ) -> usize {
-        self.place_impl(origin, settings, grid, |_, _| {})
+        self.place_impl(origin, settings, grid, &mut |_, _| {}, None)
+    }
+
+    pub fn place_with_mutations(
+        &self,
+        origin: PlaceOrigin,
+        settings: &PlaceSettings,
+        grid: &mut DenseBlockGrid,
+        mutation: &mut StructureMutationContext<'_>,
+    ) -> usize {
+        self.place_impl(origin, settings, grid, &mut |_, _| {}, Some(mutation))
     }
 
     /// Place a template and report every state-owned block-entity creation
@@ -924,7 +935,21 @@ impl StructureTemplate {
             lodestone_data::block_entity_types::BlockEntityType,
         ),
     ) -> usize {
-        self.place_impl(origin, settings, grid, &mut on_block_entity)
+        self.place_impl(origin, settings, grid, &mut on_block_entity, None)
+    }
+
+    pub fn place_with_block_entity_events_and_mutations(
+        &self,
+        origin: PlaceOrigin,
+        settings: &PlaceSettings,
+        grid: &mut DenseBlockGrid,
+        mut on_block_entity: impl FnMut(
+            [i32; 3],
+            lodestone_data::block_entity_types::BlockEntityType,
+        ),
+        mutation: &mut StructureMutationContext<'_>,
+    ) -> usize {
+        self.place_impl(origin, settings, grid, &mut on_block_entity, Some(mutation))
     }
 
     fn place_impl(
@@ -936,6 +961,7 @@ impl StructureTemplate {
             [i32; 3],
             lodestone_data::block_entity_types::BlockEntityType,
         ),
+        mut mutation: Option<&mut StructureMutationContext<'_>>,
     ) -> usize {
         let position = origin.position;
         let palette = &self.palettes[self.palette_for(position).min(self.palettes.len() - 1)];
@@ -1029,7 +1055,11 @@ impl StructureTemplate {
             if let Some(type_id) = block_entity_type_for_state(&canonical) {
                 on_block_entity(block.pos, type_id);
             }
-            grid.set(block.pos[0], block.pos[1], block.pos[2], &canonical);
+            if let Some(mutation) = mutation.as_deref_mut() {
+                mutation.write(grid, block.pos[0], block.pos[1], block.pos[2], &canonical);
+            } else {
+                grid.set(block.pos[0], block.pos[1], block.pos[2], &canonical);
+            }
             written_states.push((block.pos, canonical));
             written += 1;
         }
@@ -1047,7 +1077,17 @@ impl StructureTemplate {
                     continue;
                 };
                 if support_is_empty_or_fluid(grid.get(support[0], support[1], support[2])) {
-                    grid.set(position[0], position[1], position[2], "minecraft:air");
+                    if let Some(mutation) = mutation.as_deref_mut() {
+                        mutation.write(
+                            grid,
+                            position[0],
+                            position[1],
+                            position[2],
+                            "minecraft:air",
+                        );
+                    } else {
+                        grid.set(position[0], position[1], position[2], "minecraft:air");
+                    }
                     changed = true;
                 }
             }

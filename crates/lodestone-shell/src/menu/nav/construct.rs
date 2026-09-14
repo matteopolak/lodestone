@@ -60,6 +60,8 @@ impl MenuNav {
         Self {
             main: 0,
             ownership: 0,
+            #[cfg(target_arch = "wasm32")]
+            wasm_ownership_confirmed: false,
             server: 0,
             paused: 0,
             death: 0,
@@ -70,7 +72,10 @@ impl MenuNav {
             options: Options::load_from(&options_path),
             options_path,
             options_save_error: None,
+            #[cfg(not(target_arch = "wasm32"))]
             accounts: crate::menu::accounts::AccountsNav::with_path(profiles_path),
+            #[cfg(target_arch = "wasm32")]
+            accounts: crate::menu::accounts::AccountsNav::ephemeral(),
             // Empty on construction, deliberately: `MenuNav::new()` runs at
             // startup and in hundreds of tests, and enumerating the filesystem
             // from a constructor is the OS-side-effect-in-a-test shape §12.44
@@ -121,7 +126,27 @@ impl MenuNav {
     /// and a cached token is exactly how it would not.
     #[must_use]
     pub fn entitlement(&self) -> Option<Entitlement> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            None
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
         self.accounts.entitlement()
+        }
+    }
+
+    /// Whether the browser-only local ownership attestation has been checked.
+    #[cfg(target_arch = "wasm32")]
+    #[must_use]
+    pub fn wasm_ownership_confirmed(&self) -> bool {
+        self.wasm_ownership_confirmed
+    }
+
+    /// Toggles the browser-only local ownership attestation.
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn toggle_wasm_ownership(&mut self) {
+        self.wasm_ownership_confirmed = !self.wasm_ownership_confirmed;
     }
 
     /// Authorization for a local world. A multiplayer-capable build keeps the
@@ -129,12 +154,16 @@ impl MenuNav {
     /// join surface and can therefore play locally without online credentials.
     #[must_use]
     pub(super) fn singleplayer_permit(&self) -> Option<SingleplayerPermit> {
-        #[cfg(feature = "multiplayer")]
+        #[cfg(all(feature = "multiplayer", not(target_arch = "wasm32")))]
         {
             self.entitlement().map(SingleplayerPermit::Entitled)
         }
-        #[cfg(not(feature = "multiplayer"))]
+        #[cfg(any(not(feature = "multiplayer"), target_arch = "wasm32"))]
         {
+            #[cfg(target_arch = "wasm32")]
+            if !self.wasm_ownership_confirmed {
+                return None;
+            }
             Some(SingleplayerPermit::LocalBuild)
         }
     }
@@ -168,6 +197,22 @@ impl MenuNav {
     /// reconciling the gate onto the gate is a no-op.
     #[must_use]
     pub fn ownership_gate_blocks(&self, ui: &UiState) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let screen = ui.screen();
+            if screen == Screen::Accounts {
+                return true;
+            }
+            if screen == Screen::Error
+                || screen.in_session()
+                || (screen == Screen::Settings && ui.settings_in_world())
+            {
+                return false;
+            }
+            return !self.wasm_ownership_confirmed;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
         if !MULTIPLAYER_ENABLED {
             return false;
         }
@@ -179,6 +224,7 @@ impl MenuNav {
             return false;
         }
         self.entitlement().is_none()
+        }
     }
 
     /// Refuse a play verb that was reached without an [`Entitlement`], landing
@@ -220,6 +266,37 @@ impl MenuNav {
     /// Escape is **Quit**, not an unwind: there is no screen behind the gate to
     /// back out to, and an Escape that did nothing would read as a frozen game.
     pub(super) fn key_ownership(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        #[cfg(target_arch = "wasm32")]
+        {
+            return match key {
+                MenuKey::Up => {
+                    self.ownership = wrap_prev(self.ownership, OWNERSHIP_BUTTONS.len());
+                    MenuAction::None
+                }
+                MenuKey::Down => {
+                    self.ownership = wrap_next(self.ownership, OWNERSHIP_BUTTONS.len());
+                    MenuAction::None
+                }
+                MenuKey::Enter => match self.ownership_button() {
+                    OwnershipButton::Checkbox => {
+                        self.toggle_wasm_ownership();
+                        MenuAction::None
+                    }
+                    OwnershipButton::Continue => {
+                        if self.wasm_ownership_confirmed {
+                            ui.close_ownership_gate();
+                        }
+                        MenuAction::None
+                    }
+                },
+                MenuKey::Escape => {
+                    ui.request_quit();
+                    MenuAction::Quit
+                }
+                _ => MenuAction::None,
+            };
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         match key {
             MenuKey::Up => {
                 self.ownership = wrap_prev(self.ownership, OWNERSHIP_BUTTONS.len());

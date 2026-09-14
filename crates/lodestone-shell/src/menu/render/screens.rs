@@ -1292,6 +1292,7 @@ const OWNERSHIP_BUTTON_W: f32 = 200.0;
 
 /// Gap between the gate's two stacked buttons — vanilla's own 4 px widget
 /// spacing, which is what every stacked-button layout in this menu uses.
+#[cfg(not(target_arch = "wasm32"))]
 const OWNERSHIP_BUTTON_GAP: f32 = 4.0;
 
 /// Distance from the canvas bottom to the *top* of the lower button.
@@ -1308,18 +1309,19 @@ const OWNERSHIP_TITLE_Y: f32 = 40.0;
 /// Wrap width for the explanatory paragraph. [`ERROR_NOTICE_W`]'s derivation —
 /// `MIN_SCALED_WIDTH` less a 25 px margin each side — so the text is correct at
 /// the smallest canvas `calculate_gui_scale` can produce.
+#[cfg(not(target_arch = "wasm32"))]
 const OWNERSHIP_NOTICE_W: f32 = crate::config::MIN_SCALED_WIDTH as f32 - 50.0;
 
 /// The gate's heading.
+#[cfg(not(target_arch = "wasm32"))]
 const OWNERSHIP_TITLE: &str = "Sign in to play";
 
+#[cfg(target_arch = "wasm32")]
+const OWNERSHIP_TITLE: &str = "Confirm ownership";
+
 /// The gate's explanatory paragraph.
-///
-/// It has to answer three questions at once, because a player who has just
-/// launched the game and cannot reach *anything* will otherwise assume the
-/// build is broken: what is being asked, why singleplayer is included, and
-/// what happens to the account afterwards.
-const OWNERSHIP_BODY: &str = "Lodestone needs at least one Microsoft account                               that owns Minecraft before you can play — including                               singleplayer and offline play. Add one and it joins                               your account list, where you can switch between                               accounts or set the name you play offline under.";
+#[cfg(not(target_arch = "wasm32"))]
+const OWNERSHIP_BODY: &str = "Sign in once with a Microsoft account that owns Minecraft.                               This unlocks singleplayer, multiplayer, and offline play.";
 
 /// Builds the ownership gate ([`super::Screen::Ownership`]): a title, the
 /// paragraph above, and [`super::nav::OWNERSHIP_BUTTONS`] stacked at the
@@ -1335,6 +1337,7 @@ const OWNERSHIP_BODY: &str = "Lodestone needs at least one Microsoft account    
 /// on the same baseline the disconnect screen's single row does regardless of
 /// how many rows there are.
 #[must_use]
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn ownership_frame(nav: &super::nav::MenuNav) -> MenuFrame<'static> {
     use super::nav::OWNERSHIP_BUTTONS;
     let count = OWNERSHIP_BUTTONS.len();
@@ -1386,6 +1389,57 @@ pub(super) fn ownership_frame(nav: &super::nav::MenuNav) -> MenuFrame<'static> {
                 + (count - 1) as f32 * (WIDGET_H + OWNERSHIP_BUTTON_GAP),
             colour: LABEL,
         }),
+        ..Default::default()
+    }
+}
+
+/// Builds the browser's local ownership attestation gate. It deliberately
+/// contains no account, token, provider, or helper copy: checking the box is a
+/// session-local acknowledgement and the Continue button is its only action.
+#[must_use]
+#[cfg(target_arch = "wasm32")]
+pub(super) fn ownership_frame(nav: &super::nav::MenuNav) -> MenuFrame<'static> {
+    use super::nav::OwnershipButton;
+    let checked = nav.wasm_ownership_confirmed();
+    MenuFrame {
+        rows: vec![
+            MenuRow {
+                label: OwnershipButton::Checkbox.label().to_owned(),
+                enabled: true,
+                checkbox: Some(checked),
+                slot: Some(Slot {
+                    origin: Origin::ScreenTop,
+                    dx: -150.0,
+                    dy: OWNERSHIP_TITLE_Y + LINE_H * 3.0,
+                    w: 300.0,
+                    h: WIDGET_H,
+                }),
+                ..Default::default()
+            },
+            MenuRow {
+                label: OwnershipButton::Continue.label().to_owned(),
+                enabled: checked,
+                slot: Some(Slot {
+                    origin: Origin::ScreenBottom,
+                    dx: -(OWNERSHIP_BUTTON_W * 0.5),
+                    dy: -OWNERSHIP_BUTTON_BOTTOM_MARGIN,
+                    w: OWNERSHIP_BUTTON_W,
+                    h: WIDGET_H,
+                }),
+                ..Default::default()
+            },
+        ],
+        selected: nav.ownership_index(),
+        vanilla: true,
+        labels: vec![MenuLabel {
+            text: OWNERSHIP_TITLE.to_owned(),
+            origin: Origin::ScreenTop,
+            dx: 0.0,
+            dy: OWNERSHIP_TITLE_Y,
+            align: Align::Centre,
+            colour: LABEL,
+            scale: 1.0,
+        }],
         ..Default::default()
     }
 }

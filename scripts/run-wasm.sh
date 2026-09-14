@@ -195,7 +195,7 @@ cd "$ROOT/web" || exit 1
 # Backgrounded deliberately — see the `cleanup` comment above. A foreground
 # `trunk watch` blocks bash from running the EXIT/TERM handler at all, which
 # would leave lodestone-web-server alive holding its port.
-trunk watch --release "$@" &
+env -u NO_COLOR trunk watch --release "$@" &
 TRUNK_PID=$!
 
 # Foreground: wait on lodestone-web-server (the user-facing process — its

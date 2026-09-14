@@ -16,7 +16,7 @@ use lodestone_v26_2::packets::chunk::{ChunkShape, LevelChunkWithLight};
 use lodestone_world::{ColumnLight, LightData};
 use lodestone_worldgen_parity::lifecycle::{
     LifecycleCompletion, LifecycleMaterializer, LifecycleReplayEvent, LifecycleReplayPlan,
-    LifecycleWorldgenSource, FEATURES_WRITE_RADIUS,
+    LifecycleWorldgenSource,
 };
 use lodestone_worldgen::stage_schedule::{ChunkRequest, NETHER_FEATURE_WRITE_RADIUS};
 use support::large_parity_manifest::{

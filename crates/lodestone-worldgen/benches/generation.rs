@@ -1328,8 +1328,8 @@ fn bench_counter_calibration(_c: &mut Criterion) {
          neighbourhood); got {}",
         s.stage_entered[Stage::Shape as usize]
     );
-    // `block_at` has **two** consumers, and this assertion is an
-    // exhaustive decomposition rather than a literal.
+    // `block_at` is decomposed by production consumer, not compared with a
+    // literal that could absorb new structure work.
     //
     // 1. `fill_stage` — one call per cell, `256 × height` per chunk fill, over the
     //    5×5 pre-ore closure. This is the term the rewrite plan's D1 states as
@@ -1339,33 +1339,58 @@ fn bench_counter_calibration(_c: &mut Criterion) {
     //    top-down through the aquifer. Data-dependent: how many probes, and how
     //    deep each one goes, is a property of which structure sets try to place
     //    near (0, 0) and where the surface is. Counted, not predicted.
+    // 3. Structure-placement replaceability and block-kind predicates, counted
+    //    by call site rather than folded into the height scan.
     //
-    // Writing this as `fill + probes` keeps consumer 1 pinned. The alternative —
-    // raising the literal to the observed 99,752/fill — would have made the gate
-    // green while destroying the only thing it measures: a *third* consumer, or a
-    // per-fill regression to two calls per cell, would then be indistinguishable
-    // from a structure-placement data change.
+    // Writing this as `fill + probes + context` keeps the fill term pinned.
     //
-    // **This is self-controlling.** If `bump_structure_height_probe` were dead
-    // (compiled out, or never reached), `structure_probe_block_at` would read 0
-    // and the identity would fail by exactly the amount the probes cost — which
-    // is how this assertion was first diagnosed. No hand-bumped control is needed
-    // for a term whose absence makes the equation false.
+    // A missing hook makes the identity fail by exactly that consumer's cost.
     let fill_block_at = per_fill * COLD_PRE_ORE_CHUNKS;
+    let structure_context_block_at =
+        s.structure_context_replaceable_block_at + s.structure_context_kind_block_at;
+    assert_eq!(
+        s.structure_context_block_at,
+        structure_context_block_at,
+        "structure context block_at must equal its two instrumented call sites: replaceable={} + kind={} = {}, got {}",
+        s.structure_context_replaceable_block_at,
+        s.structure_context_kind_block_at,
+        structure_context_block_at,
+        s.structure_context_block_at
+    );
     assert_eq!(
         s.block_at,
-        fill_block_at + s.structure_probe_block_at,
-        "`block_at` must decompose exactly into its two consumers: \
+        fill_block_at + s.structure_probe_block_at + structure_context_block_at,
+        "`block_at` must decompose exactly into fill + height-probe + structure-context consumers: \
          {per_fill} per fill × {COLD_PRE_ORE_CHUNKS} fills = {fill_block_at}, plus \
-         {} calls from {} structure height probes = {}; got {}. A surplus means a THIRD \
-         consumer of `AquiferSystem::block_at` appeared (grep for `.block_at(` — there \
-         should be exactly two call sites, `overworld/fill.rs` and \
-         `overworld/structures.rs`) or the fill loop stopped being one call per cell. \
-         A deficit means the probe counter is over-reporting.",
+         {} calls from {} structure height probes, plus {} context calls (replaceable={} + kind={}) = {}; got {}. \
+         A surplus means an uninstrumented `AquiferSystem::block_at` call site appeared or the \
+         fill loop stopped being one call per cell. A deficit means one instrument over-reports.",
         s.structure_probe_block_at,
         s.structure_height_probes,
-        fill_block_at + s.structure_probe_block_at,
+        structure_context_block_at,
+        s.structure_context_replaceable_block_at,
+        s.structure_context_kind_block_at,
+        fill_block_at + s.structure_probe_block_at + structure_context_block_at,
         s.block_at
+    );
+    // Call-site liveness controls, after the production snapshot.
+    counters::bump_structure_context_replaceable_block_at();
+    counters::bump_structure_context_kind_block_at();
+    let control = counters::snapshot();
+    assert_eq!(
+        control.structure_context_replaceable_block_at,
+        s.structure_context_replaceable_block_at + 1,
+        "replaceable context counter control did not move"
+    );
+    assert_eq!(
+        control.structure_context_kind_block_at,
+        s.structure_context_kind_block_at + 1,
+        "kind context counter control did not move"
+    );
+    assert_eq!(
+        control.structure_context_block_at,
+        s.structure_context_block_at + 2,
+        "aggregate context counter control did not move with both call-site hooks"
     );
     // The probe term is not predicted, but it *is* bounded: every probe issues at
     // least one query and at most one per Y level. A ratio outside that range
@@ -1574,7 +1599,8 @@ fn bench_counter_calibration(_c: &mut Criterion) {
     println!(
         "  DERIVED: block_at/fill = {} (plan states 98,304); pre_ore closure = {} (plan: 25); \
          FEATURES sources = {} (3×3 source window)",
-        (s.block_at - s.structure_probe_block_at) / s.stage_entered[Stage::Shape as usize].max(1),
+        (s.block_at - s.structure_probe_block_at - s.structure_context_block_at)
+            / s.stage_entered[Stage::Shape as usize].max(1),
         s.pre_ore_computed,
         FEATURES_SOURCES
     );
@@ -1587,6 +1613,13 @@ fn bench_counter_calibration(_c: &mut Criterion) {
         s.structure_probe_block_at as f64 / s.structure_height_probes.max(1) as f64,
         100.0 * s.structure_probe_block_at as f64 / s.block_at.max(1) as f64,
     );
+    println!(
+        "  DERIVED: structure context = {} block_at calls (replaceable={} + kind={}; {:.1}% of all block_at)",
+        s.structure_context_block_at,
+        s.structure_context_replaceable_block_at,
+        s.structure_context_kind_block_at,
+        100.0 * s.structure_context_block_at as f64 / s.block_at.max(1) as f64,
+    );
 
     // The **fill-only** figure, i.e. with the structure-probe term removed. Before
     // this subtraction the recorded metric drifted from 98,304 to 99,752 and the
@@ -1595,7 +1628,7 @@ fn bench_counter_calibration(_c: &mut Criterion) {
         bench: "generation",
         metric: "calibration_block_at_per_chunk_fill",
         scene: "seed=42 chunk=(0,0) resolver=embedded cold=true",
-        value: ((s.block_at - s.structure_probe_block_at)
+        value: ((s.block_at - s.structure_probe_block_at - s.structure_context_block_at)
             / s.stage_entered[Stage::Shape as usize].max(1)) as f64,
         unit: "calls",
     });
@@ -1625,6 +1658,12 @@ fn print_counters(s: &Snapshot, chunks: u64) {
     row("structure_height_probes", s.structure_height_probes);
     row("structure_probe_block_at", s.structure_probe_block_at);
     row("structure_aquifers_built", s.structure_aquifers_built);
+    row("structure_context_block_at", s.structure_context_block_at);
+    row(
+        "structure_context_replaceable",
+        s.structure_context_replaceable_block_at,
+    );
+    row("structure_context_kind", s.structure_context_kind_block_at);
     row("rng_draws (all stages)", s.rng_draws_total());
     println!("  rng draws by stage:");
     for (i, name) in lodestone_worldgen::counters::STAGE_NAMES.iter().enumerate() {
@@ -1881,7 +1920,6 @@ fn bench_steady_state_and_cold(_c: &mut Criterion) {
     let (warm_col, steady_allocs, steady_allocs_by_stage) =
         measure_allocs_by_stage(|| generator.column(5, 5));
     black_box(warm_col.non_air_count());
-
     // ---- Repeatability probe: why I_ss is the comparator ---------------
     //
     // The instrument's justification, measured here rather than quoted. Both

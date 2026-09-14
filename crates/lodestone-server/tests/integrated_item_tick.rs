@@ -1,6 +1,6 @@
 //! Production-path proof that the integrated world's authoritative tick loop
-//! advances a dropped item, rather than leaving item physics in a closed
-//! `MobSim`-only test.
+//! advances a dropped item and its lifecycle counters, rather than leaving
+//! item physics in a closed `MobSim`-only test.
 
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -73,8 +73,19 @@ async fn integrated_tick_loop_advances_a_live_dropped_item() {
 
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let current_y = mobs.with(|sim| sim.item_position(item_id).map(|position| position.y));
+        let (current_y, lifecycle) = mobs.with(|sim| {
+            (
+                sim.item_position(item_id).map(|position| position.y),
+                sim.item_lifecycle(item_id).copied(),
+            )
+        });
         if current_y.is_some_and(|y| y < initial_y - 0.01) {
+            let lifecycle = lifecycle.expect("a moving item retains its lifecycle");
+            assert!(lifecycle.age > 0, "the live tick must advance item age");
+            assert!(
+                lifecycle.pickup_delay < 10,
+                "the live tick must advance item pickup delay"
+            );
             break;
         }
         assert!(

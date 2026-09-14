@@ -914,7 +914,7 @@ mod tests {
     #[test]
     #[ignore = "focused wither worker measurement; run explicitly before changing the cutoff"]
     fn measure_dense_wither_owner_workers() {
-        use std::time::Instant;
+        use lodestone_time::Instant;
 
         for count in [64, 128, 256, 512, 1_024] {
             let serial = dense_owner_fixture(count);

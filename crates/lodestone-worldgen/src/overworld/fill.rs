@@ -521,6 +521,10 @@ impl OverworldGenerator {
         mut cursor: Option<&mut BiomeSearchCursor>,
     ) -> crate::dense_grid::DenseBlockGrid {
         let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Carve);
+        let mut owned_cursor = self
+            .dynamic_biome
+            .as_ref()
+            .map(|dynamic| dynamic.table.search_cursor());
         let heightmap_fn = |lx: i32, lz: i32| -> i32 { heights[(lz * 16 + lx) as usize] };
         let top_material = |x: i32, y: i32, z: i32, under_fluid: bool| -> Option<String> {
             let lx = x - base_x;
@@ -533,13 +537,13 @@ impl OverworldGenerator {
                 .top_material(x, y, z, under_fluid, &heightmap_fn, biome, *cold)
         };
         let mut carvers_for_source = |source_x: i32, source_z: i32| -> &[CarverConfig] {
-            let biome = self.biome_for_carver_source(
-                source_x,
-                source_z,
-                cursor
-                    .as_deref_mut()
-                    .expect("dynamic biome carver stage requires a search cursor"),
-            );
+            let biome = if let Some(cursor) = cursor.as_deref_mut() {
+                self.biome_for_carver_source(source_x, source_z, cursor)
+            } else if let Some(cursor) = owned_cursor.as_mut() {
+                self.biome_for_carver_source(source_x, source_z, cursor)
+            } else {
+                self.fallback_biome.as_str()
+            };
             self.carvers_by_biome
                 .get(biome)
                 .map(Vec::as_slice)
@@ -731,7 +735,7 @@ mod tests {
     #[ignore = "diagnostic timing: run explicitly in release mode"]
     fn measure_numeric_ocean_floor_scan_against_string_oracle() {
         use std::hint::black_box;
-        use std::time::Instant;
+        use lodestone_time::Instant;
 
         let mut world = DenseBlockGrid::new(0, 0, 0, 16, 384, 16, "minecraft:air");
         for z in 0..16 {

@@ -60,13 +60,13 @@ dimension-specific.
 | Dimension | Ordered column passes | Shaped cutoff | Full suffix and entrypoint | Mutable decoration |
 | --- | --- | --- | --- | --- |
 | Overworld | `StructureStarts → StructureReferences → StructureInfluence → Fill → Biomes → Surface → Materialize → Carvers → StructurePlacement → Features → TopLayer → Output` | Through `StructurePlacement` | `OverworldGenerator::column` resumes at `Features`, then `TopLayer` and `Output`; `column_shaped` stops at the prefix | Production uses a 3×3 source window and 5×5 immutable context; lifecycle replay completes one source FEATURES body at a time against the target's radius-one CARVERS read/write region, retaining admitted neighbour spills; top-layer modification follows all feature writes |
-| Nether | `StructureStarts → StructureReferences → StructureInfluence → Fill → Biomes → Surface → Materialize → Carvers → StructurePlacement → Features → Output` | Through `Carvers` | `NetherGenerator::column` resumes with target-local `StructurePlacement`, then the mixed feature pass and `Output`; `column_shaped` returns the pre-placement prefix | Admission-dependent source completion; the mixed feature step interleaves ore and decoration entries and synchronizes the resident read view after each entry |
-| End | `Fill → Biomes → Surface → Materialize → StructureStarts → StructurePlacement → Features → Output` | Through `StructurePlacement` | `EndGenerator::column` builds a private 3×3 base region, decorates it, and emits `Output`; `column_shaped` returns one undecorated base world | The nine immutable bases are copied into a private 48×256×48 region; sources decorate in fixed order, with gateway and block-entity sidecars retained |
+| Nether | `StructureStarts → StructureReferences → StructureInfluence → Fill → Biomes → Surface → Materialize → Carvers → Features → Output` | Through `Carvers` | `NetherGenerator::column` resumes with the mixed feature pass and `Output`; structure placement is interleaved immediately before each source step's configured features; `column_shaped` returns the pre-decoration prefix | Admission-dependent source completion; the mixed feature step interleaves structure placement, ore, and decoration entries and synchronizes the resident read view after each entry |
+| End | `Fill → Biomes → Surface → Materialize → StructureStarts → Features → Output` | Through `StructureStarts` | `EndGenerator::column` builds a private 3×3 terrain region, runs the ordered decoration boundary, and emits `Output`; `column_shaped` returns the terrain prefix without structure writes | The nine immutable terrain bases are copied into a private 48×256×48 region; outer islands run before target structures, then gateway, spikes, chorus, and the fixed platform, with typed `StructureBlocks`, gateway, and block-entity sidecars retained |
 
 The cutoffs are schedule boundaries, not claims that all dimensions have the
-same work at a named status. In particular, Nether target-local structure
-placement belongs to source completion after the shaped prefix, while
-Overworld and End shaped values already contain structure placement.
+same work at a named status. Nether structure placement belongs to the mixed
+Features stream after the shaped prefix, while End structure placement is part
+of its ordered Features boundary.
 
 #### Overworld call graph
 
@@ -95,10 +95,11 @@ finished block palette.
 #### Nether call graph
 
 `NetherGenerator::pre_decoration_stage` caches the immutable prefix through
-carving. It intentionally excludes target-local structure placement so a
-source completion can observe the resident target and previously committed
-overlays. `NetherGenerator::column` resumes with structure placement, then
-calls the mixed feature pass and folds the result into `NetherColumn`.
+carving. It intentionally excludes structure placement so each source
+completion can observe the resident target and previously committed overlays.
+`NetherGenerator::column` resumes with the mixed feature pass, which places
+structures immediately before the configured features for each source step and
+folds the result into `NetherColumn`.
 
 The direct scalar path uses the fixed x-major/z-fastest source order, while
 the lifecycle path derives completion from the admitted request wavefront.
@@ -115,16 +116,18 @@ structure/container metadata are separate sidecars.
 #### End call graph
 
 `EndGenerator::base_world_for_batch` memoizes the immutable fill, biome,
-surface, materialisation, and structure-placement product. `column` copies the
-target's 3×3 base worlds into a private region, captures the three client
-heightmap snapshots at the feature boundary, runs source decoration, and
-emits the target palette. `columns_spatial_batch` may compute unique base
-worlds in parallel and then decorates/emits in requested-coordinate order.
+surface, and materialisation product. `column` copies the target's 3×3 terrain
+bases into a private region, captures the three client heightmap snapshots,
+runs outer islands, target structures, gateway, spikes, chorus, and the fixed
+platform in that order, and emits the target palette. `columns_spatial_batch`
+may compute unique base worlds in parallel and then decorates/emits in
+requested-coordinate order.
 
-The End base product retains a full 256-row world and structure block-entity
-events because structure pieces can write above the 128-row terrain field.
-Feature output retains gateways and the final client heightmaps. The server
-source separately attaches structure references and container payloads.
+The End base product retains a full 256-row terrain world. Structure placement
+and its block-entity events occur at the ordered decoration boundary because
+pieces can write above the 128-row terrain field; the shaped entrypoint does
+not apply them. Feature output retains gateways and the client heightmaps. The
+server source separately attaches structure references and container payloads.
 
 ### Current lifecycle consumers and distant terrain
 
@@ -275,7 +278,7 @@ tiers today.
 | --- | --- | --- | --- | --- | --- |
 | Horizon sample | No column stage | `preliminary_surface_level` query | Not exposed | Not exposed | Existing shell query only; no frontier or persistence |
 | Terrain | `Surface` | Fill, biomes, surface product | Fill, biomes, surface product | Fill, biomes, surface product | Proposed low-cost far/mip product |
-| Structures | `StructurePlacement` | Current `Shaped` boundary | Requires target-local completion after current `Shaped` prefix | Current `Shaped` boundary | Proposed typed tier; not a new server label |
+| Structures | Dimension-specific | Current `Shaped` boundary | Requires target-local completion after current `Shaped` prefix | No independent End stage; writes settle inside ordered `Features` | Proposed typed tier; not a new server label |
 | Decorated | `Features` plus any dimension-required top layer | Features and `TopLayer` | Features | Features | Proposed resumable near-worldgen tier |
 | Output | `Output` | Packet-ready generator column | Packet-ready generator column | Packet-ready generator column | Generator `Full` result, before all server lifecycle work |
 | Packet | Lifecycle `PacketFinalization` | Full + sidecars + settled light | Full + sidecars + settled light | Full + sidecars + settled light | Server lifecycle target, not a worldgen pass |
@@ -298,9 +301,9 @@ radius from one implementation loop.
 | Structure references | Starts in the lifecycle radius-8 dependency domain | Reference records; no block writes | Parallel over immutable starts; barrier before influence/fill |
 | Fill, biomes, surface | Own density/noise inputs, structure influence, dimension settings | Field/world, solid-height product, biome quarts/cells | Coordinate/source-major workers; commit the immutable prefix before readers |
 | Materialize and carvers | Materialized field plus declared carver/structure inputs; exact carver radius remains a descriptor contract gap | Dense resident world and carved state | Pure per prefix product once dependencies are present; no mutable feature overlays |
-| Structure placement | Overworld/End retained starts and prefix world; Nether also reads the admitted resident target and prior overlays | Structure blocks, structure events/references, placement sidecars | Overworld/End can be parallel over immutable inputs; Nether requires admission/source completion and a mutation boundary |
+| Structure placement | Overworld/End retained starts and prefix world; Nether also reads the admitted resident target and prior overlays | Typed structure-block trace, structure events/references, placement sidecars | Overworld/End can be parallel over immutable inputs; Nether is interleaved in the mixed Features stream and requires admission/source completion and a mutation boundary |
 | Feature context | 5×5 immutable context (`WIDE_RADIUS = 2`), 3×3 source selection, post-carve/structure heights | Read-only context; source seed/index plan | Build in parallel, then freeze the context for the mutable pass |
-| Mutable features | Source-specific 3×3 window, resident overlays, and per-entry height/biome views | Block writes, block entities, spills, placement loot | Current Overworld/Nether/End production is source-major/fused. A stage-outer plan needs a stage-wide barrier unless writes commute and traces match |
+| Mutable features | Source-specific 3×3 window, resident overlays, and per-entry height/biome views | Block writes, block entities, spills, typed structure blocks, placement loot | Current Overworld/Nether/End production is source-major/fused. A stage-outer plan needs a stage-wide barrier unless writes commute and traces match |
 | Overworld top layer | Final post-feature motion-blocking view of the target | Snow/ice/top-layer writes and final motion-blocking map | Target-local after all relevant feature writes; cannot run before those writes |
 | Output | Complete world field and required sidecars | Palette/blocks, biome quarts, heightmaps, spawn candidates, gateways/events | Barrier after all mutable writes; output is an immutable snapshot |
 | Light and packet finalization | Full centre plus settled-light dependency radius 1 | Packet-side light/status metadata | Stage-wide packet barrier; the packet is not complete at `Output` alone |
@@ -342,7 +345,7 @@ family is an intentional compatibility change, not an optimization.
 | --- | --- | --- |
 | Starts, references, influence, fill, biomes, surface, materialisation, and prefix carving | Yes, over immutable coordinate/source products with bounded worker admission | Commit each prerequisite product before a consumer reads it |
 | Overworld mixed features | The current canonical implementation is source-major and fuses the selected feature/ore streams; immutable 5×5 contexts can be prepared in parallel | Preserve source order and per-entry synchronization. Stage-major replay requires an equivalence trace before it may replace the fused plan |
-| Nether mixed feature step | Source-major fusion is allowed only with the existing per-entry resident synchronization and admission-derived completion | Target-local structure placement and source commit are transaction boundaries; do not assume fixed order for every request |
+| Nether mixed feature step | Source-major fusion is allowed only with the existing per-entry resident synchronization and admission-derived completion | Structure placement occurs in the same stream immediately before each configured feature step; the typed trace and source commit are transaction boundaries; do not assume fixed order for every request |
 | End base worlds | The nine immutable bases and overlapping spatial-batch dependencies can run in parallel | Copy into a private request region before any source decoration |
 | End decoration | Source bodies may share a private 3×3 region, but the committed source order is serial within that region | Do not expose a partially decorated region as a completed column |
 | Overworld top layer | The scan itself is target-local | Barrier after every feature that may alter the target's motion-blocking view |

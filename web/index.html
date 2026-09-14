@@ -4,13 +4,10 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Lodestone</title>
-    <!-- Inline data-URI favicon: the browser never issues a /favicon.ico request,
-         so there is no 404 under a plain static server (trunk's dev server hides
-         it behind an SPA fallback, but `dist/` served by anything else would 404). -->
-    <link
-      rel="icon"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%230a0a12'/%3E%3Crect x='4' y='4' width='8' height='8' fill='%232ea22e'/%3E%3C/svg%3E"
-    />
+    <link data-trunk rel="copy-file" href="favicon.svg" />
+    <link data-trunk rel="copy-file" href="apple-touch-icon.png" />
+    <link rel="icon" type="image/svg+xml" href="favicon.svg?v=2" />
+    <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=2" />
     <link data-trunk rel="rust" data-wasm-opt="0" />
 
     <!-- The renderable corpus (`client.jar`) and the block-state id table
@@ -72,7 +69,7 @@
     </style>
   </head>
   <body>
-    <canvas id="lodestone" tabindex="0"></canvas>
+    <canvas id="lodestone" data-lodestone-standalone tabindex="0"></canvas>
     <div id="boot">starting…</div>
   </body>
 </html>

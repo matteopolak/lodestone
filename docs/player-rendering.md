@@ -71,7 +71,7 @@ instead is how the first-person arm and screen overlays (pumpkin head, underwate
 wrongly reappear in the front view. The third-person camera does a collision-aware pullback,
 raycasting backward from the eye through real collision geometry rather than a coarse
 solid/not-solid test, so it does not clip through thin barriers. Player skins render through the
-**translucent** entity pipeline (not opaque/cutout) with a `0.1` alpha cutout — why vanilla diamond
+**translucent** entity pipeline (not opaque/cutout) with a `0.1` alpha cutout — why diamond
 armour has small gaps at the shoulders: the sheet underneath is deliberately transparent there so
 the skin shows through, not a depth bug to mask.
 
@@ -84,6 +84,14 @@ field can have a correct, tested consumer while its only producer for *this one 
 hardcoded default — check the producer, not just the consumer. The rig-selection flag (`slim`) is
 one such gap today, hardcoded rather than read from the resolved skin.
 
+The body-pitch swim ramp must be applied to both network player draws and the synthetic local draw:
+the latter uses `player_wide` or `player_slim` as its type path, so gating only on the network
+`player` path silently leaves the local avatar upright while its limbs perform the swim stroke.
+Swimming and crawling share the same prone rotation; the extra crawl-only positional nudge remains
+dependent on an in-water signal that is not yet carried by the remote render record.
+The shared orientation helper is used by the body, armour, cape, elytra, and held-item paths, so
+attached layers follow the same rotation instead of retaining an upright placement.
+
 ### Armour
 
 An armour piece is a second mesh, posed off the wearer's own already-computed part matrices
@@ -93,14 +101,14 @@ elytra use; describe it once and reference it, don't reimplement it. **The attac
 wearer's resolved animation family, never part names.** A pig has both a
 `head` and a `body` part; a lookup keyed on part name alone attaches a floating chestplate to a
 farm animal. The real gate is "does this rig classify as humanoid (has both arms and both legs)",
-the same predicate deciding whether a renderer owns a `HumanoidArmorLayer` in vanilla — the single
+the same predicate used to decide whether a renderer owns humanoid armour — the single
 most-repeated gotcha in this cluster, applying identically to wool, capes, armour and elytra.
 
 By slot:
 
 | slot | parts | inflation |
 |---|---|---|
-| head | `head` (+`hat` shell) | 1.0 (+1.5 for `hat`, which draws zero pixels on every vanilla sheet but is kept for fidelity) |
+| head | `head` (+`hat` shell) | 1.0 (+1.5 for `hat`, which draws zero pixels on the shipped sheets but is kept for fidelity) |
 | chest | `body`, both arms | 1.0 |
 | legs | `body`, both legs | 0.5 / 0.4 — the **inner** mesh bake, legs an extra 0.1 texel thinner |
 | feet | both legs | 0.9 |
@@ -112,7 +120,7 @@ keying a registry mapping to a
 per-layer texture list, and the asset name can differ from the item name (`golden_helmet` →
 `gold`). Dye (leather only) multiplies in **gamma space** — doing it in linear light washes colour
 toward white. A dye value of exactly `0` (including pure black) reads as *undyed*, matching
-vanilla, not a bug to special-case away.
+the protocol's behavior, not a bug to special-case away.
 
 Trim is a texture overlay, not a tint: it batches as its own draw keyed by sprite rather than
 riding the per-instance tint attribute, draws immediately after its slot's own armour layers
@@ -129,8 +137,8 @@ A stand's pose is six synced part rotations — head, body, left/right arm, left
 three derived "body stick" parts. The critical rule: **every armour stand is posed, whether or not
 a server ever sent a pose update.** The default pose (a small authored splay, not zero) applies the
 moment an entity is recognised as a stand; treating "no pose reported" as "leave the walk cycle
-running" is the actual, previously-shipped defect — an un-posed stand otherwise animates like a
-walking humanoid, including swinging a held item off the same arm. The assignment covers
+running" makes the stand animate like a walking humanoid, including swinging a held item off the
+same arm. The assignment covers
 **rotations only** — a stand's crouch offset and attack-swing arm orbit are
 translations and survive underneath it. A metadata update only mentions the parts that changed, so
 the fold must merge per-part rather than replace the whole pose, in wire order (two updates to the

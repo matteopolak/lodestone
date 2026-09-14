@@ -572,13 +572,13 @@ impl WindowApp {
         // `None`/`Some` source *is* the camera-mode toggle.
         let mut render_camera = self.sim.render_camera(aspect);
         let horizon_chunks = self.nav.options().horizon_distance_chunks;
-        let horizon_query = (horizon_chunks != 0
+        let horizon_net = (horizon_chunks != 0
             && self.sim.dimension().is_some_and(|dimension| {
                 dimension.namespace() == "minecraft" && dimension.path() == "overworld"
             }))
-        .then(|| self.sim.net().and_then(|net| net.horizon_surface()))
+        .then(|| self.sim.net().filter(|net| net.horizon_enabled()))
         .flatten();
-        if let Some(query) = horizon_query {
+        if let Some(net) = horizon_net {
             // Only the visual camera gets the longer projection. `camera`
             // above remains the pick/audio eye, and neither the server view
             // radius nor the normal chunk culler reads this option.
@@ -596,11 +596,9 @@ impl WindowApp {
                 Ok(()) => {
                     render.set_distant_terrain_outer_radius(horizon_chunks);
                     render.recenter_distant_terrain(camera_block);
+                    net.recenter_horizon(camera_block);
                     render.set_distant_terrain_near_field(self.nav.options().render_distance);
-                    // Exactly one fixed 64-by-64 coarse tile may be queried
-                    // and uploaded per presented frame. The query never enters
-                    // the generated-column store or the server stream.
-                    render.populate_distant_terrain_one(queue, |x, z| query.sample(x, z));
+                    render.populate_distant_terrain_one(queue, |x, z| net.horizon_sample(x, z));
                 }
                 Err(error) => {
                     tracing::warn!(target: "render", ?error, "distant terrain unavailable");
@@ -2906,6 +2904,8 @@ impl WindowApp {
         }
         frame.present(queue);
         self.frame_profile.mark(FramePhase::Present, Instant::now());
+        #[cfg(target_arch = "wasm32")]
+        crate::app::mark_browser_frame_submitted();
 
         // The frame-profile tracing line — see `docs/frame-profiling.md` for
         // how to read it. It is gated with `enabled!` so a session with

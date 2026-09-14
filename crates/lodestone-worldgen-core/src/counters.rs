@@ -156,9 +156,10 @@ pub const MAX_TRACKED_SLOTS: usize = 64;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     /// `AquiferSystem::block_at` calls. Exactly `256 * height` per chunk fill —
-    /// **plus** [`Self::structure_probe_block_at`], which is a second consumer
-    /// with no per-chunk shape at all. Never divide this by the fill count without
-    /// subtracting that term first.
+    /// **plus** [`Self::structure_probe_block_at`] and
+    /// [`Self::structure_context_block_at`], which are structure consumers with
+    /// no per-chunk shape at all. Never divide this by the fill count without
+    /// subtracting both terms first.
     pub block_at: u64,
     /// `NoiseChunkSampler::eval` entries, indexed by
     /// [`Density::kind_index`](crate::density::Density::kind_index) — the
@@ -299,11 +300,10 @@ pub struct Snapshot {
     /// [`Self::block_at`] calls issued *by* those probes.
     ///
     /// The reason this counter exists: `block_at` used to be exactly
-    /// `256 × height` per chunk fill, and `benches/generation.rs`'s calibration
-    /// asserted that. Structure starts added a second, data-dependent consumer,
-    /// so the calibration is now the identity
-    /// `block_at == fill cells + structure_probe_block_at` — which keeps the
-    /// per-fill figure pinned instead of absorbing the new term into a literal.
+    /// `256 × height` per chunk fill. The calibration asserts the identity
+    /// `block_at == fill cells + structure_probe_block_at +
+    /// structure_context_block_at` — which keeps the per-fill figure pinned
+    /// instead of absorbing structure work into a literal.
     pub structure_probe_block_at: u64,
     /// `AquiferSystem`s built *for* those probes, rather than for a chunk fill.
     ///
@@ -313,6 +313,12 @@ pub struct Snapshot {
     /// never be generated. Counted so that assertion can stay an exact
     /// decomposition.
     pub structure_aquifers_built: u64,
+    /// `AquiferSystem::block_at` calls made by structure-placement predicates.
+    pub structure_context_block_at: u64,
+    /// Structure-placement calls made by `is_replaceable_at`.
+    pub structure_context_replaceable_block_at: u64,
+    /// Structure-placement calls made by `block_kind_at`.
+    pub structure_context_kind_block_at: u64,
 }
 
 impl Default for Snapshot {
@@ -344,6 +350,9 @@ impl Default for Snapshot {
             structure_height_probes: 0,
             structure_probe_block_at: 0,
             structure_aquifers_built: 0,
+            structure_context_block_at: 0,
+            structure_context_replaceable_block_at: 0,
+            structure_context_kind_block_at: 0,
         }
     }
 }
@@ -418,6 +427,9 @@ mod imp {
         structure_height_probes: AtomicU64,
         structure_probe_block_at: AtomicU64,
         structure_aquifers_built: AtomicU64,
+        structure_context_block_at: AtomicU64,
+        structure_context_replaceable_block_at: AtomicU64,
+        structure_context_kind_block_at: AtomicU64,
     }
 
     static C: Counters = Counters {
@@ -447,6 +459,9 @@ mod imp {
         structure_height_probes: AtomicU64::new(0),
         structure_probe_block_at: AtomicU64::new(0),
         structure_aquifers_built: AtomicU64::new(0),
+        structure_context_block_at: AtomicU64::new(0),
+        structure_context_replaceable_block_at: AtomicU64::new(0),
+        structure_context_kind_block_at: AtomicU64::new(0),
     };
 
     thread_local! {
@@ -603,6 +618,23 @@ mod imp {
         bump(&C.structure_aquifers_built);
     }
 
+    #[inline]
+    pub fn bump_structure_context_block_at() {
+        bump(&C.structure_context_block_at);
+    }
+
+    #[inline]
+    pub fn bump_structure_context_replaceable_block_at() {
+        bump(&C.structure_context_replaceable_block_at);
+        bump_structure_context_block_at();
+    }
+
+    #[inline]
+    pub fn bump_structure_context_kind_block_at() {
+        bump(&C.structure_context_kind_block_at);
+        bump_structure_context_block_at();
+    }
+
     /// Enters `stage` on this thread; the previous tag is restored on drop.
     #[derive(Debug)]
     pub struct StageGuard(Stage);
@@ -659,6 +691,9 @@ mod imp {
         C.structure_height_probes.store(0, Relaxed);
         C.structure_probe_block_at.store(0, Relaxed);
         C.structure_aquifers_built.store(0, Relaxed);
+        C.structure_context_block_at.store(0, Relaxed);
+        C.structure_context_replaceable_block_at.store(0, Relaxed);
+        C.structure_context_kind_block_at.store(0, Relaxed);
     }
 
     pub fn snapshot() -> Snapshot {
@@ -691,6 +726,9 @@ mod imp {
             structure_height_probes: C.structure_height_probes.load(Relaxed),
             structure_probe_block_at: C.structure_probe_block_at.load(Relaxed),
             structure_aquifers_built: C.structure_aquifers_built.load(Relaxed),
+            structure_context_block_at: C.structure_context_block_at.load(Relaxed),
+            structure_context_replaceable_block_at: C.structure_context_replaceable_block_at.load(Relaxed),
+            structure_context_kind_block_at: C.structure_context_kind_block_at.load(Relaxed),
         }
     }
 }
@@ -748,6 +786,12 @@ mod imp {
     pub fn bump_structure_height_probe(_queries: u64) {}
     #[inline(always)]
     pub fn bump_structure_aquifer() {}
+    #[inline(always)]
+    pub fn bump_structure_context_block_at() {}
+    #[inline(always)]
+    pub fn bump_structure_context_replaceable_block_at() {}
+    #[inline(always)]
+    pub fn bump_structure_context_kind_block_at() {}
 
     /// Zero-sized in the default build: `StageGuard::enter` compiles to nothing.
     #[derive(Debug)]
@@ -776,7 +820,9 @@ pub use imp::{
     bump_palette_intern_new,
     bump_pre_ore, bump_rng_draw, bump_slot_hit, bump_slot_miss, bump_state_intern_new,
     bump_state_name_lookup, bump_stitch_cells, bump_string_allocs, bump_structure_aquifer,
-    bump_structure_height_probe, bump_structure_start, current_stage, reset, snapshot,
+    bump_structure_context_block_at, bump_structure_context_kind_block_at,
+    bump_structure_context_replaceable_block_at, bump_structure_height_probe, bump_structure_start,
+    current_stage, reset, snapshot,
 };
 
 /// Whether this build has counters compiled in.
@@ -811,6 +857,8 @@ mod tests {
         assert!(!enabled());
         reset();
         bump_block_at();
+        bump_structure_context_replaceable_block_at();
+        bump_structure_context_kind_block_at();
         bump_rng_draw();
         bump_stitch_cells(1_000);
         let guard = StageGuard::enter(Stage::Vegetation);
@@ -830,6 +878,8 @@ mod tests {
         reset();
         bump_block_at();
         bump_block_at();
+        bump_structure_context_replaceable_block_at();
+        bump_structure_context_kind_block_at();
         bump_rng_draw();
         {
             let _veg = StageGuard::enter(Stage::Vegetation);
@@ -849,6 +899,9 @@ mod tests {
 
         let s = snapshot();
         assert_eq!(s.block_at, 2);
+        assert_eq!(s.structure_context_block_at, 2);
+        assert_eq!(s.structure_context_replaceable_block_at, 1);
+        assert_eq!(s.structure_context_kind_block_at, 1);
         assert_eq!(s.rng_draws[Stage::Other as usize], 1);
         assert_eq!(s.rng_draws[Stage::Vegetation as usize], 3);
         assert_eq!(s.rng_draws[Stage::Shape as usize], 1);

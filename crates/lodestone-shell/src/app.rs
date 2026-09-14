@@ -32,6 +32,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(target_arch = "wasm32")]
+use std::{cell::Cell, rc::Rc};
 
 // The portable clock, not `std::time::Instant`: this module's submodules all say
 // `use super::*`, so this one import is what gives `lifecycle`, `session`,
@@ -52,6 +54,8 @@ use lodestone_render::window::attach_window;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+use winit::event_loop::EventLoopProxy;
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::monitor::MonitorHandle;
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
@@ -160,10 +164,48 @@ pub(crate) type ShellEvent = AppEvent;
 #[cfg(not(feature = "runtime-presentation"))]
 pub(crate) type ShellEvent = ();
 
-/// Custom winit events for driving presentation attach/detach from outside
-/// the event loop — the concrete shape of a runtime attach/detach: attach
-/// the presentation-only ECS systems and the GPU state at runtime, as long as
-/// both can also be removed again. Delivered through
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+#[derive(Debug)]
+pub struct BrowserControl {
+    proxy: EventLoopProxy<AppEvent>,
+    lifecycle: Rc<Cell<bool>>,
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+impl BrowserControl {
+    pub fn shutdown(&self) -> Result<(), String> {
+        self.proxy
+            .send_event(AppEvent::Quit)
+            .map_err(|_| "browser event loop is no longer running".to_string())
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        self.lifecycle.get()
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+thread_local! {
+    static BROWSER_FRAME_SUBMITTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+pub(crate) fn reset_browser_frame_signal() {
+    BROWSER_FRAME_SUBMITTED.with(|signal| signal.set(false));
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+pub fn browser_first_frame_submitted() -> bool {
+    BROWSER_FRAME_SUBMITTED.with(std::cell::Cell::get)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+pub(crate) fn mark_browser_frame_submitted() {
+    BROWSER_FRAME_SUBMITTED.with(|signal| signal.set(true));
+}
+
+/// Custom winit events for driving presentation and shutdown from outside
+/// the event loop. Delivered through
 /// [`ApplicationHandler::user_event`](winit::application::ApplicationHandler::user_event),
 /// which — like every `ApplicationHandler` callback — carries a live
 /// `&ActiveEventLoop`, the thing `docs/runtime-presentation.md` cites as
@@ -275,6 +317,19 @@ pub fn run_with_app(app: lodestone_app::App, config: Config) -> anyhow::Result<(
              a windowed WindowApp at all."
         )),
     }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+pub fn run_browser(
+    config: Config,
+    canvas: web_sys::HtmlCanvasElement,
+    lifecycle: Rc<Cell<bool>>,
+) -> anyhow::Result<BrowserControl> {
+    if config.mode != Mode::Window {
+        anyhow::bail!("run_browser only supports Mode::Window");
+    }
+    reset_browser_frame_signal();
+    runners::run_windowed_with_control(Sim::client_app(), config, canvas, lifecycle)
 }
 
 /// Sky distance fog sized to the shell's real render distance, so terrain
@@ -758,6 +813,10 @@ struct PendingPick {
 
 pub(crate) struct WindowApp {
     config: Config,
+    #[cfg(target_arch = "wasm32")]
+    browser_canvas: Option<web_sys::HtmlCanvasElement>,
+    #[cfg(target_arch = "wasm32")]
+    browser_lifecycle: Option<Rc<Cell<bool>>>,
     /// Opt-in deterministic benchmark choreography. `None` is the ordinary
     /// player-controlled path and pays no per-frame state-machine work.
     benchmark: Option<BenchmarkDriver>,

@@ -136,7 +136,7 @@ pub enum CancellationPolicy {
     TransactionBoundary,
 }
 
-/// Conservative horizontal dependency or write footprint, in chunks.
+/// Conservative horizontal task footprint, in chunks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Radius2d {
     chunks: u8,
@@ -152,21 +152,28 @@ impl Radius2d {
     pub const fn chunks_value(self) -> u8 {
         self.chunks
     }
+
+    /// Whether a relative chunk coordinate falls inside this footprint.
+    #[must_use]
+    pub const fn contains_offset(self, dx: i32, dz: i32) -> bool {
+        let radius = self.chunks as i32;
+        dx >= -radius && dx <= radius && dz >= -radius && dz <= radius
+    }
 }
 
 /// One typed pass contract in a dimension's ordered schedule.
 ///
-/// The schedule owns order; descriptors own the dependency, resident-write,
-/// sidecar, seed, and cancellation contract for that order.  Keeping the two
-/// layers separate lets the same stage table serve a scalar generator, a
-/// bounded concurrent producer, and a parity replay without a second list of
-/// pass names.
+/// The schedule owns order; descriptors own task reads, mutable writes,
+/// sidecars, seed, and cancellation for that order. Keeping the two layers
+/// separate lets the same stage table serve a scalar generator, a bounded
+/// concurrent producer, and a parity replay without a second list of pass
+/// names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StageDescriptor {
     key: StageKey,
     prerequisites: &'static [StageKey],
-    read_radius: Radius2d,
-    write_radius: Radius2d,
+    task_read_radius: Radius2d,
+    mutable_write_radius: Radius2d,
     inputs: &'static [ResourceKey],
     outputs: &'static [ResourceKey],
     retained_sidecars: &'static [SidecarKey],
@@ -180,8 +187,8 @@ impl StageDescriptor {
     pub const fn new(
         key: StageKey,
         prerequisites: &'static [StageKey],
-        read_radius: Radius2d,
-        write_radius: Radius2d,
+        task_read_radius: Radius2d,
+        mutable_write_radius: Radius2d,
         inputs: &'static [ResourceKey],
         outputs: &'static [ResourceKey],
         retained_sidecars: &'static [SidecarKey],
@@ -192,8 +199,8 @@ impl StageDescriptor {
         Self {
             key,
             prerequisites,
-            read_radius,
-            write_radius,
+            task_read_radius,
+            mutable_write_radius,
             inputs,
             outputs,
             retained_sidecars,
@@ -214,13 +221,23 @@ impl StageDescriptor {
     }
 
     #[must_use]
+    pub const fn task_read_radius(self) -> Radius2d {
+        self.task_read_radius
+    }
+
+    #[must_use]
+    pub const fn mutable_write_radius(self) -> Radius2d {
+        self.mutable_write_radius
+    }
+
+    #[must_use]
     pub const fn read_radius(self) -> Radius2d {
-        self.read_radius
+        self.task_read_radius()
     }
 
     #[must_use]
     pub const fn write_radius(self) -> Radius2d {
-        self.write_radius
+        self.mutable_write_radius()
     }
 
     #[must_use]
@@ -393,10 +410,8 @@ impl GenerationLevel {
                 Some(ColumnStage::Surface)
             }
             (Dimension::End, Self::Terrain) => Some(ColumnStage::Surface),
-            (Dimension::Overworld, Self::Structures) | (Dimension::Nether, Self::Structures) => {
-                Some(ColumnStage::StructurePlacement)
-            }
-            (Dimension::End, Self::Structures) => Some(ColumnStage::StructurePlacement),
+            (Dimension::Overworld, Self::Structures) => Some(ColumnStage::StructurePlacement),
+            (Dimension::Nether, Self::Structures) | (Dimension::End, Self::Structures) => None,
             (Dimension::Overworld, Self::Decorated) => Some(ColumnStage::TopLayer),
             (Dimension::Nether, Self::Decorated) | (Dimension::End, Self::Decorated) => {
                 Some(ColumnStage::Features)
@@ -451,13 +466,16 @@ pub enum LifecyclePhase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhaseDependency {
     phase: LifecyclePhase,
-    radius: u8,
+    dependency_radius: u8,
 }
 
 impl PhaseDependency {
     #[must_use]
-    pub const fn new(phase: LifecyclePhase, radius: u8) -> Self {
-        Self { phase, radius }
+    pub const fn new(phase: LifecyclePhase, dependency_radius: u8) -> Self {
+        Self {
+            phase,
+            dependency_radius,
+        }
     }
 
     #[must_use]
@@ -466,8 +484,13 @@ impl PhaseDependency {
     }
 
     #[must_use]
+    pub const fn dependency_radius(self) -> u8 {
+        self.dependency_radius
+    }
+
+    #[must_use]
     pub const fn radius(self) -> u8 {
-        self.radius
+        self.dependency_radius()
     }
 }
 
@@ -579,6 +602,121 @@ impl LifecycleSchedule {
         while index < self.phases.len() {
             if self.phases[index].phase as u8 == phase as u8 {
                 return Some(index);
+            }
+            index += 1;
+        }
+        None
+    }
+
+    /// Largest direct dependency radius of phases that consume `phase`.
+    #[must_use]
+    pub const fn immediate_reverse_dependency_radius(self, phase: LifecyclePhase) -> Option<u8> {
+        let mut index = 0;
+        let mut found = false;
+        let mut radius = 0;
+        while index < self.phases.len() {
+            let dependencies = self.phases[index].dependencies;
+            let mut dependency_index = 0;
+            while dependency_index < dependencies.len() {
+                let dependency = dependencies[dependency_index];
+                if dependency.phase as u8 == phase as u8 {
+                    found = true;
+                    if dependency.dependency_radius > radius {
+                        radius = dependency.dependency_radius;
+                    }
+                }
+                dependency_index += 1;
+            }
+            index += 1;
+        }
+        if found { Some(radius) } else { None }
+    }
+
+    /// Accumulated radius of the transitive reverse dependency closure.
+    #[must_use]
+    pub const fn reverse_dependency_radius(self, phase: LifecyclePhase) -> Option<u8> {
+        let Some(root_index) = self.index_of(phase) else {
+            return None;
+        };
+        let mut distances = [0_u8; 256];
+        let mut known = [false; 256];
+        known[root_index] = true;
+        let mut round = 0;
+        while round < self.phases.len() {
+            let mut changed = false;
+            let mut index = 0;
+            while index < self.phases.len() {
+                let contract = self.phases[index];
+                let mut dependency_index = 0;
+                while dependency_index < contract.dependencies.len() {
+                    let dependency = contract.dependencies[dependency_index];
+                    let Some(source_index) = self.index_of(dependency.phase) else {
+                        dependency_index += 1;
+                        continue;
+                    };
+                    if known[source_index] {
+                        let candidate = distances[source_index]
+                            .saturating_add(dependency.dependency_radius);
+                        if !known[index] || candidate > distances[index] {
+                            known[index] = true;
+                            distances[index] = candidate;
+                            changed = true;
+                        }
+                    }
+                    dependency_index += 1;
+                }
+                index += 1;
+            }
+            if !changed {
+                break;
+            }
+            round += 1;
+        }
+        let mut found = false;
+        let mut radius = 0;
+        let mut index = 0;
+        while index < self.phases.len() {
+            if index != root_index && known[index] {
+                found = true;
+                if distances[index] > radius {
+                    radius = distances[index];
+                }
+            }
+            index += 1;
+        }
+        if found { Some(radius) } else { None }
+    }
+
+    /// The settled-light dependency radius required before packet finalization.
+    #[must_use]
+    pub const fn packet_light_radius(self) -> Option<u8> {
+        let Some(packet) = self.contract(LifecyclePhase::PacketFinalization) else {
+            return None;
+        };
+        let dependencies = packet.dependencies;
+        let mut index = 0;
+        while index < dependencies.len() {
+            let dependency = dependencies[index];
+            if dependency.phase as u8 == LifecyclePhase::Light as u8 {
+                return Some(dependency.dependency_radius);
+            }
+            index += 1;
+        }
+        None
+    }
+
+    /// The target dependency radius required before packet finalization.
+    #[must_use]
+    pub const fn packet_target_radius(self) -> Option<u8> {
+        let Some(packet) = self.contract(LifecyclePhase::PacketFinalization) else {
+            return None;
+        };
+        let dependencies = packet.dependencies;
+        let mut index = 0;
+        while index < dependencies.len() {
+            let dependency = dependencies[index];
+            if dependency.phase as u8 == LifecyclePhase::Full as u8 {
+                return Some(dependency.dependency_radius);
             }
             index += 1;
         }
@@ -770,6 +908,11 @@ impl ChunkRequest {
     #[must_use]
     pub const fn single(cx: i32, cz: i32, dependency_radius: i32) -> Self {
         Self::new(cx, cx, cz, cz, dependency_radius)
+    }
+
+    #[must_use]
+    pub const fn admission_radius(self) -> i32 {
+        self.dependency_radius
     }
 
     /// The request's admitted chunk order: tile-z, tile-x, local-z,
@@ -1046,10 +1189,9 @@ impl StageSchedule {
 
     /// First stage not represented by this dimension's shaped-column value.
     ///
-    /// The boundary is dimension-specific: Overworld and End shaped columns
-    /// already include structure placement, while Nether placement belongs to
-    /// source completion. Callers must ask the schedule instead of assigning a
-    /// universal meaning to a `Shaped` label.
+    /// The boundary is dimension-specific: Overworld shaped columns include
+    /// structure placement, while Nether and End placement belongs to the
+    /// ordered Features stream.
     #[must_use]
     pub const fn shaped_boundary(self) -> ColumnStage {
         self.shaped_boundary
@@ -2087,7 +2229,6 @@ const NETHER_STAGES: &[ColumnStage] = &[
     ColumnStage::Surface,
     ColumnStage::Materialize,
     ColumnStage::Carvers,
-    ColumnStage::StructurePlacement,
     ColumnStage::Features,
     ColumnStage::Output,
 ];
@@ -2098,7 +2239,6 @@ const END_STAGES: &[ColumnStage] = &[
     ColumnStage::Surface,
     ColumnStage::Materialize,
     ColumnStage::StructureStarts,
-    ColumnStage::StructurePlacement,
     ColumnStage::Features,
     ColumnStage::Output,
 ];
@@ -2117,13 +2257,11 @@ const NETHER_GATES: &[StageGate] = &[
     StageGate::new(ColumnStage::StructureStarts, StageOption::Structures),
     StageGate::new(ColumnStage::StructureReferences, StageOption::Structures),
     StageGate::new(ColumnStage::StructureInfluence, StageOption::Structures),
-    StageGate::new(ColumnStage::StructurePlacement, StageOption::Structures),
     StageGate::new(ColumnStage::Features, StageOption::Decorations),
 ];
 
 const END_GATES: &[StageGate] = &[
     StageGate::new(ColumnStage::StructureStarts, StageOption::Structures),
-    StageGate::new(ColumnStage::StructurePlacement, StageOption::Structures),
     StageGate::new(ColumnStage::Features, StageOption::Decorations),
 ];
 
@@ -2137,7 +2275,7 @@ pub const OVERWORLD: StageSchedule = StageSchedule::with_gates(
 pub const NETHER: StageSchedule = StageSchedule::with_gates(
     Dimension::Nether,
     NETHER_STAGES,
-    ColumnStage::StructurePlacement,
+    ColumnStage::Features,
     NETHER_GATES,
 );
 /// The complete End order.
@@ -2178,6 +2316,15 @@ const FEATURES_INPUTS: &[ResourceKey] = &[
     ResourceKey::StructureBlocks,
 ];
 const FEATURES_OUTPUTS: &[ResourceKey] = &[ResourceKey::ResidentOverlay];
+const NETHER_FEATURES_INPUTS: &[ResourceKey] = &[
+    ResourceKey::MaterializedWorld,
+    ResourceKey::BiomeQuarts,
+    ResourceKey::StructureStarts,
+];
+const NETHER_FEATURES_OUTPUTS: &[ResourceKey] = &[
+    ResourceKey::StructureBlocks,
+    ResourceKey::ResidentOverlay,
+];
 const FEATURES_SIDECARS: &[SidecarKey] = &[
     SidecarKey::DecorationSpills,
     SidecarKey::ClientHeightmaps,
@@ -2204,7 +2351,7 @@ const fn terrain_stage_descriptor(
         ColumnStage::StructureStarts => Some(StageDescriptor::new(
             key,
             &[],
-            Radius2d::chunks(8),
+            Radius2d::chunks(0),
             Radius2d::chunks(0),
             &[],
             STRUCTURE_STARTS_OUTPUTS,
@@ -2289,7 +2436,7 @@ const fn terrain_stage_descriptor(
             key,
             &[],
             Radius2d::chunks(8),
-            Radius2d::chunks(1),
+            Radius2d::chunks(0),
             CARVERS_INPUTS,
             CARVERS_OUTPUTS,
             &[],
@@ -2314,8 +2461,14 @@ const fn terrain_stage_descriptor(
             &[],
             Radius2d::chunks(1),
             Radius2d::chunks(1),
-            FEATURES_INPUTS,
-            FEATURES_OUTPUTS,
+            match dimension {
+                Dimension::Nether => NETHER_FEATURES_INPUTS,
+                Dimension::Overworld | Dimension::End => FEATURES_INPUTS,
+            },
+            match dimension {
+                Dimension::Nether => NETHER_FEATURES_OUTPUTS,
+                Dimension::Overworld | Dimension::End => FEATURES_OUTPUTS,
+            },
             FEATURES_SIDECARS,
             SeedScope::SourceFeature,
             BarrierPolicy::SourceOrdered,
@@ -2365,8 +2518,6 @@ const END_SURFACE_KEY: StageKey = StageKey::new(Dimension::End, ColumnStage::Sur
 const END_MATERIALIZE_KEY: StageKey = StageKey::new(Dimension::End, ColumnStage::Materialize);
 const END_STRUCTURE_STARTS_KEY: StageKey =
     StageKey::new(Dimension::End, ColumnStage::StructureStarts);
-const END_STRUCTURE_PLACEMENT_KEY: StageKey =
-    StageKey::new(Dimension::End, ColumnStage::StructurePlacement);
 const END_FEATURES_KEY: StageKey = StageKey::new(Dimension::End, ColumnStage::Features);
 const END_OUTPUT_KEY: StageKey = StageKey::new(Dimension::End, ColumnStage::Output);
 
@@ -2386,27 +2537,21 @@ const END_MATERIALIZE_OUTPUTS: &[ResourceKey] = &[ResourceKey::MaterializedWorld
 const END_STRUCTURE_STARTS_PREREQUISITES: &[StageKey] = &[END_MATERIALIZE_KEY];
 const END_STRUCTURE_STARTS_INPUTS: &[ResourceKey] = &[ResourceKey::BiomeQuarts];
 const END_STRUCTURE_STARTS_OUTPUTS: &[ResourceKey] = &[ResourceKey::StructureStarts];
-const END_STRUCTURE_PLACEMENT_PREREQUISITES: &[StageKey] = &[END_STRUCTURE_STARTS_KEY];
-const END_STRUCTURE_PLACEMENT_INPUTS: &[ResourceKey] = &[
-    ResourceKey::MaterializedWorld,
-    ResourceKey::StructureStarts,
-];
-const END_STRUCTURE_PLACEMENT_OUTPUTS: &[ResourceKey] = &[ResourceKey::StructureBlocks];
-const END_STRUCTURE_PLACEMENT_SIDECARS: &[SidecarKey] = &[
-    SidecarKey::StructureReferences,
-    SidecarKey::BlockEntityEvents,
-];
-const END_FEATURES_PREREQUISITES: &[StageKey] = &[END_STRUCTURE_PLACEMENT_KEY];
+const END_FEATURES_PREREQUISITES: &[StageKey] = &[END_STRUCTURE_STARTS_KEY];
 const END_FEATURES_INPUTS: &[ResourceKey] = &[
     ResourceKey::MaterializedWorld,
     ResourceKey::BiomeQuarts,
-    ResourceKey::StructureBlocks,
+    ResourceKey::StructureStarts,
 ];
-const END_FEATURES_OUTPUTS: &[ResourceKey] = &[ResourceKey::ResidentOverlay];
+const END_FEATURES_OUTPUTS: &[ResourceKey] = &[
+    ResourceKey::StructureBlocks,
+    ResourceKey::ResidentOverlay,
+];
 const END_FEATURES_SIDECARS: &[SidecarKey] = &[
     SidecarKey::DecorationSpills,
     SidecarKey::Gateways,
     SidecarKey::ClientHeightmaps,
+    SidecarKey::BlockEntityEvents,
 ];
 const END_OUTPUT_PREREQUISITES: &[StageKey] = &[END_FEATURES_KEY];
 const END_OUTPUT_INPUTS: &[ResourceKey] = &[ResourceKey::ResidentOverlay];
@@ -2479,18 +2624,6 @@ const END_STAGE_DESCRIPTORS: &[StageDescriptor] = &[
         CancellationPolicy::BeforeCommit,
     ),
     StageDescriptor::new(
-        END_STRUCTURE_PLACEMENT_KEY,
-        END_STRUCTURE_PLACEMENT_PREREQUISITES,
-        Radius2d::chunks(16),
-        Radius2d::chunks(0),
-        END_STRUCTURE_PLACEMENT_INPUTS,
-        END_STRUCTURE_PLACEMENT_OUTPUTS,
-        END_STRUCTURE_PLACEMENT_SIDECARS,
-        SeedScope::StructureChunk,
-        BarrierPolicy::Pure,
-        CancellationPolicy::BeforeCommit,
-    ),
-    StageDescriptor::new(
         END_FEATURES_KEY,
         END_FEATURES_PREREQUISITES,
         Radius2d::chunks(1),
@@ -2534,9 +2667,9 @@ mod tests {
         BarrierPolicy, CancellationPolicy, ChunkRequest, ColumnStage, DecorationStep, Dimension,
         END, END_SOURCES, GenerationLevel, GenerationTarget, LIFECYCLE, LifecyclePhase, NETHER,
         NETHER_FEATURES, NETHER_SOURCES, OVERWORLD, OVERWORLD_FEATURES, OVERWORLD_SOURCES,
-        END_PIPELINE, NETHER_PIPELINE, OVERWORLD_PIPELINE, PipelineOptions, ResourceKey,
-        SeedScope, SidecarKey, SourceCompletion, StageFrontier, StageKey, StageOption, StageRecord,
-        STAGE_SCHEDULE_VERSION,
+        END_PIPELINE, NETHER_PIPELINE, OVERWORLD_PIPELINE, LifecycleSchedule, PhaseContract,
+        PhaseDependency, PipelineOptions, ResourceKey, SeedScope, SidecarKey, SourceCompletion,
+        StageFrontier, StageKey, StageOption, StageRecord, STAGE_SCHEDULE_VERSION,
     };
 
     #[test]
@@ -2607,8 +2740,8 @@ mod tests {
         assert!(OVERWORLD.gates().iter().any(|gate| {
             gate.stage() == ColumnStage::Features && gate.option() == StageOption::Decorations
         }));
-        assert!(NETHER.gates().iter().any(|gate| {
-            gate.stage() == ColumnStage::StructurePlacement && gate.option() == StageOption::Structures
+        assert!(!NETHER.gates().iter().any(|gate| {
+            gate.stage() == ColumnStage::StructurePlacement
         }));
     }
 
@@ -2622,25 +2755,25 @@ mod tests {
         assert!(OVERWORLD.index_of(ColumnStage::StructureInfluence).unwrap() < OVERWORLD.index_of(ColumnStage::Fill).unwrap());
         assert!(END.index_of(ColumnStage::StructureStarts).unwrap() > END.index_of(ColumnStage::Materialize).unwrap());
         assert!(OVERWORLD.index_of(ColumnStage::StructurePlacement).unwrap() < OVERWORLD.index_of(ColumnStage::Features).unwrap());
-        assert!(NETHER.index_of(ColumnStage::StructurePlacement).unwrap() < NETHER.index_of(ColumnStage::Features).unwrap());
-        assert!(END.index_of(ColumnStage::StructurePlacement).unwrap() < END.index_of(ColumnStage::Features).unwrap());
+        assert!(NETHER.index_of(ColumnStage::StructurePlacement).is_none());
+        assert!(END.index_of(ColumnStage::StructurePlacement).is_none());
     }
 
     #[test]
     fn shaped_prefixes_name_each_dimensions_actual_resume_boundary() {
         assert_eq!(OVERWORLD.shaped_boundary(), ColumnStage::Features);
-        assert_eq!(NETHER.shaped_boundary(), ColumnStage::StructurePlacement);
+        assert_eq!(NETHER.shaped_boundary(), ColumnStage::Features);
         assert_eq!(END.shaped_boundary(), ColumnStage::Features);
         assert_eq!(OVERWORLD.shaped_boundary_index(), 9);
         assert_eq!(NETHER.shaped_boundary_index(), 8);
-        assert_eq!(END.shaped_boundary_index(), 6);
+        assert_eq!(END.shaped_boundary_index(), 5);
         assert_eq!(
             END.stages_for(GenerationTarget::Shaped),
-            &END.stages()[..6]
+            &END.stages()[..5]
         );
         assert_eq!(
             END.target_stage(GenerationTarget::Shaped),
-            ColumnStage::StructurePlacement
+            ColumnStage::StructureStarts
         );
         assert_eq!(END.target_stage(GenerationTarget::Full), ColumnStage::Output);
         assert_eq!(
@@ -2649,11 +2782,11 @@ mod tests {
         );
         assert_eq!(
             END.stages_for_level(GenerationLevel::Structures),
-            Some(&END.stages()[..6])
+            None
         );
         assert_eq!(
             END.stages_for_level(GenerationLevel::Decorated),
-            Some(&END.stages()[..7])
+            Some(&END.stages()[..6])
         );
     }
 
@@ -2669,16 +2802,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             END.stages()
         );
-        let placement = END
-            .descriptor(ColumnStage::StructurePlacement)
-            .expect("End structure placement descriptor");
-        assert_eq!(placement.read_radius().chunks_value(), 16);
-        assert_eq!(placement.write_radius().chunks_value(), 0);
-        assert_eq!(placement.barrier(), BarrierPolicy::Pure);
-        assert_eq!(placement.seed_scope(), SeedScope::StructureChunk);
-        assert!(placement
-            .retained_sidecars()
-            .contains(&SidecarKey::BlockEntityEvents));
+        assert!(END.descriptor(ColumnStage::StructurePlacement).is_none());
 
         let features = END
             .descriptor(ColumnStage::Features)
@@ -2689,7 +2813,11 @@ mod tests {
         assert_eq!(features.cancellation(), CancellationPolicy::TransactionBoundary);
         assert_eq!(features.seed_scope(), SeedScope::SourceFeature);
         assert!(features.outputs().contains(&ResourceKey::ResidentOverlay));
+        assert!(features.outputs().contains(&ResourceKey::StructureBlocks));
         assert!(features.retained_sidecars().contains(&SidecarKey::Gateways));
+        assert!(features
+            .retained_sidecars()
+            .contains(&SidecarKey::BlockEntityEvents));
     }
 
     #[test]
@@ -2738,7 +2866,7 @@ mod tests {
         assert!(frontier.is_complete());
         assert_eq!(frontier.highest_level(), Some(GenerationLevel::Output));
         assert!(frontier.is_complete_at_level(GenerationLevel::Terrain));
-        assert!(frontier.is_complete_at_level(GenerationLevel::Structures));
+        assert!(!frontier.is_complete_at_level(GenerationLevel::Structures));
         assert!(frontier.is_complete_at_level(GenerationLevel::Decorated));
         assert!(frontier.is_complete_through(ColumnStage::Features));
         assert_eq!(frontier.next_stage(), None);
@@ -2833,6 +2961,28 @@ mod tests {
         assert_eq!(
             LIFECYCLE.phases().last().map(|contract| contract.phase()),
             Some(LifecyclePhase::PacketFinalization)
+        );
+    }
+
+    #[test]
+    fn reverse_dependency_radius_accumulates_a_chain() {
+        const MID_DEPS: &[PhaseDependency] =
+            &[PhaseDependency::new(LifecyclePhase::Empty, 2)];
+        const LEAF_DEPS: &[PhaseDependency] =
+            &[PhaseDependency::new(LifecyclePhase::StructureStarts, 3)];
+        const CHAIN: LifecycleSchedule = LifecycleSchedule::new(&[
+            PhaseContract::new(LifecyclePhase::Empty, &[], 0),
+            PhaseContract::new(LifecyclePhase::StructureStarts, MID_DEPS, 0),
+            PhaseContract::new(LifecyclePhase::StructureReferences, LEAF_DEPS, 0),
+        ]);
+
+        assert_eq!(
+            CHAIN.immediate_reverse_dependency_radius(LifecyclePhase::Empty),
+            Some(2)
+        );
+        assert_eq!(
+            CHAIN.reverse_dependency_radius(LifecyclePhase::Empty),
+            Some(5)
         );
     }
 

@@ -95,7 +95,7 @@ fn registry_selected_404_host_consumes_adapter_block_use() {
             pos: BlockPos::new(5, -10, -7),
             face: BlockFace::South,
             cursor: Vec3f::new(0.25, 1.0, 0.75),
-            sequence: lodestone_model::PredictionSequence::INITIAL,
+            sequence: 0,
             hand: 1,
         },
         "the registry-selected host must deliver the adapter's action to the shared placement consumer"

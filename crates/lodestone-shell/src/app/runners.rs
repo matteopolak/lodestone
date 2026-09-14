@@ -8,6 +8,27 @@ pub(super) fn run_windowed(config: Config) -> anyhow::Result<()> {
     run_windowed_with_app(Sim::client_app(), config)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+pub(super) fn run_windowed_with_control(
+    plugin_app: lodestone_app::App,
+    config: Config,
+    canvas: web_sys::HtmlCanvasElement,
+    lifecycle: Rc<Cell<bool>>,
+) -> anyhow::Result<BrowserControl> {
+    use winit::platform::web::EventLoopExtWebSys;
+
+    let event_loop = EventLoop::<ShellEvent>::with_user_event().build()?;
+    event_loop.set_control_flow(ControlFlow::Poll);
+    let proxy = event_loop.create_proxy();
+    event_loop.spawn_app(WindowApp::new_with_app_and_canvas(
+        plugin_app,
+        config,
+        canvas,
+        Rc::clone(&lifecycle),
+    ));
+    Ok(BrowserControl { proxy, lifecycle })
+}
+
 /// [`run_windowed`], around a caller-composed [`lodestone_app::App`] instead of
 /// [`Sim::client_app`]'s own — the entry point a downstream crate reaches through
 /// [`crate::run_with_app`] to register a plugin into the real, on-screen client.

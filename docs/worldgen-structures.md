@@ -32,6 +32,12 @@ exist yet at start time). Stronghold writes are a fourth, ordered post-surface l
 selector boxes skip a candidate only when the current state is air, while later decorations remain
 unconditional. Keeping the guarded and unguarded writes in one list preserves their source order.
 
+Structure products retain a bounded write trace at the grid boundary. Each in-bounds StateId write
+records its owning start, declared decoration step, per-source ordinal, destination and requested
+state before assignment; repeated writes and same-state writes remain observable while state names
+are resolved only when the product is finalized. Packet-facing consumers should use this trace
+instead of reconstructing history from a final block diff.
+
 Fortress starts retain both their eager `Arc<Vec<CodedBlock>>` piece output and a typed runtime
 descriptor containing piece kind, facing, chest decision, and end-cap seed. Placement reuses the
 eager blocks and runs only the terrain-dependent support columns and chest-facing/loot finalization;

@@ -14,6 +14,17 @@ The timer must work in both browser contexts used by the shell. The page context
 
 Simulation publication is separate from simulation mutation. After a world tick changes a block, scheduled queue, or entity snapshot, the connection loop must drain the corresponding feed and run its streaming diff even when the client has sent no packet. Otherwise an idle client can retain stale water, item entities, or mob positions until its next input packet.
 
+Portable acceptance uses `browser_timer` deadline tests, integrated-server fluid
+progression tests in `integrated.rs`, and `integrated_item_tick.rs` (item motion
+and lifecycle counters). The real-browser harness at `web/tests/browser-tick`
+builds against the production server, serves a temporary page, and reports in
+the page body. Its fixture exercises a queued water source, a block-break drop
+through the in-memory connection, and the live item lifecycle through the
+tick-owned `MobHandle`. It also stalls the browser event loop for several
+periods and requires exactly one resumed tick before the next delayed callback.
+Only a real Worker/page session proves browser rendering and transport; native
+tests do not.
+
 ## How to change it
 
 Keep the tick body target-independent; target-specific code belongs at the timer boundary. If the timer policy changes, update the pure deadline tests with an input where delayed and burst policies produce different next deadlines. Tests should also cover the exact-deadline boundary, a multi-period stall, and repeated stalled polls to prove that one stall cannot create a zero-delay spin.
@@ -22,7 +33,7 @@ When adding a browser-produced feed, decide whether it is consumed by the world 
 
 ## Configuration
 
-The primary browser interval is fixed at 50 ms, representing 20 ticks per second. The browser timer does not require environment variables. Worker startup and the single-thread fallback are selected by the shell launch path.
+The primary browser interval is fixed at 50 ms, representing 20 ticks per second. The browser timer does not require environment variables. The focused harness accepts `LODESTONE_BROWSER_TICK_PORT` to avoid a local port collision (default `8765`); its LLVM codegen override is internal to `run.sh`. Worker startup and the single-thread fallback are selected by the shell launch path.
 
 ## Dependencies
 

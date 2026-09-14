@@ -48,12 +48,12 @@ fn distant_terrain_reaches_pixels_only_beyond_the_near_field() {
         .expect("fixed horizon");
     state.set_distant_terrain_near_field(8);
     state.set_distant_terrain_outer_radius(64);
-    assert!(state.populate_distant_terrain_one(queue, |_x, _z| HorizonCell {
+    assert!(state.populate_distant_terrain_one(queue, |_x, _z| Some(HorizonCell {
         terrain_y: 70 + 64,
         water_y: HorizonCell::DRY,
         surface_rgb565: 0x07E0,
         flags: 0,
-    }));
+    })));
     // The first center-out upload is slot 40; slot 41 is deliberately absent.
     assert!(
         state.distant_terrain_rejects_unpopulated_submission(41),

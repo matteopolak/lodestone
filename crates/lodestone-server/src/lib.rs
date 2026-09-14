@@ -522,6 +522,14 @@ pub mod villager_trade;
 mod vitals;
 mod weather;
 mod worldgen_dispatch;
+/// Shared lifecycle replay state and production world-generation source
+/// adapters. The parity harness re-exports this module so all callers use the
+/// server-owned implementation at the `ChunkSource` boundary.
+pub mod worldgen_lifecycle;
+/// Request-scoped world-generation state for the production session seam.
+pub mod worldgen_session;
+pub mod worldgen_progress;
+mod production_worldgen_session;
 /// Lightning: per-chunk strike-target selection during a thunderstorm, the
 /// `LightningBolt` life-cycle and its entity-facing effects (`docs/lightning.md`).
 /// Public because spawning the bolt as a real entity and applying an effect
@@ -567,8 +575,8 @@ pub use brewing::{
 };
 pub use chunk::{
     ChunkColumn, ChunkGenerationStage, ColumnLightSettlement, ColumnLightSettlementError,
-    ChunkColumnMemory, ChunkSource, EndChunkSource, NetherChunkSource, OverworldChunkSource,
-    RetainedLightStatus, WorldgenChunkSource, run_worldgen_jobs,
+    ChunkColumnMemory, ChunkSource, EndChunkSource, HorizonSample, NetherChunkSource, OverworldChunkSource,
+    RetainedLightStatus, WorldRegistries, WorldgenChunkSource, run_worldgen_jobs,
 };
 // `chunk_store::ChunkStore` itself stays crate-private (its methods
 // are `pub(crate)` and `IntegratedServer` is the only thing that should build

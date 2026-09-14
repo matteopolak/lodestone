@@ -219,6 +219,9 @@ neighbour is resolved through the source's normal column path so the fence has a
 the centre and any returned dependency snapshots are stored before the initial packet is written.
 The Nether fallback admits centre and cardinal-neighbour block-light sources and defers diagonal
 propagation until a light update; persisted snapshots remain authoritative.
+When a generated request carries an owning packet snapshot, its complete detached 3x3 is passed to
+the same status-aware computation before encoding. The computed centre light is installed only on the
+packet copy as `CentreSettled`; it is not a resident lifecycle transition or a persistence write.
 Protocols that do not opt into retained initial light
 keep their one-column encoder and do not pay for adjacent reads. The detached worker encoder remains
 on the one-column contract until it can carry the same neighbourhood explicitly.

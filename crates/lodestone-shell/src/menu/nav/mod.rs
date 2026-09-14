@@ -68,6 +68,10 @@ pub struct MenuNav {
     /// moves from one to the other), and a shared cursor would carry the gate's
     /// "Quit" row onto the title screen's fourth button.
     ownership: usize,
+    /// Browser-only local attestation state. It intentionally lives in menu
+    /// memory and is never serialized or used as an account identity.
+    #[cfg(target_arch = "wasm32")]
+    wasm_ownership_confirmed: bool,
     server: usize,
     /// Highlighted row on the pause menu ([`PAUSE_BUTTONS`]).
     paused: usize,

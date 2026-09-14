@@ -115,6 +115,7 @@ use crate::engine::Program;
 use crate::interner::StateInterner;
 use crate::noise::EndIslandNoise;
 use crate::surface::{PreState, SurfaceDiff, SurfaceSystem, identity_canon};
+use crate::structure::{StructureBlocks, StructureMutationContext, StructureMutationRecorder};
 use lodestone_worldgen_core::hash::FastMap;
 
 mod podium;
@@ -282,10 +283,9 @@ pub struct EndColumn {
     /// Typed biome identity per horizontal quart, resolved to a resource name
     /// only by the explicit string accessors below.
     biome_quarts: [BiomeRef; 16],
-    /// Client heightmaps retained when the feature stage starts.  The packet
-    /// path must use these snapshots rather than rescanning the final served
-    /// 3x3 decoration result: a neighbouring feature can write terrain into
-    /// this column after its own client maps were primed.
+    /// Client heightmaps seeded from the terrain prefix and maintained as
+    /// structure and decoration writes land in the served 3x3 region. Separate
+    /// lifecycle observers may retain authenticated intermediate maps.
     client_heightmaps: [[u16; 256]; 3],
     gateways: Vec<decorate::EndGateway>,
     /// Block-entity creation events emitted while structure blocks were placed.
@@ -293,6 +293,7 @@ pub struct EndColumn {
     /// block, because the packet lifecycle observes the creation sidecar before
     /// the final block field is assembled.
     block_entity_events: Vec<EndBlockEntityEvent>,
+    structure_blocks: StructureBlocks,
 }
 
 /// One state-owned block-entity creation event from End structure placement.
@@ -309,6 +310,12 @@ pub struct EndBlockEntityEvent {
     /// Validated registry id of the block-entity type created by the state
     /// write. Textual NBT conversion belongs at the server boundary.
     pub type_id: BlockEntityType,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct EndStructurePlacementResult {
+    pub block_entity_events: Vec<EndBlockEntityEvent>,
+    pub structure_blocks: StructureBlocks,
 }
 
 impl EndColumn {
@@ -399,6 +406,12 @@ impl EndColumn {
         &self.block_entity_events
     }
 
+    /// Typed structure writes emitted by the Features composite.
+    #[must_use]
+    pub fn structure_blocks(&self) -> &StructureBlocks {
+        &self.structure_blocks
+    }
+
     /// Count of non-air blocks — the cheapest "did this actually generate terrain"
     /// question, and the one an empty-column bug fails.
     #[must_use]
@@ -476,13 +489,12 @@ pub struct EndGenerator {
 }
 
 /// Immutable End terrain prepared for one source coordinate in a spatial
-/// batch. Structure pieces are already present; feature decoration is not.
-/// Output columns calculate their heightmap after the three-by-three
-/// decoration pass so the sidecar describes final served content.
+/// batch. Structure placement and feature decoration are not present.
+/// Output columns seed their maps from this prefix and update them for each
+/// three-by-three decoration write.
 #[derive(Debug, Clone)]
 pub struct EndBaseWorld {
     world: DenseBlockGrid,
-    block_entity_events: Vec<EndBlockEntityEvent>,
 }
 
 /// Keep a long-lived End generator bounded while retaining the complete
@@ -742,8 +754,8 @@ impl EndGenerator {
 
     /// The generated column for chunk `(cx, cz)`.
     ///
-    /// The End's served order: fill, biome, surface, materialise, structures,
-    /// then decoration. No End biome names a carver.
+    /// The End's served order: fill, biome, surface, materialise, then the
+    /// ordered Features composite. No End biome names a carver.
     #[must_use]
     pub fn column(&self, cx: i32, cz: i32) -> EndColumn {
         self.column_inner(cx, cz, None)
@@ -778,16 +790,20 @@ impl EndGenerator {
         for &stage in Self::stage_schedule().stages_for(crate::stage_schedule::GenerationTarget::Shaped) {
             schedule.enter(stage);
         }
-        let (world, client_heightmaps, gateways) = schedule.run(
+        let (world, client_heightmaps, gateways, block_entity_events, structure_blocks) = schedule.run(
             crate::stage_schedule::ColumnStage::Features,
             || self.decoration_region(cx, cz),
         );
-        let block_entity_events = self
-            .base_world_for_batch(cx, cz)
-            .block_entity_events
-            .clone();
         let column = schedule.run(crate::stage_schedule::ColumnStage::Output, || {
-            self.finish_column(cx, cz, world, client_heightmaps, gateways, block_entity_events)
+            self.finish_column(
+                cx,
+                cz,
+                world,
+                client_heightmaps,
+                gateways,
+                block_entity_events,
+                structure_blocks,
+            )
         });
         schedule.finish();
         column
@@ -801,6 +817,7 @@ impl EndGenerator {
         client_heightmaps: [[u16; 256]; 3],
         gateways: Vec<decorate::EndGateway>,
         block_entity_events: Vec<EndBlockEntityEvent>,
+        structure_blocks: StructureBlocks,
     ) -> EndColumn {
         let biome_quarts = self
             .biomes
@@ -825,6 +842,7 @@ impl EndGenerator {
             client_heightmaps,
             gateways,
             block_entity_events,
+            structure_blocks,
         }
     }
 
@@ -904,8 +922,10 @@ impl EndGenerator {
                 let mut schedule = Self::stage_schedule().executor_at(
                     Self::stage_schedule().shaped_boundary_index(),
                 );
-                let gateways = schedule.run(crate::stage_schedule::ColumnStage::Features, || {
-                    self.decoration.apply_region(
+                let mut client_heightmaps =
+                    Self::end_client_heightmaps(&region, cx, cz, self.min_y, WORLD_HEIGHT);
+                let (gateways, structure_result) = schedule.run(crate::stage_schedule::ColumnStage::Features, || {
+                    self.decoration.apply_region_with_heightmaps_and_structure(
                         self.seed,
                         cx,
                         cz,
@@ -913,11 +933,15 @@ impl EndGenerator {
                         |source_x, source_z| {
                             self.biomes.biome_at_quart_typed(source_x * 4, 0, source_z * 4)
                         },
+                        &mut client_heightmaps,
+                        self.min_y,
+                        WORLD_HEIGHT,
+                        |world| self.structure_place_stage(cx, cz, world),
+                        |world, maps| {
+                            *maps = Self::end_client_heightmaps(world, cx, cz, self.min_y, WORLD_HEIGHT);
+                        },
                     )
                 });
-                let client_heightmaps =
-                    Self::end_client_heightmaps(&region, cx, cz, self.min_y, WORLD_HEIGHT);
-                let block_entity_events = base_worlds[&(cx, cz)].block_entity_events.clone();
                 let column = schedule.run(crate::stage_schedule::ColumnStage::Output, || {
                     self.finish_column(
                         cx,
@@ -925,7 +949,8 @@ impl EndGenerator {
                         region,
                         client_heightmaps,
                         gateways,
-                        block_entity_events,
+                        structure_result.block_entity_events,
+                        structure_result.structure_blocks,
                     )
                 });
                 schedule.finish();
@@ -952,20 +977,15 @@ impl EndGenerator {
 
     pub fn base_world_for_batch(&self, cx: i32, cz: i32) -> Arc<EndBaseWorld> {
         self.base_worlds.get_or_compute((cx, cz), || {
-            let (world, block_entity_events) = self.base_world(cx, cz);
-            EndBaseWorld {
-                world,
-                block_entity_events,
-            }
+            EndBaseWorld { world: self.base_world(cx, cz) }
         })
     }
 
     /// Materialize one immutable, undecorated End source column.
     ///
     /// Lifecycle replay uses this as the resident value before FEATURES. It is
-    /// the same cached fill/surface/structure prefix consumed by ordinary End
-    /// batches, so the parity path cannot silently substitute a second terrain
-    /// implementation.
+    /// the same cached terrain prefix consumed by ordinary End batches, so the
+    /// parity path cannot silently substitute a second terrain implementation.
     #[must_use]
     pub fn column_shaped(&self, cx: i32, cz: i32) -> EndColumn {
         let base = self.base_world_for_batch(cx, cz);
@@ -976,7 +996,8 @@ impl EndGenerator {
             base.world.clone(),
             maps,
             Vec::new(),
-            base.block_entity_events.clone(),
+            Vec::new(),
+            StructureBlocks::default(),
         )
     }
 
@@ -1022,12 +1043,19 @@ impl EndGenerator {
         let source_biomes = decorate::EndBiomeSet::around_source(source_x, source_z, |cx, cz| {
             self.biomes.biome_at_quart_typed(cx * 4, 0, cz * 4)
         });
-        let gateways = self.decoration.apply_source(
+        let (gateways, structure_result) = self.decoration.apply_source_with_structure(
             self.seed,
             source_x,
             source_z,
             &mut world,
             source_biomes,
+            |world| {
+                if (source_x, source_z) == (target_x, target_z) {
+                    self.structure_place_stage(target_x, target_z, world)
+                } else {
+                    EndStructurePlacementResult::default()
+                }
+            },
         );
         let mut spills = Vec::new();
         for y in min_y..min_y + size_y {
@@ -1043,7 +1071,11 @@ impl EndGenerator {
                 }
             }
         }
-        EndDecorationResult { spills, gateways }
+        EndDecorationResult {
+            spills,
+            gateways,
+            structure_blocks: structure_result.structure_blocks,
+        }
     }
 
     fn parity_decoration_grid_for_target(
@@ -1159,15 +1191,12 @@ impl EndGenerator {
                     self.default_fluid_pre.state,
                 );
                 schedule.enter(crate::stage_schedule::ColumnStage::StructureStarts);
-                let (world, block_entity_events) =
-                    self.structure_place_stage(cx, cz, self.widen_world(world));
-                schedule.enter(crate::stage_schedule::ColumnStage::StructurePlacement);
+                let world = self.widen_world(world);
                 schedule.finish_prefix(
                     Self::stage_schedule().shaped_boundary_index(),
                 );
                 let base = Arc::new(EndBaseWorld {
                     world,
-                    block_entity_events,
                 });
                 let base = self.base_worlds.insert((cx, cz), base);
                 ((cx, cz), base)
@@ -1256,7 +1285,7 @@ impl EndGenerator {
         references
     }
 
-    fn base_world(&self, cx: i32, cz: i32) -> (DenseBlockGrid, Vec<EndBlockEntityEvent>) {
+    fn base_world(&self, cx: i32, cz: i32) -> DenseBlockGrid {
         let base_x = cx * 16;
         let base_z = cz * 16;
         let mut schedule = Self::stage_schedule().executor();
@@ -1292,12 +1321,11 @@ impl EndGenerator {
             self.default_fluid_pre.state,
         );
         schedule.enter(crate::stage_schedule::ColumnStage::StructureStarts);
-        let placed = self.structure_place_stage(cx, cz, self.widen_world(world));
-        schedule.enter(crate::stage_schedule::ColumnStage::StructurePlacement);
+        let world = self.widen_world(world);
         schedule.finish_prefix(
             Self::stage_schedule().shaped_boundary_index(),
         );
-        placed
+        world
     }
 
     /// Expand the noise-generated terrain into the full End dimension window
@@ -1351,14 +1379,16 @@ impl EndGenerator {
         &self,
         cx: i32,
         cz: i32,
-        mut world: DenseBlockGrid,
-    ) -> (DenseBlockGrid, Vec<EndBlockEntityEvent>) {
+        mut world: &mut DenseBlockGrid,
+    ) -> EndStructurePlacementResult
+    {
         const START_SCAN_RADIUS: i32 = 16;
         let Some(registry) = &self.structures else {
-            return (world, Vec::new());
+            return EndStructurePlacementResult::default();
         };
         let (min_x, min_z) = (cx * 16, cz * 16);
         let mut block_entity_events = Vec::new();
+        let mut mutation_recorder = StructureMutationRecorder::default();
         let mut feature_randoms: HashMap<
             String,
             crate::rng::WorldgenRandom<crate::rng::LegacyRandomSource>,
@@ -1368,6 +1398,14 @@ impl EndGenerator {
                 if !start.pieces_complete {
                     continue;
                 }
+                let Some((structure_step, _)) = registry.feature_placement_key(&start.structure) else {
+                    continue;
+                };
+                let mut mutation = StructureMutationContext::new(
+                    &mut mutation_recorder,
+                    (start.chunk_x, start.chunk_z),
+                    structure_step,
+                );
                 let reference = crate::structure::jigsaw::reference_position(&start.pieces);
                 for piece in &start.pieces {
                     if !piece.bounding_box.intersects_xz(min_x, min_z, min_x + 15, min_z + 15) {
@@ -1388,7 +1426,7 @@ impl EndGenerator {
                                     });
                                 }
                             }
-                            world.set(block.pos[0], block.pos[1], block.pos[2], &block.state);
+                            mutation.write(&mut world, block.pos[0], block.pos[1], block.pos[2], &block.state);
                         }
                     }
                     if let Some(placement) = &piece.placement {
@@ -1408,11 +1446,12 @@ impl EndGenerator {
                             reference,
                             seed: registry.seed(),
                         };
-                        placement.template.place_with_block_entity_events(
+                        placement.template.place_with_block_entity_events_and_mutations(
                             origin,
                             &placement.settings,
                             &mut world,
                             &mut record_event,
+                            &mut mutation,
                         );
                         for extra in &piece.extra_placements {
                             let origin = crate::structure::template::PlaceOrigin {
@@ -1420,11 +1459,12 @@ impl EndGenerator {
                                 reference,
                                 seed: registry.seed(),
                             };
-                            extra.template.place_with_block_entity_events(
+                            extra.template.place_with_block_entity_events_and_mutations(
                                 origin,
                                 &extra.settings,
                                 &mut world,
                                 &mut record_event,
+                                &mut mutation,
                             );
                         }
                     }
@@ -1445,16 +1485,21 @@ impl EndGenerator {
                                 random.set_feature_seed(decoration_seed, index as i32, step);
                                 random
                             });
-                            crate::structure::feature_placement::place_feature_pool_elements(
+                            crate::structure::feature_placement::place_feature_pool_elements_with_sink(
                                 random,
                                 registry.seed(),
                                 placements,
                                 &mut world,
                                 &self.veg_tags,
+                                Some(&mut mutation),
                             );
                         }
                         Some(crate::structure::PieceRefinement::StrongholdBlocks { writes }) => {
-                            crate::structure::stronghold::place_post_surface_blocks(&mut world, writes);
+                            crate::structure::stronghold::place_post_surface_blocks_with_sink(
+                                &mut world,
+                                writes,
+                                Some(&mut mutation),
+                            );
                         }
                         Some(crate::structure::PieceRefinement::BuriedTreasureChest)
                         | Some(crate::structure::PieceRefinement::NetherFossilDriedGhast { .. })
@@ -1465,7 +1510,10 @@ impl EndGenerator {
                 }
             }
         }
-        (world, block_entity_events)
+        EndStructurePlacementResult {
+            block_entity_events,
+            structure_blocks: mutation_recorder.finish(world.interner()),
+        }
     }
 
     fn structure_origin_candidates(&self, cx: i32, cz: i32, radius: i32) -> Vec<(i32, i32)> {
@@ -1489,7 +1537,13 @@ impl EndGenerator {
         &self,
         cx: i32,
         cz: i32,
-    ) -> (DenseBlockGrid, [[u16; 256]; 3], Vec<decorate::EndGateway>) {
+    ) -> (
+        DenseBlockGrid,
+        [[u16; 256]; 3],
+        Vec<decorate::EndGateway>,
+        Vec<EndBlockEntityEvent>,
+        StructureBlocks,
+    ) {
         let mut region = DenseBlockGrid::with_interner(
             self.interner.clone(),
             (cx - 1) * 16,
@@ -1521,22 +1575,36 @@ impl EndGenerator {
                 );
             }
         }
-        let client_heightmaps =
+        let mut client_heightmaps =
             Self::end_client_heightmaps(&region, cx, cz, self.min_y, WORLD_HEIGHT);
-        let gateways = self.decoration.apply_region(
+        let (gateways, structure_result) = self.decoration.apply_region_with_heightmaps_and_structure(
             self.seed,
             cx,
             cz,
             &mut region,
             |source_x, source_z| self.biomes.biome_at_quart_typed(source_x * 4, 0, source_z * 4),
+            &mut client_heightmaps,
+            self.min_y,
+            WORLD_HEIGHT,
+            |world| {
+                self.structure_place_stage(cx, cz, world)
+            },
+            |world, maps| {
+                *maps = Self::end_client_heightmaps(world, cx, cz, self.min_y, WORLD_HEIGHT);
+            },
         );
-        (region, client_heightmaps, gateways)
+        (
+            region,
+            client_heightmaps,
+            gateways,
+            structure_result.block_entity_events,
+            structure_result.structure_blocks,
+        )
     }
 
-    /// Capture the three client maps from the centre chunk before features run.
-    /// Decoration still writes the complete three-by-three result into the
-    /// served block field, but those writes do not retroactively change the
-    /// centre chunk's already-primed snapshots.
+    /// Seed the three client maps from the centre chunk's terrain prefix.
+    /// Structure and decoration writes update these maps at their lifecycle
+    /// boundaries.
     fn end_client_heightmaps(
         region: &DenseBlockGrid,
         cx: i32,

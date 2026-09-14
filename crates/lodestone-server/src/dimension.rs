@@ -102,6 +102,16 @@ pub enum Dimension {
     End,
 }
 
+impl From<Dimension> for lodestone_worldgen::stage_schedule::Dimension {
+    fn from(dimension: Dimension) -> Self {
+        match dimension {
+            Dimension::Overworld => Self::Overworld,
+            Dimension::Nether => Self::Nether,
+            Dimension::End => Self::End,
+        }
+    }
+}
+
 impl Dimension {
     /// Every dimension, in holder order.
     pub const ALL: [Dimension; 3] = [Dimension::Overworld, Dimension::Nether, Dimension::End];
@@ -478,6 +488,10 @@ impl<S: std::fmt::Debug> std::fmt::Debug for DimensionalSource<S> {
 }
 
 impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
+    fn horizon_sample(&self, x: i32, z: i32) -> Option<crate::chunk::HorizonSample> {
+        self.primary.horizon_sample(x, z)
+    }
+
     fn columns(&self, coords: &[(i32, i32)]) -> Vec<ChunkColumn> {
         self.primary.columns(coords)
     }
@@ -621,6 +635,48 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
         stage: crate::chunk::ChunkGenerationStage,
     ) -> Option<crate::chunk::ChunkGenerationStage> {
         self.primary.packet_generation_stage(stage)
+    }
+
+    fn generation_request_dependency_radius(
+        &self,
+        target: lodestone_worldgen::stage_schedule::GenerationTarget,
+    ) -> u8 {
+        self.primary.generation_request_dependency_radius(target)
+    }
+
+    fn request_stage_driver(
+        &self,
+    ) -> Option<&dyn crate::worldgen_session::RequestStageDriver> {
+        self.primary.request_stage_driver()
+    }
+
+    fn request_generation(
+        &self,
+        request: crate::worldgen_session::GenerationRequest,
+        session: Option<&mut crate::worldgen_session::GenerationSession>,
+    ) -> Result<
+        Option<crate::worldgen_session::GenerationRequestResult>,
+        crate::worldgen_session::GenerationRequestError,
+    > {
+        self.primary.request_generation(request, session)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn request_generation_yielding<'a>(
+        &'a self,
+        request: crate::worldgen_session::GenerationRequest,
+        session: Option<&'a mut crate::worldgen_session::GenerationSession>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        Option<crate::worldgen_session::GenerationRequestResult>,
+                        crate::worldgen_session::GenerationRequestError,
+                    >,
+                > + 'a,
+        >,
+    > {
+        self.primary.request_generation_yielding(request, session)
     }
 
     fn block_state(&self, x: i32, y: i32, z: i32) -> String {

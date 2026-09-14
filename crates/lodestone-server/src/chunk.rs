@@ -96,6 +96,22 @@ pub(crate) const SECTION_ROWS: usize = 16;
 /// overwrites this with real per-quart biome data.
 pub(crate) const DEFAULT_BIOME: &str = "minecraft:plains";
 
+/// A bounded, query-only surface sample for a distant-terrain client.
+///
+/// This is deliberately smaller than a [`ChunkColumn`]. A source may answer
+/// it without generating, retaining, or mutating a column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HorizonSample {
+    /// Preliminary surface height in world coordinates.
+    pub terrain_y: i32,
+    /// Surface height of water, or `None` when the cell is dry.
+    pub water_y: Option<i32>,
+    /// Gamma-space RGB565 surface colour.
+    pub surface_rgb565: u16,
+    /// Material-class and future extension bits.
+    pub flags: u16,
+}
+
 /// Resolves a generated biome identity at the server's text/packet boundary.
 /// Worldgen retains the compact [`BiomeRef`] and never interns names locally;
 /// an extension identity must be resolved by the server-owned registry before
@@ -696,6 +712,11 @@ impl ChunkColumn {
     #[must_use]
     pub fn generation_stage(&self) -> ChunkGenerationStage {
         self.generation_stage
+    }
+
+    pub(crate) fn mark_generation_stage(&mut self, stage: ChunkGenerationStage) {
+        assert!(stage >= self.generation_stage, "generation stage cannot regress");
+        self.generation_stage = stage;
     }
 
     /// Adopts a [`lodestone_worldgen::nether::NetherColumn`], padded up to
@@ -2147,6 +2168,13 @@ pub trait ChunkSource: Send + Sync {
     /// Generates the column at chunk coordinates `(cx, cz)`.
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn;
 
+    /// Answers a cheap distant-terrain surface query without materialising a
+    /// chunk. `None` means this source does not expose a faithful surface
+    /// estimate.
+    fn horizon_sample(&self, _x: i32, _z: i32) -> Option<HorizonSample> {
+        None
+    }
+
     /// Generates several columns in the caller's exact coordinate order.
     /// Sources with shared dependency windows override this hook; the default
     /// preserves every existing source's scalar behavior.
@@ -2182,6 +2210,94 @@ pub trait ChunkSource: Send + Sync {
         None
     }
 
+    /// Returns the dependency radius admitted for a request at `target`.
+    /// Sources with cross-column generation override this policy; callers must
+    /// not infer a halo from the packet protocol or join shape.
+    fn generation_request_dependency_radius(
+        &self,
+        _target: lodestone_worldgen::stage_schedule::GenerationTarget,
+    ) -> u8 {
+        1
+    }
+
+    /// Returns the optional low-level driver used by the default request
+    /// adapter. Persistence wrappers expose only `request_generation`.
+    fn request_stage_driver(
+        &self,
+    ) -> Option<&dyn crate::worldgen_session::RequestStageDriver> {
+        None
+    }
+
+    /// Answers one request through the source's high-level boundary.
+    /// `Existing` is terminal persistence state, not a generated frontier;
+    /// `None` keeps legacy scalar generation. A supplied session lets an outer
+    /// store preserve its ledger around the default driver adapter.
+    fn request_generation(
+        &self,
+        request: crate::worldgen_session::GenerationRequest,
+        session: Option<&mut crate::worldgen_session::GenerationSession>,
+    ) -> Result<
+        Option<crate::worldgen_session::GenerationRequestResult>,
+        crate::worldgen_session::GenerationRequestError,
+    > {
+        let Some(driver) = self.request_stage_driver() else {
+            return Ok(None);
+        };
+        match session {
+            Some(session) => driver
+                .generate(session)
+                .map(crate::worldgen_session::GenerationRequestResult::Generated)
+                .map(Some)
+                .map_err(Into::into),
+            None => {
+                let mut owned = crate::worldgen_session::GenerationSession::new(request);
+                driver
+                    .generate(&mut owned)
+                    .map(crate::worldgen_session::GenerationRequestResult::Generated)
+                    .map(Some)
+                    .map_err(Into::into)
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn request_generation_yielding<'a>(
+        &'a self,
+        request: crate::worldgen_session::GenerationRequest,
+        session: Option<&'a mut crate::worldgen_session::GenerationSession>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        Option<crate::worldgen_session::GenerationRequestResult>,
+                        crate::worldgen_session::GenerationRequestError,
+                    >,
+                > + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let Some(driver) = self.request_stage_driver() else {
+                return Ok(None);
+            };
+            let generated = match session {
+                Some(session) => driver
+                    .generate_yielding(session)
+                    .await
+                    .map(crate::worldgen_session::GenerationRequestResult::Generated)
+                    .map(Some),
+                None => {
+                    let mut owned = crate::worldgen_session::GenerationSession::new(request);
+                    driver
+                        .generate_yielding(&mut owned)
+                        .await
+                        .map(crate::worldgen_session::GenerationRequestResult::Generated)
+                        .map(Some)
+                }
+            };
+            generated.map_err(Into::into)
+        })
+    }
+
     /// Reads a single block's canonical state string at world coordinates
     /// `(x, y, z)`, through the same data [`column`](Self::column) would
     /// return — including any edit already applied via
@@ -2212,6 +2328,15 @@ pub trait ChunkSource: Send + Sync {
     fn resident_column(&self, _cx: i32, _cz: i32) -> Option<ChunkColumn> {
         None
     }
+
+    /// Temporarily exposes a persisted dependency to a request-scoped source.
+    /// The matching release call keeps disk hydration out of the long-lived
+    /// edit ledger.
+    fn retain_generation_input(&self, _cx: i32, _cz: i32, _column: &ChunkColumn) -> bool {
+        false
+    }
+
+    fn release_generation_input(&self, _cx: i32, _cz: i32) {}
 
     /// Attempts a resident-only column snapshot through a source with an
     /// atomic admission boundary. `None` means the source keeps the legacy
@@ -2685,12 +2810,24 @@ pub trait ChunkSource: Send + Sync {
 /// LAN player's portal travel would silently stop working while a directly-held
 /// concrete source kept it.
 impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
+    fn horizon_sample(&self, x: i32, z: i32) -> Option<HorizonSample> {
+        (**self).horizon_sample(x, z)
+    }
+
     fn resident_block_state_id(&self, x: i32, y: i32, z: i32) -> Option<lodestone_data::block_states::StateId> {
         (**self).resident_block_state_id(x, y, z)
     }
 
     fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
         (**self).resident_column(cx, cz)
+    }
+
+    fn retain_generation_input(&self, cx: i32, cz: i32, column: &ChunkColumn) -> bool {
+        (**self).retain_generation_input(cx, cz, column)
+    }
+
+    fn release_generation_input(&self, cx: i32, cz: i32) {
+        (**self).release_generation_input(cx, cz)
     }
 
     fn try_resident_column(
@@ -2823,6 +2960,48 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
         (**self).packet_generation_stage(stage)
     }
 
+    fn generation_request_dependency_radius(
+        &self,
+        target: lodestone_worldgen::stage_schedule::GenerationTarget,
+    ) -> u8 {
+        (**self).generation_request_dependency_radius(target)
+    }
+
+    fn request_stage_driver(
+        &self,
+    ) -> Option<&dyn crate::worldgen_session::RequestStageDriver> {
+        (**self).request_stage_driver()
+    }
+
+    fn request_generation(
+        &self,
+        request: crate::worldgen_session::GenerationRequest,
+        session: Option<&mut crate::worldgen_session::GenerationSession>,
+    ) -> Result<
+        Option<crate::worldgen_session::GenerationRequestResult>,
+        crate::worldgen_session::GenerationRequestError,
+    > {
+        (**self).request_generation(request, session)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn request_generation_yielding<'a>(
+        &'a self,
+        request: crate::worldgen_session::GenerationRequest,
+        session: Option<&'a mut crate::worldgen_session::GenerationSession>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        Option<crate::worldgen_session::GenerationRequestResult>,
+                        crate::worldgen_session::GenerationRequestError,
+                    >,
+                > + 'a,
+        >,
+    > {
+        (**self).request_generation_yielding(request, session)
+    }
+
     fn block_state(&self, x: i32, y: i32, z: i32) -> String {
         (**self).block_state(x, y, z)
     }
@@ -2901,12 +3080,24 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
 /// see the `Arc` impl's own note for what an unforwarded defaulted method
 /// silently costs.
 impl<S: ChunkSource + ?Sized> ChunkSource for &S {
+    fn horizon_sample(&self, x: i32, z: i32) -> Option<HorizonSample> {
+        (**self).horizon_sample(x, z)
+    }
+
     fn resident_block_state_id(&self, x: i32, y: i32, z: i32) -> Option<lodestone_data::block_states::StateId> {
         (**self).resident_block_state_id(x, y, z)
     }
 
     fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
         (**self).resident_column(cx, cz)
+    }
+
+    fn retain_generation_input(&self, cx: i32, cz: i32, column: &ChunkColumn) -> bool {
+        (**self).retain_generation_input(cx, cz, column)
+    }
+
+    fn release_generation_input(&self, cx: i32, cz: i32) {
+        (**self).release_generation_input(cx, cz)
     }
 
     fn try_resident_column(
@@ -3033,6 +3224,48 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
         stage: ChunkGenerationStage,
     ) -> Option<ChunkGenerationStage> {
         (**self).packet_generation_stage(stage)
+    }
+
+    fn generation_request_dependency_radius(
+        &self,
+        target: lodestone_worldgen::stage_schedule::GenerationTarget,
+    ) -> u8 {
+        (**self).generation_request_dependency_radius(target)
+    }
+
+    fn request_stage_driver(
+        &self,
+    ) -> Option<&dyn crate::worldgen_session::RequestStageDriver> {
+        (**self).request_stage_driver()
+    }
+
+    fn request_generation(
+        &self,
+        request: crate::worldgen_session::GenerationRequest,
+        session: Option<&mut crate::worldgen_session::GenerationSession>,
+    ) -> Result<
+        Option<crate::worldgen_session::GenerationRequestResult>,
+        crate::worldgen_session::GenerationRequestError,
+    > {
+        (**self).request_generation(request, session)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn request_generation_yielding<'a>(
+        &'a self,
+        request: crate::worldgen_session::GenerationRequest,
+        session: Option<&'a mut crate::worldgen_session::GenerationSession>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        Option<crate::worldgen_session::GenerationRequestResult>,
+                        crate::worldgen_session::GenerationRequestError,
+                    >,
+                > + 'a,
+        >,
+    > {
+        (**self).request_generation_yielding(request, session)
     }
 
     fn block_state(&self, x: i32, y: i32, z: i32) -> String {
@@ -3182,10 +3415,9 @@ pub(crate) fn generate_columns_parallel<S: ChunkSource + ?Sized>(
     source.columns(coords)
 }
 
-/// Run independent world-generation jobs on the server's persistent global
-/// worker dispatcher and collect them in submission order. This is the shared
-/// hand-off used by lifecycle tooling: workers may finish out of order, but a
-/// caller can apply each result to mutable world state in canonical order.
+/// Run immutable world-generation jobs and collect them in submission order.
+/// Native uses the persistent dispatcher; threaded wasm uses the initialized
+/// global Rayon pool.
 #[must_use]
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_worldgen_jobs<T, R, F>(jobs: Vec<T>, work: F) -> Vec<R>
@@ -3197,10 +3429,9 @@ where
     crate::worldgen_dispatch::run_ordered(jobs, work)
 }
 
-/// Browser twin of [`run_worldgen_jobs`]. Native workers are unavailable on
-/// wasm, so submission order is also execution order.
+/// Serial browser fallback when `wasm-threads` is disabled.
 #[must_use]
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
 pub fn run_worldgen_jobs<T, R, F>(jobs: Vec<T>, work: F) -> Vec<R>
 where
     F: Fn(T) -> R,
@@ -3208,50 +3439,21 @@ where
     jobs.into_iter().map(work).collect()
 }
 
-/// [`generate_columns_parallel`] with a per-column transform applied **inside the
-/// worker that generated it**, so whatever `f` costs is parallelised on the same
-/// fan-out and the intermediate [`ChunkColumn`] is dropped without ever reaching
-/// the caller.
-///
-/// This exists because folding the protocol encode into the same blocking closure
-/// as the generation (`generate_and_encode_columns_offloaded`) and the encode
-/// both run inside the blocking fan-out. Each worker calls `encode_chunk` for
-/// its generated column, avoiding a serial pass. At the ≈2.4 ms per column
-/// `crate::protocol::ChunkEncoder` carries, a 33-column strip therefore paid ≈80 ms
-/// of *unavoidably* single-threaded work no matter how many cores generated it —
-/// which is the whole cost the offload was supposed to remove, still present, just
-/// relocated off the connection task.
-///
-/// Two consequences beyond the wall clock, both properties of doing it here rather
-/// than after the join:
-///
-/// * peak memory is one column per worker instead of `coords.len()` columns. A
-///   composed column is not small, and the old shape held the entire strip live at
-///   once purely to iterate it afterwards.
-/// * `f` runs on the worker thread, so it must be `Sync` and its output `Send`.
-///   `ChunkEncoder` already requires both (`Send + Sync + 'static`), which is why
-///   no call site has to change shape.
-///
-/// Order is still **`coords` order**, not completion order — the same guarantee
-/// [`generate_columns_parallel`] documents, and for the same reason: the wire byte
-/// sequence must not depend on which thread finished first.
+/// Rayon arm for the atomics-enabled browser worker's initialized pool.
 #[must_use]
-#[cfg(not(target_arch = "wasm32"))]
-fn map_columns_parallel<S, T, F>(source: &S, coords: &[(i32, i32)], f: F) -> Vec<T>
+#[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+pub fn run_worldgen_jobs<T, R, F>(jobs: Vec<T>, work: F) -> Vec<R>
 where
-    S: ChunkSource + ?Sized,
     T: Send,
-    F: Fn((i32, i32), ChunkColumn) -> T + Sync,
+    R: Send,
+    F: Fn(T) -> R + Send + Sync,
 {
-    source
-        .columns(coords)
-        .into_iter()
-        .zip(coords.iter().copied())
-        .map(|(column, coordinate)| f(coordinate, column))
-        .collect()
+    use rayon::prelude::*;
+
+    jobs.into_par_iter().map(work).collect()
 }
 
-/// [`map_columns_parallel`]'s single-threaded, **yielding** twin — the wasm32
+/// Single-threaded, yielding map used by the wasm32
 /// shape of the same idea, used because wasm32 has neither a scoped-thread fan-out
 /// nor a blocking pool to offload to (see [`generate_columns_offloaded`]'s own
 /// wasm32 note).
@@ -3295,6 +3497,54 @@ where
         yield_between().await;
     }
     out
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn request_column_for_packet<S: ChunkSource + ?Sized>(
+    source: &S,
+    coordinate: (i32, i32),
+    dimension: crate::dimension::Dimension,
+) -> Result<ChunkColumn, crate::protocol::ChunkEncodeError> {
+    let request = crate::worldgen_session::GenerationRequest::new(
+        dimension.into(),
+        coordinate,
+        lodestone_worldgen::stage_schedule::GenerationTarget::Full,
+        source.generation_request_dependency_radius(
+            lodestone_worldgen::stage_schedule::GenerationTarget::Full,
+        ),
+    );
+    match source.request_generation(request, None) {
+        Ok(Some(crate::worldgen_session::GenerationRequestResult::Existing(column))) => Ok(column),
+        Ok(Some(crate::worldgen_session::GenerationRequestResult::Generated(snapshot))) => {
+            Ok(snapshot.column().clone())
+        }
+        Ok(None) => Ok(source.column(coordinate.0, coordinate.1)),
+        Err(error) => Err(crate::protocol::ChunkEncodeError::new(error.to_string())),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn request_column_for_packet_yielding<S: ChunkSource + ?Sized>(
+    source: &S,
+    coordinate: (i32, i32),
+    dimension: crate::dimension::Dimension,
+) -> Result<ChunkColumn, crate::protocol::ChunkEncodeError> {
+    let request = crate::worldgen_session::GenerationRequest::new(
+        dimension.into(),
+        coordinate,
+        lodestone_worldgen::stage_schedule::GenerationTarget::Full,
+        source.generation_request_dependency_radius(
+            lodestone_worldgen::stage_schedule::GenerationTarget::Full,
+        ),
+    );
+    match source.request_generation_yielding(request, None).await {
+        Ok(Some(crate::worldgen_session::GenerationRequestResult::Existing(column))) => Ok(column),
+        Ok(Some(crate::worldgen_session::GenerationRequestResult::Generated(snapshot))) => {
+            Ok(snapshot.column().clone())
+        }
+        Ok(None) => Ok(source.column(coordinate.0, coordinate.1)),
+        Err(error) => Err(crate::protocol::ChunkEncodeError::new(error.to_string())),
+    }
 }
 
 /// [`map_columns_yielding`] with the identity transform — the yielding twin of
@@ -3342,7 +3592,7 @@ pub(crate) async fn generate_columns_borrowed(
 /// macrotask, which is the granularity Chrome's own unresponsive-page detector
 /// (and rendering) actually yields at.
 #[cfg(target_arch = "wasm32")]
-async fn yield_to_browser() {
+pub(crate) async fn yield_to_browser() {
     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
         // The normal browser singleplayer path generates columns in a
         // dedicated server worker. A worker has no `Window`, but its global
@@ -3464,19 +3714,16 @@ pub(crate) async fn generate_and_encode_columns_offloaded<S: ChunkSource + 'stat
     // into the browser build, so this path cannot create native workers there.
     #[cfg(target_arch = "wasm32")]
     {
-        Some(
-            map_columns_yielding(
-                &*source,
-                &coords,
-                |(cx, cz), column| {
-                    encoder.try_encode_chunk_in_dimension(cx, cz, &column, dimension)
-                },
-                yield_to_browser,
-            )
-            .await
-            .into_iter()
-            .collect(),
-        )
+        let mut frames = Vec::with_capacity(coords.len());
+        for (cx, cz) in coords {
+            let column = match request_column_for_packet_yielding(&*source, (cx, cz), dimension).await {
+                Ok(column) => column,
+                Err(error) => return Some(Err(error)),
+            };
+            frames.push(encoder.try_encode_chunk_in_dimension(cx, cz, &column, dimension));
+            yield_to_browser().await;
+        }
+        Some(frames.into_iter().collect())
     }
     // Native: `map_columns_parallel`, not `generate_columns_parallel`
     // followed by an encode loop — the encode runs on the worker that
@@ -3486,10 +3733,11 @@ pub(crate) async fn generate_and_encode_columns_offloaded<S: ChunkSource + 'stat
     #[cfg(not(target_arch = "wasm32"))]
     {
         let source_for_worker = Arc::clone(&source);
-        let coords_for_worker = coords;
         let encode = move || {
-            map_columns_parallel(&*source_for_worker, &coords_for_worker, |(cx, cz), column| {
-                encoder.try_encode_chunk_in_dimension(cx, cz, &column, dimension)
+            crate::worldgen_dispatch::run_ordered(coords, |(cx, cz)| {
+                request_column_for_packet(&*source_for_worker, (cx, cz), dimension).and_then(
+                    |column| encoder.try_encode_chunk_in_dimension(cx, cz, &column, dimension),
+                )
             })
         };
         Some(
@@ -3541,6 +3789,7 @@ pub struct OverworldChunkSource {
     /// Absent from this map means "not yet edited"; `column()` falls through
     /// to the generator in that case. See the struct doc comment above.
     edits: Mutex<HashMap<(i32, i32), ChunkColumn>>,
+    generation_inputs: Mutex<HashMap<(i32, i32), ChunkColumn>>,
 }
 
 impl OverworldChunkSource {
@@ -3550,6 +3799,7 @@ impl OverworldChunkSource {
         Self {
             generator,
             edits: Mutex::new(HashMap::new()),
+            generation_inputs: Mutex::new(HashMap::new()),
         }
     }
 
@@ -3684,6 +3934,23 @@ impl std::fmt::Debug for OverworldChunkSource {
 }
 
 impl ChunkSource for OverworldChunkSource {
+    fn horizon_sample(&self, x: i32, z: i32) -> Option<HorizonSample> {
+        const LAND_RGB565: u16 = 0x5A85;
+        const WATER_RGB565: u16 = 0x2D9B;
+        let terrain_y = self.generator.preliminary_surface_level(x, z);
+        let water_y = (terrain_y < self.generator.sea_level()).then_some(self.generator.sea_level());
+        Some(HorizonSample {
+            terrain_y,
+            water_y,
+            surface_rgb565: if water_y.is_some() {
+                WATER_RGB565
+            } else {
+                LAND_RGB565
+            },
+            flags: 0,
+        })
+    }
+
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
         self.column_at(cx, cz, ChunkGenerationStage::Full)
     }
@@ -3747,6 +4014,14 @@ impl ChunkSource for OverworldChunkSource {
             return edited.clone();
         }
         drop(edits);
+        let generation_inputs = self
+            .generation_inputs
+            .lock()
+            .expect("generation input lock poisoned");
+        if let Some(input) = generation_inputs.get(&(cx, cz)) {
+            return input.clone();
+        }
+        drop(generation_inputs);
         let generated = match stage {
             ChunkGenerationStage::Shaped => self.generator.column_shaped(cx, cz),
             ChunkGenerationStage::Full => self.generator.column(cx, cz),
@@ -3761,6 +4036,12 @@ impl ChunkSource for OverworldChunkSource {
             column.populate_missing_block_entity_states(cx, cz);
         }
         column
+    }
+
+    fn request_stage_driver(
+        &self,
+    ) -> Option<&dyn crate::worldgen_session::RequestStageDriver> {
+        Some(self)
     }
 
     // There is no cheaper single-block path here: the generator only answers
@@ -3824,6 +4105,21 @@ impl ChunkSource for OverworldChunkSource {
         edits.insert((cx, cz), column.clone());
         Some(crate::chunk_store::TryResidentEdit::Applied)
     }
+
+    fn retain_generation_input(&self, cx: i32, cz: i32, column: &ChunkColumn) -> bool {
+        self.generation_inputs
+            .lock()
+            .expect("generation input lock poisoned")
+            .insert((cx, cz), column.clone());
+        true
+    }
+
+    fn release_generation_input(&self, cx: i32, cz: i32) {
+        self.generation_inputs
+            .lock()
+            .expect("generation input lock poisoned")
+            .remove(&(cx, cz));
+    }
 }
 
 /// The Nether's terrain source — [`OverworldChunkSource`]'s counterpart for the
@@ -3845,6 +4141,7 @@ impl ChunkSource for OverworldChunkSource {
 pub struct NetherChunkSource {
     generator: lodestone_worldgen::nether::NetherGenerator,
     edits: Mutex<HashMap<(i32, i32), ChunkColumn>>,
+    generation_inputs: Mutex<HashMap<(i32, i32), ChunkColumn>>,
 }
 
 impl NetherChunkSource {
@@ -3861,6 +4158,7 @@ impl NetherChunkSource {
         Self {
             generator,
             edits: Mutex::new(HashMap::new()),
+            generation_inputs: Mutex::new(HashMap::new()),
         }
     }
 
@@ -3921,7 +4219,7 @@ impl NetherChunkSource {
         dependencies.dedup();
         dependencies.retain(|&(cx, cz)| !self.generator.prewarmed_for_batch(cx, cz));
         if dependencies.len() >= 8 {
-            crate::worldgen_dispatch::run_ordered(dependencies, |(cx, cz)| {
+            let _ = crate::run_worldgen_jobs(dependencies, |(cx, cz)| {
                 self.generator.prewarm_for_batch(cx, cz);
             });
         }
@@ -3990,6 +4288,14 @@ impl ChunkSource for NetherChunkSource {
             return edited.clone();
         }
         drop(edits);
+        let generation_inputs = self
+            .generation_inputs
+            .lock()
+            .expect("generation input lock poisoned");
+        if let Some(input) = generation_inputs.get(&(cx, cz)) {
+            return input.clone();
+        }
+        drop(generation_inputs);
         self.generate(cx, cz)
     }
 
@@ -3999,6 +4305,14 @@ impl ChunkSource for NetherChunkSource {
             return edited.clone();
         }
         drop(edits);
+        let generation_inputs = self
+            .generation_inputs
+            .lock()
+            .expect("generation input lock poisoned");
+        if let Some(input) = generation_inputs.get(&(cx, cz)) {
+            return input.clone();
+        }
+        drop(generation_inputs);
         match stage {
             ChunkGenerationStage::Shaped => ChunkColumn::from_nether_at(
                 self.generator.column_shaped(cx, cz),
@@ -4014,6 +4328,12 @@ impl ChunkSource for NetherChunkSource {
         stage: ChunkGenerationStage,
     ) -> Option<ChunkGenerationStage> {
         (stage == ChunkGenerationStage::Shaped).then_some(ChunkGenerationStage::Full)
+    }
+
+    fn request_stage_driver(
+        &self,
+    ) -> Option<&dyn crate::worldgen_session::RequestStageDriver> {
+        Some(self)
     }
 
 
@@ -4082,6 +4402,21 @@ impl ChunkSource for NetherChunkSource {
         edits.insert((cx, cz), column.clone());
         Some(crate::chunk_store::TryResidentEdit::Applied)
     }
+
+    fn retain_generation_input(&self, cx: i32, cz: i32, column: &ChunkColumn) -> bool {
+        self.generation_inputs
+            .lock()
+            .expect("generation input lock poisoned")
+            .insert((cx, cz), column.clone());
+        true
+    }
+
+    fn release_generation_input(&self, cx: i32, cz: i32) {
+        self.generation_inputs
+            .lock()
+            .expect("generation input lock poisoned")
+            .remove(&(cx, cz));
+    }
 }
 
 /// The End's terrain source — [`NetherChunkSource`]'s counterpart for the third
@@ -4108,6 +4443,7 @@ impl ChunkSource for NetherChunkSource {
 pub struct EndChunkSource {
     generator: lodestone_worldgen::end::EndGenerator,
     edits: Mutex<HashMap<(i32, i32), ChunkColumn>>,
+    generation_inputs: Mutex<HashMap<(i32, i32), ChunkColumn>>,
     /// Set the first time [`ChunkSource::claim_dragon_fight_start`] succeeds
     /// against this instance — see that method's own doc comment for why this
     /// is a process-lifetime gate rather than a persisted one.
@@ -4126,6 +4462,7 @@ impl EndChunkSource {
         Self {
             generator,
             edits: Mutex::new(HashMap::new()),
+            generation_inputs: Mutex::new(HashMap::new()),
             dragon_fight_started: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -4317,7 +4654,7 @@ impl EndChunkSource {
                 if Self::complete_rectangle(&dependencies) {
                     generator.base_world_rectangle(&dependencies)
                 } else {
-                    crate::worldgen_dispatch::run_ordered(dependencies, |chunk @ (cx, cz)| {
+                    crate::run_worldgen_jobs(dependencies, |chunk @ (cx, cz)| {
                         (chunk, generator.base_world_for_batch(cx, cz))
                     })
                 }
@@ -4436,6 +4773,14 @@ impl ChunkSource for EndChunkSource {
             return edited.clone();
         }
         drop(edits);
+        let generation_inputs = self
+            .generation_inputs
+            .lock()
+            .expect("generation input lock poisoned");
+        if let Some(input) = generation_inputs.get(&(cx, cz)) {
+            return input.clone();
+        }
+        drop(generation_inputs);
         self.generate(cx, cz)
     }
 
@@ -4445,6 +4790,14 @@ impl ChunkSource for EndChunkSource {
             return edited.clone();
         }
         drop(edits);
+        let generation_inputs = self
+            .generation_inputs
+            .lock()
+            .expect("generation input lock poisoned");
+        if let Some(input) = generation_inputs.get(&(cx, cz)) {
+            return input.clone();
+        }
+        drop(generation_inputs);
         match stage {
             ChunkGenerationStage::Shaped => {
                 let mut column = self.shaped_column(cx, cz);
@@ -4463,6 +4816,12 @@ impl ChunkSource for EndChunkSource {
         // must therefore be upgraded before packet encoding, or the packet
         // could omit a cross-column feature that the full source owns.
         (stage == ChunkGenerationStage::Shaped).then_some(ChunkGenerationStage::Full)
+    }
+
+    fn request_stage_driver(
+        &self,
+    ) -> Option<&dyn crate::worldgen_session::RequestStageDriver> {
+        Some(self)
     }
 
     fn columns(&self, coords: &[(i32, i32)]) -> Vec<ChunkColumn> {
@@ -4514,6 +4873,21 @@ impl ChunkSource for EndChunkSource {
         };
         edits.insert((cx, cz), column.clone());
         Some(crate::chunk_store::TryResidentEdit::Applied)
+    }
+
+    fn retain_generation_input(&self, cx: i32, cz: i32, column: &ChunkColumn) -> bool {
+        self.generation_inputs
+            .lock()
+            .expect("generation input lock poisoned")
+            .insert((cx, cz), column.clone());
+        true
+    }
+
+    fn release_generation_input(&self, cx: i32, cz: i32) {
+        self.generation_inputs
+            .lock()
+            .expect("generation input lock poisoned")
+            .remove(&(cx, cz));
     }
 
     /// The one real override — a compare-exchange on `dragon_fight_started`,
@@ -4590,6 +4964,25 @@ mod tests {
             .flat_map(|x| (0..16).map(move |z| (x, z)))
             .any(|(x, z)| (0..128).any(|y| column.block_state(x, y, z) != "minecraft:air"));
         assert!(solid, "the generator's own 0..128 range must not be entirely air at the island's centre");
+    }
+
+    #[test]
+    fn generation_inputs_are_visible_only_during_the_request() {
+        let source = crate::worldgen_data::end_chunk_source(42);
+        let mut input = ChunkColumn::new(0, EndChunkSource::WINDOW_HEIGHT);
+        input.set_block(0, 255, 0, "minecraft:gold_block");
+        assert!(source.retain_generation_input(100, 100, &input));
+        assert_eq!(
+            source.column_at(100, 100, ChunkGenerationStage::Full)
+                .block_state(0, 255, 0),
+            "minecraft:gold_block"
+        );
+        source.release_generation_input(100, 100);
+        assert_eq!(
+            source.column_at(100, 100, ChunkGenerationStage::Full)
+                .block_state(0, 255, 0),
+            "minecraft:air"
+        );
     }
 
     /// The End generator's three client heightmaps must survive the server
@@ -5603,6 +5996,62 @@ mod tests {
         );
     }
 
+    #[test]
+    fn offloaded_packet_generation_uses_request_boundary() {
+        struct RequestOnlySource {
+            requests: std::sync::atomic::AtomicUsize,
+            columns: std::sync::atomic::AtomicUsize,
+        }
+
+        impl ChunkSource for RequestOnlySource {
+            fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+                self.columns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                ChunkColumn::new(0, 16)
+            }
+
+            fn request_generation(
+                &self,
+                _request: crate::worldgen_session::GenerationRequest,
+                _session: Option<&mut crate::worldgen_session::GenerationSession>,
+            ) -> Result<
+                Option<crate::worldgen_session::GenerationRequestResult>,
+                crate::worldgen_session::GenerationRequestError,
+            > {
+                self.requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(Some(crate::worldgen_session::GenerationRequestResult::Generated(
+                    crate::worldgen_session::PacketSnapshot::for_test(ChunkColumn::new(0, 16)),
+                )))
+            }
+
+            fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+                "minecraft:air".to_owned()
+            }
+
+            fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+                DEFAULT_BIOME.to_owned()
+            }
+
+            fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+        }
+
+        let source = RequestOnlySource {
+            requests: std::sync::atomic::AtomicUsize::new(0),
+            columns: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let column = request_column_for_packet(
+            &source,
+            (19, -4),
+            crate::dimension::Dimension::Overworld,
+        )
+        .expect("request boundary returned a column");
+        assert_eq!(column.height, 16);
+        assert_eq!(source.requests.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(source.columns.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+        let _control = source.column(19, -4);
+        assert_eq!(source.columns.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
     /// Two production batch calls must share the Rayon pool rather than each
     /// creating a Tokio blocking task that fans out another `P` scoped threads.
     /// The source records both simultaneous occupancy and worker identities;
@@ -6015,5 +6464,20 @@ mod tests {
                     "minecraft:zombie".parse().expect("valid entity id")
                 )
         ));
+    }
+
+    #[test]
+    fn overworld_horizon_sample_uses_the_query_without_entering_the_column_store() {
+        let source = crate::overworld_chunk_source(42);
+        let before = source.generator().store_len();
+        let first = source
+            .horizon_sample(-16_384, 16_384)
+            .expect("the overworld source exposes a horizon estimate");
+        assert_eq!(source.generator().store_len(), before);
+        assert_eq!(
+            source.horizon_sample(-16_384, 16_384),
+            Some(first),
+            "the query must remain deterministic at one coordinate"
+        );
     }
 }

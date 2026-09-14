@@ -230,6 +230,7 @@ pub(crate) use self::biome::biome_zoom_seed;
 pub use self::output::{
     GenStage, GeneratedColumn, HEIGHTMAP_COLUMNS, MOTION_BLOCKING_HEIGHTMAP_TYPE_ID,
 };
+pub use self::decorate::MixedReplayContext;
 #[cfg(not(target_arch = "wasm32"))]
 pub use self::output::StageTimes;
 pub use self::structures::{BEARD_REACH, REFS_RADIUS, StructureRefs};
@@ -280,26 +281,6 @@ struct ChunkStages {
     structure_refs: store::StageSlot<structures::StructureRefs>,
     /// Stages 1–4 — see [`OverworldGenerator::pre_ore_stage`].
     pre_ore: store::StageSlot<PreOreResult>,
-}
-
-/// Replay-only slots for the immutable portion of the unified FEATURES
-/// dispatch. Keeping these outside [`ChunkStages`] is deliberate: normal
-/// production generation must not retain a large cloned selection context for
-/// every explored chunk. A lifecycle materializer prepares this bounded map
-/// from its authenticated admission set, and source completions then fill each
-/// slot lazily while preserving their own serial state.
-struct ReplayContextCache {
-    slots: HashMap<
-        (i32, i32),
-        Arc<store::StageSlot<decorate::MixedReplayContext>>,
-    >,
-    /// Exact-coordinate pre-ore slots covering every prepared admission's
-    /// 5x5 read closure. Keeping these handles alive prevents the general
-    /// store's production retention policy from making a replay recompute an
-    /// immutable terrain prefix between source completions.
-    pre_ore: Arc<
-        HashMap<(i32, i32), Arc<std::sync::OnceLock<Arc<PreOreResult>>>>,
-    >,
 }
 
 /// Chebyshev chunk radius one [`OverworldGenerator::column`] call closes over.
@@ -538,10 +519,6 @@ pub struct OverworldGenerator {
     /// structure data does zero placement draws per chunk, not twenty
     /// no-ops.
     structures: Option<crate::structure::StructureRegistry>,
-    /// Temporary lifecycle-only cache for immutable FEATURES contexts. It is
-    /// populated by [`Self::prepare_lifecycle_replay`] and replaced on the
-    /// next preparation; ordinary column generation leaves it empty.
-    replay_context_cache: std::sync::Mutex<Option<ReplayContextCache>>,
 }
 
 /// Renders a noise-settings block-state object (`{"Name": ..., "Properties": {...}}`)
@@ -830,7 +807,6 @@ impl OverworldGenerator {
             snow_support,
             climate_noise: crate::noise::ClimateNoise::new(),
             structures,
-            replay_context_cache: std::sync::Mutex::new(None),
         };
         if let Some(registry) = &generator.structures {
             let sampler = structures::StartSampler::new(&generator);
@@ -1084,7 +1060,8 @@ impl OverworldGenerator {
         // bodies must share both their source order and their intermediate
         // writes, so production enters the same dispatcher used by lifecycle
         // replay rather than composing an ore result with a later vegetation
-        // pass.
+        // pass. The dispatcher owns one immutable mixed replay context for
+        // this target and reuses it across its nine ordered source entries.
         let mut schedule = Self::stage_pipeline().executor_at(
             Self::stage_pipeline().schedule().shaped_boundary_index(),
         );
@@ -1195,27 +1172,6 @@ impl OverworldGenerator {
     /// distinct chunks whose stages 1–4 really ran, and a sweep can assert it
     /// equals the size of the region it swept.
     fn pre_ore_stage(&self, cx: i32, cz: i32) -> Arc<PreOreResult> {
-        let replay_slot = self
-            .replay_context_cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            .and_then(|cache| cache.pre_ore.get(&(cx, cz)).cloned());
-        if let Some(slot) = replay_slot {
-            // A generator may be prepared after ordinary generation has
-            // already populated the production store. Reuse that exact
-            // value on the replay slot's first fill; only the production slot
-            // owns the pre-ore computation counter.
-            let computed = std::cell::Cell::new(false);
-            let value = slot.get_or_init(|| {
-                computed.set(true);
-                self.pre_ore_stage_store(cx, cz)
-            });
-            if !computed.get() {
-                crate::counters::bump_pre_ore(false);
-            }
-            return Arc::clone(value);
-        }
         self.pre_ore_stage_store(cx, cz)
     }
 

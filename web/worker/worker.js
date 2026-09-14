@@ -4,8 +4,14 @@
 // module Worker and still lets the browser load the wasm glue asynchronously.
 importScripts("./lodestone-server-worker-bootstrap.js");
 
-self.onmessage = (event) => self.LodestoneWorkerBootstrap.launch(
-  event,
-  () => import("./lodestone-server-worker-wasm.js"),
-  (message) => self.postMessage(message),
-);
+self.onmessage = (event) => {
+  if (event.data?.kind === "cancel") {
+    self.LodestoneWorkerBootstrap.cancel(event, (message) => self.postMessage(message));
+    return;
+  }
+  self.LodestoneWorkerBootstrap.launch(
+    event,
+    (mode) => import(`./lodestone-server-worker-wasm-${mode}.js`),
+    (message) => self.postMessage(message),
+  );
+};

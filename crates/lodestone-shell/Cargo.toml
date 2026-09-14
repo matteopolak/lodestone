@@ -279,12 +279,8 @@ objc2-core-graphics = { version = "0.3.2", default-features = false, features = 
 # source (`fetch`), i.e. the three seams that replace `Instant::now`, `options.json`
 # and `std::fs::read` respectively. See `docs/browser-shell-port.md`.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-# `menu/accounts.rs`'s device-code sign-in worker (`run_device_code_login_wasm`)
-# builds its own short-lived `reqwest::Client` on this target too, exactly as
-# the native worker does — the same `[workspace.dependencies]` entry the
-# native block below uses, which resolves to reqwest's `fetch`-backed wasm
-# client here rather than its hyper one; see `lodestone-auth/Cargo.toml`'s
-# comment on why enabling its TLS-related features is harmless on wasm32.
+# Friends' browser runtime still constructs its transport client; it is not an
+# account sign-in or credential-storage path.
 reqwest = { workspace = true }
 tokio = { version = "1", default-features = false, features = [
     "io-util",
@@ -428,6 +424,8 @@ default = ["live", "multiplayer", "runtime-presentation", "window"]
 # preserve their current behavior; omit it for a singleplayer-only build.
 multiplayer = []
 live = ["lodestone-registry/v26-2"]
+# Propagates the worker's atomics-enabled worldgen build to the server.
+wasm-threads = ["lodestone-server/wasm-threads"]
 # Switches a running session between headless and windowed at
 # runtime rather than only at startup. Gates `Sim::attach_presentation`/
 # `detach_presentation` (the ECS-level half: `Schedule::remove_systems_in_set`

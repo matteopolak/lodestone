@@ -324,31 +324,15 @@ pub fn frame_for<'a>(
                 },
                 hovered: form.hovered_button(),
                 vanilla: true,
-                labels: vec![
-                    MenuLabel {
-                        text: title.to_string(),
-                        origin: Origin::ScreenTop,
-                        dx: 0.0,
-                        dy: MANAGE_SERVER_TITLE_Y,
-                        align: Align::Centre,
-                        colour: LABEL,
-                        scale: 1.0,
-                    },
-                    // Not vanilla — this client's own affordance, kept from
-                    // the pre-conversion screen: SRV resolution and the
-                    // name-falls-back-to-host rule have no vanilla widget to
-                    // announce them (`ServerEntry::split_host_port`,
-                    // `EditForm::to_entry`).
-                    MenuLabel {
-                        text: "Tab switches fields - an empty name uses the host".to_string(),
-                        origin: Origin::ScreenBottom,
-                        dx: 0.0,
-                        dy: -16.0,
-                        align: Align::Centre,
-                        colour: FG_DIM,
-                        scale: 1.0,
-                    },
-                ],
+                labels: vec![MenuLabel {
+                    text: title.to_string(),
+                    origin: Origin::ScreenTop,
+                    dx: 0.0,
+                    dy: MANAGE_SERVER_TITLE_Y,
+                    align: Align::Centre,
+                    colour: LABEL,
+                    scale: 1.0,
+                }],
                 ..Default::default()
             })
         }
@@ -491,7 +475,7 @@ pub fn frame_for<'a>(
             let accounts = nav.accounts();
             accounts.pump();
             // **The name editor is checked before the sign-in state, not folded
-            // into it.** `SignInView` is about the Microsoft device-code flow;
+            // into it.** `SignInView` is about the native interactive flow;
             // adding a rename variant to it would make every `match` on that
             // enum answer a question it is not about. The editor is also
             // unreachable *while* a sign-in is in flight (`handle_key_with`
@@ -513,10 +497,10 @@ pub fn frame_for<'a>(
                         user_code,
                         verification_uri,
                     } => accounts_flow_frame(
-                        // Empty means "no code to show", which is the loopback flow:
-                        // the browser is already open at the URL and there is nothing
-                        // to type. The device-code flow still fills both. `None` is a
-                        // shape `accounts_flow_frame` already handles — see the
+                        // Empty means "no code to show", which is the native loopback
+                        // flow: the browser is already open at the URL and there is
+                        // nothing to type. `None` is a shape `accounts_flow_frame`
+                        // already handles — see the
                         // `Requesting` arm above, which passes it for both.
                         (!user_code.is_empty()).then_some(user_code.as_str()),
                         Some(&verification_uri),

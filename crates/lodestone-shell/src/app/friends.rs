@@ -513,7 +513,6 @@ struct LocalFriendsWorker {
 struct LocalFriendsState {
     runtime: FriendsRuntime<SystemFriendsClock>,
     service: Option<std::rc::Rc<FriendsService>>,
-    resolver: reqwest::Client,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -523,7 +522,6 @@ impl LocalFriendsWorker {
             state: std::rc::Rc::new(std::cell::RefCell::new(LocalFriendsState {
                 runtime: FriendsRuntime::new(SystemFriendsClock::new()),
                 service: FriendsService::production().ok().map(std::rc::Rc::new),
-                resolver: reqwest::Client::new(),
             })),
             views: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
         }
@@ -565,11 +563,11 @@ impl LocalFriendsWorker {
         let state = self.state.clone();
         let views = self.views.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            let (service, resolver) = {
+            let service = {
                 let state = state.borrow();
-                (state.service.clone(), state.resolver.clone())
+                state.service.clone()
             };
-            execute_local(service.as_deref(), &resolver, state.clone(), operation).await;
+            execute_local(service.as_deref(), state.clone(), operation).await;
             views.borrow_mut().push(state.borrow().runtime.view());
         });
     }
@@ -578,20 +576,19 @@ impl LocalFriendsWorker {
 #[cfg(target_arch = "wasm32")]
 async fn execute_local(
     service: Option<&FriendsService>,
-    resolver: &reqwest::Client,
     state: std::rc::Rc<std::cell::RefCell<LocalFriendsState>>,
     operation: FriendsOperation,
 ) {
     if let FriendsOperation::ResolveSession { profile_id } = operation {
-        let session = match lodestone_auth::resolve_selected_account(resolver).await {
-            lodestone_auth::SelectedAccount::Online(session) if session.profile.id == profile_id => {
-                Some(session)
-            }
-            _ => None,
-        };
+        // Browser builds have no account store or online-session path. Keep the
+        // worker's state machine honest by completing the resolution as signed
+        // out instead of constructing an OAuth client or probing credentials.
         apply_completion(
             &mut state.borrow_mut().runtime,
-            FriendsCompletion::Resolution { profile_id, session },
+            FriendsCompletion::Resolution {
+                profile_id,
+                session: None,
+            },
         );
         return;
     }

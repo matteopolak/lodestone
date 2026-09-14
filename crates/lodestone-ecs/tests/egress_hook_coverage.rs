@@ -52,8 +52,8 @@ const KNOWN_DIRECT_SEND_FILES: &[&str] = &[
     "lodestone-shell/src/terminal.rs",
     // Test harnesses that push actions straight at a handle to drive a scenario.
     // Not user-visible paths.
-    "lodestone-shell/src/app/tests.rs",
-    "lodestone-shell/src/sim/tests.rs",
+    "lodestone-shell/src/app/tests/gameplay_keys.rs",
+    "lodestone-shell/src/sim/tests/world-mining.rs",
     //
     // --- REAL BYPASSES: a filter cannot see any of these ---
     // Verbs 3 and 6 of the cancelable-action wrapper — attack, interact-entity, use-item:

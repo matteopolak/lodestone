@@ -364,6 +364,28 @@ if (( CONFINEMENT_ONLY == 0 )); then
     echo "      └─ reproduce: cargo build --manifest-path web/worker/Cargo.toml --target $TARGET"
   fi
 
+  worker_threads_log="$LOGDIR/lodestone-server-worker-threads.log"
+  printf '  %-34s ' "lodestone-server-worker threads"
+  if CARGO_TERM_COLOR=never CARGO_PROFILE_RELEASE_CODEGEN_BACKEND=llvm \
+    RUSTFLAGS='-C target-feature=+atomics,+bulk-memory \
+      -C link-arg=--shared-memory \
+      -C link-arg=--max-memory=1073741824 \
+      -C link-arg=--import-memory \
+      -C link-arg=--export=__heap_base \
+      -C link-arg=--export=__wasm_init_tls \
+      -C link-arg=--export=__tls_size \
+      -C link-arg=--export=__tls_align \
+      -C link-arg=--export=__tls_base' \
+    cargo build --manifest-path "$ROOT/web/worker/Cargo.toml" --target "$TARGET" \
+    --release --features wasm-threads -Z build-std=panic_abort,std > "$worker_threads_log" 2>&1; then
+    echo "PASS"
+  else
+    echo "FAIL"
+    fails+=("lodestone-server-worker threads")
+    report_build_failure "$worker_threads_log"
+    echo "      └─ reproduce: CARGO_PROFILE_RELEASE_CODEGEN_BACKEND=llvm RUSTFLAGS='-C target-feature=+atomics,+bulk-memory -C link-arg=--shared-memory -C link-arg=--max-memory=1073741824 -C link-arg=--import-memory -C link-arg=--export=__heap_base -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base' cargo build --manifest-path web/worker/Cargo.toml --target $TARGET --release --features wasm-threads -Z build-std=panic_abort,std"
+  fi
+
   printf '  %-34s ' "server-worker control test"
   if node --test "$ROOT/web/worker/worker_bootstrap.test.mjs" > "$LOGDIR/server-worker-control.log" 2>&1; then
     echo "PASS"
@@ -372,6 +394,16 @@ if (( CONFINEMENT_ONLY == 0 )); then
     fails+=("server-worker control test")
     report_build_failure "$LOGDIR/server-worker-control.log"
     echo "      └─ reproduce: node --test web/worker/worker_bootstrap.test.mjs"
+  fi
+
+  printf '  %-34s ' "server-worker long-task test"
+  if node --test "$ROOT/web/worker/worldgen_long_task_harness.test.mjs" > "$LOGDIR/server-worker-long-task.log" 2>&1; then
+    echo "PASS"
+  else
+    echo "FAIL"
+    fails+=("server-worker long-task test")
+    report_build_failure "$LOGDIR/server-worker-long-task.log"
+    echo "      └─ reproduce: node --test web/worker/worldgen_long_task_harness.test.mjs"
   fi
 fi
 

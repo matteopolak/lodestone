@@ -824,6 +824,65 @@ mod block_edit_tests {
         assert_eq!(with_east, 14, "east-neighbour source crosses one air cell");
     }
 
+    #[test]
+    fn nether_detached_settlement_blocks_uninitialized_neighbour_light() {
+        use crate::packets::chunk::LevelChunkWithLight;
+
+        let shape = ChunkShape::nether_or_end_1_21();
+        let proto = V770ServerProtocol;
+        let center = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
+        let neighbours = (-1..=1)
+            .flat_map(|dz| (-1..=1).map(move |dx| (dx, dz)))
+            .filter(|&(dx, dz)| (dx, dz) != (0, 0))
+            .map(|(dx, dz)| {
+                let mut column = ServerChunkColumn::new(shape.min_y, shape.world_height as i32);
+                if (dx, dz) == (1, 0) {
+                    column.set_block(0, 64, 8, "minecraft:glowstone");
+                }
+                (dx, dz, column)
+            })
+            .collect::<Vec<_>>();
+
+        let decode = |column: &ServerChunkColumn| {
+            let ServerDirective::Send { payload, .. } = proto
+                .try_encode_chunk_with_neighbours_in_dimension(
+                    0,
+                    0,
+                    column,
+                    &neighbours,
+                    Dimension::Nether,
+                )
+                .expect("initial Nether chunk")
+            else {
+                panic!("initial Nether chunk must send a packet");
+            };
+            let mut reader = Reader::new(&payload);
+            let packet = LevelChunkWithLight::decode(&mut reader, &shape)
+                .expect("decode initial Nether chunk");
+            reader.ensure_empty().expect("no Nether trailing bytes");
+            packet.light.section_light(5).block_at(15, 0, 8)
+        };
+
+        let direct = decode(&center);
+        let settlement = proto
+            .compute_initial_column_lights_with_neighbours_in_dimension(
+                &center,
+                &neighbours,
+                Dimension::Nether,
+            )
+            .expect("detached initial Nether settlement");
+        let mut settled_center = center;
+        settled_center.set_retained_light_with_status(
+            settlement.centre_light().clone(),
+            RetainedLightStatus::CentreSettled,
+        );
+        let settled = decode(&settled_center);
+
+        assert!(direct > 0, "terrain-only initial encoding sees the east emitter");
+        assert_eq!(settled, 0, "an uninitialized dependency is an opaque seam");
+        assert_ne!(direct, settled);
+    }
+
     /// Initial Nether masks follow light-section storage allocation, not just
     /// the highest local block or the presence of an emitter. This models the
     /// accepted (-7,-8) row with a high diagonal section and keeps (-8,-8) as

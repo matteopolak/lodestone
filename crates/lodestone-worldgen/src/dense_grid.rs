@@ -43,6 +43,7 @@ use std::sync::Arc;
 use lodestone_worldgen_core::hash::FastMap;
 
 use crate::interner::{BaseStateFacts, StateId, StateInterner};
+use crate::structure::StructureMutationSink;
 
 /// A dense block field over `[min_x, min_x+size_x) × [min_y, min_y+size_y) ×
 /// [min_z, min_z+size_z)`, palette-indexed the same way
@@ -275,6 +276,27 @@ impl DenseBlockGrid {
         let Some(i) = self.index(x, y, z) else {
             return;
         };
+        self.set_id_at_index(i, state);
+    }
+
+    pub fn set_id_observed(
+        &mut self,
+        x: i32,
+        y: i32,
+        z: i32,
+        state: StateId,
+        source: (i32, i32),
+        step: i32,
+        sink: &mut dyn StructureMutationSink,
+    ) {
+        let Some(i) = self.index(x, y, z) else {
+            return;
+        };
+        sink.record_structure_mutation(source, step, [x, y, z], state);
+        self.set_id_at_index(i, state);
+    }
+
+    fn set_id_at_index(&mut self, i: usize, state: StateId) {
         let id = if let Some(&id) = self.index_of.get(&state) {
             // Diagnostic D2's other half: a palette probe on every block write.
             // Still counted, because its *volume* is what U6/U7 reduce; what

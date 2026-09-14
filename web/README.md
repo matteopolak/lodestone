@@ -1,10 +1,23 @@
 # lodestone-web — browser (WebAssembly) build
 
 The browser build of Lodestone — the real shell, not a spike; see
-`src/main.rs`'s own doc for what changed and when. It is its **own** Cargo
+`src/main.rs` for the standalone adapter and `src/embed.rs` for the host API.
+It is its **own** Cargo
 workspace (empty `[workspace]` in `Cargo.toml`), deliberately outside the
 parent `crates/lodestone-*` glob, so it never affects other crates' `cargo
 build --workspace`.
+
+## Browser identity and capabilities
+
+The Wasm client is always singleplayer-only. Its startup gate is a local,
+session-memory attestation (`I confirm that I own Minecraft: Java Edition.`
+followed by `Continue`); it has no Microsoft sign-in, account switcher, OAuth
+or device-code flow, credential storage, or identity provider callback. The
+attestation is cleared when the embedded handle is destroyed.
+
+The separate native page server may still be built with its optional relay
+feature, but the browser client does not expose that transport or a remote
+multiplayer screen.
 
 ## Singleplayer-only deployment
 
@@ -23,13 +36,10 @@ explanation. More importantly, the server build neither links
 `lodestone-relay` nor registers `/relay`; it is static-only, so it cannot be
 used as a WebSocket-to-TCP proxy even if a client bypasses the button.
 
-**Much of the section-level detail below (the "Multiplayer: a real browser
-join" section especially) still describes an earlier version of this crate
-that had its own `src/multiplayer.rs`/`src/singleplayer.rs`/`src/input.rs`/
-`src/terrain.rs` — none of which exist any more; `src/main.rs` is now the
-entire crate. That is a larger, separate cleanup than the serving-architecture
-change this pass made; treat any claim below that names a `web/src/*.rs` file
-other than `main.rs` as unverified until it is swept.
+The standalone page and embedding adapter share the same shell, asset contract,
+and browser event-loop lifetime. The embedding API is described in
+`docs/wasm-embedding.md`; the historical measurements below remain useful for
+the browser worker and rendering paths but are not a second application.
 
 ## What it demonstrates
 
@@ -44,10 +54,9 @@ other than `main.rs` as unverified until it is swept.
   owns the real server and world generator. A `MessageChannel` carries raw
   framed protocol bytes between them — no relay, no socket, and no duplicate
   world state.
-- **Server-list ping, over the relay:** `lodestone-shell`'s multiplayer server
-  list now really pings a server from the browser, through `lodestone-relay`
-  linked into `lodestone-web-server` (`web/server/`) — see "Live multiplayer
-  transport" below for what that needs and what it does not (yet) cover.
+- **Relay tooling:** the native page server can still expose an optional relay
+  for diagnostics, but the Wasm client does not expose server-list ping or
+  remote joins.
 - **Audio:** a real `web_sys::AudioContext` + `ScriptProcessorNode` drives the
   same device-free `lodestone_audio::Mixer` native uses, fed a curated `.ogg`
   subset `scripts/stage_sounds.py` stages at build time — see
@@ -105,11 +114,20 @@ deadline and *look* like a failure.
 
 ### Assets: the build succeeds without them, the page does not
 
-The page needs two files served beside it — `client.jar` (37.4 MiB, the renderable
-corpus) and `blocks.json` (6.5 MiB, the block-state id table). Both are copied out
-of `.cache/mc/26.2/` by the `post_build` hook in `Trunk.toml`, which stages them
-**only if they exist**. They arrive by two different routes, which is worth knowing
-because only the first is a single command:
+The page needs two files served beside it — the deterministic filtered `client.jar`
+(about 5.7 MiB raw, containing every `assets/` entry plus the recipe and item-tag
+data consumed by the browser) and `blocks.json` (6.5 MiB, the block-state id table).
+The archive is built from `.cache/mc/26.2/client.jar` by the `post_build` hook in
+`Trunk.toml`; JVM classes, signatures, and unused data are excluded after the
+source archive passes a CRC check. A digest manifest is staged beside the archive
+and the browser verifies it before installing the pack. Both files are staged
+**only if their sources exist**. They arrive by two different routes:
+
+Embedded hosts can bypass page-relative fetching by importing the wasm module's
+`mount` export. Pass an existing `HTMLCanvasElement` plus either both byte blobs or
+an `assetProvider(name)` callback returning a blob or promise of one. The canvas is
+passed directly to the renderer; its existing `id`, styles, and DOM ownership are
+preserved. See `docs/wasm-embedding.md` for the lifecycle and progress events.
 
 ```sh
 cargo xtask fetch-assets --version 26.2   # -> .cache/mc/26.2/client.jar
@@ -127,12 +145,14 @@ the whole reason the failure moved out of the build.
 
 #### Hosts with a per-file cap
 
-`client.jar` is larger than Cloudflare Pages' per-file limit. For that deployment,
-stage an ordered manifest and 20 MiB-or-smaller siblings instead of the direct jar:
+For a host with a per-file cap, stage an ordered manifest and 20 MiB-or-smaller
+siblings of the filtered archive instead of the direct jar:
 
 ```sh
-python3 web/scripts/stage_client_jar_parts.py \
+python3 web/scripts/stage_resource_pack.py \
   --jar .cache/mc/26.2/client.jar --out web/dist
+python3 web/scripts/stage_client_jar_parts.py \
+  --jar web/dist/client.jar --out web/dist
 rm web/dist/client.jar  # do not package the over-limit development fallback
 ```
 
@@ -144,9 +164,10 @@ change with their content and the browser fetches the mutable manifest with
 `cache: "no-store"`, so a new deployment cannot combine a fresh manifest with a
 previous deployment's cached part. Names are plain relative URLs, so a deployment
 under `/lodestone/` fetches its own sibling assets, not `/client.jar` at the domain
-root. `just run-wasm` and ordinary `trunk` work
-continue to use a direct `client.jar`: when the manifest returns 404, that is the
-intentional fallback. To make Trunk emit parts directly, run
+root. `just run-wasm` and ordinary `trunk` work continue to use the direct filtered
+`client.jar`: when the parts manifest returns 404, the browser validates the direct
+archive manifest instead. A manually staged unfiltered archive remains supported
+when both manifests return 404. To make Trunk emit parts directly, run
 `LODESTONE_WEB_CLIENT_JAR_PARTS=1 trunk build --release`.
 
 They used to be `data-trunk rel="copy-file"` links in `index.html`, i.e. a
@@ -163,48 +184,16 @@ exactly as a native checkout with no `.ogg` corpus fetched degrades. Both are
 staged by the same conditional `post_build` hook shape as `client.jar`/
 `blocks.json` — see `scripts/stage_panorama.py`/`scripts/stage_sounds.py`.
 
-### Live multiplayer transport (optional)
+### Relay tooling (optional)
 
-A browser page has no raw TCP socket, so both the multiplayer server-list
-**ping** and (once wired — see the warning below) a real **join** go through
-`lodestone-relay`, a protocol-blind WebSocket→TCP bridge. `just run-wasm`
-already runs it — see "Serving the page and the relay from one process" below
-— so nothing extra needs starting; this section explains what dialing it
-actually does.
+A native page server can expose `lodestone-relay`, a protocol-blind
+WebSocket-to-TCP bridge, for diagnostics. The Wasm client deliberately has no
+caller path to it: there is no browser account or online identity behind a
+remote join, and the Multiplayer title button is disabled.
 
-**The browser only ever needs to know its own origin.**
-`crate::platform::relay::relay_ws_url()` (`lodestone-shell`) derives the
-WebSocket URL from `window.location` plus the fixed path `/relay` — no port
-baked in anywhere in Rust. Under `just run-wasm` that resolves to
-`ws://127.0.0.1:8080/relay`, answered by `lodestone-web-server`'s own `/relay`
-route on the same listener that served the page.
-
-**Server-list ping:** `lodestone-shell`'s multiplayer screen (`menu/status.rs`)
-pings a saved server entry by dialing the relay and running the ordinary
-status exchange over it, asynchronously, with a 5 s deadline. With no server
-reachable at the relay's `--target` (or with `/relay` unanswered entirely —
-see "Serving the page and the relay from one process" below), a row resolves
-to `Failed` with a reason naming the obstacle rather than hanging on
-`Pending` forever. With a real server behind `--target`, a row shows that
-server's real MOTD/ping/player count — verified live against
-`scripts/live-oracles/creative.sh`, byte-matching its `server.properties`
-(`motd=lodestone creative oracle`, `max-players=8`). **One relay forwards to
-exactly one fixed backend** (`--target`), so every row in the list reaches the
-*same* server when pinged through a relay, regardless of which row's
-host/port triggered the probe — those fields still travel in the handshake, a
-real server may virtual-host on them, but the relay itself does not route on
-them.
-
-**Browser multiplayer join:** `lodestone-shell/src/net.rs`'s `run_async` uses
-the wasm `Origin::Remote` path to build a destination-specific relay URL with
-`crate::platform::relay::relay_ws_url_for`. It opens that URL with
-`lodestone_net::WsWebTransport::connect`, races the dial against the
-browser-safe `crate::platform::relay::sleep` deadline, and passes the connected
-transport to `ClientBuilder::connect_with`. The normal protocol handshake,
-login, and event driver then run through the same version-adapter path as a
-native connection; only the transport dial differs. The `ws-web` feature is
-enabled on the shell's dependency edge, while its implementation remains
-target-gated inside `lodestone-net`, so native builds retain their TCP path.
+The relay's origin-derived WebSocket URL and server-list diagnostics remain
+available to the separate native page-server tooling described below. They are
+not part of the browser client's public mount API or startup flow.
 
 ## Serving the page and the relay from one process
 
@@ -272,10 +261,10 @@ Cross-Origin-Opener-Policy:   same-origin
 Cross-Origin-Embedder-Policy: require-corp
 ```
 
-These make the page **cross-origin isolated**, which remains useful for future
-shared-memory work. The integrated server does not need it: it runs in a
-dedicated Worker through a transferable `MessagePort`, not a shared-memory or
-rayon worker pool.
+These make the page **cross-origin isolated**, which enables the optional
+shared-memory WebAssembly compute pool used by browser world generation. The
+integrated server always remains in its dedicated Worker; only immutable shaped
+admissions may fan out to child Web Workers through `wasm-bindgen-rayon`.
 
 **The trap:** a plain static file server (`python -m http.server`, most CDNs by
 default, etc.) does **not** send these headers. The build renders fine without
@@ -288,16 +277,27 @@ if you serve `dist/` with something else entirely, replicate both headers.
 ## Integrated-server Worker
 
 `web/worker/` is a separate wasm package staged by
-`web/scripts/stage_worker.sh` during Trunk's post-build hook. Its bootstrap
-receives launch settings and one endpoint of a `MessageChannel`, builds the
-world and server before reporting ready, then bridges framed protocol bytes with
-a bounded private credit envelope. The page keeps the other endpoint as
-`MessagePortTransport` for the normal client driver; writes wait or complete
-partially when the peer's receive window is full. Worker startup failures fall
-back to the legacy in-page server; after ready, a worker crash is a disconnect
-rather than a hidden second world. Dropping or shutting down the page endpoint
-also terminates the dedicated Worker because a `MessagePort` has no peer-close
-event.
+`web/scripts/stage_worker.sh` during Trunk's post-build hook. The hook emits
+serial and atomics-enabled bindgen modules; the bootstrap checks isolation,
+shared-memory construction, Atomics, and Wasm validation before choosing the
+threaded artifact. Its launch envelope transfers one protocol port and one
+structured worldgen-progress port, builds the world and server before reporting
+ready, then bridges framed protocol bytes with a bounded private credit
+envelope. The page keeps the protocol endpoint as `MessagePortTransport` for
+the normal client driver; writes wait or complete partially when the peer's
+receive window is full. A negative capability probe selects the serial module;
+threaded initialization failures are reported as startup errors. After ready, a
+worker crash is a disconnect rather than a hidden second world. Dropping or
+shutting down the page endpoint also terminates the dedicated
+Worker because a `MessagePort` has no peer-close event.
+
+For a browser measurement, load the staged
+`lodestone-worldgen-long-task-harness.js` and call
+`LodestoneWorldgenMeasurement.measure({ seed: "42", runtimeMs: 5000 })`. The
+report records startup mode/timing and page Long Tasks API entries; it reports
+`under100ms: false` when that API is unavailable. `web/scripts/measure_worker_size.sh`
+reports post-bindgen raw/gzip/Brotli Wasm sizes plus generated glue sizes for
+both worker variants.
 
 Page-side plugin commands are explicitly refused in worker singleplayer until
 there is a request/reply command bridge with an authorization policy.
@@ -562,15 +562,21 @@ web/
   Trunk.toml           dev-server config for standalone `trunk serve` (page-only,
                        no relay) — COOP/COEP headers, post_build asset hooks
   scripts/
+    stage_resource_pack.py stages the complete browser resource surface as a
+                        deterministic, digest-verified filtered archive
+    test_stage_resource_pack.py controls the staging filter and corruption paths
     stage_panorama.py post_build hook: stages real panorama faces if present
     stage_sounds.py    post_build hook: stages a curated .ogg sound subset
                         plus the full sounds.json registry, if present — see
                         its own module doc for the curated event list and the
                         measured byte counts, and docs/sound-playback.md
+    stage_worker.sh     builds/stages serial + atomics server-worker artifacts
+    measure_worker_size.sh reports post-bindgen worker Wasm/glue sizes
   assets/               post_build-hook staging target; empty in the repo
   src/
-    main.rs             the entire wasm crate: boot, asset fetch, hands off to
-                         lodestone-shell's `app::run` — see its own module doc
+    main.rs             standalone boot adapter and asset fetch
+    embed.rs            host-facing mount/destroy API — see
+                         docs/wasm-embedding.md
   server/               NATIVE crate `lodestone-web-server` — links
                          lodestone-relay as a library, serves dist/ and /relay
                          from one listener; see "Serving the page and the

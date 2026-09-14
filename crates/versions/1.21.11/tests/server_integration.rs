@@ -26,7 +26,7 @@ fn adapter_block_use_reaches_the_registry_selected_host_consumer() {
             z: 0.75,
         },
         inside_block: true,
-        sequence: 17,
+        sequence: lodestone_model::PredictionSequence::new(17),
     };
     let Some((packet_id, payload)) = adapter
         .encode_action(ConnectionState::Play, &action)
@@ -273,7 +273,7 @@ async fn joined_protocol_774_chest_moves_a_slot_and_closes_cleanly() {
             face: BlockFace::Up,
             cursor: Vec3f::new(0.5, 0.5, 0.5),
             inside_block: false,
-            sequence: 0,
+            sequence: lodestone_model::PredictionSequence::INITIAL,
         })
         .expect("joined client accepts the chest interaction");
     handle
@@ -322,7 +322,7 @@ async fn joined_protocol_774_chest_moves_a_slot_and_closes_cleanly() {
             face: BlockFace::Up,
             cursor: Vec3f::new(0.5, 0.5, 0.5),
             inside_block: false,
-            sequence: 1,
+            sequence: lodestone_model::PredictionSequence::new(1),
         })
         .expect("joined client reopens the hosted chest");
     handle
@@ -550,7 +550,11 @@ async fn player_loaded_reaches_the_registry_selected_readiness_consumer() {
         .expect("protocol 774 must resolve to the hosted family");
     let mut column = ChunkColumn::new(-64, 384);
     column.set_block(8, 99, 8, "minecraft:stone");
-    let source = Arc::new(FixtureSource { column: Mutex::new(column) });
+    let source = Arc::new(FixtureSource {
+        column: Mutex::new(column),
+        chest: None,
+        expose_chest: AtomicBool::new(false),
+    });
     let (server, client_io) = IntegratedServer::open_in_memory(protocol, source, 0);
     let (mut handle, _) = ClientBuilder::new(
         ServerAddress { host: "memory".to_owned(), port: 0 },
@@ -673,7 +677,11 @@ async fn hosted_lighting_reaches_client_and_extinguishes_after_a_block_break() {
         }
     }
     room.set_block(8, 100, 8, "minecraft:torch");
-    let source = Arc::new(FixtureSource { column: Mutex::new(room) });
+    let source = Arc::new(FixtureSource {
+        column: Mutex::new(room),
+        chest: None,
+        expose_chest: AtomicBool::new(false),
+    });
     let (server, client_io) = IntegratedServer::open_in_memory(protocol, source, 0);
     let (mut handle, _) = ClientBuilder::new(
         ServerAddress { host: "memory".to_owned(), port: 0 },
