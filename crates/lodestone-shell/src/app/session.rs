@@ -15,6 +15,20 @@ impl Drop for WindowApp {
 }
 
 impl WindowApp {
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn shutdown_browser_presentation(&mut self) {
+        self.sim.detach_presentation();
+        self.container = None;
+        self.menu = None;
+        self.hud = None;
+        self.render = None;
+        self.target = None;
+        if let Some(gpu) = self.gpu.take() {
+            gpu.device().destroy();
+        }
+        self.window = None;
+    }
+
     /// Build the normal shell pipeline against an offscreen target. This is
     /// used by the terminal surface so it rasterizes the exact same world,
     /// HUD, inventory, and menu passes as a window instead of maintaining a
