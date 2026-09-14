@@ -39,11 +39,9 @@
         background: #0a0a12;
         overflow: hidden;
       }
-      /* The canvas winit binds to. `resumed` looks this element up by id and passes
-         it to `WindowAttributesExtWebSys::with_canvas`; without it winit creates its
-         own canvas and does NOT insert it into the DOM, so the game would run and
-         render and be invisible. Keep the id in sync with `CANVAS_ID` in
-         `crates/lodestone-shell/src/app/lifecycle.rs`. */
+      /* The page-owned source canvas. The standalone bootstrap transfers it to the
+         render worker with `transferControlToOffscreen()`; the worker owns the
+         resulting surface and Lodestone never touches this DOM element directly. */
       #lodestone {
         display: block;
         width: 100vw;

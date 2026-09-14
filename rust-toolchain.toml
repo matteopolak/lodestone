@@ -34,7 +34,7 @@ channel = "nightly-2026-08-07"
 # same reason `targets` is below — a pin installed with `--profile minimal` carries
 # only what it names, and the previously-floating `nightly` happened to already have
 # things this one does not.
-components = ["rustfmt", "clippy", "rustc-codegen-cranelift-preview"]
+components = ["rustfmt", "clippy", "rust-src", "rustc-codegen-cranelift-preview"]
 # `targets` is load-bearing, not decoration. Pinning the channel above was done with
 # `rustup toolchain install --profile minimal`, which installs the host target only —
 # and the previously-floating `nightly` happened to already carry

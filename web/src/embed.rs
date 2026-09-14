@@ -1,17 +1,22 @@
-use std::{cell::{Cell, RefCell}, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 use js_sys::{Function, Object, Promise, Reflect, Uint8Array};
 use lodestone::{CliOutcome, Config, Mode};
 use wasm_bindgen::{JsCast, JsValue, closure::Closure, prelude::wasm_bindgen};
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{HtmlCanvasElement, window};
+use web_sys::{OffscreenCanvas, window};
 
 #[wasm_bindgen]
 pub struct LodestoneHandle {
-    control: Option<lodestone::BrowserControl>,
+    control: Option<Rc<lodestone::BrowserControl>>,
     progress: Option<Rc<Function>>,
+    host_action: Option<Rc<Function>>,
     active: Rc<Cell<bool>>,
     first_frame_raf: Rc<Cell<Option<i32>>>,
+    host_action_timer: Rc<Cell<Option<i32>>>,
     mount_lease: Option<MountLease>,
     destroyed: bool,
 }
@@ -20,6 +25,7 @@ impl Drop for LodestoneHandle {
     fn drop(&mut self) {
         self.active.set(false);
         cancel_first_frame(&self.first_frame_raf);
+        cancel_host_actions(&self.host_action_timer);
         if let Some(control) = self.control.take() {
             let _ = control.shutdown();
         }
@@ -38,6 +44,7 @@ impl LodestoneHandle {
         self.destroyed = true;
         self.active.set(false);
         cancel_first_frame(&self.first_frame_raf);
+        cancel_host_actions(&self.host_action_timer);
         let shutdown = self
             .control
             .take()
@@ -52,6 +59,64 @@ impl LodestoneHandle {
     #[wasm_bindgen(js_name = isDestroyed)]
     pub fn is_destroyed(&self) -> bool {
         self.destroyed
+    }
+
+    fn input_control(&self) -> Result<&lodestone::BrowserControl, JsValue> {
+        self.control
+            .as_deref()
+            .ok_or_else(|| JsValue::from_str("Lodestone session is destroyed"))
+    }
+
+    #[wasm_bindgen(js_name = pointerMove)]
+    pub fn pointer_move(&self, x: f64, y: f64) -> Result<(), JsValue> {
+        self.input_control()?.browser_pointer_move(x, y);
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = mouseMotion)]
+    pub fn mouse_motion(&self, dx: f64, dy: f64) -> Result<(), JsValue> {
+        self.input_control()?.browser_mouse_motion(dx, dy);
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = mouseButton)]
+    pub fn mouse_button(&self, button: u16, pressed: bool) -> Result<(), JsValue> {
+        self.input_control()?
+            .browser_mouse_button(button, pressed)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    pub fn wheel(&self, dx: f64, dy: f64) -> Result<(), JsValue> {
+        self.input_control()?.browser_wheel(dx, dy);
+        Ok(())
+    }
+
+    pub fn focus(&self, focused: bool) -> Result<(), JsValue> {
+        self.input_control()?.browser_focus(focused);
+        Ok(())
+    }
+
+    pub fn resize(&self, width: u32, height: u32) -> Result<(), JsValue> {
+        self.input_control()?.browser_resize(width, height);
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = pointerLock)]
+    pub fn pointer_lock(&self, locked: bool) -> Result<(), JsValue> {
+        self.input_control()?.browser_pointer_lock(locked);
+        Ok(())
+    }
+
+    pub fn key(
+        &self,
+        code: String,
+        pressed: bool,
+        text: Option<String>,
+        modifiers: u8,
+    ) -> Result<(), JsValue> {
+        self.input_control()?
+            .browser_key(&code, pressed, text, modifiers)
+            .map_err(|error| JsValue::from_str(&error))
     }
 
     fn emit(&self, kind: &str, fraction: f64, message: &str) {
@@ -87,14 +152,22 @@ pub async fn mount(options: JsValue) -> Result<LodestoneHandle, JsValue> {
     };
     let canvas = property(&options, "canvas")
         .ok_or_else(|| JsValue::from_str("mount requires options.canvas"))?
-        .dyn_into::<HtmlCanvasElement>()
-        .map_err(|_| JsValue::from_str("options.canvas must be an HTMLCanvasElement"))?;
+        .dyn_into::<OffscreenCanvas>()
+        .map_err(|_| JsValue::from_str("options.canvas must be an OffscreenCanvas"))?;
     let provider = match property(&options, "assetProvider") {
         Some(value) => Some(
             value
                 .dyn_into::<Function>()
                 .map_err(|_| JsValue::from_str("options.assetProvider must be a function"))?,
         ),
+        None => None,
+    };
+    let host_action = match property(&options, "onHostAction") {
+        Some(value) => Some(Rc::new(
+            value
+                .dyn_into::<Function>()
+                .map_err(|_| JsValue::from_str("options.onHostAction must be a function"))?,
+        )),
         None => None,
     };
     let client_jar = required_asset(&options, provider.as_ref(), progress.as_ref(), "clientJar").await?;
@@ -109,14 +182,16 @@ pub async fn mount(options: JsValue) -> Result<LodestoneHandle, JsValue> {
             sound_objects: Vec::new(),
         },
         progress,
+        host_action,
     )
     .await
 }
 
 pub(crate) async fn mount_bundle(
-    canvas: HtmlCanvasElement,
+    canvas: OffscreenCanvas,
     bundle: lodestone::platform::assets::Bundle,
     progress: Option<Rc<Function>>,
+    host_action: Option<Rc<Function>>,
 ) -> Result<LodestoneHandle, JsValue> {
     let mut lease = MountLease::claim().await?;
     install_bundle(bundle)?;
@@ -133,15 +208,22 @@ pub(crate) async fn mount_bundle(
     if let Some(callback) = progress.as_ref() {
         emit_callback(callback, "starting", 0.85, "starting Lodestone");
     }
-    let control = lodestone::run_browser(config, canvas.clone(), lease.lifecycle())
-        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let control = Rc::new(
+        lodestone::run_browser_offscreen(config, canvas, lease.lifecycle())
+            .map_err(|error| JsValue::from_str(&error.to_string()))?,
+    );
+    let action_control = Rc::clone(&control);
+    let first_frame_signal = control.first_frame_signal();
     lease.mark_started();
     let first_frame_raf = Rc::new(Cell::new(None));
+    let host_action_timer = Rc::new(Cell::new(None));
     let handle = LodestoneHandle {
         control: Some(control),
         progress,
+        host_action,
         active: Rc::new(Cell::new(true)),
         first_frame_raf: Rc::clone(&first_frame_raf),
+        host_action_timer: Rc::clone(&host_action_timer),
         mount_lease: Some(lease),
         destroyed: false,
     };
@@ -149,7 +231,14 @@ pub(crate) async fn mount_bundle(
     schedule_first_frame(
         handle.progress.clone(),
         handle.active.clone(),
+        first_frame_signal,
         first_frame_raf,
+    );
+    schedule_host_actions(
+        handle.host_action.clone(),
+        handle.active.clone(),
+        action_control,
+        host_action_timer,
     );
     Ok(handle)
 }
@@ -180,20 +269,19 @@ fn bundles_match(
 fn schedule_first_frame(
     progress: Option<Rc<Function>>,
     active: Rc<Cell<bool>>,
+    frame_signal: lodestone::BrowserFrameSignal,
     raf_slot: Rc<Cell<Option<i32>>>,
 ) {
-    poll_first_frame(progress, active, raf_slot, 0);
+    poll_first_frame(progress, active, frame_signal, raf_slot, 0);
 }
 
 fn poll_first_frame(
     progress: Option<Rc<Function>>,
     active: Rc<Cell<bool>>,
+    frame_signal: lodestone::BrowserFrameSignal,
     raf_slot: Rc<Cell<Option<i32>>>,
     attempt: u16,
 ) {
-    let Some(window) = window() else {
-        return;
-    };
     let Some(listener) = progress else {
         return;
     };
@@ -203,25 +291,112 @@ fn poll_first_frame(
             return;
         }
         callback_raf_slot.set(None);
-        if lodestone::browser_first_frame_submitted() {
+        if frame_signal.is_set() {
             emit_callback(&listener, "first-frame", 1.0, "first frame submitted");
         } else if attempt < 240 {
-            poll_first_frame(Some(listener), active, callback_raf_slot, attempt + 1);
+            poll_first_frame(
+                Some(listener),
+                active,
+                frame_signal,
+                callback_raf_slot,
+                attempt + 1,
+            );
         } else {
             emit_callback(&listener, "first-frame-timeout", 0.0, "renderer did not submit a frame");
         }
     });
-    if let Ok(id) = window.request_animation_frame(closure.as_ref().unchecked_ref()) {
+    let scheduled = window()
+        .map(|window| window.request_animation_frame(closure.as_ref().unchecked_ref()))
+        .unwrap_or_else(|| request_timeout(closure.as_ref(), 16.0));
+    if let Ok(id) = scheduled {
         raf_slot.set(Some(id));
         closure.forget();
     }
+}
+
+fn request_timeout(callback: &JsValue, milliseconds: f64) -> Result<i32, JsValue> {
+    let global = js_sys::global();
+    let timeout = Reflect::get(&global, &JsValue::from_str("setTimeout"))?.dyn_into::<Function>()?;
+    timeout
+        .call2(
+            &global,
+            callback,
+            &JsValue::from_f64(milliseconds.max(0.0)),
+        )?
+        .as_f64()
+        .map(|id| id as i32)
+        .ok_or_else(|| JsValue::from_str("setTimeout returned a non-numeric id"))
 }
 
 fn cancel_first_frame(raf_slot: &Rc<Cell<Option<i32>>>) {
     if let Some(id) = raf_slot.take() {
         if let Some(window) = window() {
             let _ = window.cancel_animation_frame(id);
+        } else if let Ok(clear_timeout) = Reflect::get(
+            &js_sys::global(),
+            &JsValue::from_str("clearTimeout"),
+        )
+        .and_then(|value| value.dyn_into::<Function>())
+        {
+            let _ = clear_timeout.call1(
+                &js_sys::global(),
+                &JsValue::from_f64(f64::from(id)),
+            );
         }
+    }
+}
+
+fn cancel_host_actions(timer_slot: &Rc<Cell<Option<i32>>>) {
+    let Some(id) = timer_slot.take() else {
+        return;
+    };
+    if let Some(window) = window() {
+        let _ = window.cancel_animation_frame(id);
+    } else if let Ok(clear_timeout) = Reflect::get(
+        &js_sys::global(),
+        &JsValue::from_str("clearTimeout"),
+    )
+    .and_then(|value| value.dyn_into::<Function>())
+    {
+        let _ = clear_timeout.call1(&js_sys::global(), &JsValue::from_f64(f64::from(id)));
+    }
+}
+
+fn schedule_host_actions(
+    callback: Option<Rc<Function>>,
+    active: Rc<Cell<bool>>,
+    control: Rc<lodestone::BrowserControl>,
+    timer_slot: Rc<Cell<Option<i32>>>,
+) {
+    let Some(callback) = callback else {
+        return;
+    };
+    let callback_timer = Rc::clone(&timer_slot);
+    let next_timer = Rc::clone(&timer_slot);
+    let closure = Closure::once(move || {
+        callback_timer.set(None);
+        if !active.get() {
+            return;
+        }
+        if let Some(locked) = control.take_browser_pointer_lock_action() {
+            let action = Object::new();
+            let _ = Reflect::set(
+                &action,
+                &JsValue::from_str("type"),
+                &JsValue::from_str("pointer-lock"),
+            );
+            let _ = Reflect::set(
+                &action,
+                &JsValue::from_str("locked"),
+                &JsValue::from_bool(locked),
+            );
+            let _ = callback.call1(&JsValue::NULL, &action);
+        }
+        schedule_host_actions(Some(callback), active, control, next_timer);
+    });
+    if let Ok(id) = request_timeout(closure.as_ref(), 16.0) {
+        timer_slot.set(Some(id));
+        closure.forget();
     }
 }
 
@@ -482,9 +657,6 @@ fn poll_mount_completion(
     lifecycle: Rc<Cell<bool>>,
     progress: Option<Rc<Function>>,
 ) {
-    let Some(window) = window() else {
-        return;
-    };
     let closure = Closure::once(move || {
         if !lifecycle.get() {
             poll_mount_completion(id, lifecycle, progress);
@@ -499,8 +671,9 @@ fn poll_mount_completion(
             emit_callback(&progress, "destroyed", 1.0, "session stopped");
         }
     });
-    if window
-        .request_animation_frame(closure.as_ref().unchecked_ref())
+    if window()
+        .map(|window| window.request_animation_frame(closure.as_ref().unchecked_ref()))
+        .unwrap_or_else(|| request_timeout(closure.as_ref(), 16.0))
         .is_ok()
     {
         closure.forget();
@@ -509,14 +682,13 @@ fn poll_mount_completion(
 
 async fn next_animation_frame() -> Result<(), JsValue> {
     let promise = Promise::new(&mut |resolve, reject| {
-        let Some(window) = window() else {
-            let _ = reject.call1(&JsValue::NULL, &JsValue::from_str("no browser window"));
-            return;
-        };
         let closure = Closure::once_into_js(move || {
             let _ = resolve.call0(&JsValue::NULL);
         });
-        if let Err(error) = window.request_animation_frame(closure.unchecked_ref()) {
+        let scheduled = window()
+            .map(|window| window.request_animation_frame(closure.unchecked_ref()))
+            .unwrap_or_else(|| request_timeout(closure.as_ref(), 16.0));
+        if let Err(error) = scheduled {
             let _ = reject.call1(&JsValue::NULL, &error);
         }
     });

@@ -41,3 +41,11 @@ command_arguments = [
   "-c",
   "python3 scripts/stage_sounds.py --cache-dir ../.cache/mc/26.2 --out \"$TRUNK_STAGING_DIR\"",
 ]
+
+# Stage stable filenames for the standalone OffscreenCanvas render worker. The
+# worker imports the ESM glue from its own global scope, so it cannot follow
+# Trunk's content hash at runtime without a fixed alias.
+[[hooks]]
+stage = "post_build"
+command = "sh"
+command_arguments = ["-c", "scripts/stage_render_worker.sh \"$TRUNK_STAGING_DIR\""]

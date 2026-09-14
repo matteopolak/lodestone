@@ -4,29 +4,112 @@
 
 use super::*;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn run_windowed(config: Config) -> anyhow::Result<()> {
     run_windowed_with_app(Sim::client_app(), config)
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
-pub(super) fn run_windowed_with_control(
+pub(super) fn run_offscreen_with_control(
     plugin_app: lodestone_app::App,
     config: Config,
-    canvas: web_sys::HtmlCanvasElement,
+    canvas: web_sys::OffscreenCanvas,
     lifecycle: Rc<Cell<bool>>,
 ) -> anyhow::Result<BrowserControl> {
-    use winit::platform::web::EventLoopExtWebSys;
+    let frame_signal = BrowserFrameSignal::new();
+    let task_lifecycle = Rc::clone(&lifecycle);
+    let shutdown = Rc::new(Cell::new(false));
+    let task_shutdown = Rc::clone(&shutdown);
+    let input = Rc::new(RefCell::new(BrowserInputQueue::default()));
+    let task_input = Rc::clone(&input);
+    let actions = Rc::new(RefCell::new(BrowserActionQueue::default()));
+    let task_actions = Rc::clone(&actions);
+    let task_signal = frame_signal.clone();
+    wasm_bindgen_futures::spawn_local(async move {
+        match lodestone_render::window::attach_offscreen_canvas_async(canvas).await {
+            Ok((gpu, target)) if !task_lifecycle.get() && !task_shutdown.get() => {
+                let mut app = WindowApp::new_with_app_and_offscreen(
+                    plugin_app,
+                    config,
+                    Rc::clone(&task_lifecycle),
+                    task_signal,
+                    Rc::clone(&task_actions),
+                );
+                app.finish_bring_up(
+                    None,
+                    gpu,
+                    super::PresentationTarget::Surface(target),
+                );
+                let mut pending_input = Vec::new();
+                while !task_lifecycle.get() && !task_shutdown.get() {
+                    task_input.borrow_mut().drain_into(&mut pending_input);
+                    for input in pending_input.drain(..) {
+                        if app.dispatch_browser_input(input) {
+                            task_shutdown.set(true);
+                            break;
+                        }
+                    }
+                    if task_shutdown.get() {
+                        break;
+                    }
+                    app.redraw();
+                    if app.ui.quit_requested() {
+                        task_shutdown.set(true);
+                        break;
+                    }
+                    if browser_delay(16).await.is_err() {
+                        task_shutdown.set(true);
+                        break;
+                    }
+                }
+                app.shutdown_browser_presentation();
+            }
+            Ok((gpu, _target)) => {
+                gpu.device().destroy();
+                task_lifecycle.set(true);
+            }
+            Err(error) => {
+                tracing::error!(target: "gpu", "failed to attach GPU to offscreen canvas: {error}");
+                task_lifecycle.set(true);
+            }
+        }
+    });
+    Ok(BrowserControl { lifecycle, shutdown, frame_signal, input, actions })
+}
 
-    let event_loop = EventLoop::<ShellEvent>::with_user_event().build()?;
-    event_loop.set_control_flow(ControlFlow::Poll);
-    let proxy = event_loop.create_proxy();
-    event_loop.spawn_app(WindowApp::new_with_app_and_canvas(
-        plugin_app,
-        config,
-        canvas,
-        Rc::clone(&lifecycle),
-    ));
-    Ok(BrowserControl { proxy, lifecycle })
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+async fn browser_delay(milliseconds: i32) -> Result<(), wasm_bindgen::JsValue> {
+    use js_sys::{Function, Promise, Reflect};
+    use wasm_bindgen::{JsCast, closure::Closure};
+    use wasm_bindgen_futures::JsFuture;
+
+    let promise = Promise::new(&mut |resolve, reject| {
+        let global = js_sys::global();
+        let timeout = Reflect::get(&global, &wasm_bindgen::JsValue::from_str("setTimeout"))
+            .and_then(|value| {
+                value
+                    .dyn_into::<Function>()
+                    .map_err(|_| wasm_bindgen::JsValue::from_str("setTimeout is unavailable"))
+            });
+        let timeout = match timeout {
+            Ok(timeout) => timeout,
+            Err(error) => {
+                let _ = reject.call1(&wasm_bindgen::JsValue::NULL, &error);
+                return;
+            }
+        };
+        let callback = Closure::once_into_js(move || {
+            let _ = resolve.call0(&wasm_bindgen::JsValue::NULL);
+        });
+        if let Err(error) = timeout.call2(
+            &global,
+            &callback,
+            &wasm_bindgen::JsValue::from_f64(f64::from(milliseconds.max(0))),
+        ) {
+            let _ = reject.call1(&wasm_bindgen::JsValue::NULL, &error);
+        }
+    });
+    JsFuture::from(promise).await.map(|_| ())
 }
 
 /// [`run_windowed`], around a caller-composed [`lodestone_app::App`] instead of
@@ -35,6 +118,7 @@ pub(super) fn run_windowed_with_control(
 /// Everything past `WindowApp::new_with_app` is identical to `run_windowed`: the
 /// composed `App` only changes what `Sim` the constructed `WindowApp` holds, never
 /// how the winit loop drives it.
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn run_windowed_with_app(
     mut plugin_app: lodestone_app::App,
     config: Config,
@@ -64,30 +148,9 @@ pub(super) fn run_windowed_with_app(
     event_loop.set_control_flow(ControlFlow::Poll);
     let app = WindowApp::new_with_app(plugin_app, config);
 
-    // Native: `run_app` takes over this thread and returns when the loop exits.
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let mut app = app;
-        event_loop.run_app(&mut app)?;
-        Ok(())
-    }
-
-    // Browser: `spawn_app` instead, and the difference is not cosmetic. `run_app`
-    // never returns — on wasm winit implements that by throwing a JS exception to
-    // unwind out of Rust, which works but shows up in the console as an uncaught
-    // error and runs no destructors. `spawn_app` takes ownership of the app, hands
-    // the loop to the browser's own event loop, and **returns immediately**, so the
-    // caller (`web/`) keeps running normally.
-    //
-    // That is why this function still returns `Ok(())` here rather than blocking:
-    // the game is now live and driven by `requestAnimationFrame`, and nothing after
-    // this point may assume the session has ended.
-    #[cfg(target_arch = "wasm32")]
-    {
-        use winit::platform::web::EventLoopExtWebSys;
-        event_loop.spawn_app(app);
-        Ok(())
-    }
+    let mut app = app;
+    event_loop.run_app(&mut app)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

@@ -21,9 +21,9 @@
 //!    zip parser, the atlas builder, the model baker, the font loader — is the same
 //!    synchronous code the native client runs. **The filesystem wall is crossed
 //!    exactly once, here, at the byte source.**
-//! 3. **Starting the app**, then getting out of the way. The shared embedding boundary
-//!    returns immediately in a browser (winit's `spawn_app` hands the loop to the page),
-//!    so there is deliberately nothing after it.
+//! 3. **Starting the app**, then getting out of the way. The page transfers its
+//!    source canvas to a dedicated render worker; the worker imports the shared
+//!    embedding boundary and owns the renderer for the rest of its lifetime.
 //!
 //! ## The ordering is load-bearing
 //!
@@ -45,14 +45,20 @@ mod embed;
 
 #[cfg(target_arch = "wasm32")]
 thread_local! {
-    static STANDALONE_HANDLE: std::cell::RefCell<Option<embed::LodestoneHandle>> =
+    static STANDALONE_WORKER: std::cell::RefCell<Option<web_sys::Worker>> =
         const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(target_arch = "wasm32")]
+use std::{cell::Cell, rc::Rc};
+
 use lodestone_web::client_jar;
-use wasm_bindgen::JsCast;
+use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 use wasm_bindgen_futures::{JsFuture, spawn_local};
-use web_sys::{Request, RequestCache, RequestInit, Response, window};
+use web_sys::{
+    Event, HtmlCanvasElement, KeyboardEvent, MessageEvent, MouseEvent, Request, RequestCache,
+    RequestInit, Response, WheelEvent, Worker, window,
+};
 
 /// The deterministic browser resource pack: every `assets/` and `data/` entry
 /// the browser loader can consume, plus pack metadata. Staged from the local
@@ -345,7 +351,7 @@ async fn install_assets() -> Result<lodestone::platform::assets::Bundle, String>
     Ok(bundle)
 }
 
-/// Boot: install the assets, then start the real shell.
+/// Boot: install the assets, then start the worker-owned real shell.
 #[cfg(target_arch = "wasm32")]
 async fn boot(canvas: web_sys::HtmlCanvasElement) {
     let bundle = match install_assets().await {
@@ -360,15 +366,324 @@ async fn boot(canvas: web_sys::HtmlCanvasElement) {
         }
     };
 
-    status("starting the shell …");
-    // Drop the boot overlay before the shell draws. It is a plain DOM element sitting
-    // *over* the canvas, so leaving it up would print "starting the shell…" across the
-    // title screen's first button — which is what the first successful run did.
-    remove_boot_overlay();
-    match embed::mount_bundle(canvas, bundle, None).await {
-        Ok(handle) => STANDALONE_HANDLE.with_borrow_mut(|slot| *slot = Some(handle)),
-        Err(e) => status(&format!("shell failed to start: {e:?}")),
+    status("starting the shell worker …");
+    if let Err(error) = launch_render_worker(canvas, bundle) {
+        status(&format!("shell failed to start: {error}"));
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn launch_render_worker(canvas: web_sys::HtmlCanvasElement, bundle: lodestone::platform::assets::Bundle) -> Result<(), String> {
+    resize_canvas(&canvas);
+    let worker = Worker::new("lodestone-render-worker.js")
+        .map_err(|error| format!("cannot create render worker: {error:?}"))?;
+    let pointer_lock_requested = Rc::new(Cell::new(false));
+    install_input_bridge(&canvas, &worker, Rc::clone(&pointer_lock_requested))
+        .map_err(|error| format!("cannot install canvas input bridge: {error:?}"))?;
+    let offscreen = canvas
+        .transfer_control_to_offscreen()
+        .map_err(|error| format!("cannot transfer canvas to worker: {error:?}"))?;
+    let pointer_lock_for_message = Rc::clone(&pointer_lock_requested);
+    let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
+        let value = event.data();
+        let kind = js_sys::Reflect::get(&value, &JsValue::from_str("kind"))
+            .ok()
+            .and_then(|value| value.as_string());
+        match kind.as_deref() {
+            Some("progress") => {
+                let progress = js_sys::Reflect::get(&value, &JsValue::from_str("event"))
+                    .ok()
+                    .unwrap_or(JsValue::UNDEFINED);
+                let phase = js_sys::Reflect::get(&progress, &JsValue::from_str("phase"))
+                    .ok()
+                    .and_then(|value| value.as_string());
+                let message = js_sys::Reflect::get(&progress, &JsValue::from_str("message"))
+                    .ok()
+                    .and_then(|value| value.as_string());
+                if phase.as_deref() == Some("first-frame") {
+                    remove_boot_overlay();
+                }
+                if let Some(message) = message {
+                    status(&message);
+                }
+            }
+            Some("host-action") => {
+                let action = js_sys::Reflect::get(&value, &JsValue::from_str("action"))
+                    .ok()
+                    .unwrap_or(JsValue::UNDEFINED);
+                let action_type = js_sys::Reflect::get(
+                    &action,
+                    &JsValue::from_str("type"),
+                )
+                .ok()
+                .and_then(|value| value.as_string());
+                if action_type.as_deref() == Some("pointer-lock") {
+                    let locked = js_sys::Reflect::get(
+                        &action,
+                        &JsValue::from_str("locked"),
+                    )
+                    .ok()
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                    pointer_lock_for_message.set(locked);
+                    if !locked {
+                        if let Some(document) = window().and_then(|window| window.document()) {
+                            document.exit_pointer_lock();
+                        }
+                    }
+                }
+            }
+            Some("ready") => status("renderer worker ready"),
+            Some("error") => {
+                let message = js_sys::Reflect::get(&value, &JsValue::from_str("message"))
+                    .ok()
+                    .and_then(|value| value.as_string())
+                    .unwrap_or_else(|| "renderer worker failed".to_string());
+                status(&format!("shell failed to start: {message}"));
+            }
+            _ => {}
+        }
+    });
+    worker.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+    on_message.forget();
+
+    let jar = js_sys::Uint8Array::from(bundle.client_jar.as_slice());
+    let blocks = js_sys::Uint8Array::from(bundle.blocks_report.as_slice());
+    let launch = js_sys::Object::new();
+    js_sys::Reflect::set(&launch, &JsValue::from_str("kind"), &JsValue::from_str("mount"))
+        .map_err(|error| format!("cannot build render-worker request: {error:?}"))?;
+    js_sys::Reflect::set(&launch, &JsValue::from_str("canvas"), &offscreen)
+        .map_err(|error| format!("cannot build render-worker canvas request: {error:?}"))?;
+    js_sys::Reflect::set(
+        &launch,
+        &JsValue::from_str("clientJar"),
+        &jar.buffer(),
+    )
+    .map_err(|error| format!("cannot build render-worker jar request: {error:?}"))?;
+    js_sys::Reflect::set(
+        &launch,
+        &JsValue::from_str("blocksJson"),
+        &blocks.buffer(),
+    )
+    .map_err(|error| format!("cannot build render-worker blocks request: {error:?}"))?;
+    let transfer = js_sys::Array::new();
+    transfer.push(&offscreen);
+    transfer.push(&jar.buffer());
+    transfer.push(&blocks.buffer());
+    worker
+        .post_message_with_transfer(&launch, &transfer)
+        .map_err(|error| format!("cannot start render worker: {error:?}"))?;
+    STANDALONE_WORKER.with_borrow_mut(|slot| *slot = Some(worker));
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn resize_canvas(canvas: &HtmlCanvasElement) {
+    let Some(win) = window() else {
+        return;
+    };
+    let dpr = win.device_pixel_ratio();
+    let width = (f64::from(canvas.client_width()) * dpr).round().max(1.0) as u32;
+    let height = (f64::from(canvas.client_height()) * dpr).round().max(1.0) as u32;
+    canvas.set_width(width);
+    canvas.set_height(height);
+}
+
+#[cfg(target_arch = "wasm32")]
+fn send_input(worker: &Worker, input_type: &str, fields: &[(&str, JsValue)]) {
+    let input = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(
+        &input,
+        &JsValue::from_str("type"),
+        &JsValue::from_str(input_type),
+    );
+    for (name, value) in fields {
+        let _ = js_sys::Reflect::set(&input, &JsValue::from_str(name), value);
+    }
+    let message = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(
+        &message,
+        &JsValue::from_str("kind"),
+        &JsValue::from_str("input"),
+    );
+    let _ = js_sys::Reflect::set(&message, &JsValue::from_str("input"), &input);
+    if let Err(error) = worker.post_message(&message) {
+        log::warn!("render-worker input message failed: {error:?}");
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn install_input_bridge(
+    canvas: &HtmlCanvasElement,
+    worker: &Worker,
+    pointer_lock_requested: Rc<Cell<bool>>,
+) -> Result<(), JsValue> {
+    let worker_for_pointer = worker.clone();
+    let pointer_move = Closure::<dyn FnMut(Event)>::new(move |event: Event| {
+        let Ok(event) = event.dyn_into::<MouseEvent>() else {
+            return;
+        };
+        send_input(
+            &worker_for_pointer,
+            "pointerMove",
+            &[
+                ("x", JsValue::from_f64(f64::from(event.offset_x()))),
+                ("y", JsValue::from_f64(f64::from(event.offset_y()))),
+            ],
+        );
+        if event.movement_x() != 0 || event.movement_y() != 0 {
+            send_input(
+                &worker_for_pointer,
+                "mouseMotion",
+                &[
+                    ("dx", JsValue::from_f64(f64::from(event.movement_x()))),
+                    ("dy", JsValue::from_f64(f64::from(event.movement_y()))),
+                ],
+            );
+        }
+    });
+    canvas.add_event_listener_with_callback(
+        "pointermove",
+        pointer_move.as_ref().unchecked_ref(),
+    )?;
+    pointer_move.forget();
+
+    for event_name in ["mousedown", "mouseup"] {
+        let worker_for_button = worker.clone();
+        let canvas_for_button = canvas.clone();
+        let pointer_lock_requested = Rc::clone(&pointer_lock_requested);
+        let closure = Closure::<dyn FnMut(Event)>::new(move |event: Event| {
+            let Ok(event) = event.dyn_into::<MouseEvent>() else {
+                return;
+            };
+            send_input(
+                &worker_for_button,
+                "mouseButton",
+                &[
+                    ("button", JsValue::from_f64(f64::from(event.button()))),
+                    ("pressed", JsValue::from_bool(event.type_() == "mousedown")),
+                ],
+            );
+            if event.type_() == "mousedown" && pointer_lock_requested.get() {
+                if let Some(document) = window().and_then(|window| window.document())
+                    && document.pointer_lock_element().is_none()
+                {
+                    let _ = canvas_for_button.request_pointer_lock();
+                }
+            }
+        });
+        canvas.add_event_listener_with_callback(event_name, closure.as_ref().unchecked_ref())?;
+        closure.forget();
+    }
+
+    let worker_for_wheel = worker.clone();
+    let wheel = Closure::<dyn FnMut(Event)>::new(move |event: Event| {
+        let Ok(event) = event.dyn_into::<WheelEvent>() else {
+            return;
+        };
+        send_input(
+            &worker_for_wheel,
+            "wheel",
+            &[
+                ("dx", JsValue::from_f64(event.delta_x())),
+                ("dy", JsValue::from_f64(event.delta_y())),
+            ],
+        );
+        event.prevent_default();
+    });
+    canvas.add_event_listener_with_callback("wheel", wheel.as_ref().unchecked_ref())?;
+    wheel.forget();
+
+    for event_name in ["keydown", "keyup"] {
+        let worker_for_key = worker.clone();
+        let closure = Closure::<dyn FnMut(Event)>::new(move |event: Event| {
+            let Ok(event) = event.dyn_into::<KeyboardEvent>() else {
+                return;
+            };
+            let mut modifiers = 0u8;
+            if event.shift_key() {
+                modifiers |= 1;
+            }
+            if event.ctrl_key() {
+                modifiers |= 2;
+            }
+            if event.alt_key() {
+                modifiers |= 4;
+            }
+            if event.meta_key() {
+                modifiers |= 8;
+            }
+            let text = event.key();
+            let text = (!text.is_empty()).then_some(JsValue::from_str(&text));
+            let mut fields = vec![
+                ("code", JsValue::from_str(&event.code())),
+                ("pressed", JsValue::from_bool(event.type_() == "keydown")),
+                ("modifiers", JsValue::from_f64(f64::from(modifiers))),
+            ];
+            if let Some(text) = text {
+                fields.push(("text", text));
+            }
+            send_input(&worker_for_key, "key", &fields);
+            event.prevent_default();
+        });
+        canvas.add_event_listener_with_callback(event_name, closure.as_ref().unchecked_ref())?;
+        closure.forget();
+    }
+
+    for event_name in ["focus", "blur"] {
+        let worker_for_focus = worker.clone();
+        let closure = Closure::<dyn FnMut(Event)>::new(move |event: Event| {
+            send_input(
+                &worker_for_focus,
+                "focus",
+                &[("focused", JsValue::from_bool(event.type_() == "focus"))],
+            );
+        });
+        canvas.add_event_listener_with_callback(event_name, closure.as_ref().unchecked_ref())?;
+        closure.forget();
+    }
+
+    let document = window()
+        .and_then(|window| window.document())
+        .ok_or_else(|| JsValue::from_str("no document for pointer-lock bridge"))?;
+    let worker_for_lock = worker.clone();
+    let canvas_value = JsValue::from(canvas.clone());
+    let document_for_lock = document.clone();
+    let pointer_lock = Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
+        let locked = document_for_lock
+            .pointer_lock_element()
+            .is_some_and(|element| JsValue::from(element) == canvas_value);
+        send_input(
+            &worker_for_lock,
+            "pointerLock",
+            &[("locked", JsValue::from_bool(locked))],
+        );
+    });
+    document.add_event_listener_with_callback(
+        "pointerlockchange",
+        pointer_lock.as_ref().unchecked_ref(),
+    )?;
+    pointer_lock.forget();
+
+    let Some(window) = window() else {
+        return Ok(());
+    };
+    let worker_for_resize = worker.clone();
+    let canvas_for_resize = canvas.clone();
+    let resize = Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
+        resize_canvas(&canvas_for_resize);
+        send_input(
+            &worker_for_resize,
+            "resize",
+            &[
+                ("width", JsValue::from_f64(f64::from(canvas_for_resize.width()))),
+                ("height", JsValue::from_f64(f64::from(canvas_for_resize.height()))),
+            ],
+        );
+    });
+    window.add_event_listener_with_callback("resize", resize.as_ref().unchecked_ref())?;
+    resize.forget();
+    Ok(())
 }
 
 #[cfg(target_arch = "wasm32")]

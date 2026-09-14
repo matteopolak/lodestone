@@ -94,3 +94,40 @@ pub async fn attach_window_async(
 
     Ok((ctx, target))
 }
+
+/// Attach WebGPU directly to an [`web_sys::OffscreenCanvas`] in a dedicated
+/// worker.
+///
+/// `winit`'s web backend intentionally owns a DOM window and an
+/// `HtmlCanvasElement`, neither of which exists in a worker. The renderer does
+/// not need either: wgpu can create the browser surface from the transferred
+/// offscreen canvas itself. The caller owns worker scheduling and input; this
+/// function only performs asynchronous adapter/device bring-up and sizes the
+/// surface from the canvas's backing dimensions.
+#[cfg(target_arch = "wasm32")]
+pub async fn attach_offscreen_canvas_async(
+    canvas: web_sys::OffscreenCanvas,
+) -> Result<(GpuContext, SurfaceTarget<'static>), WindowError> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let surface = instance.create_surface(wgpu::SurfaceTarget::OffscreenCanvas(canvas.clone()))?;
+    let ctx = GpuContext::new_for_surface(instance, &surface).await?;
+    let target = SurfaceTarget::new(
+        surface,
+        ctx.adapter(),
+        ctx.device(),
+        canvas.width(),
+        canvas.height(),
+    )
+    .ok_or(WindowError::NoDefaultConfig)?;
+
+    Ok((ctx, target))
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod browser_tests {
+    #[test]
+    fn offscreen_canvas_size_comes_from_its_backing_store() {
+        let canvas = web_sys::OffscreenCanvas::new(17, 19).expect("OffscreenCanvas is available");
+        assert_eq!((canvas.width(), canvas.height()), (17, 19));
+    }
+}

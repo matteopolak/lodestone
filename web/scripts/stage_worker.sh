@@ -12,6 +12,13 @@ wasm_binary="$worker_target/$wasm_target/release/lodestone_server_worker.wasm"
 
 export CARGO_PROFILE_RELEASE_CODEGEN_BACKEND=llvm
 
+if ! rustup component list --installed 2>/dev/null | grep -q '^rust-src'; then
+  echo "error: rust-src is not installed for the active Rust toolchain" >&2
+  echo "       the threaded worker uses -Z build-std and cannot be built without it" >&2
+  echo "       run: rustup component add rust-src" >&2
+  exit 1
+fi
+
 # Build serial and shared-memory artifacts; atomics are module-level.
 cargo build --manifest-path "$worker_manifest" --target "$wasm_target" --release
 wasm-bindgen --target web --out-dir "$out_dir" --out-name lodestone-server-worker-wasm-serial \

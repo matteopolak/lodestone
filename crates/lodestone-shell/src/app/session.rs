@@ -491,15 +491,17 @@ impl WindowApp {
     }
 
     #[cfg(target_arch = "wasm32")]
-    pub(super) fn new_with_app_and_canvas(
+    pub(super) fn new_with_app_and_offscreen(
         app: lodestone_app::App,
         config: Config,
-        canvas: web_sys::HtmlCanvasElement,
         lifecycle: Rc<Cell<bool>>,
+        frame_signal: BrowserFrameSignal,
+        actions: Rc<RefCell<BrowserActionQueue>>,
     ) -> Self {
         let mut window_app = Self::new_with_app(app, config);
-        window_app.browser_canvas = Some(canvas);
         window_app.browser_lifecycle = Some(lifecycle);
+        window_app.browser_frame_signal = Some(frame_signal);
+        window_app.browser_actions = Some(actions);
         window_app
     }
 
@@ -533,9 +535,15 @@ impl WindowApp {
         Self {
             config,
             #[cfg(target_arch = "wasm32")]
-            browser_canvas: None,
-            #[cfg(target_arch = "wasm32")]
             browser_lifecycle: None,
+            #[cfg(target_arch = "wasm32")]
+            browser_frame_signal: None,
+            #[cfg(target_arch = "wasm32")]
+            browser_pointer_locked: false,
+            #[cfg(target_arch = "wasm32")]
+            browser_pointer_requested: false,
+            #[cfg(target_arch = "wasm32")]
+            browser_actions: None,
             benchmark,
             benchmark_segment: None,
             sim,
@@ -784,7 +792,23 @@ impl WindowApp {
         if !grabbed {
             self.pending_pick = None;
         }
-        let Some(window) = &self.window else { return };
+        let Some(window) = &self.window else {
+            #[cfg(target_arch = "wasm32")]
+            {
+                self.grabbed = grabbed;
+                if self.browser_pointer_requested != grabbed {
+                    self.browser_pointer_requested = grabbed;
+                    if let Some(actions) = self.browser_actions.as_ref() {
+                        actions.borrow_mut().push(BrowserAction::PointerLock(grabbed));
+                    }
+                }
+                if !grabbed {
+                    self.sim.input_mut(InputState::release_all);
+                    self.sim.end_attack();
+                }
+            }
+            return;
+        };
         if grabbed {
             let locked = window
                 .set_cursor_grab(CursorGrabMode::Locked)
