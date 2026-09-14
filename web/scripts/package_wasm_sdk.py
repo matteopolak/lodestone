@@ -21,6 +21,9 @@ DEFAULT_OUTPUT = ROOT / "target" / "wasm-sdk"
 ARCHIVE_NAME = "lodestone-web-sdk.tar.gz"
 MANIFEST_NAME = "lodestone-web-sdk.manifest.json"
 REQUIRED_FILES = (
+    "lodestone-web-entry.js",
+    "lodestone-web-entry_bg.wasm",
+    "lodestone-render-worker.js",
     "lodestone-server-worker.js",
     "lodestone-server-worker-bootstrap.js",
     "lodestone-server-worker-wasm-serial.js",
@@ -81,7 +84,11 @@ def copy_file(stage: Path, package: Path, relative: str) -> None:
 
 
 def collect_package(stage: Path, package: Path) -> tuple[list[str], str]:
-    page_modules = sorted(stage.glob("lodestone-web-*.js"))
+    page_modules = sorted(
+        path
+        for path in stage.glob("lodestone-web-*.js")
+        if path.name != "lodestone-web-entry.js"
+    )
     if len(page_modules) != 1:
         raise SystemExit("expected exactly one hashed Lodestone page ESM module")
     page_module = page_modules[0]
