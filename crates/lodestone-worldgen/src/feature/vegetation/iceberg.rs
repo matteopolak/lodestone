@@ -34,8 +34,8 @@ fn iceberg_state(state: &str) -> bool {
 }
 
 fn circle_distance(x: i32, z: i32, radius: i32, random: &mut impl RandomSource) -> f64 {
-    let offset = 10.0 * f64::from(random.next_float().clamp(0.2, 0.8)) / f64::from(radius);
-    offset + f64::from(x * x + z * z) - f64::from(radius * radius)
+    let offset = 10.0_f32 * random.next_float().clamp(0.2, 0.8) / radius as f32;
+    f64::from(offset) + f64::from(x * x + z * z) - f64::from(radius * radius)
 }
 
 fn ellipse_distance(x: i32, z: i32, a: i32, c: i32, angle: f64) -> f64 {
@@ -73,7 +73,7 @@ fn steep_radius(random: &mut impl RandomSource, y: i32, height: i32, width: i32)
 }
 
 fn set_block(grid: &mut VegGrid, x: i32, y: i32, z: i32, state: &str) {
-    let _ = grid.set_if_in_bounds(x, y, z, state.to_owned());
+    let _ = grid.set_state_if_in_bounds(x, y, z, state);
 }
 
 fn set_iceberg_block(
@@ -242,9 +242,11 @@ fn cut_out(
         let radius = round_radius(random, y, height, width);
         carve(grid, radius, y, false, cut_angle, local_origin, ellipse_a, ellipse_c_value, origin);
     }
-    for y in -1..(-height + random.next_int_bounded(5)).min(0) {
+    let mut y = -1;
+    while y > -height + random.next_int_bounded(5) {
         let radius = steep_radius(random, -y, height, width);
         carve(grid, radius, y, true, cut_angle, local_origin, ellipse_a, ellipse_c_value, origin);
+        y -= 1;
     }
 }
 
@@ -277,7 +279,7 @@ pub(super) fn place_iceberg<R: RandomSource>(random: &mut R, origin: BlockPos, c
     smooth(grid, origin, width, over_height, ellipse, ellipse_a);
     for x in -a..a {
         for z in -a..a {
-            for y in -1..-under_height {
+            for y in (-under_height + 1..=-1).rev() {
                 let new_a = if ellipse {
                     ((a as f32 * (1.0 - (y * y) as f32 / (under_height as f32 * 8.0))).ceil()) as i32
                 } else { a };
@@ -301,11 +303,11 @@ mod tests {
     use super::{place_iceberg, IcebergCfg, SEA_LEVEL};
     use crate::feature::BlockPos;
     use crate::feature::vegetation::grid::VegGrid;
-    use crate::rng::{WorldgenRandom, XoroshiroRandomSource};
+    use crate::rng::LegacyRandomSource;
 
     #[test]
     fn packed_ice_matches_the_independent_compiled_server_fixture() {
-        let mut grid = VegGrid::new(-64, 384, 0, 0);
+        let mut grid = VegGrid::with_footprint(-64, 384, 0, 0, -16, 17);
         for x in -16..=16 {
             for z in -16..=16 {
                 for y in -32..=100 {
@@ -313,7 +315,7 @@ mod tests {
                 }
             }
         }
-        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        let mut random = LegacyRandomSource::new(0);
         place_iceberg(
             &mut random,
             BlockPos { x: 0, y: 0, z: 0 },

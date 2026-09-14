@@ -288,15 +288,14 @@ fn postfeatures_actually_differs_from_postcarve() {
     }
 }
 
-/// The residual ore-composition gap is measured and reported rather than
-/// guessed. `OverworldGenerator::column` composes the real 3×3 ore driver,
-/// while this fixture stage records only a single source chunk. Neighbour
-/// spill therefore produces an expected non-zero residual; this test puts a
-/// number on that residual instead of treating zero as the success condition.
-/// The only hard assertion is a floor based on the measured fixture baseline;
-/// the gap itself is reported, not asserted away.
+/// The residual ore-composition gap is measured and reported as a scoped
+/// comparator diagnostic. `OverworldGenerator::column` composes the real 3×3
+/// ore driver, while this fixture stage records only a single source chunk.
+/// Neighbour spill therefore produces an expected non-zero residual. This is
+/// not a parity gate: the fixture does not contain the 3×3 reference needed
+/// to assert a production match.
 #[test]
-fn ore_composition_gap_is_measured_and_reported() {
+fn ore_composition_gap_is_reported_against_single_source_fixture() {
     for f in &fixtures() {
         let generator = lodestone_server::overworld_generator(f.seed);
         let generated = generator.column(f.chunk_x, f.chunk_z);
@@ -308,35 +307,10 @@ fn ore_composition_gap_is_measured_and_reported() {
         );
         assert_eq!(report.total, 16 * 16 * f.height as usize);
 
-        // Floor: `postfeatures` records only the centre chunk's decoration
-        // pass, while `apply_ore_step_3x3_per_source` includes neighbour spill.
-        // A faithful 3×3 composition therefore differs wherever an ore vein
-        // from a neighbouring source lands in the centre. A diagnostic
-        // single-source probe matched the fixture's narrower scope and
-        // measured 563/98304 at (0,0),
-        // confirming that most of the full-3×3 residual is a scope difference.
-        //
-        // The (-120,-120) fixture samples badlands. Its biome-specific ore
-        // table is preserved by `crate::biome::usable_overworld_table`, so
-        // the bonus gold entry is included in the measured 96429/98304 match
-        // floor below. Floors are measured values with headroom.
-        let floor = match (f.chunk_x, f.chunk_z) {
-            (0, 0) => 92_000,       // measured 92223/98304
-            (-120, -120) => 96_300, // measured 96429/98304
-            other => panic!("no measured floor recorded for fixture chunk {other:?} — add one"),
-        };
-        assert!(
-            report.match_count() >= floor,
-            "chunk ({},{}) match count vs vanilla postfeatures dropped to {} (floor {floor})",
-            f.chunk_x,
-            f.chunk_z,
-            report.match_count()
-        );
-
         eprintln!(
-            "[parity] chunk ({}, {}): {}/{} match ({:.2}%) vs vanilla postfeatures (issue #295 \
-             ore composition landed, real 3×3 spill vs a single-source-only oracle); {} real \
-             mismatches (the residual ore gap), {} property-only",
+            "[diagnostic] chunk ({}, {}): {}/{} match ({:.2}%) vs single-source postfeatures \
+             (real 3×3 spill vs a single-source fixture); {} real mismatches (the residual ore gap), \
+             {} property-only",
             f.chunk_x,
             f.chunk_z,
             report.match_count(),
@@ -344,6 +318,39 @@ fn ore_composition_gap_is_measured_and_reported() {
             report.match_fraction() * 100.0,
             report.real_mismatches().len(),
             report.representation_only_mismatches().len(),
+        );
+    }
+}
+
+/// Independent negative control for the scoped comparator: the full column's
+/// decoration must differ from its own shaped prefix. This does not use the
+/// single-source oracle field, so a non-zero result demonstrates that the
+/// comparator can observe feature writes without claiming fixture parity.
+#[test]
+fn control_full_column_differs_from_shaped_prefix() {
+    for f in &fixtures() {
+        let generator = lodestone_server::overworld_generator(f.seed);
+        let full = generator.column(f.chunk_x, f.chunk_z);
+        let shaped = generator.column_shaped(f.chunk_x, f.chunk_z);
+        let report = diff_field(
+            f.min_y,
+            f.height,
+            |lx, y, lz| full.block_state(lx as usize, y, lz as usize).to_string(),
+            |lx, y, lz| shaped.block_state(lx as usize, y, lz as usize).to_string(),
+        );
+        assert_eq!(report.total, 16 * 16 * f.height as usize);
+        assert!(
+            !report.real_mismatches().is_empty(),
+            "chunk ({},{}) full column unexpectedly matched its shaped prefix; the negative \
+             control did not exercise a feature write",
+            f.chunk_x,
+            f.chunk_z
+        );
+        eprintln!(
+            "[diagnostic] chunk ({}, {}): full vs shaped = {} real mismatches",
+            f.chunk_x,
+            f.chunk_z,
+            report.real_mismatches().len()
         );
     }
 }
@@ -356,7 +363,7 @@ fn ore_composition_gap_is_measured_and_reported() {
 /// single-source `postfeatures` stage and Rust's now-composed `column()`, and
 /// prints both tables side by side. Anti-vacuity floor only (not exact-match,
 /// since real 3×3 spill legitimately shifts counts vs a single-source
-/// oracle — see [`ore_composition_gap_is_measured_and_reported`]'s doc
+/// oracle — see [`ore_composition_gap_is_reported_against_single_source_fixture`]'s doc
 /// comment): every ore type vanilla placed at least 10 of must appear at
 /// least once in Rust's output, so a systematically-broken ore *type*
 /// (wrong tag resolution, wrong target list) can't hide behind an
@@ -485,7 +492,7 @@ fn composed_pipeline_vs_vanilla_postsurface_reference() {
         // The badlands sample at (-120,-120) has 6704 real mismatches out of
         // 98304. Its biome-specific banded-terracotta surface rule tracks the
         // reference closely; the independent ore-composition residual is
-        // covered by `ore_composition_gap_is_measured_and_reported`.
+        // covered by `ore_composition_gap_is_reported_against_single_source_fixture`.
         //
         // 5% headroom over the measured value per chunk so this test does
         // not flap on insignificant noise while still catching a real

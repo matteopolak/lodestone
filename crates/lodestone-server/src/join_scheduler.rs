@@ -104,6 +104,10 @@ use std::time::Duration;
 use crate::chunk::{ChunkColumn, ChunkGenerationStage, ChunkSource};
 use crate::protocol::{ChunkEncodeError, ChunkEncoder, ServerDirective};
 use crate::server::{JoinTrace, SourceRef};
+use crate::worldgen_session::{
+    GenerationRequest, GenerationRequestError, GenerationRequestResult, GenerationSession,
+    RequestCancellation,
+};
 
 #[path = "join_order.rs"]
 mod join_order;
@@ -127,6 +131,8 @@ pub enum ColumnPayload {
     Encoded(ServerDirective),
     /// No off-task encoder: the caller encodes this itself, on its own task.
     Column(ChunkColumn),
+    /// A request-scoped result with an owned target and dependency halo.
+    Snapshot(crate::worldgen_session::PacketSnapshot),
 }
 
 impl ColumnPayload {
@@ -140,6 +146,7 @@ impl ColumnPayload {
     pub fn column(&self) -> Option<&ChunkColumn> {
         match self {
             Self::Column(column) => Some(column),
+            Self::Snapshot(snapshot) => Some(snapshot.column()),
             Self::Encoded(_) => None,
         }
     }
@@ -659,7 +666,7 @@ pub(crate) const JOIN_STREAM_SERVICE_BUDGET: Duration = Duration::from_millis(25
 /// There is no native worker pool, so the window is forced to 1 and columns are
 /// generated inline — the unchanged behaviour of a target that never had a second
 /// thread. Same as `crate::chunk::generate_columns_offloaded`'s `cfg`.
-pub struct ColumnPipeline<S> {
+pub struct ColumnPipeline<S: ?Sized> {
     source: Arc<S>,
     /// Protocol encode, moved **into** the worker that generates the column —
     /// [`ChunkEncoder`] carries the measurement. `None` restores the pre-existing
@@ -693,12 +700,17 @@ pub struct ColumnPipeline<S> {
     inflight: VecDeque<(
         ((i32, i32), ChunkGenerationStage),
         crate::worldgen_dispatch::DispatchHandle<Result<ColumnPayload, ChunkEncodeError>>,
+        RequestCancellation,
     )>,
     #[cfg(target_arch = "wasm32")]
     inflight: VecDeque<((i32, i32), ChunkGenerationStage, ColumnPayload)>,
+    #[cfg(target_arch = "wasm32")]
+    request_position: Option<(i32, i32)>,
+    #[cfg(target_arch = "wasm32")]
+    request_cancellation: Option<RequestCancellation>,
 }
 
-impl<S> std::fmt::Debug for ColumnPipeline<S> {
+impl<S: ?Sized> std::fmt::Debug for ColumnPipeline<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ColumnPipeline")
             .field("columns", &self.total)
@@ -711,7 +723,7 @@ impl<S> std::fmt::Debug for ColumnPipeline<S> {
     }
 }
 
-impl<S: ChunkSource + 'static> ColumnPipeline<S> {
+impl<S: ChunkSource + ?Sized + 'static> ColumnPipeline<S> {
     /// A pipeline over `coords` with the machine-derived [`generation_window`].
     #[must_use]
     pub fn new(source: Arc<S>, coords: Vec<(i32, i32)>) -> Self {
@@ -763,6 +775,10 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
             primed: false,
             trace: None,
             inflight: VecDeque::new(),
+            #[cfg(target_arch = "wasm32")]
+            request_position: None,
+            #[cfg(target_arch = "wasm32")]
+            request_cancellation: None,
         }
     }
 
@@ -882,18 +898,46 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
     /// The bug predates the steady-state path — the join stream has always been able
     /// to outlive a forget — and fixing it here fixes both.
     ///
-    /// **In-flight columns are not cancelled.** They have already been spawned, there
-    /// are at most [`window`](Self::window) of them, and reaching into the pool to
-    /// abandon its queued result would lose the column for a player who walks back into
-    /// it. So the guarantee is "a forgotten column is not *newly started*", not "no
-    /// forgotten column is ever sent".
+    /// In-flight columns are cancelled cooperatively. A running source call is
+    /// allowed to finish, but its result is suppressed and its request token is
+    /// visible to stage drivers.
     pub(crate) fn cancel(&mut self, dropped: &std::collections::HashSet<(i32, i32)>) -> usize {
         let removed = self.queue.cancel(dropped);
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut cancelled = 0;
+        #[cfg(not(target_arch = "wasm32"))]
+        self.inflight.retain(|((position, _), handle, request)| {
+            if dropped.contains(position) {
+                request.cancel();
+                handle.cancel();
+                cancelled += 1;
+                false
+            } else {
+                true
+            }
+        });
+        #[cfg(target_arch = "wasm32")]
+        let cancelled = 0usize;
+        #[cfg(target_arch = "wasm32")]
+        let cancelled_active = match (self.request_position, self.request_cancellation.take()) {
+            (Some(position), Some(request)) if dropped.contains(&position) => {
+                request.cancel();
+                self.request_position = None;
+                1
+            }
+            (position, request) => {
+                self.request_position = position;
+                self.request_cancellation = request;
+                0
+            }
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let cancelled_active = 0usize;
         // `remaining()` is `total - emitted`, and the `select!` branch is gated on
         // it: leaving `total` alone would keep the branch enabled with nothing to
         // hand back, and `next` would spin returning `None`.
-        self.total -= removed;
-        removed
+        self.total -= removed + cancelled + cancelled_active;
+        removed + cancelled + cancelled_active
     }
 
     /// The window this pipeline was built with.
@@ -938,14 +982,25 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
                 break;
             };
             let source = Arc::clone(&self.source);
-            let dimension = source
+            let source_dimension = source
                 .dimension()
                 .unwrap_or(crate::dimension::Dimension::Overworld);
+            let generation_dimension = source_dimension.into();
             let stage = if force_full {
                 ChunkGenerationStage::Full
             } else {
                 self.generation_stage_for((cx, cz))
             };
+            let generation_target = match stage {
+                ChunkGenerationStage::Shaped => {
+                    lodestone_worldgen::stage_schedule::GenerationTarget::Shaped
+                }
+                ChunkGenerationStage::Full => {
+                    lodestone_worldgen::stage_schedule::GenerationTarget::Full
+                }
+            };
+            let dependency_radius =
+                source.generation_request_dependency_radius(generation_target);
             // **Protocol encode happens here, on the worker, not on the caller's
             // task** — that is the whole point of `encoder`. The column is dropped
             // inside the closure, so the connection task never even sees the
@@ -953,28 +1008,66 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
             // multi-hundred-KiB column plus 62 M instructions of work to do to it.
             let encoder = self.encoder.clone();
             let trace = self.trace.clone();
+            let cancellation = RequestCancellation::new();
+            let request_cancellation = cancellation.clone();
             // Admission is deliberately a try-operation. If every worker is
             // occupied by another connection, keep this coordinate in the
             // queue and let an already-in-flight head make progress rather
             // than waiting on a semaphore from the connection/tick task.
             let result = match crate::worldgen_dispatch::try_spawn(move || {
-                let column = source.column_at(cx, cz, stage);
-                if let Some(trace) = trace.as_ref() {
-                    trace.mark("generated", cx, cz);
+                let request = GenerationRequest::new(
+                    generation_dimension,
+                    (cx, cz),
+                    generation_target,
+                    dependency_radius,
+                );
+                let mut session = GenerationSession::with_cancellation(request, request_cancellation);
+                let requested = source.request_generation(request, Some(&mut session));
+                if session.cancellation().is_cancelled() {
+                    return Err(ChunkEncodeError::new("generation request cancelled"));
+                }
+                let payload = match requested {
+                    Ok(Some(GenerationRequestResult::Existing(column))) => {
+                        Ok(ColumnPayload::Column(column))
+                    }
+                    Ok(Some(GenerationRequestResult::Generated(snapshot))) => {
+                        if let Some(trace) = trace.as_ref() {
+                            trace.mark("generated", cx, cz);
+                        }
+                        Ok(ColumnPayload::Snapshot(snapshot))
+                    }
+                    Ok(None) => Ok(ColumnPayload::Column(source.column_at(cx, cz, stage))),
+                    Err(GenerationRequestError::Unsupported) => {
+                        Ok(ColumnPayload::Column(source.column_at(cx, cz, stage)))
+                    }
+                    Err(error) => Err(ChunkEncodeError::new(error.to_string())),
+                }?;
+                if matches!(&payload, ColumnPayload::Column(_)) {
+                    if let Some(trace) = trace.as_ref() {
+                        trace.mark("generated", cx, cz);
+                    }
                 }
                 match encoder {
                     Some(encoder) => {
-                        let encoded = encoder
-                            .try_encode_chunk_in_dimension(cx, cz, &column, dimension)
-                            .map(ColumnPayload::Encoded);
-                        if encoded.is_ok() {
+                        // One-column worker encoders cannot consume a detached
+                        // neighbour halo; preserve snapshots for the broker.
+                        let encoded = match payload {
+                            ColumnPayload::Column(column) => encoder
+                                .try_encode_chunk_in_dimension(cx, cz, &column, source_dimension)
+                                .map(ColumnPayload::Encoded),
+                            snapshot @ ColumnPayload::Snapshot(_) => Ok(snapshot),
+                            ColumnPayload::Encoded(_) => {
+                                unreachable!("worker payload is not encoded")
+                            }
+                        };
+                        if matches!(&encoded, Ok(ColumnPayload::Encoded(_))) {
                             if let Some(trace) = trace.as_ref() {
                                 trace.mark("encoded", cx, cz);
                             }
                         }
                         encoded
                     }
-                    None => Ok(ColumnPayload::Column(column)),
+                    None => Ok(payload),
                 }
             }) {
                 Ok(result) => result,
@@ -991,10 +1084,11 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
             };
             let popped = self.queue.pop_request();
             debug_assert_eq!(popped, Some(((cx, cz), force_full)));
-            self.inflight.push_back((((cx, cz), stage), result));
+            self.inflight
+                .push_back((((cx, cz), stage), result, cancellation));
         }
         let (pos, payload) = {
-            let ((pos, _stage), handle) = self
+            let ((pos, _stage), handle, _cancellation) = self
                 .inflight
                 .front_mut()
                 .expect("the top-up above spawns at least one column while any remain");
@@ -1022,18 +1116,90 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
         } else {
             self.generation_stage_for((cx, cz))
         };
-        let column = self.source.column_at(cx, cz, stage);
+        let source_dimension = self
+            .source
+            .dimension()
+            .unwrap_or(crate::dimension::Dimension::Overworld);
+        let generation_target = match stage {
+            ChunkGenerationStage::Shaped => {
+                lodestone_worldgen::stage_schedule::GenerationTarget::Shaped
+            }
+            ChunkGenerationStage::Full => {
+                lodestone_worldgen::stage_schedule::GenerationTarget::Full
+            }
+        };
+        let dependency_radius = self
+            .source
+            .generation_request_dependency_radius(generation_target);
+        let request = GenerationRequest::new(
+            source_dimension.into(),
+            (cx, cz),
+            generation_target,
+            dependency_radius,
+        );
+        let cancellation = RequestCancellation::new();
+        let request_cancellation = cancellation.clone();
+        self.request_position = Some((cx, cz));
+        self.request_cancellation = Some(cancellation.clone());
+        let generation = {
+            let mut session = GenerationSession::with_cancellation(request, cancellation);
+            self.source
+                .request_generation_yielding(request, Some(&mut session))
+                .await
+        };
+        self.request_position = None;
+        self.request_cancellation = None;
+        if request_cancellation.is_cancelled() {
+            return Err(ChunkEncodeError::new("generation request cancelled"));
+        }
+        let payload = match generation {
+            Ok(Some(GenerationRequestResult::Existing(column))) => {
+                ColumnPayload::Column(column)
+            }
+            Ok(Some(GenerationRequestResult::Generated(snapshot))) => {
+                ColumnPayload::Snapshot(snapshot)
+            }
+            Ok(None) => ColumnPayload::Column(self.source.column_at(cx, cz, stage)),
+            Err(GenerationRequestError::Unsupported) => {
+                ColumnPayload::Column(self.source.column_at(cx, cz, stage))
+            }
+            Err(error) => return Err(ChunkEncodeError::new(error.to_string())),
+        };
         if let Some(trace) = self.trace.as_ref() {
             trace.mark("generated", cx, cz);
         }
         self.emitted += 1;
         self.primed = true;
         let _ = &self.inflight;
-        // There is no worker to move the encode to, so the arm is the same one a
-        // protocol without a `ChunkEncoder` takes: the caller encodes it. Using
-        // `self.encoder` here would be a lie about where the work happened.
-        Ok(Some(((cx, cz), ColumnPayload::Column(column))))
+        // There is no worker to move encoding to; the caller consumes the
+        // detached snapshot or scalar column on its own task.
+        Ok(Some(((cx, cz), payload)))
     }
+}
+
+pub(crate) async fn generate_owned_columns(
+    source: Arc<dyn ChunkSource>,
+    coords: Vec<(i32, i32)>,
+) -> Vec<ChunkColumn> {
+    let mut pipeline = ColumnPipeline::with_window(
+        source,
+        coords,
+        generation_window(),
+    );
+    let mut columns = Vec::with_capacity(pipeline.remaining());
+    while let Some((_, payload)) = pipeline
+        .next()
+        .await
+        .expect("owned generation request must succeed")
+    {
+        columns.push(
+            payload
+                .column()
+                .expect("owned generation request must return a column")
+                .clone(),
+        );
+    }
+    columns
 }
 
 /// The part of a join view that has **not** been sent by the time the play loop
@@ -1059,6 +1225,9 @@ pub(crate) enum JoinChunkStream<S> {
     /// [`SourceRef::Shared`]: the same primed window the inline burst used,
     /// handed on with its remaining columns and re-orderable while it drains.
     Windowed(ColumnPipeline<S>),
+    /// An owned source erased by a dimension transition. It uses the same
+    /// request path as the shared arm after the first poll.
+    Erased(ColumnPipeline<dyn ChunkSource>),
     /// [`SourceRef::Borrowed`]: whole rings, generated one ring at a time by the
     /// caller's own blocking source and emitted one column at a time.
     Ringed {
@@ -1099,13 +1268,15 @@ impl<S: ChunkSource + 'static> JoinChunkStream<S> {
     ///   precisely so that it can be re-fed (see [`windowed`](Self::windowed)).
     #[must_use]
     pub(crate) fn accepts_enqueue(&self) -> bool {
-        matches!(self, Self::Windowed(_))
+        matches!(self, Self::Windowed(_) | Self::Erased(_))
     }
 
     /// Hands `coords` to the streaming pipeline. A no-op on the two arms
     /// [`accepts_enqueue`](Self::accepts_enqueue) reports `false` for — ask first.
     pub(crate) fn enqueue(&mut self, coords: Vec<(i32, i32)>) {
         if let Self::Windowed(pipeline) = self {
+            pipeline.enqueue(coords);
+        } else if let Self::Erased(pipeline) = self {
             pipeline.enqueue(coords);
         }
     }
@@ -1116,6 +1287,8 @@ impl<S: ChunkSource + 'static> JoinChunkStream<S> {
     /// fallback path instead.
     pub(crate) fn enqueue_full(&mut self, coords: Vec<(i32, i32)>) {
         if let Self::Windowed(pipeline) = self {
+            pipeline.enqueue_full(coords);
+        } else if let Self::Erased(pipeline) = self {
             pipeline.enqueue_full(coords);
         }
     }
@@ -1130,6 +1303,7 @@ impl<S: ChunkSource + 'static> JoinChunkStream<S> {
     pub(crate) fn cancel(&mut self, dropped: &std::collections::HashSet<(i32, i32)>) -> usize {
         match self {
             Self::Windowed(pipeline) => pipeline.cancel(dropped),
+            Self::Erased(pipeline) => pipeline.cancel(dropped),
             Self::Drained => 0,
             Self::Ringed {
                 rings,
@@ -1176,6 +1350,7 @@ impl<S: ChunkSource + 'static> JoinChunkStream<S> {
         match self {
             Self::Drained => 0,
             Self::Windowed(pipeline) => pipeline.remaining(),
+            Self::Erased(pipeline) => pipeline.remaining(),
             Self::Ringed { remaining, .. } => *remaining,
         }
     }
@@ -1203,6 +1378,7 @@ impl<S: ChunkSource + 'static> JoinChunkStream<S> {
     pub(crate) fn reprioritise(&mut self, centre: (i32, i32), facing: Option<f32>) -> bool {
         match self {
             Self::Windowed(pipeline) => pipeline.reprioritise(centre, facing),
+            Self::Erased(pipeline) => pipeline.reprioritise(centre, facing),
             Self::Drained | Self::Ringed { .. } => false,
         }
     }
@@ -1226,12 +1402,24 @@ impl<S: ChunkSource + 'static> JoinChunkStream<S> {
         &mut self,
         source: SourceRef<'_, S>,
     ) -> Result<Option<((i32, i32), ColumnPayload)>, ChunkEncodeError> {
+        if let Self::Ringed { rings, ready, .. } = self
+            && ready.is_empty()
+            && let SourceRef::Dimension(source) = source
+        {
+            let coords = rings.iter().flat_map(|ring| ring.iter().copied()).collect();
+            *self = Self::Erased(ColumnPipeline::with_window(
+                Arc::clone(source),
+                coords,
+                generation_window(),
+            ));
+        }
         match self {
             Self::Drained => Ok(None),
             // **Not collapsed to `Drained` on exhaustion** — see
             // [`windowed`](Self::windowed). The pipeline has to survive so a later
             // [`enqueue`](Self::enqueue) can refill it.
             Self::Windowed(pipeline) => pipeline.next().await,
+            Self::Erased(pipeline) => pipeline.next().await,
             Self::Ringed {
                 rings,
                 ready,
@@ -1292,6 +1480,77 @@ mod tests {
     /// identical at both stages.
     struct StageRecordingSource {
         requests: Mutex<Vec<((i32, i32), ChunkGenerationStage)>>,
+    }
+
+    struct RequestPathSource {
+        requests: Mutex<Vec<((i32, i32), lodestone_worldgen::stage_schedule::GenerationTarget, bool)>>,
+        scalar_calls: AtomicUsize,
+    }
+
+    struct CancellableRequestSource {
+        started: Arc<AtomicUsize>,
+        cancelled: Arc<AtomicUsize>,
+    }
+
+    impl ChunkSource for RequestPathSource {
+        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            self.scalar_calls.fetch_add(1, Ordering::SeqCst);
+            ChunkColumn::new(0, 16)
+        }
+
+        fn request_generation(
+            &self,
+            request: GenerationRequest,
+            session: Option<&mut GenerationSession>,
+        ) -> Result<Option<GenerationRequestResult>, GenerationRequestError> {
+            self.requests
+                .lock()
+                .expect("request log lock poisoned")
+                .push((request.target(), request.generation_target(), session.is_some()));
+            Ok(Some(GenerationRequestResult::Existing(ChunkColumn::new(0, 16))))
+        }
+
+        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::AIR.to_string()
+        }
+
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::DEFAULT_BIOME.to_string()
+        }
+
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    }
+
+    impl ChunkSource for CancellableRequestSource {
+        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            panic!("a cancellable request must not use the scalar path")
+        }
+
+        fn request_generation(
+            &self,
+            _request: GenerationRequest,
+            session: Option<&mut GenerationSession>,
+        ) -> Result<Option<GenerationRequestResult>, GenerationRequestError> {
+            let session = session.expect("request path must receive a session");
+            self.started.fetch_add(1, Ordering::SeqCst);
+            while !session.cancellation().is_cancelled() {
+                std::thread::yield_now();
+            }
+            self.cancelled.fetch_add(1, Ordering::SeqCst);
+            Err(GenerationRequestError::Session(
+                crate::worldgen_session::SessionError::Cancelled,
+            ))
+        }
+
+        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::AIR.to_string()
+        }
+
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::DEFAULT_BIOME.to_string()
+        }
+
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
     }
 
     impl ChunkSource for StageRecordingSource {
@@ -1454,6 +1713,97 @@ mod tests {
         let absent: std::collections::HashSet<(i32, i32)> = [(9, 9)].into_iter().collect();
         assert_eq!(pipeline.cancel(&absent), 0);
         assert_eq!(pipeline.remaining(), 2);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn supported_request_generation_precedes_scalar_fallback() {
+        let source = Arc::new(RequestPathSource {
+            requests: Mutex::new(Vec::new()),
+            scalar_calls: AtomicUsize::new(0),
+        });
+        let coords = vec![(0, 0), (1, 0)];
+        let mut pipeline = ColumnPipeline::with_window(Arc::clone(&source), coords.clone(), 1)
+            .with_generation_band((0, 0), -1);
+        while pipeline
+            .next()
+            .await
+            .expect("request source cannot fail")
+            .is_some()
+        {}
+
+        assert_eq!(source.scalar_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            *source.requests.lock().expect("request log lock poisoned"),
+            vec![
+                (
+                    (0, 0),
+                    lodestone_worldgen::stage_schedule::GenerationTarget::Shaped,
+                    true,
+                ),
+                (
+                    (1, 0),
+                    lodestone_worldgen::stage_schedule::GenerationTarget::Shaped,
+                    true,
+                ),
+            ]
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn erased_owned_stream_uses_request_generation() {
+        let source = Arc::new(RequestPathSource {
+            requests: Mutex::new(Vec::new()),
+            scalar_calls: AtomicUsize::new(0),
+        });
+        let owned: Arc<dyn ChunkSource> = source.clone();
+        let mut stream = JoinChunkStream::<RequestPathSource>::ringed(vec![vec![(0, 0)]]);
+        let item = stream
+            .next(SourceRef::Dimension(&owned))
+            .await
+            .expect("request source cannot fail")
+            .expect("owned stream must emit");
+        assert_eq!(item.0, (0, 0));
+        assert_eq!(source.scalar_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(source.requests.lock().expect("request log lock poisoned").len(), 1);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_inflight_request_signals_the_source_and_suppresses_delivery() {
+        let source = Arc::new(CancellableRequestSource {
+            started: Arc::new(AtomicUsize::new(0)),
+            cancelled: Arc::new(AtomicUsize::new(0)),
+        });
+        let mut pipeline = ColumnPipeline::with_window(Arc::clone(&source), vec![(0, 0)], 1);
+        let mut next = Box::pin(pipeline.next());
+        let started = Arc::clone(&source.started);
+        let wait_started = async {
+            while started.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::select! {
+                result = &mut next => panic!("request completed before cancellation: {result:?}"),
+                () = wait_started => {}
+            }
+        })
+        .await
+        .expect("request worker must start");
+        drop(next);
+
+        let dropped = [(0, 0)].into_iter().collect();
+        assert_eq!(pipeline.cancel(&dropped), 1);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while source.cancelled.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("request cancellation must reach the source");
+        assert!(pipeline.next().await.expect("cancelled stream cannot fail").is_none());
     }
 
     /// **Distance is the primary key**, so no amount of looking one way can

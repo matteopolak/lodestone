@@ -1408,7 +1408,7 @@ mod tests {
     #[test]
     #[ignore = "focused minecart worker measurement; run explicitly before choosing a production cutoff"]
     fn measure_dense_minecart_owner_workers() {
-        use std::time::Instant;
+        use lodestone_time::Instant;
 
         for count in [64, 128, 256, 512, 1_024] {
             let serial = dense_minecart_owner_fixture(count);

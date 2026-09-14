@@ -60,6 +60,7 @@ pub enum MainButton {
 /// Every title-screen widget, in vanilla's display order. Indices are the one
 /// index space shared by keyboard selection, mouse hover, hit-testing and the
 /// renderer — see [`super::render::title_slot`].
+#[cfg(not(target_arch = "wasm32"))]
 pub const MAIN_BUTTONS: [MainButton; 9] = [
     MainButton::Singleplayer,
     MainButton::Multiplayer,
@@ -75,6 +76,20 @@ pub const MAIN_BUTTONS: [MainButton; 9] = [
     MainButton::Accounts,
 ];
 
+/// The browser title screen omits account management entirely. Browser
+/// sessions use the local ownership attestation on the gate instead.
+#[cfg(target_arch = "wasm32")]
+pub const MAIN_BUTTONS: [MainButton; 8] = [
+    MainButton::Singleplayer,
+    MainButton::Multiplayer,
+    MainButton::Realms,
+    MainButton::Friends,
+    MainButton::Language,
+    MainButton::Accessibility,
+    MainButton::Options,
+    MainButton::Quit,
+];
+
 /// The two widgets on the ownership gate ([`super::Screen::Ownership`]).
 ///
 /// Deliberately only two, and deliberately not a title screen with everything
@@ -87,12 +102,20 @@ pub enum OwnershipButton {
     /// reaches, writing the *same* roster. Adding an account here therefore adds
     /// it to the switcher by construction; there is no second store and no
     /// second sign-in path to keep in sync.
+    #[cfg(not(target_arch = "wasm32"))]
     AddAccount,
     /// Quit the game. Present on every host, unlike the title screen's own Quit
     /// (see [`MainButton::enabled_on`]): a browser tab cannot end its process,
     /// but a gate whose only two rows are "add an account" and one that does
     /// nothing is worse than one row.
+    #[cfg(not(target_arch = "wasm32"))]
     Quit,
+    /// The browser-only local ownership attestation checkbox.
+    #[cfg(target_arch = "wasm32")]
+    Checkbox,
+    /// Continue to the title screen after the local attestation is checked.
+    #[cfg(target_arch = "wasm32")]
+    Continue,
 }
 
 impl OwnershipButton {
@@ -100,8 +123,14 @@ impl OwnershipButton {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
+            #[cfg(not(target_arch = "wasm32"))]
             OwnershipButton::AddAccount => "Add Account",
+            #[cfg(not(target_arch = "wasm32"))]
             OwnershipButton::Quit => "Quit Game",
+            #[cfg(target_arch = "wasm32")]
+            OwnershipButton::Checkbox => "I confirm that I own Minecraft: Java Edition.",
+            #[cfg(target_arch = "wasm32")]
+            OwnershipButton::Continue => "Continue",
         }
     }
 }
@@ -109,8 +138,13 @@ impl OwnershipButton {
 /// The ownership gate's widgets, in display order. As with [`MAIN_BUTTONS`],
 /// these indices are the one index space shared by keyboard selection, mouse
 /// hover, hit-testing and the renderer.
+#[cfg(not(target_arch = "wasm32"))]
 pub const OWNERSHIP_BUTTONS: [OwnershipButton; 2] =
     [OwnershipButton::AddAccount, OwnershipButton::Quit];
+
+#[cfg(target_arch = "wasm32")]
+pub const OWNERSHIP_BUTTONS: [OwnershipButton; 2] =
+    [OwnershipButton::Checkbox, OwnershipButton::Continue];
 
 /// Whether this build can end its own process, which is what **Quit Game**
 /// means. False in a browser tab — see [`MainButton::enabled_on`].
@@ -122,7 +156,7 @@ pub const CAN_EXIT_PROCESS: bool = !cfg!(target_arch = "wasm32");
 /// `multiplayer` feature the button remains in its vanilla position but cannot
 /// open a screen that could send traffic through a remote server or browser
 /// relay.
-pub const MULTIPLAYER_ENABLED: bool = cfg!(feature = "multiplayer");
+pub const MULTIPLAYER_ENABLED: bool = cfg!(all(feature = "multiplayer", not(target_arch = "wasm32")));
 
 impl MainButton {
     /// The label drawn on the button, or narrated for an icon-only one.
@@ -176,13 +210,13 @@ impl MainButton {
             MainButton::Multiplayer => MULTIPLAYER_ENABLED,
             MainButton::Singleplayer
             | MainButton::Options
-            | MainButton::Accounts
             // Both destination screens are built now — see the variants' own
             // docs.
             | MainButton::Language
             | MainButton::Accessibility => true,
             MainButton::Realms => false,
             MainButton::Friends => true,
+            MainButton::Accounts => !cfg!(target_arch = "wasm32"),
         }
     }
 

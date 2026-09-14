@@ -646,7 +646,7 @@ impl RenderState {
     pub(crate) fn populate_distant_terrain_one(
         &mut self,
         queue: &wgpu::Queue,
-        sample: impl FnMut(i32, i32) -> lodestone_render::HorizonCell,
+        sample: impl FnMut(i32, i32) -> Option<lodestone_render::HorizonCell>,
     ) -> bool {
         self.distant_terrain
             .as_mut()

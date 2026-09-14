@@ -6,7 +6,6 @@
 
 use std::cell::RefCell;
 
-use lodestone_data::block_states::StateId as CanonicalStateId;
 use lodestone_worldgen_core::hash::FastSet;
 
 use crate::feature::BlockPos;
@@ -70,11 +69,16 @@ pub(super) fn place_simple_block<R: RandomSource>(
 fn double_plant_upper_state(grid: &VegGrid, lower: StateId) -> Option<StateId> {
     let canonical = grid.interner().canonical_id(lower)?;
     const LOWER: [u32; 6] = [12916, 12918, 12920, 12922, 12924, 12926];
-    if !LOWER.contains(&canonical.raw()) {
-        return None;
-    }
-    let upper = CanonicalStateId::new(canonical.raw() - 1)?;
-    Some(grid.interner().id_of(&upper.canonical_state()))
+    const UPPER: [&str; 6] = [
+        "minecraft:sunflower[half=upper]",
+        "minecraft:lilac[half=upper]",
+        "minecraft:rose_bush[half=upper]",
+        "minecraft:peony[half=upper]",
+        "minecraft:tall_grass[half=upper]",
+        "minecraft:large_fern[half=upper]",
+    ];
+    let index = LOWER.iter().position(|&id| id == canonical.raw())?;
+    Some(grid.interner().id_of(UPPER[index]))
 }
 
 thread_local! {
@@ -1273,7 +1277,12 @@ pub(super) fn place_trunk_vine_decorator<R: RandomSource>(
             if random.next_int_bounded(3) > 0 {
                 let (nx, nz) = (pos.x + dx, pos.z + dz);
                 if tag_at(grid, tags, Tag::Air, nx, pos.y, nz) {
-                    grid.set_if_in_bounds(nx, pos.y, nz, format!("minecraft:vine[{prop}=true]"));
+                    grid.set_formatted_state_if_in_bounds(
+                        nx,
+                        pos.y,
+                        nz,
+                        format_args!("minecraft:vine[{prop}=true]"),
+                    );
                 }
             }
         }

@@ -17,17 +17,17 @@
 //!    instead of `unreachable`.
 //! 2. **Assets, as bytes.** Native scans for a pack root and `std::fs::read`s
 //!    `client.jar`; a browser has no filesystem, so the bytes are `fetch`ed once and
-//!    handed to [`lodestone::platform::assets::install`]. Everything downstream — the
+//!    handed to the shared embedding/session boundary. Everything downstream — the
 //!    zip parser, the atlas builder, the model baker, the font loader — is the same
 //!    synchronous code the native client runs. **The filesystem wall is crossed
 //!    exactly once, here, at the byte source.**
-//! 3. **Starting the app**, then getting out of the way. `lodestone::app::run` returns
-//!    immediately in a browser (winit's `spawn_app` hands the loop to the page), so
-//!    there is deliberately nothing after it.
+//! 3. **Starting the app**, then getting out of the way. The shared embedding boundary
+//!    returns immediately in a browser (winit's `spawn_app` hands the loop to the page),
+//!    so there is deliberately nothing after it.
 //!
 //! ## The ordering is load-bearing
 //!
-//! `install` must happen **before** `app::run`. `Config::resolve_persisted` and the
+//! Asset installation must happen **before** session startup. `Config::resolve_persisted` and the
 //! whole `resources::load_*` family are called during bring-up and each resolve their
 //! assets lazily but *once*, memoised; a bundle installed after the first call would be
 //! ignored and the session would run on the demo palette with no error. Fetching first
@@ -40,15 +40,23 @@
 //! the real thing, and a synthetic stand-in on screen is indistinguishable from success
 //! — which is the defect class this repo keeps paying for.
 
-use lodestone::{CliOutcome, Config};
+#[cfg(target_arch = "wasm32")]
+mod embed;
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static STANDALONE_HANDLE: std::cell::RefCell<Option<embed::LodestoneHandle>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 use lodestone_web::client_jar;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 use web_sys::{Request, RequestCache, RequestInit, Response, window};
 
-/// The renderable corpus: blockstates, models, textures, lang, fonts, GUI sprites,
-/// sounds index. Copied into `dist/` by trunk from the local `.cache/mc/26.2` —
-/// see `index.html`, and `web/README.md` for how to populate it.
+/// The deterministic browser resource pack: every `assets/` and `data/` entry
+/// the browser loader can consume, plus pack metadata. Staged from the local
+/// `.cache/mc/26.2` archive by `stage_resource_pack.py`.
 ///
 /// **Does not carry the real title-screen panorama.** `client.jar` ships only a
 /// 1×1 grey stub for each of the six panorama faces — the real 1024×1024 art is a
@@ -144,10 +152,29 @@ async fn fetch_client_jar() -> Result<Vec<u8>, String> {
         Ok(bytes) => bytes,
         Err(error) if error.starts_with("HTTP 404 ") => {
             log::info!(
-                "[boot] {} is absent; using direct {CLIENT_JAR_URL}",
+                "[boot] {} is absent; checking direct archive manifest",
                 client_jar::PARTS_MANIFEST_URL
             );
-            return fetch_bytes(CLIENT_JAR_URL).await;
+            let direct_manifest = match fetch_bytes_no_store(client_jar::DIRECT_MANIFEST_URL).await {
+                Ok(bytes) => bytes,
+                Err(error) if error.starts_with("HTTP 404 ") => {
+                    log::info!(
+                        "[boot] {} is absent; using direct {CLIENT_JAR_URL}",
+                        client_jar::DIRECT_MANIFEST_URL
+                    );
+                    return fetch_bytes(CLIENT_JAR_URL).await;
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "fetch {} failed: {error}",
+                        client_jar::DIRECT_MANIFEST_URL
+                    ));
+                }
+            };
+            let manifest = client_jar::ClientJarManifest::parse(&direct_manifest)?;
+            let jar = fetch_bytes(CLIENT_JAR_URL).await?;
+            manifest.verify_download(&jar)?;
+            return Ok(jar);
         }
         Err(error) => return Err(format!("fetch {} failed: {error}", client_jar::PARTS_MANIFEST_URL)),
     };
@@ -275,7 +302,8 @@ async fn fetch_sound_bundle() -> (Vec<u8>, Vec<(String, Vec<u8>)>) {
 
 /// Fetch the required blobs and the optional panorama faces and sound corpus,
 /// and install them all as the session's asset bundle.
-async fn install_assets() -> Result<(), String> {
+#[cfg(target_arch = "wasm32")]
+async fn install_assets() -> Result<lodestone::platform::assets::Bundle, String> {
     status("fetching client.jar …");
     let client_jar = fetch_client_jar().await?;
     status(&format!(
@@ -306,64 +334,70 @@ async fn install_assets() -> Result<(), String> {
         sound_objects.len(),
         sounds_json.len() as f64 / 1024.0,
     );
-    lodestone::platform::assets::install(lodestone::platform::assets::Bundle {
+    let bundle = lodestone::platform::assets::Bundle {
         client_jar,
         blocks_report,
         panorama,
         sounds_json,
         sound_objects,
-    })?;
+    };
     status(&sizes);
-    Ok(())
+    Ok(bundle)
 }
 
 /// Boot: install the assets, then start the real shell.
-async fn boot() {
-    if let Err(e) = install_assets().await {
-        status(&format!(
-            "ASSET LOAD FAILED — {e}. The browser build needs client.jar and \
-             blocks.json served beside the page; see web/README.md. Nothing is drawn \
-             on purpose, so this cannot be mistaken for a working session."
-        ));
-        return;
-    }
-
-    // The version-free `Config`, from an *empty* argument list. `std::env::args()` on
-    // wasm32 yields only the program name, so there is nothing to parse and no
-    // `--help`/error outcome to handle — but going through `from_args` rather than
-    // `Config::default()` keeps one construction path, so a future query-string
-    // front end lowers into the same parser the CLI uses.
-    let mut config = match Config::from_args(std::iter::empty::<String>()) {
-        CliOutcome::Run(config) => config,
-        CliOutcome::Help(text) => {
-            log::info!("{text}");
-            return;
-        }
-        CliOutcome::Error(msg) => {
-            status(&format!("config error: {msg}"));
+#[cfg(target_arch = "wasm32")]
+async fn boot(canvas: web_sys::HtmlCanvasElement) {
+    let bundle = match install_assets().await {
+        Ok(bundle) => bundle,
+        Err(e) => {
+            status(&format!(
+                "ASSET LOAD FAILED — {e}. The browser build needs client.jar and \
+                 blocks.json served beside the page; see web/README.md. Nothing is drawn \
+                 on purpose, so this cannot be mistaken for a working session."
+            ));
             return;
         }
     };
-
-    // Fold persisted settings in, exactly as `main.rs` does on native. This is the
-    // read half of `platform::store`: in a browser it comes from `localStorage`, so a
-    // player's four dozen options survive a reload.
-    config.resolve_persisted(&lodestone::config::Options::load());
 
     status("starting the shell …");
     // Drop the boot overlay before the shell draws. It is a plain DOM element sitting
     // *over* the canvas, so leaving it up would print "starting the shell…" across the
     // title screen's first button — which is what the first successful run did.
     remove_boot_overlay();
-    // Returns immediately: winit's `spawn_app` has handed the loop to the browser.
-    // Nothing may go after this that assumes the session has ended.
-    if let Err(e) = lodestone::app::run(config) {
-        status(&format!("shell failed to start: {e}"));
+    match embed::mount_bundle(canvas, bundle, None).await {
+        Ok(handle) => STANDALONE_HANDLE.with_borrow_mut(|slot| *slot = Some(handle)),
+        Err(e) => status(&format!("shell failed to start: {e:?}")),
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+fn standalone_canvas() -> Option<web_sys::HtmlCanvasElement> {
+    window()?
+        .document()?
+        .query_selector("canvas[data-lodestone-standalone]")
+        .ok()??
+        .dyn_into()
+        .ok()
+}
+
+#[cfg(target_arch = "wasm32")]
 fn main() {
     console_error_panic_hook::set_once();
     let _ = console_log::init_with_level(log::Level::Info);
-    spawn_local(boot());
+    let standalone = window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.query_selector("[data-lodestone-standalone]").ok())
+        .flatten()
+        .is_some();
+    if standalone {
+        if let Some(canvas) = standalone_canvas() {
+            spawn_local(boot(canvas));
+        } else {
+            status("standalone page has no canvas[data-lodestone-standalone]");
+        }
+    }
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+fn main() {}

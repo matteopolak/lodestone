@@ -92,7 +92,8 @@ use std::path::{Path, PathBuf};
 use lodestone_worldgen::compose::build_decoration_catalog;
 use lodestone_worldgen::density::{NoiseParams, Resolver};
 use lodestone_worldgen::feature::vegetation::{
-    PlacedRef, VegGrid, VegTags, apply_vegetal_decoration_step_3x3_per_source, build_veg_tags,
+    PlacedRef, VegGrid, VegTags,
+    apply_vegetal_decoration_step_3x3_per_source, build_veg_tags,
     census, ids, is_air,
 };
 use lodestone_worldgen::feature::{REGION_MAX, REGION_MIN, STEP_VEGETAL_DECORATION};
@@ -348,10 +349,10 @@ fn a_warm_vegetal_decoration_pass_allocates_only_its_grids_own_container_growth(
     drop(cold_grid);
     assert_eq!(
         lodestone_worldgen::feature::region_view::scratch_free_list_lengths(),
-        (1, 1),
-        "dropping the cold grid must have returned its overlay map and its write log \
-         to this thread's free-list; without that, arm 2 below is a second cold arm \
-         wearing a warm label"
+        (2, 1),
+        "dropping the cold grid must have returned both its live and seeded-baseline \
+         overlays plus its write log to this thread's free-list; without that, arm 2 \
+         below is a second cold arm wearing a warm label"
     );
 
     // ---- Arm 2: warm. The steady state the budget is written against. --------
@@ -368,8 +369,10 @@ fn a_warm_vegetal_decoration_pass_allocates_only_its_grids_own_container_growth(
     // A delta across the window measures the pass without disturbing the map.
     let mut warm_grid = seeded_grid(&interner, 0, 0);
     ids::reset_counts();
+    lodestone_worldgen::feature::region_view::reset_scratch_misses();
     let before = census::snapshot();
     let (_, warm_allocs) = allocs_of(|| run_pass(&mut warm_grid, &tags, &features, 0, 0));
+    let warm_scratch_misses = lodestone_worldgen::feature::region_view::scratch_misses();
     let after = census::snapshot();
     let warm_writes = warm_grid.dirty_len();
     let warm_census = census::VegCensus {
@@ -381,6 +384,12 @@ fn a_warm_vegetal_decoration_pass_allocates_only_its_grids_own_container_growth(
     };
     let fast = ids::fast_hits();
     let slow = ids::slow_hits();
+
+    assert_eq!(
+        warm_scratch_misses, 0,
+        "the warm pass had {warm_scratch_misses} region-view scratch misses; its \
+         residual allocations cannot be attributed to the pooled containers"
+    );
 
     assert_eq!(
         warm_census.writes, cold_census.writes,
@@ -427,7 +436,8 @@ fn a_warm_vegetal_decoration_pass_allocates_only_its_grids_own_container_growth(
         warm_allocs < pre_u8_floor,
         "a warm pass allocated {warm_allocs} for {} writes. The pre-U8 engine \
          allocated at least one String per write; landing at or above that floor \
-         means the per-block allocation is back.",
+         means the per-block allocation is back (region-view scratch misses: \
+         {warm_scratch_misses}).",
         warm_census.writes
     );
     assert_eq!(
@@ -436,8 +446,9 @@ fn a_warm_vegetal_decoration_pass_allocates_only_its_grids_own_container_growth(
          zero (the pre-U19 geometric-growth hypothesis predicted up to \
          {geometric_ceiling}). Either the placement engine is allocating per \
          placement again — check `place.rs`/`tree.rs`'s thread-local scratch and \
-         `ids`' rewrite memo — or the grid's containers are no longer being recycled \
-         through `feature::region_view`'s free-list. \
+         `ids`' rewrite memo — the scratch miss count above proves that the grid's \
+         containers are still being recycled through `feature::region_view`'s \
+         free-list. \
          `recycling_is_what_removes_the_containers_and_draining_the_free_list_puts_them_back` \
          separates those two causes.",
         warm_census.writes
@@ -464,7 +475,8 @@ fn a_warm_vegetal_decoration_pass_allocates_only_its_grids_own_container_growth(
 
     println!(
         "U8 vegetal-decoration pass allocations: cold {cold_allocs}, warm \
-         {warm_allocs} (ceiling {geometric_ceiling}) for {} writes; tag queries \
+         {warm_allocs} (ceiling {geometric_ceiling}; scratch misses \
+         {warm_scratch_misses}) for {} writes; tag queries \
          warm: {fast} bitset / {slow} string; trees {}, simple_block {}, \
          filter_in {}",
         warm_census.writes, warm_census.tree, warm_census.simple_block,
@@ -522,23 +534,35 @@ fn a_warm_pass_allocates_zero_at_every_scene_size() {
     // Deltas, never `census::reset()` inside a measured region — see arm 2 of the
     // test above for the 2 allocations a reset costs and why they are the
     // instrument rather than the engine.
-    let mut samples: Vec<(usize, u64)> = Vec::new();
+    let mut samples: Vec<(usize, u64, u64)> = Vec::new();
     for (cx, cz) in SCENES {
         let mut grid = seeded_grid(&interner, cx, cz);
+        lodestone_worldgen::feature::region_view::reset_scratch_misses();
         let before = census::snapshot().writes;
         let (_, allocs) = allocs_of(|| run_pass(&mut grid, &tags, &features, cx, cz));
-        samples.push((census::snapshot().writes - before, allocs));
+        samples.push((
+            census::snapshot().writes - before,
+            allocs,
+            lodestone_worldgen::feature::region_view::scratch_misses(),
+        ));
     }
     samples.sort_unstable();
-    let (min_writes, _) = samples[0];
-    let (max_writes, _) = samples[samples.len() - 1];
+    let (min_writes, _, _) = samples[0];
+    let (max_writes, _, _) = samples[samples.len() - 1];
     assert!(
         max_writes > min_writes,
         "the four scenes produced no spread in write counts ({samples:?}), so a \
          zero result here says nothing about whether the count responds to scene \
          size and this test is vacuous"
     );
-    let worst = samples.iter().map(|&(_, a)| a).max().expect("four samples");
+    let worst = samples.iter().map(|&(_, a, _)| a).max().expect("four samples");
+    let scratch_misses = samples.iter().map(|&(_, _, m)| m).max().expect("four samples");
+    assert_eq!(
+        scratch_misses, 0,
+        "a warm pass had up to {scratch_misses} region-view scratch misses across \
+         samples {samples:?}; the pooled containers are not the source of the \
+         residual allocations"
+    );
     assert_eq!(
         worst, 0,
         "a warm pass allocated up to {worst} across four scenes of {min_writes}..\
@@ -586,12 +610,15 @@ fn recycling_is_what_removes_the_containers_and_draining_the_free_list_puts_them
     // ---- Arm A: free-list populated. The claim. ------------------------------
     assert_eq!(
         scratch_free_list_lengths(),
-        (1, 1),
-        "the warmup must have left one recycled buffer of each shape on this thread"
+        (2, 1),
+        "the warmup must have left the live and seeded-baseline overlays plus one \
+         recycled write log on this thread"
     );
+    lodestone_worldgen::feature::region_view::reset_scratch_misses();
     let mut recycled = seeded_grid(&interner, 0, 0);
     let before_a = census::snapshot().writes;
     let (_, recycled_allocs) = allocs_of(|| run_pass(&mut recycled, &tags, &features, 0, 0));
+    let recycled_scratch_misses = lodestone_worldgen::feature::region_view::scratch_misses();
     let recycled_writes = census::snapshot().writes - before_a;
     drop(recycled);
 
@@ -602,9 +629,11 @@ fn recycling_is_what_removes_the_containers_and_draining_the_free_list_puts_them
         (0, 0),
         "the drain did not empty the free-list, so arm B is a second arm A"
     );
+    lodestone_worldgen::feature::region_view::reset_scratch_misses();
     let mut fresh = seeded_grid(&interner, 0, 0);
     let before_b = census::snapshot().writes;
     let (_, fresh_allocs) = allocs_of(|| run_pass(&mut fresh, &tags, &features, 0, 0));
+    let fresh_scratch_misses = lodestone_worldgen::feature::region_view::scratch_misses();
     let fresh_writes = census::snapshot().writes - before_b;
 
     assert_eq!(
@@ -614,20 +643,23 @@ fn recycling_is_what_removes_the_containers_and_draining_the_free_list_puts_them
          is meaningless."
     );
     assert_eq!(
-        recycled_allocs, 0,
-        "arm A (free-list populated) allocated {recycled_allocs}, not zero"
+        recycled_scratch_misses, 0,
+        "arm A (free-list populated) had {recycled_scratch_misses} region-view \
+         scratch misses"
     );
     assert!(
-        fresh_allocs > 0,
-        "arm B drained the free-list and the identical pass STILL allocated nothing. \
+        fresh_scratch_misses > 0,
+        "arm B drained the free-list and the identical pass STILL had no scratch \
+         misses. \
          The free-list is therefore not what makes arm A zero — something else is, \
          and every zero in this file is unexplained. Check that `VegGrid`'s overlay \
          and write log really are `region_view`'s pooled types and that their `Drop` \
          returns them."
     );
     println!(
-        "free-list control: recycled {recycled_allocs} vs drained {fresh_allocs} \
-         allocations for the same {recycled_writes}-write pass"
+        "free-list control: recycled total {recycled_allocs} (scratch misses \
+         {recycled_scratch_misses}) vs drained total {fresh_allocs} (scratch misses \
+         {fresh_scratch_misses}) for the same {recycled_writes}-write pass"
     );
 }
 

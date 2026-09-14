@@ -16,6 +16,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
+target_dir="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
 SEED="${1:-3}"
 shift || true
 if [ "$#" -eq 0 ]; then
@@ -27,7 +29,7 @@ fi
 echo "Building bench_worldgen (release)..." >&2
 cargo build --release -p lodestone-server --example bench_worldgen >&2
 
-BIN="./target/release/examples/bench_worldgen"
+BIN="$target_dir/release/examples/bench_worldgen"
 # Full stdout/stderr goes to a log per radius so nothing here has to parse
 # the program's own numbers through a pipeline for anything load-bearing;
 # this script's only self-measured, trustworthy number is wall time via

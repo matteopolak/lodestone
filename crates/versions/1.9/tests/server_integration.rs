@@ -163,7 +163,7 @@ async fn assert_registry_selected_server_consumes_block_use(protocol_version: i3
             face: BlockFace::Up,
             cursor: Vec3f::new(0.5, 0.5, 0.5),
             inside_block: false,
-            sequence: 0,
+            sequence: lodestone_model::PredictionSequence::INITIAL,
         })
         .expect("joined client accepts block use");
     let powered = lodestone_data::block_states::state_id(
@@ -232,7 +232,7 @@ async fn assert_registry_selected_server_consumes_a_chest_click(protocol_version
             face: BlockFace::North,
             cursor: Vec3f::new(0.5, 0.5, 0.5),
             inside_block: false,
-            sequence: 0,
+            sequence: lodestone_model::PredictionSequence::INITIAL,
         })
         .expect("joined client accepts chest use");
 

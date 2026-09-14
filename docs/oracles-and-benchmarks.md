@@ -135,6 +135,58 @@ the real benchmark binaries instead of letting Cargo discover it as an empty sta
 When adding a benchmark, add its explicit manifest entry; when adding a helper, keep it as a
 module behind an existing target rather than creating a target with no benchmark body.
 
+### Worldgen performance campaign
+
+`just worldgen-sweep` measures the embedded server generator over separate
+processes, recording wall time and peak resident set per radius. It resolves
+Cargo's configured target directory through `cargo metadata`, so it works with
+the machine-wide shared target without introducing a per-run target override.
+The sweep's benchmark output is context; the script's completed-file wall and
+RSS readings are the measurements to compare.
+
+The `gen-counters` calibration decomposes aquifer queries into fill cells,
+height scans, and structure-placement predicates. It counts the two predicate
+call sites separately and asserts their sum with the fill and scan terms equals
+every `block_at` call, with post-snapshot hook liveness controls. Run it with:
+
+```bash
+just worldgen-bench
+```
+
+`just samply-worldgen` builds the selected bounded workload and accepts
+`--mode production|session|parity-consumer`:
+
+```text
+just samply-worldgen --mode production --seed 3 --radius 8
+just samply-worldgen --mode session --seed 42 --grid-side 16 --dimension all --stage decorated
+just samply-worldgen --mode parity-consumer --dimension overworld --cx 0 0 --cz 0 0
+```
+
+The production mode profiles the integrated server's embedded generator. The
+session mode profiles the dimension-separated generator workload used as the
+bounded session input until the request-scoped production session has its own
+finite executable. The parity-consumer mode profiles the stream comparator and
+its external producer together; use it for consumer overhead, not as a pure
+generator number. Captures are written to `bench-results/profiles/` and are
+never part of the output checksum or parity gate. `--dry-run` prints the full
+resolved command without starting Samply or an oracle.
+
+Each profile should be paired with the generation counters and allocation/RSS
+records from the same workload. Separate external-oracle startup, transfer,
+session initialization, immutable admission, mutable completion, snapshot and
+encoding, hashing/classification, and artifact-I/O costs when those boundaries
+are available; a sampled profile alone identifies hot code but cannot establish
+an end-to-end stage percentage. Record first-result latency, steady-state
+throughput, resident-column and retained-byte high-water marks, cache hits and
+misses, duplicate completions, spill counts, and simulation-thread stalls.
+
+On the current macOS toolchain, the release worldgen benchmark can fail at the
+final link when Rust emits LLVM 23 LTO bitcode but the selected Apple linker
+understands LLVM 21. `just worldgen-bench` selects the pinned toolchain's
+`rust-lld`, which understands the emitted bitcode and preserves LTO. If that
+tool is unavailable, the wrapper uses `profile.bench.lto=false` and labels the
+run as diagnostic; do not compare its timing with an LTO run.
+
 ### The PGO experiment
 
 A single measured answer to "is profile-guided optimization worth adding to the release build":

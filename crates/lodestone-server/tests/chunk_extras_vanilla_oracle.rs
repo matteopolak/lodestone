@@ -269,16 +269,24 @@ fn unmodelled_block_entity_ids_are_skipped_rather_than_failing_the_chunk() {
     ));
 }
 
-/// The terrain decoder still reads a fixture carrying block entities and
-/// ticks — the control that adding three lists to the schema did not disturb
-/// the terrain half already gated elsewhere.
+/// The terrain decoder still reads a complete fixture carrying block entities
+/// and ticks.
 #[test]
-fn the_terrain_half_still_decodes_from_the_same_bytes() {
-    for bytes in [BLOCK_ENTITY_CHUNK, TICKS_CHUNK] {
-        let mut reader = Reader::new(bytes);
-        let (_, nbt) = read_named_nbt(&mut reader).expect("valid named NBT");
-        let column = chunk_nbt::column_from_nbt(&nbt, -64, 384).expect("terrain still decodes");
-        assert_eq!(column.min_y, -64);
-        assert_eq!(column.height, 384);
-    }
+fn the_terrain_half_still_decodes_from_a_complete_fixture() {
+    let mut reader = Reader::new(TICKS_CHUNK);
+    let (_, nbt) = read_named_nbt(&mut reader).expect("valid named NBT");
+    let column = chunk_nbt::column_from_nbt(&nbt, -64, 384).expect("terrain still decodes");
+    assert_eq!(column.min_y, -64);
+    assert_eq!(column.height, 384);
+}
+
+#[test]
+fn an_earlier_generation_fixture_is_rejected_by_the_playable_decoder() {
+    let mut reader = Reader::new(BLOCK_ENTITY_CHUNK);
+    let (_, nbt) = read_named_nbt(&mut reader).expect("valid named NBT");
+    assert!(matches!(
+        chunk_nbt::column_from_nbt(&nbt, -64, 384),
+        Err(chunk_nbt::Error::InvalidStatus { actual: Some(status) })
+            if status == "minecraft:initialize_light"
+    ));
 }

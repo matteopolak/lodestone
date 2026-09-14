@@ -31,11 +31,8 @@ use super::measure::clip;
 /// [`layout::DEFAULT_HEADER_AND_FOOTER_HEIGHT`] — one 9 px title `StringWidget`
 /// with 12 px of slack either side.
 const ACCOUNTS_HEADER_H: f32 = 33.0;
-/// The footer band: [`SERVER_LIST_FOOTER_H`]'s 60, **even though this screen's
-/// footer is one row of buttons rather than two**. The 40 px a single 20 px row
-/// leaves is not waste: the `FrameLayout` splits it 20/20, and the lower half is
-/// where the key-hint line sits (see [`accounts_hint_dy`]). A 33 px band would
-/// put that line off the bottom of the canvas.
+/// The footer band: [`SERVER_LIST_FOOTER_H`]'s 60, keeping the account and
+/// multiplayer screen content bands aligned.
 pub(super) const ACCOUNTS_FOOTER_H: f32 = 60.0;
 /// Vanilla's own horizontal linear layout at spacing 4 — [`SERVER_LIST_FOOTER_SPACING`].
 pub(super) const ACCOUNTS_FOOTER_SPACING: i32 = 4;
@@ -70,8 +67,12 @@ pub(super) const ACCOUNTS_DETAIL_Y: f32 = 12.0;
 const ACCOUNTS_TITLE_H: f32 = 9.0;
 /// The account list's own title.
 const ACCOUNTS_TITLE: &str = "Accounts";
-/// The sign-in sub-flow's title.
+/// The sign-in sub-flow's title. Browser builds never enter this native flow;
+/// keep their fallback frame provider-neutral so it cannot retain auth copy.
+#[cfg(not(target_arch = "wasm32"))]
 const ACCOUNTS_SIGN_IN_TITLE: &str = "Sign in with Microsoft";
+#[cfg(target_arch = "wasm32")]
+const ACCOUNTS_SIGN_IN_TITLE: &str = "Accounts";
 /// The failure state's title.
 const ACCOUNTS_FAILED_TITLE: &str = "Sign-in failed";
 /// The offline-name editor's title.
@@ -235,18 +236,6 @@ fn accounts_wide_button_slot() -> Slot {
         w: widget::DEFAULT_WIDTH,
         h: row.h,
     }
-}
-
-/// The key-hint line's offset from the bottom edge: 8 px below the arranged
-/// button row, in the lower half of the slack [`ACCOUNTS_FOOTER_H`] leaves.
-///
-/// Derived from the arranged row rather than written as a constant, because the
-/// failure mode of a constant here is a hint line drawn *through* the buttons —
-/// and per `CLAUDE.md` a rect a gate restates is a rect that has been wrong
-/// twice.
-fn accounts_hint_dy() -> f32 {
-    let row = accounts_button_slot(0);
-    row.dy + row.h + 8.0
 }
 
 /// The screen title, positioned from the arranged header's own title cell.
@@ -448,20 +437,6 @@ fn accounts_band_label(text: String, line: f32, colour: [f32; 4]) -> MenuLabel {
     }
 }
 
-/// The key-hint line, centred along the bottom edge — this screen's stand-in for
-/// the row-stack `footer` that a `vanilla` frame suppresses.
-fn accounts_hint_label(text: &str) -> MenuLabel {
-    MenuLabel {
-        text: text.to_string(),
-        origin: Origin::ScreenBottom,
-        dx: 0.0,
-        dy: accounts_hint_dy(),
-        align: Align::Centre,
-        colour: ACCOUNTS_DIM,
-        scale: 1.0,
-    }
-}
-
 /// Builds the account list's ordinary (no sign-in in flight) frame: the scrolling
 /// account + offline list at [`ACCOUNTS_ITEM_H`] pitch, then the four action
 /// buttons in the arranged footer.
@@ -579,7 +554,16 @@ pub(super) fn accounts_idle_frame(accounts: &super::accounts::AccountsNav) -> Me
             match row {
                 AccountRow::Account(p) => MenuRow {
                     label: p.username.clone(),
-                    detail: "Microsoft account".to_string(),
+                    detail: {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            "Microsoft account".to_string()
+                        }
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            "Account".to_string()
+                        }
+                    },
                     trailing: if accounts.is_selected(p.profile_id) {
                         "Selected".to_string()
                     } else {
@@ -653,38 +637,7 @@ pub(super) fn accounts_idle_frame(accounts: &super::accounts::AccountsNav) -> Me
         list_len + (focus - list_len).min(BUTTON_COUNT - 1)
     };
 
-    let mut labels = vec![
-        accounts_title_label(ACCOUNTS_TITLE),
-        // **One line, whose middle term follows the third button.** A second
-        // hint line is not available here: `accounts_hint_dy` already sits in
-        // the lower half of the 40 px of slack `ACCOUNTS_FOOTER_H` leaves, so a
-        // line `LINE_H` below it lands ~3 px from the bottom edge and a 9 px
-        // glyph would draw off-canvas. `Del` is also *wrong* on the offline row
-        // — it cannot be removed — so making the term conditional fixes a
-        // pre-existing lie rather than only adding a hint.
-        accounts_hint_label(match accounts.third_button() {
-            super::accounts::ThirdButton::Remove => "Enter select   Del remove   Esc back",
-            super::accounts::ThirdButton::EditName => {
-                "Enter select   Edit Name renames   Esc back"
-            }
-        }),
-    ];
-    if list_len == 1 {
-        // Placed under the last row rather than under the title: the header band
-        // is 33 px and holds a 9 px title, so there is no room for a subtitle
-        // there. Row 1's top is the first free line, derived from the same two
-        // values the rows are placed by rather than restated — and a one-row list
-        // has nothing to scroll, so the unscrolled band top is the right anchor.
-        labels.push(MenuLabel {
-            text: "No accounts signed in - add one, or play offline".to_string(),
-            origin: Origin::ScreenTop,
-            dx: 0.0,
-            dy: accounts_band_top() + ACCOUNTS_ITEM_H + 4.0,
-            align: Align::Centre,
-            colour: ACCOUNTS_DIM,
-            scale: 1.0,
-        });
-    }
+    let labels = vec![accounts_title_label(ACCOUNTS_TITLE)];
     // **The "Showing 1-5 of 9" counter is deliberately gone.** It was this screen's
     // stand-in for a scrollbar, and it existed only because the frame knew its own
     // window size while the draw had no bar to show. There is a real
@@ -732,7 +685,14 @@ pub(super) fn accounts_flow_frame(
         if waiting {
             "Waiting for you to finish signing in...".to_string()
         } else {
-            "Contacting Microsoft...".to_string()
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                "Contacting Microsoft...".to_string()
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                "Sign-in is unavailable in this browser build.".to_string()
+            }
         },
         0.0,
         LABEL,
@@ -751,12 +711,6 @@ pub(super) fn accounts_flow_frame(
             ACCOUNTS_DIM,
         ));
     }
-    labels.push(accounts_hint_label(if waiting {
-        "O reopen browser   C copy code   Esc cancel"
-    } else {
-        "Esc cancel"
-    }));
-
     MenuFrame {
         rows: vec![MenuRow {
             label: "Cancel".to_string(),
@@ -837,7 +791,6 @@ pub(super) fn accounts_name_edit_frame(
             2.0 + (EDIT_BOX_H / LINE_H).ceil() + 1.0,
             ACCOUNTS_DIM,
         ),
-        accounts_hint_label("Enter save   Esc cancel"),
     ];
     // A refusal is a *notice*, not a `message`, for `accounts_failed_frame`'s
     // reason: it is wrapped and bounded to the band rather than one unwrapped
@@ -906,12 +859,8 @@ pub(super) fn accounts_failed_frame(message: &str) -> MenuFrame<'static> {
         }],
         selected: 0,
         vanilla: true,
-        labels: vec![
-            accounts_title_label(ACCOUNTS_FAILED_TITLE),
-            accounts_hint_label("Enter or Esc continues"),
-        ],
+        labels: vec![accounts_title_label(ACCOUNTS_FAILED_TITLE)],
         notice: Some(accounts_notice(message.to_string(), FG_BAD)),
         ..Default::default()
     }
 }
-

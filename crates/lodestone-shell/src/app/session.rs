@@ -5,6 +5,15 @@
 use super::*;
 use lodestone_data::item::Item;
 
+#[cfg(target_arch = "wasm32")]
+impl Drop for WindowApp {
+    fn drop(&mut self) {
+        if let Some(lifecycle) = self.browser_lifecycle.as_ref() {
+            lifecycle.set(true);
+        }
+    }
+}
+
 impl WindowApp {
     /// Build the normal shell pipeline against an offscreen target. This is
     /// used by the terminal surface so it rasterizes the exact same world,
@@ -467,6 +476,19 @@ impl WindowApp {
         Self::new_with_app(Sim::client_app(), config)
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn new_with_app_and_canvas(
+        app: lodestone_app::App,
+        config: Config,
+        canvas: web_sys::HtmlCanvasElement,
+        lifecycle: Rc<Cell<bool>>,
+    ) -> Self {
+        let mut window_app = Self::new_with_app(app, config);
+        window_app.browser_canvas = Some(canvas);
+        window_app.browser_lifecycle = Some(lifecycle);
+        window_app
+    }
+
     /// Build the windowed shell around a **caller-composed** [`lodestone_app::App`]
     /// instead of [`Sim::client_app`]'s own — the rendered half of the seam
     /// `crates/lodestone-shell/tests/interaction/rendered_client_takes_a_plugin.rs`
@@ -496,6 +518,10 @@ impl WindowApp {
         let persisted = crate::config::Options::load();
         Self {
             config,
+            #[cfg(target_arch = "wasm32")]
+            browser_canvas: None,
+            #[cfg(target_arch = "wasm32")]
+            browser_lifecycle: None,
             benchmark,
             benchmark_segment: None,
             sim,

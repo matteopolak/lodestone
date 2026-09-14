@@ -252,5 +252,7 @@ fn canonical_state(name: &str, properties: &[(&str, &str)]) -> u32 {
         .unwrap_or_else(|| panic!("26.2 registry has no {name} with {properties:?}"))
 }
 
+#[path = "capture_join/replay.rs"]
 mod replay;
+#[path = "capture_join/recording.rs"]
 mod recording;

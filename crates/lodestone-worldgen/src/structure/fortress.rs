@@ -42,7 +42,7 @@ use lodestone_worldgen_core::{
 
 use super::coded::Facing;
 use super::template::{BlockState, Mirror, Rotation};
-use super::{BoundingBox, CodedBlock, CodedLoot, StructurePiece};
+use super::{BoundingBox, CodedBlock, CodedLoot, StructureMutationContext, StructurePiece};
 use crate::dense_grid::DenseBlockGrid;
 use crate::interner::StateId;
 
@@ -474,6 +474,7 @@ fn support_in_placing_chunk(
     world: &mut DenseBlockGrid,
     x: i32,
     z: i32,
+    mut mutation: Option<&mut StructureMutationContext<'_>>,
 ) {
     let mut pos = local_pos(piece, x, -1, z);
     let min_x = placing_cx * 16;
@@ -483,7 +484,11 @@ fn support_in_placing_chunk(
         && (min_z..=min_z + 15).contains(&pos[2])
         && is_structure_replaceable(world.get(pos[0], pos[1], pos[2]))
     {
-        world.set(pos[0], pos[1], pos[2], "minecraft:nether_bricks");
+        if let Some(mutation) = mutation.as_deref_mut() {
+            mutation.write(world, pos[0], pos[1], pos[2], "minecraft:nether_bricks");
+        } else {
+            world.set(pos[0], pos[1], pos[2], "minecraft:nether_bricks");
+        }
         pos[1] -= 1;
     }
 }
@@ -498,10 +503,20 @@ fn support_in_placing_chunk(
 /// the cache boundary and carries the typed [`StateId`] through every write.
 /// The first-use order of `DenseBlockGrid`'s own palette is unchanged because
 /// blocks are still visited in their original order.
+#[cfg(test)]
 fn apply_piece_blocks(
     world: &mut DenseBlockGrid,
     blocks: &[CodedBlock],
     chest_pos: Option<[i32; 3]>,
+) {
+    apply_piece_blocks_with_sink(world, blocks, chest_pos, None);
+}
+
+fn apply_piece_blocks_with_sink(
+    world: &mut DenseBlockGrid,
+    blocks: &[CodedBlock],
+    chest_pos: Option<[i32; 3]>,
+    mut mutation: Option<&mut StructureMutationContext<'_>>,
 ) {
     let interner = std::sync::Arc::clone(world.interner());
     let mut ids: FastMap<&str, StateId> = FastMap::default();
@@ -515,85 +530,90 @@ fn apply_piece_blocks(
             PIECE_STATE_RESOLUTION_CALLS.with(|calls| calls.set(calls.get() + 1));
             interner.id_of(state)
         });
-        world.set_id(block.pos[0], block.pos[1], block.pos[2], state_id);
+        if let Some(mutation) = mutation.as_deref_mut() {
+            mutation.write_id(world, block.pos[0], block.pos[1], block.pos[2], state_id);
+        } else {
+            world.set_id(block.pos[0], block.pos[1], block.pos[2], state_id);
+        }
     }
 }
 
-fn place_supports_in_chunk(
+fn place_supports_in_chunk_with_sink(
     piece: &Node,
     placing_cx: i32,
     placing_cz: i32,
     world: &mut DenseBlockGrid,
+    mut mutation: Option<&mut StructureMutationContext<'_>>,
 ) {
     match piece.kind {
         FortressPieceKind::Start | FortressPieceKind::WideJunction => {
             for x in 7..=11 {
                 for z in 0..=2 {
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, 18 - z);
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z, mutation.as_deref_mut());
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, 18 - z, mutation.as_deref_mut());
                 }
             }
             for x in 0..=2 {
                 for z in 7..=11 {
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, 18 - x, z);
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z, mutation.as_deref_mut());
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, 18 - x, z, mutation.as_deref_mut());
                 }
             }
         }
         FortressPieceKind::SmallJunction | FortressPieceKind::RisingJunction => {
             for x in 0..=6 {
                 for z in 0..=6 {
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z, mutation.as_deref_mut());
                 }
             }
         }
         FortressPieceKind::LongBridge => {
             for x in 0..=4 {
                 for z in 0..=2 {
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, 18 - z);
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z, mutation.as_deref_mut());
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, 18 - z, mutation.as_deref_mut());
                 }
             }
         }
         FortressPieceKind::CastleGate | FortressPieceKind::Garden => {
             for x in 4..=8 {
                 for z in 0..=2 {
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, 12 - z);
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z, mutation.as_deref_mut());
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, 12 - z, mutation.as_deref_mut());
                 }
             }
             for x in 0..=2 {
                 for z in 4..=8 {
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, 12 - x, z);
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z, mutation.as_deref_mut());
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, 12 - x, z, mutation.as_deref_mut());
                 }
             }
         }
         FortressPieceKind::CastleHall | FortressPieceKind::CastleJunction | FortressPieceKind::RightElbow | FortressPieceKind::LeftElbow => {
             for x in 0..=4 {
                 for z in 0..=4 {
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z, mutation.as_deref_mut());
                 }
             }
         }
         FortressPieceKind::Ascender => {
             for x in 0..=4 {
                 for z in 0..=9 {
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z, mutation.as_deref_mut());
                 }
             }
         }
         FortressPieceKind::Balcony => {
             for x in 0..=8 {
                 for z in 0..=5 {
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z, mutation.as_deref_mut());
                 }
             }
         }
         FortressPieceKind::SpawnerHall => {
             for x in 0..=6 {
                 for z in 0..=6 {
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z, mutation.as_deref_mut());
                 }
             }
         }
@@ -603,7 +623,7 @@ fn place_supports_in_chunk(
 
 /// Applies only the terrain-dependent remainder of an already-generated
 /// fortress piece. Its immutable block list remains owned by `StructurePiece`.
-pub(crate) fn place_cached_piece(
+pub(crate) fn place_cached_piece_with_sink(
     piece: &StructurePiece,
     kind: FortressPieceKind,
     facing: Facing,
@@ -614,6 +634,7 @@ pub(crate) fn place_cached_piece(
     world: &mut DenseBlockGrid,
     placement_random: &mut impl RandomSource,
     solid_render: &dyn Fn(&str) -> bool,
+    mut mutation: Option<&mut StructureMutationContext<'_>>,
 ) -> Option<CodedLoot> {
     let node = Node {
         kind,
@@ -625,7 +646,7 @@ pub(crate) fn place_cached_piece(
     };
     let chest_pos = chest_position(&node);
     if let Some(blocks) = &piece.blocks {
-        apply_piece_blocks(world, blocks, chest_pos);
+        apply_piece_blocks_with_sink(world, blocks, chest_pos, mutation.as_deref_mut());
     }
     let loot = chest_pos.and_then(|pos| {
         (pos[0].div_euclid(16) == placing_cx
@@ -633,7 +654,11 @@ pub(crate) fn place_cached_piece(
             && base_name(world.get(pos[0], pos[1], pos[2])) != "minecraft:chest")
             .then(|| {
                 let state = chest_state(world, pos, solid_render);
-                world.set(pos[0], pos[1], pos[2], &state);
+                if let Some(mutation) = mutation.as_deref_mut() {
+                    mutation.write(world, pos[0], pos[1], pos[2], &state);
+                } else {
+                    world.set(pos[0], pos[1], pos[2], &state);
+                }
                 CodedLoot {
                     pos,
                     table: "minecraft:chests/nether_bridge".to_string(),
@@ -641,7 +666,7 @@ pub(crate) fn place_cached_piece(
                 }
             })
     });
-    place_supports_in_chunk(&node, placing_cx, placing_cz, world);
+    place_supports_in_chunk_with_sink(&node, placing_cx, placing_cz, world, mutation.as_deref_mut());
     loot
 }
 
@@ -1080,25 +1105,53 @@ pub fn place_for_chunk<R: RandomSource, P: RandomSource>(
     placement_random: &mut P,
     solid_render: &dyn Fn(&str) -> bool,
 ) -> Vec<CodedLoot> {
+    place_for_chunk_with_sink(
+        start_cx,
+        start_cz,
+        placing_cx,
+        placing_cz,
+        world,
+        tree_random,
+        placement_random,
+        solid_render,
+        None,
+    )
+}
+
+pub fn place_for_chunk_with_sink<R: RandomSource, P: RandomSource>(
+    start_cx: i32,
+    start_cz: i32,
+    placing_cx: i32,
+    placing_cz: i32,
+    world: &mut DenseBlockGrid,
+    tree_random: &mut R,
+    placement_random: &mut P,
+    solid_render: &dyn Fn(&str) -> bool,
+    mut mutation: Option<&mut StructureMutationContext<'_>>,
+) -> Vec<CodedLoot> {
     let (tree, _) = build_tree(start_cx, start_cz, tree_random);
     let mut loot = Vec::new();
     for piece in tree.pieces {
         let blocks = emit_blocks(&piece);
-        apply_piece_blocks(&mut *world, &blocks, chest_position(&piece));
+        apply_piece_blocks_with_sink(&mut *world, &blocks, chest_position(&piece), mutation.as_deref_mut());
         if let Some(pos) = chest_position(&piece)
             && pos[0].div_euclid(16) == placing_cx
             && pos[2].div_euclid(16) == placing_cz
             && base_name(world.get(pos[0], pos[1], pos[2])) != "minecraft:chest"
         {
             let state = chest_state(world, pos, solid_render);
-            world.set(pos[0], pos[1], pos[2], &state);
+            if let Some(mutation) = mutation.as_deref_mut() {
+                mutation.write(world, pos[0], pos[1], pos[2], &state);
+            } else {
+                world.set(pos[0], pos[1], pos[2], &state);
+            }
             loot.push(CodedLoot {
                 pos,
                 table: "minecraft:chests/nether_bridge".to_string(),
                 seed: placement_random.next_long(),
             });
         }
-        place_supports_in_chunk(&piece, placing_cx, placing_cz, world);
+        place_supports_in_chunk_with_sink(&piece, placing_cx, placing_cz, world, mutation.as_deref_mut());
     }
     loot
 }

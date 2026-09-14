@@ -1697,6 +1697,27 @@ fn draw_widget(
     let Some((x, y, w, h)) = row_rect(rows, i, width, height) else {
         return;
     };
+    if let Some(checked) = row.checkbox {
+        let box_size = 12.0;
+        let gap = 6.0;
+        let text_width = b.text_width(&row.label, 1.0);
+        let total_width = box_size + gap + text_width;
+        let box_x = (x + (w - total_width) * 0.5).floor();
+        let box_y = (y + (h - box_size) * 0.5).floor();
+        b.outline(box_x, box_y, box_size, box_size, 1.0, LABEL);
+        if checked {
+            b.rect(box_x + 3.0, box_y + 3.0, 6.0, 6.0, LABEL);
+        }
+        let colour = if selected || hovered { LABEL } else { FG };
+        b.text(
+            &row.label,
+            box_x + box_size + gap,
+            (y + (h - LINE_H) * 0.5).floor(),
+            1.0,
+            colour,
+        );
+        return;
+    }
     // One widget, carrying this row's state. `focused` takes `selected`; on the
     // title screen, the pause menu, the death screen and the account screen
     // `hovered` is always `false`, because those still have a *single* row cursor

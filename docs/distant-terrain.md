@@ -13,11 +13,13 @@ cell covers 16×16 blocks and stores terrain height, optional water height, RGB5
 and flags in eight bytes. At the 256-chunk visual horizon this has a fixed 2,654,208-byte CPU
 ceiling. Recentring replaces tile coordinates and clears samples without growing the allocation.
 
-For an eligible local world, the net thread publishes `HorizonSurfaceQuery`, a separate immutable
-`OverworldGenerator` estimate after the selected source has opened successfully. Its sample path
-uses `preliminary_surface_level` and sea level only; it does not enter the generated-column store.
-Remote sessions, source overrides, unsupported world presets, and non-Overworld dimensions have no
-query and skip this pass.
+On native, the net thread wraps the opened source's object-safe `ChunkSource::horizon_sample`
+capability. On wasm, the page owns only a bounded Pending/Ready tile cache and sends typed tile
+requests to the server worker; the worker's source performs the authoritative query. Epoch and
+request IDs discard responses from an old session or an evicted tile. Remote sessions, source
+overrides, unsupported world presets, and non-Overworld dimensions have no query and skip this pass.
+The response is one transferred `Uint32Array` of 8,192 words: row-major height/water and
+colour/flags pairs for the 4,096 cells. The page rejects any other shape before caching it.
 
 `DistantTerrainRenderer` owns two fixed 576×576 `R32Uint` atlases for height/water and
 colour/flags (another 2,654,208 bytes on the GPU). The redraw path installs it only while Distant
@@ -54,5 +56,6 @@ Overworld session. Values are shown in chunks and the cycle control advances in 
 
 ## Dependencies
 
-The model is pure Rust. Its query source is `lodestone-worldgen`'s query-only overworld surface
-estimate; the shell bridge uses `wgpu` and `crates/lodestone-render/src/shaders/lod_terrain.wgsl`.
+The model is pure Rust. Its native query source is the server's authoritative worldgen source; the
+browser bridge uses a transferred `MessageChannel`, `wgpu`, and
+`crates/lodestone-render/src/shaders/lod_terrain.wgsl`.

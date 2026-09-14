@@ -173,11 +173,184 @@ use serde_json::Value;
 
 use crate::aquifer::BlockKind;
 use crate::density::Resolver;
+use crate::interner::{StateId, StateInterner};
 use jigsaw::{JigsawConfig, JigsawStub};
 use placement::{Placement, PlacementKind};
 use pool::PoolStore;
 use processor::{PosTest, Processor, ProcessorRule, RuleTest};
 use template::{BlockState, Mirror, PlaceSettings, Rotation, StructureTemplate};
+
+/// One structure block write captured at the point where a source's Features
+/// stream places it. The source, configured step and write ordinal are kept
+/// with the state so a lifecycle adapter can retain exact placement provenance
+/// without re-running the mixed stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructureBlockMutation {
+    pub source: (i32, i32),
+    pub step: i32,
+    pub ordinal: u32,
+    pub position: [i32; 3],
+    pub state: String,
+}
+
+pub trait StructureMutationSink {
+    fn record_structure_mutation(
+        &mut self,
+        source: (i32, i32),
+        step: i32,
+        position: [i32; 3],
+        state: StateId,
+    );
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RecordedStructureMutation {
+    source: (i32, i32),
+    step: i32,
+    ordinal: u32,
+    position: [i32; 3],
+    state: StateId,
+}
+
+#[derive(Debug, Default)]
+pub struct StructureMutationRecorder {
+    mutations: Vec<RecordedStructureMutation>,
+    ordinals: HashMap<((i32, i32), i32), u32>,
+}
+
+impl StructureMutationRecorder {
+    pub fn finish(self, interner: &StateInterner) -> StructureBlocks {
+        let mut blocks = StructureBlocks::default();
+        for mutation in self.mutations {
+            blocks.push_mutation(StructureBlockMutation {
+                source: mutation.source,
+                step: mutation.step,
+                ordinal: mutation.ordinal,
+                position: mutation.position,
+                state: interner.name_of(mutation.state).to_owned(),
+            });
+        }
+        blocks
+    }
+}
+
+impl StructureMutationSink for StructureMutationRecorder {
+    fn record_structure_mutation(
+        &mut self,
+        source: (i32, i32),
+        step: i32,
+        position: [i32; 3],
+        state: StateId,
+    ) {
+        let ordinal = self.ordinals.entry((source, step)).or_default();
+        let current = *ordinal;
+        *ordinal = ordinal.checked_add(1).expect("structure mutation ordinal overflow");
+        self.mutations.push(RecordedStructureMutation {
+            source,
+            step,
+            ordinal: current,
+            position,
+            state,
+        });
+    }
+}
+
+pub struct StructureMutationContext<'a> {
+    sink: &'a mut dyn StructureMutationSink,
+    source: (i32, i32),
+    step: i32,
+}
+
+impl std::fmt::Debug for StructureMutationContext<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StructureMutationContext")
+            .field("source", &self.source)
+            .field("step", &self.step)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a> StructureMutationContext<'a> {
+    pub fn new(
+        sink: &'a mut dyn StructureMutationSink,
+        source: (i32, i32),
+        step: i32,
+    ) -> Self {
+        Self { sink, source, step }
+    }
+
+    pub fn write(
+        &mut self,
+        world: &mut crate::dense_grid::DenseBlockGrid,
+        x: i32,
+        y: i32,
+        z: i32,
+        state: &str,
+    ) {
+        let state = world.interner().id_of(state);
+        world.set_id_observed(x, y, z, state, self.source, self.step, self.sink);
+    }
+
+    pub fn write_id(
+        &mut self,
+        world: &mut crate::dense_grid::DenseBlockGrid,
+        x: i32,
+        y: i32,
+        z: i32,
+        state: StateId,
+    ) {
+        world.set_id_observed(x, y, z, state, self.source, self.step, self.sink);
+    }
+}
+
+/// One coded structure container produced while a source's placement stream
+/// runs. Coded loot keeps its source, step and write order alongside the
+/// existing table/seed payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructureLoot {
+    pub source: (i32, i32),
+    pub step: i32,
+    pub ordinal: u32,
+    pub loot: CodedLoot,
+}
+
+/// Typed output of the structure portion of a Features stream.
+///
+/// This is a trace/product rather than a reconstructed final block census:
+/// each write is retained in stream order, including writes later replaced by
+/// vegetation or another structure. That distinction is what lets request
+/// replay preserve read-after-write behaviour and still expose coded loot.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StructureBlocks {
+    mutations: Vec<StructureBlockMutation>,
+    loot: Vec<StructureLoot>,
+}
+
+impl StructureBlocks {
+    #[must_use]
+    pub fn mutations(&self) -> &[StructureBlockMutation] {
+        &self.mutations
+    }
+
+    #[must_use]
+    pub fn loot(&self) -> &[StructureLoot] {
+        &self.loot
+    }
+
+    pub fn push_mutation(&mut self, mutation: StructureBlockMutation) {
+        self.mutations.push(mutation);
+    }
+
+    pub fn push_loot(&mut self, loot: StructureLoot) {
+        self.loot.push(loot);
+    }
+
+    pub fn append(&mut self, mut other: Self) {
+        self.mutations.append(&mut other.mutations);
+        self.loot.append(&mut other.loot);
+    }
+}
 
 /// The concrete random every structure's per-chunk stream is —
 /// `WorldgenRandom` over a legacy LCG, seeded by
@@ -3206,6 +3379,27 @@ impl StructureRegistry {
         placement_random: &mut WorldgenRandom<XoroshiroRandomSource>,
         solid_render: &dyn Fn(&str) -> bool,
     ) -> Option<Vec<CodedLoot>> {
+        self.place_fortress_for_chunk_with_sink(
+            start,
+            chunk_x,
+            chunk_z,
+            world,
+            placement_random,
+            solid_render,
+            None,
+        )
+    }
+
+    pub(crate) fn place_fortress_for_chunk_with_sink(
+        &self,
+        start: &StructureStart,
+        chunk_x: i32,
+        chunk_z: i32,
+        world: &mut crate::dense_grid::DenseBlockGrid,
+        placement_random: &mut WorldgenRandom<XoroshiroRandomSource>,
+        solid_render: &dyn Fn(&str) -> bool,
+        mutation: Option<&mut StructureMutationContext<'_>>,
+    ) -> Option<Vec<CodedLoot>> {
         let Some(definition) = self.structures.get(&start.structure) else {
             return None;
         };
@@ -3213,7 +3407,7 @@ impl StructureRegistry {
             return None;
         };
         let mut random = structure_random(self.seed, start.chunk_x, start.chunk_z);
-        Some(fortress::place_for_chunk(
+        Some(fortress::place_for_chunk_with_sink(
             start.chunk_x,
             start.chunk_z,
             chunk_x,
@@ -3222,6 +3416,7 @@ impl StructureRegistry {
             &mut random,
             placement_random,
             solid_render,
+            mutation,
         ))
     }
 
@@ -4609,5 +4804,67 @@ mod tests {
         let bs_settings = &blackstone[0].placement.as_ref().unwrap().settings;
         assert_eq!(bs_settings.processors.len(), 6, "blackstone processor appended");
         assert!(matches!(bs_settings.processors[5], Processor::BlackstoneReplace));
+    }
+
+    #[test]
+    fn structure_mutations_retain_same_cell_history_and_order() {
+        let mut grid = crate::dense_grid::DenseBlockGrid::new(
+            0, 0, 0, 2, 1, 1, "minecraft:air",
+        );
+        let mut recorder = StructureMutationRecorder::default();
+        let mut context = StructureMutationContext::new(&mut recorder, (7, -3), 4);
+        context.write(&mut grid, 0, 0, 0, "minecraft:stone");
+        context.write(&mut grid, 0, 0, 0, "minecraft:dirt");
+        context.write(&mut grid, 0, 0, 0, "minecraft:dirt");
+        let blocks = recorder.finish(grid.interner());
+        let mutations = blocks.mutations();
+        assert_eq!(mutations.len(), 3);
+        assert_eq!(
+            mutations
+                .iter()
+                .map(|mutation| (mutation.source, mutation.step, mutation.ordinal, mutation.state.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ((7, -3), 4, 0, "minecraft:stone"),
+                ((7, -3), 4, 1, "minecraft:dirt"),
+                ((7, -3), 4, 2, "minecraft:dirt"),
+            ]
+        );
+        assert_eq!(grid.get(0, 0, 0), "minecraft:dirt");
+        assert_eq!(
+            usize::from(grid.get(0, 0, 0) != "minecraft:air"),
+            1,
+            "final-state census is intentionally unable to recover the three writes"
+        );
+    }
+
+    #[test]
+    fn structure_mutation_ordinal_is_invocation_order_not_scan_order() {
+        let mut grid = crate::dense_grid::DenseBlockGrid::new(
+            0, 0, 0, 2, 1, 1, "minecraft:air",
+        );
+        let mut recorder = StructureMutationRecorder::default();
+        let mut context = StructureMutationContext::new(&mut recorder, (2, 3), 4);
+        context.write(&mut grid, 1, 0, 0, "minecraft:stone");
+        context.write(&mut grid, 0, 0, 0, "minecraft:stone");
+        context.write(&mut grid, 0, 0, 0, "minecraft:dirt");
+        context.write(&mut grid, 0, 0, 0, "minecraft:dirt");
+        let blocks = recorder.finish(grid.interner());
+        let writes = blocks.mutations();
+        assert_eq!(writes.len(), 4);
+        assert_eq!(
+            writes
+                .iter()
+                .map(|write| (write.ordinal, write.position, write.state.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, [1, 0, 0], "minecraft:stone"),
+                (1, [0, 0, 0], "minecraft:stone"),
+                (2, [0, 0, 0], "minecraft:dirt"),
+                (3, [0, 0, 0], "minecraft:dirt"),
+            ]
+        );
+        assert_eq!(grid.get(0, 0, 0), "minecraft:dirt");
+        assert_eq!(grid.get(1, 0, 0), "minecraft:stone");
     }
 }

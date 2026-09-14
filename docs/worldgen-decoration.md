@@ -145,7 +145,14 @@ every sampled origin and applies the `small_end_islands` biome filter to that or
 gating the whole source on its centre biome. During lifecycle replay, each fixed placement is emitted by the source chunk that
 contains its configured origin; its five-by-five footprint then spills into resident neighbors just
 like the complete region path. The whole-column End terrain fixture deliberately stops before later writers, so
-it is not evidence for decoration scheduling or cross-source order. Several rarer
+it is not evidence for decoration scheduling or cross-source order. Chorus first checks that the
+source's possible-biome set includes `end_highlands`, then performs its sampled-origin biome check;
+this avoids advancing the chorus random stream for an impossible source while preserving boundary
+placements. End surface probes scan the complete vertical bounds of their dense region, including
+structure rows above the noise height. Seed-derived spike layouts use a bounded shared cache keyed
+by the world seed; the cached result is checked against the pure calculation so eviction can only
+repeat work. End packet heightmaps are seeded from the terrain prefix and updated at the structure
+and decoration boundaries; lifecycle replay retains its independently authenticated map transitions. Several rarer
 single-use types remain unmodelled and are tracked by name in
 `lodestone_server::worldgen_data::KNOWN_VEGETATION_GAPS`; update that set whenever a type lands so a
 regression (or a fixed gap that should be pruned) is loud rather than silent.
@@ -369,6 +376,11 @@ blob can carry stale set bits into a smaller one, which makes the placer skip a 
 place at — a dropped ore, not a slow one. RNG draw order and count are unaffected by any of the
 allocation work above; the surface stage (see `worldgen-biomes.md`), not the ore engine, is where
 worldgen's remaining string-classification cost actually lives.
+
+The committed composed-stage fixture records only the centre source's `postfeatures` result, so its
+comparison with the production 3×3 column is a scoped spill diagnostic, not a parity gate. A full
+3×3 reference is required before match thresholds can establish production parity; the independent
+full-versus-shaped control only proves that decoration writes are observable.
 
 An ore configuration with more than eight replacement targets bypasses the compact target cache and
 evaluates every rule in declaration order. Later targets therefore remain reachable, and each matching

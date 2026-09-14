@@ -588,7 +588,7 @@ fn forget_level_chunk_reads_z_before_x() {
          field order -- re-record it"
     );
 
-    let probe_chunk_x = UNLOAD_PROBE_X / 16;
+    let probe_chunk_x = recording::UNLOAD_PROBE_X / 16;
     let mut far = 0usize;
     let mut misordered = 0usize;
     for body in &bodies {

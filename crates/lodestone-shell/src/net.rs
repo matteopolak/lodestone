@@ -272,12 +272,12 @@ impl lodestone_server::CommandSink for EcsCommandSink {
 /// completes, same as `NetClient`'s own reads.
 pub type SharedHandle = Arc<OnceLock<Arc<ClientHandle>>>;
 
-/// The optional local, query-only Overworld horizon source for this session.
-///
-/// It is published only after the integrated world resolved its effective seed
-/// and source preset. The render thread reads it directly; it is not the
-/// server's `ChunkSource`, so it cannot expand normal chunk streaming.
+/// The optional distant-horizon client for this session.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) type SharedHorizonSurface = Arc<OnceLock<crate::horizon::HorizonSurfaceQuery>>;
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) type SharedHorizonSurface = Arc<OnceLock<crate::horizon::BrowserHorizonClient>>;
 
 /// The connecting session's local player UUID, published as soon as the
 /// [`LoginProfile`] is built — before the handshake even starts, not just
@@ -1591,13 +1591,38 @@ impl NetClient {
         Arc::clone(&self.handle)
     }
 
-    /// The local query-only Overworld surface estimate, when this is an
-    /// eligible integrated session. It is absent for remote, custom-source,
-    /// and non-Overworld rendering, so callers must simply skip the coarse
-    /// pass rather than falling back to chunk generation.
+    /// Whether this session has a worker or native source for horizon data.
     #[must_use]
-    pub(crate) fn horizon_surface(&self) -> Option<&crate::horizon::HorizonSurfaceQuery> {
-        self.horizon_surface.get()
+    pub(crate) fn horizon_enabled(&self) -> bool {
+        self.horizon_surface.get().is_some()
+    }
+
+    /// Samples a ready horizon cell. A browser miss starts one bounded tile
+    /// request and returns `None` until its response arrives.
+    #[must_use]
+    pub(crate) fn horizon_sample(
+        &self,
+        block_x: i32,
+        block_z: i32,
+    ) -> Option<lodestone_render::HorizonCell> {
+        self.horizon_surface.get().and_then(|surface| {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                surface.sample(block_x, block_z)
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                surface.sample(block_x, block_z)
+            }
+        })
+    }
+
+    /// Drops browser tile requests when the fixed renderer window recentres.
+    pub(crate) fn recenter_horizon(&self, _camera_block: [i32; 2]) {
+        #[cfg(target_arch = "wasm32")]
+        if let Some(surface) = self.horizon_surface.get() {
+            surface.recenter(_camera_block[0], _camera_block[1]);
+        }
     }
 
     /// The local player's UUID, or `None` in the short window between thread
@@ -2075,7 +2100,8 @@ async fn run_async(
         // held for the whole session below: **dropping `IntegratedServer` aborts
         // the serving task**, so binding it inside a `match` arm would kill the
         // server the instant the arm ended.
-        let mut integrated_server = None;
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut integrated_server: Option<lodestone_server::IntegratedServer> = None;
         // The Open-to-LAN world's own save handle. `open_to_lan` sets
         // `save: None` and so flushes nothing at shutdown; this is what the
         // teardown below writes through, and it is `None` for every other origin.
@@ -2248,18 +2274,12 @@ async fn run_async(
                         }
                     }
                 };
-                // This is purposefully a second, immutable estimate rather
-                // than a handle to `source`: the renderer lives on another
-                // thread and must never turn its coarse samples into normal
-                // chunk-generation or cache requests. Publishing only after
-                // `preset_chunk_source` succeeded prevents a failed launch
-                // from leaving a plausible query behind.
-                #[cfg(target_arch = "wasm32")]
-                let use_local_horizon_query = true;
-                if use_local_horizon_query {
-                    if let Some(query) = crate::horizon::HorizonSurfaceQuery::for_preset(seed, world_type) {
-                        let _ = horizon_surface.set(query);
-                    }
+                #[cfg(not(target_arch = "wasm32"))]
+                if use_local_horizon_query
+                    && let Some(query) =
+                        crate::horizon::HorizonSurfaceQuery::from_source(Arc::clone(&source))
+                {
+                    let _ = horizon_surface.set(query);
                 }
                 // Open to LAN (scope 1). Taken before the
                 // in-memory constructors below because it is a *different
@@ -2430,14 +2450,18 @@ async fn run_async(
                     }
                 };
                 #[cfg(target_arch = "wasm32")]
-                let (server, client_io, lan_address): (_, _, Option<ServerAddress>) = match launch_browser_worker(
+                let (client_io, lan_address): (
+                    Option<BrowserIntegratedTransport>,
+                    Option<ServerAddress>,
+                ) = match launch_browser_worker(
                     protocol,
                     seed,
                     world_type,
+                    Arc::clone(&horizon_surface),
                 )
                 .await
                 {
-                    Ok(worker_io) => (None, Some(worker_io), None),
+                    Ok(worker_io) => (Some(worker_io), None),
                     Err(error) => {
                         // Do not construct a second world on the page when the
                         // dedicated owner cannot start. Apart from violating
@@ -2453,10 +2477,6 @@ async fn run_async(
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     integrated_server = Some(server);
-                }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    integrated_server = server;
                 }
                 match (client_io, lan_address) {
                     // Singleplayer over the in-memory duplex: the address is
@@ -3213,6 +3233,7 @@ async fn run_async(
         // the world is on disk. That is intentional and is what vanilla's own
         // "Saving world" screen is: the alternative is a save racing process
         // exit.
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(server) = integrated_server {
             tracing::info!(target: "net", "stopping the integrated server and saving the world");
             // **`drop`, not `shutdown().await`, for a LAN handle.** `shutdown`
@@ -3446,6 +3467,13 @@ impl lodestone_server::CommandSink for WorkerCommandSink {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static HORIZON_WORKER_SERVICE:
+        std::cell::RefCell<Option<crate::horizon::HorizonWorkerService>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Starts an authoritative browser integrated server on a supplied worker port.
 ///
 /// This is called by `web/worker`, never by the page. The world source, server,
@@ -3455,9 +3483,11 @@ impl lodestone_server::CommandSink for WorkerCommandSink {
 #[cfg(target_arch = "wasm32")]
 pub fn start_browser_integrated_worker(
     port: web_sys::MessagePort,
+    horizon_port: web_sys::MessagePort,
     protocol: i32,
     seed: i64,
     preset: u8,
+    epoch: u32,
 ) -> Result<(), String> {
     let preset = world_preset_from_wire_id(preset)
         .ok_or_else(|| format!("unknown browser worker world preset {preset}"))?;
@@ -3465,6 +3495,20 @@ pub fn start_browser_integrated_worker(
         .ok_or_else(|| format!("no server protocol compiled for protocol {protocol}"))?;
     let (source, _min_y, _height) = preset_chunk_source(server_protocol.worldgen_scope(), seed, preset)
         .map_err(|error| format!("cannot build browser worker world: {error}"))?;
+    HORIZON_WORKER_SERVICE.with(|service| {
+        service.borrow_mut().take();
+    });
+    if source.horizon_sample(0, 0).is_some() {
+        HORIZON_WORKER_SERVICE.with(|service| {
+            *service.borrow_mut() = Some(crate::horizon::HorizonWorkerService::new(
+                Arc::clone(&source),
+                epoch,
+                horizon_port,
+            ));
+        });
+    } else {
+        horizon_port.close();
+    }
     let commands = lodestone_server::CommandDispatch::installed(Arc::new(WorkerCommandSink));
     let worker_io = lodestone_net::MessagePortTransport::new(port);
     lodestone_server::IntegratedServer::serve_with_transport(

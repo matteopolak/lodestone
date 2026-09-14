@@ -1,0 +1,25 @@
+# Worldgen generation ledger
+
+## What it is
+
+The generation ledger is the world-owned retention lane for resumable world generation. It keeps typed stage frontiers and immutable products separate from packet-column caching, while source completions and sparse mutations remain available when an individual request is cancelled.
+
+## How it works
+
+`GenerationLedger` groups state by `PipelineIdentity`. Each pipeline has a bounded coordinate set, a `StageFrontier` for every admitted coordinate, immutable products and sidecars, shaped aggregate prefixes and terminal output products, globally deduplicated `(target, source, stage)` completions with a contiguous source-order cursor, sparse provenance-bearing overlays owned by their absolute destination, and a per-coordinate revision counter. A new pipeline identity evicts the least-recently-used identity; per-pipeline lane caps reject an operation before inserting the overflowing item.
+
+`ChunkStore::lease_halo` canonicalizes coordinates, captures their write-gate revisions, and pins them in the cache. The lease holds the gate state records but not the gates themselves, so generation may run without blocking unrelated writes. `ChunkStore::execute_generation_session` admits the halo and snapshots a validated ledger checkpoint under the ledger lock, releases that lock while the borrowed driver runs, then publishes the session's immutable records, ordered source completions, and overlays through an atomic clone-and-swap. It rechecks cancellation immediately before `ChunkStore::commit_generation`; a cancelled request therefore leaves any committed ledger prefix and removes only newly admitted coordinates that are still empty. `ChunkStore::commit_generation` reacquires the canonical write gates, rejects any cache revision change, inserts the complete batch, and releases the gates before eviction work. Dropping the lease removes its pins and performs deferred LRU eviction.
+
+## How to change it
+
+Add new retained values through the typed `ImmutableProduct`/`ImmutableSidecar` APIs and keep their descriptor declarations in the worldgen stage schedule. A source completion is identified by target, source, stage, and its contiguous source order; do not use request identity for deduplication. Keep overlays sparse and bounded, accept only canonical provenance order for overwrites, and treat a revision conflict as a retry signal rather than overwriting newer state.
+
+`GenerationSession::export_checkpoint` is the handoff shape between the request and ledger. It carries the validated frontiers, typed products, sidecars, aggregate prefixes, ordered source identities, and provenance-bearing overlays; pending worker values are never published. Aggregate prefixes are consumed directly on resume, and terminal output products can repopulate the cache after eviction without replaying the source driver. A source completion is keyed by `(target, source, stage)` and stores its canonical order separately, so two target requests sharing one source remain independent. Concurrent requests with one request key share an in-flight admission slot; waiters retry from the resulting resident or retained output. Ledger revisions used for optimistic overlay commits are per-target cache state and are deliberately distinct from `SessionRevision`, which only allocates mutation provenance inside a request. Overlay replacement compares provenance, so publication is deterministic even when workers finish in reverse order. `ChunkStore::active_retained_bytes` reports logical bytes for both resident columns and retained ledger payloads.
+
+## Configuration
+
+`GenerationLedgerLimits` sets caps for pipelines, coordinates, source completions, overlays, retained products, and sidecars. Defaults are 4 pipelines, 4,096 coordinates, 16,384 source completions, 65,536 overlays, 32,768 products, and 16,384 sidecars per pipeline. A new pipeline uses least-recently-used eviction except for pinned active pipelines; a full set of pinned pipelines rejects admission. Per-pipeline lane caps reject before inserting the overflowing item. Cache capacity continues to come from the existing view-radius policy; halo pins may temporarily exceed that soft bound and eviction resumes after the last lease releases.
+
+## Dependencies
+
+The ledger uses `lodestone_worldgen::stage_schedule::{PipelineIdentity, StageFrontier, StageRecord}` for typed schedule state and `crate::worldgen_session` for immutable products, sidecars, mutation provenance, and session-compatible revisions. `ChunkStore` uses its existing `ChunkWriteGates`, `ChunkLifecycleHandoff`, ticket residency, and wrapped `ChunkSource` for cache commits and deferred unloads.

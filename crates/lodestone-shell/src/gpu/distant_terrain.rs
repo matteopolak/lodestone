@@ -379,16 +379,12 @@ impl DistantTerrainRenderer {
         self.outer_radius_blocks = (chunks.min(256) * HORIZON_CELL_BLOCKS as u32) as f32;
     }
 
-    /// Query and upload one still-empty tile. Returns false once the fixed
-    /// window is fully populated.
-    ///
-    /// Sampling a tile at a time bounds a redraw's generator work to 4,096
-    /// coarse queries. The caller should invoke this only for a local
-    /// Overworld query source, never as a request to the server's chunk stream.
+    /// Query and upload one still-empty tile. A missing sample leaves the tile
+    /// nonresident so a later frame can retry it after worker completion.
     pub(crate) fn populate_one(
         &mut self,
         queue: &wgpu::Queue,
-        mut sample: impl FnMut(i32, i32) -> HorizonCell,
+        mut sample: impl FnMut(i32, i32) -> Option<HorizonCell>,
     ) -> bool {
         let camera_block = self.camera_block;
         let outer_radius_blocks = self.outer_radius_blocks;
@@ -403,12 +399,11 @@ impl DistantTerrainRenderer {
         }) else {
             return false;
         };
-        let mut height_water = vec![0; HORIZON_TILE_CELLS * HORIZON_TILE_CELLS];
-        let mut colours_flags = vec![0; HORIZON_TILE_CELLS * HORIZON_TILE_CELLS];
+        let mut cells = Vec::with_capacity(HORIZON_TILE_CELLS * HORIZON_TILE_CELLS);
         {
             let tile = self
                 .terrain
-                .tiles_mut()
+                .tiles()
                 .nth(slot)
                 .expect("fixed residency slot must index the fixed terrain grid");
             let (origin_x, origin_z) = tile.coord().block_origin();
@@ -416,16 +411,25 @@ impl DistantTerrainRenderer {
                 for x in 0..HORIZON_TILE_CELLS {
                     let world_x = origin_x.saturating_add((x as i32) * HORIZON_CELL_BLOCKS);
                     let world_z = origin_z.saturating_add((z as i32) * HORIZON_CELL_BLOCKS);
-                    let cell = sample(world_x, world_z);
-                    let index = z * HORIZON_TILE_CELLS + x;
-                    height_water[index] =
-                        u32::from(cell.terrain_y) | (u32::from(cell.water_y) << 16);
-                    colours_flags[index] =
-                        u32::from(cell.surface_rgb565) | (u32::from(cell.flags) << 16);
-                    let wrote = tile.set_cell(x, z, cell);
-                    debug_assert!(wrote);
+                    let Some(cell) = sample(world_x, world_z) else {
+                        return false;
+                    };
+                    cells.push(cell);
                 }
             }
+        }
+        let mut height_water = Vec::with_capacity(cells.len());
+        let mut colours_flags = Vec::with_capacity(cells.len());
+        let tile = self
+            .terrain
+            .tiles_mut()
+            .nth(slot)
+            .expect("fixed residency slot must index the fixed terrain grid");
+        for (index, cell) in cells.into_iter().enumerate() {
+            height_water.push(u32::from(cell.terrain_y) | (u32::from(cell.water_y) << 16));
+            colours_flags.push(u32::from(cell.surface_rgb565) | (u32::from(cell.flags) << 16));
+            let wrote = tile.set_cell(index % HORIZON_TILE_CELLS, index / HORIZON_TILE_CELLS, cell);
+            debug_assert!(wrote);
         }
         Self::upload_tile(
             queue,

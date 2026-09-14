@@ -121,7 +121,7 @@ use std::sync::{
     atomic::{AtomicU64, AtomicUsize, Ordering},
     Arc, Mutex, OnceLock,
 };
-use std::time::Instant;
+use lodestone_time::Instant;
 
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
@@ -136,7 +136,9 @@ use crate::interner::{StateId, StateInterner};
 use crate::overworld::structures::{BEARD_REACH, REFS_RADIUS, StructureRefs};
 use crate::structure::beardifier::Beardifier;
 use crate::structure::{
-    CodedLoot, HeightmapKind, PieceRefinement, StartContext, StructureRegistry, StructureStart,
+    CodedLoot, HeightmapKind, PieceRefinement, StartContext, StructureBlocks,
+    StructureLoot, StructureMutationContext, StructureMutationRecorder, StructureRegistry,
+    StructureStart,
 };
 use crate::surface::{PreState, SurfaceDiff, SurfaceSystem, identity_canon};
 use crate::stage_schedule::{
@@ -510,6 +512,11 @@ pub struct ParityDecorationSpill {
 pub struct ParityTargetPass {
     /// Final block transitions from the pass, including neighbouring columns.
     pub spills: Vec<ParityDecorationSpill>,
+    /// Structure writes and coded containers emitted while the mixed source
+    /// body ran. This is the same stream that changed `spills`; it is retained
+    /// separately so the server can commit a typed structure product without
+    /// replaying the body.
+    pub structure_blocks: StructureBlocks,
     /// Internal source coordinates whose feature bodies ran during this pass.
     pub completed_sources: Vec<(i32, i32)>,
 }
@@ -1506,15 +1513,16 @@ impl NetherGenerator {
         let mut schedule = Self::stage_schedule().cursor_at(
             Self::stage_schedule().shaped_boundary_index(),
         );
-        // Structure writes are dispatched by the mixed source loop below. The
-        // explicit stage boundary remains here so the column schedule still
-        // exposes structures before FEATURES, while each source applies all
-        // structures for a step immediately before that step's features.
-        schedule.enter(ColumnStage::StructurePlacement);
         let world = (*pre.0).clone();
-        let (world, placement_loot, decoration_spills) = schedule.run(ColumnStage::Features, || {
+        let (world, structure_blocks, decoration_spills) = schedule.run(ColumnStage::Features, || {
             self.mixed_step7_stage_with_spills(cx, cz, world, &pre.1)
         });
+        let placement_loot = structure_blocks
+            .loot()
+            .iter()
+            .filter(|loot| loot.source == (cx, cz))
+            .map(|loot| loot.loot.clone())
+            .collect();
 
         let column = schedule.run(ColumnStage::Output, || {
             let (palette, blocks) = world.into_palette_and_blocks();
@@ -1602,8 +1610,31 @@ impl NetherGenerator {
         source_x: i32,
         source_z: i32,
         overrides: &[(i32, i32, i32, String)],
-        mut resident_at: impl FnMut(i32, i32) -> Option<crate::dense_grid::DenseBlockGrid>,
+        resident_at: impl FnMut(i32, i32) -> Option<crate::dense_grid::DenseBlockGrid>,
     ) -> Vec<ParityDecorationSpill> {
+        self.parity_source_pass_with_resident(
+            target_x,
+            target_z,
+            source_x,
+            source_z,
+            overrides,
+            resident_at,
+        )
+        .spills
+    }
+
+    /// Run one source completion and retain both its final spills and the
+    /// structure trace produced by the same mixed stream.
+    #[must_use]
+    pub fn parity_source_pass_with_resident(
+        &self,
+        target_x: i32,
+        target_z: i32,
+        source_x: i32,
+        source_z: i32,
+        overrides: &[(i32, i32, i32, String)],
+        mut resident_at: impl FnMut(i32, i32) -> Option<crate::dense_grid::DenseBlockGrid>,
+    ) -> ParityTargetPass {
         let mut resident: [Option<Arc<crate::dense_grid::DenseBlockGrid>>; 25] =
             std::array::from_fn(|_| None);
         for dx in -crate::feature::region_view::WIDE_RADIUS
@@ -1617,7 +1648,7 @@ impl NetherGenerator {
             }
         }
         let pre = self.pre_decoration_stage(target_x, target_z);
-        self.mixed_step7_stage_selected_with_resident(
+        let result = self.mixed_step7_stage_selected_with_resident(
             target_x,
             target_z,
             (*pre.0).clone(),
@@ -1627,8 +1658,12 @@ impl NetherGenerator {
             Some(&resident),
             false,
             None,
-        )
-        .2
+        );
+        ParityTargetPass {
+            spills: result.2,
+            structure_blocks: result.1,
+            completed_sources: vec![(source_x, source_z)],
+        }
     }
 
     /// Runs the complete FEATURES pass for one requested target against the
@@ -1684,7 +1719,7 @@ impl NetherGenerator {
             }
         }
         let pre = self.pre_decoration_stage(target_x, target_z);
-        let spills = self.mixed_step7_stage_selected_with_resident(
+        let result = self.mixed_step7_stage_selected_with_resident(
             target_x,
             target_z,
             (*pre.0).clone(),
@@ -1694,13 +1729,17 @@ impl NetherGenerator {
             Some(&resident),
             true,
             Some(completed_sources),
-        ).2;
+        );
         let completed_sources = if completed_sources.contains(&(target_x, target_z)) {
             Vec::new()
         } else {
             vec![(target_x, target_z)]
         };
-        ParityTargetPass { spills, completed_sources }
+        ParityTargetPass {
+            spills: result.2,
+            structure_blocks: result.1,
+            completed_sources,
+        }
     }
 
     fn mixed_step7_stage_with_spills(
@@ -1711,10 +1750,10 @@ impl NetherGenerator {
         center_heights: &[i32; 256],
     ) -> (
         crate::dense_grid::DenseBlockGrid,
-        Vec<CodedLoot>,
+        StructureBlocks,
         Vec<(i32, i32, i32, String)>,
     ) {
-        let (world, placement_loot, _, spills) = self.mixed_step7_stage_selected(
+        let (world, structure_blocks, _, spills) = self.mixed_step7_stage_selected(
             cx,
             cz,
             center_world,
@@ -1722,7 +1761,7 @@ impl NetherGenerator {
             None,
             &[],
         );
-        (world, placement_loot, spills)
+        (world, structure_blocks, spills)
     }
 
     /// [`Self::mixed_step7_stage_with_spills`] with an optional source filter for the
@@ -1738,7 +1777,7 @@ impl NetherGenerator {
         overrides: &[(i32, i32, i32, String)],
     ) -> (
         crate::dense_grid::DenseBlockGrid,
-        Vec<CodedLoot>,
+        StructureBlocks,
         Vec<ParityDecorationSpill>,
         Vec<(i32, i32, i32, String)>,
     ) {
@@ -1769,7 +1808,7 @@ impl NetherGenerator {
         completed_sources: Option<&BTreeSet<(i32, i32)>>,
     ) -> (
         crate::dense_grid::DenseBlockGrid,
-        Vec<CodedLoot>,
+        StructureBlocks,
         Vec<ParityDecorationSpill>,
         Vec<(i32, i32, i32, String)>,
     ) {
@@ -1983,7 +2022,7 @@ impl NetherGenerator {
         let mut grid_cursor = 0usize;
         let mut ore_cursor = 0usize;
         let mut changed_scratch = take_nether_changed_scratch();
-        let mut placement_loot = Vec::new();
+        let mut structure_blocks = StructureBlocks::default();
         // Huge fungus needs to expose its border writes to later features in
         // this same source pass: their heightmap and replacement probes read
         // the live generation view.  Those writes are not source-owned when
@@ -2033,15 +2072,13 @@ impl NetherGenerator {
             for &step_kind in NETHER_DECORATION_STEPS {
                 let dirty_before = grid.dirty_len();
                 let step = step_kind.ordinal();
-                let step_loot = self.structure_step_into_grid(
+                let step_structure_blocks = self.structure_step_into_grid(
                     source_x,
                     source_z,
                     step_kind,
                     &mut grid,
                 );
-                if selected_source.is_none() && source_x == cx && source_z == cz {
-                    placement_loot.extend(step_loot);
-                }
+                structure_blocks.append(step_structure_blocks);
                 if grid.dirty_len() != dirty_before {
                     synchronize_mixed_entry_reusing(
                         MixedEntryWriter::Decoration,
@@ -2195,7 +2232,12 @@ impl NetherGenerator {
             }
             return_nether_height_scratch(heights);
             return_nether_changed_scratch(changed_scratch);
-            return (world, placement_loot, aggregate.into_values().collect(), Vec::new());
+            return (
+                world,
+                structure_blocks,
+                aggregate.into_values().collect(),
+                Vec::new(),
+            );
         }
         if let Some(source) = selected_source {
             for (x, y, z, state) in grid.dirty_cell_ids() {
@@ -2212,7 +2254,12 @@ impl NetherGenerator {
         }
         return_nether_height_scratch(heights);
         return_nether_changed_scratch(changed_scratch);
-        (world, placement_loot, final_spills.into_values().collect(), decoration_spills)
+        (
+            world,
+            structure_blocks,
+            final_spills.into_values().collect(),
+            decoration_spills,
+        )
     }
 
     /// The immutable base prefix: terrain through carving, before target-local
@@ -2894,9 +2941,9 @@ impl NetherGenerator {
         source_z: i32,
         step: DecorationStep,
         grid: &mut crate::feature::vegetation::VegGrid,
-    ) -> Vec<CodedLoot> {
+    ) -> StructureBlocks {
         let Some(registry) = &self.structures else {
-            return Vec::new();
+            return StructureBlocks::default();
         };
         let refs = self.structure_refs(source_x, source_z);
         if !refs.entries.iter().any(|(_, _, start)| {
@@ -2904,7 +2951,7 @@ impl NetherGenerator {
                 .feature_placement_key(&start.structure)
                 .is_some_and(|(structure_step, _)| structure_step == step.ordinal())
         }) {
-            return Vec::new();
+            return StructureBlocks::default();
         }
 
         let min_x = source_x * 16;
@@ -2929,23 +2976,30 @@ impl NetherGenerator {
                 }
             }
         }
-        let before = source_world.clone();
-        let (source_world, placement_loot) = profile_stage("structure_place", || {
+        let (source_world, placement_loot, structure_blocks) = profile_stage("structure_place", || {
             self.structure_place_stage(source_x, source_z, &refs, source_world, step)
         });
         for y in self.min_y..self.min_y + self.height {
             for z in min_z..min_z + 16 {
                 for x in min_x..min_x + 16 {
-                    let before_state = before.get_id(x, y, z);
                     let after_state = source_world.get_id(x, y, z);
-                    if before_state != after_state {
+                    if after_state != grid.get_id(x, y, z) {
                         let landed = grid.set_id_if_in_bounds(x, y, z, after_state);
                         debug_assert!(landed, "structure write fell outside the mixed grid");
                     }
                 }
             }
         }
-        placement_loot
+        let mut structure_blocks = structure_blocks;
+        for (ordinal, loot) in placement_loot.into_iter().enumerate() {
+            structure_blocks.push_loot(StructureLoot {
+                source: (source_x, source_z),
+                step: step.ordinal(),
+                ordinal: ordinal as u32,
+                loot,
+            });
+        }
+        structure_blocks
     }
 
     /// Stage 4b/7: writes every piece that touches this source chunk into
@@ -2964,9 +3018,9 @@ impl NetherGenerator {
         refs: &StructureRefs,
         mut world: crate::dense_grid::DenseBlockGrid,
         step: DecorationStep,
-    ) -> (crate::dense_grid::DenseBlockGrid, Vec<CodedLoot>) {
+    ) -> (crate::dense_grid::DenseBlockGrid, Vec<CodedLoot>, StructureBlocks) {
         let Some(registry) = &self.structures else {
-            return (world, Vec::new());
+            return (world, Vec::new(), StructureBlocks::default());
         };
         let seed = registry.seed();
         let (bx, bz) = (cx * 16, cz * 16);
@@ -2983,6 +3037,7 @@ impl NetherGenerator {
             crate::rng::WorldgenRandom<crate::rng::XoroshiroRandomSource>,
         > = HashMap::new();
         let mut placement_loot = Vec::new();
+        let mut mutation_recorder = StructureMutationRecorder::default();
         let mut structure_entries = refs.entries.iter().collect::<Vec<_>>();
         structure_entries.sort_by_key(|(_, _, start)| {
             registry
@@ -2999,6 +3054,11 @@ impl NetherGenerator {
             if structure_step != step.ordinal() {
                 continue;
             }
+            let mut mutation = StructureMutationContext::new(
+                &mut mutation_recorder,
+                (start.chunk_x, start.chunk_z),
+                structure_step,
+            );
             if start.bounding_box.intersects_xz(bx, bz, bx + 15, bz + 15) {
                 if let Some((step, index)) = registry.runtime_decoration_key(&start.structure) {
                     let structure_random = structure_randoms.entry(start.structure.clone()).or_insert_with(|| {
@@ -3022,7 +3082,7 @@ impl NetherGenerator {
                         }) = piece.refine.as_ref()
                         {
                             cached_fortress = true;
-                            if let Some(loot) = crate::structure::fortress::place_cached_piece(
+                            if let Some(loot) = crate::structure::fortress::place_cached_piece_with_sink(
                                 piece,
                                 *kind,
                                 *facing,
@@ -3033,6 +3093,7 @@ impl NetherGenerator {
                                 &mut world,
                                 structure_random,
                                 &solid_render,
+                                Some(&mut mutation),
                             ) {
                                 placement_loot.push(loot);
                             }
@@ -3041,8 +3102,8 @@ impl NetherGenerator {
                     if cached_fortress {
                         continue;
                     }
-                    if let Some(mut loot) = registry.place_fortress_for_chunk_with(
-                        start, cx, cz, &mut world, structure_random, &solid_render,
+                    if let Some(mut loot) = registry.place_fortress_for_chunk_with_sink(
+                        start, cx, cz, &mut world, structure_random, &solid_render, Some(&mut mutation),
                     ) {
                         placement_loot.append(&mut loot);
                         continue;
@@ -3067,7 +3128,7 @@ impl NetherGenerator {
                 }
                 if let Some(blocks) = &piece.blocks {
                     for block in blocks.iter() {
-                        world.set(block.pos[0], block.pos[1], block.pos[2], &block.state);
+                        mutation.write(&mut world, block.pos[0], block.pos[1], block.pos[2], &block.state);
                     }
                 }
                 if let Some(placement) = &piece.placement {
@@ -3076,16 +3137,24 @@ impl NetherGenerator {
                         reference,
                         seed,
                     };
-                    placement
-                        .template
-                        .place(origin, &placement.settings, &mut world);
+                    placement.template.place_with_mutations(
+                        origin,
+                        &placement.settings,
+                        &mut world,
+                        &mut mutation,
+                    );
                     for extra in &piece.extra_placements {
                         let origin = crate::structure::template::PlaceOrigin {
                             position: extra.position,
                             reference,
                             seed,
                         };
-                        extra.template.place(origin, &extra.settings, &mut world);
+                        extra.template.place_with_mutations(
+                            origin,
+                            &extra.settings,
+                            &mut world,
+                            &mut mutation,
+                        );
                     }
                 }
                 if let Some(PieceRefinement::NetherFossilDriedGhast { seed }) = piece.refine.as_ref() {
@@ -3116,7 +3185,7 @@ impl NetherGenerator {
                             )
                             .rotate(crate::structure::template::Rotation::random(&mut ghast));
                             let state = state.canonical();
-                            world.set(x, y, z, &state);
+                            mutation.write(&mut world, x, y, z, &state);
                         }
                     }
                 }
@@ -3133,12 +3202,13 @@ impl NetherGenerator {
                             random.set_feature_seed(decoration_seed, index as i32, step);
                             random
                         });
-                        crate::structure::feature_placement::place_feature_pool_elements(
+                        crate::structure::feature_placement::place_feature_pool_elements_with_sink(
                             random,
                             seed,
                             placements,
                             &mut world,
                             &self.veg_tags,
+                            Some(&mut mutation),
                         );
                     }
                     Some(PieceRefinement::RuinedPortalTerrain {
@@ -3159,7 +3229,7 @@ impl NetherGenerator {
                             random.set_feature_seed(decoration_seed, index as i32, step);
                             random
                         });
-                        crate::overworld::structures::place_ruined_portal_terrain(
+                        crate::overworld::structures::place_ruined_portal_terrain_with_sink(
                             &mut world,
                             piece.bounding_box,
                             random,
@@ -3168,10 +3238,15 @@ impl NetherGenerator {
                             *overgrown,
                             *vines,
                             features_cannot_replace,
+                            Some(&mut mutation),
                         );
                     }
                     Some(PieceRefinement::StrongholdBlocks { writes }) => {
-                        crate::structure::stronghold::place_post_surface_blocks(&mut world, writes);
+                        crate::structure::stronghold::place_post_surface_blocks_with_sink(
+                            &mut world,
+                            writes,
+                            Some(&mut mutation),
+                        );
                     }
                     Some(PieceRefinement::FortressPlacement { .. })
                     | Some(PieceRefinement::BuriedTreasureChest)
@@ -3180,7 +3255,8 @@ impl NetherGenerator {
                 }
             }
         }
-        (world, placement_loot)
+        let structure_blocks = mutation_recorder.finish(world.interner());
+        (world, placement_loot, structure_blocks)
     }
 
     /// Every start whose origin is `(cx, cz)` and whose piece list is complete —

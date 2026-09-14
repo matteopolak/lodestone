@@ -124,11 +124,11 @@ pub enum SingleplayerPermit {
     /// The normal build's proof that the local roster contains an owning
     /// account. Keeping the token in the action prevents another native entry
     /// path from accidentally bypassing the ownership gate.
-    #[cfg(feature = "multiplayer")]
+    #[cfg(all(feature = "multiplayer", not(target_arch = "wasm32")))]
     Entitled(Entitlement),
     /// A build that cannot contact arbitrary servers may start its bundled
     /// in-memory server without asking for an online account.
-    #[cfg(not(feature = "multiplayer"))]
+    #[cfg(any(not(feature = "multiplayer"), target_arch = "wasm32"))]
     LocalBuild,
 }
 

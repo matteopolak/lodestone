@@ -1172,20 +1172,45 @@ mod tests {
             16,
             air,
         ));
+        const BUILTIN_BIOMES: [&str; crate::feature::region_view::WIDE_SLOTS] = [
+            "minecraft:badlands",
+            "minecraft:bamboo_jungle",
+            "minecraft:basalt_deltas",
+            "minecraft:beach",
+            "minecraft:birch_forest",
+            "minecraft:cherry_grove",
+            "minecraft:cold_ocean",
+            "minecraft:crimson_forest",
+            "minecraft:dark_forest",
+            "minecraft:deep_cold_ocean",
+            "minecraft:deep_dark",
+            "minecraft:deep_frozen_ocean",
+            "minecraft:deep_lukewarm_ocean",
+            "minecraft:deep_ocean",
+            "minecraft:desert",
+            "minecraft:dripstone_caves",
+            "minecraft:end_barrens",
+            "minecraft:end_highlands",
+            "minecraft:end_midlands",
+            "minecraft:eroded_badlands",
+            "minecraft:flower_forest",
+            "minecraft:forest",
+            "minecraft:frozen_ocean",
+            "minecraft:frozen_peaks",
+            "minecraft:frozen_river",
+        ];
         let biome_sources: Arc<
             [Option<Arc<BiomeCells>>; crate::feature::region_view::WIDE_SLOTS],
         > = Arc::new(std::array::from_fn(|slot| {
-            let dx = slot as i32 / 5 - 2;
-            let dz = slot as i32 % 5 - 2;
-            let name = format!("test:biome_{dx}_{dz}");
-            Some(Arc::new(BiomeCells::uniform(&name, 0, 128)))
+            let name = BUILTIN_BIOMES[slot];
+            Some(Arc::new(BiomeCells::uniform(name, 0, 128)))
         }));
         let mut source_feature_biomes = HashMap::new();
         for dx in -2..=2 {
             for dz in -2..=2 {
                 source_feature_biomes.insert(
                     format!("test:wide_gate_{dx}_{dz}"),
-                    HashSet::from([format!("test:biome_{dx}_{dz}")]),
+                    HashSet::from([BUILTIN_BIOMES[((dx + 2) * 5 + dz + 2) as usize].to_string()]),
                 );
             }
         }

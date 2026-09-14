@@ -164,7 +164,7 @@ pub enum Tag {
 impl Tag {
     /// Every variant, in declaration order. `TAG_COUNT` and the mask layout are
     /// both derived from this, so it is the single place a new tag registers.
-    pub(super) const ALL: [Tag; 28] = [
+    pub(super) const ALL: &[Tag] = &[
         Tag::CannotReplaceBelowTreeTrunk,
         Tag::SupportsVegetation,
         Tag::ReplaceableByTrees,
@@ -456,7 +456,7 @@ impl VegTags {
             let id = StateId::from_raw(u16::try_from(raw).expect("raw < ID_SPACE fits u16"));
             let name = interner.name_of(id);
             let base = base_id(name);
-            for tag in Tag::ALL {
+            for tag in Tag::ALL.iter().copied() {
                 if self.member(tag, base) {
                     self.id_tags.set_bit(tag, raw);
                 }
@@ -626,7 +626,8 @@ mod tests {
     /// order and complete.
     #[test]
     fn tag_all_is_complete_and_in_discriminant_order() {
-        assert_eq!(TAG_COUNT, 26, "TAG_COUNT is derived from Tag::ALL");
+        let last = Tag::ALL.last().copied().expect("Tag::ALL cannot be empty");
+        assert_eq!(TAG_COUNT, last.slot() + 1, "Tag::ALL must include every variant");
         for (i, tag) in Tag::ALL.iter().enumerate() {
             assert_eq!(
                 tag.slot(),
@@ -682,7 +683,7 @@ mod tests {
         reset_counts();
         for (name, &id) in names.iter().zip(&ids) {
             let base = base_id(name);
-            for tag in Tag::ALL {
+            for tag in Tag::ALL.iter().copied() {
                 assert_eq!(
                     tags.has(&interner, tag, id),
                     tags.member(tag, base),

@@ -126,6 +126,9 @@ pub mod wasm_plugins;
 
 pub use config::{CliOutcome, Config, Mode};
 
+#[cfg(all(target_arch = "wasm32", feature = "window", feature = "runtime-presentation"))]
+pub use app::{BrowserControl, browser_first_frame_submitted, run_browser};
+
 /// Entry point: dispatch on the configured mode, whether or not this build
 /// was compiled with the `window` Cargo feature.
 ///

@@ -121,18 +121,23 @@ fn place_coral_block<R: RandomSource>(
         return false;
     }
 
-    grid.set_if_in_bounds(at.x, at.y, at.z, state.to_owned());
+    grid.set_state_if_in_bounds(at.x, at.y, at.z, state);
 
     if random.next_float() < 0.25 {
         let coral = CORALS[random.next_int_bounded(CORALS.len() as i32) as usize];
-        grid.set_if_in_bounds(at.x, at.y + 1, at.z, coral_state(coral));
-    } else if random.next_float() < 0.05 {
-        let pickles = random.next_int_bounded(4) + 1;
-        grid.set_if_in_bounds(
+        grid.set_formatted_state_if_in_bounds(
             at.x,
             at.y + 1,
             at.z,
-            format!("minecraft:sea_pickle[pickles={pickles},waterlogged=true]"),
+            format_args!("{coral}[waterlogged=true]"),
+        );
+    } else if random.next_float() < 0.05 {
+        let pickles = random.next_int_bounded(4) + 1;
+        grid.set_formatted_state_if_in_bounds(
+            at.x,
+            at.y + 1,
+            at.z,
+            format_args!("minecraft:sea_pickle[pickles={pickles},waterlogged=true]"),
         );
     }
 
@@ -140,11 +145,11 @@ fn place_coral_block<R: RandomSource>(
         if random.next_float() < 0.2 && water_at(grid, at.x + dx, at.y, at.z + dz) {
             let wall = WALL_CORALS[random.next_int_bounded(WALL_CORALS.len() as i32) as usize];
             let facing = ["north", "east", "south", "west"][index];
-            grid.set_if_in_bounds(
+            grid.set_formatted_state_if_in_bounds(
                 at.x + dx,
                 at.y,
                 at.z + dz,
-                format!("{wall}[facing={facing},waterlogged=true]"),
+                format_args!("{wall}[facing={facing},waterlogged=true]"),
             );
         }
     }
@@ -157,10 +162,6 @@ fn base_at(grid: &VegGrid, x: i32, y: i32, z: i32) -> &str {
 
 fn water_at(grid: &VegGrid, x: i32, y: i32, z: i32) -> bool {
     base_at(grid, x, y, z) == "minecraft:water"
-}
-
-fn coral_state(name: &str) -> String {
-    format!("{name}[waterlogged=true]")
 }
 
 fn shuffle<R: RandomSource>(random: &mut R, directions: &mut [(i32, i32)]) {

@@ -330,11 +330,10 @@ pub struct EntityDraw {
     /// for the client-side integration this interpolates between.
     ///
     /// Its only consumer today is the body-pitch rotation
-    /// `gpu/entity_passes.rs` applies to a `"player"` [`Self::type_path`] —
-    /// see that module for why only the player is ported (vanilla's own
-    /// living-entity rotation setup has no swim branch at all; only
-    /// its own avatar renderer and drowned renderer override it, with two different
-    /// formulas, and this field only drives the one this build implements).
+    /// `gpu/entity_passes.rs` applies to a network `"player"` or the synthetic
+    /// local player's selected `"player_wide"`/`"player_slim"` model — see that
+    /// module for why only the player is ported (the shared living-entity
+    /// rotation has no swim branch; player and drowned use different formulas).
     pub swim_amount: f32,
     /// Whether this entity's shared-flags byte reports bit `0x01` — vanilla's
     /// own display-fire-animation gate: on fire and not a spectator. Player

@@ -1,12 +1,14 @@
 //! Browser integrated-server transport and worker startup.
 //!
 //! The browser cannot host the integrated server on the page thread. This
-//! module owns the Worker-backed byte transport and the small control-plane
-//! state machine that waits for world construction before handing the port to
-//! the ordinary client session.
+//! module owns the Worker-backed byte transport, a separate worldgen progress
+//! channel, and the control-plane state machine that waits for world
+//! construction before handing the byte port to the ordinary client session.
 
 #[cfg(target_arch = "wasm32")]
 use std::io;
+#[cfg(target_arch = "wasm32")]
+use std::sync::atomic::{AtomicU32, Ordering};
 #[cfg(target_arch = "wasm32")]
 use std::pin::Pin;
 #[cfg(target_arch = "wasm32")]
@@ -17,7 +19,12 @@ use wasm_bindgen::{JsCast, JsValue};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::closure::Closure;
 #[cfg(target_arch = "wasm32")]
-use web_sys::{ErrorEvent, MessageChannel, MessageEvent, Worker};
+use web_sys::{ErrorEvent, MessageChannel, MessageEvent, MessagePort, Worker};
+
+#[cfg(target_arch = "wasm32")]
+use crate::horizon::{
+    BrowserHorizonClient, apply_tile_response, parse_tile_response,
+};
 
 /// Browser-only client endpoint for an integrated session.
 ///
@@ -30,8 +37,72 @@ pub(super) enum BrowserIntegratedTransport {
     Worker {
         _worker: Worker,
         port: lodestone_net::MessagePortTransport,
+        _progress_port: MessagePort,
+        _horizon_port: MessagePort,
+        _on_progress: Closure<dyn FnMut(MessageEvent)>,
+        _on_horizon: Closure<dyn FnMut(MessageEvent)>,
         _on_error: Closure<dyn FnMut(ErrorEvent)>,
     },
+}
+
+#[cfg(target_arch = "wasm32")]
+static NEXT_WORKER_EPOCH: AtomicU32 = AtomicU32::new(1);
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BrowserWorkerProgress {
+    epoch: u32,
+    admitted: u64,
+    completed: u64,
+    committed: u64,
+    queue: u64,
+    bytes: u64,
+}
+
+#[cfg(target_arch = "wasm32")]
+const MAX_SAFE_PROGRESS: f64 = 9_007_199_254_740_991.0;
+
+#[cfg(target_arch = "wasm32")]
+fn worker_progress(value: &JsValue) -> Option<(BrowserWorkerProgress, String)> {
+    let get = |key: &str| {
+        js_sys::Reflect::get(value, &JsValue::from_str(key))
+            .ok()
+            .and_then(|number| number.as_f64())
+    };
+    let integer = |number: f64| {
+        number.is_finite()
+            && number >= 0.0
+            && number.fract() == 0.0
+            && number <= MAX_SAFE_PROGRESS
+    };
+    let epoch = get("epoch")?;
+    let admitted = get("admitted")?;
+    let completed = get("completed")?;
+    let committed = get("committed")?;
+    let queue = get("queue")?;
+    let bytes = get("bytes")?;
+    if ![epoch, admitted, completed, committed, queue, bytes]
+        .into_iter()
+        .all(integer)
+        || epoch > u32::MAX as f64
+    {
+        return None;
+    }
+    let stage = js_sys::Reflect::get(value, &JsValue::from_str("stage"))
+        .ok()?
+        .as_string()
+        .filter(|stage| !stage.is_empty())?;
+    Some((
+        BrowserWorkerProgress {
+            epoch: epoch as u32,
+            admitted: admitted as u64,
+            completed: completed as u64,
+            committed: committed as u64,
+            queue: queue as u64,
+            bytes: bytes as u64,
+        },
+        stage,
+    ))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -67,7 +138,13 @@ impl tokio::io::AsyncWrite for BrowserIntegratedTransport {
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match &mut *self {
-            Self::Worker { _worker, port, .. } => {
+            Self::Worker {
+                _worker,
+                port,
+                _progress_port,
+                _horizon_port,
+                ..
+            } => {
                 let result = Pin::new(port).poll_shutdown(cx);
                 if matches!(result, Poll::Ready(_)) {
                     // A MessagePort has no peer-close event. Once the client
@@ -76,6 +153,8 @@ impl tokio::io::AsyncWrite for BrowserIntegratedTransport {
                     // authoritative Worker explicitly. `Drop` repeats this
                     // as a guard for callers that discard the transport
                     // without polling shutdown.
+                    _progress_port.close();
+                    _horizon_port.close();
                     _worker.terminate();
                 }
                 result
@@ -87,15 +166,17 @@ impl tokio::io::AsyncWrite for BrowserIntegratedTransport {
 #[cfg(target_arch = "wasm32")]
 impl Drop for BrowserIntegratedTransport {
     fn drop(&mut self) {
-        if let Self::Worker { _worker, .. } = self {
-            // `Worker` has no Rust-side join handle, and dropping the JS
-            // wrapper does not guarantee that its event loop stops. Terminate
-            // the one authoritative server worker when the client endpoint is
-            // dropped; this prevents a quit/rejoin cycle from leaving an old
-            // world ticking behind the page. Startup failures already
-            // terminate explicitly in `launch_browser_worker`.
-            _worker.terminate();
-        }
+        let Self::Worker {
+            _worker,
+            _progress_port,
+            _horizon_port,
+            ..
+        } = self;
+        // `Worker` has no Rust-side join handle, and dropping the JS wrapper
+        // does not guarantee that its event loop stops.
+        _progress_port.close();
+        _horizon_port.close();
+        _worker.terminate();
     }
 }
 
@@ -132,11 +213,10 @@ pub(super) fn world_preset_from_wire_id(
 
 /// Starts the server worker and waits for its synchronous world construction.
 ///
-/// The transferred port contains protocol bytes only. The ordinary Worker
-/// channel carries this launch object and its ready/error response, which gives
-/// us a precise point at which startup failure must be reported: no worker
-/// world exists before `ready`, so constructing a page-owned replacement would
-/// violate the browser singleplayer scheduling boundary.
+/// The transferred protocol port contains bytes only. A second transferred
+/// port carries structured worldgen counters, while the ordinary Worker
+/// channel carries launch and ready/error responses. No page-side replacement
+/// is created when startup fails.
 #[derive(Debug, PartialEq, Eq)]
 #[cfg(any(target_arch = "wasm32", test))]
 pub(super) enum BrowserWorkerStartupAction {
@@ -235,17 +315,108 @@ pub(super) async fn launch_browser_worker(
     protocol: i32,
     seed: i64,
     preset: crate::menu::create_world::WorldTypePreset,
+    horizon_surface: super::SharedHorizonSurface,
 ) -> Result<BrowserIntegratedTransport, String> {
-    let worker = Worker::new("lodestone-server-worker.js")
-        .map_err(|e| e.as_string().unwrap_or_else(|| "cannot create server worker".to_string()))?;
     let channel = MessageChannel::new()
         .map_err(|e| e.as_string().unwrap_or_else(|| "cannot create worker channel".to_string()))?;
     let page_port = channel.port1();
     let worker_port = channel.port2();
+    let progress_channel = match MessageChannel::new() {
+        Ok(channel) => channel,
+        Err(error) => {
+            page_port.close();
+            worker_port.close();
+            return Err(
+                error
+                    .as_string()
+                    .unwrap_or_else(|| "cannot create worker progress channel".to_string()),
+            );
+        }
+    };
+    let page_progress_port = progress_channel.port1();
+    let worker_progress_port = progress_channel.port2();
+    let horizon_channel = match MessageChannel::new() {
+        Ok(channel) => channel,
+        Err(error) => {
+            page_port.close();
+            worker_port.close();
+            page_progress_port.close();
+            worker_progress_port.close();
+            return Err(
+                error
+                    .as_string()
+                    .unwrap_or_else(|| "cannot create worker horizon channel".to_string()),
+            );
+        }
+    };
+    let page_horizon_port = horizon_channel.port1();
+    let worker_horizon_port = horizon_channel.port2();
+    let worker = match Worker::new("lodestone-server-worker.js") {
+        Ok(worker) => worker,
+        Err(error) => {
+            page_port.close();
+            worker_port.close();
+            page_progress_port.close();
+            worker_progress_port.close();
+            page_horizon_port.close();
+            worker_horizon_port.close();
+            return Err(
+                error
+                    .as_string()
+                    .unwrap_or_else(|| "cannot create server worker".to_string()),
+            );
+        }
+    };
+    let epoch = NEXT_WORKER_EPOCH.fetch_add(1, Ordering::Relaxed).max(1);
+    let horizon_client = BrowserHorizonClient::new(epoch, page_horizon_port.clone());
+    let horizon_cache = horizon_client.cache();
     // Build this before waiting for `ready` so the worker error callback can
     // wake a client read after startup. A MessagePort itself has no close event.
     let transport = lodestone_net::MessagePortTransport::new(page_port);
     let port_shutdown = transport.shutdown_handle();
+    let on_progress = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
+        let value = event.data();
+        if js_sys::Reflect::get(&value, &JsValue::from_str("kind"))
+            .ok()
+            .and_then(|kind| kind.as_string())
+            .as_deref()
+            != Some("worldgen-progress")
+        {
+            return;
+        }
+        match worker_progress(&value) {
+            Some((progress, stage)) if progress.epoch == epoch => {
+                tracing::debug!(
+                    stage = %stage,
+                    admitted = progress.admitted,
+                    completed = progress.completed,
+                    committed = progress.committed,
+                    queue = progress.queue,
+                    bytes = progress.bytes,
+                    "browser worldgen progress",
+                );
+            }
+            Some(_) => tracing::warn!("ignoring stale browser worldgen progress"),
+            None => tracing::warn!("ignoring malformed browser worldgen progress"),
+        }
+    });
+    page_progress_port.set_onmessage(Some(on_progress.as_ref().unchecked_ref()));
+    page_progress_port.start();
+    let on_horizon = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
+        let Some(response) = parse_tile_response(&event.data()) else {
+            tracing::debug!("ignoring malformed browser horizon response");
+            return;
+        };
+        if response.epoch != epoch {
+            tracing::debug!("ignoring stale browser horizon response");
+            return;
+        }
+        if !apply_tile_response(&horizon_cache, response) {
+            tracing::debug!("ignoring unmatched browser horizon response");
+        }
+    });
+    page_horizon_port.set_onmessage(Some(on_horizon.as_ref().unchecked_ref()));
+    page_horizon_port.start();
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
     let ready_tx = std::rc::Rc::new(std::cell::RefCell::new(Some(ready_tx)));
     let on_message = {
@@ -324,28 +495,68 @@ pub(super) async fn launch_browser_worker(
         &JsValue::from_f64(f64::from(world_preset_wire_id(preset))),
     )
     .expect("plain launch object accepts preset");
+    js_sys::Reflect::set(
+        &launch,
+        &JsValue::from_str("epoch"),
+        &JsValue::from_f64(f64::from(epoch)),
+    )
+    .expect("plain launch object accepts cancellation epoch");
     let transfer = js_sys::Array::new();
     transfer.push(&worker_port);
-    worker
-        .post_message_with_transfer(&launch, &transfer)
-        .map_err(|e| {
-            e.as_string()
-                .unwrap_or_else(|| "cannot transfer server port to worker".to_string())
-        })?;
-    let startup = ready_rx
-        .await
-        .map_err(|_| "server worker stopped during startup".to_string())?;
+    transfer.push(&worker_progress_port);
+    transfer.push(&worker_horizon_port);
+    if let Err(error) = worker.post_message_with_transfer(&launch, &transfer) {
+        worker.set_onmessage(None);
+        worker.set_onerror(None);
+        page_progress_port.close();
+        page_horizon_port.close();
+        worker_progress_port.close();
+        worker_horizon_port.close();
+        worker.terminate();
+        return Err(
+            error
+                .as_string()
+                .unwrap_or_else(|| "cannot transfer server port to worker".to_string()),
+        );
+    }
+    let startup = match ready_rx.await {
+        Ok(startup) => startup,
+        Err(_) => {
+            worker.set_onmessage(None);
+            worker.set_onerror(None);
+            page_progress_port.close();
+            page_horizon_port.close();
+            worker_progress_port.close();
+            worker_horizon_port.close();
+            worker.terminate();
+            return Err("server worker stopped during startup".to_string());
+        }
+    };
     worker.set_onmessage(None);
     drop(on_message);
     if let Err(error) = startup {
         worker.set_onerror(None);
         drop(on_error);
+        page_horizon_port.close();
+        worker_horizon_port.close();
         worker.terminate();
         return Err(error);
+    }
+    if matches!(
+        preset,
+        crate::menu::create_world::WorldTypePreset::Normal
+            | crate::menu::create_world::WorldTypePreset::LargeBiomes
+            | crate::menu::create_world::WorldTypePreset::Amplified
+    ) {
+        let _ = horizon_surface.set(horizon_client);
     }
     Ok(BrowserIntegratedTransport::Worker {
         _worker: worker,
         port: transport,
+        _progress_port: page_progress_port,
+        _horizon_port: page_horizon_port,
+        _on_progress: on_progress,
+        _on_horizon: on_horizon,
         _on_error: on_error,
     })
 }

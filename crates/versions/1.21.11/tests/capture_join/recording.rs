@@ -39,7 +39,7 @@ const RCON_PASSWORD: &str = "lodestone";
 /// wrong field order reports (z = 62, x = 0) instead of (z = 0, x = 62). A
 /// square view distance makes a swapped pair invisible in every other
 /// situation, which is why the probe has to be a long move along one axis.
-const UNLOAD_PROBE_X: i32 = 1000;
+pub(super) const UNLOAD_PROBE_X: i32 = 1000;
 
 /// Whether an unload body names a column far enough out that only the
 /// recorder's own displacement can explain it — read without deciding which of

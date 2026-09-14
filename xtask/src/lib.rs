@@ -5390,6 +5390,19 @@ pub fn run_wasm_check(workspace_root: &Path) -> Result<()> {
         }
     }
 
+    print!("  {:<34} ", "lodestone-server-worker threads");
+    match compile_server_worker_threads_for_wasm(workspace_root) {
+        Ok(()) => println!("PASS"),
+        Err(failure) => {
+            println!("FAIL");
+            failures.push("lodestone-server-worker threads".to_string());
+            report_build_failure(&failure);
+            println!(
+                "      └─ reproduce: CARGO_PROFILE_RELEASE_CODEGEN_BACKEND=llvm RUSTFLAGS='{WASM_THREADS_RUSTFLAGS}' cargo build --manifest-path web/worker/Cargo.toml --target {WASM_TARGET} --release --features wasm-threads -Z build-std=panic_abort,std"
+            );
+        }
+    }
+
     print!("  {:<34} ", "server-worker control test");
     match run_worker_bootstrap_tests(workspace_root) {
         Ok(()) => println!("PASS"),
@@ -5398,6 +5411,17 @@ pub fn run_wasm_check(workspace_root: &Path) -> Result<()> {
             failures.push("server-worker control test".to_string());
             report_build_failure(&failure);
             println!("      └─ reproduce: node --test web/worker/worker_bootstrap.test.mjs");
+        }
+    }
+
+    print!("  {:<34} ", "server-worker long-task test");
+    match run_worker_long_task_tests(workspace_root) {
+        Ok(()) => println!("PASS"),
+        Err(failure) => {
+            println!("FAIL");
+            failures.push("server-worker long-task test".to_string());
+            report_build_failure(&failure);
+            println!("      └─ reproduce: node --test web/worker/worldgen_long_task_harness.test.mjs");
         }
     }
 
@@ -5803,6 +5827,8 @@ fn report_build_failure(failure: &CapturedBuild) {
 /// instead — the same reasoning `docs/compile-times.md` already gives for
 /// `RUSTFLAGS` clobbering `build.rustflags`, just one level further out.
 const WASM_CODEGEN_BACKEND_ENV: (&str, &str) = ("CARGO_PROFILE_DEV_CODEGEN_BACKEND", "llvm");
+const WASM_RELEASE_CODEGEN_BACKEND_ENV: (&str, &str) = ("CARGO_PROFILE_RELEASE_CODEGEN_BACKEND", "llvm");
+const WASM_THREADS_RUSTFLAGS: &str = "-C target-feature=+atomics,+bulk-memory -C link-arg=--shared-memory -C link-arg=--max-memory=1073741824 -C link-arg=--import-memory -C link-arg=--export=__heap_base -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base";
 
 /// Runs `cargo build -p <name> --target wasm32-unknown-unknown [extra]` from
 /// the workspace root, capturing the build to a log file on failure. The native
@@ -5844,6 +5870,25 @@ fn compile_server_worker_for_wasm(workspace_root: &Path) -> Result<(), CapturedB
     run_captured_build(&mut command, workspace_root, "lodestone-server-worker")
 }
 
+/// Builds the atomics-enabled worker artifact.
+fn compile_server_worker_threads_for_wasm(workspace_root: &Path) -> Result<(), CapturedBuild> {
+    let manifest = workspace_root.join("web/worker/Cargo.toml");
+    let mut command = Command::new("cargo");
+    command
+        .arg("build")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--target")
+        .arg(WASM_TARGET)
+        .arg("--release")
+        .args(["--features", "wasm-threads"])
+        .args(["-Z", "build-std=panic_abort,std"])
+        .env(WASM_RELEASE_CODEGEN_BACKEND_ENV.0, WASM_RELEASE_CODEGEN_BACKEND_ENV.1)
+        .env("RUSTFLAGS", WASM_THREADS_RUSTFLAGS)
+        .current_dir(workspace_root);
+    run_captured_build(&mut command, workspace_root, "lodestone-server-worker-threads")
+}
+
 /// Runs `trunk build` inside web/, capturing the build to a log file on failure.
 fn build_web_with_trunk(workspace_root: &Path) -> Result<(), CapturedBuild> {
     let mut command = Command::new("trunk");
@@ -5854,15 +5899,21 @@ fn build_web_with_trunk(workspace_root: &Path) -> Result<(), CapturedBuild> {
     run_captured_build(&mut command, workspace_root, "lodestone-web-trunk")
 }
 
-/// Runs the browser-worker control-plane test without needing a browser. The
-/// test supplies a synthetic Worker event and port, then proves startup never
-/// reports `ready` before the supplied wasm entry point accepts that port.
+/// Runs the browser-worker control-plane test without needing a browser.
 fn run_worker_bootstrap_tests(workspace_root: &Path) -> Result<(), CapturedBuild> {
     let mut command = Command::new("node");
     command
         .args(["--test", "web/worker/worker_bootstrap.test.mjs"])
         .current_dir(workspace_root);
     run_captured_build(&mut command, workspace_root, "server-worker-control")
+}
+
+fn run_worker_long_task_tests(workspace_root: &Path) -> Result<(), CapturedBuild> {
+    let mut command = Command::new("node");
+    command
+        .args(["--test", "web/worker/worldgen_long_task_harness.test.mjs"])
+        .current_dir(workspace_root);
+    run_captured_build(&mut command, workspace_root, "server-worker-long-task")
 }
 
 #[cfg(test)]

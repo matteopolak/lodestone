@@ -1939,7 +1939,6 @@ impl TerrainMesh {
 /// (`lodestone_server::join_scheduler`): with the queue keyed lexicographically
 /// the server's careful ordering reached no pixels, because a backlog was worked
 /// from the `−x/−z` corner of the world whatever the camera was pointing at.
-#[tracing::instrument(skip_all, fields(dirty = terrain.dirty_columns.len(), forced = terrain.forced_columns.len()))]
 pub fn heal_dirty_columns(
     store: Res<ChunkWorld>,
     mut terrain: ResMut<TerrainMesh>,

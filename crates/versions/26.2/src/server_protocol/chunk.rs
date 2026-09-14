@@ -745,6 +745,12 @@ pub(super) fn restore_end_retained_storage_gaps(light: &mut ColumnLight) {
 /// become explicit zero while layers outside the corridor stay Missing.
 pub(super) fn restore_end_retained_storage_allocation(light: &mut ColumnLight, stored: &[bool]) {
     debug_assert_eq!(stored.len(), light.light_section_count());
+    if (0..light.light_section_count())
+        .all(|section| matches!(light.sky(section), LightData::Missing)
+            && matches!(light.block(section), LightData::Missing))
+    {
+        return;
+    }
     for section in 0..light.light_section_count() {
         if !stored.get(section).copied().unwrap_or(false) {
             *light.sky_mut(section) = LightData::Missing;

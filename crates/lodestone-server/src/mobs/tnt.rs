@@ -723,7 +723,7 @@ mod tests {
     #[test]
     #[ignore = "focused TNT worker measurement; run explicitly before choosing a production cutoff"]
     fn measure_dense_tnt_owner_workers() {
-        use std::time::Instant;
+        use lodestone_time::Instant;
 
         for count in [128, 256, 512, 1_024, 2_048] {
             let serial = dense_tnt_owner_fixture(count);

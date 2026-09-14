@@ -1688,7 +1688,12 @@ struct SourcePositionSet {
 
 impl SourcePositionSet {
     fn reset(&mut self) {
-        self.buckets.clear();
+        self.buckets.truncate(16);
+        self.buckets
+            .resize_with(16, || VecDeque::with_capacity(8));
+        for bucket in &mut self.buckets {
+            bucket.clear();
+        }
         self.len = 0;
         self.first_bucket = 0;
     }
@@ -1705,7 +1710,8 @@ impl SourcePositionSet {
 
     fn resize(&mut self, capacity: usize) {
         let old = std::mem::take(&mut self.buckets);
-        let mut next = vec![VecDeque::new(); capacity];
+        let mut next = Vec::with_capacity(capacity);
+        next.resize_with(capacity, || VecDeque::with_capacity(8));
         for bucket in old {
             for position in bucket {
                 let index = Self::hash(position) & (capacity - 1);
@@ -2665,6 +2671,29 @@ pub(super) fn try_place_leaf<R: RandomSource>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reused_source_set_restores_fresh_bucket_geometry() {
+        let mut reused = SourcePositionSet::default();
+        for x in 0..40 {
+            reused.insert((x, x * 3, -x));
+        }
+        assert!(reused.buckets.len() > 16);
+        reused.reset();
+
+        let positions = [(15, 74, 15), (16, 75, 15), (14, 75, 16), (17, 73, 14)];
+        let mut fresh = SourcePositionSet::default();
+        for position in positions {
+            reused.insert(position);
+            fresh.insert(position);
+        }
+
+        assert_eq!(reused.buckets.len(), 16);
+        assert_eq!(reused.pop_first(), fresh.pop_first());
+        assert_eq!(reused.pop_first(), fresh.pop_first());
+        assert_eq!(reused.pop_first(), fresh.pop_first());
+        assert_eq!(reused.pop_first(), fresh.pop_first());
+    }
 
     /// External-value control for the leaf update at `(-120, 73, -126)` in
     /// source chunk `(-8, -8)`. The captured tree has logs at

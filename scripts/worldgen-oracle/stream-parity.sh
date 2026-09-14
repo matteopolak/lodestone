@@ -24,6 +24,8 @@ Options:
   --cz <low> <high>              target chunk z range (default 0..0)
 The target order is z-major with x fastest. All stream output is temporary and
 removed on exit; pass explicit coordinate bounds to keep batches bounded.
+Set LODESTONE_LARGE_PARITY_STREAM_SCAN_ALL=1 to inventory every mismatch and
+LODESTONE_LARGE_PARITY_STREAM_ARTIFACT_DIR to retain bounded scan artifacts.
 EOF
   exit "${1:-2}"
 }
@@ -64,6 +66,18 @@ done
 ((cx0 <= cx1 && cz0 <= cz1)) || { echo "coordinate bounds must be ordered" >&2; exit 2; }
 
 count=$(( (cx1 - cx0 + 1) * (cz1 - cz0 + 1) ))
+
+artifact_dir="${LODESTONE_LARGE_PARITY_STREAM_ARTIFACT_DIR:-}"
+if [[ -n "$artifact_dir" ]]; then
+  if [[ -e "$artifact_dir" && ! -d "$artifact_dir" ]]; then
+    echo "stream parity artifact path is not a directory: $artifact_dir" >&2
+    exit 2
+  fi
+  if [[ -d "$artifact_dir" ]] && [[ -n "$(find "$artifact_dir" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+    echo "stream parity artifact directory is not empty: $artifact_dir" >&2
+    exit 2
+  fi
+fi
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/lodestone-stream-parity.XXXXXX")"
 mkdir -p "$work/oracle-out"
@@ -165,8 +179,11 @@ fi
 if [[ -n "${LODESTONE_LARGE_PARITY_STREAM_DEFER_HEIGHTMAPS:-}" ]]; then
   consumer_env+=("LODESTONE_LARGE_PARITY_STREAM_DEFER_HEIGHTMAPS=$LODESTONE_LARGE_PARITY_STREAM_DEFER_HEIGHTMAPS")
 fi
-if [[ -n "${LODESTONE_DUMP_ACTUAL_RECORD_DIR:-}" ]]; then
-  consumer_env+=("LODESTONE_DUMP_ACTUAL_RECORD_DIR=$LODESTONE_DUMP_ACTUAL_RECORD_DIR")
+if [[ -n "${LODESTONE_LARGE_PARITY_STREAM_SCAN_ALL:-}" ]]; then
+  consumer_env+=("LODESTONE_LARGE_PARITY_STREAM_SCAN_ALL=$LODESTONE_LARGE_PARITY_STREAM_SCAN_ALL")
+fi
+if [[ -n "${LODESTONE_LARGE_PARITY_STREAM_ARTIFACT_DIR:-}" ]]; then
+  consumer_env+=("LODESTONE_LARGE_PARITY_STREAM_ARTIFACT_DIR=$LODESTONE_LARGE_PARITY_STREAM_ARTIFACT_DIR")
 fi
 env "${consumer_env[@]}" cargo test -p lodestone-v26-2 --test streaming_worldgen_parity \
   stream_external_oracle_matches_lodestone -- --ignored --nocapture \

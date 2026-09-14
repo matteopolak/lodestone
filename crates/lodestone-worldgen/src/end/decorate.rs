@@ -7,6 +7,7 @@
 //! boundary explicit instead of silently treating an End document as an
 //! Overworld vegetation document.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde_json::Value;
@@ -15,6 +16,7 @@ use lodestone_data::biomes::BuiltinBiome;
 use crate::dense_grid::DenseBlockGrid;
 use crate::density::Resolver;
 use crate::rng::{RandomSource, WorldgenRandom, XoroshiroRandomSource};
+use crate::structure::StructureBlocks;
 
 use super::{END_HIGHLANDS, SMALL_END_ISLANDS, THE_END, EndBiomeSource, EndSpike, end_spike_blocks, end_spikes_for_seed};
 
@@ -111,6 +113,7 @@ pub struct EndDecorationSpill {
 pub struct EndDecorationResult {
     pub spills: Vec<EndDecorationSpill>,
     pub gateways: Vec<EndGateway>,
+    pub structure_blocks: StructureBlocks,
 }
 
 /// One fixed platform origin read from the `end_platform` placed-feature data.
@@ -120,6 +123,25 @@ struct PlatformOrigin {
     y: i32,
     z: i32,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompositeDecorationStep {
+    OuterIslands,
+    StructurePlacement,
+    Gateway,
+    Spikes,
+    Chorus,
+    FixedPlatform,
+}
+
+pub(crate) const COMPOSITE_DECORATION_ORDER: [CompositeDecorationStep; 6] = [
+    CompositeDecorationStep::OuterIslands,
+    CompositeDecorationStep::StructurePlacement,
+    CompositeDecorationStep::Gateway,
+    CompositeDecorationStep::Spikes,
+    CompositeDecorationStep::Chorus,
+    CompositeDecorationStep::FixedPlatform,
+];
 
 /// The configured part of an End gateway feature.
 ///
@@ -242,15 +264,19 @@ impl EndDecoration {
     /// invocation targets the same fixed coordinate.  Restricting writes to the
     /// materialized column makes independently requested columns converge on the
     /// same world state without a shared cache.
-    pub(crate) fn apply(&self, world: &mut DenseBlockGrid) {
+    fn apply_with_observer<F>(&self, world: &mut DenseBlockGrid, observe: &mut F)
+    where
+        F: FnMut(&DenseBlockGrid, i32, i32, i32),
+    {
         for origin in &self.platforms {
-            apply_platform(world, *origin);
+            apply_platform_with_observer(world, *origin, observe);
         }
     }
 
     /// Executes the End features whose source chunks may write into `cx,cz`.
     /// The 3×3 source window is the feature write radius: an outer island's
     /// disc and a chorus plant may cross one chunk boundary.
+    #[cfg(test)]
     pub(crate) fn apply_region(
         &self,
         seed: i64,
@@ -259,19 +285,115 @@ impl EndDecoration {
         world: &mut DenseBlockGrid,
         biome_at_chunk: impl Fn(i32, i32) -> BuiltinBiome,
     ) -> Vec<EndGateway> {
-        self.apply(world);
-        let mut gateways = Vec::new();
-        for source_x in cx - 1..=cx + 1 {
-            for source_z in cz - 1..=cz + 1 {
-                let biomes = EndBiomeSet::around_source(source_x, source_z, &biome_at_chunk);
-                gateways.extend(self.apply_source(seed, source_x, source_z, world, biomes).into_iter().filter(|gateway| {
-                    gateway.pos.0.div_euclid(16) == cx && gateway.pos.2.div_euclid(16) == cz
-                }));
-            }
-        }
-        gateways
+        let mut observe = |_: &DenseBlockGrid, _: i32, _: i32, _: i32| {};
+        self.apply_region_inner(seed, cx, cz, world, biome_at_chunk, &mut observe, |_| (), |_| ()).0
     }
 
+    pub(crate) fn apply_region_with_heightmaps_and_structure<S, E, H>(
+        &self,
+        seed: i64,
+        cx: i32,
+        cz: i32,
+        world: &mut DenseBlockGrid,
+        biome_at_chunk: impl Fn(i32, i32) -> BuiltinBiome,
+        maps: &mut [[u16; 256]; 3],
+        min_y: i32,
+        height: i32,
+        place_structure: S,
+        recompute_structure_maps: H,
+    ) -> (Vec<EndGateway>, E)
+    where
+        S: FnOnce(&mut DenseBlockGrid) -> E,
+        H: FnOnce(&DenseBlockGrid, &mut [[u16; 256]; 3]),
+    {
+        let maps = RefCell::new(maps);
+        let mut observe = |world: &DenseBlockGrid, x: i32, y: i32, z: i32| {
+            update_client_heightmaps(&mut *maps.borrow_mut(), world, cx, cz, min_y, height, x, y, z);
+        };
+        let mut recompute_structure_maps = Some(recompute_structure_maps);
+        let mut settle_structure = |world: &DenseBlockGrid| {
+            recompute_structure_maps
+                .take()
+                .expect("End structure maps must settle once")(world, &mut *maps.borrow_mut());
+        };
+        self.apply_region_inner(
+            seed,
+            cx,
+            cz,
+            world,
+            biome_at_chunk,
+            &mut observe,
+            place_structure,
+            &mut settle_structure,
+        )
+    }
+
+    fn apply_region_inner<F, S, E, H>(
+        &self,
+        seed: i64,
+        cx: i32,
+        cz: i32,
+        world: &mut DenseBlockGrid,
+        biome_at_chunk: impl Fn(i32, i32) -> BuiltinBiome,
+        observe: &mut F,
+        place_structure: S,
+        recompute_structure_maps: H,
+    ) -> (Vec<EndGateway>, E)
+    where
+        F: FnMut(&DenseBlockGrid, i32, i32, i32),
+        S: FnOnce(&mut DenseBlockGrid) -> E,
+        H: FnMut(&DenseBlockGrid),
+    {
+        let mut gateways = Vec::new();
+        let mut structure = None;
+        let mut place_structure = Some(place_structure);
+        let mut recompute_structure_maps = Some(recompute_structure_maps);
+        for phase in COMPOSITE_DECORATION_ORDER {
+            match phase {
+                CompositeDecorationStep::OuterIslands => {
+                    for source_x in cx - 1..=cx + 1 {
+                        for source_z in cz - 1..=cz + 1 {
+                            let biomes = EndBiomeSet::around_source(source_x, source_z, &biome_at_chunk);
+                            self.apply_outer_island_source(seed, source_x, source_z, world, biomes, observe);
+                        }
+                    }
+                }
+                CompositeDecorationStep::StructurePlacement => {
+                    structure = Some(place_structure.take().expect("End structure step must run once")(world));
+                    recompute_structure_maps
+                        .take()
+                        .expect("End structure maps must settle once")(world);
+                }
+                CompositeDecorationStep::Gateway | CompositeDecorationStep::Spikes | CompositeDecorationStep::Chorus => {
+                    for source_x in cx - 1..=cx + 1 {
+                        for source_z in cz - 1..=cz + 1 {
+                            let biomes = EndBiomeSet::around_source(source_x, source_z, &biome_at_chunk);
+                            gateways.extend(
+                                self.apply_late_source_for_phase(
+                                    phase,
+                                    seed,
+                                    source_x,
+                                    source_z,
+                                    world,
+                                    biomes,
+                                    observe,
+                                )
+                                .into_iter()
+                                .filter(|gateway| {
+                                    gateway.pos.0.div_euclid(16) == cx
+                                        && gateway.pos.2.div_euclid(16) == cz
+                                }),
+                            );
+                        }
+                    }
+                }
+                CompositeDecorationStep::FixedPlatform => self.apply_with_observer(world, observe),
+            }
+        }
+        (gateways, structure.expect("End structure step must run once"))
+    }
+
+    #[cfg(test)]
     pub(crate) fn apply_source(
         &self,
         seed: i64,
@@ -280,18 +402,154 @@ impl EndDecoration {
         world: &mut DenseBlockGrid,
         source_biomes: EndBiomeSet,
     ) -> Vec<EndGateway> {
-        let biome_source = EndBiomeSource::new(seed);
-        let mut gateways = Vec::new();
-        // Fixed placement is a source-owned TOP_LAYER feature.  The complete
-        // region path applies all fixed placements before replaying the
-        // mutable source window; the lifecycle path must emit the same write
-        // from the chunk containing each configured placement origin so the
-        // spill reaches both the origin and adjacent resident columns.
+        let mut observe = |_: &DenseBlockGrid, _: i32, _: i32, _: i32| {};
+        self.apply_source_with_observer(seed, source_x, source_z, world, source_biomes, &mut observe)
+    }
+
+    pub(crate) fn apply_source_with_structure<S, E>(
+        &self,
+        seed: i64,
+        source_x: i32,
+        source_z: i32,
+        world: &mut DenseBlockGrid,
+        source_biomes: EndBiomeSet,
+        place_structure: S,
+    ) -> (Vec<EndGateway>, E)
+    where
+        S: FnOnce(&mut DenseBlockGrid) -> E,
+    {
+        self.apply_outer_island_source_without_observer(seed, source_x, source_z, world, source_biomes);
+        let structure = place_structure(world);
+        let gateways = self.apply_late_source_without_observer(seed, source_x, source_z, world, source_biomes);
+        let mut observe = |_: &DenseBlockGrid, _: i32, _: i32, _: i32| {};
         for &origin in &self.platforms {
             if origin.x.div_euclid(16) == source_x && origin.z.div_euclid(16) == source_z {
-                apply_platform(world, origin);
+                apply_platform_with_observer(world, origin, &mut observe);
             }
         }
+        (gateways, structure)
+    }
+
+    #[cfg(test)]
+    fn apply_source_with_observer<F>(
+        &self,
+        seed: i64,
+        source_x: i32,
+        source_z: i32,
+        world: &mut DenseBlockGrid,
+        source_biomes: EndBiomeSet,
+        observe: &mut F,
+    ) -> Vec<EndGateway>
+    where
+        F: FnMut(&DenseBlockGrid, i32, i32, i32),
+    {
+        self.apply_outer_island_source(seed, source_x, source_z, world, source_biomes, observe);
+        let gateways = self.apply_late_source(seed, source_x, source_z, world, source_biomes, observe);
+        for &origin in &self.platforms {
+            if origin.x.div_euclid(16) == source_x && origin.z.div_euclid(16) == source_z {
+                apply_platform_with_observer(world, origin, observe);
+            }
+        }
+        gateways
+    }
+
+    fn apply_outer_island_source_without_observer(
+        &self,
+        seed: i64,
+        source_x: i32,
+        source_z: i32,
+        world: &mut DenseBlockGrid,
+        source_biomes: EndBiomeSet,
+    ) {
+        let mut observe = |_: &DenseBlockGrid, _: i32, _: i32, _: i32| {};
+        self.apply_outer_island_source(seed, source_x, source_z, world, source_biomes, &mut observe);
+    }
+
+    fn apply_late_source_without_observer(
+        &self,
+        seed: i64,
+        source_x: i32,
+        source_z: i32,
+        world: &mut DenseBlockGrid,
+        source_biomes: EndBiomeSet,
+    ) -> Vec<EndGateway> {
+        let mut observe = |_: &DenseBlockGrid, _: i32, _: i32, _: i32| {};
+        self.apply_late_source(seed, source_x, source_z, world, source_biomes, &mut observe)
+    }
+
+    fn apply_outer_island_source<F>(
+        &self,
+        seed: i64,
+        source_x: i32,
+        source_z: i32,
+        world: &mut DenseBlockGrid,
+        source_biomes: EndBiomeSet,
+        observe: &mut F,
+    ) where
+        F: FnMut(&DenseBlockGrid, i32, i32, i32),
+    {
+        let biome_source = EndBiomeSource::new(seed);
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        let decoration_seed = random.set_decoration_seed(seed, source_x * 16, source_z * 16);
+        if self.outer_islands && source_biomes.contains(BuiltinBiome::SmallEndIslands) {
+            apply_outer_islands_with_observer(
+                world,
+                &mut random,
+                decoration_seed,
+                self.outer_island_index.unwrap_or_default() as i32,
+                source_x,
+                source_z,
+                observe,
+                |x, y, z| biome_source.biome_at_block_typed(x, y, z) == BuiltinBiome::SmallEndIslands,
+            );
+        }
+    }
+
+    fn apply_late_source<F>(
+        &self,
+        seed: i64,
+        source_x: i32,
+        source_z: i32,
+        world: &mut DenseBlockGrid,
+        source_biomes: EndBiomeSet,
+        observe: &mut F,
+    ) -> Vec<EndGateway>
+    where
+        F: FnMut(&DenseBlockGrid, i32, i32, i32),
+    {
+        let mut gateways = Vec::new();
+        for phase in [
+            CompositeDecorationStep::Gateway,
+            CompositeDecorationStep::Spikes,
+            CompositeDecorationStep::Chorus,
+        ] {
+            gateways.extend(self.apply_late_source_for_phase(
+                phase,
+                seed,
+                source_x,
+                source_z,
+                world,
+                source_biomes,
+                observe,
+            ));
+        }
+        gateways
+    }
+
+    fn apply_late_source_for_phase<F>(
+        &self,
+        phase: CompositeDecorationStep,
+        seed: i64,
+        source_x: i32,
+        source_z: i32,
+        world: &mut DenseBlockGrid,
+        source_biomes: EndBiomeSet,
+        observe: &mut F,
+    ) -> Vec<EndGateway>
+    where
+        F: FnMut(&DenseBlockGrid, i32, i32, i32),
+    {
+        let biome_source = EndBiomeSource::new(seed);
         let generated_spikes = self
             .spikes
             .as_ref()
@@ -299,7 +557,24 @@ impl EndDecoration {
             .map(|_| end_spikes_for_seed(seed));
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
         let decoration_seed = random.set_decoration_seed(seed, source_x * 16, source_z * 16);
-        if source_biomes.contains(BuiltinBiome::TheEnd) {
+        let mut gateways = Vec::new();
+        if phase == CompositeDecorationStep::Gateway
+            && source_biomes.contains(BuiltinBiome::EndHighlands)
+            && self.gateway_return.is_some()
+        {
+            random.set_feature_seed(decoration_seed, self.gateway_index.unwrap_or_default() as i32, 4);
+            if random.next_float() < 1.0 / 700.0 {
+                let x = source_x * 16 + random.next_int_bounded(16);
+                let z = source_z * 16 + random.next_int_bounded(16);
+                let y = surface_y(world, x, z) + 3 + random.next_int_bounded(7);
+                if biome_source.biome_at_block_typed(x, y, z) == BuiltinBiome::EndHighlands {
+                    write_gateway_with_observer(world, (x, y, z), observe);
+                    let config = self.gateway_return.expect("gateway flag checked immediately above");
+                    gateways.push(EndGateway { pos: (x, y, z), exit: config.exit, exact: config.exact });
+                }
+            }
+        }
+        if phase == CompositeDecorationStep::Spikes && source_biomes.contains(BuiltinBiome::TheEnd) {
             random.set_feature_seed(decoration_seed, self.spike_index.unwrap_or_default() as i32, 4);
             let spikes: &[EndSpike] = match self.spikes.as_deref() {
                 Some(configured) if !configured.is_empty() => configured,
@@ -309,36 +584,15 @@ impl EndDecoration {
             for spike in spikes {
                 if spike.center_x.div_euclid(16) == source_x && spike.center_z.div_euclid(16) == source_z {
                     for block in end_spike_blocks(spike, 0) {
-                        world.set(block.x, block.y, block.z, &block.state);
+                        set_with_observer(world, block.x, block.y, block.z, &block.state, observe);
                     }
                 }
             }
         }
-        if self.outer_islands && source_biomes.contains(BuiltinBiome::SmallEndIslands) {
-            apply_outer_islands(
-                world,
-                &mut random,
-                decoration_seed,
-                self.outer_island_index.unwrap_or_default() as i32,
-                source_x,
-                source_z,
-                |x, y, z| biome_source.biome_at_block_typed(x, y, z) == BuiltinBiome::SmallEndIslands,
-            );
-        }
-        if source_biomes.contains(BuiltinBiome::EndHighlands) && self.gateway_return.is_some() {
-            random.set_feature_seed(decoration_seed, self.gateway_index.unwrap_or_default() as i32, 4);
-            if random.next_float() < 1.0 / 700.0 {
-                let x = source_x * 16 + random.next_int_bounded(16);
-                let z = source_z * 16 + random.next_int_bounded(16);
-                let y = surface_y(world, x, z) + 3 + random.next_int_bounded(7);
-                if biome_source.biome_at_block_typed(x, y, z) == BuiltinBiome::EndHighlands {
-                    write_gateway(world, (x, y, z));
-                    let config = self.gateway_return.expect("gateway flag checked immediately above");
-                    gateways.push(EndGateway { pos: (x, y, z), exit: config.exit, exact: config.exact });
-                }
-            }
-        }
-        if self.chorus {
+        if phase == CompositeDecorationStep::Chorus
+            && self.chorus
+            && source_biomes.contains(BuiltinBiome::EndHighlands)
+        {
             random.set_feature_seed(decoration_seed, self.chorus_index.unwrap_or_default() as i32, 9);
             let attempts = random.next_int_bounded(5);
             for _ in 0..attempts {
@@ -349,7 +603,15 @@ impl EndDecoration {
                     && world.get(x, y, z) == "minecraft:air"
                     && world.get(x, y - 1, z) == "minecraft:end_stone"
                 {
-                    grow_chorus(world, &mut random, (x, y, z), (x, y, z), 0, &self.chorus_supports);
+                    grow_chorus_with_observer(
+                        world,
+                        &mut random,
+                        (x, y, z),
+                        (x, y, z),
+                        0,
+                        &self.chorus_supports,
+                        observe,
+                    );
                 }
             }
         }
@@ -363,6 +625,7 @@ impl EndDecoration {
 /// rarity, count, square, and height modifiers have consumed their draws.
 /// This keeps a source-centre biome from suppressing an eligible origin near a
 /// biome boundary while retaining the feature's exact random stream.
+#[cfg(test)]
 fn apply_outer_islands<R: RandomSource, F: FnMut(i32, i32, i32) -> bool>(
     world: &mut DenseBlockGrid,
     random: &mut WorldgenRandom<R>,
@@ -370,8 +633,34 @@ fn apply_outer_islands<R: RandomSource, F: FnMut(i32, i32, i32) -> bool>(
     feature_index: i32,
     source_x: i32,
     source_z: i32,
-    mut biome_at_origin: F,
+    biome_at_origin: F,
 ) {
+    let mut observe = |_: &DenseBlockGrid, _: i32, _: i32, _: i32| {};
+    apply_outer_islands_with_observer(
+        world,
+        random,
+        decoration_seed,
+        feature_index,
+        source_x,
+        source_z,
+        &mut observe,
+        biome_at_origin,
+    );
+}
+
+fn apply_outer_islands_with_observer<R: RandomSource, F, G>(
+    world: &mut DenseBlockGrid,
+    random: &mut WorldgenRandom<R>,
+    decoration_seed: i64,
+    feature_index: i32,
+    source_x: i32,
+    source_z: i32,
+    observe: &mut G,
+    mut biome_at_origin: F,
+) where
+    F: FnMut(i32, i32, i32) -> bool,
+    G: FnMut(&DenseBlockGrid, i32, i32, i32),
+{
     random.set_feature_seed(decoration_seed, feature_index, 0);
     if random.next_float() >= 1.0 / 14.0 {
         return;
@@ -382,20 +671,40 @@ fn apply_outer_islands<R: RandomSource, F: FnMut(i32, i32, i32) -> bool>(
         let z = source_z * 16 + random.next_int_bounded(16);
         let y = 55 + random.next_int_bounded(16);
         if biome_at_origin(x, y, z) {
-            place_outer_island(world, random, (x, y, z));
+            place_outer_island_with_observer(world, random, (x, y, z), observe);
         }
     }
 }
 
-fn apply_platform(world: &mut DenseBlockGrid, origin: PlatformOrigin) {
+fn apply_platform_with_observer<F>(
+    world: &mut DenseBlockGrid,
+    origin: PlatformOrigin,
+    observe: &mut F,
+) where
+    F: FnMut(&DenseBlockGrid, i32, i32, i32),
+{
     for dz in -2..=2 {
         for dx in -2..=2 {
-            world.set(origin.x + dx, origin.y - 1, origin.z + dz, "minecraft:obsidian");
+            set_with_observer(world, origin.x + dx, origin.y - 1, origin.z + dz, "minecraft:obsidian", observe);
             for dy in 0..3 {
-                world.set(origin.x + dx, origin.y + dy, origin.z + dz, "minecraft:air");
+                set_with_observer(world, origin.x + dx, origin.y + dy, origin.z + dz, "minecraft:air", observe);
             }
         }
     }
+}
+
+fn set_with_observer<F>(
+    world: &mut DenseBlockGrid,
+    x: i32,
+    y: i32,
+    z: i32,
+    state: &str,
+    observe: &mut F,
+) where
+    F: FnMut(&DenseBlockGrid, i32, i32, i32),
+{
+    world.set(x, y, z, state);
+    observe(world, x, y, z);
 }
 
 fn is_chorus(state: &str) -> bool {
@@ -418,8 +727,16 @@ fn chorus_plant_state(world: &DenseBlockGrid, pos: (i32, i32, i32), supports: &H
     )
 }
 
-fn set_chorus_plant(world: &mut DenseBlockGrid, pos: (i32, i32, i32), supports: &HashSet<String>) {
-    world.set(pos.0, pos.1, pos.2, &chorus_plant_state(world, pos, supports));
+fn set_chorus_plant_with_observer<F>(
+    world: &mut DenseBlockGrid,
+    pos: (i32, i32, i32),
+    supports: &HashSet<String>,
+    observe: &mut F,
+) where
+    F: FnMut(&DenseBlockGrid, i32, i32, i32),
+{
+    let state = chorus_plant_state(world, pos, supports);
+    set_with_observer(world, pos.0, pos.1, pos.2, &state, observe);
 }
 
 fn horizontally_empty(world: &DenseBlockGrid, pos: (i32, i32, i32), ignore: Option<(i32, i32)>) -> bool {
@@ -428,6 +745,7 @@ fn horizontally_empty(world: &DenseBlockGrid, pos: (i32, i32, i32), ignore: Opti
     })
 }
 
+#[cfg(test)]
 fn grow_chorus<R: RandomSource>(
     world: &mut DenseBlockGrid,
     random: &mut R,
@@ -436,13 +754,28 @@ fn grow_chorus<R: RandomSource>(
     depth: i32,
     supports: &HashSet<String>,
 ) {
-    set_chorus_plant(world, current, supports);
+    let mut observe = |_: &DenseBlockGrid, _: i32, _: i32, _: i32| {};
+    grow_chorus_with_observer(world, random, current, start, depth, supports, &mut observe);
+}
+
+fn grow_chorus_with_observer<R: RandomSource, F>(
+    world: &mut DenseBlockGrid,
+    random: &mut R,
+    current: (i32, i32, i32),
+    start: (i32, i32, i32),
+    depth: i32,
+    supports: &HashSet<String>,
+    observe: &mut F,
+) where
+    F: FnMut(&DenseBlockGrid, i32, i32, i32),
+{
+    set_chorus_plant_with_observer(world, current, supports, observe);
     let height = random.next_int_bounded(4) + 1 + i32::from(depth == 0);
     for i in 0..height {
         let target = (current.0, current.1 + i + 1, current.2);
         if !horizontally_empty(world, target, None) { return; }
-        set_chorus_plant(world, target, supports);
-        set_chorus_plant(world, (target.0, target.1 - 1, target.2), supports);
+        set_chorus_plant_with_observer(world, target, supports, observe);
+        set_chorus_plant_with_observer(world, (target.0, target.1 - 1, target.2), supports, observe);
     }
     let mut branched = false;
     if depth < 4 {
@@ -457,14 +790,21 @@ fn grow_chorus<R: RandomSource>(
                 && horizontally_empty(world, target, Some((-dx, -dz)))
             {
                 branched = true;
-                set_chorus_plant(world, target, supports);
-                set_chorus_plant(world, (target.0 - dx, target.1, target.2 - dz), supports);
-                grow_chorus(world, random, target, start, depth + 1, supports);
+                set_chorus_plant_with_observer(world, target, supports, observe);
+                set_chorus_plant_with_observer(world, (target.0 - dx, target.1, target.2 - dz), supports, observe);
+                grow_chorus_with_observer(world, random, target, start, depth + 1, supports, observe);
             }
         }
     }
     if !branched {
-        world.set(current.0, current.1 + height, current.2, "minecraft:chorus_flower[age=5]");
+        set_with_observer(
+            world,
+            current.0,
+            current.1 + height,
+            current.2,
+            "minecraft:chorus_flower[age=5]",
+            observe,
+        );
     }
 }
 
@@ -690,8 +1030,80 @@ fn parse_position(value: &Value) -> Option<(i32, i32, i32)> {
     ))
 }
 
+fn update_client_heightmaps(
+    maps: &mut [[u16; 256]; 3],
+    world: &DenseBlockGrid,
+    cx: i32,
+    cz: i32,
+    min_y: i32,
+    height: i32,
+    x: i32,
+    y: i32,
+    z: i32,
+) {
+    if x.div_euclid(16) != cx || z.div_euclid(16) != cz {
+        return;
+    }
+    let index = (z.rem_euclid(16) * 16 + x.rem_euclid(16)) as usize;
+    let local_y = y - min_y;
+    if !(0..height).contains(&local_y) {
+        return;
+    }
+    let stored = (local_y + 1) as u16;
+    let state = world
+        .interner()
+        .canonical_id(world.get_id(x, y, z));
+    let motion = state.is_some_and(|state| {
+        lodestone_data::block_solidity::blocks_motion(state)
+            || lodestone_data::snow_support::has_fluid_state(state)
+    });
+    let values = [
+        state.is_some_and(|state| state != lodestone_data::block_states::air_state()),
+        motion,
+        motion
+            && state.is_some_and(|state| {
+                !lodestone_data::tool::builtin_block_tag_contains("minecraft:leaves", state.block())
+            }),
+    ];
+    for (map_index, includes) in values.into_iter().enumerate() {
+        if includes {
+            if maps[map_index][index] < stored {
+                maps[map_index][index] = stored;
+            }
+        } else if maps[map_index][index] == stored {
+            maps[map_index][index] = (0..local_y)
+                .rev()
+                .find(|&candidate| {
+                    let Some(candidate_state) = world
+                        .interner()
+                        .canonical_id(world.get_id(x, min_y + candidate, z))
+                    else {
+                        return false;
+                    };
+                    match map_index {
+                        0 => candidate_state != lodestone_data::block_states::air_state(),
+                        1 => lodestone_data::block_solidity::blocks_motion(candidate_state)
+                            || lodestone_data::snow_support::has_fluid_state(candidate_state),
+                        2 => {
+                            let motion = lodestone_data::block_solidity::blocks_motion(candidate_state)
+                                || lodestone_data::snow_support::has_fluid_state(candidate_state);
+                            motion
+                                && !lodestone_data::tool::builtin_block_tag_contains(
+                                    "minecraft:leaves",
+                                    candidate_state.block(),
+                                )
+                        }
+                        _ => false,
+                    }
+                })
+                .map_or(0, |candidate| (candidate + 1) as u16);
+        }
+    }
+}
+
 fn surface_y(world: &DenseBlockGrid, x: i32, z: i32) -> i32 {
-    for y in (0..128).rev() {
+    let (_, min_y, _, _, height, _) = world.bounds();
+    for y in (min_y..min_y + height).rev() {
         let state = world.get_id(x, y, z);
         let Some(state) = world.interner().canonical_id(state) else {
             continue;
@@ -702,10 +1114,22 @@ fn surface_y(world: &DenseBlockGrid, x: i32, z: i32) -> i32 {
             return y + 1;
         }
     }
-    0
+    min_y
 }
 
+#[cfg(test)]
 fn write_gateway(world: &mut DenseBlockGrid, origin: (i32, i32, i32)) {
+    let mut observe = |_: &DenseBlockGrid, _: i32, _: i32, _: i32| {};
+    write_gateway_with_observer(world, origin, &mut observe);
+}
+
+fn write_gateway_with_observer<F>(
+    world: &mut DenseBlockGrid,
+    origin: (i32, i32, i32),
+    observe: &mut F,
+) where
+    F: FnMut(&DenseBlockGrid, i32, i32, i32),
+{
     for y in origin.1 - 2..=origin.1 + 2 {
         for x in origin.0 - 1..=origin.0 + 1 {
             for z in origin.2 - 1..=origin.2 + 1 {
@@ -722,7 +1146,7 @@ fn write_gateway(world: &mut DenseBlockGrid, origin: (i32, i32, i32)) {
                 } else {
                     "minecraft:air"
                 };
-                world.set(x, y, z, state);
+                set_with_observer(world, x, y, z, state, observe);
             }
         }
     }
@@ -732,11 +1156,24 @@ fn write_gateway(world: &mut DenseBlockGrid, origin: (i32, i32, i32)) {
 ///
 /// The region driver performs its rarity/count/in-square selection once per
 /// surrounding source chunk, then this primitive writes the resulting shape.
+#[cfg(test)]
 pub(crate) fn place_outer_island<R: RandomSource>(
     world: &mut DenseBlockGrid,
     random: &mut R,
     origin: (i32, i32, i32),
 ) {
+    let mut observe = |_: &DenseBlockGrid, _: i32, _: i32, _: i32| {};
+    place_outer_island_with_observer(world, random, origin, &mut observe);
+}
+
+fn place_outer_island_with_observer<R: RandomSource, F>(
+    world: &mut DenseBlockGrid,
+    random: &mut R,
+    origin: (i32, i32, i32),
+    observe: &mut F,
+) where
+    F: FnMut(&DenseBlockGrid, i32, i32, i32),
+{
     let mut radius = random.next_int_bounded(3) as f32 + 4.0;
     let mut y_offset = 0;
     while radius > 0.5 {
@@ -745,11 +1182,13 @@ pub(crate) fn place_outer_island<R: RandomSource>(
         for x_offset in lower..=upper {
             for z_offset in lower..=upper {
                 if (x_offset * x_offset + z_offset * z_offset) as f32 <= (radius + 1.0) * (radius + 1.0) {
-                    world.set(
+                    set_with_observer(
+                        world,
                         origin.0 + x_offset,
                         origin.1 + y_offset,
                         origin.2 + z_offset,
                         "minecraft:end_stone",
+                        observe,
                     );
                 }
             }
@@ -1219,6 +1658,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn chorus_possible_biome_gate_suppresses_rng_and_writes() {
+        let decoration = EndDecoration::from_resolver(&FeatureOrderResolver);
+        let seed = 42;
+        let mut world = DenseBlockGrid::new(2944, 0, 1392, 48, 256, 48, "minecraft:air");
+        for z in 1392..1440 {
+            for x in 2944..2992 {
+                world.set(x, 63, z, "minecraft:end_stone");
+            }
+        }
+
+        let mut gated = world.clone();
+        decoration.apply_source(seed, 185, 87, &mut gated, EndBiomeSet::default());
+        assert!(
+            (1392..1440).all(|z| (2944..2992).all(|x| !is_chorus(gated.get(x, 64, z)))),
+            "a source with no possible highlands must not consume or apply chorus",
+        );
+
+        let biome_source = EndBiomeSource::new(seed);
+        decoration.apply_source(
+            seed,
+            185,
+            87,
+            &mut world,
+            EndBiomeSet::around_source(185, 87, |x, z| {
+                biome_source.biome_at_quart_typed(x * 4, 0, z * 4)
+            }),
+        );
+        assert!(
+            (1392..1440).any(|z| (2944..2992).any(|x| is_chorus(world.get(x, 64, z)))),
+            "the positive possible-biome arm must still place chorus",
+        );
+    }
+
+    #[test]
+    fn surface_y_uses_the_grid_vertical_bounds() {
+        let mut world = DenseBlockGrid::new(0, -32, 0, 1, 256, 1, "minecraft:air");
+        world.set(0, 200, 0, "minecraft:end_stone");
+        assert_eq!(surface_y(&world, 0, 0), 201, "high terrain must be visible to placement");
+
+        let mut low = DenseBlockGrid::new(0, -32, 0, 1, 256, 1, "minecraft:air");
+        low.set(0, -32, 0, "minecraft:end_stone");
+        assert_eq!(surface_y(&low, 0, 0), -31, "the lower bound must be included");
+    }
+
     /// The global order fixture is independent of the End driver's local
     /// resolver walk. In particular, the spike is index 1 because the gateway
     /// occupies index 0 in the same generation step, even though each feature
@@ -1252,5 +1736,30 @@ mod tests {
         assert_eq!(rows, 5, "fixture must cover every End feature");
         assert_eq!(decoration.spike_index, Some(1), "the production decoration state must retain the global spike index");
         assert_eq!(decoration.gateway_index, Some(0), "the production decoration state must retain the global gateway index");
+    }
+
+    #[test]
+    fn production_composite_order_matches_authenticated_fixture() {
+        let fixture = include_str!("../../tests/support/end_composite_order_jvm.txt");
+        let names = |step| match step {
+            CompositeDecorationStep::OuterIslands => "outer_island",
+            CompositeDecorationStep::StructurePlacement => "structure",
+            CompositeDecorationStep::Gateway => "gateway",
+            CompositeDecorationStep::Spikes => "spike",
+            CompositeDecorationStep::Chorus => "chorus",
+            CompositeDecorationStep::FixedPlatform => "platform",
+        };
+        let actual = COMPOSITE_DECORATION_ORDER
+            .into_iter()
+            .map(names)
+            .collect::<Vec<_>>();
+        assert_eq!(&actual[..2], ["outer_island", "structure"]);
+        assert_eq!(&actual[4..], ["chorus", "platform"]);
+        assert!(fixture.contains("expected=outer_island,structure"));
+        assert!(fixture.contains("expected=chorus,platform"));
+        assert!(fixture.contains("wrong=structure,outer_island"));
+        assert!(fixture.contains("wrong=platform,chorus"));
+        assert_ne!(&actual[..2], ["structure", "outer_island"]);
+        assert_ne!(&actual[4..], ["platform", "chorus"]);
     }
 }

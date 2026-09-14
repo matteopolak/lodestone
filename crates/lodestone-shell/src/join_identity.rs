@@ -78,6 +78,7 @@
 //!
 //! [`unit_tests_never_join_as_the_selected_account`]: tests::unit_tests_never_join_as_the_selected_account
 
+#[cfg(any(test, not(target_arch = "wasm32")))]
 use lodestone_auth::AccountsMetadata;
 use lodestone_client::LoginProfile;
 
@@ -90,6 +91,7 @@ use crate::offline_identity::OfflineIdentity;
 /// as Steve" is not a report, "joined as Steve because no account is selected"
 /// is.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(any(test, not(target_arch = "wasm32")))]
 pub enum JoinIdentity {
     /// The account the switcher has selected, as `profiles.json` records it.
     SelectedAccount(LoginProfile),
@@ -110,6 +112,7 @@ pub enum JoinIdentity {
     },
 }
 
+#[cfg(any(test, not(target_arch = "wasm32")))]
 impl JoinIdentity {
     /// The profile to put in the login-start packet.
     #[must_use]
@@ -169,6 +172,7 @@ impl JoinIdentity {
 ///
 /// Pure, total, and the only place the ladder is written down.
 #[must_use]
+#[cfg(any(test, not(target_arch = "wasm32")))]
 pub fn resolve(metadata: &AccountsMetadata, offline: &OfflineIdentity) -> JoinIdentity {
     let Some(selected) = metadata.selected else {
         return JoinIdentity::Offline(offline.login_profile());
@@ -198,10 +202,25 @@ pub fn resolve(metadata: &AccountsMetadata, offline: &OfflineIdentity) -> JoinId
 /// call and does not open the keychain**: the username and UUID are both plain
 /// fields of `profiles.json`, which is exactly why the metadata was split from
 /// the secret store in the first place.
-#[cfg(not(test))]
+#[cfg(all(not(test), not(target_arch = "wasm32")))]
 #[must_use]
 pub fn join_identity() -> LoginProfile {
     resolve(&AccountsMetadata::load(), &OfflineIdentity::load()).announce()
+}
+
+/// The browser keeps no account or offline-identity storage. Its local session
+/// uses the default offline profile after the in-memory ownership attestation.
+#[cfg(all(not(test), target_arch = "wasm32"))]
+#[must_use]
+pub fn join_identity() -> LoginProfile {
+    let profile = OfflineIdentity::default().login_profile();
+    tracing::info!(
+        target: "auth",
+        account = %profile.username,
+        uuid = %profile.uuid,
+        "joining with the session-local browser identity"
+    );
+    profile
 }
 
 /// The test build's half: **always the offline identity**, never the selected

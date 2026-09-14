@@ -34,6 +34,11 @@
 //! edit and discard everything the player built. The edit map lives here
 //! instead, seeded from [`Self::column`], which consults disk first.
 //!
+//! Request generation applies the same precedence to every admitted halo
+//! coordinate before delegating to the inner driver. Inner sources that expose
+//! resident-column storage receive those snapshots as a batch, so a persisted
+//! neighbour cannot be silently regenerated while the target is being built.
+//!
 //! # What gets saved
 //!
 //! The dirty set, and only the dirty set. That is not merely an optimisation:
@@ -1162,6 +1167,75 @@ impl<S: ChunkSource> RegionChunkSource<S> {
             .fetch_add(restored, Ordering::Relaxed);
         restored
     }
+
+    /// Resolves edits and disk before generation; either hit is terminal.
+    fn terminal_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
+        let coordinate = (cx, cz);
+        {
+            let edits = self.state.edits.lock().expect("world edit lock poisoned");
+            if let Some(edited) = edits.get(&coordinate) {
+                return Some(edited.clone());
+            }
+        }
+        let loaded = self.load(cx, cz)?;
+        self.state
+            .stats
+            .loaded_from_disk
+            .fetch_add(1, Ordering::Relaxed);
+        {
+            let edits = self.state.edits.lock().expect("world edit lock poisoned");
+            if let Some(edited) = edits.get(&coordinate) {
+                return Some(edited.clone());
+            }
+        }
+        let mut loaded_column = loaded.column;
+        if self.light_is_invalidated(coordinate) && loaded_column.retained_light().is_some() {
+            loaded_column.clear_retained_light();
+            let mut edits = self.state.edits.lock().expect("world edit lock poisoned");
+            if let Some(edited) = edits.get(&coordinate) {
+                return Some(edited.clone());
+            }
+            edits.insert(coordinate, loaded_column.clone());
+            drop(edits);
+            self.state
+                .dirty
+                .lock()
+                .expect("world dirty lock poisoned")
+                .insert(coordinate);
+            return Some(loaded_column);
+        }
+        if loaded.holds_block_entities {
+            let mut edits = self.state.edits.lock().expect("world edit lock poisoned");
+            edits.entry(coordinate).or_insert_with(|| loaded_column.clone());
+        }
+        Some(loaded_column)
+    }
+
+    /// Materialize persisted and edited columns across the complete request
+    /// halo before the generator sees it. The inner source may retain these
+    /// snapshots in its own resident ledger; sources without that capability
+    /// still get the precedence guarantee for the target through the terminal
+    /// check above.
+    fn hydrate_generation_halo(
+        &self,
+        request: crate::worldgen_session::GenerationRequest,
+    ) -> Vec<(i32, i32)> {
+        let target = request.target();
+        let coordinates = lodestone_worldgen::stage_schedule::ChunkRequest::single(
+            target.0,
+            target.1,
+            i32::from(request.dependency_radius()),
+        )
+        .admission_order();
+        coordinates
+            .into_iter()
+            .filter_map(|(cx, cz)| {
+                self.terminal_column(cx, cz)
+                    .filter(|column| self.inner.retain_generation_input(cx, cz, column))
+                    .map(|_| (cx, cz))
+            })
+            .collect()
+    }
 }
 
 /// What [`RegionChunkSource::load`] found on disk.
@@ -1232,6 +1306,10 @@ fn normalize_imported_end_light_storage(column: &mut ChunkColumn, dimension: Dim
 }
 
 impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
+    fn horizon_sample(&self, x: i32, z: i32) -> Option<crate::chunk::HorizonSample> {
+        self.inner.horizon_sample(x, z)
+    }
+
     fn columns(&self, coords: &[(i32, i32)]) -> Vec<ChunkColumn> {
         coords.iter().map(|&(cx, cz)| self.column(cx, cz)).collect()
     }
@@ -1267,59 +1345,19 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
         cz: i32,
         stage: crate::chunk::ChunkGenerationStage,
     ) -> ChunkColumn {
-        let coordinate = (cx, cz);
-        {
-            let edits = self.state.edits.lock().expect("world edit lock poisoned");
-            if let Some(edited) = edits.get(&(cx, cz)) {
-                return edited.clone();
-            }
-        }
-        if let Some(loaded) = self.load(cx, cz) {
-            self.state
-                .stats
-                .loaded_from_disk
-                .fetch_add(1, Ordering::Relaxed);
-            let mut loaded_column = loaded.column;
-            if self.light_is_invalidated(coordinate)
-                && loaded_column.retained_light().is_some()
-            {
-                // The block mutation may have happened after this column was
-                // last saved, so the bytes read from disk are no longer a
-                // valid admission snapshot. Keep the cleared copy authoritative
-                // until the save path writes it back.
-                loaded_column.clear_retained_light();
-                let mut edits = self.state.edits.lock().expect("world edit lock poisoned");
-                if let Some(edited) = edits.get(&coordinate) {
-                    return edited.clone();
-                }
-                edits.insert(coordinate, loaded_column.clone());
-                drop(edits);
-                self.state
-                    .dirty
-                    .lock()
-                    .expect("world dirty lock poisoned")
-                    .insert(coordinate);
-                return loaded_column;
-            }
-            // **A chunk that holds block entities is retained in `edits` from
-            // the moment it loads**, which is the one exception to "only
-            // `set_block` populates the edit map".
-            //
-            // It has to be. A furnace's contents change through the container
-            // menu, which never touches a block, so such a chunk can be
-            // *stale on disk while nothing marks it dirty*. `save_region`
-            // carries a chunk it has no edit entry for across as its original
-            // compressed bytes — so without this, smelting into a furnace that
-            // was loaded rather than placed this session would write the old
-            // contents straight back over the new ones, silently.
-            if loaded.holds_block_entities {
-                let mut edits = self.state.edits.lock().expect("world edit lock poisoned");
-                edits.entry(coordinate).or_insert_with(|| loaded_column.clone());
-            }
-            return loaded_column;
+        if let Some(column) = self.terminal_column(cx, cz) {
+            return column;
         }
         self.state.stats.generated.fetch_add(1, Ordering::Relaxed);
         self.inner.column_at(cx, cz, stage)
+    }
+
+    fn retain_generation_input(&self, cx: i32, cz: i32, column: &ChunkColumn) -> bool {
+        self.inner.retain_generation_input(cx, cz, column)
+    }
+
+    fn release_generation_input(&self, cx: i32, cz: i32) {
+        self.inner.release_generation_input(cx, cz);
     }
 
     fn packet_generation_stage(
@@ -1327,6 +1365,75 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
         stage: crate::chunk::ChunkGenerationStage,
     ) -> Option<crate::chunk::ChunkGenerationStage> {
         self.inner.packet_generation_stage(stage)
+    }
+
+    fn generation_request_dependency_radius(
+        &self,
+        target: lodestone_worldgen::stage_schedule::GenerationTarget,
+    ) -> u8 {
+        self.inner.generation_request_dependency_radius(target)
+    }
+
+    fn request_generation(
+        &self,
+        request: crate::worldgen_session::GenerationRequest,
+        session: Option<&mut crate::worldgen_session::GenerationSession>,
+    ) -> Result<
+        Option<crate::worldgen_session::GenerationRequestResult>,
+        crate::worldgen_session::GenerationRequestError,
+    > {
+        let hydrated = self.hydrate_generation_halo(request);
+        if let Some(column) = self.terminal_column(request.target().0, request.target().1) {
+            for &(cx, cz) in &hydrated {
+                self.inner.release_generation_input(cx, cz);
+            }
+            return Ok(Some(
+                crate::worldgen_session::GenerationRequestResult::Existing(column),
+            ));
+        }
+        // Delegate only the high-level capability so an outer store can own
+        // ledger hydration and publication around generation.
+        let result = self.inner.request_generation(request, session);
+        for &(cx, cz) in &hydrated {
+            self.inner.release_generation_input(cx, cz);
+        }
+        result
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn request_generation_yielding<'a>(
+        &'a self,
+        request: crate::worldgen_session::GenerationRequest,
+        session: Option<&'a mut crate::worldgen_session::GenerationSession>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        Option<crate::worldgen_session::GenerationRequestResult>,
+                        crate::worldgen_session::GenerationRequestError,
+                    >,
+                > + 'a,
+        >,
+    > {
+        let hydrated = self.hydrate_generation_halo(request);
+        if let Some(column) = self.terminal_column(request.target().0, request.target().1) {
+            for &(cx, cz) in &hydrated {
+                self.inner.release_generation_input(cx, cz);
+            }
+            return Box::pin(async move {
+                Ok(Some(
+                    crate::worldgen_session::GenerationRequestResult::Existing(column),
+                ))
+            });
+        }
+        let inner = &self.inner;
+        Box::pin(async move {
+            let result = inner.request_generation_yielding(request, session).await;
+            for &(cx, cz) in &hydrated {
+                inner.release_generation_input(cx, cz);
+            }
+            result
+        })
     }
 
     fn prepare_packet_replay(&self, targets: &[(i32, i32)]) -> Option<usize> {

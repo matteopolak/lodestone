@@ -47,6 +47,8 @@ pub struct MenuLabel {
 pub struct MenuRow {
     /// Primary label, drawn at [`TEXT_SCALE`].
     pub label: String,
+    /// Draw this row as a compact checkbox with its label instead of a button.
+    pub checkbox: Option<bool>,
     /// Second line (MOTD, address, hint), drawn small and dim.
     pub detail: String,
     /// Right-aligned trailing text (players, latency).

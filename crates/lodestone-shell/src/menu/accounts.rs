@@ -1,13 +1,13 @@
-//! The account list screen's brain: which Microsoft accounts
+//! The native account list screen's brain: which Microsoft accounts
 //! [`lodestone_auth::metadata::AccountsMetadata`] knows about, the synthetic
-//! offline entry, and the device-code sign-in flow that adds a new one.
+//! offline entry, and the interactive sign-in flow that adds a new one.
 //!
 //! ## What it is
 //!
 //! Mirrors [`super::servers`]/[`super::status`]'s split for the multiplayer
 //! list: this module owns the *data* (the loaded metadata, which row is
 //! highlighted, the in-flight sign-in state machine) and a background thread
-//! per sign-in attempt; [`super::render`] turns it into a [`super::render::MenuFrame`]
+//! per native sign-in attempt; [`super::render`] turns it into a [`super::render::MenuFrame`]
 //! and [`super::nav::MenuNav`] wires it into the screen state machine.
 //!
 //! ## Why interior mutability
@@ -77,16 +77,18 @@
 //!
 //! ## Credentials never touch this screen
 //!
-//! The device-code flow's `user_code`/`verification_uri` are the only strings
-//! this module ever displays; no field here can hold a password, and nothing
-//! in [`SignIn`] or the worker message type carries one. Sign-in happens on
-//! Microsoft's own page, in the user's browser.
+//! The interactive flow's browser URL is the only sign-in affordance this
+//! module displays; no field here can hold a password, and nothing in
+//! [`SignIn`] or the worker message type carries one. Sign-in happens on the
+//! provider's own page.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+use std::sync::mpsc::{Receiver, TryRecvError};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::mpsc::{Sender, channel};
 
 use lodestone_auth::metadata::{AccountProfile, AccountsMetadata};
 use uuid::Uuid;
@@ -123,18 +125,16 @@ pub enum AccountRow {
     Offline,
 }
 
-/// The device-code sign-in flow's current state.
+/// The native interactive sign-in flow's current state.
 enum SignIn {
     /// Nothing in flight.
     Idle,
-    /// A device code was requested; waiting for Microsoft to answer with a
-    /// user code and verification URL.
+    /// An authorization request is pending.
     Requesting {
         rx: Receiver<WorkerMsg>,
         cancel: Arc<AtomicBool>,
     },
-    /// Showing the user code and URL, polling for the user to finish in their
-    /// browser.
+    /// Showing the provider URL while polling for the user to finish in their browser.
     Waiting {
         user_code: String,
         verification_uri: String,
@@ -170,13 +170,13 @@ impl std::fmt::Debug for SignIn {
 pub enum SignInView {
     /// Nothing in flight; the ordinary list + button screen shows.
     Idle,
-    /// Waiting on Microsoft for the very first response.
+    /// Waiting for the first provider response.
     Requesting,
-    /// Show the code and URL; sign-in is in progress in the user's browser.
+    /// Show the provider URL while sign-in is in progress in the user's browser.
     Waiting {
-        /// The short code the user types at `verification_uri`.
+        /// The optional short code associated with `verification_uri`.
         user_code: String,
-        /// The URL the user visits to enter `user_code`.
+        /// The URL the user visits to complete the sign-in.
         verification_uri: String,
     },
     /// The flow failed; `message` is the reason, already rendered to plain
@@ -189,7 +189,7 @@ pub enum SignInView {
 
 /// What the background worker reports back over the channel.
 enum WorkerMsg {
-    /// Microsoft answered with a prompt to show the user.
+    /// The provider answered with a prompt to show the user.
     Prompt {
         user_code: String,
         verification_uri: String,
@@ -207,8 +207,8 @@ enum WorkerMsg {
 }
 
 /// A spawner for the background sign-in worker: real code hands in one that
-/// starts a genuine OS thread against live Microsoft endpoints; tests hand in
-/// one that just returns a channel they control by hand. Keeping this as an
+/// starts a genuine native OS thread against live endpoints; tests hand in one
+/// that just returns a channel they control by hand. Keeping this as an
 /// injected closure is what makes [`AccountsNav::handle_key`]'s state
 /// machine testable without a network.
 type Spawn = Box<dyn FnOnce() -> (Receiver<WorkerMsg>, Arc<AtomicBool>)>;
@@ -379,6 +379,7 @@ pub enum AccountsSignal {
 impl AccountsNav {
     /// Loads metadata from the real on-disk location.
     #[must_use]
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new() -> Self {
         Self::with_path(lodestone_auth::paths::profiles_path())
     }
@@ -393,6 +394,7 @@ impl AccountsNav {
     /// A `path` with no parent (a bare file name) falls back to the current
     /// directory, which is what `Path::parent` reports as `Some("")`.
     #[must_use]
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn with_path(path: PathBuf) -> Self {
         let offline_path = path
             .parent()
@@ -411,6 +413,28 @@ impl AccountsNav {
             }),
             path,
             offline_path,
+        }
+    }
+
+    /// Constructs the inert account state used by the browser menu. The
+    /// browser gate is a local attestation, so it must not load or write the
+    /// account roster or offline identity from browser storage.
+    #[cfg(target_arch = "wasm32")]
+    #[must_use]
+    pub fn ephemeral() -> Self {
+        Self {
+            path: PathBuf::new(),
+            offline_path: PathBuf::new(),
+            state: RefCell::new(State {
+                metadata: AccountsMetadata::default(),
+                highlighted: 0,
+                focus: 0,
+                scroll: 0.0,
+                save_error: None,
+                sign_in: SignIn::Idle,
+                identity: OfflineIdentity::default(),
+                name_edit: None,
+            }),
         }
     }
 
@@ -583,9 +607,16 @@ impl AccountsNav {
         }
     }
 
-    /// Drains any finished worker message and advances the sign-in state.
+    /// Drains any finished native worker message and advances the sign-in state.
     /// Must be called every frame regardless of input — see the module docs
     /// on why this takes `&self`. Idempotent when nothing has arrived.
+    #[cfg(target_arch = "wasm32")]
+    pub fn pump(&self) {}
+
+    /// Drains any finished native worker message and advances the sign-in state.
+    /// Must be called every frame regardless of input — see the module docs
+    /// on why this takes `&self`. Idempotent when nothing has arrived.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn pump(&self) {
         let mut st = self.state.borrow_mut();
         let current = std::mem::replace(&mut st.sign_in, SignIn::Idle);
@@ -733,67 +764,31 @@ impl AccountsNav {
         select(&mut st, logical, &self.path);
     }
 
-    /// Handles one key with a real worker spawn (a genuine background thread
-    /// against live Microsoft endpoints). See [`Self::handle_key_with`] for
-    /// the seam tests use instead.
+    /// Handles one key with a real native worker spawn against live endpoints.
+    /// See [`Self::handle_key_with`] for the seam tests use instead. Browser
+    /// builds return immediately because their account state is inert.
     pub fn handle_key(&self, key: MenuKey) -> AccountsSignal {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = key;
+            return AccountsSignal::Back;
+        }
         #[cfg(not(target_arch = "wasm32"))]
         let spawn: Spawn = Box::new(|| {
             let (tx, rx) = channel();
             let cancel = Arc::new(AtomicBool::new(false));
             let worker_cancel = Arc::clone(&cancel);
-            // The **loopback** flow: it opens the real Microsoft login in the
-            // user's browser and needs no code typed. There is no device-code
-            // fallback for a headless host or a failed browser launch — a
-            // prior `run_device_code_login` implemented that chain but had no
-            // caller (its own doc claimed it was "kept as the fallback" while
-            // nothing ever selected it), so it was dead code rather than a
-            // real fallback and was removed. `open_in_browser`'s native arm
-            // also silently discards a failed `spawn`, so wiring a real
-            // fallback needs that failure surfaced first.
+            // The native loopback flow opens the provider login in the user's
+            // browser and needs no code typed. Browser builds do not construct
+            // this worker or enter the account screen.
             std::thread::spawn(move || run_browser_login(tx, worker_cancel));
             (rx, cancel)
         });
 
-        // Browser: the **device-code** flow, not loopback — `browser_login`
-        // binds a `127.0.0.1` listener (RFC 8252 §7.3) and launches an OS
-        // browser process, neither of which is meaningful from inside a
-        // browser tab (see `lodestone_auth::browser_login`'s doc). Device
-        // code needs neither: it shows a short code and a link, and the user
-        // opens the link (this tab auto-opens it in a new one, same as the
-        // native flow's `Prompt` effect in `pump`) and types the code there.
-        //
-        // What used to block this, and how each is actually closed rather
-        // than routed around:
-        //   * `std::thread::spawn` traps on wasm32 — `wasm_bindgen_futures::
-        //     spawn_local` runs the whole worker as a task on the browser's
-        //     own event loop instead, no OS thread at all.
-        //   * the flow needs a runtime to drive `.await` — the browser tab
-        //     *is* the runtime; nothing here blocks it, and the poll
-        //     interval sleep (`cancellable_sleep_secs`, below) is a real
-        //     `setTimeout` future (`crate::platform::relay::sleep`), not a
-        //     spin loop.
-        //   * `lodestone_auth::flow`/`store` were gated at their own crate —
-        //     both now compile and run on wasm32 (`flow`'s HTTP client is
-        //     reqwest's `fetch`-backed wasm arm; `store::LocalStorageStore`
-        //     replaces the OS keychain with `localStorage` — see that
-        //     module's doc for why the two are not equally protected).
-        //   * `lodestone_auth::browser_login` itself stays native-only — it
-        //     is the loopback flow specifically, not the whole crate, and
-        //     device code was always the wasm-shaped front end onto the same
-        //     downstream Xbox Live -> XSTS -> Minecraft-services -> profile
-        //     chain [`run_device_code_login_wasm`] shares with
-        //     [`run_browser_login`]'s [`finish_ms_token`] call.
-        #[cfg(target_arch = "wasm32")]
-        let spawn: Spawn = Box::new(|| {
-            let (tx, rx) = channel();
-            let cancel = Arc::new(AtomicBool::new(false));
-            let worker_cancel = Arc::clone(&cancel);
-            wasm_bindgen_futures::spawn_local(run_device_code_login_wasm(tx, worker_cancel));
-            (rx, cancel)
-        });
-
-        self.handle_key_with(key, spawn)
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.handle_key_with(key, spawn)
+        }
     }
 
     /// The real state machine, parameterised over how "Add account" spawns
@@ -867,9 +862,17 @@ impl AccountsNav {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Default for AccountsNav {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Default for AccountsNav {
+    fn default() -> Self {
+        Self::ephemeral()
     }
 }
 
@@ -1100,23 +1103,12 @@ fn handle_key_mid_flow(st: &mut State, key: MenuKey) -> AccountsSignal {
             AccountsSignal::None
         }
         MenuKey::Char('c' | 'C') => {
-            // `copy_to_clipboard` (below) shells out to `pbcopy`/`clip`/`xclip` and
-            // is native-only for that reason. Now that `SignIn::Waiting` **is**
-            // reachable on wasm32 too (the device-code worker,
-            // `run_device_code_login_wasm`, produces it exactly like the native
-            // loopback worker does), this key is no longer unreachable there —
-            // `crate::platform::clipboard::set` is the existing wasm32-capable
-            // primitive (`navigator.clipboard.writeText`, fire-and-forget; see
-            // its own doc for why it cannot be the `async`/awaited version) that
-            // `EditBox`'s own copy/cut already goes through, reused here instead
-            // of a second, `text`-shelling-out implementation.
+            // Browser builds never enter this account flow. The native helper
+            // shells out to the host clipboard only after a native sign-in
+            // prompt, so no browser credential or clipboard path is retained.
             #[cfg(not(target_arch = "wasm32"))]
             if let SignIn::Waiting { user_code, .. } = &st.sign_in {
                 copy_to_clipboard(user_code);
-            }
-            #[cfg(target_arch = "wasm32")]
-            if let SignIn::Waiting { user_code, .. } = &st.sign_in {
-                crate::platform::clipboard::set(user_code);
             }
             AccountsSignal::None
         }
@@ -1284,40 +1276,21 @@ pub fn describe_auth_error(e: &lodestone_auth::AuthError) -> String {
     }
 }
 
-/// Whether `e` came from the storage step (`secrets.save_refresh_token`/
-/// `save_session`) rather than from deriving the session itself. Shared
-/// between [`describe_finish_interactive_failure`] (which message to show)
-/// and [`finish_ms_token`] (whether to warn) so the two decisions cannot
-/// drift apart.
-///
-/// The variant checked differs per target because the variant itself is
-/// `cfg`-gated at its own enum: native's storage step can only fail with
-/// [`lodestone_auth::AuthError::Keychain`]/[`lodestone_auth::AuthError::Cache`]
-/// (neither exists on wasm32); wasm32's can only fail with
-/// [`lodestone_auth::AuthError::Storage`] (`crate::store::LocalStorageStore`'s
-/// error — does not exist natively). This `cfg` is the one place that forks;
-/// every caller of this function is a single, cross-platform body.
+/// Whether `e` came from the native storage step rather than from deriving the
+/// session itself. Shared between [`describe_finish_interactive_failure`] and
+/// [`finish_ms_token`] so their diagnostics cannot drift apart.
 #[must_use]
+#[cfg(not(target_arch = "wasm32"))]
 fn is_storage_failure(e: &lodestone_auth::AuthError) -> bool {
     use lodestone_auth::AuthError as E;
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        matches!(e, E::Keychain(_) | E::Cache(_))
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        matches!(e, E::Storage(_))
-    }
+    matches!(e, E::Keychain(_) | E::Cache(_))
 }
 
-/// Describes a failure from [`lodestone_auth::login::finish_interactive`],
-/// which now does what `run_device_code_login`/`finish_ms_token` used to
-/// hand-roll as two separate calls (deriving the session, then saving the
-/// refresh token) — see that fix and `docs/accounts.md`. Keeping the same
-/// two distinct messages those two calls used to produce, rather than
-/// collapsing to one, because [`is_storage_failure`] tells us which step
-/// failed, with no need to keep the two calls separate to distinguish them.
+/// Describes a failure from the native interactive completion step. Storage
+/// failures retain a distinct message so the user can tell them from a failed
+/// session derivation.
 #[must_use]
+#[cfg(not(target_arch = "wasm32"))]
 fn describe_finish_interactive_failure(e: &lodestone_auth::AuthError) -> String {
     if is_storage_failure(e) {
         format!("signed in, but could not save the credential: {e}")
@@ -1329,21 +1302,8 @@ fn describe_finish_interactive_failure(e: &lodestone_auth::AuthError) -> String 
 /// Runs the **loopback** sign-in: the real Microsoft login page in the user's
 /// browser, no code to type. This is what Add Account uses.
 ///
-/// A device-code → Xbox Live → XSTS → Minecraft-services worker
-/// (`run_device_code_login`) used to live beside this one, sharing everything
-/// from the `MsToken` onward through [`finish_ms_token`]. It was deleted: it
-/// had no caller (`handle_key` only ever spawns this loopback worker) and its
-/// own inline copy of the post-token steps had drifted from
-/// [`finish_ms_token`]'s — it was missing the `tracing::warn!` on a
-/// session-derivation failure. If a real headless/no-browser fallback is
-/// wanted, rebuild it from `lodestone_auth::flow::PendingLogin` and call
-/// [`finish_ms_token`] rather than re-inlining its body.
-///
-/// Same keychain save here on the worker thread, same `SignedIn` message with the
-/// metadata write left to [`AccountsNav::pump`]. Only how the authorization code
-/// arrives differs, which is the whole reason
-/// [`lodestone_auth::browser_login`] was shaped to mirror
-/// `flow::PendingLogin`'s `poll_once`.
+/// The keychain save happens on the worker thread, while the `SignedIn` message
+/// leaves the metadata write to [`AccountsNav::pump`].
 ///
 /// The URL still goes to the screen as [`WorkerMsg::Prompt`]'s
 /// `verification_uri`, with an **empty** `user_code`: there is no code in this
@@ -1381,10 +1341,9 @@ fn run_browser_login(tx: Sender<WorkerMsg>, cancel: Arc<AtomicBool>) {
             }
         };
 
-        // `WorkerMsg::Prompt` **already opens the browser**: `pump` turns it into an
-        // effect carrying the URI, and the render thread calls `open_in_browser` on
-        // it (the device-code flow's auto-open). So this must not open it too —
-        // doing both launched the browser twice, reported from play.
+        // `WorkerMsg::Prompt` **already opens the browser**: `pump` turns it into
+        // an effect carrying the URI, and the render thread calls
+        // `open_in_browser` on it. This worker must not open it a second time.
         //
         // Worth stating because reusing this variant is what caused it: it was
         // chosen to avoid touching a contended `render.rs`, and it turned out to
@@ -1396,9 +1355,8 @@ fn run_browser_login(tx: Sender<WorkerMsg>, cancel: Arc<AtomicBool>) {
         });
 
         loop {
-            // 100ms rather than the device flow's server-dictated interval: this
-            // polls our own listener, not Microsoft, so there is no rate limit to
-            // respect and a tighter loop makes sign-in feel immediate.
+            // Poll our own listener every 100ms; this keeps the browser handoff
+            // responsive without contacting the provider from this loop.
             if cancellable_sleep_ms(100, &cancel).await {
                 let _ = tx.send(WorkerMsg::Cancelled);
                 return;
@@ -1429,21 +1387,16 @@ fn run_browser_login(tx: Sender<WorkerMsg>, cancel: Arc<AtomicBool>) {
     });
 }
 
-/// The half of a sign-in that is identical for both flows — loopback
-/// (native) and device-code (both, but only wasm32 has no other option) —
-/// and now identical across *targets* too: an `MsToken` becomes a session, a
-/// saved refresh token and a [`WorkerMsg::SignedIn`].
+/// The native sign-in completion: an `MsToken` becomes a session, a saved
+/// refresh token and a [`WorkerMsg::SignedIn`].
 ///
-/// Extracted so the workers cannot drift. The credential write happens here,
-/// on the worker (native: a real OS thread; wasm32: this `spawn_local` task);
+/// The credential write happens here on the native worker thread;
 /// the `profiles.json` write deliberately does not — it stays in
 /// [`AccountsNav::pump`] so every metadata write funnels through one place
 /// rather than racing a foreground Remove.
 ///
-/// `lodestone_auth::AccountSecrets::open()` picks the real OS keychain
-/// natively and `crate::store` — sorry, [`lodestone_auth::store::LocalStorageStore`]
-/// — on wasm32; see that type's doc for why the latter is real protection but
-/// weaker than a keychain, not an equivalent one.
+/// `lodestone_auth::AccountSecrets::open()` uses the native account store.
+#[cfg(not(target_arch = "wasm32"))]
 async fn finish_ms_token(
     tx: &Sender<WorkerMsg>,
     client: &reqwest::Client,
@@ -1484,14 +1437,8 @@ async fn finish_ms_token(
     // place in the process with both the services profile and an HTTP
     // client. Never fatal.
     //
-    // Native-only for now: `crate::skin_fetch::fetch_own_skin` goes through
-    // `lodestone_auth::texture::fetch_texture` for the texture-host allow-list
-    // check, and that module stays native-only (no wasm32 caller has needed
-    // it yet — porting it is a separate, purely cosmetic follow-up, not part
-    // of resolving the sign-in dead end). A browser account
-    // therefore signs in and joins exactly like a native one; it just draws
-    // the default skin rig until that follow-up lands.
-    #[cfg(not(target_arch = "wasm32"))]
+    // Fetching a native account's skin is best-effort and never blocks the
+    // account metadata update.
     crate::skin_fetch::fetch_own_skin(client, &session.profile).await;
     let now = lodestone_time::epoch_duration().as_secs();
     let _ = tx.send(WorkerMsg::SignedIn(AccountProfile {
@@ -1516,105 +1463,6 @@ async fn cancellable_sleep_ms(millis: u64, cancel: &AtomicBool) -> bool {
     cancel.load(Ordering::Relaxed)
 }
 
-/// The wasm32 sibling of [`cancellable_sleep_ms`]: same "check, sleep, check
-/// again" shape, but the sleep is a real `setTimeout` future
-/// ([`crate::platform::relay::sleep`], the same primitive `menu::status`'s
-/// browser probe already uses) rather than `tokio::time::sleep` — which is
-/// not merely absent on this target but **traps** if ever polled
-/// (`CLAUDE.md`). `secs`, not millis: the device-code flow's poll interval
-/// is server-dictated in whole seconds ([`lodestone_auth::flow::DeviceCodePrompt::interval`]),
-/// unlike the loopback flow's fixed 100ms literal `cancellable_sleep_ms` was
-/// written for.
-#[cfg(target_arch = "wasm32")]
-async fn cancellable_sleep_secs(secs: u64, cancel: &AtomicBool) -> bool {
-    if cancel.load(Ordering::Relaxed) {
-        return true;
-    }
-    crate::platform::relay::sleep(std::time::Duration::from_secs(secs)).await;
-    cancel.load(Ordering::Relaxed)
-}
-
-/// Runs the **device-code** sign-in: Microsoft shows a short code and a link,
-/// the user opens the link in their own browser tab (or types it in by
-/// hand — the code and URL are always shown as plain text too) and enters
-/// the code, and this task polls until they finish. This is what Add Account
-/// uses on wasm32 — see [`AccountsNav::handle_key`]'s wasm arm for why
-/// `browser_login`'s loopback flow specifically cannot fill this role from
-/// inside a browser tab.
-///
-/// Runs as a `wasm_bindgen_futures::spawn_local` task on the browser's own
-/// event loop rather than an OS thread (which [`run_browser_login`] uses and
-/// which traps on wasm32) — no runtime to build, no blocking anywhere in
-/// this function.
-///
-/// Shares [`finish_ms_token`] with [`run_browser_login`] for everything from
-/// the completed [`lodestone_auth::flow::MsToken`] onward: the Xbox Live ->
-/// XSTS -> Minecraft-services -> profile chain and the credential save are
-/// one code path on both targets, exactly as they are one code path between
-/// the two sign-in *flows* natively.
-#[cfg(target_arch = "wasm32")]
-async fn run_device_code_login_wasm(tx: Sender<WorkerMsg>, cancel: Arc<AtomicBool>) {
-    // Deliberately never `flow::MOJANG_CLIENT_ID` — see `lodestone_auth::login`'s
-    // docs, same reasoning `run_browser_login` follows natively.
-    let client_id = match lodestone_auth::login::resolve_client_id() {
-        Ok(id) => id,
-        Err(e) => {
-            let _ = tx.send(WorkerMsg::Failed(describe_auth_error(&e)));
-            return;
-        }
-    };
-    // No `lodestone_auth::install_crypto_provider()` call here, unlike the
-    // native worker: that installs a *native* rustls crypto provider for
-    // reqwest's hyper-rustls backend, and reqwest's wasm32 arm has no TLS
-    // stack of its own to configure at all — the browser's own `fetch`
-    // already speaks TLS. Calling it would be a `cfg(not(wasm32))`-gated
-    // no-op at best; the function itself does not exist on this target.
-    let client = reqwest::Client::new();
-    let mut pending = match lodestone_auth::flow::PendingLogin::begin(&client, &client_id).await {
-        Ok(p) => p,
-        Err(e) => {
-            let _ = tx.send(WorkerMsg::Failed(describe_auth_error(&e)));
-            return;
-        }
-    };
-
-    // Same effect-carrying shape `run_browser_login` sends: `pump_locked`
-    // turns this into an `open_in_browser` call on the render thread, so
-    // this task must not *also* open it (that would open two tabs). Unlike
-    // the loopback flow's empty placeholder, `user_code` is real here — the
-    // device-code flow's whole UI is built to show a code alongside the link.
-    let prompt = pending.prompt();
-    let _ = tx.send(WorkerMsg::Prompt {
-        user_code: prompt.user_code.clone(),
-        verification_uri: prompt.verification_uri.clone(),
-    });
-
-    loop {
-        if cancellable_sleep_secs(pending.interval(), &cancel).await {
-            let _ = tx.send(WorkerMsg::Cancelled);
-            return;
-        }
-        if pending.is_expired() {
-            let _ = tx.send(WorkerMsg::Failed(
-                describe_auth_error(&lodestone_auth::AuthError::DeviceCodeExpired),
-            ));
-            return;
-        }
-        match pending.poll_once(&client, &client_id).await {
-            Ok(None) => continue,
-            Ok(Some(ms_token)) => {
-                finish_ms_token(&tx, &client, ms_token).await;
-                return;
-            }
-            Err(e) => {
-                tracing::warn!(target: "auth", error = ?e, "device-code sign-in failed");
-                let _ = tx.send(WorkerMsg::Failed(describe_auth_error(&e)));
-                return;
-            }
-        }
-    }
-}
-
 /// Best-effort: opens `url` in the system's default browser. Never blocks
 /// (the OS handoff command returns immediately) and never panics — a failure
 /// just means the user has to open the URL themselves, which the screen
@@ -1625,20 +1473,11 @@ async fn run_device_code_login_wasm(tx: Sender<WorkerMsg>, cancel: Arc<AtomicBoo
 /// dependency graph for a single call site.
 ///
 /// `pub(crate)` since that fix: `super::telemetry`'s Privacy Statement/Give
-/// Feedback buttons reuse this rather than duplicating it, since opening a
-/// URL has nothing account-specific about it.
-/// **A unit test must never reach the OS handoff, and one did — it reached a
-/// player.** `add_account_button_starts_the_flow_and_a_prompt_message_shows_it`
-/// fed the state machine a [`WorkerMsg::Prompt`] carrying the literal
-/// `https://microsoft.com/link` and then called [`AccountsNav::pump`], which
-/// performs the open as an *effect*. So every `cargo test -p lodestone-shell`
-/// run — several agents run that suite continuously — spawned `open` on
-/// Microsoft's device-code page, which 301s to
-/// `https://login.live.com/oauth20_remoteconnect.srf`. The owner, playing the
-/// game, saw OAuth windows appear from nowhere and reported it twice; the flow
-/// they were attributed to (Add Account) had not been touched. Measured with a
-/// PATH shim standing in for `open`: one call per lib-test run,
-/// `OPEN_CALLED https://microsoft.com/link`.
+/// Feedback buttons reuse this rather than duplicating it, since opening a URL
+/// has nothing account-specific about it.
+///
+/// Tests use a separate recorder arm so no unit test can launch an external
+/// browser while exercising a URL-opening effect.
 ///
 /// The interception below is a `cfg` **fork**, not a `cfg!(test)` early return,
 /// for two reasons: the `Command::spawn` is then not even compiled into a test
@@ -1658,15 +1497,8 @@ pub(crate) fn open_in_browser(url: &str) {
     let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 }
 
-/// The browser build's [`open_in_browser`]: `window.open`, in a new tab.
-///
-/// **This is the one native-only capability on this screen that a browser does
-/// better rather than worse** — "hand a URL to the platform's browser" is the
-/// platform's whole job here, so this is a real implementation, not a gate. It is
-/// only ever called from a key handler, i.e. inside a user gesture, which is what
-/// keeps a popup blocker from swallowing it. A blocked or refused open is ignored
-/// for the same reason the native arm ignores a failed `spawn`: every caller also
-/// shows the URL on screen as text.
+/// Opens a non-authentication URL in a new browser tab for the browser-only
+/// feedback and resource helpers. Account navigation never calls this on Wasm.
 #[cfg(all(not(test), target_arch = "wasm32"))]
 pub(crate) fn open_in_browser(url: &str) {
     if let Some(win) = web_sys::window() {
@@ -1803,12 +1635,9 @@ mod tests {
         Box::new(move || (rx, cancel))
     }
 
-    /// Fixture URLs use RFC 2606's reserved `.invalid` TLD, **never a real
-    /// endpoint**. This is defence in depth behind `open_in_browser`'s
-    /// `cfg(test)` fork: these strings used to be `https://microsoft.com/link`,
-    /// and `pump` handed that to the OS on every lib-test run. If the fork is
-    /// ever removed, a regression opens a tab that cannot resolve rather than a
-    /// live Microsoft OAuth page.
+    /// Fixture URLs use RFC 2606's reserved `.invalid` TLD and never reach a
+    /// real endpoint. The test-only browser handoff recorder is an additional
+    /// guard against external side effects.
     const FIXTURE_URI: &str = "https://example.invalid/device-login";
     const FIXTURE_URI_2: &str = "https://example.invalid/device-login-again";
 
@@ -2171,19 +2000,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
-    /// **The gate that would have caught the unrequested-browser report.**
-    ///
-    /// `pump` performs the browser open as an *effect*, so a test that feeds the
-    /// state machine a `Prompt` and pumps is indistinguishable, from the OS's
-    /// point of view, from a player pressing "Add account" — and the test above
-    /// did exactly that with `https://microsoft.com/link`, which 301s to
-    /// `login.live.com/oauth20_remoteconnect.srf`. Measured before the fix with
-    /// a PATH shim in place of `open`: one real `open` per lib-test run.
-    ///
-    /// This asserts the `cfg(test)` fork in [`open_in_browser`] is the arm that
-    /// got compiled. If it is ever deleted, the `Command::spawn` comes back and
-    /// this fails — it cannot pass by accident, because nothing else populates
-    /// the recorder.
+    /// The test-only browser handoff must remain an in-process recorder. If the
+    /// `cfg(test)` fork is deleted, this assertion stops guarding the unit suite
+    /// against external side effects.
     #[test]
     fn the_real_browser_handoff_is_unreachable_from_a_unit_test() {
         let _ = test_browser_opens::taken();

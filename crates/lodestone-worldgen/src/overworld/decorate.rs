@@ -169,7 +169,7 @@ fn overworld_source_offsets() -> &'static [(i32, i32)] {
 /// placement result: resident overrides and every source's RNG stream remain
 /// owned by the caller and are evaluated in authenticated order.
 #[derive(Debug)]
-pub(super) struct MixedReplayContext {
+pub struct MixedReplayContext {
     wide_pre: [Option<Arc<super::PreOreResult>>; crate::feature::region_view::WIDE_SLOTS],
     centre_biomes: Arc<super::biome_cells::BiomeCells>,
     ocean_floor_wg: crate::feature::RegionHeights,
@@ -177,6 +177,78 @@ pub(super) struct MixedReplayContext {
     source_ores: BTreeMap<(i32, i32), Vec<PlacedOre>>,
     source_features:
         BTreeMap<(i32, i32), Vec<(i32, usize, crate::feature::vegetation::PlacedRef)>>,
+}
+
+impl MixedReplayContext {
+    #[must_use]
+    pub fn retained_bytes(&self) -> usize {
+        let ore_maps = self
+            .source_ores
+            .iter()
+            .map(|(_, ores)| {
+                std::mem::size_of::<((i32, i32), Vec<PlacedOre>)>()
+                    + ores.capacity() * std::mem::size_of::<PlacedOre>()
+                    + ores.iter().map(placed_ore_retained_bytes).sum::<usize>()
+            })
+            .sum::<usize>();
+        let feature_maps = self
+            .source_features
+            .iter()
+            .map(|(_, features)| {
+                std::mem::size_of::<(
+                    (i32, i32),
+                    Vec<(i32, usize, crate::feature::vegetation::PlacedRef)>,
+                )>()
+                    + features.capacity()
+                        * std::mem::size_of::<(
+                            i32,
+                            usize,
+                            crate::feature::vegetation::PlacedRef,
+                        )>()
+                    + features
+                        .iter()
+                        .map(|(_, _, feature)| placed_ref_retained_bytes(feature))
+                        .sum::<usize>()
+            })
+            .sum::<usize>();
+        std::mem::size_of::<Self>()
+            + crate::feature::RegionHeights::AREA * std::mem::size_of::<i32>()
+            + ore_maps
+            + feature_maps
+    }
+}
+
+fn placed_ore_retained_bytes(value: &PlacedOre) -> usize {
+    value
+        .registry_id
+        .as_ref()
+        .map(String::capacity)
+        .unwrap_or(0)
+        + value.placements.capacity() * std::mem::size_of::<crate::feature::Placement>()
+        + value.config.targets.capacity() * std::mem::size_of::<crate::feature::OreTarget>()
+        + value
+            .config
+            .targets
+            .iter()
+            .map(|target| {
+                target.state.capacity()
+                    + match &target.target {
+                        crate::feature::RuleTest::TagMatch(value)
+                        | crate::feature::RuleTest::BlockMatch(value) => value.capacity(),
+                    }
+            })
+            .sum::<usize>()
+}
+
+fn placed_ref_retained_bytes(value: &crate::feature::vegetation::PlacedRef) -> usize {
+    value
+        .registry_id
+        .as_ref()
+        .map(String::capacity)
+        .unwrap_or(0)
+        + value.placements.capacity()
+            * std::mem::size_of::<crate::feature::vegetation::VegPlacement>()
+        + std::mem::size_of::<crate::feature::vegetation::ConfiguredFeature>()
 }
 
 /// Makes one completed entry visible through both FEATURES adapters.  Ore
@@ -364,7 +436,6 @@ impl OverworldGenerator {
             (target_x - source_x).abs() <= 1 && (target_z - source_z).abs() <= 1,
             "a decoration source must be inside the target's 3x3 dispatch window",
         );
-        let pre = self.pre_ore_stage(target_x, target_z);
         if self.decoration_catalog.is_empty() {
             return ParityDecorationResult {
                 spills: Vec::new(),
@@ -372,11 +443,40 @@ impl OverworldGenerator {
             };
         }
         let context = self.replay_context_for(target_x, target_z);
+        self.parity_source_decoration_with_context(
+            target_x,
+            target_z,
+            source_x,
+            source_z,
+            overrides,
+            &context,
+        )
+    }
+
+    /// Complete one source's FEATURES body using a context retained by the
+    /// request that owns the source wavefront.
+    #[must_use]
+    pub fn parity_source_decoration_with_context(
+        &self,
+        target_x: i32,
+        target_z: i32,
+        source_x: i32,
+        source_z: i32,
+        overrides: &[(i32, i32, i32, String)],
+        context: &MixedReplayContext,
+    ) -> ParityDecorationResult {
+        let pre = self.pre_ore_stage(target_x, target_z);
+        if self.decoration_catalog.is_empty() {
+            return ParityDecorationResult {
+                spills: Vec::new(),
+                block_entities: Vec::new(),
+            };
+        }
         self.mixed_features_stage_selected(
             target_x,
             target_z,
             (*pre.0).clone(),
-            &context,
+            context,
             Some((source_x, source_z)),
             overrides,
             true,
@@ -538,13 +638,6 @@ impl OverworldGenerator {
             }
         }
 
-        // Ores use every section biome in the source's complete 3x3 feature
-        // neighbourhood, just like the other decoration entries. The source
-        // chunk's own container is only the centre of that neighbourhood; the
-        // eight adjacent containers can make an ore entry eligible even when
-        // the source surface biome does not list it. The global catalog keeps
-        // the feature index stable across the selected biome set, which is the
-        // index `set_feature_seed` consumes.
         let mut source_ores = BTreeMap::new();
         for &(dx, dz) in overworld_source_offsets() {
             let source_x = cx + dx;
@@ -833,89 +926,20 @@ impl OverworldGenerator {
         biomes
     }
 
-    /// Prepare bounded slots for an authenticated lifecycle replay. The slots
-    /// contain no generated data yet; each source completion fills its own
-    /// immutable context lazily, after admissions have populated the staged
-    /// pre-ore entries it reads.
-    pub fn prepare_lifecycle_replay(&self, admissions: &[(i32, i32)]) {
-        let mut slots = HashMap::with_capacity(admissions.len());
-        let mut pre_ore = HashMap::with_capacity(admissions.len().saturating_mul(
-            crate::feature::region_view::WIDE_SLOTS,
-        ));
-        for &chunk in admissions {
-            assert!(
-                slots
-                    .insert(chunk, Arc::new(super::store::StageSlot::default()))
-                    .is_none(),
-                "duplicate lifecycle replay admission for {chunk:?}"
-            );
-            for dx in -crate::feature::region_view::WIDE_RADIUS
-                ..=crate::feature::region_view::WIDE_RADIUS
-            {
-                for dz in -crate::feature::region_view::WIDE_RADIUS
-                    ..=crate::feature::region_view::WIDE_RADIUS
-                {
-                    pre_ore
-                        .entry((chunk.0 + dx, chunk.1 + dz))
-                        .or_insert_with(|| Arc::new(std::sync::OnceLock::new()));
-                }
-            }
-        }
-        *self
-            .replay_context_cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(super::ReplayContextCache {
-                slots,
-                pre_ore: Arc::new(pre_ore),
-            });
-    }
-
-    /// Number of prepared replay contexts that have been materialized so far.
-    /// Diagnostics only; generation never branches on this value. A lifecycle
-    /// control can use it to distinguish one lazy context build from a repeated
-    /// rebuild without observing or mutating the generated output.
-    #[must_use]
-    pub fn lifecycle_replay_contexts_ready(&self) -> usize {
-        self.replay_context_cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            .map(|cache| cache.slots.values().filter(|slot| slot.peek().is_some()).count())
-            .unwrap_or(0)
-    }
-
-    /// Returns the immutable dispatch context for one centre chunk. During a
-    /// prepared lifecycle replay the exact admission set supplies a bounded,
-    /// once-only slot; ordinary production generation builds the context
-    /// directly and does not retain it for every explored chunk. The centre
-    /// pre-ore result supplies the key's own heights and biomes; surrounding
-    /// prefixes are borrowed as `Arc`s from exact-coordinate entries.
-    fn replay_context_for(&self, cx: i32, cz: i32) -> Arc<MixedReplayContext> {
+    /// Build the immutable dispatch product owned by one request target.
+    /// Callers retain this `Arc` for all nine source completions.
+    pub fn lifecycle_replay_context(&self, cx: i32, cz: i32) -> Arc<MixedReplayContext> {
         let centre = self.pre_ore_stage(cx, cz);
-        let slot = self
-            .replay_context_cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            .and_then(|cache| cache.slots.get(&(cx, cz)).cloned());
-        match slot {
-            Some(slot) => slot.get_or_compute(
-                |_| {},
-                || self.build_mixed_replay_context(
-                    cx,
-                    cz,
-                    &centre.1,
-                    Arc::clone(&centre.3),
-                ),
-            ),
-            None => Arc::new(self.build_mixed_replay_context(
-                cx,
-                cz,
-                &centre.1,
-                Arc::clone(&centre.3),
-            )),
-        }
+        Arc::new(self.build_mixed_replay_context(
+            cx,
+            cz,
+            &centre.1,
+            Arc::clone(&centre.3),
+        ))
+    }
+
+    fn replay_context_for(&self, cx: i32, cz: i32) -> Arc<MixedReplayContext> {
+        self.lifecycle_replay_context(cx, cz)
     }
 
     /// Builds the immutable portion of one unified FEATURES dispatch.
@@ -978,9 +1002,6 @@ impl OverworldGenerator {
         for &(dx, dz) in overworld_source_offsets() {
             let source_x = cx + dx;
             let source_z = cz + dz;
-            // Ore membership follows the same complete 3x3 section-biome
-            // union as the other decoration stream. The source's centre
-            // container remains part of the union, but is not its boundary.
             let source_biomes = Self::source_biomes(
                 source_x,
                 source_z,

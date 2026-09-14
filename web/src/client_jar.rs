@@ -1,9 +1,10 @@
-//! Loading and validating a split browser `client.jar` asset.
+//! Loading and validating browser resource-pack assets.
 //!
 //! A deployment may place `client.jar.parts.json` beside the page to work around
-//! static-host file-size limits. All names in that manifest are plain relative
-//! filenames, so `fetch` resolves them below the page's own base path rather
-//! than from the site's root.
+//! static-host file-size limits, or `client.jar.manifest.json` beside a direct
+//! filtered archive. All names in those manifests are plain relative filenames,
+//! so `fetch` resolves them below the page's own base path rather than from the
+//! site's root.
 
 use sha2::{Digest, Sha256};
 use serde::Deserialize;
@@ -11,6 +12,8 @@ use serde::Deserialize;
 /// Relative manifest URL. It deliberately has no leading slash: Pages may
 /// serve Lodestone below a project subpath.
 pub const PARTS_MANIFEST_URL: &str = "client.jar.parts.json";
+/// Digest manifest emitted beside the direct filtered archive.
+pub const DIRECT_MANIFEST_URL: &str = "client.jar.manifest.json";
 
 const MANIFEST_VERSION: u32 = 1;
 const PART_PREFIX: &str = "client.jar.part-";
@@ -19,6 +22,59 @@ const PART_PREFIX: &str = "client.jar.part-";
 const MAX_PART_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_TOTAL_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_PARTS: usize = 128;
+
+/// The digest manifest emitted by `stage_resource_pack.py`.
+#[derive(Debug, Deserialize)]
+pub struct ClientJarManifest {
+    version: u32,
+    asset: String,
+    bytes: u64,
+    sha256: String,
+    entries: usize,
+}
+
+impl ClientJarManifest {
+    /// Parses and validates an untrusted direct-archive manifest.
+    pub fn parse(bytes: &[u8]) -> Result<Self, String> {
+        let manifest: Self = serde_json::from_slice(bytes)
+            .map_err(|error| format!("client.jar manifest is not valid JSON: {error}"))?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.version != MANIFEST_VERSION {
+            return Err(format!(
+                "client.jar manifest has unsupported version {}",
+                self.version
+            ));
+        }
+        if self.asset != "client.jar" {
+            return Err("client.jar manifest names a different asset".to_string());
+        }
+        if self.bytes == 0 || self.bytes > MAX_TOTAL_BYTES {
+            return Err(format!(
+                "client.jar manifest total must be 1..={MAX_TOTAL_BYTES} bytes"
+            ));
+        }
+        if self.entries == 0 || self.entries > 250_000 {
+            return Err("client.jar manifest entry count is outside its bounds".to_string());
+        }
+        validate_sha256("client.jar manifest", &self.sha256)
+    }
+
+    /// Verifies a fetched direct archive before it is installed.
+    pub fn verify_download(&self, bytes: &[u8]) -> Result<(), String> {
+        if bytes.len() as u64 != self.bytes {
+            return Err(format!(
+                "client.jar has {} bytes, expected {}",
+                bytes.len(),
+                self.bytes
+            ));
+        }
+        verify_hash("client.jar", bytes, &self.sha256)
+    }
+}
 
 /// The checked shape produced by `web/scripts/stage_client_jar_parts.py`.
 #[derive(Debug, Deserialize)]
@@ -235,5 +291,27 @@ mod tests {
                 .expect_err("only content-addressed sibling names are safe to fetch");
             assert!(error.contains("must be named"), "unexpected error for {name}: {error}");
         }
+    }
+
+    #[test]
+    fn accepts_and_verifies_a_direct_archive_manifest() {
+        let manifest = format!(
+            r#"{{"version":1,"asset":"client.jar","bytes":1,"sha256":"{A_SHA256}","entries":1}}"#
+        );
+        let parsed = ClientJarManifest::parse(manifest.as_bytes()).expect("valid direct manifest");
+        parsed.verify_download(b"a").expect("matching archive");
+    }
+
+    #[test]
+    fn rejects_a_direct_manifest_for_a_corrupt_archive() {
+        let manifest = format!(
+            r#"{{"version":1,"asset":"client.jar","bytes":1,"sha256":"{A_SHA256}","entries":1}}"#
+        );
+        let parsed = ClientJarManifest::parse(manifest.as_bytes()).expect("valid direct manifest");
+        assert!(parsed.verify_download(b"b").is_err());
+        assert!(ClientJarManifest::parse(
+            br#"{"version":1,"asset":"client.jar","bytes":1,"sha256":"bad","entries":1}"#
+        )
+        .is_err());
     }
 }

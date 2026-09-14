@@ -136,7 +136,7 @@ async fn protocol_5_chest_move_reaches_the_live_inventory_consumer() {
             face: BlockFace::North,
             cursor: Vec3f::new(0.5, 0.5, 0.5),
             inside_block: false,
-            sequence: 0,
+            sequence: lodestone_model::PredictionSequence::INITIAL,
         })
         .expect("protocol-5 client must use the chest");
 

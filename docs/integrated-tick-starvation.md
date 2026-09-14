@@ -10,11 +10,11 @@ The tick loop's `resident_tick_terrain_snapshot` builds the natural-spawn terrai
 
 The shared `run_tick_loop_with_weather_impl` records the three phase durations for every tick as before. When tracing is enabled, it emits a structured event only for a phase lasting at least one 50 ms tick period, including the tick number, phase name, follow-area size, and resident-column count. Native and `wasm32` use the same tick-loop implementation; the environment-variable switch is intentionally native-only.
 
-Integrated mob seeding follows the same boundary: its background task waits for a
-player to join and for its requested seed area to be resident before reading the
-columns. This keeps the cold generator work owned by the join stream until the
-initial terrain is on the wire; seeding then reuses the retained columns instead
-of competing with the first spawn search.
+Integrated mob seeding waits for the production connection task to become live,
+then submits its requested columns through the bounded world-generation
+dispatcher. It does not wait for a client packet or poll residency: a server
+opened without a client still seeds, and the dispatcher keeps cold generation off
+the async runtime while the shared store makes the result authoritative.
 
 The production-path liveness witness in `worldgen_tick_liveness` holds one newly
 visible column behind a bounded gate while moving a player across its chunk
@@ -30,10 +30,14 @@ generation handoff rather than the cost of a deliberately broad spawn view.
 
 New periodic tick work must use a resident-only accessor when it reads a bounded `ChunkSource`. Do not add a cold `ChunkSource::column` or blocking `set_block` call to the tick task: generation and cache writes hold per-coordinate gates, so the join stream and the world clock can block one another. Preserve the retry behavior when a column is absent or busy, and keep changes in the shared tick-loop body so native and browser scheduling remain behaviorally aligned.
 
-The mob seed handoff must remain behind the player/residency gate. If the seed
-area is expanded, ensure the join view can populate it; otherwise move the
-additional population work to a later, explicitly scheduled pass rather than
-starting another cold generation burst during login.
+The mob seed handoff must remain after the production connection task is live and
+must continue to use the bounded dispatcher. If the seed area is expanded, keep
+it on that worker path rather than adding cold generation to the tick task or
+the connection runtime.
+
+LAN startup similarly warms its bounded fallback tick area through the same
+dispatcher, so a playerless host can perform resident-only random and scheduled
+work without making the tick task a generator.
 
 The resident-only natural-spawn view is deliberately all-or-nothing. This gives the spawner one stable terrain view rather than a mixture of newly generated and missing columns. A moved or stale area retries on a later tick after streaming has populated the cache.
 

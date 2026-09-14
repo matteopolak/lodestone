@@ -309,7 +309,7 @@ impl DecorationCatalog {
     /// still advance the global per-step index, but produce no placement work.
     #[must_use]
     pub fn select_ores<'a>(
-        &'a self,
+        &self,
         biomes: impl IntoIterator<Item = &'a str>,
         ore_definitions: &HashMap<String, PlacedOre>,
     ) -> Vec<PlacedOre> {

@@ -1853,7 +1853,7 @@ mod tests {
     #[ignore = "focused native measurement for the production cutoff"]
     fn measure_dense_projectile_owner_workers() {
         use std::hint::black_box;
-        use std::time::Instant;
+        use lodestone_time::Instant;
 
         // Instrument control: a zero-projectile scene must stay empty, while
         // the populated control must advance every tick-start entry exactly

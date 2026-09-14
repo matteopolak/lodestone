@@ -1258,7 +1258,7 @@ mod fishing_tests {
     #[ignore = "focused native measurement for the production cutoff"]
     fn measure_dense_fishing_owner_workers() {
         use std::hint::black_box;
-        use std::time::Instant;
+        use lodestone_time::Instant;
 
         // Prime the code paths so one-time codegen and allocator costs do not
         // determine the cutoff. Each sample starts from a fresh fixture because

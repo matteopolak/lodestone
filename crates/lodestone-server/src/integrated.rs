@@ -642,22 +642,15 @@ where
     })
 }
 
-/// Like [`spawn_tick_task`], but native world simulation has a dedicated Tokio
-/// runtime. It runs the same `run_primary_tick_loop_with_weather` future as the
-/// browser; only the native executor differs so synchronous terrain or random
-/// tick work cannot starve this host's connection runtime.
+/// Schedules the authoritative world loop through the same cancellation seam as
+/// the connection task. Native generation is dispatched separately, so the loop
+/// keeps the caller's clock domain and does not synchronously generate terrain.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn spawn_world_tick_task<F>(shutdown: &Arc<ShutdownSignal>, fut: F) -> Task
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    let signal = shutdown.clone();
-    crate::spawn::spawn_isolated_runtime(async move {
-        tokio::select! {
-            _ = signal.notified() => {}
-            _ = fut => {}
-        }
-    })
+    spawn_tick_task(shutdown, fut)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1155,8 +1148,8 @@ pub struct IntegratedServer {
     /// server actions. It never exposes the tick-owned ECS `World`.
     #[cfg(not(target_arch = "wasm32"))]
     spawn_proposals: Option<crate::ecs::ServerProposalHandle>,
-    /// The one-shot mob-seeding task, `Some` only for
-    /// [`open_in_memory_with_mobs`](Self::open_in_memory_with_mobs).
+    /// The one-shot terrain/mob seeding task, when a constructor needs a
+    /// background warm-up before resident-only tick work can run.
     ///
     /// It exists as a *third* task rather than as a prologue to `tick_task`
     /// because `tick_task`'s clock must start immediately: waiting for terrain
@@ -1220,6 +1213,11 @@ pub struct IntegratedServer {
     /// a channel, exactly as `save`/`level_dat` above reach persistence.
     #[cfg(not(target_arch = "wasm32"))]
     mobs: Option<MobHandle>,
+    /// The browser's live mob handle. Kept only on the wasm target so the
+    /// browser acceptance harness can inspect the same item registry the tick
+    /// task mutates; native callers use the persistence-aware field above.
+    #[cfg(target_arch = "wasm32")]
+    browser_mobs: Option<MobHandle>,
     /// The world's shared, type-erased [`ChunkSource`], `Some` for every
     /// constructor that builds a world.
     ///
@@ -1238,6 +1236,8 @@ pub struct IntegratedServer {
     /// only being visible on the next chunk reload.
     #[cfg(not(target_arch = "wasm32"))]
     block_ticks: Option<BlockTickFeed>,
+    #[cfg(target_arch = "wasm32")]
+    browser_block_ticks: Option<BlockTickFeed>,
     /// The world border handle — `Some` for every
     /// constructor that builds a real, shared one; `open_to_lan` currently
     /// builds one that is real but **not read by any accepted
@@ -1618,6 +1618,8 @@ impl IntegratedServer {
                 // Nothing persists here, so the save path has no population to read.
                 #[cfg(not(target_arch = "wasm32"))]
                 mobs: None,
+                #[cfg(target_arch = "wasm32")]
+                browser_mobs: Some(mobs.clone()),
                 // No world directory reaches this constructor, so there is
                 // nothing to restore from and nothing to write back.
                 #[cfg(not(target_arch = "wasm32"))]
@@ -1632,6 +1634,8 @@ impl IntegratedServer {
                 world_source: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 block_ticks: None,
+                #[cfg(target_arch = "wasm32")]
+                browser_block_ticks: Some(block_ticks.clone()),
                 #[cfg(not(target_arch = "wasm32"))]
                 border: None,
                 // No tick loop here, so there is nothing to share a store *with*.
@@ -1825,6 +1829,8 @@ impl IntegratedServer {
                 // Nothing persists here, so the save path has no population to read.
                 #[cfg(not(target_arch = "wasm32"))]
                 mobs: None,
+                #[cfg(target_arch = "wasm32")]
+                browser_mobs: None,
                 // No world directory reaches this constructor (see the
                 // `with_nether` call above), so there is nothing to restore
                 // from and nothing to write back.
@@ -1840,6 +1846,8 @@ impl IntegratedServer {
                 world_source: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 block_ticks: None,
+                #[cfg(target_arch = "wasm32")]
+                browser_block_ticks: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 border: None,
                 // No tick loop here, so there is nothing to share a store *with*.
@@ -2220,14 +2228,10 @@ impl IntegratedServer {
         // republishes it). See `MobHandle`'s own doc comment for why this is
         // `'static`-safe.
         let (cx_range, cz_range) = mob_area;
-        // A primary world has no player ticket before the connection finishes
-        // joining. Its fallback must therefore be empty: generating the old
-        // 49-column origin square in that window competes with the first join
-        // column on the blocking pool. Once the connection publishes its first
-        // position, `TickFollow` replaces this empty fallback with the normal
-        // player-centred area. The seed task below still owns the explicit
-        // `mob_area` pre-generation work.
-        let tick_area = (0..=-1, 0..=-1);
+        // Before a player publishes an anchor, use the already-seeded mob area
+        // as the fallback. It is resident by the time this loop can do useful
+        // terrain work; an anchor replaces it as soon as the connection moves.
+        let tick_area = (cx_range.clone(), cz_range.clone());
         let (center_x, center_z) = mob_center;
 
         // `source` is shared between the connection
@@ -2360,10 +2364,9 @@ impl IntegratedServer {
         //   share. Admission is bounded across connections; it does not create
         //   a new scoped thread set or an unbounded blocking-pool queue per
         //   seed batch.
-        // * it reads through the shared `source` store above, so every one of
-        //   these columns is either already resident from the connection's
-        //   initial view (`mob_area` is a subset of it in production) or becomes
-        //   resident *for* that view. Either way each column is generated once.
+        // * it reads through the shared `source` store above, so the generated
+        //   columns become resident in the same authoritative cache the
+        //   connection and tick loop use.
         let seed_coords: Vec<(i32, i32)> = cz_range
             .clone()
             .flat_map(|cz| cx_range.clone().map(move |cx| (cx, cz)))
@@ -2389,18 +2392,14 @@ impl IntegratedServer {
         #[cfg(not(target_arch = "wasm32"))]
         let seed_generation_spawns = generation_spawns.clone();
         let seed_task = spawn_tick_task(&shutdown, async move {
-            // Do not compete with the first join for the cold generator. The
-            // connection owns the same store and must get its spawn column and
-            // initial view onto the wire before background mob seeding starts.
-            // Waiting for the player and the requested seed area to be resident
-            // makes this a pure cache read in the normal singleplayer path;
-            // worlds opened without a client still exit through `shutdown`.
-            while seed_players.is_empty()
-                || !seed_coords.iter().all(|&(cx, cz)| {
-                    seed_ready_source.is_column_resident(cx, cz)
-                })
-            {
-                tokio::time::sleep(crate::tick::TICK_PERIOD).await;
+            tokio::time::sleep(crate::tick::TICK_PERIOD).await;
+            if !seed_players.is_empty() {
+                while !seed_coords
+                    .iter()
+                    .all(|&(cx, cz)| seed_ready_source.is_column_resident(cx, cz))
+                {
+                    tokio::time::sleep(crate::tick::TICK_PERIOD).await;
+                }
             }
             let t_seed = lodestone_time::Instant::now();
             tracing::info!(
@@ -3792,10 +3791,16 @@ impl IntegratedServer {
     /// inserted through this handle before that point is discarded. Poll
     /// [`crate::MobSim::next_id`] — `>= 1000` once the reseed has run — before
     /// seeding through it.
-    #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn mobs(&self) -> Option<&MobHandle> {
-        self.mobs.as_ref()
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.mobs.as_ref()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.browser_mobs.as_ref()
+        }
     }
 
     /// Returns a typed entity capability over this world's live mob and player
@@ -4218,6 +4223,13 @@ impl IntegratedServer {
         let tick_scheduled = registries
             .as_ref()
             .map_or_else(Default::default, |r| r.scheduled.clone());
+        let warm_source = Arc::clone(&source);
+        let warm_coords: Vec<(i32, i32)> = (-LAN_TICK_RADIUS..=LAN_TICK_RADIUS)
+            .flat_map(|cz| (-LAN_TICK_RADIUS..=LAN_TICK_RADIUS).map(move |cx| (cx, cz)))
+            .collect();
+        let warm_task = spawn_tick_task(&shutdown, async move {
+            let _ = crate::chunk::generate_columns_offloaded(warm_source, warm_coords).await;
+        });
         // Shared world state for the LAN world: rules set by one player are
         // read by the tick loop and broadcast by every connection. The handle
         // is created before `with_nether` so all constructors share it.
@@ -4553,9 +4565,7 @@ impl IntegratedServer {
             clock: Some(clock),
             server_tick: Some(server_tick),
             spawn_proposals: Some(spawn_proposals),
-            // LAN seeds no mob population (nothing calls `MobHandle::reseed`
-            // here — see the `mobs` binding above), so there is nothing to seed.
-            seed_task: None,
+            seed_task: Some(warm_task),
             #[cfg(not(target_arch = "wasm32"))]
             generation_spawns: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -4968,10 +4978,16 @@ impl IntegratedServer {
     /// schedule nothing on their own. See
     /// `crates/lodestone-anvil/tests/redstone_benchmark.rs` for the one
     /// caller today.
-    #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn block_ticks(&self) -> Option<&BlockTickFeed> {
-        self.block_ticks.as_ref()
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.block_ticks.as_ref()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.browser_block_ticks.as_ref()
+        }
     }
 
     /// This server's live block-entity registry, if its unified tick loop owns

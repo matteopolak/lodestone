@@ -210,6 +210,14 @@ fn end_spikes_are_feature_writes_with_cross_chunk_clipping() {
 
     let producer = generator.column(2, 0);
     assert_eq!(producer.block_state(10, 99, 0), "minecraft:obsidian", "spike centre belongs to its producer chunk");
+    assert_eq!(
+        producer.motion_blocking_heightmap()[10],
+        101,
+        "final packet map includes the spike's post-prefix bedrock write"
+    );
+
+    let batch = generator.columns_batch(&[(2, 0)]);
+    assert_eq!(batch[0].motion_blocking_heightmap(), producer.motion_blocking_heightmap());
 
     let neighbour = generator.column(2, -1);
     assert_eq!(neighbour.block_state(10, 99, 15), "minecraft:obsidian", "the source at z=0 writes across the southern chunk edge");
@@ -260,8 +268,13 @@ fn end_city_pieces_are_composed_into_end_columns() {
         .collect();
     assert_eq!(piece_names, expected_pieces, "fixture piece order");
 
+    let shaped = generator.column_shaped(cx, cz);
     let column = generator.column(cx, cz);
-    for line in lines {
+    assert!(
+        !column.structure_blocks().mutations().is_empty(),
+        "the fixed city fixture must produce typed structure mutations"
+    );
+    for (index, line) in lines.enumerate() {
         let fields = line.split_whitespace().collect::<Vec<_>>();
         assert_eq!(fields.len(), 5, "malformed city block fixture: {line}");
         assert_eq!(fields[0], "block");
@@ -270,7 +283,15 @@ fn end_city_pieces_are_composed_into_end_columns() {
         let z: i32 = fields[3].parse().expect("integer z");
         assert_eq!(x.div_euclid(16), cx, "fixture control must lie in served city chunk");
         assert_eq!(z.div_euclid(16), cz, "fixture control must lie in served city chunk");
-        assert_eq!(column.block_state(x.rem_euclid(16) as usize, y, z.rem_euclid(16) as usize), fields[4], "city control ({x}, {y}, {z})");
+        let local = (x.rem_euclid(16) as usize, y, z.rem_euclid(16) as usize);
+        if index == 0 {
+            assert_ne!(
+                shaped.block_state(local.0, local.1, local.2),
+                fields[4],
+                "shaped prefix must not apply composite structure writes"
+            );
+        }
+        assert_eq!(column.block_state(local.0, local.1, local.2), fields[4], "city control ({x}, {y}, {z})");
     }
 }
 
@@ -804,15 +825,22 @@ fn scalar_and_spatial_batch_columns_are_byte_identical_in_requested_order() {
     let scalar = generator(SEED);
     let expected = coords
         .iter()
-        .map(|&(cx, cz)| scalar.column(cx, cz).into_raw())
+        .map(|&(cx, cz)| scalar.column(cx, cz))
         .collect::<Vec<_>>();
     let batch = generator(SEED);
-    let actual = batch
-        .columns_batch(&coords)
-        .into_iter()
-        .map(|column| column.into_raw())
-        .collect::<Vec<_>>();
-    assert_eq!(actual, expected, "batch changed End output or request order");
+    let actual = batch.columns_batch(&coords);
+    for (index, (got, want)) in actual.iter().zip(&expected).enumerate() {
+        assert_eq!(
+            got.clone().into_raw(),
+            want.clone().into_raw(),
+            "batch changed End output at {index}"
+        );
+        assert_eq!(
+            got.client_heightmaps(),
+            want.client_heightmaps(),
+            "batch changed client heightmaps at {index}"
+        );
+    }
 }
 
 /// The real scalar End path exposes the one canonical stage sequence.
@@ -829,7 +857,6 @@ fn end_executor_trace_is_canonical() {
             lodestone_worldgen::stage_schedule::ColumnStage::Surface,
             lodestone_worldgen::stage_schedule::ColumnStage::Materialize,
             lodestone_worldgen::stage_schedule::ColumnStage::StructureStarts,
-            lodestone_worldgen::stage_schedule::ColumnStage::StructurePlacement,
             lodestone_worldgen::stage_schedule::ColumnStage::Features,
             lodestone_worldgen::stage_schedule::ColumnStage::Output,
         ]

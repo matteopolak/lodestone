@@ -3,8 +3,9 @@
 //!
 //! Moved here verbatim from `feature/vegetation.rs` by U16 Phase B.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use crate::dense_grid::DenseBlockGrid;
@@ -18,6 +19,10 @@ use lodestone_data::biomes::{BiomeRef, BuiltinBiome};
 use self::census::bump as census_bump;
 
 const HEIGHT_CACHE_UNSET: i32 = i32::MIN;
+
+thread_local! {
+    static STATE_FORMAT: RefCell<String> = const { RefCell::new(String::new()) };
+}
 /// Compact representation for a vertically invariant biome source. Name-based
 /// compatibility inputs are converted at construction; retained grids never
 /// carry a parallel string array.
@@ -182,6 +187,7 @@ pub struct VegGrid {
     /// (typically small) written subset instead of rewriting all
     /// `16 × height × 16` cells.
     dirty: WriteLog,
+    structure_mutation_capture: Option<Vec<(i32, i32, i32, StateId)>>,
     origin_x: i32,
     origin_z: i32,
 pub(super)     min_y: i32,
@@ -285,6 +291,7 @@ impl VegGrid {
             feature_biomes: Arc::new(HashMap::new()),
             interner,
             dirty: WriteLog::default(),
+            structure_mutation_capture: None,
             origin_x,
             origin_z,
             min_y,
@@ -748,6 +755,16 @@ impl VegGrid {
         })
     }
 
+    pub(crate) fn begin_structure_mutation_capture(&mut self) {
+        self.structure_mutation_capture = Some(Vec::new());
+    }
+
+    pub(crate) fn take_structure_mutation_capture(
+        &mut self,
+    ) -> Option<Vec<(i32, i32, i32, StateId)>> {
+        self.structure_mutation_capture.take()
+    }
+
     /// Keep feature height guards tied to the terrain source when resident
     /// grids include padded rows above the generated field.
     pub(crate) fn set_generation_top(&mut self, top: i32) {
@@ -928,6 +945,46 @@ impl VegGrid {
         self.set_id_if_in_bounds(x, y, z, id)
     }
 
+    /// Writes a borrowed canonical state without materializing a temporary
+    /// string. The interner owns the state after the lookup.
+    pub fn set_state_if_in_bounds(&mut self, x: i32, y: i32, z: i32, state: &str) -> bool {
+        let id = self.interner.id_of(state);
+        self.set_id_if_in_bounds(x, y, z, id)
+    }
+
+    /// Formats a synthesized state through a reusable per-thread buffer before
+    /// interning it. The first use sizes the buffer; subsequent writes avoid a
+    /// temporary heap string while preserving the normal state lookup path.
+    pub fn set_formatted_state_if_in_bounds(
+        &mut self,
+        x: i32,
+        y: i32,
+        z: i32,
+        state: std::fmt::Arguments<'_>,
+    ) -> bool {
+        STATE_FORMAT.with(|scratch| {
+            let mut scratch = scratch.borrow_mut();
+            scratch.clear();
+            scratch
+                .write_fmt(state)
+                .expect("writing a block state into a String cannot fail");
+            let id = self.interner.id_of(scratch.as_str());
+            self.set_id_if_in_bounds(x, y, z, id)
+        })
+    }
+
+    pub fn formatted_state_id(&self, state: std::fmt::Arguments<'_>) -> StateId {
+        STATE_FORMAT.with(|scratch| {
+            let mut scratch = scratch.borrow_mut();
+            scratch
+                .write_fmt(state)
+                .expect("writing a block state into a String cannot fail");
+            let id = self.interner.id_of(scratch.as_str());
+            scratch.clear();
+            id
+        })
+    }
+
     /// [`Self::set_if_in_bounds`] by interned id — the allocation-free write
     /// path. Identical bounds behaviour, including the census bumps, so which
     /// form a caller uses cannot change a placement outcome.
@@ -938,6 +995,9 @@ impl VegGrid {
             self.blocks.insert_in_bounds((lx, y, lz), state);
             self.invalidate_height_caches(lx, lz);
             self.dirty.push((lx, y, lz));
+            if let Some(capture) = &mut self.structure_mutation_capture {
+                capture.push((x, y, z, state));
+            }
             true
         } else {
             census_bump(|c| c.writes_rejected += 1);
@@ -1052,14 +1112,9 @@ impl VegGrid {
     /// `Heightmap.Types.OCEAN_FLOOR`/`OCEAN_FLOOR_WG` — topmost **motion-blocking**
     /// block, plus one. `x`/`z` are absolute world coordinates.
     ///
-    /// It used to be "topmost non-air, non-fluid", which is not the same predicate
-    /// and produced stacked, floating seagrass: seagrass is neither air nor fluid, so
-    /// an already-placed plant counted as the floor and the next placement on that
-    /// column started on top of it. The scan consumes the generated per-state
-    /// blocks-motion table through [`BaseStateFacts`]. This matters for feature
-    /// writes such as leaves: their empty collision shape makes them
-    /// non-motion-blocking even though they are non-air, so a tree canopy cannot
-    /// raise the disk's ocean-floor placement height.
+    /// The scan consumes the generated per-state blocks-motion table through
+    /// [`BaseStateFacts`], so fluids are excluded while blocks such as leaves
+    /// retain the reference predicate's own blocks-motion result.
     #[must_use]
     pub fn height_ocean_floor(&self, x: i32, z: i32) -> i32 {
         let (lx, lz) = self.to_local_clamped(x, z);
@@ -1385,13 +1440,14 @@ mod heightmap_tests {
     }
 
     #[test]
-    fn ocean_floor_ignores_leaves_but_mutation_to_stone_raises_it() {
+    fn ocean_floor_counts_leaves_and_mutation_to_stone_keeps_it_raised() {
         let mut grid = VegGrid::with_footprint(0, 80, 0, 0, 0, 1);
         let dirt = grid.interner().id_of("minecraft:dirt");
         let water = grid.interner().id_of("minecraft:water[level=0]");
         let leaves = grid
             .interner()
             .id_of("minecraft:dark_oak_leaves[distance=3,persistent=false,waterlogged=false]");
+        let short_grass = grid.interner().id_of("minecraft:short_grass");
         let stone = grid.interner().id_of("minecraft:stone");
         assert!(grid.set_id_if_in_bounds(0, 60, 0, dirt));
         assert!(grid.set_id_if_in_bounds(0, 61, 0, water));
@@ -1399,11 +1455,14 @@ mod heightmap_tests {
         assert!(grid.set_id_if_in_bounds(0, 67, 0, leaves));
         assert!(grid.set_id_if_in_bounds(0, 68, 0, leaves));
 
+        assert_eq!(grid.height_ocean_floor(0, 0), 69);
+        assert_eq!(grid.height_motion_blocking(0, 0), 69);
+
+        assert!(grid.set_id_if_in_bounds(0, 67, 0, short_grass));
+        assert!(grid.set_id_if_in_bounds(0, 68, 0, short_grass));
         assert_eq!(grid.height_ocean_floor(0, 0), 61);
         assert_eq!(grid.height_motion_blocking(0, 0), 63);
 
-        // Mutation control: replacing the canopy's highest cell with a solid
-        // block must raise both motion-based heightmaps to that cell.
         assert!(grid.set_id_if_in_bounds(0, 68, 0, stone));
         assert_eq!(grid.height_ocean_floor(0, 0), 69);
         assert_eq!(grid.height_motion_blocking(0, 0), 69);
