@@ -23,7 +23,9 @@ impl Drop for LodestoneHandle {
         if let Some(control) = self.control.take() {
             let _ = control.shutdown();
         }
-        self.mount_lease.take();
+        if let Some(mut lease) = self.mount_lease.take() {
+            lease.schedule_completion(None);
+        }
     }
 }
 
@@ -36,11 +38,15 @@ impl LodestoneHandle {
         self.destroyed = true;
         self.active.set(false);
         cancel_first_frame(&self.first_frame_raf);
-        if let Some(control) = self.control.take() {
-            let _ = control.shutdown();
+        let shutdown = self
+            .control
+            .take()
+            .map_or(Ok(()), |control| control.shutdown())
+            .map_err(|error| JsValue::from_str(&error));
+        if let Some(mut lease) = self.mount_lease.take() {
+            lease.schedule_completion(self.progress.clone());
         }
-        self.emit("destroyed", 1.0, "session stopped");
-        Ok(())
+        shutdown
     }
 
     #[wasm_bindgen(js_name = isDestroyed)]
@@ -112,7 +118,7 @@ pub(crate) async fn mount_bundle(
     bundle: lodestone::platform::assets::Bundle,
     progress: Option<Rc<Function>>,
 ) -> Result<LodestoneHandle, JsValue> {
-    let mut lease = MountLease::claim()?;
+    let mut lease = MountLease::claim().await?;
     install_bundle(bundle)?;
 
     let config = match Config::from_args(std::iter::empty::<String>()) {
@@ -389,7 +395,7 @@ struct MountLease {
 
 struct MountRecord {
     id: u64,
-    lifecycle: Rc<Cell<bool>>,
+    shutting_down: bool,
 }
 
 thread_local! {
@@ -398,17 +404,25 @@ thread_local! {
 }
 
 impl MountLease {
-    fn claim() -> Result<Self, JsValue> {
+    async fn claim() -> Result<Self, JsValue> {
+        loop {
+            let occupied = ACTIVE_MOUNT.with(|slot| {
+                slot.borrow()
+                    .as_ref()
+                    .map(|record| record.shutting_down)
+            });
+            match occupied {
+                Some(false) => {
+                    return Err(JsValue::from_str("a Lodestone session is already mounted"));
+                }
+                Some(true) => next_animation_frame().await?,
+                None => break,
+            }
+        }
+
         let lifecycle = Rc::new(Cell::new(false));
         ACTIVE_MOUNT.with(|slot| {
             let mut slot = slot.borrow_mut();
-            if let Some(record) = slot.as_ref()
-                && !record.lifecycle.get()
-            {
-                return Err(JsValue::from_str(
-                    "a Lodestone session is already mounted or shutting down",
-                ));
-            }
             let id = NEXT_MOUNT_ID.with(|next| {
                 let id = next.get().wrapping_add(1);
                 next.set(id);
@@ -416,7 +430,7 @@ impl MountLease {
             });
             *slot = Some(MountRecord {
                 id,
-                lifecycle: Rc::clone(&lifecycle),
+                shutting_down: false,
             });
             Ok(Self {
                 id,
@@ -433,16 +447,78 @@ impl MountLease {
     fn mark_started(&mut self) {
         self.started = true;
     }
+
+    fn schedule_completion(&mut self, progress: Option<Rc<Function>>) {
+        ACTIVE_MOUNT.with(|slot| {
+            if let Some(record) = slot.borrow_mut().as_mut()
+                && record.id == self.id
+            {
+                record.shutting_down = true;
+            }
+        });
+        poll_mount_completion(
+            self.id,
+            Rc::clone(&self.lifecycle),
+            progress,
+        );
+        self.started = false;
+    }
 }
 
 impl Drop for MountLease {
     fn drop(&mut self) {
         ACTIVE_MOUNT.with(|slot| {
             if slot.borrow().as_ref().is_some_and(|record| {
-                record.id == self.id && (!self.started || self.lifecycle.get())
+                record.id == self.id && !self.started && !record.shutting_down
             }) {
                 slot.replace(None);
             }
         });
     }
+}
+
+fn poll_mount_completion(
+    id: u64,
+    lifecycle: Rc<Cell<bool>>,
+    progress: Option<Rc<Function>>,
+) {
+    let Some(window) = window() else {
+        return;
+    };
+    let closure = Closure::once(move || {
+        if !lifecycle.get() {
+            poll_mount_completion(id, lifecycle, progress);
+            return;
+        }
+        ACTIVE_MOUNT.with(|slot| {
+            if slot.borrow().as_ref().is_some_and(|record| record.id == id) {
+                slot.replace(None);
+            }
+        });
+        if let Some(progress) = progress {
+            emit_callback(&progress, "destroyed", 1.0, "session stopped");
+        }
+    });
+    if window
+        .request_animation_frame(closure.as_ref().unchecked_ref())
+        .is_ok()
+    {
+        closure.forget();
+    }
+}
+
+async fn next_animation_frame() -> Result<(), JsValue> {
+    let promise = Promise::new(&mut |resolve, reject| {
+        let Some(window) = window() else {
+            let _ = reject.call1(&JsValue::NULL, &JsValue::from_str("no browser window"));
+            return;
+        };
+        let closure = Closure::once_into_js(move || {
+            let _ = resolve.call0(&JsValue::NULL);
+        });
+        if let Err(error) = window.request_animation_frame(closure.unchecked_ref()) {
+            let _ = reject.call1(&JsValue::NULL, &error);
+        }
+    });
+    JsFuture::from(promise).await.map(|_| ())
 }

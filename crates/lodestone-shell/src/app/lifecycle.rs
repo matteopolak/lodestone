@@ -136,6 +136,8 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
     #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
         if matches!(event, AppEvent::Quit) {
+            self.shutdown_browser_presentation();
+            discard_pending_gpu(self.browser_lifecycle.as_ref());
             event_loop.exit();
         }
     }
@@ -2309,6 +2311,24 @@ thread_local! {
     /// `about_to_wait` to read.
     #[cfg(target_arch = "wasm32")]
     static POINTER_LOCK_CHANGED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(target_arch = "wasm32")]
+fn discard_pending_gpu(lifecycle: Option<&Rc<Cell<bool>>>) {
+    let Some(lifecycle) = lifecycle else {
+        return;
+    };
+    PENDING_GPU.with_borrow_mut(|slot| {
+        let current = slot
+            .as_ref()
+            .is_some_and(|(pending, _, _)| Rc::ptr_eq(pending, lifecycle));
+        if current
+            && let Some((_, gpu, target)) = slot.take()
+        {
+            drop(target);
+            gpu.device().destroy();
+        }
+    });
 }
 
 /// Registers the page's one `pointerlockchange` listener, the first time this is
