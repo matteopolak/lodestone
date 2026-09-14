@@ -302,6 +302,7 @@ web-sys = { version = "0.3", features = [
     "Document",
     "Element",
     "HtmlCanvasElement",
+    "OffscreenCanvas",
     "Performance",
     "Storage",
     # `platform::clipboard::set`'s `navigator.clipboard.writeText` (issue: menu

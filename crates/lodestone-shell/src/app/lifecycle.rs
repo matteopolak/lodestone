@@ -4,6 +4,185 @@
 
 use super::*;
 
+#[cfg(target_arch = "wasm32")]
+impl WindowApp {
+    pub(super) fn dispatch_browser_input(&mut self, input: BrowserInput) -> bool {
+        match input {
+            BrowserInput::CursorMoved { x, y } => self.dispatch_window_event(
+                WindowId::dummy(),
+                WindowEvent::CursorMoved {
+                    device_id: DeviceId::dummy(),
+                    position: PhysicalPosition::new(x, y),
+                },
+            ),
+            BrowserInput::MouseInput { button, pressed } => self.dispatch_window_event(
+                WindowId::dummy(),
+                WindowEvent::MouseInput {
+                    device_id: DeviceId::dummy(),
+                    state: if pressed {
+                        ElementState::Pressed
+                    } else {
+                        ElementState::Released
+                    },
+                    button,
+                },
+            ),
+            BrowserInput::MouseMotion { dx, dy } => {
+                if self.ui.is_playing() && self.pointer_really_locked() {
+                    self.sim.input_mut(|input| input.add_mouse(dx as f32, dy as f32));
+                }
+                false
+            }
+            BrowserInput::MouseWheel { dx, dy } => self.dispatch_window_event(
+                WindowId::dummy(),
+                WindowEvent::MouseWheel {
+                    device_id: DeviceId::dummy(),
+                    delta: MouseScrollDelta::PixelDelta(PhysicalPosition::new(dx, dy)),
+                    phase: TouchPhase::Moved,
+                },
+            ),
+            BrowserInput::Focused(focused) => {
+                self.dispatch_window_event(WindowId::dummy(), WindowEvent::Focused(focused))
+            }
+            BrowserInput::Resized { width, height } => self.dispatch_window_event(
+                WindowId::dummy(),
+                WindowEvent::Resized(PhysicalSize::new(width.max(1), height.max(1))),
+            ),
+            BrowserInput::PointerLock(locked) => {
+                self.browser_pointer_locked = locked;
+                self.browser_pointer_requested = locked;
+                if !locked {
+                    self.reconcile_browser_pointer_lock_change();
+                }
+                false
+            }
+            BrowserInput::Key {
+                code,
+                pressed,
+                text,
+                modifiers,
+            } => {
+                self.modifiers = browser_modifiers(modifiers);
+                self.shift_held = self.modifiers.shift_key();
+                self.ctrl_held = self.modifiers.control_key();
+                self.handle_browser_key(code, pressed, text.as_deref());
+                false
+            }
+        }
+    }
+
+    fn handle_browser_key(&mut self, code: KeyCode, pressed: bool, text: Option<&str>) {
+        let gate = KeyGate {
+            menu: crate::menu::nav::routes_menu_input(&self.ui),
+            chat_open: self.ui.is_chat_open(),
+            container_open: self.active_container_menu().is_some(),
+            gameplay: self.ui.accepts_gameplay_input(),
+            debug_held: self.debug_held,
+            recipe_search: self.recipe_panel.open && self.recipe_panel.search_focused,
+            creative_search: self.creative_search_active(),
+            anvil_rename_active: self.anvil_rename_active(),
+            spectator: self.sim.is_spectator(),
+        };
+        let outcome = resolve_key(
+            &self.keybinds(),
+            gate,
+            Some(code),
+            pressed,
+            self.ctrl_held,
+            None,
+        );
+        match outcome {
+            Some(KeyOutcome::Menu) => {
+                if pressed && self.nav.awaiting_key_capture() {
+                    match capture_key_for(PhysicalKey::Code(code)) {
+                        Some(CaptureKey::Cancel) => self.handle_menu_key(MenuKey::Escape),
+                        Some(CaptureKey::Bind(code)) => {
+                            self.nav.capture_binding(Binding::Key(code.into()));
+                        }
+                        None => {}
+                    }
+                } else if pressed
+                    && let Some(key) = Self::menu_key_for(
+                        PhysicalKey::Code(code),
+                        text,
+                        self.modifiers,
+                    )
+                {
+                    self.handle_menu_key(key);
+                    self.set_grab(self.ui.wants_cursor_grab());
+                }
+            }
+            Some(KeyOutcome::Chat) => {
+                if pressed && !self.handle_chat_history_code(code) {
+                    self.handle_chat_key_parts(PhysicalKey::Code(code), text, self.modifiers);
+                }
+            }
+            Some(KeyOutcome::RecipeSearch) => {
+                if pressed {
+                    if code == KeyCode::Backspace {
+                        self.recipe_panel.search.pop();
+                        self.recipe_panel.page = 0;
+                    } else if let Some(text) = text {
+                        for ch in text.chars().filter(|ch| !ch.is_control()) {
+                            if self.recipe_panel.search.chars().count() < RECIPE_SEARCH_MAX_LEN {
+                                self.recipe_panel.search.push(ch);
+                            }
+                        }
+                        self.recipe_panel.page = 0;
+                    }
+                }
+            }
+            Some(KeyOutcome::CreativeSearch) => {
+                if pressed {
+                    if code == KeyCode::Backspace {
+                        self.edit_creative_search(CreativeSearchEdit::Backspace);
+                    } else if let Some(text) = text {
+                        for ch in text.chars().filter(|ch| !ch.is_control()) {
+                            self.edit_creative_search(CreativeSearchEdit::Char(ch));
+                        }
+                    }
+                }
+            }
+            Some(KeyOutcome::AnvilRename) => {
+                if pressed {
+                    if code == KeyCode::Backspace {
+                        self.anvil_rename.backspace();
+                    } else if let Some(text) = text {
+                        for ch in text.chars().filter(|ch| !ch.is_control()) {
+                            self.anvil_rename.push_char(ch);
+                        }
+                    }
+                    if let Some(name) = self.anvil_rename.resolve_rename()
+                        && let Some(net) = self.sim.net()
+                    {
+                        net.send_action(lodestone_model::ClientAction::RenameItem { name });
+                    }
+                }
+            }
+            other => self.apply_key_outcome(other, pressed, Some(code), None),
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn browser_modifiers(bits: u8) -> ModifiersState {
+    let mut raw = 0;
+    if bits & 1 != 0 {
+        raw |= 0b100;
+    }
+    if bits & 2 != 0 {
+        raw |= 0b100 << 3;
+    }
+    if bits & 4 != 0 {
+        raw |= 0b100 << 6;
+    }
+    if bits & 8 != 0 {
+        raw |= 0b100 << 9;
+    }
+    ModifiersState::from_bits_retain(raw)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 impl ApplicationHandler<ShellEvent> for WindowApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -19,10 +198,7 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
         if !self.presentation_desired {
             return;
         }
-        #[cfg(not(target_arch = "wasm32"))]
         let mut attrs = window_attributes(&self.config);
-        #[cfg(target_arch = "wasm32")]
-        let mut attrs = window_attributes(&self.config, self.browser_canvas.as_ref());
         if self.config.benchmark.is_some() {
             let Some(monitor) = benchmark_builtin_monitor(event_loop) else {
                 eprintln!("benchmark requires a discoverable built-in laptop display");
@@ -58,62 +234,8 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
         // handling (`event_loop.exit()`, unlike a runtime attach, which stays
         // headless) since a window this app cannot draw into is fatal here in
         // a way it is not for an already-running headless session.
-        #[cfg(not(target_arch = "wasm32"))]
         if !self.create_and_attach_window(event_loop, attrs) {
             event_loop.exit();
-        }
-        #[cfg(target_arch = "wasm32")]
-        let window = match event_loop.create_window(attrs) {
-            Ok(w) => Arc::new(w),
-            Err(e) => {
-                eprintln!("failed to create window: {e}");
-                event_loop.exit();
-                return;
-            }
-        };
-
-        // Browser: `resumed` is a *synchronous* winit callback, and adapter/device
-        // selection is genuinely asynchronous — `pollster::block_on` on a browser main
-        // thread cannot finish, because there is no other thread to make the future
-        // progress. So the bring-up is split at exactly that seam: kick the attach off
-        // on the microtask queue and let a later `about_to_wait` finish it.
-        //
-        // The window is parked here, before the GPU exists, so this callback's own
-        // `self.window.is_some()` guard stops a second `resumed` creating a second
-        // window and a second attach. Every field the deferred half fills is already
-        // `Option` and every consumer already reads them as such — `redraw` starts with
-        // `self.gpu.as_ref()` — so "no GPU for a frame or two" is a state this app
-        // could already represent. That is what makes the split cheap rather than a
-        // rewrite.
-        #[cfg(target_arch = "wasm32")]
-        {
-            self.window = Some(window.clone());
-            let lifecycle = self
-                .browser_lifecycle
-                .as_ref()
-                .expect("browser sessions carry a lifecycle marker")
-                .clone();
-            wasm_bindgen_futures::spawn_local(async move {
-                if lifecycle.get() {
-                    return;
-                }
-                match lodestone_render::window::attach_window_async(window).await {
-                    Ok((gpu, target)) if !lifecycle.get() => {
-                        PENDING_GPU.with_borrow_mut(|slot| {
-                            *slot = Some((lifecycle, gpu, target));
-                        })
-                    }
-                    Ok(_) => {}
-                    // Not `event_loop.exit()`: we are outside the callback and have no
-                    // `ActiveEventLoop`. Nothing else can draw, so say why loudly and
-                    // leave the page up — a blank canvas with an explanation beats a
-                    // silently dead tab.
-                    Err(e) => tracing::error!(
-                        target: "gpu",
-                        "failed to attach GPU to the canvas: {e}. This build needs WebGPU."
-                    ),
-                }
-            });
         }
     }
 
@@ -133,21 +255,35 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
         }
     }
 
-    #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
-        if matches!(event, AppEvent::Quit) {
-            self.shutdown_browser_presentation();
-            discard_pending_gpu(self.browser_lifecycle.as_ref());
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        if self.dispatch_window_event(window_id, event) {
             event_loop.exit();
         }
     }
 
-    fn window_event(
+    fn device_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
-        event: WindowEvent,
+        device_id: DeviceId,
+        event: DeviceEvent,
     ) {
+        self.device_event_impl(event_loop, device_id, event);
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.about_to_wait_impl(event_loop);
+    }
+
+}
+
+impl WindowApp {
+    pub(super) fn dispatch_window_event(&mut self, _window_id: WindowId, event: WindowEvent) -> bool {
+        let mut should_exit = false;
         // Vanilla's own framerate-limit tracker resets its AFK clock on input,
         // called from the keyboard and mouse handlers
         // (key press, mouse press, scroll) — deliberately **not**
@@ -212,7 +348,7 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
                     | WindowEvent::CursorMoved { .. }
             )
         {
-            return;
+            return false;
         }
         match event {
             // Winit reports modifier state as its own event rather than
@@ -230,7 +366,7 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
             }
             WindowEvent::CloseRequested => {
                 self.friends.shutdown();
-                event_loop.exit();
+                should_exit = true;
             }
             WindowEvent::Resized(size) => {
                 if let (Some(gpu), Some(target), Some(render)) = (
@@ -949,11 +1085,15 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
 
         // Clean shutdown path: any handler may latch a quit request.
         if self.ui.quit_requested() {
-            event_loop.exit();
+            should_exit = true;
         }
+        should_exit
     }
+}
 
-    fn device_event(
+#[cfg(not(target_arch = "wasm32"))]
+impl WindowApp {
+    fn device_event_impl(
         &mut self,
         _event_loop: &ActiveEventLoop,
         _device_id: DeviceId,
@@ -980,57 +1120,7 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
         }
     }
 
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // Browser: collect the deferred GPU attach `resumed` kicked off, the first time
-        // it is ready. This is the other half of the split — see `resumed` — and this is
-        // the right place for it because it runs every loop turn and has `&mut self`,
-        // which the `async` block that produced the pair could not hold.
-        //
-        // Ordered *before* `request_redraw` deliberately: the frame this enables should
-        // be the one we then ask for, rather than the one after it.
-        #[cfg(target_arch = "wasm32")]
-        if self.gpu.is_none() {
-            let pending = PENDING_GPU.with_borrow_mut(Option::take);
-            if let Some((lifecycle, gpu, target)) = pending {
-                let current = !lifecycle.get()
-                    && self
-                        .browser_lifecycle
-                        .as_ref()
-                        .is_some_and(|current| Rc::ptr_eq(current, &lifecycle));
-                if current {
-                    // `resumed` parked the window before spawning the attach, so it is
-                    // present here. If it somehow is not, drop the pair rather than
-                    // inventing a window: `finish_bring_up` needs the real one the surface
-                    // was created from, and a second `resumed` will retry cleanly.
-                    if let Some(window) = self.window.clone() {
-                        tracing::info!(target: "gpu", "GPU attached; finishing bring-up");
-                        self.finish_bring_up(
-                            Some(window),
-                            gpu,
-                            super::PresentationTarget::Surface(target),
-                        );
-                    } else {
-                        tracing::warn!(
-                            target: "gpu",
-                            "GPU attach landed with no window parked; discarding it"
-                        );
-                    }
-                }
-            }
-        }
-        // Browser: react to a `pointerlockchange` DOM event the listener recorded
-        // since the last turn — see `reconcile_browser_pointer_lock_change`'s doc
-        // for why this is Escape's *other* half on this target. Registering the
-        // listener is idempotent and cheap, so it is simplest to just make sure it
-        // exists every turn rather than threading a "did bring-up run yet" flag
-        // through this function.
-        #[cfg(target_arch = "wasm32")]
-        {
-            ensure_pointer_lock_change_listener();
-            if POINTER_LOCK_CHANGED.with(|flag| flag.replace(false)) {
-                self.reconcile_browser_pointer_lock_change();
-            }
-        }
+    fn about_to_wait_impl(&mut self, event_loop: &ActiveEventLoop) {
         self.replay_pending_pick();
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -1631,11 +1721,7 @@ impl WindowApp {
     pub(super) fn pointer_really_locked(&self) -> bool {
         #[cfg(target_arch = "wasm32")]
         {
-            self.grabbed
-                && self
-                    .browser_canvas
-                    .as_ref()
-                    .is_some_and(browser_pointer_locked)
+            self.grabbed && self.browser_pointer_locked
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1675,12 +1761,7 @@ impl WindowApp {
     /// double pause/unpause — this needs no ordering guarantee between the two.
     #[cfg(target_arch = "wasm32")]
     fn reconcile_browser_pointer_lock_change(&mut self) {
-        if !self.grabbed
-            || self
-                .browser_canvas
-                .as_ref()
-                .is_none_or(browser_pointer_locked)
-        {
+        if !self.grabbed || self.browser_pointer_locked {
             return;
         }
         // Mirrors the `KeyOutcome::Pause` arm in `window_event` exactly: a
@@ -1711,28 +1792,6 @@ impl WindowApp {
         gpu: GpuContext,
         #[cfg_attr(not(target_arch = "wasm32"), allow(unused_mut))] mut target: super::PresentationTarget,
     ) {
-        // Browser only: `attach_window_async` sized `target` from `window.inner_size()`,
-        // read from inside an async task racing winit's own canvas `ResizeObserver` — see
-        // `window_attributes`'s doc on why nothing seeds that observer's tracked size
-        // synchronously. When the observer has not delivered yet, `window.inner_size()`
-        // reads `(0, 0)` and `SurfaceTarget::new` clamps that to a 1x1 surface rather than
-        // failing, so `target` can be sized wrong the instant it exists. The canvas's CSS
-        // box itself needs no observer to be correct, though: bring-up only starts after
-        // `boot()`'s multi-second asset fetch, so the page has been laid out for a long
-        // time by the time this runs, and `clientWidth`/`clientHeight` are authoritative
-        // the instant they are read. Measuring directly here — before the depth buffer and
-        // first frame are ever sized from `target` — fixes the initial frame outright
-        // instead of relying on a `Resized` event to correct it a moment later.
-        #[cfg(target_arch = "wasm32")]
-        if let Some(window) = window.as_ref()
-            && let Some(canvas) = self.browser_canvas.as_ref()
-            && let Some((mw, mh)) = measured_canvas_physical_size(canvas)
-            && (mw, mh) != target.size()
-        {
-            let _ = window;
-            target.resize(gpu.device(), mw, mh);
-        }
-
         let (w, h) = target.size();
         if self.config.benchmark.is_some() {
             tracing::info!(
@@ -2095,6 +2154,10 @@ impl WindowApp {
         let PhysicalKey::Code(code) = event.physical_key else {
             return false;
         };
+        self.handle_chat_history_code(code)
+    }
+
+    pub(super) fn handle_chat_history_code(&mut self, code: KeyCode) -> bool {
         match code {
             // The suggestion popup gets first refusal on both arrows —
             // vanilla's suggestion-list key handling runs its up/down arms before
@@ -2225,198 +2288,14 @@ pub(super) fn window_attributes(config: &Config) -> winit::window::WindowAttribu
     attrs
 }
 
-#[cfg(target_arch = "wasm32")]
-pub(super) fn window_attributes(
-    _config: &Config,
-    canvas: Option<&web_sys::HtmlCanvasElement>,
-) -> winit::window::WindowAttributes {
-    use winit::platform::web::WindowAttributesExtWebSys;
-    let attrs = Window::default_attributes().with_title("Lodestone");
-    match canvas {
-        Some(canvas) => attrs.with_canvas(Some(canvas.clone())),
-        None => {
-            tracing::warn!(
-                target: "gpu",
-                "no host canvas was supplied; winit will create a canvas outside the document"
-            );
-            attrs
-        }
-    }
-}
-
-#[cfg(all(test, target_arch = "wasm32"))]
-mod browser_tests {
-    use super::*;
-    use wasm_bindgen::JsCast;
-
-    #[test]
-    fn host_canvas_id_survives_direct_window_binding() {
-        let document = web_sys::window().unwrap().document().unwrap();
-        let canvas = document
-            .create_element("canvas")
-            .unwrap()
-            .dyn_into::<web_sys::HtmlCanvasElement>()
-            .unwrap();
-        canvas.set_id("host-owned-canvas");
-        let before = canvas.id();
-        let _ = window_attributes(&Config::default(), Some(&canvas));
-        assert_eq!(canvas.id(), before);
-    }
-}
-
-/// Whether the browser's Pointer Lock API has **genuinely** engaged on our canvas —
-/// the ground truth `WindowApp::grabbed` cannot provide on its own here, and trusting
-/// it anyway is the whole of the "pointer doesn't get locked" report.
-///
-/// `winit::window::Window::set_cursor_grab(CursorGrabMode::Locked)` on this platform
-/// (`platform_impl::web::web_sys::canvas::Canvas::set_cursor_lock`) calls the
-/// fire-and-forget `Element::request_pointer_lock()` and returns `Ok(())`
-/// *unconditionally* — it never inspects a result, and winit 0.30 registers no
-/// `pointerlockchange`/`pointerlockerror` listener anywhere in its web backend, so a
-/// rejected request is invisible to it. The browser rejects any such request that is
-/// not the direct result of a user gesture (a click/keydown handler), and
-/// `app::session::drive_ui_from_session` — the call site that actually flips grab the
-/// instant `SessionPhase` becomes `Connected` — runs from the per-frame render loop,
-/// not from one. So the very first grab of a session is silently refused: `grabbed`
-/// becomes (falsely) `true`, the cursor is hidden by CSS, and `device_event` starts
-/// feeding ordinary, edge-bounded `movementX`/`Y` through as if it were an unbounded
-/// locked delta — exactly the "cursor doesn't get locked / goes off the page and
-/// stops registering" report, because the OS cursor was never actually captured.
-///
-/// Reads `Document::pointer_lock_element()` and compares it against our own canvas by
-/// identity (`===` via `JsValue` equality) rather than merely checking `is_some()`, so
-/// a lock briefly held by some other element (there is only ever one canvas here, but
-/// nothing enforces that structurally) cannot read as ours.
-#[cfg(target_arch = "wasm32")]
-fn browser_pointer_locked(canvas: &web_sys::HtmlCanvasElement) -> bool {
-    use wasm_bindgen::JsValue;
-    web_sys::window()
-        .and_then(|w| w.document())
-        .and_then(|d| d.pointer_lock_element())
-        .is_some_and(|el| JsValue::from(el) == JsValue::from(canvas))
-}
-
-thread_local! {
-    /// Set by the `pointerlockchange` listener [`ensure_pointer_lock_change_listener`]
-    /// registers, polled and cleared once per turn in `about_to_wait`.
-    ///
-    /// A bare `Cell<bool>` rather than anything richer: the listener fires on
-    /// *every* lock change (ours and the browser's own, acquired and released
-    /// alike), and the poll side always re-derives the ground truth from
-    /// [`browser_pointer_locked`] and `WindowApp::grabbed` rather than trusting a
-    /// value smuggled out of the DOM callback — "something changed, go look" is
-    /// all this needs to carry. Same shape as `PENDING_GPU` above it: a JS
-    /// callback has no way back into the live `WindowApp` winit's wasm
-    /// `spawn_app` owns, so the callback can only leave a note for the next
-    /// `about_to_wait` to read.
-    #[cfg(target_arch = "wasm32")]
-    static POINTER_LOCK_CHANGED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-#[cfg(target_arch = "wasm32")]
-fn discard_pending_gpu(lifecycle: Option<&Rc<Cell<bool>>>) {
-    let Some(lifecycle) = lifecycle else {
-        return;
-    };
-    PENDING_GPU.with_borrow_mut(|slot| {
-        let current = slot
-            .as_ref()
-            .is_some_and(|(pending, _, _)| Rc::ptr_eq(pending, lifecycle));
-        if current
-            && let Some((_, gpu, target)) = slot.take()
-        {
-            drop(target);
-            gpu.device().destroy();
-        }
-    });
-}
-
-/// Registers the page's one `pointerlockchange` listener, the first time this is
-/// called; every later call is a no-op.
-///
-/// Exists because nothing else registers one: `browser_pointer_locked`'s doc
-/// already notes winit 0.30's web backend adds no
-/// `pointerlockchange`/`pointerlockerror` listener of its own, and that gap is
-/// exactly what stops this app from ever learning that Escape released the
-/// pointer — the DOM event is the only signal there is.
-///
-/// The closure is intentionally leaked (`Closure::forget`): it has to outlive
-/// every possible lock change for the rest of the page's life, which is the
-/// app's entire lifetime, so there is no earlier point at which dropping it
-/// would be correct. Matches winit's own web backend, which leaks its DOM
-/// closures for the same reason.
-#[cfg(target_arch = "wasm32")]
-fn ensure_pointer_lock_change_listener() {
-    thread_local! {
-        static REGISTERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    }
-    REGISTERED.with(|registered| {
-        if registered.get() {
-            return;
-        }
-        let Some(document) = web_sys::window().and_then(|w| w.document()) else {
-            return;
-        };
-        use wasm_bindgen::JsCast;
-        let closure = wasm_bindgen::closure::Closure::<dyn FnMut()>::new(|| {
-            POINTER_LOCK_CHANGED.with(|flag| flag.set(true));
-        });
-        if document
-            .add_event_listener_with_callback("pointerlockchange", closure.as_ref().unchecked_ref())
-            .is_ok()
-        {
-            registered.set(true);
-        }
-        closure.forget();
-    });
-}
-
-/// The canvas's real backing-store size in physical pixels, read directly from its live CSS
-/// box rather than from winit's own tracked `Window::inner_size` — see `finish_bring_up`'s
-/// call site for why the two can disagree at browser bring-up. `clientWidth`/`clientHeight`
-/// need no `ResizeObserver` delivery to be correct; they reflect the box the browser has
-/// already laid out. Scaled by `devicePixelRatio` to match what `SurfaceTarget`/`RenderState`
-/// expect everywhere else — see `window_attributes`'s doc on rendering at native DPR.
-///
-/// `None` if the host canvas currently measures to zero
-/// (e.g. `display: none`), in which case the caller keeps whatever `target` already has
-/// rather than resizing to a degenerate surface.
-#[cfg(target_arch = "wasm32")]
-fn measured_canvas_physical_size(canvas: &web_sys::HtmlCanvasElement) -> Option<(u32, u32)> {
-    let dpr = web_sys::window()?.device_pixel_ratio();
-    dpr_scaled_size(canvas.client_width(), canvas.client_height(), dpr)
-}
-
 /// Scales a CSS-pixel box by `dpr` into a rounded physical-pixel size, or `None` if either
 /// scaled dimension rounds to less than one physical pixel.
 ///
-/// Pulled out of [`measured_canvas_physical_size`] as a plain function with no `web_sys`/DOM
-/// dependency and **no `wasm32` gate**, specifically so it is exercised by the workspace's
-/// ordinary native `cargo test` run (see `app::tests`) rather than only by a `wasm32` target
-/// nothing in `just health` builds for — a `#[cfg(test)]` block inside the `wasm32`-gated
-/// function above would never run under any check this repo actually runs.
+/// It stays independent of DOM access so the sizing arithmetic remains covered by
+/// native unit tests while the standalone page owns canvas measurement and resize forwarding.
 #[cfg(any(target_arch = "wasm32", test))]
 pub(crate) fn dpr_scaled_size(client_width: i32, client_height: i32, dpr: f64) -> Option<(u32, u32)> {
     let w = (f64::from(client_width) * dpr).round();
     let h = (f64::from(client_height) * dpr).round();
     (w >= 1.0 && h >= 1.0).then_some((w as u32, h as u32))
-}
-
-thread_local! {
-    /// Where the deferred browser GPU attach parks its result for `about_to_wait` to
-    /// collect.
-    ///
-    /// A `thread_local` because there is no way to reach back into the `WindowApp`:
-    /// winit's wasm `spawn_app` takes ownership of it, and the `async` block cannot
-    /// hold `&mut self` across an `await` regardless. Single-threaded by construction,
-    /// so there is no race to lose — the browser event loop is one thread, which is the
-    /// same fact that made the mesher's pool removable.
-    #[cfg(target_arch = "wasm32")]
-    static PENDING_GPU: std::cell::RefCell<
-        Option<(
-            Rc<Cell<bool>>,
-            GpuContext,
-            lodestone_render::SurfaceTarget<'static>,
-        )>,
-    > = const { std::cell::RefCell::new(None) };
 }

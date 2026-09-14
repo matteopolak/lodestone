@@ -2905,7 +2905,12 @@ impl WindowApp {
         frame.present(queue);
         self.frame_profile.mark(FramePhase::Present, Instant::now());
         #[cfg(target_arch = "wasm32")]
-        crate::app::mark_browser_frame_submitted();
+        // This is the only readiness edge: the frame has been handed to the
+        // browser queue, so an embedder cannot observe startup before pixels
+        // can be presented.
+        if let Some(signal) = self.browser_frame_signal.as_ref() {
+            signal.mark();
+        }
 
         // The frame-profile tracing line — see `docs/frame-profiling.md` for
         // how to read it. It is gated with `enabled!` so a session with

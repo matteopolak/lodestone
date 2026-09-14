@@ -30,10 +30,12 @@
 //! itself are here rather than in a submodule.
 
 use std::collections::HashSet;
-use std::sync::Arc;
+#[cfg(target_arch = "wasm32")]
+use std::collections::VecDeque;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::Duration;
 #[cfg(target_arch = "wasm32")]
-use std::{cell::Cell, rc::Rc};
+use std::{cell::{Cell, RefCell}, rc::Rc};
 
 // The portable clock, not `std::time::Instant`: this module's submodules all say
 // `use super::*`, so this one import is what gives `lifecycle`, `session`,
@@ -52,10 +54,14 @@ use lodestone_render::{GpuContext, HeadlessTarget, RenderTarget, fog::FogSetting
 #[cfg(not(target_arch = "wasm32"))]
 use lodestone_render::window::attach_window;
 use winit::application::ApplicationHandler;
-use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
+#[cfg(target_arch = "wasm32")]
+use winit::dpi::{PhysicalPosition, PhysicalSize};
+use winit::event::{
+    DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent,
+};
+#[cfg(target_arch = "wasm32")]
+use winit::event::{MouseScrollDelta, TouchPhase};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
-use winit::event_loop::EventLoopProxy;
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::monitor::MonitorHandle;
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
@@ -137,8 +143,10 @@ use recipe_panel::{
     recipe_item_identifier, recipe_panel_contents, recipe_panel_geometry, recipe_panel_layout,
     recipe_panel_pointer_hit, recipe_toast_now_ms, recipe_toast_view,
 };
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(unused_imports)]
 use runners::run_windowed;
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(unused_imports)]
 use runners::run_windowed_with_app;
 // Same carried-`cfg` reasoning as the import just below, but for the
@@ -164,44 +172,316 @@ pub(crate) type ShellEvent = AppEvent;
 #[cfg(not(feature = "runtime-presentation"))]
 pub(crate) type ShellEvent = ();
 
+/// A mount-local readiness latch shared by the browser control and the event
+/// loop's actual presentation path. Atomics keep the observation valid when a
+/// canonical threaded Wasm build places the host poll and renderer on different
+/// Wasm workers; unlike a thread-local flag, both sides read the same state.
+#[derive(Clone, Debug)]
+pub struct BrowserFrameSignal(Arc<AtomicBool>);
+
+impl BrowserFrameSignal {
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn new() -> Self {
+        Self(Arc::new(AtomicBool::new(false)))
+    }
+
+    pub fn is_set(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+
+    #[cfg(any(test, target_arch = "wasm32"))]
+    pub(crate) fn mark(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+#[derive(Debug)]
+pub(crate) enum BrowserInput {
+    CursorMoved { x: f64, y: f64 },
+    MouseInput { button: MouseButton, pressed: bool },
+    MouseMotion { dx: f64, dy: f64 },
+    MouseWheel { dx: f64, dy: f64 },
+    Focused(bool),
+    Resized { width: u32, height: u32 },
+    PointerLock(bool),
+    Key {
+        code: KeyCode,
+        pressed: bool,
+        text: Option<String>,
+        modifiers: u8,
+    },
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+#[derive(Debug)]
+pub(crate) enum BrowserAction {
+    PointerLock(bool),
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+#[derive(Debug, Default)]
+pub(crate) struct BrowserActionQueue {
+    pointer_lock: Option<bool>,
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+impl BrowserActionQueue {
+    fn push(&mut self, action: BrowserAction) {
+        match action {
+            BrowserAction::PointerLock(locked) => self.pointer_lock = Some(locked),
+        }
+    }
+
+    fn take(&mut self) -> Option<BrowserAction> {
+        self.pointer_lock.take().map(BrowserAction::PointerLock)
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+#[derive(Debug, Default)]
+pub(crate) struct BrowserInputQueue {
+    cursor: Option<(f64, f64)>,
+    motion: (f64, f64),
+    focus: Option<bool>,
+    resize: Option<(u32, u32)>,
+    pointer_lock: Option<bool>,
+    ordered: VecDeque<BrowserInput>,
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+impl BrowserInputQueue {
+    const MAX_ORDERED: usize = 256;
+
+    fn push(&mut self, input: BrowserInput) {
+        match input {
+            BrowserInput::CursorMoved { x, y } => self.cursor = Some((x, y)),
+            BrowserInput::MouseMotion { dx, dy } => {
+                self.motion.0 = (self.motion.0 + dx).clamp(-1.0e6, 1.0e6);
+                self.motion.1 = (self.motion.1 + dy).clamp(-1.0e6, 1.0e6);
+            }
+            BrowserInput::Focused(focused) => self.focus = Some(focused),
+            BrowserInput::Resized { width, height } => self.resize = Some((width, height)),
+            BrowserInput::PointerLock(locked) => self.pointer_lock = Some(locked),
+            ordered => {
+                if self.ordered.len() >= Self::MAX_ORDERED {
+                    self.ordered.clear();
+                    self.focus = Some(false);
+                    self.pointer_lock = Some(false);
+                    self.motion = (0.0, 0.0);
+                    return;
+                }
+                self.ordered.push_back(ordered);
+            }
+        }
+    }
+
+    fn drain_into(&mut self, output: &mut Vec<BrowserInput>) {
+        output.clear();
+        if let Some((width, height)) = self.resize.take() {
+            output.push(BrowserInput::Resized { width, height });
+        }
+        if let Some(focused) = self.focus.take() {
+            output.push(BrowserInput::Focused(focused));
+        }
+        if let Some(locked) = self.pointer_lock.take() {
+            output.push(BrowserInput::PointerLock(locked));
+        }
+        if let Some((x, y)) = self.cursor.take() {
+            output.push(BrowserInput::CursorMoved { x, y });
+        }
+        output.extend(self.ordered.drain(..));
+        let (dx, dy) = std::mem::take(&mut self.motion);
+        if dx != 0.0 || dy != 0.0 {
+            output.push(BrowserInput::MouseMotion { dx, dy });
+        }
+    }
+}
+
 #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
 #[derive(Debug)]
 pub struct BrowserControl {
-    proxy: EventLoopProxy<AppEvent>,
     lifecycle: Rc<Cell<bool>>,
+    shutdown: Rc<Cell<bool>>,
+    frame_signal: BrowserFrameSignal,
+    input: Rc<RefCell<BrowserInputQueue>>,
+    actions: Rc<RefCell<BrowserActionQueue>>,
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
 impl BrowserControl {
     pub fn shutdown(&self) -> Result<(), String> {
-        self.proxy
-            .send_event(AppEvent::Quit)
-            .map_err(|_| "browser event loop is no longer running".to_string())
+        self.lifecycle.set(true);
+        self.shutdown.set(true);
+        Ok(())
     }
 
     pub fn is_stopped(&self) -> bool {
         self.lifecycle.get()
     }
+
+    /// Returns the per-session latch set immediately after a frame is handed
+    /// to the browser's presentation queue.
+    pub fn first_frame_signal(&self) -> BrowserFrameSignal {
+        self.frame_signal.clone()
+    }
+
+    pub(crate) fn enqueue_input(&self, input: BrowserInput) {
+        self.input.borrow_mut().push(input);
+    }
+
+    pub fn take_browser_pointer_lock_action(&self) -> Option<bool> {
+        match self.actions.borrow_mut().take() {
+            Some(BrowserAction::PointerLock(locked)) => Some(locked),
+            None => None,
+        }
+    }
+
+    pub fn browser_pointer_move(&self, x: f64, y: f64) {
+        self.enqueue_input(BrowserInput::CursorMoved { x, y });
+    }
+
+    pub fn browser_mouse_motion(&self, dx: f64, dy: f64) {
+        self.enqueue_input(BrowserInput::MouseMotion { dx, dy });
+    }
+
+    pub fn browser_mouse_button(&self, button: u16, pressed: bool) -> Result<(), String> {
+        let button = match button {
+            0 => MouseButton::Left,
+            1 => MouseButton::Middle,
+            2 => MouseButton::Right,
+            3 => MouseButton::Back,
+            4 => MouseButton::Forward,
+            other => MouseButton::Other(other),
+        };
+        self.enqueue_input(BrowserInput::MouseInput { button, pressed });
+        Ok(())
+    }
+
+    pub fn browser_wheel(&self, dx: f64, dy: f64) {
+        self.enqueue_input(BrowserInput::MouseWheel { dx, dy });
+    }
+
+    pub fn browser_focus(&self, focused: bool) {
+        self.enqueue_input(BrowserInput::Focused(focused));
+    }
+
+    pub fn browser_resize(&self, width: u32, height: u32) {
+        self.enqueue_input(BrowserInput::Resized { width, height });
+    }
+
+    pub fn browser_pointer_lock(&self, locked: bool) {
+        self.enqueue_input(BrowserInput::PointerLock(locked));
+    }
+
+    pub fn browser_key(
+        &self,
+        code: &str,
+        pressed: bool,
+        text: Option<String>,
+        modifiers: u8,
+    ) -> Result<(), String> {
+        let code = browser_key_code(code).ok_or_else(|| format!("unsupported keyboard code {code:?}"))?;
+        self.enqueue_input(BrowserInput::Key {
+            code,
+            pressed,
+            text,
+            modifiers,
+        });
+        Ok(())
+    }
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
-thread_local! {
-    static BROWSER_FRAME_SUBMITTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
-pub(crate) fn reset_browser_frame_signal() {
-    BROWSER_FRAME_SUBMITTED.with(|signal| signal.set(false));
-}
-
-#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
-pub fn browser_first_frame_submitted() -> bool {
-    BROWSER_FRAME_SUBMITTED.with(std::cell::Cell::get)
-}
-
-#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
-pub(crate) fn mark_browser_frame_submitted() {
-    BROWSER_FRAME_SUBMITTED.with(|signal| signal.set(true));
+fn browser_key_code(code: &str) -> Option<KeyCode> {
+    Some(match code {
+        "Escape" => KeyCode::Escape,
+        "Enter" => KeyCode::Enter,
+        "NumpadEnter" => KeyCode::NumpadEnter,
+        "Space" => KeyCode::Space,
+        "Tab" => KeyCode::Tab,
+        "Backspace" => KeyCode::Backspace,
+        "Delete" => KeyCode::Delete,
+        "Insert" => KeyCode::Insert,
+        "Home" => KeyCode::Home,
+        "End" => KeyCode::End,
+        "PageUp" => KeyCode::PageUp,
+        "PageDown" => KeyCode::PageDown,
+        "ArrowUp" => KeyCode::ArrowUp,
+        "ArrowDown" => KeyCode::ArrowDown,
+        "ArrowLeft" => KeyCode::ArrowLeft,
+        "ArrowRight" => KeyCode::ArrowRight,
+        "ShiftLeft" => KeyCode::ShiftLeft,
+        "ShiftRight" => KeyCode::ShiftRight,
+        "ControlLeft" => KeyCode::ControlLeft,
+        "ControlRight" => KeyCode::ControlRight,
+        "AltLeft" => KeyCode::AltLeft,
+        "AltRight" => KeyCode::AltRight,
+        "SuperLeft" => KeyCode::SuperLeft,
+        "SuperRight" => KeyCode::SuperRight,
+        "CapsLock" => KeyCode::CapsLock,
+        "ContextMenu" => KeyCode::ContextMenu,
+        "Comma" => KeyCode::Comma,
+        "Period" => KeyCode::Period,
+        "Slash" => KeyCode::Slash,
+        "Backslash" => KeyCode::Backslash,
+        "Minus" => KeyCode::Minus,
+        "Equal" => KeyCode::Equal,
+        "Semicolon" => KeyCode::Semicolon,
+        "Quote" => KeyCode::Quote,
+        "BracketLeft" => KeyCode::BracketLeft,
+        "BracketRight" => KeyCode::BracketRight,
+        "Backquote" => KeyCode::Backquote,
+        "KeyA" => KeyCode::KeyA,
+        "KeyB" => KeyCode::KeyB,
+        "KeyC" => KeyCode::KeyC,
+        "KeyD" => KeyCode::KeyD,
+        "KeyE" => KeyCode::KeyE,
+        "KeyF" => KeyCode::KeyF,
+        "KeyG" => KeyCode::KeyG,
+        "KeyH" => KeyCode::KeyH,
+        "KeyI" => KeyCode::KeyI,
+        "KeyJ" => KeyCode::KeyJ,
+        "KeyK" => KeyCode::KeyK,
+        "KeyL" => KeyCode::KeyL,
+        "KeyM" => KeyCode::KeyM,
+        "KeyN" => KeyCode::KeyN,
+        "KeyO" => KeyCode::KeyO,
+        "KeyP" => KeyCode::KeyP,
+        "KeyQ" => KeyCode::KeyQ,
+        "KeyR" => KeyCode::KeyR,
+        "KeyS" => KeyCode::KeyS,
+        "KeyT" => KeyCode::KeyT,
+        "KeyU" => KeyCode::KeyU,
+        "KeyV" => KeyCode::KeyV,
+        "KeyW" => KeyCode::KeyW,
+        "KeyX" => KeyCode::KeyX,
+        "KeyY" => KeyCode::KeyY,
+        "KeyZ" => KeyCode::KeyZ,
+        "Digit0" => KeyCode::Digit0,
+        "Digit1" => KeyCode::Digit1,
+        "Digit2" => KeyCode::Digit2,
+        "Digit3" => KeyCode::Digit3,
+        "Digit4" => KeyCode::Digit4,
+        "Digit5" => KeyCode::Digit5,
+        "Digit6" => KeyCode::Digit6,
+        "Digit7" => KeyCode::Digit7,
+        "Digit8" => KeyCode::Digit8,
+        "Digit9" => KeyCode::Digit9,
+        "F1" => KeyCode::F1,
+        "F2" => KeyCode::F2,
+        "F3" => KeyCode::F3,
+        "F4" => KeyCode::F4,
+        "F5" => KeyCode::F5,
+        "F6" => KeyCode::F6,
+        "F7" => KeyCode::F7,
+        "F8" => KeyCode::F8,
+        "F9" => KeyCode::F9,
+        "F10" => KeyCode::F10,
+        "F11" => KeyCode::F11,
+        "F12" => KeyCode::F12,
+        _ => return None,
+    })
 }
 
 /// Custom winit events for driving presentation and shutdown from outside
@@ -283,7 +563,12 @@ pub fn run(config: Config) -> anyhow::Result<()> {
              event loop and stdin for its attach/detach control thread, neither of \
              which a browser session has. A browser session is always Mode::Window."
         )),
+        #[cfg(not(target_arch = "wasm32"))]
         Mode::Window => run_windowed(config),
+        #[cfg(target_arch = "wasm32")]
+        Mode::Window => Err(anyhow::anyhow!(
+            "the browser shell is OffscreenCanvas-only; transfer a canvas to a worker and use the Web SDK mount entrypoint"
+        )),
     }
 }
 
@@ -309,7 +594,12 @@ pub fn run(config: Config) -> anyhow::Result<()> {
 /// is not [`Mode::Window`].
 pub fn run_with_app(app: lodestone_app::App, config: Config) -> anyhow::Result<()> {
     match config.mode {
+        #[cfg(not(target_arch = "wasm32"))]
         Mode::Window => run_windowed_with_app(app, config),
+        #[cfg(target_arch = "wasm32")]
+        Mode::Window => Err(anyhow::anyhow!(
+            "the browser shell is OffscreenCanvas-only; use the Web SDK mount entrypoint from a worker"
+        )),
         other => Err(anyhow::anyhow!(
             "run_with_app only supports Mode::Window: {other:?} has its own \
              composition route (Sim::from_app directly for a diagnostic, or \
@@ -319,17 +609,22 @@ pub fn run_with_app(app: lodestone_app::App, config: Config) -> anyhow::Result<(
     }
 }
 
+/// Start the browser client against a canvas transferred into a dedicated
+/// worker. The worker path cannot use winit's DOM-backed event loop, so the
+/// existing [`WindowApp`] is driven by a worker timer while wgpu presents
+/// directly to the offscreen surface. Input and worker ownership remain with
+/// the embedding host; the returned control only owns renderer shutdown and
+/// the per-mount readiness signal.
 #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
-pub fn run_browser(
+pub fn run_browser_offscreen(
     config: Config,
-    canvas: web_sys::HtmlCanvasElement,
+    canvas: web_sys::OffscreenCanvas,
     lifecycle: Rc<Cell<bool>>,
 ) -> anyhow::Result<BrowserControl> {
     if config.mode != Mode::Window {
-        anyhow::bail!("run_browser only supports Mode::Window");
+        anyhow::bail!("run_browser_offscreen only supports Mode::Window");
     }
-    reset_browser_frame_signal();
-    runners::run_windowed_with_control(Sim::client_app(), config, canvas, lifecycle)
+    runners::run_offscreen_with_control(Sim::client_app(), config, canvas, lifecycle)
 }
 
 /// Sky distance fog sized to the shell's real render distance, so terrain
@@ -814,9 +1109,15 @@ struct PendingPick {
 pub(crate) struct WindowApp {
     config: Config,
     #[cfg(target_arch = "wasm32")]
-    browser_canvas: Option<web_sys::HtmlCanvasElement>,
-    #[cfg(target_arch = "wasm32")]
     browser_lifecycle: Option<Rc<Cell<bool>>>,
+    #[cfg(target_arch = "wasm32")]
+    browser_frame_signal: Option<BrowserFrameSignal>,
+    #[cfg(target_arch = "wasm32")]
+    browser_pointer_locked: bool,
+    #[cfg(target_arch = "wasm32")]
+    browser_pointer_requested: bool,
+    #[cfg(target_arch = "wasm32")]
+    browser_actions: Option<Rc<RefCell<BrowserActionQueue>>>,
     /// Opt-in deterministic benchmark choreography. `None` is the ordinary
     /// player-controlled path and pays no per-frame state-machine work.
     benchmark: Option<BenchmarkDriver>,

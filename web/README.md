@@ -72,6 +72,7 @@ the browser worker and rendering paths but are not a second application.
 | `trunk` | **0.21.14** | current stable. `0.22.0-beta.2` needs Rust 1.96.1 (> our 1.95.0). |
 | `wasm-bindgen-cli` | 0.2.126 | trunk fetches a matching one automatically. |
 | target | `wasm32-unknown-unknown` | `rustup target add wasm32-unknown-unknown` |
+| component | `rust-src` | `rustup component add rust-src` (required by the threaded worker's `-Z build-std`) |
 
 Install trunk (prebuilt binary, fastest):
 
@@ -124,10 +125,14 @@ and the browser verifies it before installing the pack. Both files are staged
 **only if their sources exist**. They arrive by two different routes:
 
 Embedded hosts can bypass page-relative fetching by importing the wasm module's
-`mount` export. Pass an existing `HTMLCanvasElement` plus either both byte blobs or
-an `assetProvider(name)` callback returning a blob or promise of one. The canvas is
-passed directly to the renderer; its existing `id`, styles, and DOM ownership are
-preserved. See `docs/wasm-embedding.md` for the lifecycle and progress events.
+`mount` export in a worker. Pass the `OffscreenCanvas` received after the page
+transfers control, plus either both byte blobs or an `assetProvider(name)` callback
+returning a blob or promise of one. The worker-local entrypoint renders directly to
+that surface and uses worker timers, so no DOM window is required. The page owns the
+source HTML canvas, transfer, UI, input bridge, and worker lifecycle. Pass
+`onHostAction` when the page needs to perform user-gesture-gated actions such as
+Pointer Lock, and forward the resulting state through the handle's typed input
+methods. See `docs/wasm-embedding.md` for the lifecycle and progress events.
 
 ```sh
 cargo xtask fetch-assets --version 26.2   # -> .cache/mc/26.2/client.jar

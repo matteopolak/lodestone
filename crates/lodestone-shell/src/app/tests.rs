@@ -33,6 +33,23 @@ mod render_controls;
 
 pub(super) use key_resolution::{playing, resolve};
 
+#[test]
+fn browser_frame_signal_is_mount_local_and_cross_thread_visible() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<BrowserFrameSignal>();
+
+    let first = BrowserFrameSignal::new();
+    let second = BrowserFrameSignal::new();
+    assert!(!first.is_set());
+    assert!(!second.is_set());
+
+    let producer = first.clone();
+    producer.mark();
+
+    assert!(first.is_set());
+    assert!(!second.is_set());
+}
+
 /// A cheap sim shared by pacing and session tests: headless mode with the
 /// smallest render distance that still generates real terrain.
 fn pacing_sim() -> Sim {
