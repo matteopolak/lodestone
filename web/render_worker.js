@@ -31,9 +31,9 @@ self.onmessage = event => {
 
 async function mount(request) {
   try {
-    const sdk = await import("./lodestone-web-entry.js");
+    const { sdk, wasmUrl } = await loadSdk(request);
     await sdk.default({
-      module_or_path: new URL("./lodestone-web-entry_bg.wasm", self.location.href),
+      module_or_path: wasmUrl,
     });
     session = await sdk.mount({
       canvas: request.canvas,
@@ -49,6 +49,34 @@ async function mount(request) {
   } finally {
     loading = false;
   }
+}
+
+async function loadSdk(request) {
+  const workerName = new URL(self.location.href).pathname.split("/").pop();
+  if (workerName === "lodestone-render-worker.js" && !request.manifest && !request.manifestUrl) {
+    return {
+      sdk: await import("./lodestone-web-entry.js"),
+      wasmUrl: new URL("./lodestone-web-entry_bg.wasm", self.location.href),
+    };
+  }
+
+  const manifestUrl = new URL(
+    request.manifestUrl ?? "./lodestone-web-sdk.manifest.json",
+    self.location.href,
+  );
+  const manifest = request.manifest ?? await fetch(manifestUrl, { cache: "no-store" }).then(response => {
+    if (!response.ok) throw new Error(`failed to fetch SDK manifest: HTTP ${response.status}`);
+    return response.json();
+  });
+  if (manifest.worker_entrypoint !== workerName) {
+    throw new Error(`SDK worker mismatch: expected ${manifest.worker_entrypoint}, running ${workerName}`);
+  }
+  if (typeof manifest.entrypoint !== "string" || !manifest.entrypoint.endsWith(".js")) {
+    throw new Error("SDK manifest has no valid module entrypoint");
+  }
+  const moduleUrl = new URL(manifest.entrypoint, manifestUrl);
+  const wasmUrl = new URL(`${manifest.entrypoint.slice(0, -3)}_bg.wasm`, manifestUrl);
+  return { sdk: await import(moduleUrl.href), wasmUrl };
 }
 
 async function packageAsset(name) {

@@ -132,7 +132,10 @@ that surface and uses worker timers, so no DOM window is required. The page owns
 source HTML canvas, transfer, UI, input bridge, and worker lifecycle. Pass
 `onHostAction` when the page needs to perform user-gesture-gated actions such as
 Pointer Lock, and forward the resulting state through the handle's typed input
-methods. See `docs/wasm-embedding.md` for the lifecycle and progress events.
+methods. Release consumers read `worker_entrypoint` from the SDK manifest and send
+that same manifest in the worker's mount message, keeping the worker, glue module,
+and Wasm binary on one content-versioned release. See `docs/wasm-embedding.md` for
+the lifecycle and progress events.
 
 ```sh
 cargo xtask fetch-assets --version 26.2   # -> .cache/mc/26.2/client.jar

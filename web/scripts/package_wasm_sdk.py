@@ -22,9 +22,6 @@ ARCHIVE_NAME = "lodestone-web-sdk.tar.gz"
 MANIFEST_NAME = "lodestone-web-sdk.manifest.json"
 PANORAMA_FILES = tuple(f"panorama_{index}.png" for index in range(6))
 REQUIRED_FILES = (
-    "lodestone-web-entry.js",
-    "lodestone-web-entry_bg.wasm",
-    "lodestone-render-worker.js",
     "lodestone-server-worker.js",
     "lodestone-server-worker-bootstrap.js",
     "lodestone-server-worker-wasm-serial.js",
@@ -85,7 +82,7 @@ def copy_file(stage: Path, package: Path, relative: str) -> None:
     shutil.copyfile(source, destination)
 
 
-def collect_package(stage: Path, package: Path) -> tuple[list[str], str]:
+def collect_package(stage: Path, package: Path) -> tuple[list[str], str, str]:
     page_modules = sorted(
         path
         for path in stage.glob("lodestone-web-*.js")
@@ -101,6 +98,15 @@ def collect_package(stage: Path, package: Path) -> tuple[list[str], str]:
     copy_file(stage, package, page_wasm.name)
     for relative in REQUIRED_FILES:
         copy_file(stage, package, relative)
+
+    worker_source = stage / "lodestone-render-worker.js"
+    if not worker_source.is_file():
+        raise SystemExit("required SDK artifact is missing: lodestone-render-worker.js")
+    release_digest = hashlib.sha256()
+    for path in (worker_source, page_module, page_wasm):
+        release_digest.update(bytes.fromhex(sha256(path)))
+    worker_entrypoint = f"lodestone-render-worker-{release_digest.hexdigest()[:16]}.js"
+    shutil.copyfile(worker_source, package / worker_entrypoint)
 
     for relative in (
         "lodestone-server-worker-wasm-serial.d.ts",
@@ -123,10 +129,16 @@ def collect_package(stage: Path, package: Path) -> tuple[list[str], str]:
         raise SystemExit("required threaded-worker snippet is missing")
 
     files = sorted(path.relative_to(package).as_posix() for path in package.rglob("*") if path.is_file())
-    forbidden = {"index.html", "lodestone-worldgen-long-task-harness.js"}
+    forbidden = {
+        "index.html",
+        "lodestone-worldgen-long-task-harness.js",
+        "lodestone-render-worker.js",
+        "lodestone-web-entry.js",
+        "lodestone-web-entry_bg.wasm",
+    }
     if forbidden.intersection(files):
         raise SystemExit("consumer page or diagnostic harness leaked into SDK package")
-    return files, page_module.name
+    return files, page_module.name, worker_entrypoint
 
 
 def write_archive(package: Path, archive: Path, files: list[str]) -> None:
@@ -180,7 +192,7 @@ def package(output: Path, version: str, allow_dirty: bool, skip_build: Path | No
             stage = skip_build.resolve()
         package_dir = Path(temporary) / "package"
         package_dir.mkdir()
-        paths, entrypoint = collect_package(stage, package_dir)
+        paths, entrypoint, worker_entrypoint = collect_package(stage, package_dir)
         entries = [
             {"path": path, "size": (package_dir / path).stat().st_size, "sha256": sha256(package_dir / path)}
             for path in paths
@@ -190,7 +202,7 @@ def package(output: Path, version: str, allow_dirty: bool, skip_build: Path | No
 
     manifest = {
         "schema": "lodestone-web-sdk",
-        "schema_version": 1,
+        "schema_version": 2,
         "version": version,
         "commit": commit,
         "dirty_checkout": dirty,
@@ -201,6 +213,7 @@ def package(output: Path, version: str, allow_dirty: bool, skip_build: Path | No
             "format": "tar.gz",
         },
         "entrypoint": entrypoint,
+        "worker_entrypoint": worker_entrypoint,
         "files": entries,
     }
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")

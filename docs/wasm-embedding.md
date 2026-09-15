@@ -70,7 +70,7 @@ One wasm module instance owns one installed asset bundle. A different bundle req
 
 ## SDK package
 
-`just wasm-sdk` first runs `just fetch-assets-ci`, which verifies the cached client/index and fetches the six content-addressed panorama faces when needed, then builds a release Trunk bundle and writes `target/wasm-sdk/lodestone-web-sdk.tar.gz` plus its sidecar manifest. The archive contains the ESM page module and Wasm, both server-worker variants and their bootstrap/snippet files, the filtered `client.jar` plus `blocks.json` required by `mount`, and `panorama_0.png` through `panorama_5.png`. Curated sound files remain outside the SDK archive because audio is optional and host-controlled. It intentionally excludes the standalone `index.html`, consumer CSS, service workers, and diagnostic harnesses; hosts own those concerns.
+`just wasm-sdk` first runs `just fetch-assets-ci`, which verifies the cached client/index and fetches the six content-addressed panorama faces when needed, then builds a release Trunk bundle and writes `target/wasm-sdk/lodestone-web-sdk.tar.gz` plus its sidecar manifest. The archive contains one content-versioned ESM module/Wasm pair, a content-versioned render worker, both server-worker variants and their bootstrap/snippet files, the filtered `client.jar` plus `blocks.json` required by `mount`, and `panorama_0.png` through `panorama_5.png`. Curated sound files remain outside the SDK archive because audio is optional and host-controlled. It intentionally excludes stable aliases, the standalone `index.html`, consumer CSS, service workers, and diagnostic harnesses; hosts own those concerns.
 
 The archive preserves the emitted filenames. Read `entrypoint` from the manifest before importing the ESM module from the unpacked directory:
 
@@ -82,7 +82,16 @@ await init();
 const session = await mount({ canvas, assetProvider });
 ```
 
-`lodestone-web-sdk.manifest.json` has schema version `1`, the source commit, archive digest and size, and a sorted digest/size record for every archive member. The packager requires a clean checkout, filtered `client.jar`, `blocks.json`, and all six panorama faces; use `--allow-dirty` only for local diagnostics. Set `LODESTONE_WEB_SDK_DIR`, `LODESTONE_WEB_SDK_VERSION`, or `LODESTONE_TRUNK` to change the output directory, package label, or Trunk executable without changing the archive layout. `just test-wasm-sdk` exercises the inventory and a missing-face negative control without compiling Wasm.
+`lodestone-web-sdk.manifest.json` has schema version `2`, the source commit, archive digest and size, content-versioned `entrypoint` and `worker_entrypoint` names, and a sorted digest/size record for every archive member. Create the worker from `worker_entrypoint` and send the same manifest object with its mount message. The worker rejects a manifest naming a different worker, imports `entrypoint`, and derives the matching `_bg.wasm` URL from that same name. This keeps all three browser cache keys on one release and prevents stale glue from instantiating a newer Wasm binary.
+
+```js
+const manifestUrl = new URL("./lodestone-web-sdk.manifest.json", import.meta.url);
+const manifest = await fetch(manifestUrl, { cache: "no-store" }).then(response => response.json());
+const worker = new Worker(new URL(manifest.worker_entrypoint, manifestUrl));
+worker.postMessage({ kind: "mount", canvas: offscreen, manifest }, [offscreen]);
+```
+
+The packager requires a clean checkout, filtered `client.jar`, `blocks.json`, and all six panorama faces; use `--allow-dirty` only for local diagnostics. Set `LODESTONE_WEB_SDK_DIR`, `LODESTONE_WEB_SDK_VERSION`, or `LODESTONE_TRUNK` to change the output directory, package label, or Trunk executable without changing the archive layout. `just test-wasm-sdk` exercises the inventory, a two-release worker cache-key swap, and a missing-face negative control without compiling Wasm.
 
 ## Dependencies
 
