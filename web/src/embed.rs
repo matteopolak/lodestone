@@ -172,12 +172,13 @@ pub async fn mount(options: JsValue) -> Result<LodestoneHandle, JsValue> {
     };
     let client_jar = required_asset(&options, provider.as_ref(), progress.as_ref(), "clientJar").await?;
     let blocks_report = required_asset(&options, provider.as_ref(), progress.as_ref(), "blocksJson").await?;
+    let panorama = panorama_assets(&options, provider.as_ref(), progress.as_ref()).await?;
     mount_bundle(
         canvas,
         lodestone::platform::assets::Bundle {
             client_jar,
             blocks_report,
-            panorama: Vec::new(),
+            panorama,
             sounds_json: Vec::new(),
             sound_objects: Vec::new(),
         },
@@ -185,6 +186,26 @@ pub async fn mount(options: JsValue) -> Result<LodestoneHandle, JsValue> {
         host_action,
     )
     .await
+}
+
+async fn panorama_assets(
+    options: &JsValue,
+    provider: Option<&Function>,
+    progress: Option<&Rc<Function>>,
+) -> Result<Vec<(String, Vec<u8>)>, JsValue> {
+    let Some(provider) = provider else {
+        return Ok(Vec::new());
+    };
+    let mut panorama = Vec::with_capacity(6);
+    for index in 0..6 {
+        let name = format!("panorama_{index}.png");
+        let bytes = required_asset(options, Some(provider), progress, &name).await?;
+        panorama.push((
+            format!("minecraft/textures/gui/title/background/{name}"),
+            bytes,
+        ));
+    }
+    Ok(panorama)
 }
 
 pub(crate) async fn mount_bundle(

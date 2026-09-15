@@ -6,7 +6,7 @@ The browser target exposes a small `mount(options)` / `LodestoneHandle.destroy()
 
 ## How it works
 
-`mount` accepts an `OffscreenCanvas` transferred into the calling worker. It also accepts `Uint8Array` or `ArrayBuffer` values for `clientJar` and `blocksJson`, and an optional `assetProvider(name)` callback for resolving either required blob. The provider may return bytes directly or a promise of bytes. The optional `onProgress` callback receives objects with `type`, `phase`, `fraction`, and `message`; the lifecycle emits asset, startup, started, first-frame, and destroyed events. `onHostAction(action)` receives browser actions such as `{ type: "pointer-lock", locked: true }`; the page must perform the corresponding user-gesture-gated DOM operation and forward the resulting state back to the handle. The worker-local path creates a WebGPU surface directly and drives the same `WindowApp` renderer from a worker timer. The returned handle owns renderer shutdown and can be destroyed idempotently from the host.
+`mount` accepts an `OffscreenCanvas` transferred into the calling worker. It also accepts `Uint8Array` or `ArrayBuffer` values for `clientJar` and `blocksJson`, and an optional `assetProvider(name)` callback. The provider resolves missing required blobs and, when present, all six `panorama_0.png` through `panorama_5.png` faces; it may return bytes directly or a promise of bytes. The optional `onProgress` callback receives objects with `type`, `phase`, `fraction`, and `message`; the lifecycle emits asset, startup, started, first-frame, and destroyed events. `onHostAction(action)` receives browser actions such as `{ type: "pointer-lock", locked: true }`; the page must perform the corresponding user-gesture-gated DOM operation and forward the resulting state back to the handle. The worker-local path creates a WebGPU surface directly and drives the same `WindowApp` renderer from a worker timer. The returned handle owns renderer shutdown and can be destroyed idempotently from the host.
 
 The transferred canvas is owned by the worker for the entire session; Lodestone never accesses the page DOM or performs the transfer itself. `first-frame` is emitted only after the render loop has handed a frame to the browser presentation queue, including the full-screen ownership menu path. The readiness latch is created per mount and is set by the same `WindowApp` present boundary that draws the frame, so it is not a process-global or thread-local observation that can miss a canonical threaded build. The worker-facing poll remains bounded only as a failure diagnostic if WebGPU never becomes ready. Fullscreen, input bridging, and worker lifetime remain caller-owned. `destroyed` is emitted after the worker has dropped the renderer and GPU state. A mount started while that teardown is in progress waits for it, so callers may safely reuse the initialized module and asset bundle without an arbitrary delay.
 
@@ -26,7 +26,9 @@ Change `web/src/embed.rs` when adding host-facing lifecycle events or options. K
 
 The public Wasm mount shape is intentionally limited to `canvas`, `clientJar`, `blocksJson`,
 `assetProvider`, `onProgress`, and `onHostAction`; do not add an auth provider or
-credential-bearing option.
+credential-bearing option. A supplied `assetProvider` must resolve every panorama face as well as
+any required blob omitted from the direct options. Omitting it retains the jar fallback for custom
+hosts that intentionally do not ship the full title panorama.
 
 ## Configuration
 
@@ -56,7 +58,8 @@ const offscreen = canvas.transferControlToOffscreen();
 worker.postMessage({ kind: "mount", canvas: offscreen }, [offscreen]);
 ```
 
-The worker calls `mount({ canvas: event.data.canvas, ... })`; the page remains
+The packaged worker fetches the six panorama files beside itself and calls
+`mount({ canvas: event.data.canvas, assetProvider, ... })`; the page remains
 responsible for the visible DOM overlay, worker termination, and any input
 messages. An `OffscreenCanvas` cannot be remounted after its owner is torn down;
 create a fresh transferred canvas for a new worker session.

@@ -39,6 +39,7 @@ async function mount(request) {
       canvas: request.canvas,
       clientJar: request.clientJar,
       blocksJson: request.blocksJson,
+      assetProvider: packageAsset,
       onHostAction: action => self.postMessage({ kind: "host-action", action }),
       onProgress: event => self.postMessage({ kind: "progress", event }),
     });
@@ -48,6 +49,14 @@ async function mount(request) {
   } finally {
     loading = false;
   }
+}
+
+async function packageAsset(name) {
+  const response = await fetch(new URL(name, self.location.href));
+  if (!response.ok) {
+    throw new Error(`failed to fetch ${name}: HTTP ${response.status}`);
+  }
+  return response.arrayBuffer();
 }
 
 function dispatchInput(input) {
