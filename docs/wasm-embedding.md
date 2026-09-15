@@ -84,6 +84,11 @@ const session = await mount({ canvas, assetProvider });
 
 `lodestone-web-sdk.manifest.json` has schema version `2`, the source commit, archive digest and size, content-versioned `entrypoint` and `worker_entrypoint` names, and a sorted digest/size record for every archive member. Create the worker from `worker_entrypoint` and send the same manifest object with its mount message. The worker rejects a manifest naming a different worker, imports `entrypoint`, and derives the matching `_bg.wasm` URL from that same name. This keeps all three browser cache keys on one release and prevents stale glue from instantiating a newer Wasm binary.
 
+The worker's provider maps the mount API's logical `clientJar` and `blocksJson` keys to the packaged
+`client.jar` and `blocks.json` paths. Panorama keys already equal their packaged filenames and pass
+through unchanged. Custom providers receive the logical names and must apply the same mapping when
+their storage layout uses the SDK filenames.
+
 ```js
 const manifestUrl = new URL("./lodestone-web-sdk.manifest.json", import.meta.url);
 const manifest = await fetch(manifestUrl, { cache: "no-store" }).then(response => response.json());

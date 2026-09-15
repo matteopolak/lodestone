@@ -3,6 +3,10 @@
 
 let session = null;
 let loading = false;
+const PACKAGE_ASSET_PATHS = Object.freeze({
+  clientJar: "client.jar",
+  blocksJson: "blocks.json",
+});
 
 self.onmessage = event => {
   const request = event.data;
@@ -80,9 +84,10 @@ async function loadSdk(request) {
 }
 
 async function packageAsset(name) {
-  const response = await fetch(new URL(name, self.location.href));
+  const path = PACKAGE_ASSET_PATHS[name] ?? name;
+  const response = await fetch(new URL(path, self.location.href));
   if (!response.ok) {
-    throw new Error(`failed to fetch ${name}: HTTP ${response.status}`);
+    throw new Error(`failed to fetch ${name} from ${path}: HTTP ${response.status}`);
   }
   return response.arrayBuffer();
 }
