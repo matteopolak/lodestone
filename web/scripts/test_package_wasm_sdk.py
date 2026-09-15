@@ -32,6 +32,7 @@ def make_stage(packager, root: Path) -> Path:
     }
     for relative in packager.REQUIRED_FILES:
         files.setdefault(relative, b"asset")
+    files["lodestone-render-worker.js"] = (ROOT / "web" / "render_worker.js").read_bytes()
     for relative, contents in files.items():
         path = stage / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -51,6 +52,9 @@ def main() -> int:
         package.mkdir()
         files, _ = packager.collect_package(stage, package)
         assert all(face in files for face in packager.PANORAMA_FILES)
+        worker = (package / "lodestone-render-worker.js").read_text(encoding="utf-8")
+        assert "assetProvider: packageAsset" in worker
+        assert "fetch(new URL(name, self.location.href))" in worker
 
         (stage / "panorama_5.png").unlink()
         missing_package = root / "missing-package"
