@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import re
 import tempfile
 
 
@@ -59,7 +60,19 @@ def main() -> int:
         assert "lodestone-web-entry_bg.wasm" not in files
         worker = (package / worker_entrypoint).read_text(encoding="utf-8")
         assert "assetProvider: packageAsset" in worker
-        assert "fetch(new URL(name, self.location.href))" in worker
+        assert 'clientJar: "client.jar"' in worker
+        assert 'blocksJson: "blocks.json"' in worker
+        assert "PACKAGE_ASSET_PATHS[name] ?? name" in worker
+        assert "fetch(new URL(path, self.location.href))" in worker
+        mapping = dict(re.findall(r'^  ([A-Za-z][A-Za-z0-9]*): "([^"]+)",$', worker, re.MULTILINE))
+        for logical_name, packaged_path in {
+            "clientJar": "client.jar",
+            "blocksJson": "blocks.json",
+            **{face: face for face in packager.PANORAMA_FILES},
+        }.items():
+            resolved = mapping.get(logical_name, logical_name)
+            assert resolved == packaged_path
+            assert packaged_path in files
         assert "cache: \"no-store\"" in worker
         assert "manifest.entrypoint" in worker
         assert "SDK worker mismatch" in worker
@@ -80,7 +93,7 @@ def main() -> int:
             assert "panorama_5.png" in str(error)
         else:
             raise AssertionError("SDK packaging accepted a missing panorama face")
-    print("wasm SDK packaging checks: PASS (versioned worker; release swap; panorama controls)")
+    print("wasm SDK packaging checks: PASS (versioned worker; asset mapping; release swap)")
     return 0
 
 
